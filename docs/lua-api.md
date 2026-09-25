@@ -1794,7 +1794,7 @@ account.signOut() — forget the session NOW, then clear the keyring and revoke 
 
 ### `account.state`
 
-account.state() — "signedOut" | "starting" | "waiting" | "signedIn" | "failed". Polled rather than called back, because signing in takes as long as a person takes to pick up their phone and a sign-in screen is redrawing anyway.
+account.state() — "signedOut" | "starting" | "waiting" | "signedIn" | "failed". Polled rather than called back, because signing in takes as long as a person takes to pick up their phone and a sign-in screen is redrawing anyway. The first ask in a run reads the stored session (the Hub's, or this game's last sign-in) with no Cloud call, and answers "starting" until it has, so a Sign in button shown only on "signedOut" never flashes at a signed-in player.
 
 ## game UI — text, buttons & hooks
 

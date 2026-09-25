@@ -262,6 +262,12 @@ a game and the Hub does. Stop and `scene.load` drop pending callbacks and
 abandon an unfinished sign-in, but never the session itself: nobody should have
 to sign in again because they pressed Play twice.
 
+The first `account.state()` or `account.player()` of a run reads that stored
+session, without a Cloud call. While it reads, `state()` answers `"starting"`,
+not `"signedOut"`, so a screen that shows **Sign in** only on `"signedOut"`
+never shows it to a player who is signed in. A project that never calls
+`account.*` never reads the keyring at all.
+
 ### Calling the Cloud
 
 ```lua

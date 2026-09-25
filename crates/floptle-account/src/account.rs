@@ -78,6 +78,11 @@ pub struct Account {
     /// the refresh token — the second one waits, then finds the session already
     /// fresh and uses it.
     refreshing: Arc<Mutex<()>>,
+    /// A [`restore`](Self::restore) is still reading the stored session. The
+    /// phase says `SignedOut` until it lands, which is true of the session and
+    /// false of the player: a sign-in screen that believed it would flash
+    /// "Sign in" at somebody who is signed in.
+    restoring: Arc<AtomicBool>,
 }
 
 /// Run `f` off the caller's thread — or, in a browser, on it.
@@ -156,6 +161,7 @@ impl Account {
             store,
             make_provider,
             refreshing: Arc::new(Mutex::new(())),
+            restoring: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -184,25 +190,41 @@ impl Account {
     /// Load a stored session off-thread. Idempotent and silent: no stored
     /// session is the ordinary case, not a failure worth reporting.
     pub fn restore(&self) {
+        self.restoring.store(true, Ordering::Relaxed);
         let me = self.clone();
-        let _ = detach("floptle-account-restore", move || {
-            let Some(session) = me.store.load() else { return };
-            // Minted by a provider we no longer point at — see `Session::issued_by`. It can
-            // only 401, so it is forgotten rather than shown as a signed-in player whose
-            // every call fails. The Hub shares this entry and applies the same rule.
-            if !session.issued_by(&me.base) {
-                let _ = me.store.clear();
-                return;
-            }
-            if let Ok(mut i) = me.inner.lock() {
-                // A sign-in that started in the meantime wins — it is the more
-                // recent statement of what the player wants.
-                if i.session.is_none() && !i.phase.is_busy() {
-                    i.session = Some(session);
-                    i.phase = Phase::SignedIn;
-                }
-            }
+        let started = detach("floptle-account-restore", move || {
+            me.restore_now();
+            // Release: a reader that sees the read finished sees what it found.
+            me.restoring.store(false, Ordering::Release);
         });
+        if started.is_err() {
+            self.restoring.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// Whether a [`restore`](Self::restore) is still reading the stored
+    /// session, so "signed out" may not be the answer yet.
+    pub fn is_restoring(&self) -> bool {
+        self.restoring.load(Ordering::Acquire)
+    }
+
+    fn restore_now(&self) {
+        let Some(session) = self.store.load() else { return };
+        // Minted by a provider we no longer point at — see `Session::issued_by`. It can
+        // only 401, so it is forgotten rather than shown as a signed-in player whose
+        // every call fails. The Hub shares this entry and applies the same rule.
+        if !session.issued_by(&self.base) {
+            let _ = self.store.clear();
+            return;
+        }
+        if let Ok(mut i) = self.inner.lock() {
+            // A sign-in that started in the meantime wins — it is the more
+            // recent statement of what the player wants.
+            if i.session.is_none() && !i.phase.is_busy() {
+                i.session = Some(session);
+                i.phase = Phase::SignedIn;
+            }
+        }
     }
 
     /// Begin the device flow. Returns immediately; watch [`Account::phase`].

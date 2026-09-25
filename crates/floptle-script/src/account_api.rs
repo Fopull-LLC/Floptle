@@ -49,6 +49,9 @@ pub(crate) struct AccountState {
     /// (D-Bus on Linux), and a project that never signs anybody in should never
     /// pay for that or trip a "an app wants your keyring" prompt.
     account: Option<Account>,
+    /// How to build it: the real one reads the OS keyring, and a test hands in
+    /// one that reads memory instead.
+    make: Rc<dyn Fn(&str) -> Account>,
     base: String,
     pending: HashMap<u64, Function>,
     tx: Sender<(u64, CloudReply)>,
@@ -68,6 +71,7 @@ impl AccountState {
             .unwrap_or_else(|_| floptle_account::DEFAULT_BASE.to_string());
         Self {
             account: None,
+            make: Rc::new(|base: &str| Account::new(base)),
             base,
             pending: HashMap::new(),
             tx,
@@ -78,16 +82,29 @@ impl AccountState {
         }
     }
 
-    /// The account, built the first time anything asks for one.
+    /// The account, built the first time anything asks for one. Building it
+    /// starts the off-thread read of the stored session.
     fn account(&mut self) -> Account {
-        self.account.get_or_insert_with(|| Account::new(self.base.clone())).clone()
+        let make = self.make.clone();
+        self.account.get_or_insert_with(|| make(&self.base)).clone()
     }
 
-    /// The account **if one already exists** — for the read-only queries, which
-    /// must not be the thing that triggers keyring I/O. `account.state()` in an
-    /// `update()` would otherwise construct one on frame zero of every project.
+    /// The account **if one already exists**, for the calls that have no
+    /// reason to read the keyring: cancelling a sign-in that never started.
     fn existing(&self) -> Option<&Account> {
         self.account.as_ref()
+    }
+
+    /// The account a "who is signed in?" question reads.
+    ///
+    /// During Play the question is the reason to look, so it builds one, and
+    /// the stored session (the Hub's, or this game's last sign-in) is read
+    /// without a Cloud call. Otherwise every scene a game opened answered
+    /// "signed out" until something happened to call the Cloud. Outside Play
+    /// it only reads one that exists: a script being edited must not be what
+    /// reads the keyring.
+    fn asked(&mut self) -> Option<Account> {
+        if self.playing { Some(self.account()) } else { self.account.clone() }
     }
 
     /// Stop / scene load: drop every waiting callback and abandon a sign-in in
@@ -118,6 +135,12 @@ impl AccountState {
     #[cfg(test)]
     pub(crate) fn use_account(&mut self, a: Account) {
         self.account = Some(a);
+    }
+
+    /// Hand in how to build the account, for a test of what building it does.
+    #[cfg(test)]
+    pub(crate) fn use_maker(&mut self, make: impl Fn(&str) -> Account + 'static) {
+        self.make = Rc::new(make);
     }
 }
 
@@ -329,15 +352,21 @@ pub(crate) fn install_account_api(
     // ---- what a screen draws ------------------------------------------------
     let st = state.clone();
     if let Ok(f) = lua.create_function(move |_, ()| {
-        Ok(st.borrow().existing().map(|a| state_word(&a.phase())).unwrap_or("signedOut"))
+        let Some(a) = st.borrow_mut().asked() else { return Ok("signedOut") };
+        let phase = a.phase();
+        // Still reading the stored session: not signed out yet, just not known.
+        if a.is_restoring() && matches!(phase, Phase::SignedOut) {
+            return Ok("starting");
+        }
+        Ok(state_word(&phase))
     }) {
         let _ = t.set("state", f);
     }
 
     let st = state.clone();
     if let Ok(f) = lua.create_function(move |lua, ()| {
-        let s = st.borrow();
-        let Some(Phase::Waiting { user_code, url, expires_in }) = s.existing().map(|a| a.phase())
+        let asked = st.borrow_mut().asked();
+        let Some(Phase::Waiting { user_code, url, expires_in }) = asked.map(|a| a.phase())
         else {
             return Ok(Value::Nil);
         };
@@ -352,8 +381,8 @@ pub(crate) fn install_account_api(
 
     let st = state.clone();
     if let Ok(f) = lua.create_function(move |lua, ()| {
-        let s = st.borrow();
-        let Some(session) = s.existing().and_then(|a| a.session()) else {
+        let asked = st.borrow_mut().asked();
+        let Some(session) = asked.and_then(|a| a.session()) else {
             return Ok(Value::Nil);
         };
         let t = lua.create_table()?;
@@ -370,8 +399,8 @@ pub(crate) fn install_account_api(
 
     let st = state.clone();
     if let Ok(f) = lua.create_function(move |lua, ()| {
-        let s = st.borrow();
-        match s.existing().map(|a| a.phase()) {
+        let asked = st.borrow_mut().asked();
+        match asked.map(|a| a.phase()) {
             Some(Phase::Failed(e)) => Ok(Value::String(lua.create_string(&e)?)),
             _ => Ok(Value::Nil),
         }
@@ -421,15 +450,89 @@ mod tests {
     #[test]
     fn a_project_that_never_signs_in_never_touches_the_keyring() {
         let (lua, state) = harness();
-        // The read-only queries answer for a signed-out player without
-        // constructing an Account — which is what would read the OS keyring and
-        // pop a permission prompt on someone who only wanted to play the game.
+        // Outside Play the read-only queries answer for a signed-out player
+        // without constructing an Account — which is what would read the OS
+        // keyring and pop a permission prompt on someone editing a script.
         let s: String = lua.load("return account.state()").eval().unwrap();
         assert_eq!(s, "signedOut");
         assert_eq!(lua.load("return account.player()").eval::<Value>().unwrap(), Value::Nil);
         assert_eq!(lua.load("return account.code()").eval::<Value>().unwrap(), Value::Nil);
         assert_eq!(lua.load("return account.error()").eval::<Value>().unwrap(), Value::Nil);
         assert!(state.borrow().existing().is_none(), "no Account should have been built");
+    }
+
+    /// A keyring that answers when the test says so, so "still reading" is a
+    /// state the test can stand in rather than race.
+    struct GatedStore {
+        open: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        session: floptle_account::Session,
+    }
+
+    impl floptle_account::TokenStore for GatedStore {
+        fn save(&self, _: &floptle_account::Session) -> Result<(), String> {
+            Ok(())
+        }
+        fn load(&self) -> Option<floptle_account::Session> {
+            self.open.lock().ok()?.recv().ok()?;
+            Some(self.session.clone())
+        }
+        fn clear(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// A game that asks who is signed in gets the stored session (the Hub's,
+    /// or its own last sign-in) with no Cloud call, in every scene: a scene
+    /// load drops callbacks and an unfinished sign-in, never the player. The
+    /// provider panics if touched, so this proves no request went out.
+    #[test]
+    fn a_stored_session_is_signed_in_in_every_scene_without_a_request() {
+        let (lua, state) = harness();
+        let (release, gate) = std::sync::mpsc::channel();
+        let store = std::sync::Arc::new(GatedStore {
+            open: std::sync::Mutex::new(gate),
+            session: floptle_account::Session {
+                sub: "p-1".into(),
+                name: Some("Ada".into()),
+                email: None,
+                tier: "free".into(),
+                access_token: "opaque".into(),
+                refresh_token: None,
+            },
+        });
+        {
+            let mut s = state.borrow_mut();
+            s.set_playing(true);
+            s.use_maker(move |base| {
+                let a = Account::with(
+                    base,
+                    store.clone(),
+                    std::sync::Arc::new(|_| panic!("reading the stored session must not call the Cloud")),
+                );
+                a.restore();
+                a
+            });
+        }
+        let now = |lua: &Lua| -> String { lua.load("return account.state()").eval().unwrap() };
+        // Asking is what starts the read; while it runs the answer is not
+        // "signed out", or a sign-in screen flashes at a signed-in player.
+        assert_eq!(now(&lua), "starting");
+        release.send(()).unwrap();
+        let mut got = now(&lua);
+        for _ in 0..400 {
+            if got != "starting" {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            got = now(&lua);
+        }
+        assert_eq!(got, "signedIn");
+        let name: String = lua.load("return account.player().name").eval().unwrap();
+        assert_eq!(name, "Ada");
+        // `scene.load`.
+        state.borrow_mut().cancel_all();
+        assert_eq!(now(&lua), "signedIn", "a scene load must not sign the player out");
+        assert_eq!(state.borrow().in_flight(), 0, "and no request was made to find that out");
     }
 
     #[test]
