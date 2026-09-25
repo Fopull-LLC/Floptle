@@ -28,3 +28,59 @@ pub use texture::{
     decode_png, encode_png, load_texture, load_texture_sized, load_texture_sized_filtered,
     save_texture_png,
 };
+
+/// A model file as the engine draws it: with its node tree when it has one
+/// worth keeping, baked flat per material when it does not.
+#[derive(Debug)]
+pub enum Model {
+    Rigged(RiggedModel),
+    Static(ImportedModel),
+}
+
+/// Import a model, reading and decoding the file **once**.
+///
+/// [`import_rigged`] followed by [`import`] reads the file and decodes every
+/// image in it, finds a lone static mesh, and hands over to the static import,
+/// which reads and decodes it all again: twice the cost for the most common
+/// model there is. This reads once and branches. A rig that fails to build
+/// still falls back to the static bake, as it always has.
+pub fn import_model(path: &std::path::Path) -> Result<Model, ImportError> {
+    let (doc, buffers, images) = gltf_import::read_gltf(path, true)?;
+    if gltf_rig::wants_rig(&doc) {
+        match gltf_rig::build_rigged(path, &doc, &buffers, &images) {
+            Ok(Some(m)) => return Ok(Model::Rigged(m)),
+            Ok(None) => {}
+            Err(e) => floptle_say::say_err!("  rig import {} failed ({e}); trying static", path.display()),
+        }
+    }
+    gltf_import::build_static(path, &doc, &buffers, &images).map(Model::Static)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    /// Reading once must not change what comes out: the same parts, the same
+    /// branch, as the two importers it replaces.
+    #[test]
+    fn one_read_imports_what_two_did() {
+        let prop = Path::new("../../assets/SaesRapier.glb");
+        assert!(crate::import_rigged(prop).unwrap().is_none(), "the fixture is a lone static mesh");
+        let old = crate::import(prop).unwrap();
+        let crate::Model::Static(new) = crate::import_model(prop).unwrap() else {
+            panic!("a lone static mesh took the rigged branch")
+        };
+        assert_eq!(new.parts.len(), old.parts.len());
+        assert_eq!(new.textures.len(), old.textures.len());
+        assert_eq!(new.parts[0].mesh.vertices.len(), old.parts[0].mesh.vertices.len());
+        assert_eq!(new.size, old.size);
+
+        let rigged = Path::new("../../assets/models/Sae.glb");
+        let old = crate::import_rigged(rigged).unwrap().expect("the fixture keeps its tree");
+        let crate::Model::Rigged(new) = crate::import_model(rigged).unwrap() else {
+            panic!("a rigged model took the static branch")
+        };
+        assert_eq!(new.parts.len(), old.parts.len());
+        assert_eq!(new.clips.len(), old.clips.len());
+    }
+}

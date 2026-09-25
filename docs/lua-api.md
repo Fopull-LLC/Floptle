@@ -44,7 +44,7 @@ each group, and meant to be searched.
 - [animation — node:animator](#animation--nodeanimator) — 16
 - [particles — effects from script](#particles--effects-from-script) — 10
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 27
-- [assets](#assets) — 7
+- [assets](#assets) — 8
 - [debug gizmos](#debug-gizmos) — 5
 - [lua stdlib](#lua-stdlib) — 43
 
@@ -715,7 +715,7 @@ Apply a material — assign a preset name ("Gold") or an assets.getFile("materia
 
 ### `node.model`
 
-A Mesh node's model path — read it, or ASSIGN it to swap the model live (e.g. node.model = assets.getFile("models/x.glb")).
+A Mesh node's model path — read it, or ASSIGN it to swap the model live (e.g. node.model = assets.getFile("models/x.glb")). A model not loaded yet loads in the background, and the node draws nothing until it is in: the frame never stops for it. When it has to be there on the frame you assign it, load it earlier with assets.preload.
 
 ### `node.name`
 
@@ -2799,7 +2799,7 @@ perf.accountedMs() — the buckets added up. Called 'accounted' and not 'total' 
 
 ### `perf.buckets`
 
-perf.buckets() → the bucket names, in frame order: scripts, mirror, physics, terrain, scatter, particles, audio, animation, ui, render. Iterate this rather than keeping your own list, which could go stale. `scripts` is the WHOLE of every script pass — setup, reference params, write flush and hooks; `mirror` is the ECS-to-Lua sync each pass runs first, nested inside a pass and subtracted out of `scripts` so nothing is counted twice.
+perf.buckets() → the bucket names, in frame order: scripts, mirror, physics, terrain, scatter, particles, audio, animation, models, ui, render. Iterate this rather than keeping your own list, which could go stale. `scripts` is the WHOLE of every script pass — setup, reference params, write flush and hooks; `mirror` is the ECS-to-Lua sync each pass runs first, nested inside a pass and subtracted out of `scripts` so nothing is counted twice.
 
 ### `perf.counts`
 
@@ -3665,7 +3665,7 @@ Fader gain in dB (0 = unity, −60 = silent).
 
 ### `assets`
 
-Reference files under Assets/ in code: assets.getFile(path), assets.getContents(dir). Read and write your own data files: assets.readText / writeText, assets.readJson / writeJson.
+Reference files under Assets/ in code: assets.getFile(path), assets.getContents(dir), assets.preload(models, cb). Read and write your own data files: assets.readText / writeText, assets.readJson / writeJson.
 
 ### `assets.getContents`
 
@@ -3674,6 +3674,10 @@ assets.getContents("models") — an array of every file under that folder (recur
 ### `assets.getFile`
 
 assets.getFile("models/armor.glb") — the asset's path (or nil), to hand to node.model / node.material. Path is relative to Assets/ and stays inside it: an absolute path or `..` is nil and one Console line.
+
+### `assets.preload`
+
+assets.preload({ "models/arm.glb", "models/leg.glb" } [, function(failed) end]) — load models in the background ahead of the moment a node needs them, and call back once every one is in. `failed` lists any path that could not load (empty when all did); a single path works too. Warm a ragdoll's parts on a menu or a loading screen, so the death that spawns them draws them on its first frame. Without a GPU (floptle run, a dedicated server) there is nothing to load and it calls back straight away. Stop and scene.load drop a waiting callback; the models stay loaded.
 
 ### `assets.readJson`
 

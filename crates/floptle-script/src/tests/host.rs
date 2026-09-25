@@ -346,3 +346,60 @@ fn save_api_round_trips_across_hosts() {
     assert!(root.join("save/main.ron").exists(), "flush wrote the slot file");
     assert_eq!(run("reader"), 42.0 + 7000.0 + 5.0);
 }
+
+/// **`assets.preload` waits for every model it named, and says which failed.**
+/// The driver is asked to start the imports, reports as they land, and the
+/// callback runs in the frame pass once all of them have answered: not when
+/// the first one does.
+#[test]
+fn a_preload_calls_back_once_every_model_is_in() {
+    let dir = std::env::temp_dir().join("floptle_script_test_preload");
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "warm",
+        "calls = 0\n\
+         function start(node)\n\
+           assets.preload({ \"models/arm.glb\", \"models/leg.glb\" }, function(failed)\n\
+             calls = calls + 1; failedCount = #failed; firstFailed = failed[1]\n\
+           end)\n\
+         end\n",
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(
+        e,
+        Scripts(vec![floptle_core::ScriptInst {
+            kind: "warm".into(),
+            enabled: true,
+            params: vec![],
+            refs: Vec::new(),
+            strs: Vec::new(),
+        }]),
+    );
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    assert_eq!(host.take_preload_requests(), vec!["models/arm.glb".to_string(), "models/leg.glb".to_string()]);
+    let calls = |host: &ScriptHost| -> i64 { host.instance_env(e.index(), "warm").unwrap().get("calls").unwrap() };
+
+    // One of two in: still waiting.
+    host.set_preload_status(HashMap::from([("models/arm.glb".to_string(), true)]));
+    host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+    assert_eq!(calls(&host), 0, "called back before every model had answered");
+
+    host.set_preload_status(HashMap::from([
+        ("models/arm.glb".to_string(), true),
+        ("models/leg.glb".to_string(), false),
+    ]));
+    host.run(&mut world, &dir, 1.0 / 60.0, 2.0 / 60.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    let env = host.instance_env(e.index(), "warm").unwrap();
+    assert_eq!(calls(&host), 1);
+    assert_eq!(env.get::<i64>("failedCount").unwrap(), 1);
+    assert_eq!(env.get::<String>("firstFailed").unwrap(), "models/leg.glb");
+    assert!(host.preload_waiting_on().is_empty(), "an answered preload must stop waiting");
+    host.run(&mut world, &dir, 1.0 / 60.0, 3.0 / 60.0);
+    assert_eq!(calls(&host), 1, "a preload calls back once");
+}

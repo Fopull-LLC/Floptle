@@ -44,6 +44,11 @@ pub enum Bucket {
     Audio,
     /// Skeletal animation: clip sampling, blending, pose composition, skinning.
     Animation,
+    /// Model imports on the main thread: what a model given to a node or
+    /// spawned with a prefab costs the frame. Reading and decoding run on a
+    /// worker; the upload lands here, and so does any import that could not
+    /// wait (opening a scene).
+    Models,
     /// Game UI: layout solve, hit-testing, the element draw list.
     Ui,
     /// Everything from the gather to submit: instances, the raymarch, the raster
@@ -54,7 +59,7 @@ pub enum Bucket {
 impl Bucket {
     /// Every bucket, in the order a readout should list them — roughly the order
     /// of a frame.
-    pub const ALL: [Bucket; 10] = [
+    pub const ALL: [Bucket; 11] = [
         Bucket::Scripts,
         Bucket::Mirror,
         Bucket::Physics,
@@ -63,6 +68,7 @@ impl Bucket {
         Bucket::Particles,
         Bucket::Audio,
         Bucket::Animation,
+        Bucket::Models,
         Bucket::Ui,
         Bucket::Render,
     ];
@@ -81,6 +87,7 @@ impl Bucket {
             Bucket::Particles => "particles",
             Bucket::Audio => "audio",
             Bucket::Animation => "animation",
+            Bucket::Models => "models",
             Bucket::Ui => "ui",
             Bucket::Render => "render",
         }

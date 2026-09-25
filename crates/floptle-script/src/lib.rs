@@ -273,6 +273,7 @@ mod audio_api;
 mod env;
 mod host;
 mod http_api;
+mod preload_api;
 pub use http_api::{browser_url, open_in_browser};
 pub mod http_policy;
 pub use http_policy::HttpPolicy;
@@ -909,6 +910,9 @@ pub struct ScriptHost {
     /// waiting on a reply. Built lazily inside — a project that never signs
     /// anybody in never touches the OS keyring.
     account: Rc<RefCell<account_api::AccountState>>,
+    /// `assets.preload`: the models scripts asked for ahead of time, and the
+    /// callbacks waiting on them.
+    preloads: Rc<RefCell<preload_api::Preloads>>,
     /// True while the tick pass is running — `http.*` warns once when called
     /// from there, because nothing about a reply's timing can be replayed.
     http_in_fixed: Rc<std::cell::Cell<bool>>,

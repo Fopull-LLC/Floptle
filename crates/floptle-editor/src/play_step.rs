@@ -1112,8 +1112,19 @@ impl Editor {
     /// every runtime model swap and the node would render as nothing, with
     /// only a stderr line no player sees.
     pub(crate) fn load_script_swapped_models(&mut self) {
+        // In the background: a model given to a node mid-game draws once it is
+        // in, rather than stopping the frame to decode it.
         for (_eid, path) in self.script_host.take_model_changes() {
-            self.import_model(&path);
+            self.request_model(&path);
+        }
+        for path in self.script_host.take_preload_requests() {
+            self.request_model(&path);
+        }
+        self.pump_model_imports();
+        let waiting = self.script_host.preload_waiting_on();
+        if !waiting.is_empty() {
+            let status = waiting.into_iter().filter_map(|p| Some((p.clone(), self.model_status(&p)?))).collect();
+            self.script_host.set_preload_status(status);
         }
     }
 

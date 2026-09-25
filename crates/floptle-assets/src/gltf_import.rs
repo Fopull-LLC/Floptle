@@ -197,17 +197,27 @@ fn read_uri(base: Option<&Path>, uri: &str) -> Result<Vec<u8>, ImportError> {
 
 fn import_inner(path: &Path, want_textures: bool) -> Result<ImportedModel, ImportError> {
     let (doc, buffers, images) = read_gltf(path, want_textures)?;
+    build_static(path, &doc, &buffers, &images)
+}
+
+/// The static bake from a file [`read_gltf`] has already read.
+pub(crate) fn build_static(
+    path: &Path,
+    doc: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+    images: &[gltf::image::Data],
+) -> Result<ImportedModel, ImportError> {
     // Decode every image to RGBA8 once; parts reference them by index.
     let textures: Vec<TextureData> = images.iter().map(to_rgba8).collect();
 
     let mut parts = Parts::default();
     if let Some(scene) = doc.default_scene().or_else(|| doc.scenes().next()) {
         for node in scene.nodes() {
-            add_node(&node, Mat4::IDENTITY, &buffers, &mut parts);
+            add_node(&node, Mat4::IDENTITY, buffers, &mut parts);
         }
     } else {
         for m in doc.meshes() {
-            add_primitives(&m, Mat4::IDENTITY, &buffers, &mut parts);
+            add_primitives(&m, Mat4::IDENTITY, buffers, &mut parts);
         }
     }
 

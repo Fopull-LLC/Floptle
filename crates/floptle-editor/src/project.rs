@@ -259,6 +259,10 @@ impl Editor {
             .collect()
     }
 
+    /// Import and register a model now, on this thread. Cached by path; true
+    /// when it is registered. Opening a scene uses this: the scene is not up
+    /// until its models are. Anything that happens mid-game goes through
+    /// [`request_model`](Self::request_model) instead.
     pub(crate) fn import_model(&mut self, path: &str) -> bool {
         if self.mesh_registry.contains_key(path) {
             return true;
@@ -268,16 +272,142 @@ impl Editor {
         // A missing file (e.g. a model deleted while still referenced by a VFX effect or
         // a scene node) must not be re-attempted + error-logged every frame — bail on the
         // cheap existence check. It re-imports for free if the file comes back.
-        if !floptle_vfs::exists(&file) {
+        if !floptle_vfs::exists(&file) || self.gpu.is_none() || self.raster.is_none() {
             return false;
+        }
+        let t = floptle_core::profile::Span::new();
+        let decoded = floptle_assets::import_model(&file).map_err(|e| e.to_string());
+        let ok = self.install_model(path, &file, decoded);
+        self.profile_record(floptle_core::profile::Bucket::Models, t.ms());
+        ok
+    }
+
+    /// Start importing a model without waiting for it: the file is read and
+    /// its images decoded on a worker thread, and
+    /// [`pump_model_imports`](Self::pump_model_imports) puts it on the GPU
+    /// when that is done. Until then a node wearing it draws nothing.
+    ///
+    /// What a game does mid-play (`node.model = …`, a prefab spawn,
+    /// `assets.preload`) comes here. Importing on the frame stalled the frame
+    /// for the whole decode: a model's embedded image is a few kilobytes of
+    /// PNG and megabytes of pixels, and a ragdoll of twenty parts froze a
+    /// fight for the time it took to decode twenty of them.
+    pub(crate) fn request_model(&mut self, path: &str) {
+        if self.mesh_registry.contains_key(path)
+            || self.model_jobs.contains_key(path)
+            || self.model_failed.contains(path)
+        {
+            return;
+        }
+        // Nothing to draw it with: a dedicated server, or `floptle run`.
+        if self.gpu.is_none() || self.raster.is_none() {
+            return;
+        }
+        let file = resolve_asset_path(&self.project_root, path);
+        if !floptle_vfs::exists(&file) {
+            self.model_failed.insert(path.to_string());
+            return;
+        }
+        // No threads in a browser, and nothing to hand the decode to.
+        #[cfg(target_arch = "wasm32")]
+        {
+            if !self.import_model(path) {
+                self.model_failed.insert(path.to_string());
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let started = std::thread::Builder::new().name("floptle-model-import".into()).spawn(move || {
+                let _ = tx.send(floptle_assets::import_model(&file).map_err(|e| e.to_string()));
+            });
+            match started {
+                Ok(_) => {
+                    self.model_jobs.insert(path.to_string(), rx);
+                }
+                Err(_) => {
+                    if !self.import_model(path) {
+                        self.model_failed.insert(path.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Put every model a worker has finished decoding on the GPU. Once a frame,
+    /// in every host that plays the game. The upload is the cheap half; it is
+    /// timed into the `models` bucket with the synchronous imports.
+    pub(crate) fn pump_model_imports(&mut self) {
+        if self.model_jobs.is_empty() || self.gpu.is_none() || self.raster.is_none() {
+            return;
+        }
+        let t = floptle_core::profile::Span::new();
+        let done: Vec<(String, Result<floptle_assets::Model, String>)> = {
+            let mut done = Vec::new();
+            self.model_jobs.retain(|path, rx| match rx.try_recv() {
+                Ok(r) => {
+                    done.push((path.clone(), r));
+                    false
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => true,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    done.push((path.clone(), Err("the import thread stopped".into())));
+                    false
+                }
+            });
+            done
+        };
+        for (path, decoded) in done {
+            let file = resolve_asset_path(&self.project_root, &path);
+            if !self.install_model(&path, &file, decoded) {
+                self.model_failed.insert(path);
+            }
+        }
+        self.profile_record(floptle_core::profile::Bucket::Models, t.ms());
+    }
+
+    /// Whether a model is ready to draw (`Some(true)`), failed (`Some(false)`),
+    /// or still on its way (`None`) — what `assets.preload` waits on.
+    ///
+    /// A host with nothing to draw with (`floptle run`, a dedicated server)
+    /// answers loaded: there is nothing to wait for, and a game waiting on a
+    /// preload must run there the same as anywhere.
+    pub(crate) fn model_status(&self, path: &str) -> Option<bool> {
+        if self.mesh_registry.contains_key(path) || self.gpu.is_none() || self.raster.is_none() {
+            Some(true)
+        } else if self.model_failed.contains(path) {
+            Some(false)
+        } else if self.model_jobs.contains_key(path) {
+            None
+        } else {
+            // Never asked for: a path that has not been requested cannot be
+            // waited on, and the caller requests before it asks.
+            Some(false)
+        }
+    }
+
+    /// The GPU half of an import: upload a decoded model's parts and textures,
+    /// build its rig, and register it under `path`.
+    fn install_model(
+        &mut self,
+        path: &str,
+        file: &Path,
+        decoded: Result<floptle_assets::Model, String>,
+    ) -> bool {
+        // Imported on this thread while a worker was still decoding it (a
+        // particle effect wanted it now): the first registration stands, and a
+        // second would leave the first's GPU meshes orphaned.
+        if self.mesh_registry.contains_key(path) {
+            return true;
         }
         let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
             return false;
         };
-        // Rigged path first: any glTF with animations keeps its node tree +
-        // clips (parts stay node-local and get posed each frame).
-        match floptle_assets::import_rigged(&file) {
-            Ok(Some(model)) => {
+        let overrides = crate::rig_overrides::RigOverrides::load(file);
+        match decoded {
+            // Rigged: any glTF with animations keeps its node tree + clips
+            // (parts stay node-local and get posed each frame).
+            Ok(floptle_assets::Model::Rigged(model)) => {
                 let parts: Vec<MeshId> = model
                     .parts
                     .iter()
@@ -292,7 +422,6 @@ impl Editor {
                         textured: p.texture.is_some(),
                     })
                     .collect();
-                let overrides = crate::rig_overrides::RigOverrides::load(&file);
                 if let Some(f) = overrides.texture_filter {
                     let s = crate::assets::TexSetting { filter: f, ..Default::default() };
                     for &mid in &parts {
@@ -328,13 +457,8 @@ impl Editor {
                     None,
                 );
                 floptle_say::say_err!("  imported {path} (rigged, {} clip(s))", model.clips.len());
-                return true;
             }
-            Ok(None) => {} // no animations — fall through to the static bake
-            Err(e) => floptle_say::say_err!("  rig import {path} failed ({e}); trying static"),
-        }
-        match floptle_assets::gltf_import::import(&file) {
-            Ok(model) => {
+            Ok(floptle_assets::Model::Static(model)) => {
                 let parts: Vec<MeshId> = model
                     .parts
                     .iter()
@@ -349,7 +473,6 @@ impl Editor {
                         textured: p.texture.is_some(),
                     })
                     .collect();
-                let overrides = crate::rig_overrides::RigOverrides::load(&file);
                 if let Some(f) = overrides.texture_filter {
                     let s = crate::assets::TexSetting { filter: f, ..Default::default() };
                     for &mid in &parts {
@@ -367,18 +490,17 @@ impl Editor {
                     },
                 );
                 floptle_say::say_err!("  imported {path}");
-                // A model imported after Play started — a script spawning a
-                // prefab, a scatter prototype baking — has to reach
-                // `node:materials()` too, or a runtime-spawned character has no
-                // parts a script can name.
-                self.script_host.set_model_slots(self.model_slots());
-                true
             }
             Err(e) => {
                 floptle_say::say_err!("  import {path} failed: {e}");
-                false
+                return false;
             }
         }
+        // A model imported after Play started — a script spawning a prefab, a
+        // scatter prototype baking — has to reach `node:materials()` too, or a
+        // runtime-spawned character has no parts a script can name.
+        self.script_host.set_model_slots(self.model_slots());
+        true
     }
 
     /// Create a new blank scene `<name>.ron`, save it, and switch the editor to it.
@@ -534,7 +656,13 @@ impl Editor {
         let wanted: Vec<String> =
             paths.into_iter().filter(|p| seen.insert(*p)).map(str::to_string).collect();
         for p in wanted {
-            self.import_model(&p);
+            // Mid-game in the background, like `node.model`; in the editor a
+            // placed prefab's models are there when it lands.
+            if self.playing {
+                self.request_model(&p);
+            } else {
+                self.import_model(&p);
+            }
         }
     }
 
@@ -2992,3 +3120,36 @@ mod package_loading_tests {
     }
 }
 
+
+#[cfg(test)]
+mod model_import_tests {
+    /// **A model asked for mid-game does not stop the frame.** The request
+    /// returns before the model is registered — the read and the decode are a
+    /// worker's — and the pump that runs once a frame puts it on the GPU when
+    /// the worker is done. Deterministic: nothing but the pump registers.
+    #[test]
+    fn a_requested_model_arrives_through_the_pump_not_the_request() {
+        let mut ed = crate::Editor::default();
+        ed.attach_gpu(floptle_render::Gpu::headless(64, 64));
+        ed.project_root = std::path::PathBuf::from("../../assets");
+        let path = "SaesRapier.glb";
+        ed.request_model(path);
+        assert!(!ed.mesh_registry.contains_key(path), "the request imported on the calling thread");
+        assert_eq!(ed.model_status(path), None, "a model on its way is neither loaded nor failed");
+        for _ in 0..2000 {
+            ed.pump_model_imports();
+            if ed.mesh_registry.contains_key(path) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(ed.mesh_registry.contains_key(path), "the pump never installed the decoded model");
+        assert_eq!(ed.model_status(path), Some(true));
+        assert!(ed.model_jobs.is_empty());
+
+        // A file that is not there is answered, so a preload waiting on it
+        // is told rather than left waiting.
+        ed.request_model("models/_test/NotThere.glb");
+        assert_eq!(ed.model_status("models/_test/NotThere.glb"), Some(false));
+    }
+}

@@ -86,12 +86,28 @@ pub struct SkinStream {
 /// or animate independently) takes the cheaper flattening path.
 pub fn import_rigged(path: &Path) -> Result<Option<RiggedModel>, ImportError> {
     let (doc, buffers, images) = crate::gltf_import::read_gltf(path, true)?;
+    build_rigged(path, &doc, &buffers, &images)
+}
+
+/// Whether a model keeps its node tree: see [`import_rigged`].
+pub(crate) fn wants_rig(doc: &gltf::Document) -> bool {
+    let mesh_objects = doc.nodes().filter(|n| n.mesh().is_some()).count();
+    doc.animations().len() > 0 || doc.skins().len() > 0 || mesh_objects >= 2
+}
+
+/// The rigged import from a file already read. `None` when the model has
+/// nothing to keep a tree for.
+pub(crate) fn build_rigged(
+    path: &Path,
+    doc: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+    images: &[gltf::image::Data],
+) -> Result<Option<RiggedModel>, ImportError> {
     // Keep the structure if the file is animated or skinned (a rig authored
     // elsewhere, clips to be keyed in-engine — the astronaut_male case) or it has
     // two or more mesh objects (the multi-part unrigged character — Sae). A single
     // mesh with no rig has no sub-objects to expose, so it stays a plain baked prop.
-    let mesh_objects = doc.nodes().filter(|n| n.mesh().is_some()).count();
-    if doc.animations().len() == 0 && doc.skins().len() == 0 && mesh_objects < 2 {
+    if !wants_rig(doc) {
         return Ok(None);
     }
 

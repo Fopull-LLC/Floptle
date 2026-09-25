@@ -861,7 +861,11 @@ fn install_gizmos(lua: &Lua) -> Rc<RefCell<Vec<GizmoCmd>>> {
 }
 
 /// `assets.*`: files under the project root, read and written from a script.
-fn install_assets(lua: &Lua, logs: &Rc<RefCell<Vec<ScriptLog>>>) -> Rc<RefCell<PathBuf>> {
+fn install_assets(
+    lua: &Lua,
+    logs: &Rc<RefCell<Vec<ScriptLog>>>,
+    preloads: Rc<RefCell<crate::preload_api::Preloads>>,
+) -> Rc<RefCell<PathBuf>> {
     // `assets.getFile(path)` / `assets.getContents(dir)`: resolve files in the project's
     // `Assets/` folder by a path the dev writes relative to it (e.g. "models/armor.glb").
     // getFile returns the full asset path (or nil if missing); getContents returns an
@@ -1018,6 +1022,7 @@ fn install_assets(lua: &Lua, logs: &Rc<RefCell<Vec<ScriptLog>>>) -> Rc<RefCell<P
             })
             .ok(),
         );
+        let _ = crate::preload_api::install(lua, &t, preloads);
         let _ = lua.globals().set("assets", t);
     }
 
@@ -2165,7 +2170,8 @@ impl ScriptHost {
         );
 
         let gizmos = install_gizmos(&lua);
-        let project_root = install_assets(&lua, &logs);
+        let preloads: Rc<RefCell<crate::preload_api::Preloads>> = Rc::default();
+        let project_root = install_assets(&lua, &logs, preloads.clone());
         let SceneCells {
             scene_request,
             scene_loaded,
@@ -2587,6 +2593,7 @@ impl ScriptHost {
             stopped: std::collections::HashSet::new(),
             dropped_lines,
             account,
+            preloads,
             http_in_fixed,
             platform,
             steam_state,
@@ -3651,6 +3658,9 @@ impl ScriptHost {
         // the OS keyring, and signing in again every time you press Play would
         // be absurd. Only the callbacks and an unfinished sign-in are dropped.
         self.account.borrow_mut().set_playing(playing);
+        if !playing {
+            self.preloads.borrow_mut().cancel_all();
+        }
         // Stop drops every leaderboard callback still waiting, for the same
         // reason as `http.*` — the backend's own request stays in flight and
         // its result lands on nothing. A `steam.onPersonaChanged` registered
@@ -3664,6 +3674,7 @@ impl ScriptHost {
     pub fn cancel_web_requests(&self) {
         self.http.borrow_mut().cancel_all();
         self.account.borrow_mut().cancel_all();
+        self.preloads.borrow_mut().cancel_all();
         self.steam_state.borrow_mut().cancel_all();
     }
 
@@ -4800,6 +4811,24 @@ impl ScriptHost {
         std::mem::take(&mut *self.model_changes.borrow_mut())
     }
 
+    /// Models `assets.preload` asked for since the last call, for the driver
+    /// to start importing.
+    pub fn take_preload_requests(&self) -> Vec<String> {
+        self.preloads.borrow_mut().take_requests()
+    }
+
+    /// Every model a preload callback is still waiting on.
+    pub fn preload_waiting_on(&self) -> Vec<String> {
+        self.preloads.borrow().waiting_on()
+    }
+
+    /// The driver's answer for those models: `true` loaded, `false` failed; a
+    /// path left out is still on its way. The next frame pass runs every
+    /// callback whose models have all answered.
+    pub fn set_preload_status(&self, status: HashMap<String, bool>) {
+        self.preloads.borrow_mut().set_status(status);
+    }
+
     /// Errors raised by the most recent [`run`](Self::run) (one per failing script).
     pub fn errors(&self) -> &[String] {
         &self.errors
@@ -4901,6 +4930,7 @@ impl ScriptHost {
         crate::http_api::set_now(&self.http, time as f64);
         crate::http_api::drain(&self.lua, &self.http, &self.logs);
         crate::account_api::drain(&self.lua, &self.account, &self.logs);
+        crate::preload_api::drain(&self.lua, &self.preloads, &self.logs);
         // Pumps the platform backend's callbacks and fires
         // `steam.onPersonaChanged` — a no-op under `NullPlatform`.
         crate::steam_api::drain(&self.lua, &self.platform, &self.steam_state, &self.logs);

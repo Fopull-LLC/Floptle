@@ -2052,6 +2052,12 @@ struct Editor {
     mesh_ids: Vec<MeshId>,
     /// Imported glTF models, keyed by asset path ⏵ registered mesh parts.
     mesh_registry: HashMap<String, MeshAsset>,
+    /// Models being read and decoded off the main thread, by the same key —
+    /// see `request_model`. Installed by `pump_model_imports`.
+    model_jobs: HashMap<String, std::sync::mpsc::Receiver<Result<floptle_assets::Model, String>>>,
+    /// Models whose import failed this session, so a preload waiting on one
+    /// is answered rather than left waiting, and a bad file is tried once.
+    model_failed: std::collections::HashSet<String>,
     /// Scatter prototypes resolved to their drawable parts, by asset string —
     /// baked once (see `scatter_prototype`). An empty entry is a remembered
     /// Failure, so a prototype that cannot be drawn is reported once rather

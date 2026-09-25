@@ -149,8 +149,14 @@ end
 ```
 
 The buckets, in frame order: `scripts` `mirror` `physics` `terrain` `scatter`
-`particles` `audio` `animation` `ui` `render`. `perf.buckets()` returns exactly
-that list, so a loop over it can never name one that does not exist.
+`particles` `audio` `animation` `models` `ui` `render`. `perf.buckets()` returns
+exactly that list, so a loop over it can never name one that does not exist.
+
+`models` is what giving a node a model, or spawning a prefab that brings one,
+costs the frame. The file is read and its images decoded in the background, so
+this is the upload that follows, plus any import that cannot wait (opening a
+scene). `floptle run` has no GPU and loads no models, so there it reads 0; the
+game, the editor and `floptle shot` load them.
 
 `scripts` is the **whole** of every script pass — the per-instance setup, the
 reference params, the write flush, and the hooks themselves. `mirror` is the
