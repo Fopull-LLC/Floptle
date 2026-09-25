@@ -1281,7 +1281,7 @@ pub(crate) fn test_editor_with_gpu() -> Option<crate::Editor> {
     if let Ok(why) = failed.lock()
         && !why.is_empty()
     {
-        eprintln!("skipped — this machine cannot build the renderer:\n{why}");
+        floptle_say::say_err!("skipped — this machine cannot build the renderer:\n{why}");
         return None;
     }
     Some(ed)
