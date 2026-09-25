@@ -81,6 +81,7 @@ fn main() {
         depth: retro.depth_view(),
         proj: proj.to_cols_array_2d(),
         inv_proj: proj.inverse().to_cols_array_2d(),
+        fog: [0.0; 4],
     };
     let settings = PostSettings {
         bloom: false,

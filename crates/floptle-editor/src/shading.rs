@@ -708,6 +708,17 @@ pub(crate) fn fog_uniforms_and_particles_at(
     ((color, params, extra), particles)
 }
 
+/// The fog the screen-space AO pass fades out under, as a linear ramp
+/// `[start, end, on, _]` over view distance.
+///
+/// The particle pass's lanes, because they are already the one linear answer
+/// for every fog the scene can have: the flat ramp, the volumetric fog's
+/// equivalent, and the water the camera is under.
+pub(crate) fn ao_fog(world: &floptle_core::World, cam: floptle_core::math::DVec3) -> [f32; 4] {
+    let light = world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
+    fog_uniforms_and_particles_at(&light, world, cam).1
+}
+
 /// Harvest up to 32 proxy shadow occluders from the world's collider shapes —
 /// how dynamic raster meshes cast sun shadows without being in the SDF field.
 /// Mirrors the physics build: a RigidBody node casts its body shape; a Collidable

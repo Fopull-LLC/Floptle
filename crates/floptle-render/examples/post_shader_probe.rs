@@ -115,6 +115,7 @@ fn main() {
             depth: gpu.depth_view(),
             proj: proj.to_cols_array_2d(),
             inv_proj: proj.inverse().to_cols_array_2d(),
+            fog: [0.0; 4],
         };
         post.run_with(&gpu, &settings, Some(&ssao), &out_view, shaders);
         read_rgb(&gpu, &out)

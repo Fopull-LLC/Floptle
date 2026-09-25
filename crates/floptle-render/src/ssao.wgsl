@@ -19,6 +19,9 @@ struct SsaoParams {
     inv_proj: mat4x4<f32>, // clip → view
     // x = radius (world units), y = strength (0..1), z = depth bias, w unused.
     params: vec4<f32>,
+    // The scene's fog as a linear ramp: x = start, y = end (view distance),
+    // z = on. Fog hides a surface, and its occlusion goes with it.
+    fog: vec4<f32>,
 };
 @group(0) @binding(1) var<uniform> sp: SsaoParams;
 
@@ -70,6 +73,23 @@ fn fs_ssao(in: VsOut) -> @location(0) vec4<f32> {
         return vec4<f32>(1.0, 0.0, 0.0, 1.0);
     }
     let c = view_pos((vec2<f32>(pix) + 0.5) / dims, d);
+    let radius = max(sp.params.x, 1e-3);
+
+    // How much of this pixel's AO survives: none once the sampling disc is a
+    // pixel or two across, and none under full fog. A disc that small samples
+    // the same few depth texels, where the depth buffer's own error at range
+    // is bigger than the bias, so distant ground occluded itself in blotches
+    // that moved with the camera. And the AO is multiplied over the fogged
+    // picture, so a fogged-out horizon came out patchy dark.
+    let r_px = radius * sp.proj[1][1] * 0.5 * dims.y / max(-c.z, 1e-3);
+    var keep = smoothstep(2.0, 6.0, r_px);
+    if (sp.fog.z > 0.5) {
+        let fogged = clamp((length(c) - sp.fog.x) / max(sp.fog.y - sp.fog.x, 1e-4), 0.0, 1.0);
+        keep = keep * (1.0 - fogged);
+    }
+    if (keep <= 0.0) {
+        return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+    }
 
     // Normal from depth. Per axis, difference against whichever neighbor is closer
     // in depth — the naive one-sided derivative smears normals across silhouettes.
@@ -98,7 +118,6 @@ fn fs_ssao(in: VsOut) -> @location(0) vec4<f32> {
     h3 = h3 + dot(h3, h3.yzx + 33.33);
     let ang0 = fract((h3.x + h3.y) * h3.z) * 6.2831853;
 
-    let radius = max(sp.params.x, 1e-3);
     let bias = sp.params.z;
     let taps = 16;
     // Per-pixel ring jitter (decorrelated from the rotation) so the spiral's
@@ -129,6 +148,6 @@ fn fs_ssao(in: VsOut) -> @location(0) vec4<f32> {
             occ = occ + (1.0 - smoothstep(radius * 0.75, radius * 1.5, abs(c.z - sv.z)));
         }
     }
-    let ao = clamp(1.0 - sp.params.y * (occ / f32(taps)) * 1.6, 0.0, 1.0);
+    let ao = clamp(1.0 - sp.params.y * keep * (occ / f32(taps)) * 1.6, 0.0, 1.0);
     return vec4<f32>(ao, 0.0, 0.0, 1.0);
 }

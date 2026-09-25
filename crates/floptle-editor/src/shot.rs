@@ -618,6 +618,7 @@ pub(crate) fn render_frame_pixels(
         depth: &depth_view,
         proj: proj.to_cols_array_2d(),
         inv_proj: proj.inverse().to_cols_array_2d(),
+        fog: crate::shading::ao_fog(&ed.world, cam.world_position),
     };
     // Where the chain lands: the retro target when there is one, the picture
     // itself otherwise. (`out` is the file; this is the texture.)

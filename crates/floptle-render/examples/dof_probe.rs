@@ -278,6 +278,7 @@ impl Rig {
             depth: gpu.depth_view(),
             proj: self.proj.to_cols_array_2d(),
             inv_proj: self.proj.inverse().to_cols_array_2d(),
+            fog: [0.0; 4],
         };
         self.post.run(gpu, s, Some(&ssao), &self.out_view);
         read_rgb(gpu, &self.out)

@@ -716,6 +716,7 @@ impl Editor {
                 depth: &depth,
                 proj: proj.to_cols_array_2d(),
                 inv_proj: proj.inverse().to_cols_array_2d(),
+                fog: crate::shading::ao_fog(&self.world, cam.world_position),
             };
             let out = if retro_on {
                 retro_views.as_ref().map(|(c, _)| c.clone()).unwrap_or_else(|| cv.clone())

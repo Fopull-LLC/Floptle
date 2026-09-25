@@ -951,6 +951,7 @@ impl Editor {
                         depth: if self.project.retro { retro.depth_view() } else { gpu.depth_view() },
                         proj: proj.to_cols_array_2d(),
                         inv_proj: proj.inverse().to_cols_array_2d(),
+                        fog: crate::shading::ao_fog(&self.world, cam.world_position),
                     };
                     // In retro mode the chain writes the retro colour target and
                     // the nearest-neighbour blit carries the finished picture up;

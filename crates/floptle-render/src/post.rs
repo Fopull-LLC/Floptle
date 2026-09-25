@@ -354,6 +354,10 @@ pub struct SsaoFrame<'a> {
     pub proj: [[f32; 4]; 4],
     /// Its inverse (clip → view).
     pub inv_proj: [[f32; 4]; 4],
+    /// The scene's fog as a linear ramp over view distance: `[start, end, on,
+    /// unused]`. AO fades out with it, so a fogged-out surface is fog colour
+    /// and not fog colour darkened.
+    pub fog: [f32; 4],
 }
 
 #[repr(C)]
@@ -397,6 +401,8 @@ struct SsaoParams {
     inv_proj: [[f32; 4]; 4],
     /// x = radius (world units), y = strength, z = depth bias, w unused.
     params: [f32; 4],
+    /// x = fog start, y = fog end, z = on.
+    fog: [f32; 4],
 }
 
 /// The three bind-group layouts a post pass uses, built in one place.
@@ -1201,6 +1207,7 @@ impl PostStack {
                 proj: f.proj,
                 inv_proj: f.inv_proj,
                 params: [s.ssao_radius, s.ssao_strength, bias, 0.0],
+                fog: f.fog,
             });
             let depth_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("post-ssao"),
