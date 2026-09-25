@@ -3129,8 +3129,7 @@ mod model_import_tests {
     /// the worker is done. Deterministic: nothing but the pump registers.
     #[test]
     fn a_requested_model_arrives_through_the_pump_not_the_request() {
-        let mut ed = crate::Editor::default();
-        ed.attach_gpu(floptle_render::Gpu::headless(64, 64));
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
         ed.project_root = std::path::PathBuf::from("../../assets");
         let path = "SaesRapier.glb";
         ed.request_model(path);

@@ -1257,6 +1257,36 @@ impl Editor {
     }
 }
 
+/// An editor on a headless GPU, or `None` when this machine's adapter cannot
+/// build the renderer (CI's is OpenGL, which lacks what the raster textures
+/// need). Said on stderr, the way every other GPU test skips: that is a fact
+/// about the machine, not a failure of the thing under test.
+#[cfg(test)]
+pub(crate) fn test_editor_with_gpu() -> Option<crate::Editor> {
+    let gpu = floptle_render::Gpu::headless(64, 64);
+    let failed = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let sink = failed.clone();
+    gpu.device.on_uncaptured_error(std::sync::Arc::new(move |e: wgpu::Error| {
+        if let Ok(mut s) = sink.lock()
+            && s.is_empty()
+        {
+            *s = e.to_string();
+        }
+    }));
+    let mut ed = crate::Editor::default();
+    ed.attach_gpu(gpu);
+    if let Some(g) = ed.gpu.as_ref() {
+        let _ = g.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    if let Ok(why) = failed.lock()
+        && !why.is_empty()
+    {
+        eprintln!("skipped — this machine cannot build the renderer:\n{why}");
+        return None;
+    }
+    Some(ed)
+}
+
 #[cfg(test)]
 mod tests {
     /// **A shipped game's pose table holds one frame, however long it runs.**
@@ -1269,8 +1299,7 @@ mod tests {
     /// drawing and the process exited.
     #[test]
     fn a_builds_pose_table_stays_flat_across_ten_thousand_frames() {
-        let mut ed = crate::Editor::default();
-        ed.attach_gpu(floptle_render::Gpu::headless(64, 64));
+        let Some(mut ed) = super::test_editor_with_gpu() else { return };
         for frame in 0..10_000 {
             // What a skinned mesh's draw does inside `render_game_into`.
             ed.raster.as_mut().unwrap().push_skin_pose(0, floptle_core::math::Mat4::IDENTITY, &[floptle_core::math::Mat4::IDENTITY; 4]);
