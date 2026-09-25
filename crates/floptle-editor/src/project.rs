@@ -1480,6 +1480,14 @@ impl Editor {
         // otherwise the new project's scripts would resolve against the old
         // project's actions.
         self.load_input_map();
+        // The UI style sheets and tokens, for the same reason. The windowed
+        // frame polls for them, but `shot` and `run` never run that frame, so
+        // a headless picture showed every menu unstyled and a broken sheet
+        // said nothing. Cleared first: a sheet that fails to parse keeps the
+        // last one that loaded, and that must not be the last project's.
+        self.ui_styles = Default::default();
+        self.ui_tokens = Default::default();
+        self.reload_ui_styles();
         self.migrate_legacy_post(&doc);
         self.check_autosave(); // offer crash recovery if an autosave is newer
         self.warn_about_shadowed_scenes();

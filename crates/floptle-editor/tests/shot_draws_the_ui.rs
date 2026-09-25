@@ -178,3 +178,42 @@ fn a_screen_built_by_a_script_in_start_is_photographed_under_after() {
 
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// **A headless picture wears the project's style sheets.** The box has no
+/// fill of its own; its red comes only from `ui/look.uistyle.ron`. Styles
+/// used to load only from the windowed frame, so `shot` drew every styled
+/// menu bare, and said nothing.
+#[test]
+fn a_shot_wears_the_projects_style_sheets() {
+    let d = temp("styled");
+    scaffold(&d);
+    std::fs::write(d.join("scenes/menu.ron"), scene(false, Some("menu"))).expect("write the scene");
+    std::fs::write(
+        d.join("scripts/menu.lua"),
+        "function start(node)\n  ui.make(node, { \"box\", pin = \"topLeft\", w = 100, h = 100, style = \"redBox\" })\nend\n",
+    )
+    .expect("write the script");
+    std::fs::create_dir_all(d.join("ui")).expect("make ui/");
+    std::fs::write(
+        d.join("ui/look.uistyle.ron"),
+        "{ \"redBox\": ( base: ( fill: (1.0, 0.0, 0.0, 1.0) ) ) }\n",
+    )
+    .expect("write the style sheet");
+
+    let img = match shoot(&d, "menu", &["--after", "5f"]) {
+        Ok(i) => i,
+        Err(why) => {
+            assert!(cannot_render(&why), "shot failed for a reason that is not the adapter:\n{why}");
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+    };
+    assert!(
+        is_red(img.get_pixel(10, 10)) && is_red(img.get_pixel(90, 80)),
+        "the box is not wearing its style's fill: {:?}",
+        img.get_pixel(10, 10)
+    );
+    assert!(!is_red(img.get_pixel(150, 80)));
+
+    let _ = std::fs::remove_dir_all(&d);
+}
