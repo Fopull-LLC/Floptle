@@ -886,6 +886,98 @@ fn script_drives_the_post_chain() {
     assert_eq!(*posterize_bands, 0, "a negative band count must floor at off, not wrap");
 }
 
+/// A settings screen switches off the lens and film effects players ask to
+/// lose, and resets the grade. Each value read here differs from the default,
+/// so a field that is missing from the mirror cannot pass as a default.
+#[test]
+fn a_settings_screen_reaches_the_lens_and_the_grade() {
+    let dir = std::env::temp_dir().join("floptle_script_test_post_settings");
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "settings",
+        concat!(
+            "function update(node, dt)\n",
+            "  local pp = find(\"Post\"):getComponent(\"PostProcess\")\n",
+            "  assert(math.abs(pp.aberration - 0.4) < 1e-6, 'aberration ' .. tostring(pp.aberration))\n",
+            "  assert(math.abs(pp.distortion + 0.09) < 1e-6, 'distortion ' .. tostring(pp.distortion))\n",
+            "  assert(math.abs(pp.grain - 0.3) < 1e-6, 'grain ' .. tostring(pp.grain))\n",
+            "  assert(math.abs(pp.gradeGamma - 1.4) < 1e-6, 'gradeGamma ' .. tostring(pp.gradeGamma))\n",
+            "  assert(math.abs(pp.saturation - 0.5) < 1e-6, 'saturation ' .. tostring(pp.saturation))\n",
+            // Feature detection: a field the component lacks is nil.
+            "  assert(pp.noSuchKnob == nil)\n",
+            "  pp.aberration = 0\n",
+            "  pp.distortion = -3\n",
+            "  pp.grain = 0\n",
+            "  pp.gradeGamma, pp.saturation, pp.contrast = 1, 1, 9\n",
+            "  pp.temperature, pp.exposure = 0, 0\n",
+            "end\n",
+        ),
+    );
+    let mut world = World::default();
+    let post = world.spawn();
+    world.insert(post, Transform::IDENTITY);
+    world.insert(post, floptle_core::Name("Post".into()));
+    let mut pp = Matter::default_post_process();
+    if let Matter::PostProcess {
+        aberration,
+        distortion,
+        grain,
+        grade_gamma,
+        saturation,
+        temperature,
+        exposure,
+        ..
+    } = &mut pp
+    {
+        *aberration = 0.4;
+        *distortion = -0.09;
+        *grain = 0.3;
+        *grade_gamma = 1.4;
+        *saturation = 0.5;
+        *temperature = 0.6;
+        *exposure = 1.5;
+    }
+    world.insert(post, pp);
+    let driver = world.spawn();
+    world.insert(driver, Transform::IDENTITY);
+    world.insert(
+        driver,
+        Scripts(vec![floptle_core::ScriptInst {
+            kind: "settings".into(),
+            enabled: true,
+            params: vec![],
+            refs: vec![],
+            strs: Vec::new(),
+        }]),
+    );
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    let Some(Matter::PostProcess {
+        aberration,
+        distortion,
+        grain,
+        grade_gamma,
+        saturation,
+        contrast,
+        temperature,
+        exposure,
+        ..
+    }) = world.get::<Matter>(post)
+    else {
+        panic!("the post node lost its matter")
+    };
+    assert_eq!(*aberration, 0.0);
+    assert_eq!(*distortion, -0.5, "distortion is signed, clamped to the Inspector's -0.5");
+    assert_eq!(*grain, 0.0);
+    assert_eq!(*grade_gamma, 1.0);
+    assert_eq!(*saturation, 1.0);
+    assert_eq!(*contrast, 3.0, "clamped to the Inspector's range");
+    assert_eq!(*temperature, 0.0);
+    assert_eq!(*exposure, 0.0);
+}
+
 #[test]
 fn a_script_paints_with_colors_and_reads_booleans_as_booleans() {
     let dir = std::env::temp_dir().join("floptle_script_test_ui_color");

@@ -219,6 +219,14 @@ app.setRetroHeight(360)
 local post = scene.find("Post Processing"):getComponent("PostProcess")
 post.bloom = true          -- a flag
 post.motionBlur = 0        -- an amount, 0..1 — the shutter, not a switch
+-- the three players most often want off; each is an amount, and 0 is off
+post.aberration = 0        -- chromatic aberration
+post.distortion = 0        -- lens distortion (signed: negative pincushions)
+post.grain = 0             -- film grain
+-- "colour grade: off" puts the grade back to neutral: 0 for the offsets,
+-- 1 for the scales
+post.exposure, post.temperature, post.tint, post.lift = 0, 0, 0, 0
+post.contrast, post.saturation, post.gradeGamma, post.gain = 1, 1, 1, 1
 
 -- Accessibility — text scale, colour filter, reduced motion, captions
 access.setTextScale(1.25)
@@ -237,7 +245,10 @@ function onQuit()
 end
 ```
 
-**Not here yet:** window resolution, fullscreen and monitor choice. Those are one
+A field a `PostProcess` does not have reads as `nil`, so a game can check for
+one before it offers the toggle.
+
+**Not here yet:** window resolution and monitor choice. Those are one
 question — windowing — and it deserves answering properly rather than by adding
 a resolution setter that only half works. `app.setRetroHeight` is the one that
 already existed as a live render setting, and in a pixel-art game it is the

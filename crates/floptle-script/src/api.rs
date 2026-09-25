@@ -858,6 +858,17 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
         dof_show_focus,
         motion_blur,
         motion_samples,
+        exposure,
+        contrast,
+        saturation,
+        temperature,
+        tint,
+        lift,
+        grade_gamma,
+        gain,
+        aberration,
+        distortion,
+        grain,
         ..
     }) = world.get::<Matter>(e)
     {
@@ -895,6 +906,21 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 // shut, and both are things that happen mid-shot.
                 ("motionBlur".to_string(), *motion_blur as f64),
                 ("motionSamples".to_string(), *motion_samples as f64),
+                // The grade, whole, so "colour grade: off" is eight writes of
+                // known values: 0 for the offsets, 1 for the scales.
+                ("exposure".to_string(), *exposure as f64),
+                ("contrast".to_string(), *contrast as f64),
+                ("saturation".to_string(), *saturation as f64),
+                ("temperature".to_string(), *temperature as f64),
+                ("tint".to_string(), *tint as f64),
+                ("lift".to_string(), *lift as f64),
+                ("gradeGamma".to_string(), *grade_gamma as f64),
+                ("gain".to_string(), *gain as f64),
+                // The lens and the film. These three are the ones players ask
+                // to switch off, so a settings screen has to reach them.
+                ("aberration".to_string(), *aberration as f64),
+                ("distortion".to_string(), *distortion as f64),
+                ("grain".to_string(), *grain as f64),
             ]),
         );
     }
@@ -1671,9 +1697,20 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                 dof_highlight,
                 dof_quality,
                 dof_show_focus,
-                motion_blur,
-                motion_samples,
-                ..
+            motion_blur,
+            motion_samples,
+            exposure,
+            contrast,
+            saturation,
+            temperature,
+            tint,
+            lift,
+            grade_gamma,
+            gain,
+            aberration,
+            distortion,
+            grain,
+            ..
             }) = world.get_mut::<Matter>(ent)
             {
                 let v = val as f32;
@@ -1711,6 +1748,20 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "dofShowFocus" => *dof_show_focus = val != 0.0,
                     "motionBlur" => *motion_blur = v.clamp(0.0, 1.0),
                     "motionSamples" => *motion_samples = val.clamp(0.0, 32.0) as u32,
+                    // The Inspector's slider ranges, so a script cannot push a
+                    // knob somewhere the editor could never show it.
+                    "exposure" => *exposure = v.clamp(-4.0, 4.0),
+                    "contrast" => *contrast = v.clamp(0.0, 3.0),
+                    "saturation" => *saturation = v.clamp(0.0, 3.0),
+                    "temperature" => *temperature = v.clamp(-1.0, 1.0),
+                    "tint" => *tint = v.clamp(-1.0, 1.0),
+                    "lift" => *lift = v.clamp(-0.5, 0.5),
+                    "gradeGamma" => *grade_gamma = v.clamp(0.2, 3.0),
+                    "gain" => *gain = v.clamp(0.0, 3.0),
+                    "aberration" => *aberration = v.clamp(0.0, 2.0),
+                    // Signed: negative pincushions.
+                    "distortion" => *distortion = v.clamp(-0.5, 0.5),
+                    "grain" => *grain = v.clamp(0.0, 1.0),
                     _ => {}
                 }
             }
