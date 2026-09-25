@@ -1,5 +1,15 @@
 ## Just shipped
 
+**v0.98.0 — "Stays Smooth"** (stable). Exported games with animated
+characters run for as long as you play them; they used to slow down, stop
+drawing parts of the level and close after a minute or two. Models given to
+a node mid-game load in the background instead of freezing the game, and
+`assets.preload` loads them ahead of time. A settings screen can turn off
+chromatic aberration, lens distortion and film grain, and reset the colour
+grade. Sliders fire `onChanged` as they are dragged, the signed-in player is
+there from the first frame, and ambient occlusion no longer darkens faraway
+ground or shows through fog.
+
 **v0.97.1 — "Square On"** (stable). Rays that hit map meshes and models
 report the face they struck, facing back at the ray, head-on or at an angle.
 A ray straight down onto a map floor could come back with a sideways normal

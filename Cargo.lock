@@ -1396,7 +1396,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-account"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
@@ -1415,14 +1415,14 @@ dependencies = [
 
 [[package]]
 name = "floptle-anim"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "floptle-core",
 ]
 
 [[package]]
 name = "floptle-assets"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "base64 0.22.1",
  "floptle-anim",
@@ -1437,7 +1437,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-audio"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "cpal",
  "env_logger",
@@ -1454,14 +1454,14 @@ dependencies = [
 
 [[package]]
 name = "floptle-brand"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "png",
 ]
 
 [[package]]
 name = "floptle-convert"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "floptle-assets",
  "floptle-render",
@@ -1474,7 +1474,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-core"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "glam",
  "web-time",
@@ -1482,7 +1482,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-dist"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "directories",
  "flate2",
@@ -1497,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-editor"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "arboard",
  "clap",
@@ -1565,7 +1565,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-field"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "floptle-core",
  "serde",
@@ -1573,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-fleet"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "flate2",
  "floptle-say",
@@ -1586,14 +1586,14 @@ dependencies = [
 
 [[package]]
 name = "floptle-gi"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "floptle-core",
 ]
 
 [[package]]
 name = "floptle-hub"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "directories",
  "eframe",
@@ -1617,7 +1617,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-image"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "floptle-vfs",
  "image",
@@ -1627,7 +1627,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-input"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "env_logger",
  "floptle-core",
@@ -1640,7 +1640,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-map"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "glam",
  "serde",
@@ -1648,7 +1648,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-matter"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "floptle-core",
  "floptle-field",
@@ -1658,7 +1658,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-nav"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "postcard",
  "serde",
@@ -1666,7 +1666,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-net"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "bytes",
  "floptle-audio",
@@ -1686,7 +1686,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-package"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "floptle-vfs",
  "ron",
@@ -1696,7 +1696,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-physics"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "floptle-core",
  "floptle-field",
@@ -1705,7 +1705,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-player"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "floptle-editor",
  "winresource",
@@ -1713,7 +1713,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-proof"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "bytemuck",
  "env_logger",
@@ -1726,7 +1726,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-relay"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "floptle-net",
  "rcgen",
@@ -1737,14 +1737,14 @@ dependencies = [
 
 [[package]]
 name = "floptle-relay-bench"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "floptle-net",
 ]
 
 [[package]]
 name = "floptle-render"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "bytemuck",
  "floptle-assets",
@@ -1771,7 +1771,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-rules"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "floptle-core",
  "floptle-field",
@@ -1779,7 +1779,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-runtime"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "env_logger",
  "floptle-anim",
@@ -1805,11 +1805,11 @@ dependencies = [
 
 [[package]]
 name = "floptle-say"
-version = "0.97.1"
+version = "0.98.0"
 
 [[package]]
 name = "floptle-scene"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "floptle-audio",
  "floptle-core",
@@ -1822,7 +1822,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-script"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "floptle-account",
  "floptle-audio",
@@ -1850,25 +1850,25 @@ dependencies = [
 
 [[package]]
 name = "floptle-server"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "floptle-editor",
 ]
 
 [[package]]
 name = "floptle-services"
-version = "0.97.1"
+version = "0.98.0"
 
 [[package]]
 name = "floptle-shader"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "naga",
 ]
 
 [[package]]
 name = "floptle-steam"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "floptle-say",
  "floptle-services",
@@ -1877,7 +1877,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-tiles"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "floptle-core",
  "ron",
@@ -1886,7 +1886,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-ui"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "ron",
  "serde",
@@ -1894,7 +1894,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-vfs"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "floptle-core",
  "wasm-bindgen",
@@ -1903,7 +1903,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-vfx"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "floptle-core",
  "floptle-render",
@@ -1913,7 +1913,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-web"
-version = "0.97.1"
+version = "0.98.0"
 dependencies = [
  "floptle-editor",
  "floptle-render",
