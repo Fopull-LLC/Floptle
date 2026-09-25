@@ -299,6 +299,7 @@ fn parse_node(
     // child would vanish. A nil child is skipped below; it has to be reached
     // first.
     let mut n = 0usize;
+    let mut saw_fn = false;
     for pair in t.clone().pairs::<Value, Value>() {
         let (k, _) = pair?;
         if let Some(i) = key_index(&k) {
@@ -317,37 +318,40 @@ fn parse_node(
         };
         match child {
             Value::Table(ct) => push(&ct, &mut node)?,
-            Value::Function(f) => match &items {
-                // The mapping function: called once per item, with the item
-                // and its 1-based position. Returning nil skips that row,
-                // which is how a filtered list stays one expression.
-                Some(list) => {
-                    for (idx, item) in list.iter().enumerate() {
-                        match f.call::<Value>((item.clone(), idx + 1))? {
-                            Value::Table(ct) => push(&ct, &mut node)?,
-                            Value::Nil => {}
-                            _ => {
-                                return Err(mlua::Error::runtime(format!(
-                                    "ui.make{trail}: the function for item {} returned something \
-                                     that isn't an element table",
-                                    idx + 1
-                                )));
+            Value::Function(f) => {
+                saw_fn = true;
+                match &items {
+                    // The mapping function: called once per item, with the item
+                    // and its 1-based position. Returning nil skips that row,
+                    // which is how a filtered list stays one expression.
+                    Some(list) => {
+                        for (idx, item) in list.iter().enumerate() {
+                            match f.call::<Value>((item.clone(), idx + 1))? {
+                                Value::Table(ct) => push(&ct, &mut node)?,
+                                Value::Nil => {}
+                                _ => {
+                                    return Err(mlua::Error::runtime(format!(
+                                        "ui.make{trail}: the function for item {} returned something \
+                                         that isn't an element table",
+                                        idx + 1
+                                    )));
+                                }
                             }
                         }
                     }
+                    // No `items`: a plain deferred child, so a conditional part of
+                    // a screen can be `function() if paused then return {...} end end`.
+                    None => match f.call::<Value>(())? {
+                        Value::Table(ct) => push(&ct, &mut node)?,
+                        Value::Nil => {}
+                        _ => {
+                            return Err(mlua::Error::runtime(format!(
+                                "ui.make{trail}: a function child must return an element table or nil"
+                            )));
+                        }
+                    },
                 }
-                // No `items`: a plain deferred child, so a conditional part of
-                // a screen can be `function() if paused then return {...} end end`.
-                None => match f.call::<Value>(())? {
-                    Value::Table(ct) => push(&ct, &mut node)?,
-                    Value::Nil => {}
-                    _ => {
-                        return Err(mlua::Error::runtime(format!(
-                            "ui.make{trail}: a function child must return an element table or nil"
-                        )));
-                    }
-                },
-            },
+            }
             Value::Nil => {}
             _ => {
                 return Err(mlua::Error::runtime(format!(
@@ -356,7 +360,10 @@ fn parse_node(
             }
         }
     }
-    if items.is_some() && node.children.is_empty() {
+    // Whether a function child was there, not whether anything came out of
+    // it: an empty list, or one the function filtered down to nothing, is a
+    // screen with nothing to show, not a mistake.
+    if items.is_some() && !saw_fn {
         return Err(mlua::Error::runtime(format!(
             "ui.make{trail}: `items` needs a function child to turn each item into an element"
         )));
@@ -683,6 +690,35 @@ mod tests {
                  function(n) if n % 2 == 0 then return { "text", text = tostring(n) } end end }"#,
         );
         assert_eq!(roots[0].children.len(), 2);
+    }
+
+    /// Every list a screen shows starts empty: no replays yet, nobody on the
+    /// board. That is a screen with nothing in it, not a malformed one.
+    #[test]
+    fn an_empty_list_builds_an_empty_element() {
+        let lua = Lua::new();
+        let json = lua.create_table().unwrap();
+        crate::json_array::install(&lua, &json).unwrap();
+        lua.globals().set("json", json).unwrap();
+        for list in ["{}", "json.array{}"] {
+            let (roots, _) = parse(
+                &lua,
+                &format!(
+                    r#"return {{ "scroll", items = {list},
+                         function(e) return {{ "text", text = e }} end }}"#
+                ),
+            );
+            assert_eq!(roots[0].children.len(), 0, "items = {list}");
+        }
+        let (roots, _) = parse(
+            &lua,
+            r#"return { "col", items = { 1, 3 },
+                 function(n) if n % 2 == 0 then return { "text", text = "even" } end end }"#,
+        );
+        assert_eq!(roots[0].children.len(), 0, "filtered down to nothing");
+        let v: Value = lua.load(r#"return { "col", items = { 1, 2 }, { "text" } }"#).eval().unwrap();
+        let err = parse_tree(&lua, &v).unwrap_err().to_string();
+        assert!(err.contains("`items` needs a function child"), "{err}");
     }
 
     #[test]
