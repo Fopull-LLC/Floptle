@@ -474,7 +474,21 @@ fn reconcile_children(
                 let node = &wanted[new];
                 let spec = world
                     .get::<ElementSpec>(e)
-                    .map(|s| node.rebuild(s))
+                    .map(|s| {
+                        let mut spec = node.rebuild(s);
+                        // A slider the player dragged stays where they left it
+                        // while the description repeats the value it said last
+                        // time. A value the description CHANGES (a "+" button,
+                        // "Reset to defaults") is the game speaking, and moves
+                        // the handle.
+                        if let (Some(o), Some(n)) = (s.slider, spec.slider.as_mut())
+                            && n.interact
+                            && world.get::<SaidValue>(e).is_some_and(|said| said.0 == n.value)
+                        {
+                            n.value = o.value;
+                        }
+                        spec
+                    })
                     .unwrap_or_else(|| node.build());
                 install(world, e, node, spec, new);
                 descend(world, e, node, path, new, out);
@@ -514,6 +528,13 @@ fn install(world: &mut World, e: Entity, node: &MadeNode, mut spec: ElementSpec,
     if world.get::<Name>(e).map(|n| n.0.as_str()) != Some(name.as_str()) {
         world.insert(e, Name(name));
     }
+    match said_value(node) {
+        Some(v) if world.get::<SaidValue>(e).map(|s| s.0) != Some(v) => world.insert(e, SaidValue(v)),
+        None if world.get::<SaidValue>(e).is_some() => {
+            world.remove::<SaidValue>(e);
+        }
+        _ => {}
+    }
     let made = Made {
         key: node.key.clone(),
         slot: slot as u32,
@@ -522,6 +543,17 @@ fn install(world: &mut World, e: Entity, node: &MadeNode, mut spec: ElementSpec,
     if world.get::<Made>(e) != Some(&made) {
         world.insert(e, made);
     }
+}
+
+/// The `value` a description last gave a slider, so the next reconcile can
+/// tell "the game said the same thing again" from "the game moved it".
+struct SaidValue(f32);
+
+fn said_value(node: &MadeNode) -> Option<f32> {
+    node.props.iter().find(|(k, _)| k == "value").and_then(|(_, v)| match v {
+        PropVal::Num(n) => Some(*n),
+        _ => None,
+    })
 }
 
 fn descend(

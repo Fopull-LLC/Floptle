@@ -664,7 +664,7 @@ scripts get pointer hooks — plain functions, called with a node handle:
 | `clicked(node)` | pressed AND released on the same element |
 | `focusEnter(node)` / `focusExit(node)` | keyboard/gamepad focus arrived / left |
 | `cancelled(node)` | `UiCancel` (Escape / B) while focused |
-| `changed(node)` / `submitted(node)` | a text field's value changed / Enter |
+| `changed(node)` / `submitted(node)` | a text field's value, or a draggable slider's, changed / Enter |
 | `dragStart` / `dragMove` / `dropped` / `dragCancel` | on a `draggable` source |
 | `dragEnter` / `dragOver` / `dragLeave` / `dropped` | on a `drop target` |
 
@@ -878,8 +878,9 @@ function clicked(node)     log("play pressed!") end
 ```
 
 A slider with **draggable** on lets the player click/drag the track to set its
-value — read it with `getcomponent("UiSlider").value` (a settings volume slider
-is a draggable slider + one `update` that reads the value). Display-only meters
+value — `changed(node)` fires on each frame a drag moves it, and
+`getcomponent("UiSlider").value` inside it is already the new value (a settings
+volume slider is a draggable slider + a `changed` that saves it). Display-only meters
 (health bars) leave it off.
 
 ### Scroll views

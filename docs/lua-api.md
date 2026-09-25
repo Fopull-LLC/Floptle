@@ -1804,7 +1804,7 @@ function cancelled(node) — UI hook: the UiCancel action (Escape / B) while thi
 
 ### `changed`
 
-function changed(node) — UI hook: a text field's value changed (typing, paste, backspace). Once per frame however many keystrokes landed. Read node.text.
+function changed(node) — UI hook: a text field's value changed (typing, paste, backspace), or a draggable slider's did (a drag or a click on the track). Once per frame however many keystrokes landed; never for a frame the slider was held still. Read node.text, or getComponent("UiSlider").value.
 
 ### `clicked`
 
@@ -2016,7 +2016,7 @@ ui.bind(node, "property", function() ... end) — say the relationship once inst
 
 ### `ui.changed`
 
-ui.changed(element) — a text field's value changed this frame. Read the value with element.text.
+ui.changed(element) — a text field's or a draggable slider's value changed this frame. Read the value with element.text, or getComponent("UiSlider").value.
 
 ### `ui.clicked`
 

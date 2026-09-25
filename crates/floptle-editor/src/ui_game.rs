@@ -1116,6 +1116,22 @@ impl Editor {
         true
     }
 
+    /// Move an interactive slider to `value`, and say so.
+    ///
+    /// `changed` once per frame the value moved, not every held frame: a
+    /// slider held still is not being changed. The press frame runs through
+    /// here too, so a click on the track that jumps the handle fires it too.
+    fn ui_slider_to(&mut self, id: u32, value: f32) {
+        if let Some(e) = self.world.entity_with::<Transform>(id)
+            && let Some(spec) = self.world.get_mut::<ElementSpec>(e)
+            && let Some(sl) = &mut spec.slider
+            && sl.value != value
+        {
+            sl.value = value;
+            self.ui_events.push((id, "changed"));
+        }
+    }
+
     /// The game-UI interaction pass (buttons + draggable sliders), run each
     /// frame while playing, before the scripts (so a slider's new value is
     /// visible to this frame's `update`). Detected hook events land in
@@ -1488,14 +1504,7 @@ impl Editor {
             if s.flip {
                 t = 1.0 - t;
             }
-            let value = s.min + t * (s.max - s.min);
-            let ent = self.world.entity_with::<Transform>(id);
-            if let Some(e) = ent
-                && let Some(spec) = self.world.get_mut::<ElementSpec>(e)
-                && let Some(sl) = &mut spec.slider
-            {
-                sl.value = value;
-            }
+            self.ui_slider_to(id, s.min + t * (s.max - s.min));
         }
         if released_edge && let Some(a) = self.ui_active.take() {
             self.ui_events.push((a, "released"));
@@ -3360,6 +3369,29 @@ mod tests {
 
     fn sized(spec: ElementSpec) -> ElementSpec {
         ElementSpec { size: [Size::Fixed(100.0), Size::Fixed(40.0)], ..spec }
+    }
+
+    /// A drag tells the game the value moved: once per frame it moved, never
+    /// for a frame it was held still, and with the new value already written.
+    #[test]
+    fn dragging_a_slider_fires_changed_only_when_the_value_moves() {
+        let mut ed = crate::Editor::default();
+        let e = ed.world.spawn();
+        ed.world.insert(e, Transform::IDENTITY);
+        ed.world.insert(
+            e,
+            ElementSpec {
+                slider: Some(SliderSpec { value: 0.5, interact: true, ..Default::default() }),
+                ..Default::default()
+            },
+        );
+        let id = e.index();
+        ed.ui_slider_to(id, 0.75);
+        assert_eq!(ed.ui_events, vec![(id, "changed")]);
+        assert_eq!(ed.world.get::<ElementSpec>(e).unwrap().slider.unwrap().value, 0.75);
+        ed.ui_events.clear();
+        ed.ui_slider_to(id, 0.75);
+        assert!(ed.ui_events.is_empty(), "held still is not a change");
     }
 
     /// What the pointer can drive, and — just as important — what it can't.

@@ -174,6 +174,13 @@ Four things are kept anyway, because none of them is something the description
 When the description does speak — `text = "reset"`, `selected = true` — the
 description wins.
 
+A draggable slider's `value` is the one exception to that: the description wins
+when it says a *new* value, not when it repeats the one it said last time. So a
+screen that re-renders with `value = settings.volume` keeps the handle where the
+player dragged it, and a **Reset to defaults** button that changes
+`settings.volume` moves it. Dragging fires `onChanged` for every frame the value
+moves, which is where the game should write it back.
+
 ### Elements you placed by hand
 
 Reconciliation only ever considers children the builder itself made. An element

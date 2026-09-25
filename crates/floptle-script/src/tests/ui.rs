@@ -641,6 +641,78 @@ fn ui_make_builds_a_screen_and_its_buttons_work() {
     assert_eq!(host.apply_ui_makes(&mut world), vec![rows[1].1.index()]);
 }
 
+/// A settings slider: `onChanged` reads the value the drag left, a
+/// re-render that repeats the old `value` keeps the player's drag, and a
+/// re-render that says a NEW value (a Reset button) moves the handle.
+#[test]
+fn a_made_slider_keeps_a_drag_until_the_game_says_a_new_value() {
+    let dir = std::env::temp_dir().join("floptle_script_test_ui_make_slider");
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "screen",
+        concat!(
+            "volume = 0.5\n",
+            "heard = -1\n",
+            "function build(node)\n",
+            "  ui.make(node, { \"slider\", key = \"vol\", interact = true, min = 0, max = 1,\n",
+            "    value = volume,\n",
+            "    onChanged = function(n) heard = n:getComponent(\"UiSlider\").value end })\n",
+            "end\n",
+            "function start(node) build(node) end\n",
+        ),
+    );
+    let mut world = World::default();
+    let panel = world.spawn();
+    world.insert(panel, Transform::IDENTITY);
+    world.insert(panel, floptle_core::Name("Panel".into()));
+    world.insert(panel, floptle_ui::ElementSpec::default());
+    world.insert(
+        panel,
+        Scripts(vec![floptle_core::ScriptInst {
+            kind: "screen".into(),
+            enabled: true,
+            params: vec![],
+            refs: vec![],
+            strs: Vec::new(),
+        }]),
+    );
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    host.apply_ui_makes(&mut world);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    let slider = world
+        .query::<floptle_core::Made>()
+        .find(|(_, m)| m.kind == "slider")
+        .map(|(e, _)| e)
+        .expect("the slider was made");
+    let value = |world: &World| {
+        world.get::<floptle_ui::ElementSpec>(slider).unwrap().slider.unwrap().value
+    };
+    assert_eq!(value(&world), 0.5);
+
+    // The player drags it: the interaction pass writes the value and queues
+    // `changed` before the scripts run, and the hook reads what the drag left.
+    // Same order as the editor's frame: the drag, the run, then the hooks.
+    world.get_mut::<floptle_ui::ElementSpec>(slider).unwrap().slider.as_mut().unwrap().value = 0.8;
+    host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+    host.run_ui_hooks(&mut world, &[(slider.index(), "changed")]);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    let heard: f64 = host.instance_env(panel.index(), "screen").unwrap().get("heard").unwrap();
+    assert!((heard - 0.8).abs() < 1e-6, "onChanged read {heard}, not the dragged 0.8");
+
+    // The screen re-renders saying the same 0.5 it said before: the drag stays.
+    host.call_action(&mut world, &dir, panel.index(), "screen", "build");
+    host.apply_ui_makes(&mut world);
+    assert_eq!(value(&world), 0.8, "a repeated description must not undo the player's drag");
+
+    // Reset to defaults: the game says a new value, and the handle goes there.
+    host.instance_env(panel.index(), "screen").unwrap().set("volume", 0.25).unwrap();
+    host.call_action(&mut world, &dir, panel.index(), "screen", "build");
+    host.apply_ui_makes(&mut world);
+    assert_eq!(value(&world), 0.25, "a value the game changed must move the handle");
+}
+
 /// `node:setShaderParam` lands in the UI element's `shader_params` when it
 /// carries a `stage ui` shader, and in the Material's otherwise — the
 /// bridge instruments (navball) drive their uniforms through.
