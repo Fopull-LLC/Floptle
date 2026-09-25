@@ -169,6 +169,26 @@ pub(crate) fn params_table(
 /// later hook is the current position. Building a fresh table per hook froze such a
 /// handle at the spawn pose, silently, while everything using the passed `node` stayed
 /// correct.
+/// Queue a body teleport for the driver, and make it what every later read
+/// sees.
+///
+/// The driver applies the queue between passes, and until then the body
+/// bridge still holds the pose from before the write. A node table stamped in
+/// that gap, or a `tickPos` read through another node's handle, answered with
+/// where the body was: a teleport made through a method call read back as the
+/// old position for the whole next tick.
+pub(crate) fn queue_body_pos(
+    queue: &std::cell::RefCell<std::collections::HashMap<u32, [f64; 3]>>,
+    bodies: &std::cell::RefCell<std::collections::HashMap<u32, BodyState>>,
+    e: u32,
+    p: [f64; 3],
+) {
+    queue.borrow_mut().insert(e, p);
+    if let Some(b) = bodies.borrow_mut().get_mut(&e) {
+        b.pos = p;
+    }
+}
+
 pub(crate) fn node_table(lua: &Lua, eid: u32, tr: &Transform, body: Option<BodyState>) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     // Tag with the entity + the node metatable so `node.parent`, `node:getscript(...)`,

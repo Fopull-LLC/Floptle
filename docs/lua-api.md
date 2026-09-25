@@ -775,7 +775,7 @@ The node's tags as an array of strings (a fresh table each read). Assign a whole
 
 ### `node.tickPos`
 
-The body's TICK pose as a vec3 (read/write) — where the simulation says it is, as opposed to node.pos, which is the interpolated pose the camera renders. Inside fixedUpdate use this one: move with node.tickPos = node.tickPos + vec3(d, 0, 0) and build hurtboxes from it. `node.x = node.x + d` in fixedUpdate teleports the body onto its VISUAL position, so the model slides and the hitbox doesn't follow. In a rollback match this is the difference between a hit registering and not.
+The body's TICK pose as a vec3 (read/write) — where the simulation says it is, as opposed to node.pos, which is the interpolated pose the camera renders. Inside fixedUpdate use this one: move with node.tickPos = node.tickPos + vec3(d, 0, 0) and build hurtboxes from it. `node.x = node.x + d` in fixedUpdate teleports the body onto its VISUAL position, so the model slides and the hitbox doesn't follow. In a rollback match this is the difference between a hit registering and not. Writing either one teleports a body: tickPos is the exact one, node.pos goes through the transform. From the write on, every read answers the new position (this node's next hook, and another node's handle), even while physics.pause is on.
 
 ### `node.tickYaw`
 

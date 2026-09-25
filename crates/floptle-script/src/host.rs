@@ -3440,7 +3440,12 @@ impl ScriptHost {
             // through the same teleport channel a cross-node `node.pos` write
             // does.
             if self.bodies.borrow().contains_key(&e) {
-                self.body_pos_changes.borrow_mut().insert(e, [local.x, local.y, local.z]);
+                crate::env::queue_body_pos(
+                    &self.body_pos_changes,
+                    &self.bodies,
+                    e,
+                    [local.x, local.y, local.z],
+                );
             }
         }
     }
@@ -6463,7 +6468,7 @@ impl ScriptHost {
         &self,
         eid: u32,
         tr: &mut Transform,
-        body: Option<BodyState>,
+        mut body: Option<BodyState>,
         slot: &mut Option<(RegistryKey, crate::env::NodeStamp)>,
     ) -> mlua::Result<Table> {
         let cached =
@@ -6485,21 +6490,35 @@ impl ScriptHost {
             // Writes made through a stashed handle from outside this script's hooks (a
             // cross-script `other:knockBack()`, a timer callback) land after the last
             // read-back has drained. Apply them now, before the re-stamp overwrites them.
+            //
+            // The stamp below then has to show those writes, not the body as it
+            // was before them: the driver has not applied them yet, and a hook
+            // that reads `node.tickPos` right after a teleport must read where
+            // the body was sent.
             let drained = crate::env::drain_node_writes(&node, stamp, tr)?;
+            let mut sent = None;
             if drained.moved && body.is_some() {
-                self.body_pos_changes.borrow_mut().insert(
-                    eid,
-                    [tr.translation.x, tr.translation.y, tr.translation.z],
-                );
+                sent = Some([tr.translation.x, tr.translation.y, tr.translation.z]);
             }
             if let Some(v) = drained.vel {
                 self.body_changes.borrow_mut().insert(eid, v);
+                if let Some(b) = body.as_mut() {
+                    b.vel = v;
+                }
             }
             if let Some(h) = drained.height {
                 self.body_height_changes.borrow_mut().insert(eid, h);
             }
+            // After the transform, so a handle that set both teleports to the
+            // tick channel's answer, as the post-hook read-back does.
             if let Some(p) = drained.tick_pos {
-                self.body_pos_changes.borrow_mut().insert(eid, p);
+                sent = Some(p);
+            }
+            if let Some(p) = sent {
+                crate::env::queue_body_pos(&self.body_pos_changes, &self.bodies, eid, p);
+                if let Some(b) = body.as_mut() {
+                    b.pos = p;
+                }
             }
         }
         crate::env::stamp_node_table(&node, tr, body)?;
@@ -6757,7 +6776,7 @@ impl ScriptHost {
             // `node.x = spawn_x` (respawns!) silently does nothing.
             let (x, y, z) = (num("x", pre.x), num("y", pre.y), num("z", pre.z));
             if x != pre.x || y != pre.y || z != pre.z {
-                self.body_pos_changes.borrow_mut().insert(eid, [x, y, z]);
+                crate::env::queue_body_pos(&self.body_pos_changes, &self.bodies, eid, [x, y, z]);
             }
             // A write to the tick channel is a body teleport that never touches
             // the render transform — which is the whole point of having it
@@ -6767,7 +6786,7 @@ impl ScriptHost {
             let tick =
                 [num("tickX", b.pos[0]), num("tickY", b.pos[1]), num("tickZ", b.pos[2])];
             if tick != b.pos {
-                self.body_pos_changes.borrow_mut().insert(eid, tick);
+                crate::env::queue_body_pos(&self.body_pos_changes, &self.bodies, eid, tick);
             }
         }
         let out = apply_node(&node, tr, &pre);

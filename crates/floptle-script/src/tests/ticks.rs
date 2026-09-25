@@ -622,6 +622,86 @@ fn the_tick_pose_channel_reads_and_writes_the_body_not_the_render_transform() {
     assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
 }
 
+/// **A teleport is where the body is from the next read on.** The "Again"
+/// button case: another script calls a method on the body's own script, which
+/// writes the body's node table outside any of the body's hooks. Nothing
+/// applies the queued teleport between these passes, which is what a
+/// `physics.pause(true)` frame looks like.
+///
+/// Two ways to be stale, one assertion each: the caller reading the body
+/// straight back through a handle (the bridge has to say where it was sent),
+/// and the body's own next hook after a `pos` teleport (the stamp has to show
+/// the drained write, not the pose from before it).
+#[test]
+fn a_teleport_from_a_method_call_is_read_back_on_the_next_tick() {
+    let dir = std::env::temp_dir().join("floptle_script_test_tick_teleport");
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "runner",
+        "local me\n\
+         function start(node) me = node end\n\
+         function teleport(v) me.tickPos = v end\n\
+         function place(v) me.pos = v end\n\
+         function fixedUpdate(node, dt) sawZ = node.tickPos.z end\n",
+    );
+    write_script(
+        &dir,
+        "again",
+        "ticks = 0\n\
+         function fixedUpdate(node, dt)\n\
+           ticks = ticks + 1\n\
+           local r = find(\"Runner\")\n\
+           if ticks == 1 then r:getScript(\"runner\").teleport(vec3(0, 20, -30)); otherZ = r.tickPos.z end\n\
+           if ticks == 2 then r:getScript(\"runner\").place(vec3(0, 5, -40)) end\n\
+         end\n",
+    );
+    let mut world = World::default();
+    let script = |kind: &str| {
+        Scripts(vec![floptle_core::ScriptInst {
+            kind: kind.into(),
+            enabled: true,
+            params: vec![],
+            refs: Vec::new(),
+            strs: Vec::new(),
+        }])
+    };
+    // The caller first, so the body's own hook runs after the write in the
+    // same tick.
+    let game = world.spawn();
+    world.insert(game, Transform::IDENTITY);
+    world.insert(game, script("again"));
+    let runner = world.spawn();
+    world.insert(runner, Transform::from_translation(glam::DVec3::new(0.0, 22.0, -28.0)));
+    world.insert(runner, floptle_core::Name("Runner".into()));
+    world.insert(runner, script("runner"));
+    let mut host = ScriptHost::new();
+    host.set_bodies(HashMap::from([(
+        runner.index(),
+        BodyState { pos: [0.0, 22.0, -28.0], ..Default::default() },
+    )]));
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    let saw = |host: &ScriptHost| -> f64 {
+        host.instance_env(runner.index(), "runner").unwrap().get("sawZ").unwrap()
+    };
+
+    host.run_fixed(&mut world, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    let other: f64 = host.instance_env(game.index(), "again").unwrap().get("otherZ").unwrap();
+    assert_eq!(other, -30.0, "the caller read the body back where it was, not where it sent it");
+    assert_eq!(saw(&host), -30.0, "the body's own next hook read where it was");
+    assert_eq!(
+        host.take_body_pos_changes().get(&runner.index()).copied(),
+        Some([0.0, 20.0, -30.0]),
+        "and the teleport still reaches the driver"
+    );
+
+    host.run_fixed(&mut world, 1.0 / 60.0, 1.0 / 60.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    assert_eq!(saw(&host), -40.0, "a `pos` teleport read back as the pose from before it");
+    assert_eq!(host.take_body_pos_changes().get(&runner.index()).copied(), Some([0.0, 5.0, -40.0]));
+}
+
 /// A node with no rigidbody has no tick channel, and saying so beats a
 /// silent no-op that looks like a working teleport.
 #[test]

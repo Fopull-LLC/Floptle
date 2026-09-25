@@ -3958,7 +3958,7 @@ let node_mt = lua.create_table()?;
                     // A body node: the physics writeback would stomp this —
                     // queue a real teleport for the driver.
                     if bodies.borrow().contains_key(&e) {
-                        body_pos.borrow_mut().insert(e, [v.x, v.y, v.z]);
+                        crate::env::queue_body_pos(&body_pos, &bodies, e, [v.x, v.y, v.z]);
                     }
                 }
             }
@@ -4011,8 +4011,15 @@ let node_mt = lua.create_table()?;
                 this.raw_set("tickX", p[0])?;
                 this.raw_set("tickY", p[1])?;
                 this.raw_set("tickZ", p[2])?;
+                // …but another node may read this body before that, and a
+                // write made from a method call is not read back until the
+                // body's own next hook. The bridge answers those reads, so it
+                // says where the body was sent from now on.
+                if let Some(b) = bodies.borrow_mut().get_mut(&e) {
+                    b.pos = p;
+                }
             } else {
-                body_pos.borrow_mut().insert(e, p);
+                crate::env::queue_body_pos(&body_pos, &bodies, e, p);
             }
             return Ok(());
         }
@@ -4089,7 +4096,7 @@ let node_mt = lua.create_table()?;
                         && bodies.borrow().contains_key(&e)
                     {
                         let t = tr.translation;
-                        body_pos.borrow_mut().insert(e, [t.x, t.y, t.z]);
+                        crate::env::queue_body_pos(&body_pos, &bodies, e, [t.x, t.y, t.z]);
                     }
                     s.dirty.insert(e);
                     return Ok(());
