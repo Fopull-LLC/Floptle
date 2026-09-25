@@ -73,6 +73,27 @@ impl Editor {
         }
     }
 
+    /// The project's frame pacing, applied before anything acquires a surface
+    /// image. `set_vsync` early-outs when nothing changed, so this is free on
+    /// every frame but the one where somebody changes the setting. A shipped
+    /// game's frame calls it too; without it a build was Fifo whatever
+    /// project.ron or `app.setVsync` said.
+    pub(crate) fn apply_project_vsync(&mut self) {
+        let want_vsync = match self.project.vsync {
+            floptle_scene::VsyncDoc::On => floptle_render::Vsync::On,
+            floptle_scene::VsyncDoc::Adaptive => floptle_render::Vsync::Adaptive,
+            floptle_scene::VsyncDoc::Off => floptle_render::Vsync::Off,
+        };
+        let applied = self.gpu.as_mut().and_then(|gpu| gpu.set_vsync(want_vsync));
+        if let Some(mode) = applied {
+            self.console.push(
+                floptle_script::LogLevel::Debug,
+                format!("frame pacing: {want_vsync:?} → {mode:?}"),
+                None,
+            );
+        }
+    }
+
     #[cfg(feature = "editor-ui")]
     pub(crate) fn render(&mut self) {
         // A held selection the world has emptied — the node deleted, the scene
@@ -295,22 +316,7 @@ impl Editor {
         // of the scene, so it belongs here beside the bake rather than inside a
         // gather, and at most one probe a frame.
         self.step_reflection_probes();
-        // The project's frame pacing, applied before anything acquires a
-        // surface image. `set_vsync` early-outs when nothing changed, so this is
-        // free on every frame but the one where somebody changes the setting.
-        let want_vsync = match self.project.vsync {
-            floptle_scene::VsyncDoc::On => floptle_render::Vsync::On,
-            floptle_scene::VsyncDoc::Adaptive => floptle_render::Vsync::Adaptive,
-            floptle_scene::VsyncDoc::Off => floptle_render::Vsync::Off,
-        };
-        let applied = self.gpu.as_mut().and_then(|gpu| gpu.set_vsync(want_vsync));
-        if let Some(mode) = applied {
-            self.console.push(
-                floptle_script::LogLevel::Debug,
-                format!("frame pacing: {want_vsync:?} → {mode:?}"),
-                None,
-            );
-        }
+        self.apply_project_vsync();
         self.sync_field_shapes();
 
         // Edit-mode animation preview (Animating tab): pose the bound node at the

@@ -123,6 +123,28 @@ pub(crate) fn read_back_frame(gpu: &floptle_render::Gpu, tex: &wgpu::Texture) ->
 }
 
 impl Editor {
+    /// The renderer's per-frame reset, before anything gathers the scene.
+    ///
+    /// Shared by the editor's frame and a shipped game's, because a build's
+    /// frame does not gather through `gather_frame` and
+    /// once skipped all of this: its pose table grew by every skinned draw of
+    /// every frame, re-uploaded whole each time, until the build crawled, then
+    /// stopped drawing the level, then exited.
+    ///
+    /// - One pose table per frame, not per pass: a frame gathers the scene
+    ///   several times over and each pass reads pose indices an earlier gather
+    ///   handed out.
+    /// - The project's era artefacts, before any gather, so every view has the
+    ///   same look.
+    /// - Skinned-buffer copies of destroyed entities go back.
+    pub(crate) fn begin_draw_frame(&mut self) {
+        if let Some(raster) = self.raster.as_mut() {
+            raster.begin_skin_frame();
+            raster.set_retro_defaults(self.project.retro_artefacts());
+        }
+        self.skin_variants.prune(&self.world);
+    }
+
     /// **One frame of a shipped game** — the standalone player's whole loop.
     ///
     /// [`Editor::render`] is this same frame with an editor around it: the
@@ -141,7 +163,10 @@ impl Editor {
     /// The list below is therefore the interesting part: it is `render`'s
     /// prefix with every editor-only entry removed, in the same order. When a
     /// new per-frame subsystem is added to `render`, the question to ask is
-    /// whether a *player* needs it, and if it does it belongs here too.
+    /// whether a *player* needs it, and if it does it belongs here too. That
+    /// includes what `render` does inside [`Editor::gather_frame`], which this
+    /// frame never calls: the renderer's reset is
+    /// [`Editor::begin_draw_frame`] here, and it was once missing.
     pub(crate) fn player_frame(&mut self, capture: bool) -> Option<(Vec<u8>, u32, u32)> {
         let now = Instant::now();
         let raw_dt = self.last.map(|l| (now - l).as_secs_f32()).unwrap_or(0.0);
@@ -163,6 +188,10 @@ impl Editor {
         self.ui_frame_dt = dt.min(0.25);
         self.fog_time = elapsed;
         self.poll_ui_styles(elapsed);
+        // Before anything this frame draws: render targets and reflection
+        // probes gather the scene too, and their pose indices must be this
+        // frame's.
+        self.begin_draw_frame();
 
         // ---- world sync, before the step (render()'s prefix, game parts only) ----
         self.sync_map_meshes();
@@ -212,6 +241,7 @@ impl Editor {
         self.update_render_targets(elapsed);
 
         // ---- draw ----
+        self.apply_project_vsync();
         // The swapchain image is acquired first and the device borrow dropped,
         // because the draw below needs the whole editor mutably.
         let Some(frame) = self.gpu.as_mut().and_then(|g| g.acquire()) else {
@@ -1223,6 +1253,30 @@ impl Editor {
             && let Some(h) = self.game_scene_history.as_mut()
         {
             h.capture(gpu, color, view_proj, cam.world_position);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// **A shipped game's pose table holds one frame, however long it runs.**
+    ///
+    /// One skinned draw a frame, the way a first-person arm rig makes one, for
+    /// ten thousand frames. The build's frame never reaches the editor's
+    /// gather, and when it also skipped the reset the table grew by every
+    /// draw of every frame: re-uploaded whole each frame until the game
+    /// stuttered, then past the storage-binding limit, where the level stopped
+    /// drawing and the process exited.
+    #[test]
+    fn a_builds_pose_table_stays_flat_across_ten_thousand_frames() {
+        let mut ed = crate::Editor::default();
+        ed.attach_gpu(floptle_render::Gpu::headless(64, 64));
+        for frame in 0..10_000 {
+            // What a skinned mesh's draw does inside `render_game_into`.
+            ed.raster.as_mut().unwrap().push_skin_pose(0, floptle_core::math::Mat4::IDENTITY, &[floptle_core::math::Mat4::IDENTITY; 4]);
+            let _ = ed.player_frame(false);
+            let poses = ed.raster.as_ref().unwrap().skin_pose_count();
+            assert_eq!(poses, 0, "frame {frame}: the build's frame must start a fresh pose table");
         }
     }
 }

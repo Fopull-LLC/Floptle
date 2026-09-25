@@ -103,6 +103,10 @@ pub fn run_player() {
         std::process::exit(1);
     }
 
+    // Before anything can crash. Beside the game's `save.*` files: see the
+    // hook for why a build needs its own.
+    crate::report::install_player_panic_hook(project.join("save"), title.clone());
+
     // Steam's lifecycle activates before any window or GPU exists, so
     // `RestartAppIfNecessary` can still exit the process.
     let steam_platform = match crate::steam_boot::resolve_app_id(steam_settings, false) {

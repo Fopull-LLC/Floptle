@@ -146,15 +146,10 @@ impl Editor {
         sky_uniform_vals: [[f32; 4]; 16],
         terrain_base_mat: MaterialParams,
     ) -> Option<FrameGather> {
-        let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
+        self.begin_draw_frame();
+        let (Some(gpu), true) = (self.gpu.as_ref(), self.raster.is_some()) else {
             return None;
         };
-        // One pose table per frame, not per pass: a frame gathers the scene
-        // several times over and each pass reads pose indices an earlier gather
-        // handed out. The project's era artefacts are set here for the same
-        // reason — before any gather, so every view has the same look.
-        raster.begin_skin_frame();
-        raster.set_retro_defaults(self.project.retro_artefacts());
         // ---- gather the scene from the World ----
         let surface_aspect = gpu.config.width as f32 / gpu.config.height.max(1) as f32;
         // The camera projects at the aspect of the target the scene composites
@@ -1718,9 +1713,8 @@ impl Editor {
         let mut blobs: Vec<(DVec3, f32, MaterialParams)> = Vec::new();
         // Reused scratch for CPU vertex skinning (deformed vertices, re-uploaded per part).
         let mut skin_scratch: Vec<floptle_render::Vertex> = Vec::new();
-        // Recycle skinned-buffer clones of deleted entities, then borrow the cache
-        // for the draw loop (disjoint field from mesh_registry/raster).
-        self.skin_variants.prune(&self.world);
+        // Borrow the skinned-buffer cache for the draw loop (disjoint field
+        // from mesh_registry/raster); `begin_draw_frame` pruned it.
         let skin_variants = &mut self.skin_variants;
         if let Some((path, pos)) = &drag_ghost
             && let Some(asset) = self.mesh_registry.get(path) {

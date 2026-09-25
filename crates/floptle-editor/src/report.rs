@@ -74,6 +74,44 @@ pub(crate) fn install_panic_hook() {
     }));
 }
 
+/// The shipped game's panic hook: a crash log beside the game's saves.
+///
+/// A build has no Console and, on Windows, no stderr at all (it is a windowed
+/// program), so a crash left no trace anywhere: a game that exited mid-level
+/// said nothing to the player or to its developer. The log goes where the
+/// game's own `save.*` files go, the one folder a build is known to own, and
+/// it names the game rather than sending the player to the engine's tracker.
+/// Replaced by the next crash, not appended to: the latest is the one wanted.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn install_player_panic_hook(save_dir: PathBuf, title: String) {
+    let previous = std::panic::take_hook();
+    static WRITTEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    std::panic::set_hook(Box::new(move |info| {
+        previous(info);
+        // The first panic is the cause; the rest are its fallout (see above).
+        if WRITTEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "(no message)".into());
+        let where_ = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "(unknown location)".into());
+        let trace = std::backtrace::Backtrace::force_capture();
+        let note = format!("{title}\n{}\npanic: {payload}\nat {where_}\n\n{trace}\n", environment());
+        let path = save_dir.join("crash.txt");
+        let _ = floptle_vfs::create_dir_all(&save_dir);
+        if floptle_vfs::write(&path, &note).is_ok() {
+            floptle_say::say_err!("\n{title} crashed; the details are in {}", path.display());
+        }
+    }));
+}
+
 /// The crash note from a previous run, if there is one. Taken (deleted) as it's read, so
 /// one crash asks once — a banner that came back every launch would be its own bug.
 pub(crate) fn take_last_crash() -> Option<String> {

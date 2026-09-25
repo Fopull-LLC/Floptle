@@ -2571,6 +2571,13 @@ impl Raster {
         self.skin_palette_dirty = true;
     }
 
+    /// How many poses the table holds: one per skinned draw since the last
+    /// [`begin_skin_frame`](Self::begin_skin_frame). A number that climbs from
+    /// frame to frame is a host that never began one.
+    pub fn skin_pose_count(&self) -> usize {
+        self.skin_meta_cpu.len()
+    }
+
     /// Append one draw's pose and return its index (what [`SkinDraw::pose`] wants).
     ///
     /// `fallback` is the part's own node matrix — what a vertex with no weights
