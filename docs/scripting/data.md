@@ -140,7 +140,7 @@ a failure, and a mission pays nothing until it is approved).
 Some things a game reads need no player at all: another player's profile
 picture, the remote config you publish from the game page, a public
 leaderboard on the title screen. `cloud.*` reads those as **the game**, with
-the key in `project.ron` (⚙ Settings ▸ Cloud). The engine attaches the key; a
+the key in `project.ron` (⚙ Settings ▸ Networked). The engine attaches the key; a
 script never handles it.
 
 ```lua

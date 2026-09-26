@@ -701,3 +701,99 @@ mod tests {
         assert_eq!(state.borrow().in_flight(), 0, "Stop must not leave callbacks armed");
     }
 }
+
+/// Against the real fopull.com, as the player signed in to the Hub on this
+/// machine (the keyring session). `#[ignore]`d: they need the network and a
+/// signed-in account. `cargo test -p floptle-script -- --ignored live_ --nocapture`.
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+    use mlua::Table;
+
+    /// Card 0054's last two criteria, from Lua: register a game slug, write
+    /// and read back a cloud save, submit a score and read the board, then
+    /// delete the game so nothing is left behind.
+    #[test]
+    #[ignore = "hits fopull.com as the signed-in player"]
+    fn live_a_game_saves_and_scores_from_lua_as_the_signed_in_player() {
+        let lua = Lua::new();
+        let state = Rc::new(RefCell::new(AccountState::new()));
+        let logs: Rc<RefCell<Vec<ScriptLog>>> = Rc::new(RefCell::new(Vec::new()));
+        install_account_api(&lua, state.clone(), logs.clone(), Rc::new(std::cell::Cell::new(false)));
+        state.borrow_mut().set_playing(true);
+        lua.load(
+            r#"
+            seen = {}
+            local slug = "engine-smoke-test"
+            local function note(name, r) seen[#seen + 1] = { name = name, status = r.status, body = r.body } end
+            function go()
+              account.post("/games", { slug = slug, name = "Engine Smoke Test" }, function(r)
+                note("register", r)
+                account.put("/games/" .. slug .. "/saves/autosave",
+                  { data = { level = 3, hp = 57, inventory = json.array({ "rope", "lamp" }) } }, function(r)
+                  note("save put", r)
+                  account.get("/games/" .. slug .. "/saves/autosave", function(r)
+                    note("save get", r)
+                    saved = r.json and r.json.data
+                    account.post("/games/" .. slug .. "/scores", { score = 1200, meta = { run = "first" } }, function(r)
+                      note("score", r)
+                      account.get("/games/" .. slug .. "/leaderboard", function(r)
+                        note("board", r)
+                        best = r.json and r.json.you and r.json.you.score
+                        account.delete("/games/" .. slug, function(r) note("cleanup", r); done = true end)
+                      end)
+                    end)
+                  end)
+                end)
+              end)
+            end
+            "#,
+        )
+        .exec()
+        .unwrap();
+
+        // The keyring read is on a worker; wait for it to say who is here.
+        let state_of = || lua.load("return account.state()").eval::<String>().unwrap();
+        let t = std::time::Instant::now();
+        while state_of() != "signedIn" && t.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // Nobody stored (or no keyring reachable): the device flow, which a
+        // person approves in a browser. The code is printed; up to 5 minutes.
+        if state_of() != "signedIn" {
+            lua.load("account.signIn()").exec().unwrap();
+            let mut shown = false;
+            let t = std::time::Instant::now();
+            while state_of() != "signedIn" && t.elapsed() < std::time::Duration::from_secs(300) {
+                if !shown && let Ok(c) = lua.load("local c = account.code(); return c and (c.url .. '  code ' .. c.code)").eval::<String>() {
+                    println!("APPROVE: {c}");
+                    shown = true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        }
+        assert_eq!(state_of(), "signedIn", "nobody signed in: {:?}", lua.load("return account.error()").eval::<Option<String>>());
+        let who: String = lua.load("return account.player().name").eval().unwrap_or_default();
+        println!("signed in as {who}");
+
+        lua.load("go()").exec().unwrap();
+        let t = std::time::Instant::now();
+        while !lua.globals().get::<bool>("done").unwrap_or(false) && t.elapsed() < std::time::Duration::from_secs(60) {
+            drain(&lua, &state, &logs);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let seen: Table = lua.globals().get("seen").unwrap();
+        for row in seen.sequence_values::<Table>() {
+            let row = row.unwrap();
+            let body: String = row.get("body").unwrap_or_default();
+            println!("{:>9} -> {} {}", row.get::<String>("name").unwrap(), row.get::<u16>("status").unwrap_or(0), &body[..body.len().min(240)]);
+        }
+        assert!(lua.globals().get::<bool>("done").unwrap_or(false), "the chain did not finish");
+        let saved: Table = lua.globals().get("saved").expect("the save did not read back");
+        assert_eq!(saved.get::<i64>("level").unwrap(), 3);
+        assert_eq!(saved.get::<i64>("hp").unwrap(), 57);
+        let inv: Table = saved.get("inventory").unwrap();
+        assert_eq!(inv.get::<String>(2).unwrap(), "lamp");
+        assert_eq!(lua.globals().get::<i64>("best").unwrap(), 1200, "the board did not show the score");
+    }
+}

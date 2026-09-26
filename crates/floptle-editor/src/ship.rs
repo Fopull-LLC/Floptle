@@ -94,7 +94,7 @@ pub(crate) fn run(project: &Path, title: &str, scene: Option<&str>, label: Optio
         return fail(
             3,
             "this project is not connected to a game on Floptle Cloud; connect it in \
-             ⚙ Settings ▸ Cloud (it names the game this bundle belongs to)"
+             ⚙ Settings ▸ Networked (it names the game this bundle belongs to)"
                 .into(),
         );
     };
@@ -245,7 +245,7 @@ fn ship_with(
     }
 }
 
-/// A `floptle ship` started from ⚙ Settings ▸ Cloud: the same verb, run as a
+/// A `floptle ship` started from ⚙ Settings ▸ Networked: the same verb, run as a
 /// child of this binary so the editor never blocks on an upload, with its
 /// lines fed to the Console as they come.
 pub(crate) struct ShipJob {

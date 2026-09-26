@@ -38,7 +38,7 @@ pub(crate) struct CloudGame {
 pub(crate) type CloudState = Rc<RefCell<Option<CloudGame>>>;
 
 const NOT_CONNECTED: &str = "this project is not connected to Floptle Cloud, so it has no game key to \
-     read with. Connect it in ⚙ Settings ▸ Cloud";
+     read with. Connect it in ⚙ Settings ▸ Networked";
 
 /// The one header the Cloud API reads a game key from.
 pub(crate) const GAME_KEY_HEADER: &str = "X-Floptle-Game-Key";

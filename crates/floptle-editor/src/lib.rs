@@ -524,7 +524,7 @@ struct EditorCmd {
     open_settings: bool,
     /// project.ron changed in the Settings tab.
     save_project: bool,
-    /// ⚙ Settings ▸ Cloud ▸ Ship a server build.
+    /// ⚙ Settings ▸ Networked ▸ Ship a server build.
     #[cfg(feature = "editor-ui")]
     ship_server: bool,
     /// Edits the Settings tab's Input section collected this frame.
@@ -2067,7 +2067,7 @@ struct Editor {
     /// Runtime pictures (`assets.textureFromUrl` / `textureFromBytes`) being
     /// decoded on a worker.
     texture_jobs: Vec<crate::runtime_textures::TextureJob>,
-    /// A `floptle ship` started from ⚙ Settings ▸ Cloud.
+    /// A `floptle ship` started from ⚙ Settings ▸ Networked.
     #[cfg(feature = "editor-ui")]
     ship_job: Option<crate::ship::ShipJob>,
     /// Models whose import failed this session, so a preload waiting on one

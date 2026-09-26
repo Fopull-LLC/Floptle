@@ -413,7 +413,7 @@ If it is stopped part-way (killed, the laptop closed), run the same command
 again. While the project is unchanged, the same bundle carries on from where
 the site's copy ends. Once you have edited the project, a fresh bundle is made
 instead. `--fresh` makes a fresh one regardless, and `--json` answers with one
-object for a script. The editor does the same from **⚙ Settings ▸ Cloud ▸ Ship
+object for a script. The editor does the same from **⚙ Settings ▸ Networked ▸ Ship
 a server build**, with its progress in the Console.
 
 What the export does, so you know what you are shipping:
