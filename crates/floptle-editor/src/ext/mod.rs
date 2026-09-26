@@ -143,9 +143,74 @@ pub(crate) struct Snapshot {
     /// about what the author is looking at.
     pub(crate) cam_pos: [f64; 3],
     pub(crate) cam_fwd: [f32; 3],
+    /// The rest of what the author sees: the Scene view's own frustum.
+    pub(crate) view: SceneView,
     /// Seconds since the editor started, and this frame's delta.
     pub(crate) time: f64,
     pub(crate) dt: f32,
+}
+
+/// The Scene view's camera as drawn this frame (`ed.camera()`).
+///
+/// The editor renders the whole window with the Scene camera and the Scene
+/// tab shows the part of that picture its rectangle covers, which is off
+/// centre whenever panels sit on one side more than the other. So the view is
+/// an off-axis frustum, and `frustum` is its exact description: tangents at
+/// unit distance for a perspective view, world units for an orthographic one,
+/// along the camera's right and up. `fov_y_deg` and `aspect` are exact when
+/// the view is centred and the angle it spans when it is not.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct SceneView {
+    pub(crate) up: [f32; 3],
+    pub(crate) right: [f32; 3],
+    pub(crate) ortho: bool,
+    /// Perspective only: the vertical angle between the view's top and bottom
+    /// edges.
+    pub(crate) fov_y_deg: Option<f32>,
+    /// Orthographic only: the world height the view covers.
+    pub(crate) ortho_height: Option<f32>,
+    pub(crate) near: f32,
+    pub(crate) far: f32,
+    /// The view in physical pixels.
+    pub(crate) width: f32,
+    pub(crate) height: f32,
+    /// `[left, right, bottom, top]`.
+    pub(crate) frustum: [f32; 4],
+}
+
+impl SceneView {
+    /// The part of a whole-window projection that `view` (x0, y0, x1, y1, as
+    /// fractions of the window, y down) shows. `window_aspect` is the aspect
+    /// the camera projects at; `px` the view's size in pixels.
+    pub(crate) fn of(
+        proj: floptle_render::Projection,
+        window_aspect: f32,
+        view: [f32; 4],
+        px: [f32; 2],
+        up: [f32; 3],
+        right: [f32; 3],
+    ) -> Self {
+        use floptle_render::Projection;
+        // Half extents of the whole picture: tangents, or world units.
+        let (half_h, near, far, ortho) = match proj {
+            Projection::Perspective { fov_y, near, far } => ((fov_y * 0.5).tan(), near, far, false),
+            Projection::Orthographic { height, near, far } => (height * 0.5, near, far, true),
+        };
+        let half_w = half_h * window_aspect;
+        let [x0, y0, x1, y1] = view;
+        let frustum = [
+            (2.0 * x0 - 1.0) * half_w,
+            (2.0 * x1 - 1.0) * half_w,
+            (1.0 - 2.0 * y1) * half_h,
+            (1.0 - 2.0 * y0) * half_h,
+        ];
+        let (fov_y_deg, ortho_height) = if ortho {
+            (None, Some(frustum[3] - frustum[2]))
+        } else {
+            (Some((frustum[3].atan() - frustum[2].atan()).to_degrees()), None)
+        };
+        Self { up, right, ortho, fov_y_deg, ortho_height, near, far, width: px[0], height: px[1], frustum }
+    }
 }
 
 /// The queues and mirrors every binding reads or writes. One per host, shared

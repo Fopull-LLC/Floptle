@@ -183,10 +183,18 @@ Everything a package registers goes away on ⟲ Reload, timers included.
 | | |
 | --- | --- |
 | `ed.project()` | `{ root, name, scene, engineVersion }` |
-| `ed.camera()` | `{ pos, forward }` — the Scene view's camera |
+| `ed.camera()` | The Scene view's camera as drawn this frame: `pos`, `forward`, `up`, `right` (vec3s), `near`, `far`, `ortho` (boolean), `width` / `height` (the Scene view in pixels) and `aspect` (`width / height`). In perspective `fovYDeg` is the vertical angle the view spans and `orthoHeight` is nil; in orthographic `orthoHeight` is the world height it covers and `fovYDeg` is nil. `frustum = { left, right, bottom, top }` is exact: tangents at unit distance in perspective, world units in orthographic, along `right` and `up` (see below) |
 | `ed.playing()` | |
 | `ed.time()` / `ed.dt()` | seconds since the editor started, and this frame |
 | `ed.package` | `{ id, name, version, root, path(rel) }` — your own package |
+
+**The Scene view is usually off centre.** The editor draws the whole window
+with the Scene camera, and the Scene tab shows the part of that picture its
+rectangle covers. With panels on one side, the middle of what the author sees
+is not straight down `forward`. `frustum` is the exact shape either way (an
+off-axis frustum: `left ≠ -right` or `bottom ≠ -top`). A service that only
+takes a symmetric camera is exact when the view is centred. Otherwise,
+`fovYDeg` and `aspect` are the angle and shape the view spans.
 
 ### Doing things
 

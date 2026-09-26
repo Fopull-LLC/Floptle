@@ -804,6 +804,23 @@ fn ed_table(lua: &Lua, shared: &Rc<Shared>, pkg: usize, state: &PkgState) -> mlu
                     "forward",
                     xyz(lua, [s.cam_fwd[0] as f64, s.cam_fwd[1] as f64, s.cam_fwd[2] as f64])?,
                 )?;
+                let v = &s.view;
+                let f64s = |a: [f32; 3]| [a[0] as f64, a[1] as f64, a[2] as f64];
+                t.set("up", xyz(lua, f64s(v.up))?)?;
+                t.set("right", xyz(lua, f64s(v.right))?)?;
+                t.set("ortho", v.ortho)?;
+                t.set("fovYDeg", v.fov_y_deg)?;
+                t.set("orthoHeight", v.ortho_height)?;
+                t.set("near", v.near)?;
+                t.set("far", v.far)?;
+                t.set("width", v.width)?;
+                t.set("height", v.height)?;
+                t.set("aspect", v.width / v.height.max(1.0))?;
+                let fr = lua.create_table()?;
+                for (k, x) in ["left", "right", "bottom", "top"].iter().zip(v.frustum) {
+                    fr.set(*k, x)?;
+                }
+                t.set("frustum", fr)?;
                 Ok(t)
             })?,
         )?;

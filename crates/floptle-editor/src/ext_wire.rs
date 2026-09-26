@@ -127,6 +127,7 @@ impl Editor {
     fn ext_snapshot(&self) -> Snapshot {
         let fwd = self.camera.rotation() * Vec3::NEG_Z;
         Snapshot {
+            view: self.scene_view(),
             project_root: self.project_root.clone(),
             project_name: self
                 .project_root
@@ -145,6 +146,35 @@ impl Editor {
             time: self.ext_clock,
             dt: self.ui_frame_dt,
         }
+    }
+
+    /// The Scene view's frustum as drawn: the Scene camera's own projection,
+    /// at the aspect it renders the window with, cut to the tab's rectangle.
+    /// With no Scene tab on screen (or no window), the whole picture.
+    fn scene_view(&self) -> crate::ext::SceneView {
+        let rot = self.camera.rotation();
+        let (up, right) = (rot * Vec3::Y, rot * Vec3::X);
+        let cam = self.camera.render_camera();
+        let (win_px, ppp) = match (self.gpu.as_ref(), self.egui.as_ref()) {
+            (Some(g), eg) => (
+                [g.config.width.max(1) as f32, g.config.height.max(1) as f32],
+                eg.map(|e| e.ctx.pixels_per_point()).unwrap_or(1.0),
+            ),
+            (None, _) => ([1280.0, 720.0], 1.0),
+        };
+        let aspect = self.project.render_aspect(win_px[0] / win_px[1]);
+        #[cfg(feature = "editor-ui")]
+        let rect = self.scene_rect;
+        #[cfg(not(feature = "editor-ui"))]
+        let rect: Option<egui::Rect> = None;
+        let (frac, px) = match rect {
+            Some(r) if r.width() > 0.0 && r.height() > 0.0 => {
+                let (w, h) = (win_px[0] / ppp, win_px[1] / ppp);
+                ([r.min.x / w, r.min.y / h, r.max.x / w, r.max.y / h], [r.width() * ppp, r.height() * ppp])
+            }
+            _ => ([0.0, 0.0, 1.0, 1.0], win_px),
+        };
+        crate::ext::SceneView::of(cam.projection, aspect, frac, px, up.to_array(), right.to_array())
     }
 
     /// Hand the extension host one frame's view of the editor and the scene,
@@ -1501,5 +1531,79 @@ mod tests {
             "a tile-size edit must not reuse a grid built for the old size"
         );
         assert_eq!(rc2.tile, 2.0, "a package reading tileSize() after this edit must see the new value");
+    }
+}
+
+#[cfg(all(test, feature = "editor-ui"))]
+mod scene_view_tests {
+    use crate::ext::SceneView;
+    use floptle_render::Projection;
+
+    fn close(a: [f32; 4], b: [f32; 4]) -> bool {
+        a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-4)
+    }
+
+    #[test]
+    fn a_view_is_the_part_of_the_window_picture_its_rectangle_covers() {
+        let up = [0.0, 1.0, 0.0];
+        let right = [1.0, 0.0, 0.0];
+        // 90° vertical at aspect 2: the whole picture spans tangents ±2 by ±1.
+        let persp = Projection::Perspective { fov_y: 90f32.to_radians(), near: 0.1, far: 2000.0 };
+        let whole = SceneView::of(persp, 2.0, [0.0, 0.0, 1.0, 1.0], [2000.0, 1000.0], up, right);
+        assert!(close(whole.frustum, [-2.0, 2.0, -1.0, 1.0]), "{:?}", whole.frustum);
+        assert!((whole.fov_y_deg.unwrap() - 90.0).abs() < 1e-3);
+        assert_eq!((whole.near, whole.far, whole.ortho_height), (0.1, 2000.0, None));
+
+        // The right half: off centre, so the frustum says so.
+        let half = SceneView::of(persp, 2.0, [0.5, 0.0, 1.0, 1.0], [1000.0, 1000.0], up, right);
+        assert!(close(half.frustum, [0.0, 2.0, -1.0, 1.0]), "{:?}", half.frustum);
+        // The bottom half spans from straight ahead to 45° down.
+        let low = SceneView::of(persp, 2.0, [0.0, 0.5, 1.0, 1.0], [2000.0, 500.0], up, right);
+        assert!(close(low.frustum, [-2.0, 2.0, -1.0, 0.0]), "{:?}", low.frustum);
+        assert!((low.fov_y_deg.unwrap() - 45.0).abs() < 1e-3);
+
+        // Orthographic: world units, and no angle that looks real.
+        let ortho = Projection::Orthographic { height: 10.0, near: -5.0, far: 5.0 };
+        let top = SceneView::of(ortho, 2.0, [0.0, 0.0, 1.0, 0.5], [2000.0, 500.0], up, right);
+        assert!(close(top.frustum, [-10.0, 10.0, 0.0, 5.0]), "{:?}", top.frustum);
+        assert_eq!((top.ortho, top.fov_y_deg, top.ortho_height), (true, None, Some(5.0)));
+    }
+
+    /// What a package is told about the view agrees with what the renderer
+    /// draws: a point along each reported edge direction lands, through the
+    /// Scene camera's own matrix, on that edge of the Scene tab.
+    #[test]
+    fn the_reported_view_is_where_the_renderer_puts_it() {
+        let mut ed = crate::Editor::default();
+        ed.camera.position = floptle_core::math::DVec3::new(3.0, 2.0, 9.0);
+        ed.camera.look(0.7, -0.3);
+        // A Scene tab off to the right and above centre, in a 1280×720 window.
+        ed.scene_rect = Some(egui::Rect::from_min_max(egui::pos2(400.0, 40.0), egui::pos2(1200.0, 500.0)));
+        let v = ed.scene_view();
+        assert_eq!((v.width, v.height), (800.0, 460.0));
+
+        let cam = ed.camera.render_camera();
+        let vp = cam.view_proj(1280.0 / 720.0);
+        let fwd = ed.camera.rotation() * floptle_core::math::Vec3::NEG_Z;
+        let (up, right) = (floptle_core::math::Vec3::from(v.up), floptle_core::math::Vec3::from(v.right));
+        let [l, r, b, t] = v.frustum;
+        let project = |x: f32, y: f32| {
+            // Camera-relative: `view_proj` puts the eye at the origin.
+            let d = (fwd + right * x + up * y) * 10.0;
+            let c = vp * d.extend(1.0);
+            let n = c.truncate() / c.w;
+            [(n.x + 1.0) * 0.5 * 1280.0, (1.0 - n.y) * 0.5 * 720.0]
+        };
+        for ((x, y), want) in [
+            ((l, t), [400.0, 40.0]),
+            ((r, b), [1200.0, 500.0]),
+            (((l + r) * 0.5, (b + t) * 0.5), [800.0, 270.0]),
+        ] {
+            let got = project(x, y);
+            assert!(
+                (got[0] - want[0]).abs() < 0.5 && (got[1] - want[1]).abs() < 0.5,
+                "frustum ({x}, {y}) projects to {got:?}, the tab's edge is at {want:?}"
+            );
+        }
     }
 }
