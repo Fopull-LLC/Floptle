@@ -1,5 +1,16 @@
 ## Just shipped
 
+**v0.99.0-rc1 — "Ship It"** (beta). Signing in to Floptle now stays signed in
+across restarts, and the Hub and your games share it. A new music track no
+longer freezes the game: sounds are read in the background, `audio.preload` reads them ahead of
+time, and decoded audio no longer piles up over a long playlist. A game can
+show pictures it downloads, a player's profile picture included, with
+`assets.textureFromUrl` and `cloud.avatar`. `cloud.*` reads your game's settings
+and public boards with no player signed in, and `floptle ship` (or ⚙ Settings ▸
+Networked ▸ Ship a server build) exports a dedicated server and uploads it in
+one step. A restarted server keeps its code and its players, and managed relays
+refuse a certificate that does not verify.
+
 **v0.98.0 — "Stays Smooth"** (stable). Exported games with animated
 characters run for as long as you play them; they used to slow down, stop
 drawing parts of the level and close after a minute or two. Models given to
