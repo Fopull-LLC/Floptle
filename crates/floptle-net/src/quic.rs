@@ -681,6 +681,11 @@ pub fn client_trust_for(addr: &str) -> ClientTrust {
     }
 }
 
+/// A managed relay's DNS name: `us-east.relay.fopull.com`.
+pub fn is_relay_name(host: &str) -> bool {
+    host.trim_end_matches('.').to_ascii_lowercase().ends_with(".relay.fopull.com")
+}
+
 /// A client endpoint connecting to a [`QuicServer`]. [`QuicClient::connect`]
 /// returns immediately; the handshake completes in the background (reliable
 /// sends queue meanwhile — the session's `Hello` is the first thing through).
@@ -734,8 +739,17 @@ impl QuicClient {
     }
 
     /// [`Self::connect`] under an explicit trust model.
+    ///
+    /// ⚠ **A managed relay's name is verified or refused, never downgraded.**
+    /// Every `*.relay.fopull.com` presents a chain the public roots trust (the
+    /// certificate is part of standing a relay up), so a chain that does not
+    /// verify there is somebody in the middle, and falling back to accepting
+    /// any certificate would hand them the session. Any other `fopull.com`
+    /// name (a fleet box's own address, which is not a way in when its region
+    /// has a relay) still falls back with a warning.
     pub fn connect_with_trust(addr: &str, trust: ClientTrust) -> Result<Self, String> {
-        Self::connect_inner(addr, trust, true)
+        let fallback = !matches!(&trust, ClientTrust::Verify { server_name } if is_relay_name(server_name));
+        Self::connect_inner(addr, trust, fallback)
     }
 
     /// Verify the server's chain for `server_name` against the public roots
@@ -1232,13 +1246,29 @@ mod tests {
         }
     }
 
-    /// **The fallback works and says so.** A client told to verify a server
-    /// that presents the dev self-signed certificate cannot verify it — and
-    /// connects anyway, once, with a warning the transport hands up. Until
-    /// the managed relay's certificate is live this is what every managed
-    /// session does; when it is, the fallback is the line to remove.
+    /// Poll until connected or refused (or 2 s): `Some(reason)` when refused.
+    fn outcome(client: &mut QuicClient) -> Option<Result<(), Option<String>>> {
+        for _ in 0..200 {
+            for i in client.poll() {
+                match i {
+                    Incoming::Connected(SERVER) => return Some(Ok(())),
+                    Incoming::Disconnected(SERVER, why) => return Some(Err(why)),
+                    _ => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        None
+    }
+
+    /// ⚠ **A relay name that presents a chain this build cannot verify is
+    /// refused, never downgraded.** The managed relay's certificate is live
+    /// and verified (card 0227), so the only way to meet an unverifiable chain
+    /// at `*.relay.fopull.com` is somebody in the middle. The dev server here
+    /// presents a self-signed certificate: the connection must not come up,
+    /// and the reason must say why.
     #[test]
-    fn a_certificate_that_does_not_verify_falls_back_with_a_warning() {
+    fn a_relay_name_that_does_not_verify_is_refused_not_downgraded() {
         let server = QuicServer::bind(0).unwrap();
         let addr = format!("127.0.0.1:{}", server.local_port());
         let mut client = QuicClient::connect_with_trust(
@@ -1246,15 +1276,29 @@ mod tests {
             ClientTrust::Verify { server_name: "us-east.relay.fopull.com".into() },
         )
         .unwrap();
-        let mut connected = false;
-        for _ in 0..200 {
-            if client.poll().iter().any(|i| matches!(i, Incoming::Connected(SERVER))) {
-                connected = true;
-                break;
+        match outcome(&mut client) {
+            Some(Err(Some(why))) => {
+                assert!(why.contains("did not present a certificate"), "{why}");
+                assert!(why.contains("us-east.relay.fopull.com"), "{why}");
             }
-            std::thread::sleep(Duration::from_millis(10));
+            other => panic!("an unverifiable relay chain was not refused: {other:?}"),
         }
-        assert!(connected, "the fallback never connected");
+        assert!(client.take_warnings().is_empty(), "a refusal is not a warning");
+    }
+
+    /// **Any other fopull.com name still falls back, and says so.** A fleet
+    /// box's own address has no public certificate and is not a way in where
+    /// its region has a relay; it keeps the old model with its warning.
+    #[test]
+    fn another_fopull_name_that_does_not_verify_falls_back_with_a_warning() {
+        let server = QuicServer::bind(0).unwrap();
+        let addr = format!("127.0.0.1:{}", server.local_port());
+        let mut client = QuicClient::connect_with_trust(
+            &addr,
+            ClientTrust::Verify { server_name: "us-east-1.fleet.fopull.com".into() },
+        )
+        .unwrap();
+        assert!(matches!(outcome(&mut client), Some(Ok(()))), "the fallback never connected");
         let warnings = client.take_warnings();
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("did not present a certificate this build can verify"), "{}", warnings[0]);
@@ -1262,13 +1306,18 @@ mod tests {
         assert!(client.take_warnings().is_empty(), "the warning was not once");
         // The ordinary trust model raises nothing.
         let mut plain = QuicClient::connect(&addr).unwrap();
-        for _ in 0..200 {
-            if plain.poll().iter().any(|i| matches!(i, Incoming::Connected(SERVER))) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        assert!(matches!(outcome(&mut plain), Some(Ok(()))));
         assert!(plain.take_warnings().is_empty());
+    }
+
+    #[test]
+    fn a_relay_name_is_known_by_its_suffix_alone() {
+        for yes in ["us-east.relay.fopull.com", "EU-CENTRAL.RELAY.FOPULL.COM.", "a.b.relay.fopull.com"] {
+            assert!(is_relay_name(yes), "{yes}");
+        }
+        for no in ["relay.fopull.com.evil.example", "us-east-1.fleet.fopull.com", "fopull.com", "xrelay.fopull.com"] {
+            assert!(!is_relay_name(no), "{no}");
+        }
     }
 
     /// A certificate for `name`, PEM, as certbot would leave it on disk.
