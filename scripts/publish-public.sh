@@ -19,7 +19,10 @@ echo "downloading $TAG assets from $PRIVATE…"
 gh release download "$TAG" --repo "$PRIVATE" --dir "$WORK"
 
 echo "publishing $TAG on $PUBLIC…"
-gh release create "$TAG" --repo "$PUBLIC" --title "$TAG" \
+# A preview tag is created as a prerelease: GitHub makes any other new release
+# the repo's Latest, and /releases/latest would serve a beta.
+PRE=(); case "$TAG" in *-*) PRE=(--prerelease);; esac
+gh release create "$TAG" --repo "$PUBLIC" --title "$TAG" "${PRE[@]}" \
   --notes "Floptle $TAG — download the floptle-hub archive for your platform; the Hub installs engine versions." \
   2>/dev/null || true
 gh release upload "$TAG" "$WORK"/* --clobber --repo "$PUBLIC"

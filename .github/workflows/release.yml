@@ -422,7 +422,10 @@ jobs:
                    artifacts/*/floptle-fleet-*-linux-aarch64.sha256 \
                    artifacts/*/floptle-relay-bench-*-linux-aarch64 \
                    artifacts/*/floptle-relay-bench-*-linux-aarch64.sha256)
-          gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes-file NOTES.md || true
+          # A preview tag is created as a prerelease: GitHub makes any other new
+          # release the repo's Latest, and /releases/latest would serve a beta.
+          PRE=(); case "$TAG" in *-*) PRE=(--prerelease);; esac
+          gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes-file NOTES.md "${PRE[@]}" || true
           gh release upload "$TAG" "${BUNDLES[@]}" releases.json docs.json artifacts/bundle-linux-x86_64/cli.json --clobber --repo "$REPO"
 
       - name: Publish to the public releases repo
@@ -448,7 +451,10 @@ jobs:
                    artifacts/*/floptle-fleet-*-linux-aarch64.sha256 \
                    artifacts/*/floptle-relay-bench-*-linux-aarch64 \
                    artifacts/*/floptle-relay-bench-*-linux-aarch64.sha256)
-          gh release create "$TAG" --repo "$PUBLIC_REPO" --title "$TAG" --notes-file NOTES.md || true
+          # A preview tag is created as a prerelease: GitHub makes any other new
+          # release the repo's Latest, and /releases/latest would serve a beta.
+          PRE=(); case "$TAG" in *-*) PRE=(--prerelease);; esac
+          gh release create "$TAG" --repo "$PUBLIC_REPO" --title "$TAG" --notes-file NOTES.md "${PRE[@]}" || true
           gh release upload "$TAG" "${BUNDLES[@]}" releases.json docs.json artifacts/bundle-linux-x86_64/cli.json --clobber --repo "$PUBLIC_REPO"
           # A fixed 'manifest' release so the Hub's default URL always resolves to
           # the newest list. It is a prerelease and the version release is marked
