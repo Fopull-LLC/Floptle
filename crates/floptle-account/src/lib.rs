@@ -28,6 +28,9 @@
 
 pub mod auth;
 pub mod cloud;
+/// `floptle ship`: a server bundle uploaded as the developer. Desktop only.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod builds;
 /// The managed relay regions, and the letter each one's lobby codes start
 /// with. The one Cloud call that needs no account.
 pub mod regions;

@@ -249,6 +249,8 @@ the screen. `floptle help <VERB>` explains any one of them.
 [x] floptle api [QUERY] [--json]
 [x] floptle export <PROJ> <OUT> <PLATFORM|server> [--title T] [--scene S] [--label L]
                                      # server: name OUT *.tar.gz for the archive
+[x] floptle ship <PROJ> [--scene S] [--label L] [--fresh] [--json]
+                                     # export a server bundle and upload it to Floptle Cloud
 [x] floptle bake gi | clips | nav [ARGS]       # all three headless
 [x] floptle migrate <DIR> [--engine-version V]
 [x] floptle serve <PROJ> [--port N | --relay URL] [--scene S] [--tick HZ]
@@ -394,6 +396,25 @@ offers the scene it names.
 Name a folder instead and you get a folder: `<OUT>/floptle-server.ron` and
 `<OUT>/assets/`, which is useful if you want to look inside one before it goes
 anywhere.
+
+**Or export and upload in one step:**
+
+```
+floptle ship <PROJECT> [--scene scenes/lobby.ron] [--label "lobby v3"]
+```
+
+`ship` makes the same bundle and uploads it to the page of the game your
+project is connected to, as the account signed in to the Floptle Hub. The
+build then waits on the game's page for you to deploy it. The upload goes in
+pieces, so a bundle of any size gets there, and a dropped connection or an
+expired upload link is picked up without you doing anything.
+
+If it is stopped part-way (killed, the laptop closed), run the same command
+again. While the project is unchanged, the same bundle carries on from where
+the site's copy ends. Once you have edited the project, a fresh bundle is made
+instead. `--fresh` makes a fresh one regardless, and `--json` answers with one
+object for a script. The editor does the same from **⚙ Settings ▸ Cloud ▸ Ship
+a server build**, with its progress in the Console.
 
 What the export does, so you know what you are shipping:
 

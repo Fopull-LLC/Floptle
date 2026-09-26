@@ -302,6 +302,64 @@ pub(crate) const VERBS: &[Verb] = &[
         legacy: &["--export"],
     },
     Verb {
+        name: "ship",
+        summary: "export a dedicated-server bundle and upload it to the game's page on Floptle Cloud",
+        detail: "`export … server` and the upload on fopull.com in one step, as the developer \
+                 signed in to the Hub. The project's `cloud:` block names the game. The upload \
+                 goes in pieces, so a bundle of any size gets there, and it survives a dropped \
+                 connection or an expired upload link on its own.\n\n\
+                 Stopped part-way (a kill, a closed laptop), run it again: while the project is \
+                 unchanged the same bundle carries on from where the site's copy ends. Once the \
+                 build is on the page, deploying it is a click there.",
+        args: &[
+            Arg {
+                name: "PROJECT",
+                value: Value::Path,
+                required: true,
+                help: "the project directory",
+            },
+            Arg {
+                name: "--scene",
+                value: Value::Text,
+                required: false,
+                help: "which scene the server hosts (default: the project's entry scene)",
+            },
+            Arg {
+                name: "--label",
+                value: Value::Text,
+                required: false,
+                help: "what to call the build on the game's page",
+            },
+            Arg {
+                name: "--title",
+                value: Value::Text,
+                required: false,
+                help: "the game's title in the bundle (default: the project directory's name)",
+            },
+            Arg {
+                name: "--fresh",
+                value: Value::Flag,
+                required: false,
+                help: "export a new bundle even if an unfinished upload of this one is waiting",
+            },
+            Arg {
+                name: "--json",
+                value: Value::Flag,
+                required: false,
+                help: "answer as JSON",
+            },
+        ],
+        needs_gpu: false,
+        writes_project: false,
+        exits: &[
+            (1, "the export or the upload failed; an unfinished upload is kept for the next run"),
+            (3, "the project is not connected to Floptle Cloud, or nobody is signed in"),
+        ],
+        output: "progress on stdout and the build id when it is on the page; with --json one \
+                 object with `ok`, `build`, `game`, `bytes`, `sha256` and `engine`",
+        legacy: &[],
+    },
+    Verb {
         name: "migrate",
         summary: "bring a project up to this engine version and exit",
         detail: "",
@@ -1384,6 +1442,18 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 &title,
                 scene.as_deref(),
                 label.as_deref(),
+            ))
+        }
+        Some(("ship", a)) => {
+            let project = path(a, "PROJECT").expect("required");
+            let title = text(a, "title").unwrap_or_else(|| default_title(&project));
+            Outcome::Exit(crate::ship::run(
+                &project,
+                &title,
+                text(a, "scene").as_deref(),
+                text(a, "label").as_deref(),
+                a.get_flag("fresh"),
+                a.get_flag("json"),
             ))
         }
         Some(("migrate", a)) => {

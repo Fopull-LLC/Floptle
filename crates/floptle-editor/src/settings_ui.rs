@@ -180,6 +180,8 @@ pub(crate) struct SettingsCtx<'a> {
     /// so the tab edits a copy and reports the change through
     /// [`SettingsOut::access`], the same deferral every other panel here uses.
     pub(crate) access: floptle_core::access::Accessibility,
+    /// A `floptle ship` started from here is still running.
+    pub(crate) shipping: bool,
 }
 
 /// What the tab changed, applied after the frame.
@@ -190,6 +192,8 @@ pub(crate) struct SettingsOut {
     pub(crate) access: Option<floptle_core::access::Accessibility>,
     pub(crate) rename_layer: Option<(String, String)>,
     pub(crate) input: crate::input_ui::InputEdits,
+    /// Export a server bundle and upload it to the game's page.
+    pub(crate) ship_server: bool,
 }
 
 impl<'a> SettingsCtx<'a> {
@@ -471,6 +475,22 @@ impl<'a> SettingsCtx<'a> {
                     "Manage this game on fopull.com",
                     format!("https://fopull.com/cloud/games/{g}"),
                 );
+                // `floptle ship`, from here: export the dedicated-server bundle
+                // and upload it to the page above, as the account signed in to
+                // the Hub. Progress goes to the Console.
+                let label = if self.shipping { "⬆ shipping… (see the Console)" } else { "⬆ Ship a server build" };
+                if ui
+                    .add_enabled(!self.shipping, egui::Button::new(label))
+                    .on_hover_text(
+                        "Export this project as a dedicated-server bundle and upload it to the \
+                         game's page on fopull.com, where you deploy it. The same as \
+                         `floptle ship` on the command line.",
+                    )
+                    .on_disabled_hover_text("an upload is already running; the Console shows how far it has got")
+                    .clicked()
+                {
+                    out.ship_server = true;
+                }
             }
         } else {
             ui.label(format!(
@@ -1359,6 +1379,7 @@ mod tests {
                         pad_names: &pads,
                         input_new_action: &mut new_action,
                         access: Default::default(),
+                    shipping: false,
                     }
                     .ui(ui, &mut project);
                 },
@@ -1450,6 +1471,7 @@ mod tests {
                             pad_names: &pad_names,
                             input_new_action: &mut new_action,
                             access: Default::default(),
+                    shipping: false,
                         };
                         let _ = cx.ui(ui, &mut project);
                     });
@@ -1527,6 +1549,7 @@ mod tests {
                     pad_names: &pad_names,
                     input_new_action: &mut new_action,
                     access: Default::default(),
+                    shipping: false,
                 };
                 let _ = cx.ui(ui, &mut project);
             });
@@ -1572,6 +1595,7 @@ mod tests {
                     pad_names: &pad_names,
                     input_new_action: &mut new_action,
                     access: Default::default(),
+                    shipping: false,
                 };
                 let _ = cx.ui(ui, &mut project);
             });

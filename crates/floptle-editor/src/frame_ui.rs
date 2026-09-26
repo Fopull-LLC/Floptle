@@ -1615,6 +1615,7 @@ impl Editor {
                 pad_names: &settings_pad_names,
                 input_new_action: &mut self.input_new_action,
                 access,
+                shipping: self.ship_job.is_some(),
             },
             packages: &mut self.packages_ui,
             packages_ctx: crate::packages_ui::PkgCtx {

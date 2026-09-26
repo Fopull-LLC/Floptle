@@ -159,6 +159,7 @@ impl Editor {
         self.autosave_tick();
         // Reap a finished cross-target export build (Windows-from-Linux etc.).
         self.poll_export_build();
+        self.poll_ship();
         // Terrain volumes render per-volume, each at native resolution: moving a
         // terrain needs no GPU work — only structural changes re-upload into the
         // shared 3D atlas (where shadow-only mesh occluders also live).
@@ -1150,6 +1151,10 @@ impl Editor {
             && let Err(e) = floptle_scene::save_project(&self.project, &self.project_cfg_path()) {
                 floptle_say::say_err!("  save project failed: {e}");
             }
+        // After the save: `floptle ship` reads project.ron from disk.
+        if cmd.ship_server {
+            self.start_ship();
+        }
         // Edit ⏵ Project Settings opens (or focuses) the ⚙ Settings TAB — it
         // docks like anything else, so there is no modal to dismiss.
         if cmd.open_settings && let Some(d) = self.dock_state.as_mut() {

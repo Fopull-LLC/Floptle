@@ -451,7 +451,7 @@ impl Account {
     /// Returns the token by value and the caller is expected to drop it: it goes
     /// to [`cloud::request`] and nowhere else. Nothing above this crate ever
     /// sees one.
-    fn access_token(&self) -> Result<String, String> {
+    pub(crate) fn access_token(&self) -> Result<String, String> {
         let session = self.session().ok_or("nobody is signed in")?;
         let now = unix_now();
         if !session.needs_refresh(now) {
