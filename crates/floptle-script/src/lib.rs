@@ -275,6 +275,7 @@ mod host;
 mod http_api;
 mod preload_api;
 mod texture_api;
+mod cloud_api;
 pub use texture_api::TextureRequest;
 pub use preload_api::PreloadKind;
 pub use http_api::{browser_url, open_in_browser};
@@ -902,6 +903,8 @@ pub struct ScriptHost {
     http: Rc<RefCell<http_api::HttpState>>,
     /// `assets.textureFromUrl` / `textureFromBytes`: the book of runtime textures.
     textures: Rc<RefCell<texture_api::TextureLoads>>,
+    /// `cloud.*`: the game this project is connected to, set by the driver.
+    cloud: cloud_api::CloudState,
     /// How long one pass into Lua may run — see [`budget`].
     budget: Rc<budget::Budget>,
     /// Scripts that ran past the budget. Not called again until their file

@@ -399,6 +399,8 @@ mod tests {
         const NOT_OPTIONS: &[(&str, &str)] = &[
             ("math_api.rs", "list helpers (map/filter/sort) take DATA, not options"),
             ("http_api.rs", "the reply table is built by the engine and read by the game"),
+            ("texture_api.rs", "reads http replies; textureFromUrl's opts go through http_api::read_opts, which checks them"),
+            ("cloud_api.rs", "reads the engine's own http reply tables; takes no options table"),
             ("ui_make.rs", "ui.make validates every property AND value itself"),
             ("api.rs", "handle metatables and the construction calls, all checked at the call"),
             ("audio_api.rs", "sound/track handles; the one options table is audio.play"),

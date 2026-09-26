@@ -2307,6 +2307,16 @@ impl ScriptHost {
         {
             floptle_say::say_err!("[lua] failed to install the runtime texture API: {e}");
         }
+        let cloud: crate::cloud_api::CloudState = Rc::default();
+        let fetcher = crate::texture_api::Fetcher {
+            book: textures.clone(),
+            http: http.clone(),
+            logs: logs.clone(),
+            in_fixed: http_in_fixed.clone(),
+        };
+        if let Err(e) = crate::cloud_api::install(&lua, cloud.clone(), fetcher) {
+            floptle_say::say_err!("[lua] failed to install the cloud API: {e}");
+        }
         // `account.*`: the same worker-thread + frame-pass
         // shape, against fopull.com only, with the token kept in Rust.
         let account: Rc<RefCell<crate::account_api::AccountState>> =
@@ -2604,6 +2614,7 @@ impl ScriptHost {
             account,
             preloads,
             textures,
+            cloud,
             http_in_fixed,
             platform,
             steam_state,
@@ -4857,6 +4868,17 @@ impl ScriptHost {
     /// Textures `assets.release` gave back since the last call.
     pub fn take_texture_releases(&self) -> Vec<String> {
         self.textures.borrow_mut().take_releases()
+    }
+
+    /// The Floptle Cloud game this project is connected to — its slug and
+    /// game key from `project.ron` — for `cloud.*`, or `None` when it is not
+    /// connected. Set by the driver before Play.
+    pub fn set_cloud_game(&self, game: Option<(String, String)>) {
+        let base = std::env::var("FLOPTLE_ACCOUNT_BASE")
+            .unwrap_or_else(|_| floptle_account::DEFAULT_BASE.to_string());
+        *self.cloud.borrow_mut() = game
+            .filter(|(_, key)| !key.trim().is_empty())
+            .map(|(game, key)| crate::cloud_api::CloudGame { game, key, base });
     }
 
     /// Whether this host can draw. One that cannot answers every texture

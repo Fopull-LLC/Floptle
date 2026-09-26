@@ -135,6 +135,33 @@ and wallet shapes, why the wallet is read-only, and the three answers that
 surprise a first test (`event_id` is mandatory, an empty `awarded` is not always
 a failure, and a mission pays nothing until it is approved).
 
+### Reading as the game: `cloud.*`
+
+Some things a game reads need no player at all: another player's profile
+picture, the remote config you publish from the game page, a public
+leaderboard on the title screen. `cloud.*` reads those as **the game**, with
+the key in `project.ron` (⚙ Settings ▸ Cloud). The engine attaches the key; a
+script never handles it.
+
+```lua
+cloud.avatar(net.identity(peer).id, 64, function(tex, err)
+  if not tex then return end            -- err is "no_picture" when they have none
+  ui.make(row, { "image", w = 32, h = 32, texture = tex, radius = 16 })
+end)
+cloud.config(function(config, err) motd = config and config.motd end)
+cloud.get("/games/" .. cloud.game() .. "/rank/laps:canyon", function(res) end)
+```
+
+| Call | What it does |
+|---|---|
+| `cloud.game()` | this project's game slug, or `nil` when it is not connected |
+| `cloud.get(path, cb)` | a read under `/games/…` or `/players/…`; `res` as `http.get` |
+| `cloud.avatar(playerId [, size], cb)` | a player's picture as a texture, `cb(tex, err)`; size 64, 128 (default) or 256 |
+| `cloud.config(cb)` | your remote config, `cb(config, err)` |
+
+Reads only: a game key never writes, so saves, scores and uploads go through
+`account.*` as the player. Play only, like `http.*`, with the same rate limits.
+
 ---
 
 ## 30. Settings a game offers its player: `app.*`

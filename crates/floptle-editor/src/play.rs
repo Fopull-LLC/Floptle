@@ -990,6 +990,10 @@ impl Editor {
             self.script_host.set_http_policy(floptle_script::HttpPolicy {
                 allow_local: self.http_allow_local,
             });
+            // `cloud.*` reads as this game, with the key the project carries.
+            self.script_host.set_cloud_game(
+                self.project.cloud.as_ref().filter(|c| c.is_connected()).map(|c| (c.game.clone(), c.key.clone())),
+            );
             // Before the first `start`: a host that draws nothing refuses a
             // texture without downloading it.
             self.script_host.set_can_draw(self.gpu.is_some() && self.raster.is_some());

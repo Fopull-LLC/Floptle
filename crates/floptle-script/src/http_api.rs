@@ -57,7 +57,7 @@ const MAX_PER_SECOND: usize = 20;
 /// wrong, and the worker thread should not be the place it finds out.
 pub(crate) const MAX_BODY: usize = 8 * 1024 * 1024;
 /// Default per-request timeout, seconds.
-const DEFAULT_TIMEOUT: f64 = 15.0;
+pub(crate) const DEFAULT_TIMEOUT: f64 = 15.0;
 
 /// What a worker thread sends back. Plain data — no Lua types cross the thread
 /// boundary (mlua values are not `Send`, and the callback stays on the main

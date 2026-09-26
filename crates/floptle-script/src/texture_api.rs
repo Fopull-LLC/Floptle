@@ -176,70 +176,116 @@ pub(crate) fn install(
         })?,
     )?;
 
-    let st = state.clone();
+    let fetcher = Fetcher { book: state.clone(), http, logs, in_fixed };
     assets.set(
         "textureFromUrl",
         lua.create_function(move |lua, args: mlua::MultiValue| {
             let (url, _, opts, cb) = http_api::parse_args(args.into_iter().collect(), false)?;
             let (headers, timeout, _) = http_api::read_opts("assets.textureFromUrl", opts.as_ref())?;
-            let id = {
-                let mut s = st.borrow_mut();
-                match s.by_url.get(&url) {
-                    Some(ByUrl::Ready(name)) => {
-                        let name = name.clone();
-                        let id = s.start(cb);
-                        s.answers.push((id, Ok(name)));
-                        return Ok(());
-                    }
-                    Some(ByUrl::Loading(id)) => {
-                        let id = *id;
-                        s.waiting.entry(id).or_default().push(cb);
-                        return Ok(());
-                    }
-                    None => {}
-                }
-                let id = s.start(cb);
-                if !s.can_draw {
-                    s.answer(id, Err(NO_GPU.into()));
-                    return Ok(());
-                }
-                s.by_url.insert(url.clone(), ByUrl::Loading(id));
-                s.url_of.insert(id, url.clone());
-                id
-            };
-            // The reply comes back through http.get's own machinery, into this
-            // function, which hands the bytes on rather than to a script.
-            let book = st.clone();
-            let on_reply = lua.create_function(move |_, res: Table| {
-                let mut s = book.borrow_mut();
-                if res.get::<bool>("ok").unwrap_or(false) {
-                    let body: mlua::String = res.get("body")?;
-                    s.request(id, body.as_bytes().to_vec());
-                } else {
-                    let why = match res.get::<Option<String>>("error").ok().flatten() {
-                        Some(e) => e,
-                        None => format!("the server answered HTTP {}", res.get::<u16>("status").unwrap_or(0)),
-                    };
-                    s.answer(id, Err(why));
-                }
-                Ok(())
-            })?;
-            let sent = http_api::send(&http, &logs, &in_fixed, "GET", url.clone(), None, headers, timeout, false, on_reply);
-            if let Err(e) = sent {
-                // Refused at the call, as http.get would be: nothing is waiting.
-                let mut s = st.borrow_mut();
-                s.waiting.remove(&id);
-                s.url_of.remove(&id);
-                s.by_url.remove(&url);
-                return Err(e);
-            }
-            Ok(())
+            fetcher.fetch(lua, url, headers, timeout, cb)
         })?,
     )?;
 
     let st = state;
     assets.set("release", lua.create_function(move |_, name: String| Ok(st.borrow_mut().release(&name)))?)?;
     Ok(())
+}
+
+/// Downloads a picture through `http.get`'s own path and hands the bytes to
+/// the book. Shared by `assets.textureFromUrl` and `cloud.avatar`, which differ
+/// only in the URL and the headers.
+#[derive(Clone)]
+pub(crate) struct Fetcher {
+    pub(crate) book: Rc<RefCell<TextureLoads>>,
+    pub(crate) http: Rc<RefCell<HttpState>>,
+    pub(crate) logs: Rc<RefCell<Vec<ScriptLog>>>,
+    pub(crate) in_fixed: Rc<Cell<bool>>,
+}
+
+impl Fetcher {
+    /// `cb(tex, err)` in a later frame pass. A URL already loaded this session
+    /// answers from memory; one on its way is waited on, not fetched twice.
+    /// Refusals `http.get` makes at the call raise here too.
+    pub(crate) fn fetch(
+        &self,
+        lua: &Lua,
+        url: String,
+        headers: Vec<(String, String)>,
+        timeout: f64,
+        cb: Function,
+    ) -> mlua::Result<()> {
+        let st = &self.book;
+        let id = {
+            let mut s = st.borrow_mut();
+            match s.by_url.get(&url) {
+                Some(ByUrl::Ready(name)) => {
+                    let name = name.clone();
+                    let id = s.start(cb);
+                    s.answers.push((id, Ok(name)));
+                    return Ok(());
+                }
+                Some(ByUrl::Loading(id)) => {
+                    let id = *id;
+                    s.waiting.entry(id).or_default().push(cb);
+                    return Ok(());
+                }
+                None => {}
+            }
+            let id = s.start(cb);
+            if !s.can_draw {
+                s.answer(id, Err(NO_GPU.into()));
+                return Ok(());
+            }
+            s.by_url.insert(url.clone(), ByUrl::Loading(id));
+            s.url_of.insert(id, url.clone());
+            id
+        };
+        // The reply comes back through http.get's own machinery, into this
+        // function, which hands the bytes on rather than to a script.
+        let book = st.clone();
+        let on_reply = lua.create_function(move |_, res: Table| {
+            let mut s = book.borrow_mut();
+            if res.get::<bool>("ok").unwrap_or(false) {
+                let body: mlua::String = res.get("body")?;
+                s.request(id, body.as_bytes().to_vec());
+            } else {
+                // The transport's words, else the server's own error token
+                // (`no_picture`), else the status.
+                let server_says = res
+                    .get::<Option<Table>>("json")
+                    .ok()
+                    .flatten()
+                    .and_then(|j| j.get::<Option<String>>("error").ok().flatten());
+                let why = match res.get::<Option<String>>("error").ok().flatten().or(server_says) {
+                    Some(e) => e,
+                    None => format!("the server answered HTTP {}", res.get::<u16>("status").unwrap_or(0)),
+                };
+                s.answer(id, Err(why));
+            }
+            Ok(())
+        })?;
+        let sent = http_api::send(
+            &self.http,
+            &self.logs,
+            &self.in_fixed,
+            "GET",
+            url.clone(),
+            None,
+            headers,
+            timeout,
+            false,
+            on_reply,
+        );
+        if let Err(e) = sent {
+            // Refused at the call, as http.get would be: nothing is waiting.
+            let mut s = st.borrow_mut();
+            s.waiting.remove(&id);
+            s.url_of.remove(&id);
+            s.by_url.remove(&url);
+            return Err(e);
+        }
+        Ok(())
+    }
 }
 
 /// Call back every script whose texture has been answered: frame pass only.

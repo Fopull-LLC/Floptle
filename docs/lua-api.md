@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 144
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 149
 - [node — transform & body fields](#node--transform--body-fields) — 37
 - [node — methods & handles](#node--methods--handles) — 28
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -197,6 +197,26 @@ app.version() — the engine version this build was made with, e.g. "0.81.0". Fo
 ### `app.vsync`
 
 app.vsync() → the current frame pacing as a name: "On", "Adaptive" or "Off" — the same names project.ron uses, so a Video tab can show what is set and save it straight back.
+
+### `cloud`
+
+Floptle Cloud read as the GAME, with the key in project.ron: cloud.avatar for a player's picture, cloud.config for your remote config, cloud.get for any public read under /games/ or /players/. Reads only; what a player does goes through account.*.
+
+### `cloud.avatar`
+
+cloud.avatar(playerId [, size], function(tex, err) end) — a player's Foverse picture as a texture, playerId being net.identity(peer).id or account.player().id. size is 64, 128 (default) or 256; the picture is square. err is "no_picture" when the player has none: draw your own stand-in. tex works anywhere a texture path does; a UI image with radius = half its size draws round. Loaded once per session per player and size; assets.release(tex) lets it go. Refuses: a size other than 64/128/256; a project not connected to Cloud.
+
+### `cloud.config`
+
+cloud.config(function(config, err) end) — the remote config you publish from the game's page on fopull.com: a table of your keys, {} when none are set, or nil and why. Changed on the page, live in every copy of the game without a new build. Refuses: a project not connected to Cloud.
+
+### `cloud.game`
+
+cloud.game() -> string|nil — this project's game slug (what /games/<slug>/… addresses), or nil when the project is not connected to Floptle Cloud.
+
+### `cloud.get`
+
+cloud.get(path, function(res) end) — read from Floptle Cloud as the game: the engine attaches the project's game key, so it works with nobody signed in. Paths under /games/… and /players/… only, GET only (a game key never writes). res as http.get, with json parsed. Play only, same rate limits as http.*. Refuses: any other path; a project not connected to Cloud.
 
 ### `createNode`
 
