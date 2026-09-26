@@ -65,6 +65,10 @@ pub struct ServerArgs {
     /// `FLOPTLE_LOBBY_CODE`. `None` means "give me a fresh one", which is every
     /// self-hosted server and every player.
     pub lobby_code: Option<String>,
+    /// **The managed deployment this server is**, from `FLOPTLE_DEPLOYMENT_ID`
+    /// (set by `floptle-fleet`). Told to the relay, so a restart is recognised
+    /// as the same server. `None` everywhere else.
+    pub deployment: Option<String>,
     pub tick_hz: f32,
     pub interest: Option<f64>,
     pub budget: Option<u32>,
@@ -109,6 +113,7 @@ impl ServerArgs {
             port: None,
             relay: None,
             lobby_code: None,
+            deployment: None,
             tick_hz: 60.0,
             interest: None,
             budget: None,
@@ -205,6 +210,7 @@ impl ServerArgs {
         // explicit flag still wins.
         self.lobby_code =
             resolve_lobby_code(self.lobby_code.take(), std::env::var(LOBBY_CODE_ENV).ok());
+        self.deployment = std::env::var(DEPLOYMENT_ENV).ok().map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
         Ok(())
     }
 }
@@ -253,6 +259,9 @@ pub(crate) fn resolve_lobby_code(
 
 /// The environment variable a supervisor passes the lobby code in.
 pub(crate) const LOBBY_CODE_ENV: &str = "FLOPTLE_LOBBY_CODE";
+
+/// The environment variable `floptle-fleet` names a server's deployment in.
+pub(crate) const DEPLOYMENT_ENV: &str = "FLOPTLE_DEPLOYMENT_ID";
 
 /// **Where a running server can actually be reached**.
 ///
@@ -342,6 +351,7 @@ pub fn run(args: ServerArgs) -> i32 {
     // Before hosting, not after: the code has to ride out with the host
     // request itself.
     ed.net_reclaim_code = args.lobby_code.clone();
+    ed.net_deployment = args.deployment.clone();
     match (&args.relay, args.port) {
         (Some(addr), _) => ed.net_host_relay(addr),
         (None, Some(port)) => ed.net_host_quic(port),
@@ -896,6 +906,7 @@ mod tests {
             port: None,
             relay: None,
             lobby_code: None,
+            deployment: None,
             tick_hz: 60.0,
             interest: None,
             budget: None,

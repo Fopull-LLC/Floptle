@@ -2885,6 +2885,9 @@ struct Editor {
     /// It survives a re-host, so a relay restart returns the same six
     /// characters rather than stranding everybody holding them.
     pub(crate) net_reclaim_code: Option<String>,
+    /// The managed deployment a fleet server is (`FLOPTLE_DEPLOYMENT_ID`),
+    /// told to the relay with every host request. `None` outside the fleet.
+    pub(crate) net_deployment: Option<String>,
     /// `net.join(addr, {timeout = …})` — how long the next join waits on a
     /// waking server. Applied when the client session is created.
     pub(crate) net_join_timeout: Option<f32>,

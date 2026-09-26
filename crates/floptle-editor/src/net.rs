@@ -1684,11 +1684,19 @@ impl Editor {
             // **Reclaim**: a managed server brings the code it
             // already had. The relay honours it only when its snapshot reserves
             // that code for this key, so asking costs nothing when we are wrong
-            // — a fresh code comes back exactly as before.
-            (Some(c), Some(code)) => {
-                floptle_net::RelayHost::host_keyed_reclaiming(relay_addr, &c.key, None, code)
+            // — a fresh code comes back exactly as before. A fleet server also
+            // says which deployment it is, first start included, so its own
+            // restart is recognised as the same server.
+            (Some(c), code) if code.is_some() || self.net_deployment.is_some() => {
+                floptle_net::RelayHost::host_keyed_as(
+                    relay_addr,
+                    &c.key,
+                    None,
+                    code,
+                    self.net_deployment.as_deref(),
+                )
             }
-            (Some(c), None) => floptle_net::RelayHost::host_keyed(relay_addr, &c.key, None),
+            (Some(c), _) => floptle_net::RelayHost::host_keyed(relay_addr, &c.key, None),
             // A code without a key is not a claim anybody can honour — the key
             // is the proof of ownership — so it is ignored rather than sent.
             (None, _) => floptle_net::RelayHost::host(relay_addr),
