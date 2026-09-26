@@ -1,5 +1,15 @@
 ## Just shipped
 
+**v0.99.0 — "Ship It"** (stable). The beta, promoted. Signing in to Floptle
+stays signed in across restarts, and the Hub and your games share it, while
+`floptle run`, `shot` and `exec` play signed out so a test never writes to your
+account. A new music track no longer freezes the game, and `audio.preload`
+reads sounds ahead of time. A game can show pictures it downloads, a player's
+profile picture included. `cloud.*` reads your game's settings and public
+boards with no player signed in, and `floptle ship` exports a dedicated server
+and uploads it to Floptle Cloud in one step. A restarted server keeps its code
+and its players, and managed relays refuse a certificate that does not verify.
+
 **v0.99.0-rc2 — "Ship It"** (beta). Signing in to Floptle now stays signed in
 across restarts, and the Hub and your games share it. A new music track no
 longer freezes the game: sounds are read in the background, `audio.preload` reads them ahead of
