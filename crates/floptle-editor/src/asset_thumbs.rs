@@ -153,8 +153,11 @@ mod tests {
 
         let ctx = egui::Context::default();
         let mut thumbs = AssetThumbs::default();
+        // A wall-clock budget, not a count of short sleeps: the decode is a
+        // worker's, and a loaded CI runner took longer than 500 × 5 ms.
         let settle = |thumbs: &mut AssetThumbs, p: &Path| {
-            for _ in 0..500 {
+            let started = std::time::Instant::now();
+            while started.elapsed() < std::time::Duration::from_secs(30) {
                 let mut out = None;
                 let _ = ctx.run_ui(egui::RawInput::default(), |_| out = thumbs.get(&ctx, p));
                 if out.is_some() || matches!(thumbs.held.get(p).map(|e| &e.state), Some(State::None)) {
