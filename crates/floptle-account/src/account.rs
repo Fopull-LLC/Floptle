@@ -508,7 +508,7 @@ impl Account {
         id: u64,
         method: &str,
         path: &str,
-        body: Option<String>,
+        body: Option<Vec<u8>>,
         timeout: Duration,
         tx: Sender<(u64, CloudReply)>,
     ) -> Result<(), String> {

@@ -53,7 +53,8 @@ pub(crate) struct AccountState {
     /// one that reads memory instead.
     make: Rc<dyn Fn(&str) -> Account>,
     base: String,
-    pending: HashMap<u64, Function>,
+    /// The callback, and whether it asked for a blob (bytes, not JSON).
+    pending: HashMap<u64, (Function, bool)>,
     tx: Sender<(u64, CloudReply)>,
     rx: Receiver<(u64, CloudReply)>,
     next_id: u64,
@@ -157,7 +158,7 @@ pub(crate) fn drain(
 ) {
     // Collect with the borrow held, call with it released — a callback that
     // makes another request re-borrows the state.
-    let ready: Vec<(CloudReply, Function)> = {
+    let ready: Vec<(CloudReply, (Function, bool))> = {
         let Ok(mut s) = state.try_borrow_mut() else { return };
         let mut out = Vec::new();
         while let Ok((id, reply)) = s.rx.try_recv() {
@@ -167,15 +168,16 @@ pub(crate) fn drain(
         }
         out
     };
-    for (r, cb) in ready {
-        // Always attempt the JSON parse: every Cloud endpoint answers JSON,
-        // including its errors, so a script should never have to ask for it.
+    for (r, (cb, blob)) in ready {
+        // Every Cloud endpoint answers JSON, errors included, so a script never
+        // has to ask for the parse. A blob answers its bytes, which are parsed
+        // only when the server says they are JSON (a refusal).
         match crate::http_api::make_reply_table(
             lua,
             r.status,
-            r.body.as_bytes(),
+            &r.body,
             r.error.as_deref(),
-            true,
+            !blob || r.said_json,
         ) {
             Ok(t) => {
                 if let Err(e) = cb.call::<()>(t) {
@@ -205,7 +207,7 @@ fn send(
     in_fixed: &Rc<std::cell::Cell<bool>>,
     method: &'static str,
     path: String,
-    body: Option<String>,
+    body: Option<Vec<u8>>,
     callback: Function,
 ) -> mlua::Result<()> {
     let mut s = state.borrow_mut();
@@ -237,7 +239,7 @@ fn send(
     s.next_id += 1;
     let tx = s.tx.clone();
     let account = s.account();
-    s.pending.insert(id, callback);
+    s.pending.insert(id, (callback, floptle_account::cloud::is_blob_path(&path)));
     drop(s);
 
     if let Err(e) =
@@ -255,7 +257,7 @@ fn send(
 fn parse_args(
     args: Vec<Value>,
     has_body: bool,
-) -> mlua::Result<(String, Option<String>, Function)> {
+) -> mlua::Result<(String, Option<Vec<u8>>, Function)> {
     let mut it = args.into_iter();
     let path = match it.next() {
         Some(Value::String(s)) => s.to_string_lossy().to_string(),
@@ -277,16 +279,26 @@ fn parse_args(
              \"/games/fofighter/events\""
         )));
     }
+    // A blob is bytes: the string goes out exactly as it is. Every other body
+    // is JSON.
+    let blob = floptle_account::cloud::is_blob_path(&path);
     let body = if has_body {
         match it.next() {
-            Some(Value::String(s)) => Some(s.to_string_lossy().to_string()),
+            Some(Value::String(s)) => Some(s.as_bytes().to_vec()),
+            Some(Value::Table(_)) if blob => {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "{path} is a blob, which is bytes: pass a string (a file's contents, a \
+                     picture's res.body), not a table"
+                )));
+            }
             // Every Cloud body is a JSON object, and `{}` is what an empty Lua
             // table encodes to, so the common case needs no thought.
             Some(Value::Table(t)) => Some(
-                serde_json::to_string(&crate::http_api::lua_to_json(&Value::Table(t))?)
+                serde_json::to_vec(&crate::http_api::lua_to_json(&Value::Table(t))?)
                     .map_err(|e| mlua::Error::RuntimeError(format!("encoding the body: {e}")))?,
             ),
-            Some(Value::Nil) | None => Some("{}".into()),
+            Some(Value::Nil) | None if blob => Some(Vec::new()),
+            Some(Value::Nil) | None => Some(b"{}".to_vec()),
             Some(other) => {
                 return Err(mlua::Error::RuntimeError(format!(
                     "the body is a table or a string, not a {}",
@@ -533,6 +545,42 @@ mod tests {
         state.borrow_mut().cancel_all();
         assert_eq!(now(&lua), "signedIn", "a scene load must not sign the player out");
         assert_eq!(state.borrow().in_flight(), 0, "and no request was made to find that out");
+    }
+
+    /// A blob is bytes: a table sent to one is refused at the call, and a
+    /// blob's reply reaches the script whole rather than failing the JSON
+    /// parse every other endpoint's reply goes through.
+    #[test]
+    fn a_blob_is_sent_as_bytes_and_its_reply_is_not_parsed_as_json() {
+        let (lua, state) = harness();
+        state.borrow_mut().set_playing(true);
+        let e = lua
+            .load("account.put('/games/g/blobs/pics/a', { x = 1 }, function() end)")
+            .exec()
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("is a blob, which is bytes"), "got {e}");
+
+        let logs = Rc::new(RefCell::new(Vec::new()));
+        for (id, blob) in [(1u64, true), (2, false)] {
+            let cb = lua
+                .create_function(move |lua, res: mlua::Table| {
+                    let body: mlua::String = res.get("body")?;
+                    lua.globals().set(format!("ok{id}"), res.get::<bool>("ok")?)?;
+                    lua.globals().set(format!("len{id}"), body.as_bytes().len())?;
+                    Ok(())
+                })
+                .unwrap();
+            let mut s = state.borrow_mut();
+            s.pending.insert(id, (cb, blob));
+            let body: Vec<u8> = (0..=255u8).collect();
+            s.tx.send((id, CloudReply { status: 200, body, error: None, said_json: false })).unwrap();
+        }
+        drain(&lua, &state, &logs);
+        let g = lua.globals();
+        assert!(g.get::<bool>("ok1").unwrap(), "a blob's bytes were parsed as JSON");
+        assert_eq!(g.get::<usize>("len1").unwrap(), 256);
+        assert!(!g.get::<bool>("ok2").unwrap(), "a JSON endpoint's bytes were not parsed");
     }
 
     #[test]

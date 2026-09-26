@@ -23,17 +23,19 @@ pub const API_PREFIX: &str = "/api/floptle/v1";
 
 // Native transport only — the browser build has no ureq call to parse for.
 #[cfg(not(target_arch = "wasm32"))]
-/// Largest reply accepted. The biggest documented Cloud payload is a 256 KB
-/// save, so this is four times the largest legitimate answer — big enough to
-/// never be the reason something fails, small enough that a confused endpoint
-/// cannot hand a game an unbounded allocation.
-const MAX_BODY: usize = 1024 * 1024;
+/// Largest reply accepted. The biggest documented Cloud payload is a 4 MB blob
+/// (the blobs ceiling in the data-primitives contract), so this is twice the
+/// largest legitimate answer: big enough to never be the reason something
+/// fails, small enough that a confused endpoint cannot hand a game an
+/// unbounded allocation.
+const MAX_BODY: usize = 8 * 1024 * 1024;
 
 /// One answer from the Cloud API. Deliberately the same shape the engine's
 /// `http.*` layer produces, so a script sees one `res` table whichever it used.
 pub struct CloudReply {
     pub status: u16,
-    pub body: String,
+    /// The reply's bytes, exactly: JSON for every endpoint but a blob's.
+    pub body: Vec<u8>,
     /// A transport-level failure (DNS, TLS, timeout). A 4xx is **not** an error:
     /// it is the server explaining itself, and the body says how.
     pub error: Option<String>,
@@ -42,7 +44,7 @@ pub struct CloudReply {
 
 impl CloudReply {
     pub fn failed(msg: impl Into<String>) -> Self {
-        Self { status: 0, body: String::new(), error: Some(msg.into()), said_json: false }
+        Self { status: 0, body: Vec::new(), error: Some(msg.into()), said_json: false }
     }
 }
 
@@ -105,6 +107,14 @@ pub fn script_may_call(rel: &str) -> Result<(), String> {
     ))
 }
 
+/// Is this a blob, `/games/{slug}/blobs/…`? A blob is bytes both ways,
+/// `application/octet-stream`; every other endpoint speaks JSON.
+pub fn is_blob_path(path: &str) -> bool {
+    let rel = path.strip_prefix(API_PREFIX).unwrap_or(path);
+    let mut seg = rel.split(['?', '#']).next().unwrap_or("").split('/').filter(|s| !s.is_empty());
+    seg.next() == Some("games") && seg.next().is_some() && seg.next() == Some("blobs")
+}
+
 /// The identity endpoints the contract pins to the domain root, so they don't
 /// get the `/api/floptle/v1` prefix applied to them.
 fn is_root_endpoint(path: &str) -> bool {
@@ -125,7 +135,7 @@ pub fn request(
     access_token: &str,
     method: &str,
     path: &str,
-    body: Option<String>,
+    body: Option<Vec<u8>>,
     timeout: Duration,
 ) -> CloudReply {
     let url = match resolve(base, path) {
@@ -141,12 +151,14 @@ pub fn request(
         _ => agent.get(&url),
     };
     req = req.set("Authorization", &format!("Bearer {access_token}"));
-    req = req.set("Accept", "application/json");
+    let blob = is_blob_path(path);
+    // A blob's refusals are still JSON, so it takes both.
+    req = req.set("Accept", if blob { "application/octet-stream, application/json" } else { "application/json" });
     if body.is_some() {
-        req = req.set("Content-Type", "application/json");
+        req = req.set("Content-Type", if blob { "application/octet-stream" } else { "application/json" });
     }
     let res = match body {
-        Some(b) => req.send_string(&b),
+        Some(b) => req.send_bytes(&b),
         None => req.call(),
     };
     match res {
@@ -158,8 +170,8 @@ pub fn request(
             let said_json =
                 r.header("content-type").is_some_and(|c| c.to_ascii_lowercase().contains("json"));
             use std::io::Read as _;
-            let mut buf = String::new();
-            let read = r.into_reader().take(MAX_BODY as u64 + 1).read_to_string(&mut buf);
+            let mut buf = Vec::new();
+            let read = r.into_reader().take(MAX_BODY as u64 + 1).read_to_end(&mut buf);
             let error = match read {
                 Err(e) => Some(format!("could not read the reply: {e}")),
                 Ok(_) if buf.len() > MAX_BODY => {
@@ -177,6 +189,85 @@ pub fn request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_blob_is_known_by_its_path() {
+        for p in [
+            "/games/freeflier/blobs/ghosts/run1",
+            "/api/floptle/v1/games/freeflier/blobs/ghosts/run1",
+            "/games/freeflier/blobs/ghosts/run1?if_version=0",
+            "/games/freeflier/blobs/ghosts",
+        ] {
+            assert!(is_blob_path(p), "{p}");
+        }
+        for p in ["/games/freeflier/data/saves/slot1", "/games/blobs/x", "/wallet", "/games/f/rank/blobs", "/me/blobs"] {
+            assert!(!is_blob_path(p), "{p}");
+        }
+    }
+
+    /// One request to a loopback "fopull.com", read back raw: what went out,
+    /// and what came back.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn exchange(method: &str, path: &str, body: Option<Vec<u8>>, reply: Vec<u8>) -> (String, Vec<u8>, CloudReply) {
+        use std::io::{Read as _, Write as _};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+        let server = std::thread::spawn(move || {
+            let (mut c, _) = l.accept().unwrap();
+            let mut got = Vec::new();
+            let mut buf = [0u8; 4096];
+            // Headers, then as much body as Content-Length says.
+            loop {
+                let n = c.read(&mut buf).unwrap();
+                got.extend_from_slice(&buf[..n]);
+                if let Some(end) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&got[..end]).to_ascii_lowercase();
+                    let len = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()))
+                        .unwrap_or(0);
+                    while got.len() < end + 4 + len {
+                        let n = c.read(&mut buf).unwrap();
+                        got.extend_from_slice(&buf[..n]);
+                    }
+                    let _ = write!(
+                        c,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        reply.len()
+                    );
+                    let _ = c.write_all(&reply);
+                    return (head, got[end + 4..].to_vec());
+                }
+            }
+        });
+        let r = request(&base, "token", method, path, body, Duration::from_secs(5));
+        let (head, sent) = server.join().unwrap();
+        (head, sent, r)
+    }
+
+    fn every_byte() -> Vec<u8> {
+        (0..=255u8).collect()
+    }
+
+    /// A blob goes out and comes back as the bytes it is, labelled as bytes.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_blob_travels_as_raw_bytes_both_ways() {
+        let (head, sent, r) = exchange("PUT", "/games/g/blobs/pics/a", Some(every_byte()), every_byte());
+        assert!(head.contains("content-type: application/octet-stream"), "{head}");
+        assert_eq!(sent, every_byte(), "the blob changed on the way out");
+        assert_eq!(r.error, None);
+        assert_eq!(r.body, every_byte(), "the blob changed on the way back");
+    }
+
+    /// Everything that is not a blob is still JSON, as it always was.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn every_other_body_is_still_sent_as_json() {
+        let (head, sent, _) = exchange("PUT", "/games/g/data/saves/slot1", Some(b"{\"data\":1}".to_vec()), b"{}".to_vec());
+        assert!(head.contains("content-type: application/json"), "{head}");
+        assert_eq!(sent, b"{\"data\":1}");
+    }
 
     #[test]
     fn a_bare_path_gets_the_game_data_prefix() {
