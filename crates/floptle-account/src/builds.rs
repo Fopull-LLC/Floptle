@@ -1,6 +1,6 @@
 //! Uploading a server bundle to Floptle Cloud as the developer (`floptle ship`).
 //!
-//! Three calls (contracts/cloud-hosting.md §4): reserve a build for the
+//! Three calls (contracts/cloud-hosting.md §4, served under `/games/{slug}/builds`): reserve a build for the
 //! bundle's digest, send the bytes to the signed URL that comes back, and
 //! complete. The bytes go in pieces whenever the site offers them
 //! (`upload.chunk_bytes`), because Cloudflare refuses any single request over
@@ -152,7 +152,10 @@ pub(crate) fn upload_with_token(
 ) -> Result<String, String> {
     check_slug(b.game)?;
     let base = base.trim_end_matches('/');
-    let builds = format!("{base}{}/cloud/games/{}/builds", crate::cloud::API_PREFIX, b.game);
+    // `/games/{slug}/builds` under the API, which is where fopull.com serves
+    // it. (cloud-hosting.md §4 writes these as `/cloud/games/…`; every
+    // spelling under `/cloud` answers the framework's "route not found".)
+    let builds = format!("{base}{}/games/{}/builds", crate::cloud::API_PREFIX, b.game);
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(120)).build();
 
     let reserve = || -> Result<Reservation, String> {
