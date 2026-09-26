@@ -523,6 +523,12 @@ pub(crate) const VERBS: &[Verb] = &[
                 required: false,
                 help: "answer as JSON",
             },
+            Arg {
+                name: "--signed-in",
+                value: Value::Flag,
+                required: false,
+                help: "play as the account you are signed in to (default: signed out, so a test never writes your Cloud data)",
+            },
         ],
         needs_gpu: false,
         writes_project: true,
@@ -624,6 +630,12 @@ pub(crate) const VERBS: &[Verb] = &[
                 value: Value::Flag,
                 required: false,
                 help: "answer as JSON",
+            },
+            Arg {
+                name: "--signed-in",
+                value: Value::Flag,
+                required: false,
+                help: "play as the account you are signed in to (default: signed out, so a test never writes your Cloud data)",
             },
             Arg {
                 name: "--timing",
@@ -768,6 +780,10 @@ pub(crate) const VERBS: &[Verb] = &[
                  unaffected — a mesh collider reads its triangles from the file), and every \
                  key reads as up. \"No errors\" means nothing raised, not that the game is \
                  good.\n\n\
+                 Scripts play **signed out**: `account.state()` answers \"signedOut\" and \
+                 nothing is written to your Floptle account, whatever a script presses. \
+                 `cloud.*` reads still work. --signed-in plays as your account, and then \
+                 its uploads are real. `shot` and `exec` do the same.\n\n\
                  **This verb writes no picture.** For the frame a player would be looking \
                  at, `shot --after 30s` plays the project the same way and then draws it.",
         args: &[
@@ -840,6 +856,12 @@ pub(crate) const VERBS: &[Verb] = &[
                 value: Value::Flag,
                 required: false,
                 help: "answer as JSON",
+            },
+            Arg {
+                name: "--signed-in",
+                value: Value::Flag,
+                required: false,
+                help: "play as the account you are signed in to (default: signed out, so a test never writes your Cloud data)",
             },
             Arg {
                 name: "--alloc",
@@ -1480,11 +1502,13 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             _ => Outcome::Exit(2),
         },
         Some(("exec", a)) => {
+            signed_in_or_not(a);
             let script = path(a, "SCRIPT").expect("required");
             let project = path(a, "PROJECT").unwrap_or_else(|| PathBuf::from("assets"));
             Outcome::Exit(crate::exec::run(&project, &script, a.get_flag("json")))
         }
         Some(("shot", a)) => {
+            signed_in_or_not(a);
             let project = path(a, "PROJECT").unwrap_or_else(|| PathBuf::from("assets"));
             let scene = text(a, "scene");
             let size = match text(a, "size").as_deref().map(crate::shot::parse_size) {
@@ -1598,6 +1622,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             }))
         }
         Some(("run", a)) => {
+            signed_in_or_not(a);
             let project = path(a, "PROJECT").unwrap_or_else(|| PathBuf::from("assets"));
             // **Parsed here, and parsed as what it is.** Not by clap's value
             // parser, so a bad number reads as a usage error with the flag
@@ -1807,6 +1832,19 @@ fn serve_argv(project: &Path, given: impl Fn(&str) -> Option<String>) -> Vec<Str
 }
 
 /// The title an export takes when none was given: the project directory's name.
+/// A headless verb plays signed out unless `--signed-in` asks otherwise: the
+/// stored session is the developer's own, and a test that reaches an upload
+/// path would write to their live Cloud data as them. Said on stderr, so
+/// `--json` on stdout stays one object.
+fn signed_in_or_not(a: &clap::ArgMatches) {
+    if a.get_flag("signed-in") {
+        floptle_say::say_err!("signed in as your Floptle account (--signed-in): uploads are real");
+    } else {
+        floptle_script::keep_account_signed_out();
+        floptle_say::say_err!("signed out (a test never uses your account; --signed-in to)");
+    }
+}
+
 fn default_title(project: &Path) -> String {
     project
         .file_name()

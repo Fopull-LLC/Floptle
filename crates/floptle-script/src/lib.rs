@@ -277,6 +277,7 @@ mod preload_api;
 mod texture_api;
 mod cloud_api;
 pub use texture_api::TextureRequest;
+pub use account_api::keep_account_signed_out;
 pub use preload_api::PreloadKind;
 pub use http_api::{browser_url, open_in_browser};
 pub mod http_policy;

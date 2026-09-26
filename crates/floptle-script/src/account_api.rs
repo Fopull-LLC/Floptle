@@ -43,6 +43,28 @@ const MAX_IN_FLIGHT: usize = 6;
 /// timeouts we know.
 const TIMEOUT: f64 = 20.0;
 
+/// Set by a headless verb (`run`, `shot`, `exec`): every `account.*` bridge
+/// built after it starts signed out and keeps any sign-in in memory. The
+/// stored session is the developer's own, and a test that reaches an upload
+/// path would otherwise write to their live Cloud data as them.
+static SIGNED_OUT_RUN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Make this process's scripts start signed out and never read or write the
+/// OS keyring. Call it before any script host is built.
+pub fn keep_account_signed_out() {
+    SIGNED_OUT_RUN.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The account a new bridge builds: the stored, shared one, or a memory-only
+/// one when [`keep_account_signed_out`] was called.
+fn make_account(base: &str) -> Account {
+    #[cfg(not(target_arch = "wasm32"))]
+    if SIGNED_OUT_RUN.load(std::sync::atomic::Ordering::Relaxed) {
+        return Account::in_memory(base);
+    }
+    Account::new(base)
+}
+
 /// The `account.*` bridge.
 pub(crate) struct AccountState {
     /// Built on first USE, not at startup: constructing one reads the OS keyring
@@ -72,7 +94,7 @@ impl AccountState {
             .unwrap_or_else(|_| floptle_account::DEFAULT_BASE.to_string());
         Self {
             account: None,
-            make: Rc::new(|base: &str| Account::new(base)),
+            make: Rc::new(make_account),
             base,
             pending: HashMap::new(),
             tx,

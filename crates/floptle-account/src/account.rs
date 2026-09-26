@@ -125,6 +125,19 @@ impl Account {
         me
     }
 
+    /// Signed out, and kept that way across runs: a sign-in lives in memory
+    /// only, and the OS keyring is never read or written. For the headless
+    /// verbs, whose scripts would otherwise act as the developer's real
+    /// account and write live Cloud data from a test.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn in_memory(base: impl Into<String>) -> Self {
+        Self::with(
+            base,
+            Arc::new(auth::MemoryStore::default()),
+            Arc::new(|base: &str| Box::new(auth::HttpProvider::new(base)) as Box<dyn Provider + Send>),
+        )
+    }
+
     /// The browser's pair: `localStorage` for the session, and a provider that
     /// refuses every network call with the reason (see
     /// [`auth::OfflineProvider`]).
