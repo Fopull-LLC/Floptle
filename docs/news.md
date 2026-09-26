@@ -1,6 +1,6 @@
 ## Just shipped
 
-**v0.99.0-rc1 — "Ship It"** (beta). Signing in to Floptle now stays signed in
+**v0.99.0-rc2 — "Ship It"** (beta). Signing in to Floptle now stays signed in
 across restarts, and the Hub and your games share it. A new music track no
 longer freezes the game: sounds are read in the background, `audio.preload` reads them ahead of
 time, and decoded audio no longer piles up over a long playlist. A game can
