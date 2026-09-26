@@ -89,11 +89,38 @@ impl Agent {
             match self.ensure(args, host, d) {
                 Ok(st) => statuses.push(st),
                 Err(e) => {
+                    bundle::log_line(&format!("deployment {}: {e}", d.deployment_id));
+                    // **A new build that could not be prepared leaves the old
+                    // one serving.** Nothing above touches the unit until the
+                    // new bundle is verified and unpacked, so a unit still
+                    // active here is the previous build, with players on it.
+                    // Reported `failed`, the control plane takes the deployment
+                    // out of `/desired` and the next cycle stops it: one bad
+                    // minute on the network became an outage. It is running,
+                    // and the reason the upgrade has not happened yet travels
+                    // with it; the fetch is retried next cycle.
+                    let name = unit::unit_name(&d.deployment_id);
+                    if !args.dry_run
+                        && args.units.join(&name).is_file()
+                        && unit_state(host, &name) == State::Running
+                    {
+                        let mut st = self.status_of(args, host, d, State::Running);
+                        // Newest last, like the journal lines it joins.
+                        if st.last_lines.len() >= 200 {
+                            st.last_lines.remove(0);
+                        }
+                        st.last_lines.push(format!(
+                            "build {} is not running yet: {e} — the previous build is still \
+                             serving, and this is retried every cycle",
+                            d.build_id
+                        ));
+                        statuses.push(st);
+                        continue;
+                    }
                     // A deployment that could not be prepared is `failed` with
                     // the reason in its own log lines, rather than absent from
                     // the report — absent tells the portal nothing, and the
                     // developer is looking at a page that says "starting".
-                    bundle::log_line(&format!("deployment {}: {e}", d.deployment_id));
                     self.seen.insert(d.deployment_id.clone(), State::Failed);
                     statuses.push(DeploymentStatus::unmeasured(
                         d.deployment_id.clone(),
@@ -868,6 +895,58 @@ mod tests {
             !h.calls.iter().any(|c| c.contains("enable --now")),
             "it must not have been started at all"
         );
+    }
+
+    /// **A new build that cannot be fetched leaves the old one serving.**
+    ///
+    /// freeflier's 0.99.0 bundle timed out mid-download; the agent reported
+    /// the deployment `failed`, the control plane dropped it from `/desired`,
+    /// and the next cycle stopped the 0.98.0 server that had been up for 17
+    /// hours. The unit is untouched until a new bundle is verified, so an
+    /// active one here is the previous build, with players on it: it is
+    /// reported running, with the reason the upgrade is waiting.
+    #[test]
+    fn a_failed_fetch_of_a_new_build_leaves_the_running_one_running() {
+        let dir = tmp("keepold");
+        let a = args_in(&dir);
+        let name = unit::unit_name("d_1");
+        std::fs::create_dir_all(&a.units).unwrap();
+        std::fs::write(a.units.join(&name), "[Service]\nExecStart=/old\n").unwrap();
+        let mut d = dep("d_1");
+        d.build_id = "b_12".into();
+        d.sha256 = "bb".into();
+        d.build_url = "http://127.0.0.1:1/unreachable".into();
+
+        let mut h = FakeHost { active: "active".into(), ..Default::default() };
+        let mut agent = Agent::default();
+        let r = agent.cycle(&a, &mut h, &Desired { deployments: vec![d] }).unwrap();
+        let s = &r.deployments[0];
+        assert_eq!(s.state, "running", "the previous build is still serving players");
+        assert!(
+            s.last_lines.last().is_some_and(|l| l.contains("b_12") && l.contains("previous build")),
+            "the reason the upgrade waits is the newest line: {:?}",
+            s.last_lines
+        );
+        assert!(
+            !h.calls.iter().any(|c| c.contains("restart") || c.contains("disable") || c.contains("stop")),
+            "nothing touched the running unit: {:?}",
+            h.calls
+        );
+        assert_eq!(
+            std::fs::read_to_string(a.units.join(&name)).unwrap(),
+            "[Service]\nExecStart=/old\n",
+            "and its unit file is the old one"
+        );
+
+        // With no server to fall back on it is still `failed`: a first deploy
+        // that cannot fetch has nothing serving.
+        let dir = tmp("keepold-none");
+        let a = args_in(&dir);
+        let mut d = dep("d_2");
+        d.build_url = "http://127.0.0.1:1/unreachable".into();
+        let mut h = FakeHost { active: "inactive".into(), ..Default::default() };
+        let r = Agent::default().cycle(&a, &mut h, &Desired { deployments: vec![d] }).unwrap();
+        assert_eq!(r.deployments[0].state, "failed");
     }
 
     /// The bundle's manifest wins over a stale row.
