@@ -1,5 +1,10 @@
 ## Just shipped
 
+**v0.99.1 — "Keeps Serving"** (stable). Server builds of any size deploy on
+Floptle Cloud: a download gives up only when nothing arrives, and one that is
+cut off carries on from where it stopped. A new build that cannot be
+downloaded no longer takes the running server, and its players, down with it.
+
 **v0.99.0 — "Ship It"** (stable). The beta, promoted. Signing in to Floptle
 stays signed in across restarts, and the Hub and your games share it, while
 `floptle run`, `shot` and `exec` play signed out so a test never writes to your
