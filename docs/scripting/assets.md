@@ -66,6 +66,35 @@ way back, `null` → `nil`); a file that is missing, not text or not JSON answer
 path is relative to `Assets/` and stays inside it. The same calls work in an
 exported build and in a browser, where a write lands in the page's own storage.
 
+**Pictures from the internet.** A player's profile picture, or an image another
+player shared, becomes a texture while the game runs:
+
+```lua
+assets.textureFromUrl(avatarUrl, { headers = { ["X-Game-Key"] = key } }, function(tex, err)
+  if not tex then return log("no picture: " .. err) end
+  ui.make(row, { "image", w = 32, h = 32, texture = tex, radius = 16 })  -- round
+end)
+```
+
+| Call | What it does |
+|---|---|
+| `assets.textureFromUrl(url [, opts], cb)` | download a picture and make it a texture; `cb(tex, err)`. `opts` as `http.get` |
+| `assets.textureFromBytes(bytes, cb)` | the same, from bytes you already have (a blob's `res.body`) |
+| `assets.release(tex)` | let a texture go; `true` if it was one of these |
+
+`tex` is a name like `"img:3"` and goes anywhere a texture path does: `draw.quad`,
+a UI image's `texture`, a material's `texture`. A UI image with `radius` half its
+size draws round. The callback runs on a later frame, never inside the call.
+
+The bytes are only ever read as pixels. PNG, JPEG and WebP are accepted, told
+apart by the file's own signature rather than its name or the server's say-so;
+anything else, or a picture wider or taller than 4096 pixels, answers
+`nil, why`. A download is exactly an `http.get` (Play only, public addresses,
+the same rate limits), and a URL already loaded this session answers from
+memory without downloading again. Pictures are kept until `assets.release` or
+Stop. A host that draws nothing, such as a dedicated server, answers every one
+with an error and downloads nothing.
+
 ### `node.model` — swap a mesh's model
 
 On a **Mesh** node, `node.model` reads its current model path and **writing it swaps the

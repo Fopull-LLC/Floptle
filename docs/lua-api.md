@@ -44,7 +44,7 @@ each group, and meant to be searched.
 - [animation — node:animator](#animation--nodeanimator) — 16
 - [particles — effects from script](#particles--effects-from-script) — 10
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 30
-- [assets](#assets) — 8
+- [assets](#assets) — 11
 - [debug gizmos](#debug-gizmos) — 5
 - [lua stdlib](#lua-stdlib) — 43
 
@@ -509,7 +509,7 @@ steam.onOverlayChanged(fn) — fn(active) runs once per open (true) and close (f
 
 ### `steam.onPersonaChanged`
 
-steam.onPersonaChanged(fn) — fires once when the local user's persona (name or avatar) changes. Re-read steam.personaName() from inside it; avatars aren't exposed to Lua yet (no engine primitive turns raw bytes into a drawable texture at runtime — see the Steam integration plan).
+steam.onPersonaChanged(fn) — fires once when the local user's persona (name or avatar) changes. Re-read steam.personaName() from inside it; avatars aren't exposed to Lua yet (Steam hands out raw pixels, not an image file, so they need a binding of their own — see the Steam integration plan).
 
 ### `steam.openInviteDialog`
 
@@ -1680,7 +1680,7 @@ http.delete(url [, opts], function(res) end) — as http.get, with DELETE.
 
 ### `http.get`
 
-http.get(url [, opts], function(res) end) — fetch a URL. NON-BLOCKING: the callback runs on a later tick on the MAIN thread, so it is safe to touch nodes from it and a slow server can never stall a frame. opts = { headers = {...}, timeout = 10, json = true }. res = { ok, status, body, json, error, location } — `ok` is a 2xx with no error; a 404 still hands you `body`, because that is where an API explains itself; a 3xx is NOT followed — `location` says where it pointed. Public addresses only: loopback, private-network and link-local addresses are refused (the editor's Play allows loopback and private ones, and says so once). Play only.
+http.get(url [, opts], function(res) end) — fetch a URL. NON-BLOCKING: the callback runs on a later tick on the MAIN thread, so it is safe to touch nodes from it and a slow server can never stall a frame. opts = { headers = {...}, timeout = 10, json = true }. res = { ok, status, body, json, error, location } — `body` is the reply's bytes exactly (a picture arrives whole; a string posted goes out as the bytes it holds); `ok` is a 2xx with no error; a 404 still hands you `body`, because that is where an API explains itself; a 3xx is NOT followed — `location` says where it pointed. Public addresses only: loopback, private-network and link-local addresses are refused (the editor's Play allows loopback and private ones, and says so once). Play only.
 
 ```lua
 -- non-blocking: the callback runs on a later tick, on the main thread
@@ -3698,6 +3698,18 @@ assets.readJson("charts/neon.json") -> value, err — a JSON file decoded straig
 ### `assets.readText`
 
 assets.readText("data/intro.txt") -> text, err — a text file's whole contents (UTF-8), or nil and why: missing, not text, over 64 MB, or a path outside the project. Relative to Assets/ and inside it. Works the same from an exported build and in a browser (it reads the bundle). Refuses: the path leaves the project (absolute, or containing `..`); no such file; the file is bigger than 64 MB; the bytes are not UTF-8 text. Each one names the call and the path.
+
+### `assets.release`
+
+assets.release(tex) -> bool — let go of a texture made by assets.textureFromUrl / textureFromBytes; anything still drawing it draws nothing. true if it was one of those; false for anything else (a project texture is never released).
+
+### `assets.textureFromBytes`
+
+assets.textureFromBytes(bytes, function(tex, err) end) — assets.textureFromUrl for bytes you already have, such as a blob's res.body. Same formats, limits and names; at most 8 MB of bytes.
+
+### `assets.textureFromUrl`
+
+assets.textureFromUrl(url [, opts], function(tex, err) end) — download a picture (a profile picture, a shared image) and make it a texture. `tex` is a name like "img:3" that goes anywhere a texture path does: draw.quad, a UI image's texture, a material's texture; a UI image with radius = half its size draws round. PNG, JPEG and WebP only, told apart by the bytes' own signature, at most 4096 pixels a side; anything else answers nil, why. The download is exactly http.get (same opts, Play only, public addresses, the same rate limits), and a URL already loaded this session answers from memory. The callback runs on a later frame. Kept until assets.release(tex) or Stop. A host that draws nothing (a dedicated server) answers with an error and downloads nothing. Refuses: what http.get refuses, at the call.
 
 ### `assets.writeJson`
 

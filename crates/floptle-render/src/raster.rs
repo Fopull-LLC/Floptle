@@ -2213,13 +2213,33 @@ impl Raster {
     /// of its mesh. Re-registering the same image with new settings returns a fresh id.
     pub fn register_texture(&mut self, gpu: &Gpu, data: &TextureData, sampling: TexSampling) -> TexId {
         let id = TexId(self.textures.len() as u32);
+        let bind = self.tex_bind(gpu, data, sampling);
+        self.textures.push(bind);
+        id
+    }
+
+    fn tex_bind(&mut self, gpu: &Gpu, data: &TextureData, sampling: TexSampling) -> TexBind {
         let texture = upload_texture_mips(gpu, data, matches!(sampling.filter, TexFilter::SmoothMipmaps));
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let linear_view = linear_view_of(&texture);
         let sampler = self.sampler_for(gpu, sampling);
         let bind = self.plain_surface_bind(gpu, "raster-material-tex", &view, &sampler);
-        self.textures.push(TexBind { bind, view, linear_view, sampling, _texture: texture });
-        id
+        TexBind { bind, view, linear_view, sampling, _texture: texture }
+    }
+
+    /// Let go of a texture's pixels: the slot now holds one transparent pixel,
+    /// so anything still drawing with the id draws nothing.
+    ///
+    /// The id is never handed out again. Material bindings are cached by
+    /// texture index, and a reused index would bring a released picture back
+    /// under a new name.
+    pub fn release_texture(&mut self, gpu: &Gpu, id: TexId) {
+        let Some(sampling) = self.textures.get(id.0 as usize).map(|t| t.sampling) else { return };
+        if self.white_tex == Some(id) {
+            return;
+        }
+        let blank = TextureData { pixels: vec![0; 4], width: 1, height: 1 };
+        self.textures[id.0 as usize] = self.tex_bind(gpu, &blank, sampling);
     }
 
     /// Register a live RENDER-TARGET texture as a material texture (A1): a

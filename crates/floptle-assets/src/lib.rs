@@ -25,8 +25,8 @@ pub use gltf_import::{import, ImportError, ImportedModel};
 pub use gltf_mirror::{mirror_apply, MirrorReport};
 pub use gltf_rig::{import_rigged, probe_animations, RiggedModel, RiggedPart};
 pub use texture::{
-    decode_png, encode_png, load_texture, load_texture_sized, load_texture_sized_filtered,
-    save_texture_png,
+    decode_png, decode_untrusted, encode_png, load_texture, load_texture_sized,
+    load_texture_sized_filtered, save_texture_png, UNTRUSTED_MAX_SIDE,
 };
 
 /// A model file as the engine draws it: with its node tree when it has one

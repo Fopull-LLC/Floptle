@@ -171,6 +171,7 @@ mod net;
 #[cfg(feature = "devices")]
 mod voice;
 mod worker;
+mod runtime_textures;
 mod node_bounds;
 mod paint_io;
 mod paint_mesh;
@@ -2057,6 +2058,9 @@ struct Editor {
     /// Models being read and decoded off the main thread, by the same key —
     /// see `request_model`. Installed by `pump_model_imports`.
     model_jobs: HashMap<String, std::sync::mpsc::Receiver<Result<floptle_assets::Model, String>>>,
+    /// Runtime pictures (`assets.textureFromUrl` / `textureFromBytes`) being
+    /// decoded on a worker.
+    texture_jobs: Vec<crate::runtime_textures::TextureJob>,
     /// Models whose import failed this session, so a preload waiting on one
     /// is answered rather than left waiting, and a bad file is tried once.
     model_failed: std::collections::HashSet<String>,

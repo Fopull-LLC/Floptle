@@ -76,7 +76,7 @@ impl Editor {
         let keys: Vec<String> = self
             .texture_registry
             .keys()
-            .filter(|k| !k.starts_with("rt:"))
+            .filter(|k| !crate::runtime_textures::names_no_file(k))
             .filter(|k| {
                 let p = crate::project::resolve_asset_path(&self.project_root, k);
                 p.canonicalize().unwrap_or(p) == target
@@ -99,7 +99,7 @@ impl Editor {
         }
         self.texture_poll_at = Some(now);
         let keys: Vec<String> =
-            self.texture_registry.keys().filter(|k| !k.starts_with("rt:")).cloned().collect();
+            self.texture_registry.keys().filter(|k| !crate::runtime_textures::names_no_file(k)).cloned().collect();
         let mut stale = Vec::new();
         for k in keys {
             let file = crate::project::resolve_asset_path(&self.project_root, &k);

@@ -1128,6 +1128,7 @@ impl Editor {
             self.script_host.set_preload_status(PreloadKind::Model, status);
         }
         self.preload_sounds();
+        self.pump_runtime_textures();
     }
 
     /// `audio.preload`, and the sounds `assets.preload` named: decoded on a

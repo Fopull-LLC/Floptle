@@ -173,7 +173,7 @@ pub(crate) fn drain(
         match crate::http_api::make_reply_table(
             lua,
             r.status,
-            &r.body,
+            r.body.as_bytes(),
             r.error.as_deref(),
             true,
         ) {

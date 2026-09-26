@@ -756,6 +756,8 @@ impl Editor {
             self.paused = false;
             // Everything on the wire belonged to the session that just ended.
             self.script_host.set_playing(false);
+            // So did every picture it downloaded.
+            self.release_runtime_textures();
             self.play_stream_hold = false;
             // Make the revert explicit — "where did my tweaks go" is a classic
             // lost-work surprise: Play-mode changes are a simulation, not edits.
@@ -988,6 +990,9 @@ impl Editor {
             self.script_host.set_http_policy(floptle_script::HttpPolicy {
                 allow_local: self.http_allow_local,
             });
+            // Before the first `start`: a host that draws nothing refuses a
+            // texture without downloading it.
+            self.script_host.set_can_draw(self.gpu.is_some() && self.raster.is_some());
             self.script_host.set_playing(true);
             // Outside a session, only player slot #1 takes input: extra
             // Predicted nodes (multiplayer slots) idle instead of mirroring

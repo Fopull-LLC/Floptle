@@ -2301,6 +2301,12 @@ impl ScriptHost {
             logs.clone(),
             http_in_fixed.clone(),
         );
+        let textures: Rc<RefCell<crate::texture_api::TextureLoads>> = Rc::default();
+        if let Err(e) =
+            crate::texture_api::install(&lua, textures.clone(), http.clone(), logs.clone(), http_in_fixed.clone())
+        {
+            floptle_say::say_err!("[lua] failed to install the runtime texture API: {e}");
+        }
         // `account.*`: the same worker-thread + frame-pass
         // shape, against fopull.com only, with the token kept in Rust.
         let account: Rc<RefCell<crate::account_api::AccountState>> =
@@ -2597,6 +2603,7 @@ impl ScriptHost {
             dropped_lines,
             account,
             preloads,
+            textures,
             http_in_fixed,
             platform,
             steam_state,
@@ -3663,6 +3670,7 @@ impl ScriptHost {
         self.account.borrow_mut().set_playing(playing);
         if !playing {
             self.preloads.borrow_mut().cancel_all();
+            self.textures.borrow_mut().reset();
         }
         // Stop drops every leaderboard callback still waiting, for the same
         // reason as `http.*` — the backend's own request stays in flight and
@@ -3678,6 +3686,7 @@ impl ScriptHost {
         self.http.borrow_mut().cancel_all();
         self.account.borrow_mut().cancel_all();
         self.preloads.borrow_mut().cancel_all();
+        self.textures.borrow_mut().cancel_all();
         self.steam_state.borrow_mut().cancel_all();
     }
 
@@ -4832,6 +4841,30 @@ impl ScriptHost {
         self.preloads.borrow_mut().set_status(kind, status);
     }
 
+    /// Pictures scripts handed over since the last call
+    /// (`assets.textureFromUrl` / `textureFromBytes`), for the driver to decode
+    /// and register under each request's `name`.
+    pub fn take_texture_requests(&self) -> Vec<crate::TextureRequest> {
+        self.textures.borrow_mut().take_requests()
+    }
+
+    /// The driver's answer for a texture request: its name once it is drawable,
+    /// or why it is not. The callback runs in the next frame pass.
+    pub fn answer_texture(&self, id: u64, result: Result<String, String>) {
+        self.textures.borrow_mut().answer(id, result);
+    }
+
+    /// Textures `assets.release` gave back since the last call.
+    pub fn take_texture_releases(&self) -> Vec<String> {
+        self.textures.borrow_mut().take_releases()
+    }
+
+    /// Whether this host can draw. One that cannot answers every texture
+    /// request at once with an error and downloads nothing.
+    pub fn set_can_draw(&self, can: bool) {
+        self.textures.borrow_mut().set_can_draw(can);
+    }
+
     /// Errors raised by the most recent [`run`](Self::run) (one per failing script).
     pub fn errors(&self) -> &[String] {
         &self.errors
@@ -4934,6 +4967,7 @@ impl ScriptHost {
         crate::http_api::drain(&self.lua, &self.http, &self.logs);
         crate::account_api::drain(&self.lua, &self.account, &self.logs);
         crate::preload_api::drain(&self.lua, &self.preloads, &self.logs);
+        crate::texture_api::drain(&self.lua, &self.textures, &self.logs);
         // Pumps the platform backend's callbacks and fires
         // `steam.onPersonaChanged` — a no-op under `NullPlatform`.
         crate::steam_api::drain(&self.lua, &self.platform, &self.steam_state, &self.logs);

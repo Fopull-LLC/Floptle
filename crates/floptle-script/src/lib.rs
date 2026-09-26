@@ -274,6 +274,8 @@ mod env;
 mod host;
 mod http_api;
 mod preload_api;
+mod texture_api;
+pub use texture_api::TextureRequest;
 pub use preload_api::PreloadKind;
 pub use http_api::{browser_url, open_in_browser};
 pub mod http_policy;
@@ -898,6 +900,8 @@ pub struct ScriptHost {
     /// The `http.*` bridge: callbacks waiting on a reply, the caps, and the
     /// session generation that keeps a stale reply out of a fresh Play.
     http: Rc<RefCell<http_api::HttpState>>,
+    /// `assets.textureFromUrl` / `textureFromBytes`: the book of runtime textures.
+    textures: Rc<RefCell<texture_api::TextureLoads>>,
     /// How long one pass into Lua may run — see [`budget`].
     budget: Rc<budget::Budget>,
     /// Scripts that ran past the budget. Not called again until their file

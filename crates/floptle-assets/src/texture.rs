@@ -72,6 +72,45 @@ pub fn decode_png(bytes: &[u8]) -> Option<TextureData> {
     Some(TextureData { pixels: img.into_raw(), width, height })
 }
 
+/// The widest or tallest picture [`decode_untrusted`] accepts, in pixels.
+pub const UNTRUSTED_MAX_SIDE: u32 = 4096;
+
+/// The most memory a decoder may ask for while decoding an untrusted picture:
+/// the RGBA of the largest accepted one, twice over for the decoder's own
+/// buffers.
+const UNTRUSTED_MAX_ALLOC: u64 = UNTRUSTED_MAX_SIDE as u64 * UNTRUSTED_MAX_SIDE as u64 * 4 * 2;
+
+/// Decode bytes that came from somewhere other than the project (a download,
+/// a player's upload) to RGBA8, or say why not.
+///
+/// Pixels only. The format is read from the bytes' own signature, never from a
+/// name or a server's content type, and only PNG, JPEG and WebP are accepted:
+/// three decoders, each of which yields pixels and nothing else. A picture
+/// wider or taller than [`UNTRUSTED_MAX_SIDE`] is refused from its header,
+/// before its pixels are decoded, and the decoder's allocations are capped, so
+/// a small file that claims to be enormous costs nothing.
+pub fn decode_untrusted(bytes: &[u8], max_side: u32) -> Result<TextureData, String> {
+    use image::ImageFormat;
+    let format = image::guess_format(bytes).map_err(|_| "not a PNG, JPEG or WebP image".to_string())?;
+    if !matches!(format, ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP) {
+        return Err(format!("a {} image; only PNG, JPEG and WebP are accepted", format.extensions_str()[0]));
+    }
+    let side = max_side.min(UNTRUSTED_MAX_SIDE);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(side);
+    limits.max_image_height = Some(side);
+    limits.max_alloc = Some(UNTRUSTED_MAX_ALLOC);
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
+    reader.limits(limits);
+    let img = reader.decode().map_err(|e| match e {
+        image::ImageError::Limits(_) => format!("larger than {side}×{side} pixels"),
+        e => format!("could not be decoded: {e}"),
+    })?;
+    let img = img.to_rgba8();
+    let (width, height) = img.dimensions();
+    Ok(TextureData { pixels: img.into_raw(), width, height })
+}
+
 /// Write an RGBA8 [`TextureData`] to `path` as a PNG.
 pub fn save_texture_png(tex: &TextureData, path: &Path) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
@@ -102,5 +141,62 @@ mod tests {
         let t = load_texture(&lying).expect("must decode a PNG-in-.jpg-clothing by content");
         assert_eq!((t.width, t.height), (2, 2));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn encoded(w: u32, h: u32, format: image::ImageFormat) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(w, h, image::Rgba([10, 20, 30, 255]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img).to_rgb8().write_to(&mut out, format).unwrap();
+        out.into_inner()
+    }
+
+    /// A downloaded picture is pixels or nothing: the three accepted formats
+    /// decode, anything else is refused by its signature, and so is a picture
+    /// past the size limit.
+    #[test]
+    fn an_untrusted_picture_is_png_jpeg_or_webp_and_no_bigger_than_the_limit() {
+        use image::ImageFormat::*;
+        for f in [Png, Jpeg, WebP] {
+            let t = decode_untrusted(&encoded(3, 2, f), 64).unwrap_or_else(|e| panic!("{f:?}: {e}"));
+            assert_eq!((t.width, t.height, t.pixels.len()), (3, 2, 24), "{f:?}");
+        }
+        for f in [Bmp, Gif, Tiff] {
+            let why = decode_untrusted(&encoded(3, 2, f), 64).expect_err("accepted a format outside the three");
+            assert!(why.contains("only PNG, JPEG and WebP"), "{f:?}: {why}");
+        }
+        assert!(decode_untrusted(b"<svg xmlns='http://www.w3.org/2000/svg'/>", 64).is_err());
+        assert!(decode_untrusted(b"", 64).is_err());
+
+        let why = decode_untrusted(&encoded(65, 8, Png), 64).expect_err("accepted a picture past the limit");
+        assert!(why.contains("64×64"), "{why}");
+        assert!(decode_untrusted(&encoded(64, 64, Png), 64).is_ok(), "refused a picture exactly at the limit");
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut c = !0u32;
+        for b in bytes {
+            c ^= *b as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+            }
+        }
+        !c
+    }
+
+    /// A PNG header can claim any size in a few dozen bytes. The claim is
+    /// refused from the header, by the size limit, before a decoder sizes a
+    /// buffer to it.
+    #[test]
+    fn a_picture_that_claims_to_be_enormous_is_refused_from_its_header() {
+        let mut png = encoded(1, 1, image::ImageFormat::Png);
+        // IHDR's width and height are bytes 16..24, and its CRC (over the
+        // chunk type and data, 12..29) is 29..33. A valid CRC, so the only
+        // thing wrong with this file is the size it claims.
+        png[16..20].copy_from_slice(&5_000u32.to_be_bytes());
+        png[20..24].copy_from_slice(&5_000u32.to_be_bytes());
+        let crc = crc32(&png[12..29]);
+        png[29..33].copy_from_slice(&crc.to_be_bytes());
+        let why = decode_untrusted(&png, UNTRUSTED_MAX_SIDE).expect_err("decoded a 5000² claim");
+        assert!(why.contains("larger than 4096×4096"), "refused for another reason: {why}");
     }
 }

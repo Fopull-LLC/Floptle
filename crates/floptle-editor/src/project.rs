@@ -92,9 +92,10 @@ impl Editor {
     /// returning its handle. Re-registers if the texture's filter/wrap was changed.
     pub(crate) fn ensure_texture(&mut self, path: &str) -> Option<TexId> {
         // Live render targets ("rt:<name>") are registered by the camera
-        // target pass (update_render_targets), never loaded from disk — the
-        // lookup misses until the named camera has rendered once.
-        if path.starts_with("rt:") {
+        // target pass (update_render_targets), and runtime pictures ("img:<n>")
+        // by `pump_runtime_textures`. Neither is a file: the lookup misses
+        // until the thing has been registered.
+        if crate::runtime_textures::names_no_file(path) {
             return self.texture_registry.get(path).copied();
         }
         let want =

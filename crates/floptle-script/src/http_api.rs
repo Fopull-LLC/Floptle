@@ -13,6 +13,10 @@
 //! -- res  = { ok, status, body, json, error }
 //! ```
 //!
+//! Bodies are bytes both ways. A Lua string holds any bytes, so an image
+//! downloaded with `http.get` arrives whole in `res.body`, and a string posted
+//! goes out exactly as it is.
+//!
 //! Outside the fixed tick. A reply arrives when it arrives, which no replay
 //! can reproduce, so HTTP lives in the frame pass and calling it from
 //! `fixedUpdate` warns once. It belongs in `update`, `start`, a timer, or an
@@ -51,7 +55,7 @@ const MAX_PER_SECOND: usize = 20;
 /// body past it is refused at the call, for the same reason from the other
 /// end — a script assembling a gigabyte to post is a script that has gone
 /// wrong, and the worker thread should not be the place it finds out.
-const MAX_BODY: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_BODY: usize = 8 * 1024 * 1024;
 /// Default per-request timeout, seconds.
 const DEFAULT_TIMEOUT: f64 = 15.0;
 
@@ -63,7 +67,7 @@ pub(crate) struct HttpReply {
     /// The session this belonged to; a reply from an older one is dropped.
     generation: u64,
     status: u16,
-    body: String,
+    body: Vec<u8>,
     /// The transport/HTTP-level failure, if any.
     error: Option<String>,
     /// Whether the server said the body is JSON.
@@ -170,7 +174,7 @@ type ReadOpts = (Vec<(String, String)>, f64, Option<bool>);
 /// A misspelled `header = {...}` is refused rather than sent without the
 /// header, which would make the server answer 401 and the game report "the
 /// API is down".
-fn read_opts(
+pub(crate) fn read_opts(
     call: &str,
     opts: Option<&Table>,
 ) -> mlua::Result<ReadOpts> {
@@ -318,7 +322,7 @@ fn log(logs: &Rc<RefCell<Vec<ScriptLog>>>, level: LogLevel, msg: String) {
 pub(crate) fn make_reply_table(
     lua: &Lua,
     status: u16,
-    body: &str,
+    body: &[u8],
     error: Option<&str>,
     parse_json: bool,
 ) -> mlua::Result<Table> {
@@ -326,12 +330,12 @@ pub(crate) fn make_reply_table(
     let ok = error.is_none() && (200..300).contains(&status);
     t.set("ok", ok)?;
     t.set("status", status)?;
-    t.set("body", body)?;
+    t.set("body", lua.create_string(body)?)?;
     if let Some(e) = error {
         t.set("error", e)?;
     }
     if parse_json {
-        match serde_json::from_str::<serde_json::Value>(body) {
+        match serde_json::from_slice::<serde_json::Value>(body) {
             Ok(v) => t.set("json", json_to_lua(lua, &v)?)?,
             // Malformed JSON sets res.error rather than raising: a server
             // having a bad day must not take a script down with it.
@@ -397,13 +401,13 @@ pub(crate) fn set_now(state: &Rc<RefCell<HttpState>>, now: f64) {
 
 /// Start one request on a worker thread.
 #[allow(clippy::too_many_arguments)]
-fn send(
+pub(crate) fn send(
     state: &Rc<RefCell<HttpState>>,
     logs: &Rc<RefCell<Vec<ScriptLog>>>,
     in_fixed: &Rc<Cell<bool>>,
     method: &'static str,
     url: String,
-    body: Option<String>,
+    body: Option<Vec<u8>>,
     headers: Vec<(String, String)>,
     timeout: f64,
     want_json: bool,
@@ -548,7 +552,7 @@ fn dispatch(
     method: &'static str,
     url: String,
     headers: Vec<(String, String)>,
-    body: Option<String>,
+    body: Option<Vec<u8>>,
     timeout: f64,
     policy: HttpPolicy,
 ) -> mlua::Result<()> {
@@ -580,7 +584,7 @@ fn dispatch(
                 req = req.set(k, v);
             }
             let res = match body {
-                Some(b) => req.send_string(&b),
+                Some(b) => req.send_bytes(&b),
                 None => req.call(),
             };
             let reply = match res {
@@ -595,9 +599,8 @@ fn dispatch(
                         .then(|| r.header("location").map(str::to_string))
                         .flatten();
                     use std::io::Read as _;
-                    let mut buf = String::new();
-                    let read =
-                        r.into_reader().take(MAX_BODY as u64 + 1).read_to_string(&mut buf);
+                    let mut buf = Vec::new();
+                    let read = r.into_reader().take(MAX_BODY as u64 + 1).read_to_end(&mut buf);
                     let error = match read {
                         Err(e) => Some(format!("could not read the reply: {e}")),
                         Ok(_) if buf.len() > MAX_BODY => {
@@ -612,7 +615,7 @@ fn dispatch(
                     id,
                     generation,
                     status: 0,
-                    body: String::new(),
+                    body: Vec::new(),
                     error: Some(e.to_string()),
                     said_json: false,
                     location: None,
@@ -644,7 +647,7 @@ fn dispatch(
     method: &'static str,
     _url: String,
     _headers: Vec<(String, String)>,
-    _body: Option<String>,
+    _body: Option<Vec<u8>>,
     _timeout: f64,
     _policy: HttpPolicy,
 ) -> mlua::Result<()> {
@@ -656,13 +659,16 @@ fn dispatch(
     )))
 }
 
+/// What [`parse_args`] pulls out of a call: (url, body, opts, callback).
+pub(crate) type CallArgs = (String, Option<Vec<u8>>, Option<Table>, Function);
+
 /// Sort `http.get(url [, opts], fn)` / `http.post(url, body [, opts], fn)` out
 /// of the argument list. The optional middle argument is what makes this
 /// fiddly and what makes the call read well, so it is worth doing once.
-fn parse_args(
+pub(crate) fn parse_args(
     args: Vec<Value>,
     has_body: bool,
-) -> mlua::Result<(String, Option<String>, Option<Table>, Function)> {
+) -> mlua::Result<CallArgs> {
     let mut it = args.into_iter();
     let url = match it.next() {
         Some(Value::String(s)) => s.to_string_lossy().to_string(),
@@ -670,13 +676,13 @@ fn parse_args(
     };
     let body = if has_body {
         match it.next() {
-            Some(Value::String(s)) => Some(s.to_string_lossy().to_string()),
-            Some(Value::Nil) | None => Some(String::new()),
+            Some(Value::String(s)) => Some(s.as_bytes().to_vec()),
+            Some(Value::Nil) | None => Some(Vec::new()),
             // A table body is JSON — the overwhelmingly common case, and
             // making people call json.encode by hand for it is friction with
             // no lesson in it.
             Some(Value::Table(t)) => Some(
-                serde_json::to_string(&lua_to_json(&Value::Table(t))?)
+                serde_json::to_vec(&lua_to_json(&Value::Table(t))?)
                     .map_err(|e| mlua::Error::RuntimeError(format!("encoding the body: {e}")))?,
             ),
             Some(other) => {
