@@ -720,6 +720,9 @@ mod live_tests {
         let state = Rc::new(RefCell::new(AccountState::new()));
         let logs: Rc<RefCell<Vec<ScriptLog>>> = Rc::new(RefCell::new(Vec::new()));
         install_account_api(&lua, state.clone(), logs.clone(), Rc::new(std::cell::Cell::new(false)));
+        // `json.*` too, as in a game: the save body lists an inventory.
+        let http = Rc::new(RefCell::new(crate::http_api::HttpState::new()));
+        crate::http_api::install_http_api(&lua, http, logs.clone(), Rc::new(std::cell::Cell::new(false)));
         state.borrow_mut().set_playing(true);
         lua.load(
             r#"
@@ -728,7 +731,7 @@ mod live_tests {
             local function note(name, r) seen[#seen + 1] = { name = name, status = r.status, body = r.body } end
             function go()
               account.post("/games", { slug = slug, name = "Engine Smoke Test" }, function(r)
-                note("register", r)
+                note("register", r)  -- 201 new, or 409 left by an earlier run
                 account.put("/games/" .. slug .. "/saves/autosave",
                   { data = { level = 3, hp = 57, inventory = json.array({ "rope", "lamp" }) } }, function(r)
                   note("save put", r)
@@ -759,12 +762,12 @@ mod live_tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         // Nobody stored (or no keyring reachable): the device flow, which a
-        // person approves in a browser. The code is printed; up to 5 minutes.
+        // person approves in a browser. The code is printed; up to 14 minutes.
         if state_of() != "signedIn" {
             lua.load("account.signIn()").exec().unwrap();
             let mut shown = false;
             let t = std::time::Instant::now();
-            while state_of() != "signedIn" && t.elapsed() < std::time::Duration::from_secs(300) {
+            while state_of() != "signedIn" && t.elapsed() < std::time::Duration::from_secs(840) {
                 if !shown && let Ok(c) = lua.load("local c = account.code(); return c and (c.url .. '  code ' .. c.code)").eval::<String>() {
                     println!("APPROVE: {c}");
                     shown = true;
@@ -781,6 +784,9 @@ mod live_tests {
         while !lua.globals().get::<bool>("done").unwrap_or(false) && t.elapsed() < std::time::Duration::from_secs(60) {
             drain(&lua, &state, &logs);
             std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        for l in logs.borrow().iter() {
+            println!("log: {}", l.msg);
         }
         let seen: Table = lua.globals().get("seen").unwrap();
         for row in seen.sequence_values::<Table>() {

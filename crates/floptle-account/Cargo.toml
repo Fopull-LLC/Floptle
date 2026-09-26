@@ -33,7 +33,21 @@ sha2 = "0.10"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ureq = { workspace = true }
 # The session lives in the OS keyring, never on disk in plaintext.
-keyring = "3"
+#
+# ⚠ **keyring 3 has NO backend unless one is asked for.** With bare
+# `keyring = "3"` every platform gets the crate's in-memory MOCK store: a
+# sign-in lasted exactly as long as the process, the Hub and a game never
+# shared one, and nothing said so. The backends are named here, one per OS.
+# Linux uses the Secret Service through zbus, which is pure Rust: the
+# libdbus-linked option would make every binary (a dedicated server
+# included) refuse to start on a machine without libdbus, before `main`.
+keyring = { version = "3", features = [
+    "apple-native",
+    "windows-native",
+    "async-secret-service",
+    "tokio",
+    "crypto-rust",
+] }
 
 # **The browser's secret store is `localStorage`, and that is a real downgrade
 # worth naming.** A keyring entry is guarded by the OS and readable only by an

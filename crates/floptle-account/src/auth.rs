@@ -964,3 +964,39 @@ mod tests {
         assert_eq!(s.display_name(), "your account");
     }
 }
+
+/// Against this machine's real keyring. `#[ignore]`d: CI has no secret
+/// service. `cargo test -p floptle-account -- --ignored live_ --nocapture`.
+#[cfg(all(test, target_os = "linux"))]
+mod keyring_live_tests {
+    use super::*;
+
+    /// **A session outlives the store that saved it.** With no backend
+    /// compiled in, keyring 3 hands out an in-memory mock, and a sign-in
+    /// lasted as long as the process. `secret-tool` is a separate program
+    /// reading the OS keyring: if it finds the entry, the next process will too.
+    #[test]
+    #[ignore = "writes to this machine's keyring"]
+    fn live_a_saved_session_is_in_the_os_keyring() {
+        let store = || KeyringStore { service: "com.fopull.floptle-test".into(), user: "session".into() };
+        let s = Session {
+            sub: "user_test".into(),
+            name: Some("Keyring Test".into()),
+            email: None,
+            tier: "free".into(),
+            access_token: "at-test".into(),
+            refresh_token: None,
+        };
+        store().save(&s).expect("save");
+        let back = store().load().expect("a fresh store did not find the session");
+        assert_eq!(back.access_token, "at-test");
+        let out = std::process::Command::new("secret-tool")
+            .args(["search", "--all", "service", "com.fopull.floptle-test"])
+            .output()
+            .expect("secret-tool");
+        let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+        store().clear().expect("clear");
+        assert!(text.contains("com.fopull.floptle-test"), "the OS keyring has no such entry: {text}");
+        assert!(store().load().is_none(), "clear left the session behind");
+    }
+}
