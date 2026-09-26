@@ -75,6 +75,8 @@ mod assets;
 // to it is telling the truth.
 #[cfg(feature = "devices")]
 mod audio;
+#[cfg(feature = "devices")]
+mod audio_clips;
 #[cfg(feature = "editor-ui")]
 mod assets_ui;
 #[cfg(feature = "editor-ui")]

@@ -1117,15 +1117,44 @@ impl Editor {
         for (_eid, path) in self.script_host.take_model_changes() {
             self.request_model(&path);
         }
-        for path in self.script_host.take_preload_requests() {
+        use floptle_script::PreloadKind;
+        for path in self.script_host.take_preload_requests(PreloadKind::Model) {
             self.request_model(&path);
         }
         self.pump_model_imports();
-        let waiting = self.script_host.preload_waiting_on();
+        let waiting = self.script_host.preload_waiting_on(PreloadKind::Model);
         if !waiting.is_empty() {
             let status = waiting.into_iter().filter_map(|p| Some((p.clone(), self.model_status(&p)?))).collect();
-            self.script_host.set_preload_status(status);
+            self.script_host.set_preload_status(PreloadKind::Model, status);
         }
+        self.preload_sounds();
+    }
+
+    /// `audio.preload`, and the sounds `assets.preload` named: decoded on a
+    /// worker and kept until their first play.
+    #[cfg(feature = "devices")]
+    fn preload_sounds(&mut self) {
+        use floptle_script::PreloadKind;
+        let root = self.project_root.clone();
+        for key in self.script_host.take_preload_requests(PreloadKind::Sound) {
+            self.audio.preload(&root, &key);
+        }
+        self.audio.pump(&self.world, &root);
+        let waiting = self.script_host.preload_waiting_on(PreloadKind::Sound);
+        if !waiting.is_empty() {
+            let status =
+                waiting.into_iter().filter_map(|p| Some((p.clone(), self.audio.clip_status(&p)?))).collect();
+            self.script_host.set_preload_status(PreloadKind::Sound, status);
+        }
+    }
+
+    /// A build with no audio has nothing to wait for: every sound answers "in".
+    #[cfg(not(feature = "devices"))]
+    fn preload_sounds(&mut self) {
+        use floptle_script::PreloadKind;
+        self.script_host.take_preload_requests(PreloadKind::Sound);
+        let status = self.script_host.preload_waiting_on(PreloadKind::Sound).into_iter().map(|p| (p, true)).collect();
+        self.script_host.set_preload_status(PreloadKind::Sound, status);
     }
 
     /// End-of-input bookkeeping: clear the per-frame key/button edges, re-pin a

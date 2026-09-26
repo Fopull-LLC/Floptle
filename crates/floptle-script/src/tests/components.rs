@@ -676,7 +676,7 @@ fn node_sound_handle_and_component_mirror() {
     let mut info = AudioInfo::default();
     info.sources.insert(
         e.index(),
-        AudioPlayState { playing: true, paused: false, position: 0.5 },
+        AudioPlayState { playing: true, paused: false, position: 0.5, loading: false },
     );
     host.set_audio_info(info);
     host.run(&mut world, &dir, 0.1, 0.1);

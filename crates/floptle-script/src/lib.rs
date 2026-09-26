@@ -274,6 +274,7 @@ mod env;
 mod host;
 mod http_api;
 mod preload_api;
+pub use preload_api::PreloadKind;
 pub use http_api::{browser_url, open_in_browser};
 pub mod http_policy;
 pub use http_policy::HttpPolicy;
@@ -1152,6 +1153,9 @@ pub struct AudioPlayState {
     pub paused: bool,
     /// Playhead in seconds.
     pub position: f64,
+    /// Asked to play, and its clip is still being decoded: `playing` is
+    /// already true and it starts from `position` once the clip is in.
+    pub loading: bool,
 }
 
 /// The audio mirror the editor feeds before each `run`: script one-shots by

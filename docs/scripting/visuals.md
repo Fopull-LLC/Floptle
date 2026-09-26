@@ -197,6 +197,26 @@ local s = audio.play("audio/roar.ogg", bossNode, {
 | `s:setPosition(x, y, z)` | move the emitter (stops following a node) |
 | `s:seek(secs)` | jump the playhead |
 | `s:isPlaying()` / `s:position()` | playback state |
+| `s:isLoading()` | its clip is still being read (see below) |
+
+The first time a clip is played, its file is read and decoded in the
+background, and the sound starts once that is done: a frame later for a
+sound effect, longer for a long music file. Until then it already reads as
+playing, from 0 seconds, and `s:isLoading()` is true; seeking, pausing,
+volume and `stop()` all apply when it starts. When a sound has to start on
+the frame it is asked for, read it in ahead of time on a menu or a loading
+screen:
+
+```lua
+audio.preload({ "audio/hit", "music/level1.ogg" }, function(failed)
+  ready = true            -- `failed` lists any clip that could not load
+end)
+```
+
+A preloaded clip is kept until it has been played. After that, clips nothing
+is playing are kept while they fit in 64 MB, and the least recently played
+goes first. A dropped clip is read again the next time it plays.
+`assets.preload` takes sound files too, beside models.
 
 `endBehavior = "Destroy"` on a node-following sound despawns that node when
 the sound finishes — spawn a node, hang a sound on it, and it cleans itself up.

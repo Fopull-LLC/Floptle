@@ -181,6 +181,16 @@ pub(crate) fn install_audio_api(lua: &Lua, b: &AudioBridges) -> mlua::Result<()>
             })?,
         )?;
     }
+    {
+        let inf = b.info.clone();
+        methods.set(
+            "isLoading",
+            lua.create_function(move |_, this: Table| {
+                let id: u32 = this.raw_get("__sound")?;
+                Ok(inf.borrow().sounds.get(&id).is_some_and(|s| s.loading))
+            })?,
+        )?;
+    }
     let sound_mt = lua.create_table()?;
     sound_mt.set("__index", methods)?;
     lua.set_named_registry_value("floptle_sound_mt", sound_mt)?;
@@ -385,6 +395,16 @@ pub(crate) fn install_audio_api(lua: &Lua, b: &AudioBridges) -> mlua::Result<()>
             lua.create_function(move |_, this: Table| {
                 let e: u32 = this.raw_get("__id")?;
                 Ok(inf.borrow().sources.get(&e).map(|s| s.position).unwrap_or(0.0))
+            })?,
+        )?;
+    }
+    {
+        let inf = b.info.clone();
+        smethods.set(
+            "isLoading",
+            lua.create_function(move |_, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                Ok(inf.borrow().sources.get(&e).is_some_and(|s| s.loading))
             })?,
         )?;
     }

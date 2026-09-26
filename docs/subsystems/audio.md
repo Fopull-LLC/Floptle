@@ -70,6 +70,18 @@ sound ends — self-cleaning one-shots), **Loop**.
   `Editor`: clip cache, play-mode voice per `AudioSource`, script one-shots,
   the runtime mixer overlay (Lua tweaks revert on Stop). Ticked in the play
   loop after physics/attachments so emitters ride final transforms.
+- **Clip cache** (`floptle-editor/src/audio_clips.rs`) — a clip is decoded on
+  a worker the first time anything asks for it (inline in a browser, like
+  every other background job). A sound asked for before its clip is in waits
+  in `AudioSystem` as `Waiting`, reads as playing with `loading` set, and
+  keeps whatever a script does to it (seek, pause, params, stop) until
+  `AudioSystem::pump` starts it. Idle clips — held by no voice — are kept up
+  to `IDLE_BUDGET_BYTES` (64 MiB), least recently played dropped first; a
+  preloaded clip is pinned until its first play. The cache only drops a clip
+  it holds the last `Arc` to, so a free never happens on the audio thread.
+  Eviction runs AFTER the waiters start: a clip that just arrived is idle
+  until then, and one bigger than the whole budget would be dropped on
+  arrival.
 - **🎧 Mixer tab** — strips (Master + tracks): fader, pan, mute/solo, live
   meter, output routing, effect chain; right panel edits the selected effect
   (the EQ gets the draggable response curve). Saves with the project.
@@ -97,5 +109,6 @@ Command-queue + info-mirror, like anim/vfx — scripts never touch the engine:
 
 ## Future
 
-Doppler, SDF-based occlusion, streaming decode for long music, convolution
+Doppler, SDF-based occlusion, streaming decode for long music (a playing
+track is still whole PCM, ~50 MB for 2.5 minutes of stereo), convolution
 reverb, per-effect automation (the particle timeline's lane pattern fits).

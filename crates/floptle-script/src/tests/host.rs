@@ -347,6 +347,73 @@ fn save_api_round_trips_across_hosts() {
     assert_eq!(run("reader"), 42.0 + 7000.0 + 5.0);
 }
 
+/// **A sound is preloaded by the audio side, a model by the model side, and
+/// one callback waits for both.** `assets.preload` tells them apart by
+/// extension; `audio.preload` takes the extensionless names `audio.play` does.
+/// `sound:isLoading()` reads the mirror the driver feeds.
+#[test]
+fn a_preload_sends_sounds_to_the_audio_side_and_waits_for_both_kinds() {
+    use crate::PreloadKind::{Model, Sound};
+    let dir = std::env::temp_dir().join("floptle_script_test_preload_sounds");
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "warm",
+        "calls = 0\n\
+         function start(node)\n\
+           assets.preload({ \"models/arm.glb\", \"audio/music.OGG\" }, function(failed)\n\
+             calls = calls + 1; failedCount = #failed\n\
+           end)\n\
+           audio.preload(\"audio/hit\")\n\
+           music = audio.play(\"audio/music.OGG\")\n\
+         end\n\
+         function update(node, dt)\n\
+           loading = music:isLoading(); playing = music:isPlaying()\n\
+         end\n",
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(
+        e,
+        Scripts(vec![floptle_core::ScriptInst {
+            kind: "warm".into(),
+            enabled: true,
+            params: vec![],
+            refs: Vec::new(),
+            strs: Vec::new(),
+        }]),
+    );
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    assert_eq!(host.take_preload_requests(Model), vec!["models/arm.glb".to_string()]);
+    assert_eq!(
+        host.take_preload_requests(Sound),
+        vec!["audio/music.OGG".to_string(), "audio/hit".to_string()]
+    );
+    let env = |host: &ScriptHost| host.instance_env(e.index(), "warm").unwrap();
+
+    // The model is in; the sound is not. Still waiting.
+    host.set_preload_status(Model, HashMap::from([("models/arm.glb".to_string(), true)]));
+    let mut info = crate::AudioInfo::default();
+    info.sounds.insert(1, crate::AudioPlayState { playing: true, loading: true, ..Default::default() });
+    host.set_audio_info(info);
+    host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+    assert_eq!(env(&host).get::<i64>("calls").unwrap(), 0, "called back before the sound had answered");
+    assert!(env(&host).get::<bool>("loading").unwrap());
+    assert!(env(&host).get::<bool>("playing").unwrap(), "a sound waiting for its clip read as stopped");
+
+    // The sound answers; the model's answer, given a frame ago, still stands.
+    host.set_preload_status(Sound, HashMap::from([("audio/music.OGG".to_string(), true)]));
+    host.set_audio_info(crate::AudioInfo::default());
+    host.run(&mut world, &dir, 1.0 / 60.0, 2.0 / 60.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    assert_eq!(env(&host).get::<i64>("calls").unwrap(), 1);
+    assert_eq!(env(&host).get::<i64>("failedCount").unwrap(), 0);
+    assert!(!env(&host).get::<bool>("loading").unwrap());
+}
+
 /// **`assets.preload` waits for every model it named, and says which failed.**
 /// The driver is asked to start the imports, reports as they land, and the
 /// callback runs in the frame pass once all of them have answered: not when
@@ -381,15 +448,15 @@ fn a_preload_calls_back_once_every_model_is_in() {
     let mut host = ScriptHost::new();
     host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
     assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
-    assert_eq!(host.take_preload_requests(), vec!["models/arm.glb".to_string(), "models/leg.glb".to_string()]);
+    assert_eq!(host.take_preload_requests(crate::PreloadKind::Model), vec!["models/arm.glb".to_string(), "models/leg.glb".to_string()]);
     let calls = |host: &ScriptHost| -> i64 { host.instance_env(e.index(), "warm").unwrap().get("calls").unwrap() };
 
     // One of two in: still waiting.
-    host.set_preload_status(HashMap::from([("models/arm.glb".to_string(), true)]));
+    host.set_preload_status(crate::PreloadKind::Model, HashMap::from([("models/arm.glb".to_string(), true)]));
     host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
     assert_eq!(calls(&host), 0, "called back before every model had answered");
 
-    host.set_preload_status(HashMap::from([
+    host.set_preload_status(crate::PreloadKind::Model, HashMap::from([
         ("models/arm.glb".to_string(), true),
         ("models/leg.glb".to_string(), false),
     ]));
@@ -399,7 +466,7 @@ fn a_preload_calls_back_once_every_model_is_in() {
     assert_eq!(calls(&host), 1);
     assert_eq!(env.get::<i64>("failedCount").unwrap(), 1);
     assert_eq!(env.get::<String>("firstFailed").unwrap(), "models/leg.glb");
-    assert!(host.preload_waiting_on().is_empty(), "an answered preload must stop waiting");
+    assert!(host.preload_waiting_on(crate::PreloadKind::Model).is_empty(), "an answered preload must stop waiting");
     host.run(&mut world, &dir, 1.0 / 60.0, 3.0 / 60.0);
     assert_eq!(calls(&host), 1, "a preload calls back once");
 }

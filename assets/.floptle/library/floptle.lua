@@ -291,6 +291,7 @@
 ---@field setClip fun(self: AudioSourceHandle, clip: string) Swap the clip (project-relative path like "audio/steps.ogg"); restarts playback if playing.
 ---@field seek fun(self: AudioSourceHandle, secs: number) Jump the playhead to a time in seconds.
 ---@field isPlaying fun(self: AudioSourceHandle): boolean Is the source audible right now?
+---@field isLoading fun(self: AudioSourceHandle): boolean True from play until its clip has been read in the background; it reads as playing, from 0 seconds, meanwhile.
 ---@field position fun(self: AudioSourceHandle): number Playhead in seconds.
 
 ---Something that walks the navmesh, returned by `nav.agent(node)`. Order it with
@@ -340,6 +341,7 @@
 ---@field setPosition fun(self: SoundHandle, x: number, y: number, z: number) Move the emitter (stops following a node).
 ---@field seek fun(self: SoundHandle, secs: number) Jump the playhead to a time in seconds.
 ---@field isPlaying fun(self: SoundHandle): boolean Still audible (false once finished)?
+---@field isLoading fun(self: SoundHandle): boolean True from audio.play until its clip has been read in the background; it reads as playing meanwhile, and what you do to it (seek, pause, volume, stop) applies when it starts.
 ---@field position fun(self: SoundHandle): number Playhead in seconds.
 
 ---A mixer track handle from `audio.track(name)` — live control of the

@@ -43,7 +43,7 @@ each group, and meant to be searched.
 - [components — getcomponent](#components--getcomponent) — 101
 - [animation — node:animator](#animation--nodeanimator) — 16
 - [particles — effects from script](#particles--effects-from-script) — 10
-- [audio — sounds & the mixer](#audio--sounds--the-mixer) — 27
+- [audio — sounds & the mixer](#audio--sounds--the-mixer) — 30
 - [assets](#assets) — 8
 - [debug gizmos](#debug-gizmos) — 5
 - [lua stdlib](#lua-stdlib) — 43
@@ -1009,7 +1009,7 @@ Not a Material. A Material says what a thing is MADE OF and supersedes the mater
 
 ### `node:sound`
 
-node:sound() — the handle for this node's Audio Source component. :play() (restarts), :stop(), :pause(), :resume(), :setClip("audio/x.ogg"), :seek(secs), :isPlaying(), :position(). Tunables (volume/pitch/distances/…) live on node:getcomponent("AudioSource").
+node:sound() — the handle for this node's Audio Source component. :play() (restarts), :stop(), :pause(), :resume(), :setClip("audio/x.ogg"), :seek(secs), :isPlaying(), :isLoading(), :position(). Tunables (volume/pitch/distances/…) live on node:getcomponent("AudioSource").
 
 ### `node:uiRect`
 
@@ -3555,11 +3555,15 @@ Sounds and the mixer: audio.play for one-shots, audio.track for a mixer bus, nod
 
 ### `audio.play`
 
-audio.play(clip [, node | x, y, z] [, opts]) — play a clip with no setup: audio.play("audio/ding.ogg") is flat 2D; pass x,y,z for a world point; pass a node to follow it. Local to this machine: in a session, play it from state that replicates, or a sound the server's code plays is heard by nobody. opts: {volume, pitch, pan, mode="Spatial|Distance|Flat", falloff="Inverse|Linear|Exponential", minDistance, maxDistance, track, endBehavior="Stop|Destroy|Loop", loop=true}. Returns a sound handle: :stop/:pause/:resume/:setVolume/:setPitch/:setPan/:setTrack/:setPosition/:seek/:isPlaying/:position. e.g. audio.play("audio/hit.ogg", h.x, h.y, h.z, { maxDistance = 35, track = "SFX" })
+audio.play(clip [, node | x, y, z] [, opts]) — play a clip with no setup: audio.play("audio/ding.ogg") is flat 2D; pass x,y,z for a world point; pass a node to follow it. Local to this machine: in a session, play it from state that replicates, or a sound the server's code plays is heard by nobody. opts: {volume, pitch, pan, mode="Spatial|Distance|Flat", falloff="Inverse|Linear|Exponential", minDistance, maxDistance, track, endBehavior="Stop|Destroy|Loop", loop=true}. Returns a sound handle: :stop/:pause/:resume/:setVolume/:setPitch/:setPan/:setTrack/:setPosition/:seek/:isPlaying/:isLoading/:position. A clip's first play reads the file in the background, so the sound starts a frame or more after the call (a long music file takes longest); audio.preload removes the wait. e.g. audio.play("audio/hit.ogg", h.x, h.y, h.z, { maxDistance = 35, track = "SFX" })
 
 ```lua
 audio.play("audio/footstep", node, { track = "SFX", volume = 0.6, minDistance = 4 })
 ```
+
+### `audio.preload`
+
+audio.preload({ "audio/hit", "music/level1.ogg" } [, function(failed) end]) — read sounds in the background ahead of their first play, so it starts on the frame audio.play is called, and call back once every one is in. Names are spelled as audio.play takes them (the extension is optional); `failed` lists any that could not load. A preloaded clip is kept until it has been played; after that, a clip nothing is playing is kept only while the idle ones fit in 64 MB, least recently played dropped first, and read again if it is played later. On a host with no audio output it calls back straight away.
 
 ### `audio.stopAll`
 
@@ -3568,6 +3572,10 @@ audio.stopAll() — stop every playing sound (sources and one-shots), with a cli
 ### `audio.track`
 
 audio.track(name) — a live mixer-track handle ("Master" or a track from the Mixer tab): :setVolume(db), :setPan(-1..1), :setMuted(bool), :setSoloed(bool). Changes affect the running session only and revert on Stop. e.g. audio.track("Music"):setVolume(-12) to duck music.
+
+### `sound:isLoading`
+
+True from audio.play until its clip has been read in the background; it reads as playing meanwhile, and what you do to it (seek, pause, volume, stop) applies when it starts.
 
 ### `sound:isPlaying`
 
@@ -3612,6 +3620,10 @@ Linear volume (1 = as authored).
 ### `sound:stop`
 
 Fade the sound out and end it.
+
+### `source:isLoading`
+
+True from play until its clip has been read in the background; it reads as playing, from 0 seconds, meanwhile.
 
 ### `source:isPlaying`
 
@@ -3677,7 +3689,7 @@ assets.getFile("models/armor.glb") — the asset's path (or nil), to hand to nod
 
 ### `assets.preload`
 
-assets.preload({ "models/arm.glb", "models/leg.glb" } [, function(failed) end]) — load models in the background ahead of the moment a node needs them, and call back once every one is in. `failed` lists any path that could not load (empty when all did); a single path works too. Warm a ragdoll's parts on a menu or a loading screen, so the death that spawns them draws them on its first frame. Without a GPU (floptle run, a dedicated server) there is nothing to load and it calls back straight away. Stop and scene.load drop a waiting callback; the models stay loaded.
+assets.preload({ "models/arm.glb", "models/leg.glb" } [, function(failed) end]) — load models in the background ahead of the moment a node needs them, and call back once every one is in. A sound file (.wav/.ogg/.mp3/.flac) in the list is preloaded as audio.preload would. `failed` lists any path that could not load (empty when all did); a single path works too. Warm a ragdoll's parts on a menu or a loading screen, so the death that spawns them draws them on its first frame. Without a GPU (floptle run, a dedicated server) there is nothing to load and it calls back straight away. Stop and scene.load drop a waiting callback; the models stay loaded.
 
 ### `assets.readJson`
 

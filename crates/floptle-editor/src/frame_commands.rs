@@ -817,6 +817,10 @@ impl Editor {
             let root = self.project_root.clone();
             self.audio.preview(&root, &rel);
         }
+        // An audition whose file is still decoding starts here once it is in.
+        // In Play the audio step pumps as well; twice is harmless.
+        let root = self.project_root.clone();
+        self.audio.pump(&self.world, &root);
         if cmd.mixer_changed {
             // Live-apply: the running play session tracks the edit too (its
             // runtime overlay restarts from the edited graph).

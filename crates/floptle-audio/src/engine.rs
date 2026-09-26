@@ -69,7 +69,8 @@ type OutStream = crate::web_out::WebStream;
 /// Control-side handle to the running audio stack. Owns the output stream —
 /// drop it and the sound stops.
 pub struct AudioEngine {
-    _stream: OutStream,
+    /// `None` for a [`silent`](Self::silent) engine.
+    _stream: Option<OutStream>,
     tx: Sender<Cmd>,
     status: Arc<Status>,
     next_id: VoiceId,
@@ -156,7 +157,7 @@ impl AudioEngine {
         stream.play().map_err(|e| format!("failed to start audio stream: {e}"))?;
 
         log::info!("audio: {sample_rate} Hz, {channels} ch, block {BLOCK}");
-        Ok(Self { _stream: stream, tx, status, next_id: 1, sample_rate })
+        Ok(Self { _stream: Some(stream), tx, status, next_id: 1, sample_rate })
     }
 
     /// Open the page's audio output. Stereo, at whatever rate the browser's
@@ -177,7 +178,16 @@ impl AudioEngine {
         let sample_rate = stream.sample_rate();
 
         log::info!("audio: {sample_rate} Hz, {channels} ch, block {BLOCK}");
-        Ok(Self { _stream: stream, tx, status, next_id: 1, sample_rate })
+        Ok(Self { _stream: Some(stream), tx, status, next_id: 1, sample_rate })
+    }
+
+    /// An engine with no output: every call is accepted and every voice
+    /// reads as playing from the moment it starts, and nothing is ever mixed.
+    /// What a test drives when the question is which voices a host started,
+    /// not what they sound like.
+    pub fn silent() -> Self {
+        let (tx, _rx) = std::sync::mpsc::channel::<Cmd>();
+        Self { _stream: None, tx, status: Arc::new(Status::default()), next_id: 1, sample_rate: 48_000 }
     }
 
     fn send(&self, cmd: Cmd) {

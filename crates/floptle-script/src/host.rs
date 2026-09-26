@@ -2283,6 +2283,9 @@ impl ScriptHost {
         if let Err(e) = crate::audio_api::install_audio_api(&lua, &audio_bridges) {
             floptle_say::say_err!("[lua] failed to install the audio API: {e}");
         }
+        if let Err(e) = crate::preload_api::install_audio(&lua, preloads.clone()) {
+            floptle_say::say_err!("[lua] failed to install audio.preload: {e}");
+        }
         // The `net.*` API (docs/multiplayer.md §8): command queue out,
         // session state in, `net.on` handler registry, `net.rewind` (§7).
         let synced_stores: Rc<RefCell<HashMap<(u32, String), Table>>> =
@@ -4811,22 +4814,22 @@ impl ScriptHost {
         std::mem::take(&mut *self.model_changes.borrow_mut())
     }
 
-    /// Models `assets.preload` asked for since the last call, for the driver
-    /// to start importing.
-    pub fn take_preload_requests(&self) -> Vec<String> {
-        self.preloads.borrow_mut().take_requests()
+    /// Paths of one kind `assets.preload` / `audio.preload` asked for since
+    /// the last call, for the driver to start loading.
+    pub fn take_preload_requests(&self, kind: crate::PreloadKind) -> Vec<String> {
+        self.preloads.borrow_mut().take_requests(kind)
     }
 
-    /// Every model a preload callback is still waiting on.
-    pub fn preload_waiting_on(&self) -> Vec<String> {
-        self.preloads.borrow().waiting_on()
+    /// Every path of one kind a preload callback is still waiting on.
+    pub fn preload_waiting_on(&self, kind: crate::PreloadKind) -> Vec<String> {
+        self.preloads.borrow().waiting_on(kind)
     }
 
-    /// The driver's answer for those models: `true` loaded, `false` failed; a
-    /// path left out is still on its way. The next frame pass runs every
-    /// callback whose models have all answered.
-    pub fn set_preload_status(&self, status: HashMap<String, bool>) {
-        self.preloads.borrow_mut().set_status(status);
+    /// The driver's answer for that kind's paths: `true` loaded, `false`
+    /// failed; a path left out is still on its way. The next frame pass runs
+    /// every callback whose paths have all answered.
+    pub fn set_preload_status(&self, kind: crate::PreloadKind, status: HashMap<String, bool>) {
+        self.preloads.borrow_mut().set_status(kind, status);
     }
 
     /// Errors raised by the most recent [`run`](Self::run) (one per failing script).
