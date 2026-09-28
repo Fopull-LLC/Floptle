@@ -1,5 +1,13 @@
 ## Just shipped
 
+**v0.101.0 — "Always Answers"** (stable). A dedicated server that had been up a
+while could stop letting anyone in while looking healthy; now it keeps
+answering, and if its connection ever fails it reconnects and keeps its lobby.
+Re-export and redeploy Cloud server builds to pick it up. Fitted UI text is sized
+the way it's drawn, `floptle shot` shows shader-drawn materials and UI,
+`floptle check` compiles every shader and reads every model, and surface shaders
+can light a normal of their own.
+
 **v0.100.0 — "Keeps Up"** (stable). The beta, promoted. Big levels get
 cheaper: changing a value every frame no longer costs the whole scene, characters
 on levels built from models cost a fraction of what they did, far-away enemies
