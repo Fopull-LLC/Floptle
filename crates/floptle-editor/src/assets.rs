@@ -238,6 +238,20 @@ pub(crate) fn collect_texture_paths(entries: &[AssetEntry], out: &mut Vec<String
 /// resolved on the machine that authored it and nowhere else. Normalising here
 /// rather than at each of the dozen call sites is what makes that one rule
 /// instead of twelve — `asset_key` has always done the same.
+/// Where `p` really is, links resolved — or `None` in a browser, whose bundle
+/// has no real paths to resolve.
+pub(crate) fn canonical(p: &Path) -> Option<std::path::PathBuf> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        p.canonicalize().ok()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = p;
+        None
+    }
+}
+
 pub(crate) fn asset_rel_path(path: &str, project_root: &Path) -> String {
     let slashed = path.replace('\\', "/");
     if let Ok(p) = Path::new(&slashed).strip_prefix(project_root) {
@@ -247,9 +261,8 @@ pub(crate) fn asset_rel_path(path: &str, project_root: &Path) -> String {
     // given relative — is still inside the project. Only an absolute path gets
     // this far, so the extra look costs nothing on the common case.
     if Path::new(&slashed).is_absolute() {
-        let canon = |p: &Path| p.canonicalize().ok();
-        let roots = [std::path::absolute(project_root).ok(), canon(project_root)];
-        let cands = [Some(Path::new(&slashed).to_path_buf()), canon(Path::new(&slashed))];
+        let roots = [std::path::absolute(project_root).ok(), canonical(project_root)];
+        let cands = [Some(Path::new(&slashed).to_path_buf()), canonical(Path::new(&slashed))];
         for root in roots.iter().flatten() {
             for c in cands.iter().flatten() {
                 if let Ok(p) = c.strip_prefix(root) {

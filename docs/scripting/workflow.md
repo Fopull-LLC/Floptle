@@ -254,7 +254,7 @@ Past the distance where anyone would notice, stop both:
 
 ```lua
 function fixedUpdate(node, dt)
-  if (playerPos() - node.worldPos):length() > 80 then
+  if (find("Player").worldPos - node.worldPos):length() > 80 then
     node.vel = vec3()
     node.asleep = true               -- the solver stops simulating the body
     script.sleep{ wakeWithin = 70 }  -- the engine stops calling this script

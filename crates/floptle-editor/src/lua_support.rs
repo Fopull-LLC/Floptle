@@ -59,6 +59,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field pitch number Pitch about X, in radians.
 ---@field roll number Roll about Z, in radians.
 ---@field grounded boolean Physics (rigidbody nodes): resting on a surface this frame.
+---@field asleep boolean Physics: the solver is skipping this body. Set true to put it to sleep now, false to wake it.
 ---@field vx number Physics: body velocity X (read/write — set it to drive the body).
 ---@field vy number Physics: body velocity Y (read/write).
 ---@field vz number Physics: body velocity Z (read/write).
@@ -107,6 +108,9 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field children fun(self: Node): Node[] An array of this node's child handles.
 ---@field getchild fun(self: Node, name: string): Node|nil The first CHILD with that name, or nil.
 ---@field getChild fun(self: Node, name: string): Node|nil The first CHILD with that name, or nil.
+---@field bonePos fun(self: Node, bone: string): Vec3|nil An animated model's bone, in world space this frame; nil with no posed skeleton.
+---@field boneRot fun(self: Node, bone: string): number|nil, number|nil, number|nil The bone's world yaw, pitch, roll this frame.
+---@field bones fun(self: Node): string[]|nil The animated model's skeleton node names.
 ---@field child fun(self: Node, name: string): Node|nil Short alias of getchild.
 ---@field find fun(self: Node, name: string): Node|nil The first DESCENDANT at any depth with that name, or nil. getchild only looks one level down.
 ---@field getscript fun(self: Node, name: string): table|nil A script handle for that script on this node, or nil: read/write its state, call its methods, reach .node / .params.

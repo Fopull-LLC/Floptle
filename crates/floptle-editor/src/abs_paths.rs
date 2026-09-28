@@ -44,7 +44,7 @@ fn looks_absolute(s: &str) -> bool {
     let has_ext = file.rsplit_once('.').is_some_and(|(stem, ext)| {
         !stem.is_empty() && !ext.is_empty() && ext.len() <= 8 && ext.chars().all(|c| c.is_ascii_alphanumeric())
     });
-    has_dir && (has_ext || Path::new(s).exists())
+    has_dir && (has_ext || floptle_vfs::exists(s))
 }
 
 /// The ways `root` can be spelled at the front of a path: as given, made
@@ -54,7 +54,7 @@ fn root_spellings(root: &Path) -> Vec<PathBuf> {
     if let Ok(a) = std::path::absolute(root) {
         out.push(a);
     }
-    if let Ok(c) = root.canonicalize() {
+    if let Some(c) = crate::assets::canonical(root) {
         out.push(c);
     }
     out.dedup();
@@ -64,7 +64,7 @@ fn root_spellings(root: &Path) -> Vec<PathBuf> {
 /// `value`'s path relative to the project, if it is inside it.
 fn relative_to(value: &str, roots: &[PathBuf]) -> Option<String> {
     let p = Path::new(value);
-    let canon = p.canonicalize().ok();
+    let canon = crate::assets::canonical(p);
     for r in roots {
         for cand in std::iter::once(p).chain(canon.as_deref()) {
             if let Ok(rel) = cand.strip_prefix(r) {
