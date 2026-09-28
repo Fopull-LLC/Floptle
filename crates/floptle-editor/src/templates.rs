@@ -350,6 +350,7 @@ mod tests {
                         pos: [0.0, 0.0, 0.0],
                         ground_normal: Some([0.0, 1.0, 0.0]),
                         wall_normal: None,
+                        asleep: false,
                     },
                 );
                 host.set_bodies(bodies);

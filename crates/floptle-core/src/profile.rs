@@ -214,6 +214,29 @@ pub struct FrameProfile {
     /// Frames folded since collection was turned on, so a reader can tell
     /// "nothing has happened yet" from "it costs nothing".
     frames: u64,
+    /// The script mirror's work this frame, and last frame's once folded.
+    mirror_frame: MirrorWork,
+    mirror_last: MirrorWork,
+    /// Why the mirror last rebuilt from scratch. Kept whether or not the
+    /// profiler is on: it is written only when a rebuild happens, and the
+    /// question is usually asked after the fact.
+    mirror_cause: Option<String>,
+    /// The fixed tick costs more than the time it simulates. Written by the
+    /// driver whether or not collection is on: it is a state, not a measurement.
+    overloaded: bool,
+}
+
+/// What the script mirror did over one frame.
+///
+/// A full rebuild is O(scene); a refresh is O(entities that changed). A game
+/// that sees `rebuilds` climbing every frame has something structural changing
+/// every frame, and [`FrameProfile::mirror_cause`] names it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MirrorWork {
+    /// Times the whole mirror was rebuilt.
+    pub rebuilds: u32,
+    /// Entities re-read individually because one of their components changed.
+    pub refreshed: u32,
 }
 
 impl FrameProfile {
@@ -232,6 +255,8 @@ impl FrameProfile {
         self.script_frame.clear();
         self.counts = Counts::default();
         self.frames = 0;
+        self.mirror_frame = MirrorWork::default();
+        self.mirror_last = MirrorWork::default();
     }
 
     /// Is anything being collected?
@@ -269,6 +294,69 @@ impl FrameProfile {
         *self.script_frame.entry(kind.to_owned()).or_default() += ms;
     }
 
+    /// Note one pass of the script mirror: a full rebuild (with why), or a
+    /// refresh of `refreshed` entities.
+    pub fn record_mirror(&mut self, rebuilt: Option<String>, refreshed: u32) {
+        if let Some(cause) = rebuilt {
+            self.mirror_frame.rebuilds += 1;
+            self.mirror_cause = Some(cause);
+        }
+        self.mirror_frame.refreshed += refreshed;
+    }
+
+    /// Last complete frame's mirror work. Zero while collection is off.
+    pub fn mirror_work(&self) -> MirrorWork {
+        self.mirror_last
+    }
+
+    /// Why the mirror last rebuilt from scratch, if it ever has.
+    pub fn mirror_cause(&self) -> Option<&str> {
+        self.mirror_cause.as_deref()
+    }
+
+    /// Each script kind's total for the frame in progress, before `end_frame`
+    /// folds it. For a caller keeping its own distribution across a run.
+    pub fn frame_scripts(&self) -> impl Iterator<Item = (&str, f32)> {
+        self.script_frame.iter().map(|(k, v)| (k.as_str(), *v))
+    }
+
+    /// Say whether the game has fallen behind real time.
+    pub fn set_overloaded(&mut self, on: bool) {
+        self.overloaded = on;
+    }
+
+    /// Has the game fallen behind real time? See `floptle_core::TickLoad`.
+    pub fn overloaded(&self) -> bool {
+        self.overloaded
+    }
+
+    /// The costliest buckets, largest first, with the costliest script named
+    /// beside `scripts`: `"physics 17.2 ms · scripts 9.0 ms (enemy 6.7) · mirror
+    /// 5.4 ms"`. For a message a person reads, so it only lists what cost
+    /// something. Empty while collection is off.
+    pub fn top_costs(&self, n: usize) -> String {
+        if !self.on {
+            return String::new();
+        }
+        let mut rows: Vec<(Bucket, f32)> = Bucket::ALL
+            .iter()
+            .filter_map(|b| self.bucket(*b).map(|c| (*b, c.ms)))
+            .filter(|(_, ms)| *ms >= 0.05)
+            .collect();
+        rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+        rows.truncate(n);
+        let top_script = self.scripts().into_iter().next();
+        rows.iter()
+            .map(|(b, ms)| match (&top_script, b) {
+                (Some((name, c)), Bucket::Scripts) if c.ms >= 0.05 => {
+                    format!("{} {ms:.1} ms ({name} {:.1})", b.name(), c.ms)
+                }
+                _ => format!("{} {ms:.1} ms", b.name()),
+            })
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+
     /// Publish this frame's counts.
     pub fn set_counts(&mut self, counts: Counts) {
         if self.on {
@@ -280,8 +368,10 @@ impl FrameProfile {
     /// frame, after everything has reported.
     pub fn end_frame(&mut self) {
         if !self.on {
+            self.mirror_frame = MirrorWork::default();
             return;
         }
+        self.mirror_last = std::mem::take(&mut self.mirror_frame);
         // Every bucket is pushed, including the ones that reported nothing —
         // otherwise a subsystem that went idle keeps its old mean forever and
         // reads as still costing what it used to.

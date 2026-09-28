@@ -54,6 +54,7 @@ pub const TABLES: &[OptTable] = &[
     OptTable { call: "http.get", keys: crate::http_api::OPT_KEYS },
     OptTable { call: "raycast", keys: crate::shape_api::QUERY_KEYS },
     OptTable { call: "nav.agent", keys: crate::nav_api::AGENT_KEYS },
+    OptTable { call: "script.sleep", keys: crate::sleep_api::SLEEP_KEYS },
     OptTable { call: "agent:set", keys: crate::nav_api::AGENT_KEYS },
     OptTable {
         call: "steam.findOrCreateLeaderboard",
@@ -334,6 +335,7 @@ mod tests {
             "http.get" => "http.get('/x', { nonesuch = 1 }, function() end)",
             "raycast" => "raycast(0,0,0, 0,-1,0, 10, { nonesuch = 1 })",
             "nav.agent" => "nav.agent(node, { nonesuch = 1 })",
+            "script.sleep" => "script.sleep{ nonesuch = 1 }",
             "agent:set" => "local a = nav.agent(node) a:set{ nonesuch = 1 }",
             "steam.findOrCreateLeaderboard" => {
                 "steam.findOrCreateLeaderboard('HI', { nonesuch = 1 }, function() end)"

@@ -325,6 +325,7 @@ mod preprocess;
 mod save_api;
 mod scatter_api;
 mod sched_api;
+mod sleep_api;
 mod shape_api;
 mod assembly_api;
 mod space_api;
@@ -628,6 +629,8 @@ pub struct ScriptHost {
     /// Capsule heights scripts wrote this frame (entity index → height), drained and
     /// applied to the sim — for crouching.
     body_height_changes: Rc<RefCell<HashMap<u32, f32>>>,
+    /// `node.asleep = …` writes this frame, drained and applied to the sim.
+    body_sleep_changes: Rc<RefCell<HashMap<u32, bool>>>,
     /// Cross-node position writes on body entities → the driver teleports the
     /// body (see `Shared::body_pos_changes`).
     body_pos_changes: Rc<RefCell<HashMap<u32, [f64; 3]>>>,
@@ -767,6 +770,14 @@ pub struct ScriptHost {
     /// only by the global `run_fixed` — never by `run_fixed_for`/replays, or
     /// prediction would double-fire every pending timer.
     sched: Rc<RefCell<sched_api::SchedState>>,
+    /// Instances put to sleep or slowed down by `script.*` — see `sleep_api`.
+    sleepers: Rc<RefCell<sleep_api::Sleepers>>,
+    /// Each script kind's source generation as of this frame (`None`: no such
+    /// file), so the file is looked at once per kind rather than once per
+    /// instance. Cleared at the start of every frame pass.
+    kinds_this_frame: HashMap<String, Option<u64>>,
+    /// The frame pass's `time`, for `script.sleep{seconds=}`.
+    script_clock: Rc<std::cell::Cell<f64>>,
     /// This tick's celestial snapshot (`space.*` reads it; the editor feeds it).
     space_info: Rc<RefCell<space_api::SpaceInfo>>,
     /// The scene's baked navmesh, if it has one — what `nav.*` answers from.
@@ -1310,9 +1321,16 @@ pub(crate) struct SceneMirror {
     /// Entities whose transform a handle wrote this frame (so we only flush those back —
     /// the current node still flushes via the value-table path).
     dirty: std::collections::HashSet<u32>,
-    /// `world.revision() - world.revision_of::<Transform>()` as of the last
-    /// full sync — see `ScriptHost::sync_scene`. `0` means never synced.
-    synced_non_transform_rev: u64,
+    /// Where the world's change log stood at the last sync — see
+    /// `ScriptHost::sync_scene`. The default belongs to no world, so the first
+    /// sync is always a full one.
+    synced_cursor: floptle_core::ChangeCursor,
+    /// Bumped by every full rebuild: the scene's *structure* (names, parents,
+    /// tags, scripts, which nodes exist) may have moved. A value refresh leaves
+    /// it alone. Reference params rebind when it moves.
+    structure_rev: u64,
+    /// Entities the sync in progress refreshed one by one, for the profiler.
+    refreshed_now: u32,
 }
 
 /// Whether a `find*` call may return switched-off nodes.
@@ -1818,6 +1836,7 @@ struct Shared {
     ui_rects: Rc<RefCell<HashMap<u32, [f32; 4]>>>,
     body_changes: Rc<RefCell<HashMap<u32, [f32; 3]>>>,
     body_height_changes: Rc<RefCell<HashMap<u32, f32>>>,
+    body_sleep_changes: Rc<RefCell<HashMap<u32, bool>>>,
     /// Cross-node position writes onto entities that have a physics body —
     /// the driver teleports the body there (otherwise the physics writeback
     /// stomps the transform next frame and the write silently vanishes).
@@ -1984,6 +2003,9 @@ pub struct BodyState {
     /// an upward component, every frame, which reads as being fired into the
     /// sky. A controller that can see the wall simply stops pushing into it.
     pub wall_normal: Option<[f32; 3]>,
+    /// The solver is skipping this body until something wakes it —
+    /// `node.asleep`.
+    pub asleep: bool,
 }
 
 impl Default for BodyState {
@@ -1996,6 +2018,7 @@ impl Default for BodyState {
             pos: [0.0; 3],
             ground_normal: None,
             wall_normal: None,
+            asleep: false,
         }
     }
 }
@@ -2125,6 +2148,7 @@ mod shipped_script_tests {
                     pos: [0.0, 0.0, 0.0],
                     ground_normal: Some([0.0, 1.0, 0.0]),
                     wall_normal: None,
+                    asleep: false,
                 },
             );
             host.set_bodies(bodies);

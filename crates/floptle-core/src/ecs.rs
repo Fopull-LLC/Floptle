@@ -104,6 +104,35 @@ impl<T: 'static> AnyColumn for Column<T> {
     }
 }
 
+/// What happened to one entity, as the [change log](World::changes_since)
+/// records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeKind {
+    /// A component of this type was written, attached or detached.
+    Component(TypeId),
+    /// The entity was created or destroyed.
+    Lifetime,
+}
+
+/// One entry of the change log: which entity, and what about it.
+#[derive(Debug, Clone, Copy)]
+pub struct Change {
+    pub index: u32,
+    pub kind: ChangeKind,
+    /// The component's type name, for saying *why* a cache had to rebuild.
+    /// `"spawn/despawn"` for a [`ChangeKind::Lifetime`] entry.
+    pub what: &'static str,
+}
+
+/// Entries the log keeps before it gives up and reads as "everything changed".
+/// A frame of ordinary gameplay writes a few dozen; a level load writes one per
+/// component, and the reader that follows a load rebuilds anyway.
+const CHANGE_LOG_CAP: usize = 16_384;
+
+/// Distinguishes worlds, so a cursor into one world's log is never mistaken
+/// for a cursor into the next scene's.
+static NEXT_WORLD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// The one source of truth: entities and their components.
 pub struct World {
     generations: Vec<u32>,
@@ -111,6 +140,12 @@ pub struct World {
     alive: Vec<bool>,
     columns: HashMap<TypeId, Box<dyn AnyColumn>>,
     revision: u64,
+    id: u64,
+    /// Every non-transform write since `log_base`, entity by entity.
+    log: Vec<Change>,
+    /// Sequence number of `log[0]`. Everything older was dropped, and a cursor
+    /// older than this reads as "unknown".
+    log_base: u64,
 }
 
 impl Default for World {
@@ -125,8 +160,18 @@ impl Default for World {
             // touched. `new` and `default` have to agree about this, so there is
             // one constructor and `new` calls it.
             revision: 1,
+            id: NEXT_WORLD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            log: Vec::new(),
+            log_base: 0,
         }
     }
+}
+
+/// A position in one world's change log. See [`World::changes_since`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChangeCursor {
+    world: u64,
+    seq: u64,
 }
 
 impl World {
@@ -171,6 +216,59 @@ impl World {
         self.column::<T>().map_or(0, |c| c.revision)
     }
 
+    /// Where the change log stands now. Hold it, and a later
+    /// [`changes_since`](Self::changes_since) says what happened after it.
+    pub fn change_cursor(&self) -> ChangeCursor {
+        ChangeCursor { world: self.id, seq: self.log_base + self.log.len() as u64 }
+    }
+
+    /// Every entity-level change since `cursor`, in order: which entity, and
+    /// which component type (or its creation or destruction).
+    ///
+    /// **Transforms are not logged.** They are the one thing that changes on
+    /// most entities every tick, and every reader copies them wholesale anyway.
+    /// So an empty answer means "only transforms moved".
+    ///
+    /// `None` means the log cannot answer: the cursor belongs to another world,
+    /// the entries it needs were dropped, or something mutated a whole column
+    /// at once ([`query_mut`](Self::query_mut) of a non-transform type). The
+    /// reader must then treat everything as changed. Like
+    /// [`revision`](Self::revision), this is conservative: a `get_mut` that
+    /// wrote nothing is still logged, so an entry means "might have changed".
+    pub fn changes_since(&self, cursor: ChangeCursor) -> Option<&[Change]> {
+        if cursor.world != self.id || cursor.seq < self.log_base {
+            return None;
+        }
+        let start = usize::try_from(cursor.seq - self.log_base).ok()?;
+        self.log.get(start..)
+    }
+
+    fn log_change<T: 'static>(&mut self, index: u32) {
+        if TypeId::of::<T>() == TypeId::of::<crate::Transform>() {
+            return;
+        }
+        self.push_change(Change {
+            index,
+            kind: ChangeKind::Component(TypeId::of::<T>()),
+            what: short_type_name::<T>(),
+        });
+    }
+
+    fn push_change(&mut self, change: Change) {
+        if self.log.len() >= CHANGE_LOG_CAP {
+            self.forget_changes();
+        }
+        self.log.push(change);
+    }
+
+    /// Drop the whole log, so every outstanding cursor reads as "unknown".
+    fn forget_changes(&mut self) {
+        // One past the end: a cursor taken before this is now older than the
+        // base, and one taken after starts from an empty log.
+        self.log_base += self.log.len() as u64 + 1;
+        self.log.clear();
+    }
+
     /// Number of live entities.
     pub fn len(&self) -> usize {
         self.alive.iter().filter(|a| **a).count()
@@ -182,7 +280,7 @@ impl World {
     /// Create a new entity (no components yet).
     pub fn spawn(&mut self) -> Entity {
         self.revision += 1;
-        if let Some(index) = self.free.pop() {
+        let e = if let Some(index) = self.free.pop() {
             self.alive[index as usize] = true;
             Entity { index, generation: self.generations[index as usize] }
         } else {
@@ -190,7 +288,9 @@ impl World {
             self.generations.push(0);
             self.alive.push(true);
             Entity { index, generation: 0 }
-        }
+        };
+        self.push_change(Change { index: e.index, kind: ChangeKind::Lifetime, what: "spawn/despawn" });
+        e
     }
 
     /// The live entity occupying a slot, or `None` if that slot is empty.
@@ -239,6 +339,7 @@ impl World {
             return;
         }
         self.revision += 1;
+        self.push_change(Change { index: e.index, kind: ChangeKind::Lifetime, what: "spawn/despawn" });
         for col in self.columns.values_mut() {
             col.remove_entity(e);
         }
@@ -266,13 +367,20 @@ impl World {
             return;
         }
         self.revision += 1;
+        self.log_change::<T>(e.index);
         self.column_mut::<T>().set(e, value);
     }
 
     /// Remove a component, returning it if present.
     pub fn remove<T: 'static>(&mut self, e: Entity) -> Option<T> {
         self.revision += 1;
-        self.column_mut::<T>().take(e)
+        let taken = self.column_mut::<T>().take(e);
+        // Removing what was never there changed nothing, and logging it would
+        // send a reader looking for a change that did not happen.
+        if taken.is_some() {
+            self.log_change::<T>(e.index);
+        }
+        taken
     }
 
     pub fn get<T: 'static>(&self, e: Entity) -> Option<&T> {
@@ -281,9 +389,13 @@ impl World {
     }
     pub fn get_mut<T: 'static>(&mut self, e: Entity) -> Option<&mut T> {
         self.revision += 1;
+        let at = self.column_mut::<T>().position(e);
+        if at.is_some() {
+            self.log_change::<T>(e.index);
+        }
         let col = self.column_mut::<T>();
         col.revision += 1;
-        col.position(e).map(|i| &mut col.rows[i].1)
+        at.map(|i| &mut col.rows[i].1)
     }
 
     /// Iterate every `(entity, &T)`. The archetype rewrite makes this a linear
@@ -294,10 +406,22 @@ impl World {
     /// Mutable iteration over a single component type.
     pub fn query_mut<T: 'static>(&mut self) -> impl Iterator<Item = (Entity, &mut T)> {
         self.revision += 1;
+        // Which rows the caller writes is unknowable from here, so a reader of
+        // the log has to assume all of them.
+        if TypeId::of::<T>() != TypeId::of::<crate::Transform>() {
+            self.forget_changes();
+        }
         let col = self.column_mut::<T>();
         col.revision += 1;
         col.rows.iter_mut().map(|(e, v)| (*e, v))
     }
+}
+
+/// `floptle_core::Visible` → `Visible`: the name a developer wrote, for messages.
+fn short_type_name<T: 'static>() -> &'static str {
+    let full = std::any::type_name::<T>();
+    let head = full.split('<').next().unwrap_or(full);
+    head.rsplit("::").next().unwrap_or(head)
 }
 
 #[cfg(test)]
@@ -342,6 +466,57 @@ mod tests {
         let base = other(&w);
         w.remove::<Label>(e);
         assert_ne!(other(&w), base, "a detach is structural");
+    }
+
+    /// The change log names the entity and the type, skips transforms, and
+    /// reads as "unknown" once it cannot answer.
+    #[test]
+    fn the_change_log_names_each_entity_and_type_but_never_a_transform() {
+        struct Lamp(f32);
+        let mut w = World::new();
+        let a = w.spawn();
+        let b = w.spawn();
+        w.insert(a, crate::Transform::IDENTITY);
+        w.insert(b, Lamp(1.0));
+        let cur = w.change_cursor();
+        assert_eq!(w.changes_since(cur).map(<[_]>::len), Some(0));
+
+        w.get_mut::<crate::Transform>(a).unwrap().translation.x = 3.0;
+        for (_, t) in w.query_mut::<crate::Transform>() {
+            t.translation.y = 1.0;
+        }
+        assert_eq!(w.changes_since(cur).map(<[_]>::len), Some(0), "transforms are never logged");
+
+        w.get_mut::<Lamp>(b).unwrap().0 = 2.0;
+        let got = w.changes_since(cur).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].index, b.index());
+        assert_eq!(got[0].kind, ChangeKind::Component(TypeId::of::<Lamp>()));
+        assert_eq!(got[0].what, "Lamp");
+
+        // A get_mut of something the entity lacks wrote nothing.
+        let _ = w.get_mut::<Lamp>(a);
+        assert_eq!(w.changes_since(cur).unwrap().len(), 1);
+
+        let c = w.spawn();
+        w.despawn(c);
+        let got = w.changes_since(cur).unwrap();
+        assert!(got[1..].iter().all(|ch| ch.kind == ChangeKind::Lifetime && ch.index == c.index()));
+
+        // A whole-column write cannot say which rows it touched.
+        for _ in w.query_mut::<Lamp>() {}
+        assert!(w.changes_since(cur).is_none(), "query_mut must read as unknown");
+        let cur = w.change_cursor();
+        assert_eq!(w.changes_since(cur).map(<[_]>::len), Some(0));
+
+        // Another world's cursor never answers for this one.
+        assert!(World::new().changes_since(cur).is_none());
+
+        // Past the cap the log forgets, and says so.
+        for _ in 0..=CHANGE_LOG_CAP {
+            let _ = w.get_mut::<Lamp>(b);
+        }
+        assert!(w.changes_since(cur).is_none(), "an overflowed log must read as unknown");
     }
 
     #[derive(Debug, PartialEq)]

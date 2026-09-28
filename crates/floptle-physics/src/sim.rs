@@ -199,6 +199,8 @@ pub struct BodyReport {
     pub ground_normal: Option<Vec3>,
     /// The steepest surface it is pressed against, when too steep to stand on.
     pub wall_normal: Option<Vec3>,
+    /// The solver is skipping this body until something wakes it.
+    pub asleep: bool,
 }
 
 /// One row of [`Sim::compound_impacts`]: `(root entity index, part = shape_id,
@@ -1661,6 +1663,7 @@ impl Sim {
                 pos,
                 ground_normal: b.ground_normal,
                 wall_normal: b.wall_normal,
+                asleep: b.asleep,
             }
         })
     }
@@ -1792,6 +1795,18 @@ impl Sim {
                 t.invalidate_surface();
                 &mut t.field
             })
+    }
+
+    /// Put the body on node `eid` to sleep now, or wake it.
+    ///
+    /// Asleep, the solver skips it — no gravity, no contacts against the
+    /// level — until something wakes it: a velocity write, a moving platform,
+    /// or its ground going away (a body put to sleep in the air wakes and falls
+    /// at the next check). Better than making it kinematic, which changes how
+    /// it behaves rather than whether it is simulated.
+    pub fn set_body_asleep(&mut self, eid: u32, asleep: bool) {
+        let Some(bi) = self.map.iter().find(|l| l.entity.index() == eid).map(|l| l.body) else { return };
+        self.world.set_asleep(bi, asleep);
     }
 
     pub fn set_body_velocity(&mut self, eid: u32, vel: Vec3) {

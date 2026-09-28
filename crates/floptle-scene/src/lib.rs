@@ -1227,6 +1227,29 @@ pub enum ProbeDetailDoc {
     Ultra,
 }
 
+/// Serializable [`floptle_core::OverloadPolicy`].
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TickOverloadDoc {
+    /// One tick per frame while the tick can't keep up: slow motion.
+    #[default]
+    SlowMotion,
+    /// Every banked tick, however long the frame gets.
+    CatchUp,
+}
+
+impl TickOverloadDoc {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn policy(self) -> floptle_core::OverloadPolicy {
+        match self {
+            Self::SlowMotion => floptle_core::OverloadPolicy::SlowMotion,
+            Self::CatchUp => floptle_core::OverloadPolicy::CatchUp,
+        }
+    }
+}
+
 /// Serializable frame pacing — mirrors `floptle_render::Vsync`.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum VsyncDoc {
@@ -2560,6 +2583,14 @@ pub struct ProjectConfigDoc {
     #[serde(default)]
     pub vsync: VsyncDoc,
 
+    /// What the game does when its fixed tick costs more than the time it
+    /// simulates. `SlowMotion` (the default) runs one tick per frame, so the
+    /// game plays slower but stays responsive; `CatchUp` drains every banked
+    /// tick, which on an overloaded machine drops the frame rate to a crawl.
+    /// A networked session always catches up, whatever this says.
+    #[serde(default, skip_serializing_if = "TickOverloadDoc::is_default")]
+    pub tick_overload: TickOverloadDoc,
+
     /// How much detail a reflection probe's capture keeps.
     ///
     /// A probe's picture spans a full turn across its width, so its width is the
@@ -2693,6 +2724,7 @@ impl ProjectConfigDoc {
             retro_vertex_lit: false,
             retro_dither_alpha: false,
             vsync: VsyncDoc::default(),
+            tick_overload: TickOverloadDoc::default(),
             probe_detail: ProbeDetailDoc::default(),
             matter: true,
             title: None,

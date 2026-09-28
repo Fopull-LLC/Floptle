@@ -2213,6 +2213,7 @@ impl ScriptHost {
             ui_rects: Rc::new(RefCell::new(HashMap::new())),
             body_changes: Rc::new(RefCell::new(HashMap::new())),
             body_height_changes: Rc::new(RefCell::new(HashMap::new())),
+            body_sleep_changes: Rc::new(RefCell::new(HashMap::new())),
             body_pos_changes: Rc::new(RefCell::new(HashMap::new())),
             sprite_draws: Rc::new(RefCell::new(HashMap::new())),
             shader_param_sets: Rc::new(RefCell::new(Vec::new())),
@@ -2406,6 +2407,17 @@ impl ScriptHost {
         let sched: Rc<RefCell<crate::sched_api::SchedState>> =
             Rc::new(RefCell::new(crate::sched_api::SchedState::default()));
         crate::sched_api::install_sched_api(&lua, sched.clone());
+        // `script.sleep/wake/setRate`: instances the engine stops calling.
+        let sleepers: Rc<RefCell<crate::sleep_api::Sleepers>> = Rc::default();
+        let script_clock: Rc<std::cell::Cell<f64>> = Rc::default();
+        if let Err(e) = crate::sleep_api::install_sleep_api(
+            &lua,
+            sleepers.clone(),
+            net.current.clone(),
+            script_clock.clone(),
+        ) {
+            floptle_say::say_err!("[lua] failed to install the script API: {e}");
+        }
         // The `space.*` orbital readouts (solar demo S2).
         let space_info: Rc<RefCell<crate::space_api::SpaceInfo>> =
             Rc::new(RefCell::new(crate::space_api::SpaceInfo::default()));
@@ -2500,6 +2512,7 @@ impl ScriptHost {
             ui_rects: shared.ui_rects.clone(),
             body_changes: shared.body_changes.clone(),
             body_height_changes: shared.body_height_changes.clone(),
+            body_sleep_changes: shared.body_sleep_changes.clone(),
             body_pos_changes: shared.body_pos_changes.clone(),
             sprite_draws: shared.sprite_draws.clone(),
             sprites_written: None,
@@ -2541,6 +2554,9 @@ impl ScriptHost {
             project_root,
             save_state,
             sched,
+            sleepers,
+            kinds_this_frame: HashMap::new(),
+            script_clock,
             space_info,
             nav_mesh,
             nav_agents,
@@ -3189,6 +3205,7 @@ impl ScriptHost {
             self.drop_net_instance(&k);
         }
         self.envs.borrow_mut().retain(|(e, _), _| keep.contains(e));
+        self.sleepers.borrow_mut().retain_nodes(|e| keep.contains(&e));
         // Bindings point at the old scene's entity indices, which the new
         // scene will reuse. Left in place they would drive the wrong nodes.
         {
@@ -4081,6 +4098,9 @@ impl ScriptHost {
         let mut called = false;
         for (kind, env) in targets {
             let Ok(Some(f)) = env.raw_get::<Option<mlua::Function>>(func) else { continue };
+            // Something touched it: a sleeping script hears about it, and is
+            // awake again for whatever it decides to do next.
+            self.sleepers.borrow_mut().wake(eid, Some(&kind));
             let (Ok(node), Ok(other)) =
                 (new_node_handle(&self.lua, eid), new_node_handle(&self.lua, other))
             else {
@@ -4807,6 +4827,12 @@ impl ScriptHost {
         std::mem::take(&mut *self.body_height_changes.borrow_mut())
     }
 
+    /// Drain the `node.asleep = …` writes (entity index → asleep), for the
+    /// driver to apply to the sim after the velocity writes.
+    pub fn take_body_sleep_changes(&self) -> HashMap<u32, bool> {
+        std::mem::take(&mut *self.body_sleep_changes.borrow_mut())
+    }
+
     /// Drain cross-node position writes on body entities — the driver teleports
     /// each body there (the transform alone would be stomped by the physics
     /// writeback next frame).
@@ -4967,18 +4993,24 @@ impl ScriptHost {
         // `start`, and (because the node is out of the sim too) not its collision
         // hooks. `Disabled` is inherited, so turning off a folder turns off every
         // script under it.
-        let work: Vec<(Entity, Scripts)> = world
+        let work: Vec<Entity> = world
             .query::<Scripts>()
             .filter(|(e, _)| !floptle_core::is_disabled(world, *e))
-            .map(|(e, s)| (e, s.clone()))
+            .map(|(e, _)| e)
             .collect();
         // Pass 1: build/refresh every environment so cross-references (findScript, etc.)
         // resolve regardless of which script ticks first.
-        for (e, scripts) in &work {
+        self.kinds_this_frame.clear();
+        for &e in &work {
+            let Some(scripts) = world.get::<Scripts>(e) else { continue };
             for inst in &scripts.0 {
                 if inst.enabled {
-                    self.ensure_instance(*e, &inst.kind, scripts_dir);
-                    self.seed_params(*e, &inst.kind, &inst.params, &inst.refs, &inst.strs);
+                    self.ensure_instance(e, &inst.kind, scripts_dir);
+                    // A sleeper's params are seeded when it wakes, by the tick
+                    // that calls it.
+                    if !self.sleepers.borrow().is_asleep(e.index(), &inst.kind) {
+                        self.seed_params(e, &inst.kind, &inst.params, &inst.refs, &inst.strs);
+                    }
                 }
             }
         }
@@ -4993,6 +5025,19 @@ impl ScriptHost {
         // Pumps the platform backend's callbacks and fires
         // `steam.onPersonaChanged` — a no-op under `NullPlatform`.
         crate::steam_api::drain(&self.lua, &self.platform, &self.steam_state, &self.logs);
+        // Sleepers whose timer ran out, or whose camera came close, wake before
+        // the pass that would call them.
+        self.script_clock.set(time as f64);
+        {
+            let mut sl = self.sleepers.borrow_mut();
+            if !sl.asleep.is_empty() {
+                let cam = floptle_core::active_camera(world)
+                    .map(|c| floptle_core::world_transform(world, c).translation);
+                sl.wake_due(time as f64, cam, |id| {
+                    world.entity_at(id).map(|e| floptle_core::world_transform(world, e).translation)
+                });
+            }
+        }
         // Pass 2: run each script's start/update.
         self.run_pass(world, &work, dt, time, Pass::Frame, floptle_input::Domain::Frame);
         // Every `nav.agent` walks here: after the orders this frame's scripts
@@ -5015,6 +5060,7 @@ impl ScriptHost {
             self.envs.borrow_mut().remove(&k);
             self.drop_net_instance(&k);
             self.drop_ui_listeners_of(&k);
+            self.sleepers.borrow_mut().forget(k.0, &k.1);
         }
     }
 
@@ -5041,10 +5087,10 @@ impl ScriptHost {
         // `start`, and (because the node is out of the sim too) not its collision
         // hooks. `Disabled` is inherited, so turning off a folder turns off every
         // script under it.
-        let work: Vec<(Entity, Scripts)> = world
+        let work: Vec<Entity> = world
             .query::<Scripts>()
             .filter(|(e, _)| !floptle_core::is_disabled(world, *e))
-            .map(|(e, s)| (e, s.clone()))
+            .map(|(e, _)| e)
             .collect();
         self.run_pass(world, &work, dt, time, Pass::Fixed, floptle_input::Domain::Tick);
         self.flush_writes(world);
@@ -5064,10 +5110,10 @@ impl ScriptHost {
         // `start`, and (because the node is out of the sim too) not its collision
         // hooks. `Disabled` is inherited, so turning off a folder turns off every
         // script under it.
-        let work: Vec<(Entity, Scripts)> = world
+        let work: Vec<Entity> = world
             .query::<Scripts>()
             .filter(|(e, _)| !floptle_core::is_disabled(world, *e))
-            .map(|(e, s)| (e, s.clone()))
+            .map(|(e, _)| e)
             .collect();
         self.run_pass(world, &work, dt, time, Pass::Late, floptle_input::Domain::Frame);
         self.flush_writes(world);
@@ -5093,10 +5139,10 @@ impl ScriptHost {
     fn run_one(&mut self, world: &mut World, eid: u32, dt: f32, time: f32, fixed: bool) {
         let _budget = self.budget.arm();
         self.sync_scene(world);
-        let work: Vec<(Entity, Scripts)> = world
+        let work: Vec<Entity> = world
             .query::<Scripts>()
             .filter(|(e, _)| e.index() == eid)
-            .map(|(e, s)| (e, s.clone()))
+            .map(|(e, _)| e)
             .collect();
         // The targeted passes bypass the skip sets — they are the substitute
         // execution for a filtered entity.
@@ -5200,7 +5246,7 @@ impl ScriptHost {
     fn run_pass(
         &mut self,
         world: &mut World,
-        work: &[(Entity, Scripts)],
+        work: &[Entity],
         dt: f32,
         time: f32,
         pass: Pass,
@@ -5213,7 +5259,7 @@ impl ScriptHost {
         // `http.*` warns when it is called from the tick pass — a reply arrives
         // when it arrives, which no replay can reproduce.
         self.http_in_fixed.set(pass == Pass::Fixed);
-        for (e, scripts) in work {
+        for e in work {
             if self.script_skip.contains(&e.index()) {
                 continue; // networked: this node's state arrives in snapshots
             }
@@ -5228,9 +5274,28 @@ impl ScriptHost {
                 continue; // predicted: its `update` re-runs on the tick clock
             }
             let Some(mut tr) = world.get::<Transform>(*e).copied() else { continue };
+            // Borrowed, not cloned: no hook can reach the world, so nothing
+            // changes a node's script list while its scripts run. Cloning
+            // every list — names, params, strings — three passes a frame was
+            // an allocation per scripted node per pass.
+            let Some(scripts) = world.get::<Scripts>(*e) else { continue };
             let tr0 = tr; // pass-start, to detect a self-move via the `node` argument
             let mut ran = false;
             for inst in &scripts.0 {
+                // Asleep (`script.sleep`): not called at all — no hook, no
+                // node stamp, no setup. A `fixedUpdate` on a lower rate
+                // (`script.setRate`) skips the ticks between its calls and is
+                // handed the time since the last one.
+                let mut dt = dt;
+                if inst.enabled && self.sleepers.borrow().is_asleep(e.index(), &inst.kind) {
+                    continue;
+                }
+                if inst.enabled && pass == Pass::Fixed {
+                    match self.sleepers.borrow_mut().fixed_dt(e.index(), &inst.kind, dt) {
+                        Some(d) => dt = d,
+                        None => continue,
+                    }
+                }
                 if inst.enabled {
                     // Per-script attribution. One `Instant` pair
                     // per instance per pass would be thousands of syscalls in a
@@ -5387,8 +5452,12 @@ impl ScriptHost {
                         world.insert(ent, m.clone());
                     }
             }
+            // `bar.visible = show` every frame with `show` unchanged is the
+            // common case, and a write that changes nothing should cost nothing.
             for (eid, shown) in self.visible_changes.borrow().iter() {
-                if let Some(&ent) = scene.ents.get(eid) {
+                if let Some(&ent) = scene.ents.get(eid)
+                    && world.get::<Visible>(ent).is_none_or(|v| v.0 != *shown)
+                {
                     world.insert(ent, Visible(*shown));
                 }
             }
@@ -5757,33 +5826,48 @@ impl ScriptHost {
 
     fn sync_scene_inner(&self, world: &World) {
         let mut s = self.scene.borrow_mut();
-        // The mirror is rebuilt three times a frame — before the frame, tick
+        // The mirror is refreshed three times a frame — before the frame, tick
         // and late passes — and between two of those, in the ordinary case,
-        // the only thing that changed is where things are: physics moved
-        // bodies, a script moved its node. Everything else here (names,
-        // parents, scripts, tags, components…) is exactly as it was, and
-        // rebuilding it is mostly allocation: on a 376-node scene the full
-        // sync cost 1.2 ms, three times over.
+        // what changed is where things are (physics moved bodies, a script
+        // moved its node) plus a handful of component values: a camera's FOV
+        // eased, a light flickered, a node was hidden. Names, parents, tags and
+        // scripts are exactly as they were.
         //
-        // The world says which case this is. `revision()` counts every
-        // mutation; `revision_of::<Transform>()` counts mutable access to
-        // transforms alone; their difference moves on anything else — a spawn,
-        // a despawn, an attach, a rename, a material edit, a script's queued
-        // writes landing. Unchanged difference means transforms-only, and
-        // transforms-only means the cheap path. The world is
-        // conservative in what it counts (a `get_mut` that wrote nothing still
-        // counts), so this can only ever do too much work, never too little.
-        let non_transform_rev = world.revision() - world.revision_of::<Transform>();
-        if non_transform_rev == s.synced_non_transform_rev {
+        // The world's change log says which entities were touched and in what
+        // type. Transforms are never logged (every one is copied below), so an
+        // empty log is the transforms-only case. A touched entity whose name,
+        // tags, parent and scripts still match the mirror only needs its value
+        // fields re-read, which costs that entity and nothing else. Anything
+        // the log cannot express that way — a spawn, a despawn, a rename, a
+        // reparent, a log that overflowed — rebuilds the whole mirror, and says
+        // why.
+        //
+        // Rebuilding on every value write used to be the only path: a single
+        // `cam.fovY = …` a frame cost O(scene) three times over, and the cost
+        // grew with the level while the profiler blamed no script at all.
+        let cursor = s.synced_cursor;
+        s.synced_cursor = world.change_cursor();
+        let cause = match world.changes_since(cursor) {
+            None => Some(if s.order.is_empty() {
+                "first sync".to_string()
+            } else {
+                "the scene was replaced, or a whole component column was rewritten".to_string()
+            }),
+            Some(changes) => Self::refresh_touched(&mut s, world, changes),
+        };
+        let refreshed = std::mem::take(&mut s.refreshed_now);
+        let Some(cause) = cause else {
             for (e, tr) in world.query::<Transform>() {
                 s.transforms.insert(e.index(), *tr);
             }
             s.dirty.clear();
+            self.profile.borrow_mut().record_mirror(None, refreshed);
             return;
-        }
+        };
         #[cfg(test)]
         FULL_SYNCS.with(|c| c.set(c.get() + 1));
-        s.synced_non_transform_rev = non_transform_rev;
+        self.profile.borrow_mut().record_mirror(Some(cause), 0);
+        s.structure_rev += 1;
         s.order.clear();
         s.names.clear();
         s.by_name.clear();
@@ -5804,6 +5888,9 @@ impl ScriptHost {
         s.ui_styles.clear();
         s.ui_textures.clear();
         s.component_strings.clear();
+        s.component_colors.clear();
+        s.shader_state.clear();
+        s.repeat_index.clear();
         // not cleared: the grids are reused when a map has not changed.
         // Entities that are gone, or that stopped being a
         // tilemap, are dropped by the retain after the loop.
@@ -5822,6 +5909,117 @@ impl ScriptHost {
         s.tilemaps.retain(|id, _| live_tilemaps.contains(id));
     }
 
+    /// Bring the mirror up to date with `changes` one entity at a time.
+    ///
+    /// Returns why a full rebuild is needed instead, or `None` once every
+    /// touched entity has been re-read. Nothing here is wasted when it bails
+    /// half way: the rebuild clears every table it wrote to.
+    fn refresh_touched(
+        s: &mut crate::SceneMirror,
+        world: &World,
+        changes: &[floptle_core::Change],
+    ) -> Option<String> {
+        if changes.is_empty() {
+            return None;
+        }
+        let transform = std::any::TypeId::of::<Transform>();
+        let mut touched: Vec<u32> = Vec::with_capacity(changes.len());
+        for ch in changes {
+            match ch.kind {
+                floptle_core::ChangeKind::Lifetime => {
+                    return Some(format!("a node was spawned or destroyed ({})", Self::label(s, world, ch.index)));
+                }
+                // A transform attached or detached decides whether the entity is
+                // in the mirror at all.
+                floptle_core::ChangeKind::Component(t) if t == transform => {
+                    let has = world.entity_with::<Transform>(ch.index).is_some();
+                    if has != s.ents.contains_key(&ch.index) {
+                        return Some(format!("a Transform was attached or removed ({})", Self::label(s, world, ch.index)));
+                    }
+                }
+                floptle_core::ChangeKind::Component(_) => touched.push(ch.index),
+            }
+        }
+        touched.sort_unstable();
+        touched.dedup();
+        for id in touched {
+            // Not in the mirror (no Transform) and not joining it: nothing to do.
+            let Some(&mirrored) = s.ents.get(&id) else { continue };
+            let Some(e) = world.entity_at(id).filter(|&e| e == mirrored) else {
+                return Some(format!("node {id} was replaced"));
+            };
+            if let Some(what) = Self::structure_moved(s, world, e) {
+                let at = changes.iter().rev().find(|c| c.index == id).map_or("?", |c| c.what);
+                return Some(format!("{what} changed on {} (a {at} write)", Self::label(s, world, id)));
+            }
+            Self::forget_values(s, id);
+            Self::mirror_values(s, world, e, None);
+            s.refreshed_now += 1;
+        }
+        None
+    }
+
+    /// `'Enemy 3' (node 812)`, or `node 812` for a node with no name.
+    fn label(s: &crate::SceneMirror, world: &World, id: u32) -> String {
+        let name = world
+            .entity_at(id)
+            .and_then(|e| world.get::<floptle_core::Name>(e))
+            .map(|n| n.0.as_str())
+            .or_else(|| s.names.get(&id).map(String::as_str));
+        match name {
+            Some(n) => format!("'{n}' (node {id})"),
+            None => format!("node {id}"),
+        }
+    }
+
+    /// Which of the fields the mirror indexes by — the ones behind `find`,
+    /// `children`, `findScript` and `findTagged` — no longer matches the world,
+    /// if any. Allocation-free: this runs for every touched entity.
+    fn structure_moved(s: &crate::SceneMirror, world: &World, e: Entity) -> Option<&'static str> {
+        let id = e.index();
+        if s.names.get(&id).map(String::as_str) != world.get::<floptle_core::Name>(e).map(|n| n.0.as_str()) {
+            return Some("the name");
+        }
+        if s.tags.get(&id).map(Vec::as_slice) != world.get::<floptle_core::Tags>(e).map(|t| t.0.as_slice()) {
+            return Some("the tags");
+        }
+        if s.parent.get(&id).copied() != world.get::<floptle_core::Parent>(e).map(|p| p.0.index()) {
+            return Some("the parent");
+        }
+        let kinds_match = match (s.scripts.get(&id), world.get::<Scripts>(e)) {
+            (None, None) => true,
+            (Some(have), Some(now)) => {
+                have.len() == now.0.len() && have.iter().zip(&now.0).all(|(a, b)| *a == b.kind)
+            }
+            _ => false,
+        };
+        if !kinds_match {
+            return Some("the attached scripts");
+        }
+        None
+    }
+
+    /// Drop every value field [`Self::mirror_values`] writes for `id`, so it can
+    /// be written again. The tilemap grid stays: `mirror_values` reuses it.
+    fn forget_values(s: &mut crate::SceneMirror, id: u32) {
+        s.models.remove(&id);
+        s.sprites.remove(&id);
+        s.sprite_batches.remove(&id);
+        s.sorting.remove(&id);
+        s.ui_texts.remove(&id);
+        s.ui_styles.remove(&id);
+        s.ui_textures.remove(&id);
+        s.components.remove(&id);
+        s.repeat_index.remove(&id);
+        s.component_colors.remove(&id);
+        s.component_strings.remove(&id);
+        s.shader_state.remove(&id);
+        s.visible.remove(&id);
+        s.disabled.remove(&id);
+        s.persistent.remove(&id);
+        s.layers.remove(&id);
+    }
+
     /// Put one entity into the mirror.
     ///
     /// Split out of [`Self::sync_scene`] so that a freshly spawned node can be
@@ -5838,12 +6036,46 @@ impl ScriptHost {
         world: &World,
         e: floptle_core::Entity,
         tr: &Transform,
-        mut live: Option<&mut std::collections::HashSet<u32>>,
+        live: Option<&mut std::collections::HashSet<u32>>,
     ) {
             let id = e.index();
             s.order.push(id);
             s.ents.insert(id, e);
             s.transforms.insert(id, *tr);
+            Self::mirror_values(s, world, e, live);
+            if let Some(t) = world.get::<floptle_core::Tags>(e) {
+                for tag in &t.0 {
+                    s.by_tag.entry(tag.clone()).or_default().push(id);
+                }
+                s.tags.insert(id, t.0.clone());
+            }
+            if let Some(n) = world.get::<floptle_core::Name>(e) {
+                s.names.insert(id, n.0.clone());
+                s.by_name.entry(n.0.clone()).or_insert(id);
+            }
+            if let Some(p) = world.get::<floptle_core::Parent>(e) {
+                let pid = p.0.index();
+                s.parent.insert(id, pid);
+                s.children.entry(pid).or_default().push(id);
+            }
+            if let Some(sc) = world.get::<Scripts>(e) {
+                for inst in &sc.0 {
+                    s.by_kind.entry(inst.kind.clone()).or_default().push(id);
+                }
+                s.scripts.insert(id, sc.0.iter().map(|i| i.kind.clone()).collect());
+            }
+    }
+
+    /// The value half of [`Self::mirror_entity`]: everything a script reads
+    /// off a node that no index is built from. Safe to redo for one entity
+    /// after [`Self::forget_values`].
+    fn mirror_values(
+        s: &mut crate::SceneMirror,
+        world: &World,
+        e: floptle_core::Entity,
+        mut live: Option<&mut std::collections::HashSet<u32>>,
+    ) {
+            let id = e.index();
             match world.get::<Matter>(e) {
                 Some(Matter::Mesh { asset_path }) => {
                     s.models.insert(id, asset_path.clone());
@@ -5975,27 +6207,6 @@ impl ScriptHost {
             if let Some(l) = world.get::<floptle_core::Layer>(e) {
                 s.layers.insert(id, l.0.clone());
             }
-            if let Some(t) = world.get::<floptle_core::Tags>(e) {
-                for tag in &t.0 {
-                    s.by_tag.entry(tag.clone()).or_default().push(id);
-                }
-                s.tags.insert(id, t.0.clone());
-            }
-            if let Some(n) = world.get::<floptle_core::Name>(e) {
-                s.names.insert(id, n.0.clone());
-                s.by_name.entry(n.0.clone()).or_insert(id);
-            }
-            if let Some(p) = world.get::<floptle_core::Parent>(e) {
-                let pid = p.0.index();
-                s.parent.insert(id, pid);
-                s.children.entry(pid).or_default().push(id);
-            }
-            if let Some(sc) = world.get::<Scripts>(e) {
-                for inst in &sc.0 {
-                    s.by_kind.entry(inst.kind.clone()).or_default().push(id);
-                }
-                s.scripts.insert(id, sc.0.iter().map(|i| i.kind.clone()).collect());
-            }
     }
 
     /// Add newly created entities to the mirror, leaving the rest of it alone.
@@ -6074,14 +6285,27 @@ impl ScriptHost {
     /// script before any `update`, so a manager is reachable even by a script that ticks
     /// first.
     fn ensure_instance(&mut self, e: Entity, name: &str, scripts_dir: &Path) -> bool {
-        let path = resolve_script_path(scripts_dir, &self.extra_script_dirs, name);
-        let Some(generation) = self.ensure_source(name, &path) else {
+        // Where a kind's file is, and whether it changed, is asked once per
+        // kind per frame: it is three filesystem calls, and asking it for
+        // every instance made a crowd of one script cost a syscall storm.
+        let generation = match self.kinds_this_frame.get(name) {
+            Some(g) => *g,
+            None => {
+                let path = resolve_script_path(scripts_dir, &self.extra_script_dirs, name);
+                let g = self.ensure_source(name, &path);
+                self.kinds_this_frame.insert(name.to_string(), g);
+                g
+            }
+        };
+        let Some(generation) = generation else {
+            let path = resolve_script_path(scripts_dir, &self.extra_script_dirs, name);
             self.record_error(name, format!("{name}: script not found ({})", path.display()));
             return false;
         };
         let key = (e.index(), name.to_string());
         let needs_build = self.instances.get(&key).is_none_or(|i| i.generation != generation);
         if needs_build {
+            let path = resolve_script_path(scripts_dir, &self.extra_script_dirs, name);
             // Don't recompile a known-broken generation every frame; re-emit it
             // to the Scripting tab, which is a live list of what is wrong right
             // now. not to the Console — `fail` already said it once, and this
@@ -6386,7 +6610,7 @@ impl ScriptHost {
         // already knows when the scene's structure last moved (the revision
         // `sync_scene` rebuilt at); folding it in rebuilds the table exactly
         // then, and a script with no refs never pays for it.
-        let structure = if refs.is_empty() { 0 } else { self.scene.borrow().synced_non_transform_rev };
+        let structure = if refs.is_empty() { 0 } else { self.scene.borrow().structure_rev };
         let fp = seed_fingerprint(params, refs, strs, structure);
         // A script that ran past its budget waits for an edit — see `fail`.
         if self.stopped.contains(name) {
@@ -6805,6 +7029,14 @@ impl ScriptHost {
                         && let Some(f) = lifecycle_fn(env, &["start", "on_start"])? {
                             *called = true;
                             f.call::<()>(node.clone())?;
+                            // `script.sleep()` in `start` means from now on,
+                            // this frame's `update` included.
+                            let asleep = self.net.current.borrow().as_ref().is_some_and(|(e, k)| {
+                                self.sleepers.borrow().is_asleep(*e, k)
+                            });
+                            if asleep {
+                                return Ok(true);
+                            }
                         }
                     if let Some(f) = lifecycle_fn(env, &["update", "on_update"])? {
                         *called = true;

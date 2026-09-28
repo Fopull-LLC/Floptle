@@ -109,6 +109,182 @@ impl FixedTimestep {
     }
 }
 
+// --- Falling behind -------------------------------------------------------------
+
+/// What a frame does when the fixed tick costs more than the time it simulates.
+///
+/// With a 60 Hz tick that costs 30 ms, no amount of catching up can hold real
+/// time: every catch-up tick makes the frame longer, which banks more ticks for
+/// the next frame. [`FixedTimestep`]'s clamp bounds that queue but not the loop,
+/// so the game settles at the worst rate it can reach. Freeflier's main level
+/// did exactly this: 2 fps, and the loading screen never lifted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OverloadPolicy {
+    /// Run at most one tick per rendered frame while overloaded. The game plays
+    /// in slow motion at a frame rate that can still be looked at and debugged.
+    #[default]
+    SlowMotion,
+    /// Keep draining every banked tick, as before. For a session whose clock is
+    /// shared with other machines, where running slow would desync it.
+    CatchUp,
+}
+
+/// Watches what each tick really costs and says when the game can't keep up.
+///
+/// Fed once per frame with the ticks it ran and the wall time they took. The
+/// per-tick cost is smoothed, so one hitch (a level streaming in, a shader
+/// compiling) is not an overload but a sustained cost above the slice is. It
+/// takes a clearly lower cost to leave the state than to enter it, so a game
+/// sitting on the line doesn't flip in and out every few frames.
+#[derive(Clone, Debug, Default)]
+pub struct TickLoad {
+    /// Smoothed milliseconds per tick.
+    avg_ms: f32,
+    overloaded: bool,
+    /// Wall seconds the current overload has lasted.
+    for_s: f32,
+    /// Frames fed since construction or the last reset.
+    frames: u32,
+    /// Consecutive frames whose own per-tick cost was over the slice.
+    over_run: u32,
+}
+
+/// What changed on one [`TickLoad::record`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadChange {
+    Entered,
+    Left,
+}
+
+impl TickLoad {
+    /// Smoothing weight of the newest frame.
+    const WEIGHT: f32 = 0.2;
+    /// Leave the state only once a tick is back under this share of its slice.
+    const LEAVE_BELOW: f32 = 0.8;
+    /// Frames needed before a verdict: the first few after Play are the level
+    /// loading, not the game.
+    const SETTLE_FRAMES: u32 = 5;
+    /// Consecutive over-slice frames it takes to enter the state. One hitch is
+    /// one frame; a game that can't keep up is every frame.
+    const ENTER_RUN: u32 = 6;
+
+    /// Fold in one frame: `ticks` ticks took `spent_ms` of wall time, each
+    /// simulating `step_s` seconds; the frame itself was `frame_s` of wall time.
+    pub fn record(&mut self, ticks: u32, spent_ms: f32, step_s: f32, frame_s: f32) -> Option<LoadChange> {
+        if ticks == 0 {
+            return None;
+        }
+        let per = spent_ms / ticks as f32;
+        self.frames = self.frames.saturating_add(1);
+        self.avg_ms = if self.frames == 1 { per } else { self.avg_ms + (per - self.avg_ms) * Self::WEIGHT };
+        let slice = step_s * 1000.0;
+        self.over_run = if per > slice { self.over_run.saturating_add(1) } else { 0 };
+        if self.overloaded {
+            self.for_s += frame_s;
+            if self.avg_ms < slice * Self::LEAVE_BELOW {
+                self.overloaded = false;
+                self.for_s = 0.0;
+                return Some(LoadChange::Left);
+            }
+        } else if self.frames >= Self::SETTLE_FRAMES
+            && self.over_run >= Self::ENTER_RUN
+            && self.avg_ms > slice
+        {
+            self.overloaded = true;
+            self.for_s = 0.0;
+            return Some(LoadChange::Entered);
+        }
+        None
+    }
+
+    /// Is the tick costing more than the time it simulates?
+    pub fn overloaded(&self) -> bool {
+        self.overloaded
+    }
+
+    /// The smoothed cost of one tick, in milliseconds.
+    pub fn tick_ms(&self) -> f32 {
+        self.avg_ms
+    }
+
+    /// Wall seconds the current overload has lasted; zero when not overloaded.
+    pub fn overloaded_for(&self) -> f32 {
+        self.for_s
+    }
+
+    /// Forget everything, for a new Play session.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+impl FixedTimestep {
+    /// Drop whatever is banked beyond the part of a step already in progress,
+    /// keeping `alpha`. What [`OverloadPolicy::SlowMotion`] does after the one
+    /// tick it allows.
+    pub fn drop_backlog(&mut self) {
+        if self.accumulator >= self.step {
+            self.accumulator %= self.step;
+        }
+    }
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::*;
+
+    const STEP: f32 = 1.0 / 60.0;
+
+    /// A tick that costs double its slice is an overload once it has lasted a
+    /// few frames, and stops being one only once it is well under the slice.
+    #[test]
+    fn a_sustained_cost_over_the_slice_is_an_overload_and_one_hitch_is_not() {
+        let mut l = TickLoad::default();
+        // Settled and cheap.
+        for _ in 0..10 {
+            assert_eq!(l.record(1, 5.0, STEP, STEP), None);
+        }
+        // One 200 ms hitch moves the average but not past the slice for good.
+        let hitch = l.record(1, 200.0, STEP, 0.2);
+        let after: Vec<_> = (0..10).filter_map(|_| l.record(1, 5.0, STEP, STEP)).collect();
+        assert_eq!((hitch, after.as_slice()), (None, &[][..]), "a single hitch read as an overload");
+
+        let mut entered = 0;
+        for _ in 0..20 {
+            if l.record(8, 8.0 * 31.0, STEP, 0.25) == Some(LoadChange::Entered) {
+                entered += 1;
+            }
+        }
+        assert_eq!(entered, 1, "entered once, not every frame");
+        assert!(l.overloaded() && l.tick_ms() > 25.0, "tick {}", l.tick_ms());
+        assert!(l.overloaded_for() > 1.0);
+
+        // Just under the slice is not enough to leave: the line needs margin.
+        for _ in 0..30 {
+            l.record(1, 16.0, STEP, 0.03);
+        }
+        assert!(l.overloaded(), "left the state sitting on the line");
+        let mut left = 0;
+        for _ in 0..30 {
+            if l.record(1, 6.0, STEP, STEP) == Some(LoadChange::Left) {
+                left += 1;
+            }
+        }
+        assert_eq!(left, 1);
+        assert!(!l.overloaded() && l.overloaded_for() == 0.0);
+    }
+
+    #[test]
+    fn dropping_the_backlog_keeps_the_step_in_progress() {
+        let mut t = FixedTimestep::new(60.0);
+        t.accumulate(STEP * 5.5);
+        assert!(t.tick());
+        t.drop_backlog();
+        assert!(!t.tick(), "a banked tick survived");
+        assert!((t.alpha() - 0.5).abs() < 1e-3, "alpha {}", t.alpha());
+    }
+}
+
 // --- The wall clock ------------------------------------------------------------
 //
 // `std::time::Instant::now()` compiles for `wasm32-unknown-unknown` and panics

@@ -18,6 +18,11 @@ pub(crate) struct PerfSnapshot {
     scripts: Vec<(String, floptle_core::profile::Cost)>,
     accounted_ms: f32,
     counts: floptle_core::profile::Counts,
+    /// The fixed tick costs more than the time it simulates.
+    overloaded: bool,
+    /// Last frame's script-mirror work, and why it last rebuilt.
+    mirror: floptle_core::profile::MirrorWork,
+    mirror_cause: Option<String>,
     /// How the frames are actually arriving, and whether dt snapping is
     /// managing to do anything about it.
     pub(crate) pacing: Pacing,
@@ -60,6 +65,9 @@ impl PerfSnapshot {
             scripts: p.scripts(),
             accounted_ms: p.accounted_ms().unwrap_or(0.0),
             counts: p.counts(),
+            overloaded: p.overloaded(),
+            mirror: p.mirror_work(),
+            mirror_cause: p.mirror_cause().map(str::to_owned),
         }
     }
 }
@@ -506,6 +514,30 @@ pub(crate) fn perf_readout(ui: &mut egui::Ui, s: &PerfSnapshot) {
     ui.add_space(4.0);
     pacing_readout(ui, &s.pacing);
     ui.add_space(4.0);
+    let warn = egui::Color32::from_rgb(230, 150, 90);
+    if s.overloaded {
+        ui.label(
+            egui::RichText::new(
+                "The fixed tick costs more than the time it simulates: the game is \
+                 playing in slow motion. The largest rows below are why.",
+            )
+            .color(warn),
+        );
+    }
+    // A rebuild is O(scene) and lands in `mirror` with no script to blame,
+    // so name what caused it when it is happening every frame.
+    if s.mirror.rebuilds > 0
+        && let Some(cause) = &s.mirror_cause
+    {
+        ui.label(
+            egui::RichText::new(format!(
+                "The scripts' copy of the scene was rebuilt {}× last frame (cost grows with \
+                 the scene). Last cause: {cause}.",
+                s.mirror.rebuilds
+            ))
+            .color(warn),
+        );
+    }
     egui::Grid::new("perf-buckets").num_columns(3).striped(true).show(ui, |ui| {
         ui.label(egui::RichText::new("").strong());
         ui.label(egui::RichText::new("avg ms").strong());

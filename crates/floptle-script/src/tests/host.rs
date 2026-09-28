@@ -80,6 +80,135 @@ fn defaults_are_read() {
     assert!(d.iter().any(|(k, v)| k == "amplitude" && (*v - 0.3).abs() < 1e-6));
 }
 
+/// A level of `n` plain named nodes plus a camera named `Cam`, and a script
+/// node running `kind`.
+fn level_with_camera(kind: &str, n: usize) -> (World, Entity, Entity) {
+    let (mut world, e) = world_with_script(kind);
+    for i in 0..n {
+        let s = world.spawn();
+        world.insert(s, Transform::IDENTITY);
+        world.insert(s, floptle_core::Name(format!("Prop {i}")));
+        world.insert(s, Visible(true));
+    }
+    let cam = world.spawn();
+    world.insert(cam, Transform::IDENTITY);
+    world.insert(cam, floptle_core::Name("Cam".into()));
+    world.insert(
+        cam,
+        Matter::Camera {
+            fov_y: 1.0,
+            active: true,
+            target: String::new(),
+            cull_mask: u32::MAX,
+            target_w: 0,
+            target_h: 0,
+            target_hz: 0.0,
+            ortho: false,
+            ortho_height: 10.0,
+        },
+    );
+    (world, e, cam)
+}
+
+/// **A component value written every frame re-reads that one node, not the
+/// scene.** A camera's FOV eased by speed, a light's shimmer, a vignette
+/// pulse: each used to rebuild the whole mirror on every pass, which cost
+/// milliseconds on a 1,361-node level and grew as the level grew, while the
+/// profiler named no script. The write must still land, and a second script
+/// reading it back must see the new value.
+#[test]
+fn a_component_write_every_frame_refreshes_one_node_not_the_whole_mirror() {
+    let dir = std::env::temp_dir().join(format!("floptle_mirror_fov_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "zoomer",
+        "t = 0\nfunction update(node, dt)\n  t = t + 1\n  find('Cam'):getComponent('Camera').fovY = 1 + t * 0.01\n  node.x = find('Cam2'):getComponent('Camera').fovY\nend\n",
+    );
+    let (mut world, e, cam) = level_with_camera("zoomer", 2000);
+    // A second camera the script only reads, changed from outside the script:
+    // the refreshed mirror has to serve the new value, not the one it held.
+    let cam2 = world.spawn();
+    world.insert(cam2, Transform::IDENTITY);
+    world.insert(cam2, floptle_core::Name("Cam2".into()));
+    let m = world.get::<Matter>(cam).unwrap().clone();
+    world.insert(cam2, m);
+    let mut host = ScriptHost::new();
+    host.profile().borrow_mut().enable(true);
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    crate::host::FULL_SYNCS.with(|c| c.set(0));
+    for f in 1..=5 {
+        if let Some(Matter::Camera { fov_y, .. }) = world.get_mut::<Matter>(cam2) {
+            *fov_y = 2.0 + f as f32 * 0.1;
+        }
+        host.run(&mut world, &dir, 1.0 / 60.0, f as f32 / 60.0);
+        host.run_fixed(&mut world, 1.0 / 60.0, f as f32 / 60.0);
+        host.run_late(&mut world, 1.0 / 60.0, f as f32 / 60.0);
+        host.profile().borrow_mut().end_frame();
+    }
+    assert_eq!(
+        crate::host::FULL_SYNCS.with(|c| c.get()),
+        0,
+        "a per-frame FOV write rebuilt the mirror (cause: {:?})",
+        host.profile().borrow().mirror_cause()
+    );
+    let Some(Matter::Camera { fov_y, .. }) = world.get::<Matter>(cam) else { panic!("camera gone") };
+    assert!((fov_y - 1.06).abs() < 1e-4, "the write did not land: fovY {fov_y}");
+    let x = world.get::<Transform>(e).unwrap().translation.x;
+    assert!((x - 2.5).abs() < 1e-4, "the mirror served a stale fovY: {x}");
+    let work = host.profile().borrow().mirror_work();
+    assert_eq!(work.rebuilds, 0);
+    assert!(work.refreshed >= 1 && work.refreshed <= 8, "refreshed {} nodes", work.refreshed);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A write of the value a node already has costs no rebuild.** Scripts
+/// write `bar.visible = show` every frame, `show` usually unchanged.
+#[test]
+fn a_same_value_visible_write_every_frame_does_not_rebuild_the_mirror() {
+    let dir = std::env::temp_dir().join(format!("floptle_mirror_vis_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "hider",
+        "function update(node, dt)\n  local p = find('Prop 7')\n  p.visible = p.visible\nend\nfunction fixedUpdate(node, dt)\n  local p = find('Prop 9')\n  p.visible = false\nend\n",
+    );
+    let (mut world, _e, _cam) = level_with_camera("hider", 50);
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    crate::host::FULL_SYNCS.with(|c| c.set(0));
+    for f in 1..=4 {
+        host.run(&mut world, &dir, 1.0 / 60.0, f as f32 / 60.0);
+        host.run_fixed(&mut world, 1.0 / 60.0, f as f32 / 60.0);
+        host.run_late(&mut world, 1.0 / 60.0, f as f32 / 60.0);
+    }
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    assert_eq!(crate::host::FULL_SYNCS.with(|c| c.get()), 0, "a visibility write rebuilt the mirror");
+    let p9 = world.query::<floptle_core::Name>().find(|(_, n)| n.0 == "Prop 9").unwrap().0;
+    assert_eq!(world.get::<Visible>(p9).map(|v| v.0), Some(false), "the real write did not land");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A structural change still rebuilds, and says what it was.** The refresh
+/// path must not swallow a rename: `find` has to see the new name.
+#[test]
+fn a_rebuild_names_the_node_and_the_change_that_caused_it() {
+    let dir = std::env::temp_dir().join(format!("floptle_mirror_cause_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(&dir, "idle", "function update(node, dt) end\n");
+    let (mut world, _e, cam) = level_with_camera("idle", 3);
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    crate::host::FULL_SYNCS.with(|c| c.set(0));
+    world.insert(cam, floptle_core::Tags(vec!["main".into()]));
+    host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+    assert_eq!(crate::host::FULL_SYNCS.with(|c| c.get()), 1, "a tag change must rebuild");
+    let cause = host.profile().borrow().mirror_cause().unwrap_or_default().to_string();
+    assert!(cause.contains("tags") && cause.contains("'Cam'"), "cause: {cause}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// **When only transforms moved, the mirror is refreshed, not rebuilt** —
 /// and the refresh is real: a handle reads the moved value.
 ///

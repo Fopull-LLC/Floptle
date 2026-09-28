@@ -30,6 +30,7 @@ pub(crate) fn body_state(r: &floptle_physics::BodyReport) -> floptle_script::Bod
         pos: [r.pos.x, r.pos.y, r.pos.z],
         ground_normal: r.ground_normal.map(|n| n.to_array()),
         wall_normal: r.wall_normal.map(|n| n.to_array()),
+        asleep: r.asleep,
     }
 }
 
@@ -943,6 +944,10 @@ impl Editor {
             // and no stale per-tick input edges from before Play.
             self.game_tick.reset();
             self.game_tick_no = 0;
+            self.tick_load.reset();
+            self.tick_overload_said = false;
+            self.tick_overload_report_in = None;
+            self.script_host.profile().borrow_mut().set_overloaded(false);
             self.tick_keys_pressed.clear();
             self.tick_keys_released.clear();
             self.tick_buttons_pressed = [false; 3];

@@ -14,8 +14,8 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 149
-- [node — transform & body fields](#node--transform--body-fields) — 37
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 154
+- [node — transform & body fields](#node--transform--body-fields) — 38
 - [node — methods & handles](#node--methods--handles) — 28
 - [vectors, directions & easing](#vectors-directions--easing) — 49
 - [scene lookups & raycast](#scene-lookups--raycast) — 16
@@ -35,7 +35,7 @@ each group, and meant to be searched.
 - [vessels — assembly.*](#vessels--assembly) — 14
 - [the camera & the screen](#the-camera--the-screen) — 7
 - [physics controls — pause & step](#physics-controls--pause--step) — 4
-- [frame cost — perf.*](#frame-cost--perf) — 11
+- [frame cost — perf.*](#frame-cost--perf) — 13
 - [accessibility — access.*](#accessibility--access) — 11
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
@@ -336,6 +336,26 @@ end
 ### `perf`
 
 Where YOUR frame time goes — per subsystem and per script, readable from Lua so a game can assert its own budget in a smoke test rather than filing an engine ticket. Off by default and free while off: call perf.enable(true) first. Every getter RAISES while collection is off rather than answering 0, because a budget assertion that passes on no data is worse than no assertion.
+
+### `script`
+
+Turning a script down when nobody needs it: script.sleep stops the engine calling its hooks, script.setRate runs its fixedUpdate less often. A level with dozens of NPCs pays for every one of them every tick unless the far ones are asleep.
+
+### `script.asleep`
+
+script.asleep(node, kind) → true while that script is asleep (script.sleep).
+
+### `script.setRate`
+
+script.setRate(hz) — run this script's fixedUpdate hz times a second instead of every tick, handing it the time since its last call as dt; nil or 0 goes back to every tick. script.setRate(hz, node, kind) sets another's. Nodes are staggered, so a crowd at 10 Hz doesn't all think on the same tick. For NPCs far enough away that nobody sees them react late.
+
+### `script.sleep`
+
+script.sleep() — stop calling this script's update, fixedUpdate and lateUpdate on this node until it is woken. The engine skips it entirely, so a sleeping NPC costs nothing a frame. Wakes on script.wake(node, kind), on a collision or trigger event on its node (the event is delivered, and wakes it), or on its own terms: script.sleep{ seconds = 2 } wakes after that much game time, script.sleep{ wakeWithin = 40 } once the active camera is within 40 m. Calling one of its functions from another script does NOT wake it — call script.wake there. Called from start(), the same frame's update is skipped too.
+
+### `script.wake`
+
+script.wake(node, kind) — wake that script on that node; script.wake(node) wakes every script on it. Harmless on one that is awake.
 
 ### `spawn`
 
@@ -698,6 +718,10 @@ voice.speaking(peer) — true while that peer's frames are arriving, for a HUD i
 voice.transmitting() — is the microphone open right now?
 
 ## node — transform & body fields
+
+### `node.asleep`
+
+True while the physics solver is skipping this rigidbody. Set it true to put the body to sleep now: it stops where it is and costs nothing until something wakes it (a node.vel write, a moving platform, or its ground going away — a body slept in mid-air wakes and falls at the next check). Set false to wake it. Better than switching it kinematic, which changes how it behaves rather than whether it is simulated. For far-away NPCs, pair it with script.sleep.
 
 ### `node.forward`
 
@@ -2823,7 +2847,7 @@ perf.buckets() → the bucket names, in frame order: scripts, mirror, physics, t
 
 ### `perf.counts`
 
-perf.counts() → { nodes=, culled=, instances=, draws=, chunks=, props=, particles=, effects=, effectsDropped=, lights=, lightsDropped=, voices= }. Readable even while collection is off, because counts are free to keep — and three of the four 'the engine is slow' reports this API exists for were answerable from one count alone (a scatter field asking for 117,000 props was one of them). The *Dropped pair is what a ceiling refused this frame: nonzero means the engine is cutting your look, which you should hear from a number rather than from a screenshot.
+perf.counts() → { nodes=, culled=, instances=, draws=, chunks=, props=, particles=, effects=, effectsDropped=, lights=, lightsDropped=, voices=, mirrorRebuilds=, mirrorRefreshed= }. Readable even while collection is off, because counts are free to keep — and three of the four 'the engine is slow' reports this API exists for were answerable from one count alone (a scatter field asking for 117,000 props was one of them). The *Dropped pair is what a ceiling refused this frame: nonzero means the engine is cutting your look, which you should hear from a number rather than from a screenshot. mirrorRebuilds is how many times last frame the scripts' copy of the scene was rebuilt from scratch (each costs time in proportion to the whole scene, in the mirror bucket); mirrorRefreshed is how many single nodes were re-read because a component of theirs changed, which costs only those nodes.
 
 ### `perf.enable`
 
@@ -2833,9 +2857,17 @@ perf.enable(true) — start collecting; perf.enable(false) stops and CLEARS the 
 
 perf.enabled() — is anything being measured? Safe to call while off, so a script can ask before reading.
 
+### `perf.mirrorCause`
+
+perf.mirrorCause() → why the scripts' copy of the scene was last rebuilt from scratch — the node and what changed on it, e.g. "the tags changed on 'Crate 4' (node 812) (a Tags write)" — or nil if it never has. Changing a component's value (a camera's fovY, a light's intensity, visible) re-reads only that node; spawning, destroying, renaming, reparenting, retagging or attaching a script rebuilds the whole copy. If perf.counts().mirrorRebuilds is nonzero every frame, this names what is doing it. Readable while collection is off.
+
 ### `perf.ms`
 
 perf.ms("scripts") — that bucket's rolling average, in milliseconds. An unknown bucket names every accepted value rather than answering 0.
+
+### `perf.overloaded`
+
+perf.overloaded() → true while the fixed tick costs more than the time it simulates: this machine can't run the game in real time. The game then plays in slow motion (one tick per frame) rather than dropping to a few frames a second — unless project.ron says tick_overload: CatchUp, or it is a networked session, which must keep up. For a loading screen that would otherwise wait forever for calm frames: say the machine is struggling instead. Readable while collection is off.
 
 ### `perf.scriptMs`
 

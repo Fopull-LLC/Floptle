@@ -157,6 +157,8 @@ mod shadow;
 mod sprite2d;
 #[cfg(test)]
 mod spawn_scaling;
+#[cfg(test)]
+mod tick_overload_tests;
 #[cfg(feature = "editor-ui")]
 mod lua_format;
 #[cfg(feature = "editor-ui")]
@@ -2732,6 +2734,13 @@ struct Editor {
     /// tick counter (the netcode timebase). Reset on Play.
     game_tick: floptle_core::FixedTimestep,
     game_tick_no: u64,
+    /// What a tick really costs, and whether the game has fallen behind real
+    /// time. Reset on Play. See `Editor::note_tick_load`.
+    tick_load: floptle_core::TickLoad,
+    /// The overload has been reported this Play session — or, while `Some`,
+    /// will be once the profiler has this many more frames to name the costs.
+    tick_overload_said: bool,
+    tick_overload_report_in: Option<u32>,
     /// Frame-step: while `paused` freezes the gameplay tick, this releases exactly this
     /// many ticks — scripts, physics and animation each advancing one step. A fighter is
     /// authored in single frames, and "is this jab 4 frames of startup or 5" cannot be

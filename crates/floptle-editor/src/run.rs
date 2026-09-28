@@ -133,20 +133,91 @@ struct Timing {
     samples: Vec<f32>,
     /// Steps that were taken without the clock moving. Reported, never averaged in.
     paused: u32,
+    /// Per profiler bucket, one entry per simulating step: what the step was
+    /// made of, so "the engine got slower" and "my script got slower" read
+    /// differently.
+    buckets: Vec<Vec<f32>>,
+    /// Per script kind, the steps it ran in. A step it did not run in cost it
+    /// nothing, which the report pads back in.
+    scripts: std::collections::HashMap<String, Vec<f32>>,
+    /// Live nodes when the run ended.
+    nodes: usize,
 }
 
 impl Timing {
     fn new(capacity: u32) -> Self {
-        Timing { samples: Vec::with_capacity(capacity as usize), paused: 0 }
+        Timing {
+            samples: Vec::with_capacity(capacity as usize),
+            paused: 0,
+            buckets: floptle_core::profile::Bucket::ALL
+                .iter()
+                .map(|_| Vec::with_capacity(capacity as usize))
+                .collect(),
+            scripts: std::collections::HashMap::new(),
+            nodes: 0,
+        }
     }
 
-    /// Record one step. `advanced` is whether the session clock moved.
-    fn push(&mut self, ms: f32, advanced: bool) {
+    /// Record one step. `advanced` is whether the session clock moved;
+    /// `profile` is the frame in progress, read before it is folded.
+    fn push(&mut self, ms: f32, advanced: bool, profile: &floptle_core::profile::FrameProfile) {
         if advanced {
             self.samples.push(ms);
+            for (i, b) in floptle_core::profile::Bucket::ALL.iter().enumerate() {
+                self.buckets[i].push(profile.frame_total(*b));
+            }
+            for (kind, ms) in profile.frame_scripts() {
+                match self.scripts.get_mut(kind) {
+                    Some(v) => v.push(ms),
+                    None => {
+                        self.scripts.insert(kind.to_owned(), vec![ms]);
+                    }
+                }
+            }
         } else {
             self.paused += 1;
         }
+    }
+
+    /// Steps that took longer than the fixed tick they simulate. Every one of
+    /// those, in a window, is the game falling behind real time.
+    fn overloaded(&self) -> usize {
+        let slice = DT * 1000.0;
+        self.samples.iter().filter(|&&ms| ms > slice).count()
+    }
+
+    /// `(bucket name, p50, max)` for each bucket that cost anything, costliest
+    /// p50 first.
+    fn bucket_rows(&self) -> Vec<(&'static str, f32, f32)> {
+        let mut rows: Vec<(&'static str, f32, f32)> = floptle_core::profile::Bucket::ALL
+            .iter()
+            .zip(&self.buckets)
+            .filter_map(|(b, v)| {
+                let mut v = v.clone();
+                v.sort_by(f32::total_cmp);
+                let max = pct(&v, 1.0);
+                (max > 0.0).then(|| (b.name(), pct(&v, 0.5), max))
+            })
+            .collect();
+        rows.sort_by(|a, b| b.1.total_cmp(&a.1).then(b.2.total_cmp(&a.2)));
+        rows
+    }
+
+    /// `(script kind, p50, max)` over every simulating step, costliest first.
+    fn script_rows(&self) -> Vec<(String, f32, f32)> {
+        let n = self.samples.len();
+        let mut rows: Vec<(String, f32, f32)> = self
+            .scripts
+            .iter()
+            .map(|(k, v)| {
+                let mut v = v.clone();
+                v.resize(n.max(v.len()), 0.0);
+                v.sort_by(f32::total_cmp);
+                (k.clone(), pct(&v, 0.5), pct(&v, 1.0))
+            })
+            .collect();
+        rows.sort_by(|a, b| b.1.total_cmp(&a.1).then(b.2.total_cmp(&a.2)).then(a.0.cmp(&b.0)));
+        rows
     }
 
     /// The sorted samples. Sorting a copy, so `samples` keeps the order the
@@ -423,6 +494,12 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
     // Allocated up front, before the first step, so the loop never grows a Vec
     // inside the region it is timing.
     let mut clock = timing.then(|| Timing::new(asked));
+    // The breakdown under the step cost comes from the profiler, which is off
+    // until something asks. Turned on before the first step so the first
+    // step's buckets are there too.
+    if timing {
+        ed.script_host.profile().borrow_mut().enable(true);
+    }
     // `--alloc`: how much Lua heap a frame makes. Measured across a window in
     // the middle of the run — after the opening frames, which allocate the
     // world rather than a steady frame — with the collector stopped, because
@@ -501,7 +578,8 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
         // and charging the game for it would make the number depend on how
         // chatty the project's `print`s are.
         if let Some(c) = clock.as_mut() {
-            c.push(began.elapsed().as_secs_f32() * 1000.0, ed.play_t > was);
+            let ms = began.elapsed().as_secs_f32() * 1000.0;
+            c.push(ms, ed.play_t > was, &ed.script_host.profile().borrow());
         }
         steps += 1;
         // The same drain the editor's frame does, for the same reason it does it
@@ -543,6 +621,9 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
     ed.drain_script_logs();
 
     let simulated = (ed.play_t - t0).max(0.0);
+    if let Some(c) = clock.as_mut() {
+        c.nodes = ed.world.len();
+    }
     report(
         &opened,
         &ed.console,
@@ -641,6 +722,45 @@ impl Pacer {
             self.next = now + period;
         }
     }
+}
+
+/// The lines under the `--timing` total: whether the game kept up, what the
+/// step was made of, and which scripts cost the most.
+fn breakdown_lines(c: &Timing) -> Vec<String> {
+    let mut out = Vec::new();
+    if c.samples.is_empty() {
+        return out;
+    }
+    let over = c.overloaded();
+    if over > 0 {
+        out.push(format!(
+            "  overloaded: {over} of {} step(s) cost more than the {:.1} ms tick slice — on this \
+             machine the game falls behind real time there",
+            c.samples.len(),
+            DT * 1000.0
+        ));
+    }
+    let buckets = c.bucket_rows();
+    if !buckets.is_empty() {
+        let row: Vec<String> =
+            buckets.iter().map(|(b, p50, max)| format!("{b} {p50:.2}/{max:.2}")).collect();
+        out.push(format!("  by bucket, p50/max ms: {}", row.join(" · ")));
+    }
+    let scripts = c.script_rows();
+    if !scripts.is_empty() {
+        const TOP: usize = 8;
+        let mut row: Vec<String> = scripts
+            .iter()
+            .take(TOP)
+            .map(|(k, p50, max)| format!("{k} {p50:.2}/{max:.2}"))
+            .collect();
+        if scripts.len() > TOP {
+            row.push(format!("+{} more", scripts.len() - TOP));
+        }
+        out.push(format!("  by script, p50/max ms: {}", row.join(" · ")));
+    }
+    out.push(format!("  nodes: {}", c.nodes));
+    out
 }
 
 /// The line `--timing` adds.
@@ -813,6 +933,17 @@ fn report(
                 "p95_ms": pct(&sorted, 0.95),
                 "p99_ms": pct(&sorted, 0.99),
                 "max_ms": pct(&sorted, 1.0),
+                // Steps that cost more than the tick they simulate: the game
+                // was running slower than real time on this machine.
+                "overloaded": c.overloaded(),
+                "tick_ms": DT * 1000.0,
+                "nodes": c.nodes,
+                "buckets": c.bucket_rows().iter().map(|(b, p50, max)| {
+                    serde_json::json!({"bucket": b, "p50_ms": p50, "max_ms": max})
+                }).collect::<Vec<_>>(),
+                "scripts": c.script_rows().iter().map(|(k, p50, max)| {
+                    serde_json::json!({"script": k, "p50_ms": p50, "max_ms": max})
+                }).collect::<Vec<_>>(),
             });
         }
         // Absent, not zero, when it was not asked for — the rule the timing
@@ -875,6 +1006,9 @@ fn report(
     }
     if let Some(c) = clock {
         floptle_say::say!("{}", timing_line(c));
+        for line in breakdown_lines(c) {
+            floptle_say::say!("{line}");
+        }
     }
     if let Some(a) = allocated {
         floptle_say::say!(
@@ -1365,6 +1499,38 @@ mod tests {
     /// The distribution here is the shape a real game has: mostly
     /// cheap, with a tail. A mean reads as comfortable; p95 does not, and a VM
     /// comparison that averaged its frames would call a collector pause a pass.
+    /// **The breakdown says what the step was made of, and whether it kept
+    /// up.** Four steps: two inside the tick, two over it. One script ran in
+    /// every step, another in one step only — its p50 is zero, not its one
+    /// sample, because the steps it skipped cost it nothing.
+    #[test]
+    fn the_breakdown_names_the_costliest_bucket_and_script_and_counts_the_overload() {
+        use floptle_core::profile::{Bucket, FrameProfile};
+        let mut c = Timing::new(4);
+        for (i, ms) in [10.0f32, 30.0, 12.0, 25.0].into_iter().enumerate() {
+            let mut p = FrameProfile::default();
+            p.enable(true);
+            p.record(Bucket::Physics, ms * 0.5);
+            p.record(Bucket::Mirror, 0.25);
+            p.record_script("enemy", ms * 0.25);
+            if i == 1 {
+                p.record_script("spawner", 9.0);
+            }
+            c.push(ms, true, &p);
+        }
+        c.nodes = 1361;
+        assert_eq!(c.overloaded(), 2);
+        let lines = breakdown_lines(&c);
+        let all = lines.join("\n");
+        assert!(all.contains("overloaded: 2 of 4 step(s)"), "{all}");
+        assert!(all.contains("16.7 ms tick slice"), "{all}");
+        let buckets = lines.iter().find(|l| l.contains("by bucket")).expect(&all);
+        assert!(buckets.contains("physics 6.00/15.00 · mirror 0.25/0.25"), "{buckets}");
+        let scripts = lines.iter().find(|l| l.contains("by script")).expect(&all);
+        assert!(scripts.contains("enemy 3.00/7.50 · spawner 0.00/9.00"), "{scripts}");
+        assert!(all.contains("nodes: 1361"), "{all}");
+    }
+
     #[test]
     fn the_tail_is_visible_where_a_mean_would_hide_it() {
         // Every figure distinct, so the line cannot pass by printing the wrong
@@ -1373,7 +1539,7 @@ mod tests {
         let mut c = Timing::new(100);
         for (n, ms) in [(50, 1.0f32), (45, 2.0), (4, 8.0), (1, 21.0)] {
             for _ in 0..n {
-                c.push(ms, true);
+                c.push(ms, true, &Default::default());
             }
         }
         assert_eq!(c.mean(), 1.93, "the mean of this run reads like a 2 ms frame");
@@ -1407,11 +1573,11 @@ mod tests {
         let mut c = Timing::new(20);
         // Ten paused steps: cheap, and not the game.
         for _ in 0..10 {
-            c.push(0.01, false);
+            c.push(0.01, false, &Default::default());
         }
         // Ten real ones at 5 ms.
         for _ in 0..10 {
-            c.push(5.0, true);
+            c.push(5.0, true, &Default::default());
         }
         assert_eq!(c.paused, 10);
         assert_eq!(c.sorted().len(), 10, "only the simulating steps are samples");
@@ -1432,7 +1598,7 @@ mod tests {
     fn a_run_that_never_advanced_reports_no_timing_rather_than_zeroes() {
         let mut c = Timing::new(4);
         for _ in 0..4 {
-            c.push(0.02, false);
+            c.push(0.02, false, &Default::default());
         }
         let line = timing_line(&c);
         assert!(line.contains("nothing to time"), "{line}");
@@ -1447,7 +1613,7 @@ mod tests {
     fn the_order_the_steps_ran_in_is_kept() {
         let mut c = Timing::new(4);
         for ms in [9.0, 1.0, 5.0, 3.0] {
-            c.push(ms, true);
+            c.push(ms, true, &Default::default());
         }
         assert_eq!(c.sorted(), vec![1.0, 3.0, 5.0, 9.0]);
         assert_eq!(c.samples, vec![9.0, 1.0, 5.0, 3.0], "the run's own order is not destroyed");

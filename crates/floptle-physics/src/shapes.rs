@@ -47,6 +47,16 @@ pub trait CollisionShape {
     fn bounds(&self) -> Option<(Vec3, f32)> {
         None
     }
+    /// An axis-aligned box `(min, max)` such that [`Self::distance`] at any
+    /// point is at least that point's distance to the box.
+    ///
+    /// Tighter than [`Self::bounds`] for anything long and thin — a 50 m
+    /// building's sphere is mostly empty air — and what lets a body skip a
+    /// shape it is nowhere near without asking it. `None` (the default) means
+    /// no such box, and the shape is always tested.
+    fn aabb(&self) -> Option<(Vec3, Vec3)> {
+        None
+    }
     /// The surface label of the nearest face to `p`, when this shape carries
     /// per-face labels at all.
     ///
@@ -739,6 +749,13 @@ fn ray_triangle(o: Vec3, rd: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
 /// the face. Resolved every substep, so a body never tunnels to the wrong side.
 pub struct TriMeshCollider {
     tris: Vec<[Vec3; 3]>,
+    /// Per triangle, parallel to `tris`: its unit normal and plane offset, and
+    /// its box. Each gives a cheap lower bound on the distance to the triangle,
+    /// which lets a query skip the closest-point test for a triangle that
+    /// cannot beat what it already has. A floor is hundreds of coplanar
+    /// triangles, and a point above it is the same height above every one.
+    planes: Vec<(Vec3, f32)>,
+    boxes: Vec<(Vec3, Vec3)>,
     /// A sphere around every triangle, for the world's broadphase.
     ///
     /// Without it a mesh was filed with an infinite radius and offered to
@@ -754,6 +771,9 @@ pub struct TriMeshCollider {
     /// inverted ranges are exactly what an empty mesh wants: the loops run zero
     /// times.
     cells: ((i32, i32, i32), (i32, i32, i32)),
+    /// Every vertex is inside this box. `distance` is to the nearest triangle,
+    /// so it is never less than the distance to the box.
+    aabb: (Vec3, Vec3),
     /// Per-triangle index into `labels`, parallel to `tris`. **Empty** when this
     /// mesh has no per-face labels, which is the ordinary case — an imported
     /// model is one surface as far as this crate is concerned.
@@ -768,7 +788,80 @@ pub struct TriMeshCollider {
     /// [`CollisionShape::face_label`].
     labels: Vec<String>,
     cell: f32,
-    grid: std::collections::HashMap<(i32, i32, i32), Vec<u32>>,
+    grid: CellGrid,
+}
+
+/// The mesh collider's triangle lists, one per cell.
+///
+/// A closest-point query looks at up to 125 cells, and a body on a mesh level
+/// asks dozens of those a tick, so the lookup is the hot path. Flat when the
+/// mesh's cell range is small enough to hold as an array — an index instead of
+/// a hash — and a map otherwise (a long thin diagonal wall's box is mostly
+/// empty cells). Both hand back the same lists in the same order, so which one
+/// a mesh gets never changes an answer.
+enum CellGrid {
+    /// `start[i]..start[i + 1]` indexes `items` for cell `i` of the range
+    /// `lo ..= lo + dims - 1`, x fastest.
+    Flat { lo: (i32, i32, i32), dims: (usize, usize, usize), start: Vec<u32>, items: Vec<u32> },
+    Sparse(std::collections::HashMap<(i32, i32, i32), Vec<u32>>),
+}
+
+impl CellGrid {
+    /// Cells a mesh may spend on a flat grid: 4 bytes each.
+    const FLAT_MAX: usize = 1 << 20;
+
+    fn build(map: std::collections::HashMap<(i32, i32, i32), Vec<u32>>) -> Self {
+        let Some(&first) = map.keys().next() else { return Self::Sparse(map) };
+        let (lo, hi) = map.keys().fold((first, first), |(lo, hi), k| {
+            ((lo.0.min(k.0), lo.1.min(k.1), lo.2.min(k.2)), (hi.0.max(k.0), hi.1.max(k.1), hi.2.max(k.2)))
+        });
+        let dims = (
+            (hi.0 - lo.0 + 1) as usize,
+            (hi.1 - lo.1 + 1) as usize,
+            (hi.2 - lo.2 + 1) as usize,
+        );
+        let cells = dims.0.saturating_mul(dims.1).saturating_mul(dims.2);
+        if cells > Self::FLAT_MAX || cells > (map.len() * 64).max(1 << 16) {
+            return Self::Sparse(map);
+        }
+        let mut start = vec![0u32; cells + 1];
+        let at = |k: &(i32, i32, i32)| {
+            (k.0 - lo.0) as usize + dims.0 * ((k.1 - lo.1) as usize + dims.1 * (k.2 - lo.2) as usize)
+        };
+        for (k, v) in &map {
+            start[at(k) + 1] = v.len() as u32;
+        }
+        for i in 1..start.len() {
+            start[i] += start[i - 1];
+        }
+        let mut items = vec![0u32; start[cells] as usize];
+        for (k, v) in &map {
+            let i = at(k);
+            items[start[i] as usize..start[i + 1] as usize].copy_from_slice(v);
+        }
+        Self::Flat { lo, dims, start, items }
+    }
+
+    /// The triangles registered in cell `c`, or `None` if it holds none.
+    #[inline]
+    fn get(&self, c: &(i32, i32, i32)) -> Option<&[u32]> {
+        match self {
+            Self::Flat { lo, dims, start, items } => {
+                let (x, y, z) = (c.0 - lo.0, c.1 - lo.1, c.2 - lo.2);
+                if x < 0 || y < 0 || z < 0 {
+                    return None;
+                }
+                let (x, y, z) = (x as usize, y as usize, z as usize);
+                if x >= dims.0 || y >= dims.1 || z >= dims.2 {
+                    return None;
+                }
+                let i = x + dims.0 * (y + dims.1 * z);
+                let (a, b) = (start[i] as usize, start[i + 1] as usize);
+                (b > a).then(|| &items[a..b])
+            }
+            Self::Sparse(m) => m.get(c).map(Vec::as_slice),
+        }
+    }
 }
 
 impl TriMeshCollider {
@@ -832,6 +925,10 @@ impl TriMeshCollider {
                 }
             }
         }
+        let aabb = tris.iter().flatten().fold(
+            (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+            |(lo, hi), v| (lo.min(*v), hi.max(*v)),
+        );
         let bound = if tris.is_empty() {
             (Vec3::ZERO, 0.0)
         } else {
@@ -855,7 +952,16 @@ impl TriMeshCollider {
                  (hi.0.max(k.0), hi.1.max(k.1), hi.2.max(k.2)))
             },
         );
-        Self { tris, tri_label: kept_label, labels, cell, grid, bound, cells }
+        let grid = CellGrid::build(grid);
+        let planes = tris
+            .iter()
+            .map(|[a, b, c]| {
+                let n = (*b - *a).cross(*c - *a).normalize();
+                (n, n.dot(*a))
+            })
+            .collect();
+        let boxes = tris.iter().map(|[a, b, c]| (a.min(*b).min(*c), a.max(*b).max(*c))).collect();
+        Self { tris, planes, boxes, tri_label: kept_label, labels, cell, grid, bound, cells, aabb }
     }
 
     /// Closest point on the mesh to `p` (its squared distance, and which triangle
@@ -898,6 +1004,11 @@ impl TriMeshCollider {
                     }
                     let Some(list) = self.grid.get(&(cx, cy, cz)) else { continue };
                     for &ti in list {
+                        // Past the bound, it can be neither the closest nor
+                        // tied with it; see `lower_d2`.
+                        if self.lower_d2(p, ti) > bound {
+                            continue;
+                        }
                         let t = self.tris[ti as usize];
                         let q = closest_point_on_triangle(p, t[0], t[1], t[2]);
                         let d2 = (p - q).length_squared();
@@ -918,10 +1029,32 @@ impl TriMeshCollider {
     fn cell_best_d2(&self, p: Vec3, c: (i32, i32, i32), seed: f32) -> f32 {
         let Some(list) = self.grid.get(&c) else { return seed };
         list.iter().fold(seed, |acc, &ti| {
+            if self.lower_d2(p, ti) > acc {
+                return acc;
+            }
             let t = self.tris[ti as usize];
             let d2 = (p - closest_point_on_triangle(p, t[0], t[1], t[2])).length_squared();
             if d2.is_finite() && d2 < acc { d2 } else { acc }
         })
+    }
+
+    /// A squared distance from `p` that triangle `ti` is certainly not closer
+    /// than: the larger of its plane's and its box's. Skipping a triangle whose
+    /// bound is already past the best leaves the answer bit-identical,
+    /// triangle index included — as long as the bound never lands above the
+    /// distance the full test would compute. Both are rounded, so the bound is
+    /// pulled in by a tolerance scaled to the coordinates (a point exactly on
+    /// a vertex is distance 0 from it, and its plane reads 1e-9) and then by a
+    /// thousandth.
+    #[inline]
+    fn lower_d2(&self, p: Vec3, ti: u32) -> f32 {
+        let (n, off) = self.planes[ti as usize];
+        let tol = 1e-5 * (1.0 + p.abs().max_element() + off.abs());
+        let plane = ((n.dot(p) - off).abs() - tol).max(0.0);
+        let (lo, hi) = self.boxes[ti as usize];
+        let out = ((lo - p).max(p - hi).max(Vec3::ZERO).length() - tol).max(0.0);
+        let d = plane.max(out);
+        d * d * 0.999
     }
 
     /// Closest point on the mesh to `p`, and its squared distance.
@@ -977,6 +1110,11 @@ impl TriMeshCollider {
 impl CollisionShape for TriMeshCollider {
     fn bounds(&self) -> Option<(Vec3, f32)> {
         Some(self.bound)
+    }
+    fn aabb(&self) -> Option<(Vec3, Vec3)> {
+        // An empty mesh's box is inverted (+inf..-inf), which every gap test
+        // reads as infinitely far: correct, since it has nothing to touch.
+        Some(self.aabb)
     }
     fn distance(&self, p: Vec3) -> f32 {
         // No nearby triangle → far away (no collision). Unsigned, so always ≥ 0.
@@ -1270,6 +1408,139 @@ mod mesh_bound_tests {
         // And it is tight enough to be worth having: a probe well away from
         // the mesh must fall outside it.
         assert!((Vec3::new(-50.0, 0.0, -50.0) - c).length() > r);
+    }
+
+    /// The closest-point walk with none of its skips: every cell of the block,
+    /// every triangle in it, first strictly-closer wins.
+    fn nearest_reference(m: &TriMeshCollider, p: Vec3) -> Option<(Vec3, f32, u32)> {
+        let c = cell_coord(p, m.cell);
+        let s = TriMeshCollider::SEARCH;
+        let mut best: Option<(Vec3, f32, u32)> = None;
+        for cz in c.2 - s..=c.2 + s {
+            for cy in c.1 - s..=c.1 + s {
+                for cx in c.0 - s..=c.0 + s {
+                    let Some(list) = m.grid.get(&(cx, cy, cz)) else { continue };
+                    for &ti in list {
+                        let t = m.tris[ti as usize];
+                        let q = closest_point_on_triangle(p, t[0], t[1], t[2]);
+                        let d2 = (p - q).length_squared();
+                        if d2.is_finite() && best.is_none_or(|(_, bd, _)| d2 < bd) {
+                            best = Some((q, d2, ti));
+                        }
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// The walk as it was before triangles could be skipped: the cell skips
+    /// and the seeded bound, nothing else.
+    fn nearest_cells_only(m: &TriMeshCollider, p: Vec3) -> Option<(Vec3, f32, u32)> {
+        let c = cell_coord(p, m.cell);
+        let s = TriMeshCollider::SEARCH;
+        let mut best: Option<(Vec3, f32, u32)> = None;
+        let mut bound = m.grid.get(&c).map_or(f32::INFINITY, |list| {
+            list.iter().fold(f32::INFINITY, |acc, &ti| {
+                let t = m.tris[ti as usize];
+                let d2 = (p - closest_point_on_triangle(p, t[0], t[1], t[2])).length_squared();
+                if d2.is_finite() && d2 < acc { d2 } else { acc }
+            })
+        });
+        let (lo, hi) = m.cells;
+        for cz in (c.2 - s).max(lo.2)..=(c.2 + s).min(hi.2) {
+            for cy in (c.1 - s).max(lo.1)..=(c.1 + s).min(hi.1) {
+                for cx in (c.0 - s).max(lo.0)..=(c.0 + s).min(hi.0) {
+                    if cell_min_dist2(p, (cx, cy, cz), m.cell) > bound {
+                        continue;
+                    }
+                    let Some(list) = m.grid.get(&(cx, cy, cz)) else { continue };
+                    for &ti in list {
+                        let t = m.tris[ti as usize];
+                        let q = closest_point_on_triangle(p, t[0], t[1], t[2]);
+                        let d2 = (p - q).length_squared();
+                        if d2.is_finite() && best.is_none_or(|(_, bd, _)| d2 < bd) {
+                            best = Some((q, d2, ti));
+                            bound = bound.min(d2);
+                        }
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// **Every skip in the mesh query is exact.** Physics resimulates rollback
+    /// ticks and needs the same answer, bit for bit, whichever cells and
+    /// triangles the query was able to rule out. Checked over a subdivided
+    /// floor (hundreds of coplanar triangles: every one the same height below
+    /// a point), a wall, and points on the surface, on shared edges and in the
+    /// air:
+    ///
+    /// * the point and distance equal a walk with no skips at all;
+    /// * point, distance and triangle equal the walk before triangles could be
+    ///   skipped. Which of two triangles meeting at a vertex a point is
+    ///   nearest to is an exact tie, and the cell skips already broke those
+    ///   differently from the unskipped walk (deterministically, so rollback
+    ///   never minded); skipping triangles must not break them differently
+    ///   again.
+    #[test]
+    fn the_pruned_mesh_query_answers_exactly_what_the_full_walk_does() {
+        let mut verts = Vec::new();
+        let mut idx = Vec::new();
+        // A 24 m floor of 0.75 m quads, gently warped so it is not all one plane.
+        let n = 32u32;
+        for z in 0..=n {
+            for x in 0..=n {
+                let (fx, fz) = (x as f32 * 0.75 - 12.0, z as f32 * 0.75 - 12.0);
+                verts.push(Vec3::new(fx, 0.02 * (fx * 0.7).sin() * (fz * 0.3).cos(), fz));
+            }
+        }
+        for z in 0..n {
+            for x in 0..n {
+                let a = z * (n + 1) + x;
+                idx.extend([a, a + 1, a + n + 1, a + 1, a + n + 2, a + n + 1]);
+            }
+        }
+        // A wall standing on it.
+        let w = verts.len() as u32;
+        verts.extend([
+            Vec3::new(-3.0, 0.0, 2.0),
+            Vec3::new(3.0, 0.0, 2.0),
+            Vec3::new(3.0, 4.0, 2.0),
+            Vec3::new(-3.0, 4.0, 2.0),
+        ]);
+        idx.extend([w, w + 1, w + 2, w, w + 2, w + 3]);
+        let m = TriMeshCollider::new(&verts, &idx);
+
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / (1u64 << 24) as f32
+        };
+        let mut probes: Vec<Vec3> = (0..6000)
+            .map(|_| Vec3::new(rnd() * 30.0 - 15.0, rnd() * 7.0 - 1.5, rnd() * 30.0 - 15.0))
+            .collect();
+        // Exactly on vertices and edge midpoints: the ties.
+        for t in m.tris.iter().step_by(37) {
+            probes.extend([t[0], (t[0] + t[1]) * 0.5, (t[1] + t[2]) * 0.5 + Vec3::Y * 0.4]);
+        }
+        let mut hits = 0;
+        for p in probes {
+            let got = m.nearest_tri(p);
+            let bits = |r: Option<(Vec3, f32, u32)>| r.map(|(q, d2, ti)| (q.to_array().map(f32::to_bits), d2.to_bits(), ti));
+            assert_eq!(bits(got), bits(nearest_cells_only(&m, p)), "at {p}: differs from the cell-skip walk");
+            let full = nearest_reference(&m, p);
+            assert_eq!(
+                bits(got).map(|(q, d2, _)| (q, d2)),
+                bits(full).map(|(q, d2, _)| (q, d2)),
+                "at {p}: a different point than the full walk"
+            );
+            hits += usize::from(got.is_some());
+        }
+        assert!(hits > 3000, "the probes mostly missed the mesh ({hits}), so they proved little");
     }
 }
 

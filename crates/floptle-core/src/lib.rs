@@ -38,7 +38,7 @@ pub mod tile;
 pub mod time;
 pub mod transform;
 
-pub use ecs::{Entity, World};
+pub use ecs::{Change, ChangeCursor, ChangeKind, Entity, World};
 pub use layers::Layers;
 pub use material::{Material, ObjectMaterials, Retro, Shading, Tiling, Tint};
 pub use matter::{
@@ -63,7 +63,7 @@ pub use tile::{
 };
 pub use script::{ScriptInst, Scripts};
 pub use origin::FloatingOrigin;
-pub use time::{FixedTimestep, Time};
+pub use time::{FixedTimestep, LoadChange, OverloadPolicy, Time, TickLoad};
 pub use transform::Transform;
 
 /// Engine-wide version string, surfaced in the editor title bar and crash logs.

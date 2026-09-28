@@ -161,8 +161,33 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
             // can reach them, which is the answer a 2D game most wants to be
             // able to check.
             out.set("flat2d", c.flat2d)?;
+            // The script mirror, last frame: whole rebuilds (O(scene) each)
+            // and single nodes re-read because a component of theirs changed.
+            // Rebuilds climbing every frame is something structural changing
+            // every frame, and `perf.mirrorCause()` names it.
+            let m = p.borrow().mirror_work();
+            out.set("mirrorRebuilds", m.rebuilds)?;
+            out.set("mirrorRefreshed", m.refreshed)?;
             Ok(out)
         })?,
+    )?;
+
+    // perf.overloaded() -> true while the fixed tick costs more than the time
+    // it simulates: this machine can't run the game in real time, and (unless
+    // the project says CatchUp) it is playing in slow motion. For a loading
+    // screen that would otherwise wait forever for calm frames.
+    let p = profile.clone();
+    t.set("overloaded", lua.create_function(move |_, ()| Ok(p.borrow().overloaded()))?)?;
+
+    // perf.mirrorCause() -> why the script mirror last rebuilt from scratch,
+    // naming the node and what changed on it; nil if it never has.
+    //
+    // A rebuild costs time proportional to the whole scene and shows up in the
+    // `mirror` bucket, not under any script — this is how to find who caused it.
+    let p = profile.clone();
+    t.set(
+        "mirrorCause",
+        lua.create_function(move |_, ()| Ok(p.borrow().mirror_cause().map(str::to_owned)))?,
     )?;
 
     // perf.accountedMs() -> the buckets added up.
@@ -236,7 +261,7 @@ fn require_on(
 /// against this list — so a getter added later cannot quietly default to
 /// answering zero without somebody deciding it should.
 #[cfg(test)]
-const READABLE_WHILE_OFF: &[&str] = &["enable", "enabled", "buckets", "counts"];
+const READABLE_WHILE_OFF: &[&str] = &["enable", "enabled", "buckets", "counts", "mirrorCause", "overloaded"];
 
 #[cfg(test)]
 mod tests {

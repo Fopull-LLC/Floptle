@@ -70,6 +70,23 @@ impl AnchoredCollider {
         self.shape.bounds().map(|(c, r)| (c + self.offset, r))
     }
 
+    /// The shape's box in the SIM frame, if it has one — see
+    /// [`CollisionShape::aabb`].
+    pub fn aabb(&self) -> Option<(Vec3, Vec3)> {
+        self.shape.aabb().map(|(lo, hi)| (lo + self.offset, hi + self.offset))
+    }
+
+    /// Can anything inside the box `(lo, hi)` be within `reach` of this
+    /// collider? Conservative: `true` whenever the collider has no box, and a
+    /// hair of slack on top of `reach` so rounding can only ever keep a
+    /// collider, never drop one.
+    pub(crate) fn may_reach(&self, lo: Vec3, hi: Vec3, reach: f32) -> bool {
+        let Some((clo, chi)) = self.aabb() else { return true };
+        let gap = (clo - hi).max(lo - chi).max(Vec3::ZERO);
+        let slack = reach * 1.001 + 1e-3;
+        gap.length_squared() <= slack * slack
+    }
+
     /// Signed distance from sim-frame point `p` to the surface.
     pub fn distance(&self, p: Vec3) -> f32 {
         self.shape.distance(p - self.offset)
@@ -161,6 +178,8 @@ pub struct PhysicsWorld {
     collider_index: floptle_core::spatial::Grid,
     /// Scratch candidate list, reused so the broadphase allocates nothing per body.
     cand: Vec<u32>,
+    /// The candidates a capsule's feet could reach this pass — see `step_body`.
+    cand_feet: Vec<u32>,
     /// True while `step` has already rebuilt the index for this tick.
     ///
     /// `step_body` is also reachable directly (the rollback driver steps bodies
@@ -220,6 +239,7 @@ impl Default for PhysicsWorld {
             compound_contacts: Vec::new(),
             collider_index: Default::default(),
             cand: Vec::new(),
+            cand_feet: Vec::new(),
             index_fresh: false,
             indexed_hash: 0,
             resting: Vec::new(),
@@ -820,6 +840,23 @@ impl PhysicsWorld {
             self.revalidate_sleeping_bodies();
         }
         self.index_fresh = false;
+    }
+
+    /// Put body `bi` to sleep now (stopped where it is, resting on whatever it
+    /// is touching), or wake it.
+    pub fn set_asleep(&mut self, bi: usize, asleep: bool) {
+        if bi >= self.bodies.len() || self.bodies[bi].asleep == asleep {
+            return;
+        }
+        if asleep {
+            self.reindex_colliders();
+            self.bodies[bi].asleep = true;
+            self.bodies[bi].vel = Vec3::ZERO;
+            self.resting[bi] = self.find_resting_contacts(bi);
+        } else {
+            self.bodies[bi].asleep = false;
+        }
+        self.bodies[bi].sleep_time = 0.0;
     }
 
     pub fn add_compound(&mut self, c: Compound) -> usize {
@@ -1522,7 +1559,26 @@ impl PhysicsWorld {
                 // pushing out along the slope's normal, the feet pulling back
                 // down, and the body creeping sideways by the difference every
                 // substep.
-                let foot = self.foot_probe(bi, &cand, row);
+                // Only the colliders whose box comes within the probe's reach of
+                // the capsule can ever be the nearest thing under the feet — or,
+                // if one is the nearest, the march steps past its reach on it
+                // and answers "nothing" either way — so the probe asks those
+                // alone and gets the same answer. The probe runs from the
+                // bottom sphere's centre down twice the radius, and a surface
+                // counts once it is within that reach of a probe point: four
+                // radii around the capsule's own box covers every case.
+                let foot = {
+                    let (centres, n_c, radius) = self.bodies[bi].sample_centers();
+                    let (lo, hi) = centres_box(&centres[..n_c]);
+                    let mut feet = std::mem::take(&mut self.cand_feet);
+                    feet.clear();
+                    feet.extend(cand.iter().copied().filter(|&ci| {
+                        !prefilter_on() || self.colliders[ci as usize].may_reach(lo, hi, 4.0 * radius)
+                    }));
+                    let foot = self.foot_probe(bi, &feet, row);
+                    self.cand_feet = feet;
+                    foot
+                };
                 let cos_walk = self.bodies[bi]
                     .slope_limit
                     .clamp(0.0, std::f32::consts::FRAC_PI_2)
@@ -1536,6 +1592,38 @@ impl PhysicsWorld {
                     // (touch events), the body passes straight through.
                     if self.colliders[ci].sensor {
                         continue;
+                    }
+                    // Every contact sample lies on the capsule's axis (or is a
+                    // sphere's centre), and a push needs one within `radius`
+                    // of the surface. A collider whose box is farther than that
+                    // from the axis' box has no contact to give, so the dozen
+                    // distance queries `contact_samples` would spend on it are
+                    // skipped. Checked against where the body is NOW: an earlier
+                    // collider in this pass may already have pushed it.
+                    //
+                    // Then one query at the middle of that box: a distance
+                    // changes by at most how far you move, so a surface farther
+                    // than `radius` plus the box's half-diagonal from its middle
+                    // is out of reach of every sample, however the capsule
+                    // search below would have placed them. A body inside a big
+                    // building's box but nowhere near its walls stops paying
+                    // for that building here. Only for a shape with a box: its
+                    // distance is the true one, which is what makes the
+                    // argument hold.
+                    if prefilter_on() {
+                        let (centres, n_c, radius) = self.bodies[bi].sample_centers();
+                        let (lo, hi) = centres_box(&centres[..n_c]);
+                        let c = &self.colliders[ci];
+                        if !c.may_reach(lo, hi, radius) {
+                            continue;
+                        }
+                        if c.aabb().is_some() {
+                            let mid = (lo + hi) * 0.5;
+                            let half = (hi - lo).length() * 0.5;
+                            if c.distance(mid) - half > radius * 1.001 + 1e-3 {
+                                continue;
+                            }
+                        }
                     }
                     let (centers, n_c, radius) = self.contact_samples(bi, ci);
                     for (si, &c) in centers[..n_c].iter().enumerate() {
@@ -1809,6 +1897,33 @@ impl PhysicsWorld {
 }
 
 #[cfg(test)]
+thread_local! {
+    /// Off turns the per-body collider prefilters in `step_body` off, so a test
+    /// can prove they change nothing.
+    static PREFILTER: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+#[inline]
+fn prefilter_on() -> bool {
+    #[cfg(test)]
+    {
+        PREFILTER.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
+
+/// The box around a body's sample centres.
+fn centres_box(centres: &[Vec3]) -> (Vec3, Vec3) {
+    centres.iter().fold(
+        (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+        |(lo, hi), c| (lo.min(*c), hi.max(*c)),
+    )
+}
+
+#[cfg(test)]
 mod step_body_tests {
     use super::*;
     use crate::gravity::GravityField;
@@ -1877,6 +1992,84 @@ mod step_body_tests {
             panic!("the body never fell asleep in {} ticks — fixture is wrong, not the property", 300);
         };
         assert_eq!(sf, ss, "the two paths must fall asleep on the exact same tick");
+    }
+
+    /// **Skipping far meshes changes nothing, and is where a mesh level's
+    /// physics time went.** Fifty walking capsules on a subdivided floor among
+    /// a hundred building meshes, the shape of a real level: every body
+    /// overlaps several buildings' bounding spheres while touching none of
+    /// their walls. Stepped twice, with the per-body prefilters and without:
+    /// every position and velocity must match bit for bit on every tick, and
+    /// the filtered run must be clearly cheaper, measured in the same run so
+    /// machine speed cancels.
+    #[test]
+    fn the_collider_prefilter_is_exact_and_pays_for_itself() {
+        let build = || {
+            let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+            let (mut verts, mut idx) = (Vec::new(), Vec::<u32>::new());
+            const HALF: i32 = 40;
+            for xi in -HALF..HALF {
+                for zi in -HALF..HALF {
+                    let (x, z) = (xi as f32, zi as f32);
+                    let base = verts.len() as u32;
+                    verts.extend([
+                        Vec3::new(x, 0.0, z),
+                        Vec3::new(x + 1.0, 0.0, z),
+                        Vec3::new(x + 1.0, 0.0, z + 1.0),
+                        Vec3::new(x, 0.0, z + 1.0),
+                    ]);
+                    idx.extend([base, base + 2, base + 1, base, base + 3, base + 2]);
+                }
+            }
+            w.add_collider(Box::new(crate::shapes::TriMeshCollider::new(&verts, &idx)));
+            // A hundred closed box buildings, 3–8 m across and
+            // up to 30 m tall, on a jittered grid.
+            for i in 0..100 {
+                let (gx, gz) = ((i % 10) as f32 * 8.0 - 38.0, (i / 10) as f32 * 8.0 - 38.0);
+                let a = i as f32 * 0.618_034;
+                let (sx, sz, sy) = (1.5 + a.fract() * 2.5, 1.5 + (a * 1.7).fract() * 2.5, 6.0 + (a * 2.3).fract() * 24.0);
+                let c = Vec3::new(gx + (a * 3.1).fract() * 2.0, 0.0, gz + (a * 4.3).fract() * 2.0);
+                let v: Vec<Vec3> = (0..8)
+                    .map(|k| c + Vec3::new(if k & 1 == 0 { -sx } else { sx }, if k & 2 == 0 { 0.0 } else { sy }, if k & 4 == 0 { -sz } else { sz }))
+                    .collect();
+                let f: [u32; 36] = [
+                    0, 1, 3, 0, 3, 2, 4, 6, 7, 4, 7, 5, 0, 4, 5, 0, 5, 1, 2, 3, 7, 2, 7, 6, 0, 2, 6, 0,
+                    6, 4, 1, 5, 7, 1, 7, 3,
+                ];
+                w.add_collider(Box::new(crate::shapes::TriMeshCollider::new(&v, &f)));
+            }
+            for i in 0..50 {
+                let a = i as f32 * 0.618_034;
+                let pos = Vec3::new((a.fract() - 0.5) * 70.0 + 4.0, 1.0, ((a * 1.37).fract() - 0.5) * 70.0 + 4.0);
+                let mut b = Body::capsule(pos, 0.4, 1.8);
+                b.feet = true;
+                w.add_body(b);
+            }
+            w
+        };
+        let run = |filtered: bool| {
+            PREFILTER.with(|p| p.set(filtered));
+            let mut w = build();
+            let mut trace = Vec::new();
+            let t0 = std::time::Instant::now();
+            for tick in 0..240 {
+                for (bi, b) in w.bodies.iter_mut().enumerate() {
+                    // Everybody keeps walking, turning slowly, so nobody sleeps.
+                    let ang = tick as f32 * 0.02 + bi as f32;
+                    b.vel = Vec3::new(ang.cos() * 3.0, b.vel.y, ang.sin() * 3.0);
+                }
+                w.step(1.0 / 120.0);
+                trace.extend(w.bodies.iter().map(|b| (b.pos.to_array().map(f32::to_bits), b.vel.to_array().map(f32::to_bits), b.grounded)));
+            }
+            let ms = t0.elapsed().as_secs_f64() * 1000.0;
+            PREFILTER.with(|p| p.set(true));
+            (trace, ms)
+        };
+        let (plain, plain_ms) = run(false);
+        let (fast, fast_ms) = run(true);
+        assert!(plain.iter().filter(|t| t.2).count() > plain.len() / 2, "the bodies were not walking on the floor");
+        assert!(plain == fast, "the prefilter changed where a body went");
+        assert!(plain_ms > fast_ms * 1.5, "the prefilter saved too little: {plain_ms:.1} ms without, {fast_ms:.1} ms with");
     }
 
     /// A body standing on a mesh floor costs about what a body standing on a
@@ -2073,6 +2266,32 @@ mod step_body_tests {
         let before = w.bodies[bi].pos;
         w.step(dt);
         assert_ne!(w.bodies[bi].pos, before, "a woken body with a real velocity must actually move");
+    }
+
+    /// **A script can put a moving body to sleep, and a velocity wakes it.**
+    /// Asleep it stops where it is — no gravity, no creep — and still reports
+    /// what it rests on; `set_asleep(false)` or a velocity write brings it back.
+    #[test]
+    fn a_body_put_to_sleep_stops_until_woken() {
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        w.add_collider(Box::new(Plane::ground(0.0)));
+        let bi = w.add_body(Body::sphere(Vec3::new(0.0, 0.5, 0.0), 0.5));
+        let dt = 1.0 / 120.0;
+        w.bodies[bi].vel = Vec3::new(2.0, 0.0, 0.0);
+        w.step(dt);
+        assert!(!w.bodies[bi].asleep);
+        w.set_asleep(bi, true);
+        let at = w.bodies[bi].pos;
+        for _ in 0..30 {
+            w.step(dt);
+        }
+        assert!(w.bodies[bi].asleep, "it woke with nothing waking it");
+        assert_eq!(w.bodies[bi].pos, at, "asleep, it moved");
+        assert!(!w.contacts.is_empty(), "asleep, it stopped reporting the floor it rests on");
+        w.set_asleep(bi, false);
+        w.bodies[bi].vel = Vec3::new(2.0, 0.0, 0.0);
+        w.step(dt);
+        assert!(w.bodies[bi].pos.x > at.x, "woken, it did not move");
     }
 
     /// Criterion 2: a chunk's colliders unloading out from under a sleeping

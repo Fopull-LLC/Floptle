@@ -302,6 +302,30 @@ fn script_reads_grounded_and_writes_velocity() {
     assert_eq!(changes.get(&e.index()).copied().unwrap()[0], 5.0);
 }
 
+/// `node.asleep` reads the solver's state and a write queues for the driver,
+/// reading back at once.
+#[test]
+fn node_asleep_reads_the_body_and_a_write_queues_for_the_sim() {
+    let dir = std::env::temp_dir().join(format!("floptle_body_sleep_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "napper",
+        "function update(node, dt)\n  node.x = node.asleep and 1 or 0\n  node.asleep = true\n  node.y = node.asleep and 1 or 0\nend\n",
+    );
+    let (mut world, e) = world_with_script("napper");
+    let mut host = ScriptHost::new();
+    let mut bodies = HashMap::new();
+    bodies.insert(e.index(), BodyState { grounded: true, ..Default::default() });
+    host.set_bodies(bodies);
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    let t = world.get::<Transform>(e).unwrap().translation;
+    assert_eq!((t.x, t.y), (0.0, 1.0), "read before the write, then read back after it");
+    assert_eq!(host.take_body_sleep_changes().get(&e.index()), Some(&true));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Three lines of Lua, and the node walks across the level.
 ///
 /// This is the shape the whole agent layer exists to make possible, so it is

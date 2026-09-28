@@ -320,6 +320,7 @@ impl Editor {
                         // impulses; "the floor under it" isn't one normal.
                         ground_normal: None,
                         wall_normal: None,
+                        asleep: false,
                     },
                 );
             }
@@ -628,6 +629,9 @@ impl Editor {
             for (eid, h) in self.script_host.take_body_height_changes() {
                 sim.set_body_height(eid, h);
             }
+            for (eid, on) in self.script_host.take_body_sleep_changes() {
+                sim.set_body_asleep(eid, on);
+            }
             for (eid, p) in self.script_host.take_body_pos_changes() {
                 sim.set_body_position(eid, DVec3::new(p[0], p[1], p[2]));
             }
@@ -664,15 +668,27 @@ impl Editor {
                 // Steps queued while running are meaningless — never let them bank.
                 self.tick_steps = 0;
             }
+            // A tick that costs more than the time it simulates can't be caught
+            // up with: each catch-up tick lengthens the frame, which banks more
+            // ticks for the next one. Past that point one tick a frame is all
+            // that runs, and the game plays in slow motion instead of at 2 fps.
+            let slow_motion = self.tick_load.overloaded()
+                && self.overload_policy() == floptle_core::OverloadPolicy::SlowMotion;
+            let ticks_began = floptle_core::time::Instant::now();
+            let mut ticks_run = 0u32;
             loop {
                 if stepping {
                     if self.tick_steps == 0 {
                         break;
                     }
                     self.tick_steps -= 1;
+                } else if slow_motion && ticks_run >= 1 {
+                    self.game_tick.drop_backlog();
+                    break;
                 } else if !self.game_tick.tick() {
                     break;
                 }
+                ticks_run += 1;
                 self.game_tick_no += 1;
                 // Celestial rails first (solar demo S2): body nodes + their
                 // terrain collider anchors + gravity centers + the space.*
@@ -749,6 +765,7 @@ impl Editor {
                                 pos: [pos.x, pos.y, pos.z],
                                 ground_normal: None,
                                 wall_normal: None,
+                                asleep: false,
                             },
                         );
                     }
@@ -817,6 +834,9 @@ impl Editor {
                     }
                     for (eid, h) in self.script_host.take_body_height_changes() {
                         sim.set_body_height(eid, h);
+                    }
+                    for (eid, on) in self.script_host.take_body_sleep_changes() {
+                        sim.set_body_asleep(eid, on);
                     }
                     for (eid, p) in self.script_host.take_body_pos_changes() {
                         sim.set_body_position(eid, DVec3::new(p[0], p[1], p[2]));
@@ -894,6 +914,10 @@ impl Editor {
                 // dispatch — all after physics, all on the deterministic clock.
                 self.net_tick(self.game_tick_no);
             }
+            if !stepping {
+                let spent = ticks_began.elapsed().as_secs_f32() * 1000.0;
+                self.note_tick_load(ticks_run, spent, sdt);
+            }
             if let Some(sim) = self.sim.as_mut() {
                 // Render this frame partway into the current tick: smooth at any fps.
                 sim.writeback_interpolated(&mut self.world, self.game_tick.alpha());
@@ -908,6 +932,64 @@ impl Editor {
                     floptle_core::math::DVec3::from_array(pred.error_offset);
             }
         }
+    }
+
+    /// Whether this session may fall back to slow motion. A session sharing
+    /// its clock with other machines must keep up or desync, so it always
+    /// catches up.
+    fn overload_policy(&self) -> floptle_core::OverloadPolicy {
+        if self.net_server.is_some() || self.net_client.is_some() || self.net_rollback.is_some() {
+            return floptle_core::OverloadPolicy::CatchUp;
+        }
+        self.project.tick_overload.policy()
+    }
+
+    /// Fold one frame's ticks into the load watch, and say so — once a Play
+    /// session, naming what costs the most — when the game falls behind.
+    fn note_tick_load(&mut self, ticks: u32, spent_ms: f32, frame_s: f32) {
+        let step = self.game_tick.step;
+        let change = self.tick_load.record(ticks, spent_ms, step, frame_s);
+        let overloaded = self.tick_load.overloaded();
+        self.script_host.profile().borrow_mut().set_overloaded(overloaded);
+        if change == Some(floptle_core::LoadChange::Entered) && !self.tick_overload_said {
+            // The breakdown comes from the profiler. If nobody had it on, turn
+            // it on and give it a second of frames to measure before speaking.
+            let mut p = self.script_host.profile().borrow_mut();
+            if p.enabled() && p.frames() > 0 {
+                self.tick_overload_report_in = Some(0);
+            } else {
+                p.enable(true);
+                self.tick_overload_report_in = Some(60);
+            }
+        }
+        let Some(left) = self.tick_overload_report_in else { return };
+        if left > 0 {
+            self.tick_overload_report_in = Some(left - 1);
+            return;
+        }
+        self.tick_overload_report_in = None;
+        if !overloaded || self.tick_overload_said {
+            return;
+        }
+        self.tick_overload_said = true;
+        let costs = self.script_host.profile().borrow().top_costs(3);
+        let what = match self.overload_policy() {
+            floptle_core::OverloadPolicy::SlowMotion => {
+                "It now runs one tick per frame, so it plays in slow motion instead of \
+                 dropping to a few frames a second"
+            }
+            floptle_core::OverloadPolicy::CatchUp => {
+                "It keeps catching up, so the frame rate will fall as far as it has to"
+            }
+        };
+        let msg = format!(
+            "The fixed tick costs {:.1} ms, more than its {:.1} ms slice: this machine can't \
+             run the game in real time. {what}. Top costs per frame: {costs}. \
+             perf.overloaded() tells a script; the ⏱ panel has the whole breakdown.",
+            self.tick_load.tick_ms(),
+            step * 1000.0,
+        );
+        self.console.push(floptle_script::LogLevel::Warn, msg, None);
     }
 
     /// `lateUpdate`: the camera pass after physics, then the immediate-mode
@@ -947,6 +1029,7 @@ impl Editor {
                         // impulses; "the floor under it" isn't one normal.
                         ground_normal: None,
                         wall_normal: None,
+                        asleep: false,
                     },
                 );
             }

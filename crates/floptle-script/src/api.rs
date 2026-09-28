@@ -3883,6 +3883,9 @@ let node_mt = lua.create_table()?;
                     bodies.borrow().get(&e).map(|b| b.grounded).unwrap_or(false),
                 ));
             }
+            "asleep" => {
+                return Ok(Value::Boolean(bodies.borrow().get(&e).is_some_and(|b| b.asleep)));
+            }
             "height" => {
                 return Ok(match bodies.borrow().get(&e) {
                     Some(b) => Value::Number(b.height as f64),
@@ -3920,6 +3923,7 @@ let node_mt = lua.create_table()?;
     let bodies = shared.bodies.clone();
     let body_changes = shared.body_changes.clone();
     let body_height = shared.body_height_changes.clone();
+    let body_sleep = shared.body_sleep_changes.clone();
     let body_pos = shared.body_pos_changes.clone();
     let model_changes = shared.model_changes.clone();
     let material_changes = shared.material_changes.clone();
@@ -4136,6 +4140,20 @@ let node_mt = lua.create_table()?;
             "height" => {
                 if let Some(n) = as_num(&val) {
                     body_height.borrow_mut().insert(e, n as f32);
+                }
+                return Ok(());
+            }
+            // `node.asleep = true` — the solver stops simulating this body
+            // until something wakes it (a velocity write, a moving platform,
+            // its ground going away). Read back at once, so a script that
+            // slept it sees it asleep the same frame.
+            "asleep" => {
+                let Value::Boolean(on) = val else {
+                    return Err(mlua::Error::RuntimeError("node.asleep takes true or false".into()));
+                };
+                body_sleep.borrow_mut().insert(e, on);
+                if let Some(b) = bodies.borrow_mut().get_mut(&e) {
+                    b.asleep = on;
                 }
                 return Ok(());
             }

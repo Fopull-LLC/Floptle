@@ -909,3 +909,140 @@ fn a_hook_that_does_nothing_allocates_almost_nothing() {
     assert!(nohooks < 300.0, "one more hook-less script costs {nohooks:.1} B per pass");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A world of `n` nodes each running `kind`, spread along x.
+fn crowd(kind: &str, n: usize) -> (World, Vec<Entity>) {
+    let mut world = World::default();
+    let ents = (0..n)
+        .map(|i| {
+            let e = world.spawn();
+            world.insert(e, Transform::from_translation(glam::DVec3::new(i as f64 * 10.0, 0.0, 0.0)));
+            world.insert(e, floptle_core::Name(format!("N{i}")));
+            world.insert(
+                e,
+                Scripts(vec![floptle_core::ScriptInst {
+                    kind: kind.into(),
+                    enabled: true,
+                    params: vec![],
+                    refs: Vec::new(),
+                    strs: Vec::new(),
+                }]),
+            );
+            e
+        })
+        .collect();
+    (world, ents)
+}
+
+/// **A sleeping script is not called at all, and costs next to nothing.**
+/// Two hundred instances put themselves to sleep in `start`; after that no
+/// hook of theirs runs, and a frame of them costs a small fraction of a frame
+/// of the same crowd awake — measured in the same run, so the machine cancels.
+#[test]
+fn a_script_asleep_is_not_called_and_a_sleeping_crowd_is_cheap() {
+    let dir = std::env::temp_dir().join(format!("floptle_sleep_crowd_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let body = "function update(node, dt) node.y = node.y + 1 end\nfunction fixedUpdate(node, dt) node.z = node.z + 1 end\nfunction lateUpdate(node, dt) node.y = node.y + 0 end\n";
+    write_script(&dir, "awake", body);
+    write_script(&dir, "sleeper", &format!("function start(node) script.sleep() end\n{body}"));
+    let frame = |host: &mut ScriptHost, world: &mut World, f: usize| {
+        let t = f as f32 / 60.0;
+        host.run(world, &dir, 1.0 / 60.0, t);
+        host.run_fixed(world, 1.0 / 60.0, t);
+        host.run_late(world, 1.0 / 60.0, t);
+    };
+    let time = |kind: &str| {
+        let (mut world, ents) = crowd(kind, 200);
+        let mut host = ScriptHost::new();
+        for f in 0..5 {
+            frame(&mut host, &mut world, f);
+        }
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let t0 = std::time::Instant::now();
+        for f in 5..65 {
+            frame(&mut host, &mut world, f);
+        }
+        (t0.elapsed().as_secs_f64(), world, ents)
+    };
+    let (awake_s, _, _) = time("awake");
+    let (asleep_s, world, ents) = time("sleeper");
+    for e in &ents {
+        let tr = world.get::<Transform>(*e).unwrap().translation;
+        assert_eq!((tr.y, tr.z), (0.0, 0.0), "a sleeping script's hook ran");
+    }
+    assert!(asleep_s * 4.0 < awake_s, "asleep {:.2} ms vs awake {:.2} ms for 60 frames", asleep_s * 1e3, awake_s * 1e3);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **Everything that is supposed to wake a sleeper does**: another script's
+/// `script.wake`, its own timer, the camera coming close, and a collision.
+#[test]
+fn a_sleeper_wakes_by_call_by_timer_by_distance_and_by_touch() {
+    let dir = std::env::temp_dir().join(format!("floptle_sleep_wake_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "napper",
+        "function start(node)\n  if node.name == 'N1' then script.sleep{ seconds = 0.5 }\n  elseif node.name == 'N2' then script.sleep{ wakeWithin = 15 }\n  else script.sleep() end\nend\nfunction update(node, dt) node.y = node.y + 1 end\nfunction onCollisionEnter(node, other, hit) end\n",
+    );
+    write_script(
+        &dir,
+        "waker",
+        "function update(node, dt)\n  if time > 0.2 and not woke then woke = true; script.wake(find('N0'), 'napper') end\nend\n",
+    );
+    let (mut world, ents) = crowd("napper", 4);
+    let boss = world.spawn();
+    world.insert(boss, Transform::IDENTITY);
+    world.insert(
+        boss,
+        Scripts(vec![floptle_core::ScriptInst { kind: "waker".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() }]),
+    );
+    let cam = world.spawn();
+    world.insert(cam, Transform::from_translation(glam::DVec3::new(100.0, 0.0, 0.0)));
+    world.insert(
+        cam,
+        Matter::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: 0, target_h: 0, target_hz: 0.0, ortho: false, ortho_height: 10.0 },
+    );
+    let mut host = ScriptHost::new();
+    let y = |w: &World, i: usize| w.get::<Transform>(ents[i]).unwrap().translation.y;
+    for f in 0..6 {
+        host.run(&mut world, &dir, 0.1, f as f32 * 0.1);
+    }
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    assert!(y(&world, 0) > 0.0, "script.wake from another script did not wake it");
+    assert!(y(&world, 1) > 0.0, "its own timer did not wake it");
+    assert_eq!(y(&world, 2), 0.0, "woke with the camera 80 m off");
+    assert_eq!(y(&world, 3), 0.0, "woke with nothing waking it");
+    world.get_mut::<Transform>(cam).unwrap().translation.x = 25.0;
+    host.run(&mut world, &dir, 0.1, 0.7);
+    assert!(y(&world, 2) > 0.0, "the camera came within 15 m and it slept on");
+    host.call_touch(&mut world, ents[3].index(), "onCollisionEnter", boss.index(), [0.0; 3], [0.0; 3]);
+    host.run(&mut world, &dir, 0.1, 0.8);
+    assert!(y(&world, 3) > 0.0, "a collision did not wake it");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **`script.setRate` runs `fixedUpdate` less often, with the time it
+/// missed.** Ten ticks a second on a sixty-tick clock is every sixth tick, and
+/// the `dt` each call gets adds up to the time that passed.
+#[test]
+fn a_rate_limited_fixed_update_runs_at_its_rate_with_the_banked_dt() {
+    let dir = std::env::temp_dir().join(format!("floptle_sleep_rate_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "slow",
+        "function start(node) script.setRate(10) end\nfunction fixedUpdate(node, dt) node.y = node.y + 1; node.z = node.z + dt end\n",
+    );
+    let (mut world, ents) = crowd("slow", 1);
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    for t in 0..120 {
+        host.run_fixed(&mut world, 1.0 / 60.0, t as f32 / 60.0);
+    }
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let tr = world.get::<Transform>(ents[0]).unwrap().translation;
+    assert!((19.0..=21.0).contains(&tr.y), "{} calls in 2 s at 10 Hz", tr.y);
+    assert!((tr.z - 2.0).abs() < 0.11, "the dt handed over summed to {} s of 2", tr.z);
+    let _ = std::fs::remove_dir_all(&dir);
+}

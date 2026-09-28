@@ -221,6 +221,59 @@ assert(c.props < 20000, "the forest is asking for too much")
 
 Counts are free to keep, so `perf.counts()` works even while collection is off.
 
+### The `mirror` bucket
+
+Scripts read the scene through a copy of it that the engine brings up to date
+before each pass. Changing a component's **value** (a camera's `fovY`, a light's
+intensity, `node.visible`, a post-process setting) re-reads only that node, so
+tweening one every frame is cheap. Changing the scene's **shape** rebuilds the
+whole copy, and that costs time in proportion to the whole scene. Spawning,
+destroying, renaming, reparenting, retagging and attaching a script all count as
+shape changes.
+
+If `mirror` is high, check two numbers:
+
+```lua
+local c = perf.counts()
+print(c.mirrorRebuilds, c.mirrorRefreshed)   -- last frame
+print(perf.mirrorCause())   -- "the tags changed on 'Crate 4' (node 812) …"
+```
+
+`mirrorRebuilds` above zero on every frame means something changes the shape of
+the scene every frame, and `perf.mirrorCause()` names the node and what changed.
+Usually that's a tag toggled per frame or a spawn per frame that could be pooled.
+
+### Many NPCs: put the far ones to sleep
+
+Every script instance's hooks run every frame, and every awake rigidbody is
+simulated every tick, whether or not the player is anywhere near it. On one
+shipped level, 64 placed enemies cost 17 ms of physics and 7 ms of script per
+tick with all of them thinking. That's more than the whole frame budget.
+
+Past the distance where anyone would notice, stop both:
+
+```lua
+function fixedUpdate(node, dt)
+  if (playerPos() - node.worldPos):length() > 80 then
+    node.vel = vec3()
+    node.asleep = true               -- the solver stops simulating the body
+    script.sleep{ wakeWithin = 70 }  -- the engine stops calling this script
+    return
+  end
+  -- …think…
+end
+```
+
+A sleeping script costs nothing a frame: the engine doesn't call it at all, so
+it can't check the distance itself. Instead it wakes on its own terms:
+`wakeWithin` wakes it when the active camera comes that close, and `seconds`
+wakes it after that much game time. A collision or trigger on its node also
+wakes it, and so does `script.wake(node, "enemy")` from another script, for
+instance the one that just shot it.
+
+For NPCs in view but far away, `script.setRate(10)` runs `fixedUpdate` ten
+times a second instead of sixty, handing it the time since its last call.
+
 ### It is off by default, and reading it while off is an ERROR
 
 A profiler that is itself a frame cost gets turned off, and then it does not
