@@ -1,5 +1,16 @@
 ## Just shipped
 
+**v0.100.0-rc1 — "Keeps Up"** (beta). Big levels get cheaper. Changing a
+camera's field of view or a light every frame no longer costs time for the
+whole scene, characters walking on levels built from models cost a fraction of
+what they did, far-away enemies can be put to sleep with `script.sleep` and
+`node.asleep`, and hidden or off-screen characters stop animating. A game that
+still can't keep up plays in slow motion instead of falling to a few frames a
+second, and says why. `app.setRenderScale` gives a game a render-resolution
+setting with a sharp UI, every collidable building casts its shadow, scripts
+can ask where a bone is, and scenes stop saving paths that only work on your
+machine.
+
 **v0.99.1 — "Keeps Serving"** (stable). Server builds of any size deploy on
 Floptle Cloud: a download gives up only when nothing arrives, and one that is
 cut off carries on from where it stopped. A new build that cannot be
