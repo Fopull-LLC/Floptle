@@ -133,10 +133,15 @@ fn rel(root: &Path, path: &Path) -> String {
 /// "your path is wrong" and "your project is broken" are the exact distinction
 /// this verb exists to draw, so a caller must not have to read the prose to
 /// tell them apart.
-pub(crate) fn run(root: &Path, json: bool) -> i32 {
+pub(crate) fn run(root: &Path, json: bool, fix: bool) -> i32 {
     if !root.join("project.ron").is_file() {
         floptle_say::say_err!("{} is not a project directory (no project.ron)", root.display());
         return 2;
+    }
+    if fix {
+        for (file, n) in fix_absolute_paths(root) {
+            floptle_say::say_err!("fixed {n} absolute path(s) in {file}");
+        }
     }
     let report = examine(root);
     if json {
@@ -194,9 +199,13 @@ pub(crate) fn examine(root: &Path) -> Report {
     let mut files = Vec::new();
     walk(root, &mut files);
 
+    check_linked_packages(root, &mut r);
     for path in &files {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let where_ = rel(root, path);
+        if name.ends_with(".ron") && where_ != "packages.ron" {
+            check_absolute_paths(root, path, &where_, &mut r);
+        }
         if name.ends_with(".vfx.ron") {
             r.effects += 1;
             match floptle_scene::load_vfx_effect(path) {
@@ -215,6 +224,91 @@ pub(crate) fn examine(root: &Path) -> Report {
         }
     }
     r
+}
+
+/// **A path only this machine has.** Anything the editor wrote as
+/// `/home/you/Game/models/tower.glb` loads here and is missing everywhere else,
+/// and nothing else in a check would notice, because it resolves here.
+fn check_absolute_paths(root: &Path, path: &Path, where_: &str, r: &mut Report) {
+    let Ok(text) = std::fs::read_to_string(path) else { return };
+    for a in crate::abs_paths::find(&text, root) {
+        let who = match &a.owner {
+            Some(n) => format!("\"{n}\""),
+            None => "the file".to_string(),
+        };
+        let what = a.field.as_deref().unwrap_or("a path");
+        let file = format!("{where_}:{}", a.line);
+        match &a.relative {
+            Some(rel) => r.error(
+                Some(file),
+                format!(
+                    "{who}: {what} is an absolute path ({}) — it loads on this machine and will \
+                     be missing in an export or anywhere else. It should be \"{rel}\". Fix: \
+                     floptle check --fix",
+                    a.value
+                ),
+            ),
+            None => r.error(
+                Some(file),
+                format!(
+                    "{who}: {what} is {} — outside the project, so an export will not include it \
+                     at all. Copy it into the project and point at the copy.",
+                    a.value
+                ),
+            ),
+        }
+    }
+}
+
+/// Rewrite every in-project absolute path in the project's `.ron` files to a
+/// project-relative one: `(file, how many)` per file changed.
+fn fix_absolute_paths(root: &Path) -> Vec<(String, usize)> {
+    let mut files = Vec::new();
+    walk(root, &mut files);
+    let mut out = Vec::new();
+    for path in files {
+        let where_ = rel(root, &path);
+        if !where_.ends_with(".ron") || where_ == "packages.ron" {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let (fixed, n) = crate::abs_paths::relativize(&text, root);
+        if n > 0 && std::fs::write(&path, fixed).is_ok() {
+            out.push((where_, n));
+        }
+    }
+    out
+}
+
+/// **A linked package ships, and only from here.** An export copies an enabled
+/// linked package into the build, so the build is fine; a copy of the project
+/// on another machine is not, until the package is linked there too. Said as
+/// a warning, since the project is not wrong on this machine.
+fn check_linked_packages(root: &Path, r: &mut Report) {
+    let Ok(reg) = floptle_package::registry::Registry::load(root) else { return };
+    for e in reg.packages.iter().filter(|e| e.enabled && e.source.is_linked()) {
+        let dir = e.root_in(root);
+        if dir.strip_prefix(root).is_ok() {
+            continue;
+        }
+        if !dir.is_dir() {
+            r.error(
+                Some("packages.ron".into()),
+                format!("{} is linked to {}, and there is nothing there", e.id, dir.display()),
+            );
+        } else {
+            r.warn(
+                Some("packages.ron".into()),
+                format!(
+                    "{} is linked from outside the project ({}). An export copies it into the \
+                     build; a copy of this project on another machine won't have it until it is \
+                     linked there too.",
+                    e.id,
+                    dir.display()
+                ),
+            );
+        }
+    }
 }
 
 /// Is `path` inside `<root>/<dir>/`?
@@ -564,6 +658,41 @@ mod tests {
     /// A node with a material, a script and nothing missing.
     fn scene(nodes: &str) -> String {
         format!("(name: \"s\", nodes: [{nodes}])")
+    }
+
+    /// **A full path to a file in the project fails the check, naming the node
+    /// and field, and `--fix` makes it project-relative.** It loads on the
+    /// machine that wrote it, which is exactly why nothing else noticed.
+    #[test]
+    fn an_absolute_path_fails_the_check_and_fix_makes_it_relative() {
+        let d = temp("abs");
+        std::fs::create_dir_all(d.join("models")).unwrap();
+        std::fs::write(d.join("models/tower.glb"), b"glb").unwrap();
+        let abs = d.join("models/tower.glb");
+        let node = format!(
+            "(name: \"Building 7\", transform: (translation: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), \
+             scale: (1.0, 1.0, 1.0)), matter: Mesh(asset_path: \"{}\"), scripts: [], id: Some(812))",
+            abs.display()
+        );
+        std::fs::write(d.join("scenes/first.ron"), scene(&node)).unwrap();
+        let r = examine(&d);
+        let hit = r
+            .findings
+            .iter()
+            .find(|f| f.message.contains("absolute path"))
+            .unwrap_or_else(|| panic!("no finding for the absolute path: {:?}", r.findings));
+        assert_eq!(hit.level, Level::Error);
+        assert!(hit.message.contains("\"Building 7\"") && hit.message.contains("asset_path"), "{}", hit.message);
+        assert!(hit.message.contains("\"models/tower.glb\""), "{}", hit.message);
+        assert!(hit.file.as_deref().is_some_and(|f| f.starts_with("scenes/first.ron:")), "{:?}", hit.file);
+
+        let fixed = fix_absolute_paths(&d);
+        assert_eq!(fixed, vec![("scenes/first.ron".to_string(), 1)]);
+        let text = std::fs::read_to_string(d.join("scenes/first.ron")).unwrap();
+        assert!(text.contains("asset_path: \"models/tower.glb\""), "{text}");
+        let r = examine(&d);
+        assert_eq!(r.errors(), 0, "still failing after --fix: {:?}", r.findings);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// The happy path — and, more to the point, that the checker actually

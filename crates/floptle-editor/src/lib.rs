@@ -89,6 +89,8 @@ mod material_view;
 mod ui_snapshots;
 #[cfg(feature = "editor-ui")]
 mod check;
+#[cfg_attr(not(feature = "editor-ui"), allow(dead_code))]
+mod abs_paths;
 #[cfg(feature = "editor-ui")]
 mod cli;
 #[cfg(feature = "editor-ui")]

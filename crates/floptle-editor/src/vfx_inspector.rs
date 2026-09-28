@@ -31,7 +31,7 @@ impl EditorTabViewer<'_> {
         let tree = self.asset_tree;
         let root = self.project_root;
         let mut model_list = Vec::new();
-        collect_model_paths(self.asset_tree, &mut model_list);
+        collect_model_paths(self.asset_tree, root, &mut model_list);
 
         let st = &mut *self.vfx_ui;
         let Some(mut doc) = st.doc.take() else {

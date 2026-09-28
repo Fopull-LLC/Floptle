@@ -7042,7 +7042,7 @@ impl EditorTabViewer<'_> {
                 }
                 // Each importable model is a Mesh type you can become.
                 let mut models = Vec::new();
-                collect_model_paths(self.asset_tree, &mut models);
+                collect_model_paths(self.asset_tree, self.project_root, &mut models);
                 for p in models {
                     let name = Path::new(&p)
                         .file_name()

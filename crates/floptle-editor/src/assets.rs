@@ -240,10 +240,25 @@ pub(crate) fn collect_texture_paths(entries: &[AssetEntry], out: &mut Vec<String
 /// instead of twelve — `asset_key` has always done the same.
 pub(crate) fn asset_rel_path(path: &str, project_root: &Path) -> String {
     let slashed = path.replace('\\', "/");
-    Path::new(&slashed)
-        .strip_prefix(project_root)
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or(slashed)
+    if let Ok(p) = Path::new(&slashed).strip_prefix(project_root) {
+        return p.to_string_lossy().replace('\\', "/");
+    }
+    // The same place spelled another way — through a symlink, or with the root
+    // given relative — is still inside the project. Only an absolute path gets
+    // this far, so the extra look costs nothing on the common case.
+    if Path::new(&slashed).is_absolute() {
+        let canon = |p: &Path| p.canonicalize().ok();
+        let roots = [std::path::absolute(project_root).ok(), canon(project_root)];
+        let cands = [Some(Path::new(&slashed).to_path_buf()), canon(Path::new(&slashed))];
+        for root in roots.iter().flatten() {
+            for c in cands.iter().flatten() {
+                if let Ok(p) = c.strip_prefix(root) {
+                    return p.to_string_lossy().replace('\\', "/");
+                }
+            }
+        }
+    }
+    slashed
 }
 
 /// Put a texture's sheet grid onto **every material that wears it**.
@@ -363,11 +378,16 @@ pub(crate) fn tex_setting(
 
 /// Collect the path of every importable model (.glb/.gltf) in the asset tree — for the
 /// Inspector's mesh model picker and the Add Component menu.
-pub(crate) fn collect_model_paths(entries: &[AssetEntry], out: &mut Vec<String>) {
+///
+/// Project-relative, the way a scene stores them. The tree holds full paths,
+/// and handing one of those to a node's model wrote `/home/…/models/x.glb` into
+/// the scene: it loads on the machine that saved it and is missing everywhere
+/// else.
+pub(crate) fn collect_model_paths(entries: &[AssetEntry], root: &Path, out: &mut Vec<String>) {
     for e in entries {
         match e {
-            AssetEntry::Dir(_, children) => collect_model_paths(children, out),
-            AssetEntry::File { path, .. } if is_model(path) => out.push(path.clone()),
+            AssetEntry::Dir(_, children) => collect_model_paths(children, root, out),
+            AssetEntry::File { path, .. } if is_model(path) => out.push(asset_rel_path(path, root)),
             AssetEntry::File { .. } => {}
         }
     }

@@ -1768,6 +1768,22 @@ impl Editor {
     /// in the Console loudly — a failed save must never look like a saved one
     /// (the old path printed to stderr and callers cleared `scene_dirty`
     /// unconditionally, which could silently lose work).
+    /// Write a scene the way every editor save does: with any path to a file
+    /// inside the project stored project-relative, whatever route put the full
+    /// path there. Returns how many were. A full path loads on the machine that
+    /// saved it and nowhere else, and nothing else says so until a build is
+    /// missing its buildings.
+    pub(crate) fn write_scene_doc(
+        &self,
+        doc: &floptle_scene::SceneDoc,
+        path: &Path,
+    ) -> Result<usize, floptle_scene::SceneError> {
+        let text = floptle_scene::to_ron(doc)?;
+        let (text, fixed) = crate::abs_paths::relativize(&text, &self.project_root);
+        floptle_vfs::write(path, text).map_err(floptle_scene::SceneError::Io)?;
+        Ok(fixed)
+    }
+
     pub(crate) fn save_scene(&mut self) -> bool {
         // never save during Play: the world holds simulation state (moved
         // bodies, script spawns), and a mid-play `scene.load(...)` may have
@@ -1807,13 +1823,24 @@ impl Editor {
         // fields, paint, map geometry, the palette. The always-visible status
         // chip rests on this flag, so it must never read "saved" while a
         // sidecar full of sculpting is still only in memory.
-        let mut ok = match floptle_scene::save(&doc, &path) {
-            Ok(()) => {
+        let mut ok = match self.write_scene_doc(&doc, &path) {
+            Ok(fixed) => {
                 self.console.push(
                     floptle_script::LogLevel::Debug,
                     format!("💾 saved {}", path.display()),
                     None,
                 );
+                if fixed > 0 {
+                    self.console.push(
+                        floptle_script::LogLevel::Warn,
+                        format!(
+                            "💾 {fixed} path(s) in this scene pointed at a file inside the project by \
+                             its full path on this machine; they were saved project-relative, so \
+                             the scene works on any machine and in an export"
+                        ),
+                        None,
+                    );
+                }
                 true
             }
             Err(e) => {
@@ -1989,7 +2016,7 @@ impl Editor {
         let path = self.autosave_path();
         let _ = floptle_vfs::create_dir_all(path.parent().unwrap_or(&self.project_root));
         let doc = floptle_scene::to_doc(self.scene_name.clone(), &self.world);
-        if let Err(e) = floptle_scene::save(&doc, &path) {
+        if let Err(e) = self.write_scene_doc(&doc, &path) {
             self.console.push(
                 floptle_script::LogLevel::Warn,
                 format!("autosave failed: {e}"),

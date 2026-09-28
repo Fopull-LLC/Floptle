@@ -986,7 +986,8 @@ pub(crate) const VERBS: &[Verb] = &[
         name: "check",
         summary: "report anything wrong with a project, and exit",
         detail: "Loads every scene, prefab, effect and material, runs the engine's own wiring \
-                 checks, and reports every reference that does not resolve to a file. No window \
+                 checks, and reports every reference that does not resolve to a file, and every \
+                 absolute path, which resolves only on the machine that wrote it. No window \
                  and no GPU. A `.ron` file that parses is not a scene that works, and this is \
                  the difference.",
         args: &[
@@ -1002,9 +1003,17 @@ pub(crate) const VERBS: &[Verb] = &[
                 required: false,
                 help: "answer as JSON",
             },
+            Arg {
+                name: "--fix",
+                value: Value::Flag,
+                required: false,
+                help: "first rewrite every absolute path inside the project to a project-relative \
+                       one, in every .ron file, then check",
+            },
         ],
         needs_gpu: false,
-        writes_project: false,
+        // Only with --fix.
+        writes_project: true,
         exits: &[(1, "something in the project is wrong")],
         output: "one line per finding, then a count; with --json an object with \
                  `ok`, `examined`, `errors`, `warnings` and `findings`",
@@ -1782,7 +1791,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
         }
         Some(("check", a)) => {
             let project = path(a, "PROJECT").unwrap_or_else(|| PathBuf::from("assets"));
-            Outcome::Exit(crate::check::run(&project, a.get_flag("json")))
+            Outcome::Exit(crate::check::run(&project, a.get_flag("json"), a.get_flag("fix")))
         }
         Some(("version", a)) => {
             if a.get_flag("json") {

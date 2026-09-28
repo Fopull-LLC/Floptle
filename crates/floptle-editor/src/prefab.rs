@@ -190,6 +190,7 @@ impl Editor {
         let path = unique_path(dir, &stem, Some("prefab.ron"));
         match ron::ser::to_string_pretty(&docs, ron::ser::PrettyConfig::default()) {
             Ok(ron) => {
+                let (ron, _) = crate::abs_paths::relativize(&ron, &self.project_root);
                 if let Err(e) = floptle_vfs::write(&path, ron) {
                     self.console.push(
                         floptle_script::LogLevel::Error,

@@ -133,6 +133,14 @@ live, on another disk or another operating system — is redirected to the
 build's own copy, and the report lists each one. A path with no such file in
 the build can't be repaired, so it's listed as a warning.
 
+The project itself shouldn't hold them either, because a teammate who opens
+it has the same problem a player would. The editor saves every path to a file
+inside the project as project-relative, whichever way it got into the scene.
+`floptle check` fails on any absolute path it finds in a `.ron` file, naming
+the file, line, node and field, and `floptle check --fix` rewrites the ones
+inside the project to relative ones. A path outside the project has no
+relative form, so `check` says the export won't include that file at all.
+
 The player applies the same rescue at load time: an absolute reference that
 names nothing is walked from its tail (`…/MyGame/models/door.glb` →
 `models/door.glb`) and the longest tail that exists in the project wins. That
