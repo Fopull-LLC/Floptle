@@ -1,5 +1,15 @@
 ## Just shipped
 
+**v0.100.0 — "Keeps Up"** (stable). The beta, promoted. Big levels get
+cheaper: changing a value every frame no longer costs the whole scene, characters
+on levels built from models cost a fraction of what they did, far-away enemies
+can sleep, and hidden characters stop animating. A game that can't keep up plays
+in slow motion instead of stalling. `app.setRenderScale` rescues a weak GPU with
+the UI kept sharp, every building casts its shadow, and scenes keep paths that
+work on every machine. New since the beta: `cloud.get` downloads replays and
+shared levels, and `floptle cloud collections` keeps a game's Cloud collections
+in the project.
+
 **v0.100.0-rc1 — "Keeps Up"** (beta). Big levels get cheaper. Changing a
 camera's field of view or a light every frame no longer costs time for the
 whole scene, characters walking on levels built from models cost a fraction of
