@@ -64,6 +64,8 @@ mod doctor;
 #[cfg(feature = "editor-ui")]
 mod ship;
 #[cfg(feature = "editor-ui")]
+mod cloud_collections;
+#[cfg(feature = "editor-ui")]
 mod anim_ui;
 #[cfg(feature = "editor-ui")]
 mod anim_curves;

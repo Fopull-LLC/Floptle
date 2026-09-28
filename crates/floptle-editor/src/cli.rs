@@ -360,6 +360,51 @@ pub(crate) const VERBS: &[Verb] = &[
         legacy: &[],
     },
     Verb {
+        name: "cloud collections",
+        summary: "compare the game's Cloud collections with cloud_collections.ron, or make them match",
+        detail: "`cloud_collections.ron` beside `project.ron` lists what the game stores on \
+                 fopull.com, one collection per line: \
+                 `(name: \"time\", kind: rank, keep: min)`. Kinds are docs, blobs, rank and \
+                 counter; each takes `access`, `authority` and `cap_kb`, a rank collection says \
+                 what it keeps (max for points, min for times, latest), and a counter may say \
+                 `mode: unique`.\n\n\
+                 With no flag it reads the game's collections with the project's game key and \
+                 prints what differs, writing nothing, so it runs anywhere, CI included. \
+                 `--apply` declares what differs as the developer signed in to the Hub, who \
+                 must own the game. A collection only on the server is left alone: deleting \
+                 one deletes its data, and that stays a click on the game's page.",
+        args: &[
+            Arg {
+                name: "PROJECT",
+                value: Value::Path,
+                required: true,
+                help: "the project directory",
+            },
+            Arg {
+                name: "--apply",
+                value: Value::Flag,
+                required: false,
+                help: "declare what differs on fopull.com (default: only print it)",
+            },
+            Arg {
+                name: "--json",
+                value: Value::Flag,
+                required: false,
+                help: "answer as JSON",
+            },
+        ],
+        needs_gpu: false,
+        writes_project: false,
+        exits: &[
+            (1, "without --apply: the server differs from the file; with it: fopull.com refused a declaration"),
+            (4, "cloud_collections.ron is missing or has a mistake, each one named"),
+            (3, "the project is not connected to Floptle Cloud, or nobody is signed in"),
+        ],
+        output: "one line per collection (= same, + new, ~ changed, ? only on the server); with \
+                 --json one object with `ok`, `game`, `applied`, `collections` and `server_only`",
+        legacy: &[],
+    },
+    Verb {
         name: "migrate",
         summary: "bring a project up to this engine version and exit",
         detail: "",
@@ -1424,7 +1469,11 @@ fn group_summary(head: &str) -> String {
             _ => None,
         })
         .collect();
-    format!("the offline bakes: {}", kids.join(", "))
+    let what = match head {
+        "cloud" => "the game's setup on Floptle Cloud",
+        _ => "the offline bakes",
+    };
+    format!("{what}: {}", kids.join(", "))
 }
 
 /// Run whichever verb matched.
@@ -1487,6 +1536,14 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 a.get_flag("json"),
             ))
         }
+        Some(("cloud", a)) => match a.subcommand() {
+            Some(("collections", b)) => Outcome::Exit(crate::cloud_collections::run(
+                &path(b, "PROJECT").expect("required"),
+                b.get_flag("apply"),
+                b.get_flag("json"),
+            )),
+            _ => Outcome::Exit(2),
+        },
         Some(("migrate", a)) => {
             let dir = path(a, "DIR").expect("required");
             let stamp = text(a, "engine-version").unwrap_or_else(crate::distribution_version);

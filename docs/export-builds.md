@@ -259,6 +259,8 @@ the screen. `floptle help <VERB>` explains any one of them.
                                      # server: name OUT *.tar.gz for the archive
 [x] floptle ship <PROJ> [--scene S] [--label L] [--fresh] [--json]
                                      # export a server bundle and upload it to Floptle Cloud
+[x] floptle cloud collections <PROJ> [--apply] [--json]
+                                     # compare cloud_collections.ron with the server, or apply it
 [x] floptle bake gi | clips | nav [ARGS]       # all three headless
 [x] floptle migrate <DIR> [--engine-version V]
 [x] floptle serve <PROJ> [--port N | --relay URL] [--scene S] [--tick HZ]

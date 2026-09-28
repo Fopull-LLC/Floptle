@@ -96,14 +96,14 @@ struct Reservation {
 }
 
 /// A game slug is one URL segment and nothing else.
-fn check_slug(game: &str) -> Result<(), String> {
+pub(crate) fn check_slug(game: &str) -> Result<(), String> {
     if game.is_empty() || !game.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
         return Err(format!("'{game}' is not a game slug (letters, digits, - and _)"));
     }
     Ok(())
 }
 
-fn error_of(status: u16, body: &str) -> String {
+pub(crate) fn error_of(status: u16, body: &str) -> String {
     let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
     let said = v
         .get("error_description")
@@ -125,7 +125,7 @@ fn received_of(body: &str) -> Option<(u64, bool)> {
 
 /// One HTTP exchange, reduced to what the protocol reads: `Err` is a transport
 /// failure, `Ok` any status with its body.
-fn exchange(req: ureq::Request, body: Option<&[u8]>) -> Result<(u16, String), String> {
+pub(crate) fn exchange(req: ureq::Request, body: Option<&[u8]>) -> Result<(u16, String), String> {
     let res = match body {
         Some(b) => req.send_bytes(b),
         None => req.call(),

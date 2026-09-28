@@ -155,12 +155,51 @@ cloud.get("/games/" .. cloud.game() .. "/rank/laps:canyon", function(res) end)
 | Call | What it does |
 |---|---|
 | `cloud.game()` | this project's game slug, or `nil` when it is not connected |
-| `cloud.get(path, cb)` | a read under `/games/…` or `/players/…`; `res` as `http.get` |
+| `cloud.get(path, cb)` | a read under `/games/…` or `/players/…`; `res` as `http.get`, and a blob's bytes in `res.body` |
 | `cloud.avatar(playerId [, size], cb)` | a player's picture as a texture, `cb(tex, err)`; size 64, 128 (default) or 256 |
 | `cloud.config(cb)` | your remote config, `cb(config, err)` |
 
 Reads only: a game key never writes, so saves, scores and uploads go through
 `account.*` as the player. Play only, like `http.*`, with the same rate limits.
+
+### Declaring what the game stores: `cloud_collections.ron`
+
+Everything a game stores on fopull.com lives in a named collection. Public
+data, leaderboards and counters have to be declared before the first write, or
+the write is refused with `no_such_collection`. Keep the list with the game, in
+`cloud_collections.ron` beside `project.ron`:
+
+```ron
+[
+    (name: "replays", kind: blobs, access: public, cap_kb: 512),
+    (name: "stages", kind: docs, access: public),
+    (name: "time", kind: rank, keep: min),
+    (name: "installs", kind: counter, mode: unique),
+]
+```
+
+- **`kind`**: `docs` (JSON), `blobs` (bytes), `rank` (leaderboards) or `counter`.
+- **`access`**: `private` (only the player who wrote it, the default for docs and
+  blobs) or `public` (anyone playing can read it). Rank and counter collections
+  are always public.
+- **`keep`**, rank only, and required: `max` keeps each player's highest score,
+  `min` their lowest (a lap time), `latest` their most recent.
+- **`mode`**, counter only: `total` (the default) adds every count, `unique`
+  counts each player once.
+- **`cap_kb`**: the largest single object. Left out, the server's default holds.
+
+```sh
+floptle cloud collections path/to/game           # what differs; writes nothing
+floptle cloud collections path/to/game --apply   # make fopull.com match
+```
+
+Without `--apply` it reads with the game key, so it needs nobody signed in and
+fits in a build script: it exits 1 when the server differs from the file.
+`--apply` declares as the developer signed in to the Hub, who has to own the
+game. A collection that holds data can't change its `kind` or `access`, and the
+server's refusal is printed as it is. A collection that is only on the server is
+listed and left alone: deleting one deletes its data, so that stays a click on
+the game's page.
 
 ---
 
