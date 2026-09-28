@@ -82,7 +82,9 @@ pub(crate) fn install(lua: &Lua, cloud: CloudState, fetcher: Fetcher) -> mlua::R
             let game = c.borrow().clone().ok_or_else(|| mlua::Error::runtime(NOT_CONNECTED))?;
             let url = url_for(&game, &path).map_err(mlua::Error::runtime)?;
             let headers = vec![(GAME_KEY_HEADER.to_string(), game.key.clone())];
-            http_api::send(&f.http, &f.logs, &f.in_fixed, "GET", url, None, headers, http_api::DEFAULT_TIMEOUT, true, cb)
+            // JSON only when the reply says so: a blob is bytes, and reading it
+            // as JSON would turn a delivered file into a failure.
+            http_api::send(&f.http, &f.logs, &f.in_fixed, "GET", url, None, headers, http_api::DEFAULT_TIMEOUT, false, cb)
         })?,
     )?;
 
@@ -275,6 +277,32 @@ mod tests {
 
         let e = h.lua.load("cloud.avatar('x', 100, function() end)").exec().unwrap_err().to_string();
         assert!(e.contains("64, 128 or 256"), "{e}");
+    }
+
+    #[test]
+    fn a_blob_arrives_byte_exact_and_is_not_read_as_json() {
+        // Every byte value, so a lossy text round trip anywhere would show.
+        let blob: Vec<u8> = (0..=255u8).rev().chain(0..=255u8).collect();
+        let (base, seen) = fopull("200 OK", "application/octet-stream", blob.clone());
+        let h = harness(Some(&base));
+        h.lua
+            .load("cloud.get('/games/freeflier/blobs/replays/run%3A1', function(r) ok = r.ok; body = r.body; err = r.error; json = r.json; done = true end)")
+            .exec()
+            .unwrap();
+        h.until(|h| h.global::<Option<bool>>("done").is_some());
+        assert_eq!(h.global::<Option<String>>("err"), None);
+        assert!(h.global::<bool>("ok"), "a 200 blob came back as a failure");
+        assert!(h.global::<Value>("json").is_nil());
+        assert_eq!(h.global::<mlua::String>("body").as_bytes().to_vec(), blob, "the blob changed on the way");
+        assert!(seen.lock().unwrap()[0].starts_with("get /api/floptle/v1/games/freeflier/blobs/replays/run%3a1 "));
+
+        // A reply that says it is JSON is still parsed, errors included.
+        let (base, _) = fopull("404 Not Found", "application/json", br#"{"error":"not_found"}"#.to_vec());
+        let h = harness(Some(&base));
+        h.lua.load("cloud.get('/games/freeflier/blobs/replays/x', function(r) ok = r.ok; why = r.json.error end)").exec().unwrap();
+        h.until(|h| h.global::<Option<String>>("why").is_some());
+        assert!(!h.global::<bool>("ok"));
+        assert_eq!(h.global::<String>("why"), "not_found");
     }
 
     #[test]

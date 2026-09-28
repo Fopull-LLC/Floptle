@@ -224,7 +224,7 @@ cloud.game() -> string|nil — this project's game slug (what /games/<slug>/… 
 
 ### `cloud.get`
 
-cloud.get(path, function(res) end) — read from Floptle Cloud as the game: the engine attaches the project's game key, so it works with nobody signed in. Paths under /games/… and /players/… only, GET only (a game key never writes). res as http.get, with json parsed. Play only, same rate limits as http.*. Refuses: any other path; a project not connected to Cloud.
+cloud.get(path, function(res) end) — read from Floptle Cloud as the game: the engine attaches the project's game key, so it works with nobody signed in. Paths under /games/… and /players/… only, GET only (a game key never writes). res as http.get: res.json when the reply is JSON; a blob comes back as its bytes in res.body, with no res.json. Play only, same rate limits as http.*. Refuses: any other path; a project not connected to Cloud.
 
 ### `createNode`
 
