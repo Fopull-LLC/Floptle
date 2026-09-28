@@ -873,6 +873,8 @@ pub struct ScriptHost {
     /// Animator state per entity (layers/states/time), fed by the editor before `run`
     /// so scripts can read `anim:state()`, `anim:time()`, `anim:clips()`, ….
     anim_info: Rc<RefCell<HashMap<u32, AnimInfo>>>,
+    /// Animated skeletons' poses, for `node:bonePos` / `boneRot` / `bones`.
+    bone_poses: Rc<RefCell<BonePoses>>,
     /// Animator commands scripts queued this frame (`anim:play(...)` etc.), drained by
     /// the editor and applied to the controller runtimes before they advance — so intent
     /// set this frame lands this frame.
@@ -1056,6 +1058,70 @@ fn gizmo_color(r: Option<f64>, g: Option<f64>, b: Option<f64>) -> [f32; 3] {
     }
 }
 
+/// Every animated skeleton's pose this frame, for `node:bonePos` and friends.
+///
+/// Filled by the driver after the animators advance, into buffers it keeps: a
+/// frame's refill is a copy into memory that is already there, not an
+/// allocation per character.
+#[derive(Default)]
+pub struct BonePoses {
+    nodes: HashMap<u32, NodeBones>,
+    frame: u64,
+}
+
+struct NodeBones {
+    /// Skeleton node names, index-parallel to `model`. Shared per rig.
+    names: Rc<Vec<String>>,
+    /// Each bone's transform in the model's space (placement offset included):
+    /// what a bone-attached node is placed by.
+    model: Vec<glam::Mat4>,
+    frame: u64,
+}
+
+impl BonePoses {
+    /// Start a frame's refill.
+    pub fn begin(&mut self) {
+        self.frame += 1;
+    }
+
+    /// Node `eid`'s pose this frame.
+    pub fn set(&mut self, eid: u32, names: &Rc<Vec<String>>, model: &[glam::Mat4]) {
+        let frame = self.frame;
+        let nb = self.nodes.entry(eid).or_insert_with(|| NodeBones {
+            names: names.clone(),
+            model: Vec::with_capacity(model.len()),
+            frame,
+        });
+        if !Rc::ptr_eq(&nb.names, names) {
+            nb.names = names.clone();
+        }
+        nb.model.clear();
+        nb.model.extend_from_slice(model);
+        nb.frame = frame;
+    }
+
+    /// Drop the nodes the refill did not reach: gone, or no longer animated.
+    pub fn end(&mut self) {
+        let frame = self.frame;
+        self.nodes.retain(|_, nb| nb.frame == frame);
+    }
+
+    /// The model-space transform of bone `name` on node `eid`: `Ok(None)` when
+    /// the node has no posed skeleton, `Err` with the bone names when it has one
+    /// and no such bone.
+    pub(crate) fn bone(&self, eid: u32, name: &str) -> Result<Option<glam::Mat4>, Vec<String>> {
+        let Some(nb) = self.nodes.get(&eid) else { return Ok(None) };
+        match nb.names.iter().position(|n| n == name) {
+            Some(i) => Ok(nb.model.get(i).copied()),
+            None => Err(nb.names.to_vec()),
+        }
+    }
+
+    pub(crate) fn names(&self, eid: u32) -> Option<Rc<Vec<String>>> {
+        self.nodes.get(&eid).map(|nb| nb.names.clone())
+    }
+}
+
 /// The animator state of one entity, mirrored to scripts each frame.
 #[derive(Clone, Debug, Default)]
 pub struct AnimInfo {
@@ -1093,6 +1159,18 @@ pub enum AnimCmd {
     SetLayerWeight { layer: String, weight: f32 },
     /// Scrub the current state of `layer` (`None` = base) to `t` seconds.
     Seek { t: f32, layer: Option<String> },
+    /// `anim:setEnabled(on)`: off = no advance and no pose until back on.
+    SetEnabled(bool),
+    /// `anim:setCulling(mode)`: override the controller's culling.
+    SetCulling(AnimCulling),
+}
+
+/// `anim:setCulling`'s modes — see the controller asset's `culling`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnimCulling {
+    Always,
+    WhenVisible,
+    Reduced,
 }
 
 /// The particle-system state of one node, mirrored to scripts each frame so
@@ -1907,6 +1985,7 @@ struct Shared {
     rich_sets: Rc<RefCell<Vec<(u32, RichSet)>>>,
     /// Animator mirror (entity → layers/states), fed by the editor each frame.
     anim_info: Rc<RefCell<HashMap<u32, AnimInfo>>>,
+    bone_poses: Rc<RefCell<BonePoses>>,
     /// Animator commands queued by `node:animator()` handles this frame.
     anim_commands: Rc<RefCell<Vec<(u32, AnimCmd)>>>,
     /// Particle-system mirror (entity → playing/alive/asset), fed by the editor.

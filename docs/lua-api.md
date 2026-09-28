@@ -16,7 +16,7 @@ each group, and meant to be searched.
 
 - [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 154
 - [node — transform & body fields](#node--transform--body-fields) — 38
-- [node — methods & handles](#node--methods--handles) — 28
+- [node — methods & handles](#node--methods--handles) — 31
 - [vectors, directions & easing](#vectors-directions--easing) — 49
 - [scene lookups & raycast](#scene-lookups--raycast) — 16
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
@@ -41,7 +41,7 @@ each group, and meant to be searched.
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 19
 - [components — getcomponent](#components--getcomponent) — 101
-- [animation — node:animator](#animation--nodeanimator) — 16
+- [animation — node:animator](#animation--nodeanimator) — 18
 - [particles — effects from script](#particles--effects-from-script) — 10
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 30
 - [assets](#assets) — 11
@@ -901,12 +901,24 @@ node:addTag("burning") — add a tag at runtime (duplicates are ignored). findTa
 
 ### `node:animator`
 
-node:animator() — the animation handle for this node's Animation Controller (or a rigged model's embedded clips). Setters: :play/:restart/:crossfade/:stop/:setSpeed/:setLayerWeight/:seek. Getters: :state/:time/:finished/:isPlaying/:clips/:layers.
+node:animator() — the animation handle for this node's Animation Controller (or a rigged model's embedded clips). Setters: :play/:restart/:crossfade/:stop/:setSpeed/:setLayerWeight/:seek/:setEnabled/:setCulling. Getters: :state/:time/:finished/:isPlaying/:clips/:layers.
 
 ```lua
 local anim = node:animator()
 anim:crossfade(node.vel:length() > 4 and "run" or "walk", 0.15)
 ```
+
+### `node:bonePos`
+
+node:bonePos("mixamorig:Head") → the bone's world position this frame, as a vec3, on an animated model — the same point a node attached to that bone would be at, without adding one. nil while the model has no posed skeleton (not loaded yet, or a headless run, which loads no models). A bone name the model doesn't have raises, naming the closest. node:bones() lists them.
+
+### `node:boneRot`
+
+node:boneRot("mixamorig:Head") → yaw, pitch, roll of the bone in world space this frame, in the same convention as node.yaw/pitch/roll, so a node spawned at the root can be set to match. nil, nil, nil while the model has no posed skeleton.
+
+### `node:bones`
+
+node:bones() → the names of the animated model's skeleton nodes, in skeleton order; nil while it has no posed skeleton. What node:bonePos and node:boneRot accept.
 
 ### `node:children`
 
@@ -2847,7 +2859,7 @@ perf.buckets() → the bucket names, in frame order: scripts, mirror, physics, t
 
 ### `perf.counts`
 
-perf.counts() → { nodes=, culled=, instances=, draws=, chunks=, props=, particles=, effects=, effectsDropped=, lights=, lightsDropped=, voices=, mirrorRebuilds=, mirrorRefreshed= }. Readable even while collection is off, because counts are free to keep — and three of the four 'the engine is slow' reports this API exists for were answerable from one count alone (a scatter field asking for 117,000 props was one of them). The *Dropped pair is what a ceiling refused this frame: nonzero means the engine is cutting your look, which you should hear from a number rather than from a screenshot. mirrorRebuilds is how many times last frame the scripts' copy of the scene was rebuilt from scratch (each costs time in proportion to the whole scene, in the mirror bucket); mirrorRefreshed is how many single nodes were re-read because a component of theirs changed, which costs only those nodes.
+perf.counts() → { nodes=, culled=, instances=, draws=, chunks=, props=, particles=, effects=, effectsDropped=, lights=, lightsDropped=, voices=, mirrorRebuilds=, mirrorRefreshed=, animators=, animatorsCulled= }. Readable even while collection is off, because counts are free to keep — and three of the four 'the engine is slow' reports this API exists for were answerable from one count alone (a scatter field asking for 117,000 props was one of them). The *Dropped pair is what a ceiling refused this frame: nonzero means the engine is cutting your look, which you should hear from a number rather than from a screenshot. mirrorRebuilds is how many times last frame the scripts' copy of the scene was rebuilt from scratch (each costs time in proportion to the whole scene, in the mirror bucket); mirrorRefreshed is how many single nodes were re-read because a component of theirs changed, which costs only those nodes. animators and animatorsCulled are last frame's animated models and how many culling skipped (see anim:setCulling).
 
 ### `perf.enable`
 
@@ -3536,6 +3548,14 @@ anim:restart("Attack" [, fade [, layer]]) — like play, but re-enters even if t
 ### `anim:seek`
 
 anim:seek(t [, layer]) — jump the current state's playhead to t seconds.
+
+### `anim:setCulling`
+
+anim:setCulling("whenVisible") — override the controller's culling for this node: "always" (animate whether seen or not), "whenVisible" (skip while the model or an ancestor is hidden, or it is behind or beside the active camera, then catch up in one step when it comes back, without firing the events it missed), or "reduced" (as whenVisible, and past 30 m pose every third frame). Keep "always" for anything a bone must drive while nobody is looking, such as a hitbox on a hand. perf.counts().animatorsCulled says how many were skipped.
+
+### `anim:setEnabled`
+
+anim:setEnabled(false) — switch this animator off: no advance and no pose (the model holds its last pose) until anim:setEnabled(true). Unlike setSpeed(0), which stops time but still poses the skeleton every frame, off costs nothing. Survives the animator rebinding.
 
 ### `anim:setLayerWeight`
 

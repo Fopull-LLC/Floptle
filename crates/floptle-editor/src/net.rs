@@ -2162,6 +2162,7 @@ impl Editor {
             &self.mesh_registry,
             step,
             anim_cmds,
+            anim::CullBy::Nothing,
         );
         for (eid, func) in fired {
             hs.host.call_function(&mut hs.world, eid, &func);

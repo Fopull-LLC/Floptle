@@ -2236,6 +2236,7 @@ impl ScriptHost {
             component_strs: Rc::new(RefCell::new(HashMap::new())),
             rich_sets: Rc::new(RefCell::new(Vec::new())),
             anim_info: Rc::new(RefCell::new(HashMap::new())),
+            bone_poses: Rc::default(),
             anim_commands: Rc::new(RefCell::new(Vec::new())),
             vfx_info: Rc::new(RefCell::new(HashMap::new())),
             vfx_commands: Rc::new(RefCell::new(Vec::new())),
@@ -2591,6 +2592,7 @@ impl ScriptHost {
             ui_hover,
             ui_active,
             anim_info: shared.anim_info.clone(),
+            bone_poses: shared.bone_poses.clone(),
             anim_commands: shared.anim_commands.clone(),
             vfx_info: shared.vfx_info.clone(),
             vfx_commands: shared.vfx_commands.clone(),
@@ -3309,6 +3311,12 @@ impl ScriptHost {
     /// so scripts can read `anim:state()/:time()/:clips()`.
     pub fn set_anim_info(&self, map: HashMap<u32, AnimInfo>) {
         *self.anim_info.borrow_mut() = map;
+    }
+
+    /// The skeleton poses `node:bonePos` reads — refilled by the driver each
+    /// frame after the animators advance (`begin`, `set` per node, `end`).
+    pub fn bone_poses(&self) -> std::cell::RefMut<'_, crate::BonePoses> {
+        self.bone_poses.borrow_mut()
     }
 
     /// Feed this frame's assembly mirror (`assembly.info` reads it).

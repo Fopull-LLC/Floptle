@@ -22,7 +22,7 @@ pub mod anim;
 pub use anim::{
     key_mode_at, load_anim_clip, load_anim_controller, move_key_mode, same_key_time, save_anim_clip,
     save_anim_controller, set_key_mode, AnimChannelDoc, AnimInterpDoc, AnimKeyModeDoc,
-    AnimClipDoc, AnimControllerDoc, AnimEventDoc, AnimLayerDoc, AnimPropTrackDoc, AnimPropValueDoc,
+    AnimClipDoc, AnimControllerDoc, AnimCullingDoc, AnimEventDoc, AnimLayerDoc, AnimPropTrackDoc, AnimPropValueDoc,
     load_sprite_anim, save_sprite_anim, AnimStateDoc, AnimTrackDoc3, AnimTrackDoc4,
     AnimTransitionDoc, SpriteAnimDoc, SpriteAnimFrameDoc, SpriteFrameDoc, ANIM_CLIP_EXT,
     ANIM_CTL_EXT, SPRITE_ANIM_EXT, SPRITE_COMPONENT, SPRITE_FIELD,

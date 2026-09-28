@@ -289,6 +289,39 @@ pub struct AnimControllerDoc {
     /// Priority stack: index 0 is the base; higher layers override the nodes
     /// their playing clip animates, scaled by the layer weight.
     pub layers: Vec<AnimLayerDoc>,
+    /// When an animator using this controller does its work. Absent in a file
+    /// is `Always`, which is what every controller did before the field
+    /// existed; a controller made in the editor starts at `WhenVisible`.
+    #[serde(default, skip_serializing_if = "AnimCullingDoc::is_always")]
+    pub culling: AnimCullingDoc,
+}
+
+/// When an animator advances and poses its skeleton.
+///
+/// Advancing a character and posing 20–60 bones is real work, and a level of
+/// enemies that are hidden past the fog or behind the player pays it for every
+/// one of them. Culling stops that without changing what anyone sees.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AnimCullingDoc {
+    /// Every frame, seen or not. Bone-attached gameplay (a hitbox on a hand,
+    /// a weapon that fires from the muzzle bone) needs this if it must stay
+    /// right while nobody is looking.
+    #[default]
+    Always,
+    /// Only while the model is visible (its node and every ancestor) and in
+    /// front of the active camera. Coming back into view, it catches up in one
+    /// step to where it would have been; events from the time it was culled
+    /// don't fire.
+    WhenVisible,
+    /// Like `WhenVisible`, and past 30 m from the camera it poses every third
+    /// frame.
+    Reduced,
+}
+
+impl AnimCullingDoc {
+    fn is_always(&self) -> bool {
+        *self == Self::Always
+    }
 }
 
 impl Default for AnimControllerDoc {
@@ -296,6 +329,7 @@ impl Default for AnimControllerDoc {
         Self {
             default_fade: default_fade(),
             sample_fps: None,
+            culling: AnimCullingDoc::WhenVisible,
             layers: vec![AnimLayerDoc {
                 name: "Base".into(),
                 weight: 1.0,
@@ -632,6 +666,7 @@ mod tests {
         let doc = AnimControllerDoc {
             default_fade: 0.5,
             sample_fps: Some(12.0),
+            culling: AnimCullingDoc::Reduced,
             layers: vec![
                 AnimLayerDoc {
                     name: "Movement".into(),

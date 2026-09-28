@@ -6404,6 +6404,38 @@ fn node_animator_method(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Re
     {
         let cmds = shared.anim_commands.clone();
         anim_methods.set(
+            "setEnabled",
+            lua.create_function(move |_, (this, on): (Table, bool)| {
+                let e: u32 = this.raw_get("__id")?;
+                queue(&cmds, e, AnimCmd::SetEnabled(on));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let cmds = shared.anim_commands.clone();
+        anim_methods.set(
+            "setCulling",
+            lua.create_function(move |_, (this, mode): (Table, String)| {
+                let e: u32 = this.raw_get("__id")?;
+                let m = match mode.as_str() {
+                    "always" => crate::AnimCulling::Always,
+                    "whenVisible" => crate::AnimCulling::WhenVisible,
+                    "reduced" => crate::AnimCulling::Reduced,
+                    other => {
+                        return Err(mlua::Error::runtime(format!(
+                            "anim:setCulling: '{other}' is not a culling mode — accepted: always, whenVisible, reduced"
+                        )));
+                    }
+                };
+                queue(&cmds, e, AnimCmd::SetCulling(m));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let cmds = shared.anim_commands.clone();
+        anim_methods.set(
             "setLayerWeight",
             lua.create_function(move |_, (this, layer, w): (Table, String, f64)| {
                 let e: u32 = this.raw_get("__id")?;
@@ -7075,7 +7107,73 @@ fn install_node_methods(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
     node_animator_method(lua, shared, &methods)?;
     node_particles_method(lua, shared, &methods)?;
     node_motion_methods(lua, shared, &methods)?;
+    node_bone_methods(lua, shared, &methods)?;
     lua.set_named_registry_value("floptle_node_methods", methods)?;
+    Ok(())
+}
+
+/// A bone's world transform on an animated skeleton: the node's world
+/// transform composed with the bone's model-space pose — the frame a
+/// bone-attached node is placed in, so a read here and a marker node attached
+/// to the same bone agree.
+fn bone_world(
+    scene: &Rc<RefCell<crate::SceneMirror>>,
+    poses: &Rc<RefCell<crate::BonePoses>>,
+    this: &Table,
+    name: &str,
+    call: &str,
+) -> mlua::Result<Option<floptle_core::Transform>> {
+    let e: u32 = this.raw_get("__id")?;
+    let model = match poses.borrow().bone(e, name) {
+        Ok(Some(m)) => m,
+        Ok(None) => return Ok(None),
+        Err(names) => {
+            return Err(mlua::Error::runtime(format!(
+                "node:{call}: no bone \"{name}\" on this model — node:bones() lists them ({})",
+                crate::opts::near_miss_hint(name, &names.iter().map(String::as_str).collect::<Vec<_>>())
+            )));
+        }
+    };
+    let s = scene.borrow();
+    let world = world_transform_of_handle(&s, this, e);
+    Ok(Some(world.mul_transform(&floptle_core::Transform::from_matrix(model.as_dmat4()))))
+}
+
+/// `node:bonePos(name)`, `node:boneRot(name)`, `node:bones()` — where an
+/// animated skeleton's bones are this frame, without a marker node per bone.
+fn node_bone_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Result<()> {
+    let (scene, poses) = (shared.scene.clone(), shared.bone_poses.clone());
+    methods.set(
+        "bonePos",
+        lua.create_function(move |lua, (this, name): (Table, String)| {
+            Ok(match bone_world(&scene, &poses, &this, &name, "bonePos")? {
+                Some(w) => crate::math_api::LuaVec3(w.translation).into_lua(lua)?,
+                None => Value::Nil,
+            })
+        })?,
+    )?;
+    let (scene, poses) = (shared.scene.clone(), shared.bone_poses.clone());
+    methods.set(
+        "boneRot",
+        lua.create_function(move |_, (this, name): (Table, String)| {
+            Ok(match bone_world(&scene, &poses, &this, &name, "boneRot")? {
+                Some(w) => {
+                    let (y, p, r) = w.rotation.to_euler(EulerRot::YXZ);
+                    (Some(y as f64), Some(p as f64), Some(r as f64))
+                }
+                None => (None, None, None),
+            })
+        })?,
+    )?;
+    let poses = shared.bone_poses.clone();
+    methods.set(
+        "bones",
+        lua.create_function(move |lua, this: Table| {
+            let e: u32 = this.raw_get("__id")?;
+            let Some(names) = poses.borrow().names(e) else { return Ok(Value::Nil) };
+            Ok(Value::Table(lua.create_sequence_from(names.iter().cloned())?))
+        })?,
+    )?;
     Ok(())
 }
 

@@ -628,6 +628,28 @@ impl EditorTabViewer<'_> {
                     && ui.add(egui::DragValue::new(fps).speed(0.2).range(1.0..=60.0).suffix(" fps")).changed() {
                         st.graph_dirty = true;
                     }
+                use floptle_scene::AnimCullingDoc as C;
+                let label = |c: C| match c {
+                    C::Always => "animate always",
+                    C::WhenVisible => "only when visible",
+                    C::Reduced => "reduced when far",
+                };
+                egui::ComboBox::from_id_salt("anim-ctl-culling")
+                    .selected_text(label(doc.culling))
+                    .show_ui(ui, |ui| {
+                        for c in [C::Always, C::WhenVisible, C::Reduced] {
+                            if ui.selectable_value(&mut doc.culling, c, label(c)).changed() {
+                                st.graph_dirty = true;
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "When an animator using this controller does its work. \"Only when visible\" \
+                         skips a hidden or off-screen model and catches it up when it comes back. \
+                         \"Reduced when far\" also poses every third frame past 30 m. Keep \"always\" \
+                         when something must follow a bone while nobody is looking at it.",
+                    );
             }
         });
         // New-controller prompt.

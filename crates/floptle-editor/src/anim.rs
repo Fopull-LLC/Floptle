@@ -238,6 +238,14 @@ pub struct AnimInstance {
     pub binding: AnimBinding,
     /// Scratch: world matrices for the rig path.
     world: Vec<Mat4>,
+    /// When it does its work — from the controller asset; `anim:setCulling`
+    /// overrides it (see [`AnimSystem::overrides`]).
+    pub culling: floptle_scene::AnimCullingDoc,
+    /// Time that passed while it was culled, or between its reduced-rate
+    /// frames, not yet advanced.
+    held: f32,
+    /// Frames since its last pose, for the reduced rate.
+    stride: u32,
 }
 
 /// Everything animation the editor owns. One field on `Editor`.
@@ -282,13 +290,134 @@ pub struct AnimSystem {
     pub warnings: Vec<String>,
     /// Warning keys already emitted this play session (one warning, not 60/s).
     warned: HashSet<String>,
+    /// What scripts said about an animator, kept by entity so it survives a
+    /// rebind: `anim:setEnabled`, `anim:setCulling`.
+    pub overrides: HashMap<Entity, AnimOverride>,
+    /// Last frame: animators, and how many of them culling skipped.
+    pub counts: (usize, usize),
+    /// Each rig's skeleton node names, shared with the script host's bone
+    /// reads so a frame's refill copies poses and never names.
+    bone_names: HashMap<String, Rc<Vec<String>>>,
     /// `anim:events` / `anim:duration` data per entity, keyed by the bound revision.
     /// The script mirror is rebuilt every frame; this half only changes when an
     /// instance rebinds, so cloning event strings 60×/s would be pure waste.
     clip_info: std::cell::RefCell<ClipInfoCache>,
 }
 
+/// A script's say over one animator.
+#[derive(Clone, Copy, Debug)]
+pub struct AnimOverride {
+    /// `anim:setEnabled(false)`: no advance and no pose until switched back on.
+    pub enabled: bool,
+    pub culling: Option<floptle_scene::AnimCullingDoc>,
+}
+
+impl Default for AnimOverride {
+    fn default() -> Self {
+        Self { enabled: true, culling: None }
+    }
+}
+
+/// Where the active camera is looking, for animation culling. A cone around
+/// its forward axis wide enough to hold the whole view at any aspect a window
+/// is likely to have, so a model at the edge of a wide screen is never culled.
+#[derive(Clone, Copy, Debug)]
+pub struct AnimView {
+    pub eye: floptle_core::math::DVec3,
+    pub forward: floptle_core::math::DVec3,
+    /// Half-angle of the cone, radians.
+    pub half_angle: f64,
+}
+
+impl AnimView {
+    /// Past this far from the camera a `Reduced` animator poses every third
+    /// frame.
+    const REDUCE_BEYOND: f64 = 30.0;
+
+    /// A view from a camera node: its world transform and vertical FOV.
+    pub fn from_camera(tr: &Transform, fov_y: f32) -> Self {
+        // 2.4:1 is wider than any ordinary window; the diagonal of that view.
+        const ASPECT: f64 = 2.4;
+        let half_diag = ((fov_y as f64 * 0.5).tan() * (1.0 + ASPECT * ASPECT).sqrt()).atan();
+        let forward = tr.rotation.as_dquat() * floptle_core::math::DVec3::NEG_Z;
+        Self { eye: tr.translation, forward, half_angle: half_diag }
+    }
+
+    /// Could a sphere at `c` of radius `r` be on screen?
+    fn sees(&self, c: floptle_core::math::DVec3, r: f64) -> bool {
+        let to = c - self.eye;
+        let d = to.length();
+        if d <= r {
+            return true;
+        }
+        // Angle off-axis, less the angle the sphere itself covers.
+        let off = (to.dot(self.forward) / d).clamp(-1.0, 1.0).acos();
+        off - (r / d).clamp(0.0, 1.0).asin() <= self.half_angle
+    }
+}
+
+/// What may stop an animator doing its work this frame.
+#[derive(Clone, Copy, Debug)]
+pub enum CullBy {
+    /// Nothing: every animator runs, whatever its controller asks. A server,
+    /// whose clip events are authoritative hit windows and whose poses nobody
+    /// looks at anyway.
+    Nothing,
+    /// The controllers' own culling, against this view (`None`: there is no
+    /// camera, so only hiding culls).
+    Camera(Option<AnimView>),
+}
+
+/// Hidden, by its own `Visible(false)` or an ancestor's.
+fn hidden_in_tree(world: &World, e: Entity) -> bool {
+    let mut cur = e;
+    for _ in 0..64 {
+        if matches!(world.get::<floptle_core::Visible>(cur), Some(floptle_core::Visible(false))) {
+            return true;
+        }
+        match world.get::<floptle_core::Parent>(cur) {
+            Some(p) => cur = p.0,
+            None => return false,
+        }
+    }
+    false
+}
+
 impl AnimSystem {
+    /// Hand this frame's skeleton poses to the scripts (`node:bonePos`).
+    pub fn publish_bones(
+        &mut self,
+        world: &World,
+        mesh_registry: &HashMap<String, MeshAsset>,
+        out: &mut floptle_script::BonePoses,
+    ) {
+        out.begin();
+        for (e, pose) in &self.poses {
+            let Some(Matter::Mesh { asset_path }) = world.get::<Matter>(*e) else { continue };
+            let Some(rig) = mesh_registry.get(asset_path).and_then(|m| m.rig.as_ref()) else { continue };
+            let nodes = &rig.skeleton.nodes;
+            let names = match self.bone_names.get(asset_path) {
+                // A re-import can change the skeleton under the same path; the
+                // count and the two ends catch that without comparing every
+                // name of every character every frame.
+                Some(n)
+                    if n.len() == nodes.len()
+                        && n.first() == nodes.first().map(|b| &b.name)
+                        && n.last() == nodes.last().map(|b| &b.name) =>
+                {
+                    n.clone()
+                }
+                _ => {
+                    let n = Rc::new(nodes.iter().map(|n| n.name.clone()).collect::<Vec<_>>());
+                    self.bone_names.insert(asset_path.clone(), n.clone());
+                    n
+                }
+            };
+            out.set(e.index(), &names, pose);
+        }
+        out.end();
+    }
+
     /// The authored duration + events of every state this instance can play, for
     /// `anim:duration` / `anim:events`. Built once per (entity, revision) and handed to
     /// the per-frame mirror as a shared pointer.
@@ -1034,6 +1163,9 @@ pub fn bind_entity(
                 ctl,
                 binding: AnimBinding::Rig,
                 world: Vec::new(),
+                culling: doc.culling,
+                held: 0.0,
+                stride: 0,
             })
         }
         // Controller on anything else: animate the node + its descendants.
@@ -1064,6 +1196,9 @@ pub fn bind_entity(
                     covered,
                 },
                 world: Vec::new(),
+                culling: doc.culling,
+                held: 0.0,
+                stride: 0,
             })
         }
         // No controller, but a rigged mesh: embedded clips, "Idle" (or the
@@ -1098,6 +1233,9 @@ pub fn bind_entity(
                 ctl,
                 binding: AnimBinding::Rig,
                 world: Vec::new(),
+                culling: floptle_scene::AnimCullingDoc::Always,
+                held: 0.0,
+                stride: 0,
             })
         }
         (None, None) => None,
@@ -1105,17 +1243,27 @@ pub fn bind_entity(
 }
 
 /// Which entities should have an animator right now.
-fn animated_entities(world: &World, mesh_registry: &HashMap<String, MeshAsset>) -> Vec<Entity> {
+/// Every entity that animates, in a stable order, and the same as a set.
+fn animated_entities(
+    world: &World,
+    mesh_registry: &HashMap<String, MeshAsset>,
+) -> (Vec<Entity>, HashSet<Entity>) {
     let mut out: Vec<Entity> = world.query::<AnimController>().map(|(e, _)| e).collect();
+    // A set beside the list, so the dedup is a hash probe: `out.contains`
+    // here was a scan of every animator for every mesh in the scene.
+    let mut seen: HashSet<Entity> = out.iter().copied().collect();
     for (e, m) in world.query::<Matter>() {
         if let Matter::Mesh { asset_path } = m
-            && mesh_registry.get(asset_path).is_some_and(|a| a.rig.is_some())
-                && !out.contains(&e)
-            {
+            && seen.insert(e)
+        {
+            if mesh_registry.get(asset_path).is_some_and(|a| a.rig.is_some()) {
                 out.push(e);
+            } else {
+                seen.remove(&e);
             }
+        }
     }
-    out
+    (out, seen)
 }
 
 /// True when `e`'s instance is missing or bound against stale data.
@@ -1125,17 +1273,18 @@ fn needs_bind(
     mesh_registry: &HashMap<String, MeshAsset>,
     e: Entity,
 ) -> bool {
-    let cur_key = world.get::<AnimController>(e).map(|c| c.asset.clone());
+    // Borrowed, not cloned: this runs for every animator every frame.
+    let cur_key = world.get::<AnimController>(e).map(|c| c.asset.as_str());
     let mesh_path = match world.get::<Matter>(e) {
-        Some(Matter::Mesh { asset_path }) => Some(asset_path.clone()),
+        Some(Matter::Mesh { asset_path }) => Some(asset_path.as_str()),
         _ => None,
     };
     match system.instances.get(&e) {
         None => true,
         Some(inst) => {
             if inst.revision != system.revision
-                || inst.asset != cur_key
-                || inst.mesh_path != mesh_path
+                || inst.asset.as_deref() != cur_key
+                || inst.mesh_path.as_deref() != mesh_path
             {
                 return true;
             }
@@ -1148,7 +1297,6 @@ fn needs_bind(
             // mesh's skeleton is available.
             if matches!(inst.binding, AnimBinding::Nodes { .. })
                 && mesh_path
-                    .as_ref()
                     .and_then(|p| mesh_registry.get(p))
                     .is_some_and(|a| a.rig.is_some())
             {
@@ -1169,11 +1317,17 @@ pub fn advance_animators(
     mesh_registry: &HashMap<String, MeshAsset>,
     dt: f32,
     cmds: Vec<(u32, floptle_script::AnimCmd)>,
+    cull: CullBy,
 ) -> Vec<(u32, String)> {
-    let wanted = animated_entities(world, mesh_registry);
+    let (wanted, wanted_set) = animated_entities(world, mesh_registry);
     // Drop stale instances (component removed / node deleted).
-    system.instances.retain(|e, _| wanted.contains(e));
-    system.poses.retain(|e, _| system.instances.contains_key(e));
+    if system.instances.len() != wanted.len() || system.instances.keys().any(|e| !wanted_set.contains(e)) {
+        system.instances.retain(|e, _| wanted_set.contains(e));
+        system.poses.retain(|e, _| system.instances.contains_key(e));
+    }
+    if !system.overrides.is_empty() {
+        system.overrides.retain(|e, _| world.is_alive(*e));
+    }
 
     // Pass 1: (re)bind whatever is missing, stale, or re-keyed.
     for &e in &wanted {
@@ -1194,23 +1348,85 @@ pub fn advance_animators(
 
     // Pass 3: advance, collect events, apply poses.
     let mut fired = Vec::new();
+    let (mut counted, mut culled) = (0usize, 0usize);
     for e in wanted {
+        let ov = system.overrides.get(&e).copied().unwrap_or_default();
         let Some(inst) = system.instances.get_mut(&e) else {
             // A wanted entity with no instance never got bound — diagnose why.
             diagnose_anim(system, world, mesh_registry, e, DiagBind::Missing);
             continue;
         };
+        counted += 1;
+        // Switched off by a script: nothing at all, and the last pose stays.
+        if !ov.enabled {
+            culled += 1;
+            continue;
+        }
         let bind = match inst.binding {
             AnimBinding::Rig => DiagBind::Rig,
             AnimBinding::Nodes { .. } => DiagBind::Nodes,
         };
-        inst.ctl.advance(dt);
+        let mode = match cull {
+            CullBy::Nothing => floptle_scene::AnimCullingDoc::Always,
+            CullBy::Camera(_) => ov.culling.unwrap_or(inst.culling),
+        };
+        let view = match cull {
+            CullBy::Camera(v) => v,
+            CullBy::Nothing => None,
+        };
+        let mut reduce = false;
+        if mode != floptle_scene::AnimCullingDoc::Always {
+            let hidden = hidden_in_tree(world, e);
+            let (seen, far) = match view {
+                Some(v) if !hidden => {
+                    let tr = floptle_core::world_transform(world, e);
+                    let size = match world.get::<Matter>(e) {
+                        Some(Matter::Mesh { asset_path }) => mesh_registry.get(asset_path).map_or(2.0, |m| m.size),
+                        _ => 2.0,
+                    };
+                    // A generous sphere: half the model's size scaled by its
+                    // largest axis, plus a metre for limbs swinging out of the
+                    // bind pose.
+                    let r = size as f64 * 0.5 * tr.scale.abs().max_element() as f64 + 1.0;
+                    (v.sees(tr.translation, r), tr.translation.distance(v.eye) > AnimView::REDUCE_BEYOND)
+                }
+                // No camera to ask (a headless run): visible unless hidden.
+                _ => (!hidden, false),
+            };
+            if !seen {
+                inst.held += dt;
+                culled += 1;
+                continue;
+            }
+            reduce = far && mode == floptle_scene::AnimCullingDoc::Reduced;
+        }
+        // Back in view after being culled: catch up in one step, silently —
+        // the events of time nobody saw don't fire now.
+        let caught_up = std::mem::take(&mut inst.held);
+        if caught_up > 0.0 && !reduce {
+            inst.ctl.advance(caught_up);
+            let _ = inst.ctl.take_fired();
+        }
+        let mut step = dt;
+        if reduce {
+            inst.stride += 1;
+            if inst.stride < 3 {
+                inst.held = caught_up + dt;
+                culled += 1;
+                continue;
+            }
+            inst.stride = 0;
+            // Seen, just not every frame: its events are real ones.
+            step += caught_up;
+        }
+        inst.ctl.advance(step);
         for func in inst.ctl.take_fired() {
             fired.push((e.index(), func));
         }
         apply_instance(system, world, mesh_registry, e);
         diagnose_anim(system, world, mesh_registry, e, bind);
     }
+    system.counts = (counted, culled);
     fired
 }
 
@@ -1690,6 +1906,27 @@ pub fn apply_commands(
         system.instances.keys().map(|e| (e.index(), *e)).collect();
     let mut warn: Vec<(String, String)> = Vec::new();
     for (eid, cmd) in cmds {
+        // A script's say over the animator outlives any one binding, and must
+        // land even before the first one exists.
+        match cmd {
+            AnimCmd::SetEnabled(on) => {
+                if let Some(e) = world.entity_at(eid) {
+                    system.overrides.entry(e).or_default().enabled = on;
+                }
+                continue;
+            }
+            AnimCmd::SetCulling(m) => {
+                if let Some(e) = world.entity_at(eid) {
+                    system.overrides.entry(e).or_default().culling = Some(match m {
+                        floptle_script::AnimCulling::Always => floptle_scene::AnimCullingDoc::Always,
+                        floptle_script::AnimCulling::WhenVisible => floptle_scene::AnimCullingDoc::WhenVisible,
+                        floptle_script::AnimCulling::Reduced => floptle_scene::AnimCullingDoc::Reduced,
+                    });
+                }
+                continue;
+            }
+            _ => {}
+        }
         let Some(&e) = by_index.get(&eid) else {
             // No instance yet (e.g. play() on the very first frame): it will
             // exist after this frame's advance; commands next frame will land.
@@ -1746,6 +1983,7 @@ pub fn apply_commands(
                 let li = layer.as_deref().and_then(|l| inst.ctl.layer_index(l)).unwrap_or(0);
                 inst.ctl.seek(li, t);
             }
+            AnimCmd::SetEnabled(_) | AnimCmd::SetCulling(_) => {}
         }
     }
     for (key, msg) in warn {
@@ -2528,6 +2766,7 @@ mod tests {
             floptle_scene::AnimControllerDoc {
                 default_fade: 0.0,
                 sample_fps: None,
+                culling: floptle_scene::AnimCullingDoc::Always,
                 layers: vec![floptle_scene::AnimLayerDoc {
                     name: "Base".to_string(),
                     weight: 1.0,
@@ -2547,7 +2786,7 @@ mod tests {
         ));
 
         let registry: HashMap<String, crate::MeshAsset> = HashMap::new();
-        let fired = advance_animators(&mut system, &mut world, &registry, 0.5, Vec::new());
+        let fired = advance_animators(&mut system, &mut world, &registry, 0.5, Vec::new(), CullBy::Nothing);
         assert_eq!(fired, vec![(root.index(), "onHalfOpen".to_string())]);
         let tr = world.get::<Transform>(door).unwrap();
         assert!(
@@ -2556,8 +2795,284 @@ mod tests {
             tr.translation.y
         );
         // The half-open event fires exactly once.
-        let fired = advance_animators(&mut system, &mut world, &registry, 0.1, Vec::new());
+        let fired = advance_animators(&mut system, &mut world, &registry, 0.1, Vec::new(), CullBy::Nothing);
         assert!(fired.is_empty());
+    }
+
+    /// A controller that raises a door 4 m over 8 s (every one of `limbs`
+    /// children, so a test can make an animator as expensive as it likes),
+    /// firing `onHalfOpen` at 4 s.
+    fn door_system(culling: floptle_scene::AnimCullingDoc, limbs: usize) -> AnimSystem {
+        let mut system = AnimSystem::default();
+        let track = || floptle_scene::AnimTrackDoc3 {
+            times: vec![0.0, 8.0],
+            values: vec![[0.0, 0.0, 0.0], [0.0, 4.0, 0.0]],
+            step: false,
+            modes: Vec::new(),
+            hold_times: Vec::new(),
+        };
+        system.clips.push((
+            "animations/DoorOpen".to_string(),
+            floptle_scene::AnimClipDoc {
+                name: "DoorOpen".to_string(),
+                duration: 8.0,
+                source_model: String::new(),
+                channels: (0..limbs.max(1))
+                    .map(|i| floptle_scene::AnimChannelDoc {
+                        node: if i == 0 { "Door".to_string() } else { format!("Limb{i}") },
+                        translation: Some(track()),
+                        rotation: None,
+                        scale: None,
+                        properties: Vec::new(),
+                    })
+                    .collect(),
+                events: vec![floptle_scene::AnimEventDoc { t: 4.0, func: "onHalfOpen".to_string() }],
+            },
+        ));
+        system.controllers.push((
+            "animation_controllers/Cut".to_string(),
+            floptle_scene::AnimControllerDoc {
+                default_fade: 0.0,
+                sample_fps: None,
+                culling,
+                layers: vec![floptle_scene::AnimLayerDoc {
+                    name: "Base".to_string(),
+                    weight: 1.0,
+                    states: vec![floptle_scene::AnimStateDoc {
+                        name: "Open".to_string(),
+                        clip: "animations/DoorOpen".to_string(),
+                        speed: 1.0,
+                        looped: true,
+                        fade_in: None,
+                        fps: None,
+                        pos: [0.0, 0.0],
+                    }],
+                    default_state: Some("Open".to_string()),
+                    transitions: Vec::new(),
+                }],
+            },
+        ));
+        system
+    }
+
+    /// A director with the Cut controller and a Door child (plus `limbs - 1`
+    /// more), at `at`.
+    fn director(world: &mut World, at: floptle_core::math::DVec3, limbs: usize) -> (Entity, Entity) {
+        let root = world.spawn();
+        world.insert(root, Name("Director".to_string()));
+        world.insert(root, Transform::from_translation(at));
+        world.insert(root, Matter::Empty);
+        world.insert(root, AnimController { asset: "animation_controllers/Cut".to_string() });
+        let mut door = root;
+        for i in 0..limbs.max(1) {
+            let c = world.spawn();
+            world.insert(c, Name(if i == 0 { "Door".to_string() } else { format!("Limb{i}") }));
+            world.insert(c, Transform::IDENTITY);
+            // No Matter: a bone of a skeleton, not a piece of scenery the
+            // per-frame scan for rigged meshes has to look at.
+            world.insert(c, floptle_core::Parent(root));
+            if i == 0 {
+                door = c;
+            }
+        }
+        (root, door)
+    }
+
+    /// **A culled animator does no work, and catches up silently.** Hidden,
+    /// it neither advances nor poses; shown again, it is where it would have
+    /// been, and the event that fell in the hidden time does not fire late.
+    /// A script's `setEnabled(false)` freezes it; `setCulling("always")`
+    /// overrides the controller.
+    #[test]
+    fn a_hidden_animator_does_nothing_and_catches_up_silently_when_shown() {
+        use floptle_scene::AnimCullingDoc as C;
+        let mut system = door_system(C::WhenVisible, 1);
+        let mut world = World::new();
+        let (root, door) = director(&mut world, floptle_core::math::DVec3::ZERO, 1);
+        let reg: HashMap<String, crate::MeshAsset> = HashMap::new();
+        let y = |w: &World| w.get::<Transform>(door).unwrap().translation.y;
+        let cam = CullBy::Camera(None);
+        advance_animators(&mut system, &mut world, &reg, 1.0, Vec::new(), cam);
+        assert!((y(&world) - 0.5).abs() < 1e-4, "visible, it animates: {}", y(&world));
+        world.insert(root, floptle_core::Visible(false));
+        let mut fired = Vec::new();
+        for _ in 0..5 {
+            fired.extend(advance_animators(&mut system, &mut world, &reg, 1.0, Vec::new(), cam));
+        }
+        assert_eq!(system.counts, (1, 1));
+        assert!((y(&world) - 0.5).abs() < 1e-4, "hidden, it moved: {}", y(&world));
+        world.insert(root, floptle_core::Visible(true));
+        fired.extend(advance_animators(&mut system, &mut world, &reg, 1.0, Vec::new(), cam));
+        assert!((y(&world) - 3.5).abs() < 1e-4, "shown, it did not catch up: {}", y(&world));
+        assert!(fired.is_empty(), "the event from the hidden time fired late: {fired:?}");
+        // 7 s on, 6 more: round the 8 s loop and across 4 s again, in view.
+        fired.extend(advance_animators(&mut system, &mut world, &reg, 6.0, Vec::new(), cam));
+        assert_eq!(fired, vec![(root.index(), "onHalfOpen".to_string())], "a visible event must still fire");
+
+        // Off by script: frozen, visible or not.
+        let off = vec![(root.index(), floptle_script::AnimCmd::SetEnabled(false))];
+        advance_animators(&mut system, &mut world, &reg, 1.0, off, cam);
+        let frozen = y(&world);
+        advance_animators(&mut system, &mut world, &reg, 1.0, Vec::new(), cam);
+        assert_eq!(y(&world), frozen, "switched off, it moved");
+        let on = vec![
+            (root.index(), floptle_script::AnimCmd::SetEnabled(true)),
+            (root.index(), floptle_script::AnimCmd::SetCulling(floptle_script::AnimCulling::Always)),
+        ];
+        world.insert(root, floptle_core::Visible(false));
+        advance_animators(&mut system, &mut world, &reg, 1.0, on, cam);
+        assert_ne!(y(&world), frozen, "setCulling(always) must animate a hidden model");
+        // A server culls nothing, whatever the controller says.
+        let mut server = door_system(C::WhenVisible, 1);
+        let fired = advance_animators(&mut server, &mut world, &reg, 5.0, Vec::new(), CullBy::Nothing);
+        assert_eq!(fired.len(), 1, "a server skipped a hidden animator's event");
+    }
+
+    /// **`node:bonePos` answers where a bone-attached marker would be.** A
+    /// ragdoll used to hang an empty node on every bone it needed and read the
+    /// marker's `worldPos`; reading the bone must give the same point, on a
+    /// mesh that is parented, turned and scaled, to within a millimetre.
+    #[test]
+    fn bone_pos_matches_a_bone_attached_marker() {
+        use floptle_anim::{SkelNode, Skeleton, TransformTRS};
+        use floptle_core::math::DVec3;
+        let bone = |name: &str, parent: Option<usize>, t: Vec3| SkelNode {
+            name: name.to_string(),
+            parent,
+            rest: TransformTRS { t, r: Quat::IDENTITY, s: Vec3::ONE },
+            pivot: Vec3::ZERO,
+        };
+        let skeleton = Skeleton::new(vec![
+            bone("Hips", None, Vec3::new(0.0, 1.0, 0.0)),
+            bone("Spine", Some(0), Vec3::new(0.0, 0.4, 0.0)),
+            bone("Head", Some(1), Vec3::new(0.0, 0.5, 0.1)),
+        ]);
+        let offset = Mat4::from_translation(Vec3::new(0.0, -0.9, 0.0));
+        let rig = RigAsset {
+            skeleton,
+            clips: Vec::new(),
+            part_nodes: Vec::new(),
+            rest_world: vec![Mat4::IDENTITY; 3],
+            offset,
+            skins: Vec::new(),
+            skin_bases: Vec::new(),
+            node_is_object: vec![false; 3],
+        };
+        let mut reg: HashMap<String, crate::MeshAsset> = HashMap::new();
+        reg.insert(
+            "models/soldier.glb".to_string(),
+            crate::MeshAsset { parts: Vec::new(), part_meta: Vec::new(), tex_filter: None, size: 2.0, rig: Some(rig) },
+        );
+        let mut world = World::new();
+        let squad = world.spawn();
+        world.insert(
+            squad,
+            Transform { translation: DVec3::new(100.0, 0.0, -40.0), rotation: Quat::from_rotation_y(0.3), scale: Vec3::ONE },
+        );
+        let soldier = world.spawn();
+        world.insert(soldier, Name("Soldier".to_string()));
+        world.insert(
+            soldier,
+            Transform {
+                translation: DVec3::new(3.0, 1.0, 2.0),
+                rotation: Quat::from_rotation_y(1.1) * Quat::from_rotation_x(0.2),
+                scale: Vec3::splat(1.3),
+            },
+        );
+        world.insert(soldier, Matter::Mesh { asset_path: "models/soldier.glb".to_string() });
+        world.insert(soldier, floptle_core::Parent(squad));
+        let marker = world.spawn();
+        world.insert(marker, Transform::IDENTITY);
+        world.insert(marker, floptle_core::Parent(soldier));
+        world.insert(
+            marker,
+            BoneAttach { target: soldier, bone: "Head".to_string(), offset: Transform::IDENTITY },
+        );
+        // A posed frame: the head bent and lifted, in model space with the
+        // placement offset in, as the animator leaves it.
+        let mut system = AnimSystem::default();
+        let head = offset
+            * Mat4::from_rotation_translation(Quat::from_rotation_z(0.4), Vec3::new(0.2, 1.9, 0.15));
+        system.poses.insert(soldier, vec![offset, offset, head]);
+        resolve_attachments(&system, &mut world, &reg);
+        let want = floptle_core::world_transform(&world, marker).translation;
+
+        let dir = std::env::temp_dir().join(format!("floptle_bonepos_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("reader.lua"),
+            "function update(node, dt)\n  local p = find('Soldier'):bonePos('Head')\n  node.x, node.y, node.z = p.x, p.y, p.z\n  local y = find('Soldier'):boneRot('Head')\n  node.scale = y\n  names = #find('Soldier'):bones()\nend\n",
+        )
+        .unwrap();
+        let reader = world.spawn();
+        world.insert(reader, Transform::IDENTITY);
+        world.insert(
+            reader,
+            floptle_core::Scripts(vec![floptle_core::ScriptInst {
+                kind: "reader".into(),
+                enabled: true,
+                params: Vec::new(),
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = floptle_script::ScriptHost::new();
+        system.publish_bones(&world, &reg, &mut host.bone_poses());
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let got = world.get::<Transform>(reader).unwrap().translation;
+        assert!(got.distance(want) < 1e-3, "bonePos {got} vs the marker at {want}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Off to the side of the camera or behind it is culled; in front, or so
+    /// close the sphere reaches the eye, is not.
+    #[test]
+    fn the_camera_cone_culls_what_it_cannot_see() {
+        let v = AnimView::from_camera(&Transform::IDENTITY, 1.0); // looks down -Z
+        let at = |x: f64, z: f64| floptle_core::math::DVec3::new(x, 0.0, z);
+        assert!(v.sees(at(0.0, -20.0), 1.0));
+        assert!(!v.sees(at(0.0, 20.0), 1.0), "behind the camera");
+        assert!(!v.sees(at(200.0, -5.0), 1.0), "far off to the side");
+        assert!(v.sees(at(0.0, 0.5), 1.0), "the sphere reaches the eye");
+        // The edge of a wide view is kept: 45° off-axis at a 57° vertical FOV
+        // is inside a 2.4:1 window.
+        assert!(v.sees(at(20.0, -20.0), 1.0));
+    }
+
+    /// **A crowd of hidden animators costs a fraction of a visible one**: a
+    /// hundred characters, ninety hidden, measured against the same hundred
+    /// all shown in the same run.
+    ///
+    /// The bound is a fifth, where ten shown characters alone are a tenth: the
+    /// rest is the handful of lookups each hidden one still costs to decide it
+    /// is hidden. These fixture animators are light (24 translation lanes, no
+    /// skinning), so that bookkeeping weighs more here than beside a real
+    /// skinned character, whose hidden skinning is saved too.
+    #[test]
+    fn ninety_hidden_animators_of_a_hundred_cost_a_fraction() {
+        use floptle_scene::AnimCullingDoc as C;
+        let reg: HashMap<String, crate::MeshAsset> = HashMap::new();
+        let run = |hidden: usize| {
+            let mut system = door_system(C::WhenVisible, 24);
+            let mut world = World::new();
+            let roots: Vec<Entity> = (0..100)
+                .map(|i| director(&mut world, floptle_core::math::DVec3::new(i as f64, 0.0, 0.0), 24).0)
+                .collect();
+            for r in &roots[..hidden] {
+                world.insert(*r, floptle_core::Visible(false));
+            }
+            advance_animators(&mut system, &mut world, &reg, 0.016, Vec::new(), CullBy::Camera(None));
+            let t0 = std::time::Instant::now();
+            for _ in 0..40 {
+                advance_animators(&mut system, &mut world, &reg, 0.016, Vec::new(), CullBy::Camera(None));
+            }
+            (t0.elapsed().as_secs_f64(), system.counts)
+        };
+        let (all, _) = run(0);
+        let (most, counts) = run(90);
+        assert_eq!(counts, (100, 90));
+        assert!(most < all * 0.2, "90 hidden cost {:.2} ms, all shown {:.2} ms", most * 1e3, all * 1e3);
     }
 
     /// Regression: a command issued on the very first play frame (a script's
@@ -2589,6 +3104,7 @@ mod tests {
             floptle_scene::AnimControllerDoc {
                 default_fade: 0.0,
                 sample_fps: None,
+                culling: floptle_scene::AnimCullingDoc::Always,
                 layers: vec![floptle_scene::AnimLayerDoc {
                     name: "Base".to_string(),
                     weight: 1.0,
@@ -2628,7 +3144,7 @@ mod tests {
                 restart: false,
             },
         )];
-        advance_animators(&mut system, &mut world, &registry, 0.016, cmds);
+        advance_animators(&mut system, &mut world, &registry, 0.016, cmds, CullBy::Nothing);
         let inst = system.instances.get(&root).expect("bound on frame 1");
         let (name, _, _) = inst.ctl.layers[0].current().expect("state playing");
         assert_eq!(name, "Run", "the first-frame play() command must land");

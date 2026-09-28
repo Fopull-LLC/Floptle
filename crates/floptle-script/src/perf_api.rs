@@ -168,6 +168,11 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
             let m = p.borrow().mirror_work();
             out.set("mirrorRebuilds", m.rebuilds)?;
             out.set("mirrorRefreshed", m.refreshed)?;
+            // Animators last frame, and how many culling skipped (hidden, off
+            // screen, switched off, or between a reduced-rate animator's frames).
+            let (animators, culled) = p.borrow().anim_counts();
+            out.set("animators", animators)?;
+            out.set("animatorsCulled", culled)?;
             Ok(out)
         })?,
     )?;

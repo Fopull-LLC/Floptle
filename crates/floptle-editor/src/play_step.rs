@@ -571,13 +571,25 @@ impl Editor {
             sdt
         };
         let anim_t = floptle_core::profile::Span::new();
+        let view = floptle_core::active_camera(&self.world).and_then(|c| match self.world.get::<Matter>(c) {
+            Some(Matter::Camera { fov_y, ortho: false, .. }) => {
+                Some(anim::AnimView::from_camera(&floptle_core::world_transform(&self.world, c), *fov_y))
+            }
+            _ => None,
+        });
         let fired = anim::advance_animators(
             &mut self.anim,
             &mut self.world,
             &self.mesh_registry,
             anim_dt,
             anim_cmds,
+            anim::CullBy::Camera(view),
         );
+        {
+            let (n, culled) = self.anim.counts;
+            self.script_host.profile().borrow_mut().set_anim_counts(n, culled);
+            self.anim.publish_bones(&self.world, &self.mesh_registry, &mut self.script_host.bone_poses());
+        }
         // Animation: clip sampling, blending, pose composition and CPU
         // skinning.
         self.profile_record(floptle_core::profile::Bucket::Animation, anim_t.ms());

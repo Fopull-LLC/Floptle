@@ -224,6 +224,8 @@ pub struct FrameProfile {
     /// The fixed tick costs more than the time it simulates. Written by the
     /// driver whether or not collection is on: it is a state, not a measurement.
     overloaded: bool,
+    /// Last frame's animators and how many were culled.
+    anim_counts: (usize, usize),
 }
 
 /// What the script mirror did over one frame.
@@ -318,6 +320,16 @@ impl FrameProfile {
     /// folds it. For a caller keeping its own distribution across a run.
     pub fn frame_scripts(&self) -> impl Iterator<Item = (&str, f32)> {
         self.script_frame.iter().map(|(k, v)| (k.as_str(), *v))
+    }
+
+    /// Last frame's animators, and how many culling skipped.
+    pub fn set_anim_counts(&mut self, animators: usize, culled: usize) {
+        self.anim_counts = (animators, culled);
+    }
+
+    /// `(animators, culled)` as of the last animation pass.
+    pub fn anim_counts(&self) -> (usize, usize) {
+        self.anim_counts
     }
 
     /// Say whether the game has fallen behind real time.

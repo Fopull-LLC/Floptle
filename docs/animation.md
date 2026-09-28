@@ -55,6 +55,16 @@ the graph editor:
 - **Stepped playback**: check **stepped** in the header (e.g. 12 fps) for the
   whole controller; a state's own fps overrides it. Time itself keeps flowing
   smoothly — only the *sampling* snaps — so transitions and events never drift.
+- **Culling**: the drop-down beside it picks when an animator using this
+  controller does its work. **Only when visible** (the default for a new
+  controller) skips a model that is hidden, or behind or beside the active
+  camera. When the model comes back into view it catches up in one step to
+  where it would have been, and the events of the time it was skipped don't
+  fire. **Reduced when far** also poses every third frame past 30 m. **Animate
+  always** is what a controller made before this option existed does, and it's
+  the one to keep when something rides a bone while nobody looks, such as a
+  hitbox on a hand or a muzzle a gun fires from. A level of 64 enemies, most of
+  them behind the player or past the fog, only pays for the ones on screen.
 
 ### Layers
 
@@ -264,6 +274,13 @@ end
 - `anim:crossfade(state, fade [, layer])` — explicit fade.
 - `anim:stop([layer [, fade]])`, `anim:setSpeed(x)`,
   `anim:setLayerWeight(layer, w)`, `anim:seek(t [, layer])`.
+- `anim:setEnabled(false)` switches the animator off (it holds its last pose and
+  costs nothing); `anim:setCulling("always" | "whenVisible" | "reduced")`
+  overrides the controller's culling for this one node.
+- Where the bones are: `node:bonePos(name)` (a world vec3), `node:boneRot(name)`
+  (yaw, pitch, roll) and `node:bones()`, on the model's node. They answer where
+  a node attached to that bone would be, so a ragdoll can read the pose at the
+  moment of death without a marker node per bone.
 - Reads: `anim:state([layer])`, `anim:time([layer])`, `anim:finished([layer])`,
   `anim:isPlaying([state])`, `anim:clips()`, `anim:layers()`.
 - Authored data, from the asset rather than playback (so it works in `start()`):
