@@ -401,7 +401,7 @@ fn main() {
             },
             vec![child],
         );
-        let placed = floptle_ui::solve(std::slice::from_ref(&root), [W as f32, H as f32], &|_| {
+        let placed = floptle_ui::solve(std::slice::from_ref(&root), [W as f32, H as f32], &|_, _| {
             [0.0, 0.0]
         });
         let mut list = floptle_ui::draw_list(&[root], &placed, &[]);

@@ -69,6 +69,18 @@ pub(crate) struct Report {
     pub(crate) prefabs: usize,
     pub(crate) effects: usize,
     pub(crate) materials: usize,
+    pub(crate) shaders: usize,
+    /// Every shader a scene, prefab or material names, with the stage the
+    /// place that names it needs. Judged once the whole tree is read.
+    shader_refs: Vec<ShaderRef>,
+}
+
+/// A `.flsl` named somewhere, and what it has to be there.
+struct ShaderRef {
+    path: String,
+    stage: floptle_shader::Stage,
+    who: String,
+    where_: String,
 }
 
 impl Report {
@@ -89,7 +101,7 @@ impl Report {
     }
 
     fn examined(&self) -> usize {
-        self.scenes + self.prefabs + self.effects + self.materials
+        self.scenes + self.prefabs + self.effects + self.materials + self.shaders
     }
 }
 
@@ -221,8 +233,12 @@ pub(crate) fn examine(root: &Path) -> Report {
         } else if name.ends_with(".ron") && in_dir(root, path, "materials") {
             r.materials += 1;
             check_material_file(root, path, &where_, &settings, &mut r);
+        } else if name.ends_with(".flsl") {
+            r.shaders += 1;
+            check_shader_file(path, &where_, &mut r);
         }
     }
+    check_shader_refs(root, &mut r);
     r
 }
 
@@ -399,6 +415,20 @@ fn check_scene(root: &Path, path: &Path, where_: &str, settings: &Settings, r: &
     for node in &doc.nodes {
         check_node_refs(root, node, where_, settings, r);
     }
+    // A scene file with no Skybox loads with the default one, a flat mid-grey,
+    // which reads as a broken render rather than as "no sky". Only a scene with
+    // its own camera is meant to be looked at alone; an additive layer carries
+    // no Skybox on purpose and keeps the base scene's.
+    let has = |f: fn(&floptle_scene::MatterDoc) -> bool| doc.nodes.iter().any(|n| f(&n.matter));
+    if has(|m| matches!(m, floptle_scene::MatterDoc::Camera { .. }))
+        && !has(|m| matches!(m, floptle_scene::MatterDoc::Skybox { .. }))
+    {
+        r.warn(
+            Some(where_.into()),
+            "no Skybox node, so the scene opens with the default flat mid-grey sky; \
+             add a Skybox to choose its colour, texture or shader",
+        );
+    }
 }
 
 /// Everything one node names: its materials, its model, its scripts.
@@ -430,14 +460,121 @@ fn check_node_refs(
         check_texture(root, m, who, where_, r);
         check_sheet_grid(root, m, cell(m), who, where_, settings, r);
     }
+    note_node_shaders(node, who, where_, r);
     if let floptle_scene::MatterDoc::Mesh { asset_path } = &node.matter
         && !asset_path.is_empty()
-        && !exists(root, asset_path)
     {
-        r.error(Some(where_.into()), format!("{who}: no model at {asset_path}"));
+        if !exists(root, asset_path) {
+            r.error(Some(where_.into()), format!("{who}: no model at {asset_path}"));
+        } else if !asset_path.contains("://")
+            // Read, not just found: a file the importer refuses (a Draco-compressed
+            // .glb) draws nothing, and the scene has a hole with no reason given.
+            && let Err(e) = floptle_assets::gltf_import::check_readable(&crate::project::resolve_asset_path(root, asset_path))
+        {
+            r.error(Some(where_.into()), format!("{who}: model {asset_path} cannot be loaded: {e}"));
+        }
     }
     for s in &node.scripts {
         check_script(root, &s.kind, who, where_, r);
+    }
+}
+
+/// Every shader this node names, with the stage each place needs: a Field
+/// Shape's material is a distance field, every other material a surface; a
+/// Skybox wants a sky, a UI element a ui face, the PostProcess list post passes.
+fn note_node_shaders(node: &floptle_scene::NodeDoc, who: &str, where_: &str, r: &mut Report) {
+    use floptle_scene::MatterDoc;
+    use floptle_shader::Stage;
+    let material_stage =
+        if matches!(node.matter, MatterDoc::FieldShape { .. }) { Stage::Sdf } else { Stage::Fragment };
+    let mut named: Vec<(&str, Stage)> = Vec::new();
+    for m in node.material.iter().chain(node.object_materials.values()) {
+        if let Some(sh) = m.shader.as_deref() {
+            named.push((sh, material_stage));
+        }
+    }
+    match &node.matter {
+        MatterDoc::Skybox { shader: Some(sh), .. } => named.push((sh, Stage::Sky)),
+        MatterDoc::PostProcess { screen_shaders, .. } => {
+            named.extend(screen_shaders.iter().map(|p| (p.shader.as_str(), Stage::Post)));
+        }
+        _ => {}
+    }
+    if let Some(ui) = &node.ui {
+        named.push((&ui.shader, Stage::Ui));
+    }
+    for (path, stage) in named {
+        if !path.is_empty() {
+            r.shader_refs.push(ShaderRef {
+                path: path.to_string(),
+                stage,
+                who: who.to_string(),
+                where_: where_.to_string(),
+            });
+        }
+    }
+}
+
+/// **A shader is compiled, not just found.** Through the same path its stage's
+/// loader takes, naga included, so a shader that would fall back to the plain
+/// look in the game fails here with its own line and column.
+fn check_shader_file(path: &Path, where_: &str, r: &mut Report) {
+    let src = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => return r.error(Some(where_.into()), format!("{e}")),
+    };
+    let Err(msg) = crate::shaders::compile_any_stage(&src) else { return };
+    // One finding per line of the compiler's answer, each at its own place in
+    // the file when the line carries one (`12:5: unknown name`).
+    for line in msg.lines().filter(|l| !l.trim().is_empty()) {
+        let mut parts = line.splitn(3, ':');
+        let (l, c, rest) = (parts.next(), parts.next(), parts.next());
+        match (l.and_then(|l| l.parse::<u32>().ok()), c.and_then(|c| c.parse::<u32>().ok()), rest) {
+            (Some(l), Some(c), Some(rest)) => r.error(Some(format!("{where_}:{l}:{c}")), rest.trim().to_string()),
+            _ => r.error(Some(where_.into()), line.to_string()),
+        }
+    }
+}
+
+/// The references, once every file is read: a shader that is not there, and
+/// one of the wrong stage for the place that names it. (A material's missing
+/// shader is reported with its other files, in `check_texture`.)
+fn check_shader_refs(root: &Path, r: &mut Report) {
+    use floptle_shader::Stage;
+    let name = |s: Stage| match s {
+        Stage::Fragment => "surface",
+        Stage::Sdf => "sdf",
+        Stage::Sky => "sky",
+        Stage::Ui => "ui",
+        Stage::Post => "post",
+    };
+    let refs = std::mem::take(&mut r.shader_refs);
+    for f in &refs {
+        if f.path.contains("://") {
+            continue;
+        }
+        let full = crate::project::resolve_asset_path(root, &f.path);
+        let Ok(src) = std::fs::read_to_string(&full) else {
+            if !matches!(f.stage, Stage::Fragment | Stage::Sdf) {
+                r.error(Some(f.where_.clone()), format!("{}: no shader at {}", f.who, f.path));
+            }
+            continue;
+        };
+        // A file that does not parse is reported at the file itself.
+        let Ok(ir) = floptle_shader::parse(&src) else { continue };
+        let found = ir.stage.unwrap_or(Stage::Fragment);
+        if found != f.stage {
+            r.error(
+                Some(f.where_.clone()),
+                format!(
+                    "{}: {} is a {} shader, and this place draws a {} one; it falls back to the plain look",
+                    f.who,
+                    f.path,
+                    name(found),
+                    name(f.stage)
+                ),
+            );
+        }
     }
 }
 
@@ -457,6 +594,14 @@ fn check_material_file(
         Ok(m) => {
             check_texture(root, &m, "this material", where_, r);
             check_sheet_grid(root, &m, m.cell, "this material", where_, settings, r);
+            if let Some(sh) = m.shader.as_deref().filter(|s| !s.is_empty()) {
+                r.shader_refs.push(ShaderRef {
+                    path: sh.to_string(),
+                    stage: floptle_shader::Stage::Fragment,
+                    who: "this material".into(),
+                    where_: where_.to_string(),
+                });
+            }
         }
         Err(e) => r.error(Some(where_.into()), format!("not a material: {e}")),
     }
@@ -592,14 +737,14 @@ fn print_text(r: &Report, root: &Path) {
         }
     }
     let counted = format!(
-        "{} scene(s), {} prefab(s), {} effect(s), {} material(s)",
-        r.scenes, r.prefabs, r.effects, r.materials
+        "{} scene(s), {} prefab(s), {} effect(s), {} material(s), {} shader(s)",
+        r.scenes, r.prefabs, r.effects, r.materials, r.shaders
     );
     if r.examined() == 0 {
         // Said plainly: a checker that looked at nothing and printed nothing is
         // indistinguishable from a clean project, and that is the one way this
         // verb can lie.
-        floptle_say::say!("checked nothing in {} — no scenes, prefabs, effects or materials", root.display());
+        floptle_say::say!("checked nothing in {} — no scenes, prefabs, effects, materials or shaders", root.display());
         return;
     }
     match (r.errors(), r.warnings()) {
@@ -629,6 +774,7 @@ fn print_json(r: &Report) {
             "prefabs": r.prefabs,
             "effects": r.effects,
             "materials": r.materials,
+            "shaders": r.shaders,
         },
         "errors": r.errors(),
         "warnings": r.warnings(),
@@ -667,7 +813,8 @@ mod tests {
     fn an_absolute_path_fails_the_check_and_fix_makes_it_relative() {
         let d = temp("abs");
         std::fs::create_dir_all(d.join("models")).unwrap();
-        std::fs::write(d.join("models/tower.glb"), b"glb").unwrap();
+        // The smallest glTF there is: the check reads a model, so it has to be one.
+        std::fs::write(d.join("models/tower.glb"), r#"{"asset":{"version":"2.0"}}"#).unwrap();
         let abs = d.join("models/tower.glb");
         let node = format!(
             "(name: \"Building 7\", transform: (translation: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), \
@@ -833,6 +980,90 @@ mod tests {
         )
         .unwrap();
         assert_eq!(examine(&d).findings.len(), 0, "a correct grid was reported anyway");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **A scene with a camera and no Skybox is told what its sky will be.**
+    /// The loader gives it the default mid-grey one, and a menu drawn over a
+    /// flat grey read as a broken render. A camera-less scene is an additive
+    /// layer, which keeps the base scene's sky and says nothing.
+    #[test]
+    fn a_scene_with_a_camera_and_no_skybox_is_warned_about_its_grey_sky() {
+        let d = temp("nosky");
+        let cam = "(name: \"Camera\", matter: Camera(fov_y: 1.0, active: true))";
+        let sky = "(name: \"Sky\", matter: Skybox(color: (0.0, 0.0, 0.0), size: 500.0))";
+        std::fs::write(d.join("scenes/first.ron"), scene(cam)).unwrap();
+        std::fs::write(d.join("scenes/hud.ron"), scene("(name: \"Hud\", matter: Empty)")).unwrap();
+        let r = examine(&d);
+        let grey: Vec<_> = r.findings.iter().filter(|f| f.message.contains("no Skybox")).collect();
+        assert_eq!(grey.len(), 1, "{:?}", r.findings);
+        assert_eq!(grey[0].level, Level::Warning);
+        assert!(grey[0].file.as_deref().is_some_and(|f| f.starts_with("scenes/first.ron")), "{:?}", grey[0].file);
+
+        std::fs::write(d.join("scenes/first.ron"), scene(&format!("{cam}, {sky}"))).unwrap();
+        assert!(examine(&d).findings.iter().all(|f| !f.message.contains("no Skybox")), "a scene with a sky was warned");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **A shader is compiled, not just found.** A broken `.flsl` falls back to
+    /// the plain look in the game and nothing else says so; here it is an
+    /// error at its own line and column. A shader named by a UI element that
+    /// is not there is an error (a game's panels drew as white slabs), and so is
+    /// a ui shader worn as a mesh material.
+    #[test]
+    fn every_shader_is_compiled_and_every_named_one_is_the_right_stage() {
+        let d = temp("flsl");
+        std::fs::create_dir_all(d.join("shaders")).unwrap();
+        std::fs::write(d.join("shaders/good.flsl"), "shader good {\n  stage fragment\n  output color = vec4(1, 0, 0, 1)\n}\n").unwrap();
+        std::fs::write(d.join("shaders/face.flsl"), "shader face {\n  stage ui\n  output color = vec4(0, 0, 1, 1)\n}\n").unwrap();
+        std::fs::write(d.join("shaders/broken.flsl"), "shader broken {\n  stage fragment\n  output color = vec4(nope, 0, 0, 1)\n}\n").unwrap();
+        std::fs::write(
+            d.join("scenes/first.ron"),
+            scene(
+                "(name: \"Wall\", matter: Primitive(shape: Cube, color: (1.0, 1.0, 1.0)), \
+                 material: Some((shader: Some(\"shaders/good.flsl\")))), \
+                 (name: \"Badge\", matter: Primitive(shape: Cube, color: (1.0, 1.0, 1.0)), \
+                 material: Some((shader: Some(\"shaders/face.flsl\")))), \
+                 (name: \"Gauge\", matter: Empty, ui: Some((shader: \"shaders/face.flsl\"))), \
+                 (name: \"Scanlines\", matter: Empty, ui: Some((shader: \"shaders/ui/ui_scanline.flsl\")))",
+            ),
+        )
+        .unwrap();
+        let r = examine(&d);
+        assert_eq!(r.shaders, 3, "every .flsl in the project is compiled");
+        let msgs: Vec<String> =
+            r.findings.iter().map(|f| format!("{}: {}", f.file.as_deref().unwrap_or(""), f.message)).collect();
+
+        let broken: Vec<_> = r.findings.iter().filter(|f| f.file.as_deref().is_some_and(|p| p.starts_with("shaders/broken.flsl"))).collect();
+        assert!(!broken.is_empty(), "the broken shader passed: {msgs:#?}");
+        assert!(broken.iter().all(|f| f.level == Level::Error));
+        assert!(broken[0].file.as_deref() == Some("shaders/broken.flsl:3:23"), "not placed at its line and column: {msgs:#?}");
+        assert!(broken[0].message.contains("nope"), "{msgs:#?}");
+
+        assert!(msgs.iter().any(|m| m.contains("Scanlines: no shader at shaders/ui/ui_scanline.flsl")), "{msgs:#?}");
+        assert!(msgs.iter().any(|m| m.contains("Badge: shaders/face.flsl is a ui shader")), "{msgs:#?}");
+        assert!(!msgs.iter().any(|m| m.contains("Wall") || m.contains("Gauge") || m.contains("good.flsl")), "{msgs:#?}");
+        assert_eq!(r.errors(), broken.len() + 2, "{msgs:#?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **A model is read, not just found.** A Draco-compressed `.glb` exists,
+    /// so it passed, and drew nothing in the game.
+    #[test]
+    fn a_model_the_importer_refuses_is_an_error_naming_why() {
+        let d = temp("draco");
+        std::fs::create_dir_all(d.join("models")).unwrap();
+        std::fs::write(
+            d.join("models/arm.gltf"),
+            "{\"asset\":{\"version\":\"2.0\"},\"extensionsUsed\":[\"KHR_draco_mesh_compression\"],\
+             \"extensionsRequired\":[\"KHR_draco_mesh_compression\"]}",
+        )
+        .unwrap();
+        std::fs::write(d.join("scenes/first.ron"), scene("(name: \"Arm\", matter: Mesh(asset_path: \"models/arm.gltf\"))")).unwrap();
+        let r = examine(&d);
+        let hit = r.findings.iter().find(|f| f.message.contains("models/arm.gltf")).expect("the model was not reported");
+        assert_eq!(hit.level, Level::Error);
+        assert!(hit.message.contains("KHR_draco_mesh_compression"), "{}", hit.message);
         let _ = std::fs::remove_dir_all(&d);
     }
 

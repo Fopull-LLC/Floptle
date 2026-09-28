@@ -891,6 +891,7 @@ impl Editor {
                             .record(floptle_core::profile::Bucket::Physics, ms);
                     }
                 }
+                self.warn_water_density_mismatch();
                 // Collision / trigger events from this tick, dispatched to
                 // both nodes' scripts: `onCollisionEnter/Stay/Exit(node,
                 // other, hit)` for solid contacts (incl. body-vs-body),

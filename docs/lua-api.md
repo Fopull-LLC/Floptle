@@ -40,7 +40,7 @@ each group, and meant to be searched.
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 19
-- [components — getcomponent](#components--getcomponent) — 101
+- [components — getcomponent](#components--getcomponent) — 102
 - [animation — node:animator](#animation--nodeanimator) — 18
 - [particles — effects from script](#particles--effects-from-script) — 10
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 30
@@ -1429,7 +1429,7 @@ Contact point Z (world).
 
 ### `overlapSphere`
 
-overlapSphere(center, radius [, opts]) — everything inside a sphere, DEEPEST overlap first, as hit tables ({x,y,z, nx,ny,nz, distance, node, material}) — the same fields raycast returns. Reports static geometry AND body hulls. opts takes { exclude = node, layers = {"Enemies"} }. The blast-radius / "what is in this area" query.
+overlapSphere(center, radius [, opts]) — everything inside a sphere, DEEPEST overlap first, as hit tables ({x,y,z, nx,ny,nz, distance, node, material}) — the same fields raycast returns. Reports static geometry AND body hulls. opts takes { ignore = node, layers = {"Enemies"} }. The blast-radius / "what is in this area" query.
 
 ### `raycast`
 
@@ -2135,7 +2135,7 @@ find("Caption").text = over and over.name or ""
 
 ### `ui.make`
 
-ui.make(container, tree) — build a UI subtree from data and RECONCILE it with the one already there: call it again and only the difference is spawned and destroyed, so surviving rows keep their entity, their hover, their scroll and their in-flight transitions. An element is { "kind", prop = value, ..., children }, where kind is box/row/col/text/image/button/field/slider/scroll. `items = {...}` plus a function child makes one child per item (the function gets (item, i); return nil to skip it). `key = "id"` is how a row is matched through a re-sort. `onClicked = function(node) ... end` (any UI hook, `on` + its name) carries behaviour inline — no prefab, no script file. Properties the table stops mentioning go back to default; what the PLAYER did (scroll, typing, a toggle, a dragged slider) is kept. Play only, and a mistyped property raises rather than being ignored. Elements you placed by hand under the same container are never touched.
+ui.make(container, tree) — build a UI subtree from data and RECONCILE it with the one already there: call it again and only the difference is spawned and destroyed, so surviving rows keep their entity, their hover, their scroll and their in-flight transitions. An element is { "kind", prop = value, ..., children }, where kind is box/row/col/text/image/button/field/slider/scroll. A container (row, col, or any element given dir/gap/pad/justify/align) starts at pad = 8 and gap = 8; write pad = 0, gap = 0 for a flush stack. `items = {...}` plus a function child makes one child per item (the function gets (item, i); return nil to skip it). `key = "id"` is how a row is matched through a re-sort. `onClicked = function(node) ... end` (any UI hook, `on` + its name) carries behaviour inline — no prefab, no script file. Properties the table stops mentioning go back to default; what the PLAYER did (scroll, typing, a toggle, a dragged slider) is kept. Play only, and a mistyped property raises rather than being ignored. Elements you placed by hand under the same container are never touched.
 
 ```lua
 ui.make(find("Crew Panel"), {
@@ -3393,6 +3393,10 @@ mat.roughness — 0 is a mirror, 1 is chalk.
 ### `mat.roughnessMap`
 
 mat.roughnessMap — per-pixel roughness. "" clears it.
+
+### `mat.shader`
+
+mat.shader — the .flsl surface shader this material draws with, project-relative ("shaders/ocean.flsl"), or "" when it has none. Assigning swaps it; "" goes back to the built-in look.
 
 ### `mat.sheetCols`
 

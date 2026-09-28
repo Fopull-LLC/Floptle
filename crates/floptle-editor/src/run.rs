@@ -526,8 +526,14 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
     // tick period, the way the dedicated server paces its own loop: sleep to
     // the next tick, and give up lost time rather than sprint to catch up.
     let mut pacer = Pacer::new(join.is_some().then(|| std::time::Duration::from_secs_f32(DT)));
+    // Real time given to background terrain generation and streaming, which
+    // runs on the wall clock while this loop runs on the step count.
+    let terrain_deadline = floptle_core::time::Instant::now() + TERRAIN_BUDGET;
+    let mut terrain_held = std::time::Duration::ZERO;
     for step in 0..asked {
         pacer.wait();
+        // Before the step's clock starts, so the frame timing is the game's.
+        terrain_held += ed.wait_for_terrain_workers(terrain_deadline);
         if let Some(w) = &window {
             if step == w.start {
                 ed.script_host.gc_collect();
@@ -567,6 +573,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
         // none of it, which is the one failure a verb built to be believed must
         // not have. See `pump_world_streaming`.
         ed.pump_world_streaming();
+        ed.tick_headless_ui_clock(DT);
         ed.play_step(DT, true);
         // After the step, so a ghost sees the tick the server has just
         // finished rather than the one before it.
@@ -621,6 +628,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
     ed.drain_script_logs();
 
     let simulated = (ed.play_t - t0).max(0.0);
+    let terrain = TerrainHold { held: terrain_held, still_busy: ed.terrain_worker_busy() };
     if let Some(c) = clock.as_mut() {
         c.nodes = ed.world.len();
     }
@@ -630,7 +638,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
         steps,
         asked,
         simulated,
-        Measured { clock: clock.as_ref(), allocated, by_script: &by_script, seed, ghosts: &ghosts },
+        Measured { clock: clock.as_ref(), allocated, by_script: &by_script, seed, ghosts: &ghosts, terrain },
         json,
     )
 }
@@ -826,6 +834,35 @@ struct Measured<'a> {
     /// Empty when none were asked for — the report then says nothing about
     /// clients at all, rather than reporting zero of them.
     ghosts: &'a [Ghost],
+    terrain: TerrainHold,
+}
+
+/// Real time the run gave background terrain threads, in total.
+const TERRAIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How the run waited on background terrain generation and streaming.
+#[derive(Clone, Copy, Default)]
+struct TerrainHold {
+    /// Real time spent holding the step for it.
+    held: std::time::Duration,
+    /// Generation or streaming was still running when the run ended: the world
+    /// the run tested was not the finished one.
+    still_busy: bool,
+}
+
+impl TerrainHold {
+    /// The report line, or none when the run never waited and nothing is left.
+    fn line(&self) -> Option<String> {
+        let held = self.held.as_secs_f32();
+        match (self.still_busy, held >= 0.05) {
+            (true, _) => Some(format!(
+                "background terrain generation was still running when the run ended ({held:.1}s of real \
+                 time given to it); the world this run tested was not finished"
+            )),
+            (false, true) => Some(format!("held {held:.1}s of real time for background terrain generation")),
+            (false, false) => None,
+        }
+    }
 }
 
 /// How many scripts the text report names under `--alloc`. The JSON carries
@@ -841,7 +878,7 @@ fn report(
     measured: Measured<'_>,
     json: bool,
 ) -> i32 {
-    let Measured { clock, allocated, by_script, seed, ghosts } = measured;
+    let Measured { clock, allocated, by_script, seed, ghosts, terrain } = measured;
     use floptle_script::LogLevel;
     let all = || opened.iter().map(|e| ("open", e)).chain(console.entries.iter().map(|e| ("play", e)));
     let errors = all().filter(|(_, e)| e.level == LogLevel::Error).count();
@@ -885,6 +922,10 @@ fn report(
             "errors": errors,
             "warnings": warnings,
             "log": lines,
+            // Real seconds the steps waited on background terrain work, and
+            // whether it was still running at the end.
+            "terrain_held_s": terrain.held.as_secs_f32(),
+            "terrain_still_generating": terrain.still_busy,
         });
         // Absent unless ghosts were asked for, by the same rule: an empty
         // `clients: []` on a run that stood none up reads as "nobody could
@@ -1001,6 +1042,9 @@ fn report(
         }
     }
     floptle_say::say!("{}", summary_line(steps, asked, simulated, errors, warnings));
+    if let Some(line) = terrain.line() {
+        floptle_say::say!("{line}");
+    }
     if !ghosts.is_empty() {
         floptle_say::say!("{}", ghosts_line(ghosts));
     }
@@ -1248,6 +1292,19 @@ mod tests {
     /// **A joined run keeps real time; a plain run keeps none.** Five paced
     /// waits at 20 ms take at least the four periods between them; five unpaced
     /// waits take nothing.
+    /// A run that ended with terrain still generating says so: it tested a
+    /// world that was not finished. A run that waited says how long; one that
+    /// never waited says nothing.
+    #[test]
+    fn the_terrain_hold_is_reported_and_an_unfinished_world_is_named() {
+        let secs = std::time::Duration::from_secs_f32;
+        let unfinished = TerrainHold { held: secs(120.0), still_busy: true }.line().unwrap();
+        assert!(unfinished.contains("still running") && unfinished.contains("not finished"), "{unfinished}");
+        let waited = TerrainHold { held: secs(12.5), still_busy: false }.line().unwrap();
+        assert!(waited.contains("12.5s"), "{waited}");
+        assert_eq!(TerrainHold::default().line(), None);
+    }
+
     #[test]
     fn the_pacer_holds_a_step_to_its_period_and_an_unpaced_loop_to_nothing() {
         let period = std::time::Duration::from_millis(20);

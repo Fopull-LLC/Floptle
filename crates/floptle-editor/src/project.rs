@@ -494,6 +494,15 @@ impl Editor {
             }
             Err(e) => {
                 floptle_say::say_err!("  import {path} failed: {e}");
+                // The node stays in the scene and draws nothing, so without this
+                // line the only sign is a hole where the model should stand.
+                if self.model_import_reported.insert((path.to_string(), e.clone())) {
+                    self.console.push(
+                        floptle_script::LogLevel::Error,
+                        format!("model {path} did not load: {e}"),
+                        None,
+                    );
+                }
                 return false;
             }
         }
@@ -1393,7 +1402,8 @@ impl Editor {
             return;
         }
         // Never silent: this rewrites input.ron, comments and all.
-        floptle_say::say!("  input.ron: added {}", added.join(", "));
+        // stderr, with the other open-time notes: stdout is a `--json` verb's answer.
+        floptle_say::say_err!("  input.ron: added {}", added.join(", "));
     }
 
     pub(crate) fn load_materials(&self) -> Vec<(String, floptle_scene::MaterialDoc)> {
@@ -2292,9 +2302,20 @@ pub(crate) fn resolve_asset_path(project_root: &Path, path: &str) -> PathBuf {
 }
 
 /// Inside the project's own tree, or inside a linked package's.
+///
+/// Lexical first, then with links resolved on both sides: a project opened
+/// through a symlink has a CWD that `getcwd` spells as the real folder, so
+/// every CWD-relative ref comes back under a root the lexical test does not
+/// recognise. Only the miss path pays for the second look.
 fn is_inside_project(project_root: &Path, p: &Path) -> bool {
-    floptle_vfs::is_within(project_root, p)
-        || PACKAGE_ROOTS.with(|m| m.borrow().values().any(|root| floptle_vfs::is_within(root, p)))
+    let within = |root: &Path| {
+        floptle_vfs::is_within(root, p)
+            || matches!(
+                (crate::assets::canonical(root), crate::assets::canonical(p)),
+                (Some(r), Some(c)) if c.starts_with(&r)
+            )
+    };
+    within(project_root) || PACKAGE_ROOTS.with(|m| m.borrow().values().any(|root| within(root)))
 }
 
 /// A path under the project that cannot exist, so every loader downstream
@@ -2788,6 +2809,35 @@ mod path_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **A project opened through a symlink still owns its own files.** The
+    /// Hub may hold a project at `…/Engine/solar` → `../Solar`; the working
+    /// directory is then the link, but `getcwd` answers the real folder, so a
+    /// ref resolved against the CWD comes back spelled `…/Solar/models/x.glb`.
+    /// A lexical prefix test against `…/Engine/solar` refused every model,
+    /// texture and sound in the game. A link inside the project that points
+    /// outside it is still outside.
+    #[cfg(unix)]
+    #[test]
+    fn a_project_opened_through_a_symlink_owns_its_files() {
+        let dir = std::env::temp_dir().join(format!("floptle-symroot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let real = dir.join("Solar");
+        floptle_vfs::create_dir_all(real.join("models")).unwrap();
+        floptle_vfs::write(real.join("models/ok.glb"), b"glb").unwrap();
+        floptle_vfs::write(dir.join("secret.glb"), b"glb").unwrap();
+        let link = dir.join("engine-solar");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        std::os::unix::fs::symlink(dir.join("secret.glb"), real.join("models/escape.glb")).unwrap();
+
+        // The same file under the link's name and under the real one.
+        assert!(is_inside_project(&link, &link.join("models/ok.glb")));
+        assert!(is_inside_project(&link, &real.join("models/ok.glb")), "the real spelling was refused");
+        // A link that leaves the project is not let in by the new rule.
+        assert!(!is_inside_project(&link, &dir.join("secret.glb")));
+        assert!(!is_inside_project(&link, &real.join("models/escape.glb")), "an escaping link was let in");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// **A reference that resolves outside the project is missing, and the
     /// Console says so once.** `node.model = "/etc/hostname"` names a file
     /// that exists; it is not an asset. Same for a `../..` that climbs out. A
@@ -3179,5 +3229,38 @@ mod model_import_tests {
         // is told rather than left waiting.
         ed.request_model("models/_test/NotThere.glb");
         assert_eq!(ed.model_status("models/_test/NotThere.glb"), Some(false));
+    }
+
+    /// **A model that cannot be read says so on the Console, once.** It used to
+    /// say so only on stderr, so in the editor a Draco-compressed prop was a
+    /// hole in the scene with no reason anywhere a person was looking. Several
+    /// callers retry a failed model every frame; the line is said once.
+    #[test]
+    fn a_model_that_fails_to_import_says_why_on_the_console_once() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let dir = std::env::temp_dir().join(format!("floptle-badmodel-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("models")).unwrap();
+        let draco = "{\"asset\":{\"version\":\"2.0\"},\"extensionsUsed\":[\"KHR_draco_mesh_compression\"],\
+             \"extensionsRequired\":[\"KHR_draco_mesh_compression\"]}";
+        std::fs::write(dir.join("models/arm.gltf"), draco).unwrap();
+        std::fs::write(dir.join("models/sat.gltf"), draco).unwrap();
+        ed.project_root = dir.clone();
+        // Two bad models, retried in turn the way a frame's callers do: the
+        // Console merges only a line repeated back to back, so these would
+        // interleave into one line per frame without the once-per-file rule.
+        for _ in 0..3 {
+            assert!(!ed.import_model("models/arm.gltf"));
+            assert!(!ed.import_model("models/sat.gltf"));
+        }
+        let said: Vec<String> = ed
+            .console
+            .entries
+            .iter()
+            .filter(|l| l.msg.contains("models/arm.gltf"))
+            .map(|l| l.msg.clone())
+            .collect();
+        assert_eq!(said.len(), 1, "{said:#?}");
+        assert!(said[0].contains("KHR_draco_mesh_compression"), "{}", said[0]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

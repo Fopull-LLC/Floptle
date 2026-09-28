@@ -610,6 +610,9 @@ struct Anim {
     ease: Ease,
     /// The last `StyleRuntime::frame` this entry charged `dt` on.
     stepped: u64,
+    /// The element this entry belongs to, as the host identifies it (index and
+    /// generation). `None` until [`StyleRuntime::sync_owners`] first sees it.
+    owner: Option<u64>,
 }
 
 /// Per-element transition state, owned by whoever drives the frame.
@@ -676,6 +679,25 @@ impl StyleRuntime {
         self.live.retain(|id, _| alive(*id));
     }
 
+    /// Drop the state of elements that are gone, and of any id now held by a
+    /// different element. `owner` answers who holds `id` now (the host's full
+    /// entity, generation included), or `None` if nobody does.
+    ///
+    /// Ids are reused: a screen rebuilt by `ui.make` can hand a new element the
+    /// id of one it just destroyed, and without this the new element eases in
+    /// from the dead one's look. Call it before styling and after, so a new
+    /// entry is stamped with the element it was made for.
+    pub fn sync_owners(&mut self, owner: &dyn Fn(u32) -> Option<u64>) {
+        self.live.retain(|id, a| match (owner(*id), a.owner) {
+            (None, _) => false,
+            (Some(now), Some(was)) => now == was,
+            (Some(now), None) => {
+                a.owner = Some(now);
+                true
+            }
+        });
+    }
+
     /// Advance `id` toward `target`, returning what to draw this frame.
     ///
     /// A state change restarts the transition from the current animated value,
@@ -697,6 +719,7 @@ impl StyleRuntime {
             // Never stepped: `frame` itself would mean "already charged this
             // frame" and cost a brand-new element its first tick of movement.
             stepped: frame.wrapping_sub(1),
+            owner: None,
         });
         if entry.state != state || entry.to != target {
             let current = entry.current();
@@ -708,6 +731,7 @@ impl StyleRuntime {
                 dur: tr.duration.max(0.0),
                 ease: tr.ease,
                 stepped: entry.stepped,
+                owner: entry.owner,
             };
         }
         // Once per frame, no matter how many passes style this element.
@@ -1207,6 +1231,41 @@ mod tests {
         assert!((roots[0].spec.scale[0] - 1.05).abs() < 1e-4);
     }
 
+    /// **A reused id starts from its own look, not the dead element's.** A
+    /// screen rebuilt by `ui.make` can hand a new element the id of one it
+    /// just destroyed; the new element eased in from the old one's hover,
+    /// and under a frozen clock it kept that look for good.
+    #[test]
+    fn an_id_taken_by_a_new_element_starts_from_its_own_base() {
+        let sheet = button_sheet();
+        let tk = tokens();
+        let mut rt = StyleRuntime::default();
+        let make = || {
+            vec![node(1, ElementSpec { style: "button".into(), shape: Some(ShapeSpec::default()), ..Default::default() })]
+        };
+        let hover = StateInput { hovered: Some(1), ..Default::default() };
+        let (old, new) = (1u64 << 32 | 1, 2u64 << 32 | 1);
+
+        // The old element, hovered and settled at the full hover scale.
+        for _ in 0..2 {
+            rt.begin_frame();
+            rt.sync_owners(&|_| Some(old));
+            apply_styles(&mut make(), &sheet, &tk, &hover, &mut rt, 1.0);
+            rt.sync_owners(&|_| Some(old));
+        }
+        // Destroyed; a new element takes id 1 and is not hovered. A frame with
+        // no time on the clock shows where its transition starts.
+        rt.begin_frame();
+        rt.sync_owners(&|_| Some(new));
+        let mut roots = make();
+        apply_styles(&mut roots, &sheet, &tk, &StateInput::default(), &mut rt, 0.0);
+        assert_eq!(roots[0].spec.scale, [1.0, 1.0], "the new element started from the dead one's hover");
+
+        // And an id nobody holds any more is forgotten.
+        rt.sync_owners(&|_| None);
+        assert!(rt.live.is_empty());
+    }
+
     /// Un-hovering mid-transition must ease back from where the element actually
     /// is, not snap to the full hover value first. Getting this wrong produces
     /// a visible pop that reads as a bug.
@@ -1485,7 +1544,7 @@ mod tests {
 
         let mut rt = StyleRuntime::default();
         apply_styles(&mut roots, &sheet, &tokens(), &StateInput::default(), &mut rt, 1.0);
-        let placed = solve(&roots, [400.0, 300.0], &|_| [0.0, 0.0]);
+        let placed = solve(&roots, [400.0, 300.0], &|_, _| [0.0, 0.0]);
         let dl = draw_list(&roots, &placed, &[]);
 
         // The card is painted from the token.
@@ -1537,7 +1596,7 @@ mod tests {
 
         let mut rt = StyleRuntime::default();
         apply_styles(&mut roots, &sheet, &tokens(), &StateInput::default(), &mut rt, 1.0);
-        let placed = solve(&roots, [400.0, 300.0], &|_| [0.0, 0.0]);
+        let placed = solve(&roots, [400.0, 300.0], &|_, _| [0.0, 0.0]);
         let dl = draw_list(&roots, &placed, &[]);
 
         // Fill first, frame over it — a frame is an edge, not a backdrop.
@@ -1560,7 +1619,7 @@ mod tests {
             },
             children: vec![],
         }];
-        let placed = solve(&bare, [400.0, 300.0], &|_| [0.0, 0.0]);
+        let placed = solve(&bare, [400.0, 300.0], &|_, _| [0.0, 0.0]);
         assert_eq!(draw_list(&bare, &placed, &[]).quads.len(), 1);
         bare[0].spec.shape.as_mut().unwrap().frame = Some(FrameSpec::default());
         assert_eq!(draw_list(&bare, &placed, &[]).quads.len(), 1);

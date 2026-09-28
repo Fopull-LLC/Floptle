@@ -147,6 +147,12 @@ pub enum Input {
     /// The node's own Material tint + alpha (`vec4`) — so one shader composes
     /// with per-node coloring. Fragment only.
     InstanceColor,
+    /// `lightDir`: unit vector from the surface toward the key light (`vec3`): the sun, or in
+    /// a scene lit by stars the dominant one. Same space as `normal`. Fragment only.
+    LightDir,
+    /// `lightColor`: the key light's colour times its intensity (`vec3`), as `litSurface`
+    /// lights with it. Fragment only.
+    LightColor,
     /// The world-space RAY direction (`vec3`, normalized) for a Sky shader — the
     /// direction the camera ray travels toward the horizon/zenith. Sky only.
     SkyDir,
@@ -162,6 +168,8 @@ impl Input {
             Input::ViewDir => "viewDir",
             Input::Time => "time",
             Input::InstanceColor => "instanceColor",
+            Input::LightDir => "lightDir",
+            Input::LightColor => "lightColor",
             Input::SkyDir => "skyDir",
         }
     }
@@ -169,9 +177,13 @@ impl Input {
     pub fn ty(self) -> Ty {
         match self {
             Input::Uv => Ty::Vec2,
-            Input::Normal | Input::WorldPos | Input::ObjectPos | Input::ViewDir | Input::SkyDir => {
-                Ty::Vec3
-            }
+            Input::Normal
+            | Input::WorldPos
+            | Input::ObjectPos
+            | Input::ViewDir
+            | Input::LightDir
+            | Input::LightColor
+            | Input::SkyDir => Ty::Vec3,
             Input::Time => Ty::Float,
             Input::InstanceColor => Ty::Vec4,
         }
@@ -186,6 +198,8 @@ impl Input {
             Input::ViewDir,
             Input::Time,
             Input::InstanceColor,
+            Input::LightDir,
+            Input::LightColor,
             Input::SkyDir,
         ]
     }

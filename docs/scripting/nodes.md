@@ -331,6 +331,13 @@ pieces make that work:
 boots into. The editor opens it on project load too, so what you see is what
 ships. It's saved in `project.ron` as `entry_scene`.
 
+**A scene with no Skybox node gets one.** A scene file written by hand or by
+a tool, with no Skybox in it, opens with the default: a flat mid-grey (0.5,
+0.5, 0.52), which reads as a broken render more often than as "no sky". Add a
+Skybox to choose the colour, texture or sky shader; `floptle check` warns about
+any scene with a camera and no Skybox. An additive scene is the exception: it
+brings no sky of its own and keeps the base scene's (see below).
+
 **`scene.load(name)`** switches scenes from code:
 
 ```lua

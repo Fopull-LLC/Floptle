@@ -2008,6 +2008,23 @@ impl Editor {
             || !self.terrain_load_jobs.is_empty()
     }
 
+    /// Hold a headless loop while the background terrain threads work, until
+    /// they are idle or `deadline` passes, and answer how long it held.
+    ///
+    /// A windowed frame gives those threads about sixteen milliseconds of wall
+    /// time; `run` and `shot --after` step in microseconds, so a world being
+    /// generated or streamed would otherwise never finish inside the span.
+    /// Those two verbs are its only callers, and it sleeps, so it is built with them.
+    #[cfg(feature = "editor-ui")]
+    pub(crate) fn wait_for_terrain_workers(&mut self, deadline: floptle_core::time::Instant) -> std::time::Duration {
+        let began = floptle_core::time::Instant::now();
+        while self.terrain_worker_busy() && floptle_core::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(4));
+            self.pump_world_streaming();
+        }
+        began.elapsed()
+    }
+
     /// Mesh every resident terrain chunk the view can see and wait for it, for
     /// the one-shot verbs that have no frame loop to do it over time. Returns
     /// whether it settled inside `budget`.

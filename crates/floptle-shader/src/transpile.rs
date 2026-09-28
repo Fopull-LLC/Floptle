@@ -195,7 +195,10 @@ pub fn transpile_fragment(ir: &ShaderIr, ck: &Checked) -> Result<CompiledFragmen
 /// marched shadows + AO + point lights + the node Material's specular/rim.
 /// must stay in sync with `fs` in raster.wgsl.
 pub(crate) const FRAGMENT_LIT_WGSL: &str = r#"fn flsl_lit(in: VsOut, front: bool, albedo: vec3<f32>) -> vec3<f32> {
-    let n = facing_normal(normalize(in.normal), front);
+    return flsl_lit_n(in, front, albedo, in.normal);
+}
+fn flsl_lit_n(in: VsOut, front: bool, albedo: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let n = facing_normal(normalize(normal), front);
     let v = normalize(-in.view_pos);
     let pix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));
     var occ = 1.0;
@@ -345,6 +348,8 @@ impl<'a> Writer<'a> {
                 // the floating origin the way `worldPos`/`view_pos` does.
                 (EmitCtx::Fragment, Input::ObjectPos) => "in.lpos".into(),
                 (EmitCtx::Fragment, Input::ViewDir) => "normalize(-in.view_pos)".into(),
+                (EmitCtx::Fragment, Input::LightDir) => "flsl_sun_dir(in.view_pos)".into(),
+                (EmitCtx::Fragment, Input::LightColor) => "flsl_sun_color(in.view_pos)".into(),
                 // The UI pass has no field globals `G`; time rides its own
                 // globals' spare lane (see UiGlobals in floptle-render/ui.rs).
                 (EmitCtx::Ui, Input::Time) => "globals.viewport.w".into(),
@@ -518,7 +523,13 @@ impl<'a> Writer<'a> {
                 }
                 "litSurface" => {
                     let albedo = self.emit_resolved(&call.args[0], Some(Ty::Vec3))?;
-                    Ok(format!("flsl_lit(in, front, {albedo})"))
+                    match call.args.get(1) {
+                        Some(n @ ResolvedArg::Expr(_)) => {
+                            let n = self.emit_resolved(n, Some(Ty::Vec3))?;
+                            Ok(format!("flsl_lit_n(in, front, {albedo}, {n})"))
+                        }
+                        _ => Ok(format!("flsl_lit(in, front, {albedo})")),
+                    }
                 }
                 "sunShadow" => {
                     let p = self.emit_resolved(&call.args[0], Some(Ty::Vec3))?;
@@ -1159,6 +1170,8 @@ fn key_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, shininess: f32, pix: vec2
     return out;
 }
 fn sun_dir_at(p: vec3<f32>) -> vec3<f32> { return normalize(g.light_dir.xyz); }
+fn flsl_sun_dir(p: vec3<f32>) -> vec3<f32> { return normalize(g.light_dir.xyz); }
+fn flsl_sun_color(p: vec3<f32>) -> vec3<f32> { return g.light_color.rgb; }
 fn sun_shadow(p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return vec3<f32>(1.0); }
 fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 { return 1.0; }
 fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return color; }

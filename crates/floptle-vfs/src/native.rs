@@ -37,11 +37,29 @@ pub(crate) fn modified_impl(path: &Path) -> Option<floptle_core::time::SystemTim
 
 /// List a directory. Order is the platform's, as with `std::fs::read_dir`;
 /// sort if it matters.
+///
+/// A link to a folder lists as a folder, so a project whose `ui/` or
+/// `animation_controllers/` is a link keeps its styles and controllers. A link
+/// back to the folder being listed, or to one of its parents, lists as a file:
+/// every walk in the engine would otherwise descend it forever.
 pub fn read_dir<P: AsRef<Path>>(path: P) -> io::Result<Vec<DirEntry>> {
+    let path = path.as_ref();
+    let mut here: Option<Option<PathBuf>> = None;
     let mut out = Vec::new();
     for entry in std::fs::read_dir(path)? {
         let entry = entry?;
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let kind = entry.file_type().ok();
+        let is_dir = match kind {
+            Some(t) if t.is_symlink() => match std::fs::canonicalize(entry.path()) {
+                Ok(target) if target.is_dir() => {
+                    let here = here.get_or_insert_with(|| std::fs::canonicalize(path).ok());
+                    here.as_ref().is_none_or(|h| !h.starts_with(&target))
+                }
+                _ => false,
+            },
+            Some(t) => t.is_dir(),
+            None => false,
+        };
         out.push(DirEntry::new(entry.path(), is_dir));
     }
     Ok(out)

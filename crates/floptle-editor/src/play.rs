@@ -134,6 +134,41 @@ impl Editor {
     /// Centres are converted into the sim frame in f64 here, so a sea placed
     /// far out is exact, and the sea's own radius survives the
     /// node's scale — scaling a sea node scales the sea.
+    /// Warn once per body and volume when the water is more than fifty times
+    /// denser or lighter than the body. Water `density` and body `mass` share the
+    /// game's units, and a ratio that far out is a default mass or a unit mix-up,
+    /// not a crate or a lead ball; the line names both remedies.
+    pub(crate) fn warn_water_density_mismatch(&mut self) {
+        const BAND: f32 = 50.0;
+        let Some(sim) = self.sim.as_ref() else { return };
+        for (body, vol, density, mass, ratio) in sim.water_density_ratios() {
+            if (1.0 / BAND..=BAND).contains(&ratio) || !self.water_ratio_warned.insert((body.index(), vol)) {
+                continue;
+            }
+            let name = |e: Option<floptle_core::Entity>| {
+                e.and_then(|e| self.world.get::<floptle_core::Name>(e))
+                    .map_or_else(|| "a node".into(), |n| format!("\"{}\"", n.0))
+            };
+            let (who, water) = (name(Some(body)), name(self.world.entity_at(vol)));
+            let (times, how, fate) = if ratio > 1.0 {
+                (ratio, "denser than", "fling it out of the water")
+            } else {
+                (1.0 / ratio, "less dense than", "never hold it up")
+            };
+            // The mass at which this body would float half under.
+            let floats_at = mass * ratio * 0.5;
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!(
+                    "≈ {water} (density {density}) is {times:.0}× {how} {who} (mass {mass}), so buoyancy will \
+                     {fate}. Density and mass are in the same units: at this density a body that size floats \
+                     half under at mass {floats_at:.3}; if the game's masses are tonnes, water is about 1.0."
+                ),
+                None,
+            );
+        }
+    }
+
     pub(crate) fn build_water_field(
         world: &floptle_core::World,
         origin: DVec3,
@@ -438,6 +473,8 @@ impl Editor {
         }
         // Water is a static field like gravity, sampled per step.
         sim.world.water = Self::build_water_field(&self.world, origin);
+        // Each Play says a density mismatch again: the warnings are per run.
+        self.water_ratio_warned.clear();
         self.script_host.set_layers(sim.layers().clone());
         // …and the tilesets this scene's tilemaps reference, so `tm:solid` /
         // `tm:tags` / `tm:autotile` can answer. Lent rather than loaded by the
@@ -925,6 +962,7 @@ impl Editor {
             self.script_host.set_physics_paused(false);
             self.space_coast.clear();
             self.space_frame.clear(); // dominant-frame tracking restarts too
+            self.space_rails_prev.clear(); // the first tick snaps authored → rails
             self.compound_lod.clear(); // distant-craft LOD restarts with them
             self.lod_keep_live.clear(); // keep-live exemptions don't persist runs
             self.compound_coast.clear();
@@ -1813,6 +1851,62 @@ mod water_streaming_tests {
             "the ball should be held up near the pool, not have fallen through it: {}",
             pos_of(&ed)
         );
+    }
+}
+
+#[cfg(test)]
+mod water_density_tests {
+    use crate::Editor;
+    use floptle_core::{Matter, Name, RigidBody, Transform, WaterKind};
+
+    /// **A body the water will throw out is named once, with the remedy.**
+    /// A game whose masses are tonnes set its sea to 1025, and its one-tonne
+    /// astronaut came out of the water four metres up with nothing saying why. Here: a pool at
+    /// 1025, one ball left at the default mass (hundreds of times lighter than
+    /// the water it displaces) and one weighted to float. One line per light
+    /// body, however many ticks it stays in.
+    #[test]
+    fn a_body_hundreds_of_times_lighter_than_its_water_is_warned_about_once() {
+        let mut ed = Editor::default();
+        let pool = ed.world.spawn();
+        ed.world.insert(pool, Name("Sea".into()));
+        ed.world.insert(pool, Transform::IDENTITY);
+        ed.world.insert(
+            pool,
+            Matter::WaterVolume {
+                kind: WaterKind::Pool,
+                radius: 0.0,
+                half_extents: [20.0, 20.0, 20.0],
+                density: 1025.0,
+                drag: 1.0,
+                angular_drag: 1.0,
+                frozen: false,
+                tint: [0.1, 0.3, 0.4],
+                visibility: 20.0,
+            },
+        );
+        let ball = |ed: &mut Editor, name: &str, x: f64, mass: f32| {
+            let e = ed.world.spawn();
+            ed.world.insert(e, Name(name.into()));
+            ed.world.insert(e, Transform { translation: [x, -2.0, 0.0].into(), ..Transform::IDENTITY });
+            ed.world.insert(e, RigidBody { mass, ..RigidBody::default() });
+        };
+        ball(&mut ed, "Astronaut", 0.0, 1.0);
+        ball(&mut ed, "Buoy", 5.0, 300.0);
+        // A second light body, so the two lines alternate tick by tick: the
+        // Console merges only a line repeated back to back.
+        ball(&mut ed, "Diver", -5.0, 2.0);
+        ed.toggle_play();
+        assert!(ed.playing);
+        for _ in 0..30 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        let said: Vec<&str> =
+            ed.console.entries.iter().filter(|l| l.msg.contains("buoyancy")).map(|l| l.msg.as_str()).collect();
+        assert_eq!(said.len(), 2, "{said:#?}");
+        assert!(said.iter().any(|l| l.contains("\"Astronaut\"")) && said.iter().any(|l| l.contains("\"Diver\"")), "{said:#?}");
+        assert!(said.iter().all(|l| l.contains("\"Sea\"") && !l.contains("Buoy")), "{said:#?}");
+        assert!(said[0].contains("fling it out") && said[0].contains("same units"), "{}", said[0]);
     }
 }
 

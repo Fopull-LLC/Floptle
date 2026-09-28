@@ -204,7 +204,7 @@ fn main() {
 
     let roots = screen();
     let design_vp = [W as f32, H as f32];
-    let measure = |t: &TextSpec| ui.measure_spec(t);
+    let measure = |t: &TextSpec, w: Option<f32>| ui.measure_spec(t, w);
     let placed = floptle_ui::solve(&roots, design_vp, &measure);
 
     // One render per case, because only one element can be edited at a time —

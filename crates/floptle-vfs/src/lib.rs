@@ -196,6 +196,31 @@ mod tests {
         assert!(!is_within(Path::new("assets"), Path::new("assets/../solar/x.ron")));
     }
 
+    /// A link to a folder is a folder to every walk, so a project whose `ui/`
+    /// is a link keeps its style sheets. A link back up the tree is not, or
+    /// every recursive walk in the engine would descend it forever.
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    #[test]
+    fn a_folder_link_lists_as_a_folder_and_a_loop_does_not() {
+        let dir = std::env::temp_dir().join(format!("floptle-vfs-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let proj = dir.join("proj");
+        std::fs::create_dir_all(proj.join("real_ui")).unwrap();
+        std::fs::create_dir_all(dir.join("shared_ui")).unwrap();
+        std::os::unix::fs::symlink(dir.join("shared_ui"), proj.join("ui")).unwrap();
+        std::os::unix::fs::symlink(&proj, proj.join("real_ui/back_to_root")).unwrap();
+        std::os::unix::fs::symlink(proj.join("real_ui"), proj.join("real_ui/itself")).unwrap();
+
+        let kind = |dir: &Path, name: &str| {
+            read_dir(dir).unwrap().into_iter().find(|e| e.file_name() == name).map(|e| e.is_dir())
+        };
+        assert_eq!(kind(&proj, "ui"), Some(true), "a linked folder listed as a file");
+        assert_eq!(kind(&proj, "real_ui"), Some(true));
+        assert_eq!(kind(&proj.join("real_ui"), "back_to_root"), Some(false), "a link to a parent would loop");
+        assert_eq!(kind(&proj.join("real_ui"), "itself"), Some(false), "a link to itself would loop");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_desktop_reads_the_real_disk() {
         let dir = std::env::temp_dir().join(format!("floptle-vfs-{}", std::process::id()));

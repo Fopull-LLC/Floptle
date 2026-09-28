@@ -180,7 +180,7 @@ pub static OPS: &[OpSpec] = &[
     OpSpec { name: "twist", inputs: &[req("p", V3), req("amount", F)], output: V3, stages: BOTH, emit: Emit::Fn("flsl_op_twist"), doc: "Twist space around the Y axis (radians per unit height).", category: "sdf" },
 
     // ---- engine hooks (the concat-seam dividend) ----------------------------
-    OpSpec { name: "litSurface", inputs: &[req("albedo", V3)], output: V3, stages: FRAG, emit: Emit::Special, doc: "The engine's full lighting on your albedo: sun + shadows + AO + point lights + specular/rim from the node's Material.", category: "engine" },
+    OpSpec { name: "litSurface", inputs: &[req("albedo", V3), opt("normal", V3, f64::NAN)], output: V3, stages: FRAG, emit: Emit::Special, doc: "The engine's full lighting on your albedo: sun + shadows + AO + point lights + specular/rim from the node's Material. Give a normal (same space as `normal`) to light a bent one — waves, bumps, detail; omit it for the mesh's own.", category: "engine" },
     OpSpec { name: "sunShadow", inputs: &[req("p", V3), req("n", V3)], output: V3, stages: FRAG, emit: Emit::Special, doc: "The scene's marched sun-shadow factor at a point (1 = fully lit).", category: "engine" },
     OpSpec { name: "sdfAo", inputs: &[req("p", V3), req("n", V3)], output: F, stages: FRAG, emit: Emit::Fn("flsl_ao"), doc: "True SDF ambient occlusion at a point (1 = open sky).", category: "engine" },
     OpSpec { name: "applyFog", inputs: &[req("c", V3), req("p", V3)], output: V3, stages: FRAG, emit: Emit::Special, doc: "The scene's distance fog applied to a color.", category: "engine" },

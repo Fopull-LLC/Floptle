@@ -324,6 +324,8 @@ fn target_vis(
                 (Stage::Fragment, Input::WorldPos) => "in.view_pos",
                 (Stage::Fragment, Input::ObjectPos) => "in.lpos",
                 (Stage::Fragment, Input::ViewDir) => "normalize(-in.view_pos)",
+                (Stage::Fragment, Input::LightDir) => "flsl_sun_dir(in.view_pos)",
+                (Stage::Fragment, Input::LightColor) => "flsl_sun_color(in.view_pos)",
                 (Stage::Fragment, Input::InstanceColor) => "in.color",
                 (Stage::Sdf, Input::WorldPos) => "q",
                 (Stage::Sdf, _) => {
@@ -421,6 +423,8 @@ fn key_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, shininess: f32, pix: vec2
     return out;
 }
 fn sun_dir_at(p: vec3<f32>) -> vec3<f32> { return normalize(g.light_dir.xyz); }
+fn flsl_sun_dir(p: vec3<f32>) -> vec3<f32> { return normalize(g.light_dir.xyz); }
+fn flsl_sun_color(p: vec3<f32>) -> vec3<f32> { return g.light_color.rgb; }
 fn sun_shadow(p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return vec3<f32>(1.0); }
 fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 { return 1.0; }
 fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return color; }

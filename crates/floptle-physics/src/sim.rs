@@ -1303,6 +1303,46 @@ impl Sim {
         self.touching = now;
     }
 
+    /// Every body whose centre is in water, with the volume it is in and how
+    /// many times denser the water is than the body: `(body entity, volume
+    /// entity index, water density, body mass, ratio)`. Sized the way the water step
+    /// sizes them, so the ratio is the one buoyancy actually applies.
+    pub fn water_density_ratios(&self) -> Vec<(Entity, u32, f32, f32, f32)> {
+        if self.world.water.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for link in &self.map {
+            let b = &self.world.bodies[link.body];
+            let (_, _, r) = b.sample_centers();
+            let r = if r > 0.0 { r } else { b.bounding_radius() };
+            if let Some((v, d, ratio)) = crate::water::density_ratio(&self.world.water, b.pos, r, b.mass) {
+                out.push((link.entity, v, d, b.mass, ratio));
+            }
+        }
+        for link in &self.cmap {
+            let c = &self.world.compounds[link.compound];
+            // The spheres the per-shape water step displaces, summed into one.
+            let displaced: f32 = c
+                .shapes
+                .iter()
+                .map(|s| match s.geom {
+                    crate::ShapeGeom::Sphere { radius } => radius,
+                    crate::ShapeGeom::Capsule { radius, half_height } => radius + half_height,
+                    crate::ShapeGeom::Box { half } => half.length(),
+                })
+                .map(|r| r * r * r)
+                .sum();
+            if displaced > 0.0
+                && let Some((v, d, ratio)) =
+                    crate::water::density_ratio(&self.world.water, c.pos, displaced.cbrt(), c.mass)
+            {
+                out.push((link.entity, v, d, c.mass, ratio));
+            }
+        }
+        out
+    }
+
     /// Drain the collision/trigger events produced since the last drain (the
     /// driver dispatches them to both nodes' scripts after each tick).
     pub fn take_touch_events(&mut self) -> Vec<TouchEvent> {

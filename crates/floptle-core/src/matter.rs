@@ -1497,8 +1497,9 @@ pub enum Matter {
         radius: f32,
         /// `Pool`: half-extents of the box. Ignored by `Sea`.
         half_extents: [f32; 3],
-        /// kg/m³. Fresh water ≈ 1000, seawater ≈ 1025, and an alien ocean is
-        /// whatever you say it is — a denser sea floats heavier hulls.
+        /// Mass per m³, in the same units as body `mass`: with kilograms, fresh
+        /// water ≈ 1000 and seawater ≈ 1025; with tonnes, 1.0 and 1.025. A
+        /// denser sea floats heavier hulls.
         density: f32,
         /// Quadratic drag coefficient — how hard the water resists moving
         /// through it. Quadratic is what makes a gentle touchdown float and a

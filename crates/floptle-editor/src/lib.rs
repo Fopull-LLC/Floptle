@@ -2079,6 +2079,13 @@ struct Editor {
     /// Models whose import failed this session, so a preload waiting on one
     /// is answered rather than left waiting, and a bad file is tried once.
     model_failed: std::collections::HashSet<String>,
+    /// Model import failures already said on the Console, by path and reason:
+    /// several callers retry a failed model every frame, and one line is the
+    /// message. A different reason for the same file is said again.
+    model_import_reported: std::collections::HashSet<(String, String)>,
+    /// (body entity index, water volume entity index) pairs whose density
+    /// mismatch has been said this Play. See `warn_water_density_mismatch`.
+    water_ratio_warned: std::collections::HashSet<(u32, u32)>,
     /// Scatter prototypes resolved to their drawable parts, by asset string —
     /// baked once (see `scatter_prototype`). An empty entry is a remembered
     /// Failure, so a prototype that cannot be drawn is reported once rather
@@ -2796,7 +2803,7 @@ struct Editor {
     /// Warp-coasting rails (S4): body eid → (dominant celestial eid, captured
     /// Kepler conic). While warp > 1 each in-flight body is driven analytically
     /// from its cached conic — drift-free at any warp; cleared at warp 1.
-    space_coast: std::collections::HashMap<u32, (u32, floptle_core::frames::Kepler)>,
+    space_coast: std::collections::HashMap<u32, (Entity, floptle_core::frames::Kepler)>,
     /// A1 render targets: target name → its allocated texture + views.
     /// Registered in the raster texture table as `rt:<name>` so materials/UI
     /// images sample the live feed; rendered by `update_render_targets` at the
@@ -2812,7 +2819,10 @@ struct Editor {
     /// node index): the carried patched-conic frame. On a dominance change the
     /// body's sim velocity is re-expressed in the new frame so its world
     /// velocity stays continuous across the SOI seam (see space.rs).
-    space_frame: std::collections::HashMap<u32, u32>,
+    space_frame: std::collections::HashMap<u32, Entity>,
+    /// Each celestial's rails position as of the last tick: the "before" of
+    /// the carry's per-tick delta. Empty at Play start.
+    space_rails_prev: std::collections::HashMap<Entity, DVec3>,
     /// Physics LOD for distant compound craft (root eid → state): far from the
     /// camera, landed craft freeze in the carried frame and in-flight craft
     /// coast on analytic Kepler rails; both wake on approach (see space.rs).

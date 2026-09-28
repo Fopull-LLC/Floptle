@@ -294,6 +294,14 @@ hull that lands flat floats and the same hull nose-down sinks its nose and
 rights itself. A single force at the centre of mass would give you a craft that
 bobs but never rights itself.
 
+**Density is in your game's mass units per cubic metre.** The engine has no
+kilograms of its own: a volume's `density` and a body's `mass` are compared
+directly, so they have to be written in the same units. With masses in
+kilograms, fresh water is 1000 and sea water 1025; with masses in tonnes they
+are 1.0 and 1.025. A body 50 times lighter or heavier than the water it
+displaces gets one Console warning per Play, naming the body, the volume, and
+the mass at which it would float half under.
+
 **Drag is quadratic**, which is what makes a gentle touchdown float and a
 60 m/s belly-flop stop hard without either being a special case.
 
@@ -347,8 +355,11 @@ to keep in step with the sphere it drew.
 
 The surface is a translucent, tinted, specular volume sized to what the solver
 uses. It has **no waves, no shoreline softening against terrain and no
-depth-based tint from outside** — an authorable `.flsl` water surface is still
-to come. Underwater is a fog/colour grade, not refraction.
+depth-based tint from outside** of its own. A `.flsl` surface shader on the sea
+mesh can draw them: `litSurface(albedo, n)` lights a wave normal through the
+engine's sun, shadow and point lights, and `lightDir` / `lightColor` give a glint
+the key light's direction and colour (see the shader reference, §4.4).
+Underwater is a fog/colour grade, not refraction.
 
 ---
 

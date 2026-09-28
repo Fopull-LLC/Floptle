@@ -560,7 +560,7 @@ pub(crate) const MATERIAL_NUM_FIELDS: &[&str] = &[
 /// …and every string-valued one: the texture and the surface maps, plus the
 /// shading model's name.
 pub(crate) const MATERIAL_STR_FIELDS: &[&str] =
-    &["texture", "normalMap", "roughnessMap", "metallicMap", "occlusionMap", "shading"];
+    &["texture", "normalMap", "roughnessMap", "metallicMap", "occlusionMap", "shading", "shader"];
 
 /// The Material a component name addresses: the node's own for `Material`, or
 /// one sub-object's override for `Material:<key>` — created on demand, because
@@ -3289,6 +3289,7 @@ pub fn apply_component_field_str(world: &mut World, ent: Entity, comp: &str, fie
                     "roughnessMap" => m.roughness_map = path,
                     "metallicMap" => m.metallic_map = path,
                     "occlusionMap" => m.ao_map = path,
+                    "shader" => m.shader = path,
                     "shading" => {
                         if let Some(sh) = floptle_core::Shading::parse(val) {
                             m.shading = sh;
@@ -3333,6 +3334,7 @@ pub fn mirror_component_strings(
             ("metallicMap".to_string(), p(&m.metallic_map)),
             ("occlusionMap".to_string(), p(&m.ao_map)),
             ("shading".to_string(), m.shading.as_str().to_string()),
+            ("shader".to_string(), p(&m.shader)),
         ])
     };
     if let Some(m) = world.get::<floptle_core::Material>(e) {
@@ -7333,6 +7335,25 @@ mod tests {
         // Negative frames clamp instead of wrapping to four billion.
         apply_component_field(&mut world, e, "Material", "cell", -3.0);
         assert_eq!(world.get::<Material>(e).unwrap().cell, 0);
+    }
+
+    /// **A script can see which shader a material draws with, and swap it.**
+    /// The path mirrored for reading is the path written back, so
+    /// `node:material().shader` reads what the surface wears and an
+    /// assignment changes it; `""` clears it.
+    #[test]
+    fn a_materials_shader_is_read_and_written_by_path() {
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, Material { shader: Some("shaders/ocean.flsl".into()), ..Material::default() });
+        let strs = mirror_component_strings(&world, e);
+        assert_eq!(strs["Material"].get("shader").map(String::as_str), Some("shaders/ocean.flsl"));
+
+        apply_component_field_str(&mut world, e, "Material", "shader", "shaders/ice.flsl");
+        assert_eq!(world.get::<Material>(e).unwrap().shader.as_deref(), Some("shaders/ice.flsl"));
+        apply_component_field_str(&mut world, e, "Material", "shader", "");
+        assert_eq!(world.get::<Material>(e).unwrap().shader, None);
+        assert_eq!(mirror_component_strings(&world, e)["Material"].get("shader").map(String::as_str), Some(""));
     }
 
     /// Both spellings of a legacy snake_case component field reach the same

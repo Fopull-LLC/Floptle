@@ -1114,7 +1114,7 @@ impl Editor {
         }
         let (placed, dl) = {
             let Some(uir) = self.ui_render.as_ref() else { return };
-            let measure = |t: &floptle_ui::TextSpec| uir.measure_spec(t);
+            let measure = |t: &floptle_ui::TextSpec, w: Option<f32>| uir.measure_spec(t, w);
             let mut placed = floptle_ui::solve(&roots, design_vp, &measure);
             floptle_ui::place_scrollbars(&roots, &mut placed, &self.ui_layer_scrollbars(&roots));
             let masks = self.ui_layer_masks(&roots);
@@ -1330,5 +1330,50 @@ mod tests {
             ..Default::default()
         };
         assert!(!elsewhere.scene_visible());
+    }
+}
+
+#[cfg(test)]
+mod render_scale_tests {
+    /// **A render scale switched mid-game allocates its targets once.** The
+    /// scaled picture and the post chain it feeds are sized on the frame the
+    /// scale changes and then reused; a target rebuilt every frame would turn
+    /// a performance setting into a stall. Views compare by identity, so the
+    /// same view on the next five frames is the same texture.
+    #[test]
+    fn a_render_scale_switch_allocates_its_targets_once() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        ed.project_root = std::path::PathBuf::from("../../assets");
+        // Retro mode wins over a render scale; this is the scale's own target.
+        ed.project.retro = false;
+        ed.project.render_scale = 1.0;
+        ed.toggle_play();
+        let (w, h) = (320u32, 180u32);
+        let gpu = ed.gpu.as_ref().unwrap();
+        let (color, depth) = crate::viewports::offscreen_textures(gpu, w, h, "scale", wgpu::TextureUsages::COPY_SRC);
+        let (cv, dv) = (color.create_view(&Default::default()), depth.create_view(&Default::default()));
+        let frame = |ed: &mut crate::Editor| {
+            ed.play_step(1.0 / 60.0, true);
+            ed.begin_draw_frame();
+            ed.render_game_into(cv.clone(), dv.clone(), Some(depth.clone()), [0.0, 0.0], [w as f32, h as f32], 0.0, true, false);
+        };
+        let targets = |ed: &crate::Editor| {
+            (
+                ed.game_retro.as_ref().map(|r| r.color_view().clone()),
+                ed.game_post.as_ref().map(|p| p.input_view().clone()),
+            )
+        };
+        for _ in 0..3 {
+            frame(&mut ed);
+        }
+        ed.project.render_scale = 0.5;
+        frame(&mut ed);
+        let first = targets(&ed);
+        assert!(first.0.is_some(), "a scaled frame has a scaled target");
+        assert_eq!(ed.game_retro.as_ref().unwrap().resolution(), (160, 90));
+        for i in 0..5 {
+            frame(&mut ed);
+            assert!(targets(&ed) == first, "frame {i} after the switch rebuilt a render target");
+        }
     }
 }

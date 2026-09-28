@@ -225,6 +225,11 @@ leftover space in a stack; `"fit"` wraps the content.
 `"center"`, `"end"`, `"between"`), `align` (`"start"`, `"center"`, `"end"`,
 `"stretch"`). Any one of them makes the element a container.
 
+A container starts with `pad = 8` and `gap = 8` — a `row`, a `col`, and any
+element made a container by one of these keys. A nested row or column
+therefore sits 8 units inside its parent's edge and 8 from its neighbours
+until you say otherwise; write `pad = 0, gap = 0` for a flush stack.
+
 **Shape** — `fill`, `radius`, `border`, `borderColor`, plus the indexed forms
 (`fillR`, `radiusTL`, `borderB`, …). A quad takes a scalar for all four or a
 list: `radius = {8, 8, 0, 0}`.

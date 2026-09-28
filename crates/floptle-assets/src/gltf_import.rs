@@ -53,6 +53,9 @@ pub struct ImportedPart {
 pub enum ImportError {
     Gltf(gltf::Error),
     NoGeometry,
+    /// The file requires an extension this importer cannot decode, so it has no
+    /// geometry it could read. Named, so the fix is in the message.
+    Unsupported(&'static str),
 }
 
 impl fmt::Display for ImportError {
@@ -60,6 +63,11 @@ impl fmt::Display for ImportError {
         match self {
             ImportError::Gltf(e) => write!(f, "glTF parse error: {e}"),
             ImportError::NoGeometry => write!(f, "glTF contained no triangle geometry"),
+            ImportError::Unsupported(ext) => write!(
+                f,
+                "the file is compressed with {ext}, which Floptle cannot decode; \
+                 re-export it without mesh compression (Blender: File ▸ Export ▸ glTF ▸ Data ▸ Compression off)"
+            ),
         }
     }
 }
@@ -117,6 +125,34 @@ pub fn geometry(path: &Path) -> Result<Arc<ImportedModel>, ImportError> {
     Ok(model)
 }
 
+/// Mesh compression this importer cannot decode. A file that requires one keeps
+/// its vertices only in the compressed stream; a file that merely uses one
+/// carries an uncompressed fallback and loads.
+const REFUSED_EXTENSIONS: [&str; 2] = ["KHR_draco_mesh_compression", "EXT_meshopt_compression"];
+
+fn refused_extension(doc: &gltf::Document) -> Option<&'static str> {
+    doc.extensions_required().find_map(|e| REFUSED_EXTENSIONS.iter().copied().find(|r| *r == e))
+}
+
+/// Parse a glTF, naming the compression when that is why it was refused. The
+/// validator already turns such a file away, as "Unsupported extension" among
+/// its other findings; the name and the remedy are what a person needs.
+fn parse(bytes: &[u8]) -> Result<gltf::Gltf, ImportError> {
+    gltf::Gltf::from_slice(bytes).map_err(|e| {
+        match gltf::Gltf::from_slice_without_validation(bytes).ok().and_then(|g| refused_extension(&g.document)) {
+            Some(ext) => ImportError::Unsupported(ext),
+            None => ImportError::Gltf(e),
+        }
+    })
+}
+
+/// Can this importer read the model at `path`? Parses the document only, not
+/// its images, so `floptle check` can ask it of every model a project names.
+pub fn check_readable(path: &Path) -> Result<(), ImportError> {
+    let bytes = floptle_vfs::read(path).map_err(|e| ImportError::Gltf(gltf::Error::Io(e)))?;
+    parse(&bytes).map(|_| ())
+}
+
 /// Read a glTF file and everything it references — the document, its
 /// buffers, and (when asked) its images decoded to pixels — through the
 /// engine's filesystem.
@@ -132,7 +168,7 @@ pub(crate) fn read_gltf(
     want_images: bool,
 ) -> Result<(gltf::Document, Vec<gltf::buffer::Data>, Vec<gltf::image::Data>), ImportError> {
     let bytes = floptle_vfs::read(path).map_err(|e| ImportError::Gltf(gltf::Error::Io(e)))?;
-    let gltf::Gltf { document, mut blob } = gltf::Gltf::from_slice(&bytes).map_err(ImportError::Gltf)?;
+    let gltf::Gltf { document, mut blob } = parse(&bytes)?;
     let base = path.parent();
     let mut buffers = Vec::with_capacity(document.buffers().len());
     for buffer in document.buffers() {
@@ -427,6 +463,34 @@ mod tests {
             assert!((v[0]).abs() < 1e-6 && (v[1]).abs() < 1e-6);
             assert!((v[2] - 1.0).abs() < 1e-6, "expected +Z normal, got {v:?}");
         }
+    }
+
+    /// **A Draco-compressed model is refused by name, not imported as nothing.**
+    /// Its vertices live only in the compressed stream, so reading it the
+    /// ordinary way found no geometry and the scene had a hole with no reason
+    /// given. A file that only uses the extension has an uncompressed fallback
+    /// and still loads.
+    #[test]
+    fn a_model_that_requires_mesh_compression_is_refused_by_name() {
+        let dir = std::env::temp_dir().join(format!("floptle-draco-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = |required: &str| {
+            format!(
+                "{{\"asset\":{{\"version\":\"2.0\"}},\"extensionsUsed\":[\"KHR_draco_mesh_compression\"],\
+                 \"extensionsRequired\":[{required}]}}"
+            )
+        };
+        let draco = dir.join("draco.gltf");
+        std::fs::write(&draco, doc("\"KHR_draco_mesh_compression\"")).unwrap();
+        let used = dir.join("used.gltf");
+        std::fs::write(&used, doc("")).unwrap();
+
+        for err in [check_readable(&draco).unwrap_err(), import(&draco).err().unwrap()] {
+            let msg = err.to_string();
+            assert!(msg.contains("KHR_draco_mesh_compression") && msg.contains("re-export"), "{msg}");
+        }
+        check_readable(&used).expect("a file that only uses the extension is readable");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

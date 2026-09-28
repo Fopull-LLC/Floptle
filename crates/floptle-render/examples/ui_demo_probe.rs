@@ -324,7 +324,7 @@ fn main() {
 
         let scale = layer.scale_for([vw, vh]);
         let design_vp = [vw / scale, vh / scale];
-        let measure = |t: &TextSpec| ui.measure_spec(t);
+        let measure = |t: &TextSpec, w: Option<f32>| ui.measure_spec(t, w);
         let mut placed = floptle_ui::solve(&roots, design_vp, &measure);
         floptle_ui::place_scrollbars(&roots, &mut placed, &scrollbars(&doc.nodes, &roots));
         // The same tree with the styles left off — what the hit test used to

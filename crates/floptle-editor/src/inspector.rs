@@ -2002,12 +2002,13 @@ fn water_volume_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
             }
         }
     }
-    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(density, 1.0..=5000.0),
-                "density kg/m³")
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(density, 0.01..=5000.0).logarithmic(true),
+                "density")
         .on_hover_text(
-            "1000 = fresh water. What decides whether a given hull \
-             floats is this against the hull's own density, so a \
-             denser sea carries heavier craft.",
+            "Mass per cubic metre, in the same units as body mass: \
+             1000 is fresh water when masses are kilograms, 1.0 when \
+             they are tonnes. A hull floats when this is more than \
+             its own density, so a denser sea carries heavier craft.",
         )
         .changed();
     cmd.inspector_changed |=

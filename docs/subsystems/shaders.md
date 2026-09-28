@@ -288,6 +288,24 @@ shader inside_box {
 }
 ```
 
+### 4.4 Lighting a normal of your own
+
+`litSurface(albedo)` lights the mesh's own normal. Give it a second argument,
+`litSurface(albedo, n)`, and it lights `n` instead, through the same key light,
+shadows, ambient occlusion and point lights: waves on a flat sea, bumps on a
+flat panel, anything a normal map would do. `n` is in the same space as
+`normal`, so the usual move is to bend `normal`:
+
+```
+let n = normalize(normal + vec3(dx, 0, dz))
+output color = vec4(litSurface(albedo.rgb, n), 1)
+```
+
+For light the engine does not do for you, such as a glint or a subsurface glow,
+`lightDir` is the unit vector toward the key light (the sun, or in a scene lit
+by stars the dominant one) and `lightColor` is its colour times its intensity.
+Both are fragment-stage inputs, in the same space as `normal`.
+
 ## 5. Materials reference a compiled shader
 
 A **material** binds a compiled shader plus its **param block** (uniform values,

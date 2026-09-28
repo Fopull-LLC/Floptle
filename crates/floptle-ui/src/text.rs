@@ -106,6 +106,39 @@ pub enum Overflow {
     Ellipsis,
 }
 
+/// The distance from one line's top to the next: `line_height` times the
+/// font's natural height, or 1.15 times it when `line_height` is 0.
+pub fn line_step(natural_h: f32, line_height: f32) -> f32 {
+    natural_h * if line_height > 0.0 { line_height } else { 1.15 }
+}
+
+/// The size a run draws at: its case applied, its lines broken at `\n` and,
+/// when it wraps, at `wrap_at`, each as wide as `advance` plus its tracking,
+/// stacked at [`line_step`]. `advance` is one line's width without tracking;
+/// `natural_h` is the font's ascent to descent at the run's size.
+///
+/// The measure the layout solver sizes a `Fit` element by, built from the
+/// same pieces the renderer draws with, so a fitted box holds what is drawn.
+pub fn measure_run(
+    t: &crate::TextSpec,
+    wrap_at: Option<f32>,
+    advance: &dyn Fn(&str) -> f32,
+    natural_h: f32,
+) -> [f32; 2] {
+    let shown = t.display();
+    let adv = |s: &str| advance(s) + t.tracking * s.chars().count() as f32;
+    let mut lines = match wrap_at.filter(|_| t.wrap) {
+        Some(w) => wrap_lines(&shown, w, &adv),
+        None => shown.split('\n').map(str::to_string).collect(),
+    };
+    if t.max_lines > 0 {
+        lines.truncate(t.max_lines as usize);
+    }
+    let w = lines.iter().map(|l| adv(l)).fold(0.0, f32::max);
+    let h = natural_h + line_step(natural_h, t.line_height) * lines.len().saturating_sub(1) as f32;
+    [w, h]
+}
+
 /// Break a run into lines, honouring explicit `\n` and (optionally) wrapping
 /// at `max_width`.
 ///

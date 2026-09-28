@@ -1378,8 +1378,10 @@ pub struct Placed {
 }
 
 /// Text measurement, provided by whoever owns the font (the renderer; tests
-/// stub it): returns [width, height] of the run at [`TextSpec::size`].
-pub type MeasureText<'a> = &'a dyn Fn(&TextSpec) -> [f32; 2];
+/// stub it): returns [width, height] of the run at [`TextSpec::size`], as it
+/// will be drawn. The second argument is the width a `wrap` run breaks at,
+/// `None` when it has none; the answer is then every line, not one.
+pub type MeasureText<'a> = &'a dyn Fn(&TextSpec, Option<f32>) -> [f32; 2];
 
 /// Solve a layer: place every visible element of `roots` inside a viewport of
 /// `viewport` design units. Output order is parent-before-children (painter's
@@ -1405,13 +1407,9 @@ fn measure_node(n: &Node, avail: [f32; 2], measure: MeasureText) -> [f32; 2] {
         Place::Stretch { min, max, .. } => [max[0] - min[0] > 0.0, max[1] - min[1] > 0.0],
         _ => [false, false],
     };
-    let needs_fit = n.spec.size.iter().zip(stretch).any(|(s, st)| {
-        !st && matches!(s, Size::Fit | Size::Grow(_))
-    });
-    let fit = if needs_fit { fit_size(n, avail, measure) } else { [0.0, 0.0] };
-    let mut size = [0.0f32; 2];
-    for a in 0..2 {
-        size[a] = if stretch[a] {
+    let fits = |a: usize| !stretch[a] && matches!(n.spec.size[a], Size::Fit | Size::Grow(_));
+    let axis = |a: usize, fit: f32| {
+        let mut v = if stretch[a] {
             // Fill the anchored span (fraction of the parent) minus the margins.
             let Place::Stretch { min, max, margin } = n.spec.place else { unreachable!() };
             let span = (max[a] - min[a]).clamp(0.0, 1.0);
@@ -1421,25 +1419,38 @@ fn measure_node(n: &Node, avail: [f32; 2], measure: MeasureText) -> [f32; 2] {
             match n.spec.size[a] {
                 Size::Fixed(v) => v.max(0.0),
                 Size::Pct(p) => (avail[a] * p).max(0.0),
-                Size::Fit | Size::Grow(_) => fit[a],
+                Size::Fit | Size::Grow(_) => fit,
             }
         };
         // Clamp to the authored min/max (0 = unbounded on that end).
         let (lo, hi) = (n.spec.min_size[a], n.spec.max_size[a]);
         if lo > 0.0 {
-            size[a] = size[a].max(lo);
+            v = v.max(lo);
         }
         if hi > 0.0 {
-            size[a] = size[a].min(hi);
+            v = v.min(hi);
         }
-    }
-    size
+        v
+    };
+    // A wrapping run breaks at its own width, so that width comes first: the
+    // one it is given, or for a fitted width the most it may take.
+    let wrap_at = match &n.spec.text {
+        Some(t) if t.wrap && !fits(0) => Some(axis(0, 0.0)),
+        Some(t) if t.wrap => Some(if n.spec.max_size[0] > 0.0 { n.spec.max_size[0] } else { avail[0] }),
+        _ => None,
+    };
+    // Content is measured in the space this element gives it: its own size on
+    // an axis it does not fit, so a fixed-width column wraps its rows at its
+    // width and not at its parent's.
+    let inside = [0, 1].map(|a| if fits(a) { avail[a] } else { axis(a, 0.0) });
+    let fit = if fits(0) || fits(1) { fit_size(n, inside, measure, wrap_at) } else { [0.0, 0.0] };
+    [axis(0, fit[0]), axis(1, fit[1])]
 }
 
 /// Content size for `Fit`: text measurement, or the stacked/overlaid children.
-fn fit_size(n: &Node, avail: [f32; 2], measure: MeasureText) -> [f32; 2] {
+fn fit_size(n: &Node, avail: [f32; 2], measure: MeasureText, wrap_at: Option<f32>) -> [f32; 2] {
     if let Some(t) = &n.spec.text {
-        return measure(t);
+        return measure(t, wrap_at);
     }
     let visible: Vec<&Node> = n.children.iter().filter(|c| c.spec.visible).collect();
     if visible.is_empty() {
@@ -2400,14 +2411,83 @@ fn inherited_tints(roots: &[Node]) -> std::collections::HashMap<u32, [f32; 4]> {
 mod tests {
     use super::*;
 
-    /// Deterministic test metrics: 0.6·size per char wide, size tall.
-    fn m(t: &TextSpec) -> [f32; 2] {
-        [t.text.chars().count() as f32 * t.size * 0.6, t.size]
+    /// Deterministic test metrics: 0.6·size per char wide, size tall, through
+    /// the same line assembly the renderer measures with.
+    fn m(t: &TextSpec, wrap_at: Option<f32>) -> [f32; 2] {
+        text::measure_run(t, wrap_at, &|s| s.chars().count() as f32 * t.size * 0.6, t.size)
     }
 
     fn el(spec: ElementSpec, children: Vec<Node>) -> Node {
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
         Node { id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed), spec, children }
+    }
+
+    /// A wrapped run of known width in a fitted height, placed on its own.
+    fn prose(text: &str, w: Size) -> Node {
+        el(
+            ElementSpec {
+                size: [w, Size::Fit],
+                text: Some(TextSpec { text: text.into(), size: 10.0, wrap: true, ..Default::default() }),
+                ..Default::default()
+            },
+            vec![],
+        )
+    }
+
+    /// **A wrapped run fits its height to the lines it draws.** It was
+    /// measured as one line and wrapped only when drawn, so three lines sat
+    /// centred in a one-line box, over the rows above and below it.
+    #[test]
+    fn a_wrapped_text_fits_its_height_to_its_line_count() {
+        // Six units a character: "aaaa bbbb" is 54 wide, the whole run 84.
+        let n = prose("aaaa bbbb cccc", Size::Fixed(60.0));
+        let placed = solve(std::slice::from_ref(&n), [1280.0, 720.0], &m);
+        assert_eq!(rect_of(&placed, n.id)[3], 10.0 + 11.5, "two lines: one natural height, one line step");
+
+        // A fitted width wraps at the most it may take, and is as wide as its
+        // longest line rather than as wide as that.
+        let mut n = prose("aaaa bbbb cccc", Size::Fit);
+        n.spec.max_size[0] = 60.0;
+        let placed = solve(std::slice::from_ref(&n), [1280.0, 720.0], &m);
+        let r = rect_of(&placed, n.id);
+        assert!((r[2] - 54.0).abs() < 1e-3 && r[3] == 21.5, "{r:?}");
+    }
+
+    /// **Every line a run draws is measured, at the leading it draws with,
+    /// in the case and tracking it draws with.**
+    #[test]
+    fn newlines_line_height_case_and_tracking_are_measured() {
+        let fit = |t: TextSpec| {
+            let n = el(ElementSpec { size: [Size::Fit, Size::Fit], text: Some(t), ..Default::default() }, vec![]);
+            let placed = solve(std::slice::from_ref(&n), [1280.0, 720.0], &m);
+            [rect_of(&placed, n.id)[2], rect_of(&placed, n.id)[3]]
+        };
+        let base = TextSpec { size: 10.0, ..Default::default() };
+        assert_eq!(fit(TextSpec { text: "ab\ncd".into(), ..base.clone() }), [12.0, 21.5]);
+        assert_eq!(fit(TextSpec { text: "ab\ncd".into(), line_height: 2.0, ..base.clone() }), [12.0, 30.0]);
+        assert_eq!(fit(TextSpec { text: "ab".into(), tracking: 3.0, ..base.clone() }), [18.0, 10.0]);
+        // Upper-casing "ß" draws "SS": one more character than was typed.
+        assert_eq!(fit(TextSpec { text: "straße".into(), case: text::Case::Upper, ..base.clone() })[0], 42.0);
+    }
+
+    /// **A fitted column of wrapped rows stacks them without overlap.**
+    #[test]
+    fn a_fitted_column_of_wrapped_rows_stacks_them_without_overlap() {
+        let rows = vec![prose("aaaa bbbb cccc", Size::Pct(1.0)), prose("dddd eeee ffff", Size::Pct(1.0))];
+        let (a, b) = (rows[0].id, rows[1].id);
+        let col = el(
+            ElementSpec {
+                size: [Size::Fixed(60.0), Size::Fit],
+                stack: Some(StackCfg { dir: Dir::Column, gap: 0.0, pad: 0.0, ..Default::default() }),
+                ..Default::default()
+            },
+            rows,
+        );
+        let placed = solve(std::slice::from_ref(&col), [1280.0, 720.0], &m);
+        let (ra, rb) = (rect_of(&placed, a), rect_of(&placed, b));
+        assert_eq!(ra[3], 21.5);
+        assert!(rb[1] >= ra[1] + ra[3], "the second row starts at {} inside the first ({ra:?})", rb[1]);
+        assert_eq!(rect_of(&placed, col.id)[3], 43.0);
     }
 
     fn rect_of(placed: &[Placed], id: u32) -> [f32; 4] {
@@ -2473,7 +2553,7 @@ mod tests {
 
     #[test]
     fn a_scrollbar_thumb_shows_position_and_how_much_you_can_see() {
-        let m: MeasureText = &|_| [0.0, 0.0];
+        let m: MeasureText = &|_, _| [0.0, 0.0];
         let row = |y: f32| {
             el(
                 ElementSpec {
@@ -2531,7 +2611,7 @@ mod tests {
 
     #[test]
     fn a_scrollbar_over_content_that_fits_is_full_length() {
-        let m: MeasureText = &|_| [0.0, 0.0];
+        let m: MeasureText = &|_, _| [0.0, 0.0];
         let view = el(
             ElementSpec {
                 place: Place::Free { pos: [0.0, 0.0] },
@@ -2577,7 +2657,7 @@ mod tests {
 
     #[test]
     fn a_scroll_view_scrolls_sideways_too() {
-        let m: MeasureText = &|_| [0.0, 0.0];
+        let m: MeasureText = &|_, _| [0.0, 0.0];
         let card = |x: f32| {
             el(
                 ElementSpec {
@@ -3424,7 +3504,7 @@ mod tests {
             },
             vec![],
         );
-        let m: MeasureText = &|_| [0.0, 0.0];
+        let m: MeasureText = &|_, _| [0.0, 0.0];
         let placed = solve(std::slice::from_ref(&n), [400.0, 300.0], m);
         draw_list_with(std::slice::from_ref(&n), &placed, &[], edit)
     }
@@ -3469,7 +3549,7 @@ mod tests {
             },
             vec![],
         );
-        let m: MeasureText = &|_| [0.0, 0.0];
+        let m: MeasureText = &|_, _| [0.0, 0.0];
         let placed = solve(std::slice::from_ref(&label), [400.0, 300.0], m);
         let dl = draw_list(std::slice::from_ref(&label), &placed, &[]);
         assert!(dl.texts[0].clip.is_none());

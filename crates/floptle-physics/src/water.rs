@@ -211,6 +211,21 @@ fn cap_fraction(r: f32, h: f32) -> f32 {
     (h * h * (3.0 * r - h) / (4.0 * r * r * r)).clamp(0.0, 1.0)
 }
 
+/// How many times denser the water is than a body of `radius` and `mass`
+/// whose centre is at `p`, with the volume it is in: `(volume entity,
+/// water density, ratio)`. `None` when the centre is dry.
+///
+/// Above 1 it floats, below 1 it sinks. A ratio in the hundreds is not a light
+/// body; it is a volume whose `density` was written in different mass units
+/// from the body's (a sea at 1025 kg/m³ in a game whose masses are tonnes).
+pub fn density_ratio(field: &WaterField, p: Vec3, radius: f32, mass: f32) -> Option<(u32, f32, f32)> {
+    let s = field.sample(p);
+    let entity = s.entity?;
+    let r = radius.max(1e-4);
+    let volume = 4.0 / 3.0 * core::f32::consts::PI * r * r * r;
+    Some((entity, s.density, s.density * volume / mass.max(1e-4)))
+}
+
 /// The acceleration water applies to a sphere of `radius` and `mass` moving at
 /// `vel`, centred at `p`: buoyancy up, quadratic drag against the motion.
 ///

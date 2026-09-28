@@ -175,8 +175,9 @@ override that **already exists and wears a shader** — it never creates one,
 because an override is a whole material and creating one for a uniform would
 blank the part to default white with nothing for the uniform to drive. And a
 write with nowhere to land is said once in the Console rather than lost. Which
-`.flsl` a part wears is authoring — set it in ◑ Model materials — and the
-knobs are the runtime half. The node-level `node:setShaderParam` on a model
+`.flsl` a part wears is usually authoring — set it in ◑ Model materials — and the
+knobs are the runtime half; `mat.shader` reads which one it is, and assigning a
+path swaps it (`""` goes back to the built-in look). The node-level `node:setShaderParam` on a model
 with overrides and no node Material fans out to every part that wears a shader,
 which is the "everything glows" case.
 

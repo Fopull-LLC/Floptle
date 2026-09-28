@@ -274,20 +274,7 @@ impl Editor {
             }
         };
 
-        let outcome = floptle_shader::compile_fragment(&src).and_then(|compiled| {
-            // naga against the real pass sources — passing here means the
-            // pipeline build below can't fail on the shader.
-            floptle_shader::validate(floptle_render::pass_prelude(), &compiled.chunk).map_err(
-                |d| match d.chunk_line.and_then(|l| compiled.flsl_span_of_chunk_line(l)) {
-                    Some(span) => {
-                        let (l, c) = floptle_shader::text::line_col(&src, span.start);
-                        format!("{l}:{c}: {}", d.message)
-                    }
-                    None => d.message,
-                },
-            )?;
-            Ok(compiled)
-        });
+        let outcome = compile_fragment_validated(&src);
 
         match outcome {
             Ok(compiled) => {
@@ -820,26 +807,7 @@ impl Editor {
                 return;
             }
         };
-        let outcome = floptle_shader::compile_ui(&src).and_then(|compiled| {
-            // naga against the real ui pass source (+ the field shim the
-            // shared stdlib support needs) — passing here means the pipeline
-            // build below can't fail on the shader.
-            let prelude = format!(
-                "{}\n{}",
-                floptle_render::Ui::ui_prelude(),
-                floptle_shader::transpile::UI_FIELD_SHIM
-            );
-            floptle_shader::validate(&prelude, &compiled.chunk).map_err(|d| {
-                match d.chunk_line.and_then(|l| compiled.flsl_span_of_chunk_line(l)) {
-                    Some(span) => {
-                        let (l, c) = floptle_shader::text::line_col(&src, span.start);
-                        format!("{l}:{c}: {}", d.message)
-                    }
-                    None => d.message,
-                }
-            })?;
-            Ok(compiled)
-        });
+        let outcome = compile_ui_validated(&src);
         match outcome {
             Ok(compiled) => {
                 let replace =
@@ -1000,20 +968,7 @@ impl Editor {
                 return;
             }
         };
-        let outcome = floptle_shader::compile_post(&src).and_then(|compiled| {
-            // naga against the real module, assembled exactly as the pipeline
-            // will be — passing here means the pipeline build can't fail.
-            floptle_shader::validate(&post_prelude(), &compiled.chunk).map_err(|d| {
-                match d.chunk_line.and_then(|l| compiled.flsl_span_of_chunk_line(l)) {
-                    Some(span) => {
-                        let (l, c) = floptle_shader::text::line_col(&src, span.start);
-                        format!("{l}:{c}: {}", d.message)
-                    }
-                    None => d.message,
-                }
-            })?;
-            Ok(compiled)
-        });
+        let outcome = compile_post_validated(&src);
         match outcome {
             Ok(compiled) => {
                 let replace = self
@@ -1045,6 +1000,68 @@ impl Editor {
 /// What a post chunk is validated against: the language's own prelude plus the
 /// field stand-ins the shared stdlib support needs (a full-screen pass has no
 /// field bound).
+/// A naga diagnostic, placed on the `.flsl` line that produced it when the
+/// compiled chunk can say which one that is.
+fn at_flsl_line(
+    src: &str,
+    d: floptle_shader::transpile::WgslDiag,
+    span_of: impl Fn(u32) -> Option<floptle_shader::ir::Span>,
+) -> String {
+    match d.chunk_line.and_then(span_of) {
+        Some(span) => {
+            let (l, c) = floptle_shader::text::line_col(src, span.start);
+            format!("{l}:{c}: {}", d.message)
+        }
+        None => d.message,
+    }
+}
+
+/// A mesh material's shader, compiled and then validated by naga against the
+/// real raster + field sources: passing here means the pipeline build cannot
+/// fail on the shader. The editor's loader and `floptle check` both call this.
+pub(crate) fn compile_fragment_validated(src: &str) -> Result<floptle_shader::CompiledFragment, String> {
+    let compiled = floptle_shader::compile_fragment(src)?;
+    floptle_shader::validate(floptle_render::pass_prelude(), &compiled.chunk)
+        .map_err(|d| at_flsl_line(src, d, |l| compiled.flsl_span_of_chunk_line(l)))?;
+    Ok(compiled)
+}
+
+/// A UI element's shader, validated against the real UI pass source plus the
+/// field shim the shared stdlib support needs.
+pub(crate) fn compile_ui_validated(src: &str) -> Result<floptle_shader::transpile::CompiledUi, String> {
+    let compiled = floptle_shader::compile_ui(src)?;
+    let prelude = format!("{}\n{}", floptle_render::Ui::ui_prelude(), floptle_shader::transpile::UI_FIELD_SHIM);
+    floptle_shader::validate(&prelude, &compiled.chunk)
+        .map_err(|d| at_flsl_line(src, d, |l| compiled.flsl_span_of_chunk_line(l)))?;
+    Ok(compiled)
+}
+
+/// A screen shader, validated against the module assembled exactly as the
+/// pipeline will be.
+pub(crate) fn compile_post_validated(src: &str) -> Result<floptle_shader::transpile::CompiledPost, String> {
+    let compiled = floptle_shader::compile_post(src)?;
+    floptle_shader::validate(&post_prelude(), &compiled.chunk)
+        .map_err(|d| at_flsl_line(src, d, |l| compiled.flsl_span_of_chunk_line(l)))?;
+    Ok(compiled)
+}
+
+/// Compile a `.flsl` source for the stage it declares, through the same path
+/// that stage's loader takes. `floptle check` asks this of every shader in a
+/// project, so a broken one is found without opening the game to look at it.
+#[cfg(feature = "editor-ui")]
+pub(crate) fn compile_any_stage(src: &str) -> Result<floptle_shader::Stage, String> {
+    use floptle_shader::Stage;
+    let stage = floptle_shader::parse(src).ok().and_then(|ir| ir.stage).unwrap_or(Stage::Fragment);
+    match stage {
+        Stage::Fragment => compile_fragment_validated(src).map(|_| ()),
+        Stage::Ui => compile_ui_validated(src).map(|_| ()),
+        Stage::Post => compile_post_validated(src).map(|_| ()),
+        Stage::Sky => floptle_shader::compile_sky(src).map(|_| ()),
+        Stage::Sdf => floptle_shader::check_sdf(src).map(|_| ()),
+    }
+    .map(|()| stage)
+}
+
 fn post_prelude() -> String {
     format!(
         "{}\n{}",

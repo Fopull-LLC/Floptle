@@ -1286,6 +1286,7 @@ function findTagged(tag) end
 ---@field roughnessMap string
 ---@field metallicMap string
 ---@field occlusionMap string
+---@field shader string The `.flsl` surface shader it draws with, project-relative. `""` when it has none, or to clear it.
 ---@field color Color The tint, multiplied into the texture.
 ---@field emissive Color Light this surface gives off (scaled by emissiveStrength).
 ---@field specular Color

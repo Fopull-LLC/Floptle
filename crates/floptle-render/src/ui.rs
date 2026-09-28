@@ -1231,9 +1231,13 @@ impl Ui {
         self.measure_font(0, text, size)
     }
 
-    /// Measure with a text spec's font (the solver callback for real layers).
-    pub fn measure_spec(&self, t: &floptle_ui::TextSpec) -> [f32; 2] {
-        self.measure_font(self.font_id(&t.font), t.text.as_str(), t.size)
+    /// Measure a text spec as it will be drawn: its font, case, tracking,
+    /// lines and leading, wrapped at `wrap_at` when it wraps (the solver
+    /// callback for real layers).
+    pub fn measure_spec(&self, t: &floptle_ui::TextSpec, wrap_at: Option<f32>) -> [f32; 2] {
+        let fid = self.font_id(&t.font);
+        let natural_h = self.measure_font(fid, "", t.size)[1];
+        floptle_ui::text::measure_run(t, wrap_at, &|s| self.measure_font(fid, s, t.size)[0], natural_h)
     }
 
     fn measure_font(&self, fid: usize, text: &str, size: f32) -> [f32; 2] {
@@ -1689,10 +1693,8 @@ impl Ui {
                 .map(|l| (l.ascent, l.descent))
                 .unwrap_or((px as f32, 0.0));
             let natural_h = ascent - descent;
-            // `line_height` is a multiplier on the font's own metrics; 0 keeps
-            // the historical 1.15 leading so existing multi-line text is
-            // untouched.
-            let line_h = if t.line_height > 0.0 { natural_h * t.line_height } else { natural_h * 1.15 };
+            // The same leading the layout solver measured with.
+            let line_h = floptle_ui::text::line_step(natural_h, t.line_height);
             let block_h = natural_h + line_h * (lines.len().saturating_sub(1)) as f32;
             let vf = match t.valign {
                 Align::Start => 0.0,

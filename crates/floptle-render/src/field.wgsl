@@ -1818,6 +1818,24 @@ struct KeyLight {
     spec: vec3<f32>,
 }
 
+// The key light as a `.flsl` surface reads it (`lightDir`, `lightColor`): the sun,
+// or in a scene lit by stars the dominant one, exactly as `key_light` lights with.
+fn flsl_sun_dir(p: vec3<f32>) -> vec3<f32> {
+    if (u32(G.star_meta.x) == 0u) {
+        return sun_dir_at(p);
+    }
+    return star_dir_at(0u, p);
+}
+fn flsl_sun_color(p: vec3<f32>) -> vec3<f32> {
+    if (G.gi_meta.y > 0.5) {
+        return vec3<f32>(0.0);
+    }
+    if (u32(G.star_meta.x) == 0u) {
+        return G.light_color.rgb;
+    }
+    return star_col_at(0u, p);
+}
+
 fn key_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, shininess: f32, pix: vec2<u32>) -> KeyLight {
     var out: KeyLight;
     out.diffuse = vec3<f32>(0.0);

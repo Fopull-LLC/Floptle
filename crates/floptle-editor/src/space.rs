@@ -105,10 +105,23 @@ impl Editor {
         // Rails deltas for the dominant-frame carry below: how far each
         // celestial moved this tick (old node pos → new rails pos).
         let mut deltas = Vec::with_capacity(cb.len());
+        // Where each celestial was on the rails last tick. When none of them
+        // has a last tick (Play start, a scene swap) the authored position
+        // stands in, so the authored-to-rails snap carries the crew with its
+        // planet. A celestial created beside ones already running moved
+        // nowhere, and carries nothing, however far its authored position is
+        // from its rails.
+        let first_tick = !cb.iter().any(|(e, _)| self.space_rails_prev.contains_key(e));
+        let mut rails_now = std::collections::HashMap::with_capacity(cb.len());
         for (i, (e, b)) in cb.iter().enumerate() {
             let (sp, sv) = sys.body_pos_vel(i, t);
             let wp = root_pos + sp;
-            let old = floptle_core::world_transform(&self.world, *e).translation;
+            let old = match self.space_rails_prev.get(e) {
+                Some(p) => *p,
+                None if first_tick => floptle_core::world_transform(&self.world, *e).translation,
+                None => wp,
+            };
+            rails_now.insert(*e, wp);
             deltas.push(wp - old);
             if i != root {
                 // `wp` is world-space but `Transform.translation` is parent-local:
@@ -136,6 +149,7 @@ impl Editor {
                 soi: sys.bodies[i].soi,
             });
         }
+        self.space_rails_prev = rails_now;
         // Dominant-frame carry (the patched-conic frame, made physical): every
         // dynamic body inside a moving celestial's sphere of influence shifts
         // by that body's rails delta this tick — stand on an orbiting moon and
@@ -195,7 +209,7 @@ impl Editor {
                 // the world velocity continuous, so the sim velocity jumps by
                 // (old frame vel − new frame vel) — leave a planet's SOI and
                 // you carry its orbital velocity into the star's frame.
-                let dom_key = cb[i].0.index();
+                let dom_key = cb[i].0;
                 // The tick-sampled SOI seam only runs for bodies not coasting
                 // on rails: a coast handles its own frame handoffs at the
                 // exact crossing time (bisected on the conic below). Applying
@@ -208,7 +222,7 @@ impl Editor {
                     let prev = self.space_frame.insert(eid, dom_key);
                     if let Some(p) = prev
                         && p != dom_key
-                        && let Some(j) = cb.iter().position(|(e, _)| e.index() == p)
+                        && let Some(j) = cb.iter().position(|(e, _)| *e == p)
                     {
                         let dv = DVec3::from(bodies[j].vel) - DVec3::from(bodies[i].vel);
                         vel = (vel.as_dvec3() + dv).as_vec3();
@@ -260,7 +274,7 @@ impl Editor {
                     };
                     let (mut fdk, mut k) = *self.space_coast.get(&eid).unwrap();
                     let mut fd =
-                        cb.iter().position(|(e, _)| e.index() == fdk).unwrap_or(i);
+                        cb.iter().position(|(e, _)| *e == fdk).unwrap_or(i);
                     // Evaluate t_old → t, bisecting each SOI crossing to its
                     // exact time and re-capturing the conic there (world
                     // velocity continuous by construction). A warped tick can
@@ -307,7 +321,7 @@ impl Editor {
                         let (np, nv) = body_w(nd, tx);
                         k = Kepler::from_state(wpx - np, wvx - nv, cb[nd].1.mu, tx);
                         fd = nd;
-                        fdk = cb[nd].0.index();
+                        fdk = cb[nd].0;
                         t_lo = tx;
                     }
                     self.space_coast.insert(eid, (fdk, k));
@@ -376,11 +390,11 @@ impl Editor {
                     }
                 }
                 let Some((i, _)) = dom else { continue };
-                let dom_key = cb[i].0.index();
+                let dom_key = cb[i].0;
                 let prev = self.space_frame.insert(eid, dom_key);
                 if let Some(p) = prev
                     && p != dom_key
-                    && let Some(j) = cb.iter().position(|(e, _)| e.index() == p)
+                    && let Some(j) = cb.iter().position(|(e, _)| *e == p)
                 {
                     let dv = DVec3::from(bodies[j].vel) - DVec3::from(bodies[i].vel);
                     let vel = sim
@@ -697,5 +711,84 @@ mod tests {
         let top = w.spawn();
         w.insert(top, Transform::IDENTITY);
         assert_eq!(world_to_parent_local(&w, top, rails_wp), rails_wp);
+    }
+
+    /// **A celestial created mid-play does not carry anyone on its first
+    /// tick.** Its first rails delta used to be measured from its authored
+    /// position, so a planet authored on top of the crew and railed 4000 units
+    /// away took them with it. A streamer adding a neighbouring star system is
+    /// the ordinary case: a crew standing still was thrown 3.5 Mm.
+    #[test]
+    fn a_celestial_created_mid_play_does_not_carry_a_body_on_its_first_tick() {
+        use floptle_core::{Name, RigidBody};
+        let mut ed = crate::Editor::default();
+        let celestial = |ed: &mut crate::Editor, name: &str, at: DVec3, body: CelestialBody| {
+            let e = ed.world.spawn();
+            ed.world.insert(e, Name(name.into()));
+            ed.world.insert(e, Transform { translation: at, ..Transform::IDENTITY });
+            ed.world.insert(e, body);
+            e
+        };
+        celestial(&mut ed, "Sun", DVec3::ZERO, CelestialBody { mu: 1.0e6, ..Default::default() });
+        let home = CelestialBody { parent: "Sun".into(), a: 1000.0, mu: 1.0e4, soi: 200.0, ..Default::default() };
+        celestial(&mut ed, "Home", DVec3::new(1000.0, 0.0, 0.0), home);
+        let crew = ed.world.spawn();
+        ed.world.insert(crew, Name("Crew".into()));
+        ed.world.insert(crew, Transform { translation: DVec3::new(1000.0, 60.0, 0.0), ..Transform::IDENTITY });
+        ed.world.insert(crew, RigidBody::default());
+
+        ed.toggle_play();
+        assert!(ed.playing);
+        let crew_at = |ed: &crate::Editor| ed.sim.as_ref().unwrap().body_states().find(|r| r.entity == crew).unwrap().pos;
+        for _ in 0..5 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        let before = crew_at(&ed);
+
+        // Authored right where the crew is, with a smaller sphere of influence
+        // than Home, and railed at the far side of its own orbit.
+        let far = CelestialBody { parent: "Sun".into(), a: 5000.0, mu: 1.0e4, soi: 50.0, ..Default::default() };
+        celestial(&mut ed, "Neighbour", before, far);
+        ed.play_step(1.0 / 60.0, true);
+        let moved = (crew_at(&ed) - before).length();
+        assert!(moved < 5.0, "the crew moved {moved} units the tick a planet appeared elsewhere");
+    }
+
+    /// **At Play start the crew rides its planet onto the rails.** A planet is
+    /// authored wherever the author put it, and its first tick snaps it to its
+    /// orbit; the crew standing on it goes with it rather than being left in
+    /// space where the planet was.
+    #[test]
+    fn at_play_start_the_crew_rides_its_planet_onto_the_rails() {
+        use floptle_core::{Name, RigidBody};
+        let mut ed = crate::Editor::default();
+        let celestial = |ed: &mut crate::Editor, name: &str, at: DVec3, body: CelestialBody| {
+            let e = ed.world.spawn();
+            ed.world.insert(e, Name(name.into()));
+            ed.world.insert(e, Transform { translation: at, ..Transform::IDENTITY });
+            ed.world.insert(e, body);
+            e
+        };
+        celestial(&mut ed, "Sun", DVec3::ZERO, CelestialBody { mu: 1.0e6, ..Default::default() });
+        // A quarter of an orbit from where it is authored.
+        let home = CelestialBody {
+            parent: "Sun".into(),
+            a: 1000.0,
+            mu: 1.0e4,
+            soi: 200.0,
+            m0: std::f64::consts::FRAC_PI_2,
+            ..Default::default()
+        };
+        let planet = celestial(&mut ed, "Home", DVec3::new(1000.0, 0.0, 0.0), home);
+        let crew = ed.world.spawn();
+        ed.world.insert(crew, Transform { translation: DVec3::new(1000.0, 60.0, 0.0), ..Transform::IDENTITY });
+        ed.world.insert(crew, RigidBody::default());
+
+        ed.toggle_play();
+        ed.play_step(1.0 / 60.0, true);
+        let railed = floptle_core::world_transform(&ed.world, planet).translation;
+        assert!((railed - DVec3::new(1000.0, 0.0, 0.0)).length() > 500.0, "the fixture needs the planet to jump");
+        let pos = ed.sim.as_ref().unwrap().body_states().find(|r| r.entity == crew).unwrap().pos;
+        assert!((pos - railed).length() < 80.0, "the crew was left at {pos:?}, its planet is at {railed:?}");
     }
 }

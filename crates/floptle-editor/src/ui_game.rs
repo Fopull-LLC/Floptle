@@ -535,6 +535,14 @@ impl Editor {
     /// the rects somewhere other than where they are drawn — which as a hit
     /// test reads exactly like the mouse being offset from the cursor. The
     /// frame's `dt` is safe to hand to all of them (see `Editor::ui_style_dt`).
+    /// Advance UI style transitions by one fixed step, for a host with no
+    /// window clock (`floptle run`, `shot --after`). Left at zero, every
+    /// transition would hold its first value for the whole run.
+    pub(crate) fn tick_headless_ui_clock(&mut self, dt: f32) {
+        self.ui_style_dt = dt.min(0.25);
+        self.ui_style_rt.begin_frame();
+    }
+
     fn style_layer(&mut self, roots: &mut [floptle_ui::Node]) {
         // The player's text scale, applied before the solver measures anything —
         // which is what makes it reflow instead of clip. It runs
@@ -555,7 +563,11 @@ impl Editor {
         // a hover still changes, it just does not slide, because a 40 ms slide is
         // still a slide.
         self.ui_style_rt.reduced_motion = self.access.reduced_motion;
+        let world = &self.world;
+        let owner = |id: u32| world.entity_at(id).map(|e| (u64::from(e.generation()) << 32) | u64::from(e.index()));
+        self.ui_style_rt.sync_owners(&owner);
         floptle_ui::apply_styles(roots, sheet, tokens, &input, &mut self.ui_style_rt, dt);
+        self.ui_style_rt.sync_owners(&owner);
         // An element naming a style no sheet defines draws unstyled and used to
         // say nothing — the commonest thing to break in a rename, and invisible
         // (the element looks authored, just wrong). Drained, so each name is
@@ -650,7 +662,7 @@ impl Editor {
         for (_, layer, roots) in &layers {
             let scale = layer.scale_for(viewport);
             let design_vp = [viewport[0] / scale, viewport[1] / scale];
-            let measure = |t: &TextSpec| uir.measure_spec(t);
+            let measure = |t: &TextSpec, w: Option<f32>| uir.measure_spec(t, w);
             let mut placed = floptle_ui::solve(roots, design_vp, &measure);
             floptle_ui::place_scrollbars(roots, &mut placed, &layer_scrollbars(&self.world, &ents, roots));
             let masks = layer_masks(&self.world, &ents, roots);
@@ -680,7 +692,7 @@ impl Editor {
                     font: t.font.clone(),
                     ..Default::default()
                 };
-                let [w, h] = uir.measure_spec(&spec);
+                let [w, h] = uir.measure_spec(&spec, None);
                 let x = match t.align {
                     1 => t.pos[0] - w * 0.5,
                     2 => t.pos[0] - w,
@@ -746,7 +758,7 @@ impl Editor {
                     size,
                     ..Default::default()
                 };
-                let [w, h] = uir.measure_spec(&spec);
+                let [w, h] = uir.measure_spec(&spec, None);
                 y -= h + pad * 2.0 + line_gap;
                 let x = (viewport[0] - w) * 0.5;
                 dl.quads.push(floptle_ui::Quad {
@@ -901,7 +913,7 @@ impl Editor {
         for (e, layer, roots) in &built {
             let design_vp =
                 [layer.design_height * window_aspect.max(0.1), layer.design_height];
-            let measure = |t: &TextSpec| uir.measure_spec(t);
+            let measure = |t: &TextSpec, w: Option<f32>| uir.measure_spec(t, w);
             let mut placed = floptle_ui::solve(roots, design_vp, &measure);
             floptle_ui::place_scrollbars(roots, &mut placed, &layer_scrollbars(&self.world, &ents, roots));
             let masks = layer_masks(&self.world, &ents, roots);
@@ -1288,7 +1300,7 @@ impl Editor {
                             Some(scale),
                         )
                     };
-                    let measure = |t: &TextSpec| uir.measure_spec(t);
+                    let measure = |t: &TextSpec, w: Option<f32>| uir.measure_spec(t, w);
                     let mut placed = floptle_ui::solve(roots, design_vp, &measure);
                     let bars = layer_scrollbars(&self.world, &ents, roots);
                     floptle_ui::place_scrollbars(roots, &mut placed, &bars);
@@ -3363,12 +3375,59 @@ mod tests {
     use super::*;
     use floptle_ui::{Node, Size};
 
-    fn measure(_: &TextSpec) -> [f32; 2] {
+    fn measure(_: &TextSpec, _: Option<f32>) -> [f32; 2] {
         [0.0, 0.0]
     }
 
     fn sized(spec: ElementSpec) -> ElementSpec {
         ElementSpec { size: [Size::Fixed(100.0), Size::Fixed(40.0)], ..spec }
+    }
+
+    /// **A new element on a reused index is styled as itself.** The style
+    /// runtime is keyed by index, and a rebuilt screen hands the index of an
+    /// element it just destroyed to the next one it makes: that element drew
+    /// the dead one's 40-point text until its own transition caught up, and
+    /// for the whole run under a clock that was not moving.
+    #[test]
+    fn a_new_element_on_a_reused_index_starts_from_its_own_look() {
+        let mut ed = crate::Editor {
+            ui_styles: floptle_ui::StyleSheet::parse(
+                r#"{ "chip": ( base: ( fill: (1.0, 1.0, 1.0, 1.0) ), transition: ( duration: 1.0, ease: Linear ) ) }"#,
+            )
+            .expect("the sheet parses"),
+            ..Default::default()
+        };
+        let layer = ed.world.spawn();
+        ed.world.insert(layer, Transform::IDENTITY);
+        ed.world.insert(layer, UiLayer::default());
+        let chip = |ed: &mut crate::Editor, size: f32| {
+            let e = ed.world.spawn();
+            ed.world.insert(e, Transform::IDENTITY);
+            ed.world.insert(e, Parent(layer));
+            ed.world.insert(
+                e,
+                ElementSpec {
+                    style: "chip".into(),
+                    text: Some(TextSpec { text: "PRO".into(), size, ..Default::default() }),
+                    ..sized(ElementSpec::default())
+                },
+            );
+            e
+        };
+        let text_size = |ed: &mut crate::Editor| {
+            let (layers, _) = ed.ui_layer_trees(|_| true);
+            layers[0].2[0].spec.text.as_ref().unwrap().size
+        };
+
+        let old = chip(&mut ed, 40.0);
+        ed.tick_headless_ui_clock(1.0);
+        assert_eq!(text_size(&mut ed), 40.0);
+        ed.world.despawn(old);
+        let new = chip(&mut ed, 10.0);
+        assert_eq!(new.index(), old.index(), "the fixture needs the index reused");
+
+        ed.ui_style_dt = 0.0;
+        assert_eq!(text_size(&mut ed), 10.0, "the new element drew the destroyed one's text size");
     }
 
     /// A drag tells the game the value moved: once per frame it moved, never

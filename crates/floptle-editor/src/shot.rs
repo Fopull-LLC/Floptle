@@ -138,22 +138,15 @@ fn play_for(ed: &mut crate::Editor, seconds: f32, anchor: DVec3, view: (Option<&
         // one — no fixed tick, so no rails, no physics, and a `dt` of zero
         // handed to every script.
         ed.pump_world_streaming();
-        // **A headless loop has no wall clock, and the terrain workers need
-        // one.** A windowed frame takes about sixteen milliseconds, which is
-        // when the background threads get their work done; these steps run back
-        // to back in microseconds, so a world that streams during Play — a
-        // planet the ship is approaching — never finishes, the hold never lifts
-        // and the whole span is stepped without being simulated. Giving the
-        // threads the time they need is the difference between a picture of the
-        // game and a picture of the loading screen.
-        while ed.terrain_worker_busy() && floptle_core::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(4));
-            ed.pump_world_streaming();
-        }
+        // A headless loop has no wall clock, and the terrain workers need one:
+        // without the wait, a world streamed or generated during Play never
+        // finishes and the picture is of the loading screen.
+        ed.wait_for_terrain_workers(deadline);
         // Before the step, so the first `update` already sees the viewport —
         // and every step, so a camera a script moves is what the next one
         // projects through.
         feed_view(ed, view.0, view.1, view.2);
+        ed.tick_headless_ui_clock(crate::run::DT);
         ed.play_step(crate::run::DT, true);
         ed.drain_script_logs();
         // A script that asked to quit has said the session is over, and stepping
@@ -389,10 +382,35 @@ pub(crate) fn run(args: Args) -> i32 {
     // meshes, the map meshes and the baked GI above.
     ed.sync_sky_shader();
     ed.sync_sky_texture();
+    // ⏱ `--timing` measures frames the game would actually draw: the first
+    // frames pay once for pipeline builds, bakes and uploads, so they are drawn
+    // untimed, and the report is each pass's median over several after them.
+    let mut timed: Vec<(f32, Vec<(String, f32)>)> = Vec::new();
+    if ed.gpu_timing_headless {
+        ed.gpu_timing_headless = false;
+        for _ in 0..TIMING_WARMUP {
+            if render_frame_pixels(&mut ed, &cam, w, h, cull_mask, !no_ui).is_none() {
+                floptle_say::say_err!("no GPU: this machine has no adapter floptle can render on");
+                return 1;
+            }
+        }
+        ed.gpu_timing_headless = true;
+        for _ in 1..TIMING_FRAMES {
+            if render_frame_pixels(&mut ed, &cam, w, h, cull_mask, !no_ui).is_none() {
+                return 1;
+            }
+            timed.extend(landed_timing(&mut ed));
+        }
+    }
     let Some(pixels) = render_frame_pixels(&mut ed, &cam, w, h, cull_mask, !no_ui) else {
         floptle_say::say_err!("no GPU: this machine has no adapter floptle can render on");
         return 1;
     };
+    if ed.gpu_timing_headless {
+        timed.extend(landed_timing(&mut ed));
+        // The sequence below is pictures, not measurements.
+        ed.gpu_timing_headless = false;
+    }
     if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty())
         && let Err(e) = std::fs::create_dir_all(parent)
     {
@@ -421,6 +439,7 @@ pub(crate) fn run(args: Args) -> i32 {
             if after.is_some() && ed.playing {
                 ed.pump_world_streaming();
                 feed_view(&mut ed, camera, w, h);
+                ed.tick_headless_ui_clock(crate::run::DT);
                 ed.play_step(crate::run::DT, true);
                 ed.drain_script_logs();
             }
@@ -462,14 +481,11 @@ pub(crate) fn run(args: Args) -> i32 {
     // Per-pass GPU cost, when asked. Absent — not zeroed — when it was not: a
     // `gpu_ms: 0` would read as "free", which is the wrong answer in exactly
     // the shape the `perf` API exists to refuse.
-    let gpu_timing: Option<(f32, Vec<(String, f32)>)> = if ed.gpu_timing_headless {
-        ed.gpu_timer.as_mut().map(|t| {
-            t.poll();
-            (t.total_ms(), t.spans().iter().map(|s| (s.label.clone(), s.ms)).collect())
-        })
-    } else {
-        None
-    };
+    let gpu_timing: Option<(f32, Vec<(String, f32)>)> = if timing { median_timing(&timed) } else { None };
+    let measured = format!(
+        "median of {} frames, after {TIMING_WARMUP} untimed warm-up frames",
+        timed.len()
+    );
     if json {
         floptle_say::say!(
             "{}",
@@ -480,6 +496,9 @@ pub(crate) fn run(args: Args) -> i32 {
                 "height": h,
                 "camera": ed.world.get::<floptle_core::Name>(e).map(|n| n.0.clone()),
                 "timing": gpu_timing.as_ref().map(|(total, passes)| serde_json::json!({
+                    "measured": measured,
+                    "frames": timed.len(),
+                    "warmup": TIMING_WARMUP,
                     "gpu_ms": total,
                     "passes": passes
                         .iter()
@@ -491,13 +510,58 @@ pub(crate) fn run(args: Args) -> i32 {
     } else {
         floptle_say::say!("wrote {} ({w}x{h})", out.display());
         if let Some((total, passes)) = &gpu_timing {
-            floptle_say::say!("gpu {total:.2} ms across {} passes at {w}x{h}:", passes.len());
+            floptle_say::say!("gpu {total:.2} ms across {} passes at {w}x{h} ({measured}):", passes.len());
             for (label, ms) in passes {
                 floptle_say::say!("  {label:<20} {ms:7.3} ms");
             }
         }
     }
     0
+}
+
+/// Frames drawn and thrown away before `--timing` measures anything.
+const TIMING_WARMUP: usize = 3;
+/// Frames measured; the report is the median of each.
+const TIMING_FRAMES: usize = 5;
+
+/// The frame the GPU timer just finished, if its readback has landed (the
+/// picture's readback waits on the device, so it has).
+fn landed_timing(ed: &mut crate::Editor) -> Option<(f32, Vec<(String, f32)>)> {
+    let t = ed.gpu_timer.as_mut()?;
+    t.poll();
+    Some((t.total_ms(), t.spans().iter().map(|s| (s.label.clone(), s.ms)).collect()))
+}
+
+/// Each pass's median across the timed frames, in the order the passes ran,
+/// and the median total. A pass missing from some frames is the median of the
+/// frames it ran in.
+fn median_timing(frames: &[(f32, Vec<(String, f32)>)]) -> Option<(f32, Vec<(String, f32)>)> {
+    fn median(mut v: Vec<f32>) -> f32 {
+        v.sort_by(f32::total_cmp);
+        match v.len() {
+            0 => 0.0,
+            n if n % 2 == 1 => v[n / 2],
+            n => 0.5 * (v[n / 2 - 1] + v[n / 2]),
+        }
+    }
+    let first = frames.first()?;
+    let total = median(frames.iter().map(|(t, _)| *t).collect());
+    let mut labels: Vec<&str> = first.1.iter().map(|(l, _)| l.as_str()).collect();
+    for (_, passes) in frames {
+        for (l, _) in passes {
+            if !labels.contains(&l.as_str()) {
+                labels.push(l);
+            }
+        }
+    }
+    let passes = labels
+        .into_iter()
+        .map(|label| {
+            let ms = frames.iter().flat_map(|(_, p)| p.iter().filter(|(l, _)| l == label).map(|(_, ms)| *ms));
+            (label.to_string(), median(ms.collect()))
+        })
+        .collect();
+    Some((total, passes))
 }
 
 /// Draw one frame of `ed`'s world from `cam` and read it back as RGBA8.
@@ -527,6 +591,14 @@ pub(crate) fn render_frame_pixels(
     cull_mask: u32,
     ui: bool,
 ) -> Option<Vec<u8>> {
+    // The frame loop's GPU prelude, which this path has no frame loop to run:
+    // UI shaders, `stage post` shaders and Field Shape SDFs compile and bind
+    // here, or a shot draws each of them as its fallback look and says nothing.
+    // (`.flsl` materials, scene textures and effect assets are pre-warmed inside
+    // `render_world_into`, which reflection captures reach without this.)
+    ed.ensure_ui_shaders();
+    ed.ensure_post_shaders();
+    ed.sync_field_shapes();
     let gpu = ed.gpu.take()?;
     let aspect = w as f32 / h as f32;
     // **Retro composites at the retro resolution and upscales**, exactly as the
@@ -1000,6 +1072,24 @@ mod tests {
             ed.toggle_play();
         }
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **One expensive frame does not move the report.** The first frame a
+    /// device draws pays for pipeline builds and bakes that no later frame pays;
+    /// a median of several, after a warm-up, is what the game costs.
+    #[test]
+    fn timing_reports_each_passs_median_so_a_one_off_frame_cannot_move_it() {
+        let f = |total: f32, opaque: f32, post: Option<f32>| {
+            let mut p = vec![("opaque + lighting".to_string(), opaque)];
+            p.extend(post.map(|ms| ("post".to_string(), ms)));
+            (total, p)
+        };
+        let frames =
+            [f(9.0, 7.0, Some(2.0)), f(180.0, 170.0, Some(10.0)), f(8.0, 6.0, Some(2.0)), f(9.5, 7.5, None), f(8.5, 6.5, Some(2.0))];
+        let (total, passes) = median_timing(&frames).unwrap();
+        assert_eq!(total, 9.0);
+        assert_eq!(passes, vec![("opaque + lighting".to_string(), 7.0), ("post".to_string(), 2.0)]);
+        assert!(median_timing(&[]).is_none(), "no frames is no report, not zeros");
     }
 
     #[test]

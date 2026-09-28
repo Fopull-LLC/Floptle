@@ -82,8 +82,11 @@ fn scene(authored: bool, script: Option<&str>) -> String {
 
 fn shoot(d: &Path, scene: &str, extra: &[&str]) -> Result<image::RgbaImage, String> {
     let out = d.join(format!("{scene}{}.png", extra.join("")));
+    // 160x90 puts one design unit on one pixel, unless the caller asks otherwise.
+    let size: &[&str] = if extra.contains(&"--size") { &[] } else { &["--size", "160x90"] };
     let r = Command::new(bin())
-        .args(["shot", &d.to_string_lossy(), "--scene", scene, "--size", "160x90", "--out", &out.to_string_lossy()])
+        .args(["shot", &d.to_string_lossy(), "--scene", scene, "--out", &out.to_string_lossy()])
+        .args(size)
         .args(extra)
         .output()
         .expect("run shot");
@@ -215,5 +218,94 @@ fn a_shot_wears_the_projects_style_sheets() {
     );
     assert!(!is_red(img.get_pixel(150, 80)));
 
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// **A style transition runs under `--after`.** The box is built red and
+/// restyled blue on the next frame, with a 0.3 s transition, then photographed
+/// a second later. The headless clock never moved, so every transition held
+/// its first value for the whole run and the box stayed red.
+#[test]
+fn a_style_transition_finishes_under_after() {
+    let d = temp("transition");
+    scaffold(&d);
+    std::fs::write(d.join("scenes/menu.ron"), scene(false, Some("menu"))).expect("write the scene");
+    std::fs::write(
+        d.join("scripts/menu.lua"),
+        "local frames = 0\n\
+         local function build(node, style)\n  \
+           ui.make(node, { \"box\", key = \"b\", pin = \"topLeft\", w = 100, h = 100, style = style })\n\
+         end\n\
+         function start(node) build(node, \"redBox\") end\n\
+         function update(node, dt)\n  frames = frames + 1\n  if frames == 2 then build(node, \"blueBox\") end\nend\n",
+    )
+    .expect("write the script");
+    std::fs::create_dir_all(d.join("ui")).expect("make ui/");
+    std::fs::write(
+        d.join("ui/look.uistyle.ron"),
+        "{\n  \"redBox\": ( base: ( fill: (1.0, 0.0, 0.0, 1.0) ), transition: (duration: 0.3, ease: Linear) ),\n  \
+         \"blueBox\": ( base: ( fill: (0.0, 0.0, 1.0, 1.0) ), transition: (duration: 0.3, ease: Linear) ),\n}\n",
+    )
+    .expect("write the style sheet");
+
+    let img = match shoot(&d, "menu", &["--after", "1s"]) {
+        Ok(i) => i,
+        Err(why) => {
+            assert!(cannot_render(&why), "shot failed for a reason that is not the adapter:\n{why}");
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+    };
+    let p = img.get_pixel(50, 50);
+    assert!(p[2] > 200 && p[0] < 60, "the box is {p:?}: its transition to blue never ran");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// **A fitted column of prose stacks without its rows drawing over each
+/// other.** A wrapped run was measured as one line and wrapped when drawn, so
+/// a three-line paragraph sat centred in a one-line box, over its neighbours.
+/// White prose, then yellow prose, then green `\n` lines, then a red bar: each
+/// colour must end above where the next begins.
+#[test]
+fn a_fitted_column_of_wrapped_prose_does_not_overlap() {
+    let d = temp("prose");
+    scaffold(&d);
+    std::fs::write(d.join("scenes/menu.ron"), scene(false, Some("menu"))).expect("write the scene");
+    std::fs::write(
+        d.join("scripts/menu.lua"),
+        r##"function start(node)
+  ui.make(node, { "col", pin = "topLeft", w = 150, h = "fit", pad = 0, gap = 2,
+    { "text", w = "100%", h = "fit", wrap = true, textSize = 8, textColor = "#ffffff",
+      text = "Fly to the second moon, dock with the relay station and deliver the crew." },
+    { "text", w = "100%", h = "fit", wrap = true, textSize = 8, textColor = "#ffd060",
+      text = "Fuel is low. Refuel at the depot or you will not make the return burn." },
+    { "text", w = "fit", h = "fit", textSize = 8, textColor = "#80ff80", text = "one\ntwo\nthree" },
+    { "box", w = "100%", h = 4, fill = "#ff2020" },
+  })
+end
+"##,
+    )
+    .expect("write the script");
+
+    let img = match shoot(&d, "menu", &["--after", "5f", "--size", "320x180"]) {
+        Ok(i) => i,
+        Err(why) => {
+            assert!(cannot_render(&why), "shot failed for a reason that is not the adapter:\n{why}");
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+    };
+    let rows = |hit: &dyn Fn(&image::Rgba<u8>) -> bool| -> (u32, u32) {
+        let ys: Vec<u32> = img.enumerate_pixels().filter(|(_, _, p)| hit(p)).map(|(_, y, _)| y).collect();
+        assert!(!ys.is_empty(), "a colour is missing from the picture");
+        (*ys.iter().min().unwrap(), *ys.iter().max().unwrap())
+    };
+    let white = rows(&|p| p[0] > 230 && p[1] > 230 && p[2] > 230);
+    let yellow = rows(&|p| p[0] > 230 && (170..235).contains(&p[1]) && p[2] < 130);
+    let green = rows(&|p| p[1] > 230 && p[0] < 170 && p[2] < 170);
+    let red = rows(&|p| p[0] > 230 && p[1] < 60 && p[2] < 60);
+    assert!(white.1 < yellow.0, "white prose rows {white:?} run into the yellow {yellow:?}");
+    assert!(yellow.1 < green.0, "yellow prose rows {yellow:?} run into the green {green:?}");
+    assert!(green.1 < red.0, "the last line {green:?} runs into the bar {red:?}");
     let _ = std::fs::remove_dir_all(&d);
 }

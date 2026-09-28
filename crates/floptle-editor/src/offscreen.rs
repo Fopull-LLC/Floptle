@@ -364,6 +364,10 @@ impl Editor {
         // and a live effect's billboards resolve their texture in this same
         // gather — so a shot draws every burst textured, not as a tinted square.
         self.ensure_vfx_assets();
+        // `.flsl` materials compile and bind here too: the gather below reads
+        // `flsl_binds`, and nothing else fills them on the `shot` path, so a
+        // shot drew every shader-wearing mesh as its plain white fallback.
+        self.ensure_flsl_materials();
         let view_proj = cam.view_proj(aspect);
         // Layer names resolve to bits only when a mask actually culls.
         let layer_table = (cull_mask != u32::MAX).then(|| self.project.build_layers());

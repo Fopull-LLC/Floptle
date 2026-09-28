@@ -287,7 +287,7 @@ impl Editor {
         let width = |s: &str| {
             let mut p = probe.borrow_mut();
             p.text = s.to_string();
-            uir.measure_spec(&p)[0] + t.tracking * s.chars().count() as f32
+            uir.measure_spec(&p, None)[0]
         };
         let full = width(&shown);
         let left = match t.align {

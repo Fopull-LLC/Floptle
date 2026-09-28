@@ -155,7 +155,7 @@ fn canvas(
     let h = (design_vp[1] * render_scale).round() as u32;
 
     let roots = screen();
-    let measure = |t: &TextSpec| ui.measure_spec(t);
+    let measure = |t: &TextSpec, w: Option<f32>| ui.measure_spec(t, w);
     let placed = floptle_ui::solve(&roots, design_vp, &measure);
     let dl = floptle_ui::draw_list(&roots, &placed, &[]);
 
