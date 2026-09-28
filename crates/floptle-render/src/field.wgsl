@@ -24,10 +24,10 @@ struct Globals {
     params: vec4<f32>,      // x = time, y = blob count, z = blob↔volume blend k, w = volume count
     // Up to 16 baked volumes, EACH at its native voxel resolution inside one shared
     // 3D atlas (no combined-grid resolution spread — multi-volume terrain).
-    vol_center: array<vec4<f32>, 16>, // xyz camera-relative box center, w = KIND (see `vol_drawn` & co.)
-    vol_half: array<vec4<f32>, 16>,   // xyz half-extent, w = volume↔volume fuse k
-    vol_atlas: array<vec4<f32>, 16>,  // xyz voxel offset in the atlas (renderer-patched)
-    vol_dims: array<vec4<f32>, 16>,   // xyz voxel dims of this volume (renderer-patched)
+    vol_center: array<vec4<f32>, 32>, // xyz camera-relative box center, w = KIND (see `vol_drawn` & co.)
+    vol_half: array<vec4<f32>, 32>,   // xyz half-extent, w = volume↔volume fuse k
+    vol_atlas: array<vec4<f32>, 32>,  // xyz voxel offset in the atlas (renderer-patched)
+    vol_dims: array<vec4<f32>, 32>,   // xyz voxel dims of this volume (renderer-patched)
     // Terrain surface material (same model as the raster meshes). Ignored by blobs.
     terrain_tint: vec4<f32>,     // rgb tint (× painted albedo), a unused
     terrain_emissive: vec4<f32>, // rgb, a = strength
@@ -69,8 +69,8 @@ struct Globals {
     // actually holds surface. All march bounds use it instead of the full brick:
     // a generous terrain box is mostly empty air above the hills, and a camera
     // standing inside the brick must not pay to march (and fetch) through it.
-    vol_tight_c: array<vec4<f32>, 16>,
-    vol_tight_h: array<vec4<f32>, 16>,
+    vol_tight_c: array<vec4<f32>, 32>,
+    vol_tight_h: array<vec4<f32>, 32>,
     // ---- Field Shapes (the SDF stage): up to 4 authored SDF shaders in
     // the scene, each contributing a distance (`custom_d`) min-folded into the
     // field. Shader code is SPLICED into this module by the renderer; per-shape
@@ -298,7 +298,7 @@ fn field_span(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> vec2<f32> {
     var t0 = 1e30;
     var t1 = -1e30;
     let inv = safe_inv(rd);
-    let vols = min(u32(G.params.w), 16u);
+    let vols = min(u32(G.params.w), 32u);
     for (var i = 0u; i < vols; i = i + 1u) {
         if (!vol_drawn(i)) { continue; }        // DRAW: kind 3 terrain is meshed, not marched
         // The TIGHT content box, not the brick: rays over the hills toward the
@@ -413,7 +413,7 @@ fn box_edge(i: u32, p: vec3<f32>) -> f32 {
 // A single isolated volume reduces exactly to its own edge (the original look).
 fn union_edge_m(p: vec3<f32>, mask: u32) -> f32 {
     var e = -1e9;
-    let vols = min(u32(G.params.w), 16u);
+    let vols = min(u32(G.params.w), 32u);
     for (var i = 0u; i < vols; i = i + 1u) {
         if ((mask & (1u << i)) == 0u) { continue; }
         if (!vol_in_field(i)) { continue; }
@@ -426,14 +426,14 @@ fn union_edge_m(p: vec3<f32>, mask: u32) -> f32 {
 }
 
 fn union_edge(p: vec3<f32>) -> f32 {
-    return union_edge_m(p, 0xffffu);
+    return union_edge_m(p, 0xffffffffu);
 }
 
 // True when `p` is inside ANY volume's box expanded by `e` — used to reject false
 // hits on the boxes' bounding faces (the box-approach distance is never a real
 // surface), while a small `e` still admits genuine terrain hits right at a face.
 fn inside_volume_box_eps(p: vec3<f32>, e: f32) -> bool {
-    let vols = min(u32(G.params.w), 16u);
+    let vols = min(u32(G.params.w), 32u);
     for (var i = 0u; i < vols; i = i + 1u) {
         if (!vol_drawn(i)) { continue; }        // DRAW: only a drawn box can produce a false hit
         let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
@@ -447,7 +447,7 @@ fn inside_volume_box_eps(p: vec3<f32>, e: f32) -> bool {
 fn containing_volume(p: vec3<f32>, e: f32) -> i32 {
     var best = -1;
     var bd = 1e9;
-    let vols = min(u32(G.params.w), 16u);
+    let vols = min(u32(G.params.w), 32u);
     for (var i = 0u; i < vols; i = i + 1u) {
         if (!vol_drawn(i)) { continue; }        // DRAW: picks the texture slot the march shades with
         let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
@@ -465,7 +465,7 @@ struct VolFoldD { d: f32, any: bool };
 fn volumes_d(p: vec3<f32>) -> VolFoldD {
     var d = 1e9;
     var any = false;
-    let vols = min(u32(G.params.w), 16u);
+    let vols = min(u32(G.params.w), 32u);
     for (var i = 0u; i < vols; i = i + 1u) {
         if (!vol_in_field(i)) { continue; }
         let v = volume_d(i, p);
@@ -508,7 +508,7 @@ fn map_d(p: vec3<f32>) -> f32 {
 // grid+f16 noise), a small fixed epsilon on the analytic blobs.
 fn field_eps(p: vec3<f32>) -> f32 {
     var h = 0.012;
-    let vols = min(u32(G.params.w), 16u);
+    let vols = min(u32(G.params.w), 32u);
     for (var i = 0u; i < vols; i = i + 1u) {
         if (!vol_in_field(i)) { continue; }
         let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
@@ -1274,7 +1274,7 @@ fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
 // planet's 192-cap shadow proxy runs 4+ units per voxel).
 fn vol_voxel_at(p: vec3<f32>) -> f32 {
     var h = 0.02;
-    let vols = min(u32(G.params.w), 16u);
+    let vols = min(u32(G.params.w), 32u);
     for (var i = 0u; i < vols; i = i + 1u) {
         if (!vol_in_field(i)) { continue; }
         let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
@@ -1310,7 +1310,7 @@ fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 {
 // march only; the render/AO field (`map_d`) skips them.
 fn shadow_volumes_d(p: vec3<f32>) -> f32 {
     var d = 1e9;
-    let vols = min(u32(G.params.w), 16u);
+    let vols = min(u32(G.params.w), 32u);
     for (var i = 0u; i < vols; i = i + 1u) {
         if (!vol_occluder(i)) { continue; }
         d = min(d, volume_d(i, p));
@@ -1323,7 +1323,7 @@ fn shadow_volumes_d(p: vec3<f32>) -> f32 {
 // standing in its bake would blanket self-shadow.
 fn shadow_vol_eps(p: vec3<f32>) -> f32 {
     var h = 0.0;
-    let vols = min(u32(G.params.w), 16u);
+    let vols = min(u32(G.params.w), 32u);
     for (var i = 0u; i < vols; i = i + 1u) {
         if (!vol_occluder(i)) { continue; }
         let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
@@ -1388,7 +1388,7 @@ fn shadow_field_d(p: vec3<f32>, vmask: u32, blobs: bool) -> f32 {
     var vd = 1e9;   // render volumes (w = 1): smin fold + union-edge taper
     var any = false;
     var sd = 1e9;   // shadow-only occluder bakes (w = 2): plain min
-    let vols = min(u32(G.params.w), 16u);
+    let vols = min(u32(G.params.w), 32u);
     for (var i = 0u; i < vols; i = i + 1u) {
         if ((vmask & (1u << i)) == 0u) { continue; }
         if (vol_occluder(i)) {
@@ -1455,7 +1455,7 @@ fn field_vis(ro: vec3<f32>, l: vec3<f32>, max_d: f32, k: f32, pen_t0: f32, lift:
     var pmask = 0u;
     var blobs = false;
     var t_end = 0.0;
-    let vols = min(u32(G.params.w), 16u);
+    let vols = min(u32(G.params.w), 32u);
     for (var i = 0u; i < vols; i = i + 1u) {
         if (vol_absent(i)) { continue; } // every present kind casts (1, 2 and 3 alike)
         // Tight content box, not the brick: a sun ray from open ground exits the

@@ -1227,6 +1227,14 @@ pub enum ProbeDetailDoc {
     Ultra,
 }
 
+fn default_shadow_volumes() -> u32 {
+    32
+}
+
+fn is_default_shadow_volumes(n: &u32) -> bool {
+    *n == default_shadow_volumes()
+}
+
 /// Serializable [`floptle_core::OverloadPolicy`].
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TickOverloadDoc {
@@ -2591,6 +2599,14 @@ pub struct ProjectConfigDoc {
     #[serde(default, skip_serializing_if = "TickOverloadDoc::is_default")]
     pub tick_overload: TickOverloadDoc,
 
+    /// How many baked volumes (terrains, then collidable meshes nearest the
+    /// camera) the distance-field sun shadows and AO fold in at once, up to 32.
+    /// Each one adds a little to every shadow ray that passes near it, so a
+    /// game short on GPU can lower it; the meshes beyond it still draw and
+    /// collide, they just cast no distance-field shadow while they're far.
+    #[serde(default = "default_shadow_volumes", skip_serializing_if = "is_default_shadow_volumes")]
+    pub shadow_volumes: u32,
+
     /// How much detail a reflection probe's capture keeps.
     ///
     /// A probe's picture spans a full turn across its width, so its width is the
@@ -2725,6 +2741,7 @@ impl ProjectConfigDoc {
             retro_dither_alpha: false,
             vsync: VsyncDoc::default(),
             tick_overload: TickOverloadDoc::default(),
+            shadow_volumes: default_shadow_volumes(),
             probe_detail: ProbeDetailDoc::default(),
             matter: true,
             title: None,

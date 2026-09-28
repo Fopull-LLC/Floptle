@@ -67,8 +67,8 @@ fn main() {
         bg: [0.55, 0.66, 0.8, 1.0],
         center: [0.0; 4],
         params: [0.0, 0.0, 0.0, 0.0],
-        vol_center: { let mut a = [[0.0f32; 4]; 16]; a[0] = [cr.x, cr.y, cr.z, 1.0]; a },
-        vol_half: { let mut a = [[1.0f32, 1.0, 1.0, 0.5]; 16]; a[0] = [16.0, 6.0, 16.0, 0.1]; a },
+        vol_center: { let mut a = [[0.0f32; 4]; floptle_render::MAX_VOLUMES]; a[0] = [cr.x, cr.y, cr.z, 1.0]; a },
+        vol_half: { let mut a = [[1.0f32, 1.0, 1.0, 0.5]; floptle_render::MAX_VOLUMES]; a[0] = [16.0, 6.0, 16.0, 0.1]; a },
         blobs: [[0.0; 4]; 16],
         ..Default::default()
     };

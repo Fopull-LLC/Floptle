@@ -30,14 +30,14 @@ pub struct RaymarchGlobals {
     /// Up to [`MAX_VOLUMES`] baked volumes: each xyz camera-relative box center,
     /// w = present (1.0/0.0). Every terrain volume renders at its own native
     /// resolution — no shared combined grid (multi-volume terrain).
-    pub vol_center: [[f32; 4]; 16],
+    pub vol_center: [[f32; 4]; MAX_VOLUMES],
     /// Per volume: xyz half-extent, w = volume↔volume fuse blend radius k.
-    pub vol_half: [[f32; 4]; 16],
+    pub vol_half: [[f32; 4]; MAX_VOLUMES],
     /// Per volume: xyz voxel offset inside the shared 3D atlas (renderer-patched
     /// at draw time from the uploaded layout — callers leave this zeroed).
-    pub vol_atlas: [[f32; 4]; 16],
+    pub vol_atlas: [[f32; 4]; MAX_VOLUMES],
     /// Per volume: xyz voxel dimensions (renderer-patched at draw time).
-    pub vol_dims: [[f32; 4]; 16],
+    pub vol_dims: [[f32; 4]; MAX_VOLUMES],
     /// Terrain surface material (mirrors the raster `MaterialParams`) so terrain shades
     /// with the same lighting model as the meshes instead of a hardcoded look. Ignored
     /// by blobs. `terrain_tint`: rgb tint (× painted albedo), a = unused.
@@ -115,9 +115,9 @@ pub struct RaymarchGlobals {
     /// A generous terrain box is mostly empty air above the hills; bounding the
     /// marches with the content box instead of the brick is what keeps a camera
     /// standing inside the box from paying for all that air.
-    pub vol_tight_c: [[f32; 4]; 16],
+    pub vol_tight_c: [[f32; 4]; MAX_VOLUMES],
     /// Per volume: xyz = the tight content box's half-extent (renderer-patched).
-    pub vol_tight_h: [[f32; 4]; 16],
+    pub vol_tight_h: [[f32; 4]; MAX_VOLUMES],
     /// Field Shapes (the SDF stage): x = active count (0..=4).
     pub shape_meta: [f32; 4],
     /// Per shape: xyz = camera-relative position, w = uniform scale.
@@ -270,10 +270,10 @@ impl Default for RaymarchGlobals {
             bg: [0.0; 4],
             center: [0.0; 4],
             params: [0.0; 4],
-            vol_center: [[0.0; 4]; 16],
-            vol_half: [[1.0, 1.0, 1.0, 0.5]; 16],
-            vol_atlas: [[0.0; 4]; 16],
-            vol_dims: [[1.0, 1.0, 1.0, 0.0]; 16],
+            vol_center: [[0.0; 4]; MAX_VOLUMES],
+            vol_half: [[1.0, 1.0, 1.0, 0.5]; MAX_VOLUMES],
+            vol_atlas: [[0.0; 4]; MAX_VOLUMES],
+            vol_dims: [[1.0, 1.0, 1.0, 0.0]; MAX_VOLUMES],
             terrain_tint: [1.0, 1.0, 1.0, 1.0],
             terrain_emissive: [0.0; 4],
             terrain_specular: [1.0, 1.0, 1.0, 0.0],
@@ -303,8 +303,8 @@ impl Default for RaymarchGlobals {
             fog_params: [0.0; 4],
             // Effectively unbounded until the renderer patches the real content
             // bounds — an unpatched volume behaves exactly like the full brick.
-            vol_tight_c: [[0.0; 4]; 16],
-            vol_tight_h: [[1e8, 1e8, 1e8, 0.0]; 16],
+            vol_tight_c: [[0.0; 4]; MAX_VOLUMES],
+            vol_tight_h: [[1e8, 1e8, 1e8, 0.0]; MAX_VOLUMES],
             shape_meta: [0.0; 4],
             shape_pos: [[0.0, 0.0, 0.0, 1.0]; 4],
             shape_rot: [[0.0, 0.0, 0.0, 1.0]; 4],
@@ -360,7 +360,18 @@ pub const MAX_BLOBS: usize = 16;
 
 /// Max baked volumes (terrains / mesh bakes) folded together in one pass. Each keeps
 /// its native voxel resolution inside a shared 3D atlas.
-pub const MAX_VOLUMES: usize = 16;
+///
+/// These are *instances*: several can draw from one baked region of the atlas
+/// (seven copies of one building are one bake), so this bounds what the
+/// shader walks per step, not what the atlas holds. A caller shares a region
+/// by writing `region + 1` into an instance's `vol_atlas[i].w`; zero means the
+/// instance's own slot, in upload order.
+pub const MAX_VOLUMES: usize = 32;
+
+/// Max distinct bakes the atlas holds at once. Each costs VRAM for its voxels
+/// (6 bytes each: a 16-bit distance and an RGBA8 colour — about 12 MB for a
+/// 128³ brick), and the stack is bounded by the device's 3D texture limit too.
+pub const MAX_ATLAS_VOLUMES: usize = 64;
 
 /// Max placeable point lights accumulated in one pass (raster + raymarch).
 pub const MAX_POINT_LIGHTS: usize = 16;
@@ -1166,7 +1177,7 @@ impl Raymarch {
         // Accept volumes until the Z stack or the XY footprint would exceed the limit.
         let mut accepted = Vec::new();
         let (mut aw, mut ah, mut ad) = (1u32, 1u32, 0u32);
-        for &b in volumes.iter().take(MAX_VOLUMES) {
+        for &b in volumes.iter().take(MAX_ATLAS_VOLUMES) {
             let [w, h, d] = b.dims;
             if w.max(aw) > limit || h.max(ah) > limit || ad + d > limit {
                 break;
@@ -1290,9 +1301,25 @@ impl Raymarch {
     /// it stays consistent under the floating origin. Callers only provide world
     /// data.
     fn patch_globals(&self, globals: &mut RaymarchGlobals) {
-        for (i, s) in self.slots.iter().enumerate().take(MAX_VOLUMES) {
+        let mut count = 0;
+        for i in 0..MAX_VOLUMES {
+            // The atlas region this instance samples: its own slot, or the one
+            // the caller named in `vol_atlas.w` (region + 1) to share a bake.
+            let tag = globals.vol_atlas[i][3];
+            let region = if tag >= 0.5 { tag as usize - 1 } else { i };
+            let Some(s) = self.slots.get(region) else {
+                // Nothing uploaded for it: absent, whatever the caller said,
+                // or the shader would sample the atlas at a meaningless offset.
+                globals.vol_center[i][3] = 0.0;
+                continue;
+            };
+            if globals.vol_center[i][3] >= 0.5 {
+                count = i + 1;
+            }
             let (off, dims) = (s.origin, s.dims);
-            globals.vol_atlas[i] = [off[0] as f32, off[1] as f32, off[2] as f32, 0.0];
+            // `w` keeps the caller's tag, so patching the same globals twice
+            // maps every instance the same way both times.
+            globals.vol_atlas[i] = [off[0] as f32, off[1] as f32, off[2] as f32, tag];
             globals.vol_dims[i] = [dims[0] as f32, dims[1] as f32, dims[2] as f32, 0.0];
             for (a, &dim) in dims.iter().enumerate() {
                 let (c, h) = (globals.vol_center[i][a], globals.vol_half[i][a]);
@@ -1303,7 +1330,7 @@ impl Raymarch {
                 globals.vol_tight_h[i][a] = 0.5 * (hi - lo);
             }
         }
-        globals.params[3] = self.slots.len() as f32;
+        globals.params[3] = count as f32;
     }
 
     /// Clear `color`/`depth` and draw the SDF matter into them (with true depth) —

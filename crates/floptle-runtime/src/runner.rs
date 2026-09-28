@@ -455,8 +455,8 @@ impl Runner {
         let present = if self.volume_present { 1.0 } else { 0.0 };
         let mut blobs = [[0.0f32; 4]; 16];
         blobs[0] = [center_cam.x, center_cam.y, center_cam.z, self.matter_scale];
-        let mut vol_center = [[0.0f32; 4]; 16];
-        let mut vol_half = [[1.0f32, 1.0, 1.0, 0.5]; 16];
+        let mut vol_center = [[0.0f32; 4]; floptle_render::MAX_VOLUMES];
+        let mut vol_half = [[1.0f32, 1.0, 1.0, 0.5]; floptle_render::MAX_VOLUMES];
         vol_center[0] = [vol_cam.x, vol_cam.y, vol_cam.z, present];
         vol_half[0] = [self.volume_half[0], self.volume_half[1], self.volume_half[2], 0.7];
         let rm_globals = RaymarchGlobals {

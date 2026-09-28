@@ -3,7 +3,6 @@
 use floptle_core::Entity;
 use floptle_core::Material;
 use floptle_core::Matter;
-use floptle_core::Name;
 use crate::Editor;
 
 
@@ -41,30 +40,26 @@ impl Editor {
                     .collect();
                 items.sort_by_key(|(id, _)| *id);
                 let entities: Vec<Entity> = items.iter().map(|&(_, e)| e).collect();
-                // Occluders upload after the terrains (stable order by asset + name,
-                // so identical content always lays out identically).
-                let mut occ_items: Vec<(String, Entity)> = self
-                    .mesh_occluders
-                    .iter()
-                    .map(|(&e, (key, _))| {
-                        let name =
-                            self.world.get::<Name>(e).map(|n| n.0.clone()).unwrap_or_default();
-                        (format!("{}\u{1}{name}", key.0), e)
-                    })
-                    .collect();
-                occ_items.sort_by(|a, b| a.0.cmp(&b.0));
-                let occ_entities: Vec<Entity> = occ_items.iter().map(|(_, e)| *e).collect();
+                // Occluders upload after the terrains, ONE bake per distinct
+                // (model, rotation, scale): seven copies of one building share
+                // one region of the atlas, each drawn at its own place. Sorted
+                // by key, so identical content always lays out identically.
+                let unique: std::collections::BTreeMap<&crate::shading::OccKey, &floptle_field::BakedSdf> =
+                    self.mesh_occluders.values().map(|(k, b)| (k, &**b)).collect();
                 let mut baked: Vec<&floptle_field::BakedSdf> =
                     entities.iter().map(|e| &self.terrains[e].shadow).collect();
-                baked.extend(occ_entities.iter().map(|e| &*self.mesh_occluders[e].1));
+                baked.extend(unique.values().copied());
                 let accepted = raymarch.set_volumes(gpu, &baked);
-                let total = entities.len() + occ_entities.len();
+                let total = baked.len();
                 if accepted < total {
-                    // Never drop content silently: colliders still work, but say so.
+                    // Never drop content silently: say what is missing, and
+                    // that it is only the distance-field shadow.
                     self.console.push(
                         floptle_script::LogLevel::Warn,
                         format!(
-                            "{} volume(s) (terrain / mesh shadow occluders) exceed the GPU volume budget and won't render or cast (collision is unaffected)",
+                            "{} distinct terrain / collidable-mesh shape(s) don't fit the GPU's \
+                             shadow atlas, so they cast no distance-field shadow or AO. They still \
+                             draw and collide.",
                             total - accepted
                         ),
                         None,
@@ -72,7 +67,38 @@ impl Editor {
                 }
                 let t_kept = accepted.min(entities.len());
                 self.terrain_slots = entities[..t_kept].to_vec();
-                self.occluder_slots = occ_entities[..accepted - t_kept].to_vec();
+                self.occluder_regions = unique
+                    .keys()
+                    .enumerate()
+                    .filter(|(j, _)| entities.len() + j < accepted)
+                    .map(|(j, k)| ((*k).clone(), entities.len() + j))
+                    .collect();
+                // Instances are chosen per frame, nearest the camera first (see
+                // `fill_terrain_volumes`). When more want to cast than fit, the
+                // far ones go without. That is the policy working, not content
+                // going missing, so it is a note in the Console, not a warning.
+                let casting = self
+                    .mesh_occluders
+                    .keys()
+                    .filter(|&&e| self.world.get::<floptle_core::CastShadow>(e).is_none_or(|c| c.0))
+                    .count();
+                let room = (self.project.shadow_volumes as usize)
+                    .min(floptle_render::MAX_VOLUMES)
+                    .saturating_sub(t_kept);
+                if casting > room && !self.occluder_overflow_said {
+                    self.occluder_overflow_said = true;
+                    self.console.push(
+                        floptle_script::LogLevel::Debug,
+                        format!(
+                            "{casting} collidable meshes cast distance-field shadows and {room} fit at \
+                             once, so the {room} nearest the camera cast them. The rest still draw \
+                             and collide. Set \"casts shadows\" off on small props to spend the budget \
+                             on what matters, or raise shadow_volumes in project.ron (up to {}).",
+                            floptle_render::MAX_VOLUMES
+                        ),
+                        None,
+                    );
+                }
                 self.terrain_gpu_dirty = false;
                 self.terrain_region_dirty = None; // the full upload supersedes any region
                 self.terrain_wire_world.clear(); // terrain changed → rebuild the wireframe

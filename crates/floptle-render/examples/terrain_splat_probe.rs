@@ -97,8 +97,8 @@ fn main() {
         ambient: [0.3, 0.3, 0.3, 0.0],
         bg: [0.5, 0.6, 0.75, 1.0],
         params: [0.0, 0.0, 0.0, 1.0],
-        vol_center: { let mut a = [[0.0f32; 4]; 16]; a[0] = [cr.x, cr.y, cr.z, 3.0]; a },
-        vol_half: { let mut a = [[1.0f32, 1.0, 1.0, 0.5]; 16]; a[0] = [16.0, 6.0, 16.0, 0.6]; a },
+        vol_center: { let mut a = [[0.0f32; 4]; floptle_render::MAX_VOLUMES]; a[0] = [cr.x, cr.y, cr.z, 3.0]; a },
+        vol_half: { let mut a = [[1.0f32, 1.0, 1.0, 0.5]; floptle_render::MAX_VOLUMES]; a[0] = [16.0, 6.0, 16.0, 0.6]; a },
         ..Default::default()
     };
     raymarch.draw_into(&gpu, &color_view, gpu.depth_view(), rm);

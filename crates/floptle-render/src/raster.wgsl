@@ -1224,7 +1224,7 @@ fn terrain_triplanar(slot: i32, p: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy:
 fn splat_volume(p: vec3<f32>) -> i32 {
     var best = -1;
     var bd = 1e9;
-    let vols = min(u32(G.params.w), 16u);
+    let vols = min(u32(G.params.w), 32u);
     for (var i = 0u; i < vols; i = i + 1u) {
         if (!vol_in_field(i)) { continue; }
         let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;

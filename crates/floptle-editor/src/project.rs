@@ -1748,6 +1748,7 @@ impl Editor {
         self.terrains.clear();
         self.active_terrain = None;
         self.terrain_slots.clear();
+        self.occluder_overflow_said = false;
         self.selection.clear();
         self.selected_asset = None;
         #[cfg(feature = "editor-ui")]

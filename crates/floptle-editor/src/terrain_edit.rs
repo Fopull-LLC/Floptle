@@ -1135,6 +1135,11 @@ impl Editor {
             if !static_collider {
                 continue;
             }
+            // "Casts shadows" off: no bake, no atlas space, no instance. A prop
+            // switched off here frees the budget for the buildings.
+            if self.world.get::<floptle_core::CastShadow>(e).is_some_and(|c| !c.0) {
+                continue;
+            }
             let wt = floptle_core::world_transform(&self.world, e);
             let q = |v: f32| (v * 1000.0).round() as i32;
             let key: OccKey = (
@@ -2801,11 +2806,13 @@ impl Editor {
     /// with the same smin the old CPU combine used (k = 0.6).
     /// (Associated fn taking explicit fields — callers sit inside the render section
     /// where `self.gpu`/`self.egui` are mutably borrowed, so `&self` is unavailable.)
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn fill_terrain_volumes(
         terrains: &HashMap<Entity, EditorTerrain>,
         slots: &[Entity],
         occluders: &HashMap<Entity, (OccKey, std::sync::Arc<floptle_field::BakedSdf>)>,
-        occ_slots: &[Entity],
+        occ_regions: &HashMap<OccKey, usize>,
+        budget: u32,
         world: &floptle_core::World,
         g: &mut RaymarchGlobals,
         cam_world: DVec3,
@@ -2845,30 +2852,60 @@ impl Editor {
             g.vol_center[i] = [cr.x as f32, cr.y as f32, cr.z as f32, 3.0];
             g.vol_half[i] = [hf[0], hf[1], hf[2], 0.6];
         }
-        // Mesh shadow occluders ride the slots after the terrains, flagged
+        // Mesh shadow occluders take the instances after the terrains, flagged
         // shadow-only (w = 2): the shadow march folds them in, the drawn field
-        // skips them. Per-node "casts shadows" / visibility opt-outs simply leave
-        // the slot absent this frame — no re-upload needed to toggle.
-        for (j, &e) in occ_slots.iter().enumerate() {
-            let i = slots.len() + j;
-            if i >= floptle_render::MAX_VOLUMES {
-                break;
-            }
-            let Some((_, b)) = occluders.get(&e) else { continue };
-            let casts = world.get::<floptle_core::CastShadow>(e).map(|c| c.0).unwrap_or(true)
-                && !matches!(
-                    world.get::<floptle_core::Visible>(e),
-                    Some(floptle_core::Visible(false))
-                );
-            if !casts {
-                continue;
-            }
-            let anchor = floptle_core::world_transform(world, e).translation;
-            let bc = b.center;
-            let hf = b.half_extent;
-            let cr = anchor + DVec3::new(bc[0] as f64, bc[1] as f64, bc[2] as f64) - cam_world;
-            g.vol_center[i] = [cr.x as f32, cr.y as f32, cr.z as f32, 2.0];
-            g.vol_half[i] = [hf[0], hf[1], hf[2], 0.0];
+        // skips them. Each draws from its bake's region of the atlas, so copies
+        // of one model cost one bake. When more want to cast than there are
+        // instances, the ones nearest the camera win, this frame: shadows
+        // follow the player around the level instead of going to whichever
+        // meshes sort first by name. A node that doesn't cast (switched off, or
+        // hidden) takes no instance at all.
+        let first = slots.len().min(floptle_render::MAX_VOLUMES);
+        let room = (budget as usize).min(floptle_render::MAX_VOLUMES).saturating_sub(first);
+        struct Cand {
+            gap: f64,
+            id: u32,
+            region: usize,
+            centre: [f32; 3],
+            half: [f32; 3],
+        }
+        let mut cands: Vec<Cand> = occluders
+            .iter()
+            .filter_map(|(&e, (key, b))| {
+                let casts = world.get::<floptle_core::CastShadow>(e).is_none_or(|c| c.0)
+                    && !matches!(world.get::<floptle_core::Visible>(e), Some(floptle_core::Visible(false)));
+                if !casts {
+                    return None;
+                }
+                let region = *occ_regions.get(key)?;
+                let anchor = floptle_core::world_transform(world, e).translation;
+                let (bc, hf) = (b.center, b.half_extent);
+                let cr = anchor + DVec3::new(bc[0] as f64, bc[1] as f64, bc[2] as f64) - cam_world;
+                // How far the camera is from the box, not its centre: a long
+                // building the player stands beside is near however far away
+                // its middle is.
+                let half = DVec3::new(hf[0] as f64, hf[1] as f64, hf[2] as f64);
+                let gap = (cr.abs() - half).max(DVec3::ZERO).length();
+                Some(Cand {
+                    gap,
+                    id: e.index(),
+                    region,
+                    centre: [cr.x as f32, cr.y as f32, cr.z as f32],
+                    half: hf,
+                })
+            })
+            .collect();
+        if cands.len() > room {
+            cands.sort_by(|a, b| a.gap.total_cmp(&b.gap).then(a.id.cmp(&b.id)));
+        } else {
+            // Everyone fits: order only has to be stable.
+            cands.sort_by_key(|c| c.id);
+        }
+        for (j, c) in cands.into_iter().take(room).enumerate() {
+            let i = first + j;
+            g.vol_center[i] = [c.centre[0], c.centre[1], c.centre[2], 2.0];
+            g.vol_half[i] = [c.half[0], c.half[1], c.half[2], 0.0];
+            g.vol_atlas[i][3] = (c.region + 1) as f32;
         }
     }
 
@@ -2890,6 +2927,63 @@ impl Editor {
         pick.and_then(|e| self.world.get::<Material>(e))
             .map(material_params)
             .unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]))
+    }
+}
+
+#[cfg(test)]
+mod occluder_tests {
+    use floptle_core::math::DVec3;
+    use floptle_core::{Transform, World};
+    use std::collections::HashMap;
+
+    /// **Copies of one model share a bake, and the nearest ones cast.** Forty
+    /// copies of one building plus five props with shadows switched off; a
+    /// budget of 32: exactly the 32 nearest buildings get an instance, every
+    /// one drawing from the single shared region, and the switched-off props
+    /// take none of the budget.
+    #[test]
+    fn copies_share_one_bake_and_the_nearest_ones_cast() {
+        let bake = std::sync::Arc::new(floptle_field::BakedSdf {
+            dims: [4, 4, 4],
+            center: [0.0, 5.0, 0.0],
+            half_extent: [3.0, 5.0, 3.0],
+            distance: vec![1.0; 64],
+            color: vec![[255; 4]; 64],
+        });
+        let key: crate::shading::OccKey = ("models/building.glb".into(), [0, 0, 0, 1000], [1000; 3]);
+        let mut world = World::new();
+        let mut occluders = HashMap::new();
+        let mut near = Vec::new();
+        for i in 0..45 {
+            let e = world.spawn();
+            // Placed in a shuffled order, so nearness is not spawn order.
+            let d = ((i * 17) % 45) as f64 * 20.0;
+            world.insert(e, Transform::from_translation(DVec3::new(d, 0.0, 0.0)));
+            if i >= 40 {
+                world.insert(e, floptle_core::CastShadow(false));
+            } else {
+                near.push((d, e.index()));
+            }
+            occluders.insert(e, (key.clone(), bake.clone()));
+        }
+        near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let regions = HashMap::from([(key.clone(), 3usize)]);
+        let mut g = floptle_render::RaymarchGlobals::default();
+        crate::Editor::fill_terrain_volumes(&HashMap::new(), &[], &occluders, &regions, 32, &world, &mut g, DVec3::ZERO);
+        let placed: Vec<usize> = (0..floptle_render::MAX_VOLUMES).filter(|&i| g.vol_center[i][3] >= 0.5).collect();
+        assert_eq!(placed.len(), 32, "the budget was not filled, or overfilled");
+        assert!(placed.iter().all(|&i| g.vol_atlas[i][3] == 4.0), "an instance did not draw from the shared bake");
+        // The 32 placed are the 32 nearest casters.
+        let mut xs: Vec<f64> = placed.iter().map(|&i| g.vol_center[i][0] as f64).collect();
+        xs.sort_by(f64::total_cmp);
+        let want: Vec<f64> = near[..32].iter().map(|n| n.0).collect();
+        assert_eq!(xs, want, "the kept instances are not the nearest ones");
+
+        // Everyone fits: no choice to make, all 40 casters placed.
+        let mut g = floptle_render::RaymarchGlobals::default();
+        crate::Editor::fill_terrain_volumes(&HashMap::new(), &[], &occluders, &regions, 64, &world, &mut g, DVec3::ZERO);
+        let n = (0..floptle_render::MAX_VOLUMES).filter(|&i| g.vol_center[i][3] >= 0.5).count();
+        assert_eq!(n, floptle_render::MAX_VOLUMES, "a budget past the shader's capacity must stop at it");
     }
 }
 

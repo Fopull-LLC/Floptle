@@ -121,12 +121,12 @@ fn main() {
         bg: [0.5, 0.62, 0.78, 1.0],
         params: [0.0, 0.0, 0.0, 1.0],
         vol_center: {
-            let mut a = [[0.0f32; 4]; 16];
+            let mut a = [[0.0f32; 4]; floptle_render::MAX_VOLUMES];
             a[0] = [cr.x, cr.y, cr.z, 3.0]; // w = 3: shadow + AO, the raster draws it
             a
         },
         vol_half: {
-            let mut a = [[1.0f32, 1.0, 1.0, 0.5]; 16];
+            let mut a = [[1.0f32, 1.0, 1.0, 0.5]; floptle_render::MAX_VOLUMES];
             a[0] = [16.0, 6.0, 16.0, 0.6];
             a
         },

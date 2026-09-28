@@ -144,12 +144,12 @@ fn main() {
             bg: [0.006, 0.007, 0.016, 1.0], // space void tint
             params: [2.0, 0.0, 0.0, 1.0],   // x = time (twinkle phase)
             vol_center: {
-                let mut a = [[0.0f32; 4]; 16];
+                let mut a = [[0.0f32; 4]; floptle_render::MAX_VOLUMES];
                 a[0] = [cr.x + bc.x, cr.y + bc.y, cr.z + bc.z, 3.0];
                 a
             },
             vol_half: {
-                let mut a = [[1.0f32, 1.0, 1.0, 0.5]; 16];
+                let mut a = [[1.0f32, 1.0, 1.0, 0.5]; floptle_render::MAX_VOLUMES];
                 a[0] = [hf[0], hf[1], hf[2], 0.6];
                 a
             },

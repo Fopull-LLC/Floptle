@@ -934,10 +934,10 @@ impl Editor {
                 bg: [clear[0], clear[1], clear[2], 1.0],
                 center: [0.0; 4],
                 params: [elapsed, if show_blobs { n as f32 } else { 0.0 }, 0.0, 0.0],
-                vol_center: [[0.0; 4]; 16],
-                vol_half: [[1.0, 1.0, 1.0, 0.5]; 16],
-                vol_atlas: [[0.0; 4]; 16],
-                vol_dims: [[1.0, 1.0, 1.0, 0.0]; 16],
+                vol_center: [[0.0; 4]; floptle_render::MAX_VOLUMES],
+                vol_half: [[1.0, 1.0, 1.0, 0.5]; floptle_render::MAX_VOLUMES],
+                vol_atlas: [[0.0; 4]; floptle_render::MAX_VOLUMES],
+                vol_dims: [[1.0, 1.0, 1.0, 0.0]; floptle_render::MAX_VOLUMES],
                 // .w = per-slot nearest mask (bit i = slot i is Pixelated). The palette
                 // is one texture_2d_array with one sampler, so the shader can't pick a
                 // sampler per slot — it reads this mask and selects the result instead.
@@ -1005,7 +1005,7 @@ impl Editor {
                 g.sky_meta = [1.0, 0.0, 0.0, 0.0];
                 g.sky_uniforms = sky_uniform_vals;
             }
-            Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.mesh_occluders, &self.occluder_slots, &self.world, &mut g, cam.world_position);
+            Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.mesh_occluders, &self.occluder_regions, self.project.shadow_volumes, &self.world, &mut g, cam.world_position);
             crate::shaders::apply_field_shapes(&self.world, &self.flsl_shape_slots, &self.sdf_cache, &mut g, cam.world_position, None);
             if let Some(rmarch) = self.raymarch.as_ref() {
                 rmarch.gi().apply(&mut g, cam.world_position.into());

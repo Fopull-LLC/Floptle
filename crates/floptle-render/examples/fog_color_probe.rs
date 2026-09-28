@@ -61,8 +61,8 @@ fn main() {
     let bc = t.baked.center;
     let hf = t.baked.half_extent;
     let vol_c = (DVec3::new(bc[0] as f64, bc[1] as f64, bc[2] as f64) - eye).as_vec3();
-    let mut vol_center = [[0.0f32; 4]; 16];
-    let mut vol_half = [[1.0f32, 1.0, 1.0, 0.5]; 16];
+    let mut vol_center = [[0.0f32; 4]; floptle_render::MAX_VOLUMES];
+    let mut vol_half = [[1.0f32, 1.0, 1.0, 0.5]; floptle_render::MAX_VOLUMES];
     vol_center[0] = [vol_c.x, vol_c.y, vol_c.z, 1.0];
     vol_half[0] = [hf[0], hf[1], hf[2], 0.6];
 

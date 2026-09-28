@@ -81,6 +81,19 @@ skips, zero cost.
    around it. Bakes are cached by (asset, rotation, scale) — *moving* a map
    never rebakes (the volume anchors on the node's f64 translation per frame);
    re-orienting or rescaling one rebakes once.
+
+   **Copies share a bake.** Seven copies of one building at the same rotation
+   and scale are one bake in the atlas, and each copy draws from it at its own
+   place. The atlas holds up to 64 distinct bakes; a 128-voxel bake costs about
+   12 MB of VRAM (6 bytes a voxel).
+
+   **The nearest ones cast.** The shader folds in up to 32 volumes at once
+   (`shadow_volumes` in `project.ron` lowers that, for a game short on GPU:
+   each one adds a little to every shadow ray that passes near it). Terrains
+   take theirs first. The rest go to the collidable meshes nearest the camera
+   that frame, so the shadows follow the player around a big level. A mesh
+   whose **Casts shadows** is off is never baked and takes none of the budget,
+   so switching it off on small props spends the budget on the buildings.
 2. **Dynamic meshes → proxy occluders.** The editor harvests up to 32 cheap
    analytic stand-ins per frame (`collect_shadow_proxies`): a `RigidBody`
    casts its body shape (sphere / capsule / oriented box), and a static
@@ -145,9 +158,11 @@ scenes load with the defaults above and just start casting).
   loop samples `map_d` (one color fetch per ray, at the hit).
 - Volume slots carry a role flag (`vol_center.w`: 0 absent, 1 render,
   2 shadow-only). The editor bakes/caches occluders in
-  `refresh_mesh_occluders`, uploads them AFTER the terrains in the same
-  `set_volumes` atlas, and places them per frame in `fill_terrain_volumes`
-  (where the per-node cast/visible toggles gate placement).
+  `refresh_mesh_occluders`, uploads each distinct bake once AFTER the
+  terrains in the same `set_volumes` atlas, and places instances per frame in
+  `fill_terrain_volumes`, nearest the camera first. An instance names the
+  atlas region it samples with `vol_atlas[i].w = region + 1`; zero means its
+  own slot in upload order, which is what every other caller relies on.
 - Probes: `shadow_probe` renders the whole matrix (off / soft / hard / retro /
   tint / full-with-AO) over a hill + shadowed cube (receive) + capsule (proxy
   cast) + blob + an invisible occluder slab with a cube "indoors" beneath it

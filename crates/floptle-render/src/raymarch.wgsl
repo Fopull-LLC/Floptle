@@ -297,7 +297,7 @@ fn march_bound() -> f32 {
     let count = min(u32(G.params.y), 16u);
     var reach = 0.0;
     var maxc = 0.0;
-    let vols = min(u32(G.params.w), 16u);
+    let vols = min(u32(G.params.w), 32u);
     for (var i = 0u; i < vols; i = i + 1u) {
         if (G.vol_center[i].w < 0.5 || G.vol_center[i].w > 1.5) { continue; }
         reach = max(reach, length(G.vol_half[i].xyz));
@@ -359,7 +359,7 @@ struct VolFold { m: Matter, any: bool };
 fn volumes(p: vec3<f32>) -> VolFold {
     var m = Matter(1e9, vec3<f32>(1.0));
     var any = false;
-    let vols = min(u32(G.params.w), 16u);
+    let vols = min(u32(G.params.w), 32u);
     for (var i = 0u; i < vols; i = i + 1u) {
         // Skip absent slots AND shadow-only occluder bakes (w = 2) — those exist
         // for `light_vis` alone; the drawn field must not contain them.

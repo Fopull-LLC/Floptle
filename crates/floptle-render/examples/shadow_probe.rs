@@ -134,8 +134,8 @@ fn main() {
     let bc = t.baked.center;
     let hf = t.baked.half_extent;
     let vc = (DVec3::new(bc[0] as f64, bc[1] as f64, bc[2] as f64) - cam.world_position).as_vec3();
-    let mut vol_center = [[0.0f32; 4]; 16];
-    let mut vol_half = [[1.0f32, 1.0, 1.0, 0.5]; 16];
+    let mut vol_center = [[0.0f32; 4]; floptle_render::MAX_VOLUMES];
+    let mut vol_half = [[1.0f32, 1.0, 1.0, 0.5]; floptle_render::MAX_VOLUMES];
     vol_center[0] = [vc.x, vc.y, vc.z, 1.0];
     vol_half[0] = [hf[0], hf[1], hf[2], 0.6];
     // Slot 1: the slab, flagged shadow-only (w = 2) — marched by light_vis, never drawn.

@@ -65,8 +65,8 @@ fn main() {
     let light = Vec3::new(0.4, 0.9, 0.45).normalize();
     // Per-volume box centers: node anchor (f64) + local center, then camera-relative
     // (exact at any world distance, ADR-0015). w = present; half.w = the fuse k.
-    let mut vol_center = [[0.0f32; 4]; 16];
-    let mut vol_half = [[1.0f32, 1.0, 1.0, 0.5]; 16];
+    let mut vol_center = [[0.0f32; 4]; floptle_render::MAX_VOLUMES];
+    let mut vol_half = [[1.0f32, 1.0, 1.0, 0.5]; floptle_render::MAX_VOLUMES];
     for (i, (t, o)) in volumes.iter().zip(origins).enumerate() {
         let bc = t.baked.center;
         let hf = t.baked.half_extent;

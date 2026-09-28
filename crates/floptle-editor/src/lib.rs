@@ -2386,8 +2386,11 @@ struct Editor {
     /// Bakes by (asset path, quantized world rotation + scale) — translation is
     /// free (the anchor is read per frame), so moving a map never rebakes.
     occluder_cache: HashMap<OccKey, std::sync::Arc<floptle_field::BakedSdf>>,
-    /// Atlas slot order for the occluder volumes (appended after `terrain_slots`).
-    occluder_slots: Vec<Entity>,
+    /// Where each distinct occluder bake landed in the volume atlas (after the
+    /// terrains). Every node wearing that bake draws from the one region.
+    occluder_regions: HashMap<OccKey, usize>,
+    /// "More occluders want to cast than fit at once" has been said.
+    occluder_overflow_said: bool,
     /// A paint/sculpt dab on a single terrain only dirties a small voxel box — uploaded
     /// to the GPU directly (no full re-clone + re-upload), so editing a big terrain stays
     /// smooth. `(entity, min inclusive, max exclusive, geometry-changed)`; `geometry` is
