@@ -2207,6 +2207,67 @@ mod tests {
         );
     }
 
+    /// **One big reliable message does not leave a host deaf.** A reliable leg
+    /// is a single framed stream, and a reader that met a frame it would not
+    /// take gave up on the stream in silence, which stopped the writer at the
+    /// other end too, while keepalives and datagrams kept the connection
+    /// looking healthy. A dedicated server that had once sent a large world
+    /// snapshot answered nobody after it: joins reached it and every reply was
+    /// lost. Here the host sends one 2 MiB message, then a second player joins
+    /// and must be answered.
+    #[test]
+    fn a_host_that_sent_one_huge_message_still_answers_the_next_player() {
+        // A byte budget the message fits in: this is about the stream, not
+        // the relay's rate limit.
+        let relay = TestRelay::limited(RelayLimits { bytes_per_window: 64 << 20, ..RelayLimits::default() });
+        let addr = relay.addr();
+        let (mut host, code) = RelayHost::host(&addr).expect("host");
+        let connected = |host: &mut RelayHost, want: usize| -> Vec<PeerId> {
+            let mut peers = Vec::new();
+            for _ in 0..600 {
+                for i in host.poll() {
+                    if let Incoming::Connected(p) = i {
+                        peers.push(p);
+                    }
+                }
+                if peers.len() >= want {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            peers
+        };
+        let mut a = RelayClient::join(&addr, &code).expect("a joins");
+        let pa = connected(&mut host, 1);
+        assert_eq!(pa.len(), 1, "the first player never reached the host");
+        // Over the relay's per-message ceiling for a host, so the relay drops
+        // it by policy; what matters is that the leg it arrived on survives.
+        let big = vec![7u8; 2 << 20];
+        host.send(pa[0], Channel::Reliable, &big);
+        for _ in 0..100 {
+            let _ = a.poll();
+            let _ = host.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // The next player: the host must hear them and they must hear back.
+        let mut b = RelayClient::join(&addr, &code).expect("b joins");
+        let pb = connected(&mut host, 1);
+        assert_eq!(pb.len(), 1, "the second player never reached the host");
+        host.send(pb[0], Channel::Reliable, b"welcome");
+        let mut answered = false;
+        for _ in 0..600 {
+            answered |= b.poll().iter().any(|i| matches!(i, Incoming::Message(_, _, m) if m == b"welcome"));
+            let _ = host.poll();
+            let _ = a.poll();
+            if answered {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(answered, "the host's reply to the second player never arrived: the host is deaf");
+    }
+
     #[test]
     fn a_full_session_replicates_through_the_relay() {
         use floptle_core::math::DVec3;

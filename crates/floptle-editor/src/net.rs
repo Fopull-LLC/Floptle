@@ -198,8 +198,13 @@ impl Editor {
                 // screen, where the players who cannot get in are looking.
                 self.net_notice = Some(last.clone());
             }
-            for line in said {
-                self.console.push(floptle_script::LogLevel::Debug, line, None);
+            // A dedicated server's journal is its only log, and the Console
+            // mirrors only warnings there: who joined, who was refused and
+            // what the relay said are the lines an operator needs.
+            let level =
+                if self.dedicated { floptle_script::LogLevel::Warn } else { floptle_script::LogLevel::Debug };
+            for line in said.into_iter().chain(s.take_join_log()) {
+                self.console.push(level, line, None);
             }
         }
         self.apply_net_commands();

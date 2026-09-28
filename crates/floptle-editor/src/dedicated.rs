@@ -1507,6 +1507,34 @@ mod server_tests {
     /// a controller that is right on every other tick. The server is pumped
     /// twice per client tick so both messages arrive in one poll, which is
     /// what a real link does.
+    /// **A dedicated server's journal says who joined.** The session keeps a
+    /// line per join and per refusal, and nothing drained it, so a server that
+    /// stopped answering joins left nothing in its log to show whether any
+    /// join had reached it. Now the lines reach the Console at a level it
+    /// mirrors to stderr, which is the journal.
+    #[test]
+    fn a_dedicated_server_writes_each_join_to_its_journal() {
+        let root = temp("joinlog");
+        write(&root, "scenes/arena.ron", "(nodes: [(name: \"Rules\", net: Some((transform: false)))])");
+        write(&root, "project.ron", "(entry_scene: Some(\"scenes/arena.ron\"))");
+        let mut s = serve(&root, "scenes/arena.ron");
+        let mut c = super::open(&root, &root.join("scenes/arena.ron"), 1.0 / STEP);
+        c.dedicated = false;
+        c.toggle_play();
+        c.net_join_with(Box::new(s.hub.connect()), "the test hub");
+        for _ in 0..SETTLE {
+            for _ in 0..2 {
+                s.tick += 1;
+                s.hub.set_now(s.tick);
+                s.ed.play_step(STEP, false);
+            }
+            c.play_step(STEP, false);
+        }
+        let joined = s.ed.console.entries.iter().find(|e| e.msg.contains("joined as"));
+        let joined = joined.unwrap_or_else(|| panic!("no join line. Server said:\n{}", s.console()));
+        assert_eq!(joined.level, floptle_script::LogLevel::Warn, "a Debug line never reaches the journal");
+    }
+
     #[test]
     fn a_rig_spawned_for_a_joiner_has_its_body_on_its_first_tick() {
         let root = temp("firsttick");

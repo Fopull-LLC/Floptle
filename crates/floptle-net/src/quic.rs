@@ -36,9 +36,10 @@ use crate::transport::{Channel, Incoming, LinkStats, PeerId, Transport, SERVER};
 const DGRAM_UNRELIABLE: u8 = 1;
 const DGRAM_SEQUENCED: u8 = 2;
 
-/// Reliable-stream frame cap — a decoder guard, far above any real message
-/// (RPC/values are ≤ 1 KB by the §13.2 guardrails; spawns are small RON docs).
-const MAX_FRAME: usize = 1 << 20;
+/// Reliable-stream frame cap: a decoder guard, and the largest message the
+/// sender will put on the stream. A late joiner's full baseline of a big world
+/// is the largest real message and runs to megabytes.
+const MAX_FRAME: usize = 64 << 20;
 
 /// Keep-alives + a short idle timeout so a vanished peer is detected in
 /// seconds, not minutes.
@@ -103,36 +104,64 @@ impl PeerHandle {
     }
 }
 
-/// Drain the reliable outbox onto the stream, length-prefix framed.
-async fn write_frames(
-    mut tx: quinn::SendStream,
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
-) {
+/// The reliable leg failed: end the whole connection, so both ends see a
+/// disconnect and reconnect. A connection whose reliable stream has stopped
+/// but whose keepalives and datagrams still flow looks healthy from both ends
+/// and delivers no joins, no welcomes and no refusals.
+fn reliable_leg_failed(conn: &quinn::Connection, why: &str) {
+    conn.close(quinn::VarInt::from_u32(1), format!("reliable stream failed: {why}").as_bytes());
+}
+
+/// Open our reliable stream and drain the outbox onto it, length-prefix framed.
+async fn write_frames(conn: quinn::Connection, mut rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
+    let mut tx = match conn.open_uni().await {
+        Ok(tx) => tx,
+        Err(e) => return reliable_leg_failed(&conn, &format!("could not open it ({e})")),
+    };
     while let Some(b) = rx.recv().await {
+        // Over the cap, the receiver would reject the frame; the message is
+        // dropped and said, rather than sent and taking the stream with it.
+        if b.len() > MAX_FRAME {
+            floptle_say::say_err!(
+                "floptle: warning: dropped a {} byte reliable message, over the {} byte limit",
+                b.len(),
+                MAX_FRAME
+            );
+            continue;
+        }
         let len = (b.len() as u32).to_le_bytes();
-        if tx.write_all(&len).await.is_err() || tx.write_all(&b).await.is_err() {
-            return;
+        if let Err(e) = async {
+            tx.write_all(&len).await?;
+            tx.write_all(&b).await
+        }
+        .await
+        {
+            return reliable_leg_failed(&conn, &format!("write ({e})"));
         }
     }
 }
 
-/// Read length-prefixed frames off the peer's reliable stream.
-async fn read_frames(mut rx: quinn::RecvStream, peer: PeerId, events: mpsc::Sender<Incoming>) {
+/// Accept the peer's reliable stream and read length-prefixed frames off it.
+async fn read_frames(conn: quinn::Connection, peer: PeerId, events: mpsc::Sender<Incoming>) {
+    let mut rx = match conn.accept_uni().await {
+        Ok(rx) => rx,
+        Err(e) => return reliable_leg_failed(&conn, &format!("could not accept it ({e})")),
+    };
     loop {
         let mut len = [0u8; 4];
-        if rx.read_exact(&mut len).await.is_err() {
-            return;
+        if let Err(e) = rx.read_exact(&mut len).await {
+            return reliable_leg_failed(&conn, &format!("read ({e})"));
         }
         let n = u32::from_le_bytes(len) as usize;
         if n > MAX_FRAME {
-            return; // corrupt/hostile framing: drop the stream
+            return reliable_leg_failed(&conn, &format!("a {n} byte frame is over the {MAX_FRAME} byte limit"));
         }
         let mut buf = vec![0u8; n];
-        if rx.read_exact(&mut buf).await.is_err() {
-            return;
+        if let Err(e) = rx.read_exact(&mut buf).await {
+            return reliable_leg_failed(&conn, &format!("read ({e})"));
         }
         if events.send(Incoming::Message(peer, Channel::Reliable, buf)).is_err() {
-            return;
+            return; // the transport was dropped: nobody is listening
         }
     }
 }
@@ -486,19 +515,9 @@ impl QuicServer {
                         return; // transport dropped
                     }
                     // Writer: our reliable stream toward this peer.
-                    let c = conn.clone();
-                    let rrx = reliable_rx;
-                    tokio::spawn(async move {
-                        let Ok(tx) = c.open_uni().await else { return };
-                        write_frames(tx, rrx).await;
-                    });
+                    tokio::spawn(write_frames(conn.clone(), reliable_rx));
                     // Reader: the peer's reliable stream toward us.
-                    let c = conn.clone();
-                    let ev = events_tx.clone();
-                    tokio::spawn(async move {
-                        let Ok(rx) = c.accept_uni().await else { return };
-                        read_frames(rx, peer, ev).await;
-                    });
+                    tokio::spawn(read_frames(conn.clone(), peer, events_tx.clone()));
                     // Datagrams.
                     tokio::spawn(read_datagrams(conn.clone(), peer, events_tx.clone()));
                     // Death watch.
@@ -870,17 +889,8 @@ impl QuicClient {
                 };
                 *conn_slot.lock().unwrap() = Some(conn.clone());
                 let _ = events_tx.send(Incoming::Connected(SERVER));
-                let c = conn.clone();
-                tokio::spawn(async move {
-                    let Ok(tx) = c.open_uni().await else { return };
-                    write_frames(tx, reliable_rx).await;
-                });
-                let c = conn.clone();
-                let ev = events_tx.clone();
-                tokio::spawn(async move {
-                    let Ok(rx) = c.accept_uni().await else { return };
-                    read_frames(rx, SERVER, ev).await;
-                });
+                tokio::spawn(write_frames(conn.clone(), reliable_rx));
+                tokio::spawn(read_frames(conn.clone(), SERVER, events_tx.clone()));
                 tokio::spawn(read_datagrams(conn.clone(), SERVER, events_tx.clone()));
                 conn.closed().await;
                 *conn_slot.lock().unwrap() = None;
@@ -1072,6 +1082,41 @@ mod tests {
             }
             self.seen.iter().filter(|i| pred(i)).cloned().collect()
         }
+    }
+
+    /// **A reliable stream that fails ends the connection.** A reader that met
+    /// a frame it would not take used to stop reading in silence: the
+    /// connection stayed up on keepalives, the other end's writer stalled, and
+    /// every reliable message after it went nowhere. Here a raw client sends a
+    /// length prefix over the limit; the server must close the connection and
+    /// say why, and report the peer gone.
+    #[test]
+    fn a_reliable_stream_that_fails_ends_the_connection_rather_than_going_deaf() {
+        install_crypto_provider();
+        let mut server = QuicServer::bind(0).expect("bind");
+        let addr: SocketAddr = format!("127.0.0.1:{}", server.local_port()).parse().unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let reason = rt.block_on(async {
+            let mut ep = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap()).unwrap();
+            ep.set_default_client_config(tls_config(&ClientTrust::AcceptAny).unwrap());
+            let conn = ep.connect(addr, "floptle-dev").unwrap().await.expect("handshake");
+            let mut s = conn.open_uni().await.unwrap();
+            s.write_all(&((MAX_FRAME as u32) + 1).to_le_bytes()).await.unwrap();
+            match tokio::time::timeout(Duration::from_secs(5), conn.closed()).await {
+                Ok(quinn::ConnectionError::ApplicationClosed(c)) => String::from_utf8_lossy(&c.reason).into_owned(),
+                other => panic!("the connection was not closed with a reason: {other:?}"),
+            }
+        });
+        assert!(reason.contains("reliable stream failed") && reason.contains("over the"), "{reason}");
+        let mut gone = false;
+        for _ in 0..400 {
+            gone |= server.poll().iter().any(|i| matches!(i, Incoming::Disconnected(..)));
+            if gone {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(gone, "the server never reported the peer gone");
     }
 
     #[test]
