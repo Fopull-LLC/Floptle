@@ -533,11 +533,15 @@ pub(crate) fn render_frame_pixels(
     // Game view does — post, AO and dither have to land on the same chunky
     // pixel grid the game uses, or a pixel-art project photographs as a crisp
     // picture of itself that no player will ever see.
+    // A render scale below 1 takes the same route with a smooth upscale, so a
+    // `shot --timing` of a scaled game measures what the game costs.
     let retro_on = ed.project.retro;
-    let (cw, ch) = if retro_on { ed.project.retro_size(aspect) } else { (w, h) };
-    let retro = retro_on.then(|| {
+    let lowres = ed.project.composite_size(w, h);
+    let (cw, ch) = lowres.unwrap_or((w, h));
+    let retro = lowres.map(|_| {
         let mut r = floptle_render::Retro::new(&gpu, ch);
         r.resize_to(&gpu, cw, ch);
+        r.set_smooth(&gpu, !retro_on);
         r
     });
     // The picture that gets written. In retro mode the scene never draws into
@@ -640,7 +644,7 @@ pub(crate) fn render_frame_pixels(
     // …and the chunky upscale, the way the game presents it.
     if let Some(r) = &retro {
         let dest = [w as f32, h as f32];
-        if ed.project.retro_integer_scale {
+        if retro_on && ed.project.retro_integer_scale {
             r.blit_integer(gpu, &color_view, dest);
         } else {
             r.blit_to(gpu, &color_view);

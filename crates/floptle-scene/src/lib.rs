@@ -1227,6 +1227,17 @@ pub enum ProbeDetailDoc {
     Ultra,
 }
 
+fn default_render_scale() -> f32 {
+    1.0
+}
+
+fn is_default_render_scale(s: &f32) -> bool {
+    *s >= 0.999
+}
+
+/// The range `render_scale` is held to.
+pub const RENDER_SCALE_MIN: f32 = 0.25;
+
 fn default_shadow_volumes() -> u32 {
     32
 }
@@ -2607,6 +2618,13 @@ pub struct ProjectConfigDoc {
     #[serde(default = "default_shadow_volumes", skip_serializing_if = "is_default_shadow_volumes")]
     pub shadow_volumes: u32,
 
+    /// The fraction of the window the 3D scene renders at, 0.25 to 1, upscaled
+    /// smoothly to fill it; the game UI stays at full resolution. The setting
+    /// that rescues a weak GPU: pixel count is most of what a frame costs.
+    /// Retro mode, when on, decides the resolution instead.
+    #[serde(default = "default_render_scale", skip_serializing_if = "is_default_render_scale")]
+    pub render_scale: f32,
+
     /// How much detail a reflection probe's capture keeps.
     ///
     /// A probe's picture spans a full turn across its width, so its width is the
@@ -2742,6 +2760,7 @@ impl ProjectConfigDoc {
             vsync: VsyncDoc::default(),
             tick_overload: TickOverloadDoc::default(),
             shadow_volumes: default_shadow_volumes(),
+            render_scale: default_render_scale(),
             probe_detail: ProbeDetailDoc::default(),
             matter: true,
             title: None,
@@ -2866,6 +2885,21 @@ impl ProjectConfigDoc {
     /// tab, an exported build — so a project cannot look one way in the editor
     /// and another in a build. With `retro_width` set the size is fixed and the
     /// aspect is ignored: that is the whole point of setting it.
+    /// The size the 3D scene composites at for a `w × h` target, when that is
+    /// not the target itself: the retro resolution in retro mode, else the
+    /// render scale's fraction of the target. `None` renders straight into
+    /// the target.
+    pub fn composite_size(&self, w: u32, h: u32) -> Option<(u32, u32)> {
+        if self.retro {
+            return Some(self.retro_size(w as f32 / h.max(1) as f32));
+        }
+        let s = self.render_scale.clamp(RENDER_SCALE_MIN, 1.0);
+        if s >= 0.999 {
+            return None;
+        }
+        Some((((w as f32 * s).round() as u32).max(1), ((h as f32 * s).round() as u32).max(1)))
+    }
+
     pub fn retro_size(&self, aspect: f32) -> (u32, u32) {
         let h = self.retro_height.max(80);
         let w = match self.retro_width {
@@ -4252,6 +4286,26 @@ mod tests {
 
     /// An explicit choice is carried through the file unchanged — in
     /// particular `Fast` is never "helpfully" pinned back to `Exact`.
+    #[test]
+    fn the_composite_size_follows_retro_then_render_scale() {
+        let mut cfg = ProjectConfigDoc { retro: false, ..Default::default() };
+        assert_eq!(cfg.render_scale, 1.0);
+        assert_eq!(cfg.composite_size(1920, 1080), None, "native renders straight into the window");
+        cfg.render_scale = 0.67;
+        assert_eq!(cfg.composite_size(1920, 1080), Some((1286, 724)));
+        cfg.render_scale = 0.01;
+        assert_eq!(cfg.composite_size(1920, 1080), Some((480, 270)), "held to the minimum");
+        // Retro decides the resolution when it is on, scale or not.
+        cfg.retro = true;
+        cfg.retro_height = 240;
+        assert_eq!(cfg.composite_size(1920, 1080), Some(cfg.retro_size(1920.0 / 1080.0)));
+        // A default scale is not written into project.ron.
+        cfg.retro = false;
+        cfg.render_scale = 1.0;
+        let text = ron::ser::to_string(&cfg).unwrap();
+        assert!(!text.contains("render_scale"), "{text}");
+    }
+
     #[test]
     fn an_explicit_fast_survives_a_round_trip() {
         let dir = std::env::temp_dir().join(format!("floptle_vec3_fast_{}", std::process::id()));

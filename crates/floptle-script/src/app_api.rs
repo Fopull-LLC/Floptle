@@ -85,6 +85,8 @@ pub struct AppInfo {
     pub retro_height: u32,
     /// Upscale by a whole number and letterbox, rather than stretching.
     pub retro_integer_scale: bool,
+    /// The fraction of the window the 3D scene renders at (1 = native).
+    pub render_scale: f32,
     /// Whether the game's window currently covers the screen. Always `false`
     /// where there is no window (`floptle run`).
     pub fullscreen: bool,
@@ -105,6 +107,7 @@ pub struct AppRequests {
     pub retro: Option<bool>,
     pub retro_height: Option<u32>,
     pub retro_integer_scale: Option<bool>,
+    pub render_scale: Option<f32>,
     /// Cover the screen (borderless, on the monitor the window is on), or
     /// go back to a window.
     pub fullscreen: Option<bool>,
@@ -119,12 +122,17 @@ impl AppRequests {
             && self.retro.is_none()
             && self.retro_height.is_none()
             && self.retro_integer_scale.is_none()
+            && self.render_scale.is_none()
             && self.fullscreen.is_none()
     }
 }
 
 pub type SharedAppInfo = Rc<RefCell<AppInfo>>;
 pub type SharedAppRequests = Rc<RefCell<AppRequests>>;
+
+/// The smallest render scale `app.setRenderScale` accepts: a sixteenth of the
+/// pixels. Below that the picture is mush on any screen.
+pub const RENDER_SCALE_MIN: f32 = 0.25;
 
 /// The smallest internal height worth compositing at, and the largest.
 ///
@@ -232,6 +240,28 @@ pub fn install(lua: &Lua, info: &SharedAppInfo, req: &SharedAppRequests) -> mlua
     }
     {
         let i = info.clone();
+        t.set("renderScale", lua.create_function(move |_, ()| Ok(i.borrow().render_scale as f64))?)?;
+    }
+    {
+        let r = req.clone();
+        let i = info.clone();
+        t.set(
+            "setRenderScale",
+            lua.create_function(move |_, s: f64| {
+                if !(RENDER_SCALE_MIN as f64..=1.0).contains(&s) {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "app.setRenderScale({s}) — between {RENDER_SCALE_MIN} and 1 (a fraction \
+                         of the window: 0.5 renders a quarter of the pixels)"
+                    )));
+                }
+                r.borrow_mut().render_scale = Some(s as f32);
+                i.borrow_mut().render_scale = s as f32;
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let i = info.clone();
         t.set(
             "retroIntegerScale",
             lua.create_function(move |_, ()| Ok(i.borrow().retro_integer_scale))?,
@@ -302,6 +332,22 @@ mod tests {
 
     /// The driver skips its whole apply path when nothing was asked for, which
     /// is every frame but the one somebody clicks in.
+    /// `app.setRenderScale` queues for the driver, reads back at once, and
+    /// refuses a scale outside 0.25–1 with the range in the message.
+    #[test]
+    fn set_render_scale_queues_reads_back_and_refuses_out_of_range() {
+        let lua = Lua::new();
+        let info: SharedAppInfo = Rc::new(RefCell::new(AppInfo { render_scale: 1.0, ..Default::default() }));
+        let req: SharedAppRequests = Rc::new(RefCell::new(AppRequests::default()));
+        install(&lua, &info, &req).unwrap();
+        let back: f64 = lua.load("app.setRenderScale(0.67) return app.renderScale()").eval().unwrap();
+        assert!((back - 0.67).abs() < 1e-6);
+        assert_eq!(req.borrow().render_scale, Some(0.67));
+        assert!(!req.borrow().is_empty(), "a render-scale request must not read as an empty frame");
+        let err = lua.load("app.setRenderScale(2)").exec().unwrap_err().to_string();
+        assert!(err.contains("between 0.25 and 1"), "{err}");
+    }
+
     /// **`app.setFullscreen` reaches the driver, and the getter answers the
     /// click on the same frame.** The plumbing half of the feature — the window
     /// half needs a window, which no test has. A menu that reads the setting

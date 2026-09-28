@@ -177,9 +177,29 @@ this page; `app.*` is the rest.
 | `app.version()` | the engine version this build was made with |
 | `app.vsync()` / `app.setVsync(mode)` | `"On"`, `"Adaptive"` or `"Off"` |
 | `app.retro()` / `app.setRetro(on)` | the retro presentation — compositing small and upscaling |
-| `app.retroHeight()` / `app.setRetroHeight(px)` | the height it composites at: this engine's "resolution" |
+| `app.retroHeight()` / `app.setRetroHeight(px)` | the height it composites at, for a pixel-art game |
+| `app.renderScale()` / `app.setRenderScale(s)` | the fraction of the window the 3D scene renders at (0.25–1), upscaled smoothly with the UI kept sharp: the "render resolution" setting a weak GPU needs |
 | `app.retroIntegerScale()` / `app.setRetroIntegerScale(on)` | upscale by a whole number and letterbox, instead of stretching |
 | `app.fullscreen()` / `app.setFullscreen(on)` | cover the screen (borderless, no mode switch), or go back to a window |
+
+### Render scale is the setting that rescues a slow GPU
+
+Pixel count is most of what a frame costs on the GPU. On one shipped level,
+switching every lighting feature to its lowest setting saved 9% of the GPU
+time, while `app.setRenderScale(0.67)` saved 44%. The 3D scene renders at that
+fraction of the window and is upscaled smoothly. The game's UI draws
+afterwards at full resolution, so text stays sharp. A Video menu usually offers
+something like Native / 0.85 / 0.67 / 0.5 and keeps the player's choice with
+`save.*`:
+
+```lua
+function start(node)
+  app.setRenderScale(save.get("renderScale") or 1)
+end
+```
+
+It's independent of retro mode. When retro is on, the retro height decides
+the resolution instead.
 
 ### What `app.quit()` does depends on where the game is running
 

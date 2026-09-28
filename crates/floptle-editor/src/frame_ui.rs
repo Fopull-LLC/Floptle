@@ -427,12 +427,17 @@ impl Editor {
         // "old" one and the target was never resized — the setting appeared to
         // do nothing, for ever. Comparing against what the
         // target actually is has no such blind spot, whoever moved the number.
-        let want_retro =
-            self.project.retro_size(gpu.config.width as f32 / gpu.config.height.max(1) as f32);
+        // Retro mode or a render scale below 1 composites small; the same
+        // target serves both, upscaled in hard pixels or smoothly.
+        let lowres = self.project.composite_size(gpu.config.width, gpu.config.height);
+        let want_retro = lowres.unwrap_or_else(|| {
+            self.project.retro_size(gpu.config.width as f32 / gpu.config.height.max(1) as f32)
+        });
         if want_retro != self.retro_applied {
             retro.resize_to(gpu, want_retro.0, want_retro.1);
             self.retro_applied = want_retro;
         }
+        retro.set_smooth(gpu, !self.project.retro);
 
         // Post-processing (SSAO/bloom/vignette, from the scene's PostProcess node —
         // gathered above) runs at the resolution the scene was composited at: the
@@ -440,7 +445,7 @@ impl Editor {
         // AO/bloom/vignette land on the same chunky pixel grid as the scene), else
         // full frame res. The stack lazily re-sizes when retro toggles/resizes.
         let post_size =
-            if self.project.retro { retro.resolution() } else { (gpu.config.width, gpu.config.height) };
+            if lowres.is_some() { retro.resolution() } else { (gpu.config.width, gpu.config.height) };
         post.configure(gpu, post_size.0, post_size.1, self.project.retro);
 
         // Screen-space reflections need somewhere to keep last frame's picture.

@@ -838,6 +838,24 @@ impl<'a> SettingsCtx<'a> {
                 }
             },
         );
+        ui.add_enabled_ui(!project.retro, |ui| {
+            row(
+                ui,
+                "Render scale",
+                Some("the fraction of the window the 3D scene renders at, upscaled smoothly; the \
+                      game's UI stays sharp. The setting that rescues a weak GPU — a game's own \
+                      Video menu sets it with app.setRenderScale"),
+                |ui| {
+                    out.save_project |= slider(
+                        ui,
+                        egui::Slider::new(&mut project.render_scale, floptle_scene::RENDER_SCALE_MIN..=1.0)
+                            .fixed_decimals(2),
+                        "",
+                    )
+                    .changed();
+                },
+            );
+        });
         row(ui, "Retro", Some("render at a low resolution and upscale"), |ui| {
             out.save_project |= check(ui, &mut project.retro, "pixelization").changed();
         });

@@ -72,6 +72,7 @@ impl crate::Editor {
             retro: self.project.retro,
             retro_height: self.project.retro_height,
             retro_integer_scale: self.project.retro_integer_scale,
+            render_scale: self.project.render_scale,
             fullscreen: self.window.as_ref().is_some_and(|w| w.fullscreen().is_some()),
         };
         self.script_host.set_app_info(info);
@@ -99,6 +100,9 @@ impl crate::Editor {
         }
         if let Some(on) = req.retro_integer_scale {
             self.project.retro_integer_scale = on;
+        }
+        if let Some(s) = req.render_scale {
+            self.project.render_scale = s;
         }
         if let Some(on) = req.fullscreen {
             self.app_set_fullscreen(on);
@@ -224,7 +228,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("floptle-app-revert-{}", std::process::id()));
         settings_project(
             &dir,
-            "function update(node, dt)\n  app.setVsync('Off')\n  app.setRetroHeight(360)\nend\n",
+            "function update(node, dt)\n  app.setVsync('Off')\n  app.setRetroHeight(360)\n  app.setRenderScale(0.5)\nend\n",
         );
         let mut ed = crate::Editor::default();
         ed.open_project(dir.clone());
@@ -240,6 +244,7 @@ mod tests {
             "the change has to take effect for the run, or the setting does nothing"
         );
         assert_eq!(ed.project.retro_height, 360);
+        assert_eq!(ed.project.render_scale, 0.5, "app.setRenderScale did not reach the project");
 
         ed.toggle_play();
         assert!(!ed.playing);
@@ -250,6 +255,7 @@ mod tests {
              save would write it into project.ron and ship it"
         );
         assert_eq!(ed.project.retro_height, 240, "…and the same for the retro height");
+        assert_eq!(ed.project.render_scale, 1.0, "…and the render scale");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

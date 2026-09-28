@@ -641,6 +641,10 @@ impl Editor {
         };
         match acquired {
             Some(frame) => {
+                // Composited small (retro, or a render scale below 1) and
+                // upscaled at the end, or straight into the window.
+                let lowres =
+                    self.project.composite_size(gpu.config.width, gpu.config.height).is_some();
                 // The scene always renders into the post input, whether or not
                 // any effect is switched on: the scene renders in the
                 // floating-point scene format, the window takes 8-bit sRGB, and
@@ -648,7 +652,7 @@ impl Editor {
                 // get from one to the other. So "no effects" is a chain of
                 // exactly one pass rather than a different route.
                 let depth =
-                    if self.project.retro { retro.depth_view() } else { gpu.depth_view() };
+                    if lowres { retro.depth_view() } else { gpu.depth_view() };
                 let color = post.input_view();
                 // `rm_draw` already accounts for the matter toggle + terrain presence;
                 // with nothing to raymarch the globals still upload so the raster
@@ -678,7 +682,7 @@ impl Editor {
                     // hidden raster fragments before their shadow-marching shader
                     // runs) and caps the raymarch at the nearest mesh per pixel.
                     let depth_tex =
-                        if self.project.retro { retro.depth_texture() } else { gpu.depth_texture() };
+                        if lowres { retro.depth_texture() } else { gpu.depth_texture() };
                     let hist = scene_history.as_ref().map(|h| (h.view(), h.sampler()));
                     gpu_mark!("depth prepass");
                     prepass_and_bind(
@@ -707,7 +711,7 @@ impl Editor {
                     raster_clear, Some(raymarch.field_bind()),
                 );
                 let composited = {
-                    let d = if self.project.retro {
+                    let d = if lowres {
                         retro.depth_texture()
                     } else {
                         gpu.depth_texture()
@@ -940,13 +944,15 @@ impl Editor {
                         let mut enc = gpu.device.create_command_encoder(
                             &wgpu::CommandEncoderDescriptor { label: Some("ui-backdrop") },
                         );
-                        uir.capture_backdrop(
-                            gpu,
-                            &mut enc,
-                            post.input_view(),
-                            gpu.config.width,
-                            gpu.config.height,
-                        );
+                        // At the size the scene was composited at: a render
+                        // scale's smaller picture, sampled by position, blurs
+                        // the same.
+                        let (bw, bh) = if lowres {
+                            retro.resolution()
+                        } else {
+                            (gpu.config.width, gpu.config.height)
+                        };
+                        uir.capture_backdrop(gpu, &mut enc, post.input_view(), bw, bh);
                         gpu.queue.submit(Some(enc.finish()));
                     } else {
                         uir.clear_backdrop();
@@ -955,7 +961,7 @@ impl Editor {
                 {
                     let proj = cam.proj_matrix(aspect);
                     let ssao_frame = floptle_render::SsaoFrame {
-                        depth: if self.project.retro { retro.depth_view() } else { gpu.depth_view() },
+                        depth: if lowres { retro.depth_view() } else { gpu.depth_view() },
                         proj: proj.to_cols_array_2d(),
                         inv_proj: proj.inverse().to_cols_array_2d(),
                         fog: crate::shading::ao_fog(&self.world, cam.world_position),
@@ -963,7 +969,7 @@ impl Editor {
                     // In retro mode the chain writes the retro colour target and
                     // the nearest-neighbour blit carries the finished picture up;
                     // otherwise it writes the window.
-                    let out = if self.project.retro { retro.color_view() } else { &frame.view };
+                    let out = if lowres { retro.color_view() } else { &frame.view };
                     // Focus-on-a-node is resolved here, against the camera this
                     // view is actually rendering from, so the Scene view shows
                     // its own focus while you fly around instead of the game
@@ -984,7 +990,7 @@ impl Editor {
                             self.motion_prev,
                             cam.view_proj(aspect),
                             cam.world_position,
-                            if self.project.retro {
+                            if lowres {
                                 retro.resolution().1
                             } else {
                                 gpu.config.height
@@ -996,8 +1002,8 @@ impl Editor {
                     gpu_mark!("post (AO, bloom, blur…)");
                     post.run_with(gpu, &ps, Some(&ssao_frame), out, post_shaders);
                 }
-                if self.project.retro {
-                    if self.project.retro_integer_scale {
+                if lowres {
+                    if self.project.retro && self.project.retro_integer_scale {
                         let dest =
                             [gpu.config.width as f32, gpu.config.height.max(1) as f32];
                         retro.blit_integer(gpu, &frame.view, dest);

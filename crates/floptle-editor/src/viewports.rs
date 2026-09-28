@@ -635,16 +635,22 @@ impl Editor {
         // movement, and freezing it makes it more of a fixed pattern to look at.
         post_settings.time = self.fog_time;
         let retro_on = self.project.retro;
+        // Composited somewhere smaller and upscaled: retro mode, or a render
+        // scale below 1. Either way the scene and post run on the small
+        // target and one blit brings the picture up to the panel.
+        let lowres = self.project.composite_size(w, h);
+        let scaled_on = lowres.is_some();
 
         // Composited resolution: the retro internal res in retro mode (so post/AO/dither
-        // land on the same chunky pixel grid as the fullscreen view, then upscale), else
-        // the panel res. This mirrors the surface path so a docked/split Game tab looks
-        // identical to fullscreen instead of rendering crisp + unprocessed.
-        let (cw, ch) = if retro_on { self.project.retro_size(panel_aspect) } else { (w, h) };
+        // land on the same chunky pixel grid as the fullscreen view, then upscale), the
+        // render scale's fraction of the panel, else the panel res. This mirrors the
+        // surface path so a docked/split Game tab looks identical to fullscreen
+        // instead of rendering crisp + unprocessed.
+        let (cw, ch) = lowres.unwrap_or((w, h));
         if let Some(gpu) = self.gpu.as_ref() {
             // The game's own retro pass, sized to the panel aspect (the shared `retro` is
             // window-sized, and same-frame reuse would fight the surface render).
-            if retro_on {
+            if scaled_on {
                 match self.game_retro.as_mut() {
                     Some(r) if r.resolution() == (cw, ch) => {}
                     Some(r) => r.resize_to(gpu, cw, ch),
@@ -653,6 +659,9 @@ impl Editor {
                         r.resize_to(gpu, cw, ch);
                         self.game_retro = Some(r);
                     }
+                }
+                if let Some(r) = self.game_retro.as_mut() {
+                    r.set_smooth(gpu, !retro_on);
                 }
             }
             // Always configured, not only when an effect is on: the chain is
@@ -668,7 +677,7 @@ impl Editor {
         // into the egui-registered game_vp color. Non-retro composites straight at panel res.
         let retro_views =
             self.game_retro.as_ref().map(|r| (r.color_view().clone(), r.depth_view().clone()));
-        let depth = if retro_on {
+        let depth = if scaled_on {
             retro_views.as_ref().map(|(_, d)| d.clone()).unwrap_or_else(|| dv.clone())
         } else {
             dv.clone()
@@ -683,7 +692,7 @@ impl Editor {
         // therefore what makes a docked Game panel show the same picture as the
         // same game fullscreen: contact shadows, shoreline foam, screen-space
         // reflections and lamp shadows all read it.
-        let depth_tex = if retro_on {
+        let depth_tex = if scaled_on {
             self.game_retro.as_ref().map(|r| r.depth_texture().clone())
         } else {
             dtex
@@ -718,7 +727,7 @@ impl Editor {
                 inv_proj: proj.inverse().to_cols_array_2d(),
                 fog: crate::shading::ao_fog(&self.world, cam.world_position),
             };
-            let out = if retro_on {
+            let out = if scaled_on {
                 retro_views.as_ref().map(|(c, _)| c.clone()).unwrap_or_else(|| cv.clone())
             } else {
                 cv.clone()
@@ -735,16 +744,17 @@ impl Editor {
                 cam.world_position,
                 self.game_retro
                     .as_ref()
-                    .filter(|_| retro_on)
+                    .filter(|_| scaled_on)
                     .map(|r| r.resolution().1)
                     .unwrap_or(h),
             ));
             post.run_with(gpu, &ps, Some(&ssao_frame), &out, post_shaders);
         }
-        // Retro upscale: chunky nearest-neighbor blit of the retro color into game_vp.
-        if retro_on && let (Some(gpu), Some(retro)) = (self.gpu.as_ref(), self.game_retro.as_ref()) {
+        // Upscale into game_vp: chunky nearest-neighbour for retro, smooth for
+        // a render scale.
+        if scaled_on && let (Some(gpu), Some(retro)) = (self.gpu.as_ref(), self.game_retro.as_ref()) {
             let dest = [w.max(1) as f32, h.max(1) as f32];
-            if self.project.retro_integer_scale {
+            if retro_on && self.project.retro_integer_scale {
                 retro.blit_integer(gpu, &cv, dest);
             } else {
                 retro.blit_to(gpu, &cv);

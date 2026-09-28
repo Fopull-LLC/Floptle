@@ -22,6 +22,10 @@ pub struct Retro {
     pipeline: wgpu::RenderPipeline,
     bind_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    /// Bilinear, for a render scale: a fraction of the window upscaled
+    /// smoothly rather than into chunky pixels.
+    smooth_sampler: wgpu::Sampler,
+    smooth: bool,
     bind: wgpu::BindGroup,
 }
 
@@ -98,10 +102,39 @@ impl Retro {
             ..Default::default()
         });
 
+        let smooth_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("render-scale-samp"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
         let (color_view, depth_tex, depth_view, width, height) = make_targets(gpu, internal_height);
         let bind = make_bind(device, &bind_layout, &color_view, &sampler);
 
-        Self { color_view, depth_tex, depth_view, width, height, pipeline, bind_layout, sampler, bind }
+        Self {
+            color_view,
+            depth_tex,
+            depth_view,
+            width,
+            height,
+            pipeline,
+            bind_layout,
+            sampler,
+            smooth_sampler,
+            smooth: false,
+            bind,
+        }
+    }
+
+    /// Upscale smoothly (a render scale) or in hard-edged pixels (retro).
+    pub fn set_smooth(&mut self, gpu: &Gpu, smooth: bool) {
+        if self.smooth == smooth {
+            return;
+        }
+        self.smooth = smooth;
+        let s = if smooth { &self.smooth_sampler } else { &self.sampler };
+        self.bind = make_bind(&gpu.device, &self.bind_layout, &self.color_view, s);
     }
 
     /// Rebuild the target at a new internal height and/or window aspect.
@@ -128,7 +161,8 @@ impl Retro {
         width: u32,
         height: u32,
     ) {
-        self.bind = make_bind(&gpu.device, &self.bind_layout, &color_view, &self.sampler);
+        let s = if self.smooth { &self.smooth_sampler } else { &self.sampler };
+        self.bind = make_bind(&gpu.device, &self.bind_layout, &color_view, s);
         self.color_view = color_view;
         self.depth_tex = depth_tex;
         self.depth_view = depth_view;

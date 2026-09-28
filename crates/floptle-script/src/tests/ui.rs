@@ -27,6 +27,7 @@ fn a_menu_opens_showing_the_settings_the_game_actually_has() {
         retro: true,
         retro_height: 240,
         retro_integer_scale: false,
+        render_scale: 1.0,
         fullscreen: false,
     });
     host.run(&mut world, &dir, 0.1, 0.1);
@@ -70,6 +71,7 @@ fn a_settings_menu_reads_back_what_it_just_set() {
         retro: true,
         retro_height: 240,
         retro_integer_scale: false,
+        render_scale: 1.0,
         fullscreen: false,
     });
     host.run(&mut world, &dir, 0.1, 0.1);

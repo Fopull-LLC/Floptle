@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 154
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 156
 - [node — transform & body fields](#node--transform--body-fields) — 38
 - [node — methods & handles](#node--methods--handles) — 31
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -154,6 +154,10 @@ app.fullscreen() → whether the game's window covers the screen. The real state
 
 app.quit() — end the game. What that means depends on where it is running, and they are genuinely different things: an EXPORTED BUILD closes (your save.* data is flushed first, since somebody quitting from a settings menu expects the setting they just changed to have been kept); the EDITOR stops Play and says so in the Console, deliberately NOT a process exit — an editor that closed because a game under test called quit would take your unsaved work with it; `floptle run` ends the run where it stands and reports that it stopped early.
 
+### `app.renderScale`
+
+app.renderScale() → the fraction of the window the 3D scene renders at, 0.25–1 (1 = native). The project's render_scale until a script sets it.
+
 ### `app.retro`
 
 app.retro() → whether the retro presentation is on: the game composites at a small internal resolution and upscales, which is what gives it chunky pixels.
@@ -169,6 +173,10 @@ app.retroIntegerScale() → whether the retro composite is upscaled by a WHOLE n
 ### `app.setFullscreen`
 
 app.setFullscreen(true) — cover the screen (borderless, on the monitor the window is on; no mode switch), or false to go back to a window. In an EXPORTED BUILD it applies this frame. In the EDITOR the window is the editor's, so it is left alone and the Console says so once — the same honesty app.quit() has about where it is running. For this session only; persist it with save.*.
+
+### `app.setRenderScale`
+
+app.setRenderScale(0.67) — render the 3D scene at that fraction of the window and upscale it smoothly; the game's UI stays at full resolution, so text stays sharp. The one setting that rescues a weak GPU: on one shipped level every lighting feature together was worth 9% of the GPU time and 0.67 was worth 44%. 0.25–1; outside that RAISES. Independent of retro mode (which, when on, decides the resolution itself). For this session only; persist it with save.*.
 
 ### `app.setRetro`
 
