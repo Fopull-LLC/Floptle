@@ -934,6 +934,17 @@ impl Editor {
                     self.physics_paused = on;
                     self.script_host.set_physics_paused(on);
                 }
+                // A node a script switched off takes its static colliders with
+                // it, and brings them back when switched on.
+                if self.script_host.take_enabled_toggled()
+                    && let Some(sim) = self.sim.as_mut()
+                {
+                    let world = &self.world;
+                    sim.sync_parked_colliders(|eid| {
+                        world.entity_with::<floptle_core::transform::Transform>(eid)
+                            .is_some_and(|e| floptle_core::is_disabled(world, e))
+                    });
+                }
                 if let Some(sim) = self.sim.as_mut() {
                     if self.physics_paused {
                         sim.clear_held_forces();

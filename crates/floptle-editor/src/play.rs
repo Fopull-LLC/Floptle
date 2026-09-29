@@ -61,6 +61,14 @@ impl Editor {
     #[cfg(not(feature = "devices"))]
     fn audio_stop_play(&mut self) {}
 
+    #[cfg(feature = "devices")]
+    fn audio_forget(&mut self, gone: &std::collections::HashSet<Entity>) {
+        self.audio.forget_entities(gone);
+    }
+
+    #[cfg(not(feature = "devices"))]
+    fn audio_forget(&mut self, _gone: &std::collections::HashSet<Entity>) {}
+
     /// Build the physics gravity field from the scene's GravityVolume nodes: `Down`
     /// volumes add uniform −Y gravity (the level's base), `Radial` volumes add a planet
     /// gravity well at the node. No GravityVolume node → zero gravity (a space/zero-g
@@ -304,99 +312,125 @@ impl Editor {
         // where a disabled node was is the bug people spend an evening on.
         ents.retain(|e| !floptle_core::is_disabled(&self.world, *e));
         for e in ents {
-            let wt = floptle_core::world_transform(&self.world, e);
-            // Anchor each collider on its own node (full f64) and bake geometry
-            // relative to it — the residuals stay small and exact no matter how far
-            // out the node sits; the sim re-anchors them per rebase.
-            let anchor = wt.translation;
-            let s = wt.scale;
-            // The node's identity for this collider: resolved layer bit (the
-            // collision matrix + masked raycasts filter with it), entity (what
-            // touch events name), and the trigger flag (sensor: events only).
-            let layer = sim.tag_for(&self.world, e);
-            match self.world.get::<Matter>(e) {
-                Some(Matter::Mesh { asset_path }) => {
-                    let path = asset_path.clone();
-                    // Resolved against the project, never read as a bare
-                    // relative path: in a shipped build the CWD is wherever the
-                    // player launched from, and the project rides in `assets/`.
-                    // Reading it raw made every mesh collider in an export fail
-                    // to load — a level whose floors and walls are simply not
-                    // there, on a stderr nobody sees.
-                    let file = crate::project::resolve_asset_path(&self.project_root, &path);
-                    let Ok(model) = floptle_assets::gltf_import::import(&file) else {
-                        floptle_say::say_err!("collidable mesh: failed to load {path}");
-                        continue;
-                    };
-                    // Scale + rotate locally (f32 is exact here — model-sized numbers);
-                    // the node's translation lives in the f64 anchor, never the verts.
-                    let m = Mat4::from_scale_rotation_translation(s, wt.rotation, Vec3::ZERO);
-                    let mut verts: Vec<Vec3> = Vec::new();
-                    let mut indices: Vec<u32> = Vec::new();
-                    for part in &model.parts {
-                        let base = verts.len() as u32;
-                        verts.extend(part.mesh.vertices.iter().map(|v| m.transform_point3(Vec3::from(v.pos))));
-                        indices.extend(part.mesh.indices.iter().map(|i| i + base));
-                    }
-                    sim.add_static_mesh(anchor, &verts, &indices, layer);
+            self.add_static_collider_for(sim, e);
+
+        }
+    }
+
+    /// The static collider for one node, as [`Self::add_static_colliders`]
+    /// builds it for the whole scene: for a node that arrives mid-play (a
+    /// spawned prefab, an additive layer) without rebuilding the sim, which
+    /// would re-import every collidable model in the level.
+    pub(crate) fn add_static_collider_for(&self, sim: &mut floptle_physics::Sim, e: Entity) {
+        let wt = floptle_core::world_transform(&self.world, e);
+        // Anchor each collider on its own node (full f64) and bake geometry
+        // relative to it — the residuals stay small and exact no matter how far
+        // out the node sits; the sim re-anchors them per rebase.
+        let anchor = wt.translation;
+        let s = wt.scale;
+        // The node's identity for this collider: resolved layer bit (the
+        // collision matrix + masked raycasts filter with it), entity (what
+        // touch events name), and the trigger flag (sensor: events only).
+        let layer = sim.tag_for(&self.world, e);
+        match self.world.get::<Matter>(e) {
+            Some(Matter::Mesh { asset_path }) => {
+                let path = asset_path.clone();
+                // Resolved against the project, never read as a bare
+                // relative path: in a shipped build the CWD is wherever the
+                // player launched from, and the project rides in `assets/`.
+                // Reading it raw made every mesh collider in an export fail
+                // to load — a level whose floors and walls are simply not
+                // there, on a stderr nobody sees.
+                let file = crate::project::resolve_asset_path(&self.project_root, &path);
+                let Ok(model) = floptle_assets::gltf_import::import(&file) else {
+                    floptle_say::say_err!("collidable mesh: failed to load {path}");
+                    return;
+                };
+                // Scale + rotate locally (f32 is exact here — model-sized numbers);
+                // the node's translation lives in the f64 anchor, never the verts.
+                let m = Mat4::from_scale_rotation_translation(s, wt.rotation, Vec3::ZERO);
+                let mut verts: Vec<Vec3> = Vec::new();
+                let mut indices: Vec<u32> = Vec::new();
+                for part in &model.parts {
+                    let base = verts.len() as u32;
+                    verts.extend(part.mesh.vertices.iter().map(|v| m.transform_point3(Vec3::from(v.pos))));
+                    indices.extend(part.mesh.indices.iter().map(|i| i + base));
                 }
-                // Map meshes: the kernel geometry is the collider (all slots
-                // concatenated) — a blockout wall collides exactly where it draws.
-                Some(Matter::MapMesh { id }) => {
-                    let Some(mesh) = self.maps.meshes.get(id) else { continue };
-                    let m = Mat4::from_scale_rotation_translation(s, wt.rotation, Vec3::ZERO);
-                    // Per-face material slots ride along, so a query can answer
-                    // what it hit and not only which node — one big building
-                    // with nine slots is one node, and the node's own material
-                    // says "stone" for its grass too.
-                    let (verts, indices, tri_slot, slots) =
-                        crate::map_edit::map_collision_geometry(mesh, m);
-                    if indices.len() >= 3 {
-                        sim.add_static_mesh_labelled(
-                            anchor, &verts, &indices, &tri_slot, slots, layer,
-                        );
-                    }
+                sim.add_static_mesh(anchor, &verts, &indices, layer);
+            }
+            // Map meshes: the kernel geometry is the collider (all slots
+            // concatenated) — a blockout wall collides exactly where it draws.
+            Some(Matter::MapMesh { id }) => {
+                let Some(mesh) = self.maps.meshes.get(id) else { return };
+                let m = Mat4::from_scale_rotation_translation(s, wt.rotation, Vec3::ZERO);
+                // Per-face material slots ride along, so a query can answer
+                // what it hit and not only which node — one big building
+                // with nine slots is one node, and the node's own material
+                // says "stone" for its grass too.
+                let (verts, indices, tri_slot, slots) =
+                    crate::map_edit::map_collision_geometry(mesh, m);
+                if indices.len() >= 3 {
+                    sim.add_static_mesh_labelled(
+                        anchor, &verts, &indices, &tri_slot, slots, layer,
+                    );
                 }
-                // Primitive geometry → matching analytic collider, sized to match the
-                // mesh the renderer draws (cube half 0.7, sphere r 0.85, capsule r/half 0.5).
-                // A tilemap's solid tiles, merged into as few boxes as the shape
-                // allows (`floptle_tiles::collision_boxes`). Two reasons it is
-                // merged rather than one box per square:
-                //
-                // 1. A 100x100 solid floor is 10,000 squares and one box. Ten
-                //    thousand static colliders is more than most whole 3D levels
-                //    have, and the sim rebuilds its index over all of them.
-                // 2. A character sliding along a row of separate boxes catches on
-                //    the seams between them — each box's face is its own plane, and
-                //    at a shallow angle the depenetration pass ticks across each
-                //    boundary. One merged box has no interior seams.
-                //
-                // Depth is one tile: a 2D game's collider has to have some depth to
-                // be a box, and a tile's own size is the only defensible choice —
-                // it keeps a character with any thickness at all inside the layer
-                // rather than passing through a paper-thin wall.
-                Some(m @ Matter::Tilemap { .. }) => {
-                    crate::tile_edit::add_tilemap_colliders(sim, &self.tiles, &wt, m, layer);
+            }
+            // Primitive geometry → matching analytic collider, sized to match the
+            // mesh the renderer draws (cube half 0.7, sphere r 0.85, capsule r/half 0.5).
+            // A tilemap's solid tiles, merged into as few boxes as the shape
+            // allows (`floptle_tiles::collision_boxes`). Two reasons it is
+            // merged rather than one box per square:
+            //
+            // 1. A 100x100 solid floor is 10,000 squares and one box. Ten
+            //    thousand static colliders is more than most whole 3D levels
+            //    have, and the sim rebuilds its index over all of them.
+            // 2. A character sliding along a row of separate boxes catches on
+            //    the seams between them — each box's face is its own plane, and
+            //    at a shallow angle the depenetration pass ticks across each
+            //    boundary. One merged box has no interior seams.
+            //
+            // Depth is one tile: a 2D game's collider has to have some depth to
+            // be a box, and a tile's own size is the only defensible choice —
+            // it keeps a character with any thickness at all inside the layer
+            // rather than passing through a paper-thin wall.
+            Some(m @ Matter::Tilemap { .. }) => {
+                crate::tile_edit::add_tilemap_colliders(sim, &self.tiles, &wt, m, layer);
+            }
+            Some(Matter::Primitive { shape, .. }) => match shape {
+                floptle_core::Shape::Cube => {
+                    sim.add_static_box(anchor, Vec3::new(0.7 * s.x, 0.7 * s.y, 0.7 * s.z), wt.rotation, layer);
                 }
-                Some(Matter::Primitive { shape, .. }) => match shape {
-                    floptle_core::Shape::Cube => {
-                        sim.add_static_box(anchor, Vec3::new(0.7 * s.x, 0.7 * s.y, 0.7 * s.z), wt.rotation, layer);
-                    }
-                    floptle_core::Shape::Plane => {
-                        // Flat in Z → a thin box so you can stand on / collide with the quad.
-                        sim.add_static_box(anchor, Vec3::new(0.7 * s.x, 0.7 * s.y, 0.02 * s.z.max(1.0)), wt.rotation, layer);
-                    }
-                    floptle_core::Shape::Sphere => {
-                        sim.add_static_sphere(anchor, 0.85 * s.max_element(), layer);
-                    }
-                    floptle_core::Shape::Capsule => {
-                        let up = wt.rotation * Vec3::Y;
-                        sim.add_static_capsule(anchor, up, 0.5 * s.y, 0.5 * s.x.max(s.z), layer);
-                    }
-                },
-                _ => {}
+                floptle_core::Shape::Plane => {
+                    // Flat in Z → a thin box so you can stand on / collide with the quad.
+                    sim.add_static_box(anchor, Vec3::new(0.7 * s.x, 0.7 * s.y, 0.02 * s.z.max(1.0)), wt.rotation, layer);
+                }
+                floptle_core::Shape::Sphere => {
+                    sim.add_static_sphere(anchor, 0.85 * s.max_element(), layer);
+                }
+                floptle_core::Shape::Capsule => {
+                    let up = wt.rotation * Vec3::Y;
+                    sim.add_static_capsule(anchor, up, 0.5 * s.y, 0.5 * s.x.max(s.z), layer);
+                }
+            },
+            _ => {}
+        }
+    }
+
+    /// Give every node in `ents` that is static world geometry (Collidable or
+    /// a mesh collider, no RigidBody, switched on) its collider.
+    pub(crate) fn add_static_colliders_for(&mut self, ents: &[Entity]) {
+        let Some(mut sim) = self.sim.take() else { return };
+        for &e in ents {
+            let geometry = self.world.get::<floptle_core::Collidable>(e).is_some()
+                || self.world.get::<floptle_core::MeshCollider>(e).is_some();
+            if geometry
+                && self.world.get::<floptle_core::RigidBody>(e).is_none()
+                && !floptle_core::is_disabled(&self.world, e)
+            {
+                self.add_static_collider_for(&mut sim, e);
             }
         }
+        self.sim = Some(sim);
     }
 
     /// Build the play sim under the project'S layer table: terrain + static
@@ -772,6 +806,11 @@ impl Editor {
         // Marks belong to the run that laid them.
         self.script_host.clear_decals();
         self.sync_decals();
+        // Additive layers' map geometry belongs to the session that loaded them.
+        let tags: Vec<String> = self.layer_maps.keys().cloned().collect();
+        for tag in tags {
+            self.drop_layer_maps(&tag);
+        }
         self.script_gizmos.clear();
         self.script_lines.clear();
         self.script_rects.clear();
@@ -1335,14 +1374,19 @@ impl Editor {
     /// tagged with the scene they came from, and wired into the running sim the
     /// same way a `spawn(...)`ed prefab is — which is what makes this cheap
     /// enough to use for streaming a level in pieces.
-    pub(crate) fn perform_scene_additive(&mut self, req: &str, environment: bool) {
+    pub(crate) fn perform_scene_additive(
+        &mut self,
+        req: &str,
+        environment: bool,
+        offset: Option<[f64; 3]>,
+    ) -> Vec<floptle_core::Entity> {
         let Some(path) = self.resolve_scene_request(req) else {
             self.console.push(
                 floptle_script::LogLevel::Error,
                 format!("scene.load(\"{req}\", {{additive = true}}): no such scene (looked in scenes/)"),
                 None,
             );
-            return;
+            return Vec::new();
         };
         let doc = match floptle_scene::load(&path) {
             Ok(d) => d,
@@ -1352,7 +1396,7 @@ impl Editor {
                     format!("scene.load(\"{req}\", {{additive = true}}): {e}"),
                     None,
                 );
-                return;
+                return Vec::new();
             }
         };
         // The TAG is the request string as written, so `scene.unload` takes the
@@ -1372,8 +1416,21 @@ impl Editor {
                 format!("scene.load(\"{req}\", {{additive = true}}): the scene has no nodes"),
                 None,
             );
-            return;
+            return Vec::new();
         }
+        // `{ offset = vec3 }`: the layer's roots move, and everything under
+        // them rides along.
+        if let Some(o) = offset {
+            let o = floptle_core::math::DVec3::from(o);
+            for &e in &ents {
+                if self.world.get::<floptle_core::Parent>(e).is_none()
+                    && let Some(t) = self.world.get_mut::<floptle_core::transform::Transform>(e)
+                {
+                    t.translation += o;
+                }
+            }
+        }
+        self.adopt_layer_maps(&path, &tag, &ents);
         // Meshes need GPU parts before they can draw; map/paint sidecars are
         // keyed by scene name and belong to the base scene, so an additive
         // layer does not touch them.
@@ -1389,18 +1446,16 @@ impl Editor {
                 sim.add_compound_for(e, &self.world);
             }
         }
-        // Static colliders and gravity sources are built wholesale from the
-        // world, so they need the rebuild — which preserves live velocities and
+        // Static colliders go in one node at a time. A gravity source is part of
+        // a field built wholesale from the world, so a layer that brings one
+        // still needs the rebuild — which preserves live velocities and
         // compound state (see `rebuild_sim`), so nothing in flight is disturbed.
         if ents.iter().any(|&e| {
-            self.world.get::<floptle_core::Collidable>(e).is_some()
-                || self.world.get::<floptle_core::MeshCollider>(e).is_some()
-                || matches!(
-                    self.world.get::<floptle_core::Matter>(e),
-                    Some(floptle_core::Matter::GravityVolume { .. })
-                )
+            matches!(self.world.get::<floptle_core::Matter>(e), Some(floptle_core::Matter::GravityVolume { .. }))
         }) {
             self.rebuild_sim();
+        } else {
+            self.add_static_colliders_for(&ents);
         }
         // Audio sources in the layer start now; the running scene's voices are
         // untouched (`start_play` is additive over live voices).
@@ -1415,6 +1470,7 @@ impl Editor {
         // frame's pass, like any node that appears mid-play. `onLoaded` fires
         // here anyway: the nodes exist, which is what the caller asked about.
         self.script_host.fire_scene_loaded(&mut self.world, &tag, true);
+        ents
     }
 
     /// Hand the world's environment to an additive layer
@@ -1518,23 +1574,36 @@ impl Editor {
             );
             return;
         }
+        // Everything keyed by these nodes has to let go of them, and nothing
+        // else: restarting every sound and effect in the world to drop one
+        // layer's was a hitch every time a level unloaded. A gravity source is
+        // part of a field built from the whole world, so a layer carrying one
+        // still rebuilds the sim.
+        let gone: std::collections::HashSet<floptle_core::Entity> = doomed.iter().copied().collect();
+        let gravity = doomed.iter().any(|&e| {
+            matches!(self.world.get::<floptle_core::Matter>(e), Some(floptle_core::Matter::GravityVolume { .. }))
+        });
+        if !gravity && let Some(sim) = self.sim.as_mut() {
+            for e in &doomed {
+                sim.remove_compound(e.index());
+                sim.remove_body(e.index());
+            }
+        }
+        self.audio_forget(&gone);
+        self.vfx.forget_entities(&gone);
+        self.anim.forget_entities(&gone);
         let n = floptle_scene::despawn_tagged(&mut self.world, &tag);
         // If this layer held the environment, the base scene's comes back —
         // after the despawn, so the nodes waking up are the only ones left.
         if self.env_layer.as_ref().is_some_and(|(t, _, _)| *t == tag) {
             self.return_environment();
         }
-        // Everything keyed by entity has to let go: physics bodies, audio
-        // voices, effects, and the scripts that were running on them.
-        self.rebuild_sim();
-        self.audio_stop_play();
-        self.audio_start_play();
-        self.vfx.clear_instances();
-        self.vfx.start_play(&self.world);
-        self.reset_anim_bindings();
+        self.drop_layer_maps(&tag);
+        if gravity {
+            self.rebuild_sim();
+        }
         self.paint_meshes.clear();
         self.mesh_wire_cache.clear();
-        self.register_scene_meshes();
         self.selection.retain(|e| self.world.is_alive(*e));
         self.console.push(
             floptle_script::LogLevel::Debug,

@@ -94,6 +94,34 @@ impl AudioSystem {
     /// and a number a game reads to check its own budget should not count the
     /// editor auditioning a file. A sound still waiting for its clip is not
     /// mixing yet, so it is not counted either.
+    /// Let go of everything the given nodes were playing: their AudioSource
+    /// voices and the script sounds following them. For nodes leaving
+    /// mid-play (`scene.unload`) without stopping every other sound.
+    pub fn forget_entities(&mut self, gone: &std::collections::HashSet<Entity>) {
+        let mut stop: Vec<VoiceId> = Vec::new();
+        self.source_voices.retain(|e, v| {
+            let keep = !gone.contains(e);
+            if !keep {
+                stop.push(*v);
+            }
+            keep
+        });
+        self.source_waiting.retain(|e, _| !gone.contains(e));
+        self.source_cache.retain(|e, _| !gone.contains(e));
+        self.sounds.retain(|_, s| {
+            let keep = !s.follow.is_some_and(|f| gone.contains(&f));
+            if !keep && let Some(v) = s.live() {
+                stop.push(v);
+            }
+            keep
+        });
+        if let Some(eng) = self.engine() {
+            for v in stop {
+                eng.stop(v);
+            }
+        }
+    }
+
     pub fn live_voices(&self) -> usize {
         self.source_voices.len() + self.sounds.values().filter(|s| s.live().is_some()).count()
     }

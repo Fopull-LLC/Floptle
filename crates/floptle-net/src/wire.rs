@@ -362,6 +362,15 @@ pub enum Msg {
     /// measures it the same way over every transport there will ever be.
     Ping { id: u32 },
     Pong { id: u32 },
+    /// Server → client: load `scene` additively as the layer `tag`, offset by
+    /// `offset`, its `Networked` nodes numbered from `id_base` in node order —
+    /// the numbering the server gave them, so the ids agree without sending
+    /// one per node. Sent when the server loads a layer and, in order, to
+    /// every late joiner. Appended at the end: postcard numbers variants by
+    /// position, and every variant above keeps its number.
+    LayerLoad { epoch: u8, tag: String, scene: String, offset: [f64; 3], environment: bool, id_base: u64 },
+    /// Server → client: the layer `tag` is gone.
+    LayerUnload { epoch: u8, tag: String },
 }
 
 /// **What each kind of message is costing on the wire**.
@@ -451,6 +460,8 @@ impl Msg {
             Msg::Voice { .. } => "Voice",
             Msg::Ping { .. } => "Ping",
             Msg::Pong { .. } => "Pong",
+            Msg::LayerLoad { .. } => "LayerLoad",
+            Msg::LayerUnload { .. } => "LayerUnload",
         }
     }
 
@@ -462,6 +473,25 @@ impl Msg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A message's number is its place in the enum**, and postcard sends
+    /// only the number. A variant inserted above these renumbers every one
+    /// below it, and an older peer then reads a layer load as something else
+    /// without an error. New variants go at the end; this pins the last three.
+    #[test]
+    fn the_newest_messages_keep_their_numbers() {
+        assert_eq!(Msg::Pong { id: 1 }.encode()[0], 23);
+        let load = Msg::LayerLoad {
+            epoch: 0,
+            tag: "a".into(),
+            scene: "a".into(),
+            offset: [0.0; 3],
+            environment: false,
+            id_base: 1,
+        };
+        assert_eq!(load.encode()[0], 24);
+        assert_eq!(Msg::LayerUnload { epoch: 0, tag: "a".into() }.encode()[0], 25);
+    }
 
     #[test]
     fn round_trips() {

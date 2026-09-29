@@ -654,6 +654,12 @@ impl AnimSystem {
     }
 
     /// Drop every live runtime (Play start/stop, scene load).
+    /// Drop the animators on nodes that are leaving (`scene.unload`).
+    pub fn forget_entities(&mut self, gone: &std::collections::HashSet<Entity>) {
+        self.instances.retain(|e, _| !gone.contains(e));
+        self.poses.retain(|e, _| !gone.contains(e));
+    }
+
     pub fn clear_instances(&mut self) {
         self.instances.clear();
         self.poses.clear();

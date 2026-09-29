@@ -197,7 +197,7 @@ type UiBindings = Rc<RefCell<Vec<UiBinding>>>;
 /// requests and all three must happen. A full swap is still last-one-wins —
 /// the driver stops at the first one it performs, since everything queued
 /// behind it named the world that just stopped existing.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SceneRequest {
     /// `scene.load(name)` — replace the world.
     Load { name: String },
@@ -209,7 +209,12 @@ pub enum SceneRequest {
     /// disabled rather than destroyed and come back on `unload`. Without it an
     /// additive layer brings nodes only, and a second Skybox would leave the
     /// look decided by query order.
-    Additive { name: String, environment: bool },
+    ///
+    /// `offset` moves the layer's root nodes by that much, so one level can be
+    /// placed anywhere (`{ offset = vec3(2500, 0, 0) }`). `replicate` (true
+    /// unless a script says false) has a hosting server tell every client to
+    /// load the same layer; a client's own layers stay its own.
+    Additive { name: String, environment: bool, offset: Option<[f64; 3]>, replicate: bool },
     /// `scene.unload(name)` — take an additive layer away again.
     Unload { name: String },
 }
@@ -728,6 +733,9 @@ pub struct ScriptHost {
     /// `node.enabled = …` — switches the node (and its subtree) off/on. Separate from
     /// `visible`: that one only stops the draw, this also stops physics and scripts.
     enabled_changes: Rc<RefCell<HashMap<u32, bool>>>,
+    /// A `node.enabled` write landed since the driver last asked: its
+    /// colliders have to leave the sim (or come back).
+    enabled_toggled: std::cell::Cell<bool>,
     /// `node.persistent = …` — whether the node (and its subtree) survives a
     /// scene swap. Applied as a `Persistent` marker; absence means "ordinary".
     persistent_changes: Rc<RefCell<HashMap<u32, bool>>>,

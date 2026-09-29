@@ -88,6 +88,9 @@ pub struct Sim {
     /// per-substep lists clear on each `world.step`; this accumulates them
     /// across the tick) — the raw material for per-part impact attribution.
     tick_cc: Vec<crate::compound::CompoundContact>,
+    /// Static colliders of switched-off nodes, out of the solver and every
+    /// query until their node comes back (see [`Self::sync_parked_colliders`]).
+    parked: Vec<crate::AnchoredCollider>,
 }
 
 /// The last known contact between a touching pair (world coordinates, so a
@@ -347,7 +350,50 @@ impl Sim {
             touching: std::collections::HashMap::new(),
             events: Vec::new(),
             tick_cc: Vec::new(),
+            parked: Vec::new(),
         }
+    }
+
+    /// Take the static colliders of switched-off nodes out of the world, and
+    /// put back those whose node is on again. `off(eid)` says whether node
+    /// `eid` is switched off. Returns whether anything moved.
+    ///
+    /// Switching a node off used to leave its colliders standing: the sim is
+    /// built once, from the nodes that were on then, so a level turned off by
+    /// a script kept its invisible floors and walls. Rebuilding the sim to
+    /// drop them re-imports every collidable model, which is a hitch; parking
+    /// costs one reindex of what is left.
+    pub fn sync_parked_colliders(&mut self, off: impl Fn(u32) -> bool) -> bool {
+        let is_off = |c: &crate::AnchoredCollider| c.eid.is_some_and(&off);
+        let leaving = self.world.colliders.iter().any(is_off);
+        let returning = self.parked.iter().any(|c| !is_off(c));
+        if !leaving && !returning {
+            return false;
+        }
+        let origin = self.world.origin;
+        let mut live = Vec::with_capacity(self.world.colliders.len());
+        let mut parked = Vec::with_capacity(self.parked.len());
+        for c in std::mem::take(&mut self.world.colliders) {
+            if is_off(&c) { parked.push(c) } else { live.push(c) }
+        }
+        for mut c in std::mem::take(&mut self.parked) {
+            if is_off(&c) {
+                parked.push(c);
+            } else {
+                // The world may have rebased while it was away.
+                let anchor = c.anchor;
+                c.re_anchor(anchor, origin);
+                live.push(c);
+            }
+        }
+        self.parked = parked;
+        self.world.set_colliders(live);
+        true
+    }
+
+    /// How many static colliders are parked for switched-off nodes.
+    pub fn parked_colliders(&self) -> usize {
+        self.parked.len()
     }
 
     /// Build every compound assembly: for each Dynamic `RigidBody` with

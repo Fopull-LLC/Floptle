@@ -1474,6 +1474,34 @@ impl Editor {
         self.script_host.set_script_filter(skip);
     }
 
+    /// Client: act on the layer loads and unloads the server announced.
+    fn net_client_apply_layers(&mut self, my_peer: Option<floptle_net::PeerId>) {
+        let events = self.net_play_client.as_mut().map(|cs| cs.take_layer_events()).unwrap_or_default();
+        if events.is_empty() {
+            return;
+        }
+        for ev in events {
+            match ev {
+                floptle_net::LayerEvent::Load { tag, scene, offset, environment, id_base } => {
+                    let ents = self.perform_scene_additive(&scene, environment, Some(offset));
+                    if let Some(cs) = self.net_play_client.as_mut() {
+                        cs.bind_layer(&self.world, &tag, &scene, offset, id_base, &ents);
+                    }
+                }
+                floptle_net::LayerEvent::Unload { tag } => {
+                    if let Some(cs) = self.net_play_client.as_mut() {
+                        cs.drop_layer(&tag);
+                    }
+                    self.perform_scene_unload(&tag);
+                }
+            }
+        }
+        // The layer's networked nodes are snapshot-driven here, and one the
+        // server handed to us is ours to predict.
+        let owner = if self.net_hub.is_some() { Some(1) } else { my_peer };
+        self.net_client_side_setup(owner, false);
+    }
+
     /// A queued `scene.load(...)` from a script, routed by session role:
     /// offline = plain switch; hosting = switch locally, announce to every
     /// client (they load + rebind), rebuild the session against the new scene;
@@ -1486,11 +1514,22 @@ impl Editor {
         // announced scene, its NetIds, its slot order) is untouched. A client
         // may do them; a swap is still the server's alone.
         match req {
-            SceneRequest::Additive { name, environment } => {
-                self.perform_scene_additive(name, *environment);
+            SceneRequest::Additive { name, environment, offset, replicate } => {
+                let ents = self.perform_scene_additive(name, *environment, *offset);
+                // A hosting server's layer is the session's: every client loads
+                // it, late joiners too, and its Networked nodes replicate.
+                if *replicate
+                    && !ents.is_empty()
+                    && let Some(s) = self.net_server.as_mut()
+                {
+                    s.load_layer(&self.world, name.trim(), name.trim(), offset.unwrap_or([0.0; 3]), *environment, &ents);
+                }
                 return;
             }
             SceneRequest::Unload { name } => {
+                if let Some(s) = self.net_server.as_mut() {
+                    s.unload_layer(name.trim());
+                }
                 self.perform_scene_unload(name);
                 return;
             }
@@ -2354,6 +2393,8 @@ impl Editor {
                 Some(floptle_core::Matter::Mesh { .. })
             );
         }
+        let arrived: Vec<Entity> = spawned.iter().map(|(_, e, _)| *e).collect();
+        self.add_static_colliders_for(&arrived);
         if mesh {
             self.load_script_swapped_models();
         }
@@ -2754,6 +2795,9 @@ impl Editor {
                 self.net_stop("the server switched to a scene this project doesn't have");
             }
         }
+        // Additive layers the server loaded or unloaded: load the same scene
+        // and number its Networked nodes the server's way, or take it away.
+        self.net_client_apply_layers(my_peer);
         if let Some((me, peers, delay, seed)) = rollback_start {
             self.net_rollback_start(me, peers, delay, seed);
         }
@@ -2970,6 +3014,7 @@ impl Editor {
                 sim.add_body_for(e, &self.world);
             }
         }
+        self.add_static_colliders_for(&ents);
         // A remote player's avatar (`net.spawn(..., { owner = peer })` +
         // Predicted): its scripts run with the owner's replayed input, not
         // the host's keyboard.

@@ -349,6 +349,44 @@ A HUD reads `view().hp`, an animator picks its clip from `view().state`, and a
 camera shake keys off `view()`. Offline and on the server `view()` is the
 locals; on the owner and on everyone else it is the server's word.
 
+### Levels in one session: additive layers
+
+A hub with portals into separate levels doesn't have to be one giant scene.
+Load each level as a layer on top of the hub, on the server, and every client
+loads it too:
+
+```lua
+-- on the server, when a player steps into the cave portal
+scene.load("levels/cave", { additive = true, offset = vec3(2500, 0, 0) })
+
+-- and when the last player leaves it
+scene.unload("levels/cave")
+```
+
+What that does:
+
+- **Every client follows.** A player who joins later is told about every
+  layer the session is running, in order, and loads them too. Nobody
+  reconnects and nothing reloads.
+- **The layer's Networked nodes replicate.** The server numbers them and each
+  client numbers its copy the same way, so a lift in the cave moves for
+  everyone.
+- **`offset` places the layer.** Each level can live in its own file, worked
+  on by its own person, and still sit 2.5 km from the hub in the running game.
+- **Its map geometry comes with it.** Each layer reads its own map file, so
+  a level built with the map tools arrives whole.
+- **Unloading is cheap.** Only that layer's sounds, effects, animators and
+  colliders go, and the rest of the world keeps playing.
+
+`replicate = false` keeps a layer on the server alone. A client can load its
+own layers too (a cockpit interior only its player sees), and those stay its
+own. Loading a new scene with `scene.load(name)` still replaces everything,
+layers included.
+
+To switch a whole level off without unloading it, set `node.enabled = false`
+on its root. Its static colliders leave physics and rays with it, and come back
+when it's switched on.
+
 ### Lag-compensated combat: `withInput` + `net.rewind`
 
 On your screen, every *other* player is rendered a beat in the past (the

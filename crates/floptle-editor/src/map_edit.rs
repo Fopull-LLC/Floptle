@@ -569,6 +569,65 @@ impl Editor {
         }
     }
 
+    /// Bring an additive layer's map geometry into the store: the layer's own
+    /// sidecar (`maps/<scene>.map.ron`), each of its map nodes given a fresh id
+    /// so it cannot collide with the base scene's. Call before the layer's
+    /// colliders are built — a map collider is read from this store.
+    ///
+    /// A layer used to bring its map nodes with no geometry at all: sidecars
+    /// were keyed by the base scene, so each one became a placeholder box.
+    pub(crate) fn adopt_layer_maps(&mut self, scene: &std::path::Path, tag: &str, ents: &[floptle_core::Entity]) {
+        let has_maps = ents
+            .iter()
+            .any(|&e| matches!(self.world.get::<floptle_core::Matter>(e), Some(floptle_core::Matter::MapMesh { .. })));
+        if !has_maps {
+            return;
+        }
+        let stem = scene.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let file = self.project_root.join("maps").join(format!("{stem}.map.ron"));
+        let loaded: BTreeMap<u32, MapMesh> = match floptle_vfs::read_to_string(&file) {
+            Ok(text) => match ron::from_str(&text) {
+                Ok(m) => m,
+                Err(e) => {
+                    self.console.push(
+                        floptle_script::LogLevel::Error,
+                        format!("▦ layer {tag}: map sidecar {} failed to parse: {e}", file.display()),
+                        None,
+                    );
+                    return;
+                }
+            },
+            Err(_) => BTreeMap::new(),
+        };
+        let mut fresh_ids = Vec::new();
+        for &e in ents {
+            let Some(floptle_core::Matter::MapMesh { id }) = self.world.get::<floptle_core::Matter>(e).cloned() else {
+                continue;
+            };
+            let Some(mesh) = loaded.get(&id).cloned() else { continue };
+            let fresh = self.next_map_id();
+            self.maps.meshes.insert(fresh, mesh);
+            self.maps.dirty.insert(fresh);
+            self.world.insert(e, floptle_core::Matter::MapMesh { id: fresh });
+            fresh_ids.push(fresh);
+        }
+        self.layer_maps.entry(tag.to_string()).or_default().extend(fresh_ids);
+    }
+
+    /// Take a layer's map geometry back out of the store (its unload, Stop).
+    pub(crate) fn drop_layer_maps(&mut self, tag: &str) {
+        let Some(ids) = self.layer_maps.remove(tag) else { return };
+        for id in ids {
+            self.maps.meshes.remove(&id);
+            self.maps.dirty.remove(&id);
+            if let (Some(parts), Some(raster)) = (self.maps.parts.remove(&id), self.raster.as_mut()) {
+                for (mid, _) in parts {
+                    raster.free_dynamic(mid);
+                }
+            }
+        }
+    }
+
     /// Reload the store for the current scene (any scene load — the same slot
     /// `adopt_terrain`/`adopt_paint` occupy). Frees the previous scene's
     /// dynamic parts first; every loaded mesh is marked dirty and re-uploads

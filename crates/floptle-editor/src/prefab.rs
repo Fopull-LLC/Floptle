@@ -507,6 +507,11 @@ impl Editor {
                     sim.add_compound_for(e, &self.world);
                 }
             }
+            // Static world geometry in the prefab (a Collidable with no
+            // RigidBody) gets its collider now. Bodies above cover only
+            // RigidBody nodes, so a spawned wall stood there to be looked at
+            // and walked through until something rebuilt the sim.
+            self.add_static_colliders_for(&ents);
         }
     }
 

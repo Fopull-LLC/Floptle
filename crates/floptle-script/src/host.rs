@@ -73,7 +73,7 @@ use crate::{
 };
 
 /// Every key a `scene.load` options table reads.
-pub(crate) const SCENE_LOAD_KEYS: &[&str] = &["additive", "environment"];
+pub(crate) const SCENE_LOAD_KEYS: &[&str] = &["additive", "environment", "offset", "replicate"];
 
 /// Render any Lua value as readable Console text: primitives plainly, engine
 /// handles by identity (`node "Player" (#4)`, `component "RigidBody" of …`),
@@ -1160,20 +1160,39 @@ fn install_scene(lua: &Lua, net: &crate::net_api::SharedNet, project_root: &Rc<R
                 // chain replace the base scene's for as long as it is
                 // loaded. Meaningless without `additive` (a full swap
                 // already brings its own), so it is read alongside it.
-                let (additive, environment) = match &opts {
+                let (additive, environment, offset, replicate) = match &opts {
                     Some(o) => {
                         crate::opts::check_keys(o, SCENE_LOAD_KEYS, "scene.load")?;
+                        let offset = match o.get::<Value>("offset")? {
+                            Value::Nil => None,
+                            v => {
+                                let p = crate::math_api::vec3_of(&v).ok_or_else(|| {
+                                    mlua::Error::runtime("scene.load: `offset` is a vec3, where the layer's origin goes")
+                                })?;
+                                Some([p.x, p.y, p.z])
+                            }
+                        };
                         (
                             crate::opts::opt_bool(o, "scene.load", "additive")?
                                 .unwrap_or(false),
                             crate::opts::opt_bool(o, "scene.load", "environment")?
                                 .unwrap_or(false),
+                            offset,
+                            crate::opts::opt_bool(o, "scene.load", "replicate")?,
                         )
                     }
-                    None => (false, false),
+                    None => (false, false, None, None),
                 };
+                // Both only mean something for a layer. Read as a full swap,
+                // `offset` would be dropped in silence and the level would
+                // arrive at the origin with everything else gone.
+                if !additive && (offset.is_some() || replicate.is_some()) {
+                    return Err(mlua::Error::runtime(
+                        "scene.load: `offset` and `replicate` are for a layer; add `additive = true`",
+                    ));
+                }
                 let req = if additive {
-                    crate::SceneRequest::Additive { name, environment }
+                    crate::SceneRequest::Additive { name, environment, offset, replicate: replicate.unwrap_or(true) }
                 } else {
                     crate::SceneRequest::Load { name }
                 };
@@ -2822,6 +2841,7 @@ impl ScriptHost {
             visible_changes: shared.visible_changes.clone(),
             cast_shadow_changes: shared.cast_shadow_changes.clone(),
             enabled_changes: shared.enabled_changes.clone(),
+            enabled_toggled: std::cell::Cell::new(false),
             persistent_changes: shared.persistent_changes.clone(),
             layer_changes: shared.layer_changes.clone(),
             tag_changes: shared.tag_changes.clone(),
@@ -3896,6 +3916,11 @@ impl ScriptHost {
     pub fn clear_decals(&self) {
         self.decals.borrow_mut().clear();
         self.profile.borrow_mut().set_decal_counts(0, 0);
+    }
+
+    /// Whether a script switched a node on or off since the last call.
+    pub fn take_enabled_toggled(&self) -> bool {
+        self.enabled_toggled.replace(false)
     }
 
     pub fn take_nav_rebakes(&self) -> Vec<crate::NavRebakeRequest> {
@@ -5800,6 +5825,7 @@ impl ScriptHost {
             // marker rather than storing a `true` — same rule as `layer`, and it keeps
             // scene files free of a field that means nothing.
             for (eid, on) in self.enabled_changes.borrow().iter() {
+                self.enabled_toggled.set(true);
                 if let Some(&ent) = scene.ents.get(eid) {
                     if *on {
                         world.remove::<floptle_core::Disabled>(ent);

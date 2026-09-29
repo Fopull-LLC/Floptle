@@ -2117,6 +2117,9 @@ struct Editor {
     /// Editable map-mesh geometry (the map-building suite) — the authority
     /// behind every `Matter::MapMesh { id }` node and its `@map/<id>` parts.
     maps: map_edit::MapStore,
+    /// Map-mesh ids each additive layer brought into `maps`, so the layer's
+    /// unload (and Stop) takes its geometry away again.
+    layer_maps: HashMap<String, Vec<u32>>,
     /// Active sub-object selection of the ▦ Model tool (verts/edges/faces on
     /// the primary map-mesh node). Cleared on undo restore — see history.rs.
     map_sel: Option<map_edit::MapSel>,

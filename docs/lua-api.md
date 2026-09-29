@@ -805,7 +805,7 @@ Whether the node casts sun shadows (read/write, default true) — the Inspector'
 
 ### `node.enabled`
 
-Whether the node is switched on (read/write). node.enabled = false takes it and everything under it out of the game: not drawn, not simulated, and its scripts stop running. A switched-off script keeps its state, so a call made into it through a handle is still there when it is switched back on. find() skips switched-off nodes unless asked with { scope = "all" }.
+Whether the node is switched on (read/write). node.enabled = false takes it and everything under it out of the game: not drawn, not simulated (its static colliders leave physics and rays too, and come back when it does), and its scripts stop running. A switched-off script keeps its state, so a call made into it through a handle is still there when it is switched back on. find() skips switched-off nodes unless asked with { scope = "all" }.
 
 ### `node.forward`
 
@@ -2446,7 +2446,7 @@ scene.list() — every scene in the project as names scene.load accepts (sorted;
 
 ### `scene.load`
 
-scene.load("arena") — switch to another scene at the next frame boundary: the world swaps, physics/animators/particles/audio rebuild, every start re-fires (like the scene booting fresh). Accepts a name, a scenes-relative path ("arenas/desert"), or "scenes/arena.ron". Multiplayer: only the SERVER may call it — every client follows automatically; a client's call is refused (send the server an RPC instead).
+scene.load("arena") — switch to another scene at the next frame boundary: the world swaps, physics/animators/particles/audio rebuild, every start re-fires (like the scene booting fresh). Accepts a name, a scenes-relative path ("arenas/desert"), or "scenes/arena.ron". Multiplayer: only the SERVER may call it — every client follows automatically; a client's call is refused (send the server an RPC instead). scene.load("cave", { additive = true }) layers a scene over this one instead of replacing it; add offset = vec3(...) to place it, and on a hosting server every client (and every late joiner) loads the same layer, its Networked nodes replicating — replicate = false keeps it on the server. A client's own additive loads stay its own.
 
 ### `scene.onLoaded`
 
@@ -2454,7 +2454,7 @@ scene.onLoaded(function(name, additive) ... end) — run something once a scene 
 
 ### `scene.unload`
 
-scene.unload("Shop") — remove a scene that was loaded additively, and everything under it. The other half of scene.load{ additive = true }.
+scene.unload("Shop") — remove a scene that was loaded additively, and everything under it. The other half of scene.load{ additive = true }. Only that layer's sounds, effects, animators and colliders go; everything else keeps playing. On a hosting server every client unloads it too.
 
 ## terrain — runtime sculpt & queries
 

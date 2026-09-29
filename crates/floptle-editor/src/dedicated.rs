@@ -2092,4 +2092,126 @@ mod server_tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// **A layer the server loads reaches every client, and so do its unload
+    /// and its colliders.** The server's script loads a cave additively at an
+    /// offset: its floor answers rays there, a client session is told to load
+    /// it with the server's numbering, and a client editor loads the same
+    /// scene and binds the same ids. The unload takes the floor and the ids
+    /// away on both.
+    #[test]
+    fn an_additive_layer_the_server_loads_replicates_and_unloads() {
+        let root = temp("layers");
+        write(&root, "project.ron", "(title: Some(\"layers\"), entry_scene: Some(\"scenes/hub.ron\"))");
+        write(
+            &root,
+            "scenes/cave.ron",
+            "(name: \"cave\", nodes: [\
+             (name: \"CaveFloor\", transform: (scale: (10.0, 1.0, 10.0)), matter: Primitive(shape: Cube, color: (0.4, 0.4, 0.4)), collidable: true),\
+             (name: \"Lift\", transform: (translation: (0.0, 3.0, 0.0)), net: Some(()))])",
+        );
+        write(
+            &root,
+            "scripts/levels.lua",
+            "local frames = 0\n\
+             function update(node, dt)\n\
+             \x20 if not net.isServer() then return end\n\
+             \x20 frames = frames + 1\n\
+             \x20 if frames == 5 then scene.load('scenes/cave.ron', { additive = true, offset = vec3(100, 0, 0) }) end\n\
+             \x20 if frames == 30 then print('floor ' .. tostring(raycast(100, 10, 0, 0, -1, 0, 20) ~= nil)) end\n\
+             \x20 if frames == 60 then scene.unload('scenes/cave.ron') end\n\
+             \x20 if frames == 70 then print('gone ' .. tostring(raycast(100, 10, 0, 0, -1, 0, 20) == nil)) end\n\
+             end\n",
+        );
+        write(&root, "scenes/hub.ron", "(name: \"hub\", nodes: [(name: \"Levels\", scripts: [(kind: \"levels\")])])");
+
+        let mut server = serve(&root, "scenes/hub.ron");
+        let mut client = server.join();
+        let mut viewer = super::open(&root, &root.join("scenes/hub.ron"), 1.0 / STEP);
+        viewer.toggle_play();
+        viewer.net_play_client =
+            Some(NetSession::client(Box::new(server.hub.connect()), viewer.input_map_hash()));
+
+        let mut events = Vec::new();
+        for _ in 0..40 {
+            server.pump(1, &mut [&mut client]);
+            viewer.play_step(STEP, false);
+            events.extend(client.session.take_layer_events());
+        }
+        let console = server.console();
+        assert!(console.contains("floor true"), "the layer's floor answered no ray at its offset:\n{console}");
+        let id_base = match events.as_slice() {
+            [floptle_net::LayerEvent::Load { tag, offset, id_base, .. }] => {
+                assert_eq!((tag.as_str(), *offset), ("scenes/cave.ron", [100.0, 0.0, 0.0]));
+                *id_base
+            }
+            other => panic!("expected one layer load on the client, got {other:?}\n{console}"),
+        };
+        let lift = server.ed.net_server.as_ref().and_then(|s| s.entity_of(id_base)).expect("the server numbered the lift");
+        assert_eq!(server.ed.world.get::<Name>(lift).map(|n| n.0.as_str()), Some("Lift"));
+        let x = floptle_core::world_transform(&server.ed.world, lift).translation.x;
+        assert!((x - 100.0).abs() < 1e-6, "the layer is not at its offset: lift at x {x}");
+        let seen = viewer.net_play_client.as_ref().and_then(|c| c.entity_of(id_base));
+        assert_eq!(
+            seen.and_then(|e| viewer.world.get::<Name>(e).map(|n| n.0.clone())).as_deref(),
+            Some("Lift"),
+            "the client editor did not load the layer with the server's ids"
+        );
+
+        for _ in 0..40 {
+            server.pump(1, &mut [&mut client]);
+            viewer.play_step(STEP, false);
+            events.extend(client.session.take_layer_events());
+        }
+        let console = server.console();
+        assert!(console.contains("gone true"), "the unloaded floor still answered a ray:\n{console}");
+        assert!(
+            events.iter().any(|e| matches!(e, floptle_net::LayerEvent::Unload { tag } if tag == "scenes/cave.ron")),
+            "the client was not told the layer went: {events:?}"
+        );
+        assert!(find(&viewer.world, "Lift").is_none(), "the client editor kept the unloaded layer's lift");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **An additive layer brings its own map geometry.** Map sidecars were
+    /// keyed by the base scene, so a layer's map nodes arrived with no
+    /// geometry (a placeholder box each) — or, sharing an id with the base
+    /// scene's, wore the base scene's shape. Here both scenes use map id 1: a
+    /// box in the hub, a wedge in the cave. After the load each node wears its
+    /// own, under its own id, and the unload takes the cave's back out.
+    #[test]
+    fn an_additive_layer_brings_its_own_map_geometry() {
+        use crate::map_edit::MapShape;
+        let root = temp("layer-maps");
+        std::fs::create_dir_all(root.join("maps")).unwrap();
+        write(&root, "project.ron", "(title: Some(\"maps\"), entry_scene: Some(\"scenes/hub.ron\"))");
+        write(&root, "scenes/hub.ron", "(name: \"hub\", nodes: [(name: \"HubBlock\", matter: MapMesh(id: 1))])");
+        write(&root, "scenes/cave.ron", "(name: \"cave\", nodes: [(name: \"CaveRamp\", matter: MapMesh(id: 1))])");
+        let probe = super::open(&root, &root.join("scenes/hub.ron"), 1.0 / STEP);
+        let (block, ramp) = (MapShape::Box.mesh(probe.map_opts), MapShape::Wedge.mesh(probe.map_opts));
+        let sidecar = |m: &floptle_map::MapMesh| {
+            let mut one = std::collections::BTreeMap::new();
+            one.insert(1u32, m.clone());
+            ron::to_string(&one).unwrap()
+        };
+        write(&root, "maps/hub.map.ron", &sidecar(&block));
+        write(&root, "maps/cave.map.ron", &sidecar(&ramp));
+
+        let mut ed = super::open(&root, &root.join("scenes/hub.ron"), 1.0 / STEP);
+        ed.toggle_play();
+        let id_of = |ed: &Editor, name: &str| match find(&ed.world, name).and_then(|e| ed.world.get::<floptle_core::Matter>(e)) {
+            Some(floptle_core::Matter::MapMesh { id }) => *id,
+            other => panic!("{name} is not a map node: {other:?}"),
+        };
+        ed.perform_scene_additive("scenes/cave.ron", false, None);
+        let (hub_id, cave_id) = (id_of(&ed, "HubBlock"), id_of(&ed, "CaveRamp"));
+        assert_ne!(hub_id, cave_id, "the layer's map node shares the hub's id");
+        assert_eq!(ed.maps.meshes.get(&hub_id), Some(&block), "the hub's block changed");
+        assert_eq!(ed.maps.meshes.get(&cave_id), Some(&ramp), "the cave's ramp is not its own geometry");
+
+        ed.perform_scene_unload("scenes/cave.ron");
+        assert!(!ed.maps.meshes.contains_key(&cave_id), "the unloaded layer's geometry stayed in the store");
+        assert_eq!(ed.maps.meshes.get(&hub_id), Some(&block));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

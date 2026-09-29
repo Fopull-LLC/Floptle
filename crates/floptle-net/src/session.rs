@@ -225,6 +225,26 @@ const KEYFRAME_EVERY: u32 = 30;
 /// Ticks between per-peer [`Msg::InputAck`] sends (4 Hz at the 60 Hz tick).
 const INPUT_ACK_EVERY: u64 = 15;
 
+/// One additive layer a session is running.
+#[derive(Clone, Debug)]
+struct LayerRec {
+    tag: String,
+    scene: String,
+    offset: [f64; 3],
+    environment: bool,
+    id_base: u64,
+    ents: Vec<Entity>,
+}
+
+/// What the server told a client to do with a layer, for the driver: load the
+/// scene (then [`NetSession::bind_layer`]) or take it away (after
+/// [`NetSession::drop_layer`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum LayerEvent {
+    Load { tag: String, scene: String, offset: [f64; 3], environment: bool, id_base: u64 },
+    Unload { tag: String },
+}
+
 pub struct NetSession {
     role: NetRole,
     transport: Box<dyn Transport>,
@@ -341,6 +361,12 @@ pub struct NetSession {
     /// order, the moment the driver rebinds; a stale epoch's are still dropped.
     /// Bounded, so a client that never rebinds cannot grow it without limit.
     held_for_rebind: Vec<Msg>,
+    /// The additive layers this session is running, in load order: on the
+    /// server, what a late joiner is told to load; on a client, what the
+    /// driver has bound.
+    layers: Vec<LayerRec>,
+    /// Client: layer loads and unloads the server announced, for the driver.
+    layers_in: Vec<LayerEvent>,
     /// Live body states fed by the driver each tick (velocity + grounded per
     /// physics-synced entity) — carried in snapshots for prediction.
     body_states: HashMap<Entity, ([f32; 3], bool)>,
@@ -678,6 +704,8 @@ impl NetSession {
             scene_switch_in: None,
             scene_pending: false,
             held_for_rebind: Vec::new(),
+            layers: Vec::new(),
+            layers_in: Vec::new(),
             body_states: HashMap::new(),
             late_inputs: 0,
             peer_inputs: HashMap::new(),
@@ -1045,6 +1073,10 @@ impl NetSession {
         self.owner_changed_in.clear();
         self.synced_in.clear();
         self.scene_pending = false;
+        // Layers belonged to the scene that went; the driver's load of the new
+        // one took their nodes with it.
+        self.layers.clear();
+        self.layers_in.clear();
         self.register_scene(world);
         // What the server sent for this scene while the swap was pending —
         // the first spawn after its `scene.load`, typically — lands now, in
@@ -1887,6 +1919,123 @@ impl NetSession {
     /// Client: replicated spawns materialized since the last drain — the
     /// driver registers physics bodies and (for a spawn it owns) binds
     /// prediction to it.
+    /// Server: the driver loaded `scene` as the additive layer `tag` and
+    /// spawned `ents` (in node order). Numbers its `Replicated` nodes from the
+    /// next free id, and tells every client to load the same layer. A late
+    /// joiner is told too, in load order, after its `Welcome`.
+    pub fn load_layer(
+        &mut self,
+        world: &World,
+        tag: &str,
+        scene: &str,
+        offset: [f64; 3],
+        environment: bool,
+        ents: &[Entity],
+    ) {
+        debug_assert_eq!(self.role, NetRole::Server, "only the server loads a session's layers");
+        let id_base = self.next_id;
+        self.next_id += self.bind_layer_ids(world, ents, id_base);
+        self.layers.push(LayerRec {
+            tag: tag.to_string(),
+            scene: scene.to_string(),
+            offset,
+            environment,
+            id_base,
+            ents: ents.to_vec(),
+        });
+        let msg = Msg::LayerLoad {
+            epoch: self.scene_epoch,
+            tag: tag.to_string(),
+            scene: scene.to_string(),
+            offset,
+            environment,
+            id_base,
+        }
+        .encode();
+        for &p in &self.peers {
+            self.transport.send(p, Channel::Reliable, &msg);
+        }
+    }
+
+    /// Server: the layer `tag` is going. Its nodes stop replicating and every
+    /// client is told to unload it; the driver despawns them. False when the
+    /// session is running no such layer.
+    pub fn unload_layer(&mut self, tag: &str) -> bool {
+        let Some(i) = self.layers.iter().position(|l| l.tag == tag) else { return false };
+        let rec = self.layers.remove(i);
+        self.forget_layer_ents(&rec.ents);
+        let msg = Msg::LayerUnload { epoch: self.scene_epoch, tag: tag.to_string() }.encode();
+        for &p in &self.peers {
+            self.transport.send(p, Channel::Reliable, &msg);
+        }
+        true
+    }
+
+    /// Whether this session is running the layer `tag` (either role).
+    pub fn has_layer(&self, tag: &str) -> bool {
+        self.layers.iter().any(|l| l.tag == tag)
+    }
+
+    /// Client: layer loads and unloads the server announced since the last
+    /// call, in order.
+    pub fn take_layer_events(&mut self) -> Vec<LayerEvent> {
+        std::mem::take(&mut self.layers_in)
+    }
+
+    /// Client: the driver loaded the layer a [`LayerEvent::Load`] named and
+    /// spawned `ents` (in node order). Numbers them from the server's
+    /// `id_base`, keeping whatever the snapshots already sent for those ids.
+    pub fn bind_layer(&mut self, world: &World, tag: &str, scene: &str, offset: [f64; 3], id_base: u64, ents: &[Entity]) {
+        self.bind_layer_ids(world, ents, id_base);
+        self.layers.push(LayerRec {
+            tag: tag.to_string(),
+            scene: scene.to_string(),
+            offset,
+            environment: false,
+            id_base,
+            ents: ents.to_vec(),
+        });
+    }
+
+    /// Client: the layer `tag` is going; its ids stop meaning anything here.
+    pub fn drop_layer(&mut self, tag: &str) {
+        if let Some(i) = self.layers.iter().position(|l| l.tag == tag) {
+            let rec = self.layers.remove(i);
+            self.forget_layer_ents(&rec.ents);
+        }
+    }
+
+    /// Number a layer's `Replicated` nodes from `base`, in node order — the
+    /// same walk on both ends, which is what lets the server send one number.
+    /// Returns how many ids it used.
+    fn bind_layer_ids(&mut self, world: &World, ents: &[Entity], base: u64) -> u64 {
+        let mut id = base;
+        for &e in ents {
+            let Some(rep) = world.get::<Replicated>(e) else { continue };
+            self.net_to_ent.insert(id, e);
+            self.ent_to_net.insert(e, id);
+            if self.role == NetRole::Client {
+                // Snapshots for these ids may have arrived before the driver
+                // finished loading the layer; their samples stay.
+                self.interp.entry(id).or_insert_with(|| InterpBuf::new(rep));
+            }
+            id += 1;
+        }
+        id - base
+    }
+
+    fn forget_layer_ents(&mut self, ents: &[Entity]) {
+        for e in ents {
+            if let Some(nid) = self.ent_to_net.remove(e) {
+                self.net_to_ent.remove(&nid);
+                self.interp.remove(&nid);
+                self.last_sent.retain(|(_, sid), _| *sid != nid);
+                self.anim_bufs.retain(|(bid, _), _| *bid != nid);
+                self.anim_started.retain(|(bid, _)| *bid != nid);
+            }
+        }
+    }
+
     pub fn take_spawned(&mut self) -> Vec<(u64, Entity, Option<PeerId>)> {
         std::mem::take(&mut self.spawned_in)
     }
@@ -2501,6 +2650,23 @@ impl NetSession {
                     .collect();
                 for s in spawns {
                     self.transport.send(from, Channel::Reliable, &s.encode());
+                }
+                // …and the layers the session is running, in the order they
+                // were loaded, so the joiner's ids line up with everyone's.
+                let layers: Vec<Msg> = self
+                    .layers
+                    .iter()
+                    .map(|l| Msg::LayerLoad {
+                        epoch: self.scene_epoch,
+                        tag: l.tag.clone(),
+                        scene: l.scene.clone(),
+                        offset: l.offset,
+                        environment: l.environment,
+                        id_base: l.id_base,
+                    })
+                    .collect();
+                for m in layers {
+                    self.transport.send(from, Channel::Reliable, &m.encode());
                 }
                 // The joiner's baseline. Under interest management there is no
                 // such thing as "the whole world's state" to hand someone —
@@ -3126,6 +3292,29 @@ impl NetSession {
                     self.spawned_in.push((nid, e, owner));
                 }
                 self.spawned_ents.insert(id, ents);
+            }
+            Msg::LayerLoad { epoch, tag, scene, offset, environment, id_base } => {
+                if epoch != self.scene_epoch {
+                    return; // another scene's layer — stale
+                }
+                if self.scene_pending {
+                    self.hold_for_rebind(Msg::LayerLoad { epoch, tag, scene, offset, environment, id_base });
+                    return;
+                }
+                if self.has_layer(&tag) {
+                    return; // duplicate catch-up
+                }
+                self.layers_in.push(LayerEvent::Load { tag, scene, offset, environment, id_base });
+            }
+            Msg::LayerUnload { epoch, tag } => {
+                if epoch != self.scene_epoch {
+                    return;
+                }
+                if self.scene_pending {
+                    self.hold_for_rebind(Msg::LayerUnload { epoch, tag });
+                    return;
+                }
+                self.layers_in.push(LayerEvent::Unload { tag });
             }
             Msg::Despawn { epoch, id } => {
                 if epoch != self.scene_epoch {

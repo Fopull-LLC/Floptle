@@ -234,6 +234,12 @@ impl VfxSystem {
         }
     }
 
+    /// Drop the instances on nodes that are leaving (`scene.unload`); every
+    /// other effect keeps playing.
+    pub fn forget_entities(&mut self, gone: &std::collections::HashSet<Entity>) {
+        self.instances.retain(|e, _| !gone.contains(e));
+    }
+
     /// Drop every live instance + detached one-shot (Play start/stop, scene load).
     pub fn clear_instances(&mut self) {
         self.instances.clear();
