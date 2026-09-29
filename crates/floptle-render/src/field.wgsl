@@ -2119,7 +2119,14 @@ fn sun_shadow(p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
     // from closer up, so it takes the same tint, strength and posterize the
     // marched one does. Two shadow terms with two different looks would read as
     // two shadows.
-    var vis = min(light_vis(p, n, l), contact_vis(p, n, l, pix));
+    // The shadow map answers when the raster pass has one; the march otherwise.
+    // A branch, not `select`: `select` evaluates both sides, so the march would
+    // run anyway and the map would only add to it.
+    var far = sun_map_vis(p, n);
+    if (far < 0.0) {
+        far = light_vis(p, n, l);
+    }
+    var vis = min(far, contact_vis(p, n, l, pix));
     // Retro styling: posterize the penumbra into N bands; Bayer-dither between
     // adjacent bands when dither is on (quantize 2 + dither ≈ the PS1 edge).
     let bands = G.shadow_tint.w;

@@ -853,3 +853,8 @@ fn fs_env(in: VOut) -> @location(0) vec4<f32> {
     c = select(G.bg.rgb, c, c == c);
     return vec4<f32>(max(c, vec3<f32>(0.0)), 1.0);
 }
+
+// The raster pass's sun shadow map is not bound here: the field march decides.
+fn sun_map_vis(p: vec3<f32>, n: vec3<f32>) -> f32 {
+    return -1.0;
+}

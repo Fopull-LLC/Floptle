@@ -482,6 +482,29 @@ pub(crate) fn shadow_uniforms(l: &Light) -> ([f32; 4], [f32; 4], [f32; 4]) {
     )
 }
 
+/// The sun shadow map's lanes for this view (`Light::shadow_map`): the
+/// matrix, then [on, filter radius in texels, normal offset, one texel in uv],
+/// then [depth bias]. All zero, and the march decides, unless the sun casts
+/// and the map is asked for. Stars mode keeps the march: it has many suns.
+#[allow(clippy::type_complexity)]
+pub(crate) fn sun_map_lanes(
+    l: &Light,
+    sun: [f32; 4],
+    view_proj: floptle_core::math::Mat4,
+) -> ([[f32; 4]; 4], [f32; 4], [f32; 4]) {
+    if !(l.shadows && l.shadow_map && !l.stars) {
+        return ([[0.0; 4]; 4], [0.0; 4], [0.0; 4]);
+    }
+    let to_sun = floptle_core::math::Vec3::new(sun[0], sun[1], sun[2]);
+    let (vp, texel) = floptle_render::sun_shadow_matrix(to_sun, view_proj, l.shadow_distance);
+    let size = floptle_render::SUN_MAP_SIZE as f32;
+    // Softness widens the filter: 1.5 texels hard, about 7.5 at full softness.
+    let radius = 1.5 + 6.0 * l.shadow_softness.clamp(0.0, 1.0);
+    // The map's depth runs over the box's whole reach toward the sun.
+    let range = texel * size + 300.0;
+    (vp.to_cols_array_2d(), [1.0, radius, texel * 1.5, 1.0 / size], [texel * 2.0 / range, 0.0, 0.0, 0.0])
+}
+
 /// The contact-shadow lane. Reported off when the sun's shadows are off, because
 /// a contact shadow is the same shadow: leaving it running under a scene whose
 /// shadows are switched off would mean "shadows off" did not mean off.

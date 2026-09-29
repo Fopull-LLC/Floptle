@@ -1556,8 +1556,12 @@ impl Editor {
             cam.world_position,
             light_node.shadows || point_shadows,
         );
+        let (sun_vp, sun_map, sun_extra) = crate::shading::sun_map_lanes(&light_node, sun, view_proj);
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
+            sun_vp,
+            sun_map,
+            sun_extra,
             light_dir: sun,
             light_color: [light_node.color[0] * li, light_node.color[1] * li, light_node.color[2] * li, 0.0],
             ambient: [light_node.ambient[0], light_node.ambient[1], light_node.ambient[2], 0.0],

@@ -86,6 +86,14 @@ pub struct Globals {
     ///
     /// Appended at the end so the WGSL struct stays byte-identical.
     pub point_cone: [[f32; 4]; 16],
+    /// Camera-relative world → the sun shadow map's clip space
+    /// ([`sun_shadow_matrix`]). Only read when `sun_map.x` is set.
+    pub sun_vp: [[f32; 4]; 4],
+    /// Sun shadow map: x = on, y = filter radius in texels, z = normal offset
+    /// (world units), w = one texel in uv. All zero is off: the march decides.
+    pub sun_map: [f32; 4],
+    /// x = depth bias (in the map's depth units).
+    pub sun_extra: [f32; 4],
 }
 
 impl Default for Globals {
@@ -104,8 +112,41 @@ impl Default for Globals {
             terrain_bits: [0; 4],
             // -1 is "no cone": every direction is inside it.
             point_cone: [[-1.0, -1.0, 0.0, 0.0]; 16],
+            sun_vp: [[0.0; 4]; 4],
+            sun_map: [0.0; 4],
+            sun_extra: [0.0; 4],
         }
     }
+}
+
+/// The sun shadow map's edge, in texels.
+pub const SUN_MAP_SIZE: u32 = 2048;
+
+/// The sun shadow map's view for a camera: an orthographic box looking along
+/// the sun, centred a third of the shadow distance ahead of the camera and
+/// reaching most of the distance around it, in the camera-relative frame the
+/// instances are drawn in. Snapped to whole texels in the sun's own frame, so a
+/// camera that moves does not make every shadow edge crawl.
+///
+/// Returns the matrix and the size of one texel in world units.
+pub fn sun_shadow_matrix(to_sun: glam::Vec3, view_proj: Mat4, distance: f32) -> (Mat4, f32) {
+    let l = to_sun.try_normalize().unwrap_or(glam::Vec3::Y);
+    let inv = view_proj.inverse();
+    let near = inv.project_point3(glam::Vec3::new(0.0, 0.0, 0.0));
+    let far = inv.project_point3(glam::Vec3::new(0.0, 0.0, 1.0));
+    let fwd = (far - near).try_normalize().unwrap_or(glam::Vec3::NEG_Z);
+    let d = distance.clamp(8.0, 400.0);
+    let radius = d * 0.85;
+    let texel = radius * 2.0 / SUN_MAP_SIZE as f32;
+    let up = if l.y.abs() > 0.95 { glam::Vec3::Z } else { glam::Vec3::Y };
+    let view = Mat4::look_to_rh(glam::Vec3::ZERO, -l, up);
+    // Snap the centre in the sun's frame to the texel grid.
+    let c = view.transform_point3(fwd * (d / 3.0));
+    let c = glam::Vec3::new((c.x / texel).round() * texel, (c.y / texel).round() * texel, c.z);
+    // Casters well above the box (a tower outside the view) still reach in.
+    let reach = radius + 300.0;
+    let proj = Mat4::orthographic_rh(c.x - radius, c.x + radius, c.y - radius, c.y + radius, -c.z - radius, -c.z + reach);
+    (proj * view, texel)
 }
 
 /// Per-instance GPU data: model matrix, inverse-transpose normal matrix (3 padded
@@ -329,6 +370,8 @@ fn make_globals_bind(
     skin_palette: &wgpu::Buffer,
     skin_meta: &wgpu::Buffer,
     mat_ext: &wgpu::Buffer,
+    sun_map: &wgpu::TextureView,
+    sun_samp: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("raster-globals"),
@@ -345,6 +388,8 @@ fn make_globals_bind(
             wgpu::BindGroupEntry { binding: 8, resource: skin_palette.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 9, resource: skin_meta.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 10, resource: mat_ext.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(sun_map) },
+            wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(sun_samp) },
             // The palette again, for the nearest sampler. See `raster.wgsl`:
             // GLSL cannot express one image with two samplers, so the image is
             // what gets duplicated. Same view, so there is one texture.
@@ -684,6 +729,14 @@ pub struct Raster {
     /// one rather than about whichever happened to be created last.
     prepass_active: Option<usize>,
     globals_bind: wgpu::BindGroup,
+    /// The same, with the 1×1 stand-in where the sun map goes: for the pass
+    /// that draws the sun map.
+    globals_bind_sunpass: wgpu::BindGroup,
+    _sun_map: wgpu::Texture,
+    sun_map_view: wgpu::TextureView,
+    _sun_stub: wgpu::Texture,
+    sun_stub_view: wgpu::TextureView,
+    sun_samp: wgpu::Sampler,
     globals_buf: wgpu::Buffer,
     /// The vertex-paint block store: every painted mesh's RGBA8 colors, packed back
     /// to back, indexed in `vs` as `vpaint[paint_base + vertex_index]`. Index 0 is a
@@ -1070,7 +1123,50 @@ impl Raster {
                     },
                     count: None,
                 },
+                // Bindings 12/13: the sun shadow map and its comparison sampler.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 12,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 13,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
             ],
+        });
+        // The sun shadow map, its comparison sampler, and a 1×1 stand-in for
+        // the pass that draws into it (a texture cannot be sampled and drawn to
+        // in one pass).
+        let depth_tex = |label: &str, size: u32| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: Gpu::DEPTH_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+        };
+        let sun_map = depth_tex("raster-sun-map", SUN_MAP_SIZE);
+        let sun_map_view = sun_map.create_view(&wgpu::TextureViewDescriptor::default());
+        let sun_stub = depth_tex("raster-sun-map-stub", 1);
+        let sun_stub_view = sun_stub.create_view(&wgpu::TextureViewDescriptor::default());
+        let sun_samp = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("raster-sun-samp"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
         });
         // Group 1: this surface's five maps, each with its own sampler (so each
         // texture chooses its own filtering / wrap mode).
@@ -1204,6 +1300,25 @@ impl Raster {
             &skin_palette_buf,
             &skin_meta_buf,
             &mat_ext_buf,
+            &sun_map_view,
+            &sun_samp,
+        );
+        let globals_bind_sunpass = make_globals_bind(
+            device,
+            &globals_layout,
+            &globals_buf,
+            &vpaint_buf,
+            &tpaint_buf,
+            &terrain_pal_view,
+            &terrain_samp,
+            &terrain_samp_nearest,
+            &skin_joints_buf,
+            &skin_weights_buf,
+            &skin_palette_buf,
+            &skin_meta_buf,
+            &mat_ext_buf,
+            &sun_stub_view,
+            &sun_samp,
         );
 
         // 1×1 white default for meshes registered without a texture (the tint then
@@ -1339,6 +1454,12 @@ impl Raster {
             prepass_seq: 0,
             prepass_active: None,
             globals_bind,
+            globals_bind_sunpass,
+            _sun_map: sun_map,
+            sun_map_view,
+            _sun_stub: sun_stub,
+            sun_stub_view,
+            sun_samp,
             globals_buf,
             vpaint_buf,
             vpaint_cpu,
@@ -2378,6 +2499,25 @@ impl Raster {
             &self.skin_palette_buf,
             &self.skin_meta_buf,
             &self.mat_ext_buf,
+            &self.sun_map_view,
+            &self.sun_samp,
+        );
+        self.globals_bind_sunpass = make_globals_bind(
+            device,
+            &self.globals_layout,
+            &self.globals_buf,
+            &self.vpaint_buf,
+            &self.tpaint_buf,
+            &self.terrain_pal_view,
+            &self.terrain_samp,
+            &self.terrain_samp_nearest,
+            &self.skin_joints_buf,
+            &self.skin_weights_buf,
+            &self.skin_palette_buf,
+            &self.skin_meta_buf,
+            &self.mat_ext_buf,
+            &self.sun_stub_view,
+            &self.sun_samp,
         );
     }
 
@@ -3696,26 +3836,18 @@ impl Raster {
         gpu.queue.submit([encoder.finish()]);
     }
 
-    /// Returns nothing. "Was the target reallocated?" is not "does the bind
-    /// group need refreshing?": a frame that draws two views claims a
-    /// different cached slot for each, so after the first few frames neither
-    /// is ever reallocated while every view needs binding every frame, and a
-    /// caller that trusted the first answer would draw the window with the
-    /// docked Game panel's depth buffer and stored picture. Run this, then
-    /// bind [`prepass_view`](Self::prepass_view) unconditionally.
-    pub fn depth_prepass_with(
+    /// Bucket and upload the draws a depth-only pass renders: opaque instances,
+    /// opaque-shader flsl draws and opaque skinned parts, never glass. Shared by
+    /// the depth prepass and the sun shadow map, so the two cannot disagree
+    /// about what is solid.
+    #[allow(clippy::type_complexity)]
+    fn upload_opaque_depth_draws(
         &mut self,
         gpu: &Gpu,
-        globals: Globals,
         instances: &[(MeshId, Option<TexId>, InstanceRaw)],
         flsl: &[FlslDraw],
         skins: &[SkinDraw],
-        main_depth: &wgpu::Texture,
-    ) {
-        let size = main_depth.size();
-        self.claim_prepass(gpu, size);
-        self.begin_pass(gpu, globals);
-
+    ) -> (Vec<(usize, Option<u32>, u32, u32)>, Vec<(usize, Option<u32>, u32, u32)>) {
         // Opaque instances only, bucketed by (mesh, texture) exactly like
         // `draw_scene` (the texture is bound for the per-texel alpha discard).
         // Opaque-SHADER flsl draws join in — their phase comes from the shader,
@@ -3766,6 +3898,89 @@ impl Raster {
         if !raws.is_empty() {
             gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
         }
+        (buckets, skin_buckets)
+    }
+
+    /// Draw the sun shadow map for this view: every opaque draw, depth only,
+    /// from the sun ([`Globals::sun_vp`]). A no-op unless `globals.sun_map.x`
+    /// is set. Before the main pass, which samples it.
+    pub fn sun_shadow_pass(
+        &mut self,
+        gpu: &Gpu,
+        globals: Globals,
+        instances: &[(MeshId, Option<TexId>, InstanceRaw)],
+        flsl: &[FlslDraw],
+        skins: &[SkinDraw],
+    ) {
+        if globals.sun_map[0] < 0.5 {
+            return;
+        }
+        let mut g = globals;
+        g.view_proj = g.sun_vp;
+        self.begin_pass(gpu, g);
+        let (buckets, skin_buckets) = self.upload_opaque_depth_draws(gpu, instances, flsl, skins);
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster-sun-map") });
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("raster-sun-map"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.sun_map_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rp.set_pipeline(&self.prepass_pipeline);
+            rp.set_bind_group(0, &self.globals_bind_sunpass, &[]);
+            rp.set_vertex_buffer(1, self.instance_buf.slice(..));
+            let draw = |rp: &mut wgpu::RenderPass<'_>, bs: &[(usize, Option<u32>, u32, u32)]| {
+                for &(mesh_idx, tex_key, start, count) in bs {
+                    let mesh = &self.meshes[mesh_idx];
+                    let bind = match tex_key {
+                        Some(t) => &self.textures[t as usize].bind,
+                        None => &mesh.tex_bind,
+                    };
+                    rp.set_bind_group(1, bind, &[]);
+                    rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
+                    rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                    rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+                }
+            };
+            draw(&mut rp, &buckets);
+            if !skin_buckets.is_empty() {
+                rp.set_pipeline(&self.skin_prepass_pipeline);
+                draw(&mut rp, &skin_buckets);
+            }
+        }
+        gpu.queue.submit([encoder.finish()]);
+    }
+
+    /// Returns nothing. "Was the target reallocated?" is not "does the bind
+    /// group need refreshing?": a frame that draws two views claims a
+    /// different cached slot for each, so after the first few frames neither
+    /// is ever reallocated while every view needs binding every frame, and a
+    /// caller that trusted the first answer would draw the window with the
+    /// docked Game panel's depth buffer and stored picture. Run this, then
+    /// bind [`prepass_view`](Self::prepass_view) unconditionally.
+    pub fn depth_prepass_with(
+        &mut self,
+        gpu: &Gpu,
+        globals: Globals,
+        instances: &[(MeshId, Option<TexId>, InstanceRaw)],
+        flsl: &[FlslDraw],
+        skins: &[SkinDraw],
+        main_depth: &wgpu::Texture,
+    ) {
+        let size = main_depth.size();
+        self.claim_prepass(gpu, size);
+        self.begin_pass(gpu, globals);
+
+        let (buckets, skin_buckets) = self.upload_opaque_depth_draws(gpu, instances, flsl, skins);
         let slot = &self.prepass[self.prepass_active.expect("claim_prepass ran")];
         let (prepass_tex, prepass_view) = (&slot.tex, &slot.view);
 

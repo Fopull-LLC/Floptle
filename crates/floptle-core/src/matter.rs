@@ -1068,6 +1068,13 @@ pub struct Light {
     /// steps end a ray sooner, at the price of shadows that thin out behind
     /// long or intricate casters.
     pub shadow_steps: u32,
+    /// Sun shadows from a shadow map rather than the field march: every
+    /// drawn mesh (map geometry, models, characters, terrain chunks) is
+    /// rendered once from the sun, and each pixel does a few filtered
+    /// lookups. The cost stays flat however many casters a level has, and
+    /// map-tool geometry casts, which the march never saw. Distance-field
+    /// matter that is not drawn as a mesh (blobs) casts only in the march.
+    pub shadow_map: bool,
     /// Contact shadows: a short screen-space trace that catches what the marched
     /// field cannot. A dynamic mesh casts through a collider proxy — a box or a
     /// capsule — so a character's shadow is a capsule's, and the place that reads
@@ -1231,6 +1238,7 @@ impl Default for Light {
             shadow_dither: false,
             shadow_distance: 150.0,
             shadow_steps: 64,
+            shadow_map: false,
             contact_shadows: false,
             contact_length: 0.35,
             contact_steps: 12,

@@ -4424,6 +4424,9 @@ impl EditorTabViewer<'_> {
                     l.shadow_steps = steps as u32;
                     cmd.inspector_changed = true;
                 }
+                cmd.inspector_changed |= crate::responsive::check(ui, &mut l.shadow_map, "shadow map")
+                    .on_hover_text("sun shadows from a shadow map: every drawn mesh casts, map geometry included, at a cost that stays flat as a level grows. Off = the field march")
+                    .changed();
                 // Contact shadows: the short-range half, from the depth
                 // buffer rather than from the field.
                 ui.separator();

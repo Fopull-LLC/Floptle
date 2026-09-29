@@ -67,7 +67,7 @@ pub use ui::{Ui, UiBatch, UiBindingId, UiInstance, UiPlane, UiShaderId, UiTex};
 pub use raster::{
     ext_index_of, instance_of, instance_of_mat, pass_prelude, raster_custom_source, set_ext_index,
     FlslBindingId, FlslBlend, FlslDraw, FlslShaderId, Globals, InstanceRaw, MaterialParams, Raster,
-    SkinDraw, SurfaceExtras, TexFilter, TexId, TexSampling, TexWrap,
+    SkinDraw, SurfaceExtras, TexFilter, TexId, TexSampling, TexWrap, sun_shadow_matrix, SUN_MAP_SIZE,
 };
 pub use raymarch::{
     Raymarch, RaymarchGlobals, MAX_FIELD_SHAPES, MAX_SHADOW_PROXIES, MAX_VOLUMES, TERRAIN_SLOTS,

@@ -40,7 +40,7 @@ each group, and meant to be searched.
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 19
-- [components — getcomponent](#components--getcomponent) — 103
+- [components — getcomponent](#components--getcomponent) — 104
 - [animation — node:animator](#animation--nodeanimator) — 26
 - [particles — effects from script](#particles--effects-from-script) — 10
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 32
@@ -3369,6 +3369,10 @@ Max world distance a shadow ray marches before giving up; far geometry stops cas
 ### `env.shadowDither`
 
 Bayer-dither the penumbra (1/0) — the classic PS1 dithered shadow edge.
+
+### `env.shadowMap`
+
+Sun shadows from a shadow map instead of the field march (read/write, true/false; the Lighting panel's "shadow map"). Every drawn mesh casts — map-tool geometry, models, characters, terrain chunks — whether or not it collides, and the cost stays flat as a level grows: on a dense city at 1080p the lighting pass fell from 9.5 ms to 4.1 ms plus 0.65 ms for the map. shadowSoftness widens the filter; shadowDistance is how far around the camera the map reaches. Distance-field matter that is not drawn as a mesh (blobs) casts only in the march, and Stars mode keeps the march. Off by default.
 
 ### `env.shadowQuantize`
 

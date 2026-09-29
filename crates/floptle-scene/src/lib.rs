@@ -2212,6 +2212,10 @@ pub struct LightDoc {
     pub shadow_distance: f32,
     #[serde(default = "default_shadow_steps", skip_serializing_if = "is_default_shadow_steps")]
     pub shadow_steps: u32,
+    /// Sun shadows from a shadow map (see `Light::shadow_map`). Off, and not
+    /// written, by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shadow_map: bool,
     /// Contact shadows default off: they cost a screen-space trace per lit
     /// fragment, and a scene that never asked for them should not start paying.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -2389,6 +2393,7 @@ impl From<&Light> for LightDoc {
             shadow_dither: l.shadow_dither,
             shadow_distance: l.shadow_distance,
             shadow_steps: l.shadow_steps,
+            shadow_map: l.shadow_map,
             contact_shadows: l.contact_shadows,
             contact_length: l.contact_length,
             contact_steps: l.contact_steps,
@@ -2437,6 +2442,7 @@ impl LightDoc {
             shadow_dither: self.shadow_dither,
             shadow_distance: self.shadow_distance,
             shadow_steps: self.shadow_steps.clamp(8, 64),
+            shadow_map: self.shadow_map,
             contact_shadows: self.contact_shadows,
             contact_length: self.contact_length.clamp(0.01, 20.0),
             contact_steps: self.contact_steps.clamp(2, 32),
@@ -5464,6 +5470,22 @@ mod tests {
     /// **The shadow step budget.** Round-trips when set, is left out of
     /// the file at its default (so every existing scene reads unchanged), and
     /// is fenced to 8..64 when typed by hand.
+    /// The shadow-map switch round-trips, and is not written while off, so a
+    /// scene saved before it existed and one that never turned it on read the
+    /// same.
+    #[test]
+    fn the_shadow_map_switch_round_trips_and_is_omitted_when_off() {
+        let on = LightDoc::from(&Light { shadow_map: true, ..Light::default() });
+        let ron = ron::to_string(&on).unwrap();
+        assert!(ron.contains("shadow_map:true"), "{ron}");
+        let back: LightDoc = ron::from_str(&ron).unwrap();
+        assert!(back.to_light().shadow_map);
+        let plain = ron::to_string(&LightDoc::from(&Light::default())).unwrap();
+        assert!(!plain.contains("shadow_map"), "the default is not written: {plain}");
+        let old: LightDoc = ron::from_str("(direction: (0, 1, 0), color: (1, 1, 1), ambient: (0, 0, 0), intensity: 1)").unwrap();
+        assert!(!old.to_light().shadow_map, "an old scene marches as it always did");
+    }
+
     #[test]
     fn the_shadow_step_budget_round_trips_is_omitted_at_default_and_is_fenced() {
         let authored = Light { shadow_steps: 20, ..Light::default() };

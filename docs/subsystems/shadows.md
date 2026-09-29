@@ -350,6 +350,51 @@ is the only thing that can take it away. It checks that the far side goes dark,
 that the near side does **not** (a lamp getting dimmer is not a lamp getting
 blocked), and that without the flag both sides are lit.
 
+## 5d. The sun shadow map
+
+`Light::shadow_map` (the Lighting panel's **shadow map**, `env.shadowMap`)
+swaps the sun's field march for a shadow map. Off by default.
+
+**Why.** The march costs pixels × the casters in each ray's reach × steps,
+so a dense level pays most exactly where it has the most buildings. It also
+only sees what physics sees: colliders, their proxies and terrain. A drawn
+mesh that doesn't collide never cast, and neither did map-tool geometry,
+because the occluder bakes only collect models. The map renders what's drawn,
+once from the sun, and each pixel does twelve filtered lookups. The cost
+stays flat however many casters there are.
+
+**Measured** on freeflier's city (RTX 4060, 1080p, softness 0.35): the
+opaque + lighting pass fell from 9.5 ms to 4.1 ms, and the map itself costs
+0.65 ms. The whole GPU frame went from 12.9 ms to 8.0 ms.
+
+**How.**
+
+- `raster.rs` `sun_shadow_pass` draws the depth prepass's own opaque draw
+  list, skinned parts included, into a 2048² depth map, using the prepass
+  pipelines and a view from `sun_shadow_matrix`.
+- The map is an orthographic box along the sun, centred a third of
+  `shadow_distance` ahead of the camera, reaching 0.85 of it around the
+  camera and 300 m toward the sun. It's snapped to whole texels so edges
+  don't crawl as the camera moves.
+- The pass binds a group(0) variant with a 1×1 stand-in at the map's slot,
+  because a texture can't be sampled and drawn to in one pass.
+- `raster.wgsl` `sun_map_vis` offsets the point along its normal by 1.5
+  texels, biases the depth by two texels, and takes a rotated 12-tap disc of
+  hardware 2×2 compares. Softness scales the disc from 1.5 to 7.5 texels. The
+  last 4% of the map fades to sun.
+- `field.wgsl` `sun_shadow` asks `sun_map_vis` first and marches only when
+  it answers −1. The raymarch module's stub always answers −1, so raymarched
+  matter keeps the march.
+
+**Watch out:** that hook has to be an `if`, not `select`. WGSL's `select`
+evaluates both sides, and the first cut ran the march and the map on every
+pixel: 16 ms instead of 4.
+
+**Limits:** one cascade, so detail is set by `shadow_distance` (about 10 cm a
+texel at 120). Blobs that are only a distance field cast only in the march.
+Stars mode keeps the march, since it has many suns. Cached static casters and
+more cascades are the next levers.
+
 ## 6. Not yet
 
 - **Point-light shadows from geometry with no collider.** §5c now covers

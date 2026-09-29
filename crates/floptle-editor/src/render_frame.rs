@@ -715,6 +715,8 @@ impl Editor {
                     raymarch.upload_globals(gpu, rm);
                     Some(clear.map(|c| c as f64))
                 };
+                gpu_mark!("sun shadow map");
+                raster.sun_shadow_pass(gpu, globals, &instances, &flsl_draws, &skin_draws);
                 gpu_mark!("opaque + lighting");
                 raster.draw_scene_with(
                     gpu, color, depth, globals, &instances, &flsl_draws, &skin_draws,

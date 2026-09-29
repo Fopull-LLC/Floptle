@@ -26,9 +26,50 @@ struct RasterGlobals {
     // angle where it is still full. x = -1 is NO cone. Appended at the END so
     // this struct stays byte-identical to the Rust `Globals`.
     point_cone: array<vec4<f32>, 16>,
+    // The sun shadow map: camera-relative world → its clip space, then
+    // [on, filter radius in texels, normal offset in world units, one texel in
+    // uv], then [depth bias, -, -, -]. All zero is off.
+    sun_vp: mat4x4<f32>,
+    sun_map: vec4<f32>,
+    sun_extra: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: RasterGlobals;
+@group(0) @binding(12) var sun_map_tex: texture_depth_2d;
+@group(0) @binding(13) var sun_map_samp: sampler_comparison;
+
+// How much sun reaches `p` (camera-relative) on a surface facing `n`, from the
+// sun shadow map, or -1 when the map is off and the field march decides. A
+// point outside the map is in the sun: the map reaches most of the shadow
+// distance, and past its edge the fade beats a hard seam.
+fn sun_map_vis(p: vec3<f32>, n: vec3<f32>) -> f32 {
+    if (g.sun_map.x < 0.5) {
+        return -1.0;
+    }
+    let clip = g.sun_vp * vec4<f32>(p + n * g.sun_map.z, 1.0);
+    let uv = vec2<f32>(clip.x * 0.5 + 0.5, 0.5 - clip.y * 0.5);
+    let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+    if (edge <= 0.0 || clip.z >= 1.0) {
+        return 1.0;
+    }
+    let depth = clip.z - g.sun_extra.x;
+    // A rotated 12-tap disc, each tap itself a 2×2 hardware compare: soft
+    // enough at the default radius that the texel grid never shows.
+    let r = g.sun_map.y * g.sun_map.w;
+    var taps = array<vec2<f32>, 12>(
+        vec2<f32>(-0.326, -0.406), vec2<f32>(-0.840, -0.074), vec2<f32>(-0.696, 0.457),
+        vec2<f32>(-0.203, 0.621), vec2<f32>(0.962, -0.195), vec2<f32>(0.473, -0.480),
+        vec2<f32>(0.519, 0.767), vec2<f32>(0.185, -0.893), vec2<f32>(0.507, 0.064),
+        vec2<f32>(0.896, 0.412), vec2<f32>(-0.322, -0.933), vec2<f32>(-0.792, -0.598),
+    );
+    var lit = 0.0;
+    for (var i = 0; i < 12; i++) {
+        lit += textureSampleCompareLevel(sun_map_tex, sun_map_samp, uv + taps[i] * r, depth);
+    }
+    let vis = lit / 12.0;
+    // The last few percent of the map fade to sun, so its edge is never a line.
+    return mix(1.0, vis, clamp(edge / 0.04, 0.0, 1.0));
+}
 // Vertex paint: every painted mesh's RGBA8 colors packed back to back, read as
 // `vpaint[paint_base + vertex_index]`. A storage buffer rather than a vertex
 // attribute because locations 0..15 are FULL (see VsIn) — and because one global
