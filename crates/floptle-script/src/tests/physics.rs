@@ -857,3 +857,30 @@ fn raycast_many_answers_what_one_raycast_each_would() {
     assert!(said.iter().any(|m| m == "n=6 hit1=true miss2=false flat=false,true"), "{said:?}");
     assert!(said.iter().any(|m| m == "rays=14"), "6 + 2 in the batches and 6 single rays: {said:?}");
 }
+
+/// **0315: `terrain.lodAnchor` takes a node, a point or nil, and hands back
+/// what it replaced.** Anything else is refused rather than read as nil.
+#[test]
+fn a_terrain_lod_anchor_is_a_node_a_point_or_nothing() {
+    let dir = std::env::temp_dir().join(format!("floptle-lodanchor-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "anchor",
+        "function update(node, dt)\n  \
+           local was = terrain.lodAnchor(node)\n  \
+           local back = terrain.lodAnchor(vec3(1, 2, 3))\n  \
+           local p = terrain.lodAnchor()\n  \
+           local ok = pcall(terrain.lodAnchor, 'ship')\n  \
+           log(string.format('%s %s %.0f,%.0f,%.0f %s', tostring(was), tostring(back.id == node.id), p.x, p.y, p.z, tostring(ok)))\n\
+         end\n",
+    );
+    let (mut world, e) = world_with_script("anchor");
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 0.1, 0.1);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    assert!(said.iter().any(|m| m == "nil true 1,2,3 false"), "{said:?}");
+    assert_eq!(host.terrain_lod_anchor(), Some(crate::LodAnchor::Point([1.0, 2.0, 3.0])));
+    let _ = e;
+}

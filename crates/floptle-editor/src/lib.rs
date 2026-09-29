@@ -1953,6 +1953,12 @@ struct Editor {
     gpu_timing_headless: bool,
     /// `app.setFullscreen` under the editor has explained itself once.
     fullscreen_explained: bool,
+    /// How hard a render-scale upscale sharpens (`app.setRenderSharpness`);
+    /// `None` until a game sets it, which reads as the default.
+    render_sharpness: Option<f32>,
+    /// This frame's script lines are drawn over the finished picture, after
+    /// post and any upscale, not in the scene pass (`draw.nativeLines`).
+    pub(crate) lines_deferred: bool,
     retro: Option<Retro>,
     /// Post-processing stack (bloom + vignette), full frame res.
     post: Option<floptle_render::PostStack>,
@@ -3635,6 +3641,12 @@ struct History {
     redo: Vec<Snapshot>,
     /// Max retained undo steps (a user preference later).
     max: usize,
+}
+
+impl Editor {
+    pub(crate) fn render_sharpness(&self) -> f32 {
+        self.render_sharpness.unwrap_or(floptle_render::retro::DEFAULT_SHARPNESS)
+    }
 }
 
 impl Default for History {

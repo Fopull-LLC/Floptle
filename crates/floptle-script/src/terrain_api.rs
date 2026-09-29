@@ -79,6 +79,16 @@ pub enum TerrainOpMode {
     PaintTexture(u8),
 }
 
+/// The point terrain detail follows in place of the render camera — see
+/// `terrain.lodAnchor`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LodAnchor {
+    /// A node, followed wherever it goes (entity index).
+    Node(u32),
+    /// A fixed world point.
+    Point([f64; 3]),
+}
+
 /// Per-op safety caps: a runaway loop must not freeze the frame. Radius is
 /// clamped; at most [`OPS_PER_FRAME`] ops land in a frame and the rest wait, in
 /// order, for the frames after; past [`MAX_PENDING_OPS`] waiting, an op is
@@ -93,6 +103,9 @@ const MAX_PENDING_OPS: usize = 4096;
 /// bundled so the install signature stays sane as the API grows.
 pub(crate) struct TerrainStreamShared {
     pub save_dir: Rc<RefCell<Option<String>>>,
+    /// `terrain.lodAnchor(...)`: what drives terrain detail instead of the
+    /// render camera.
+    pub lod_anchor: Rc<RefCell<Option<LodAnchor>>>,
     pub warm: Rc<RefCell<Vec<String>>>,
     pub flush: Rc<RefCell<bool>>,
     /// Mirror of "the background terrain worker has something to do" — a field
@@ -113,7 +126,7 @@ pub(crate) fn install_terrain_api(
     stream: TerrainStreamShared,
     receipts: TerrainReceipts,
 ) {
-    let TerrainStreamShared { save_dir, warm, flush, busy, root } = stream;
+    let TerrainStreamShared { save_dir, lod_anchor, warm, flush, busy, root } = stream;
     let TerrainReceipts { yields, next_op_id } = receipts;
     let Ok(t) = lua.create_table() else { return };
 
@@ -196,6 +209,38 @@ pub(crate) fn install_terrain_api(
             Ok(())
         }) {
             let _ = t.set("warm", f);
+        }
+    }
+
+    // terrain.lodAnchor(node | vec3 | nil) — what terrain detail, the far-body
+    // impostor switch and far-vessel freezing follow, in place of the render
+    // camera. A map view that pulls the camera thousands of units off leaves
+    // the ground under the anchor exactly as it was. nil hands it back to the
+    // camera. Returns the anchor it replaced (a node handle, a vec3, or nil).
+    {
+        let la = lod_anchor.clone();
+        if let Ok(f) = lua.create_function(move |lua, v: mlua::MultiValue| {
+            let prev = *la.borrow();
+            if let Some(v) = v.into_iter().next() {
+                let next = match &v {
+                    Value::Nil => None,
+                    Value::Table(t) if t.raw_get::<u32>("__id").is_ok() => Some(LodAnchor::Node(t.raw_get("__id")?)),
+                    other => {
+                        let p = crate::math_api::vec3_of(other).ok_or_else(|| {
+                            mlua::Error::runtime("terrain.lodAnchor takes a node, a vec3 or nil")
+                        })?;
+                        Some(LodAnchor::Point([p.x, p.y, p.z]))
+                    }
+                };
+                *la.borrow_mut() = next;
+            }
+            Ok(match prev {
+                None => Value::Nil,
+                Some(LodAnchor::Node(id)) => Value::Table(crate::env::new_node_handle(lua, id)?),
+                Some(LodAnchor::Point(p)) => mlua::IntoLua::into_lua(crate::math_api::LuaVec3(glam::DVec3::from(p)), lua)?,
+            })
+        }) {
+            let _ = t.set("lodAnchor", f);
         }
     }
 

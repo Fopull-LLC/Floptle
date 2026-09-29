@@ -499,6 +499,10 @@ Two things the engine does so a big field degrades instead of stopping:
 * On a body **smaller than your view distance**, residency saturates at the body.
   Asking to see 700 m of a 214 m planet costs exactly what asking to see 190 m
   costs.
+* **Height counts.** A camera high above a region reaches less of it, and one
+  higher above the ground than the outermost `lod` distance keeps nothing
+  resident at all, so a map zooming out from a planet stops costing scatter
+  work instead of re-settling a disc of props under wherever it looks.
 
 ### Harvesting
 
@@ -534,6 +538,27 @@ not a ray. Prototypes are **mesh assets**, not prefabs or script-built subtrees.
 ---
 
 ## 25. Space: orbits, gravity & time-warp
+
+### A map view: `terrain.lodAnchor`
+
+Terrain detail, the switch of a far planet to its plain sphere, and the freezing
+of far-away craft all follow the render camera, because the camera is usually
+where the player is. A map view breaks that: it moves the one camera thousands
+of units off, and the planet under the ship would switch to its sphere and be
+remeshed from nothing when the map closes. Name what they should follow instead
+while the map is open:
+
+```lua
+function openMap()
+  terrain.lodAnchor(ship)        -- a node (followed), or a vec3
+end
+function closeMap()
+  terrain.lodAnchor(nil)         -- back to the camera
+end
+```
+
+It returns the anchor it replaced. A scene swap clears it. The planet switches to
+its sphere past 60 body radii from the anchor and back to its meshes inside 42.
 
 Scenes with **Celestial Body** components (Add Component → ☉) put planets and
 moons on exact Kepler rails: every tick the engine writes their positions from

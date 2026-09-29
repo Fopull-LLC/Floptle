@@ -624,6 +624,7 @@ pub(crate) fn render_frame_pixels(
         let mut r = floptle_render::Retro::new(&gpu, ch);
         r.resize_to(&gpu, cw, ch);
         r.set_smooth(&gpu, !retro_on);
+        r.set_sharpness(&gpu, ed.render_sharpness());
         r
     });
     // The picture that gets written. In retro mode the scene never draws into
@@ -662,6 +663,8 @@ pub(crate) fn render_frame_pixels(
     // screen-space reflections and lamp shadows all quietly draw nothing. A
     // picture missing four effects still looks like a picture, which is exactly
     // why this is easy to get wrong and hard to notice.
+    let defer_lines = ed.script_host.native_lines();
+    ed.lines_deferred = defer_lines;
     ed.render_world_into(
         post.input_view(),
         &depth_view,
@@ -676,6 +679,7 @@ pub(crate) fn render_frame_pixels(
             ..Default::default()
         },
     );
+    ed.lines_deferred = false;
     // World-space UI canvases are geometry: into the scene, with its depth,
     // before post — exactly where the Game view puts them.
     if ui {
@@ -743,6 +747,9 @@ pub(crate) fn render_frame_pixels(
     //
     // A UI-first scene photographed without its UI is wrong on first sight,
     // and nothing else would say so.
+    if defer_lines {
+        ed.draw_lines_over(&color_view, cam.view_proj(aspect), cam.world_position);
+    }
     if ui {
         ed.draw_game_ui_overlay(&color_view, w, h, true);
     }

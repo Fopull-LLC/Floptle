@@ -44,12 +44,17 @@ pub(crate) struct ResolvedChunk {
 /// frames, furthest last. The cost of not having it is a frame that stops.
 const SETTLE_BUDGET: usize = 512;
 
+/// …and the time the same frame may spend doing it. A prop costs a ray down
+/// to the ground, and a ray over a terrain field is a march, so 512 of them
+/// were most of a second on a planet: the count alone does not bound the frame.
+const SETTLE_MS: f32 = 3.0;
+
 /// Which chunks one source is resident in, and where the eye was standing when
 /// that was worked out.
 struct Sweep {
-    /// The chunk the eye was in. The key set changes when this changes, not
-    /// when the frame advances. `None` = never swept.
-    at: Option<ChunkKey>,
+    /// The chunk the eye was over, and its height band. The key set changes
+    /// when these change, not when the frame advances. `None` = never swept.
+    at: Option<(ChunkKey, i64)>,
     /// Nearest first, as `chunks_near` returns them.
     keys: Vec<ChunkKey>,
 }
@@ -159,6 +164,7 @@ pub(crate) fn build_instances(
     // it all is fully resident afterwards and stops asking, so the next source
     // gets the next frame's — it converges rather than starving anyone.
     let mut settled = 0usize;
+    let started = floptle_core::profile::Span::new();
     for src in sources {
         let range = src.range();
         if range <= 0.0 || src.bands.is_empty() {
@@ -187,7 +193,7 @@ pub(crate) fn build_instances(
         // so a body that orbits at 99 units/s changes exactly one number here —
         // and no id, no local position, no settled height and no cached chunk.
         let eye_local = src.frame.to_local(eye);
-        let at = scatter::eye_chunk(src, eye_local);
+        let at = (scatter::eye_chunk(src, eye_local), scatter::eye_height_band(src, eye_local));
         let sweep = sweeps.entry(src.id).or_insert_with(|| Sweep { at: None, keys: Vec::new() });
         if sweep.at != Some(at) {
             sweep.at = Some(at);
@@ -206,7 +212,7 @@ pub(crate) fn build_instances(
             if known.is_none() || cut {
                 // Arriving is the other case, and it is thousands of props at
                 // once. Let them come over the next few frames instead.
-                if known.is_none() && settled >= SETTLE_BUDGET {
+                if known.is_none() && (settled >= SETTLE_BUDGET || (settled > 0 && started.ms() > SETTLE_MS)) {
                     continue;
                 }
                 let rolled = scatter::chunk_instances(src, key);

@@ -760,6 +760,20 @@ net.core.wmem_max = 16777216
 Linux reports double what it applied (it books its own overhead in the same
 number), which is why an unclamped 8 MiB reads as sixteen here and in `ss -m`.
 
+### When the host's connection blips
+
+A host whose link to the relay drops for a moment (a Wi-Fi roam, a NAT
+rebinding, a burst of loss) does not end the session. The relay holds the
+lobby and its players for 20 seconds, and the host reconnects on its own and
+gets the same lobby code back with everybody still in it. What proves it is
+the same host is a secret the relay gave it when the lobby opened, not the
+code (every player knows that) and not the game key (every copy of the game
+has that), so nobody else can take a held lobby over. Past the 20 seconds, the
+players are told the host left.
+
+This needs a relay from engine 0.102 or later. An older relay mints the
+returning host a new code, as it always did.
+
 ### What it costs you if it is down
 
 Nothing that is already running, and nothing about joining. The relay decides

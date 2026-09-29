@@ -1696,6 +1696,7 @@ fn push_polyline(q: &mut Vec<crate::DrawLine>, pts: &[glam::DVec3], closed: bool
 /// What [`install_draw`] hands back to the host.
 struct DrawCells {
     draw_lines: Rc<RefCell<Vec<crate::DrawLine>>>,
+    native_lines: Rc<std::cell::Cell<bool>>,
     draw_tris: Rc<RefCell<Vec<crate::DrawTri>>>,
     draw_quads: Rc<RefCell<Vec<crate::DrawQuad>>>,
     draw_rects: Rc<RefCell<Vec<crate::DrawRect>>>,
@@ -1709,6 +1710,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
     // tick and are re-drawn every fixedUpdate while wanted (the S6 v2 map
     // screen draws its orbit conics this way). Depth-tested in the scene.
     let draw_lines: Rc<RefCell<Vec<crate::DrawLine>>> = Rc::new(RefCell::new(Vec::new()));
+    let native_lines: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
     let draw_tris: Rc<RefCell<Vec<crate::DrawTri>>> = Rc::new(RefCell::new(Vec::new()));
     let draw_quads: Rc<RefCell<Vec<crate::DrawQuad>>> = Rc::new(RefCell::new(Vec::new()));
     let draw_rects: Rc<RefCell<Vec<crate::DrawRect>>> = Rc::new(RefCell::new(Vec::new()));
@@ -1783,6 +1785,21 @@ fn install_draw(lua: &Lua) -> DrawCells {
                     },
                 ) {
                     let _ = t.set("ring", f);
+                }
+            }
+            // `draw.nativeLines([on])` — lines and rings drawn over the finished
+            // picture (after post and any render-scale upscale) at full window
+            // resolution, instead of into the scene. Persistent. Returns the
+            // setting.
+            {
+                let nl = native_lines.clone();
+                if let Ok(f) = lua.create_function(move |_, on: Option<bool>| {
+                    if let Some(on) = on {
+                        nl.set(on);
+                    }
+                    Ok(nl.get())
+                }) {
+                    let _ = t.set("nativeLines", f);
                 }
             }
             // `draw.polyline(points, r,g,b [,a [, closed]])` — one call per curve
@@ -2151,6 +2168,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
 
     DrawCells {
         draw_lines,
+        native_lines,
         draw_tris,
         draw_quads,
         draw_rects,
@@ -2407,6 +2425,7 @@ impl ScriptHost {
         let spawn_effects = install_spawn_effect(&lua);
         let DrawCells {
             draw_lines,
+            native_lines,
             draw_tris,
             draw_quads,
             draw_rects,
@@ -2586,6 +2605,7 @@ impl ScriptHost {
         // and the residency streamer prefers/writes player-edited fields there.
         let terrain_save_dir: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         let terrain_warm: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let terrain_lod_anchor: Rc<RefCell<Option<crate::terrain_api::LodAnchor>>> = Rc::new(RefCell::new(None));
         let terrain_flush: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
         let terrain_busy: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
         let terrain_yields: Rc<RefCell<Vec<crate::terrain_api::TerrainYield>>> =
@@ -2599,6 +2619,7 @@ impl ScriptHost {
             logs.clone(),
             crate::terrain_api::TerrainStreamShared {
                 save_dir: terrain_save_dir.clone(),
+                lod_anchor: terrain_lod_anchor.clone(),
                 warm: terrain_warm.clone(),
                 flush: terrain_flush.clone(),
                 busy: terrain_busy.clone(),
@@ -2742,6 +2763,7 @@ impl ScriptHost {
             terrain_generates,
             terrain_save_dir,
             terrain_warm,
+            terrain_lod_anchor,
             terrain_flush,
             terrain_busy,
             create_requests,
@@ -2821,6 +2843,7 @@ impl ScriptHost {
             assembly_impacts,
             assembly_cmds,
             draw_lines,
+            native_lines,
             draw_tris,
             draw_quads,
             draw_rects,
@@ -3404,8 +3427,10 @@ impl ScriptHost {
         // Pending timers belong to the old session — a scene switch drops them.
         // (Including a persistent node's: a timer is a promise about a world.)
         self.sched.borrow_mut().clear();
-        // Terrain edits still waiting to land were aimed at the old world.
+        // Terrain edits still waiting to land were aimed at the old world, and
+        // an anchor names a node in it.
         self.terrain_ops.borrow_mut().clear();
+        *self.terrain_lod_anchor.borrow_mut() = None;
         // So do agents: one belongs to a node in a world that is going away, and
         // a crowd that survived a Stop would walk the next Play's units from
         // wherever the last one left them.
@@ -3850,6 +3875,17 @@ impl ScriptHost {
     /// Drain this frame's `terrain.warm(name)` requests — body names whose
     /// terrain must be resident regardless of gameplay-anchor distance
     /// (immediate mode: callers re-warm every frame, e.g. the map's focus).
+    /// What terrain detail follows instead of the render camera, if a script
+    /// named one (`terrain.lodAnchor`).
+    pub fn terrain_lod_anchor(&self) -> Option<crate::terrain_api::LodAnchor> {
+        *self.terrain_lod_anchor.borrow()
+    }
+
+    /// Set what `terrain.lodAnchor` would, from the engine side.
+    pub fn set_terrain_lod_anchor(&self, a: Option<crate::terrain_api::LodAnchor>) {
+        *self.terrain_lod_anchor.borrow_mut() = a;
+    }
+
     pub fn take_terrain_warm(&self) -> Vec<String> {
         std::mem::take(&mut *self.terrain_warm.borrow_mut())
     }
@@ -3873,6 +3909,11 @@ impl ScriptHost {
 
     /// Drain this tick's `draw.line(...)` segments (immediate mode — the editor
     /// replaces its line list with each tick's drain, so an idle script clears).
+    /// Whether a game asked for its lines at full resolution (`draw.nativeLines`).
+    pub fn native_lines(&self) -> bool {
+        self.native_lines.get()
+    }
+
     pub fn take_draw_lines(&self) -> Vec<crate::DrawLine> {
         std::mem::take(&mut *self.draw_lines.borrow_mut())
     }

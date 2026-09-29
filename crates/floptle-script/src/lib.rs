@@ -353,7 +353,7 @@ pub use net_api::{
 };
 pub use assembly_api::{AssemblyCmd, AssemblyImpact, AssemblyInfo};
 pub use space_api::{SpaceBodyInfo, SpaceInfo};
-pub use terrain_api::{TerrainOp, TerrainOpMode, TerrainYield};
+pub use terrain_api::{LodAnchor, TerrainOp, TerrainOpMode, TerrainYield};
 pub use rollback_api::{ScriptState, MAX_STATE_DEPTH};
 pub use view_api::ViewInfo;
 
@@ -681,6 +681,9 @@ pub struct ScriptHost {
     /// gameplay anchor's distance — the map warms its focused planet while
     /// open. A warmed body loads if cold and never evicts.
     terrain_warm: Rc<RefCell<Vec<String>>>,
+    /// `terrain.lodAnchor(...)`: what drives terrain detail instead of the
+    /// render camera. Cleared on a scene swap.
+    terrain_lod_anchor: Rc<RefCell<Option<terrain_api::LodAnchor>>>,
     /// The editor's answer to `terrain.busy()`: true while the background
     /// terrain worker has a field generating or streaming in. Published each
     /// frame so a game that builds its world on demand can wait its turn
@@ -911,6 +914,9 @@ pub struct ScriptHost {
     nav_rebakes: Rc<RefCell<Vec<NavRebakeRequest>>>,
     /// This tick's `draw.line(...)` segments (immediate mode; drained per tick).
     draw_lines: Rc<RefCell<Vec<DrawLine>>>,
+    /// `draw.nativeLines(true)`: lines over the finished picture at full
+    /// resolution rather than in a scaled scene target.
+    native_lines: Rc<std::cell::Cell<bool>>,
     /// This tick's `draw.tri/cone/disc(...)` filled triangles (immediate mode).
     draw_tris: Rc<RefCell<Vec<DrawTri>>>,
     /// This tick's `draw.quad(...)` textured quads (immediate mode).

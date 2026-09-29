@@ -14,20 +14,20 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 157
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 163
 - [node — transform & body fields](#node--transform--body-fields) — 40
 - [node — methods & handles](#node--methods--handles) — 31
 - [vectors, directions & easing](#vectors-directions--easing) — 49
 - [scene lookups & raycast](#scene-lookups--raycast) — 16
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
 - [input — keyboard & mouse](#input--keyboard--mouse) — 42
-- [drawing — draw.*](#drawing--draw) — 16
+- [drawing — draw.*](#drawing--draw) — 17
 - [the web — http.*, json.*](#the-web--http-json) — 11
 - [the player's account — account.*](#the-players-account--account) — 13
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 71
 - [networking — net.*, synced](#networking--net-synced) — 38
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
-- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 15
+- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 16
 - [pathfinding — nav.*](#pathfinding--nav) — 26
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 8
@@ -158,6 +158,10 @@ app.quit() — end the game. What that means depends on where it is running, and
 
 app.renderScale() → the fraction of the window the 3D scene renders at, 0.25–1 (1 = native). The project's render_scale until a script sets it.
 
+### `app.renderSharpness`
+
+app.renderSharpness() → how hard the upscale from a render scale below 1 sharpens, 0–1 (default 0.4).
+
 ### `app.retro`
 
 app.retro() → whether the retro presentation is on: the game composites at a small internal resolution and upscales, which is what gives it chunky pixels.
@@ -177,6 +181,10 @@ app.setFullscreen(true) — cover the screen (borderless, on the monitor the win
 ### `app.setRenderScale`
 
 app.setRenderScale(0.67) — render the 3D scene at that fraction of the window and upscale it smoothly; the game's UI stays at full resolution, so text stays sharp. The one setting that rescues a weak GPU: on one shipped level every lighting feature together was worth 9% of the GPU time and 0.67 was worth 44%. 0.25–1; outside that RAISES. Independent of retro mode (which, when on, decides the resolution itself). For this session only; persist it with save.*.
+
+### `app.setRenderSharpness`
+
+app.setRenderSharpness(0.4) — how hard the upscale from a render scale below 1 sharpens, 0..1. Contrast-adaptive: edges get crisper, flat sky and gradients do not turn to grain. 0 is a plain bilinear stretch. A retro upscale (hard pixels) is never sharpened. Refuses: outside 0..1.
 
 ### `app.setRetro`
 
@@ -214,9 +222,21 @@ Floptle Cloud read as the GAME, with the key in project.ron: cloud.avatar for a 
 
 cloud.avatar(playerId [, size], function(tex, err) end) — a player's Foverse picture as a texture, playerId being net.identity(peer).id or account.player().id. size is 64, 128 (default) or 256; the picture is square. err is "no_picture" when the player has none: draw your own stand-in. tex works anywhere a texture path does; a UI image with radius = half its size draws round. Loaded once per session per player and size; assets.release(tex) lets it go. Refuses: a size other than 64/128/256; a project not connected to Cloud.
 
+### `cloud.blobs`
+
+cloud.blobs(name [, { private = true }]) — a collection of files (bytes): :list(opts, cb), :get(key, function(bytes, err) end), :put(key, bytes [, { ifVersion }], cb), :delete(key, cb). Refuses: a :put that is not a string.
+
 ### `cloud.config`
 
 cloud.config(function(config, err) end) — the remote config you publish from the game's page on fopull.com: a table of your keys, {} when none are set, or nil and why. Changed on the page, live in every copy of the game without a new build. Refuses: a project not connected to Cloud.
+
+### `cloud.counter`
+
+cloud.counter(name) — atomic counters: :add(key [, n], cb) as the player (a unique counter counts each player once; -1 takes it back), :get(key, cb) → {key, value, mine}, :top({ prefix, sort, limit }, cb). A counter collection must be declared in cloud_collections.ron first.
+
+### `cloud.docs`
+
+cloud.docs(name [, { private = true }]) — a collection of JSON documents: :list({ prefix, owner, sort, after, limit }, cb), :get(key, cb), :put(key, data [, { ifVersion }], cb), :delete(key, cb). Reads with the game key (as the player for a private collection); writes as the player. ifVersion = 0 claims a new public key without racing another player; err.code = "key_taken" or "version_conflict" when that loses.
 
 ### `cloud.game`
 
@@ -225,6 +245,10 @@ cloud.game() -> string|nil — this project's game slug (what /games/<slug>/… 
 ### `cloud.get`
 
 cloud.get(path, function(res) end) — read from Floptle Cloud as the game: the engine attaches the project's game key, so it works with nobody signed in. Paths under /games/… and /players/… only, GET only (a game key never writes). res as http.get: res.json when the reply is JSON; a blob comes back as its bytes in res.body, with no res.json. Play only, same rate limits as http.*. Refuses: any other path; a project not connected to Cloud.
+
+### `cloud.rank`
+
+cloud.rank(board) — a leaderboard by name ("laps" or "laps:canyon"; its collection is the part before the first ':'). :page({ limit, offset, around, player, sort }, function(page, err) end) reads with the game key → {entries, total, keep, next}; :submit(value [, { meta, blob }], function(r, err) end) as the player → {board, value, best, kept, rank}; :remove([playerId], cb) takes an entry down (default: the signed-in player's). err is { code, message, status } for every cloud call. Refuses: a non-finite value, an unknown option.
 
 ### `createNode`
 
@@ -1692,6 +1716,10 @@ draw.disc(cx,cy,cz, nx,ny,nz, r0, r1, r,g,b [,a]) — a filled annulus around no
 
 draw.line(x1,y1,z1, x2,y2,z2, r,g,b [, a]) — queue one world-space 3D line for THIS frame (immediate mode: re-draw every lateUpdate — the camera pass — while wanted). Drawn OVER the scene, never occluded — the KSP-style map draws its orbit conics with these.
 
+### `draw.nativeLines`
+
+draw.nativeLines(true) — draw.line / ring / sphere / box / polyline / conic lines over the finished picture, one pixel wide at the window's own resolution and in exactly the colour given, instead of into the 3D scene. At a render scale below 1 scene lines are drawn at the lowered resolution and go soft; these do not. They skip the post effects (bloom, depth of field, grain). Persistent until switched off; draw.nativeLines() answers the setting.
+
 ### `draw.polyline`
 
 draw.polyline(points, r,g,b [,a [, closed]]) — a connected line through every point, in ONE call: points is a flat {x1,y1,z1, x2,y2,z2, ...} array or an array of vec3s. closed = true joins the last point back to the first. The same segments as one draw.line per pair, without crossing into the engine once per segment — the way to draw an orbit, a trajectory or a path with hundreds of points.
@@ -2420,6 +2448,10 @@ terrain.generatePlanet(id [, opts]) — REPLACE terrain id's whole field with a 
 ### `terrain.height`
 
 terrain.height(x, z) — world Y of the highest terrain surface under (x,z), or nil when nothing is hit. Spawning, footstep audio by ground, drop-to-floor.
+
+### `terrain.lodAnchor`
+
+terrain.lodAnchor(node | vec3 | nil) — what terrain detail, the far-planet impostor switch and far-craft freezing follow during Play, in place of the render camera. For a map view: anchor on the ship while the map moves the camera thousands of units away, and the ground under the ship stays meshed exactly as it was; nil hands it back to the camera. Returns the anchor it replaced. A scene swap clears it. Refuses: anything that is not a node, a vec3 or nil.
 
 ### `terrain.paint`
 

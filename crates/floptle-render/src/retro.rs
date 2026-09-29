@@ -26,8 +26,15 @@ pub struct Retro {
     /// smoothly rather than into chunky pixels.
     smooth_sampler: wgpu::Sampler,
     smooth: bool,
+    /// How hard a smooth upscale sharpens (0 = plain bilinear, 1 = most).
+    sharpness: f32,
+    /// `[smooth, sharpness, 1/width, 1/height]` for the blit shader.
+    params: wgpu::Buffer,
     bind: wgpu::BindGroup,
 }
+
+/// How hard a render-scale upscale sharpens unless a game says otherwise.
+pub const DEFAULT_SHARPNESS: f32 = 0.4;
 
 impl Retro {
     /// Create the retro target at `internal_height` rows (width derives from the
@@ -57,6 +64,16 @@ impl Retro {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
                     count: None,
                 },
             ],
@@ -110,9 +127,15 @@ impl Retro {
         });
 
         let (color_view, depth_tex, depth_view, width, height) = make_targets(gpu, internal_height);
-        let bind = make_bind(device, &bind_layout, &color_view, &sampler);
+        let params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("retro-params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind = make_bind(device, &bind_layout, &color_view, &sampler, &params);
 
-        Self {
+        let me = Self {
             color_view,
             depth_tex,
             depth_view,
@@ -123,8 +146,37 @@ impl Retro {
             sampler,
             smooth_sampler,
             smooth: false,
+            sharpness: DEFAULT_SHARPNESS,
+            params,
             bind,
+        };
+        me.write_params(gpu);
+        me
+    }
+
+    fn write_params(&self, gpu: &Gpu) {
+        let p = [
+            if self.smooth { 1.0f32 } else { 0.0 },
+            self.sharpness,
+            1.0 / self.width.max(1) as f32,
+            1.0 / self.height.max(1) as f32,
+        ];
+        gpu.queue.write_buffer(&self.params, 0, bytemuck::cast_slice(&p));
+    }
+
+    /// How hard a smooth upscale sharpens, 0..=1: contrast-adaptive, so edges
+    /// get crisper without flat areas turning to grain. 0 is plain bilinear.
+    /// A retro (hard-pixel) upscale ignores it.
+    pub fn set_sharpness(&mut self, gpu: &Gpu, s: f32) {
+        let s = s.clamp(0.0, 1.0);
+        if self.sharpness != s {
+            self.sharpness = s;
+            self.write_params(gpu);
         }
+    }
+
+    pub fn sharpness(&self) -> f32 {
+        self.sharpness
     }
 
     /// Upscale smoothly (a render scale) or in hard-edged pixels (retro).
@@ -134,7 +186,8 @@ impl Retro {
         }
         self.smooth = smooth;
         let s = if smooth { &self.smooth_sampler } else { &self.sampler };
-        self.bind = make_bind(&gpu.device, &self.bind_layout, &self.color_view, s);
+        self.bind = make_bind(&gpu.device, &self.bind_layout, &self.color_view, s, &self.params);
+        self.write_params(gpu);
     }
 
     /// Rebuild the target at a new internal height and/or window aspect.
@@ -162,12 +215,13 @@ impl Retro {
         height: u32,
     ) {
         let s = if self.smooth { &self.smooth_sampler } else { &self.sampler };
-        self.bind = make_bind(&gpu.device, &self.bind_layout, &color_view, s);
+        self.bind = make_bind(&gpu.device, &self.bind_layout, &color_view, s, &self.params);
         self.color_view = color_view;
         self.depth_tex = depth_tex;
         self.depth_view = depth_view;
         self.width = width;
         self.height = height;
+        self.write_params(gpu);
     }
 
     /// The low-res color target the scene renders into (surface format).
@@ -311,6 +365,7 @@ fn make_bind(
     layout: &wgpu::BindGroupLayout,
     color_view: &wgpu::TextureView,
     sampler: &wgpu::Sampler,
+    params: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("retro"),
@@ -321,6 +376,7 @@ fn make_bind(
                 resource: wgpu::BindingResource::TextureView(color_view),
             },
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+            wgpu::BindGroupEntry { binding: 2, resource: params.as_entire_binding() },
         ],
     })
 }

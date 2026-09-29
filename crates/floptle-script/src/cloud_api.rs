@@ -5,6 +5,8 @@
 //! cloud.avatar(net.identity(peer).id, 64, function(tex, err) end)  -- err "no_picture" when unset
 //! cloud.config(function(config, err) end)                           -- the developer's remote config
 //! cloud.get("/games/" .. cloud.game() .. "/rank/laps:canyon", function(res) end)
+//! cloud.rank("laps:canyon"):page({ limit = 25 }, function(page, err) end)
+//! cloud.docs("stages"):put("s1", data, { ifVersion = 0 }, function(doc, err) end)
 //! ```
 //!
 //! `account.*` acts as the signed-in player. This is the other credential the
@@ -146,7 +148,10 @@ pub(crate) fn install(lua: &Lua, cloud: CloudState, fetcher: Fetcher) -> mlua::R
         })?,
     )?;
 
-    lua.globals().set("cloud", t)
+    lua.globals().set("cloud", t)?;
+    // `cloud.rank` / `docs` / `blobs` / `counter`: the primitives by name, over
+    // `cloud.get` and `account.*` (see the file).
+    lua.load(include_str!("cloud_sugar.lua")).set_name("=cloud").exec()
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -227,6 +232,92 @@ mod tests {
         fn global<T: mlua::FromLua>(&self, name: &str) -> T {
             self.lua.globals().get(name).unwrap()
         }
+    }
+
+    /// **0278: the primitives by name.** A board's page is the documented path
+    /// with its name and query encoded, read with the game key; a refusal
+    /// arrives as one `{ code, message, status }` table, whichever call made it.
+    #[test]
+    fn a_rank_page_is_the_documented_path_and_a_refusal_is_one_error_table() {
+        let (base, seen) = fopull("200 OK", "application/json", br#"{"entries":[{"rank":1}],"total":1}"#.to_vec());
+        let h = harness(Some(&base));
+        h.lua
+            .load("cloud.rank('time:play:run'):page({ limit = 25, around = 'p 1' }, function(p, e) n = #p.entries; err = e end)")
+            .exec()
+            .unwrap();
+        h.until(|h| h.global::<Option<i64>>("n").is_some());
+        let req = seen.lock().unwrap()[0].clone();
+        assert!(
+            req.starts_with("get /api/floptle/v1/games/freeflier/rank/time%3aplay%3arun?around=p%201&limit=25 "),
+            "{req}"
+        );
+        assert!(req.contains(&format!("x-floptle-game-key: {}", KEY.to_ascii_lowercase())), "{req}");
+
+        let (base, _) = fopull(
+            "404 Not Found",
+            "application/json",
+            br#"{"error":"no_such_collection","message":"declare stages in the portal"}"#.to_vec(),
+        );
+        let h = harness(Some(&base));
+        h.lua.load("cloud.docs('stages'):get('s1', function(d, e) code = e.code; msg = e.message; st = e.status end)").exec().unwrap();
+        h.until(|h| h.global::<Option<String>>("code").is_some());
+        assert_eq!(h.global::<String>("code"), "no_such_collection");
+        assert_eq!(h.global::<String>("msg"), "declare stages in the portal");
+        assert_eq!(h.global::<i64>("st"), 404);
+
+        let e = h.lua.load("cloud.rank('laps'):page({ limt = 5 }, function() end)").exec().unwrap_err().to_string();
+        assert!(e.contains("no option 'limt'") && e.contains("limit"), "{e}");
+    }
+
+    /// Writes go out as the player, on the documented paths with the
+    /// documented bodies: a submit's value, meta and blob pointer; a doc's
+    /// data and `if_version`; a blob's bytes as they are; a counter's `add`.
+    #[test]
+    fn writes_go_out_as_the_player_on_the_documented_paths() {
+        let h = harness(Some("http://127.0.0.1:1"));
+        h.lua
+            .load(
+                "calls = {}\n\
+                 local function rec(m) return function(p, b, cb) calls[#calls + 1] = { m, p, b } end end\n\
+                 account = { post = rec('POST'), put = rec('PUT'), delete = rec('DELETE'), get = rec('GET'),\n\
+                             player = function() return { id = 'p-7' } end }\n\
+                 cloud.rank('laps:canyon'):submit(61.25, { meta = { m = 1 }, blob = 'replays/k' })\n\
+                 cloud.docs('stages'):put('s 1', { name = 'x' }, { ifVersion = 0 })\n\
+                 cloud.blobs('replays'):put('k', 'BYTES', { ifVersion = 3 })\n\
+                 cloud.counter('installs'):add('day')\n\
+                 cloud.rank('laps'):remove()\n\
+                 cloud.docs('saves', { private = true }):get('slot1')\n",
+            )
+            .exec()
+            .unwrap();
+        let got: Vec<String> = h
+            .lua
+            .load(
+                "local out = {}\n\
+                 for i, c in ipairs(calls) do\n\
+                   local b = c[3]\n\
+                   if type(b) == 'table' then b = json.encode(b) elseif type(b) == 'function' then b = 'cb' end\n\
+                   out[i] = c[1] .. ' ' .. c[2] .. ' ' .. tostring(b)\n\
+                 end\n\
+                 return out",
+            )
+            .eval()
+            .unwrap();
+        let want = [
+            "POST /games/freeflier/rank/laps%3Acanyon ",
+            "PUT /games/freeflier/data/stages/s%201 ",
+            "PUT /games/freeflier/blobs/replays/k?if_version=3 BYTES",
+            "POST /games/freeflier/count/installs/day ",
+            "DELETE /games/freeflier/rank/laps/p-7 cb",
+            "GET /games/freeflier/data/saves/slot1 cb",
+        ];
+        assert_eq!(got.len(), want.len(), "{got:?}");
+        for (g, w) in got.iter().zip(want) {
+            assert!(g.starts_with(w), "{g:?} does not start with {w:?}");
+        }
+        assert!(got[0].contains("\"value\":61.25") && got[0].contains("\"blob\":\"replays/k\""), "{}", got[0]);
+        assert!(got[1].contains("\"if_version\":0") && got[1].contains("\"data\":{\"name\":\"x\"}"), "{}", got[1]);
+        assert!(got[3].contains("\"add\":1"), "{}", got[3]);
     }
 
     #[test]

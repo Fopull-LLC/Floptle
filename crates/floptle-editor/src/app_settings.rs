@@ -73,6 +73,7 @@ impl crate::Editor {
             retro_height: self.project.retro_height,
             retro_integer_scale: self.project.retro_integer_scale,
             render_scale: self.project.render_scale,
+            render_sharpness: self.render_sharpness(),
             fullscreen: self.window.as_ref().is_some_and(|w| w.fullscreen().is_some()),
         };
         self.script_host.set_app_info(info);
@@ -103,6 +104,9 @@ impl crate::Editor {
         }
         if let Some(s) = req.render_scale {
             self.project.render_scale = s;
+        }
+        if let Some(s) = req.render_sharpness {
+            self.render_sharpness = Some(s);
         }
         if let Some(on) = req.fullscreen {
             self.app_set_fullscreen(on);

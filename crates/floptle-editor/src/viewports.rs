@@ -640,6 +640,7 @@ impl Editor {
         // target and one blit brings the picture up to the panel.
         let lowres = self.project.composite_size(w, h);
         let scaled_on = lowres.is_some();
+        let defer_lines = self.script_host.native_lines();
 
         // Composited resolution: the retro internal res in retro mode (so post/AO/dither
         // land on the same chunky pixel grid as the fullscreen view, then upscale), the
@@ -662,6 +663,7 @@ impl Editor {
                 }
                 if let Some(r) = self.game_retro.as_mut() {
                     r.set_smooth(gpu, !retro_on);
+                    r.set_sharpness(gpu, self.render_sharpness.unwrap_or(floptle_render::retro::DEFAULT_SHARPNESS));
                 }
             }
             // Always configured, not only when an effect is on: the chain is
@@ -697,6 +699,7 @@ impl Editor {
         } else {
             dtex
         };
+        self.lines_deferred = defer_lines;
         self.render_world_into(
             &scene_target,
             &depth,
@@ -711,6 +714,7 @@ impl Editor {
                 history: crate::offscreen::HistorySlot::GamePanel,
             },
         );
+        self.lines_deferred = false;
         // World canvases: real geometry, so they draw into the scene target with
         // its depth, before post. `include_screen: false` — this tab shows a
         // build, so screen-space layers belong in the flat overlay below, not
@@ -764,6 +768,9 @@ impl Editor {
             } else {
                 retro.blit_to(gpu, &cv);
             }
+        }
+        if defer_lines {
+            self.draw_lines_over(&cv, cam.view_proj(aspect), cam.world_position);
         }
         // ---- game UI: the docked Game view shows exactly what a build shows ----
         self.draw_game_ui_overlay(&cv, w.max(1), h.max(1), target_samplable);

@@ -204,9 +204,11 @@ impl Editor {
         // LOD rings centre on what the player actually sees. There is no editor
         // fly-camera to fall back to here, so a scene with no active camera
         // streams around the origin rather than around nothing.
-        let lod_cam = floptle_core::active_camera(&self.world)
-            .map(|e| floptle_core::world_transform(&self.world, e).translation)
-            .unwrap_or(self.camera.position);
+        let lod_cam = self.lod_center(
+            floptle_core::active_camera(&self.world)
+                .map(|e| floptle_core::world_transform(&self.world, e).translation)
+                .unwrap_or(self.camera.position),
+        );
         self.drain_terrain_generates();
         self.update_terrain_residency(lod_cam);
         self.publish_terrain_busy();
@@ -1168,19 +1170,8 @@ impl Editor {
                 }
             }
             // Script-drawn 3D lines (draw.line — the map's orbit conics).
-            if !self.script_lines.is_empty() {
-                let verts: Vec<floptle_render::LineVertex> = self
-                    .script_lines
-                    .iter()
-                    .flat_map(|l| {
-                        let a = (DVec3::from(l.a) - cam.world_position).as_vec3();
-                        let b = (DVec3::from(l.b) - cam.world_position).as_vec3();
-                        [
-                            floptle_render::LineVertex { pos: [a.x, a.y, a.z], color: l.color },
-                            floptle_render::LineVertex { pos: [b.x, b.y, b.z], color: l.color },
-                        ]
-                    })
-                    .collect();
+            if !self.script_lines.is_empty() && !self.lines_deferred {
+                let verts = script_line_verts(&self.script_lines, cam.world_position);
                 headless_mark!("lines");
                 line_layer.draw(gpu, color, depth, view_proj, &verts);
             }
@@ -1293,6 +1284,35 @@ pub(crate) fn test_editor_with_gpu() -> Option<crate::Editor> {
         return None;
     }
     Some(ed)
+}
+
+/// Script lines as camera-relative vertex pairs.
+pub(crate) fn script_line_verts(lines: &[floptle_script::DrawLine], cam: DVec3) -> Vec<floptle_render::LineVertex> {
+    lines
+        .iter()
+        .flat_map(|l| {
+            let a = (DVec3::from(l.a) - cam).as_vec3();
+            let b = (DVec3::from(l.b) - cam).as_vec3();
+            [
+                floptle_render::LineVertex { pos: [a.x, a.y, a.z], color: l.color },
+                floptle_render::LineVertex { pos: [b.x, b.y, b.z], color: l.color },
+            ]
+        })
+        .collect()
+}
+
+impl Editor {
+    /// Draw this frame's script lines over a finished, full-resolution picture
+    /// (after post and the upscale): `draw.nativeLines`.
+    pub(crate) fn draw_lines_over(&mut self, target: &wgpu::TextureView, view_proj: floptle_core::math::Mat4, cam: DVec3) {
+        if self.script_lines.is_empty() {
+            return;
+        }
+        let verts = script_line_verts(&self.script_lines, cam);
+        if let (Some(gpu), Some(lines)) = (self.gpu.as_ref(), self.line_layer.as_mut()) {
+            lines.draw_overlay(gpu, target, gpu.surface_format(), view_proj, &verts);
+        }
+    }
 }
 
 #[cfg(test)]

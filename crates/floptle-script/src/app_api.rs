@@ -87,6 +87,8 @@ pub struct AppInfo {
     pub retro_integer_scale: bool,
     /// The fraction of the window the 3D scene renders at (1 = native).
     pub render_scale: f32,
+    /// How hard the upscale from a render scale below 1 sharpens, 0..=1.
+    pub render_sharpness: f32,
     /// Whether the game's window currently covers the screen. Always `false`
     /// where there is no window (`floptle run`).
     pub fullscreen: bool,
@@ -108,6 +110,7 @@ pub struct AppRequests {
     pub retro_height: Option<u32>,
     pub retro_integer_scale: Option<bool>,
     pub render_scale: Option<f32>,
+    pub render_sharpness: Option<f32>,
     /// Cover the screen (borderless, on the monitor the window is on), or
     /// go back to a window.
     pub fullscreen: Option<bool>,
@@ -123,6 +126,7 @@ impl AppRequests {
             && self.retro_height.is_none()
             && self.retro_integer_scale.is_none()
             && self.render_scale.is_none()
+            && self.render_sharpness.is_none()
             && self.fullscreen.is_none()
     }
 }
@@ -256,6 +260,29 @@ pub fn install(lua: &Lua, info: &SharedAppInfo, req: &SharedAppRequests) -> mlua
                 }
                 r.borrow_mut().render_scale = Some(s as f32);
                 i.borrow_mut().render_scale = s as f32;
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let i = info.clone();
+        t.set("renderSharpness", lua.create_function(move |_, ()| Ok(i.borrow().render_sharpness as f64))?)?;
+    }
+    // app.setRenderSharpness(0..1) — how hard the upscale from a render scale
+    // below 1 sharpens. 0 is a plain bilinear stretch.
+    {
+        let r = req.clone();
+        let i = info.clone();
+        t.set(
+            "setRenderSharpness",
+            lua.create_function(move |_, s: f64| {
+                if !(0.0..=1.0).contains(&s) {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "app.setRenderSharpness({s}) — between 0 (a plain stretch) and 1 (the most)"
+                    )));
+                }
+                r.borrow_mut().render_sharpness = Some(s as f32);
+                i.borrow_mut().render_sharpness = s as f32;
                 Ok(())
             })?,
         )?;

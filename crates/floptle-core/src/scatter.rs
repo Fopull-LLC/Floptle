@@ -459,6 +459,17 @@ pub fn chunk_center(src: &ScatterSource, key: ChunkKey) -> DVec3 {
     }
 }
 
+/// How high above the region the eye is, in whole chunks (rounded down, and
+/// never below the surface). With [`eye_chunk`], the whole of what
+/// [`chunks_near`] depends on.
+pub fn eye_height_band(src: &ScatterSource, eye: DVec3) -> i64 {
+    let h = match src.region {
+        Region::Ground { center, .. } => (eye.y - center.y).abs(),
+        Region::Sphere { center, radius } => (eye - center).length() - radius,
+    };
+    (h.max(0.0) / src.chunk).floor() as i64
+}
+
 /// Which chunk the eye is standing in. The key set changes when this changes —
 /// which is when the sweep is worth redoing, and not once a frame.
 pub fn eye_chunk(src: &ScatterSource, eye: DVec3) -> ChunkKey {
@@ -491,12 +502,24 @@ pub fn eye_chunk(src: &ScatterSource, eye: DVec3) -> ChunkKey {
 /// its first frames on what is visible. The square sweep is cut to a disc: a
 /// corner of the square is √2 range away and can hold nothing visible.
 ///
-/// The answer depends on the eye's chunk, not on the eye: both the cull and the
-/// order measure from the centre of the chunk the eye stands in, so the list is
-/// cacheable until the eye crosses a chunk boundary.
+/// **Height counts.** An eye `h` above the ground reaches only
+/// `sqrt(range² − h²)` of it, and an eye higher than `range` reaches none: a
+/// camera pulling back from a planet (a map zooming out) used to keep a full
+/// disc of chunks resident under its sub-point and re-settle it every frame as
+/// that point slid across the surface.
+///
+/// The answer depends on the eye's chunk and its [`eye_height_band`], not on
+/// the eye: the cull and the order measure from the centre of the chunk the eye
+/// stands over, at the bottom of its height band, so the list is cacheable until
+/// the eye crosses a chunk boundary or a band.
 pub fn chunks_near(src: &ScatterSource, eye: DVec3, range: f64) -> Vec<ChunkKey> {
     let mut keys: Vec<(f64, ChunkKey)> = Vec::new();
-    let reach = range + src.chunk;
+    let h = (eye_height_band(src, eye) as f64 * src.chunk).max(0.0);
+    let full = range + src.chunk;
+    if h > full {
+        return Vec::new();
+    }
+    let reach = (full * full - h * h).sqrt();
     // Two chunks of slack, measured centre to centre: one for the eye sitting
     // in the corner of its own chunk, one for a prop sitting in the corner of
     // the chunk being measured. Each is worth at most 0.71 of a chunk, so this
@@ -808,6 +831,29 @@ mod tests {
         let (a, b) = (cost(&big(200.0, 20.0, 1)), cost(&big(400.0, 20.0, 1)));
         let ratio = b.chunks as f64 / a.chunks as f64;
         assert!((3.0..4.2).contains(&ratio), "doubling the distance cost {ratio:.2}x, not ~4x");
+    }
+
+    /// **0315: an eye above a planet reaches less of it, and one higher than
+    /// the view range reaches none.** A map zooming out off-axis slid the eye's
+    /// sub-point across the surface and kept a full disc resident under it at
+    /// any height, re-settling props every frame, 35 → 449 ms a frame.
+    #[test]
+    fn residency_shrinks_with_height_and_ends_above_the_view_range() {
+        let s = ScatterSource {
+            region: Region::Sphere { center: DVec3::ZERO, radius: 2000.0 },
+            chunk: 20.0,
+            per_chunk: 4,
+            bands: vec![Band { asset: "rock.glb".into(), distance: 200.0 }],
+            ..ground(4)
+        };
+        let dir = DVec3::new(0.3, 0.9, 0.2).normalize();
+        let at = |h: f64| chunks_near(&s, dir * (2000.0 + h), 200.0).len();
+        let (ground_level, mid, high, above) = (at(1.7), at(150.0), at(215.0), at(400.0));
+        assert!(ground_level > 0 && mid > 0 && high > 0, "{ground_level} {mid} {high}");
+        assert!(ground_level > mid && mid > high, "fewer chunks as the eye rises: {ground_level} {mid} {high}");
+        assert_eq!(above, 0, "an eye 400 m up with a 200 m range keeps nothing resident");
+        assert_eq!(eye_height_band(&s, dir * 2001.0), 0);
+        assert_eq!(eye_height_band(&s, dir * 1990.0), 0, "under the surface reads as on it");
     }
 
     /// On a body smaller than the view distance, residency saturates at the

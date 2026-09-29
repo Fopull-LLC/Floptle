@@ -172,6 +172,7 @@ impl Editor {
         if !warping && !self.space_coast.is_empty() {
             self.space_coast.clear();
         }
+        let lod_anchor = self.lod_anchor_world();
         if let Some(sim) = self.sim.as_mut() {
             let states: std::collections::HashMap<u32, (floptle_core::math::Vec3, bool)> = sim
                 .body_states()
@@ -534,11 +535,17 @@ impl Editor {
             // Distant-craft LOD (hundreds of deployed craft, cheaply): far
             // compounds leave live physics — landed/slow ones freeze in the
             // carried frame, in-flight ones snap to their own Kepler rails —
-            // and wake on approach. The active camera is "near".
-            let cam = self.world.query::<floptle_core::Matter>().find_map(|(e, m)| {
-                matches!(m, floptle_core::Matter::Camera { active: true, .. })
-                    .then(|| floptle_core::world_transform(&self.world, e).translation)
-            });
+            // and wake on approach. The active camera is "near", unless a
+            // game named a `terrain.lodAnchor`: a map camera thousands of units
+            // out must not freeze the craft beside the player.
+            let cam = self
+                .world
+                .query::<floptle_core::Matter>()
+                .find_map(|(e, m)| {
+                    matches!(m, floptle_core::Matter::Camera { active: true, .. })
+                        .then(|| floptle_core::world_transform(&self.world, e).translation)
+                })
+                .map(|c| lod_anchor.unwrap_or(c));
             if let Some(cam) = cam {
                 for (eid, com) in sim.compound_positions() {
                     if self.compound_coast.contains_key(&eid) {

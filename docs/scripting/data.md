@@ -162,6 +162,52 @@ cloud.get("/games/" .. cloud.game() .. "/rank/laps:canyon", function(res) end)
 Reads only: a game key never writes, so saves, scores and uploads go through
 `account.*` as the player. Play only, like `http.*`, with the same rate limits.
 
+### Leaderboards, documents, files and counters by name
+
+Four calls name a collection and hand back an object with the operations that
+collection has. They build the paths, encode the names and unwrap the replies,
+so a game writes no URL. Reads use the game key (or the player, for a private
+collection); writes always go out as the signed-in player.
+
+```lua
+local times = cloud.rank("time:" .. level)
+times:page({ limit = 25 }, function(page, err)      -- {entries, total, keep, next}
+  if err then return show(err.message) end
+  for _, e in ipairs(page.entries) do row(e.rank, e.player, e.value) end
+end)
+times:submit(61.25, { meta = { deaths = 2 }, blob = "replays/" .. runId }, function(r, err)
+  if r and r.kept then print("new best, rank " .. r.rank) end
+end)
+
+local stages = cloud.docs("stages")
+stages:put("canyon-2", data, { ifVersion = 0 }, function(doc, err)
+  if err and err.code == "key_taken" then print("somebody already has that name") end
+end)
+cloud.blobs("replays"):put(runId, replayBytes)
+cloud.counter("likes"):add("canyon-2", 1)
+```
+
+| Object | Operations |
+|---|---|
+| `cloud.rank(board)` | `:page{ limit, offset, around, player, sort }`, `:submit(value [, { meta, blob }])`, `:remove([playerId])` |
+| `cloud.docs(name [, { private = true }])` | `:list{ prefix, owner, sort, after, limit }`, `:get(key)`, `:put(key, data [, { ifVersion }])`, `:delete(key)` |
+| `cloud.blobs(name [, { private = true }])` | the same, with bytes (a string) where docs take a table; `:get` answers the bytes |
+| `cloud.counter(name)` | `:add(key [, n])`, `:get(key)`, `:top{ prefix, sort, limit }` |
+
+Every operation takes a last `function(result, err)`. `result` is the reply
+the Cloud documents for that call. `err` is `nil` on success, and otherwise
+the same table whichever call made it: `{ code = "key_taken", message = "...",
+status = 409 }`. The codes are the Cloud's own (`no_such_collection`,
+`private_collection`, `key_taken`, `version_conflict`, `invalid_blob`,
+`storage_budget_exceeded`), or `http_<status>` and `network` when the server
+said nothing more. A board's collection is the part of its name before the
+first `:`, so `time:canyon` and `time:canyon:week39` both belong to `time`.
+
+`floptle check` warns about a collection a script uses that
+`cloud_collections.ron` does not declare. The one that matters most is a
+ranking: an undeclared one is created on its first write keeping each player's
+highest value, so a time trial would rank its slowest times first.
+
 ### Declaring what the game stores: `cloud_collections.ron`
 
 Everything a game stores on fopull.com lives in a named collection. Public
@@ -218,6 +264,7 @@ this page; `app.*` is the rest.
 | `app.retro()` / `app.setRetro(on)` | the retro presentation — compositing small and upscaling |
 | `app.retroHeight()` / `app.setRetroHeight(px)` | the height it composites at, for a pixel-art game |
 | `app.renderScale()` / `app.setRenderScale(s)` | the fraction of the window the 3D scene renders at (0.25–1), upscaled smoothly with the UI kept sharp: the "render resolution" setting a weak GPU needs |
+| `app.renderSharpness()` / `app.setRenderSharpness(s)` | how hard the upscale from a render scale below 1 sharpens, 0–1 (default 0.4; 0 is a plain stretch) |
 | `app.retroIntegerScale()` / `app.setRetroIntegerScale(on)` | upscale by a whole number and letterbox, instead of stretching |
 | `app.fullscreen()` / `app.setFullscreen(on)` | cover the screen (borderless, no mode switch), or go back to a window |
 
@@ -239,6 +286,18 @@ end
 
 It's independent of retro mode. When retro is on, the retro height decides
 the resolution instead.
+
+The upscale sharpens by local contrast, so edges stay crisp while flat sky and
+gradients do not turn to grain. `app.setRenderSharpness(s)` sets how hard,
+from 0 (a plain bilinear stretch) to 1; the default is 0.4. A retro upscale is
+hard pixels and is never sharpened.
+
+Lines and rings a script draws with `draw.*` go into the scene, so they are
+drawn at the lowered resolution too and go soft. `draw.nativeLines(true)` draws
+them over the finished picture instead, one pixel wide at the window's own
+resolution and in exactly the colour given, whatever the render scale; the
+post effects (bloom, depth of field, grain) no longer touch them. An orbit map
+or an aim reticle wants that.
 
 ### What `app.quit()` does depends on where the game is running
 

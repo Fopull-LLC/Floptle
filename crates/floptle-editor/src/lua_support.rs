@@ -479,6 +479,13 @@ function draw.line(x1, y1, z1, x2, y2, z2, r, g, b, a) end
 ---@param closed? boolean join the last point back to the first
 function draw.polyline(points, r, g, b, a, closed) end
 
+---Draw script lines over the finished picture at the window's own resolution
+---(after post effects and any render-scale upscale), in exactly their colour,
+---instead of into the 3D scene. Persistent. Returns the setting.
+---@param on? boolean
+---@return boolean
+function draw.nativeLines(on) end
+
 ---A Kepler orbit around the focus `center`, in the plane of `e1` (toward
 ---periapsis) and `e2`: r(θ) = p / (1 + ecc·cos θ). Closed for ecc < 1; an
 ---open arc cut where r reaches `maxR` (default 10·p) otherwise.
@@ -1729,6 +1736,12 @@ function terrain.saveDir(path) end
 ---positions of dynamic bodies, never the camera.
 ---@param bodyName string The body's node name (as in `space.bodies()`).
 function terrain.warm(bodyName) end
+---What terrain detail, the far-planet impostor switch and far-craft freezing
+---follow during Play, in place of the render camera (a map view anchors on
+---the ship). nil hands it back to the camera. Returns the anchor it replaced.
+---@param anchor? table|vec3 A node, a point, or nil.
+---@return table|vec3|nil
+function terrain.lodAnchor(anchor) end
 ---Is the background terrain worker already occupied? True while any field is
 ---generating or streaming in.
 ---

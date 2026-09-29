@@ -239,7 +239,78 @@ pub(crate) fn examine(root: &Path) -> Report {
         }
     }
     check_shader_refs(root, &mut r);
+    check_cloud_collections(root, &files, &mut r);
     r
+}
+
+/// Every literal `cloud.rank/docs/blobs/counter("name")` in the project's
+/// scripts: `(file, line, kind, collection, says private)`. A board's
+/// collection is the part before its first `:`.
+fn cloud_calls(root: &Path, files: &[PathBuf]) -> Vec<(String, usize, &'static str, String, bool)> {
+    let mut out = Vec::new();
+    for path in files.iter().filter(|p| p.extension().is_some_and(|x| x == "lua")) {
+        let Ok(text) = std::fs::read_to_string(path) else { continue };
+        for (i, line) in text.lines().enumerate() {
+            for kind in ["rank", "docs", "blobs", "counter"] {
+                let call = format!("cloud.{kind}(");
+                let mut rest = line;
+                while let Some(at) = rest.find(&call) {
+                    rest = &rest[at + call.len()..];
+                    let t = rest.trim_start();
+                    let Some(q) = t.chars().next().filter(|c| *c == '"' || *c == '\'') else { continue };
+                    let Some(end) = t[1..].find(q) else { continue };
+                    let name = &t[1..1 + end];
+                    let collection = name.split(':').next().unwrap_or(name).to_string();
+                    let private = t[1 + end..].split(')').next().is_some_and(|a| a.contains("private") && a.contains("true"));
+                    out.push((rel(root, path), i + 1, kind, collection, private));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// **A collection the code uses and the project does not declare.** An
+/// undeclared ranking auto-creates keeping each player's HIGHEST value, so a
+/// time trial that ships before somebody declares it keeps every player's
+/// slowest time, silently, forever; a public docs or blobs collection and every
+/// counter refuse writes until declared.
+fn check_cloud_collections(root: &Path, files: &[PathBuf], r: &mut Report) {
+    let calls = cloud_calls(root, files);
+    if calls.is_empty() {
+        return;
+    }
+    let declared: std::collections::HashSet<String> =
+        match std::fs::read_to_string(root.join(crate::cloud_collections::FILE)) {
+            Ok(text) => match crate::cloud_collections::parse(&text) {
+                Ok(wants) => wants.into_iter().map(|w| w.name).collect(),
+                // The file's own mistakes are `floptle cloud collections`'s to report.
+                Err(_) => return,
+            },
+            Err(_) => Default::default(),
+        };
+    let mut said = std::collections::HashSet::new();
+    for (file, line, kind, name, private) in calls {
+        if declared.contains(&name) || !said.insert((kind, name.clone())) {
+            continue;
+        }
+        let why = match kind {
+            "rank" => "an undeclared ranking is created on its first write keeping each player's HIGHEST value, \
+                       which ranks a time trial's slowest time first. Declare it with the `keep` it needs (Min for times)",
+            "counter" => "a counter must be declared before anything can count into it",
+            _ if private => continue,
+            _ => "a public collection must be declared before anything can be written to it (a private one says \
+                  { private = true } and creates itself)",
+        };
+        r.warn(
+            Some(file),
+            format!(
+                "line {line}: cloud.{kind} uses the collection `{name}`, which is not in {}: {why}, then run \
+                 `floptle cloud collections --apply`",
+                crate::cloud_collections::FILE
+            ),
+        );
+    }
 }
 
 /// **A path only this machine has.** Anything the editor wrote as
@@ -839,6 +910,33 @@ mod tests {
         assert!(text.contains("asset_path: \"models/tower.glb\""), "{text}");
         let r = examine(&d);
         assert_eq!(r.errors(), 0, "still failing after --fix: {:?}", r.findings);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **0278: a collection the code uses and the project does not declare.**
+    /// A ranking warns (it would auto-create keeping the highest value); a
+    /// private docs collection does not (it creates itself); a declared one
+    /// does not; each collection is said once.
+    #[test]
+    fn a_cloud_collection_the_scripts_use_and_the_project_does_not_declare_warns() {
+        let d = temp("cloud");
+        std::fs::write(d.join("scenes/first.ron"), scene("")).unwrap();
+        std::fs::write(
+            d.join("scripts/online.lua"),
+            "local times = cloud.rank('time:play:' .. mode)\n\
+             local again = cloud.rank(\"time:other\")\n\
+             local saves = cloud.docs('saves', { private = true })\n\
+             local stages = cloud.docs(\"stages\")\n\
+             local likes = cloud.counter('likes')\n",
+        )
+        .unwrap();
+        std::fs::write(d.join("cloud_collections.ron"), "[(name: \"stages\", kind: docs, access: public)]").unwrap();
+        let r = examine(&d);
+        let cloud: Vec<&String> = r.findings.iter().map(|f| &f.message).filter(|m| m.contains("cloud.")).collect();
+        assert_eq!(cloud.len(), 2, "{cloud:?}");
+        assert!(cloud.iter().any(|m| m.contains("line 1") && m.contains("`time`") && m.contains("HIGHEST")), "{cloud:?}");
+        assert!(cloud.iter().any(|m| m.contains("`likes`") && m.contains("counter")), "{cloud:?}");
+        assert!(r.findings.iter().all(|f| f.level != Level::Error), "a warning, not an error");
         let _ = std::fs::remove_dir_all(&d);
     }
 

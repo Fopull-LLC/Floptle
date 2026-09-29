@@ -172,6 +172,17 @@ fn rings_for_body(body_radius: Option<f64>, chunk_units: f64) -> [i32; 3] {
 /// radii of camera distance (~2° of angular diameter — chunk meshes would be
 /// a handful of pixels).
 const IMPOSTOR_RADII: f64 = 60.0;
+/// …and back to its meshes only inside this fraction of that (42 radii). The
+/// switch frees every chunk mesh and the way back remeshes the whole body, so
+/// a camera parked near the line must not flip it.
+const IMPOSTOR_LEAVE: f64 = 0.7;
+
+/// Whether a celestial terrain of `radius` is drawn as its impostor when its
+/// LOD centre is `dist` away, given whether it was last frame.
+fn impostor_next(was: bool, dist: f64, radius: f64) -> bool {
+    let enter = radius.max(1.0) * IMPOSTOR_RADII;
+    if was { dist > enter * IMPOSTOR_LEAVE } else { dist > enter }
+}
 
 /// G1 residency (docs/subsystems/large-world-space.md): a cold celestial terrain's
 /// field starts loading (background) when the camera comes inside this many body
@@ -616,14 +627,13 @@ impl Editor {
             // Far-body impostor gate: a celestial terrain seen from far enough
             // that its whole disc is a couple of degrees wide stops streaming
             // entirely and frees its resident chunk meshes; push_terrain_instances
-            // draws the shaded sphere instead. ×0.9 hysteresis so orbiting along
-            // the threshold can't thrash evict/remesh cycles.
+            // draws the shaded sphere instead, with hysteresis (see
+            // `impostor_next`) so orbiting along the threshold can't thrash
+            // evict/remesh cycles.
             if let Some(cb) = self.world.get::<floptle_core::CelestialBody>(e) {
                 let cam_dist = (cam_world - anchor).length();
-                let enter = cb.body_radius.max(1.0) * IMPOSTOR_RADII;
                 let was = render.impostor;
-                render.impostor =
-                    if render.impostor { cam_dist > enter * 0.9 } else { cam_dist > enter };
+                render.impostor = impostor_next(was, cam_dist, cb.body_radius);
                 if render.impostor != was {
                     // The SDF shadow/AO atlas excludes impostor bodies — re-lay it out.
                     self.terrain_gpu_dirty = true;
@@ -2856,6 +2866,29 @@ impl Editor {
         (wt.translation, wt.rotation.normalize(), wt.scale.x.max(1e-6))
     }
 
+    /// Where terrain detail, the impostor switch and far-craft freezing are
+    /// measured from: the game's `terrain.lodAnchor` during Play, when it named
+    /// one that still exists, else `camera`.
+    pub(crate) fn lod_center(&self, camera: DVec3) -> DVec3 {
+        self.lod_anchor_world().unwrap_or(camera)
+    }
+
+    /// The game's `terrain.lodAnchor` in world space, during Play, when it
+    /// names a point or a node that still exists.
+    pub(crate) fn lod_anchor_world(&self) -> Option<DVec3> {
+        if !self.playing {
+            return None;
+        }
+        match self.script_host.terrain_lod_anchor()? {
+            floptle_script::LodAnchor::Node(id) => self
+                .world
+                .entity_at(id)
+                .filter(|e| self.world.get::<floptle_core::Transform>(*e).is_some())
+                .map(|e| floptle_core::world_transform(&self.world, e).translation),
+            floptle_script::LodAnchor::Point(p) => Some(DVec3::from(p)),
+        }
+    }
+
     /// World point → a terrain's field-local frame.
     pub(crate) fn terrain_world_to_local(&self, e: Entity, p: DVec3) -> Vec3 {
         let (anchor, rot, s) = self.terrain_world_frame_of(e);
@@ -3073,6 +3106,38 @@ mod tests {
     use super::{CHUNK_FADE_SECS, chunk_fade, chunk_priority, lod_for, raw_lod, rings_for_body, LOD_RINGS};
     use floptle_core::math::{DVec3, Quat};
     use floptle_field::BakedSdf;
+
+    /// **0315: a map camera does not move the terrain's centre of detail.**
+    /// With an anchor on the ship, the render camera can go from 50 to 80 body
+    /// radii and back and the terrain is measured from the ship throughout, so
+    /// nothing remeshes or switches to its impostor. The switch itself has
+    /// real hysteresis: in at 60 radii, out at 42.
+    #[test]
+    fn terrain_detail_follows_the_anchor_not_a_roaming_camera() {
+        use super::impostor_next;
+        let r = 150.0;
+        assert!(!impostor_next(false, 59.0 * r, r) && impostor_next(false, 61.0 * r, r));
+        assert!(impostor_next(true, 45.0 * r, r), "a camera parked just inside 60 radii does not flip it back");
+        assert!(!impostor_next(true, 41.0 * r, r), "it returns to meshes inside 42 radii");
+
+        let mut ed = crate::Editor::default();
+        let ship = ed.world.spawn();
+        ed.world.insert(ship, floptle_core::Transform::from_translation(DVec3::new(0.0, r + 2.0, 0.0)));
+        let far = |k: f64| DVec3::new(0.0, 0.0, k * r);
+        assert_eq!(ed.lod_center(far(80.0)), far(80.0), "outside Play the camera is the centre");
+        ed.playing = true;
+        assert_eq!(ed.lod_center(far(80.0)), far(80.0), "no anchor: the camera");
+        ed.script_host.set_terrain_lod_anchor(Some(floptle_script::LodAnchor::Node(ship.index())));
+        for k in [50.0, 80.0, 50.0] {
+            let c = ed.lod_center(far(k));
+            assert_eq!(c, DVec3::new(0.0, r + 2.0, 0.0), "camera at {k} R: the ship stays the centre");
+            assert!(!impostor_next(false, c.length(), r), "and the planet under it stays meshed");
+        }
+        ed.world.despawn(ship);
+        assert_eq!(ed.lod_center(far(80.0)), far(80.0), "an anchor node that is gone hands it back to the camera");
+        ed.script_host.set_terrain_lod_anchor(Some(floptle_script::LodAnchor::Point([1.0, 2.0, 3.0])));
+        assert_eq!(ed.lod_center(far(80.0)), DVec3::new(1.0, 2.0, 3.0));
+    }
 
     /// **0320: which plane a flatten levels to.** On a planet the radial up at
     /// the brush, on a flat terrain `+Y`, and a script's own normal turned into

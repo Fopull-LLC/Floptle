@@ -174,9 +174,11 @@ impl Editor {
         // LOD rings center on what the player actually sees: the active game camera
         // during Play, the editor fly-camera otherwise.
         let lod_cam = if self.playing {
-            floptle_core::active_camera(&self.world)
-                .map(|e| floptle_core::world_transform(&self.world, e).translation)
-                .unwrap_or(self.camera.position)
+            self.lod_center(
+                floptle_core::active_camera(&self.world)
+                    .map(|e| floptle_core::world_transform(&self.world, e).translation)
+                    .unwrap_or(self.camera.position),
+            )
         } else {
             self.camera.position
         };
@@ -652,6 +654,7 @@ impl Editor {
                 // upscaled at the end, or straight into the window.
                 let lowres =
                     self.project.composite_size(gpu.config.width, gpu.config.height).is_some();
+                let defer_lines = self.script_host.native_lines();
                 // The scene always renders into the post input, whether or not
                 // any effect is switched on: the scene renders in the
                 // floating-point scene format, the window takes 8-bit sRGB, and
@@ -792,19 +795,8 @@ impl Editor {
                     }
                 }
                 // Script-drawn 3D lines (draw.line — the map's orbit conics).
-                if !self.script_lines.is_empty() {
-                    let verts: Vec<floptle_render::LineVertex> = self
-                        .script_lines
-                        .iter()
-                        .flat_map(|l| {
-                            let a = (DVec3::from(l.a) - cam.world_position).as_vec3();
-                            let b = (DVec3::from(l.b) - cam.world_position).as_vec3();
-                            [
-                                floptle_render::LineVertex { pos: [a.x, a.y, a.z], color: l.color },
-                                floptle_render::LineVertex { pos: [b.x, b.y, b.z], color: l.color },
-                            ]
-                        })
-                        .collect();
+                if !self.script_lines.is_empty() && !defer_lines {
+                    let verts = crate::offscreen::script_line_verts(&self.script_lines, cam.world_position);
                     line_layer.draw(gpu, color, depth, view_proj, &verts);
                 }
                 // The navmesh's walkable surface, filled. Before the script
@@ -1017,6 +1009,12 @@ impl Editor {
                     } else {
                         retro.blit(gpu, &frame);
                     }
+                }
+                // `draw.nativeLines`: over the upscaled picture, at the
+                // window's own resolution.
+                if defer_lines && !self.script_lines.is_empty() {
+                    let verts = crate::offscreen::script_line_verts(&self.script_lines, cam.world_position);
+                    line_layer.draw_overlay(gpu, &frame.view, gpu.surface_format(), view_proj, &verts);
                 }
 
                 profile
