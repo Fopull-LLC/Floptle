@@ -342,6 +342,84 @@ impl ChunkField {
         }
     }
 
+    /// [`Self::renormalize`] for a brush that knows which voxels it wrote: the
+    /// same projection, visiting only what the write could have disturbed.
+    ///
+    /// The first sweep looks at the written voxels and their six neighbours; each
+    /// later sweep only at the neighbours of what the previous one changed. A voxel
+    /// the edit could not reach keeps the value a whole-chunk sweep would have left
+    /// it, so the result is the same, and the cost follows the size of the edit
+    /// rather than the chunks around it: a flatten on a planet swept every chunk it
+    /// grazed and a ring of their neighbours, six times, at seven hash lookups a
+    /// voxel, which was most of a second per building pad.
+    ///
+    /// Returns the chunks it changed, which can spill one voxel past the write.
+    fn renormalize_from(&mut self, mut active: Vec<[i32; 3]>) -> Vec<[i32; 3]> {
+        const NEIGHBOURS: [(i32, i32, i32); 6] =
+            [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)];
+        let h = self.voxel;
+        let band = self.band();
+        let mut changed: Vec<[i32; 3]> = Vec::new();
+        let grow = |set: &mut Vec<[i32; 3]>| {
+            let n = set.len();
+            for k in 0..n {
+                let i = set[k];
+                for (dx, dy, dz) in NEIGHBOURS {
+                    set.push([i[0] + dx, i[1] + dy, i[2] + dz]);
+                }
+            }
+            // Chunk-major order, so the reader's one-chunk cache hits.
+            set.sort_unstable_by_key(|i| (chunk_of(*i), *i));
+            set.dedup();
+        };
+        grow(&mut active);
+        for _ in 0..6 {
+            let mut writes: Vec<([i32; 3], f32)> = Vec::new();
+            {
+                let mut read = VoxelReader::new(self);
+                for &i in &active {
+                    let cur = read.at(i);
+                    if cur.abs() >= band {
+                        continue; // saturated plateau: zero gradient by design
+                    }
+                    let (mut lo, mut hi) = (f32::NEG_INFINITY, f32::INFINITY);
+                    for (dx, dy, dz) in NEIGHBOURS {
+                        let n = read.at([i[0] + dx, i[1] + dy, i[2] + dz]);
+                        if n.abs() >= band {
+                            continue;
+                        }
+                        lo = lo.max(n - h);
+                        hi = hi.min(n + h);
+                    }
+                    if !lo.is_finite() || !hi.is_finite() {
+                        continue;
+                    }
+                    let next = if lo > hi { 0.5 * (lo + hi) } else { cur.clamp(lo, hi) };
+                    if (next - cur).abs() > 1e-6 {
+                        writes.push((i, next));
+                    }
+                }
+            }
+            if writes.is_empty() {
+                break;
+            }
+            // Jacobi, as in `renormalize`: every read above saw the same field.
+            active.clear();
+            for (i, v) in writes {
+                let li = local_of(i);
+                let c = chunk_of(i);
+                let data = self.data_mut(c);
+                data.dist[li] = v.clamp(-band, band);
+                changed.push(c);
+                active.push(i);
+            }
+            grow(&mut active);
+        }
+        changed.sort_unstable();
+        changed.dedup();
+        changed
+    }
+
     /// Project the field back onto the 1-Lipschitz constraint over the given chunks.
     ///
     /// **Why this is not optional.** A brush moves each voxel by its own weight, so a
@@ -503,6 +581,37 @@ pub struct SculptYield {
 #[inline]
 fn occupancy(d: f32, voxel: f32) -> f32 {
     (0.5 - d / voxel).clamp(0.0, 1.0)
+}
+
+/// Reads voxels with the last chunk it looked up kept to hand: neighbouring
+/// voxels are nearly always in the same chunk, so most reads skip the hash.
+struct VoxelReader<'a> {
+    field: &'a ChunkField,
+    last: Option<([i32; 3], Option<&'a Chunk>)>,
+}
+
+impl<'a> VoxelReader<'a> {
+    fn new(field: &'a ChunkField) -> Self {
+        Self { field, last: None }
+    }
+
+    #[inline]
+    fn at(&mut self, i: [i32; 3]) -> f32 {
+        let c = chunk_of(i);
+        let chunk = match self.last {
+            Some((lc, ch)) if lc == c => ch,
+            _ => {
+                let ch = self.field.chunks.get(&c);
+                self.last = Some((c, ch));
+                ch
+            }
+        };
+        match chunk {
+            None => self.field.band(),
+            Some(Chunk::Uniform(v)) => *v,
+            Some(Chunk::Data(d)) => d.dist[local_of(i)],
+        }
+    }
 }
 
 impl ChunkField {
@@ -700,13 +809,18 @@ impl ChunkField {
             }
         }
         let mut touched = Vec::new();
+        let mut seeds = Vec::with_capacity(writes.len());
         for (i, v) in writes {
+            if (v - self.voxel_at(i)).abs() < 1e-6 {
+                continue;
+            }
             self.set_voxel(i, v, None);
             touched.push(chunk_of(i));
+            seeds.push(i);
         }
+        touched.extend(self.renormalize_from(seeds));
         touched.sort_unstable();
         touched.dedup();
-        self.renormalize(&touched);
         self.compact(&touched);
         touched
     }
@@ -737,33 +851,51 @@ impl ChunkField {
     ) -> Vec<[i32; 3]> {
         let n = normal.try_normalize().unwrap_or(Vec3::Y);
         let s = strength.clamp(0.0, 1.0);
+        let band = self.band();
         let (lo, hi) = self.voxel_range(center, radius);
-        let mut touched = Vec::new();
-        for iz in lo[2]..=hi[2] {
-            for iy in lo[1]..=hi[1] {
-                for ix in lo[0]..=hi[0] {
-                    let p = Vec3::new(ix as f32, iy as f32, iz as f32) * self.voxel;
-                    let rel = p - center;
-                    let along = rel.dot(n);
-                    let across = (rel - n * along).length();
-                    if across > radius {
-                        continue;
+        // Read everything first, then write: the reads share one chunk cache, and
+        // a voxel whose value would not change is never written at all. Deep rock
+        // under the pad and open sky above it are already as far from the plane as
+        // the field can say, so writing them only turned compact chunks into dense
+        // ones for the projection below to sweep.
+        let mut writes: Vec<([i32; 3], f32)> = Vec::new();
+        {
+            let mut read = VoxelReader::new(self);
+            for iz in lo[2]..=hi[2] {
+                for iy in lo[1]..=hi[1] {
+                    for ix in lo[0]..=hi[0] {
+                        let p = Vec3::new(ix as f32, iy as f32, iz as f32) * self.voxel;
+                        let rel = p - center;
+                        let along = rel.dot(n);
+                        let across = (rel - n * along).length();
+                        if across > radius {
+                            continue;
+                        }
+                        let w = s * profile.weight(across, radius);
+                        if w <= 0.0 {
+                            continue;
+                        }
+                        // The plane's SDF through the hit point.
+                        let cur = read.at([ix, iy, iz]);
+                        let next = (cur + (along - cur) * w).clamp(-band, band);
+                        if (next - cur).abs() < 1e-6 {
+                            continue;
+                        }
+                        writes.push(([ix, iy, iz], next));
                     }
-                    let w = s * profile.weight(across, radius);
-                    if w <= 0.0 {
-                        continue;
-                    }
-                    // The plane's SDF through the hit point.
-                    let target = along;
-                    let cur = self.voxel_at([ix, iy, iz]);
-                    self.set_voxel([ix, iy, iz], cur + (target - cur) * w, None);
-                    touched.push(chunk_of([ix, iy, iz]));
                 }
             }
         }
+        let mut touched = Vec::with_capacity(writes.len());
+        let mut seeds = Vec::with_capacity(writes.len());
+        for (i, v) in writes {
+            self.set_voxel(i, v, None);
+            touched.push(chunk_of(i));
+            seeds.push(i);
+        }
+        touched.extend(self.renormalize_from(seeds));
         touched.sort_unstable();
         touched.dedup();
-        self.renormalize(&touched);
         self.compact(&touched);
         touched
     }
@@ -1860,6 +1992,26 @@ mod tests {
             }
         }
         assert!(worst < 1.0, "the pad is not level with the ground's up: worst |d| on the tangent plane {worst}");
+    }
+
+    /// **A flatten writes the ground it moves, not the cube around it.** Deep
+    /// rock under the pad and sky above it are already as far from the plane as
+    /// the field can say; writing them anyway turned compact chunks into dense
+    /// ones for the projection to sweep, most of a second per building pad on a
+    /// planet. A pad on a big solid sphere now adds no dense chunk beyond the
+    /// surface band, and leaves the field a distance field.
+    #[test]
+    fn a_flatten_leaves_deep_rock_and_open_sky_compact() {
+        let mut f = ChunkField::new(0.5);
+        f.fill_with(Vec3::splat(-64.0), Vec3::splat(64.0), |p| p.length() - 60.0, |_| [0.5, 0.5, 0.5]);
+        let up = Vec3::new(0.3, 1.0, 0.2).normalize();
+        let before = f.data_chunks();
+        let touched = f.flatten_to_plane(up * 60.5, up, 12.0, 1.0, BrushProfile::default());
+        let after = f.data_chunks();
+        assert!(after <= before + 2, "the pad made {} chunks dense ({before} -> {after})", after - before);
+        assert!(touched.len() <= 12, "a 12 m pad touched {} chunks", touched.len());
+        let (worst, bad) = f.lipschitz_audit();
+        assert!(bad < 0.01, "the pad left {:.2}% of band voxels steeper than a distance field (worst {worst:.2})", bad * 100.0);
     }
 
     /// Per-write-path |∇d| report. This is the diagnostic that found the real culprit:

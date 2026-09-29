@@ -228,6 +228,34 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
         })?,
     )?;
 
+    // perf.hitches() -> every frame since the last call whose buckets added up
+    // to 50 ms or more: { {frame=, ms=, top=, buckets={terrain=157.4, ...}}, ... },
+    // oldest first. The window behind `worstMs` is sixty frames, so a probe
+    // that reads every few seconds had already lost the spike it was after.
+    let p = profile.clone();
+    t.set(
+        "hitches",
+        lua.create_function(move |lua, ()| {
+            require_on(&p.borrow(), "hitches")?;
+            let list = lua.create_table()?;
+            for (i, h) in p.borrow_mut().take_hitches().into_iter().enumerate() {
+                let row = lua.create_table()?;
+                row.set("frame", h.frame)?;
+                row.set("ms", h.ms)?;
+                if let Some((b, _)) = h.buckets.first() {
+                    row.set("top", b.name())?;
+                }
+                let buckets = lua.create_table()?;
+                for (b, ms) in &h.buckets {
+                    buckets.set(b.name(), *ms)?;
+                }
+                row.set("buckets", buckets)?;
+                list.raw_set(i + 1, row)?;
+            }
+            Ok(list)
+        })?,
+    )?;
+
     // perf.overloaded() -> true while the fixed tick costs more than the time
     // it simulates: this machine can't run the game in real time, and (unless
     // the project says CatchUp) it is playing in slow motion. For a loading

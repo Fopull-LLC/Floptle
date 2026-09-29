@@ -101,6 +101,23 @@ impl Bucket {
     }
 }
 
+/// A frame whose buckets add up to this many milliseconds or more is a hitch,
+/// and is kept for [`FrameProfile::take_hitches`].
+pub const HITCH_MS: f32 = 50.0;
+/// The most hitches kept between two reads; past that the oldest go.
+pub const MAX_HITCHES: usize = 64;
+
+/// One slow frame, as the buckets saw it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hitch {
+    /// Which frame, counted since collection started.
+    pub frame: u64,
+    /// The buckets added up.
+    pub ms: f32,
+    /// Every bucket that spent anything, most expensive first.
+    pub buckets: Vec<(Bucket, f32)>,
+}
+
 /// How many frames the "worst recently" window covers.
 ///
 /// One second at 60 fps. Long enough that a hitch does not scroll off before you
@@ -232,6 +249,10 @@ pub struct FrameProfile {
     /// frame's once folded. Inside the `scripts` bucket, not beside it.
     rays_frame: (u64, f32),
     rays_last: (u64, f32),
+    /// Frames whose buckets added up to [`HITCH_MS`] or more, kept until a
+    /// script takes them: the one reading a probe polling every few seconds
+    /// can still see, after the spike has rolled out of the window.
+    hitches: std::collections::VecDeque<Hitch>,
     /// The GPU's own per-pass times for the last frame whose timestamps have
     /// landed, and their total. `None` when nothing measured them: timing off,
     /// or a device without timestamp queries.
@@ -444,9 +465,21 @@ impl FrameProfile {
         // Every bucket is pushed, including the ones that reported nothing —
         // otherwise a subsystem that went idle keeps its old mean forever and
         // reads as still costing what it used to.
+        let mut spent: Vec<(Bucket, f32)> = Vec::new();
         for b in Bucket::ALL {
             let ms = self.frame.remove(&b).unwrap_or(0.0);
             self.series.entry(b).or_default().push(ms);
+            if ms > 0.0 {
+                spent.push((b, ms));
+            }
+        }
+        let total: f32 = spent.iter().map(|(_, ms)| ms).sum();
+        if total >= HITCH_MS {
+            spent.sort_by(|a, b| b.1.total_cmp(&a.1));
+            if self.hitches.len() >= MAX_HITCHES {
+                self.hitches.pop_front();
+            }
+            self.hitches.push_back(Hitch { frame: self.frames, ms: total, buckets: spent });
         }
         // A script that stopped running this frame gets a zero for the same
         // reason, and a script that has been destroyed stops being listed at all.
@@ -474,6 +507,11 @@ impl FrameProfile {
             series.push(ms);
         }
         self.frames += 1;
+    }
+
+    /// Every hitch since the last call, oldest first.
+    pub fn take_hitches(&mut self) -> Vec<Hitch> {
+        self.hitches.drain(..).collect()
     }
 
     /// What a bucket cost, or `None` while collection is off.
@@ -588,6 +626,30 @@ mod tests {
         assert_eq!(p.accounted_ms(), None);
         assert!(p.scripts().is_empty());
         assert_eq!(p.frames(), 0);
+    }
+
+    /// **A spike is kept until it is read, however long after.** The worst
+    /// window is sixty frames, so a probe reading every few seconds lost the
+    /// frame it was hunting; the hitch log still has it, with the bucket that
+    /// spent the time on top, and a read empties it.
+    #[test]
+    fn a_hitch_is_kept_until_it_is_read() {
+        let mut p = FrameProfile::default();
+        p.enable(true);
+        p.record(Bucket::Scripts, 30.0);
+        p.record(Bucket::Terrain, 120.0);
+        p.end_frame();
+        for _ in 0..200 {
+            p.record(Bucket::Render, 4.0);
+            p.end_frame();
+        }
+        assert!(p.bucket(Bucket::Terrain).unwrap().worst_ms < 0.1, "the window has rolled past it");
+        let h = p.take_hitches();
+        assert_eq!(h.len(), 1, "{h:?}");
+        assert_eq!(h[0].frame, 0);
+        assert!((h[0].ms - 150.0).abs() < 1e-3);
+        assert_eq!(h[0].buckets[0], (Bucket::Terrain, 120.0), "the costliest bucket first");
+        assert!(p.take_hitches().is_empty(), "a read empties it");
     }
 
     /// The mean smooths and the worst does not — the whole reason there are two

@@ -35,7 +35,7 @@ each group, and meant to be searched.
 - [vessels — assembly.*](#vessels--assembly) — 14
 - [the camera & the screen](#the-camera--the-screen) — 7
 - [physics controls — pause & step](#physics-controls--pause--step) — 4
-- [frame cost — perf.*](#frame-cost--perf) — 15
+- [frame cost — perf.*](#frame-cost--perf) — 16
 - [accessibility — access.*](#accessibility--access) — 11
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
@@ -2976,6 +2976,10 @@ perf.gpu() → { total = ms, passes = { {name=, ms=}, … } } — the GPU's own 
 ### `perf.gpuMs`
 
 perf.gpuMs(pass) → one pass's GPU milliseconds last frame ("opaque + lighting" is where sun shadows are paid for), or "total"; nil when the pass did not run or nothing was timed. See perf.gpu.
+
+### `perf.hitches`
+
+perf.hitches() → every frame since the last call whose buckets added up to 50 ms or more, oldest first: { {frame=, ms=, top="terrain", buckets={terrain=157.4, scripts=30.1, ...}}, ... }. perf.worstMs looks back sixty frames, so a probe that reads every few seconds loses the spike it is hunting; this keeps each one (up to 64) until it is read, with the bucket that spent the time on top. Needs perf.enable(true).
 
 ### `perf.mirrorCause`
 
