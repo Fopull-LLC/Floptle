@@ -774,3 +774,40 @@ fn spawning_and_destroying_nodes_keeps_the_mirror_exact_without_a_rebuild() {
         assert_eq!(snapshot(&host), snapshot(&fresh), "round {round}: the incremental mirror drifted from a rebuild");
     }
 }
+
+/// **A component a `createNode` callback adds is readable afterwards.** The
+/// drain mirrors the new node before its callback runs, so the next sync finds
+/// the spawn and the callback's write in the same batch, on a node the mirror
+/// already holds. Skipping every change on a spawned node dropped the write:
+/// `setCamera` in the callback, then `getComponent("Camera")` answered nil.
+#[test]
+fn a_component_added_by_a_create_callback_reaches_the_mirror() {
+    let mut world = World::default();
+    let root = world.spawn();
+    world.insert(root, Transform::IDENTITY);
+    let host = ScriptHost::new();
+    host.sync_scene_for_test(&world);
+    // The editor's drain: spawn, mirror it for the callback, run the callback.
+    let cam = world.spawn();
+    world.insert(cam, Transform::IDENTITY);
+    world.insert(cam, floptle_core::Name("ZZCam".into()));
+    host.sync_new_entities(&world, &[cam]);
+    world.insert(
+        cam,
+        Matter::Camera {
+            fov_y: 1.2,
+            active: false,
+            target: String::new(),
+            cull_mask: u32::MAX,
+            target_w: Matter::TARGET_W,
+            target_h: Matter::TARGET_H,
+            target_hz: 0.0,
+            ortho: false,
+            ortho_height: Matter::ORTHO_HEIGHT,
+        },
+    );
+    host.sync_scene_for_test(&world);
+    let s = host.scene.borrow();
+    let fov = s.components.get(&cam.index()).and_then(|c| c.get("Camera")).and_then(|c| c.get("fovY"));
+    assert_eq!(fov.map(|v| (v * 1e4).round() / 1e4), Some(1.2), "the callback's camera never reached the mirror");
+}

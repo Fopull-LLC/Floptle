@@ -96,6 +96,7 @@ impl Editor {
 
     #[cfg(feature = "editor-ui")]
     pub(crate) fn render(&mut self) {
+        self.pace_frame();
         // A held selection the world has emptied — the node deleted, the scene
         // switched — releases here, before anything draws. The lock's only
         // switch is on the Inspector's name row, so a lock over nothing would
@@ -499,17 +500,26 @@ impl Editor {
         };
 
         // The panel, or a game that asked `perf` for GPU pass times.
-        let live = self.playing && profile.borrow().enabled();
+        // …or dynamic resolution, which is driven by the same timings.
+        let perf_on = self.playing && profile.borrow().enabled();
+        let live = perf_on || self.wants_gpu_for_resolution();
+        let mut landed = None;
         let timing = (self.gpu_timing_open || live)
             && self.gpu_timer.as_mut().map(|t| {
                 t.poll();
                 if live && !t.spans().is_empty() {
-                    profile
-                        .borrow_mut()
-                        .set_gpu(t.spans().iter().map(|s| (s.label.clone(), s.ms)).collect(), t.total_ms());
+                    if perf_on {
+                        profile
+                            .borrow_mut()
+                            .set_gpu(t.spans().iter().map(|s| (s.label.clone(), s.ms)).collect(), t.total_ms());
+                    }
+                    landed = Some(t.total_ms());
                 }
                 t.begin()
             }) == Some(true);
+        if let Some(ms) = landed {
+            self.feed_dynamic_resolution(ms);
+        }
         let Some((gather, ui)) = self.build_frame_ui(
             gather,
             elapsed,

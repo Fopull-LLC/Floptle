@@ -6334,6 +6334,12 @@ impl ScriptHost {
                 floptle_core::ChangeKind::Component(_) => touched.push(ch.index),
             }
         }
+        // Read whole just below, so their other changes need no second read.
+        // Not every spawn is in here: a `createNode` drain mirrors the node
+        // before its callback runs, and what the callback wrote comes in this
+        // same batch for a node the mirror already holds.
+        let mut fresh: Vec<u32> = born.iter().map(|e| e.index()).collect();
+        fresh.sort_unstable();
         if !born.is_empty() || gone {
             // In the order the rows hold them, which is scene order.
             born.sort_unstable_by_key(|e| world.row_of::<Transform>(*e));
@@ -6358,7 +6364,7 @@ impl ScriptHost {
         touched.sort_unstable();
         touched.dedup();
         for id in touched {
-            if lifetime.binary_search(&id).is_ok() {
+            if fresh.binary_search(&id).is_ok() {
                 continue;
             }
             // Not in the mirror (no Transform) and not joining it: nothing to do.

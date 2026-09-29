@@ -30,6 +30,7 @@ fn a_menu_opens_showing_the_settings_the_game_actually_has() {
         render_scale: 1.0,
         render_sharpness: 0.4,
         fullscreen: false,
+        ..Default::default()
     });
     host.run(&mut world, &dir, 0.1, 0.1);
     assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
@@ -75,6 +76,7 @@ fn a_settings_menu_reads_back_what_it_just_set() {
         render_scale: 1.0,
         render_sharpness: 0.4,
         fullscreen: false,
+        ..Default::default()
     });
     host.run(&mut world, &dir, 0.1, 0.1);
     assert!(host.errors().is_empty(), "errors: {:?}", host.errors());

@@ -92,6 +92,13 @@ pub struct AppInfo {
     /// Whether the game's window currently covers the screen. Always `false`
     /// where there is no window (`floptle run`).
     pub fullscreen: bool,
+    /// The most frames a second the game draws, 0 for no cap.
+    pub frame_cap: f32,
+    /// The display's refresh rate in Hz, `None` where there is no display or it
+    /// has not said yet.
+    pub refresh_hz: Option<f32>,
+    /// Whether the engine is choosing the render scale itself.
+    pub dynamic_resolution: bool,
 }
 
 /// What a script asked the driver to change or do this frame.
@@ -114,6 +121,10 @@ pub struct AppRequests {
     /// Cover the screen (borderless, on the monitor the window is on), or
     /// go back to a window.
     pub fullscreen: Option<bool>,
+    /// A frame cap in frames a second; 0 removes it.
+    pub frame_cap: Option<f32>,
+    /// Turn dynamic resolution on with these settings, or off (`Some(None)`).
+    pub dynamic_resolution: Option<Option<DynResSpec>>,
 }
 
 impl AppRequests {
@@ -128,6 +139,97 @@ impl AppRequests {
             && self.render_scale.is_none()
             && self.render_sharpness.is_none()
             && self.fullscreen.is_none()
+            && self.frame_cap.is_none()
+            && self.dynamic_resolution.is_none()
+    }
+}
+
+/// What `app.setDynamicResolution{...}` asked for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DynResSpec {
+    /// The GPU time a frame should fit in, ms. `None`: the frame's own period,
+    /// from the frame cap or else the display, with a tenth kept spare.
+    pub target_ms: Option<f32>,
+    /// The lowest render scale it may choose.
+    pub min: f32,
+    /// The highest.
+    pub max: f32,
+}
+
+/// Every key `app.setDynamicResolution{...}` reads.
+pub const DYNRES_KEYS: &[&str] = &["targetMs", "min", "max"];
+
+/// The frame caps `app.setFrameCap` accepts, besides 0 (no cap).
+pub const FRAME_CAP_MIN: f32 = 10.0;
+pub const FRAME_CAP_MAX: f32 = 1000.0;
+
+/// Chooses a render scale each frame from how long the GPU took.
+///
+/// The render scale is the one quality lever that moves GPU time in
+/// proportion, since pixels go as its square. Steps are 5%, and sized so one
+/// step down is enough for most overruns (the step to `scale·√(budget/gpu)`).
+/// Down as soon as a frame overruns, up only after a second and a half of
+/// frames well inside the budget, so it settles rather than hunting. After a
+/// change it waits a quarter second: GPU timings land a few frames late, and
+/// the frames already in flight were drawn at the old scale.
+#[derive(Clone, Debug)]
+pub struct DynamicResolution {
+    pub spec: DynResSpec,
+    scale: f32,
+    calm_for: f32,
+    hold: f32,
+}
+
+impl DynamicResolution {
+    /// One step, as a fraction of the window.
+    pub const STEP: f32 = 0.05;
+
+    pub fn new(spec: DynResSpec, scale: f32) -> Self {
+        Self { spec, scale: scale.clamp(spec.min, spec.max), calm_for: 0.0, hold: 0.0 }
+    }
+
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    /// The budget a frame has: the one asked for, else 90% of `period_ms`.
+    pub fn budget_ms(&self, period_ms: f32) -> f32 {
+        self.spec.target_ms.unwrap_or(if period_ms > 0.0 { period_ms * 0.9 } else { 1000.0 / 60.0 * 0.9 })
+    }
+
+    /// Feed one frame's GPU time. Returns the new scale when it changes.
+    pub fn update(&mut self, gpu_ms: f32, period_ms: f32, dt: f32) -> Option<f32> {
+        if !gpu_ms.is_finite() || gpu_ms <= 0.0 {
+            return None;
+        }
+        self.hold = (self.hold - dt).max(0.0);
+        let budget = self.budget_ms(period_ms);
+        let quantize = |s: f32| (s / Self::STEP).round() * Self::STEP;
+        let before = self.scale;
+        if gpu_ms > budget {
+            self.calm_for = 0.0;
+            if self.hold > 0.0 {
+                return None;
+            }
+            let want = quantize(self.scale * (budget / gpu_ms).sqrt()).min(self.scale - Self::STEP);
+            self.scale = want.max(self.spec.min);
+        } else if gpu_ms < budget * 0.7 {
+            self.calm_for += dt;
+            if self.calm_for < 1.5 || self.hold > 0.0 {
+                return None;
+            }
+            self.calm_for = 0.0;
+            self.scale = (quantize(self.scale) + Self::STEP).min(self.spec.max);
+        } else {
+            self.calm_for = 0.0;
+        }
+        if (self.scale - before).abs() > 1e-4 {
+            self.hold = 0.25;
+            Some(self.scale)
+        } else {
+            self.scale = before;
+            None
+        }
     }
 }
 
@@ -258,8 +360,16 @@ pub fn install(lua: &Lua, info: &SharedAppInfo, req: &SharedAppRequests) -> mlua
                          of the window: 0.5 renders a quarter of the pixels)"
                     )));
                 }
-                r.borrow_mut().render_scale = Some(s as f32);
-                i.borrow_mut().render_scale = s as f32;
+                // A scale chosen outright is the game's decision, so the
+                // engine stops choosing one.
+                let mut rq = r.borrow_mut();
+                rq.render_scale = Some(s as f32);
+                if i.borrow().dynamic_resolution {
+                    rq.dynamic_resolution = Some(None);
+                }
+                let mut inf = i.borrow_mut();
+                inf.render_scale = s as f32;
+                inf.dynamic_resolution = false;
                 Ok(())
             })?,
         )?;
@@ -324,6 +434,85 @@ pub fn install(lua: &Lua, info: &SharedAppInfo, req: &SharedAppRequests) -> mlua
                 // setting back on the same frame it clicked should see its own
                 // click.
                 i.borrow_mut().fullscreen = on;
+                Ok(())
+            })?,
+        )?;
+    }
+
+    // --- pacing -------------------------------------------------------------
+    {
+        let i = info.clone();
+        t.set("frameCap", lua.create_function(move |_, ()| Ok(i.borrow().frame_cap as f64))?)?;
+    }
+    // app.setFrameCap(fps) — draw no more than this many frames a second; 0
+    // removes the cap. A rate the game can always make, held steadily, reads
+    // smoother than a higher one it keeps missing.
+    {
+        let r = req.clone();
+        let i = info.clone();
+        t.set(
+            "setFrameCap",
+            lua.create_function(move |_, fps: f64| {
+                if fps != 0.0 && !(FRAME_CAP_MIN as f64..=FRAME_CAP_MAX as f64).contains(&fps) {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "app.setFrameCap({fps}) — frames a second between {FRAME_CAP_MIN} and \
+                         {FRAME_CAP_MAX}, or 0 for no cap"
+                    )));
+                }
+                r.borrow_mut().frame_cap = Some(fps as f32);
+                i.borrow_mut().frame_cap = fps as f32;
+                Ok(())
+            })?,
+        )?;
+    }
+    // app.refreshRate() — the display's refresh rate in Hz, nil where there is
+    // no display. What a cap is chosen from: half of it, a third.
+    {
+        let i = info.clone();
+        t.set("refreshRate", lua.create_function(move |_, ()| Ok(i.borrow().refresh_hz.map(f64::from)))?)?;
+    }
+    {
+        let i = info.clone();
+        t.set("dynamicResolution", lua.create_function(move |_, ()| Ok(i.borrow().dynamic_resolution))?)?;
+    }
+    // app.setDynamicResolution{ targetMs =, min =, max = } — the engine picks the
+    // render scale each frame to keep the GPU inside the frame; `false` turns
+    // it off and leaves the scale where it was.
+    {
+        let r = req.clone();
+        let i = info.clone();
+        t.set(
+            "setDynamicResolution",
+            lua.create_function(move |_, v: mlua::Value| {
+                use crate::opts::{check_keys, opt_num};
+                const CALL: &str = "app.setDynamicResolution";
+                let spec = match v {
+                    mlua::Value::Boolean(false) | mlua::Value::Nil => None,
+                    mlua::Value::Boolean(true) => {
+                        Some(DynResSpec { target_ms: None, min: 0.5, max: 1.0 })
+                    }
+                    mlua::Value::Table(t) => {
+                        check_keys(&t, DYNRES_KEYS, CALL)?;
+                        let target_ms = opt_num(&t, CALL, "targetMs", 1.0, 1000.0)?.map(|v| v as f32);
+                        let min = opt_num(&t, CALL, "min", RENDER_SCALE_MIN as f64, 1.0)?.unwrap_or(0.5) as f32;
+                        let max = opt_num(&t, CALL, "max", RENDER_SCALE_MIN as f64, 1.0)?.unwrap_or(1.0) as f32;
+                        if min > max {
+                            return Err(mlua::Error::RuntimeError(format!(
+                                "{CALL}: min = {min} is above max = {max}"
+                            )));
+                        }
+                        Some(DynResSpec { target_ms, min, max })
+                    }
+                    other => {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "{CALL} takes a table {{ targetMs =, min =, max = }}, true, or false — \
+                             got a {}",
+                            other.type_name()
+                        )));
+                    }
+                };
+                r.borrow_mut().dynamic_resolution = Some(spec);
+                i.borrow_mut().dynamic_resolution = spec.is_some();
                 Ok(())
             })?,
         )?;
@@ -398,6 +587,97 @@ mod tests {
         let back: bool = lua.load("app.setFullscreen(false) return app.fullscreen()").eval().unwrap();
         assert!(!back);
         assert_eq!(req.borrow().fullscreen, Some(false));
+    }
+
+    fn spec() -> DynResSpec {
+        DynResSpec { target_ms: None, min: 0.5, max: 1.0 }
+    }
+
+    /// **Over budget, the scale drops at once, far enough in one step.** A
+    /// frame taking twice its budget needs a scale of 1/√2 of what it had, and
+    /// gets it on the first frame; then it holds while the late timings of the
+    /// frames already drawn land, rather than stepping on down.
+    #[test]
+    fn an_overrun_drops_the_scale_at_once_and_then_holds() {
+        let mut d = DynamicResolution::new(spec(), 1.0);
+        let period = 1000.0 / 60.0;
+        let budget = d.budget_ms(period);
+        assert_eq!(d.update(budget * 2.0, period, 1.0 / 60.0), Some(0.7));
+        for _ in 0..10 {
+            assert_eq!(d.update(budget * 2.0, period, 1.0 / 60.0), None, "stepped again before the new scale's timings landed");
+        }
+        // Past the hold, still over: another step.
+        for _ in 0..10 {
+            d.update(budget * 2.0, period, 1.0 / 60.0);
+        }
+        assert!(d.scale() < 0.7 - 1e-4 && d.scale() >= 0.5, "{}", d.scale());
+        // Never below the floor, however slow.
+        for _ in 0..200 {
+            d.update(budget * 20.0, period, 1.0 / 60.0);
+        }
+        assert!((d.scale() - 0.5).abs() < 1e-5, "{}", d.scale());
+    }
+
+    /// **Up only after a second and a half of headroom, one step at a time**,
+    /// and not at all while frames sit just inside the budget: that band is
+    /// where a step up would overrun and step straight back down.
+    #[test]
+    fn headroom_raises_the_scale_slowly_and_near_the_budget_it_stays() {
+        let period = 1000.0 / 144.0;
+        let mut d = DynamicResolution::new(spec(), 0.6);
+        let budget = d.budget_ms(period);
+        let dt = 1.0 / 144.0;
+        let mut ups = 0;
+        for _ in 0..(144 * 3 / 2 - 2) {
+            if d.update(budget * 0.5, period, dt).is_some() {
+                ups += 1;
+            }
+        }
+        assert_eq!(ups, 0, "raised before a second and a half of headroom");
+        let mut first = None;
+        for _ in 0..4 {
+            first = first.or(d.update(budget * 0.5, period, dt));
+        }
+        assert_eq!(first.map(|s| (s * 100.0).round()), Some(65.0), "one 5% step up");
+        let mut e = DynamicResolution::new(spec(), 0.6);
+        for _ in 0..144 * 5 {
+            assert_eq!(e.update(budget * 0.85, period, dt), None, "moved while just inside the budget");
+        }
+    }
+
+    /// The app calls: a cap reads back and refuses nonsense; dynamic
+    /// resolution takes a table, true or false, refuses an unknown key and an
+    /// inverted range, and a scale set outright switches it off.
+    #[test]
+    fn frame_cap_and_dynamic_resolution_calls_queue_and_check_their_values() {
+        let lua = Lua::new();
+        let info: SharedAppInfo = Rc::new(RefCell::new(AppInfo { render_scale: 1.0, ..Default::default() }));
+        let req: SharedAppRequests = Rc::new(RefCell::new(AppRequests::default()));
+        install(&lua, &info, &req).unwrap();
+        let cap: f64 = lua.load("app.setFrameCap(72) return app.frameCap()").eval().unwrap();
+        assert_eq!(cap, 72.0);
+        assert_eq!(req.borrow().frame_cap, Some(72.0));
+        lua.load("app.setFrameCap(0)").exec().unwrap();
+        assert!(lua.load("app.setFrameCap(5)").exec().unwrap_err().to_string().contains("between 10"));
+        let none: Option<f64> = lua.load("return app.refreshRate()").eval().unwrap();
+        assert_eq!(none, None, "no display, no rate");
+        info.borrow_mut().refresh_hz = Some(143.9);
+        let hz: f64 = lua.load("return app.refreshRate()").eval().unwrap();
+        assert!((hz - 143.9).abs() < 1e-3);
+
+        let on: bool = lua.load("app.setDynamicResolution{ targetMs = 11, min = 0.6 } return app.dynamicResolution()").eval().unwrap();
+        assert!(on);
+        assert_eq!(
+            req.borrow().dynamic_resolution,
+            Some(Some(DynResSpec { target_ms: Some(11.0), min: 0.6, max: 1.0 }))
+        );
+        let err = lua.load("app.setDynamicResolution{ target = 11 }").exec().unwrap_err().to_string();
+        assert!(err.contains("target"), "{err}");
+        let err = lua.load("app.setDynamicResolution{ min = 0.9, max = 0.6 }").exec().unwrap_err().to_string();
+        assert!(err.contains("above max"), "{err}");
+        let off: bool = lua.load("app.setRenderScale(0.8) return app.dynamicResolution()").eval().unwrap();
+        assert!(!off, "a scale set outright is the game's choice, so the engine stops choosing");
+        assert_eq!(req.borrow().dynamic_resolution, Some(None));
     }
 
     #[test]

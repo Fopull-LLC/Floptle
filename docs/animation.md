@@ -367,38 +367,40 @@ thigh. Name them with `root` and `mid` when the rig has a twist bone between.
 the knee or behind the elbow. A target out of reach straightens the limb
 toward it.
 
-**Planting feet on uneven ground.** Cast a ray down from each foot, drop the
-hips by the deeper foot's gap, then reach each foot to its hit:
+**Planting feet on uneven ground.** Cast a ray down from where each foot
+stands, drop the hips by the deeper foot's gap, then reach each foot to its hit:
 
 ```lua
 local HIP_DROP_MAX = 0.35
+-- Where each foot stands, in the character's own frame.
+local STANCE = { LeftFoot = vec3(-0.12, 0, 0.05), RightFoot = vec3(0.12, 0, 0.05) }
 
 function update(node, dt)
   local anim = node:animator()
   local drop, hits = 0, {}
-  for _, foot in ipairs({ "LeftFoot", "RightFoot" }) do
-    local p = anim:boneWorld(foot)
-    if p then
-      local hit = raycast(p + vec3(0, 0.5, 0), vec3(0, -1, 0), 1.5)
-      if hit then
-        hits[foot] = vec3(hit.x, hit.y, hit.z)
-        drop = math.max(drop, p.y - hit.y)
-      end
+  for foot, offset in pairs(STANCE) do
+    local p = node:toWorld(offset)
+    local hit = raycast(p + vec3(0, 0.5, 0), vec3(0, -1, 0), 1.5)
+    if hit then
+      hits[foot] = vec3(hit.x, hit.y, hit.z)
+      drop = math.max(drop, p.y - hit.y)
     end
   end
   drop = math.min(drop, HIP_DROP_MAX)
   anim:addBonePos("Hips", vec3(0, -drop, 0))
   local fwd = node.forward
   for foot, point in pairs(hits) do
-    local knee = anim:boneWorld(foot) + fwd * 0.5 + vec3(0, 0.5, 0)
-    anim:reach(foot, point, { pole = knee })
+    anim:reach(foot, point, { pole = point + fwd * 0.5 + vec3(0, 0.5, 0) })
   end
 end
 ```
 
-`boneWorld` answers the pose from the frame before, which the clips have
-barely moved by the time this runs. Keep the hips' drop under the length of a
-bent leg, or a foot on a deep step can't get there and straightens instead.
+Take the targets from a fixed stance like this, not from `anim:boneWorld(foot)`.
+`boneWorld` answers last frame's pose *after* the reach, so a foot placed from
+it is placed from where the reach last put it, and on a slope each frame's
+target lands a little lower than the one before: the feet creep downhill and
+the legs stretch out from under the hips. Keep the hips' drop under the length
+of a bent leg, or a foot on a deep step can't get there and straightens instead.
 
 **Looking at something.** Share the turn along the neck so one bone isn't
 doing it all, and cap it so a target behind the character doesn't snap the

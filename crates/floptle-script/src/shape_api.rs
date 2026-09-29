@@ -35,6 +35,10 @@ pub(crate) struct QueryShared {
 /// `spherecast`, …). Anything else is refused.
 pub(crate) const QUERY_KEYS: &[&str] = &["ignore", "layers"];
 
+/// A sweep's keys: the query's, and `ignoreStart` — surfaces the shape starts
+/// against do not count, so a body resting on a floor can cast along it.
+pub(crate) const CAST_KEYS: &[&str] = &["ignore", "layers", "ignoreStart"];
+
 /// Parse the shared options table into (bodies to skip, layer mask).
 ///
 /// Identical in meaning to `raycast`'s: an unknown layer name is
@@ -44,6 +48,27 @@ fn query_opts(
     who: &str,
     opts: Option<&Value>,
     shared: &QueryShared,
+) -> mlua::Result<(Vec<u32>, u32)> {
+    query_opts_with(who, opts, shared, QUERY_KEYS)
+}
+
+/// A sweep's options: the query's, plus whether to skip starting contacts.
+fn cast_opts(who: &str, opts: Option<&Value>, shared: &QueryShared) -> mlua::Result<(Vec<u32>, u32, bool)> {
+    let (exclude, mask) = query_opts_with(who, opts, shared, CAST_KEYS)?;
+    let skip = match opts {
+        Some(Value::Table(t)) if t.raw_get::<Option<u32>>("__id").ok().flatten().is_none() => {
+            crate::opts::opt_bool(t, who, "ignoreStart")?.unwrap_or(false)
+        }
+        _ => false,
+    };
+    Ok((exclude, mask, skip))
+}
+
+fn query_opts_with(
+    who: &str,
+    opts: Option<&Value>,
+    shared: &QueryShared,
+    keys: &[&str],
 ) -> mlua::Result<(Vec<u32>, u32)> {
     let mut exclude: Vec<u32> = Vec::with_capacity(2);
     let mut mask = !0u32;
@@ -60,7 +85,7 @@ fn query_opts(
                 // An options table, not a node handle. A misspelled `ignor`
                 // would have meant "ignore nothing", so the ray hits the caller
                 // and every query returns itself.
-                crate::opts::check_keys(t, QUERY_KEYS, who)?;
+                crate::opts::check_keys(t, keys, who)?;
                 if let Ok(ig) = t.get::<Table>("ignore")
                     && let Ok(eid) = ig.raw_get::<u32>("__id")
                 {
@@ -273,7 +298,7 @@ pub(crate) fn install_shape_api(
                         .into(),
                 ));
             };
-            let (exclude, mask) = query_opts("spherecast", a.get(4), &s)?;
+            let (exclude, mask, skip) = cast_opts("spherecast", a.get(4), &s)?;
             let sim = *s.sim_origin.borrow();
             let p = (glam::DVec3::new(o.x, o.y, o.z) - sim).as_vec3();
             let dir = glam::Vec3::new(d.x as f32, d.y as f32, d.z as f32);
@@ -286,6 +311,7 @@ pub(crate) fn install_shape_api(
                 max as f32,
                 &exclude,
                 mask,
+                skip,
             );
             match hit {
                 Some(h) => Ok(Value::Table(shape_hit_table(lua, &h, sim)?)),
@@ -321,7 +347,7 @@ pub(crate) fn install_shape_api(
                     "capsulecast(origin, dir, radius, halfHeight, max [, opts])".into(),
                 ));
             };
-            let (exclude, mask) = query_opts("capsulecast", a.get(5), &s)?;
+            let (exclude, mask, skip) = cast_opts("capsulecast", a.get(5), &s)?;
             let sim = *s.sim_origin.borrow();
             let p = (glam::DVec3::new(o.x, o.y, o.z) - sim).as_vec3();
             let dir = glam::Vec3::new(d.x as f32, d.y as f32, d.z as f32);
@@ -345,6 +371,7 @@ pub(crate) fn install_shape_api(
                 max as f32,
                 &exclude,
                 mask,
+                skip,
             );
             match hit {
                 Some(h) => Ok(Value::Table(shape_hit_table(lua, &h, sim)?)),

@@ -75,6 +75,9 @@ impl crate::Editor {
             render_scale: self.project.render_scale,
             render_sharpness: self.render_sharpness(),
             fullscreen: self.window.as_ref().is_some_and(|w| w.fullscreen().is_some()),
+            frame_cap: self.frame_cap,
+            refresh_hz: (self.refresh_period > 0.0).then(|| 1.0 / self.refresh_period),
+            dynamic_resolution: self.dyn_res.is_some(),
         };
         self.script_host.set_app_info(info);
     }
@@ -110,6 +113,16 @@ impl crate::Editor {
         }
         if let Some(on) = req.fullscreen {
             self.app_set_fullscreen(on);
+        }
+        if let Some(fps) = req.frame_cap {
+            self.frame_cap = fps.max(0.0);
+        }
+        if let Some(spec) = req.dynamic_resolution {
+            self.dyn_res = spec.map(|s| {
+                let d = floptle_script::app_api::DynamicResolution::new(s, self.project.render_scale);
+                self.project.render_scale = d.scale();
+                d
+            });
         }
         if req.quit {
             self.app_quit();
@@ -260,6 +273,35 @@ mod tests {
         );
         assert_eq!(ed.project.retro_height, 240, "…and the same for the retro height");
         assert_eq!(ed.project.render_scale, 1.0, "…and the render scale");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A frame cap and dynamic resolution reach the driver, act, and end
+    /// with the run.** The governor's choice lands on the render scale the
+    /// renderer reads, a slow GPU frame lowers it, and Stop puts back the
+    /// project's scale and switches both off.
+    #[test]
+    fn frame_cap_and_dynamic_resolution_act_for_the_run_and_end_at_stop() {
+        let dir = std::env::temp_dir().join(format!("floptle-app-dynres-{}", std::process::id()));
+        settings_project(
+            &dir,
+            "function start(node)\n  app.setFrameCap(72)\n  app.setDynamicResolution{ min = 0.5 }\nend\n",
+        );
+        let mut ed = crate::Editor::default();
+        ed.open_project(dir.clone());
+        ed.toggle_play();
+        ed.play_step(1.0 / 60.0, true);
+        assert_eq!(ed.frame_cap, 72.0, "app.setFrameCap did not reach the driver");
+        assert!(ed.dyn_res.is_some(), "app.setDynamicResolution did not reach the driver");
+        assert!((ed.frame_period_ms() - 1000.0 / 72.0).abs() < 1e-3, "the cap is the frame's period");
+        ed.frame_ms = 1000.0 / 72.0;
+        ed.feed_dynamic_resolution(40.0);
+        assert!(ed.project.render_scale < 0.95, "a slow GPU frame left the scale at {}", ed.project.render_scale);
+        assert!(ed.project.render_scale >= 0.5);
+        ed.toggle_play();
+        assert_eq!(ed.frame_cap, 0.0, "the cap outlived the run");
+        assert!(ed.dyn_res.is_none(), "dynamic resolution outlived the run");
+        assert_eq!(ed.project.render_scale, 1.0, "the project's own scale came back");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -42,6 +42,13 @@ Inspector ▸ **◆ Rigidbody** turns a node into a dynamic body. Properties:
 Drive a body from a script via its velocity (`node.vx/vy/vz`) rather than setting its
 position — setting position fights the solver. See [scripting.md](./scripting.md#4-node--the-physics-body).
 
+**Fast bodies.** A sphere or capsule moving more than half its radius in one
+physics step (about 21 m/s for a 0.35 m capsule) sweeps its move: it stops where
+it first touches a wall, loses only its speed into that wall, and keeps going
+along it. So a launch, a fling or a long fall never ends up on the far side of a
+mesh wall it ran into. Slower bodies move exactly as they always have. Box
+bodies are not swept.
+
 ### 2D bodies
 
 Tick **2D** and the body stays in the XY plane: it keeps the depth you gave it,
@@ -118,6 +125,15 @@ capsule on SDF + mesh). For custom checks (step detection, edge detection, gamep
 and returns `{x,y,z, nx,ny,nz, distance}` or `nil`. Uses: ground checks, line-of-sight,
 shooting, placing objects on a surface. It's a step-capped sphere-trace, so it's safe
 against both the SDF terrain and triangle meshes; practical range is up to ~512 units.
+
+`spherecast` and `capsulecast` sweep a shape the same way. A shape that starts
+against a surface, such as a character standing on a floor and casting along it,
+reports distance 0 at once; pass `{ ignoreStart = true }` and only a surface the
+shape moves into counts:
+
+```lua
+local hit = capsulecast(node.pos, move, 0.35, 0.9, move:length(), { ignoreStart = true })
+```
 
 In Rust the same is `PhysicsWorld::raycast` / `Sim::raycast`.
 

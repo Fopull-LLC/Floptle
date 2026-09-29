@@ -168,6 +168,8 @@ impl Editor {
     /// frame never calls: the renderer's reset is
     /// [`Editor::begin_draw_frame`] here, and it was once missing.
     pub(crate) fn player_frame(&mut self, capture: bool) -> Option<(Vec<u8>, u32, u32)> {
+        // Before the clock is read, so the frame's dt is the paced one.
+        self.pace_frame();
         let now = Instant::now();
         let raw_dt = self.last.map(|l| (now - l).as_secs_f32()).unwrap_or(0.0);
         self.last = Some(now);

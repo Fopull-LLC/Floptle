@@ -89,13 +89,15 @@ fn two_bone(
     let now = acos((a - b).normalize_or_zero().dot((c - b).normalize_or_zero()));
     let want = acos((lab * lab + lcb * lcb - lat * lat) / (2.0 * lab * lcb));
     // The plane the limb bends in: its own, or (straight, with no plane) the
-    // one through the pole, else any.
+    // one through the pole, else any. A positive turn about this axis opens
+    // the joint, so the turn is `want − now`. From straight the tip swings
+    // away from the pole, and step 2's swing then carries the knee toward it.
     let bend = (a - b)
         .cross(c - b)
         .try_normalize()
-        .or_else(|| pole.and_then(|p| (c - a).cross(p - a).try_normalize()).map(|n| -n))
+        .or_else(|| pole.and_then(|p| (c - a).cross(p - a).try_normalize()))
         .unwrap_or_else(|| (c - a).normalize_or_zero().any_orthonormal_vector());
-    pose[mid].r = spin(pose[mid].r, rot(&world[mid]), Quat::from_axis_angle(bend, now - want));
+    pose[mid].r = spin(pose[mid].r, rot(&world[mid]), Quat::from_axis_angle(bend, want - now));
 
     // 2. Reach: swing the root so the tip lies on the line to the target.
     skel.world_matrices(pose, world);
@@ -237,6 +239,31 @@ mod tests {
         apply(&skel, &mut half, &[PoseOp::TwoBone { root: 0, mid: 1, tip: 2, target: Vec3::new(0.0, 1.5, 0.0), pole: None, weight: 0.5 }]);
         let tip = pos(&world_of(&skel, &half)[2]);
         assert!(tip.x > 0.2 && tip.y > 0.2, "half weight is half way: {tip}");
+    }
+
+    /// **A limb that starts bent still reaches.** A straight limb has no bend
+    /// plane of its own and takes the pole's, where either sign of the bend
+    /// passes; an idle knee is already bent, and a bend turned the wrong way
+    /// opened it, leaving the foot at `2·now − want` from the hip.
+    #[test]
+    fn a_limb_that_starts_bent_reaches_nearer_and_farther_targets() {
+        let skel = arm();
+        let pole = Vec3::new(0.7, 3.0, 0.0);
+        for bent in [0.5f32, -0.5] {
+            for target in [Vec3::new(1.2, 0.0, 0.0), Vec3::new(1.9, 0.0, 0.0), Vec3::new(0.9, -0.9, 0.4)] {
+                for pole in [None, Some(pole)] {
+                    let mut pose = skel.rest_pose();
+                    pose[1].r = Quat::from_rotation_z(bent);
+                    apply(&skel, &mut pose, &[PoseOp::TwoBone { root: 0, mid: 1, tip: 2, target, pole, weight: 1.0 }]);
+                    let w = world_of(&skel, &pose);
+                    let miss = (pos(&w[2]) - target).length();
+                    assert!(miss < 1e-3, "bent {bent}, pole {pole:?}: tip {} is {miss} from {target}", pos(&w[2]));
+                    if pole.is_some() {
+                        assert!(pos(&w[1]).y > 0.0, "bent {bent}: the knee left the pole's side: {}", pos(&w[1]));
+                    }
+                }
+            }
+        }
     }
 
     /// The head turns to face the target, shared along the chain, and never

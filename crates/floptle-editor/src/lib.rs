@@ -56,6 +56,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 mod agents_guide;
 mod anim;
 mod app_settings;
+mod frame_pace;
 mod model_textures;
 #[cfg(feature = "editor-ui")]
 mod bake;
@@ -1957,6 +1958,13 @@ struct Editor {
     /// How hard a render-scale upscale sharpens (`app.setRenderSharpness`);
     /// `None` until a game sets it, which reads as the default.
     render_sharpness: Option<f32>,
+    /// `app.setFrameCap`, frames a second; 0 = no cap. For the run only.
+    frame_cap: f32,
+    /// When the next capped frame may start ([`Self::pace_frame`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    frame_next: Option<std::time::Instant>,
+    /// `app.setDynamicResolution`: the governor choosing the render scale.
+    dyn_res: Option<floptle_script::app_api::DynamicResolution>,
     /// This frame's script lines are drawn over the finished picture, after
     /// post and any upscale, not in the scene pass (`draw.nativeLines`).
     pub(crate) lines_deferred: bool,

@@ -584,6 +584,14 @@ pub fn overlap_sphere_hulls(
 /// every distance — which is what makes a swept sphere free here: an SDF's
 /// `d - r` is the sphere's distance field. `exclude` and `mask` behave exactly
 /// as they do for a ray, so `{layers = …}` means the same thing for both.
+///
+/// Only colliders whose box the swept sphere crosses are marched, the same
+/// broadphase the ray has.
+///
+/// `skip_start`: a sphere that starts against a surface (a body resting on a
+/// floor, casting along it) answers distance 0 at once, which blocks every
+/// move. With it set, the radius shrinks to just inside whatever the sphere
+/// starts touching, so only a surface it moves into counts.
 #[allow(clippy::too_many_arguments)]
 pub fn spherecast(
     colliders: &[AnchoredCollider],
@@ -594,9 +602,45 @@ pub fn spherecast(
     max_dist: f32,
     exclude: &[u32],
     mask: u32,
+    skip_start: bool,
 ) -> Option<ShapeHit> {
+    // A march stops within 0.02 of a surface, so a box grazed by that much
+    // must still be marched.
+    const SLACK: f32 = 0.05;
     let rd = dir.try_normalize()?;
-    let r = radius.max(0.0);
+    let mut r = radius.max(0.0);
+    let near: Vec<&AnchoredCollider> = colliders
+        .iter()
+        .filter(|c| (mask >> c.layer) & 1 == 1 && !c.sensor)
+        .filter(|c| match c.aabb().map(Ok).or_else(|| c.bounds().map(Err)) {
+            Some(Ok((lo, hi))) => {
+                let grow = Vec3::splat(r + SLACK);
+                crate::ray_box_span(origin, rd, lo - grow, hi + grow, max_dist).is_some()
+            }
+            Some(Err((centre, cr))) => {
+                let reach = cr + r + SLACK;
+                let tc = (centre - origin).dot(rd).clamp(0.0, max_dist);
+                (origin + rd * tc - centre).length_squared() <= reach * reach
+            }
+            None => true,
+        })
+        .collect();
+    if skip_start {
+        let d0 = near
+            .iter()
+            .map(|c| c.distance(origin))
+            .chain(
+                hulls
+                    .iter()
+                    .filter(|h| !exclude.contains(&h.eid) && (mask >> h.layer) & 1 == 1)
+                    .map(|h| h.distance(origin)),
+            )
+            .fold(f32::INFINITY, f32::min);
+        // Leave a gap wider than the march's stop distance.
+        if d0.is_finite() && d0 - r < 0.03 {
+            r = (d0 - 0.03).max(0.0);
+        }
+    }
     let mut t = 0.0f32;
     for _ in 0..512 {
         if t > max_dist {
@@ -605,10 +649,7 @@ pub fn spherecast(
         let p = origin + rd * t;
         let mut dmin = f32::MAX;
         let mut best: Option<Result<&AnchoredCollider, &BodyHull>> = None;
-        for c in colliders {
-            if (mask >> c.layer) & 1 == 0 || c.sensor {
-                continue;
-            }
+        for &c in &near {
             let d = c.distance(p) - r;
             if d < dmin {
                 dmin = d;
@@ -667,16 +708,32 @@ pub fn capsulecast(
     max_dist: f32,
     exclude: &[u32],
     mask: u32,
+    skip_start: bool,
 ) -> Option<ShapeHit> {
     let u = up.try_normalize().unwrap_or(Vec3::Y);
     let h = (half_height - radius).max(0.0);
-    let a = spherecast(colliders, hulls, origin + u * h, dir, radius, max_dist, exclude, mask);
-    let b = spherecast(colliders, hulls, origin - u * h, dir, radius, max_dist, exclude, mask);
+    let a = spherecast(colliders, hulls, origin + u * h, dir, radius, max_dist, exclude, mask, skip_start);
+    let b = spherecast(colliders, hulls, origin - u * h, dir, radius, max_dist, exclude, mask, skip_start);
     match (a, b) {
         (Some(a), Some(b)) => Some(if a.distance <= b.distance { a } else { b }),
         (Some(a), None) => Some(a),
         (None, b) => b,
     }
+}
+
+/// How far a body may move in one substep, as a fraction of its radius,
+/// before the move is swept rather than taken whole ([`PhysicsWorld::swept_move`]).
+/// Half a radius is 21 m/s for a 0.35 m capsule at 120 Hz.
+pub const SWEEP_FRACTION: f32 = 0.5;
+
+/// The surface a swept move stopped at.
+#[derive(Clone, Copy, Debug)]
+struct SweptHit {
+    collider: usize,
+    point: Vec3,
+    normal: Vec3,
+    /// The speed taken out of the move, summed over every stop.
+    dv: f32,
 }
 
 impl PhysicsWorld {
@@ -1431,6 +1488,125 @@ impl PhysicsWorld {
     /// property prediction replay depends on (`docs/multiplayer.md` §6:
     /// replay touches only the predicted body, and it's exact, not
     /// approximate). Does not clear `contacts`; the frame driver owns that.
+    /// Move body `bi` by `delta`, stopping at the first surface in the way
+    /// when the move is long enough to carry a sample sphere through one.
+    ///
+    /// The push-out after the move finds the nearest surface and pushes away
+    /// from it. A triangle mesh has no inside, so once a substep carries a
+    /// sphere's centre past a face, the nearest surface is on the far side and
+    /// the push finishes the crossing: past a radius of travel per substep
+    /// (42 m/s for a 0.35 m capsule at 120 Hz), a fast body could end up behind
+    /// the wall it ran into. So a move longer than [`SWEEP_FRACTION`] of the
+    /// radius is marched first, each sphere along the whole move, and the body
+    /// stops where the first one touches. Only the speed into that surface
+    /// goes; what is left of the move carries on along it.
+    ///
+    /// A sphere starting against a surface (the floor under a running
+    /// character) marches with its radius cut to just inside that gap, so the
+    /// floor it slides along never stops it and the wall ahead still does.
+    /// A shorter move is exactly the plain one, so everything at ordinary
+    /// speeds steps as it always has.
+    fn swept_move(&mut self, bi: usize, delta: Vec3) -> Option<SweptHit> {
+        let radius = self.bodies[bi].radius;
+        let len0 = delta.length();
+        if self.bodies[bi].sensor
+            || radius <= 0.0
+            || matches!(self.bodies[bi].shape, BodyShape::Box { .. })
+            || !len0.is_finite()
+            || len0 <= radius * SWEEP_FRACTION
+        {
+            self.bodies[bi].pos += delta;
+            return None;
+        }
+        let row = self.matrix[self.bodies[bi].layer as usize];
+        let mut hit: Option<SweptHit> = None;
+        let mut left = delta;
+        for _ in 0..3 {
+            let len = left.length();
+            if !len.is_finite() || len <= radius * SWEEP_FRACTION {
+                self.bodies[bi].pos += left;
+                break;
+            }
+            let dir = left / len;
+            let (centres, n_c, r) = self.bodies[bi].sample_centers();
+            let pos = self.bodies[bi].pos;
+            let reach = centres[..n_c].iter().map(|c| c.distance(pos)).fold(0.0f32, f32::max);
+            let mut cand = std::mem::take(&mut self.cand);
+            cand.clear();
+            self.collider_index.segment(pos, pos + left, reach + r + 0.01, &mut cand);
+            cand.sort_unstable();
+            cand.retain(|&ci| {
+                let c = &self.colliders[ci as usize];
+                (row >> c.layer) & 1 == 1 && !c.sensor
+            });
+            let nearest = |p: Vec3| {
+                let mut best = (f32::INFINITY, usize::MAX);
+                for &ci in &cand {
+                    let d = self.colliders[ci as usize].distance(p);
+                    if d < best.0 {
+                        best = (d, ci as usize);
+                    }
+                }
+                best
+            };
+            // The earliest touch over every sphere: (travel, collider, centre).
+            let mut first: Option<(f32, usize, Vec3)> = None;
+            for &c0 in &centres[..n_c] {
+                let (d0, _) = nearest(c0);
+                if !d0.is_finite() {
+                    continue;
+                }
+                let margin = (r * 0.25).min(0.05);
+                let reff = r.min(d0 - margin);
+                if reff <= 0.0 {
+                    continue; // buried already: the push-out's to resolve
+                }
+                let stop = first.map_or(len, |f| f.0);
+                let mut t = 0.0f32;
+                for _ in 0..128 {
+                    let p = c0 + dir * t;
+                    let (d, ci) = nearest(p);
+                    if !d.is_finite() {
+                        break;
+                    }
+                    let gap = d - reff;
+                    if gap < 0.005 {
+                        if t > 0.0 {
+                            first = Some((t, ci, p));
+                        }
+                        break;
+                    }
+                    // Capped so an unsigned mesh distance cannot step over a face.
+                    t += gap.clamp(0.005, 1.0);
+                    if t >= stop {
+                        break;
+                    }
+                }
+            }
+            self.cand = cand;
+            let Some((t, ci, c)) = first else {
+                self.bodies[bi].pos += left;
+                break;
+            };
+            self.bodies[bi].pos += dir * (t - 1e-3).max(0.0);
+            let n = self.colliders[ci].normal(c);
+            let b = &mut self.bodies[bi];
+            let vn = b.vel.dot(n);
+            let mut dv = 0.0;
+            if vn < 0.0 {
+                let vt = b.vel - n * vn;
+                b.vel = vt - n * vn * b.restitution;
+                dv = -vn * (1.0 + b.restitution);
+            }
+            let dv = dv + hit.as_ref().map_or(0.0, |h| h.dv);
+            hit = Some(SweptHit { collider: ci, point: c - n * r, normal: n, dv });
+            // What is left of the move, less its part into the surface.
+            let rest = left - dir * t;
+            left = rest - n * rest.dot(n).min(0.0);
+        }
+        hit
+    }
+
     pub fn step_body(&mut self, bi: usize, dt: f32) {
         let dt = dt.clamp(0.0, 0.1);
         if !self.index_fresh {
@@ -1577,7 +1753,7 @@ impl PhysicsWorld {
                 self.rub(bi, (-g.dot(n)).max(0.0) * dt, n);
             }
             let v = self.bodies[bi].vel;
-            self.bodies[bi].pos += v * dt;
+            let swept = self.swept_move(bi, v * dt);
             // Whether it stood on something last step, and on what — what
             // lets the feet pull a body down onto ground it is walking over
             // rather than only pushing it up out of ground it is walking into.
@@ -1603,6 +1779,13 @@ impl PhysicsWorld {
             // not, and it is why you skid when you land fast and stick when you
             // don't. Accumulated here and spent once below.
             let mut impact_dv = 0.0f32;
+            // A surface the move stopped at is a contact like any the push-out
+            // finds: it grounds the body, and its load feeds friction.
+            if let Some(h) = swept {
+                impact_dv += h.dv;
+                self.note_body_contact(bi, h.normal);
+                self.contacts.push(Contact { body: bi, collider: h.collider, point: h.point, normal: h.normal });
+            }
             for _ in 0..passes {
                 // Broadphase: ask the index which colliders can
                 // possibly reach this body, instead of walking all of them. The
@@ -2537,7 +2720,7 @@ mod shape_query_tests {
             raycast_hulls(&hulls, o, d, 20.0, &[], !0).is_none(),
             "a bare ray misses it"
         );
-        let hit = spherecast(&[], &hulls, o, d, 0.6, 20.0, &[], !0)
+        let hit = spherecast(&[], &hulls, o, d, 0.6, 20.0, &[], !0, false)
             .expect("a sphere of radius 0.6 does not");
         assert_eq!(hit.eid, Some(1));
         assert!(hit.distance > 0.0 && hit.distance < 6.0, "and stops at it: {}", hit.distance);
@@ -2548,8 +2731,8 @@ mod shape_query_tests {
     #[test]
     fn a_cast_into_empty_space_misses() {
         let hulls = [hull(1, Vec3::new(0.0, 0.0, 40.0), 0.5)];
-        assert!(spherecast(&[], &hulls, Vec3::ZERO, Vec3::X, 0.5, 10.0, &[], !0).is_none());
-        assert!(spherecast(&[], &[], Vec3::ZERO, Vec3::X, 0.5, 10.0, &[], !0).is_none());
+        assert!(spherecast(&[], &hulls, Vec3::ZERO, Vec3::X, 0.5, 10.0, &[], !0, false).is_none());
+        assert!(spherecast(&[], &[], Vec3::ZERO, Vec3::X, 0.5, 10.0, &[], !0, false).is_none());
     }
 
     /// A capsule sweep catches what its ends meet, not just its middle — the
@@ -2559,8 +2742,8 @@ mod shape_query_tests {
         // A body at head height only; a sphere cast from the centre misses it.
         let hulls = [hull(1, Vec3::new(4.0, 1.6, 0.0), 0.5)];
         let (o, d) = (Vec3::ZERO, Vec3::X);
-        assert!(spherecast(&[], &hulls, o, d, 0.4, 10.0, &[], !0).is_none());
-        let hit = capsulecast(&[], &hulls, o, d, 0.4, 1.8, Vec3::Y, 10.0, &[], !0)
+        assert!(spherecast(&[], &hulls, o, d, 0.4, 10.0, &[], !0, false).is_none());
+        let hit = capsulecast(&[], &hulls, o, d, 0.4, 1.8, Vec3::Y, 10.0, &[], !0, false)
             .expect("the capsule's top cap reaches it");
         assert_eq!(hit.eid, Some(1));
     }
@@ -3185,7 +3368,7 @@ mod mesh_ray_normal_tests {
     fn a_zero_radius_spherecast_reports_the_face_it_struck() {
         let cols = box_mesh();
         for (n, p) in faces() {
-            let h = spherecast(&cols, &[], p + n * 2.37, -n, 0.0, 20.0, &[], !0)
+            let h = spherecast(&cols, &[], p + n * 2.37, -n, 0.0, 20.0, &[], !0, false)
                 .expect("the sweep hits the box");
             let got = Vec3::from(h.normal);
             assert!(got.dot(n) > 0.99, "face {n:?} at {p:?} read {got:?}");
@@ -3389,5 +3572,147 @@ mod exact_ray_tests {
         assert!(down.is_some() && up.is_none(), "the fixture: down hits the ground, up misses");
         assert!(ball.is_some_and(|h| (h.distance - 2.5).abs() < 0.03), "a marched shape still answers: {ball:?}");
         assert_eq!(ASKED.load(Ordering::Relaxed), 0, "a collider nowhere near the ray was asked");
+    }
+}
+
+#[cfg(test)]
+mod swept_tests {
+    use super::*;
+    use crate::shapes::TriMeshCollider;
+
+    /// A mesh floor at y = 0 and, at x = 5, a mesh wall: one plane of
+    /// triangles, as thin as a mesh wall gets, the kind with nothing inside
+    /// it for a push-out to find.
+    fn level() -> PhysicsWorld {
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        let quad = |a: Vec3, b: Vec3, c: Vec3, d: Vec3| TriMeshCollider::new(&[a, b, c, d], &[0, 1, 2, 0, 2, 3]);
+        w.add_collider(Box::new(quad(
+            Vec3::new(-40.0, 0.0, -40.0),
+            Vec3::new(-40.0, 0.0, 40.0),
+            Vec3::new(40.0, 0.0, 40.0),
+            Vec3::new(40.0, 0.0, -40.0),
+        )));
+        w.add_collider(Box::new(quad(
+            Vec3::new(5.0, -1.0, -40.0),
+            Vec3::new(5.0, 20.0, -40.0),
+            Vec3::new(5.0, 20.0, 40.0),
+            Vec3::new(5.0, -1.0, 40.0),
+        )));
+        w
+    }
+
+    /// **A fast body never ends up behind the wall it ran into.** A capsule
+    /// running along the floor and one flying at head height, at 40 to 90 m/s,
+    /// head-on and at an angle: each stops on the near side of a mesh wall,
+    /// and one meeting it at an angle keeps its speed along it.
+    #[test]
+    fn a_fast_capsule_stops_at_a_mesh_wall_instead_of_passing_through() {
+        for speed in [40.0f32, 45.0, 60.0, 70.0, 90.0] {
+            for (y, grounded) in [(0.9f32, true), (4.0, false)] {
+                for angle in [0.0f32, 0.5, 1.0] {
+                    let mut w = level();
+                    let mut b = Body::capsule(Vec3::new(0.0, y, 0.0), 0.35, 1.8);
+                    b.feet = true;
+                    b.use_gravity = grounded;
+                    // Frictionless, so the speed along the wall is the move's
+                    // alone: a wall's friction takes its share of a fast hit
+                    // the same as of a slow one.
+                    b.friction = 0.0;
+                    b.vel = Vec3::new(angle.cos(), 0.0, angle.sin()) * speed;
+                    let bi = w.add_body(b);
+                    for tick in 0..60 {
+                        w.step(1.0 / 120.0);
+                        let p = w.bodies[bi].pos;
+                        assert!(
+                            p.x < 5.0 - 0.3,
+                            "{speed} m/s at {angle} rad, y {y}: tick {tick} put the capsule at x = {} behind the wall",
+                            p.x
+                        );
+                    }
+                    let v = w.bodies[bi].vel;
+                    assert!(v.x < 0.05, "{speed} m/s: still moving into the wall at {}", v.x);
+                    if angle > 0.0 && !grounded {
+                        assert!(v.z > speed * angle.sin() * 0.5, "{speed} m/s at {angle}: lost its speed along the wall ({})", v.z);
+                    }
+                }
+            }
+        }
+    }
+
+    /// **The floor a body slides along never stops it.** At 60 m/s along a
+    /// mesh floor, the capsule covers the whole distance a plain move would.
+    #[test]
+    fn a_fast_capsule_slides_along_the_floor_it_stands_on() {
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        w.add_collider(Box::new(TriMeshCollider::new(
+            &[
+                Vec3::new(-100.0, 0.0, -10.0),
+                Vec3::new(-100.0, 0.0, 10.0),
+                Vec3::new(100.0, 0.0, 10.0),
+                Vec3::new(100.0, 0.0, -10.0),
+            ],
+            &[0, 1, 2, 0, 2, 3],
+        )));
+        let mut b = Body::capsule(Vec3::new(-50.0, 0.9, 0.0), 0.35, 1.8);
+        b.feet = true;
+        b.friction = 0.0;
+        b.vel = Vec3::new(60.0, 0.0, 0.0);
+        let bi = w.add_body(b);
+        for _ in 0..120 {
+            w.step(1.0 / 120.0);
+        }
+        let p = w.bodies[bi].pos;
+        assert!((p.x - 10.0).abs() < 0.5, "a second at 60 m/s from x = -50 should end near 10, got {}", p.x);
+        assert!((p.y - 0.9).abs() < 0.05, "and on the floor, got y = {}", p.y);
+    }
+
+    /// **A sweep can start against the floor.** A sphere resting on a floor
+    /// and cast along it answers distance 0 at once, which is what stopped a
+    /// game's slide jumps; with `skip_start` the floor it sits on does not
+    /// count and the wall ahead does, where it is. One the cast starts
+    /// against and moves into still stops it.
+    #[test]
+    fn a_cast_that_skips_its_start_passes_the_floor_and_meets_the_wall() {
+        let w = level();
+        let from = Vec3::new(0.0, 0.35, 0.0);
+        let plain = spherecast(&w.colliders, &[], from, Vec3::X, 0.35, 20.0, &[], !0, false).unwrap();
+        assert!(plain.distance < 0.05, "the fixture: a plain cast stops at once ({})", plain.distance);
+        let hit = spherecast(&w.colliders, &[], from, Vec3::X, 0.35, 20.0, &[], !0, true).expect("hit the wall");
+        assert!((hit.distance - (5.0 - 0.35)).abs() < 0.1, "stopped at {} instead of the wall", hit.distance);
+        assert!(hit.normal[0] < -0.9, "on the wall, facing back: {:?}", hit.normal);
+        let into = spherecast(&w.colliders, &[], from, Vec3::new(1.0, -1.0, 0.0), 0.35, 20.0, &[], !0, true)
+            .expect("a cast into the floor it starts on still meets it");
+        assert!(into.distance < 0.2, "into the floor: {}", into.distance);
+        let cap = capsulecast(&w.colliders, &[], Vec3::new(0.0, 0.9, 0.0), Vec3::X, 0.35, 0.9, Vec3::Y, 20.0, &[], !0, true)
+            .expect("the capsule meets the wall");
+        assert!((cap.distance - (5.0 - 0.35)).abs() < 0.1, "capsule stopped at {}", cap.distance);
+    }
+
+    /// **A sweep asks only the colliders on its path.** Fifty colliders off to
+    /// the side are never queried.
+    #[test]
+    fn a_cast_never_asks_a_collider_off_its_path() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static ASKED: AtomicUsize = AtomicUsize::new(0);
+        struct Aside;
+        impl crate::CollisionShape for Aside {
+            fn distance(&self, p: Vec3) -> f32 {
+                ASKED.fetch_add(1, Ordering::Relaxed);
+                (p - Vec3::new(0.0, 0.0, 50.0)).length() - 1.0
+            }
+            fn normal(&self, _p: Vec3) -> Vec3 {
+                Vec3::Y
+            }
+            fn aabb(&self) -> Option<(Vec3, Vec3)> {
+                Some((Vec3::new(-1.0, -1.0, 49.0), Vec3::new(1.0, 1.0, 51.0)))
+            }
+        }
+        let mut w = level();
+        for _ in 0..50 {
+            w.add_collider(Box::new(Aside));
+        }
+        let hit = spherecast(&w.colliders, &[], Vec3::new(0.0, 2.0, 0.0), Vec3::X, 0.35, 20.0, &[], !0, false);
+        assert!(hit.is_some_and(|h| (h.distance - 4.65).abs() < 0.1), "the wall is still found: {hit:?}");
+        assert_eq!(ASKED.load(Ordering::Relaxed), 0, "a collider nowhere near the sweep was asked");
     }
 }

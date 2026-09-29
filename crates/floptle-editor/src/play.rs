@@ -920,6 +920,9 @@ impl Editor {
             if let Some(p) = self.play_project.take() {
                 self.project = p;
             }
+            // The cap and the governor are the run's, like the settings above.
+            self.frame_cap = 0.0;
+            self.dyn_res = None;
             // Map geometry lives outside the scene doc too — and unlike terrain
             // it has no in-Play authoring path, so a restore here is purely a
             // guard against a script (or a stray Map-tab click) mutating the

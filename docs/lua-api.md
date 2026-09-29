@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 173
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 178
 - [node — transform & body fields](#node--transform--body-fields) — 40
 - [node — methods & handles](#node--methods--handles) — 31
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -146,6 +146,14 @@ agent:teleport(point) — put it AND its node somewhere without walking there, a
 
 The settings a game offers the person playing it, and the one thing every main menu needs: quit. app.quit(), app.title(), app.version(), and the video settings — app.vsync/setVsync, app.retro/setRetro, app.retroHeight/setRetroHeight, app.retroIntegerScale/setRetroIntegerScale. A setting you change here is for THIS SESSION: it lives in project.ron, the file that ships to every player, so Stop puts it back — persist the player's choice yourself with save.*, the same rule access.* follows. Window resolution and fullscreen are NOT here yet; that is one question (windowing) waiting to be answered properly. See docs/scripting.md §30.
 
+### `app.dynamicResolution`
+
+app.dynamicResolution() → whether the engine is choosing the render scale itself (app.setDynamicResolution).
+
+### `app.frameCap`
+
+app.frameCap() → the frame cap in frames a second, 0 when there is none.
+
 ### `app.fullscreen`
 
 app.fullscreen() → whether the game's window covers the screen. The real state, not the last thing asked for — so a Video tab shows what the player sees, including after F11 or Alt+Enter, which a build answers on its own.
@@ -153,6 +161,10 @@ app.fullscreen() → whether the game's window covers the screen. The real state
 ### `app.quit`
 
 app.quit() — end the game. What that means depends on where it is running, and they are genuinely different things: an EXPORTED BUILD closes (your save.* data is flushed first, since somebody quitting from a settings menu expects the setting they just changed to have been kept); the EDITOR stops Play and says so in the Console, deliberately NOT a process exit — an editor that closed because a game under test called quit would take your unsaved work with it; `floptle run` ends the run where it stands and reports that it stopped early.
+
+### `app.refreshRate`
+
+app.refreshRate() → the display's refresh rate in Hz (143.9, 60, …), or nil where there is no display. What a frame cap is chosen from.
 
 ### `app.renderScale`
 
@@ -173,6 +185,14 @@ app.retroHeight() → the internal height the game composites at, in pixels. In 
 ### `app.retroIntegerScale`
 
 app.retroIntegerScale() → whether the retro composite is upscaled by a WHOLE number and letterboxed rather than stretched to fill.
+
+### `app.setDynamicResolution`
+
+app.setDynamicResolution{ targetMs =, min =, max = } — let the engine choose the render scale each frame from how long the GPU took, so a view that costs more renders fewer pixels instead of missing the frame. targetMs is the GPU time a frame should fit in (default: 90% of the frame's period, from the frame cap or else the display); min and max bound the scale (default 0.5 and 1). It steps down 5% at a time as soon as a frame overruns, sized so one step usually covers it, and back up only after a second and a half of frames well inside the budget, so it settles rather than hunting. app.renderScale() answers the scale it chose. true turns it on with the defaults, false turns it off and leaves the scale where it is, and app.setRenderScale turns it off too — a scale chosen outright is the game's decision. Refuses: an unknown key, min above max. For this session only; persist it with save.*.
+
+### `app.setFrameCap`
+
+app.setFrameCap(72) — draw no more than this many frames a second, on a steady clock; 0 removes the cap. A rate the game can always make reads smoother than a higher one it keeps missing: on a 144 Hz display a game that flips between 144 and 72 frame to frame judders by metres at speed, and one capped to 72 does not. Pick it from app.refreshRate() — half of it, or a third — so every frame lands on a refresh. 10–1000, or 0; outside that RAISES. Headless runs are never capped. For this session only; persist it with save.*.
 
 ### `app.setFullscreen`
 
@@ -1442,7 +1462,7 @@ local heading = math.deg(yawOf(node.vel))
 
 ### `capsulecast`
 
-capsulecast(origin, dir, radius, halfHeight, max [, opts]) — the player-shaped sweep: "can I actually move there", asked with the shape that will be moving. Upright along the capsule's own axis, matching how the solver keeps a capsule body aligned, so the cast and the move agree. Same hit fields as raycast, hit.material included.
+capsulecast(origin, dir, radius, halfHeight, max [, opts]) — the player-shaped sweep: "can I actually move there", asked with the shape that will be moving. Upright along the capsule's own axis, matching how the solver keeps a capsule body aligned, so the cast and the move agree. Same hit fields as raycast, hit.material included. opts: ignore, layers, and ignoreStart = true, so a capsule standing on a floor can cast along it: surfaces it starts against do not count, only one it moves into.
 
 ### `find`
 
@@ -1518,7 +1538,7 @@ if hit then log("ground at " .. hit.y) end
 
 ### `spherecast`
 
-spherecast(origin, dir, radius, max [, opts]) — the first thing a moving BALL of that radius would hit, or nil. A raycast that can't slip through a gap narrower than the thing you are actually moving. The hit carries the same fields raycast's does, hit.material included — the usual ground check for a footstep.
+spherecast(origin, dir, radius, max [, opts]) — the first thing a moving BALL of that radius would hit, or nil. A raycast that can't slip through a gap narrower than the thing you are actually moving. The hit carries the same fields raycast's does, hit.material included — the usual ground check for a footstep. opts: ignore, layers, and ignoreStart = true (surfaces the ball starts against do not count, only one it moves into).
 
 ## references — wire nodes in the Inspector
 

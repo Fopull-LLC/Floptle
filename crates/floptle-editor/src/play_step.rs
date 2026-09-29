@@ -40,16 +40,22 @@ impl Editor {
     /// marks are the ones `shot --timing` places. Returns whether this frame is
     /// being timed: pair it with [`Self::end_live_gpu_timing`].
     pub(crate) fn begin_live_gpu_timing(&mut self) -> bool {
-        if self.gpu_timing_headless || !self.script_host.profile().borrow().enabled() {
+        let perf_on = self.script_host.profile().borrow().enabled();
+        if self.gpu_timing_headless || !(perf_on || self.wants_gpu_for_resolution()) {
             return false;
         }
         let Some(t) = self.gpu_timer.as_mut() else { return false };
         t.poll();
         let landed: Vec<(String, f32)> = t.spans().iter().map(|s| (s.label.clone(), s.ms)).collect();
-        if !landed.is_empty() {
-            self.script_host.profile().borrow_mut().set_gpu(landed, t.total_ms());
+        let total = (!landed.is_empty()).then(|| t.total_ms());
+        let begun = t.begin();
+        if let Some(ms) = total {
+            if perf_on {
+                self.script_host.profile().borrow_mut().set_gpu(landed, ms);
+            }
+            self.feed_dynamic_resolution(ms);
         }
-        if !t.begin() {
+        if !begun {
             return false;
         }
         self.gpu_timing_headless = true;
