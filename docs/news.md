@@ -1,5 +1,13 @@
 ## Just shipped
 
+**v0.102.0-rc1 — "Leaves A Mark"** (beta). Blood, scorch marks and bullet
+holes wrap round edges and climb walls with `decals.add`, hundreds at a time
+and none of them nodes. Characters can reach for things, look at things and
+plant their feet, and controllers get blend states, additive layers, masks and
+mirrored clips. A map view leaves the terrain alone, a lowered render scale
+stays sharp, a host whose connection blips keeps its lobby, and spawning,
+raycasts and terrain edits get cheaper.
+
 **v0.101.0 — "Always Answers"** (stable). A dedicated server that had been up a
 while could stop letting anyone in while looking healthy; now it keeps
 answering, and if its connection ever fails it reconnects and keeps its lobby.
