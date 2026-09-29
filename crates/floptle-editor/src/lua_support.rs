@@ -390,6 +390,8 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field setPitch fun(self: SoundHandle, pitch: number) Playback-rate pitch (0.5 = octave down, 2 = octave up).
 ---@field setPan fun(self: SoundHandle, pan: number) Stereo pan −1..1 (non-spatial sounds).
 ---@field setTrack fun(self: SoundHandle, track: string) Re-route through a mixer track (\"Master\" or a track name).
+---@field setSend fun(self: SoundHandle, track: string, level: number) Tap into another mixer track at that level; 0 removes the tap.
+---@field setLowpass fun(self: SoundHandle, hz: number) Muffle above that many Hz; 0 = off.
 ---@field setPosition fun(self: SoundHandle, x: number, y: number, z: number) Move the emitter (stops following a node).
 ---@field seek fun(self: SoundHandle, secs: number) Jump the playhead to a time in seconds.
 ---@field isPlaying fun(self: SoundHandle): boolean Still audible (false once finished)?
@@ -416,6 +418,8 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field track string? Mixer track to route through (default Master).
 ---@field endBehavior string? \"Stop\" (default) | \"Destroy\" (despawn the followed node) | \"Loop\".
 ---@field loop boolean? Shorthand for endBehavior = \"Loop\".
+---@field sends table<string, number>? Taps into other mixer tracks beside its own, track = level (a reverb bus heard partly).
+---@field lowpass number? Muffle this sound alone above that many Hz (behind a wall); 0 = off.
 
 ---The sound system: fire-and-forget playback + mixer control. Positions and
 ---following make it spatial; pass no position for flat 2D (UI, music).
@@ -910,6 +914,13 @@ function VoiceSource:setFalloff(falloff) end
 function VoiceSource:setMinDistance(d) end
 ---@param d number
 function VoiceSource:setMaxDistance(d) end
+---Put this speaker partly in another mixer track (a reverb bus); 0 removes it.
+---@param track string
+---@param level number
+function VoiceSource:setSend(track, level) end
+---Muffle this speaker above that many Hz (through a wall); 0 = off.
+---@param hz number
+function VoiceSource:setLowpass(hz) end
 
 ---Proximity voice chat. A remote player's voice is an ORDINARY spatial sound:
 ---it is spatialised, attenuated and routed through a mixer track like anything
@@ -937,10 +948,17 @@ function voice.level() end
 ---Hear your own microphone. Off by default.
 ---@param on boolean
 function voice.sidetone(on) end
+---Level this machine's microphone toward a steady speaking level before it
+---is sent. On by default.
+---@param on boolean
+function voice.setAutoGain(on) end
+---A fixed gain on this machine's microphone, in dB, before the leveller.
+---@param db number
+function voice.setInputGain(db) end
 ---A remote player's voice comes out of `node` and follows it.
 ---@param peer integer
 ---@param node Node
----@param opts { mode: string, falloff: string, minDistance: number, maxDistance: number, volume: number, track: string }|nil
+---@param opts { mode: string, falloff: string, minDistance: number, maxDistance: number, volume: number, track: string, sends: table<string, number>, lowpass: number }|nil
 function voice.attach(peer, node, opts) end
 ---Stop following a node. The stream keeps running.
 ---@param peer integer

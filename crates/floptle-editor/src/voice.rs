@@ -63,6 +63,8 @@ struct Speaker {
 pub struct VoiceChat {
     capture: Capture,
     encoder: Option<VoiceEncoder>,
+    /// Brings the microphone to a steady speaking level before it is sent.
+    leveler: floptle_audio::VoiceLeveler,
     speakers: HashMap<u64, Speaker>,
     /// The stream carrying our own voice back to us, when sidetone is on.
     /// `None` = off, which is the default: hearing yourself is disconcerting,
@@ -127,6 +129,8 @@ impl VoiceChat {
                 },
                 VoiceCmd::SetTransmit { on } => self.capture.set_transmit(on),
                 VoiceCmd::Sidetone { on } => self.set_sidetone(on),
+                VoiceCmd::AutoGain { on } => self.leveler.auto = on,
+                VoiceCmd::InputGain { db } => self.leveler.input_db = db,
                 VoiceCmd::Mute { peer, muted } => {
                     if let Some(s) = self.speakers.get_mut(&peer) {
                         s.muted = muted;
@@ -169,6 +173,11 @@ impl VoiceChat {
         if frames.is_empty() {
             return Vec::new();
         }
+        // Sidetone hears the raw capture (below); the lobby hears it levelled.
+        let mut levelled = frames.clone();
+        for f in &mut levelled {
+            self.leveler.process(f);
+        }
         if self.encoder.is_none() {
             match VoiceEncoder::new() {
                 Ok(e) => self.encoder = Some(e),
@@ -180,7 +189,7 @@ impl VoiceChat {
         }
         let enc = self.encoder.as_mut().expect("just built");
         let mut out = Vec::new();
-        for f in &frames {
+        for f in &levelled {
             match enc.encode(f) {
                 Ok(Some(p)) => out.push(p.to_vec()),
                 Ok(None) => {} // DTX: silence, nothing worth sending
@@ -493,6 +502,12 @@ fn apply_opts(params: &mut PlayParams, o: &VoiceOpts) {
     if let Some(t) = &o.track {
         params.track = t.clone();
     }
+    for (track, level) in &o.sends {
+        params.set_send(track, *level);
+    }
+    if let Some(hz) = o.lowpass {
+        params.lowpass = hz.max(0.0);
+    }
 }
 
 #[cfg(test)]
@@ -614,6 +629,61 @@ mod tests {
         assert_eq!(s.params.track, "Voice Monster", "the mixer track is how a monster is made");
         assert_eq!(s.params.max_distance, 40.0);
         assert_eq!(s.params.mode, floptle_audio::SpatialMode::Distance);
+    }
+
+    /// Sends and a low-pass reach the speaker's voice, and a send set to 0
+    /// comes off again.
+    #[test]
+    fn sends_and_a_lowpass_reach_the_voice() {
+        let mut v = VoiceChat::default();
+        let world = World::default();
+        let opts = |sends: Vec<(&str, f32)>, lowpass: Option<f32>| VoiceOpts {
+            sends: sends.into_iter().map(|(t, l)| (t.to_string(), l)).collect(),
+            lowpass,
+            ..Default::default()
+        };
+        v.apply_commands(
+            vec![VoiceCmd::Params { peer: 3, opts: opts(vec![("Room", 0.4), ("Hall", 0.6)], Some(850.0)) }],
+            &world,
+        );
+        let p = &v.speakers[&3].params;
+        let level = |t: &str| p.sends.iter().find(|s| s.track == t).map(|s| s.level);
+        assert_eq!((level("Room"), level("Hall"), p.lowpass), (Some(0.4), Some(0.6), 850.0));
+        v.apply_commands(vec![VoiceCmd::Params { peer: 3, opts: opts(vec![("Room", 0.0)], Some(0.0)) }], &world);
+        let p = &v.speakers[&3].params;
+        assert_eq!(p.sends.len(), 1, "{:?}", p.sends);
+        assert_eq!(p.lowpass, 0.0);
+    }
+
+    /// **The lobby hears a quiet microphone at a speaking level.** Speech
+    /// captured at about -34 dBFS is sent, decoded, and lands well above it;
+    /// with the leveller off it stays where it was.
+    #[test]
+    fn a_quiet_microphone_is_levelled_before_it_is_sent() {
+        let heard = |auto: bool| {
+            let mut v = VoiceChat::default();
+            v.apply_commands(vec![VoiceCmd::AutoGain { on: auto }], &World::default());
+            v.set_transmit(true);
+            // A frame a tick, as a real microphone arrives: the capture keeps
+            // only the newest few frames, so two seconds injected at once
+            // would be mostly thrown away before the leveller saw it.
+            let quiet: Vec<f32> = speech(FRAME_SAMPLES * 100).iter().map(|s| s * 0.05).collect();
+            let mut packets = Vec::new();
+            for frame in quiet.chunks(FRAME_SAMPLES) {
+                v.inject_microphone(frame);
+                packets.extend(v.encode_captured());
+            }
+            let mut dec = floptle_audio::VoiceDecoder::new().expect("decoder");
+            let mut tail = Vec::new();
+            for p in packets.iter().rev().take(10) {
+                tail.extend_from_slice(dec.decode(Some(p)).expect("decodes"));
+            }
+            let rms = (tail.iter().map(|s| s * s).sum::<f32>() / tail.len().max(1) as f32).sqrt();
+            20.0 * rms.max(1e-9).log10()
+        };
+        let (on, off) = (heard(true), heard(false));
+        assert!(off < -30.0, "the raw capture was already loud: {off:.1} dBFS");
+        assert!(on > -22.0 && on - off > 10.0, "levelled {on:.1} dBFS against raw {off:.1}");
     }
 
     /// The harness microphone: a clip played in as though a peer were speaking,

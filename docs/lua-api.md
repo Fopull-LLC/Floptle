@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 171
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 173
 - [node — transform & body fields](#node--transform--body-fields) — 40
 - [node — methods & handles](#node--methods--handles) — 31
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -43,7 +43,7 @@ each group, and meant to be searched.
 - [components — getcomponent](#components--getcomponent) — 103
 - [animation — node:animator](#animation--nodeanimator) — 26
 - [particles — effects from script](#particles--effects-from-script) — 10
-- [audio — sounds & the mixer](#audio--sounds--the-mixer) — 30
+- [audio — sounds & the mixer](#audio--sounds--the-mixer) — 32
 - [assets](#assets) — 11
 - [debug gizmos](#debug-gizmos) — 5
 - [lua stdlib](#lua-stdlib) — 43
@@ -731,7 +731,7 @@ Proximity voice chat: the microphone, and every remote player's voice as an ordi
 
 ### `voice.attach`
 
-voice.attach(peer, node, { mode = "Spatial", falloff = "Inverse", minDistance = 2, maxDistance = 22, track = "Voice" }) — a remote player's voice comes out of that node and follows it. The same knob set audio.play takes, because a remote speaker IS an ordinary spatial sound. Survives scene.load: the stream lives with the SESSION, so a server switching maps does not cut anyone off mid-sentence — re-attach in the new scene and the stream never restarted.
+voice.attach(peer, node, { mode = "Spatial", falloff = "Inverse", minDistance = 2, maxDistance = 22, track = "Voice", sends = { Room = 0.4 }, lowpass = 850 }) — a remote player's voice comes out of that node and follows it. The same knob set audio.play takes, because a remote speaker IS an ordinary spatial sound: sends put it partly in a reverb bus (one stream, heard dry and wet at once), lowpass muffles it through a wall. A mode or falloff the engine does not know raises, naming what it takes. Survives scene.load: the stream lives with the SESSION, so a server switching maps does not cut anyone off mid-sentence — re-attach in the new scene and the stream never restarted.
 
 ### `voice.detach`
 
@@ -757,6 +757,10 @@ voice.mute(peer, on) — a LOCAL mute: one player's choice not to listen, which 
 
 voice.muted(peer) — has this machine muted that peer locally?
 
+### `voice.setAutoGain`
+
+voice.setAutoGain(on) — level this machine's microphone toward a steady speaking level before it is sent: a quiet mic is raised (up to +24 dB), a loud one lowered, and silence between sentences is never pumped up. On by default; off sends the microphone at voice.setInputGain alone.
+
 ### `voice.setDevice`
 
 voice.setDevice(name) — open that input device; voice.setDevice(nil) opens the system default. A device that isn't there is one Console line, not a crash.
@@ -764,6 +768,10 @@ voice.setDevice(name) — open that input device; voice.setDevice(nil) opens the
 ### `voice.setForward`
 
 SERVER ONLY: voice.setForward(peer, { peers }) — who may hear that speaker; nil for everyone. THIS IS WHERE PROXIMITY VOICE IS ENFORCED. A game using it sets this from distance every tick or so, and a peer not on the list is never sent the audio at all — because attenuating a stream a client already received is a volume slider a modified client turns back up, and in a hidden-role game hearing someone is knowing where they are.
+
+### `voice.setInputGain`
+
+voice.setInputGain(db) — a fixed gain on this machine's microphone, before the leveller (or alone, with voice.setAutoGain(false)). 0 by default; a settings slider.
 
 ### `voice.setTransmit`
 
@@ -775,7 +783,7 @@ voice.sidetone(on) — hear your own microphone. Off by default because it is di
 
 ### `voice.source`
 
-voice.source(peer) — a handle shaped like the one audio.play returns: :setTrack, :setVolume, :setPosition(node), :setMode, :setFalloff, :setMinDistance, :setMaxDistance. `.live` says whether that stream exists at all, so a game can tell "quiet" from "not in this session". Moving a peer between mixer tracks is how a voice becomes a monster: voice.source(peer):setTrack("Voice Monster").
+voice.source(peer) — a handle shaped like the one audio.play returns: :setTrack, :setVolume, :setPosition(node), :setMode, :setFalloff, :setMinDistance, :setMaxDistance, :setSend(track, level) (0 removes it), :setLowpass(hz) (0 = off). `.live` says whether that stream exists at all, so a game can tell "quiet" from "not in this session". Moving a peer between mixer tracks is how a voice becomes a monster: voice.source(peer):setTrack("Voice Monster").
 
 ### `voice.speaking`
 
@@ -3767,7 +3775,7 @@ Sounds and the mixer: audio.play for one-shots, audio.track for a mixer bus, nod
 
 ### `audio.play`
 
-audio.play(clip [, node | x, y, z] [, opts]) — play a clip with no setup: audio.play("audio/ding.ogg") is flat 2D; pass x,y,z for a world point; pass a node to follow it. Local to this machine: in a session, play it from state that replicates, or a sound the server's code plays is heard by nobody. opts: {volume, pitch, pan, mode="Spatial|Distance|Flat", falloff="Inverse|Linear|Exponential", minDistance, maxDistance, track, endBehavior="Stop|Destroy|Loop", loop=true}. Returns a sound handle: :stop/:pause/:resume/:setVolume/:setPitch/:setPan/:setTrack/:setPosition/:seek/:isPlaying/:isLoading/:position. A clip's first play reads the file in the background, so the sound starts a frame or more after the call (a long music file takes longest); audio.preload removes the wait. e.g. audio.play("audio/hit.ogg", h.x, h.y, h.z, { maxDistance = 35, track = "SFX" })
+audio.play(clip [, node | x, y, z] [, opts]) — play a clip with no setup: audio.play("audio/ding.ogg") is flat 2D; pass x,y,z for a world point; pass a node to follow it. Local to this machine: in a session, play it from state that replicates, or a sound the server's code plays is heard by nobody. opts: {volume, pitch, pan, mode="Spatial|Distance|Flat", falloff="Inverse|Linear|Exponential", minDistance, maxDistance, track, endBehavior="Stop|Destroy|Loop", loop=true, sends={["Verb Large"]=0.4}, lowpass=hz}. sends taps the sound into other mixer tracks beside its own, at those levels, after its volume and distance (a reverb bus heard partly); lowpass muffles it alone (a sound behind a wall), 0 = off. Returns a sound handle: :stop/:pause/:resume/:setVolume/:setPitch/:setPan/:setTrack/:setSend/:setLowpass/:setPosition/:seek/:isPlaying/:isLoading/:position. A clip's first play reads the file in the background, so the sound starts a frame or more after the call (a long music file takes longest); audio.preload removes the wait. e.g. audio.play("audio/hit.ogg", h.x, h.y, h.z, { maxDistance = 35, track = "SFX" })
 
 ```lua
 audio.play("audio/footstep", node, { track = "SFX", volume = 0.6, minDistance = 4 })
@@ -3809,6 +3817,10 @@ Continue a paused sound.
 
 Jump the playhead to a time in seconds.
 
+### `sound:setLowpass`
+
+sound:setLowpass(850) — muffle this sound alone above that many Hz (a sound behind a wall); 0 turns it off. Glides, so moving it every frame does not click.
+
 ### `sound:setPan`
 
 Stereo pan −1..1 (non-spatial sounds).
@@ -3820,6 +3832,10 @@ Playback-rate pitch (0.5 = octave down, 2 = octave up).
 ### `sound:setPosition`
 
 Move the emitter (stops following a node).
+
+### `sound:setSend`
+
+sound:setSend("Verb Large", 0.4) — tap this sound into another mixer track beside its own, at that level; 0 removes the tap. A send to a track that doesn't exist does nothing.
 
 ### `sound:setTrack`
 

@@ -192,6 +192,8 @@ field_diff!(floptle_audio::PlayParams {
     max_distance,
     track,
     end,
+    sends,
+    lowpass,
 });
 
 impl FieldDiff for floptle_audio::AudioSource {

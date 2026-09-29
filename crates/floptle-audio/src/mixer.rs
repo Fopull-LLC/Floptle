@@ -294,6 +294,12 @@ impl MixerDsp {
         self.tracks.iter().position(|t| t.name == name).unwrap_or(0)
     }
 
+    /// A track by exact name, Master included; `None` when there is none.
+    /// For a send, where falling back to Master would double the sound.
+    pub fn find_track(&self, name: &str) -> Option<usize> {
+        self.tracks.iter().position(|t| t.name == name)
+    }
+
     /// The input buffers for a track — voices accumulate into these before
     /// `process` runs. `idx` out of range lands on master.
     pub fn input(&mut self, idx: usize) -> (&mut [f32], &mut [f32]) {

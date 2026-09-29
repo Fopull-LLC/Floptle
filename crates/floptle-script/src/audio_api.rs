@@ -25,7 +25,7 @@ pub(crate) struct AudioBridges {
 /// Every key an `audio.play` options table reads. Anything else is refused.
 pub(crate) const PLAY_KEYS: &[&str] = &[
     "volume", "pitch", "pan", "minDistance", "maxDistance", "mode", "falloff", "track",
-    "endBehavior", "loop",
+    "endBehavior", "loop", "sends", "lowpass",
 ];
 
 /// Read a play-options table into `PlayParams`, refusing anything it does not
@@ -78,6 +78,17 @@ fn parse_params(opts: Option<&Table>) -> mlua::Result<PlayParams> {
     if let Ok(true) = t.raw_get::<bool>("loop") {
         p.end = EndBehavior::Loop;
     }
+    match t.raw_get::<Value>("sends")? {
+        Value::Nil => {}
+        v => {
+            for (track, level) in crate::voice_api::read_sends(v, CALL)? {
+                p.set_send(&track, level);
+            }
+        }
+    }
+    if let Some(v) = num("lowpass") {
+        p.lowpass = v.max(0.0) as f32;
+    }
     Ok(p)
 }
 
@@ -111,7 +122,7 @@ pub(crate) fn install_audio_api(lua: &Lua, b: &AudioBridges) -> mlua::Result<()>
             })?,
         )?;
     }
-    for field in ["volume", "pitch", "pan"] {
+    for field in ["volume", "pitch", "pan", "lowpass"] {
         let cmds = b.commands.clone();
         // setVolume / setPitch / setPan
         let name = format!("set{}{}", field[..1].to_uppercase(), &field[1..]);
@@ -124,6 +135,17 @@ pub(crate) fn install_audio_api(lua: &Lua, b: &AudioBridges) -> mlua::Result<()>
                     field: field.to_string(),
                     value: v,
                 });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let cmds = b.commands.clone();
+        methods.set(
+            "setSend",
+            lua.create_function(move |_, (this, track, level): (Table, String, f64)| {
+                let id: u32 = this.raw_get("__sound")?;
+                cmds.borrow_mut().push(AudioCmd::SetSend { handle: id, track, level: level.clamp(0.0, 4.0) as f32 });
                 Ok(())
             })?,
         )?;

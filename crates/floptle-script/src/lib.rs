@@ -1261,9 +1261,11 @@ pub enum AudioCmd {
     Play { handle: u32, clip: String, at: AudioAt, params: Box<floptle_audio::PlayParams> },
     Stop { handle: u32 },
     Pause { handle: u32, paused: bool },
-    /// Set a numeric knob on a playing sound ("volume" | "pitch" | "pan").
+    /// Set a numeric knob on a playing sound ("volume" | "pitch" | "pan" | "lowpass").
     SetParam { handle: u32, field: String, value: f64 },
     SetTrack { handle: u32, track: String },
+    /// `sound:setSend(track, level)`; a level of 0 removes the send.
+    SetSend { handle: u32, track: String, level: f32 },
     Move { handle: u32, pos: [f64; 3] },
     Seek { handle: u32, secs: f64 },
     StopAll,

@@ -70,6 +70,66 @@ struct Voice {
     done: bool,
     cur_l: f32,
     cur_r: f32,
+    /// The sends, resolved to track indices, each with the level it is
+    /// gliding from; a send to a track that doesn't exist is dropped.
+    sends: Vec<SendTap>,
+    lowpass: LowPass,
+}
+
+/// One resolved send.
+struct SendTap {
+    track: String,
+    idx: usize,
+    cur: f32,
+    tgt: f32,
+}
+
+/// Two one-pole low-passes in series (12 dB an octave), per ear, with a
+/// coefficient that glides so a cutoff change never clicks. A coefficient of
+/// 1 passes the sound through untouched.
+struct LowPass {
+    cur: f32,
+    tgt: f32,
+    z: [f32; 4],
+}
+
+impl LowPass {
+    fn off() -> Self {
+        Self { cur: 1.0, tgt: 1.0, z: [0.0; 4] }
+    }
+
+    fn set(&mut self, hz: f32, sample_rate: f32) {
+        self.tgt = if hz > 0.0 && hz < sample_rate * 0.45 {
+            1.0 - (-std::f32::consts::TAU * hz / sample_rate).exp()
+        } else {
+            1.0
+        };
+    }
+
+    fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+        if self.cur >= 0.9999 && self.tgt >= 0.9999 {
+            // Passing through: keep the state on the signal so engaging later
+            // starts from where the sound is, not from silence.
+            if let (Some(&a), Some(&b)) = (l.last(), r.last()) {
+                self.z = [a, a, b, b];
+            }
+            return;
+        }
+        let n = l.len().max(1) as f32;
+        let (start, step) = (self.cur, (self.tgt - self.cur) / n);
+        let [mut l1, mut l2, mut r1, mut r2] = self.z;
+        for (i, (x, y)) in l.iter_mut().zip(r.iter_mut()).enumerate() {
+            let a = start + step * i as f32;
+            l1 += a * (*x - l1);
+            l2 += a * (l1 - l2);
+            r1 += a * (*y - r1);
+            r2 += a * (r1 - r2);
+            *x = l2;
+            *y = r2;
+        }
+        self.z = [l1, l2, r1, r2];
+        self.cur = self.tgt;
+    }
 }
 
 /// A control-side snapshot of one voice, published after every render.
@@ -91,6 +151,23 @@ pub struct AudioCore {
     smooth: f32,
     /// Voice ids that finished since the last `drain_finished`.
     finished: Vec<VoiceId>,
+    /// One voice's block, before it is added to its tracks.
+    tmp_l: Vec<f32>,
+    tmp_r: Vec<f32>,
+}
+
+/// Match `params.sends` onto a voice's taps, keeping the level a surviving
+/// send is at so a change glides.
+fn resolve_sends(mixer: &MixerDsp, old: &[SendTap], params: &PlayParams) -> Vec<SendTap> {
+    params
+        .sends
+        .iter()
+        .filter_map(|s| {
+            let idx = mixer.find_track(&s.track)?;
+            let cur = old.iter().find(|o| o.track == s.track).map_or(0.0, |o| o.cur);
+            Some(SendTap { track: s.track.clone(), idx, cur, tgt: s.level.clamp(0.0, 4.0) })
+        })
+        .collect()
 }
 
 impl AudioCore {
@@ -103,6 +180,8 @@ impl AudioCore {
             listener: Listener::default(),
             smooth: (-1.0 / (VOICE_SMOOTH_MS / 1000.0 * sample_rate)).exp(),
             finished: Vec::new(),
+            tmp_l: vec![0.0; block],
+            tmp_r: vec![0.0; block],
         }
     }
 
@@ -111,6 +190,7 @@ impl AudioCore {
         // Re-resolve voice routing: track indices may have shifted.
         for v in &mut self.voices {
             v.track_idx = self.mixer.track_index(&v.params.track);
+            v.sends = resolve_sends(&self.mixer, &v.sends, &v.params);
         }
     }
 
@@ -146,11 +226,18 @@ impl AudioCore {
             self.finished.push(id);
             return;
         }
+        let sends = resolve_sends(&self.mixer, &[], &params);
+        let mut lowpass = LowPass::off();
+        lowpass.set(params.lowpass, self.sample_rate);
+        // A sound that starts muffled starts muffled, not gliding into it.
+        lowpass.cur = lowpass.tgt;
         self.voices.push(Voice {
             id,
             source,
             pos: 0.0,
             track_idx: self.mixer.track_index(&params.track),
+            sends,
+            lowpass,
             params,
             emitter: emitter.unwrap_or(DVec3::ZERO),
             positioned: emitter.is_some(),
@@ -207,10 +294,14 @@ impl AudioCore {
     /// The clip and id stay; routing re-resolves if the track changed.
     pub fn update_params(&mut self, id: VoiceId, params: PlayParams) {
         let idx = self.mixer.track_index(&params.track);
-        if let Some(v) = self.voice_mut(id) {
-            v.params = params;
-            v.track_idx = idx;
-        }
+        let sr = self.sample_rate;
+        let Some(pos) = self.voices.iter().position(|v| v.id == id) else { return };
+        let sends = resolve_sends(&self.mixer, &self.voices[pos].sends, &params);
+        let v = &mut self.voices[pos];
+        v.lowpass.set(params.lowpass, sr);
+        v.params = params;
+        v.track_idx = idx;
+        v.sends = sends;
     }
 
     /// Snapshot a voice's state (None once fully finished and drained).
@@ -265,10 +356,12 @@ impl AudioCore {
         });
     }
 
-    /// Mix every live voice into its track's input buffer for `n` frames.
+    /// Mix every live voice into its track's input buffer for `n` frames,
+    /// and into the tracks it sends to.
     fn render_block(&mut self, n: usize) {
         let smooth = self.smooth;
-        for v in &mut self.voices {
+        let Self { mixer, voices, listener, tmp_l, tmp_r, sample_rate, .. } = self;
+        for v in voices.iter_mut() {
             if v.done || v.paused {
                 continue;
             }
@@ -282,16 +375,18 @@ impl AudioCore {
                 v.params.max_distance,
                 v.params.pan,
                 v.emitter,
-                &self.listener,
+                listener,
             );
             let vol = if v.stopping { 0.0 } else { v.params.volume.clamp(0.0, 4.0) * s.gain };
             let (pl, pr) = pan_gains(s.pan);
             let (tgt_l, tgt_r) = (vol * pl, vol * pr);
 
-            let step = v.source.sample_rate() as f64 / self.sample_rate as f64
+            let step = v.source.sample_rate() as f64 / *sample_rate as f64
                 * v.params.pitch.clamp(0.05, 8.0) as f64;
             let looping = v.params.end == EndBehavior::Loop;
-            let (buf_l, buf_r) = self.mixer.input(v.track_idx);
+            let (buf_l, buf_r) = (&mut tmp_l[..n], &mut tmp_r[..n]);
+            buf_l.fill(0.0);
+            buf_r.fill(0.0);
 
             let mut cur_l = v.cur_l;
             let mut cur_r = v.cur_r;
@@ -313,8 +408,8 @@ impl AudioCore {
                         let (sl, sr) = clip.sample_at(pos);
                         cur_l = tgt_l + smooth * (cur_l - tgt_l);
                         cur_r = tgt_r + smooth * (cur_r - tgt_r);
-                        buf_l[i] += sl * cur_l;
-                        buf_r[i] += sr * cur_r;
+                        buf_l[i] = sl * cur_l;
+                        buf_r[i] = sr * cur_r;
                         pos += step;
                     }
                 }
@@ -335,11 +430,35 @@ impl AudioCore {
                         let s = *prev + (*next - *prev) * pos as f32;
                         cur_l = tgt_l + smooth * (cur_l - tgt_l);
                         cur_r = tgt_r + smooth * (cur_r - tgt_r);
-                        buf_l[i] += s * cur_l;
-                        buf_r[i] += s * cur_r;
+                        buf_l[i] = s * cur_l;
+                        buf_r[i] = s * cur_r;
                         pos += step;
                     }
                 }
+            }
+            v.lowpass.process(buf_l, buf_r);
+            // The dry path, then each wet tap. A stream's samples are pulled
+            // from its ring once, above, and handed to every track here: two
+            // voices on one ring would split the samples between them.
+            let (dl, dr) = mixer.input(v.track_idx);
+            for i in 0..n {
+                dl[i] += buf_l[i];
+                dr[i] += buf_r[i];
+            }
+            let stopping = v.stopping;
+            for tap in &mut v.sends {
+                let tgt = if stopping { 0.0 } else { tap.tgt };
+                if tap.cur == 0.0 && tgt == 0.0 {
+                    continue;
+                }
+                let (start, inc) = (tap.cur, (tgt - tap.cur) / n.max(1) as f32);
+                let (sl, sr) = mixer.input(tap.idx);
+                for i in 0..n {
+                    let g = start + inc * i as f32;
+                    sl[i] += buf_l[i] * g;
+                    sr[i] += buf_r[i] * g;
+                }
+                tap.cur = tgt;
             }
             v.pos = pos;
             v.cur_l = cur_l;
@@ -452,6 +571,93 @@ mod tests {
         let st = core.status(7).expect("still playing");
         assert_eq!(st.position_secs, 0.0);
         assert!(st.playing);
+    }
+
+    fn mixer_with(tracks: &[(&str, bool)]) -> MixerDesc {
+        let mut d = MixerDesc::default();
+        for (name, muted) in tracks {
+            let mut t = crate::mixer::TrackDesc::new(*name);
+            t.muted = *muted;
+            d.tracks.push(t);
+        }
+        d
+    }
+
+    fn peak(l: &[f32]) -> f32 {
+        l.iter().map(|s| s.abs()).fold(0.0, f32::max)
+    }
+
+    /// **One stream, heard dry and in a reverb at once.** A voice sends into
+    /// another track as well as its own, at the send's level, and its ring is
+    /// read once: a second engine voice on the same ring would split the
+    /// samples between them instead.
+    #[test]
+    fn a_stream_sends_to_a_second_track_and_is_read_once() {
+        // Dry path muted or not, send track muted or not: each alone.
+        let run = |dry_muted: bool, wet_muted: bool, send: f32| {
+            let mut core = AudioCore::new(48_000.0, 128);
+            core.set_mixer(&mixer_with(&[("Voice", dry_muted), ("Verb", wet_muted)]));
+            let ring = crate::stream::StreamRing::new(48_000);
+            ring.push(&vec![0.5f32; 24_000]);
+            let mut p = PlayParams { track: "Voice".into(), ..Default::default() };
+            p.set_send("Verb", send);
+            core.play_stream(1, Arc::clone(&ring), None, p);
+            let (mut l, mut r) = (vec![0.0f32; 4800], vec![0.0f32; 4800]);
+            core.render(&mut l, &mut r);
+            (peak(&l[2400..]), ring.len())
+        };
+        let (dry, left_dry) = run(false, true, 0.5);
+        let (wet, left_wet) = run(true, false, 0.5);
+        let (none, _) = run(true, false, 0.0);
+        assert!(dry > 0.1, "the dry path is silent: {dry}");
+        assert!((wet / dry - 0.5).abs() < 0.02, "the send is {wet} against a dry {dry}, not half");
+        assert!(none < 1e-4, "no send, and the reverb track still heard it: {none}");
+        assert_eq!(left_dry, left_wet, "the send read the ring a second time");
+    }
+
+    /// A send to a track that doesn't exist is dropped. Falling back to Master,
+    /// as a voice's own track does, would play the sound twice as loud.
+    #[test]
+    fn a_send_to_a_missing_track_is_dropped_not_doubled() {
+        let run = |send: Option<&str>| {
+            let mut core = AudioCore::new(48_000.0, 128);
+            let mut p = PlayParams::default();
+            if let Some(t) = send {
+                p.set_send(t, 1.0);
+            }
+            core.play(1, tone_clip(48_000, 0.2), None, p);
+            let (mut l, mut r) = (vec![0.0f32; 4800], vec![0.0f32; 4800]);
+            core.render(&mut l, &mut r);
+            peak(&l[2400..])
+        };
+        let plain = run(None);
+        let missing = run(Some("Nope"));
+        assert!((missing - plain).abs() < 1e-4, "{missing} vs {plain}");
+    }
+
+    /// **The low-pass muffles.** A high tone through a 500 Hz cutoff is a
+    /// fraction of itself; a low one is nearly untouched.
+    #[test]
+    fn a_lowpass_cuts_the_highs_and_keeps_the_lows() {
+        let tone = |hz: f32| {
+            let n = 48_000 / 5;
+            Arc::new(Clip {
+                sample_rate: 48_000,
+                channels: 1,
+                samples: (0..n).map(|i| (std::f32::consts::TAU * hz * i as f32 / 48_000.0).sin() * 0.5).collect(),
+            })
+        };
+        let run = |hz: f32, lowpass: f32| {
+            let mut core = AudioCore::new(48_000.0, 128);
+            core.play(1, tone(hz), None, PlayParams { lowpass, ..Default::default() });
+            let (mut l, mut r) = (vec![0.0f32; 4800], vec![0.0f32; 4800]);
+            core.render(&mut l, &mut r);
+            peak(&l[2400..])
+        };
+        let (high, high_cut) = (run(5000.0, 0.0), run(5000.0, 500.0));
+        let (low, low_cut) = (run(100.0, 0.0), run(100.0, 500.0));
+        assert!(high_cut < high * 0.05, "5 kHz through 500 Hz kept {high_cut} of {high}");
+        assert!(low_cut > low * 0.9, "100 Hz through 500 Hz kept only {low_cut} of {low}");
     }
 
     #[test]

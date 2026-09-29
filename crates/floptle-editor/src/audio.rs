@@ -501,8 +501,20 @@ impl AudioSystem {
                             "volume" => s.params.volume = (value as f32).clamp(0.0, 4.0),
                             "pitch" => s.params.pitch = (value as f32).clamp(0.05, 8.0),
                             "pan" => s.params.pan = (value as f32).clamp(-1.0, 1.0),
+                            "lowpass" => s.params.lowpass = (value as f32).max(0.0),
                             _ => {}
                         }
+                        let (v, p) = (s.live(), s.params.clone());
+                        if let Some(v) = v
+                            && let Some(eng) = self.engine()
+                        {
+                            eng.update_params(v, p);
+                        }
+                    }
+                }
+                AudioCmd::SetSend { handle, track, level } => {
+                    if let Some(s) = self.sounds.get_mut(&handle) {
+                        s.params.set_send(&track, level);
                         let (v, p) = (s.live(), s.params.clone());
                         if let Some(v) = v
                             && let Some(eng) = self.engine()

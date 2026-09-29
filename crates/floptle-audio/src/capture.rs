@@ -198,16 +198,19 @@ impl Capture {
         let Ok(mut partial) = shared.partial.lock() else { return };
         let (buf, pos) = &mut *partial;
         let mut p = *pos;
+        // One channel carrying the voice (a mic in one input of a stereo
+        // interface) is taken on its own; averaging it with a silent channel
+        // halves it. Otherwise the channels are averaged, so a mic in either
+        // input is heard rather than silence with nothing saying why.
+        let pick = mono_pick(data, channels);
         while (p as usize) < frames_in {
             let i = p as usize;
-            // Downmix: the sum of the channels, not the first one — plugging
-            // into the right-hand channel of a stereo interface is otherwise
-            // total silence with nothing anywhere saying why.
-            let mut s = 0.0;
-            for c in 0..channels {
-                s += data[i * channels + c];
-            }
-            buf.push((s / channels as f32).clamp(-1.0, 1.0));
+            let frame = &data[i * channels..(i + 1) * channels];
+            let s = match pick {
+                Some(c) => frame[c],
+                None => frame.iter().sum::<f32>() / channels as f32,
+            };
+            buf.push(s.clamp(-1.0, 1.0));
             if buf.len() == FRAME_SAMPLES
                 && let Ok(mut frames) = shared.frames.lock()
             {
@@ -278,8 +281,43 @@ impl Capture {
     }
 }
 
+/// The one channel that carries the sound in an interleaved block, when one
+/// does: more than four times the energy of every other channel. `None` for a
+/// mono device, silence, or channels that carry much the same thing.
+pub fn mono_pick(data: &[f32], channels: usize) -> Option<usize> {
+    if channels < 2 || data.len() < channels {
+        return None;
+    }
+    let mut energy = vec![0.0f32; channels];
+    for frame in data.chunks_exact(channels) {
+        for (e, s) in energy.iter_mut().zip(frame) {
+            *e += s * s;
+        }
+    }
+    let (best, &top) = energy.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1))?;
+    if top <= 1e-9 {
+        return None;
+    }
+    energy.iter().enumerate().all(|(c, &e)| c == best || e * 4.0 < top).then_some(best)
+}
+
 #[cfg(test)]
 mod tests {
+    /// A mic in one input of a stereo interface is taken on its own, not
+    /// averaged with the silent input; a real stereo mic is averaged.
+    #[test]
+    fn a_one_sided_input_is_picked_and_a_stereo_one_averaged() {
+        let one_sided: Vec<f32> = (0..480).flat_map(|i| [0.0, (i as f32 * 0.1).sin() * 0.3]).collect();
+        assert_eq!(super::mono_pick(&one_sided, 2), Some(1));
+        let stereo: Vec<f32> = (0..480).flat_map(|i| {
+            let s = (i as f32 * 0.1).sin() * 0.3;
+            [s, s * 0.8]
+        }).collect();
+        assert_eq!(super::mono_pick(&stereo, 2), None);
+        assert_eq!(super::mono_pick(&vec![0.0; 960], 2), None, "silence picks nothing");
+        assert_eq!(super::mono_pick(&one_sided, 1), None, "a mono device has nothing to pick");
+    }
+
     use super::*;
 
     /// The path every machine without a microphone takes — and a dedicated

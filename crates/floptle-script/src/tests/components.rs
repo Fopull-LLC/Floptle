@@ -910,3 +910,73 @@ fn animator_exposes_authored_clip_events_and_duration() {
     assert_eq!(tr.y, 2.0, "both authored events came through");
     assert_eq!(tr.z, 1.0, "an unknown clip reads nil rather than erroring");
 }
+
+/// **A sound and a remote voice can both sit partly in a reverb.**
+/// `sends` and `lowpass` on `audio.play` and `voice.attach` reach their
+/// parameters, `:setSend` and `:setLowpass` retune them, and a mode or falloff
+/// the engine would not understand raises on a voice exactly as it does on
+/// `audio.play`.
+#[test]
+fn sends_lowpass_and_strict_voice_options_reach_their_commands() {
+    let dir = std::env::temp_dir().join("floptle_script_test_sends");
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "wet",
+        "function start(node)\n\
+         \x20 local s = audio.play('audio/hit.ogg', { sends = { ['Verb Large'] = 0.4, Room = 0.25 }, lowpass = 900 })\n\
+         \x20 s:setSend('Room', 0)\n\
+         \x20 s:setLowpass(2000)\n\
+         \x20 voice.attach(7, node, { track = 'Voice', sends = { Hall = 0.6 }, lowpass = 850 })\n\
+         \x20 local src = voice.source(7)\n\
+         \x20 src:setSend('Hall', 0.3)\n\
+         \x20 src:setLowpass(0)\n\
+         \x20 voice.setAutoGain(false)\n\
+         \x20 voice.setInputGain(6)\n\
+         \x20 local ok1, e1 = pcall(voice.attach, 7, node, { mode = 'spacial' })\n\
+         \x20 local ok2, e2 = pcall(function() src:setFalloff('exponentail') end)\n\
+         \x20 print(tostring(ok1) .. ' ' .. tostring(e1))\n\
+         \x20 print(tostring(ok2) .. ' ' .. tostring(e2))\n\
+         end\n",
+    );
+    let (mut world, _e) = world_with_script("wet");
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 0.1, 0.1);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let said = host.drain_logs().into_iter().map(|l| l.msg).collect::<Vec<_>>().join("\n");
+    assert!(said.contains("false") && said.contains("`mode = \"spacial\"` is not a name I know"), "{said}");
+    assert!(said.contains("`falloff = \"exponentail\"` is not a name I know"), "{said}");
+
+    let audio = host.take_audio_commands();
+    let AudioCmd::Play { params, handle, .. } = &audio[0] else { panic!("{audio:?}") };
+    let level = |t: &str| params.sends.iter().find(|s| s.track == t).map(|s| s.level);
+    assert_eq!((level("Verb Large"), level("Room"), params.lowpass), (Some(0.4), Some(0.25), 900.0));
+    assert!(
+        matches!(&audio[1], AudioCmd::SetSend { handle: h, track, level } if h == handle && track == "Room" && *level == 0.0),
+        "{audio:?}"
+    );
+    assert!(
+        matches!(&audio[2], AudioCmd::SetParam { field, value, .. } if field == "lowpass" && *value == 2000.0),
+        "{audio:?}"
+    );
+
+    let voice = host.take_voice_commands();
+    let attach = voice.iter().find_map(|c| match c {
+        crate::VoiceCmd::Attach { peer: 7, opts, .. } => Some(opts.clone()),
+        _ => None,
+    });
+    let attach = attach.expect("the attach");
+    assert_eq!((attach.sends.clone(), attach.lowpass), (vec![("Hall".to_string(), 0.6)], Some(850.0)));
+    let params: Vec<_> = voice
+        .iter()
+        .filter_map(|c| match c {
+            crate::VoiceCmd::Params { peer: 7, opts } => Some(opts.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(params.iter().any(|o| o.sends == vec![("Hall".to_string(), 0.3)]), "{params:?}");
+    assert!(params.iter().any(|o| o.lowpass == Some(0.0)), "{params:?}");
+    assert!(voice.contains(&crate::VoiceCmd::AutoGain { on: false }), "{voice:?}");
+    assert!(voice.contains(&crate::VoiceCmd::InputGain { db: 6.0 }), "{voice:?}");
+    assert_eq!(voice.iter().filter(|c| matches!(c, crate::VoiceCmd::Attach { .. })).count(), 1, "the typo'd attach was queued anyway");
+}

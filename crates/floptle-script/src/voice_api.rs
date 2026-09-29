@@ -38,7 +38,7 @@ use crate::{LogLevel, ScriptLog};
 /// Every key `voice.attach` / `voice.source(...)` options tables read
 /// (a misspelled option must not silently do nothing).
 pub(crate) const ATTACH_KEYS: &[&str] =
-    &["mode", "falloff", "minDistance", "maxDistance", "volume", "track"];
+    &["mode", "falloff", "minDistance", "maxDistance", "volume", "track", "sends", "lowpass"];
 
 /// A queued voice command, drained by the editor each tick.
 #[derive(Clone, Debug, PartialEq)]
@@ -62,6 +62,12 @@ pub enum VoiceCmd {
     SetForward { peer: u64, to: Option<Vec<u64>> },
     /// `voice.sidetone(bool)` — hear your own microphone. Off by default.
     Sidetone { on: bool },
+    /// `voice.setAutoGain(bool)` — level the microphone toward a steady
+    /// speaking level before it is sent. On by default.
+    AutoGain { on: bool },
+    /// `voice.setInputGain(db)` — a fixed gain on the microphone, before the
+    /// leveller (or alone, with it off).
+    InputGain { db: f32 },
 }
 
 /// The tunables a voice source carries — the same knob set `audio.play` takes,
@@ -74,18 +80,60 @@ pub struct VoiceOpts {
     pub max_distance: Option<f32>,
     pub volume: Option<f32>,
     pub track: Option<String>,
+    /// Sends to set, by track: a level of 0 removes one.
+    pub sends: Vec<(String, f32)>,
+    /// A low-pass in Hz; 0 turns it off.
+    pub lowpass: Option<f32>,
+}
+
+/// Refuse a mode or falloff the engine would not understand, naming what it
+/// takes — as `audio.play` does, instead of keeping the old value in silence.
+fn checked_mode(call: &str, s: &str) -> mlua::Result<String> {
+    use floptle_audio::SpatialMode;
+    crate::opts::parse_enum(call, "mode", s, SpatialMode::ACCEPTS, SpatialMode::parse)?;
+    Ok(s.to_string())
+}
+
+fn checked_falloff(call: &str, s: &str) -> mlua::Result<String> {
+    use floptle_audio::Falloff;
+    crate::opts::parse_enum(call, "falloff", s, Falloff::ACCEPTS, Falloff::parse)?;
+    Ok(s.to_string())
+}
+
+/// `sends = { ["Verb Large"] = 0.4, Room = 0.2 }`, sorted by track name.
+pub(crate) fn read_sends(v: Value, call: &str) -> mlua::Result<Vec<(String, f32)>> {
+    let Value::Table(t) = v else {
+        return Err(mlua::Error::runtime(format!(
+            "{call}: `sends` is a table of track = level, like {{ [\"Verb Large\"] = 0.4 }}"
+        )));
+    };
+    let mut out = Vec::new();
+    for pair in t.pairs::<String, f64>() {
+        let (track, level) = pair.map_err(|_| {
+            mlua::Error::runtime(format!("{call}: `sends` maps a track name to a level from 0 to 1"))
+        })?;
+        out.push((track, level.clamp(0.0, 4.0) as f32));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
 }
 
 impl VoiceOpts {
     fn read(t: &Table) -> mlua::Result<Self> {
-        crate::opts::check_keys(t, ATTACH_KEYS, "voice.attach")?;
+        const CALL: &str = "voice.attach";
+        crate::opts::check_keys(t, ATTACH_KEYS, CALL)?;
         Ok(Self {
-            mode: t.get::<Option<String>>("mode").ok().flatten(),
-            falloff: t.get::<Option<String>>("falloff").ok().flatten(),
+            mode: t.get::<Option<String>>("mode")?.map(|m| checked_mode(CALL, &m)).transpose()?,
+            falloff: t.get::<Option<String>>("falloff")?.map(|f| checked_falloff(CALL, &f)).transpose()?,
             min_distance: t.get::<Option<f32>>("minDistance").ok().flatten(),
             max_distance: t.get::<Option<f32>>("maxDistance").ok().flatten(),
             volume: t.get::<Option<f32>>("volume").ok().flatten(),
             track: t.get::<Option<String>>("track").ok().flatten(),
+            sends: match t.get::<Value>("sends")? {
+                Value::Nil => Vec::new(),
+                v => read_sends(v, CALL)?,
+            },
+            lowpass: t.get::<Option<f32>>("lowpass").ok().flatten(),
         })
     }
 }
@@ -180,6 +228,29 @@ pub(crate) fn install_voice_api(lua: &Lua, voice: &SharedVoice) -> mlua::Result<
     {
         let v = voice.state.clone();
         t.set("transmitting", lua.create_function(move |_, ()| Ok(v.borrow().transmitting))?)?;
+    }
+    {
+        let sv = voice.cmds.clone();
+        t.set(
+            "setAutoGain",
+            lua.create_function(move |_, on: bool| {
+                sv.borrow_mut().push(VoiceCmd::AutoGain { on });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let sv = voice.cmds.clone();
+        t.set(
+            "setInputGain",
+            lua.create_function(move |_, db: f64| {
+                if !db.is_finite() {
+                    return Err(mlua::Error::runtime("voice.setInputGain: the gain is a number of dB"));
+                }
+                sv.borrow_mut().push(VoiceCmd::InputGain { db: db.clamp(-40.0, 40.0) as f32 });
+                Ok(())
+            })?,
+        )?;
     }
     {
         let sv = voice.cmds.clone();
@@ -326,15 +397,17 @@ fn make_source(
         let cmds = cmds.clone();
         move |_: &Lua, (_this, value): (Table, Value)| {
             let mut opts = VoiceOpts::default();
+            let text = || value.as_string().map(|s| s.to_string_lossy().to_string());
             match field {
-                "track" => opts.track = value.as_string().map(|s| s.to_string_lossy().to_string()),
+                "track" => opts.track = text(),
                 "volume" => opts.volume = value.as_f32(),
                 "minDistance" => opts.min_distance = value.as_f32(),
                 "maxDistance" => opts.max_distance = value.as_f32(),
-                "mode" => opts.mode = value.as_string().map(|s| s.to_string_lossy().to_string()),
+                "mode" => opts.mode = text().map(|m| checked_mode("source:setMode", &m)).transpose()?,
                 "falloff" => {
-                    opts.falloff = value.as_string().map(|s| s.to_string_lossy().to_string())
+                    opts.falloff = text().map(|f| checked_falloff("source:setFalloff", &f)).transpose()?
                 }
+                "lowpass" => opts.lowpass = Some(value.as_f32().unwrap_or(0.0)),
                 _ => {}
             }
             cmds.borrow_mut().push(VoiceCmd::Params { peer, opts });
@@ -347,6 +420,18 @@ fn make_source(
     h.set("setMaxDistance", lua.create_function(setter("maxDistance"))?)?;
     h.set("setMode", lua.create_function(setter("mode"))?)?;
     h.set("setFalloff", lua.create_function(setter("falloff"))?)?;
+    h.set("setLowpass", lua.create_function(setter("lowpass"))?)?;
+    {
+        let cmds = cmds.clone();
+        h.set(
+            "setSend",
+            lua.create_function(move |_, (_this, track, level): (Table, String, f64)| {
+                let opts = VoiceOpts { sends: vec![(track, level.clamp(0.0, 4.0) as f32)], ..Default::default() };
+                cmds.borrow_mut().push(VoiceCmd::Params { peer, opts });
+                Ok(())
+            })?,
+        )?;
+    }
     {
         let cmds = cmds.clone();
         h.set(

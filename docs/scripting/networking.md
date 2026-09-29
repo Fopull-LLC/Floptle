@@ -557,6 +557,38 @@ between them:
 voice.source(peer):setTrack(isMonster and "Voice Monster" or "Voice")
 ```
 
+### Putting a voice in the room
+
+A voice can be partly in a reverb and partly behind a wall at once. `sends`
+taps a speaker into other mixer tracks beside its own track, each at its own
+level. It's one stream heard dry and wet together, so a voice can be 40% in the
+room's reverb and 60% in the hall's, and moving between rooms is a glide
+rather than a cut. `lowpass` muffles it through a wall:
+
+```lua
+voice.attach(peer, avatar, { track = "Voice", sends = { ["Verb Small"] = 0.4 } })
+
+-- each frame, from where the listener is and what's between them
+local src = voice.source(peer)
+src:setSend("Verb Small", roomAmount)
+src:setSend("Verb Large", hallAmount)
+src:setLowpass(wallBetween and 850 or 0)
+```
+
+Sends are taken after the voice's own volume and distance, so a far speaker
+sends less. The same `sends` and `lowpass` work on `audio.play`, with
+`:setSend` and `:setLowpass` on the handle it returns.
+
+**Loudness.** Each machine levels its own microphone before sending it, so a
+quiet mic is raised toward a steady speaking level (up to +24 dB) and a loud
+one is lowered. Silence between sentences is never raised, so room hiss stays
+hiss. `voice.setAutoGain(false)` turns it off, and `voice.setInputGain(db)` is
+a fixed gain for a settings slider. A microphone plugged into one input of a
+stereo interface is taken on its own, not averaged with the silent input.
+
+A `mode` or `falloff` the engine doesn't know now raises on `voice.attach` and
+`voice.source(peer)`, naming what it takes, as it does on `audio.play`.
+
 ### Who can hear you is the server's decision
 
 This is the part worth reading twice.

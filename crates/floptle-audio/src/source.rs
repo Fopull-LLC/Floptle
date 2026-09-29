@@ -135,6 +135,37 @@ pub struct PlayParams {
     /// Mixer track this sound routes through; empty = Master.
     pub track: String,
     pub end: EndBehavior,
+    /// Wet taps into other tracks, beside the dry path through `track`: a
+    /// sound that is partly in a small room and partly in a hall sends to
+    /// both reverbs at once. Taken after the sound's own volume and distance,
+    /// so a far sound sends less.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sends: Vec<AuxSend>,
+    /// A low-pass on this sound alone, in Hz: a voice behind a wall. 0 = off.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub lowpass: f32,
+}
+
+fn is_zero(x: &f32) -> bool {
+    *x == 0.0
+}
+
+/// One wet tap: how much of a sound also goes into another track.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuxSend {
+    pub track: String,
+    /// Linear, 0..1 (more is allowed, up to 4).
+    pub level: f32,
+}
+
+impl PlayParams {
+    /// Set the send into `track` to `level`; 0 or less removes it.
+    pub fn set_send(&mut self, track: &str, level: f32) {
+        self.sends.retain(|s| s.track != track);
+        if level > 0.0 {
+            self.sends.push(AuxSend { track: track.to_string(), level: level.min(4.0) });
+        }
+    }
 }
 
 impl Default for PlayParams {
@@ -149,6 +180,8 @@ impl Default for PlayParams {
             max_distance: 50.0,
             track: String::new(),
             end: EndBehavior::Stop,
+            sends: Vec::new(),
+            lowpass: 0.0,
         }
     }
 }
