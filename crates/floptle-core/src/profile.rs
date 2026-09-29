@@ -226,6 +226,18 @@ pub struct FrameProfile {
     overloaded: bool,
     /// Last frame's animators and how many were culled.
     anim_counts: (usize, usize),
+    /// Rays scripts cast this frame and the milliseconds they took, and last
+    /// frame's once folded. Inside the `scripts` bucket, not beside it.
+    rays_frame: (u64, f32),
+    rays_last: (u64, f32),
+    /// The GPU's own per-pass times for the last frame whose timestamps have
+    /// landed, and their total. `None` when nothing measured them: timing off,
+    /// or a device without timestamp queries.
+    gpu: Option<(Vec<(String, f32)>, f32)>,
+    /// Frames in a row whose mirror rebuilt from scratch at least once.
+    /// Counted whether or not collection is on: it feeds a warning, not a
+    /// readout.
+    rebuild_streak: u32,
 }
 
 /// What the script mirror did over one frame.
@@ -298,6 +310,12 @@ impl FrameProfile {
 
     /// Note one pass of the script mirror: a full rebuild (with why), or a
     /// refresh of `refreshed` entities.
+    /// Frames in a row, up to the last one folded, that rebuilt the script
+    /// mirror from scratch. A game doing something structural every frame.
+    pub fn mirror_rebuild_streak(&self) -> u32 {
+        self.rebuild_streak
+    }
+
     pub fn record_mirror(&mut self, rebuilt: Option<String>, refreshed: u32) {
         if let Some(cause) = rebuilt {
             self.mirror_frame.rebuilds += 1;
@@ -325,6 +343,30 @@ impl FrameProfile {
     /// Last frame's animators, and how many culling skipped.
     pub fn set_anim_counts(&mut self, animators: usize, culled: usize) {
         self.anim_counts = (animators, culled);
+    }
+
+    /// Count `n` script rays that took `ms` between them. Nothing while off.
+    pub fn record_rays(&mut self, n: u64, ms: f32) {
+        if self.on {
+            self.rays_frame.0 += n;
+            self.rays_frame.1 += ms;
+        }
+    }
+
+    /// Publish the GPU's per-pass times, `(label, ms)` in pass order, and the
+    /// frame's total.
+    pub fn set_gpu(&mut self, passes: Vec<(String, f32)>, total_ms: f32) {
+        self.gpu = Some((passes, total_ms));
+    }
+
+    /// The last measured GPU frame, if any was: see [`Self::set_gpu`].
+    pub fn gpu(&self) -> Option<&(Vec<(String, f32)>, f32)> {
+        self.gpu.as_ref()
+    }
+
+    /// `(rays, ms)` scripts cast last frame.
+    pub fn rays(&self) -> (u64, f32) {
+        self.rays_last
     }
 
     /// `(animators, culled)` as of the last animation pass.
@@ -379,11 +421,14 @@ impl FrameProfile {
     /// Fold the frame in progress into the history. Called once per rendered
     /// frame, after everything has reported.
     pub fn end_frame(&mut self) {
+        self.rebuild_streak = if self.mirror_frame.rebuilds > 0 { self.rebuild_streak.saturating_add(1) } else { 0 };
         if !self.on {
             self.mirror_frame = MirrorWork::default();
+            self.rays_frame = (0, 0.0);
             return;
         }
         self.mirror_last = std::mem::take(&mut self.mirror_frame);
+        self.rays_last = std::mem::take(&mut self.rays_frame);
         // Every bucket is pushed, including the ones that reported nothing —
         // otherwise a subsystem that went idle keeps its old mean forever and
         // reads as still costing what it used to.

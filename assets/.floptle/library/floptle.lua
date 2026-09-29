@@ -21,6 +21,7 @@
 ---@field up_y number Physics: body up (−gravity) Y.
 ---@field up_z number Physics: body up (−gravity) Z.
 ---@field visible boolean Show / hide this node's geometry (Inspector eye toggle).
+---@field castShadow boolean Whether this node casts sun shadows (default true).
 ---@field persistent boolean Carry this node — and everything under it — across a `scene.load` swap. Its scripts keep RUNNING (`start` does not re-fire), because the node never stopped existing.
 ---@field pos Vec3 The node's position as a vec3 (read/write: `node.pos = node.pos + dir * dt`). Accepts any {x=,y=,z=} value.
 ---@field vel Vec3 The body's velocity as a vec3 (read/write) — one write instead of vx/vy/vz: `node.vel = node.vel + node.up * jump`.
@@ -170,6 +171,7 @@
 ---@field shadowQuantize number 0 = smooth penumbra; 2..8 = posterize it into that many bands (toon/retro).
 ---@field shadowDither number Bayer-dither the penumbra (1/0) — the classic PS1 dithered shadow edge.
 ---@field shadowDistance number Max world distance a shadow ray marches before giving up; far geometry stops casting past it.
+---@field shadowSteps number Most steps a sun-shadow ray takes (8..64, default 64). The cheapest quality lever for shadows: fewer steps cost less and thin out shadows behind long casters.
 ---@field fog number Depth fog on (1/0; assign true/false).
 ---@field contactShadows number Contact shadows (1/0): the small dark line where things touch, traced from the depth buffer so a mesh casts its real silhouette. Only what is ON SCREEN casts one.
 ---@field contactLength number How far a contact shadow traces, in world units.
@@ -421,6 +423,27 @@ draw = {}
 ---@param r number 0..1 @param g number 0..1 @param b number 0..1
 ---@param a? number alpha, default 1
 function draw.line(x1, y1, z1, x2, y2, z2, r, g, b, a) end
+
+---A connected line through every point, in one call. `points` is a flat
+---`{x1,y1,z1, x2,y2,z2, ...}` array or an array of vec3s.
+---e.g. `draw.polyline(orbitPoints, 0.3, 0.85, 1.0, 1, true)`
+---@param points number[]|vec3[]
+---@param r number 0..1 @param g number 0..1 @param b number 0..1
+---@param a? number alpha, default 1
+---@param closed? boolean join the last point back to the first
+function draw.polyline(points, r, g, b, a, closed) end
+
+---A Kepler orbit around the focus `center`, in the plane of `e1` (toward
+---periapsis) and `e2`: r(θ) = p / (1 + ecc·cos θ). Closed for ecc < 1; an
+---open arc cut where r reaches `maxR` (default 10·p) otherwise.
+---@param center vec3 @param e1 vec3 @param e2 vec3
+---@param p number semi-latus rectum, above 0
+---@param ecc number eccentricity
+---@param segs integer segments
+---@param r number 0..1 @param g number 0..1 @param b number 0..1
+---@param a? number alpha, default 1
+---@param maxR? number where an open orbit stops
+function draw.conic(center, e1, e2, p, ecc, segs, r, g, b, a, maxR) end
 
 ---One textured quad IN the world for this frame: depth-tested, alpha-blended,
 ---both sides. Corners run around the quad; corner 0 is at (u0,v0), corner 2 at
@@ -1212,6 +1235,16 @@ function camera.screenToRay(sx, sy) end
 ---@return { x: number, y: number, z: number, nx: number, ny: number, nz: number, distance: number, node: Node|nil }|nil
 function raycast(ox, oy, oz, dx, dy, dz, max, ignore) end
 
+---Many rays in one call. One origin and one dir per ray (vec3s, or flat
+---{x1,y1,z1, ...} arrays); `maxes` is one distance or one per ray; `opts` as
+---raycast's. One entry per ray, in order: a hit table, or false for a miss.
+---@param origins vec3[]|number[]
+---@param dirs vec3[]|number[]
+---@param maxes number|number[]
+---@param opts? {ignore?: table, layers?: string|string[]}
+---@return (table|false)[]
+function raycastMany(origins, dirs, maxes, opts) end
+
 ---EVERY node carrying script `kind`, as script handles in scene order — for
 ---picking among several instances (a camera finding the one third_person
 ---that is `net.isMine`, out of many player avatars).
@@ -1582,15 +1615,17 @@ function water.volumes() end
 terrain = {}
 ---Sculpt the nearest terrain at (x,y,z): mode "raise" (default), "lower"/"dig",
 ---"smooth", or "flatten". strength 0..1 (default 1). No-op when no terrain
----surface is near the point.
+---surface is near the point. "flatten" levels to the terrain's up, or on a
+---planet the radial up at the point; `opts.normal` names another plane.
 ---@param x number
 ---@param y number
 ---@param z number
 ---@param radius number
 ---@param strength? number
 ---@param mode? string
+---@param opts? {normal?: vec3}
 ---@return number id an id for the yield report this edit will produce
-function terrain.sculpt(x, y, z, radius, strength, mode) end
+function terrain.sculpt(x, y, z, radius, strength, mode, opts) end
 ---Dig a hole — sugar for `terrain.sculpt(x, y, z, radius, strength, "lower")`.
 ---@param x number
 ---@param y number

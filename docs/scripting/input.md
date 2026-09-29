@@ -295,6 +295,32 @@ Use it for ground checks, line-of-sight, shooting, or dropping objects onto a su
 (The built-in `node.grounded` already does a robust contact check for the character;
 raycast is the general-purpose tool for everything else.)
 
+#### Many rays at once — `raycastMany`
+
+When the rays are known up front (the corners of a decal, a ragdoll's contact
+probes, a fan of sight lines), cast them in one call:
+
+```lua
+local hits = raycastMany(origins, dirs, 0.5, { layers = "Level" })
+for i, h in ipairs(hits) do
+  if h then place(i, h) end          -- a hit table, or false for a miss
+end
+```
+
+`origins` and `dirs` are arrays of vec3s (or flat `{x1,y1,z1, x2,...}` arrays),
+one of each per ray. `maxes` is one distance for all of them or a list of one
+per ray. The options are `raycast`'s. The answer has one entry per ray, in order:
+the same hit table `raycast` returns, or `false` where it would return `nil`, so
+`#hits` is always the number of rays.
+
+#### What a ray costs
+
+A ray only asks the colliders whose bounds it passes through, and a mesh
+collider answers by walking its own triangles along the ray, so a short ray
+costs about a microsecond on a level of a hundred models. `perf.counts().rays`
+is how many rays scripts cast last frame and `perf.counts().rayMs` what they
+took (with `perf.enable(true)`; the time is part of `scripts`).
+
 ### Shape queries — `overlapSphere`, `spherecast`, `capsulecast`
 
 A ray answers *what is along this line*. A melee swing, an explosion or a

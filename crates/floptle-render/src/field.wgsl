@@ -1586,7 +1586,10 @@ fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
     // planet proxies — far enough to START the ray past a cave roof or a whole
     // terrain feature, which lit sealed caves from the inside (2026-07-20).
     let lift = min(base * clamp(0.5 / max(dot(n, l), 0.125), 1.0, 4.0), 3.0);
-    return field_vis(p + n * lift, l, G.shadow_params.w, G.shadow_params.y, base * 3.0, lift, 64);
+    // The Lighting node's step budget; 0 (a host that never set it) is the
+    // 64 the march always took.
+    let steps = select(i32(clamp(G.shadow_extra.y, 8.0, 64.0)), 64, G.shadow_extra.y < 0.5);
+    return field_vis(p + n * lift, l, G.shadow_params.w, G.shadow_params.y, base * 3.0, lift, steps);
 }
 
 // Is lamp `i` blocked by something the CAMERA CANNOT SEE?

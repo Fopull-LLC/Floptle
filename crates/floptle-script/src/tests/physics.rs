@@ -772,3 +772,88 @@ fn physics_moving_a_body_is_not_mistaken_for_a_stashed_write() {
         .unwrap_or(f64::NAN);
     assert_eq!(seen, 3.0, "and the stashed handle still reads the live pose");
 }
+
+/// **0320: terrain edits past a frame's share wait; they are not dropped.**
+/// A game laying 100 small flattens in one frame gets 64 this frame and 36 the
+/// next, in the order it asked, each carrying the normal it named. The drop
+/// that used to happen past 64 also applied its own "warning" op as a 65th
+/// edit.
+#[test]
+fn terrain_edits_past_a_frames_share_wait_in_order_with_their_normal() {
+    let dir = std::env::temp_dir().join(format!("floptle-ops-queue-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "pads",
+        "local done = false\n\
+         function update(node, dt)\n  \
+           if done then return end\n  \
+           done = true\n  \
+           for i = 1, 100 do\n    \
+             terrain.sculpt(i, 0, 0, 2, 1, \"flatten\", { normal = vec3(0, 0, 2) })\n  \
+           end\n  \
+           local ok, err = pcall(terrain.sculpt, 0, 0, 0, 2, 1, \"flatten\", { norml = vec3(0, 1, 0) })\n  \
+           log(ok and \"accepted\" or tostring(err))\n\
+         end\n",
+    );
+    let (mut world, _) = world_with_script("pads");
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 0.1, 0.1);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    assert!(said.iter().any(|m| m.contains("did you mean `normal`")), "an unknown option names the fix: {said:?}");
+
+    let first = host.take_terrain_ops();
+    let second = host.take_terrain_ops();
+    assert_eq!((first.len(), second.len()), (64, 36), "64 land this frame, the rest the next");
+    assert!(host.take_terrain_ops().is_empty());
+    let xs: Vec<f64> = first.iter().chain(&second).map(|o| o.pos[0]).collect();
+    assert_eq!(xs, (1..=100).map(f64::from).collect::<Vec<_>>(), "in the order they were asked");
+    assert!(first.iter().chain(&second).all(|o| o.normal == Some([0.0, 0.0, 1.0])), "each carries its normal, unit length");
+}
+
+
+/// **0293: many rays in one call answer what one call each would.** A hit
+/// table where `raycast` gives one, `false` where it gives nil, in order, and
+/// `perf.counts().rays` counts every ray of both.
+#[test]
+fn raycast_many_answers_what_one_raycast_each_would() {
+    let dir = std::env::temp_dir().join(format!("floptle-raymany-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "probe",
+        "local frame = 0\n\
+         function update(node, dt)\n  \
+           frame = frame + 1\n  \
+           if frame == 1 then perf.enable(true) return end\n  \
+           if frame == 3 then log('rays=' .. perf.counts().rays) return end\n  \
+           if frame ~= 2 then return end\n  \
+           local os, ds = {}, {}\n  \
+           for i = 1, 6 do os[i] = vec3(i, 2, 0); ds[i] = vec3(0, i % 2 == 0 and 1 or -1, 0) end\n  \
+           local many = raycastMany(os, ds, 5)\n  \
+           local flat = raycastMany({1,2,0, 2,2,0}, {0,-1,0, 0,-1,0}, {1, 5})\n  \
+           for i = 1, 6 do\n    \
+             local one = raycast(os[i], ds[i], 5)\n    \
+             local m = many[i]\n    \
+             if (one == nil) ~= (m == false) then error('ray ' .. i .. ' disagrees') end\n    \
+             if one and math.abs(one.distance - m.distance) > 1e-6 then error('ray ' .. i .. ' distance') end\n  \
+           end\n  \
+           log(string.format('n=%d hit1=%s miss2=%s flat=%s,%s', #many, tostring(many[1] ~= false), tostring(many[2]), tostring(flat[1]), tostring(flat[2] ~= false)))\n\
+         end\n",
+    );
+    let (mut world, _) = world_with_script("probe");
+    let mut host = ScriptHost::new();
+    host.set_colliders(
+        vec![floptle_physics::AnchoredCollider::world(Box::new(floptle_physics::Plane::ground(0.0)))],
+        glam::DVec3::ZERO,
+    );
+    for i in 1..=3 {
+        host.run(&mut world, &dir, 0.1, 0.1 * i as f32);
+        host.profile().borrow_mut().end_frame();
+        assert!(host.errors().is_empty(), "frame {i}: {:?}", host.errors());
+    }
+    let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    assert!(said.iter().any(|m| m == "n=6 hit1=true miss2=false flat=false,true"), "{said:?}");
+    assert!(said.iter().any(|m| m == "rays=14"), "6 + 2 in the batches and 6 single rays: {said:?}");
+}

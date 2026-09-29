@@ -52,6 +52,47 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
     let p = profile.clone();
     t.set("enabled", lua.create_function(move |_, ()| Ok(p.borrow().enabled()))?)?;
 
+    // perf.gpu() -> { total = ms, passes = { {name=, ms=}, ... } } for the last
+    // frame the GPU finished timing, or nil when nothing has been timed (a
+    // device without timestamp queries, or the first frames after enabling).
+    // What a quality governor wants: the GPU's own answer, not a CPU guess.
+    let p = profile.clone();
+    t.set(
+        "gpu",
+        lua.create_function(move |lua, ()| {
+            let prof = p.borrow();
+            require_on(&prof, "gpu")?;
+            let Some((passes, total)) = prof.gpu() else { return Ok(mlua::Value::Nil) };
+            let out = lua.create_table()?;
+            out.set("total", *total as f64)?;
+            let list = lua.create_table_with_capacity(passes.len(), 0)?;
+            for (i, (name, ms)) in passes.iter().enumerate() {
+                let row = lua.create_table()?;
+                row.set("name", name.as_str())?;
+                row.set("ms", *ms as f64)?;
+                list.raw_set(i + 1, row)?;
+            }
+            out.set("passes", list)?;
+            Ok(mlua::Value::Table(out))
+        })?,
+    )?;
+
+    // perf.gpuMs(pass) -> one pass's GPU time last frame ("opaque + lighting",
+    // "post", …, or "total"), nil when it was not timed or did not run.
+    let p = profile.clone();
+    t.set(
+        "gpuMs",
+        lua.create_function(move |_, name: String| {
+            let prof = p.borrow();
+            require_on(&prof, "gpuMs")?;
+            let Some((passes, total)) = prof.gpu() else { return Ok(None) };
+            if name == "total" {
+                return Ok(Some(*total as f64));
+            }
+            Ok(passes.iter().filter(|(n, _)| *n == name).map(|(_, ms)| *ms as f64).reduce(|a, b| a + b))
+        })?,
+    )?;
+
     // perf.ms(bucket) -> the rolling average, in milliseconds.
     let p = profile.clone();
     t.set(
@@ -173,6 +214,11 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
             let (animators, culled) = p.borrow().anim_counts();
             out.set("animators", animators)?;
             out.set("animatorsCulled", culled)?;
+            // Rays scripts cast last frame (raycast + raycastMany) and what
+            // they took, which is part of `scripts`, not beside it.
+            let (rays, ray_ms) = p.borrow().rays();
+            out.set("rays", rays)?;
+            out.set("rayMs", ray_ms)?;
             Ok(out)
         })?,
     )?;
@@ -286,6 +332,22 @@ mod tests {
     /// This is the whole design decision. A zero would let
     /// `assert(perf.ms("scripts") < 4)` pass in a smoke test that measured
     /// nothing, which is the exact shape of bug this engine has shipped 32 times.
+    /// **0313: the GPU's own pass times reach a script.** Nil until a frame
+    /// has been timed (a device without timestamp queries never is), then each
+    /// pass by name and the total, as the renderer published them.
+    #[test]
+    fn gpu_pass_times_read_back_by_name_and_nil_until_measured() {
+        let (lua, p) = host();
+        p.borrow_mut().enable(true);
+        assert!(lua.load("return perf.gpu() == nil and perf.gpuMs('post') == nil").eval::<bool>().unwrap());
+        p.borrow_mut().set_gpu(vec![("opaque + lighting".into(), 7.25), ("post".into(), 1.5)], 9.0);
+        let (opaque, total, n, missing): (f64, f64, i64, bool) = lua
+            .load("local g = perf.gpu() return perf.gpuMs('opaque + lighting'), perf.gpuMs('total'), #g.passes, perf.gpuMs('glass') == nil")
+            .eval()
+            .unwrap();
+        assert_eq!((opaque, total, n, missing), (7.25, 9.0, 2, true));
+    }
+
     #[test]
     fn reading_a_time_while_off_refuses_and_says_how_to_turn_it_on() {
         let (lua, _p) = host();

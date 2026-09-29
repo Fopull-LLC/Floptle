@@ -752,6 +752,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("shadowQuantize".to_string(), l.shadow_quantize as f64),
                 ("shadowDither".to_string(), f64::from(l.shadow_dither)),
                 ("shadowDistance".to_string(), l.shadow_distance as f64),
+                ("shadowSteps".to_string(), l.shadow_steps as f64),
                 ("contactShadows".to_string(), f64::from(l.contact_shadows)),
                 ("contactLength".to_string(), l.contact_length as f64),
                 ("contactSteps".to_string(), l.contact_steps as f64),
@@ -1834,6 +1835,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "shadowQuantize" => l.shadow_quantize = val.max(0.0) as u32,
                     "shadowDither" => l.shadow_dither = val != 0.0,
                     "shadowDistance" => l.shadow_distance = v.max(0.0),
+                    "shadowSteps" => l.shadow_steps = (v.max(8.0) as u32).min(64),
                     "contactShadows" => l.contact_shadows = val != 0.0,
                     "contactLength" => l.contact_length = v.clamp(0.01, 20.0),
                     "contactSteps" => l.contact_steps = (val.max(2.0) as u32).min(32),
@@ -3524,6 +3526,7 @@ let node_mt = lua.create_table()?;
     let ui_focus = shared.ui_focus.clone();
     let layer_changes = shared.layer_changes.clone();
     let enabled_changes = shared.enabled_changes.clone();
+    let cast_shadow_r = shared.cast_shadow_changes.clone();
     let persistent_changes = shared.persistent_changes.clone();
     let tag_changes = shared.tag_changes.clone();
     let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
@@ -3689,6 +3692,16 @@ let node_mt = lua.create_table()?;
                     .get(&e)
                     .copied()
                     .unwrap_or_else(|| !scene.borrow().disabled.contains(&e));
+                return Ok(Value::Boolean(v));
+            }
+            // Whether the node casts sun shadows (read-your-writes, then the
+            // mirror; absent = casts).
+            "castShadow" => {
+                let v = cast_shadow_r
+                    .borrow()
+                    .get(&e)
+                    .copied()
+                    .unwrap_or_else(|| scene.borrow().cast_shadow.get(&e).copied().unwrap_or(true));
                 return Ok(Value::Boolean(v));
             }
             // Whether the node survives a scene swap (read-your-writes, as
@@ -3930,6 +3943,7 @@ let node_mt = lua.create_table()?;
     let model_changes = shared.model_changes.clone();
     let material_changes = shared.material_changes.clone();
     let visible_changes = shared.visible_changes.clone();
+    let cast_shadow_changes = shared.cast_shadow_changes.clone();
     let enabled_changes = shared.enabled_changes.clone();
     let persistent_changes = shared.persistent_changes.clone();
     let layer_changes = shared.layer_changes.clone();
@@ -4180,6 +4194,15 @@ let node_mt = lua.create_table()?;
                 if let Value::Boolean(b) = val {
                     visible_changes.borrow_mut().insert(e, b);
                 }
+                return Ok(());
+            }
+            // Whether the node casts sun shadows: its body or collider in the
+            // shadow march, or a mesh's own shadow volume.
+            "castShadow" => {
+                let Value::Boolean(b) = val else {
+                    return Err(mlua::Error::runtime("node.castShadow takes true or false"));
+                };
+                cast_shadow_changes.borrow_mut().insert(e, b);
                 return Ok(());
             }
             // Switch the node — and everything under it — off or on. Stronger than

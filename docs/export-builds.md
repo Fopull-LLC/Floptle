@@ -122,6 +122,41 @@ The export owns the `assets/` copy, and deliberately leaves things out:
 - **`replays/`** — recorded match logs.
 
 Only at the project root: a nested folder named `save/` is content and ships.
+The game writes those two folders beside its own `assets/` when it runs, so a
+build you have played from its export folder carries your save the next time
+you zip that folder. Export again, or zip a fresh export, before you upload.
+
+**Anything else you name in `.floptleignore`.** A file beside `project.ron`,
+one pattern per line, read the way `.gitignore` reads them:
+
+```
+# folders, at any depth
+tools/
+docs/
+# a leading / means at the project root only
+/AGENTS.md
+# the masters; the game plays the .mp3 copies
+*.wav
+audio/**/*.aiff
+```
+
+A `#` starts a comment only at the beginning of a line.
+
+`*` and `?` match within a name and `**` matches any number of folders. The
+export (native, web and server) reports how many files and megabytes the list
+left out.
+
+**The biggest files nothing names.** After the copy, the report lists up to
+five of the heaviest images, sounds, models, fonts and videos (1 MB or more)
+whose file name appears in none of the build's scripts, scenes or data files.
+It is a hint rather than a verdict: a name a script puts together at runtime
+(`track .. ".mp3"`) is not written anywhere either. If nothing loads them, add
+them to `.floptleignore`.
+
+**Linked packages.** A package you work on through a link is copied into the
+build's `packages/` folder, and the build's `packages.ron` lists it as an
+ordinary package. A switched-off link is not copied and is taken off the
+build's list, so no path on your disk ends up in the build.
 
 **Absolute asset paths are rewritten.** An absolute path is taken as written
 when it exists, so a build carrying one is broken on every machine except the
@@ -282,10 +317,12 @@ across all of them so they can be compared. Which moments are worth
 photographing is decided by rendering the effect at thumbnail size first and
 keeping the part where something actually lands in the picture.
 
-`shot --frames N --turn DEG` writes a sequence instead of one picture: the
-world keeps playing a fixed step between frames and the camera turns by `DEG`
-over the run, nodding up and down as it goes. A thing that flickers cannot be
-shown by one frame; a folder of them can be scanned for it.
+`shot --frames N` writes a sequence instead of one picture: the world keeps
+playing a fixed step between frames, and each frame is drawn from the camera
+the scene holds at that step. Add `--turn DEG` to look around: the camera yaws
+by `DEG` over the run and nods from 10° below to 60° above its own forward,
+three times. A thing that flickers cannot be shown by one frame; a folder of
+them can be scanned for it.
 
 Two diagnostics reach the windowed editor the same way, for a glitch that only
 happens on screen. `FLOPTLE_FRAME_DUMP=<dir>` photographs every presented frame

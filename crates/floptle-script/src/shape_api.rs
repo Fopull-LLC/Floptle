@@ -166,16 +166,16 @@ pub(crate) fn hit_table(
     eid: Option<u32>,
     origin: glam::DVec3,
 ) -> mlua::Result<Table> {
-    let t = lua.create_table()?;
-    t.set("x", origin.x + point[0] as f64)?;
-    t.set("y", origin.y + point[1] as f64)?;
-    t.set("z", origin.z + point[2] as f64)?;
-    t.set("nx", normal[0] as f64)?;
-    t.set("ny", normal[1] as f64)?;
-    t.set("nz", normal[2] as f64)?;
-    t.set("distance", distance as f64)?;
+    let t = lua.create_table_with_capacity(0, 8)?;
+    t.raw_set("x", origin.x + point[0] as f64)?;
+    t.raw_set("y", origin.y + point[1] as f64)?;
+    t.raw_set("z", origin.z + point[2] as f64)?;
+    t.raw_set("nx", normal[0] as f64)?;
+    t.raw_set("ny", normal[1] as f64)?;
+    t.raw_set("nz", normal[2] as f64)?;
+    t.raw_set("distance", distance as f64)?;
     if let Some(eid) = eid {
-        t.set("node", crate::env::new_node_handle(lua, eid)?)?;
+        t.raw_set("node", crate::env::new_node_handle(lua, eid)?)?;
     }
     // `material` comes from here — see `install_hit_meta`.
     if let Ok(mt) = lua.named_registry_value::<Table>(HIT_MT) {

@@ -305,6 +305,17 @@ node greys out, and it saves with the scene.
 > **A node can't re-enable itself** — its scripts aren't running to do it. Something
 > else has to, which is the same rule as any other object you've turned off.
 
+A switched-off script **keeps its state**. Its globals, and anything another script
+set through a handle, are still there when the node comes back on, and `start` does
+not run a second time. So a spawn-then-configure pattern works even if the node is
+switched off in between:
+
+```lua
+-- a frame after the rig was spawned, once its script has been built:
+rig:getScript("hands").follow(target)
+rig.enabled = false                         -- hidden for now; `follow` is kept
+```
+
 ### `node:getcomponent(name)` — tweak component fields live
 
 Every tunable the Inspector shows on a **Rigidbody** or **Point Light** is also

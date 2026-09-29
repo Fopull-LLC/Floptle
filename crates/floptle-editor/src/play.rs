@@ -956,6 +956,7 @@ impl Editor {
             self.play_t = 0.0;
             self.paused = false;
             self.terrain_mirror_warned = false; // fresh Play, fresh one-shot warning
+            self.mirror_churn_warned = false;
             self.space_time = 0.0; // rails restart from the authored epoch
             self.space_warp = 1.0;
             self.physics_paused = false; // a fresh run starts unpaused

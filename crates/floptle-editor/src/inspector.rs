@@ -4416,6 +4416,14 @@ impl EditorTabViewer<'_> {
                             "distance")
                     .on_hover_text("max distance a shadow ray marches (a perf fence — farther geometry stops casting)")
                     .changed();
+                let mut steps = l.shadow_steps as i32;
+                if crate::responsive::slider(ui, egui::Slider::new(&mut steps, 8..=64), "steps")
+                    .on_hover_text("most steps a shadow ray takes — fewer is cheaper; too few and shadows behind long casters thin out")
+                    .changed()
+                {
+                    l.shadow_steps = steps as u32;
+                    cmd.inspector_changed = true;
+                }
                 // Contact shadows: the short-range half, from the depth
                 // buffer rather than from the field.
                 ui.separator();

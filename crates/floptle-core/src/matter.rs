@@ -1063,6 +1063,11 @@ pub struct Light {
     /// Max distance (world units) a shadow ray marches before giving up — a perf
     /// fence; far geometry simply stops casting past it.
     pub shadow_distance: f32,
+    /// Most steps a sun-shadow ray takes (8..=64). The march is most of what
+    /// shadows cost, so this is the knob a low quality setting turns: fewer
+    /// steps end a ray sooner, at the price of shadows that thin out behind
+    /// long or intricate casters.
+    pub shadow_steps: u32,
     /// Contact shadows: a short screen-space trace that catches what the marched
     /// field cannot. A dynamic mesh casts through a collider proxy — a box or a
     /// capsule — so a character's shadow is a capsule's, and the place that reads
@@ -1225,6 +1230,7 @@ impl Default for Light {
             shadow_quantize: 0,
             shadow_dither: false,
             shadow_distance: 150.0,
+            shadow_steps: 64,
             contact_shadows: false,
             contact_length: 0.35,
             contact_steps: 12,

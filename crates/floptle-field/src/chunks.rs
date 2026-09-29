@@ -547,7 +547,7 @@ impl ChunkField {
                 return (self.smooth(center, radius, strength, profile), SculptYield::default());
             }
             Brush::Flatten => {
-                return (self.flatten(center, radius, strength, profile), SculptYield::default());
+                return (self.flatten(center, radius, strength, profile, Vec3::Y), SculptYield::default());
             }
             _ => {}
         }
@@ -711,7 +711,31 @@ impl ChunkField {
         touched
     }
 
-    fn flatten(&mut self, center: Vec3, radius: f32, strength: f32, profile: BrushProfile) -> Vec<[i32; 3]> {
+    /// [`Brush::Flatten`] toward the plane through `center` facing `normal`: the
+    /// footprint is a disc in that plane (distance measured perpendicular to the
+    /// normal) and every voxel in it is pulled toward the plane's distance. The
+    /// plain brush uses `+Y`; a planet passes its radial up at `center`, or the
+    /// "flat" pad is tilted by the latitude.
+    pub fn flatten_to_plane(
+        &mut self,
+        center: Vec3,
+        normal: Vec3,
+        radius: f32,
+        strength: f32,
+        profile: BrushProfile,
+    ) -> Vec<[i32; 3]> {
+        self.flatten(center, radius, strength, profile, normal)
+    }
+
+    fn flatten(
+        &mut self,
+        center: Vec3,
+        radius: f32,
+        strength: f32,
+        profile: BrushProfile,
+        normal: Vec3,
+    ) -> Vec<[i32; 3]> {
+        let n = normal.try_normalize().unwrap_or(Vec3::Y);
         let s = strength.clamp(0.0, 1.0);
         let (lo, hi) = self.voxel_range(center, radius);
         let mut touched = Vec::new();
@@ -719,16 +743,18 @@ impl ChunkField {
             for iy in lo[1]..=hi[1] {
                 for ix in lo[0]..=hi[0] {
                     let p = Vec3::new(ix as f32, iy as f32, iz as f32) * self.voxel;
-                    let dxz = Vec3::new(p.x - center.x, 0.0, p.z - center.z).length();
-                    if dxz > radius {
+                    let rel = p - center;
+                    let along = rel.dot(n);
+                    let across = (rel - n * along).length();
+                    if across > radius {
                         continue;
                     }
-                    let w = s * profile.weight(dxz, radius);
+                    let w = s * profile.weight(across, radius);
                     if w <= 0.0 {
                         continue;
                     }
-                    // Plane SDF at the hit height — the same target the dense brush used.
-                    let target = p.y - center.y;
+                    // The plane's SDF through the hit point.
+                    let target = along;
                     let cur = self.voxel_at([ix, iy, iz]);
                     self.set_voxel([ix, iy, iz], cur + (target - cur) * w, None);
                     touched.push(chunk_of([ix, iy, iz]));
@@ -1806,6 +1832,34 @@ mod tests {
         let torn = s.finish();
         let back = ChunkField::from_bytes(&torn).expect("torn snapshot must stay parseable");
         assert!(back.data_chunks() > 0);
+    }
+
+    /// **A flatten on a planet levels to the ground's own up.** At 45° latitude
+    /// a `+Y` flatten tilts the pad by 45° and cuts a slice rather than a disc;
+    /// flattening to the radial normal leaves the tangent plane at the centre on
+    /// the surface across the footprint.
+    #[test]
+    fn a_flatten_to_the_radial_normal_levels_a_pad_on_a_sphere() {
+        let mut f = ChunkField::new(1.0);
+        f.sculpt(Brush::Raise, Vec3::ZERO, 40.0, 1.0, BrushProfile::default());
+        let up = Vec3::new(0.0, 1.0, 1.0).normalize();
+        let r = (300..500).map(|k| k as f32 * 0.1).find(|r| f.d(up * *r) > 0.0).expect("a surface along up");
+        let c = up * r;
+        for _ in 0..4 {
+            f.flatten_to_plane(c, up, 8.0, 1.0, BrushProfile::default());
+        }
+        let u = up.cross(Vec3::X).normalize();
+        let v = up.cross(u);
+        let mut worst = 0.0f32;
+        for i in -4..=4 {
+            for j in -4..=4 {
+                let p = c + u * (i as f32) + v * (j as f32);
+                if (p - c).length() <= 4.0 {
+                    worst = worst.max(f.d(p).abs());
+                }
+            }
+        }
+        assert!(worst < 1.0, "the pad is not level with the ground's up: worst |d| on the tangent plane {worst}");
     }
 
     /// Per-write-path |∇d| report. This is the diagnostic that found the real culprit:

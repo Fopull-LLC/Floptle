@@ -14,14 +14,14 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 156
-- [node — transform & body fields](#node--transform--body-fields) — 38
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 157
+- [node — transform & body fields](#node--transform--body-fields) — 40
 - [node — methods & handles](#node--methods--handles) — 31
 - [vectors, directions & easing](#vectors-directions--easing) — 49
 - [scene lookups & raycast](#scene-lookups--raycast) — 16
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
 - [input — keyboard & mouse](#input--keyboard--mouse) — 42
-- [drawing — draw.*](#drawing--draw) — 14
+- [drawing — draw.*](#drawing--draw) — 16
 - [the web — http.*, json.*](#the-web--http-json) — 11
 - [the player's account — account.*](#the-players-account--account) — 13
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 71
@@ -35,12 +35,12 @@ each group, and meant to be searched.
 - [vessels — assembly.*](#vessels--assembly) — 14
 - [the camera & the screen](#the-camera--the-screen) — 7
 - [physics controls — pause & step](#physics-controls--pause--step) — 4
-- [frame cost — perf.*](#frame-cost--perf) — 13
+- [frame cost — perf.*](#frame-cost--perf) — 15
 - [accessibility — access.*](#accessibility--access) — 11
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 19
-- [components — getcomponent](#components--getcomponent) — 102
+- [components — getcomponent](#components--getcomponent) — 103
 - [animation — node:animator](#animation--nodeanimator) — 18
 - [particles — effects from script](#particles--effects-from-script) — 10
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 30
@@ -344,6 +344,10 @@ end
 ### `perf`
 
 Where YOUR frame time goes — per subsystem and per script, readable from Lua so a game can assert its own budget in a smoke test rather than filing an engine ticket. Off by default and free while off: call perf.enable(true) first. Every getter RAISES while collection is off rather than answering 0, because a budget assertion that passes on no data is worse than no assertion.
+
+### `raycastMany`
+
+raycastMany(origins, dirs, maxes [, opts]) — many rays in one call: origins and dirs are arrays of vec3s (or flat {x1,y1,z1, ...} arrays), one of each per ray; maxes is one distance or a list of one per ray; opts are raycast's ({ ignore=, layers= }). Returns one entry per ray, in order: raycast's hit table, or false for a miss, so #hits is the ray count. For probes known up front: a decal's corners, a ragdoll's contacts. Refuses: origins and dirs of different lengths, a flat list that is not x,y,z triples, an unknown option or layer.
 
 ### `script`
 
@@ -731,6 +735,14 @@ voice.transmitting() — is the microphone open right now?
 
 True while the physics solver is skipping this rigidbody. Set it true to put the body to sleep now: it stops where it is and costs nothing until something wakes it (a node.vel write, a moving platform, or its ground going away — a body slept in mid-air wakes and falls at the next check). Set false to wake it. Better than switching it kinematic, which changes how it behaves rather than whether it is simulated. For far-away NPCs, pair it with script.sleep.
 
+### `node.castShadow`
+
+Whether the node casts sun shadows (read/write, default true) — the Inspector's casts-shadows checkbox. A body or collider's stand-in in the shadow march, or a mesh's baked shadow volume. Turn it off for bodies that are dormant or far away: the march takes the 32 casters nearest the camera, so a crowd of idle ones spends nothing once they are out of it.
+
+### `node.enabled`
+
+Whether the node is switched on (read/write). node.enabled = false takes it and everything under it out of the game: not drawn, not simulated, and its scripts stop running. A switched-off script keeps its state, so a call made into it through a handle is still there when it is switched back on. find() skips switched-off nodes unless asked with { scope = "all" }.
+
 ### `node.forward`
 
 The node's facing as a vec3, from its rotation (-Z forward, matching the camera). Works on anything with a transform, body or not.
@@ -950,7 +962,7 @@ The parent node handle, or nil (same as node.parent).
 
 ### `node:getScript`
 
-node:getScript("health") — a script handle for that script on this node, or nil. Read/write its state, call its methods, reach .node / .params.
+node:getScript("health") — a script handle for that script on this node, or nil. Read/write its state, call its methods, reach .node / .params. A script's state exists from the frame after its node is spawned or first switched on; a handle to a script that has never run reads nil for everything and warns once. Once built, it is kept while the node or the script is switched off, so a call made then is not lost.
 
 ### `node:hasTag`
 
@@ -1668,6 +1680,10 @@ draw.circleOutline(x, y, radius, r,g,b [, a] [, px]) — a hollow circle, `px` t
 
 draw.cone(bx,by,bz, dx,dy,dz, radius, height, r,g,b [,a]) — a SOLID cone: base disc at b, apex `height` along the unit direction d. Gizmo arrowheads, thruster plumes, direction markers.
 
+### `draw.conic`
+
+draw.conic(center, e1, e2, p, ecc, segs, r,g,b [,a [, maxR]]) — a Kepler orbit around the focus `center` (a vec3), in the plane of e1 (toward periapsis) and e2: r(θ) = p / (1 + ecc·cos θ), p the semi-latus rectum. ecc < 1 is a closed ellipse of `segs` segments; ecc ≥ 1 is an open arc that stops where r reaches maxR (default 10·p). Refuses: p ≤ 0.
+
 ### `draw.disc`
 
 draw.disc(cx,cy,cz, nx,ny,nz, r0, r1, r,g,b [,a]) — a filled annulus around normal n (r0 = inner, r1 = outer; r0 = 0 gives a full disc). Rotation gizmo bands, ground markers.
@@ -1675,6 +1691,10 @@ draw.disc(cx,cy,cz, nx,ny,nz, r0, r1, r,g,b [,a]) — a filled annulus around no
 ### `draw.line`
 
 draw.line(x1,y1,z1, x2,y2,z2, r,g,b [, a]) — queue one world-space 3D line for THIS frame (immediate mode: re-draw every lateUpdate — the camera pass — while wanted). Drawn OVER the scene, never occluded — the KSP-style map draws its orbit conics with these.
+
+### `draw.polyline`
+
+draw.polyline(points, r,g,b [,a [, closed]]) — a connected line through every point, in ONE call: points is a flat {x1,y1,z1, x2,y2,z2, ...} array or an array of vec3s. closed = true joins the last point back to the first. The same segments as one draw.line per pair, without crossing into the engine once per segment — the way to draw an orbit, a trajectory or a path with hundreds of points.
 
 ### `draw.quad`
 
@@ -2419,7 +2439,7 @@ terrain.saveDir(path) / terrain.saveDir() — set (or read) the game's SAVE-SLOT
 
 ### `terrain.sculpt`
 
-terrain.sculpt(x,y,z, radius [, strength [, mode]]) — sculpt the nearest terrain at a world point, landing the SAME tick (collision updates with the surface). mode: "raise" (default), "lower"/"dig", "smooth", "flatten"; strength 0..1. No-op when no terrain surface is near the point. Multiplayer: run on the server + mirror by RPC (deterministic ops).
+terrain.sculpt(x,y,z, radius [, strength [, mode [, opts]]]) — sculpt the nearest terrain at a world point, landing the SAME tick (collision updates with the surface). mode: "raise" (default), "lower"/"dig", "smooth", "flatten"; strength 0..1. "flatten" levels to the terrain's up, or on a planet to the radial up at the point, over a disc in that plane; opts = { normal = vec3 } names another plane (world space). At most 64 edits land a frame; more wait for the next frames in order. No-op when no terrain surface is near the point. Refuses: an unknown opts key, a zero normal. Multiplayer: run on the server + mirror by RPC (deterministic ops).
 
 ### `terrain.slotAt`
 
@@ -2867,7 +2887,7 @@ perf.buckets() → the bucket names, in frame order: scripts, mirror, physics, t
 
 ### `perf.counts`
 
-perf.counts() → { nodes=, culled=, instances=, draws=, chunks=, props=, particles=, effects=, effectsDropped=, lights=, lightsDropped=, voices=, mirrorRebuilds=, mirrorRefreshed=, animators=, animatorsCulled= }. Readable even while collection is off, because counts are free to keep — and three of the four 'the engine is slow' reports this API exists for were answerable from one count alone (a scatter field asking for 117,000 props was one of them). The *Dropped pair is what a ceiling refused this frame: nonzero means the engine is cutting your look, which you should hear from a number rather than from a screenshot. mirrorRebuilds is how many times last frame the scripts' copy of the scene was rebuilt from scratch (each costs time in proportion to the whole scene, in the mirror bucket); mirrorRefreshed is how many single nodes were re-read because a component of theirs changed, which costs only those nodes. animators and animatorsCulled are last frame's animated models and how many culling skipped (see anim:setCulling).
+perf.counts() → { nodes=, culled=, instances=, draws=, chunks=, props=, particles=, effects=, effectsDropped=, lights=, lightsDropped=, voices=, mirrorRebuilds=, mirrorRefreshed=, animators=, animatorsCulled=, rays=, rayMs= }. Readable even while collection is off, because counts are free to keep — and three of the four 'the engine is slow' reports this API exists for were answerable from one count alone (a scatter field asking for 117,000 props was one of them). The *Dropped pair is what a ceiling refused this frame: nonzero means the engine is cutting your look, which you should hear from a number rather than from a screenshot. mirrorRebuilds is how many times last frame the scripts' copy of the scene was rebuilt from scratch (each costs time in proportion to the whole scene, in the mirror bucket); mirrorRefreshed is how many single nodes were re-read because a component of theirs changed, which costs only those nodes. animators and animatorsCulled are last frame's animated models and how many culling skipped (see anim:setCulling). rays and rayMs are the raycasts scripts made last frame (raycast and raycastMany) and the milliseconds they took, a part of the scripts bucket (counted with collection on).
 
 ### `perf.enable`
 
@@ -2876,6 +2896,14 @@ perf.enable(true) — start collecting; perf.enable(false) stops and CLEARS the 
 ### `perf.enabled`
 
 perf.enabled() — is anything being measured? Safe to call while off, so a script can ask before reading.
+
+### `perf.gpu`
+
+perf.gpu() → { total = ms, passes = { {name=, ms=}, … } } — the GPU's own time for each render pass of the last frame it finished timing, in the order they ran ("depth prepass", "opaque + lighting", "post", …). nil when nothing has been timed yet: the first frames after perf.enable(true), or a GPU whose driver cannot time passes. For a game's own quality governor on the player's machine, which the CPU-side buckets cannot see. Raises while collection is off, like perf.ms.
+
+### `perf.gpuMs`
+
+perf.gpuMs(pass) → one pass's GPU milliseconds last frame ("opaque + lighting" is where sun shadows are paid for), or "total"; nil when the pass did not run or nothing was timed. See perf.gpu.
 
 ### `perf.mirrorCause`
 
@@ -3269,6 +3297,10 @@ Bayer-dither the penumbra (1/0) — the classic PS1 dithered shadow edge.
 ### `env.shadowSoftness`
 
 0 = razor-hard edge … 1 = dreamy-soft penumbra.
+
+### `env.shadowSteps`
+
+Most steps a sun-shadow ray takes, 8..64 (default 64). The march is most of what sun shadows cost on the GPU, so this and shadowDistance are the levers a low quality setting turns while keeping shadows on: fewer steps end each ray sooner, and a shadow behind a long or intricate caster thins out.
 
 ### `env.shadowStrength`
 

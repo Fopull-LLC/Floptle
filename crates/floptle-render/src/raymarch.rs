@@ -91,7 +91,8 @@ pub struct RaymarchGlobals {
     /// rgb = the color full shadow darkens toward (black = plain darkness),
     /// w = quantize bands (0 = smooth penumbra, 2..=8 = posterized).
     pub shadow_tint: [f32; 4],
-    /// x = Bayer-dither the penumbra (0/1); yzw reserved.
+    /// x = Bayer-dither the penumbra (0/1), y = most steps a sun-shadow ray
+    /// takes (0 reads as 64); zw reserved.
     pub shadow_extra: [f32; 4],
     /// x = active proxy-occluder count (see `prox_a`); rest pad to a vec4.
     pub prox_count: [f32; 4],

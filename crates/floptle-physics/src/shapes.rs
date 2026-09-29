@@ -80,6 +80,47 @@ pub trait CollisionShape {
     fn chunk_terrain_mut(&mut self) -> Option<&mut ChunkTerrain> {
         None
     }
+    /// An exact answer to "where does the ray from `o` along unit `rd` first
+    /// meet this shape, within `tmax`", when the shape has one cheaper than a
+    /// sphere march. [`RayAnswer::March`] (the default) hands the ray to the
+    /// march in `raycast_colliders`.
+    fn ray_cast(&self, o: Vec3, rd: Vec3, tmax: f32) -> RayAnswer {
+        let _ = (o, rd, tmax);
+        RayAnswer::March
+    }
+}
+
+/// What [`CollisionShape::ray_cast`] knows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RayAnswer {
+    /// Nothing exact: march it.
+    March,
+    Miss,
+    /// Distance along the ray, and the face's normal facing back along it.
+    Hit(f32, Vec3),
+}
+
+/// Where the ray `o + rd·t` is inside the box `(lo, hi)`, clipped to
+/// `[0, tmax]`: the slab test. `None` when it never is.
+pub fn ray_box_span(o: Vec3, rd: Vec3, lo: Vec3, hi: Vec3, tmax: f32) -> Option<(f32, f32)> {
+    let (mut t0, mut t1) = (0.0f32, tmax);
+    for k in 0..3 {
+        if rd[k].abs() < 1e-12 {
+            if o[k] < lo[k] || o[k] > hi[k] {
+                return None;
+            }
+            continue;
+        }
+        let inv = 1.0 / rd[k];
+        let (a, b) = ((lo[k] - o[k]) * inv, (hi[k] - o[k]) * inv);
+        let (a, b) = if a <= b { (a, b) } else { (b, a) };
+        t0 = t0.max(a);
+        t1 = t1.min(b);
+        if t0 > t1 {
+            return None;
+        }
+    }
+    Some((t0, t1))
 }
 
 /// A signed-distance query result: distance to surface + the outward normal.
@@ -1108,6 +1149,72 @@ impl TriMeshCollider {
 }
 
 impl CollisionShape for TriMeshCollider {
+    /// The first triangle the ray crosses, found by walking the cells of the
+    /// mesh's own grid along it (3D DDA) rather than marching a distance
+    /// field: a ray costs the triangles in the cells it passes through, not a
+    /// closest-point search per step.
+    fn ray_cast(&self, o: Vec3, rd: Vec3, tmax: f32) -> RayAnswer {
+        let Some((t0, t1)) = ray_box_span(o, rd, self.aabb.0, self.aabb.1, tmax) else {
+            return RayAnswer::Miss;
+        };
+        let cell = self.cell;
+        let start = o + rd * t0;
+        let (mut c, lo, hi) = (cell_coord(start, cell), self.cells.0, self.cells.1);
+        let clamp = |v: i32, a: i32, b: i32| v.max(a).min(b);
+        c = (clamp(c.0, lo.0, hi.0), clamp(c.1, lo.1, hi.1), clamp(c.2, lo.2, hi.2));
+        let step = |d: f32| if d > 0.0 { 1 } else if d < 0.0 { -1 } else { 0 };
+        let st = (step(rd.x), step(rd.y), step(rd.z));
+        // t at which the ray crosses the next cell wall on each axis.
+        let next = |ci: i32, s: i32, oi: f32, di: f32| -> (f32, f32) {
+            if s == 0 {
+                return (f32::INFINITY, f32::INFINITY);
+            }
+            let wall = if s > 0 { (ci + 1) as f32 * cell } else { ci as f32 * cell };
+            ((wall - oi) / di, cell / di.abs())
+        };
+        let (mut tx, dx) = next(c.0, st.0, o.x, rd.x);
+        let (mut ty, dy) = next(c.1, st.1, o.y, rd.y);
+        let (mut tz, dz) = next(c.2, st.2, o.z, rd.z);
+        let mut best: Option<(f32, u32)> = None;
+        loop {
+            if let Some(list) = self.grid.get(&c) {
+                for &ti in list {
+                    let [a, b, cc] = self.tris[ti as usize];
+                    let Some(t) = ray_triangle(o, rd, a, b, cc) else { continue };
+                    if t < 0.0 || t > tmax {
+                        continue;
+                    }
+                    if best.is_none_or(|(bt, bi)| t < bt || (t == bt && ti < bi)) {
+                        best = Some((t, ti));
+                    }
+                }
+            }
+            let exit = tx.min(ty).min(tz);
+            if best.is_some_and(|(bt, _)| bt <= exit) || exit > t1 {
+                break;
+            }
+            if tx <= ty && tx <= tz {
+                c.0 += st.0;
+                tx += dx;
+            } else if ty <= tz {
+                c.1 += st.1;
+                ty += dy;
+            } else {
+                c.2 += st.2;
+                tz += dz;
+            }
+            if c.0 < lo.0 || c.0 > hi.0 || c.1 < lo.1 || c.1 > hi.1 || c.2 < lo.2 || c.2 > hi.2 {
+                break;
+            }
+        }
+        match best {
+            Some((t, ti)) => {
+                let n = self.face_normal(ti);
+                RayAnswer::Hit(t, if n.dot(rd) > 0.0 { -n } else { n })
+            }
+            None => RayAnswer::Miss,
+        }
+    }
     fn bounds(&self) -> Option<(Vec3, f32)> {
         Some(self.bound)
     }

@@ -2790,6 +2790,9 @@ struct Editor {
     /// collider copy (no matching terrain collider) — a silent miss here reads
     /// as "standing on an invisible old surface" and is unfindable later.
     terrain_mirror_warned: bool,
+    /// The "rebuilding the script mirror every frame" warning has been said
+    /// this Play session.
+    pub(crate) mirror_churn_warned: bool,
     /// Space time (solar demo S2): seconds of on-rails celestial time, advanced
     /// each gameplay tick by `space_warp × tick_dt`. Drives every
     /// `CelestialBody` node's Kepler position.

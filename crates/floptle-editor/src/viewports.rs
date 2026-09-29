@@ -717,6 +717,11 @@ impl Editor {
         // hanging in the world as authoring holograms. Without this the docked
         // tab drew no diegetic UI at all while still happily hit-testing it.
         self.draw_world_canvases(&scene_target, &depth, &cam, aspect);
+        if self.gpu_timing_headless
+            && let (Some(t), Some(g)) = (self.gpu_timer.as_mut(), self.gpu.as_ref())
+        {
+            t.mark(g, "post");
+        }
         // Post composites into the retro color (retro) or the game_vp color (non-retro).
         if let (Some(gpu), Some(post)) = (self.gpu.as_ref(), self.game_post.as_ref()) {
             let post_shaders = self.post_shaders.as_ref();

@@ -611,7 +611,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
         // not new instrumentation. Counts that come from a GPU gather (draws,
         // instances, lights…) stay at their true value here: `run` has no
         // renderer at all, so zero is what they honestly are, not a bug.
-        ed.script_host.profile().borrow_mut().end_frame();
+        ed.end_profile_frame();
         // A script that asked to quit has said the run is over, and stepping a
         // stopped session further would report on a world nobody is in.
         if !ed.playing {
@@ -1160,6 +1160,50 @@ mod alloc_window_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **0311: a rebuild every frame is said, once.** A game that retags a
+    /// node each frame rebuilds the scripts' copy of the whole scene each
+    /// frame; after half a second the Console names the cause, and says it
+    /// once. A game that only moves things is never told anything.
+    #[test]
+    fn rebuilding_the_mirror_every_frame_is_said_once_with_its_cause() {
+        let d = std::env::temp_dir().join(format!("flrun-churn-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("scenes")).unwrap();
+        std::fs::create_dir_all(d.join("scripts")).unwrap();
+        std::fs::write(d.join("project.ron"), "(title: Some(\"t\"), entry_scene: Some(\"scenes/first.ron\"))").unwrap();
+        std::fs::write(
+            d.join("scripts/churn.lua"),
+            "local n = 0\nfunction update(node, dt)\n  n = n + 1\n  node.tags = { 'wave' .. n }\nend\n",
+        )
+        .unwrap();
+        std::fs::write(d.join("scripts/mover.lua"), "function update(node, dt)\n  node.x = node.x + dt\nend\n").unwrap();
+        let said = |kind: &str| {
+            std::fs::write(
+                d.join("scenes/first.ron"),
+                format!("(name: \"s\", nodes: [(name: \"A\", scripts: [(kind: \"{kind}\")]), (name: \"B\")])"),
+            )
+            .unwrap();
+            let mut ed = crate::Editor::default();
+            ed.open_project(d.clone());
+            ed.open_scene_file(&d.join("scenes/first.ron").to_string_lossy());
+            ed.toggle_play();
+            assert!(ed.playing);
+            for _ in 0..90 {
+                ed.pump_world_streaming();
+                ed.play_step(DT, true);
+                ed.drain_script_logs();
+                ed.end_profile_frame();
+            }
+            ed.console.entries.iter().filter(|e| e.msg.contains("rebuilt from scratch")).map(|e| e.msg.clone()).collect::<Vec<_>>()
+        };
+        let churn = said("churn");
+        assert_eq!(churn.len(), 1, "said once per Play: {churn:?}");
+        assert!(churn[0].contains("the tags changed"), "and names the cause: {churn:?}");
+        assert!(!churn[0].contains("  "), "no hole where a line continuation was lost: {churn:?}");
+        assert!(said("mover").is_empty(), "moving a node is not a rebuild");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     /// **No loader echoes the contents of a file it was pointed at.** A scene
     /// or a script can name any path the engine then opens; if a loader's

@@ -599,3 +599,178 @@ fn a_preload_calls_back_once_every_model_is_in() {
     host.run(&mut world, &dir, 1.0 / 60.0, 3.0 / 60.0);
     assert_eq!(calls(&host), 1, "a preload calls back once");
 }
+
+/// **A polyline is the segments the per-segment calls would have made.** One
+/// call per curve instead of one per segment, and the same vertices out.
+#[test]
+fn a_polyline_draws_the_same_segments_as_one_line_call_each() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_polyline_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "curves",
+        "function update(node, dt)\n  \
+           local flat, pts = {}, {}\n  \
+           for i = 0, 127 do\n    \
+             local t = i / 127 * 6.283\n    \
+             local x, y, z = math.cos(t) * 5, i * 0.01, math.sin(t) * 5\n    \
+             flat[#flat+1] = x; flat[#flat+1] = y; flat[#flat+1] = z\n    \
+             pts[#pts+1] = vec3(x, y, z)\n  \
+           end\n  \
+           draw.polyline(flat, 1, 0.5, 0.25, 0.8)\n  \
+           for i = 1, 127 do\n    \
+             local a, b = (i - 1) * 3, i * 3\n    \
+             draw.line(flat[a+1], flat[a+2], flat[a+3], flat[b+1], flat[b+2], flat[b+3], 1, 0.5, 0.25, 0.8)\n  \
+           end\n  \
+           draw.polyline(pts, 1, 0.5, 0.25, 0.8)\n\
+         end\n",
+    );
+    let (mut world, _) = world_with_script("curves");
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 0.1, 0.1);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let lines = host.take_draw_lines();
+    assert_eq!(lines.len(), 127 * 3, "one polyline of 128 points is 127 segments");
+    let (poly, rest) = lines.split_at(127);
+    let (singles, vecs) = rest.split_at(127);
+    for i in 0..127 {
+        assert_eq!((poly[i].a, poly[i].b, poly[i].color), (singles[i].a, singles[i].b, singles[i].color), "segment {i}");
+        for k in 0..3 {
+            assert!((vecs[i].a[k] - singles[i].a[k]).abs() < 1e-5 && (vecs[i].b[k] - singles[i].b[k]).abs() < 1e-5);
+        }
+    }
+}
+
+/// **A conic is the orbit it names.** Every vertex of an ellipse sits at
+/// `r = p / (1 + e cos θ)` from the focus, the loop closes, and an open orbit
+/// stops where `r` reaches `maxR`.
+#[test]
+fn a_conic_is_a_closed_ellipse_or_an_arc_cut_at_its_reach() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_conic_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "orbit",
+        "function update(node, dt)\n  \
+           draw.conic(vec3(10, 0, 0), vec3(1, 0, 0), vec3(0, 0, 1), 4, 0.5, 64, 1, 1, 1)\n  \
+           draw.conic(vec3(0, 0, 0), vec3(1, 0, 0), vec3(0, 0, 1), 2, 1.5, 32, 1, 1, 1, 1, 20)\n\
+         end\n",
+    );
+    let (mut world, _) = world_with_script("orbit");
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 0.1, 0.1);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let lines = host.take_draw_lines();
+    assert_eq!(lines.len(), 64 + 32, "a closed ellipse of 64 segments and an open arc of 32");
+    let focus = glam::DVec3::new(10.0, 0.0, 0.0);
+    for l in &lines[..64] {
+        let d = glam::DVec3::from(l.a) - focus;
+        let th = d.z.atan2(d.x);
+        let want = 4.0 / (1.0 + 0.5 * th.cos());
+        assert!((d.length() - want).abs() < 1e-6, "vertex off the ellipse: {} vs {want}", d.length());
+    }
+    assert_eq!(lines[63].b, lines[0].a, "the ellipse closes on its first vertex");
+    let ends = [glam::DVec3::from(lines[64].a).length(), glam::DVec3::from(lines[95].b).length()];
+    for r in ends {
+        assert!((r - 20.0).abs() < 1e-6, "the arc ends where r reaches maxR, got {r}");
+    }
+}
+
+/// **0311: a spawn or a despawn is not a rebuild, and says the same thing one
+/// would.** After each round of random spawns and despawns the scripts' copy
+/// of the scene is exactly what a fresh full rebuild makes of the same world
+/// (the scene order, first-name-wins, the per-kind and per-tag lists, children)
+/// and the incremental host never rebuilt.
+#[test]
+fn spawning_and_destroying_nodes_keeps_the_mirror_exact_without_a_rebuild() {
+    fn node(world: &mut World, i: u32, parent: Option<Entity>) -> Entity {
+        let e = world.spawn();
+        world.insert(e, Transform::from_translation(glam::DVec3::new(i as f64, 0.0, 0.0)));
+        if i.is_multiple_of(3) {
+            world.insert(e, floptle_core::Name("Crate".into()));
+        } else {
+            world.insert(e, floptle_core::Name(format!("n{i}")));
+        }
+        if i.is_multiple_of(4) {
+            world.insert(e, floptle_core::Tags(vec!["enemy".into(), format!("t{}", i % 7)]));
+        }
+        if i.is_multiple_of(5) {
+            world.insert(e, Scripts(vec![floptle_core::ScriptInst::new("ai")]));
+        }
+        if let Some(p) = parent {
+            world.insert(e, floptle_core::Parent(p));
+        }
+        e
+    }
+    fn snapshot(h: &ScriptHost) -> String {
+        let s = h.scene.borrow();
+        let sorted = |m: &HashMap<u32, String>| {
+            let mut v: Vec<_> = m.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            v.sort();
+            v
+        };
+        let mut by_name: Vec<_> = s.by_name.iter().collect();
+        by_name.sort();
+        let mut by_kind: Vec<_> = s.by_kind.iter().collect();
+        by_kind.sort();
+        let mut by_tag: Vec<_> = s.by_tag.iter().collect();
+        by_tag.sort();
+        let mut children: Vec<_> = s.children.iter().collect();
+        children.sort();
+        let mut parent: Vec<_> = s.parent.iter().collect();
+        parent.sort();
+        let mut ents: Vec<_> = s.ents.iter().collect();
+        ents.sort_by_key(|(k, _)| **k);
+        let mut tr: Vec<_> = s.transforms.keys().collect();
+        tr.sort();
+        format!(
+            "order {:?}\nnames {:?}\nby_name {by_name:?}\nby_kind {by_kind:?}\nby_tag {by_tag:?}\n\
+             children {children:?}\nparent {parent:?}\nents {ents:?}\ntransforms {tr:?}",
+            s.order,
+            sorted(&s.names)
+        )
+    }
+    let mut world = World::default();
+    let root = node(&mut world, 0, None);
+    let mut live = vec![root];
+    for i in 1..300 {
+        let p = (i % 6 == 0).then_some(root);
+        live.push(node(&mut world, i, p));
+    }
+    let host = ScriptHost::new();
+    host.sync_scene_for_test(&world);
+    let mut seed = 0x2545_f491u32;
+    let mut rnd = |n: u32| {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed % n
+    };
+    let mut next = 300;
+    for round in 0..60 {
+        for _ in 0..rnd(4) {
+            if live.len() > 2 {
+                let k = 1 + rnd(live.len() as u32 - 1) as usize;
+                world.despawn(live.swap_remove(k));
+            }
+        }
+        for _ in 0..rnd(4) {
+            let p = (rnd(3) == 0).then(|| live[rnd(live.len() as u32) as usize]);
+            live.push(node(&mut world, next, p));
+            next += 1;
+        }
+        let before = crate::host::FULL_SYNCS.with(|c| c.get());
+        host.sync_scene_for_test(&world);
+        assert_eq!(
+            crate::host::FULL_SYNCS.with(|c| c.get()),
+            before,
+            "round {round}: a spawn/despawn rebuilt the mirror ({:?})",
+            host.profile().borrow().mirror_cause()
+        );
+        let fresh = ScriptHost::new();
+        fresh.sync_scene_for_test(&world);
+        assert_eq!(snapshot(&host), snapshot(&fresh), "round {round}: the incremental mirror drifted from a rebuild");
+    }
+}

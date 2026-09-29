@@ -16,7 +16,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use floptle_core::math::Vec3;
-use mlua::{Lua, Table};
+use mlua::{Lua, Table, Value};
 
 /// One queued terrain write, in world coordinates (scripts speak world; the editor
 /// converts into each terrain's local frame when applying).
@@ -31,6 +31,9 @@ pub struct TerrainOp {
     /// removed — the edit has not happened yet. It returns this instead, and the
     /// measured report arrives through `terrain.yields()`.
     pub id: u64,
+    /// `flatten`'s plane normal in world space, when the script chose one.
+    /// `None` lets the engine decide: the radial up on a planet, `+Y` otherwise.
+    pub normal: Option<[f64; 3]>,
 }
 
 impl TerrainOp {
@@ -76,10 +79,15 @@ pub enum TerrainOpMode {
     PaintTexture(u8),
 }
 
-/// Per-op safety caps: a runaway loop must not freeze the frame. Radius is clamped;
-/// ops past the per-frame cap are dropped with a warning (once per play).
+/// Per-op safety caps: a runaway loop must not freeze the frame. Radius is
+/// clamped; at most [`OPS_PER_FRAME`] ops land in a frame and the rest wait, in
+/// order, for the frames after; past [`MAX_PENDING_OPS`] waiting, an op is
+/// dropped with a warning (once).
 const MAX_RADIUS: f32 = 64.0;
-const MAX_OPS_PER_FRAME: usize = 64;
+/// What `terrain.sculpt`'s options table reads.
+pub(crate) const SCULPT_KEYS: &[&str] = &["normal"];
+pub(crate) const OPS_PER_FRAME: usize = 64;
+const MAX_PENDING_OPS: usize = 4096;
 
 /// The streaming-related shared slots (`terrain.saveDir` / `warm` / `flush`) —
 /// bundled so the install signature stays sane as the API grows.
@@ -243,36 +251,53 @@ pub(crate) fn install_terrain_api(
         let ops = ops.clone();
         let logs = logs.clone();
         let ids = next_op_id.clone();
+        let warned = Rc::new(std::cell::Cell::new(false));
         move |mut op: TerrainOp| -> u64 {
-            op.id = ids.get().wrapping_add(1);
-            ids.set(op.id);
-            let id = op.id;
             let mut q = ops.borrow_mut();
-            if q.len() >= MAX_OPS_PER_FRAME {
-                if q.len() == MAX_OPS_PER_FRAME {
+            if q.len() >= MAX_PENDING_OPS {
+                if !warned.replace(true) {
                     logs.borrow_mut().push(crate::ScriptLog {
                         level: crate::LogLevel::Warn,
                         msg: format!(
-                            "terrain: more than {MAX_OPS_PER_FRAME} edits in one frame — extra ops dropped"
+                            "terrain: {MAX_PENDING_OPS} edits are already waiting to land \
+                             ({OPS_PER_FRAME} land per frame) — this one and any more are dropped \
+                             until they catch up"
                         ),
                         source: None,
                     });
-                    q.push(op); // sentinel push so the warning fires once
                 }
                 // A dropped op yields nothing; 0 is the "no receipt" id.
                 return 0;
             }
+            op.id = ids.get().wrapping_add(1);
+            ids.set(op.id);
+            let id = op.id;
             q.push(op);
             id
         }
     };
 
-    // terrain.sculpt(x,y,z, radius, strength?, mode?) — mode: "raise" (default),
-    // "lower"/"dig", "smooth", "flatten". Queued; lands this tick.
+    // terrain.sculpt(x,y,z, radius, strength?, mode?, opts?) — mode: "raise"
+    // (default), "lower"/"dig", "smooth", "flatten". opts.normal is the plane
+    // flatten levels to. Queued; lands this tick.
     {
         let push = push.clone();
-        type Args = (f64, f64, f64, f64, Option<f64>, Option<String>);
-        if let Ok(f) = lua.create_function(move |_, (x, y, z, radius, strength, mode): Args| {
+        type Args = (f64, f64, f64, f64, Option<f64>, Option<String>, Option<Table>);
+        if let Ok(f) = lua.create_function(move |_, (x, y, z, radius, strength, mode, opts): Args| {
+            let mut normal = None;
+            if let Some(o) = &opts {
+                crate::opts::check_keys(o, SCULPT_KEYS, "terrain.sculpt")?;
+                let v: Value = o.get("normal")?;
+                if !v.is_nil() {
+                    let n = crate::math_api::vec3_of(&v)
+                        .filter(|n| n.length_squared() > 1e-12 && n.is_finite())
+                        .ok_or_else(|| {
+                            mlua::Error::runtime("terrain.sculpt: `normal` must be a non-zero vec3 or {x,y,z}")
+                        })?
+                        .normalize();
+                    normal = Some([n.x, n.y, n.z]);
+                }
+            }
             let mode = match mode.as_deref().unwrap_or("raise") {
                 "raise" => TerrainOpMode::Raise,
                 "lower" | "dig" => TerrainOpMode::Lower,
@@ -290,6 +315,7 @@ pub(crate) fn install_terrain_api(
                 strength: strength.unwrap_or(1.0).clamp(0.0, 1.0) as f32,
                 mode,
                 id: 0,
+                normal,
             }))
         }) {
             let _ = t.set("sculpt", f);
@@ -308,6 +334,7 @@ pub(crate) fn install_terrain_api(
                 strength: strength.unwrap_or(1.0).clamp(0.0, 1.0) as f32,
                 mode: TerrainOpMode::Lower,
                 id: 0,
+                normal: None,
             }))
         }) {
             let _ = t.set("dig", f);
@@ -326,6 +353,7 @@ pub(crate) fn install_terrain_api(
                     strength: strength.unwrap_or(1.0).clamp(0.0, 1.0) as f32,
                     mode: TerrainOpMode::Paint([r as f32, g as f32, b as f32]),
                     id: 0,
+                    normal: None,
                 });
                 Ok(())
             })
@@ -346,6 +374,7 @@ pub(crate) fn install_terrain_api(
                 strength: 1.0,
                 mode: TerrainOpMode::PaintTexture((slot.max(0.0) as u8).min(32)),
                 id: 0,
+                normal: None,
             });
             Ok(())
         }) {

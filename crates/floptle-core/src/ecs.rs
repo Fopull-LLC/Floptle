@@ -349,6 +349,11 @@ impl World {
         self.free.push(e.index);
     }
 
+    /// Where `e`'s `T` sits in that component's rows — the order
+    /// [`Self::query`] visits them in. `None` without one.
+    pub fn row_of<T: 'static>(&self, e: Entity) -> Option<usize> {
+        self.column::<T>()?.position(e)
+    }
     fn column<T: 'static>(&self) -> Option<&Column<T>> {
         self.columns.get(&TypeId::of::<T>()).and_then(|c| c.as_any().downcast_ref::<Column<T>>())
     }

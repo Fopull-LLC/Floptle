@@ -447,6 +447,9 @@ struct Source {
 /// close over, tagged with the source generation it was built from.
 struct Instance {
     env: RegistryKey,
+    /// The node it was built for, generation included: a node index reused by a
+    /// later spawn must not inherit a destroyed node's state.
+    entity: floptle_core::Entity,
     generation: u64,
     started: bool,
     seen: bool,
@@ -713,6 +716,8 @@ pub struct ScriptHost {
     material_changes: Rc<RefCell<HashMap<u32, String>>>,
     /// `node.visible = ...` writes (entity index → shown), applied as a `Visible` component.
     visible_changes: Rc<RefCell<HashMap<u32, bool>>>,
+    /// `node.castShadow = ...` writes, applied as a `CastShadow` component.
+    cast_shadow_changes: Rc<RefCell<HashMap<u32, bool>>>,
     /// `node.enabled = …` — switches the node (and its subtree) off/on. Separate from
     /// `visible`: that one only stops the draw, this also stops physics and scripts.
     enabled_changes: Rc<RefCell<HashMap<u32, bool>>>,
@@ -1352,6 +1357,8 @@ pub(crate) struct SceneMirror {
     /// Nodes that carry an explicit `Visible` component (so a script can read
     /// `node.visible`; absent = visible by default).
     visible: HashMap<u32, bool>,
+    /// Nodes with an explicit `CastShadow` component (absent = casts).
+    cast_shadow: HashMap<u32, bool>,
     /// Nodes carrying `floptle_core::Disabled` themselves (not inherited) — what
     /// `node.enabled` reads back. Inheritance is resolved by the engine, not mirrored.
     disabled: std::collections::HashSet<u32>,
@@ -1949,6 +1956,8 @@ struct Shared {
     material_changes: Rc<RefCell<HashMap<u32, String>>>,
     /// `node.visible = ...` writes (entity index → shown), applied as a `Visible` component.
     visible_changes: Rc<RefCell<HashMap<u32, bool>>>,
+    /// `node.castShadow = ...` writes, applied as a `CastShadow` component.
+    cast_shadow_changes: Rc<RefCell<HashMap<u32, bool>>>,
     /// `node.enabled = …` — switches the node (and its subtree) off/on. Separate from
     /// `visible`: that one only stops the draw, this also stops physics and scripts.
     enabled_changes: Rc<RefCell<HashMap<u32, bool>>>,

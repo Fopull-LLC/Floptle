@@ -41,6 +41,28 @@ pub(crate) struct EditorTerrain {
 /// coarse field; primary visibility (the unforgiving part) is the chunk meshes.
 pub(crate) const TERRAIN_SHADOW_MAX_DIM: u32 = 192;
 
+/// What one frame's script terrain ops wrote to one terrain, applied together:
+/// one collider copy, and one shadow/remesh refresh per cluster of boxes.
+#[derive(Default)]
+struct TerrainBatch {
+    boxes: Vec<(Vec3, Vec3)>,
+    geom: bool,
+    touched: Vec<[i32; 3]>,
+}
+
+impl TerrainBatch {
+    /// Add an op's box, merging it with every box it overlaps, so ops that
+    /// cluster share one refresh and ops far apart each keep their own.
+    fn add_box(&mut self, mut lo: Vec3, mut hi: Vec3) {
+        while let Some(i) = self.boxes.iter().position(|(l, h)| l.cmple(hi).all() && lo.cmple(*h).all()) {
+            let (l, h) = self.boxes.swap_remove(i);
+            lo = lo.min(l);
+            hi = hi.max(h);
+        }
+        self.boxes.push((lo, hi));
+    }
+}
+
 impl EditorTerrain {
     /// Wrap a field, deriving its shadow proxy.
     pub(crate) fn new(field: floptle_field::ChunkField) -> Self {
@@ -1333,6 +1355,7 @@ impl Editor {
                 Some(Matter::Terrain { id, .. }) => *id,
                 _ => 0,
             };
+            let flat_normal = self.flatten_normal(active, hit, None);
             let terrain = self.terrains.get_mut(&active).unwrap();
             // Capture the pre-dab chunks into the stroke's undo record — lazily, only
             // the chunks this dab could touch that aren't already captured. The whole
@@ -1353,6 +1376,9 @@ impl Editor {
                 }
                 floptle_field::Brush::Paint => {
                     terrain.field.paint(hit, r_local, brush.strength, brush.color, brush.profile)
+                }
+                floptle_field::Brush::Flatten => {
+                    terrain.field.flatten_to_plane(hit, flat_normal, r_local, brush.strength, brush.profile)
                 }
                 m => terrain.field.sculpt(m, hit, r_local, brush.strength, brush.profile),
             };
@@ -1398,9 +1424,28 @@ impl Editor {
                     .collect()
             }
         };
+        // One collider copy and one remesh/shadow refresh per terrain for the
+        // whole batch: a game laying 32 small flattens in a frame paid for 32
+        // of each, and none of it showed in any `perf` bucket.
+        let t0 = floptle_core::profile::Span::new();
+        let mut batch: HashMap<Entity, TerrainBatch> = HashMap::new();
         for op in ops {
-            self.apply_terrain_op(&op);
+            self.apply_terrain_op(&op, &mut batch);
         }
+        for (e, mut b) in batch {
+            b.touched.sort_unstable();
+            b.touched.dedup();
+            if b.geom {
+                self.mirror_terrain_chunks_to_sim(e, &b.touched);
+            }
+            let mut touched = Some(b.touched);
+            for (lo, hi) in b.boxes {
+                let c = (lo + hi) * 0.5;
+                let r = ((hi - lo) * 0.5).max_element();
+                self.queue_terrain_dirty(e, c, r, b.geom, touched.take().unwrap_or_default());
+            }
+        }
+        self.profile_record(floptle_core::profile::Bucket::Terrain, t0.ms());
         if !dirty.is_empty() {
             let sources: Vec<floptle_core::scatter::ScatterSource> =
                 self.script_host.scatter_sources().clone();
@@ -1415,7 +1460,7 @@ impl Editor {
     /// queue, and the shadow-proxy region — the same pipeline as an editor brush dab.
     /// Play-mode only state: Stop restores the pre-Play fields (`play_terrains`), so
     /// script edits never leak into the authored scene.
-    fn apply_terrain_op(&mut self, op: &floptle_script::TerrainOp) {
+    fn apply_terrain_op(&mut self, op: &floptle_script::TerrainOp, batch: &mut HashMap<Entity, TerrainBatch>) {
         use floptle_field::{Brush, BrushProfile};
         use floptle_script::TerrainOpMode as M;
         let pos = DVec3::new(op.pos[0], op.pos[1], op.pos[2]);
@@ -1438,15 +1483,16 @@ impl Editor {
         }
         let r_local = op.radius / ts;
         let profile = BrushProfile::default();
+        let flat_normal = (op.mode == M::Flatten).then(|| self.flatten_normal(e, local, op.normal));
         let t = self.terrains.get_mut(&e).unwrap();
         let mut measured = None;
         let touched = match op.mode {
-            M::Raise | M::Lower | M::Smooth | M::Flatten => {
+            M::Flatten => t.field.flatten_to_plane(local, flat_normal.unwrap_or(Vec3::Y), r_local, op.strength, profile),
+            M::Raise | M::Lower | M::Smooth => {
                 let brush = match op.mode {
                     M::Raise => Brush::Raise,
                     M::Lower => Brush::Lower,
-                    M::Smooth => Brush::Smooth,
-                    _ => Brush::Flatten,
+                    _ => Brush::Smooth,
                 };
                 let (touched, y) =
                     t.field.sculpt_measured(brush, local, r_local, op.strength, profile);
@@ -1460,8 +1506,8 @@ impl Editor {
         // report zero rather than nothing, or a game cannot tell "I dug air"
         // from "the report is still coming". Volumes are measured
         // in the field's local units, so a scaled terrain converts by scale³.
-        if let Some(y) = measured
-            && op.id != 0
+        if op.id != 0
+            && let Some(y) = measured.or_else(|| (op.mode == M::Flatten).then(Default::default))
         {
             let w = f64::from(ts).powi(3);
             self.script_host.push_terrain_yield(floptle_script::TerrainYield {
@@ -1476,13 +1522,30 @@ impl Editor {
             return;
         }
         let geom = !matches!(op.mode, M::Paint(_) | M::PaintTexture(_));
-        // Mirror geometry edits into the sim's collider copy so collision agrees
-        // with the drawn surface this tick (color never affects collision).
-        if geom {
-            self.mirror_terrain_chunks_to_sim(e, &touched);
-        }
-        self.queue_terrain_dirty(e, local, r_local, geom, touched);
+        // Geometry edits reach the sim's collider copy when the batch lands, so
+        // collision agrees with the drawn surface this tick (color never
+        // affects collision).
+        let b = batch.entry(e).or_default();
+        b.add_box(local - Vec3::splat(r_local), local + Vec3::splat(r_local));
+        b.geom |= geom;
+        b.touched.extend(touched);
     }
+
+    /// The plane a flatten levels to, in terrain `e`'s local frame: the one the
+    /// script named, else the radial up on a planet (a `CelestialBody` terrain
+    /// is centred on its node), else `+Y`.
+    pub(crate) fn flatten_normal(&self, e: Entity, local: Vec3, asked: Option<[f64; 3]>) -> Vec3 {
+        if let Some(n) = asked {
+            let (_, rot, _) = self.terrain_world_frame_of(e);
+            return (rot.inverse() * DVec3::from(n).as_vec3()).try_normalize().unwrap_or(Vec3::Y);
+        }
+        if self.world.get::<floptle_core::CelestialBody>(e).is_some() {
+            return local.try_normalize().unwrap_or(Vec3::Y);
+        }
+        Vec3::Y
+    }
+
+
 
     /// Make the play sim's collider copy of terrain `e` agree with the authority
     /// field over `touched` chunks — by cloning those chunks (plus the one-chunk
@@ -3010,6 +3073,32 @@ mod tests {
     use super::{CHUNK_FADE_SECS, chunk_fade, chunk_priority, lod_for, raw_lod, rings_for_body, LOD_RINGS};
     use floptle_core::math::{DVec3, Quat};
     use floptle_field::BakedSdf;
+
+    /// **0320: which plane a flatten levels to.** On a planet the radial up at
+    /// the brush, on a flat terrain `+Y`, and a script's own normal turned into
+    /// the terrain's frame.
+    #[test]
+    fn a_flatten_levels_to_the_planets_up_unless_told_otherwise() {
+        use floptle_core::math::Vec3;
+        let mut ed = crate::Editor::default();
+        let flat = ed.world.spawn();
+        ed.world.insert(flat, floptle_core::Transform::IDENTITY);
+        let planet = ed.world.spawn();
+        ed.world.insert(planet, floptle_core::Transform::IDENTITY);
+        ed.world.insert(planet, floptle_core::CelestialBody { body_radius: 100.0, ..Default::default() });
+        let at = Vec3::new(0.0, 70.0, 70.0);
+        let n = ed.flatten_normal(planet, at, None);
+        assert!((n - at.normalize()).length() < 1e-5, "a planet levels to its radial up, got {n}");
+        assert_eq!(ed.flatten_normal(flat, at, None), Vec3::Y, "a flat terrain levels to +Y");
+
+        let tilted = ed.world.spawn();
+        ed.world.insert(
+            tilted,
+            floptle_core::Transform { rotation: Quat::from_rotation_z(std::f32::consts::FRAC_PI_2), ..floptle_core::Transform::IDENTITY },
+        );
+        let n = ed.flatten_normal(tilted, at, Some([0.0, 1.0, 0.0]));
+        assert!((n - Vec3::X).length() < 1e-5, "world up is local +X on a node turned 90° about Z, got {n}");
+    }
 
     /// The wait and the flag are the same question.
     ///

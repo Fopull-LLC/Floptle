@@ -599,13 +599,119 @@ fn ships_file(path: &Path) -> bool {
 pub(crate) struct Skipped {
     pub(crate) files: u64,
     pub(crate) bytes: u64,
+    /// Left out by the project's `.floptleignore`.
+    pub(crate) ignored_files: u64,
+    pub(crate) ignored_bytes: u64,
+}
+
+/// The file a project names what its builds leave out, beside `project.ron`.
+pub(crate) const IGNORE_FILE: &str = ".floptleignore";
+
+/// A project's `.floptleignore`: one pattern per line, `#` comments, paths
+/// relative to the project root with `/` separators, read the way `.gitignore`
+/// reads them. `*` and `?` match within a name, `**` any number of folders. A
+/// pattern with no `/` before its end matches a name at any depth (`*.wav`,
+/// `tools/`); a leading or inner `/` anchors it at the root (`/AGENTS.md`,
+/// `docs/**/*.psd`). A trailing `/` matches only a folder.
+#[cfg(feature = "editor-ui")]
+#[derive(Default, Debug)]
+pub(crate) struct ExportIgnore {
+    patterns: Vec<IgnorePattern>,
+}
+
+#[cfg(feature = "editor-ui")]
+#[derive(Debug)]
+struct IgnorePattern {
+    segs: Vec<String>,
+    dir_only: bool,
+    anchored: bool,
+}
+
+#[cfg(feature = "editor-ui")]
+impl ExportIgnore {
+    pub(crate) fn load(proj: &Path) -> Self {
+        floptle_vfs::read_to_string(proj.join(IGNORE_FILE)).map(|t| Self::parse(&t)).unwrap_or_default()
+    }
+
+    pub(crate) fn parse(text: &str) -> Self {
+        let patterns = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| {
+                let l = l.replace('\\', "/");
+                let dir_only = l.ends_with('/');
+                let body = l.trim_matches('/');
+                let anchored = l.starts_with('/') || body.contains('/');
+                IgnorePattern { segs: body.split('/').map(str::to_string).collect(), dir_only, anchored }
+            })
+            .collect();
+        Self { patterns }
+    }
+
+    /// Whether `rel` (project-relative, `/`-separated) is left out.
+    pub(crate) fn ignores(&self, rel: &str, is_dir: bool) -> bool {
+        let path: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+        self.patterns.iter().any(|p| {
+            if p.dir_only && !is_dir {
+                return false;
+            }
+            if p.anchored {
+                segs_match(&p.segs, &path)
+            } else {
+                path.last().is_some_and(|name| name_match(&p.segs[0], name))
+            }
+        })
+    }
+}
+
+#[cfg(feature = "editor-ui")]
+fn segs_match(pat: &[String], path: &[&str]) -> bool {
+    match pat.split_first() {
+        None => path.is_empty(),
+        Some((first, rest)) if first == "**" => (0..=path.len()).any(|k| segs_match(rest, &path[k..])),
+        Some((first, rest)) => {
+            path.split_first().is_some_and(|(name, tail)| name_match(first, name) && segs_match(rest, tail))
+        }
+    }
+}
+
+#[cfg(feature = "editor-ui")]
+fn name_match(pat: &str, name: &str) -> bool {
+    fn go(p: &[u8], n: &[u8]) -> bool {
+        match p.split_first() {
+            None => n.is_empty(),
+            Some((b'*', rest)) => (0..=n.len()).any(|k| go(rest, &n[k..])),
+            Some((b'?', rest)) => !n.is_empty() && go(rest, &n[1..]),
+            Some((c, rest)) => n.first() == Some(c) && go(rest, &n[1..]),
+        }
+    }
+    go(pat.as_bytes(), name.as_bytes())
+}
+
+#[cfg(feature = "editor-ui")]
+fn tree_stats(p: &Path) -> (u64, u64) {
+    let (mut files, mut bytes) = (0, 0);
+    let mut stack = vec![p.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = floptle_vfs::read_dir(&d) else { continue };
+        for e in rd {
+            if e.is_dir() {
+                stack.push(e.path());
+            } else {
+                files += 1;
+                bytes += floptle_vfs::size(e.path()).unwrap_or(0);
+            }
+        }
+    }
+    (files, bytes)
 }
 
 /// Recursive copy for the export. Returns the number of files copied, and
 /// records what [`ships_file`] refused.
 #[cfg(feature = "editor-ui")]
-fn copy_tree(src: &Path, dst: &Path, at_root: bool, skipped: &mut Skipped) -> std::io::Result<u64> {
-    copy_tree_with(src, dst, at_root, skipped, &ships_file)
+fn copy_tree(src: &Path, dst: &Path, ignore: &ExportIgnore, skipped: &mut Skipped) -> std::io::Result<u64> {
+    copy_tree_with(src, dst, "", ignore, skipped, &ships_file)
 }
 
 /// [`copy_tree`], with the per-file rule handed in: a player build keeps
@@ -617,7 +723,8 @@ fn copy_tree(src: &Path, dst: &Path, at_root: bool, skipped: &mut Skipped) -> st
 fn copy_tree_with(
     src: &Path,
     dst: &Path,
-    at_root: bool,
+    rel: &str,
+    ignore: &ExportIgnore,
     skipped: &mut Skipped,
     keep: &dyn Fn(&Path) -> bool,
 ) -> std::io::Result<u64> {
@@ -625,13 +732,21 @@ fn copy_tree_with(
     let mut n = 0;
     for entry in floptle_vfs::read_dir(src)? {
         let name = entry.file_name();
-        if !ships(&name.to_string_lossy(), at_root) {
+        let name_s = name.to_string_lossy();
+        if !ships(&name_s, rel.is_empty()) {
             continue;
         }
         let from = entry.path();
         let to = dst.join(&name);
+        let rel_here = if rel.is_empty() { name_s.to_string() } else { format!("{rel}/{name_s}") };
+        if ignore.ignores(&rel_here, entry.is_dir()) {
+            let (f, b) = if entry.is_dir() { tree_stats(&from) } else { (1, floptle_vfs::size(&from).unwrap_or(0)) };
+            skipped.ignored_files += f;
+            skipped.ignored_bytes += b;
+            continue;
+        }
         if entry.is_dir() {
-            n += copy_tree_with(&from, &to, false, skipped, keep)?;
+            n += copy_tree_with(&from, &to, &rel_here, ignore, skipped, keep)?;
         } else {
             if !keep(&from) {
                 skipped.files += 1;
@@ -723,7 +838,8 @@ pub(crate) fn make_portable(shipped: &Path, project_root: &Path) -> Portability 
                 changed = true;
                 out.rewritten += 1;
             }
-            for abs in absolute_refs(&text) {
+            let lua = p.extension().is_some_and(|x| x == "lua");
+            for abs in absolute_refs(&text, lua) {
                 match stranded_tail(shipped, &abs) {
                     Some(rel) => {
                         text = text.replace(&format!("\"{abs}\""), &format!("\"{rel}\""));
@@ -777,9 +893,20 @@ fn looks_like_a_file(abs: &str) -> bool {
 }
 
 #[cfg(feature = "editor-ui")]
-fn absolute_refs(text: &str) -> Vec<String> {
+fn absolute_refs(text: &str, lua: bool) -> Vec<String> {
     let mut out = Vec::new();
-    for chunk in text.split('"').skip(1).step_by(2) {
+    let pieces: Vec<&str> = text.split('"').collect();
+    for i in (1..pieces.len()).step_by(2) {
+        let chunk = pieces[i];
+        // In a script, a literal joined onto something with `..` is part of a
+        // path built at runtime (`"replays/" .. mode .. "/run.json"`), not a
+        // path of its own.
+        if lua
+            && (pieces[i - 1].trim_end().ends_with("..")
+                || pieces.get(i + 1).is_some_and(|a| a.trim_start().starts_with("..")))
+        {
+            continue;
+        }
         let is_abs = chunk.starts_with('/')
             || (chunk.len() > 2
                 && chunk.as_bytes()[1] == b':'
@@ -841,6 +968,19 @@ fn ship_linked_packages(proj: &Path, ship_assets: &Path) -> Result<usize, String
             .map_err(|e| format!("copy linked package `{}`: {e}", entry.id))?;
         n += 1;
     }
+    // The build's own registry names no folder on the developer's disk: a
+    // linked package that shipped is now an ordinary one in `packages/<id>/`,
+    // and a switched-off link is not loaded, so it goes.
+    let Ok(mut shipped) = floptle_package::Registry::load(ship_assets) else { return Ok(n) };
+    if shipped.packages.iter().any(|e| e.source.is_linked()) {
+        shipped.packages.retain(|e| e.enabled || !e.source.is_linked());
+        for e in &mut shipped.packages {
+            if e.source.is_linked() {
+                e.source = floptle_package::Source::Authored;
+            }
+        }
+        shipped.save(ship_assets).map_err(|e| format!("write the build's packages.ron: {e}"))?;
+    }
     Ok(n)
 }
 
@@ -853,6 +993,7 @@ struct Staged {
     linked: usize,
     port: Portability,
     skipped: Skipped,
+    unnamed: Vec<(String, u64)>,
 }
 
 #[cfg(feature = "editor-ui")]
@@ -865,6 +1006,24 @@ impl Staged {
                 " — left out {} authoring file(s), {:.1} MB the engine has no loader for",
                 self.skipped.files,
                 self.skipped.bytes as f64 / 1.0e6,
+            ));
+        }
+        if self.skipped.ignored_files > 0 {
+            msg.push_str(&format!(
+                " — left out {} file(s), {:.1} MB, named in {IGNORE_FILE}",
+                self.skipped.ignored_files,
+                self.skipped.ignored_bytes as f64 / 1.0e6,
+            ));
+        }
+        if !self.unnamed.is_empty() {
+            msg.push_str(&format!(
+                " — the biggest files no script, scene or data file names (leave them out with \
+                 {IGNORE_FILE} if nothing loads them): {}",
+                self.unnamed
+                    .iter()
+                    .map(|(p, s)| format!("{p} ({:.1} MB)", *s as f64 / 1.0e6))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         if self.linked > 0 {
@@ -938,8 +1097,8 @@ fn stage_game(proj: &Path, out_c: &Path, title: &str) -> Result<Staged, String> 
         floptle_vfs::remove_file(&ship_assets).map_err(|e| format!("clear old assets copy: {e}"))?;
     }
     let mut skipped = Skipped::default();
-    let files =
-        copy_tree(proj, &ship_assets, true, &mut skipped).map_err(|e| format!("copy assets: {e}"))?;
+    let files = copy_tree(proj, &ship_assets, &ExportIgnore::load(proj), &mut skipped)
+        .map_err(|e| format!("copy assets: {e}"))?;
     // A linked package is not inside the project, so the copy above missed it —
     // it lives wherever the person writing it keeps it. A build has to carry
     // what it needs, so linked packages are materialised into the shipped
@@ -948,11 +1107,67 @@ fn stage_game(proj: &Path, out_c: &Path, title: &str) -> Result<Staged, String> 
     // scheme falls back to `<project>/packages/<id>/`.
     let linked = ship_linked_packages(proj, &ship_assets)?;
     let port = make_portable(&ship_assets, proj);
+    let unnamed = heaviest_unnamed(&ship_assets, 5);
     let manifest = GameManifest { title: title.to_string(), project: "assets".into(), steam: cfg.steam };
     let text = ron::ser::to_string_pretty(&manifest, ron::ser::PrettyConfig::default())
         .map_err(|e| format!("manifest: {e}"))?;
     floptle_vfs::write(out_c.join("floptle-game.ron"), text).map_err(|e| format!("write manifest: {e}"))?;
-    Ok(Staged { files, linked, port, skipped })
+    Ok(Staged { files, linked, port, skipped, unnamed })
+}
+
+/// Media files whose every use is a path written in a script, scene or data
+/// file. Implicitly loaded kinds (terrain fields named after their scene,
+/// `.meta`) are not here, so the report never calls one of those unused.
+#[cfg(feature = "editor-ui")]
+const NAMED_MEDIA: &[&str] = &[
+    "wav", "ogg", "mp3", "flac", "aiff", "aif", "m4a", "opus", "png", "jpg", "jpeg", "tga", "bmp", "gif",
+    "webp", "dds", "ktx2", "hdr", "exr", "glb", "gltf", "ttf", "otf", "mp4", "webm",
+];
+
+/// What an export report lists: the heaviest media files in the build whose
+/// name appears in none of its text files (scripts, scenes, data), biggest
+/// first, at 1 MB or more. A hint, not a verdict: a name a script assembles at
+/// runtime (`name .. ".mp3"`) appears nowhere either.
+#[cfg(feature = "editor-ui")]
+fn heaviest_unnamed(shipped: &Path, n: usize) -> Vec<(String, u64)> {
+    const MIN: u64 = 1 << 20;
+    let mut text = String::new();
+    let mut media = Vec::new();
+    let mut stack = vec![shipped.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = floptle_vfs::read_dir(&d) else { continue };
+        for e in rd {
+            let p = e.path();
+            if e.is_dir() {
+                stack.push(p);
+            } else if is_texty(&p) || p.extension().is_some_and(|x| x == "uistyle") {
+                if let Ok(t) = floptle_vfs::read_to_string(&p) {
+                    text.push_str(&t);
+                    text.push('\n');
+                }
+            } else if p
+                .extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| NAMED_MEDIA.contains(&x.to_ascii_lowercase().as_str()))
+            {
+                let size = floptle_vfs::size(&p).unwrap_or(0);
+                if size >= MIN {
+                    media.push((p, size));
+                }
+            }
+        }
+    }
+    let mut out: Vec<(String, u64)> = media
+        .into_iter()
+        .filter(|(p, _)| {
+            let name = p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+            !text.contains(&name)
+        })
+        .map(|(p, s)| (p.strip_prefix(shipped).unwrap_or(&p).to_string_lossy().replace('\\', "/"), s))
+        .collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out.truncate(n);
+    out
 }
 
 /// Stamp a native build: the staged project beside the player binary, renamed
@@ -1116,7 +1331,7 @@ pub(crate) fn export_server(
         floptle_vfs::remove_file(&ship).map_err(|e| format!("clear old bundle: {e}"))?;
     }
     let mut skipped = Skipped::default();
-    let files = copy_tree_with(&proj, &ship, true, &mut skipped, &serves_file)
+    let files = copy_tree_with(&proj, &ship, "", &ExportIgnore::load(&proj), &mut skipped, &serves_file)
         .map_err(|e| format!("copy project: {e}"))?;
     let linked = ship_linked_packages(&proj, &ship)?;
     let port = make_portable(&ship, &proj);
@@ -1179,6 +1394,13 @@ pub(crate) fn export_server(
             "\n  left out {} file(s) ({}) a headless server never reads",
             skipped.files,
             human_bytes(skipped.bytes)
+        ));
+    }
+    if skipped.ignored_files > 0 {
+        msg.push_str(&format!(
+            "\n  left out {} file(s) ({}) named in {IGNORE_FILE}",
+            skipped.ignored_files,
+            human_bytes(skipped.ignored_bytes)
         ));
     }
     if linked > 0 {
@@ -2555,6 +2777,83 @@ mod tests {
         assert!(out.join("assets/scenes/save/level.ron").is_file(), "nested `save` is content");
 
         for d in [&proj, &out] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    #[test]
+    fn an_ignore_pattern_matches_names_anywhere_and_paths_from_the_root() {
+        let ig = ExportIgnore::parse("# dev files\ntools/\n*.wav\ndocs/**/*.md\n/AGENTS.md\nscratch?.txt\n");
+        assert!(ig.ignores("tools", true), "a folder pattern takes the folder");
+        assert!(!ig.ignores("tools", false), "…but not a file of that name");
+        assert!(ig.ignores("scripts/tools", true), "a bare folder name matches at any depth, as in .gitignore");
+        let anchored = ExportIgnore::parse("/tools/\n");
+        assert!(anchored.ignores("tools", true) && !anchored.ignores("scripts/tools", true), "a leading / anchors it");
+        assert!(ig.ignores("audio/music/theme.wav", false), "a bare name matches at any depth");
+        assert!(!ig.ignores("audio/music/theme.mp3", false));
+        assert!(ig.ignores("docs/a/b/notes.md", false) && ig.ignores("docs/notes.md", false), "** is any depth, zero included");
+        assert!(!ig.ignores("scenes/notes.md", false));
+        assert!(ig.ignores("AGENTS.md", false) && !ig.ignores("scripts/AGENTS.md", false));
+        assert!(ig.ignores("scratch1.txt", false) && !ig.ignores("scratch12.txt", false));
+        assert!(!ExportIgnore::parse("").ignores("anything", false));
+    }
+
+    /// **0294: what a jam build shipped that it should not have.** A
+    /// `.floptleignore` leaves out what the developer names; the report lists
+    /// the heaviest media nothing names; and neither a path a script assembles
+    /// with `..` nor a switched-off linked package is reported as a reference
+    /// outside the project.
+    #[test]
+    fn an_export_leaves_out_what_the_project_ignores_and_names_what_nothing_uses() {
+        let proj = temp("proj-ignore");
+        let pkg = temp("linked-pkg");
+        floptle_vfs::write(proj.join("project.ron"), "()").unwrap();
+        floptle_vfs::write(proj.join(IGNORE_FILE), "tools/\n*.wav\n").unwrap();
+        for (p, bytes) in [
+            ("tools/make.sh", 10usize),
+            ("audio/theme.wav", 3 << 20),
+            ("audio/theme.mp3", 2 << 20),
+            ("audio/unused.mp3", 2 << 20),
+            ("textures/big.png", 1 << 21),
+        ] {
+            let at = proj.join(p);
+            floptle_vfs::create_dir_all(at.parent().unwrap()).unwrap();
+            floptle_vfs::write(&at, vec![0u8; bytes]).unwrap();
+        }
+        floptle_vfs::create_dir_all(proj.join("scripts")).unwrap();
+        floptle_vfs::write(
+            proj.join("scripts/music.lua"),
+            "audio.play(\"audio/theme.mp3\")\nlocal t = \"textures/big.png\"\n\
+             local p = \"replays/best/\" .. mode .. \"/run.json\"\n",
+        )
+        .unwrap();
+        floptle_vfs::write(
+            proj.join("packages.ron"),
+            format!(
+                "(packages: [(id: \"some.tool\", version: \"1.0.0\", source: Linked(\"{}\"), enabled: false)])",
+                pkg.display()
+            ),
+        )
+        .unwrap();
+        let out = temp("out-ignore");
+        let me = std::env::current_exe().unwrap();
+        let (msg, _) = export_game_with(&proj, &out, "G", &me, &EXPORT_TARGETS[0]).expect("export");
+
+        assert!(!out.join("assets/tools").exists(), "an ignored folder does not ship");
+        assert!(!out.join("assets/audio/theme.wav").exists(), "an ignored pattern does not ship");
+        assert!(out.join("assets/audio/theme.mp3").is_file());
+        assert!(!out.join("assets").join(IGNORE_FILE).exists(), "the ignore file is the developer's");
+        assert!(msg.contains("named in .floptleignore"), "the report says what it left out: {msg}");
+
+        let (_, unnamed) = msg.split_once("no script, scene or data file names").expect("the unnamed list");
+        assert!(unnamed.contains("audio/unused.mp3"), "{msg}");
+        assert!(!unnamed.contains("theme.mp3") && !unnamed.contains("big.png"), "named files are used: {msg}");
+
+        assert!(!msg.contains("OUTSIDE the project"), "no false foreign refs: {msg}");
+        let reg = floptle_vfs::read_to_string(out.join("assets/packages.ron")).unwrap_or_default();
+        assert!(!reg.contains(&pkg.display().to_string()), "the build names no folder on this disk: {reg}");
+
+        for d in [&proj, &out, &pkg] {
             let _ = std::fs::remove_dir_all(d);
         }
     }

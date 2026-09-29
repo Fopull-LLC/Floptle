@@ -496,9 +496,16 @@ impl Editor {
             return;
         };
 
-        let timing = self.gpu_timing_open
+        // The panel, or a game that asked `perf` for GPU pass times.
+        let live = self.playing && profile.borrow().enabled();
+        let timing = (self.gpu_timing_open || live)
             && self.gpu_timer.as_mut().map(|t| {
                 t.poll();
+                if live && !t.spans().is_empty() {
+                    profile
+                        .borrow_mut()
+                        .set_gpu(t.spans().iter().map(|s| (s.label.clone(), s.ms)).collect(), t.total_ms());
+                }
                 t.begin()
             }) == Some(true);
         let Some((gather, ui)) = self.build_frame_ui(
@@ -1230,7 +1237,7 @@ impl Editor {
         // Once, at the very end, so a subsystem that reported in several pieces —
         // physics per tick, scripts per pass — contributes one figure per frame.
         // A no-op while collection is off.
-        self.script_host.profile().borrow_mut().end_frame();
+        self.end_profile_frame();
     }
 }
 

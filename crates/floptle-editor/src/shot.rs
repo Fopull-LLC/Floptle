@@ -192,8 +192,8 @@ pub(crate) struct Args<'a> {
     /// camera moving between frames can, and can be scanned for it.
     pub(crate) frames: u32,
     /// `--turn DEG`: yaw the camera by this much over the whole sequence, with
-    /// a gentle pitch nod on top — "looking around", which is when the sky
-    /// flickers were reported.
+    /// a pitch nod on top — "looking around", which is when the sky flickers
+    /// were reported. See `sequence_rotation`. Zero draws the scene's camera.
     pub(crate) turn: f32,
 }
 
@@ -434,7 +434,6 @@ pub(crate) fn run(args: Args) -> i32 {
     if frames > 1 {
         let stem = out.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         let dir = out.parent().map(Path::to_path_buf).unwrap_or_default();
-        let base_rot = wt.rotation;
         for i in 1..frames {
             if after.is_some() && ed.playing {
                 ed.pump_world_streaming();
@@ -444,17 +443,13 @@ pub(crate) fn run(args: Args) -> i32 {
                 ed.drain_script_logs();
             }
             let f = i as f32 / (frames - 1).max(1) as f32;
-            let yaw = floptle_core::math::Quat::from_rotation_y((turn * f).to_radians());
-            // Pitch sweeps from ten degrees below the horizon to sixty above
-            // it and back, three times over the sequence — the sky and the
-            // horizon both cross every part of the frame, corners included.
-            let pitch = floptle_core::math::Quat::from_rotation_x(
-                (25.0 + 35.0 * (f * std::f32::consts::TAU * 1.5).sin()).to_radians(),
-            );
-            let pos = floptle_core::world_transform(&ed.world, e).translation;
+            // The pose the scene holds THIS frame, so a camera the game moves
+            // is photographed where the game put it.
+            let live = floptle_core::world_transform(&ed.world, e);
+            let pos = live.translation;
             let cam_i = RenderCamera::new(
                 pos,
-                yaw * base_rot * pitch,
+                sequence_rotation(live.rotation, turn, f),
                 Projection::of_camera(fov_y, ortho, ortho_height, 0.05, 300_000.0),
             );
             ed.sync_terrain_gpu();
@@ -530,6 +525,21 @@ fn landed_timing(ed: &mut crate::Editor) -> Option<(f32, Vec<(String, f32)>)> {
     let t = ed.gpu_timer.as_mut()?;
     t.poll();
     Some((t.total_ms(), t.spans().iter().map(|s| (s.label.clone(), s.ms)).collect()))
+}
+
+/// The camera rotation for frame fraction `f` (0..=1) of a `--frames` sequence.
+/// Without `--turn` it is the scene's own rotation, untouched. With it, a yaw of
+/// `turn * f` degrees about world up, and a pitch nod about the camera's own
+/// right axis between 10° below and 60° above its forward, three sweeps over the
+/// sequence, so the sky and the horizon cross every part of the frame.
+fn sequence_rotation(scene: floptle_core::math::Quat, turn: f32, f: f32) -> floptle_core::math::Quat {
+    use floptle_core::math::Quat;
+    if turn == 0.0 {
+        return scene;
+    }
+    let yaw = Quat::from_rotation_y((turn * f).to_radians());
+    let pitch = Quat::from_rotation_x((25.0 + 35.0 * (f * std::f32::consts::TAU * 1.5).sin()).to_radians());
+    yaw * scene * pitch
 }
 
 /// Each pass's median across the timed frames, in the order the passes ran,
@@ -1090,6 +1100,26 @@ mod tests {
         assert_eq!(total, 9.0);
         assert_eq!(passes, vec![("opaque + lighting".to_string(), 7.0), ("post".to_string(), 2.0)]);
         assert!(median_timing(&[]).is_none(), "no frames is no report, not zeros");
+    }
+
+    /// **Without `--turn`, a sequence is drawn from the scene's camera.** The
+    /// nod used to ride every `--frames` run, so a static camera swung ~40°
+    /// between frames and read as a game bug.
+    #[test]
+    fn a_sequence_without_turn_keeps_the_scenes_camera() {
+        use floptle_core::math::{Quat, Vec3};
+        let scene = Quat::from_rotation_y(0.7) * Quat::from_rotation_x(-0.2);
+        for i in 0..=10 {
+            let f = i as f32 / 10.0;
+            let r = sequence_rotation(scene, 0.0, f);
+            assert!(r.dot(scene).abs() > 1.0 - 1e-6, "frame {f}: turned off the scene camera without --turn");
+        }
+        // With --turn the nod reaches 60° above the camera's forward.
+        let fwd = |q: Quat| q * Vec3::NEG_Z;
+        let most = (0..=100)
+            .map(|i| fwd(sequence_rotation(Quat::IDENTITY, 90.0, i as f32 / 100.0)).y.asin().to_degrees())
+            .fold(f32::MIN, f32::max);
+        assert!((most - 60.0).abs() < 0.5, "the documented nod peaks at 60°, got {most}");
     }
 
     #[test]

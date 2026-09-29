@@ -2210,6 +2210,8 @@ pub struct LightDoc {
     pub shadow_dither: bool,
     #[serde(default = "default_shadow_distance")]
     pub shadow_distance: f32,
+    #[serde(default = "default_shadow_steps", skip_serializing_if = "is_default_shadow_steps")]
+    pub shadow_steps: u32,
     /// Contact shadows default off: they cost a screen-space trace per lit
     /// fragment, and a scene that never asked for them should not start paying.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -2293,6 +2295,12 @@ fn default_shadow_softness() -> f32 {
 }
 fn default_shadow_distance() -> f32 {
     150.0
+}
+fn default_shadow_steps() -> u32 {
+    64
+}
+fn is_default_shadow_steps(n: &u32) -> bool {
+    *n == 64
 }
 fn default_fog_sky() -> f32 {
     1.0
@@ -2380,6 +2388,7 @@ impl From<&Light> for LightDoc {
             shadow_quantize: l.shadow_quantize,
             shadow_dither: l.shadow_dither,
             shadow_distance: l.shadow_distance,
+            shadow_steps: l.shadow_steps,
             contact_shadows: l.contact_shadows,
             contact_length: l.contact_length,
             contact_steps: l.contact_steps,
@@ -2427,6 +2436,7 @@ impl LightDoc {
             shadow_quantize: self.shadow_quantize,
             shadow_dither: self.shadow_dither,
             shadow_distance: self.shadow_distance,
+            shadow_steps: self.shadow_steps.clamp(8, 64),
             contact_shadows: self.contact_shadows,
             contact_length: self.contact_length.clamp(0.01, 20.0),
             contact_steps: self.contact_steps.clamp(2, 32),
@@ -5449,6 +5459,29 @@ mod tests {
         let l = wild.to_light();
         assert_eq!(l.contact_steps, 2, "a zero step count is clamped, not honoured");
         assert_eq!(l.contact_length, 20.0, "and a wild reach is fenced");
+    }
+
+    /// **0313: the shadow step budget.** Round-trips when set, is left out of
+    /// the file at its default (so every existing scene reads unchanged), and
+    /// is fenced to 8..64 when typed by hand.
+    #[test]
+    fn the_shadow_step_budget_round_trips_is_omitted_at_default_and_is_fenced() {
+        let authored = Light { shadow_steps: 20, ..Light::default() };
+        let ron = ron::ser::to_string(&LightDoc::from(&authored)).expect("serializes");
+        assert!(ron.contains("shadow_steps:20"), "{ron}");
+        let back: LightDoc = ron::from_str(&ron).expect("parses");
+        assert_eq!(back.to_light().shadow_steps, 20);
+        let plain = ron::ser::to_string(&LightDoc::from(&Light::default())).expect("serializes");
+        assert!(!plain.contains("shadow_steps"), "the default is not written: {plain}");
+        let old: LightDoc = ron::from_str("(direction: (0, 1, 0), color: (1, 1, 1), ambient: (0, 0, 0), intensity: 1)").expect("parses");
+        assert_eq!(old.to_light().shadow_steps, 64, "an old scene marches as it always did");
+        for (typed, want) in [(0, 8), (500, 64)] {
+            let wild: LightDoc = ron::from_str(&format!(
+                "(direction: (0, 1, 0), color: (1, 1, 1), ambient: (0, 0, 0), intensity: 1, shadow_steps: {typed})"
+            ))
+            .expect("parses");
+            assert_eq!(wild.to_light().shadow_steps, want);
+        }
     }
 
     /// A body's slope limit round-trips, and a scene that names none gets 60°:

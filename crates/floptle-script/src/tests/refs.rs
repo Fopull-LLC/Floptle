@@ -995,3 +995,48 @@ fn a_cross_script_write_through_a_stashed_handle_lands() {
         "the teleport written through the stashed handle must reach the transform"
     );
 }
+
+/// **A call into a script survives its node being switched off and on.**
+/// freeflier spawned a spectator rig, called `hands.follow(puppet)` on it,
+/// switched the rig off while it was seen from outside, and on again for first
+/// person. Switching off dropped the script's environment and switching on
+/// built a fresh one, so `puppet` read `false` for weeks and the arms copied
+/// the local player.
+#[test]
+fn a_call_into_a_script_survives_its_node_being_switched_off_and_on() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_off_on_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(&dir, "hands", "puppet = false\nfunction follow(p) puppet = p end\n");
+    write_script(
+        &dir,
+        "ghost",
+        "local n = 0\n\
+         function update(node, dt)\n  \
+           n = n + 1\n  \
+           local rig = find(\"Rig\", { scope = \"all\" })\n  \
+           if n == 1 then rig:getScript(\"hands\").follow(true); rig.enabled = false end\n  \
+           if n == 3 then rig.enabled = true end\n  \
+           if n == 5 then node.x = rig:getScript(\"hands\").puppet and 1 or -1 end\n\
+         end\n",
+    );
+    let mut world = World::default();
+    let rig = world.spawn();
+    world.insert(rig, Transform::IDENTITY);
+    world.insert(rig, floptle_core::Name("Rig".into()));
+    world.insert(rig, Scripts(vec![floptle_core::ScriptInst::new("hands")]));
+    let ghost = world.spawn();
+    world.insert(ghost, Transform::IDENTITY);
+    world.insert(ghost, Scripts(vec![floptle_core::ScriptInst::new("ghost")]));
+
+    let mut host = ScriptHost::new();
+    for i in 1..=5 {
+        host.run(&mut world, &dir, 0.1, 0.1 * i as f32);
+        assert!(host.errors().is_empty(), "frame {i}: {:?}", host.errors());
+    }
+    assert_eq!(
+        world.get::<Transform>(ghost).unwrap().translation.x,
+        1.0,
+        "the rig's script forgot the call made into it before it was switched off"
+    );
+}

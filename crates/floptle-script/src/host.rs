@@ -570,7 +570,121 @@ struct WorldQueryCells {
 }
 
 /// `raycast`, the shape queries and the layer table they filter by; the `net` bridge state the raycast closure shares.
-fn install_world_queries(lua: &Lua, logs: &Rc<RefCell<Vec<ScriptLog>>>) -> WorldQueryCells {
+/// The ray a script cast, what it passes through, and which layers it sees:
+/// the parse `raycast` and `raycastMany` share.
+fn ray_filter(
+    opts: Option<&Value>,
+    current: &Option<(u32, String)>,
+    layers: &floptle_core::Layers,
+    call: &str,
+) -> mlua::Result<(Vec<u32>, u32)> {
+    // Bodies the ray passes through: the caster's own, plus an optional
+    // explicit ignore (a node handle or entity id) — e.g. an orbit camera
+    // skipping the character it follows. The argument is either that ignore
+    // directly, or an options table: `{ ignore = node, layers = "Ground" |
+    // {"Ground", "Props"} }` — `layers` filters both static geometry and body
+    // hulls by the project's named layers (a misspelled name is an error, not
+    // a silent everything-misses).
+    let mut exclude: Vec<u32> = Vec::with_capacity(2);
+    let mut mask = !0u32;
+    if let Some((eid, _)) = current.as_ref() {
+        exclude.push(*eid);
+    }
+    match opts {
+        Some(Value::Table(t)) => {
+            if let Ok(eid) = t.raw_get::<u32>("__id") {
+                exclude.push(eid);
+            } else {
+                // No __id → an options table. Checked against the same list
+                // `shape_api`'s queries use, because this is a second copy of
+                // that parsing and the two lists drifting is how `layers` ends
+                // up honoured by one and ignored by the other.
+                crate::opts::check_keys(t, crate::shape_api::QUERY_KEYS, call)?;
+                if let Ok(ig) = t.get::<Table>("ignore")
+                    && let Ok(eid) = ig.raw_get::<u32>("__id")
+                {
+                    exclude.push(eid);
+                }
+                let names: Vec<String> = match t.get::<Value>("layers") {
+                    Ok(Value::String(s)) => vec![s.to_string_lossy().to_string()],
+                    Ok(Value::Table(list)) => list.sequence_values::<String>().flatten().collect(),
+                    _ => Vec::new(),
+                };
+                if !names.is_empty() {
+                    mask = 0;
+                    for n in &names {
+                        match layers.index_of(n) {
+                            Some(i) => mask |= 1u32 << i,
+                            None => {
+                                return Err(mlua::Error::RuntimeError(format!(
+                                    "{call}: no layer named '{n}' (project layers: {})",
+                                    layers.names.join(", ")
+                                )))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Some(Value::Integer(id)) => exclude.push(*id as u32),
+        Some(Value::Number(id)) => exclude.push(*id as u32),
+        _ => {}
+    }
+    Ok((exclude, mask))
+}
+
+/// One ray, sim frame in and out: static geometry and body hulls, nearest
+/// surface wins.
+fn cast_ray(
+    cols: &[floptle_physics::AnchoredCollider],
+    hulls: &[floptle_physics::BodyHull],
+    o: glam::Vec3,
+    dir: glam::Vec3,
+    max: f32,
+    exclude: &[u32],
+    mask: u32,
+) -> Option<floptle_physics::RayHit> {
+    let solid = floptle_physics::raycast_colliders(cols, o, dir, max, mask);
+    let body = floptle_physics::raycast_hulls(hulls, o, dir, max, exclude, mask);
+    match (solid, body) {
+        (Some(s), Some((_, b))) if b.distance < s.distance => Some(b),
+        (Some(s), _) => Some(s),
+        (None, Some((_, b))) => Some(b),
+        (None, None) => None,
+    }
+}
+
+/// `raycastMany`'s point lists: an array of vec3s (or anything `vec3_of`
+/// reads), or a flat `{x1,y1,z1, x2,...}` array.
+fn ray_points(t: &Table, what: &str) -> mlua::Result<Vec<glam::DVec3>> {
+    let n = t.raw_len();
+    if matches!(t.raw_get::<Value>(1)?, Value::Number(_) | Value::Integer(_)) {
+        if !n.is_multiple_of(3) {
+            return Err(mlua::Error::runtime(format!(
+                "raycastMany: a flat `{what}` list is x,y,z triples, but this one has {n} numbers"
+            )));
+        }
+        return (0..n / 3)
+            .map(|i| {
+                let c = |k: usize| t.raw_get::<f64>(i * 3 + k + 1);
+                Ok(glam::DVec3::new(c(0)?, c(1)?, c(2)?))
+            })
+            .collect();
+    }
+    (1..=n)
+        .map(|i| {
+            crate::math_api::vec3_of(&t.raw_get::<Value>(i)?).ok_or_else(|| {
+                mlua::Error::runtime(format!("raycastMany: `{what}[{i}]` is not a vec3 or {{x,y,z}}"))
+            })
+        })
+        .collect()
+}
+
+fn install_world_queries(
+    lua: &Lua,
+    logs: &Rc<RefCell<Vec<ScriptLog>>>,
+    profile: &crate::SharedProfile,
+) -> WorldQueryCells {
     // The `net.*` bridge state — created early so the raycast closure can
     // read the current-instance marker (self-hit exclusion) and `net.rewind`
     // can re-pose the hulls (the API itself installs further down).
@@ -600,6 +714,7 @@ fn install_world_queries(lua: &Lua, logs: &Rc<RefCell<Vec<ScriptLog>>>) -> World
         let so = sim_origin.clone();
         let cur = net.current.clone();
         let lt = layer_table.clone();
+        let prof = profile.clone();
         if let Ok(f) = lua.create_function(move |lua, args: mlua::MultiValue| {
             // Two spellings, one ray: the vector form
             // `raycast(origin, dir, max [, ignore])` — origin may be a node
@@ -654,91 +769,16 @@ fn install_world_queries(lua: &Lua, logs: &Rc<RefCell<Vec<ScriptLog>>>) -> World
             let origin = *so.borrow();
             let o = (glam::DVec3::new(ox, oy, oz) - origin).as_vec3();
             let dir = glam::Vec3::new(dx as f32, dy as f32, dz as f32);
-            // Bodies the ray passes through: the caster's own, plus an
-            // optional explicit ignore (a node handle or entity id) — e.g.
-            // an orbit camera skipping the character it follows. The 8th
-            // arg is either that ignore directly, or an options table:
-            // `{ ignore = node, layers = "Ground" | {"Ground", "Props"} }`
-            // — `layers` filters both static geometry and body hulls by
-            // the project's named layers (a misspelled name is an error,
-            // not a silent everything-misses).
-            let mut exclude: Vec<u32> = Vec::with_capacity(2);
-            let mut mask = !0u32;
-            if let Some((eid, _)) = cur.borrow().as_ref() {
-                exclude.push(*eid);
+            let (exclude, mask) = ray_filter(ignore.as_ref(), &cur.borrow(), &lt.borrow(), "raycast")?;
+            let timer = prof.borrow().enabled().then(floptle_core::profile::Span::new);
+            let hit = cast_ray(&cols.borrow(), &hus.borrow(), o, dir, max as f32, &exclude, mask);
+            if let Some(t) = timer {
+                prof.borrow_mut().record_rays(1, t.ms());
             }
-            match &ignore {
-                Some(Value::Table(t)) => {
-                    if let Ok(eid) = t.raw_get::<u32>("__id") {
-                        exclude.push(eid);
-                    } else {
-                        // No __id → an options table. Checked against the
-                        // same list `shape_api`'s queries use, because this
-                        // is a second copy of that parsing and the two lists
-                        // drifting is how `layers` ends up honoured by one
-                        // and ignored by the other.
-                        crate::opts::check_keys(
-                            t,
-                            crate::shape_api::QUERY_KEYS,
-                            "raycast",
-                        )?;
-                        if let Ok(ig) = t.get::<Table>("ignore")
-                            && let Ok(eid) = ig.raw_get::<u32>("__id")
-                        {
-                            exclude.push(eid);
-                        }
-                        let names: Vec<String> = match t.get::<Value>("layers") {
-                            Ok(Value::String(s)) => vec![s.to_string_lossy().to_string()],
-                            Ok(Value::Table(list)) => {
-                                list.sequence_values::<String>().flatten().collect()
-                            }
-                            _ => Vec::new(),
-                        };
-                        if !names.is_empty() {
-                            let lt = lt.borrow();
-                            mask = 0;
-                            for n in &names {
-                                match lt.index_of(n) {
-                                    Some(i) => mask |= 1u32 << i,
-                                    None => {
-                                        return Err(mlua::Error::RuntimeError(format!(
-                                            "raycast: no layer named '{n}' (project layers: {})",
-                                            lt.names.join(", ")
-                                        )))
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                Some(Value::Integer(id)) => exclude.push(*id as u32),
-                Some(Value::Number(id)) => exclude.push(*id as u32),
-                _ => {}
-            }
-            let solid =
-                floptle_physics::raycast_colliders(&cols.borrow(), o, dir, max as f32, mask);
-            let body = floptle_physics::raycast_hulls(
-                &hus.borrow(),
-                o,
-                dir,
-                max as f32,
-                &exclude,
-                mask,
-            );
-            // Nearest surface wins between static geometry and body hulls.
-            //
             // `hit.node` is answered for both static geometry and body hulls,
             // so a ray down at the floor of a level names the map mesh the way
-            // `spherecast` does. The march has
-            // the collider in hand the whole time; the field was dropped,
-            // not unavailable, and reading the docs it looked like the
-            // engine could not tell you.
-            let h = match (solid, body) {
-                (Some(s), Some((_, b))) if b.distance < s.distance => b,
-                (Some(s), _) => s,
-                (None, Some((_, b))) => b,
-                (None, None) => return Ok(Value::Nil),
-            };
+            // `spherecast` does.
+            let Some(h) = hit else { return Ok(Value::Nil) };
             // Built by the same function every shape query uses, so the two
             // cannot drift apart again.
             Ok(Value::Table(crate::shape_api::hit_table(
@@ -746,6 +786,59 @@ fn install_world_queries(lua: &Lua, logs: &Rc<RefCell<Vec<ScriptLog>>>) -> World
             )?))
         }) {
             let _ = lua.globals().set("raycast", f);
+        }
+    }
+    // `raycastMany(origins, dirs, maxes [, opts])` — many rays in one call, for
+    // probes known up front (a decal's corners, a ragdoll's contacts). Same
+    // query and options as `raycast`; the answer is one entry per ray, a hit
+    // table or `false`.
+    {
+        let cols = colliders.clone();
+        let hus = hulls.clone();
+        let so = sim_origin.clone();
+        let cur = net.current.clone();
+        let lt = layer_table.clone();
+        let prof = profile.clone();
+        type Args = (Table, Table, Value, Option<Value>);
+        if let Ok(f) = lua.create_function(move |lua, (origins, dirs, maxes, opts): Args| {
+            let os = ray_points(&origins, "origins")?;
+            let ds = ray_points(&dirs, "dirs")?;
+            if os.len() != ds.len() {
+                return Err(mlua::Error::runtime(format!(
+                    "raycastMany: {} origins and {} dirs — one of each per ray",
+                    os.len(),
+                    ds.len()
+                )));
+            }
+            let max_of = |i: usize| -> mlua::Result<f64> {
+                match &maxes {
+                    Value::Number(n) => Ok(*n),
+                    Value::Integer(n) => Ok(*n as f64),
+                    Value::Table(t) => t.raw_get::<f64>(i + 1).map_err(|_| {
+                        mlua::Error::runtime(format!("raycastMany: `maxes[{}]` is not a distance", i + 1))
+                    }),
+                    _ => Err(mlua::Error::runtime("raycastMany: `maxes` is a distance, or a list of one per ray")),
+                }
+            };
+            let (exclude, mask) = ray_filter(opts.as_ref(), &cur.borrow(), &lt.borrow(), "raycastMany")?;
+            let origin = *so.borrow();
+            let out = lua.create_table_with_capacity(os.len(), 0)?;
+            let timer = prof.borrow().enabled().then(floptle_core::profile::Span::new);
+            let (cols, hus) = (cols.borrow(), hus.borrow());
+            for (i, (o, d)) in os.iter().zip(&ds).enumerate() {
+                let hit = cast_ray(&cols, &hus, (*o - origin).as_vec3(), d.as_vec3(), max_of(i)? as f32, &exclude, mask);
+                let v = match hit {
+                    Some(h) => Value::Table(crate::shape_api::hit_table(lua, h.point, h.normal, h.distance, h.eid, origin)?),
+                    None => Value::Boolean(false),
+                };
+                out.raw_set(i + 1, v)?;
+            }
+            if let Some(t) = timer {
+                prof.borrow_mut().record_rays(os.len() as u64, t.ms());
+            }
+            Ok(out)
+        }) {
+            let _ = lua.globals().set("raycastMany", f);
         }
     }
 
@@ -1527,6 +1620,79 @@ fn install_spawn_effect(lua: &Lua) -> Rc<RefCell<Vec<crate::SpawnedEffect>>> {
     spawn_effects
 }
 
+/// `draw.polyline`'s points: a flat `{x1,y1,z1, x2,...}` array, or an array of
+/// vec3s (or anything `vec3_of` reads).
+fn polyline_points(points: &Table) -> mlua::Result<Vec<glam::DVec3>> {
+    let n = points.raw_len();
+    let flat = matches!(points.raw_get::<Value>(1)?, Value::Number(_) | Value::Integer(_));
+    if flat {
+        if !n.is_multiple_of(3) {
+            return Err(mlua::Error::runtime(format!(
+                "draw.polyline: a flat point list is x,y,z triples, but this one has {n} numbers"
+            )));
+        }
+        let mut out = Vec::with_capacity(n / 3);
+        for i in 0..n / 3 {
+            let c = |k: usize| points.raw_get::<f64>(i * 3 + k + 1);
+            out.push(glam::DVec3::new(c(0)?, c(1)?, c(2)?));
+        }
+        return Ok(out);
+    }
+    let mut out = Vec::with_capacity(n);
+    for i in 1..=n {
+        let v: Value = points.raw_get(i)?;
+        out.push(crate::math_api::vec3_of(&v).ok_or_else(|| {
+            mlua::Error::runtime(format!("draw.polyline: point {i} is not a vec3 or {{x,y,z}}"))
+        })?);
+    }
+    Ok(out)
+}
+
+/// `draw.conic`'s points: the orbit `r(θ) = p / (1 + ecc·cos θ)` around the
+/// focus `center`, in the plane of `e1` (toward periapsis) and `e2`. A closed
+/// ellipse for `ecc < 1`; an open arc for `ecc ≥ 1`, cut where `r` reaches
+/// `max_r`.
+fn conic_points(
+    center: glam::DVec3,
+    e1: glam::DVec3,
+    e2: glam::DVec3,
+    p: f64,
+    ecc: f64,
+    segs: usize,
+    max_r: f64,
+) -> (Vec<glam::DVec3>, bool) {
+    let u = e1.try_normalize().unwrap_or(glam::DVec3::X);
+    let v = (e2 - u * e2.dot(u)).try_normalize().unwrap_or_else(|| u.any_orthonormal_vector());
+    let segs = segs.clamp(3, 4096);
+    let ecc = ecc.max(0.0);
+    let (lo, hi, closed) = if ecc < 1.0 {
+        (0.0, std::f64::consts::TAU, true)
+    } else {
+        // 1 + ecc·cosθ = p / max_r at the cut.
+        let c = ((p / max_r.max(p) - 1.0) / ecc).clamp(-1.0, 1.0);
+        let t = c.acos();
+        (-t, t, false)
+    };
+    let count = if closed { segs } else { segs + 1 };
+    let pts = (0..count)
+        .map(|k| {
+            let th = lo + (hi - lo) * k as f64 / segs as f64;
+            let r = p / (1.0 + ecc * th.cos()).max(1e-9);
+            center + (u * th.cos() + v * th.sin()) * r
+        })
+        .collect();
+    (pts, closed)
+}
+
+fn push_polyline(q: &mut Vec<crate::DrawLine>, pts: &[glam::DVec3], closed: bool, color: [f32; 4]) {
+    for w in pts.windows(2) {
+        q.push(crate::DrawLine { a: w[0].into(), b: w[1].into(), color });
+    }
+    if closed && pts.len() > 2 {
+        q.push(crate::DrawLine { a: pts[pts.len() - 1].into(), b: pts[0].into(), color });
+    }
+}
+
 /// What [`install_draw`] hands back to the host.
 struct DrawCells {
     draw_lines: Rc<RefCell<Vec<crate::DrawLine>>>,
@@ -1617,6 +1783,53 @@ fn install_draw(lua: &Lua) -> DrawCells {
                     },
                 ) {
                     let _ = t.set("ring", f);
+                }
+            }
+            // `draw.polyline(points, r,g,b [,a [, closed]])` — one call per curve
+            // rather than one per segment.
+            {
+                let q = draw_lines.clone();
+                type PolyArgs = (Table, f32, f32, f32, Option<f32>, Option<bool>);
+                if let Ok(f) = lua.create_function(move |_, (points, r, g, b, a, closed): PolyArgs| {
+                    let pts = polyline_points(&points)?;
+                    push_polyline(&mut q.borrow_mut(), &pts, closed.unwrap_or(false), [r, g, b, a.unwrap_or(1.0)]);
+                    Ok(())
+                }) {
+                    let _ = t.set("polyline", f);
+                }
+            }
+            // `draw.conic(center, e1, e2, p, ecc, segs, r,g,b [,a [, maxR]])` —
+            // a Kepler orbit around a focus.
+            {
+                let q = draw_lines.clone();
+                type ConicArgs =
+                    (Value, Value, Value, f64, f64, usize, f32, f32, f32, Option<f32>, Option<f64>);
+                if let Ok(f) = lua.create_function(
+                    move |_, (c, e1, e2, p, ecc, segs, r, g, b, a, max_r): ConicArgs| {
+                        let v = |x: &Value, what: &str| {
+                            crate::math_api::vec3_of(x).ok_or_else(|| {
+                                mlua::Error::runtime(format!("draw.conic: `{what}` is not a vec3 or {{x,y,z}}"))
+                            })
+                        };
+                        if !(p.is_finite() && p > 0.0) {
+                            return Err(mlua::Error::runtime(format!(
+                                "draw.conic: the semi-latus rectum `p` must be above 0, got {p}"
+                            )));
+                        }
+                        let (pts, closed) = conic_points(
+                            v(&c, "center")?,
+                            v(&e1, "e1")?,
+                            v(&e2, "e2")?,
+                            p,
+                            ecc,
+                            segs,
+                            max_r.unwrap_or(p * 10.0),
+                        );
+                        push_polyline(&mut q.borrow_mut(), &pts, closed, [r, g, b, a.unwrap_or(1.0)]);
+                        Ok(())
+                    },
+                ) {
+                    let _ = t.set("conic", f);
                 }
             }
             {
@@ -2137,13 +2350,14 @@ impl ScriptHost {
             mouse_lock,
             reserved_keys,
         } = install_input(&lua, &logs);
+        let profile: crate::SharedProfile = Rc::new(RefCell::new(Default::default()));
         let WorldQueryCells {
             net,
             colliders,
             hulls,
             sim_origin,
             layer_table,
-        } = install_world_queries(&lua, &logs);
+        } = install_world_queries(&lua, &logs, &profile);
         // `water.*` — the engine floats
         // things; a game still decides what being wet means, and every one of
         // those decisions is the same question with a different answer.
@@ -2223,6 +2437,7 @@ impl ScriptHost {
             model_changes: Rc::new(RefCell::new(HashMap::new())),
             material_changes: Rc::new(RefCell::new(HashMap::new())),
             visible_changes: Rc::new(RefCell::new(HashMap::new())),
+            cast_shadow_changes: Rc::new(RefCell::new(HashMap::new())),
             enabled_changes: Rc::new(RefCell::new(HashMap::new())),
             persistent_changes: Rc::new(RefCell::new(HashMap::new())),
             layer_changes: Rc::new(RefCell::new(HashMap::new())),
@@ -2255,7 +2470,6 @@ impl ScriptHost {
         }
         // `perf.*` — a game reading its own frame cost. Off by
         // default and free while off, so this costs nothing but the table.
-        let profile: crate::SharedProfile = Rc::new(RefCell::new(Default::default()));
         if let Err(e) = crate::perf_api::install(&lua, &profile) {
             floptle_say::say_err!("[lua] failed to install the perf API: {e}");
         }
@@ -2541,6 +2755,7 @@ impl ScriptHost {
             model_changes: shared.model_changes.clone(),
             material_changes: shared.material_changes.clone(),
             visible_changes: shared.visible_changes.clone(),
+            cast_shadow_changes: shared.cast_shadow_changes.clone(),
             enabled_changes: shared.enabled_changes.clone(),
             persistent_changes: shared.persistent_changes.clone(),
             layer_changes: shared.layer_changes.clone(),
@@ -3189,6 +3404,8 @@ impl ScriptHost {
         // Pending timers belong to the old session — a scene switch drops them.
         // (Including a persistent node's: a timer is a promise about a world.)
         self.sched.borrow_mut().clear();
+        // Terrain edits still waiting to land were aimed at the old world.
+        self.terrain_ops.borrow_mut().clear();
         // So do agents: one belongs to a node in a world that is going away, and
         // a crowd that survived a Stop would walk the next Play's units from
         // wherever the last one left them.
@@ -4469,8 +4686,12 @@ impl ScriptHost {
         }
     }
 
+    /// This frame's terrain edits: the oldest [`crate::terrain_api::OPS_PER_FRAME`]
+    /// waiting. The rest stay queued, in order, for the next frame.
     pub fn take_terrain_ops(&self) -> Vec<crate::TerrainOp> {
-        std::mem::take(&mut self.terrain_ops.borrow_mut())
+        let mut q = self.terrain_ops.borrow_mut();
+        let n = q.len().min(crate::terrain_api::OPS_PER_FRAME);
+        q.drain(..n).collect()
     }
 
     /// Feed this frame's dynamic-body hulls ([`Sim::body_hulls`] copies) so
@@ -5022,6 +5243,7 @@ impl ScriptHost {
                 }
             }
         }
+        self.keep_switched_off_instances(world);
         // Web replies land here — the frame pass, never the tick pass. A reply
         // arrives when it arrives, so a rollback replay must never see one.
         // Before `update`, so a callback's writes are visible to the same frame.
@@ -5469,6 +5691,13 @@ impl ScriptHost {
                     world.insert(ent, Visible(*shown));
                 }
             }
+            for (eid, casts) in self.cast_shadow_changes.borrow().iter() {
+                if let Some(&ent) = scene.ents.get(eid)
+                    && world.get::<floptle_core::CastShadow>(ent).is_none_or(|c| c.0) != *casts
+                {
+                    world.insert(ent, floptle_core::CastShadow(*casts));
+                }
+            }
             // `node.enabled = …`. Absence is enabled, so turning one on removes the
             // marker rather than storing a `true` — same rule as `layer`, and it keeps
             // scene files free of a field that means nothing.
@@ -5725,6 +5954,7 @@ impl ScriptHost {
         }
         self.material_changes.borrow_mut().clear();
         self.visible_changes.borrow_mut().clear();
+        self.cast_shadow_changes.borrow_mut().clear();
         self.enabled_changes.borrow_mut().clear();
         self.persistent_changes.borrow_mut().clear();
         self.layer_changes.borrow_mut().clear();
@@ -5824,6 +6054,11 @@ impl ScriptHost {
     /// a 376-node scene and had no bucket at all until 0.84.2; `enabled()` gates
     /// the `Span` the way `record_script` does, so it costs nothing while the
     /// profiler is off.
+    #[cfg(test)]
+    pub(crate) fn sync_scene_for_test(&self, world: &World) {
+        self.sync_scene(world);
+    }
+
     fn sync_scene(&self, world: &World) {
         let span = self.profile.borrow().enabled().then(floptle_core::profile::Span::new);
         self.sync_scene_inner(world);
@@ -5887,6 +6122,7 @@ impl ScriptHost {
         s.dirty.clear();
         s.models.clear();
         s.visible.clear();
+        s.cast_shadow.clear();
         s.disabled.clear();
         s.persistent.clear();
         s.layers.clear();
@@ -5931,15 +6167,41 @@ impl ScriptHost {
             return None;
         }
         let transform = std::any::TypeId::of::<Transform>();
+        // Spawns and despawns first. A spawn goes in whole, a despawn comes out
+        // whole, and neither re-reads any other node: a game laying one decal a
+        // frame used to rebuild the scripts' copy of all 1400 nodes for it.
+        let mut born: Vec<Entity> = Vec::new();
+        let mut gone = false;
+        let mut lifetime: Vec<u32> = changes
+            .iter()
+            .filter(|c| c.kind == floptle_core::ChangeKind::Lifetime)
+            .map(|c| c.index)
+            .collect();
+        lifetime.sort_unstable();
+        lifetime.dedup();
+        for &id in &lifetime {
+            let now = world.entity_with::<Transform>(id);
+            let was = s.ents.get(&id).copied();
+            if was.is_some() && was != now {
+                Self::forget_node(s, id);
+                gone = true;
+            }
+            if let Some(e) = now
+                && was != Some(e)
+            {
+                born.push(e);
+            }
+        }
         let mut touched: Vec<u32> = Vec::with_capacity(changes.len());
         for ch in changes {
             match ch.kind {
-                floptle_core::ChangeKind::Lifetime => {
-                    return Some(format!("a node was spawned or destroyed ({})", Self::label(s, world, ch.index)));
-                }
+                floptle_core::ChangeKind::Lifetime => {}
                 // A transform attached or detached decides whether the entity is
                 // in the mirror at all.
                 floptle_core::ChangeKind::Component(t) if t == transform => {
+                    if lifetime.binary_search(&ch.index).is_ok() {
+                        continue;
+                    }
                     let has = world.entity_with::<Transform>(ch.index).is_some();
                     if has != s.ents.contains_key(&ch.index) {
                         return Some(format!("a Transform was attached or removed ({})", Self::label(s, world, ch.index)));
@@ -5948,9 +6210,33 @@ impl ScriptHost {
                 floptle_core::ChangeKind::Component(_) => touched.push(ch.index),
             }
         }
+        if !born.is_empty() || gone {
+            // In the order the rows hold them, which is scene order.
+            born.sort_unstable_by_key(|e| world.row_of::<Transform>(*e));
+            let spawned = born.len() as u32;
+            for e in born {
+                let Some(tr) = world.get::<Transform>(e) else { continue };
+                if gone {
+                    Self::mirror_node_data(s, world, e, tr);
+                } else {
+                    Self::mirror_entity(s, world, e, tr, None);
+                }
+            }
+            // A despawn moves the last row into its place, so the order and the
+            // lists built in it are re-derived from what is already mirrored.
+            // A spawn alone only appends, unless the rows say otherwise.
+            if gone || !s.order.iter().copied().eq(world.query::<Transform>().map(|(e, _)| e.index())) {
+                Self::rebuild_indices(s, world);
+            }
+            s.structure_rev += 1;
+            s.refreshed_now += spawned;
+        }
         touched.sort_unstable();
         touched.dedup();
         for id in touched {
+            if lifetime.binary_search(&id).is_ok() {
+                continue;
+            }
             // Not in the mirror (no Transform) and not joining it: nothing to do.
             let Some(&mirrored) = s.ents.get(&id) else { continue };
             let Some(e) = world.entity_at(id).filter(|&e| e == mirrored) else {
@@ -5965,6 +6251,85 @@ impl ScriptHost {
             s.refreshed_now += 1;
         }
         None
+    }
+
+    /// Take a despawned node out of every per-node table. The lists built in
+    /// scene order are the caller's to re-derive ([`Self::rebuild_indices`]).
+    fn forget_node(s: &mut crate::SceneMirror, id: u32) {
+        Self::forget_values(s, id);
+        s.ents.remove(&id);
+        s.transforms.remove(&id);
+        s.names.remove(&id);
+        s.tags.remove(&id);
+        s.parent.remove(&id);
+        s.scripts.remove(&id);
+        s.tilemaps.remove(&id);
+        s.dirty.remove(&id);
+    }
+
+    /// [`Self::mirror_entity`]'s per-node half: everything but the lists kept
+    /// in scene order, which [`Self::rebuild_indices`] derives afterwards.
+    fn mirror_node_data(s: &mut crate::SceneMirror, world: &World, e: Entity, tr: &Transform) {
+        let id = e.index();
+        s.ents.insert(id, e);
+        s.transforms.insert(id, *tr);
+        Self::mirror_values(s, world, e, None);
+        if let Some(t) = world.get::<floptle_core::Tags>(e) {
+            s.tags.insert(id, t.0.clone());
+        }
+        if let Some(n) = world.get::<floptle_core::Name>(e) {
+            s.names.insert(id, n.0.clone());
+        }
+        if let Some(p) = world.get::<floptle_core::Parent>(e) {
+            s.parent.insert(id, p.0.index());
+        }
+        if let Some(sc) = world.get::<Scripts>(e) {
+            s.scripts.insert(id, sc.0.iter().map(|i| i.kind.clone()).collect());
+        }
+    }
+
+    /// Re-derive the tables kept in scene order — `order`, `by_name` (first
+    /// wins), `by_kind`, `by_tag`, `children` — from the rows and the per-node
+    /// data already mirrored. The same lists a full rebuild makes, without
+    /// re-reading a single component.
+    fn rebuild_indices(s: &mut crate::SceneMirror, world: &World) {
+        s.order.clear();
+        s.by_name.clear();
+        s.by_kind.clear();
+        s.by_tag.clear();
+        s.children.clear();
+        for (e, _) in world.query::<Transform>() {
+            let id = e.index();
+            s.order.push(id);
+            if let Some(n) = s.names.get(&id)
+                && !s.by_name.contains_key(n)
+            {
+                s.by_name.insert(n.clone(), id);
+            }
+            if let Some(tags) = s.tags.get(&id) {
+                for t in tags {
+                    match s.by_tag.get_mut(t) {
+                        Some(v) => v.push(id),
+                        None => {
+                            s.by_tag.insert(t.clone(), vec![id]);
+                        }
+                    }
+                }
+            }
+            if let Some(kinds) = s.scripts.get(&id) {
+                for k in kinds {
+                    match s.by_kind.get_mut(k) {
+                        Some(v) => v.push(id),
+                        None => {
+                            s.by_kind.insert(k.clone(), vec![id]);
+                        }
+                    }
+                }
+            }
+            if let Some(&p) = s.parent.get(&id) {
+                s.children.entry(p).or_default().push(id);
+            }
+        }
     }
 
     /// `'Enemy 3' (node 812)`, or `node 812` for a node with no name.
@@ -6023,6 +6388,7 @@ impl ScriptHost {
         s.component_strings.remove(&id);
         s.shader_state.remove(&id);
         s.visible.remove(&id);
+        s.cast_shadow.remove(&id);
         s.disabled.remove(&id);
         s.persistent.remove(&id);
         s.layers.remove(&id);
@@ -6206,6 +6572,9 @@ impl ScriptHost {
             if let Some(v) = world.get::<Visible>(e) {
                 s.visible.insert(id, v.0);
             }
+            if let Some(c) = world.get::<floptle_core::CastShadow>(e) {
+                s.cast_shadow.insert(id, c.0);
+            }
             if world.get::<floptle_core::Disabled>(e).is_some() {
                 s.disabled.insert(id);
             }
@@ -6292,6 +6661,27 @@ impl ScriptHost {
     /// order. Returns false if the script is missing or broken this frame. Done for every
     /// script before any `update`, so a manager is reachable even by a script that ticks
     /// first.
+    /// A script on a switched-off node, or with its own tickbox off, keeps the
+    /// environment it already has: it does not run, but its state survives until
+    /// it is switched back on. Dropping it lost every call another script had
+    /// made into it (`handle.follow(x)` on the frame before a rig was switched
+    /// off), because switching back on built a fresh environment.
+    fn keep_switched_off_instances(&mut self, world: &World) {
+        for (e, scripts) in world.query::<Scripts>() {
+            let off = floptle_core::is_disabled(world, e);
+            for s in &scripts.0 {
+                if !(off || !s.enabled) {
+                    continue;
+                }
+                if let Some(inst) = self.instances.get_mut(&(e.index(), s.kind.clone()))
+                    && inst.entity == e
+                {
+                    inst.seen = true;
+                }
+            }
+        }
+    }
+
     fn ensure_instance(&mut self, e: Entity, name: &str, scripts_dir: &Path) -> bool {
         // Where a kind's file is, and whether it changed, is asked once per
         // kind per frame: it is three filesystem calls, and asking it for
@@ -6311,7 +6701,7 @@ impl ScriptHost {
             return false;
         };
         let key = (e.index(), name.to_string());
-        let needs_build = self.instances.get(&key).is_none_or(|i| i.generation != generation);
+        let needs_build = self.instances.get(&key).is_none_or(|i| i.generation != generation || i.entity != e);
         if needs_build {
             let path = resolve_script_path(scripts_dir, &self.extra_script_dirs, name);
             // Don't recompile a known-broken generation every frame; re-emit it
@@ -6367,6 +6757,7 @@ impl ScriptHost {
                                 key.clone(),
                                 Instance {
                                     env: reg,
+                                    entity: e,
                                     generation,
                                     started: false,
                                     seen: true,

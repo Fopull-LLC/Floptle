@@ -260,6 +260,7 @@ impl Editor {
             .gpu
             .as_ref()
             .is_some_and(|g| g.config.usage.contains(wgpu::TextureUsages::TEXTURE_BINDING));
+        let timed = self.begin_live_gpu_timing();
         self.render_game_into(
             frame.view.clone(),
             depth_view,
@@ -270,6 +271,9 @@ impl Editor {
             true,
             samplable,
         );
+        if timed {
+            self.end_live_gpu_timing();
+        }
         // **Photographed before it is presented**, and out of the swapchain
         // image itself — so what lands in the PNG is the frame the player saw,
         // not a second render that resembles it.
@@ -284,7 +288,7 @@ impl Editor {
         self.drain_script_logs();
         // The frame is over: fold every bucket into its history, once, exactly
         // as the editor frame does.
-        self.script_host.profile().borrow_mut().end_frame();
+        self.end_profile_frame();
         shot.map(|px| (px, w, h))
     }
 

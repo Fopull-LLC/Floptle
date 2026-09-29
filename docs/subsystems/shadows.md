@@ -134,6 +134,7 @@ apply instantly, no rebake).
 | quantize | `shadow_quantize` | smooth / 2–4 bands | posterized toon/retro penumbra |
 | dither | `shadow_dither` | Bayer-pattern the quantized penumbra | the PS1 edge; pairs with retro mode |
 | distance | `shadow_distance` | max march distance (perf fence) | open-world haze |
+| steps | `shadow_steps` | most steps a ray takes, 8–64 (default 64) | a low quality setting that keeps shadows |
 
 Serialized in `SceneDoc.lighting` (`LightDoc`, serde defaults — pre-shadow
 scenes load with the defaults above and just start casting).
@@ -178,11 +179,22 @@ scenes load with the defaults above and just start casting).
 ## 5. Performance posture
 
 Decision D (full-res first, measure, then optimize — renderer.md §6): the
-march runs per shaded fragment, ≤64 steps, and is gated hard — it never runs
-when shadows are off, on sun-averted fragments (`n·l ≤ 0`), on unlit matter,
-or past `shadow_distance`; empty scenes break out after one sample. At retro
-internal resolutions the cost is trivial. If a full-res scene ever burns here,
-the SSAO-style half-res + blur-upsample path is the known next lever.
+march runs per shaded fragment, at most `shadow_steps` steps (default 64), and
+is gated hard — it never runs when shadows are off, on sun-averted fragments
+(`n·l ≤ 0`), on unlit matter, or past `shadow_distance`; empty scenes break out
+after one sample. At retro internal resolutions the cost is trivial.
+
+The 32 proxy slots go to the casters nearest the camera, skipping switched-off
+bodies and bodies whose meshes are all hidden (a body with no mesh under it at
+all is a stand-in and still casts). They used to go to the first 32 in scene
+order. A game drops a body from the march with `node.castShadow = false`.
+
+Measured 2026-09-29 on a mesh level at 1080p (RTX 4060), the player in a
+trench with enemies awake: shadows are 4.7 ms of a 7.3 ms opaque + lighting
+pass at 64 steps and 4.1 ms at 20 — most rays end at their last relevant bound
+long before the cap, so the step budget trims rather than halves. The enemy
+proxies were 0.2 ms of it there. The next lever is still the SSAO-style
+half-res + depth-aware upsample path.
 
 ## 5b. Contact shadows (v0.48.0)
 

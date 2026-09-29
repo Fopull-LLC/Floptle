@@ -287,6 +287,14 @@ They look similar but serve different masters:
   rings, orbit conics: player-facing linework. Immediate mode (re-issue
   every frame/tick you want it visible), world space, alpha supported.
   - `draw.line(x1,y1,z1, x2,y2,z2, r,g,b [,a])`
+  - `draw.polyline(points, r,g,b [,a [, closed]])` — a connected line through
+    `points` (a flat `{x1,y1,z1, x2,...}` array or an array of vec3s) in one
+    call. A 128-point orbit is one call rather than 127 `draw.line`s, which is
+    what a map with dozens of orbits spends its frame on otherwise.
+  - `draw.conic(center, e1, e2, p, ecc, segs, r,g,b [,a [, maxR]])` — the orbit
+    `r(θ) = p / (1 + ecc·cos θ)` around the focus `center`, in the plane of `e1`
+    (toward periapsis) and `e2`. Closed for `ecc < 1`; an open arc cut at `maxR`
+    (default `10 × p`) otherwise.
   - `draw.ring(cx,cy,cz, nx,ny,nz, radius, r,g,b [,a])` — a circle around
     the normal `n`
   - `draw.sphere(cx,cy,cz, radius, r,g,b [,a])` — three rings

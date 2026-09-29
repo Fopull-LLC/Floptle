@@ -212,7 +212,7 @@ end
 
 | call | effect |
 |---|---|
-| `terrain.sculpt(x,y,z, radius [, strength [, mode]])` | sculpt: mode `"raise"` (default), `"lower"`/`"dig"`, `"smooth"`, `"flatten"`; strength 0–1 |
+| `terrain.sculpt(x,y,z, radius [, strength [, mode [, opts]]])` | sculpt: mode `"raise"` (default), `"lower"`/`"dig"`, `"smooth"`, `"flatten"`; strength 0–1; `opts.normal` = the plane `"flatten"` levels to (below) |
 | `terrain.dig(x,y,z, radius [, strength])` | sugar for `sculpt(..., "lower")` |
 | `terrain.paint(x,y,z, radius, r,g,b [, strength])` | recolor the surface (0–1 colors) |
 | `terrain.paintTexture(x,y,z, radius, slot)` | paint a palette texture slot (1-based; 0 clears) |
@@ -220,6 +220,26 @@ end
 | `terrain.slotAt(x,y,z)` → `slot` | the texture-palette slot at a point — *what the rock is made of*; `nil` where untextured |
 | `terrain.height(x, z)` → `y` | world Y of the highest surface under (x,z); `nil` if none |
 | `terrain.yields()` → `list` | the reports for edits that have **landed** since the last call (drained) |
+
+### Which way "flat" is
+
+`"flatten"` pulls the ground toward a plane through the point, over a disc of
+`radius` in that plane. On a flat landscape the plane is level (the terrain's
+own up). On a planet it is the **radial up at the point**, so a landing pad or
+a building site is level with the ground under it at any latitude. To level to
+something else, a slope or a building's own floor, pass the plane's normal in
+world space:
+
+```lua
+terrain.sculpt(p.x, p.y, p.z, 6, 1, "flatten", { normal = building:worldUp() })
+```
+
+Edits land at most 64 a frame. A game that queues more (a few hundred small
+patches while a base is built) sees them land over the next frames, in the
+order it asked; none are dropped until over 4,000 are waiting. Each edit also
+costs a remesh of the ground it touched, so one flatten the size of a
+footprint is far cheaper than a grid of small ones. The time edits cost is
+counted in `perf.ms("terrain")`.
 
 ### What a dig removed
 

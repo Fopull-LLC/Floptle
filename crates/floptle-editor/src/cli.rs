@@ -662,7 +662,9 @@ pub(crate) const VERBS: &[Verb] = &[
                 value: Value::Text,
                 required: false,
                 help: "with --frames: yaw the camera by this many degrees over the \
-                       sequence, with a small pitch nod — looking around",
+                       sequence, nodding between 10° below and 60° above its forward \
+                       three times — looking around. Without it every frame is drawn \
+                       from the scene's own camera",
             },
             Arg {
                 name: "--out",

@@ -478,7 +478,7 @@ pub(crate) fn shadow_uniforms(l: &Light) -> ([f32; 4], [f32; 4], [f32; 4]) {
             l.shadow_distance.max(1.0),
         ],
         [l.shadow_tint[0], l.shadow_tint[1], l.shadow_tint[2], l.shadow_quantize as f32],
-        [if l.shadow_dither { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+        [if l.shadow_dither { 1.0 } else { 0.0 }, l.shadow_steps.clamp(8, 64) as f32, 0.0, 0.0],
     )
 }
 
@@ -726,8 +726,9 @@ pub(crate) fn ao_fog(world: &floptle_core::World, cam: floptle_core::math::DVec3
 /// 0.7·scale box, Sphere → 0.85·max-scale, Capsule → 0.5-sized). Static collider
 /// Meshes don't proxy — they bake real shadow-only occluder volumes instead
 /// (`refresh_mesh_occluders`), so a level casts with its true silhouette. Skips
-/// hidden nodes and `CastShadow(false)` opt-outs; returns zeros when shadows are
-/// off.
+/// switched-off nodes, bodies that draw nothing (every mesh under them hidden)
+/// and `CastShadow(false)` opt-outs, and keeps the 32 nearest the camera;
+/// returns zeros when shadows are off.
 /// The proxy-occluder uniform block: `[count, 0, 0, 0]` plus the `prox_a` /
 /// `prox_b` / `prox_rot` arrays the shadow march reads (see `field.wgsl`).
 pub(crate) type ShadowProxies = ([f32; 4], [[f32; 4]; 32], [[f32; 4]; 32], [[f32; 4]; 32]);
@@ -736,85 +737,111 @@ pub(crate) fn collect_shadow_proxies(world: &World, cam_world: DVec3, enabled: b
     let mut a = [[0.0f32; 4]; 32];
     let mut b = [[0.0f32; 4]; 32];
     let mut r = [[0.0f32, 0.0, 0.0, 1.0]; 32];
-    let mut n = 0usize;
     if !enabled {
         return ([0.0; 4], a, b, r);
     }
+    // Every caster first, then the nearest 32 to the camera. Taking the first
+    // 32 in scene order let bodies 300 m away cast while the enemies in front
+    // of the player did not.
+    let mut children: std::collections::HashMap<u32, Vec<Entity>> = std::collections::HashMap::new();
+    for (e, p) in world.query::<floptle_core::Parent>() {
+        children.entry(p.0.index()).or_default().push(e);
+    }
+    // A proxy stands in for what the body draws, so a body whose meshes are
+    // all hidden (its model hidden past the fog, say) has no shadow to cast.
+    // A body with no mesh under it at all still casts: that is a physics body
+    // standing in for something drawn elsewhere, a first-person player's own.
+    // `(has a mesh, has a visible mesh)`.
+    fn meshes(world: &World, children: &std::collections::HashMap<u32, Vec<Entity>>, e: Entity, depth: u32) -> (bool, bool) {
+        let hidden = matches!(world.get::<floptle_core::Visible>(e), Some(floptle_core::Visible(false)));
+        let mut out = match world.get::<Matter>(e) {
+            Some(Matter::Mesh { .. } | Matter::Primitive { .. }) => (true, !hidden),
+            _ => (false, false),
+        };
+        if depth < 16 {
+            for &c in children.get(&e.index()).map(Vec::as_slice).unwrap_or(&[]) {
+                let (has, shown) = meshes(world, children, c, depth + 1);
+                out = (out.0 || has, out.1 || (shown && !hidden));
+            }
+        }
+        out
+    }
     let casts = |e: Entity| {
+        let (has, shown) = meshes(world, &children, e, 0);
         world.get::<floptle_core::CastShadow>(e).map(|c| c.0).unwrap_or(true)
+            && !floptle_core::is_disabled(world, e)
             && !matches!(world.get::<floptle_core::Visible>(e), Some(floptle_core::Visible(false)))
+            && (shown || !has)
     };
-    // Dynamic bodies first (the movers a shadow grounds most), then static
-    // Collidable primitives. Blobs/terrain are already in the field itself.
+    // (distance to the camera past its reach, a, b, rot)
+    type Found = (f32, [f32; 4], [f32; 4], [f32; 4]);
+    let mut found: Vec<Found> = Vec::new();
+    let no_rot = [0.0, 0.0, 0.0, 1.0];
     for (e, rb) in world.query::<floptle_core::RigidBody>() {
-        if n >= floptle_render::MAX_SHADOW_PROXIES || !casts(e) {
+        if !casts(e) {
             continue;
         }
         let wt = floptle_core::world_transform(world, e);
         let c = (wt.translation - cam_world).as_vec3();
-        match rb.kind {
-            floptle_core::BodyKind::Sphere => {
-                a[n] = [c.x, c.y, c.z, rb.radius];
-                b[n] = [0.0, 0.0, 0.0, 0.0];
-            }
+        let q = wt.rotation;
+        let (pa, pb, rot, reach) = match rb.kind {
+            floptle_core::BodyKind::Sphere => ([c.x, c.y, c.z, rb.radius], [0.0; 4], no_rot, rb.radius),
             floptle_core::BodyKind::Capsule => {
                 let up = wt.rotation * Vec3::Y;
                 let half = (0.5 * rb.height - rb.radius).max(0.0);
-                let (pa, pb) = (c - up * half, c + up * half);
-                a[n] = [pa.x, pa.y, pa.z, rb.radius];
-                b[n] = [pb.x, pb.y, pb.z, 1.0];
+                let (p0, p1) = (c - up * half, c + up * half);
+                ([p0.x, p0.y, p0.z, rb.radius], [p1.x, p1.y, p1.z, 1.0], no_rot, half + rb.radius)
             }
             floptle_core::BodyKind::Box => {
                 let h = rb.half_extents;
-                a[n] = [c.x, c.y, c.z, 0.0];
-                b[n] = [h[0], h[1], h[2], 2.0];
-                let q = wt.rotation;
-                r[n] = [q.x, q.y, q.z, q.w];
+                ([c.x, c.y, c.z, 0.0], [h[0], h[1], h[2], 2.0], [q.x, q.y, q.z, q.w], Vec3::from(h).length())
             }
-        }
-        n += 1;
+        };
+        found.push(((c.length() - reach).max(0.0), pa, pb, rot));
     }
     for (e, _) in world.query::<floptle_core::Collidable>() {
-        if n >= floptle_render::MAX_SHADOW_PROXIES
-            || !casts(e)
-            || world.get::<floptle_core::RigidBody>(e).is_some()
-        {
+        if world.get::<floptle_core::RigidBody>(e).is_some() || !casts(e) {
             continue;
         }
         let wt = floptle_core::world_transform(world, e);
         let c = (wt.translation - cam_world).as_vec3();
         let s = wt.scale;
-        match world.get::<Matter>(e) {
+        let q = wt.rotation;
+        let rot = [q.x, q.y, q.z, q.w];
+        let (pa, pb, rot, reach) = match world.get::<Matter>(e) {
             Some(Matter::Primitive { shape, .. }) => match shape {
                 floptle_core::Shape::Cube => {
-                    a[n] = [c.x, c.y, c.z, 0.0];
-                    b[n] = [0.7 * s.x, 0.7 * s.y, 0.7 * s.z, 2.0];
-                    let q = wt.rotation;
-                    r[n] = [q.x, q.y, q.z, q.w];
+                    let h = 0.7 * s;
+                    ([c.x, c.y, c.z, 0.0], [h.x, h.y, h.z, 2.0], rot, h.length())
                 }
+                // Flat in Z → a thin oriented box occluder (w = 2.0 = box).
                 floptle_core::Shape::Plane => {
-                    // Flat in Z → a thin oriented box occluder (w = 2.0 = box).
-                    a[n] = [c.x, c.y, c.z, 0.0];
-                    b[n] = [0.7 * s.x, 0.7 * s.y, 0.02 * s.z.max(1.0), 2.0];
-                    let q = wt.rotation;
-                    r[n] = [q.x, q.y, q.z, q.w];
+                    let h = Vec3::new(0.7 * s.x, 0.7 * s.y, 0.02 * s.z.max(1.0));
+                    ([c.x, c.y, c.z, 0.0], [h.x, h.y, h.z, 2.0], rot, h.length())
                 }
                 floptle_core::Shape::Sphere => {
-                    a[n] = [c.x, c.y, c.z, 0.85 * s.max_element()];
-                    b[n] = [0.0, 0.0, 0.0, 0.0];
+                    let rad = 0.85 * s.max_element();
+                    ([c.x, c.y, c.z, rad], [0.0; 4], no_rot, rad)
                 }
                 floptle_core::Shape::Capsule => {
                     let up = wt.rotation * Vec3::Y;
                     let radius = 0.5 * s.x.max(s.z);
                     let half = (0.5 * s.y).max(0.0);
-                    let (pa, pb) = (c - up * half, c + up * half);
-                    a[n] = [pa.x, pa.y, pa.z, radius];
-                    b[n] = [pb.x, pb.y, pb.z, 1.0];
+                    let (p0, p1) = (c - up * half, c + up * half);
+                    ([p0.x, p0.y, p0.z, radius], [p1.x, p1.y, p1.z, 1.0], no_rot, half + radius)
                 }
             },
             _ => continue, // trimesh colliders don't proxy (see doc comment)
-        }
-        n += 1;
+        };
+        found.push(((c.length() - reach).max(0.0), pa, pb, rot));
+    }
+    // Stable, so equal distances keep scene order and a frame is repeatable.
+    found.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let n = found.len().min(floptle_render::MAX_SHADOW_PROXIES);
+    for (i, (_, pa, pb, rot)) in found.into_iter().take(n).enumerate() {
+        a[i] = pa;
+        b[i] = pb;
+        r[i] = rot;
     }
     ([n as f32, 0.0, 0.0, 0.0], a, b, r)
 }
@@ -1356,5 +1383,46 @@ mod light_split_tests {
             "{:?}",
             s.three_d.cone[0]
         );
+    }
+}
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::*;
+
+    fn body(world: &mut World, z: f64) -> Entity {
+        let e = world.spawn();
+        world.insert(e, floptle_core::Transform::from_translation(DVec3::new(0.0, 1.0, z)));
+        world.insert(e, floptle_core::RigidBody { kind: floptle_core::BodyKind::Capsule, radius: 0.4, height: 1.8, ..Default::default() });
+        e
+    }
+
+    /// **0313: the bodies that cast are the ones near the camera.** Sixty
+    /// bodies listed far-to-near used to give the march the first 32 in scene
+    /// order, the ones hundreds of metres away. A body whose model is hidden
+    /// casts nothing; a body with nothing drawn under it at all (a physics
+    /// stand-in) still does; `CastShadow(false)` opts out.
+    #[test]
+    fn the_nearest_casters_get_the_proxy_slots() {
+        let mut world = World::default();
+        for i in (0..60).rev() {
+            body(&mut world, 5.0 + i as f64 * 10.0);
+        }
+        let hidden = body(&mut world, 1.0);
+        let model = world.spawn();
+        world.insert(model, floptle_core::Transform::IDENTITY);
+        world.insert(model, Matter::Mesh { asset_path: "m.glb".into() });
+        world.insert(model, floptle_core::Parent(hidden));
+        world.insert(model, floptle_core::Visible(false));
+        let opted = body(&mut world, 2.0);
+        world.insert(opted, floptle_core::CastShadow(false));
+
+        let (count, a, _, _) = collect_shadow_proxies(&world, DVec3::ZERO, true);
+        assert_eq!(count[0] as usize, 32);
+        let mut zs: Vec<f32> = a.iter().map(|p| p[2]).collect();
+        zs.sort_by(|x, y| x.total_cmp(y));
+        assert!(zs.iter().all(|z| *z > 4.0), "the hidden-model and opted-out bodies are not in: {zs:?}");
+        assert!(zs[31] < 320.0, "the 32 nearest, not the first 32 listed: farthest chosen at {}", zs[31]);
+        assert!((zs[0] - (5.0 - 0.5)).abs() < 1.0, "the nearest body is in: {zs:?}");
     }
 }

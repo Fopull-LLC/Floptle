@@ -97,6 +97,11 @@ impl AnchoredCollider {
         self.shape.normal(p - self.offset)
     }
 
+    /// [`CollisionShape::ray_cast`] from sim-frame `o`.
+    pub fn ray_cast(&self, o: Vec3, rd: Vec3, tmax: f32) -> crate::RayAnswer {
+        self.shape.ray_cast(o - self.offset, rd, tmax)
+    }
+
     /// The normal a ray travelling along unit `rd` reports where it stopped,
     /// at sim-frame `p` — see [`CollisionShape::ray_normal`].
     pub fn ray_normal(&self, p: Vec3, rd: Vec3) -> Vec3 {
@@ -266,12 +271,18 @@ pub struct RayHit {
     pub eid: Option<u32>,
 }
 
-/// Sphere-trace a ray against a set of colliders (SDF terrain, triangle mesh, analytic).
-/// Returns the first surface within `max_dist`, or None. The step is capped so a mesh
-/// collider's unsigned distance (which flattens to a large sentinel past its search reach)
-/// can't make the ray overshoot — at the cost of marching in ≤1-unit steps far from any
-/// surface (fine for the short rays games actually cast: ground checks, line-of-sight,
-/// shots). Range is bounded by the iteration budget (~512 units).
+/// The first surface a ray meets among `colliders`, within `max_dist`.
+///
+/// Only colliders whose box (or bounding sphere) the ray crosses are asked at
+/// all. A shape with an exact ray test (a triangle mesh walks its own cell
+/// grid) answers directly; the rest, terrain fields and analytic shapes, are
+/// sphere-traced together over the stretch of ray their boxes cover. The step
+/// is capped at one unit so an unsigned mesh distance cannot overshoot, and
+/// the march is bounded by its iteration budget (~512 units).
+///
+/// It used to march over EVERY collider at every step: a 3 m ground check on a
+/// level of a hundred models cost ~20 µs, a 50 m miss ~40 µs.
+///
 /// `mask` filters by collision layer: bit `i` set = colliders on layer `i` are
 /// testable (`!0` = everything, the no-filter default).
 pub fn raycast_colliders(
@@ -281,22 +292,64 @@ pub fn raycast_colliders(
     max_dist: f32,
     mask: u32,
 ) -> Option<RayHit> {
+    // A march stops within 0.02 of a surface, so a box grazed by that much
+    // must still be marched.
+    const SLACK: f32 = 0.05;
     let rd = dir.try_normalize()?;
-    let mut t = 0.0f32;
+    let mut best: Option<RayHit> = None;
+    let mut marched: Vec<usize> = Vec::new();
+    let (mut m_lo, mut m_hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    for (i, c) in colliders.iter().enumerate() {
+        // Sensors don't block rays either (a camera ray must pass through
+        // a portal trigger exactly like the player does).
+        if (mask >> c.layer) & 1 == 0 || c.sensor {
+            continue;
+        }
+        let span = match c.aabb().map(Ok).or_else(|| c.bounds().map(Err)) {
+            Some(Ok((lo, hi))) => {
+                crate::ray_box_span(origin, rd, lo - Vec3::splat(SLACK), hi + Vec3::splat(SLACK), max_dist)
+            }
+            Some(Err((centre, r))) => {
+                let r = r + SLACK;
+                let tc = (centre - origin).dot(rd);
+                let d2 = (origin + rd * tc - centre).length_squared();
+                (d2 <= r * r).then(|| {
+                    let h = (r * r - d2).sqrt();
+                    ((tc - h).max(0.0), (tc + h).min(max_dist))
+                })
+                .filter(|(a, b)| a <= b)
+            }
+            None => Some((0.0, max_dist)),
+        };
+        let Some((t0, t1)) = span else { continue };
+        match c.ray_cast(origin, rd, max_dist) {
+            crate::RayAnswer::March => {
+                marched.push(i);
+                m_lo = m_lo.min(t0);
+                m_hi = m_hi.max(t1);
+            }
+            crate::RayAnswer::Miss => {}
+            crate::RayAnswer::Hit(t, n) => {
+                if best.as_ref().is_none_or(|b| t < b.distance) {
+                    best = Some(RayHit { point: (origin + rd * t).into(), normal: n.into(), distance: t, eid: c.eid });
+                }
+            }
+        }
+    }
+    if marched.is_empty() {
+        return best;
+    }
+    let stop = best.as_ref().map_or(max_dist, |b| b.distance).min(m_hi);
+    let mut t = m_lo;
     for _ in 0..512 {
-        if t > max_dist {
-            return None;
+        if t > stop {
+            break;
         }
         let p = origin + rd * t;
         let mut dmin = f32::MAX;
         let mut hit = 0usize;
-        for (i, c) in colliders.iter().enumerate() {
-            // Sensors don't block rays either (a camera ray must pass through
-            // a portal trigger exactly like the player does).
-            if (mask >> c.layer) & 1 == 0 || c.sensor {
-                continue;
-            }
-            let d = c.distance(p);
+        for &i in &marched {
+            let d = colliders[i].distance(p);
             if d < dmin {
                 dmin = d;
                 hit = i;
@@ -309,16 +362,11 @@ pub fn raycast_colliders(
         if dmin < 0.02 {
             let c = &colliders[hit];
             let n = c.ray_normal(p, rd);
-            return Some(RayHit {
-                point: p.into(),
-                normal: n.into(),
-                distance: t,
-                eid: c.eid,
-            });
+            return Some(RayHit { point: p.into(), normal: n.into(), distance: t, eid: c.eid });
         }
         t += dmin.clamp(0.02, 1.0); // cap so an unsigned mesh distance can't overshoot
     }
-    None
+    best
 }
 
 /// A raycastable snapshot of a dynamic body, in the sim frame. Lent to the
@@ -3190,5 +3238,130 @@ mod mesh_ray_normal_tests {
             }
         }
         assert!(bad.is_empty(), "the feet did not stand on a flat mesh floor: {bad:?}");
+    }
+}
+
+#[cfg(test)]
+mod exact_ray_tests {
+    use super::*;
+    use crate::shapes::TriMeshCollider;
+
+    /// A bumpy grid of triangles: a terrain-like mesh with many cells.
+    fn bumpy(ox: f32, oz: f32) -> (Vec<Vec3>, Vec<u32>) {
+        let n = 24;
+        let mut verts = Vec::new();
+        for z in 0..=n {
+            for x in 0..=n {
+                let (fx, fz) = (x as f32 * 0.7 + ox, z as f32 * 0.7 + oz);
+                verts.push(Vec3::new(fx, (fx * 0.9).sin() * 0.6 + (fz * 1.3).cos() * 0.4, fz));
+            }
+        }
+        let mut idx = Vec::new();
+        for z in 0..n {
+            for x in 0..n {
+                let i = z * (n + 1) + x;
+                idx.extend([i, i + n + 1, i + 1, i + 1, i + n + 1, i + n + 2]);
+            }
+        }
+        (verts, idx)
+    }
+
+    fn brute(verts: &[Vec3], idx: &[u32], o: Vec3, rd: Vec3, tmax: f32) -> Option<f32> {
+        idx.chunks(3)
+            .filter_map(|t| {
+                let (a, b, c) = (verts[t[0] as usize], verts[t[1] as usize], verts[t[2] as usize]);
+                let (e1, e2) = (b - a, c - a);
+                let h = rd.cross(e2);
+                let det = e1.dot(h);
+                if det.abs() < 1e-9 {
+                    return None;
+                }
+                let s = o - a;
+                let u = s.dot(h) / det;
+                let q = s.cross(e1);
+                let v = rd.dot(q) / det;
+                let t = e2.dot(q) / det;
+                (u >= 0.0 && v >= 0.0 && u + v <= 1.0 && (0.0..=tmax).contains(&t)).then_some(t)
+            })
+            .min_by(|a, b| a.total_cmp(b))
+    }
+
+    /// **The mesh answers a ray exactly.** Its cell walk finds the same first
+    /// triangle a test of every triangle does, from above, below, at a slant
+    /// and along the ground.
+    #[test]
+    fn a_mesh_ray_finds_the_triangle_a_brute_force_test_finds() {
+        let (verts, idx) = bumpy(-3.1, -2.7);
+        let cols = vec![AnchoredCollider::world(Box::new(TriMeshCollider::new(&verts, &idx)))];
+        let mut seed = 0x9e37_79b9u32;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as f32 / u32::MAX as f32
+        };
+        let (mut hits, mut misses) = (0, 0);
+        for _ in 0..400 {
+            let o = Vec3::new(rnd() * 20.0 - 4.0, rnd() * 6.0 - 3.0, rnd() * 20.0 - 4.0);
+            let d = Vec3::new(rnd() - 0.5, rnd() - 0.5, rnd() - 0.5).normalize();
+            let want = brute(&verts, &idx, o, d, 30.0);
+            let got = raycast_colliders(&cols, o, d, 30.0, !0);
+            match (want, got) {
+                (Some(w), Some(g)) => {
+                    hits += 1;
+                    assert!((w - g.distance).abs() < 1e-3, "from {o} along {d}: brute {w}, ray {}", g.distance);
+                    assert!(Vec3::from(g.normal).dot(d) <= 0.0, "the normal faces back along the ray");
+                }
+                (None, None) => misses += 1,
+                (w, g) => {
+                    // Tolerance at a triangle edge: accept only a hit that is ON an edge.
+                    let t = w.or(g.map(|g| g.distance)).unwrap();
+                    let p = o + d * t;
+                    let near_edge = brute(&verts, &idx, p - d * 1e-3, d, 2e-3).is_some()
+                        != brute(&verts, &idx, p - d * 1e-3 + Vec3::splat(2e-3), d, 2e-3).is_some();
+                    assert!(near_edge, "from {o} along {d}: brute {w:?}, ray {:?}", g.map(|g| g.distance));
+                }
+            }
+        }
+        assert!(hits > 100 && misses > 50, "the fixture must test both: {hits} hits, {misses} misses");
+    }
+
+    /// **A ray asks only the colliders on its path.** A collider off to the
+    /// side of the ray is never queried, however many there are; the old march
+    /// asked every collider in the level at every step, which is what made a
+    /// 3 m ground check cost ~20 µs on a level of a hundred models.
+    #[test]
+    fn a_ray_never_asks_a_collider_off_its_path() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static ASKED: AtomicUsize = AtomicUsize::new(0);
+        struct Aside;
+        impl crate::CollisionShape for Aside {
+            fn distance(&self, p: Vec3) -> f32 {
+                ASKED.fetch_add(1, Ordering::Relaxed);
+                (p - Vec3::new(50.0, 0.0, 0.0)).length() - 1.0
+            }
+            fn normal(&self, _p: Vec3) -> Vec3 {
+                Vec3::Y
+            }
+            fn aabb(&self) -> Option<(Vec3, Vec3)> {
+                Some((Vec3::new(49.0, -1.0, -1.0), Vec3::new(51.0, 1.0, 1.0)))
+            }
+            fn ray_cast(&self, _o: Vec3, _rd: Vec3, _t: f32) -> crate::RayAnswer {
+                ASKED.fetch_add(1, Ordering::Relaxed);
+                crate::RayAnswer::March
+            }
+        }
+        let (v, i) = bumpy(0.0, 0.0);
+        let mut cols = vec![AnchoredCollider::world(Box::new(TriMeshCollider::new(&v, &i)))];
+        cols.push(AnchoredCollider::world(Box::new(crate::SphereShape { center: Vec3::new(8.0, 0.0, 8.0), radius: 0.5 })));
+        for _ in 0..50 {
+            cols.push(AnchoredCollider::world(Box::new(Aside)));
+        }
+        let down = raycast_colliders(&cols, Vec3::new(5.0, 3.0, 5.0), Vec3::NEG_Y, 10.0, !0);
+        let up = raycast_colliders(&cols, Vec3::new(5.0, 1.0, 5.0), Vec3::Y, 50.0, !0);
+        let ball = raycast_colliders(&cols, Vec3::new(8.0, 3.0, 8.0), Vec3::NEG_Y, 10.0, !0);
+        assert!(down.is_some() && up.is_none(), "the fixture: down hits the ground, up misses");
+        assert!(ball.is_some_and(|h| (h.distance - 2.5).abs() < 0.03), "a marched shape still answers: {ball:?}");
+        assert_eq!(ASKED.load(Ordering::Relaxed), 0, "a collider nowhere near the ray was asked");
     }
 }

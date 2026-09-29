@@ -34,6 +34,67 @@ impl Editor {
         self.script_host.profile().borrow_mut().record(bucket, ms);
     }
 
+    /// Time this frame's passes on the GPU when a game has turned the profiler
+    /// on (`perf.enable(true)`), so `perf.gpuMs` can answer on the player's own
+    /// machine; and publish the last frame whose timestamps have landed. The
+    /// marks are the ones `shot --timing` places. Returns whether this frame is
+    /// being timed: pair it with [`Self::end_live_gpu_timing`].
+    pub(crate) fn begin_live_gpu_timing(&mut self) -> bool {
+        if self.gpu_timing_headless || !self.script_host.profile().borrow().enabled() {
+            return false;
+        }
+        let Some(t) = self.gpu_timer.as_mut() else { return false };
+        t.poll();
+        let landed: Vec<(String, f32)> = t.spans().iter().map(|s| (s.label.clone(), s.ms)).collect();
+        if !landed.is_empty() {
+            self.script_host.profile().borrow_mut().set_gpu(landed, t.total_ms());
+        }
+        if !t.begin() {
+            return false;
+        }
+        self.gpu_timing_headless = true;
+        true
+    }
+
+    pub(crate) fn end_live_gpu_timing(&mut self) {
+        if let (Some(t), Some(g)) = (self.gpu_timer.as_mut(), self.gpu.as_ref()) {
+            t.end(g);
+        }
+        self.gpu_timing_headless = false;
+    }
+
+    /// Frames in a row a game may rebuild the script mirror before the Console
+    /// says so: half a second at 60 fps. A one-off rebuild (a scene swap, a
+    /// burst of renames) never reaches it.
+    pub(crate) const MIRROR_CHURN_FRAMES: u32 = 30;
+
+    /// Fold the frame into the profiler's history, and say once per Play when
+    /// the script mirror has been rebuilt from scratch every frame for
+    /// [`Self::MIRROR_CHURN_FRAMES`]: a cost in proportion to the whole scene
+    /// that nothing else names unless the game asks `perf.mirrorCause()`.
+    pub(crate) fn end_profile_frame(&mut self) {
+        let (streak, cause) = {
+            let mut p = self.script_host.profile().borrow_mut();
+            p.end_frame();
+            (p.mirror_rebuild_streak(), p.mirror_cause().map(str::to_string))
+        };
+        if self.playing && !self.mirror_churn_warned && streak >= Self::MIRROR_CHURN_FRAMES {
+            self.mirror_churn_warned = true;
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!(
+                    "the scripts' copy of the scene has been rebuilt from scratch on each of the last \
+                     {streak} frames, which costs time in proportion to the whole scene (the `mirror` \
+                     bucket in perf). The last cause: {}. Something structural is changing every \
+                     frame: a rename, a retag, a reparent or a script attached. Pool the node or keep \
+                     its name and tags fixed.",
+                    cause.as_deref().unwrap_or("unknown")
+                ),
+                None,
+            );
+        }
+    }
+
     /// Live syntax check for the active IDE file (drives the red squiggle):
     /// Lua through the script host, `.flsl` through the shader compiler.
     #[cfg(feature = "editor-ui")]
