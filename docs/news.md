@@ -1,5 +1,13 @@
 ## Just shipped
 
+**v0.103.0 — "Holds Steady"** (stable). A game can hold a steady frame rate:
+`app.setFrameCap` holds it to a rate it can always make, and
+`app.setDynamicResolution` lowers the render resolution whenever the graphics
+card falls behind. Fast bodies stop at the walls they run into instead of
+ending up behind them, and shape casts can start from a floor. A camera added
+in a `createNode` callback can be read back again, and a bent arm or leg
+reaches its target.
+
 **v0.102.0 — "Leaves A Mark"** (stable). Sun shadows can come from a shadow
 map: in a dense city it cuts the lighting cost by more than half, and
 everything drawn casts, including geometry built with the map tools. Decals
