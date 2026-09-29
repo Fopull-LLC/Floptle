@@ -1,5 +1,13 @@
 ## Just shipped
 
+**v0.102.0 — "Leaves A Mark"** (stable). Sun shadows can come from a shadow
+map: in a dense city it cuts the lighting cost by more than half, and
+everything drawn casts, including geometry built with the map tools. Decals
+wrap round corners, characters can reach, look and plant their feet, and a
+server can load levels as layers every player follows. Voice chat gets reverb
+sends, muffling and levelled microphones; terrain flattens are dozens of times
+cheaper; and script lines can hide behind the scene.
+
 **v0.102.0-rc1 — "Leaves A Mark"** (beta). Blood, scorch marks and bullet
 holes wrap round edges and climb walls with `decals.add`, hundreds at a time
 and none of them nodes. Characters can reach for things, look at things and
