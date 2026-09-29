@@ -1,5 +1,5 @@
 //! **`draw.nativeLines(true)` draws script lines over the finished picture at
-//! full resolution** (card 0317).
+//! full resolution**.
 //!
 //! At a render scale below 1 a line drawn into the scene is rasterised at the
 //! lowered resolution and stretched: at 0.5 a one-pixel line is two rows of

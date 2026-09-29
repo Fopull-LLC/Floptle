@@ -1161,7 +1161,7 @@ mod alloc_window_tests {
 mod tests {
     use super::*;
 
-    /// **0311: a rebuild every frame is said, once.** A game that retags a
+    /// **A rebuild every frame is said, once.** A game that retags a
     /// node each frame rebuilds the scripts' copy of the whole scene each
     /// frame; after half a second the Console names the cause, and says it
     /// once. A game that only moves things is never told anything.

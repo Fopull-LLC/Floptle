@@ -1397,7 +1397,7 @@ mod proxy_tests {
         e
     }
 
-    /// **0313: the bodies that cast are the ones near the camera.** Sixty
+    /// **The bodies that cast are the ones near the camera.** Sixty
     /// bodies listed far-to-near used to give the march the first 32 in scene
     /// order, the ones hundreds of metres away. A body whose model is hidden
     /// casts nothing; a body with nothing drawn under it at all (a physics

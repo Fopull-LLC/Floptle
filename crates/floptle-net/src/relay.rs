@@ -1795,7 +1795,8 @@ impl Transport for RelayHost {
                     if self.retry_at.is_some() {
                         self.notices.push(if kept {
                             format!(
-                                "back on the relay at {} — lobby {code} is still yours, and                                  everybody who was in it still is",
+                                "back on the relay at {} — lobby {code} is still yours, and \
+                                 everybody who was in it still is",
                                 self.relay_addr
                             )
                         } else {
@@ -2850,7 +2851,10 @@ mod managed_tests {
     /// remainder of the old one: the clock restarts at the reclaim.
     #[test]
     fn a_reclaimed_lobbys_idle_clock_restarts_at_the_reclaim() {
-        let idle = Duration::from_millis(200);
+        // A whole second: the checks below land a fraction of the window
+        // after a sleep, and a busy CI machine oversleeps by tens of
+        // milliseconds.
+        let idle = Duration::from_secs(1);
         let relay = TestRelay::managed_limited(
             TablePolicy::with(KEY, 20).reserving("U5FEFJ", KEY),
             Duration::from_secs(30),
@@ -2864,8 +2868,7 @@ mod managed_tests {
         let (mut again, back) =
             RelayHost::host_keyed_reclaiming(&relay.addr(), KEY, None, "U5FEFJ").expect("re-hosts");
         assert_eq!(back, "U5FEFJ", "not a reclaim");
-        // Past the old deadline, inside the new one: still open. (No `drain`
-        // here — it polls for 200 ms, which is the whole window.)
+        // Past the old deadline, inside the new one: still open.
         std::thread::sleep(idle * 3 / 4);
         let _ = again.poll();
         assert_eq!(relay.lobbies.load(Ordering::Relaxed), 1, "the old clock was carried over the reclaim");
@@ -2939,7 +2942,7 @@ mod managed_tests {
         panic!("the relay never sent this host its reclaim token");
     }
 
-    /// **0266: a listen host that drops gets its own lobby back, by its token.**
+    /// **A listen host that drops gets its own lobby back, by its token.**
     /// A player's game has no reservation, so on a managed relay the policy
     /// never agrees it owns its code, and a Wi-Fi blip minted a new one and
     /// stranded everybody held in the old lobby. The token the relay gave the

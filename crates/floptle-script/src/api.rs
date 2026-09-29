@@ -6337,6 +6337,163 @@ fn node_tag_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Result
     Ok(())
 }
 
+/// What `anim:reach`'s options table reads.
+pub(crate) const REACH_KEYS: &[&str] = &["pole", "weight", "root", "mid"];
+/// What `anim:lookAt`'s options table reads.
+pub(crate) const LOOK_KEYS: &[&str] = &["weight", "limit", "axis"];
+
+/// Read an optional weight argument: 0..1, default 1.
+fn anim_weight(v: Option<f64>, call: &str) -> mlua::Result<f32> {
+    let w = v.unwrap_or(1.0);
+    if !w.is_finite() {
+        return Err(mlua::Error::runtime(format!("anim:{call}: the weight is a number from 0 to 1")));
+    }
+    Ok(w.clamp(0.0, 1.0) as f32)
+}
+
+/// The animator methods that change this frame's pose after the animator has
+/// made it: bone writes, reach (two-bone IK) and look-at, plus the
+/// parameters blend states read and `boneWorld`.
+fn install_anim_pose_methods(
+    lua: &Lua,
+    shared: &Shared,
+    anim_methods: &Table,
+    queue: impl Fn(&Rc<RefCell<Vec<(u32, AnimCmd)>>>, u32, AnimCmd) + Copy + 'static,
+) -> mlua::Result<()> {
+    use crate::AnimPoseOp;
+    let euler = |y: f64, p: f64, r: f64| {
+        let q = glam::Quat::from_euler(EulerRot::YXZ, y as f32, p as f32, r as f32);
+        [q.x, q.y, q.z, q.w]
+    };
+    for (name, add) in [("setBoneRot", false), ("addBoneRot", true)] {
+        let cmds = shared.anim_commands.clone();
+        anim_methods.set(
+            name,
+            lua.create_function(move |_, (this, bone, y, p, r, w): (Table, String, f64, f64, f64, Option<f64>)| {
+                let e: u32 = this.raw_get("__id")?;
+                let weight = anim_weight(w, name)?;
+                queue(&cmds, e, AnimCmd::Pose(AnimPoseOp::Bone { bone, rot: Some(euler(y, p, r)), pos: None, add, weight }));
+                Ok(())
+            })?,
+        )?;
+    }
+    for (name, add) in [("setBonePos", false), ("addBonePos", true)] {
+        let cmds = shared.anim_commands.clone();
+        anim_methods.set(
+            name,
+            lua.create_function(move |_, (this, bone, v, w): (Table, String, Value, Option<f64>)| {
+                let e: u32 = this.raw_get("__id")?;
+                let p = crate::math_api::vec3_of(&v)
+                    .ok_or_else(|| mlua::Error::runtime(format!("anim:{name}: the position is a vec3")))?;
+                let weight = anim_weight(w, name)?;
+                let pos = Some([p.x as f32, p.y as f32, p.z as f32]);
+                queue(&cmds, e, AnimCmd::Pose(AnimPoseOp::Bone { bone, rot: None, pos, add, weight }));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let cmds = shared.anim_commands.clone();
+        anim_methods.set(
+            "reach",
+            lua.create_function(move |_, (this, tip, target, opts): (Table, String, Value, Option<Table>)| {
+                let e: u32 = this.raw_get("__id")?;
+                let t = crate::math_api::vec3_of(&target)
+                    .ok_or_else(|| mlua::Error::runtime("anim:reach: the target is a vec3 (world space)"))?;
+                let (mut pole, mut weight, mut root, mut mid) = (None, 1.0, None, None);
+                if let Some(o) = &opts {
+                    crate::opts::check_keys(o, REACH_KEYS, "anim:reach")?;
+                    if let Ok(v) = o.get::<Value>("pole")
+                        && !v.is_nil()
+                    {
+                        let p = crate::math_api::vec3_of(&v)
+                            .ok_or_else(|| mlua::Error::runtime("anim:reach: `pole` is a vec3 (world space)"))?;
+                        pole = Some([p.x, p.y, p.z]);
+                    }
+                    weight = anim_weight(o.get::<Option<f64>>("weight")?, "reach")?;
+                    root = o.get::<Option<String>>("root")?;
+                    mid = o.get::<Option<String>>("mid")?;
+                }
+                queue(&cmds, e, AnimCmd::Pose(AnimPoseOp::Reach { root, mid, tip, target: [t.x, t.y, t.z], pole, weight }));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let cmds = shared.anim_commands.clone();
+        anim_methods.set(
+            "lookAt",
+            lua.create_function(move |_, (this, bones, target, opts): (Table, Value, Value, Option<Table>)| {
+                let e: u32 = this.raw_get("__id")?;
+                let bones: Vec<String> = match bones {
+                    Value::String(s) => vec![s.to_str()?.to_string()],
+                    Value::Table(t) => t.sequence_values::<String>().collect::<mlua::Result<_>>()?,
+                    _ => return Err(mlua::Error::runtime("anim:lookAt: the bones are a name or a list of names, root-most first")),
+                };
+                if bones.is_empty() {
+                    return Err(mlua::Error::runtime("anim:lookAt: name at least one bone"));
+                }
+                let t = crate::math_api::vec3_of(&target)
+                    .ok_or_else(|| mlua::Error::runtime("anim:lookAt: the target is a vec3 (world space)"))?;
+                let (mut weight, mut limit, mut axis) = (1.0, 75.0f32, None);
+                if let Some(o) = &opts {
+                    crate::opts::check_keys(o, LOOK_KEYS, "anim:lookAt")?;
+                    weight = anim_weight(o.get::<Option<f64>>("weight")?, "lookAt")?;
+                    if let Some(l) = o.get::<Option<f64>>("limit")? {
+                        limit = l.clamp(0.0, 180.0) as f32;
+                    }
+                    if let Ok(v) = o.get::<Value>("axis")
+                        && !v.is_nil()
+                    {
+                        let a = crate::math_api::vec3_of(&v)
+                            .ok_or_else(|| mlua::Error::runtime("anim:lookAt: `axis` is a vec3"))?;
+                        axis = Some([a.x as f32, a.y as f32, a.z as f32]);
+                    }
+                }
+                queue(&cmds, e, AnimCmd::Pose(AnimPoseOp::LookAt { bones, target: [t.x, t.y, t.z], axis, limit_deg: limit, weight }));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let cmds = shared.anim_commands.clone();
+        anim_methods.set(
+            "setParam",
+            lua.create_function(move |_, (this, name, v): (Table, String, f64)| {
+                let e: u32 = this.raw_get("__id")?;
+                if !v.is_finite() {
+                    return Err(mlua::Error::runtime("anim:setParam: the value is a finite number"));
+                }
+                queue(&cmds, e, AnimCmd::SetParam { name, value: v as f32 });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let (scene, poses) = (shared.scene.clone(), shared.bone_poses.clone());
+        anim_methods.set(
+            "boneWorld",
+            lua.create_function(move |lua, (this, name): (Table, String)| {
+                let e: u32 = this.raw_get("__id")?;
+                let node = new_node_handle(lua, e)?;
+                Ok(match bone_world(&scene, &poses, &node, &name, "boneWorld")? {
+                    Some(w) => {
+                        let (y, p, r) = w.rotation.to_euler(EulerRot::YXZ);
+                        mlua::MultiValue::from_vec(vec![
+                            crate::math_api::LuaVec3(w.translation).into_lua(lua)?,
+                            Value::Number(y as f64),
+                            Value::Number(p as f64),
+                            Value::Number(r as f64),
+                        ])
+                    }
+                    None => mlua::MultiValue::new(),
+                })
+            })?,
+        )?;
+    }
+    Ok(())
+}
+
 /// `node:animator()` and the animation handle it returns.
 fn node_animator_method(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Result<()> {
 // node:animator() → the animation handle: play/stop/fade animation states on the
@@ -6419,9 +6576,12 @@ fn node_animator_method(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Re
         let cmds = shared.anim_commands.clone();
         anim_methods.set(
             "setSpeed",
-            lua.create_function(move |_, (this, s): (Table, f64)| {
+            lua.create_function(move |_, (this, s, layer): (Table, f64, Option<String>)| {
                 let e: u32 = this.raw_get("__id")?;
-                queue(&cmds, e, AnimCmd::SetSpeed(s as f32));
+                queue(&cmds, e, match layer {
+                    Some(layer) => AnimCmd::SetLayerSpeed { layer, speed: s as f32 },
+                    None => AnimCmd::SetSpeed(s as f32),
+                });
                 Ok(())
             })?,
         )?;
@@ -6480,6 +6640,7 @@ fn node_animator_method(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Re
             })?,
         )?;
     }
+    install_anim_pose_methods(lua, shared, &anim_methods, queue)?;
     // The layer whose state "shows": the topmost active layer, else the base.
     fn showing(info: &AnimInfo) -> Option<&(String, Option<String>, f32, bool)> {
         info.layers.iter().rev().find(|(_, s, _, _)| s.is_some()).or(info.layers.first())

@@ -271,6 +271,32 @@ pub struct RayHit {
     pub eid: Option<u32>,
 }
 
+/// Every face of the static colliders on the layers in `mask` that may cross
+/// the sim-frame box `(lo, hi)`, in the sim frame: what a projected decal is
+/// laid on. Sensors are skipped, as a ray skips them. The second value counts
+/// the colliders in reach that have no faces to give (a sphere, a capsule, a
+/// baked SDF), which a decal therefore cannot land on.
+pub fn triangles_in_box(colliders: &[AnchoredCollider], lo: Vec3, hi: Vec3, mask: u32) -> (Vec<crate::FaceTri>, usize) {
+    let mut out = Vec::new();
+    let mut faceless = 0;
+    for c in colliders {
+        if (mask >> c.layer) & 1 == 0 || c.sensor || !c.may_reach(lo, hi, 0.0) {
+            continue;
+        }
+        let from = out.len();
+        if !c.shape.triangles_in(lo - c.offset, hi - c.offset, &mut out) {
+            faceless += 1;
+            continue;
+        }
+        for t in &mut out[from..] {
+            for p in &mut t.p {
+                *p += c.offset;
+            }
+        }
+    }
+    (out, faceless)
+}
+
 /// The first surface a ray meets among `colliders`, within `max_dist`.
 ///
 /// Only colliders whose box (or bounding sphere) the ray crosses are asked at

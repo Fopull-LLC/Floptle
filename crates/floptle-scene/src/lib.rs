@@ -5461,7 +5461,7 @@ mod tests {
         assert_eq!(l.contact_length, 20.0, "and a wild reach is fenced");
     }
 
-    /// **0313: the shadow step budget.** Round-trips when set, is left out of
+    /// **The shadow step budget.** Round-trips when set, is left out of
     /// the file at its default (so every existing scene reads unchanged), and
     /// is fenced to 8..64 when typed by hand.
     #[test]

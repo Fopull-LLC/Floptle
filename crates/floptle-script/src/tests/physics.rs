@@ -773,7 +773,7 @@ fn physics_moving_a_body_is_not_mistaken_for_a_stashed_write() {
     assert_eq!(seen, 3.0, "and the stashed handle still reads the live pose");
 }
 
-/// **0320: terrain edits past a frame's share wait; they are not dropped.**
+/// **Terrain edits past a frame's share wait; they are not dropped.**
 /// A game laying 100 small flattens in one frame gets 64 this frame and 36 the
 /// next, in the order it asked, each carrying the normal it named. The drop
 /// that used to happen past 64 also applied its own "warning" op as a 65th
@@ -813,7 +813,7 @@ fn terrain_edits_past_a_frames_share_wait_in_order_with_their_normal() {
 }
 
 
-/// **0293: many rays in one call answer what one call each would.** A hit
+/// **Many rays in one call answer what one call each would.** A hit
 /// table where `raycast` gives one, `false` where it gives nil, in order, and
 /// `perf.counts().rays` counts every ray of both.
 #[test]
@@ -858,7 +858,7 @@ fn raycast_many_answers_what_one_raycast_each_would() {
     assert!(said.iter().any(|m| m == "rays=14"), "6 + 2 in the batches and 6 single rays: {said:?}");
 }
 
-/// **0315: `terrain.lodAnchor` takes a node, a point or nil, and hands back
+/// **`terrain.lodAnchor` takes a node, a point or nil, and hands back
 /// what it replaced.** Anything else is refused rather than read as nil.
 #[test]
 fn a_terrain_lod_anchor_is_a_node_a_point_or_nothing() {

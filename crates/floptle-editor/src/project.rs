@@ -273,8 +273,11 @@ impl Editor {
         // A missing file (e.g. a model deleted while still referenced by a VFX effect or
         // a scene node) must not be re-attempted + error-logged every frame — bail on the
         // cheap existence check. It re-imports for free if the file comes back.
-        if !floptle_vfs::exists(&file) || self.gpu.is_none() || self.raster.is_none() {
+        if !floptle_vfs::exists(&file) {
             return false;
+        }
+        if self.gpu.is_none() || self.raster.is_none() {
+            return self.import_rig_headless(path, &file);
         }
         let t = floptle_core::profile::Span::new();
         let decoded = floptle_assets::import_model(&file).map_err(|e| e.to_string());
@@ -300,8 +303,10 @@ impl Editor {
         {
             return;
         }
-        // Nothing to draw it with: a dedicated server, or `floptle run`.
+        // Nothing to draw it with: a dedicated server, or `floptle run`. The
+        // rig alone is read now, without its pictures.
         if self.gpu.is_none() || self.raster.is_none() {
+            self.import_model(path);
             return;
         }
         let file = resolve_asset_path(&self.project_root, path);
@@ -385,6 +390,44 @@ impl Editor {
             // waited on, and the caller requests before it asks.
             Some(false)
         }
+    }
+
+    /// A model on a host with nothing to draw with: its rig and nothing else,
+    /// so a dedicated server and `floptle run` pose the skeleton and a script
+    /// can ask where a bone is. A model with no rig is remembered as one and
+    /// never read again. True when the rig is registered.
+    fn import_rig_headless(&mut self, path: &str, file: &Path) -> bool {
+        if self.model_failed.contains(path) {
+            return false;
+        }
+        let t = floptle_core::profile::Span::new();
+        let ok = match floptle_assets::import_rig_only(file) {
+            Ok(Some(model)) => {
+                let overrides = crate::rig_overrides::RigOverrides::load(file);
+                let rig = anim::rig_from_model(&model, &overrides);
+                self.mesh_registry.insert(
+                    path.to_string(),
+                    MeshAsset {
+                        parts: Vec::new(),
+                        part_meta: Vec::new(),
+                        tex_filter: overrides.texture_filter,
+                        size: model.size,
+                        rig: Some(rig),
+                    },
+                );
+                true
+            }
+            Ok(None) => false,
+            Err(e) => {
+                floptle_say::say_err!("  rig import {path} failed ({e})");
+                false
+            }
+        };
+        if !ok {
+            self.model_failed.insert(path.to_string());
+        }
+        self.profile_record(floptle_core::profile::Bucket::Models, t.ms());
+        ok
     }
 
     /// The GPU half of an import: upload a decoded model's parts and textures,

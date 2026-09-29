@@ -1,6 +1,6 @@
 # Maths & the world
 
-Vectors, terrain, water, scattered props, and orbital time.
+Vectors, terrain, water, scattered props, decals, and orbital time.
 
 Part of the [scripting guide](../scripting.md) · [every call, as a reference](../lua-api.md)
 
@@ -10,6 +10,7 @@ Part of the [scripting guide](../scripting.md) · [every call, as a reference](.
 - [22. Terrain: `terrain.sculpt`, `dig` & queries](#22-terrain-terrainsculpt-dig-queries)
 - [22a. Water: volumes, buoyancy & `water.*`](#22a-water-volumes-buoyancy-water)
 - [22b. Scatter: thousands of props from a seed](#22b-scatter-thousands-of-props-from-a-seed)
+- [22c. Decals: marks on the world's surfaces](#22c-decals-marks-on-the-worlds-surfaces)
 - [25. Space: orbits, gravity & time-warp](#25-space-orbits-gravity-time-warp)
 
 ---
@@ -536,6 +537,80 @@ raycast will not hit one — aim with `scatter.near`, which is a proximity query
 not a ray. Prototypes are **mesh assets**, not prefabs or script-built subtrees.
 
 ---
+
+## 22c. Decals: marks on the world's surfaces
+
+Blood, scorch marks, bullet holes, footprints and paint are pictures laid on a
+surface, and `decals.add` lays one. It isn't a node. It lands on the static
+geometry under it (level meshes, terrain, Collidable boxes and planes), folds
+over edges and into corners, and is lit, shadowed and fogged like the surface
+it lies on.
+
+```lua
+function onHit(hit)
+  decals.add{
+    texture = "textures/decals/blood.png",
+    pos = vec3(hit.x, hit.y, hit.z),
+    normal = vec3(hit.nx, hit.ny, hit.nz),
+    size = 0.8,
+    rotation = math.random() * math.pi * 2,
+  }
+end
+```
+
+A decal is a box standing on the surface: `size` wide, `height` tall (default
+the same as `size`) and `depth` deep (default half the larger of the two).
+Everything inside the box takes the picture:
+
+- **Over an edge** the picture carries on down the side, as if folded there. A
+  splat that lands near the lip of a ledge wraps the lip, and never hangs in
+  the air past it.
+- **Into a corner** the picture carries on up the wall. A splat on the floor by
+  a wall climbs the wall. It never pokes through.
+- **On a curved surface** it follows the curve.
+- It never reaches the back of a thin wall or the underside of a ledge. Faces
+  turned more than `maxAngle` (default 100°) from `normal` get nothing.
+
+The other options:
+
+| Option | Default | |
+| --- | --- | --- |
+| `up` | world up | Which way the top of the picture points, flattened onto the surface. |
+| `rotation` | 0 | Radians about `normal`, applied after `up`. |
+| `color` | `{1, 1, 1}` | Multiplies the picture. |
+| `alpha` | 1 | Multiplies the picture's own alpha. |
+| `sheetCols`, `sheetRows`, `cell` | 1, 1, 0 | Use one cell of a sheet: six splats in one picture. |
+| `layers` | every layer | A layer name or a list: the layer your level is on keeps marks off everything else. |
+| `maxAngle` | 100 | Degrees. See above. |
+
+`decals.add` gives back an id, or `nil` when nothing under the box could take
+the mark: a spray into the sky, or a sphere or capsule collider, which has no
+faces for a decal to lie on.
+
+```lua
+local id = decals.add{ texture = "textures/decals/scorch.png", pos = p, normal = n, size = 2 }
+decals.set(id, { alpha = 0.5 })     -- fade it; also color = {r, g, b}
+decals.remove(id)
+decals.clear()
+decals.count()
+```
+
+**The engine keeps the budget.** It holds 1024 decals, and the oldest goes
+when a new one arrives past that. `decals.setMax(n)` changes the budget, up to
+65536. `decals.set` and `decals.remove` on a decal that has already gone
+answer `false`.
+
+**What they cost.** All the decals that share a picture are one mesh and one
+draw, whatever their number. Adding, changing or removing a decal rebuilds its
+picture's mesh once, that frame. `perf.counts().decals` and
+`perf.counts().decalTris` are the number in the world and the triangles they
+were laid as. A mark is cut to its box at the moment it's added, so on a big
+flat floor it's a handful of triangles, and on finely meshed ground it's the
+triangles under it, up to 4096.
+
+Decals stay where they were laid. One on a door that later opens stays in the
+doorway, and one on terrain that is later dug stays in the air. Remove it when
+its surface changes. Playing again, or switching scene, clears them all.
 
 ## 25. Space: orbits, gravity & time-warp
 

@@ -19,6 +19,10 @@
 
 use floptle_core::math::{Mat4, Quat, Vec3};
 use std::collections::HashMap;
+use std::sync::Arc;
+
+pub mod ik;
+pub use ik::PoseOp;
 
 /// Local translation/rotation/scale — the node-space currency of the runtime.
 /// `f32` (not `Transform`'s `f64`): animated nodes live near their model/rig
@@ -595,11 +599,161 @@ impl Clip {
     }
 }
 
+/// Clips placed on a line or a plane and mixed by where the controller's
+/// parameters put the state: jog to sprint by speed, an aim by yaw and pitch.
+///
+/// The state's own clip sets its clock. Every point plays at the same
+/// normalised time, so a walk and a run blended mid-stride stay in step.
+#[derive(Clone, Debug)]
+pub struct BlendSpace {
+    /// The controller parameters it reads: one (a line) or two (a plane).
+    pub params: Vec<String>,
+    /// Each clip, and where on the line (`x`) or plane (`x`, `y`) it sits.
+    pub points: Vec<(Clip, [f32; 2])>,
+}
+
+impl BlendSpace {
+    /// How much of each point to mix at `at`, summing to 1. On a line, the two
+    /// points either side, linearly (clamped past the ends). On a plane, by
+    /// inverse squared distance, exact at a point.
+    pub fn weights(&self, at: [f32; 2], out: &mut Vec<f32>) {
+        out.clear();
+        out.resize(self.points.len(), 0.0);
+        if self.points.is_empty() {
+            return;
+        }
+        if self.params.len() < 2 {
+            let x = at[0];
+            let (mut lo, mut hi): (Option<usize>, Option<usize>) = (None, None);
+            for (i, (_, p)) in self.points.iter().enumerate() {
+                if p[0] <= x && lo.is_none_or(|l| p[0] > self.points[l].1[0]) {
+                    lo = Some(i);
+                }
+                if p[0] >= x && hi.is_none_or(|h| p[0] < self.points[h].1[0]) {
+                    hi = Some(i);
+                }
+            }
+            match (lo, hi) {
+                (Some(a), Some(b)) if a != b => {
+                    let (xa, xb) = (self.points[a].1[0], self.points[b].1[0]);
+                    let k = ((x - xa) / (xb - xa).max(1e-9)).clamp(0.0, 1.0);
+                    out[a] = 1.0 - k;
+                    out[b] = k;
+                }
+                (Some(a), _) | (None, Some(a)) => out[a] = 1.0,
+                (None, None) => {}
+            }
+            return;
+        }
+        let mut total = 0.0;
+        for (i, (_, p)) in self.points.iter().enumerate() {
+            let d2 = (p[0] - at[0]).powi(2) + (p[1] - at[1]).powi(2);
+            if d2 < 1e-10 {
+                out.iter_mut().for_each(|w| *w = 0.0);
+                out[i] = 1.0;
+                return;
+            }
+            out[i] = 1.0 / d2;
+            total += out[i];
+        }
+        out.iter_mut().for_each(|w| *w /= total);
+    }
+}
+
+/// A pose played as its own mirror image across the character's left-right
+/// plane (model-space X, the glTF convention: a character faces +Z). What a
+/// left bone does, its right twin does, reflected; a bone with no twin (the
+/// spine, the head) is reflected onto itself.
+///
+/// Each bone's motion is measured in model space against its own rest, so a
+/// rig whose left and right rest frames are not mirror images of each other
+/// still mirrors correctly: the reflected motion is applied to the twin's rest.
+#[derive(Debug)]
+pub struct Mirror {
+    skel: Skeleton,
+    twin: Vec<usize>,
+    rest_world: Vec<Mat4>,
+    rest_world_inv: Vec<Mat4>,
+}
+
+impl Mirror {
+    pub fn new(skel: &Skeleton) -> Self {
+        let twin = (0..skel.len())
+            .map(|i| twin_name(&skel.nodes[i].name).and_then(|n| skel.index_of(&n)).unwrap_or(i))
+            .collect();
+        let mut rest_world = Vec::new();
+        skel.world_matrices(&skel.rest_pose(), &mut rest_world);
+        let rest_world_inv = rest_world.iter().map(|m| m.inverse()).collect();
+        Self { skel: skel.clone(), twin, rest_world, rest_world_inv }
+    }
+
+    /// The bone that plays `i`'s part in the mirror image.
+    pub fn twin(&self, i: usize) -> usize {
+        self.twin.get(i).copied().unwrap_or(i)
+    }
+
+    /// Replace `pose` (a full local pose on this skeleton) with its mirror image.
+    pub fn apply(&self, pose: &mut [TransformTRS]) {
+        let n = self.skel.len();
+        if pose.len() != n {
+            return;
+        }
+        let mut world = Vec::with_capacity(n);
+        self.skel.world_matrices(pose, &mut world);
+        let flip = Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0));
+        let mirrored: Vec<Mat4> = (0..n)
+            .map(|i| {
+                let j = self.twin[i];
+                flip * (world[j] * self.rest_world_inv[j]) * flip * self.rest_world[i]
+            })
+            .collect();
+        for (i, node) in self.skel.nodes.iter().enumerate() {
+            let local = match node.parent {
+                Some(p) => mirrored[p].inverse() * mirrored[i],
+                None => mirrored[i],
+            };
+            // Undo `matrix_about_rest`: T(t + anchor)·R·S·T(-pivot).
+            let mut trs = TransformTRS::from_matrix(local * Mat4::from_translation(node.pivot));
+            if node.pivot != Vec3::ZERO {
+                trs.t -= node.pivot_anchor();
+            }
+            pose[i] = trs;
+        }
+    }
+}
+
+/// The other side's name for a bone: `Hand.L` ↔ `Hand.R`, `hand_l` ↔
+/// `hand_r`, `LeftHand` ↔ `RightHand`, `mixamorig:LeftArm` ↔
+/// `mixamorig:RightArm`. `None` for a bone on the middle line.
+pub fn twin_name(name: &str) -> Option<String> {
+    for (a, b) in [(".L", ".R"), ("_L", "_R"), (".l", ".r"), ("_l", "_r"), (" L", " R")] {
+        if let Some(stem) = name.strip_suffix(a) {
+            return Some(format!("{stem}{b}"));
+        }
+        if let Some(stem) = name.strip_suffix(b) {
+            return Some(format!("{stem}{a}"));
+        }
+    }
+    for (a, b) in [("Left", "Right"), ("left", "right"), ("LEFT", "RIGHT")] {
+        if name.contains(a) {
+            return Some(name.replacen(a, b, 1));
+        }
+        if name.contains(b) {
+            return Some(name.replacen(b, a, 1));
+        }
+    }
+    None
+}
+
 /// One state (a node in the controller graph): a clip plus how to play it.
 #[derive(Clone, Debug)]
 pub struct State {
     pub name: String,
     pub clip: Clip,
+    /// Mix several clips by the controller's parameters instead of playing
+    /// `clip` alone. `clip` still sets the state's clock (duration, looping,
+    /// events).
+    pub blend: Option<BlendSpace>,
     pub speed: f32,
     pub looped: bool,
     /// Overrides the fade of every transition into this state (seconds).
@@ -608,6 +762,8 @@ pub struct State {
     /// Stepped-playback override for this state (frames/sec); `None` falls
     /// back to the controller-wide `sample_fps`.
     pub fps: Option<f32>,
+    /// Play the clip as its left-right mirror image (see [`Mirror`]).
+    pub mirror: Option<Arc<Mirror>>,
     /// Precomputed `clip.covered_nodes()`.
     covered: Vec<usize>,
 }
@@ -615,7 +771,73 @@ pub struct State {
 impl State {
     pub fn new(name: String, clip: Clip) -> Self {
         let covered = clip.covered_nodes();
-        Self { name, clip, speed: 1.0, looped: true, fade_in: None, fps: None, covered }
+        Self { name, clip, blend: None, speed: 1.0, looped: true, fade_in: None, fps: None, mirror: None, covered }
+    }
+
+    /// This state played as its mirror image: every bone it moves hands its
+    /// motion to its twin.
+    pub fn with_mirror(mut self, mirror: Arc<Mirror>) -> Self {
+        let twins: Vec<usize> = self.covered.iter().map(|&i| mirror.twin(i)).collect();
+        self.covered.extend(twins);
+        self.covered.sort_unstable();
+        self.covered.dedup();
+        self.mirror = Some(mirror);
+        self
+    }
+
+    /// This state as a blend of `space`'s clips (see [`BlendSpace`]).
+    pub fn with_blend(mut self, space: BlendSpace) -> Self {
+        let mut covered = self.covered.clone();
+        for (c, _) in &space.points {
+            covered.extend(c.covered_nodes());
+        }
+        covered.sort_unstable();
+        covered.dedup();
+        self.covered = covered;
+        self.blend = Some(space);
+        self
+    }
+
+    /// Sample the state at clock time `t` into `out` (seeded by the caller
+    /// with the rest pose).
+    fn sample(&self, t: f32, params: &HashMap<String, f32>, out: &mut [TransformTRS]) {
+        self.sample_clips(t, params, out);
+        if let Some(m) = &self.mirror {
+            m.apply(out);
+        }
+    }
+
+    fn sample_clips(&self, t: f32, params: &HashMap<String, f32>, out: &mut [TransformTRS]) {
+        let Some(space) = &self.blend else {
+            self.clip.sample_into(t, out);
+            return;
+        };
+        let at = [
+            space.params.first().and_then(|p| params.get(p)).copied().unwrap_or(0.0),
+            space.params.get(1).and_then(|p| params.get(p)).copied().unwrap_or(0.0),
+        ];
+        let mut weights = Vec::new();
+        space.weights(at, &mut weights);
+        let u = t / self.clip.duration.max(1e-6);
+        let seed = out.to_vec();
+        let mut scratch = seed.clone();
+        let mut total = 0.0;
+        for ((clip, _), &w) in space.points.iter().zip(&weights) {
+            if w <= 0.0 {
+                continue;
+            }
+            scratch.copy_from_slice(&seed);
+            clip.sample_into(u * clip.duration, &mut scratch);
+            if total == 0.0 {
+                out.copy_from_slice(&scratch);
+            } else {
+                let k = w / (total + w);
+                for (o, s) in out.iter_mut().zip(scratch.iter()) {
+                    *o = TransformTRS::blend(o, s, k);
+                }
+            }
+            total += w;
+        }
     }
 }
 
@@ -662,6 +884,18 @@ pub struct Layer {
     pub fades: HashMap<(usize, usize), f32>,
     /// Blend of this layer over the ones below (1 = full override).
     pub weight: f32,
+    /// This layer's own playback rate, on top of the controller's `speed`.
+    pub speed: f32,
+    /// Add this layer's motion on top of the layers below instead of replacing
+    /// it: each clip is played as its difference from its own first frame, so
+    /// a lean or a breath rides on the run cycle rather than deleting it.
+    pub additive: bool,
+    /// The only nodes this layer may touch (by skeleton index), when set; the
+    /// clip's own keys decide within them. `None`: whatever the clip keys.
+    pub mask: Option<Vec<bool>>,
+    /// Each state's first frame, the reference an additive layer measures
+    /// from. Filled on first use.
+    additive_ref: Vec<Vec<TransformTRS>>,
     cur: Option<Playback>,
     fade: Option<Fade>,
 }
@@ -674,9 +908,17 @@ impl Layer {
             default_state,
             fades: HashMap::new(),
             weight: 1.0,
+            speed: 1.0,
+            additive: false,
+            mask: None,
+            additive_ref: Vec::new(),
             cur: None,
             fade: None,
         }
+    }
+
+    fn masked(&self, n: usize) -> bool {
+        self.mask.as_ref().is_none_or(|m| m.get(n).copied().unwrap_or(false))
     }
 
     pub fn state_index(&self, name: &str) -> Option<usize> {
@@ -745,6 +987,8 @@ pub struct Controller {
     fired: Vec<FiredEvent>,
     /// Global playback speed multiplier (Lua `setSpeed`).
     pub speed: f32,
+    /// Named values blend states read (`anim:setParam`).
+    params: HashMap<String, f32>,
 }
 
 impl Controller {
@@ -759,6 +1003,28 @@ impl Controller {
             rest,
             fired: Vec::new(),
             speed: 1.0,
+            params: HashMap::new(),
+        }
+    }
+
+    /// Set a parameter blend states read.
+    pub fn set_param(&mut self, name: &str, v: f32) {
+        match self.params.get_mut(name) {
+            Some(p) => *p = v,
+            None => {
+                self.params.insert(name.to_string(), v);
+            }
+        }
+    }
+
+    pub fn param(&self, name: &str) -> Option<f32> {
+        self.params.get(name).copied()
+    }
+
+    /// One layer's own playback rate (on top of the controller's `speed`).
+    pub fn set_layer_speed(&mut self, layer: usize, s: f32) {
+        if let Some(l) = self.layers.get_mut(layer) {
+            l.speed = s;
         }
     }
 
@@ -838,6 +1104,7 @@ impl Controller {
         let default_fade = self.default_fade;
         let sample_fps = self.sample_fps;
         let rest = &self.rest;
+        let params = &self.params;
         let Some(l) = self.layers.get_mut(layer) else { return };
         if state >= l.states.len() {
             return;
@@ -864,7 +1131,7 @@ impl Controller {
             // If a fade is already in flight, freeze its current blend as the
             // new fade source (never juggle 3 live states).
             let from = if let Some(old) = l.fade.take() {
-                Self::freeze_blend(l, &old, Some(cur), sample_fps, rest)
+                Self::freeze_blend(l, &old, Some(cur), sample_fps, rest, params)
             } else {
                 FadeFrom::Playback(cur)
             };
@@ -872,7 +1139,7 @@ impl Controller {
         } else if let Some(old) = l.fade.take() {
             // The layer was fading out — keep fading from that snapshot into
             // the new state instead of snapping.
-            let from = Self::freeze_blend(l, &old, None, sample_fps, rest);
+            let from = Self::freeze_blend(l, &old, None, sample_fps, rest, params);
             l.fade = Some(Fade { from, t: 0.0, dur: fade_dur });
         }
         l.cur = Some(Playback::enter(state));
@@ -886,12 +1153,13 @@ impl Controller {
         cur: Option<Playback>,
         sample_fps: Option<f32>,
         rest: &[TransformTRS],
+        params: &HashMap<String, f32>,
     ) -> FadeFrom {
         let mut pose = rest.to_vec();
         let mut covered: Vec<usize> = Vec::new();
         match cur {
             Some(cur) => {
-                Self::eval_layer_pose(l, fade, cur, sample_fps, &mut pose);
+                Self::eval_layer_pose(l, fade, cur, sample_fps, params, &mut pose);
                 covered.extend_from_slice(&l.states[cur.state].covered);
             }
             None => {
@@ -903,7 +1171,7 @@ impl Controller {
                         let st = &l.states[p.state];
                         let tq = Self::quantize(p.t, st.fps.or(sample_fps));
                         let mut sampled = rest.to_vec();
-                        st.clip.sample_into(tq, &mut sampled);
+                        st.sample(tq, params, &mut sampled);
                         for (o, s) in pose.iter_mut().zip(sampled.iter()) {
                             *o = TransformTRS::blend(o, s, k);
                         }
@@ -942,12 +1210,13 @@ impl Controller {
         let sample_fps = self.sample_fps;
         let default_fade = self.default_fade;
         let rest = &self.rest;
+        let params = &self.params;
         let Some(l) = self.layers.get_mut(layer) else { return };
         let Some(cur) = l.cur.take() else { return };
         let dur = fade.unwrap_or(default_fade);
         if dur > 0.0 {
             let from = if let Some(old) = l.fade.take() {
-                Self::freeze_blend(l, &old, Some(cur), sample_fps, rest)
+                Self::freeze_blend(l, &old, Some(cur), sample_fps, rest, params)
             } else {
                 FadeFrom::Playback(cur)
             };
@@ -998,7 +1267,7 @@ impl Controller {
                     looped: l.cur.map(|c| l.states[c.state].looped).unwrap_or(false),
                     rate: l
                         .cur
-                        .map(|c| self.speed * l.states[c.state].speed)
+                        .map(|c| self.speed * l.speed * l.states[c.state].speed)
                         .unwrap_or(0.0),
                 })
                 .collect(),
@@ -1091,6 +1360,7 @@ impl Controller {
         fade: &Fade,
         cur: Playback,
         sample_fps: Option<f32>,
+        params: &HashMap<String, f32>,
         out: &mut [TransformTRS],
     ) {
         let cs = &l.states[cur.state];
@@ -1101,8 +1371,8 @@ impl Controller {
                 let pt = Self::quantize(p.t, ps.fps.or(sample_fps));
                 // out already holds rest; layer 'from' first, then blend in cur.
                 let mut b = out.to_vec();
-                ps.clip.sample_into(pt, out);
-                cs.clip.sample_into(ct, &mut b);
+                ps.sample(pt, params, out);
+                cs.sample(ct, params, &mut b);
                 let k = smoothstep((fade.t / fade.dur.max(1e-6)).clamp(0.0, 1.0));
                 for (o, nb) in out.iter_mut().zip(b.iter()) {
                     *o = TransformTRS::blend(o, nb, k);
@@ -1110,7 +1380,7 @@ impl Controller {
             }
             FadeFrom::Frozen { pose: frozen, .. } => {
                 let mut b = out.to_vec();
-                cs.clip.sample_into(ct, &mut b);
+                cs.sample(ct, params, &mut b);
                 let k = smoothstep((fade.t / fade.dur.max(1e-6)).clamp(0.0, 1.0));
                 for ((o, f), nb) in out.iter_mut().zip(frozen.iter()).zip(b.iter()) {
                     *o = *f;
@@ -1131,6 +1401,24 @@ impl Controller {
 
         for li in 0..self.layers.len() {
             let l = &mut self.layers[li];
+            // Clip time runs at the layer's own rate; fades stay in seconds.
+            let ldt = dt * l.speed;
+            if l.additive && l.additive_ref.len() != l.states.len() {
+                let rest = &self.rest;
+                let params = &self.params;
+                l.additive_ref = l
+                    .states
+                    .iter()
+                    .map(|st| {
+                        let mut r = rest.clone();
+                        match &st.blend {
+                            Some(b) if !b.points.is_empty() => b.points[0].0.sample_into(0.0, &mut r),
+                            _ => st.sample(0.0, params, &mut r),
+                        }
+                        r
+                    })
+                    .collect();
+            }
 
             // Start the default state if idle (base behavior on spawn).
             if l.cur.is_none() && l.fade.is_none()
@@ -1146,8 +1434,8 @@ impl Controller {
                 let prev_t = cur.t;
                 let fresh = cur.fresh;
                 cur.fresh = false;
-                let mut new_t = cur.t + dt * st.speed;
-                let forward = dt * st.speed > 0.0;
+                let mut new_t = cur.t + ldt * st.speed;
+                let forward = ldt * st.speed > 0.0;
                 if st.looped {
                     if forward && !st.clip.events.is_empty() {
                         // Count each event's crossings in (prev_t, new_t] on the
@@ -1200,7 +1488,7 @@ impl Controller {
                 if let FadeFrom::Playback(p) = &mut f.from {
                     let st = &l.states[p.state];
                     let dur = st.clip.duration.max(1e-6);
-                    p.t += dt * st.speed;
+                    p.t += ldt * st.speed;
                     if st.looped {
                         p.t %= dur;
                     } else if p.t >= dur {
@@ -1224,7 +1512,7 @@ impl Controller {
                                 // Still blending in when it finished — freeze
                                 // the mid-blend so the return doesn't pop.
                                 let from =
-                                    Self::freeze_blend(l, &old, Some(cur), sample_fps, &self.rest);
+                                    Self::freeze_blend(l, &old, Some(cur), sample_fps, &self.rest, &self.params);
                                 l.fade = Some(Fade { from, t: 0.0, dur: fade });
                             } else {
                                 l.fade =
@@ -1251,10 +1539,13 @@ impl Controller {
             if w <= 0.0 {
                 continue;
             }
+            let params = &self.params;
+            // An additive layer measures each state from its own first frame.
+            let reference = |state: usize| l.additive.then(|| l.additive_ref.get(state)).flatten();
             match (l.cur, l.fade.as_ref()) {
                 (Some(cur), Some(fade)) => {
                     self.scratch_a.copy_from_slice(&self.rest);
-                    Self::eval_layer_pose(l, fade, cur, sample_fps, &mut self.scratch_a);
+                    Self::eval_layer_pose(l, fade, cur, sample_fps, params, &mut self.scratch_a);
                     // Fold over accumulator on the union of covered nodes —
                     // a frozen snapshot carries the covered set it captured.
                     let mut nodes = l.states[cur.state].covered.clone();
@@ -1268,11 +1559,10 @@ impl Controller {
                     }
                     nodes.sort_unstable();
                     nodes.dedup();
+                    let r = reference(cur.state);
                     for &n in &nodes {
-                        if let (Some(dst), Some(src)) =
-                            (self.pose.get(n).copied(), self.scratch_a.get(n))
-                        {
-                            self.pose[n] = TransformTRS::blend(&dst, src, w);
+                        if l.masked(n) {
+                            fold(&mut self.pose, n, self.scratch_a.get(n), w, r.and_then(|r| r.get(n)));
                         }
                     }
                 }
@@ -1280,12 +1570,11 @@ impl Controller {
                     let st = &l.states[cur.state];
                     let t = Self::quantize(cur.t, st.fps.or(sample_fps));
                     self.scratch_b.copy_from_slice(&self.rest);
-                    st.clip.sample_into(t, &mut self.scratch_b);
+                    st.sample(t, params, &mut self.scratch_b);
+                    let r = reference(cur.state);
                     for &n in &st.covered {
-                        if let (Some(dst), Some(src)) =
-                            (self.pose.get(n).copied(), self.scratch_b.get(n))
-                        {
-                            self.pose[n] = TransformTRS::blend(&dst, src, w);
+                        if l.masked(n) {
+                            fold(&mut self.pose, n, self.scratch_b.get(n), w, r.and_then(|r| r.get(n)));
                         }
                     }
                 }
@@ -1298,21 +1587,21 @@ impl Controller {
                             let st = &l.states[p.state];
                             let t = Self::quantize(p.t, st.fps.or(sample_fps));
                             self.scratch_b.copy_from_slice(&self.rest);
-                            st.clip.sample_into(t, &mut self.scratch_b);
+                            st.sample(t, params, &mut self.scratch_b);
+                            let r = reference(p.state);
                             for &n in &st.covered {
-                                if let (Some(dst), Some(src)) =
-                                    (self.pose.get(n).copied(), self.scratch_b.get(n))
-                                {
-                                    self.pose[n] = TransformTRS::blend(&dst, src, w * k);
+                                if l.masked(n) {
+                                    fold(&mut self.pose, n, self.scratch_b.get(n), w * k, r.and_then(|r| r.get(n)));
                                 }
                             }
                         }
                         FadeFrom::Frozen { pose: frozen, covered } => {
+                            // A frozen snapshot of an additive layer has no
+                            // reference of its own; it releases from rest.
+                            let rest = l.additive.then_some(self.rest.as_slice());
                             for &n in covered {
-                                if let (Some(dst), Some(src)) =
-                                    (self.pose.get(n).copied(), frozen.get(n))
-                                {
-                                    self.pose[n] = TransformTRS::blend(&dst, src, w * k);
+                                if l.masked(n) {
+                                    fold(&mut self.pose, n, frozen.get(n), w * k, rest.and_then(|r| r.get(n)));
                                 }
                             }
                         }
@@ -1322,6 +1611,25 @@ impl Controller {
             }
         }
     }
+}
+
+/// Fold one node's sampled `src` into the accumulated pose at weight `w`:
+/// replacing it (an override layer), or adding its difference from
+/// `reference` (an additive layer).
+fn fold(pose: &mut [TransformTRS], n: usize, src: Option<&TransformTRS>, w: f32, reference: Option<&TransformTRS>) {
+    let (Some(dst), Some(src)) = (pose.get(n).copied(), src) else { return };
+    pose[n] = match reference {
+        None => TransformTRS::blend(&dst, src, w),
+        Some(r) => {
+            let dr = r.r.inverse() * src.r;
+            let ds = src.s / r.s.max(Vec3::splat(1e-6));
+            TransformTRS {
+                t: dst.t + (src.t - r.t) * w,
+                r: (dst.r * Quat::IDENTITY.slerp(dr, w)).normalize(),
+                s: dst.s * Vec3::ONE.lerp(ds, w),
+            }
+        }
+    };
 }
 
 fn smoothstep(k: f32) -> f32 {
@@ -1794,6 +2102,95 @@ mod tests {
     }
 
     #[test]
+    fn twin_names_pair_left_and_right() {
+        assert_eq!(twin_name("Hand.L").as_deref(), Some("Hand.R"));
+        assert_eq!(twin_name("hand_r").as_deref(), Some("hand_l"));
+        assert_eq!(twin_name("mixamorig:LeftArm").as_deref(), Some("mixamorig:RightArm"));
+        assert_eq!(twin_name("RightUpLeg").as_deref(), Some("LeftUpLeg"));
+        assert_eq!(twin_name("Spine1"), None);
+    }
+
+    /// A mirrored pose moves each twin exactly as the reflection of the
+    /// original, even when the two sides' rest frames are not mirror images
+    /// of each other (here the right arm's rest is turned half round, as a
+    /// rig's bone roll often leaves it): a vertex skinned to the left arm and
+    /// its reflection skinned to the right one end up reflections of each other.
+    #[test]
+    fn a_mirrored_pose_is_the_reflection_of_the_original() {
+        let node = |name: &str, parent: Option<usize>, t: Vec3, r: Quat| SkelNode {
+            name: name.to_string(),
+            parent,
+            rest: TransformTRS { t, r, s: Vec3::ONE },
+            pivot: Vec3::ZERO,
+        };
+        let skel = Skeleton::new(vec![
+            node("Hips", None, Vec3::new(0.0, 1.0, 0.0), Quat::IDENTITY),
+            node("Arm.L", Some(0), Vec3::new(0.4, 0.5, 0.0), Quat::from_rotation_z(0.2)),
+            node("Arm.R", Some(0), Vec3::new(-0.4, 0.5, 0.0), Quat::from_rotation_y(std::f32::consts::PI) * Quat::from_rotation_z(0.2)),
+            node("Hand.L", Some(1), Vec3::new(0.5, 0.0, 0.0), Quat::IDENTITY),
+            node("Hand.R", Some(2), Vec3::new(-0.5, 0.0, 0.0), Quat::from_rotation_x(0.3)),
+        ]);
+        let mirror = Mirror::new(&skel);
+        let mut pose = skel.rest_pose();
+        pose[0].t += Vec3::new(0.3, 0.0, 0.2);
+        pose[0].r = Quat::from_rotation_y(0.4);
+        pose[1].r = Quat::from_euler(floptle_core::math::EulerRot::YXZ, 0.3, -0.5, 0.9) * pose[1].r;
+        pose[3].r = Quat::from_rotation_z(0.7);
+        let mut rest_w = Vec::new();
+        skel.world_matrices(&skel.rest_pose(), &mut rest_w);
+        let mut before = Vec::new();
+        skel.world_matrices(&pose, &mut before);
+        let mut mirrored = pose.clone();
+        mirror.apply(&mut mirrored);
+        let mut after = Vec::new();
+        skel.world_matrices(&mirrored, &mut after);
+        let flip = |v: Vec3| Vec3::new(-v.x, v.y, v.z);
+        for (a, b) in [(1usize, 2usize), (2, 1), (3, 4), (4, 3), (0, 0)] {
+            for p in [Vec3::new(0.9, 1.4, 0.1), Vec3::new(1.2, 1.6, -0.3), Vec3::new(0.0, 1.0, 0.5)] {
+                let moved = before[a].transform_point3(rest_w[a].inverse().transform_point3(p));
+                let twin = after[b].transform_point3(rest_w[b].inverse().transform_point3(flip(p)));
+                assert!(twin.distance(flip(moved)) < 1e-4, "bone {a} → {b}: {twin} is not the reflection of {moved}");
+            }
+        }
+        // Mirroring twice gives the pose back.
+        mirror.apply(&mut mirrored);
+        for (x, y) in mirrored.iter().zip(&pose) {
+            assert!(x.t.distance(y.t) < 1e-4 && x.r.angle_between(y.r) < 1e-3, "{x:?} vs {y:?}");
+        }
+    }
+
+    /// A mirrored state covers the twins of what its clip keys, so an
+    /// override layer playing it writes the other side.
+    #[test]
+    fn a_mirrored_state_covers_the_twins() {
+        let node = |name: &str, t: Vec3| SkelNode {
+            name: name.to_string(),
+            parent: if name == "Hips" { None } else { Some(0) },
+            rest: TransformTRS { t, r: Quat::IDENTITY, s: Vec3::ONE },
+            pivot: Vec3::ZERO,
+        };
+        let skel = Skeleton::new(vec![node("Hips", Vec3::Y), node("Arm.L", Vec3::X), node("Arm.R", -Vec3::X)]);
+        let channels = vec![NodeChannels {
+            node: 1,
+            rotation: Some(Track {
+                times: vec![0.0],
+                values: vec![Quat::from_rotation_z(0.8)],
+                interp: Interp::Linear,
+                key_interp: Vec::new(),
+            }),
+            ..Default::default()
+        }];
+        let clip = Clip { name: "WallrunL".into(), duration: 1.0, channels, ..Default::default() };
+        let st = State::new("WallrunR".into(), clip).with_mirror(Arc::new(Mirror::new(&skel)));
+        assert_eq!(st.covered, vec![1, 2]);
+        let mut ctl = Controller::new(skel.rest_pose(), vec![Layer::new("Base".into(), vec![st], Some(0))], 0.0);
+        ctl.advance(0.1);
+        let pose = ctl.pose();
+        assert!(pose[1].r.angle_between(Quat::IDENTITY) < 1e-4, "the left arm is at rest: {:?}", pose[1].r);
+        assert!(pose[2].r.angle_between(Quat::from_rotation_z(-0.8)) < 1e-4, "the right arm turned the other way: {:?}", pose[2].r);
+    }
+
+    #[test]
     fn higher_layer_overrides_covered_nodes_only() {
         let skel = skel2();
         // Base moves node 0; the overlay moves node 1 only.
@@ -1822,6 +2219,85 @@ mod tests {
         c.advance(1.0);
         c.advance(0.1);
         assert!((c.pose()[1].t.x - 0.0).abs() < 1e-2, "overlay released after finish");
+    }
+
+    /// **An additive layer rides on the layers below.** A clip that
+    /// moves node 0 from 0 to +2 over its length, on an additive layer over a
+    /// base holding node 0 at 3, lands at 3 + (x − x₀): the base survives and
+    /// the difference is added, where an override layer would replace it.
+    #[test]
+    fn an_additive_layer_adds_its_motion_on_top_of_the_base() {
+        let skel = skel2();
+        let base = Layer::new("Move".into(), vec![State::new("Hold".into(), move_clip("Hold", 0, 3.0, 3.0, 1.0))], Some(0));
+        let mut lean = Layer::new("Lean".into(), vec![State::new("Lean".into(), move_clip("Lean", 0, 0.0, 2.0, 1.0))], Some(0));
+        lean.additive = true;
+        let mut c = Controller::new(skel.rest_pose(), vec![base, lean], 0.0);
+        c.advance(0.0);
+        c.advance(0.5);
+        assert!((c.pose()[0].t.x - 4.0).abs() < 1e-3, "3 from the base + 1 from half the lean: {}", c.pose()[0].t.x);
+        c.set_layer_weight(1, 0.5);
+        c.advance(0.0);
+        assert!((c.pose()[0].t.x - 3.5).abs() < 1e-3, "half weight adds half: {}", c.pose()[0].t.x);
+    }
+
+    /// A layer with a mask touches only the nodes in it, whatever its clip keys.
+    #[test]
+    fn a_masked_layer_touches_only_its_nodes() {
+        let skel = skel2();
+        let mut both = move_clip("Both", 0, 5.0, 5.0, 1.0);
+        both.channels.push(move_clip("x", 1, 6.0, 6.0, 1.0).channels.remove(0));
+        let mut over = Layer::new("Over".into(), vec![State::new("Both".into(), both)], Some(0));
+        over.mask = Some(vec![false, true]);
+        let mut c = Controller::new(skel.rest_pose(), vec![over], 0.0);
+        c.advance(0.1);
+        assert!((c.pose()[0].t.x).abs() < 1e-4, "node 0 is outside the mask: {}", c.pose()[0].t.x);
+        assert!((c.pose()[1].t.x - 6.0).abs() < 1e-4);
+    }
+
+    /// A layer's own speed moves its clip clock and nobody else's.
+    #[test]
+    fn a_layers_speed_is_its_own() {
+        let skel = skel2();
+        let base = Layer::new("Base".into(), vec![State::new("Walk".into(), move_clip("Walk", 0, 0.0, 10.0, 10.0))], Some(0));
+        let over = Layer::new("Over".into(), vec![State::new("Punch".into(), move_clip("Punch", 1, 0.0, 10.0, 10.0))], Some(0));
+        let mut c = Controller::new(skel.rest_pose(), vec![base, over], 0.0);
+        c.set_layer_speed(0, 2.0);
+        c.advance(0.0);
+        c.advance(1.0);
+        assert!((c.pose()[0].t.x - 2.0).abs() < 1e-3, "the base ran at 2x: {}", c.pose()[0].t.x);
+        assert!((c.pose()[1].t.x - 1.0).abs() < 1e-3, "the other layer did not: {}", c.pose()[1].t.x);
+    }
+
+    /// **A blend state mixes its clips by the controller's parameters.**
+    /// On a line, the two points either side, linearly; on a plane, exact at a
+    /// point and weighted by closeness between them.
+    #[test]
+    fn a_blend_state_mixes_its_clips_by_parameter() {
+        let jog = move_clip("Jog", 0, 2.0, 2.0, 1.0);
+        let sprint = move_clip("Sprint", 0, 6.0, 6.0, 1.0);
+        let state = State::new("Move".into(), jog.clone()).with_blend(BlendSpace {
+            params: vec!["speed".into()],
+            points: vec![(jog, [2.0, 0.0]), (sprint, [6.0, 0.0])],
+        });
+        let mut c = one_layer_ctl(vec![state], Some(0));
+        for (speed, want) in [(2.0, 2.0), (4.0, 4.0), (5.0, 5.0), (9.0, 6.0), (0.0, 2.0)] {
+            c.set_param("speed", speed);
+            c.advance(0.01);
+            assert!((c.pose()[0].t.x - want).abs() < 1e-3, "speed {speed}: {}", c.pose()[0].t.x);
+        }
+        let space = BlendSpace {
+            params: vec!["yaw".into(), "pitch".into()],
+            points: vec![
+                (move_clip("a", 0, 0.0, 0.0, 1.0), [0.0, 0.0]),
+                (move_clip("b", 0, 1.0, 1.0, 1.0), [1.0, 0.0]),
+                (move_clip("c", 0, 2.0, 2.0, 1.0), [0.0, 1.0]),
+            ],
+        };
+        let mut w = Vec::new();
+        space.weights([1.0, 0.0], &mut w);
+        assert_eq!(w, vec![0.0, 1.0, 0.0], "exact at a point");
+        space.weights([0.5, 0.5], &mut w);
+        assert!((w.iter().sum::<f32>() - 1.0).abs() < 1e-5 && w.iter().all(|x| *x > 0.0), "{w:?}");
     }
 
     #[test]

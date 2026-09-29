@@ -336,6 +336,7 @@ impl Default for AnimControllerDoc {
                 states: Vec::new(),
                 default_state: None,
                 transitions: Vec::new(),
+                additive: false, mask: Vec::new(),
             }],
         }
     }
@@ -354,6 +355,13 @@ pub struct AnimLayerDoc {
     /// Per-pair crossfade overrides; anything else uses `default_fade`.
     #[serde(default)]
     pub transitions: Vec<AnimTransitionDoc>,
+    /// Add this layer's motion on top of the layers below (each clip measured
+    /// from its own first frame) instead of replacing it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub additive: bool,
+    /// The only bones this layer may touch. Empty: whatever its clips key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mask: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -375,6 +383,31 @@ pub struct AnimStateDoc {
     /// Node position in the controller graph editor.
     #[serde(default)]
     pub pos: [f32; 2],
+    /// Mix several clips by the controller's parameters instead of playing
+    /// `clip` alone; `clip` still sets the state's clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend: Option<AnimBlendDoc>,
+    /// Play the clip as its left-right mirror image: `Hand.L` does what
+    /// `Hand.R` did, reflected. A left wallrun played as a right one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mirror: bool,
+}
+
+/// A blend state's clips and where they sit: on a line (one parameter, each
+/// point at `(x, 0)`) or a plane (two parameters).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct AnimBlendDoc {
+    /// The controller parameters it reads (`anim:setParam`): one or two.
+    pub params: Vec<String>,
+    pub points: Vec<AnimBlendPointDoc>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct AnimBlendPointDoc {
+    /// Clip asset key.
+    pub clip: String,
+    /// Where it sits: `x` on a line, `(x, y)` on a plane.
+    pub at: [f32; 2],
 }
 
 /// One crossfade override: `from → to` in `fade` seconds.
@@ -602,6 +635,23 @@ pub fn save_anim_controller(doc: &AnimControllerDoc, path: &Path) -> Result<(), 
 mod tests {
     use super::*;
 
+    /// The blend state in `docs/animation.md` is one a controller file can
+    /// hold, mirror flag and all.
+    #[test]
+    fn the_guide_s_blend_state_parses() {
+        let guide = include_str!("../../../docs/animation.md");
+        let start = guide.find("```ron\n(name: \"Aim\"").expect("the guide's blend example") + "```ron\n".len();
+        let body = &guide[start..start + guide[start..].find("```").unwrap()];
+        let text = body.trim().trim_end_matches(',');
+        let st: AnimStateDoc = ron::from_str(text).unwrap_or_else(|e| panic!("{e}: {text}"));
+        let blend = st.blend.expect("a blend");
+        assert_eq!(blend.params, vec!["aimX".to_string()]);
+        assert_eq!(blend.points.iter().map(|p| p.at[0]).collect::<Vec<_>>(), vec![-1.0, 0.0, 1.0]);
+        assert!(!st.mirror);
+        let mirrored: AnimStateDoc = ron::from_str(&text.replacen("pos: (0, 0),", "pos: (0, 0), mirror: true,", 1)).unwrap();
+        assert!(mirrored.mirror);
+    }
+
     #[test]
     fn clip_doc_round_trips() {
         let doc = AnimClipDoc {
@@ -680,6 +730,7 @@ mod tests {
                             fade_in: None,
                             fps: None,
                             pos: [40.0, 40.0],
+                            blend: None, mirror: false,
                         },
                         AnimStateDoc {
                             name: "Attack".into(),
@@ -689,6 +740,7 @@ mod tests {
                             fade_in: Some(0.0),
                             fps: Some(8.0),
                             pos: [240.0, 40.0],
+                            blend: None, mirror: false,
                         },
                     ],
                     default_state: Some("Idle".into()),
@@ -697,6 +749,7 @@ mod tests {
                         to: "Idle".into(),
                         fade: 0.1,
                     }],
+                    additive: false, mask: Vec::new(),
                 },
                 AnimLayerDoc {
                     name: "Overlay".into(),
@@ -704,6 +757,7 @@ mod tests {
                     states: Vec::new(),
                     default_state: None,
                     transitions: Vec::new(),
+                    additive: false, mask: Vec::new(),
                 },
             ],
         };

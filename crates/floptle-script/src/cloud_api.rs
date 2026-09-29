@@ -234,7 +234,7 @@ mod tests {
         }
     }
 
-    /// **0278: the primitives by name.** A board's page is the documented path
+    /// **The primitives by name.** A board's page is the documented path
     /// with its name and query encoded, read with the game key; a refusal
     /// arrives as one `{ code, message, status }` table, whichever call made it.
     #[test]

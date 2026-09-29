@@ -219,6 +219,11 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
             let (rays, ray_ms) = p.borrow().rays();
             out.set("rays", rays)?;
             out.set("rayMs", ray_ms)?;
+            // Decals in the world (`decals.add`) and the triangles they were
+            // laid as: one batch per picture, so this is geometry, not draws.
+            let (decals, decal_tris) = p.borrow().decal_counts();
+            out.set("decals", decals)?;
+            out.set("decalTris", decal_tris)?;
             Ok(out)
         })?,
     )?;
@@ -332,7 +337,7 @@ mod tests {
     /// This is the whole design decision. A zero would let
     /// `assert(perf.ms("scripts") < 4)` pass in a smoke test that measured
     /// nothing, which is the exact shape of bug this engine has shipped 32 times.
-    /// **0313: the GPU's own pass times reach a script.** Nil until a frame
+    /// **The GPU's own pass times reach a script.** Nil until a frame
     /// has been timed (a device without timestamp queries never is), then each
     /// pass by name and the total, as the renderer published them.
     #[test]

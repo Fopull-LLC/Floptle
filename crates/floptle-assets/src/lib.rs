@@ -56,6 +56,18 @@ pub fn import_model(path: &std::path::Path) -> Result<Model, ImportError> {
     gltf_import::build_static(path, &doc, &buffers, &images).map(Model::Static)
 }
 
+/// A model's node tree and clips without its pictures, for a host with
+/// nothing to draw with: a dedicated server still asks where a hand is.
+/// `None` when the model has no tree to keep. The parts come back with their
+/// geometry, and no image is decoded.
+pub fn import_rig_only(path: &std::path::Path) -> Result<Option<RiggedModel>, ImportError> {
+    let (doc, buffers, _) = gltf_import::read_gltf(path, false)?;
+    if !gltf_rig::wants_rig(&doc) {
+        return Ok(None);
+    }
+    gltf_rig::build_rigged(path, &doc, &buffers, &[])
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;

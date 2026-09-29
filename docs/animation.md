@@ -78,6 +78,45 @@ a script calls `anim:play("Slash")`, the attack takes over; when the one-shot
 finishes, the layer releases automatically and movement shows again. If the
 attack clip only animates the arms, the legs keep walking.
 
+Four more things a layer and a state can do. The controller editor has no
+controls for these yet, so set them in the controller file (`.actl.ron`):
+
+- **`additive: true`** on a layer adds its motion on top of the layers below
+  instead of replacing it. Each clip is measured from its own first frame, so a
+  lean clip that starts upright and ends tilted tilts whatever is under it: a
+  run, a slide, a wallrun.
+- **`mask: ["Spine1", "Neck", "Head"]`** on a layer limits it to those bones,
+  whatever its clips key. A look layer can then own the upper spine while a
+  body clip keeps the hips and lower spine.
+- **`blend`** on a state mixes several clips by one or two controller
+  parameters instead of playing one. Scripts set the parameters with
+  `anim:setParam`. The state's `clip` still sets its clock:
+
+```ron
+(name: "Aim", clip: "animations/Soldier/AimCenter", pos: (0, 0),
+ blend: Some((params: ["aimX"], points: [
+   (clip: "animations/Soldier/AimLeft",   at: (-1, 0)),
+   (clip: "animations/Soldier/AimCenter", at: ( 0, 0)),
+   (clip: "animations/Soldier/AimRight",  at: ( 1, 0)),
+ ]))),
+```
+
+With one parameter the points sit on a line and the two either side of the
+value mix. With two (`params: ["moveX", "moveZ"]`) they sit on a plane and
+mix by distance, exactly one clip when the value lands on its point.
+
+- **`mirror: true`** on a state plays its clip as its left-right mirror
+  image, so a left wallrun serves as the right one. Bones pair by name:
+  `Hand.L` ↔ `Hand.R`, `hand_l` ↔ `hand_r`, `LeftHand` ↔ `RightHand`. A bone
+  with no twin, such as the spine or the head, is reflected onto itself. The
+  reflection is across the character's left-right plane, with the model
+  facing +Z as glTF does. It works even when the two sides' bones were rolled
+  differently in the modelling program.
+
+Each layer also has its own speed: `anim:setSpeed(1.5, "Movement")` speeds up
+the run to match the ground, and a punch on the layer above keeps its own
+speed.
+
 ## 3. The ⏱ Animating tab (timeline)
 
 Select a node that has a controller (or a rigged model) and open **Window →
@@ -281,6 +320,15 @@ end
   (yaw, pitch, roll) and `node:bones()`, on the model's node. They answer where
   a node attached to that bone would be, so a ragdoll can read the pose at the
   moment of death without a marker node per bone.
+- Bones, after the clips: `anim:setBoneRot(bone, yaw, pitch, roll [, w])`,
+  `anim:addBoneRot(...)`, `anim:setBonePos(bone, v [, w])`,
+  `anim:addBonePos(...)`, two-bone IK with
+  `anim:reach(tip, target, { pole = p })`, and
+  `anim:lookAt(bones, target, { limit = 75 })`. See
+  [Bones from a script](#bones-from-a-script).
+- `anim:boneWorld(bone)` gives the bone's world position, yaw, pitch and roll
+  after all of that. It works under `floptle run` and on a dedicated server
+  too.
 - Reads: `anim:state([layer])`, `anim:time([layer])`, `anim:finished([layer])`,
   `anim:isPlaying([state])`, `anim:clips()`, `anim:layers()`.
 - Authored data, from the asset rather than playback (so it works in `start()`):
@@ -296,6 +344,72 @@ frame shows this frame.
 > transform has no visible effect. Animate plain nodes (doors, platforms,
 > cameras, props) and give them **Collidable** if things should bump into them;
 > drive rigidbodies from scripts via velocities instead.
+
+### Bones from a script
+
+The clips pose the rig first, then a script can change it for the frame:
+
+1. Bone writes (`setBoneRot`, `addBoneRot`, `setBonePos`, `addBonePos`) run in
+   the order they were called.
+2. `reach` and `lookAt` run in the order they were called.
+
+All of them last one frame. Call them every frame you want them held, and stop
+calling to hand the bone back to the clips. Angles are radians in the
+`node.yaw/pitch/roll` convention, and positions are in the bone's parent space.
+Targets and poles for `reach` and `lookAt` are world points. Every call takes a
+weight from 0 to 1 that blends from the animated pose. All of it needs a rigged
+model (a `.glb` with a skeleton). A bone the model doesn't have warns once, in
+the Console.
+
+`reach` bends the tip's parent and grandparent: for `"Foot"`, the shin and the
+thigh. Name them with `root` and `mid` when the rig has a twist bone between.
+`pole` is a point the middle joint bends toward, such as a point in front of
+the knee or behind the elbow. A target out of reach straightens the limb
+toward it.
+
+**Planting feet on uneven ground.** Cast a ray down from each foot, drop the
+hips by the deeper foot's gap, then reach each foot to its hit:
+
+```lua
+local HIP_DROP_MAX = 0.35
+
+function update(node, dt)
+  local anim = node:animator()
+  local drop, hits = 0, {}
+  for _, foot in ipairs({ "LeftFoot", "RightFoot" }) do
+    local p = anim:boneWorld(foot)
+    if p then
+      local hit = raycast(p + vec3(0, 0.5, 0), vec3(0, -1, 0), 1.5)
+      if hit then
+        hits[foot] = vec3(hit.x, hit.y, hit.z)
+        drop = math.max(drop, p.y - hit.y)
+      end
+    end
+  end
+  drop = math.min(drop, HIP_DROP_MAX)
+  anim:addBonePos("Hips", vec3(0, -drop, 0))
+  local fwd = node.forward
+  for foot, point in pairs(hits) do
+    local knee = anim:boneWorld(foot) + fwd * 0.5 + vec3(0, 0.5, 0)
+    anim:reach(foot, point, { pole = knee })
+  end
+end
+```
+
+`boneWorld` answers the pose from the frame before, which the clips have
+barely moved by the time this runs. Keep the hips' drop under the length of a
+bent leg, or a foot on a deep step can't get there and straightens instead.
+
+**Looking at something.** Share the turn along the neck so one bone isn't
+doing it all, and cap it so a target behind the character doesn't snap the
+head round:
+
+```lua
+anim:lookAt({ "Spine2", "Neck", "Head" }, target.pos, { limit = 80, weight = 0.8 })
+```
+
+The last bone's forward at rest is +Z. If the rig's head faces another way,
+say so with `axis = vec3(0, 1, 0)`.
 
 ## 5. The retro stepped look
 

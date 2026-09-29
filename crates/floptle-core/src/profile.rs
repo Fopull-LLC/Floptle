@@ -226,6 +226,8 @@ pub struct FrameProfile {
     overloaded: bool,
     /// Last frame's animators and how many were culled.
     anim_counts: (usize, usize),
+    /// Decals in the world and the triangles they were laid as.
+    decal_counts: (usize, usize),
     /// Rays scripts cast this frame and the milliseconds they took, and last
     /// frame's once folded. Inside the `scripts` bucket, not beside it.
     rays_frame: (u64, f32),
@@ -372,6 +374,16 @@ impl FrameProfile {
     /// `(animators, culled)` as of the last animation pass.
     pub fn anim_counts(&self) -> (usize, usize) {
         self.anim_counts
+    }
+
+    /// Decals in the world and their triangles, whenever they change.
+    pub fn set_decal_counts(&mut self, decals: usize, triangles: usize) {
+        self.decal_counts = (decals, triangles);
+    }
+
+    /// `(decals, triangles)`.
+    pub fn decal_counts(&self) -> (usize, usize) {
+        self.decal_counts
     }
 
     /// Say whether the game has fallen behind real time.

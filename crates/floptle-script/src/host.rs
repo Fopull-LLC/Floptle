@@ -2630,6 +2630,21 @@ impl ScriptHost {
                 next_op_id: terrain_op_id.clone(),
             },
         );
+        // `decals.*`: marks laid on the static colliders lent for the pass.
+        let decals: Rc<RefCell<crate::decal_api::DecalStore>> = Rc::default();
+        if let Err(e) = crate::decal_api::install_decal_api(
+            &lua,
+            crate::decal_api::DecalShared {
+                store: decals.clone(),
+                colliders: colliders.clone(),
+                sim_origin: sim_origin.clone(),
+                layers: layer_table.clone(),
+                logs: logs.clone(),
+                profile: profile.clone(),
+            },
+        ) {
+            floptle_say::say_err!("[lua] failed to install the decals API: {e}");
+        }
         // The `save.*` persistent store (roadmap A2).
         let save_state: Rc<RefCell<crate::save_api::SaveState>> =
             Rc::new(RefCell::new(crate::save_api::SaveState::default()));
@@ -2839,6 +2854,7 @@ impl ScriptHost {
             spawn_effects,
             spawn_requests,
             nav_rebakes,
+            decals,
             assembly_info,
             assembly_impacts,
             assembly_cmds,
@@ -3431,6 +3447,8 @@ impl ScriptHost {
         // an anchor names a node in it.
         self.terrain_ops.borrow_mut().clear();
         *self.terrain_lod_anchor.borrow_mut() = None;
+        // Marks were laid on the old world's surfaces.
+        self.clear_decals();
         // So do agents: one belongs to a node in a world that is going away, and
         // a crowd that survived a Stop would walk the next Play's units from
         // wherever the last one left them.
@@ -3841,6 +3859,17 @@ impl ScriptHost {
     /// Drain the prefab instances scripts requested via `spawn(...)`. The driver
     /// spawns each subtree, then calls [`Self::call_spawn_callback`] per request.
     /// Drain queued `nav.rebake(...)` requests. See [`crate::NavRebakeRequest`].
+    /// Every decal laid, for the editor to batch and draw.
+    pub fn decals(&self) -> &Rc<RefCell<crate::decal_api::DecalStore>> {
+        &self.decals
+    }
+
+    /// Take every decal off the world: Play starting or stopping.
+    pub fn clear_decals(&self) {
+        self.decals.borrow_mut().clear();
+        self.profile.borrow_mut().set_decal_counts(0, 0);
+    }
+
     pub fn take_nav_rebakes(&self) -> Vec<crate::NavRebakeRequest> {
         std::mem::take(&mut *self.nav_rebakes.borrow_mut())
     }

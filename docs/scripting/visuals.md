@@ -44,7 +44,8 @@ function onSlashHit(node) log("hit frame!") end
 | `anim:restart(state [, fade [, layer]])` | force re-entry (re-trigger a one-shot) |
 | `anim:crossfade(state, fade [, layer])` | transition with an explicit fade |
 | `anim:stop([layer [, fade]])` | stop a layer (all if omitted) |
-| `anim:setSpeed(x)` | global speed multiplier |
+| `anim:setSpeed(x [, layer])` | speed multiplier: the whole animator's, or one layer's |
+| `anim:setParam(name, x)` | the number a blend state mixes its clips by |
 | `anim:setLayerWeight(layer, w)` | blend a layer over the ones below (0..1) |
 | `anim:seek(t [, layer])` | jump the playhead |
 | `anim:state([layer])` / `anim:time([layer])` | what's showing / seconds in (`anim:current` is an alias of `anim:state`) |
@@ -52,6 +53,12 @@ function onSlashHit(node) log("hit frame!") end
 | `anim:isPlaying([state])` | is a state (or anything) playing |
 | `anim:clips()` / `anim:layers()` | available state / layer names |
 | `anim:duration(clip)` / `anim:events(clip)` | the clip **as authored** — length in seconds, and its event list |
+| `anim:setBoneRot` / `addBoneRot` / `setBonePos` / `addBonePos` | change one bone after the clips, for this frame |
+| `anim:reach(tip, target, {pole=})` / `anim:lookAt(bones, target)` | two-bone IK and look-at, for this frame |
+| `anim:boneWorld(bone)` | where a bone is: position, yaw, pitch, roll |
+
+Bone writes and IK, with a foot-planting recipe, are in
+[`docs/animation.md`](../animation.md#bones-from-a-script).
 
 **`anim:duration` / `anim:events` read the asset, not playback**, so they answer
 in `start()`, before anything has played a frame. `events` returns

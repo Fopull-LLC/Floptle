@@ -276,6 +276,7 @@ mod http_api;
 mod preload_api;
 mod texture_api;
 mod cloud_api;
+pub mod decal_api;
 pub use texture_api::TextureRequest;
 pub use account_api::keep_account_signed_out;
 pub use preload_api::PreloadKind;
@@ -912,6 +913,8 @@ pub struct ScriptHost {
     spawn_requests: Rc<RefCell<Vec<SpawnRequest>>>,
     /// `nav.rebake(...)`, waiting for the editor to gather the geometry.
     nav_rebakes: Rc<RefCell<Vec<NavRebakeRequest>>>,
+    /// `decals.*`: every mark laid on the world, and which pictures changed.
+    decals: Rc<RefCell<decal_api::DecalStore>>,
     /// This tick's `draw.line(...)` segments (immediate mode; drained per tick).
     draw_lines: Rc<RefCell<Vec<DrawLine>>>,
     /// `draw.nativeLines(true)`: lines over the finished picture at full
@@ -1174,6 +1177,27 @@ pub enum AnimCmd {
     SetEnabled(bool),
     /// `anim:setCulling(mode)`: override the controller's culling.
     SetCulling(AnimCulling),
+    /// `anim:setSpeed(x, layer)`: one layer's own playback rate.
+    SetLayerSpeed { layer: String, speed: f32 },
+    /// `anim:setParam(name, v)`: a value blend states read.
+    SetParam { name: String, value: f32 },
+    /// A change to this frame's pose, applied after the animator has posed
+    /// the rig (`anim:setBoneRot`, `reach`, `lookAt`, …). Lasts one frame.
+    Pose(AnimPoseOp),
+}
+
+/// What a script asks of a rig's pose after the animator made it. Positions
+/// are world space; the driver converts them into the rig's own.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AnimPoseOp {
+    /// Set (`add: false`) or turn by (`add: true`) a bone's local rotation
+    /// and/or translation, blended in by `weight`.
+    Bone { bone: String, rot: Option<[f32; 4]>, pos: Option<[f32; 3]>, add: bool, weight: f32 },
+    /// Two-bone IK: turn `root` and `mid` so `tip` reaches `target`, bending
+    /// toward `pole`.
+    Reach { root: Option<String>, mid: Option<String>, tip: String, target: [f64; 3], pole: Option<[f64; 3]>, weight: f32 },
+    /// Turn `bones` (root-most first) so the last one faces `target`.
+    LookAt { bones: Vec<String>, target: [f64; 3], axis: Option<[f32; 3]>, limit_deg: f32, weight: f32 },
 }
 
 /// `anim:setCulling`'s modes — see the controller asset's `culling`.

@@ -66,12 +66,13 @@ The three things that make a scene feel alive, driven from a script.
 
 ### [Maths & the world](scripting/world.md)
 
-Vectors, terrain, water, scattered props, and orbital time.
+Vectors, terrain, water, scattered props, decals, and orbital time.
 
 - [19. Vectors & math: `vec3`, `vec2`, `distance`](scripting/world.md#19-vectors-math-vec3-vec2-distance)
 - [22. Terrain: `terrain.sculpt`, `dig` & queries](scripting/world.md#22-terrain-terrainsculpt-dig-queries)
 - [22a. Water: volumes, buoyancy & `water.*`](scripting/world.md#22a-water-volumes-buoyancy-water)
 - [22b. Scatter: thousands of props from a seed](scripting/world.md#22b-scatter-thousands-of-props-from-a-seed)
+- [22c. Decals: marks on the world's surfaces](scripting/world.md#22c-decals-marks-on-the-worlds-surfaces)
 - [25. Space: orbits, gravity & time-warp](scripting/world.md#25-space-orbits-gravity-time-warp)
 
 ### [Multiplayer](scripting/networking.md)

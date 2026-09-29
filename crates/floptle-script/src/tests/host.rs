@@ -678,7 +678,7 @@ fn a_conic_is_a_closed_ellipse_or_an_arc_cut_at_its_reach() {
     }
 }
 
-/// **0311: a spawn or a despawn is not a rebuild, and says the same thing one
+/// **A spawn or a despawn is not a rebuild, and says the same thing one
 /// would.** After each round of random spawns and despawns the scripts' copy
 /// of the scene is exactly what a fresh full rebuild makes of the same world
 /// (the scene order, first-name-wins, the per-kind and per-tag lists, children)

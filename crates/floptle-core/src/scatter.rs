@@ -833,7 +833,7 @@ mod tests {
         assert!((3.0..4.2).contains(&ratio), "doubling the distance cost {ratio:.2}x, not ~4x");
     }
 
-    /// **0315: an eye above a planet reaches less of it, and one higher than
+    /// **An eye above a planet reaches less of it, and one higher than
     /// the view range reaches none.** A map zooming out off-axis slid the eye's
     /// sub-point across the surface and kept a full disc resident under it at
     /// any height, re-settling props every frame, 35 → 449 ms a frame.

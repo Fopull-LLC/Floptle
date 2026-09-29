@@ -3107,7 +3107,7 @@ mod tests {
     use floptle_core::math::{DVec3, Quat};
     use floptle_field::BakedSdf;
 
-    /// **0315: a map camera does not move the terrain's centre of detail.**
+    /// **A map camera does not move the terrain's centre of detail.**
     /// With an anchor on the ship, the render camera can go from 50 to 80 body
     /// radii and back and the terrain is measured from the ship throughout, so
     /// nothing remeshes or switches to its impostor. The switch itself has
@@ -3139,7 +3139,7 @@ mod tests {
         assert_eq!(ed.lod_center(far(80.0)), DVec3::new(1.0, 2.0, 3.0));
     }
 
-    /// **0320: which plane a flatten levels to.** On a planet the radial up at
+    /// **Which plane a flatten levels to.** On a planet the radial up at
     /// the brush, on a flat terrain `+Y`, and a script's own normal turned into
     /// the terrain's frame.
     #[test]

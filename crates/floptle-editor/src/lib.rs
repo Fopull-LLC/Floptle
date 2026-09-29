@@ -59,6 +59,7 @@ mod app_settings;
 mod model_textures;
 #[cfg(feature = "editor-ui")]
 mod bake;
+mod decals;
 #[cfg(feature = "editor-ui")]
 mod doctor;
 #[cfg(feature = "editor-ui")]
@@ -1990,6 +1991,8 @@ struct Editor {
     /// texture resolved through the registry and sorted by texture, so the draw
     /// is one run per image.
     script_quads: Vec<(floptle_render::TexId, floptle_script::DrawQuad)>,
+    /// `decals.*`: one GPU mesh per picture, rebuilt when its marks change.
+    decal_batches: crate::decals::DecalBatches,
     /// Screen-space rectangles queued this frame (`draw.rect` / `draw.rectOutline`).
     /// Drawn through the game-UI pipeline over the HUD — see `gather_game_ui`.
     script_rects: Vec<floptle_script::DrawRect>,

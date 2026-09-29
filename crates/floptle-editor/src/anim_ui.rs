@@ -770,6 +770,7 @@ impl EditorTabViewer<'_> {
                     states: Vec::new(),
                     default_state: None,
                     transitions: Vec::new(),
+                    additive: false, mask: Vec::new(),
                 });
                 st.graph_layer = doc.layers.len() - 1;
                 st.graph_dirty = true;
@@ -1113,6 +1114,7 @@ impl EditorTabViewer<'_> {
                                 fade_in: None,
                                 fps: None,
                                 pos: [drop_pos.x, drop_pos.y],
+                                blend: None, mirror: false,
                             });
                             if layer.default_state.is_none() {
                                 layer.default_state = Some(name.clone());
@@ -1817,6 +1819,7 @@ impl EditorTabViewer<'_> {
                                 fade_in: None,
                                 fps: None,
                                 pos: [40.0 + 30.0 * layer.states.len() as f32, 40.0],
+                                blend: None, mirror: false,
                             });
                             if layer.default_state.is_none() {
                                 layer.default_state = Some(sname.clone());

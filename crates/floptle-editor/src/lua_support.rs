@@ -119,7 +119,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field script fun(self: Node, name: string): table|nil Short alias of getscript.
 ---@field scripts table[] Every script on this node as handles, in attach order \u{2014} possibly empty, never nil. The plural of getScript, for when you do not yet know the name: `for _, s in ipairs(n.scripts) do print(s.kind) end` tells you what a node actually carries, which is the question a getScript that answered nil leaves you with.
 ---@field component fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|LightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|MaterialHandle|nil Short alias of getcomponent.
----@field animator fun(self: Node): table The animation handle for this node's Animation Controller (or a rigged model's embedded clips): :play / :restart / :crossfade / :stop / :setSpeed / :setLayerWeight / :seek, and :state / :time / :finished / :isPlaying.
+---@field animator fun(self: Node): table The animation handle for this node's Animation Controller (or a rigged model's embedded clips): :play / :restart / :crossfade / :stop / :setSpeed / :setLayerWeight / :seek / :setParam, per-frame bone writes :setBoneRot / :addBoneRot / :setBonePos / :addBonePos / :reach / :lookAt, and :state / :time / :finished / :isPlaying / :boneWorld.
 ---@field toWorld fun(self: Node, v: Vec3): Vec3 A point in this node's own frame converted to world space \u{2014} position, rotation AND scale, composed up the whole parent chain. \"Where is the muzzle?\" is gun:toWorld(vec3(0, 0, -1.2)).
 ---@field toLocal fun(self: Node, v: Vec3): Vec3 The inverse of toWorld: a world point expressed in this node's frame.
 ---@field setWorldPos fun(self: Node, v: Vec3) Put this node at a WORLD point, whatever it is parented to, without deriving the parent inverse by hand.
@@ -1659,6 +1659,37 @@ function water.setFrozen(node, frozen) end
 ---Every water volume in the scene, as nodes.
 ---@return Node[]
 function water.volumes() end
+
+---Pictures laid on the world's static surfaces: blood, scorch marks, bullet
+---holes, paint. Not nodes. A decal folds over edges and into corners and is lit
+---like the surface under it; every decal sharing a picture is one draw.
+---@class Decals
+decals = {}
+---Lay a picture on the static surfaces under a box standing at `pos`, facing
+---`normal`. nil when nothing under it can take a mark.
+---@param opts {texture: string, pos: vec3, normal: vec3, size: number, height?: number, depth?: number, up?: vec3, rotation?: number, color?: number[], alpha?: number, sheetCols?: number, sheetRows?: number, cell?: number, layers?: string|string[], maxAngle?: number}
+---@return number|nil id
+function decals.add(opts) end
+---Change a decal's alpha or tint; false if it has already gone.
+---@param id number
+---@param opts {alpha?: number, color?: number[]}
+---@return boolean
+function decals.set(id, opts) end
+---Take one decal off; false if it had already gone.
+---@param id number
+---@return boolean
+function decals.remove(id) end
+---Take every decal off the world.
+function decals.clear() end
+---How many decals are in the world.
+---@return number
+function decals.count() end
+---The budget: past `n` decals the oldest goes (1024 until set, at most 65536).
+---@param n number
+function decals.setMax(n) end
+---The budget `decals.setMax` set.
+---@return number
+function decals.max() end
 
 ---Runtime terrain editing + queries (Terrain 2.0). Edits queue and land the
 ---same tick (collision updates with the surface). World coordinates.

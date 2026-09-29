@@ -246,6 +246,9 @@ pub struct AnimInstance {
     held: f32,
     /// Frames since its last pose, for the reduced rate.
     stride: u32,
+    /// This frame's script changes to the pose (`anim:setBoneRot`, `reach`,
+    /// `lookAt`), applied after the animator and dropped with the frame.
+    pub pose_ops: Vec<floptle_script::AnimPoseOp>,
 }
 
 /// Everything animation the editor owns. One field on `Editor`.
@@ -1099,6 +1102,7 @@ fn layers_from_doc(
     skeleton: &Skeleton,
 ) -> Vec<Layer> {
     let mut layers = Vec::new();
+    let mut mirror: Option<std::sync::Arc<floptle_anim::Mirror>> = None;
     for ld in &doc.layers {
         let mut states = Vec::new();
         for sd in &ld.states {
@@ -1107,6 +1111,18 @@ fn layers_from_doc(
                 None => Clip { name: sd.name.clone(), duration: 1e-3, ..Default::default() },
             };
             let mut st = State::new(sd.name.clone(), clip);
+            if let Some(b) = &sd.blend {
+                let points = b
+                    .points
+                    .iter()
+                    .filter_map(|p| system.clip(&p.clip).map(|cd| (clip_from_doc(cd, skeleton), p.at)))
+                    .collect();
+                st = st.with_blend(floptle_anim::BlendSpace { params: b.params.clone(), points });
+            }
+            if sd.mirror {
+                let m = mirror.get_or_insert_with(|| std::sync::Arc::new(floptle_anim::Mirror::new(skeleton)));
+                st = st.with_mirror(m.clone());
+            }
             st.speed = sd.speed;
             st.looped = sd.looped;
             st.fade_in = sd.fade_in;
@@ -1117,6 +1133,16 @@ fn layers_from_doc(
             ld.default_state.as_ref().and_then(|n| states.iter().position(|s| &s.name == n));
         let mut layer = Layer::new(ld.name.clone(), states, default_state);
         layer.weight = ld.weight.clamp(0.0, 1.0);
+        layer.additive = ld.additive;
+        if !ld.mask.is_empty() {
+            let mut mask = vec![false; skeleton.len()];
+            for name in &ld.mask {
+                if let Some(i) = skeleton.index_of(name) {
+                    mask[i] = true;
+                }
+            }
+            layer.mask = Some(mask);
+        }
         for t in &ld.transitions {
             let (Some(f), Some(to)) = (layer.state_index(&t.from), layer.state_index(&t.to))
             else {
@@ -1166,6 +1192,7 @@ pub fn bind_entity(
                 culling: doc.culling,
                 held: 0.0,
                 stride: 0,
+                pose_ops: Vec::new(),
             })
         }
         // Controller on anything else: animate the node + its descendants.
@@ -1199,16 +1226,17 @@ pub fn bind_entity(
                 culling: doc.culling,
                 held: 0.0,
                 stride: 0,
+                pose_ops: Vec::new(),
             })
         }
         // No controller, but a rigged mesh: embedded clips, "Idle" (or the
         // first clip) as the default — models animate out of the box. Once a
         // clip has been extracted, the `.anim.ron` of the same name takes over
         // (so timeline edits + events apply without requiring a controller).
+        //
+        // A rig with no clips still gets one, holding its rest pose: that is
+        // what a script poses with `reach`, `lookAt` and the bone writes.
         (None, Some(rig)) => {
-            if rig.clips.is_empty() {
-                return None;
-            }
             let states: Vec<State> = rig
                 .clips
                 .iter()
@@ -1236,6 +1264,7 @@ pub fn bind_entity(
                 culling: floptle_scene::AnimCullingDoc::Always,
                 held: 0.0,
                 stride: 0,
+                pose_ops: Vec::new(),
             })
         }
         (None, None) => None,
@@ -1488,6 +1517,99 @@ fn diagnose_anim(
     }
 }
 
+/// A script's pose changes in the rig's own terms: bones by index, points in
+/// skeleton space (`to_rig` = the inverse of the node's world matrix times the
+/// rig's placement offset). A bone that is not there is said once, by name.
+fn rig_pose_ops(
+    ops: &[floptle_script::AnimPoseOp],
+    skel: &floptle_anim::Skeleton,
+    to_rig: floptle_core::math::DMat4,
+    eid: u32,
+    warn: &mut Vec<(String, String)>,
+) -> Vec<floptle_anim::PoseOp> {
+    use floptle_anim::PoseOp;
+    use floptle_script::AnimPoseOp;
+    let mut bone = |name: &str, call: &str| {
+        let found = skel.index_of(name);
+        if found.is_none() {
+            let names: Vec<&str> = skel.nodes.iter().map(|n| n.name.as_str()).collect();
+            warn.push((
+                format!("{eid}:bone:{name}"),
+                format!("anim:{call}: no bone \"{name}\" on this model{}", floptle_script::opts::near_miss_hint(name, &names)),
+            ));
+        }
+        found
+    };
+    let point = |p: [f64; 3]| to_rig.transform_point3(floptle_core::math::DVec3::from(p)).as_vec3();
+    let mut out = Vec::new();
+    // A tip without a parent and a grandparent has no limb to bend.
+    let mut limbless: Vec<&str> = Vec::new();
+    for op in ops {
+        match op {
+            AnimPoseOp::Bone { bone: name, rot, pos, add, weight } => {
+                let call = if rot.is_some() { if *add { "addBoneRot" } else { "setBoneRot" } } else if *add { "addBonePos" } else { "setBonePos" };
+                let Some(node) = bone(name, call) else { continue };
+                out.push(PoseOp::Local {
+                    node,
+                    rot: rot.map(Quat::from_array),
+                    pos: pos.map(Vec3::from_array),
+                    add: *add,
+                    weight: *weight,
+                });
+            }
+            AnimPoseOp::Reach { root, mid, tip, target, pole, weight } => {
+                let Some(t) = bone(tip, "reach") else { continue };
+                let parent = |i: usize| skel.nodes.get(i).and_then(|n| n.parent);
+                let m = match mid {
+                    Some(n) => bone(n, "reach"),
+                    None => parent(t),
+                };
+                let Some(m) = m else {
+                    if mid.is_none() {
+                        limbless.push(tip);
+                    }
+                    continue;
+                };
+                let r = match root {
+                    Some(n) => bone(n, "reach"),
+                    None => parent(m),
+                };
+                let Some(r) = r else {
+                    if root.is_none() {
+                        limbless.push(tip);
+                    }
+                    continue;
+                };
+                out.push(PoseOp::TwoBone { root: r, mid: m, tip: t, target: point(*target), pole: pole.map(point), weight: *weight });
+            }
+            AnimPoseOp::LookAt { bones, target, axis, limit_deg, weight } => {
+                let chain: Vec<usize> = bones.iter().filter_map(|b| bone(b, "lookAt")).collect();
+                if chain.len() != bones.len() {
+                    continue;
+                }
+                out.push(PoseOp::LookAt {
+                    chain,
+                    target: point(*target),
+                    // glTF's front: a character faces +Z in its own space.
+                    axis: axis.map(Vec3::from_array).unwrap_or(Vec3::Z),
+                    limit: limit_deg.to_radians(),
+                    weight: *weight,
+                });
+            }
+        }
+    }
+    for tip in limbless {
+        warn.push((
+            format!("{eid}:limb:{tip}"),
+            format!(
+                "anim:reach: \"{tip}\" has no parent and grandparent bone to bend, so there is no limb to reach with; \
+                 name the two bones with {{ root = \"UpperArm\", mid = \"Forearm\" }}"
+            ),
+        ));
+    }
+    out
+}
+
 /// Apply an instance's current pose (rig → poses map, nodes → Transforms).
 pub fn apply_instance(
     system: &mut AnimSystem,
@@ -1496,13 +1618,22 @@ pub fn apply_instance(
     e: Entity,
 ) {
     let Some(inst) = system.instances.get_mut(&e) else { return };
+    let mut warn: Vec<(String, String)> = Vec::new();
     match &inst.binding {
         AnimBinding::Rig => {
             let Some(Matter::Mesh { asset_path }) = world.get::<Matter>(e) else { return };
             let Some(rig) = mesh_registry.get(asset_path).and_then(|m| m.rig.as_ref()) else {
                 return;
             };
-            rig.skeleton.world_matrices(inst.ctl.pose(), &mut inst.world);
+            if inst.pose_ops.is_empty() {
+                rig.skeleton.world_matrices(inst.ctl.pose(), &mut inst.world);
+            } else {
+                let to_rig = (floptle_core::world_transform(world, e).world_matrix() * rig.offset.as_dmat4()).inverse();
+                let ops = rig_pose_ops(&inst.pose_ops, &rig.skeleton, to_rig, e.index(), &mut warn);
+                let mut pose = inst.ctl.pose().to_vec();
+                floptle_anim::ik::apply(&rig.skeleton, &mut pose, &ops);
+                rig.skeleton.world_matrices(&pose, &mut inst.world);
+            }
             // Same placement offset as rest_world so pose and rest agree.
             for m in inst.world.iter_mut() {
                 *m = rig.offset * *m;
@@ -1510,6 +1641,14 @@ pub fn apply_instance(
             system.poses.insert(e, inst.world.clone());
         }
         AnimBinding::Nodes { entities, covered } => {
+            if !inst.pose_ops.is_empty() {
+                warn.push((
+                    format!("{}:pose-ops-nodes", e.index()),
+                    "anim: bone writes, reach and lookAt work on a rigged model (a .glb with a skeleton); \
+                     this animator moves plain nodes, so they were ignored"
+                        .into(),
+                ));
+            }
             let pose = inst.ctl.pose();
             for &n in covered {
                 let Some(Some(ent)) = entities.get(n) else { continue };
@@ -1540,6 +1679,11 @@ pub fn apply_instance(
                     ),
                 }
             }
+        }
+    }
+    for (key, msg) in warn {
+        if system.warned.insert(key) {
+            system.warnings.push(msg);
         }
     }
 }
@@ -1898,6 +2042,10 @@ pub fn apply_commands(
     cmds: Vec<(u32, floptle_script::AnimCmd)>,
 ) {
     use floptle_script::AnimCmd;
+    // A pose change lasts the frame it was asked for.
+    for inst in system.instances.values_mut() {
+        inst.pose_ops.clear();
+    }
     if cmds.is_empty() {
         return;
     }
@@ -1983,6 +2131,15 @@ pub fn apply_commands(
                 let li = layer.as_deref().and_then(|l| inst.ctl.layer_index(l)).unwrap_or(0);
                 inst.ctl.seek(li, t);
             }
+            AnimCmd::SetLayerSpeed { layer, speed } => match inst.ctl.layer_index(&layer) {
+                Some(li) => inst.ctl.set_layer_speed(li, speed),
+                None => warn.push((
+                    format!("{eid}:layer:{layer}"),
+                    format!("anim:setSpeed: no layer \"{layer}\" on this animator"),
+                )),
+            },
+            AnimCmd::SetParam { name, value } => inst.ctl.set_param(&name, value),
+            AnimCmd::Pose(op) => inst.pose_ops.push(op),
             AnimCmd::SetEnabled(_) | AnimCmd::SetCulling(_) => {}
         }
     }
@@ -2778,9 +2935,11 @@ mod tests {
                         fade_in: None,
                         fps: None,
                         pos: [0.0, 0.0],
+                        blend: None, mirror: false,
                     }],
                     default_state: Some("Open".to_string()),
                     transitions: Vec::new(),
+                    additive: false, mask: Vec::new(),
                 }],
             },
         ));
@@ -2846,9 +3005,11 @@ mod tests {
                         fade_in: None,
                         fps: None,
                         pos: [0.0, 0.0],
+                        blend: None, mirror: false,
                     }],
                     default_state: Some("Open".to_string()),
                     transitions: Vec::new(),
+                    additive: false, mask: Vec::new(),
                 }],
             },
         ));
@@ -3025,6 +3186,96 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **A script puts a rigged hand on a world point.** `reach` on the
+    /// animator of a placed, turned model lands the hand on the target the
+    /// same frame, the pole decides the elbow, `setBoneRot` sets a bone
+    /// outright, and a bone that is not there is said by name, once.
+    #[test]
+    fn a_script_reaches_a_rigged_arm_to_a_world_point() {
+        use floptle_anim::{SkelNode, Skeleton, TransformTRS};
+        use floptle_core::math::DVec3;
+        let bone = |name: &str, parent: Option<usize>, t: Vec3| SkelNode {
+            name: name.to_string(),
+            parent,
+            rest: TransformTRS { t, r: Quat::IDENTITY, s: Vec3::ONE },
+            pivot: Vec3::ZERO,
+        };
+        let skeleton = Skeleton::new(vec![
+            bone("Shoulder", None, Vec3::ZERO),
+            bone("Elbow", Some(0), Vec3::X),
+            bone("Hand", Some(1), Vec3::X),
+        ]);
+        let rig = RigAsset {
+            skeleton,
+            clips: Vec::new(),
+            part_nodes: Vec::new(),
+            rest_world: vec![Mat4::IDENTITY; 3],
+            offset: Mat4::IDENTITY,
+            skins: Vec::new(),
+            skin_bases: Vec::new(),
+            node_is_object: vec![false; 3],
+        };
+        let mut reg: HashMap<String, crate::MeshAsset> = HashMap::new();
+        reg.insert(
+            "models/arm.glb".to_string(),
+            crate::MeshAsset { parts: Vec::new(), part_meta: Vec::new(), tex_filter: None, size: 2.0, rig: Some(rig) },
+        );
+        let mut world = World::new();
+        let arm = world.spawn();
+        world.insert(arm, Name("Arm".to_string()));
+        let placed = Transform { translation: DVec3::new(10.0, 0.0, 5.0), rotation: Quat::from_rotation_y(0.5), scale: Vec3::ONE };
+        world.insert(arm, placed);
+        world.insert(arm, Matter::Mesh { asset_path: "models/arm.glb".to_string() });
+        let target = placed.translation + (placed.rotation * Vec3::new(1.2, 0.0, 0.6)).as_dvec3();
+        let pole = placed.translation + (placed.rotation * Vec3::new(0.6, 3.0, 0.3)).as_dvec3();
+
+        let dir = std::env::temp_dir().join(format!("floptle_reach_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("arm.lua"),
+            format!(
+                "function update(node, dt)\n  local a = find('Arm'):animator()\n  \
+                 a:reach('Hand', vec3({}, {}, {}), {{ pole = vec3({}, {}, {}) }})\n  \
+                 a:setBoneRot('Hand', 0.3, 0, 0)\n  a:setBoneRot('Wrist', 0, 0, 0)\n  \
+                 a:reach('Elbow', vec3(0, 0, 0))\nend\n",
+                target.x, target.y, target.z, pole.x, pole.y, pole.z
+            ),
+        )
+        .unwrap();
+        let driver = world.spawn();
+        world.insert(driver, Transform::IDENTITY);
+        world.insert(
+            driver,
+            floptle_core::Scripts(vec![floptle_core::ScriptInst {
+                kind: "arm".into(),
+                enabled: true,
+                params: Vec::new(),
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = floptle_script::ScriptHost::new();
+        let mut system = AnimSystem::default();
+        for i in 0..2 {
+            host.run(&mut world, &dir, 1.0 / 60.0, i as f32 / 60.0);
+            assert!(host.errors().is_empty(), "{:?}", host.errors());
+            advance_animators(&mut system, &mut world, &reg, 1.0 / 60.0, host.take_anim_commands(), CullBy::Nothing);
+        }
+        let pose = system.poses.get(&arm).expect("the arm was posed");
+        let to_world = |m: Mat4| placed.world_matrix() * m.as_dmat4();
+        let hand = to_world(pose[2]).w_axis.truncate();
+        let elbow = to_world(pose[1]).w_axis.truncate();
+        assert!(hand.distance(target) < 1e-3, "the hand is at {hand}, the target at {target}");
+        assert!((elbow - placed.translation).dot((pole - placed.translation).normalize()) > 0.5, "the elbow bent toward the pole: {elbow}");
+        let hand_turn = (Quat::from_mat4(&pose[1]).inverse() * Quat::from_mat4(&pose[2])).normalize();
+        assert!(hand_turn.angle_between(Quat::from_rotation_y(0.3)) < 1e-3, "setBoneRot set the hand's local rotation");
+        let said: Vec<&String> = system.warnings.iter().filter(|w| w.contains("Wrist")).collect();
+        assert_eq!(said.len(), 1, "a missing bone is said once: {:?}", system.warnings);
+        let limbless: Vec<&String> = system.warnings.iter().filter(|w| w.contains("\"Elbow\" has no parent and grandparent")).collect();
+        assert_eq!(limbless.len(), 1, "a reach with no limb to bend is said once: {:?}", system.warnings);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Off to the side of the camera or behind it is culled; in front, or so
     /// close the sphere reaches the eye, is not.
     #[test]
@@ -3117,6 +3368,7 @@ mod tests {
                             fade_in: None,
                             fps: None,
                             pos: [0.0, 0.0],
+                            blend: None, mirror: false,
                         },
                         floptle_scene::AnimStateDoc {
                             name: "Run".to_string(),
@@ -3126,10 +3378,12 @@ mod tests {
                             fade_in: None,
                             fps: None,
                             pos: [0.0, 0.0],
+                            blend: None, mirror: false,
                         },
                     ],
                     default_state: Some("Idle".to_string()),
                     transitions: Vec::new(),
+                    additive: false, mask: Vec::new(),
                 }],
             },
         ));

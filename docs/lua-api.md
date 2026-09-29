@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 163
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 171
 - [node — transform & body fields](#node--transform--body-fields) — 40
 - [node — methods & handles](#node--methods--handles) — 31
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -41,7 +41,7 @@ each group, and meant to be searched.
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 19
 - [components — getcomponent](#components--getcomponent) — 103
-- [animation — node:animator](#animation--nodeanimator) — 18
+- [animation — node:animator](#animation--nodeanimator) — 26
 - [particles — effects from script](#particles--effects-from-script) — 10
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 30
 - [assets](#assets) — 11
@@ -253,6 +253,38 @@ cloud.rank(board) — a leaderboard by name ("laps" or "laps:canyon"; its collec
 ### `createNode`
 
 createNode(name [, parent] [, fn]) — create a PLAIN node (Empty matter). It does NOT return the node: the create is queued and the node is made after this pass, so the handle arrives ONLY through the callback — `local n = createNode("Stain")` gives you something that says so the moment you touch it, rather than a nil that fails a line later. fn(n) gets its handle: combine with n:setTerrain(id) / n:setCelestial{...} / n:setPrimitive(shape, color) / n:setMaterial{...} + transform writes to build content from script (procgen, editor actions). Nested creates inside callbacks are fine.
+
+### `decals`
+
+Pictures laid on the world's static surfaces: blood, scorch marks, bullet holes, paint. A decal folds over edges and into corners, is lit like the surface under it, and is not a node; every decal sharing a picture is one draw. decals.add lays one, decals.set fades or tints it, and the engine keeps the budget (decals.setMax).
+
+### `decals.add`
+
+decals.add{ texture, pos, normal, size [, height, depth, up, rotation, color = {r,g,b}, alpha, sheetCols, sheetRows, cell, layers, maxAngle] } → id — lay a picture on the static surfaces under a box standing at pos, facing normal (a raycast hit's point and normal). It folds over edges and into corners, follows curves, and is lit, shadowed and fogged like the surface. No node: every decal sharing a picture is one mesh and one draw. nil when nothing under it can take a mark (the sky, or a sphere or capsule collider, which has no faces). maxAngle (default 100°) is how far a face may turn from normal and still take it. Cleared by a new Play or a scene switch.
+
+### `decals.clear`
+
+decals.clear() — take every decal off the world.
+
+### `decals.count`
+
+decals.count() — how many decals are in the world.
+
+### `decals.max`
+
+decals.max() — the budget decals.setMax set (1024 by default).
+
+### `decals.remove`
+
+decals.remove(id) — take one decal off; false if it had already gone.
+
+### `decals.set`
+
+decals.set(id, { alpha = 0.5, color = {r, g, b} }) — change a decal's alpha or tint. false if it has already gone (removed, or pushed out by the budget).
+
+### `decals.setMax`
+
+decals.setMax(n) — the budget: past n decals the oldest goes as each new one arrives. 1024 until set, at most 65536.
 
 ### `defaults`
 
@@ -945,7 +977,7 @@ node:addTag("burning") — add a tag at runtime (duplicates are ignored). findTa
 
 ### `node:animator`
 
-node:animator() — the animation handle for this node's Animation Controller (or a rigged model's embedded clips). Setters: :play/:restart/:crossfade/:stop/:setSpeed/:setLayerWeight/:seek/:setEnabled/:setCulling. Getters: :state/:time/:finished/:isPlaying/:clips/:layers.
+node:animator() — the animation handle for this node's Animation Controller (or a rigged model's embedded clips). Setters: :play/:restart/:crossfade/:stop/:setSpeed/:setLayerWeight/:seek/:setParam/:setEnabled/:setCulling. Bones, per frame: :setBoneRot/:addBoneRot/:setBonePos/:addBonePos/:reach/:lookAt. Getters: :state/:time/:finished/:isPlaying/:clips/:layers/:boneWorld.
 
 ```lua
 local anim = node:animator()
@@ -954,7 +986,7 @@ anim:crossfade(node.vel:length() > 4 and "run" or "walk", 0.15)
 
 ### `node:bonePos`
 
-node:bonePos("mixamorig:Head") → the bone's world position this frame, as a vec3, on an animated model — the same point a node attached to that bone would be at, without adding one. nil while the model has no posed skeleton (not loaded yet, or a headless run, which loads no models). A bone name the model doesn't have raises, naming the closest. node:bones() lists them.
+node:bonePos("mixamorig:Head") → the bone's world position this frame, as a vec3, on an animated model — the same point a node attached to that bone would be at, without adding one. nil while the model has no posed skeleton (not loaded yet, or not animated). A bone name the model doesn't have raises, naming the closest. node:bones() lists them.
 
 ### `node:boneRot`
 
@@ -2919,7 +2951,7 @@ perf.buckets() → the bucket names, in frame order: scripts, mirror, physics, t
 
 ### `perf.counts`
 
-perf.counts() → { nodes=, culled=, instances=, draws=, chunks=, props=, particles=, effects=, effectsDropped=, lights=, lightsDropped=, voices=, mirrorRebuilds=, mirrorRefreshed=, animators=, animatorsCulled=, rays=, rayMs= }. Readable even while collection is off, because counts are free to keep — and three of the four 'the engine is slow' reports this API exists for were answerable from one count alone (a scatter field asking for 117,000 props was one of them). The *Dropped pair is what a ceiling refused this frame: nonzero means the engine is cutting your look, which you should hear from a number rather than from a screenshot. mirrorRebuilds is how many times last frame the scripts' copy of the scene was rebuilt from scratch (each costs time in proportion to the whole scene, in the mirror bucket); mirrorRefreshed is how many single nodes were re-read because a component of theirs changed, which costs only those nodes. animators and animatorsCulled are last frame's animated models and how many culling skipped (see anim:setCulling). rays and rayMs are the raycasts scripts made last frame (raycast and raycastMany) and the milliseconds they took, a part of the scripts bucket (counted with collection on).
+perf.counts() → { nodes=, culled=, instances=, draws=, chunks=, props=, particles=, effects=, effectsDropped=, lights=, lightsDropped=, voices=, mirrorRebuilds=, mirrorRefreshed=, animators=, animatorsCulled=, rays=, rayMs=, decals=, decalTris= }. Readable even while collection is off, because counts are free to keep — and three of the four 'the engine is slow' reports this API exists for were answerable from one count alone (a scatter field asking for 117,000 props was one of them). The *Dropped pair is what a ceiling refused this frame: nonzero means the engine is cutting your look, which you should hear from a number rather than from a screenshot. mirrorRebuilds is how many times last frame the scripts' copy of the scene was rebuilt from scratch (each costs time in proportion to the whole scene, in the mirror bucket); mirrorRefreshed is how many single nodes were re-read because a component of theirs changed, which costs only those nodes. animators and animatorsCulled are last frame's animated models and how many culling skipped (see anim:setCulling). rays and rayMs are the raycasts scripts made last frame (raycast and raycastMany) and the milliseconds they took, a part of the scripts bucket (counted with collection on). decals and decalTris are the decals in the world (decals.add) and the triangles they were laid as.
 
 ### `perf.enable`
 
@@ -3581,6 +3613,18 @@ Steepest standable surface, in degrees (default 60). Past it nothing grounds the
 
 ## animation — node:animator
 
+### `anim:addBonePos`
+
+anim:addBonePos("Hips", vec3(0, -0.12, 0) [, weight]) — move one bone by this much in its parent's space, on top of the clips, for this frame only.
+
+### `anim:addBoneRot`
+
+anim:addBoneRot("Spine1", yaw, pitch, roll [, weight]) — turn one bone further by this much, on top of what the clips put there, for this frame only. The way to aim a chest over a run cycle without taking the run's motion off it.
+
+### `anim:boneWorld`
+
+anim:boneWorld("Hand") → pos, yaw, pitch, roll — where the bone is this frame, in world space, after clips, bone writes and IK. nil until the model is posed. Works under `floptle run` and on a dedicated server, which read the rig without its pictures, so a hitbox can follow a hand where nothing is drawn.
+
 ### `anim:clips`
 
 anim:clips() — every playable state name, as a list.
@@ -3613,9 +3657,17 @@ anim:isPlaying([state]) — is that state playing on any layer (or anything at a
 
 anim:layers() — every layer name, base first, as a list.
 
+### `anim:lookAt`
+
+anim:lookAt({"Spine2", "Neck", "Head"}, target [, { weight = 1, limit = 75, axis = vec3(0, 0, 1) }]) — turn a bone, or a chain shared out root-first, so it faces a world point, for this frame only. limit caps the whole turn in degrees; axis is which way the last bone faces at rest (+Z unless your rig says otherwise).
+
 ### `anim:play`
 
 anim:play("Run" [, fade [, layer]]) — transition to a state. The controller supplies the crossfade (default fade, per-arrow overrides, and a state's ⇥ fade-in override which beats everything — 0 = instant); pass `fade` to override the first two. Safe to call every frame — re-playing the current state is a no-op.
+
+### `anim:reach`
+
+anim:reach("Hand", target [, { pole = vec3, weight = 1, root = "UpperArm", mid = "Forearm" }]) — two-bone IK: bend the tip's parent and grandparent (or the named root and mid) so the tip lands on a world-space point, for this frame only. pole is a world point the middle joint bends toward: in front of a knee, behind an elbow. A target out of reach straightens the limb toward it. Runs after the clips and the bone writes.
 
 ### `anim:restart`
 
@@ -3624,6 +3676,14 @@ anim:restart("Attack" [, fade [, layer]]) — like play, but re-enters even if t
 ### `anim:seek`
 
 anim:seek(t [, layer]) — jump the current state's playhead to t seconds.
+
+### `anim:setBonePos`
+
+anim:setBonePos("Hips", vec3(0, 0.9, 0) [, weight]) — replace one bone's local position, in its parent's space, for this frame only. For the root or hips: drop them to plant both feet on a slope.
+
+### `anim:setBoneRot`
+
+anim:setBoneRot("Neck", yaw, pitch, roll [, weight]) — replace one bone's local rotation (radians, the node.yaw/pitch/roll convention) after the clips have posed the rig, for this frame only: call it every frame you want it held. weight 0..1 blends from the animated pose. On a rigged model; a bone the model doesn't have warns once.
 
 ### `anim:setCulling`
 
@@ -3637,9 +3697,13 @@ anim:setEnabled(false) — switch this animator off: no advance and no pose (the
 
 anim:setLayerWeight("Attack", 0.5) — blend a layer over the ones below (0 = off, 1 = full override).
 
+### `anim:setParam`
+
+anim:setParam("speed", 3.2) — set a number the controller's blend states read. A blend state mixes its clips by where one or two params fall among its points: `aimX` from -1 to 1 across aim-left, aim-center and aim-right. A param no state reads is kept and does nothing.
+
 ### `anim:setSpeed`
 
-anim:setSpeed(2) — global playback speed multiplier for this node's animator.
+anim:setSpeed(2 [, layer]) — playback speed: with no layer, the whole animator's; with a layer, that layer's own rate on top of it, so a punch keeps its speed while the run under it is sped up to match the ground.
 
 ### `anim:state`
 

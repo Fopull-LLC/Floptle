@@ -769,6 +769,9 @@ impl Editor {
         // across sessions.
         self.stop_recording();
         self.script_host.clear_anim_state();
+        // Marks belong to the run that laid them.
+        self.script_host.clear_decals();
+        self.sync_decals();
         self.script_gizmos.clear();
         self.script_lines.clear();
         self.script_rects.clear();

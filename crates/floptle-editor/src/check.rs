@@ -913,7 +913,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// **0278: a collection the code uses and the project does not declare.**
+    /// **A collection the code uses and the project does not declare.**
     /// A ranking warns (it would auto-create keeping the highest value); a
     /// private docs collection does not (it creates itself); a declared one
     /// does not; each collection is said once.

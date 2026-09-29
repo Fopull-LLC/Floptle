@@ -11,6 +11,7 @@ use floptle_core::{Scripts, World};
 use std::io::Write;
 
 mod components;
+mod decals;
 mod host;
 mod input;
 mod logs;

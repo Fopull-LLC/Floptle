@@ -88,6 +88,41 @@ pub trait CollisionShape {
         let _ = (o, rd, tmax);
         RayAnswer::March
     }
+    /// Push every face of this shape that may cross the box `(lo, hi)` onto
+    /// `out`, in the shape's own frame, and say whether the shape can answer at
+    /// all. A projected decal lays itself on what comes back.
+    ///
+    /// Conservative: a face near the box may come back too, and the caller
+    /// clips. `false` (the default) is a shape with no faces to give: a sphere,
+    /// a capsule, a baked SDF.
+    fn triangles_in(&self, lo: Vec3, hi: Vec3, out: &mut Vec<FaceTri>) -> bool {
+        let _ = (lo, hi, out);
+        false
+    }
+}
+
+/// One face of a collider as [`CollisionShape::triangles_in`] hands it out:
+/// its corners, and the normal at each. A flat face has the same normal three
+/// times; a terrain face carries the drawn surface's own vertex normals, so
+/// what is laid on it is lit the way the ground under it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FaceTri {
+    pub p: [Vec3; 3],
+    pub n: [Vec3; 3],
+}
+
+impl FaceTri {
+    /// A flat face, its normal from its winding (counter-clockwise = front).
+    pub fn flat(p: [Vec3; 3]) -> Self {
+        let n = (p[1] - p[0]).cross(p[2] - p[0]).normalize_or_zero();
+        Self { p, n: [n; 3] }
+    }
+}
+
+/// Does the triangle's box meet `(lo, hi)`?
+fn tri_box_overlap(t: &[Vec3; 3], lo: Vec3, hi: Vec3) -> bool {
+    let (a, b) = (t[0].min(t[1]).min(t[2]), t[0].max(t[1]).max(t[2]));
+    a.cmple(hi).all() && b.cmpge(lo).all()
 }
 
 /// What [`CollisionShape::ray_cast`] knows.
@@ -149,6 +184,36 @@ impl CollisionShape for Plane {
     }
     fn normal(&self, _p: Vec3) -> Vec3 {
         self.normal.try_normalize().unwrap_or(Vec3::Y)
+    }
+    /// A square of the plane big enough to cover the box, when the plane
+    /// passes through it.
+    fn triangles_in(&self, lo: Vec3, hi: Vec3, out: &mut Vec<FaceTri>) -> bool {
+        let n = self.normal.try_normalize().unwrap_or(Vec3::Y);
+        let (c, half) = ((lo + hi) * 0.5, (hi - lo) * 0.5);
+        let d = (c - self.point).dot(n);
+        if d.abs() > half.dot(n.abs()) {
+            return true;
+        }
+        let on = c - n * d;
+        let u = n.any_orthonormal_vector();
+        let v = n.cross(u);
+        let r = half.length() * 1.01;
+        let q = [on - u * r - v * r, on + u * r - v * r, on + u * r + v * r, on - u * r + v * r];
+        out.push(FaceTri { p: [q[0], q[2], q[1]], n: [n; 3] }.front(n));
+        out.push(FaceTri { p: [q[0], q[3], q[2]], n: [n; 3] }.front(n));
+        true
+    }
+}
+
+impl FaceTri {
+    /// Wound so its front faces `n`.
+    fn front(self, n: Vec3) -> Self {
+        let w = (self.p[1] - self.p[0]).cross(self.p[2] - self.p[0]);
+        if w.dot(n) < 0.0 {
+            Self { p: [self.p[0], self.p[2], self.p[1]], ..self }
+        } else {
+            self
+        }
     }
 }
 
@@ -291,6 +356,36 @@ impl BoxShape {
 }
 
 impl CollisionShape for BoxShape {
+    /// Its six faces, two triangles each.
+    fn triangles_in(&self, lo: Vec3, hi: Vec3, out: &mut Vec<FaceTri>) -> bool {
+        let (c, r) = (self.center, self.half.length());
+        if (c - Vec3::splat(r)).cmpgt(hi).any() || (c + Vec3::splat(r)).cmplt(lo).any() {
+            return true;
+        }
+        let rot = self.inv_rot.inverse();
+        let h = self.half;
+        for axis in 0..3 {
+            for sign in [-1.0f32, 1.0] {
+                let mut n = Vec3::ZERO;
+                n[axis] = sign;
+                let (a, b) = ((axis + 1) % 3, (axis + 2) % 3);
+                let corner = |su: f32, sv: f32| {
+                    let mut l = n * h;
+                    l[a] = su * h[a];
+                    l[b] = sv * h[b];
+                    c + rot * l
+                };
+                let q = [corner(-1.0, -1.0), corner(1.0, -1.0), corner(1.0, 1.0), corner(-1.0, 1.0)];
+                let wn = rot * n;
+                for t in [[q[0], q[1], q[2]], [q[0], q[2], q[3]]] {
+                    if tri_box_overlap(&t, lo, hi) {
+                        out.push(FaceTri { p: t, n: [wn; 3] }.front(wn));
+                    }
+                }
+            }
+        }
+        true
+    }
     fn bounds(&self) -> Option<(Vec3, f32)> {
         // The box's own diagonal, so any rotation is covered without asking
         // which one this is.
@@ -504,34 +599,38 @@ impl ChunkTerrain {
     fn ensure_meshed(&self, local: Vec3, s: &mut Surface) {
         let r = Vec3::splat(self.reach());
         for c in self.field.chunks_in_world_box(local - r, local + r) {
-            if !s.meshed.insert(c) {
-                continue;
+            if s.meshed.insert(c) {
+                self.mesh_into(c, s);
             }
-            let m = drawn_chunk(&self.field, c);
-            let origin = Vec3::from(m.origin);
-            let cell = self.bucket();
-            for t in m.indices.as_chunks::<3>().0 {
-                let at = |i: u32| origin + Vec3::from(m.positions[i as usize]);
-                let tri = [at(t[0]), at(t[1]), at(t[2])];
-                if (tri[1] - tri[0]).cross(tri[2] - tri[0]).length_squared() <= 1e-12 {
-                    continue; // zero-area: no closest point worth having
-                }
-                // The mesher's normals are unit gradients; a degenerate one
-                // (deep in uniform solid, which never meshes) falls back to
-                // the face so the side test always has something to compare
-                // against rather than a zero.
-                let face = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize();
-                let nrm = |i: u32| {
-                    Vec3::from(m.normals[i as usize]).try_normalize().unwrap_or(face)
-                };
-                let entry = SurfaceTri { p: tri, n: [nrm(t[0]), nrm(t[1]), nrm(t[2])] };
-                let lo = cell_coord(tri[0].min(tri[1]).min(tri[2]), cell);
-                let hi = cell_coord(tri[0].max(tri[1]).max(tri[2]), cell);
-                for cz in lo.2..=hi.2 {
-                    for cy in lo.1..=hi.1 {
-                        for cx in lo.0..=hi.0 {
-                            s.grid.entry((cx, cy, cz)).or_default().push(entry);
-                        }
+        }
+    }
+
+    /// Mesh chunk `c` into the surface's buckets.
+    fn mesh_into(&self, c: [i32; 3], s: &mut Surface) {
+        let m = drawn_chunk(&self.field, c);
+        let origin = Vec3::from(m.origin);
+        let cell = self.bucket();
+        for t in m.indices.as_chunks::<3>().0 {
+            let at = |i: u32| origin + Vec3::from(m.positions[i as usize]);
+            let tri = [at(t[0]), at(t[1]), at(t[2])];
+            if (tri[1] - tri[0]).cross(tri[2] - tri[0]).length_squared() <= 1e-12 {
+                continue; // zero-area: no closest point worth having
+            }
+            // The mesher's normals are unit gradients; a degenerate one
+            // (deep in uniform solid, which never meshes) falls back to
+            // the face so the side test always has something to compare
+            // against rather than a zero.
+            let face = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize();
+            let nrm = |i: u32| {
+                Vec3::from(m.normals[i as usize]).try_normalize().unwrap_or(face)
+            };
+            let entry = SurfaceTri { p: tri, n: [nrm(t[0]), nrm(t[1]), nrm(t[2])] };
+            let lo = cell_coord(tri[0].min(tri[1]).min(tri[2]), cell);
+            let hi = cell_coord(tri[0].max(tri[1]).max(tri[2]), cell);
+            for cz in lo.2..=hi.2 {
+                for cy in lo.1..=hi.1 {
+                    for cx in lo.0..=hi.0 {
+                        s.grid.entry((cx, cy, cz)).or_default().push(entry);
                     }
                 }
             }
@@ -696,6 +795,47 @@ impl CollisionShape for ChunkTerrain {
     }
     fn chunk_terrain_mut(&mut self) -> Option<&mut ChunkTerrain> {
         Some(self)
+    }
+    /// The drawn triangles under the box, with the drawn surface's normals:
+    /// the same LOD-0 faces the collider meshes, from the same cache.
+    fn triangles_in(&self, lo: Vec3, hi: Vec3, out: &mut Vec<FaceTri>) -> bool {
+        let scale = self.scale.max(1e-6);
+        let inv = self.rot.inverse();
+        let (c, half) = ((lo + hi) * 0.5, (hi - lo) * 0.5);
+        let m = floptle_core::math::Mat3::from_quat(inv);
+        let half_l = (m.x_axis.abs() * half.x + m.y_axis.abs() * half.y + m.z_axis.abs() * half.z) / scale;
+        let c_l = self.to_local(c);
+        let (llo, lhi) = (c_l - half_l, c_l + half_l);
+        let mut s = self.surface.borrow_mut();
+        let cell = self.bucket();
+        for ch in self.field.chunks_in_world_box(llo, lhi) {
+            if s.meshed.insert(ch) {
+                self.mesh_into(ch, &mut s);
+            }
+        }
+        let (a, b) = (cell_coord(llo, cell), cell_coord(lhi, cell));
+        let mut seen: std::collections::HashSet<[u32; 9]> = std::collections::HashSet::new();
+        for cz in a.2..=b.2 {
+            for cy in a.1..=b.1 {
+                for cx in a.0..=b.0 {
+                    let Some(bucket) = s.grid.get(&(cx, cy, cz)) else { continue };
+                    for tri in bucket {
+                        if !tri_box_overlap(&tri.p, llo, lhi) {
+                            continue;
+                        }
+                        let key: [u32; 9] = std::array::from_fn(|i| tri.p[i / 3][i % 3].to_bits());
+                        if !seen.insert(key) {
+                            continue;
+                        }
+                        out.push(FaceTri {
+                            p: tri.p.map(|p| self.rot * (p * scale)),
+                            n: tri.n.map(|n| self.rot * n),
+                        });
+                    }
+                }
+            }
+        }
+        true
     }
 }
 
@@ -1149,6 +1289,33 @@ impl TriMeshCollider {
 }
 
 impl CollisionShape for TriMeshCollider {
+    /// The triangles in the grid cells the box covers, each once.
+    fn triangles_in(&self, lo: Vec3, hi: Vec3, out: &mut Vec<FaceTri>) -> bool {
+        if self.aabb.0.cmpgt(hi).any() || self.aabb.1.cmplt(lo).any() {
+            return true;
+        }
+        let (a, b) = (cell_coord(lo, self.cell), cell_coord(hi, self.cell));
+        let (clo, chi) = self.cells;
+        let mut found: Vec<u32> = Vec::new();
+        for cz in a.2.max(clo.2)..=b.2.min(chi.2) {
+            for cy in a.1.max(clo.1)..=b.1.min(chi.1) {
+                for cx in a.0.max(clo.0)..=b.0.min(chi.0) {
+                    if let Some(list) = self.grid.get(&(cx, cy, cz)) {
+                        found.extend_from_slice(list);
+                    }
+                }
+            }
+        }
+        found.sort_unstable();
+        found.dedup();
+        for ti in found {
+            let t = self.tris[ti as usize];
+            if tri_box_overlap(&t, lo, hi) {
+                out.push(FaceTri::flat(t));
+            }
+        }
+        true
+    }
     /// The first triangle the ray crosses, found by walking the cells of the
     /// mesh's own grid along it (3D DDA) rather than marching a distance
     /// field: a ray costs the triangles in the cells it passes through, not a
@@ -1493,6 +1660,29 @@ mod face_label_tests {
 mod mesh_bound_tests {
     use super::*;
 
+    /// A face spanning many cells of the grid comes back once, and a box
+    /// nowhere near the mesh gets nothing.
+    #[test]
+    fn a_mesh_hands_out_each_face_in_a_box_once() {
+        let verts = [
+            Vec3::new(-20.0, 0.0, -20.0),
+            Vec3::new(20.0, 0.0, -20.0),
+            Vec3::new(0.0, 0.0, 20.0),
+            Vec3::new(100.0, 0.0, 100.0),
+            Vec3::new(101.0, 0.0, 100.0),
+            Vec3::new(100.0, 0.0, 101.0),
+        ];
+        let m = TriMeshCollider::new(&verts, &[0, 2, 1, 3, 5, 4]);
+        let mut out = Vec::new();
+        assert!(m.triangles_in(Vec3::new(-6.0, -1.0, -6.0), Vec3::new(6.0, 1.0, 6.0), &mut out));
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].p, [verts[0], verts[2], verts[1]]);
+        assert!((out[0].n[0] - Vec3::Y).length() < 1e-5, "wound up, faces up: {:?}", out[0].n);
+        out.clear();
+        m.triangles_in(Vec3::new(50.0, -1.0, 50.0), Vec3::new(51.0, 1.0, 51.0), &mut out);
+        assert!(out.is_empty(), "{out:?}");
+    }
+
     /// A mesh has a bound, and it is the right one. `None` would file it as
     /// "everywhere" and every body would test every mesh in the level every
     /// tick. The bound must contain every vertex (a vertex outside it is a
@@ -1655,6 +1845,29 @@ mod mesh_bound_tests {
 mod drawn_surface_tests {
     use super::*;
     use floptle_field::{Brush, BrushProfile, ChunkField};
+
+    /// A posed terrain hands out the triangles it collides with, each once,
+    /// in the anchor frame, with the drawn surface's normals turned with it.
+    #[test]
+    fn terrain_hands_out_its_drawn_faces_with_their_normals() {
+        let rot = Quat::from_rotation_z(0.3);
+        let t = ChunkTerrain::posed(hill(), rot, 2.0);
+        let mut out = Vec::new();
+        let inside = t.distance(Vec3::ZERO);
+        assert!(t.triangles_in(Vec3::splat(-30.0), Vec3::splat(30.0), &mut out));
+        assert!(out.len() > 20, "only {} faces; the box centre is {inside} from the surface", out.len());
+        let mut seen = std::collections::HashSet::new();
+        for f in &out {
+            let key: [u32; 9] = std::array::from_fn(|i| f.p[i / 3][i % 3].to_bits());
+            assert!(seen.insert(key), "a face came back twice");
+            let c = (f.p[0] + f.p[1] + f.p[2]) / 3.0;
+            assert!(t.distance(c).abs() < 1e-3, "a face centre is {} off the collider", t.distance(c));
+            let face = (f.p[1] - f.p[0]).cross(f.p[2] - f.p[0]).normalize();
+            for n in f.n {
+                assert!(n.dot(face) > 0.3, "normal {n} does not face with {face}");
+            }
+        }
+    }
 
     /// A rounded hill: curvature is what makes surface nets and the field
     /// disagree, so a flat plane would prove nothing.

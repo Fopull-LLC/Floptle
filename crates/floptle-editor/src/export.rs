@@ -2798,7 +2798,7 @@ mod tests {
         assert!(!ExportIgnore::parse("").ignores("anything", false));
     }
 
-    /// **0294: what a jam build shipped that it should not have.** A
+    /// **What a jam build shipped that it should not have.** A
     /// `.floptleignore` leaves out what the developer names; the report lists
     /// the heaviest media nothing names; and neither a path a script assembles
     /// with `..` nor a switched-off linked package is reported as a reference
