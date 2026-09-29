@@ -78,6 +78,9 @@ pub struct DrawLine {
     pub a: [f64; 3],
     pub b: [f64; 3],
     pub color: [f32; 4],
+    /// Hidden behind the surfaces in front of it (`draw.depthTest(true)`);
+    /// otherwise it draws through them, as an orbit through a planet.
+    pub depth: bool,
 }
 
 /// One screen-space rectangle a script queued via `draw.rect` /

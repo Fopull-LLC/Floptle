@@ -1172,9 +1172,10 @@ impl Editor {
             }
             // Script-drawn 3D lines (draw.line — the map's orbit conics).
             if !self.script_lines.is_empty() && !self.lines_deferred {
-                let verts = script_line_verts(&self.script_lines, cam.world_position);
+                let (through, tested) = script_line_batches(&self.script_lines, cam.world_position);
                 headless_mark!("lines");
-                line_layer.draw(gpu, color, depth, view_proj, &verts);
+                line_layer.draw(gpu, color, depth, view_proj, &through, false);
+                line_layer.draw(gpu, color, depth, view_proj, &tested, true);
             }
             // Script-drawn FILLED triangles (draw.tri/cone/disc — solid gizmos).
             if !self.script_tris.is_empty() {
@@ -1287,6 +1288,16 @@ pub(crate) fn test_editor_with_gpu() -> Option<crate::Editor> {
     Some(ed)
 }
 
+/// Script lines as camera-relative vertex pairs, split into those that draw
+/// through the scene and those `draw.depthTest` hides behind it.
+pub(crate) fn script_line_batches(
+    lines: &[floptle_script::DrawLine],
+    cam: DVec3,
+) -> (Vec<floptle_render::LineVertex>, Vec<floptle_render::LineVertex>) {
+    let (tested, through): (Vec<_>, Vec<_>) = lines.iter().cloned().partition(|l| l.depth);
+    (script_line_verts(&through, cam), script_line_verts(&tested, cam))
+}
+
 /// Script lines as camera-relative vertex pairs.
 pub(crate) fn script_line_verts(lines: &[floptle_script::DrawLine], cam: DVec3) -> Vec<floptle_render::LineVertex> {
     lines
@@ -1304,14 +1315,25 @@ pub(crate) fn script_line_verts(lines: &[floptle_script::DrawLine], cam: DVec3) 
 
 impl Editor {
     /// Draw this frame's script lines over a finished, full-resolution picture
-    /// (after post and the upscale): `draw.nativeLines`.
-    pub(crate) fn draw_lines_over(&mut self, target: &wgpu::TextureView, view_proj: floptle_core::math::Mat4, cam: DVec3) {
+    /// (after post and the upscale): `draw.nativeLines`. `scene_depth` is the
+    /// depth the scene was drawn with, at its own resolution, which the lines
+    /// `draw.depthTest` asked for hide behind.
+    pub(crate) fn draw_lines_over(
+        &mut self,
+        target: &wgpu::TextureView,
+        size: [u32; 2],
+        view_proj: floptle_core::math::Mat4,
+        cam: DVec3,
+        scene_depth: &wgpu::TextureView,
+    ) {
         if self.script_lines.is_empty() {
             return;
         }
-        let verts = script_line_verts(&self.script_lines, cam);
+        let (through, tested) = script_line_batches(&self.script_lines, cam);
+        let px = [size[0] as f32, size[1] as f32];
         if let (Some(gpu), Some(lines)) = (self.gpu.as_ref(), self.line_layer.as_mut()) {
-            lines.draw_overlay(gpu, target, gpu.surface_format(), view_proj, &verts);
+            lines.draw_overlay(gpu, target, gpu.surface_format(), px, view_proj, &through, None);
+            lines.draw_overlay(gpu, target, gpu.surface_format(), px, view_proj, &tested, Some(scene_depth));
         }
     }
 }

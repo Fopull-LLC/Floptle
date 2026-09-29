@@ -227,7 +227,7 @@ fn main() {
                 wire.push(LineVertex { pos: rel(b), color: c });
             }
         }
-        lines.draw(&gpu, &color_view, gpu.depth_view(), view_proj, &wire);
+        lines.draw(&gpu, &color_view, gpu.depth_view(), view_proj, &wire, false);
 
         // The overlay proper.
         let mut fill: Vec<TriVertex> = Vec::new();
@@ -304,7 +304,7 @@ fn main() {
         if !fill.is_empty() {
             tris.draw(&gpu, &color_view, gpu.depth_view(), view_proj, &fill);
         }
-        lines.draw(&gpu, &color_view, gpu.depth_view(), view_proj, &edges);
+        lines.draw(&gpu, &color_view, gpu.depth_view(), view_proj, &edges, false);
 
         let regions: std::collections::HashSet<u32> =
             mesh.polys.iter().map(|p| p.region).collect();

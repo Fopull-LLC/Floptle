@@ -1684,12 +1684,12 @@ fn conic_points(
     (pts, closed)
 }
 
-fn push_polyline(q: &mut Vec<crate::DrawLine>, pts: &[glam::DVec3], closed: bool, color: [f32; 4]) {
+fn push_polyline(q: &mut Vec<crate::DrawLine>, pts: &[glam::DVec3], closed: bool, color: [f32; 4], depth: bool) {
     for w in pts.windows(2) {
-        q.push(crate::DrawLine { a: w[0].into(), b: w[1].into(), color });
+        q.push(crate::DrawLine { a: w[0].into(), b: w[1].into(), color, depth });
     }
     if closed && pts.len() > 2 {
-        q.push(crate::DrawLine { a: pts[pts.len() - 1].into(), b: pts[0].into(), color });
+        q.push(crate::DrawLine { a: pts[pts.len() - 1].into(), b: pts[0].into(), color, depth });
     }
 }
 
@@ -1708,15 +1708,20 @@ fn install_draw(lua: &Lua) -> DrawCells {
     // `draw.line(x1,y1,z1, x2,y2,z2, r,g,b [, a])` — queue one world-space
     // 3D line segment for this tick. Immediate mode: segments live for one
     // tick and are re-drawn every fixedUpdate while wanted (the S6 v2 map
-    // screen draws its orbit conics this way). Depth-tested in the scene.
+    // screen draws its orbit conics this way). Drawn through the scene
+    // unless `draw.depthTest(true)` came first.
     let draw_lines: Rc<RefCell<Vec<crate::DrawLine>>> = Rc::new(RefCell::new(Vec::new()));
     let native_lines: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
+    // `draw.depthTest(on)`: whether the lines queued after it hide behind
+    // surfaces. Off by default, so an orbit still reads through its planet.
+    let line_depth: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
     let draw_tris: Rc<RefCell<Vec<crate::DrawTri>>> = Rc::new(RefCell::new(Vec::new()));
     let draw_quads: Rc<RefCell<Vec<crate::DrawQuad>>> = Rc::new(RefCell::new(Vec::new()));
     let draw_rects: Rc<RefCell<Vec<crate::DrawRect>>> = Rc::new(RefCell::new(Vec::new()));
     let draw_texts: Rc<RefCell<Vec<crate::DrawText>>> = Rc::new(RefCell::new(Vec::new()));
     {
         let q = draw_lines.clone();
+        let ld = line_depth.clone();
         if let (Ok(f), Ok(t)) = (
             lua.create_function(
                 move |_,
@@ -1736,6 +1741,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
                         a: [x1, y1, z1],
                         b: [x2, y2, z2],
                         color: [r, g, b, a.unwrap_or(1.0)],
+                        depth: ld.get(),
                     });
                     Ok(())
                 },
@@ -1755,7 +1761,8 @@ fn install_draw(lua: &Lua) -> DrawCells {
                              c: glam::DVec3,
                              n: glam::DVec3,
                              radius: f64,
-                             color: [f32; 4]| {
+                             color: [f32; 4],
+                             depth: bool| {
                 let n = n.try_normalize().unwrap_or(glam::DVec3::Y);
                 let u = if n.x.abs() < 0.9 { glam::DVec3::X } else { glam::DVec3::Z };
                 let u = (u - n * u.dot(n)).normalize();
@@ -1765,12 +1772,13 @@ fn install_draw(lua: &Lua) -> DrawCells {
                 for k in 1..=N {
                     let t = k as f64 / N as f64 * std::f64::consts::TAU;
                     let p = c + u * (radius * t.cos()) + v * (radius * t.sin());
-                    q.push(crate::DrawLine { a: prev.into(), b: p.into(), color });
+                    q.push(crate::DrawLine { a: prev.into(), b: p.into(), color, depth });
                     prev = p;
                 }
             };
             {
                 let q = draw_lines.clone();
+                let ld = line_depth.clone();
                 type RingArgs = (f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, Option<f32>);
                 if let Ok(f) = lua.create_function(
                     move |_, (cx, cy, cz, nx, ny, nz, radius, r, g, b, a): RingArgs| {
@@ -1780,6 +1788,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
                             glam::DVec3::new(nx, ny, nz),
                             radius.max(1e-4),
                             [r, g, b, a.unwrap_or(1.0)],
+                            ld.get(),
                         );
                         Ok(())
                     },
@@ -1802,14 +1811,30 @@ fn install_draw(lua: &Lua) -> DrawCells {
                     let _ = t.set("nativeLines", f);
                 }
             }
+            // `draw.depthTest([on])` — whether the lines, rings, boxes, polylines
+            // and conics queued after it hide behind the surfaces in front of
+            // them. Off by default: an orbit line reads through its planet.
+            // Holds until changed, like `nativeLines`. Returns the setting.
+            {
+                let ld = line_depth.clone();
+                if let Ok(f) = lua.create_function(move |_, on: Option<bool>| {
+                    if let Some(on) = on {
+                        ld.set(on);
+                    }
+                    Ok(ld.get())
+                }) {
+                    let _ = t.set("depthTest", f);
+                }
+            }
             // `draw.polyline(points, r,g,b [,a [, closed]])` — one call per curve
             // rather than one per segment.
             {
                 let q = draw_lines.clone();
+                let ld = line_depth.clone();
                 type PolyArgs = (Table, f32, f32, f32, Option<f32>, Option<bool>);
                 if let Ok(f) = lua.create_function(move |_, (points, r, g, b, a, closed): PolyArgs| {
                     let pts = polyline_points(&points)?;
-                    push_polyline(&mut q.borrow_mut(), &pts, closed.unwrap_or(false), [r, g, b, a.unwrap_or(1.0)]);
+                    push_polyline(&mut q.borrow_mut(), &pts, closed.unwrap_or(false), [r, g, b, a.unwrap_or(1.0)], ld.get());
                     Ok(())
                 }) {
                     let _ = t.set("polyline", f);
@@ -1819,6 +1844,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
             // a Kepler orbit around a focus.
             {
                 let q = draw_lines.clone();
+                let ld = line_depth.clone();
                 type ConicArgs =
                     (Value, Value, Value, f64, f64, usize, f32, f32, f32, Option<f32>, Option<f64>);
                 if let Ok(f) = lua.create_function(
@@ -1842,7 +1868,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
                             segs,
                             max_r.unwrap_or(p * 10.0),
                         );
-                        push_polyline(&mut q.borrow_mut(), &pts, closed, [r, g, b, a.unwrap_or(1.0)]);
+                        push_polyline(&mut q.borrow_mut(), &pts, closed, [r, g, b, a.unwrap_or(1.0)], ld.get());
                         Ok(())
                     },
                 ) {
@@ -1851,6 +1877,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
             }
             {
                 let q = draw_lines.clone();
+                let ld = line_depth.clone();
                 type BallArgs = (f64, f64, f64, f64, f32, f32, f32, Option<f32>);
                 if let Ok(f) = lua.create_function(
                     move |_, (cx, cy, cz, radius, r, g, b, a): BallArgs| {
@@ -1858,7 +1885,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
                         let col = [r, g, b, a.unwrap_or(1.0)];
                         let mut q = q.borrow_mut();
                         for n in [glam::DVec3::X, glam::DVec3::Y, glam::DVec3::Z] {
-                            ring_segs(&mut q, c, n, radius.max(1e-4), col);
+                            ring_segs(&mut q, c, n, radius.max(1e-4), col, ld.get());
                         }
                         Ok(())
                     },
@@ -1868,6 +1895,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
             }
             {
                 let q = draw_lines.clone();
+                let ld = line_depth.clone();
                 type BoxArgs = (f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, Option<f32>);
                 if let Ok(f) = lua.create_function(
                     move |_, (cx, cy, cz, hx, hy, hz, yaw, r, g, b, a): BoxArgs| {
@@ -1889,7 +1917,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
                             (0, 2), (1, 3), (4, 6), (5, 7), // y edges
                             (0, 4), (1, 5), (2, 6), (3, 7), // z edges
                         ] {
-                            q.push(crate::DrawLine { a: corner(i).into(), b: corner(j).into(), color: col });
+                            q.push(crate::DrawLine { a: corner(i).into(), b: corner(j).into(), color: col, depth: ld.get() });
                         }
                         Ok(())
                     },

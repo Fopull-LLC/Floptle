@@ -796,8 +796,10 @@ impl Editor {
                 }
                 // Script-drawn 3D lines (draw.line — the map's orbit conics).
                 if !self.script_lines.is_empty() && !defer_lines {
-                    let verts = crate::offscreen::script_line_verts(&self.script_lines, cam.world_position);
-                    line_layer.draw(gpu, color, depth, view_proj, &verts);
+                    let (through, tested) =
+                        crate::offscreen::script_line_batches(&self.script_lines, cam.world_position);
+                    line_layer.draw(gpu, color, depth, view_proj, &through, false);
+                    line_layer.draw(gpu, color, depth, view_proj, &tested, true);
                 }
                 // The navmesh's walkable surface, filled. Before the script
                 // triangles so a game's own gizmos draw on top of it rather
@@ -1013,8 +1015,14 @@ impl Editor {
                 // `draw.nativeLines`: over the upscaled picture, at the
                 // window's own resolution.
                 if defer_lines && !self.script_lines.is_empty() {
-                    let verts = crate::offscreen::script_line_verts(&self.script_lines, cam.world_position);
-                    line_layer.draw_overlay(gpu, &frame.view, gpu.surface_format(), view_proj, &verts);
+                    let (through, tested) =
+                        crate::offscreen::script_line_batches(&self.script_lines, cam.world_position);
+                    let px = [gpu.config.width as f32, gpu.config.height as f32];
+                    let scene_depth = if lowres { retro.depth_view() } else { gpu.depth_view() };
+                    line_layer.draw_overlay(gpu, &frame.view, gpu.surface_format(), px, view_proj, &through, None);
+                    line_layer.draw_overlay(
+                        gpu, &frame.view, gpu.surface_format(), px, view_proj, &tested, Some(scene_depth),
+                    );
                 }
 
                 profile

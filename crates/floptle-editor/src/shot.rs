@@ -228,20 +228,14 @@ pub(crate) fn run(args: Args) -> i32 {
     // a pass failed is a picture that lies. See `Gpu::headless_with`, which
     // installs no handler at all for the same reason in reverse — a probe must
     // never swallow one.
-    gpu.device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
-        floptle_say::say_err!("this machine's graphics driver could not build the renderer, so there is no \
-                   picture to write:\n  {e}");
-        // A guess, offered as one. It is the cause on every machine this has
-        // been seen on — the raster pipeline binds one palette texture to a
-        // filtering sampler and a nearest one, which OpenGL forbids — but the
-        // handler cannot know that from here, and a confident wrong cause is
-        // worse than a hint.
-        floptle_say::say_err!(
-            "if this machine has only an OpenGL adapter, that is the likely cause: floptle's \
-             shaders need Vulkan, Metal or DirectX 12."
-        );
-        std::process::exit(1);
-    }));
+    //
+    // **Except when it IS the engine.** A shader that does not parse is broken on
+    // every adapter, and on Vulkan, Metal or DirectX 12 the renderer is expected
+    // to build: a validation error there is a bug in floptle. Reported in the
+    // driver's words, it read to every render test as "this machine cannot
+    // render" and they skipped themselves, green, on a renderer that could not
+    // draw a line.
+    exit_on_render_error(&gpu, "no picture to write");
     // **The Console has to go somewhere.** `run` and `exec` publish theirs as
     // the report; this verb's answer is a picture, so anything the editor says
     // while making it — a scene that failed to load, a device missing the
@@ -748,7 +742,7 @@ pub(crate) fn render_frame_pixels(
     // A UI-first scene photographed without its UI is wrong on first sight,
     // and nothing else would say so.
     if defer_lines {
-        ed.draw_lines_over(&color_view, cam.view_proj(aspect), cam.world_position);
+        ed.draw_lines_over(&color_view, [w, h], cam.view_proj(aspect), cam.world_position, &depth_view);
     }
     if ui {
         ed.draw_game_ui_overlay(&color_view, w, h, true);
@@ -899,6 +893,42 @@ pub(crate) fn default_out(root: &Path, scene: Option<&str>) -> PathBuf {
         .unwrap_or_default()
         .unwrap_or_else(|| "scene".into());
     root.join(format!("{stem}.png"))
+}
+
+/// Stop the process when the renderer fails validation, saying whose fault it
+/// is. `nothing` finishes "so there is …" (`"no picture to write"`).
+///
+/// On an OpenGL-only adapter some of the engine's pipelines cannot be built at
+/// all, and that is the machine, not a defect: exit 1, in the words every
+/// render test reads as "skip, this machine cannot render". A shader that does
+/// not parse is broken everywhere, and on Vulkan, Metal or DirectX 12 the
+/// renderer is expected to build, so there any validation error is a bug in
+/// floptle: exit 2, in words no test mistakes for a missing GPU. Reported the
+/// first way, a broken shader turned every render test green.
+pub(crate) fn exit_on_render_error(gpu: &Gpu, nothing: &'static str) {
+    let opengl = gpu.adapter.get_info().backend == wgpu::Backend::Gl;
+    gpu.device.on_uncaptured_error(std::sync::Arc::new(move |e: wgpu::Error| {
+        if !opengl || e.to_string().contains("parsing error") {
+            floptle_say::say_err!(
+                "floptle's renderer failed its own validation, so there is {nothing}. This is a \
+                 bug in floptle, not in this machine:\n  {e}"
+            );
+            std::process::exit(2);
+        }
+        floptle_say::say_err!(
+            "this machine's graphics driver could not build the renderer, so there is {nothing}:\n  {e}"
+        );
+        // A guess, offered as one. It is the cause on every machine this has
+        // been seen on — the raster pipeline binds one palette texture to a
+        // filtering sampler and a nearest one, which OpenGL forbids — but the
+        // handler cannot know that from here, and a confident wrong cause is
+        // worse than a hint.
+        floptle_say::say_err!(
+            "if this machine has only an OpenGL adapter, that is the likely cause: floptle's \
+             shaders need Vulkan, Metal or DirectX 12."
+        );
+        std::process::exit(1);
+    }));
 }
 
 #[cfg(test)]

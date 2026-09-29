@@ -349,17 +349,7 @@ pub(crate) fn run(args: Args<'_>) -> i32 {
     // same reason: `open_project` imports models and adopts paint, and both look
     // for a device.
     let gpu = Gpu::headless_hdr(w, h);
-    gpu.device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
-        floptle_say::say_err!(
-            "this machine's graphics driver could not build the renderer, so there is no \
-             picture to write:\n  {e}"
-        );
-        floptle_say::say_err!(
-            "if this machine has only an OpenGL adapter, that is the likely cause: floptle's \
-             shaders need Vulkan, Metal or DirectX 12."
-        );
-        std::process::exit(1);
-    }));
+    crate::shot::exit_on_render_error(&gpu, "no picture to write");
     let mut ed = crate::Editor {
         show_gizmos: false,
         console: crate::console::ConsoleState { mirror_to_stderr: true, ..Default::default() },

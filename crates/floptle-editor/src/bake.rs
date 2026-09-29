@@ -33,11 +33,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, json: bool) -> i32 {
     // bake's own: every probe face renders into a texture the bake allocates
     // from the Light Probes node's quality setting.
     let gpu = Gpu::headless_hdr(64, 64);
-    gpu.device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
-        floptle_say::say_err!("this machine's graphics driver could not build the renderer, so there is \
-                   nothing to bake with:\n  {e}");
-        std::process::exit(1);
-    }));
+    crate::shot::exit_on_render_error(&gpu, "nothing to bake with");
     let mut ed = crate::Editor {
         show_gizmos: false,
         // The bake reports through the Console — its progress line, the "no

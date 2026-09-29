@@ -21,7 +21,7 @@ each group, and meant to be searched.
 - [scene lookups & raycast](#scene-lookups--raycast) — 16
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
 - [input — keyboard & mouse](#input--keyboard--mouse) — 42
-- [drawing — draw.*](#drawing--draw) — 17
+- [drawing — draw.*](#drawing--draw) — 18
 - [the web — http.*, json.*](#the-web--http-json) — 11
 - [the player's account — account.*](#the-players-account--account) — 13
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 71
@@ -1748,17 +1748,21 @@ draw.cone(bx,by,bz, dx,dy,dz, radius, height, r,g,b [,a]) — a SOLID cone: base
 
 draw.conic(center, e1, e2, p, ecc, segs, r,g,b [,a [, maxR]]) — a Kepler orbit around the focus `center` (a vec3), in the plane of e1 (toward periapsis) and e2: r(θ) = p / (1 + ecc·cos θ), p the semi-latus rectum. ecc < 1 is a closed ellipse of `segs` segments; ecc ≥ 1 is an open arc that stops where r reaches maxR (default 10·p). Refuses: p ≤ 0.
 
+### `draw.depthTest`
+
+draw.depthTest(true) — the lines, rings, spheres, boxes, polylines and conics queued after it hide behind whatever is in front of them: a ground reticle behind the character, an orbit behind its planet. Off by default, so lines draw through the scene. Holds until changed, so switch it around the calls that want it: draw.depthTest(true) … draw.depthTest(false). Works with draw.nativeLines too. draw.depthTest() answers the setting.
+
 ### `draw.disc`
 
 draw.disc(cx,cy,cz, nx,ny,nz, r0, r1, r,g,b [,a]) — a filled annulus around normal n (r0 = inner, r1 = outer; r0 = 0 gives a full disc). Rotation gizmo bands, ground markers.
 
 ### `draw.line`
 
-draw.line(x1,y1,z1, x2,y2,z2, r,g,b [, a]) — queue one world-space 3D line for THIS frame (immediate mode: re-draw every lateUpdate — the camera pass — while wanted). Drawn OVER the scene, never occluded — the KSP-style map draws its orbit conics with these.
+draw.line(x1,y1,z1, x2,y2,z2, r,g,b [, a]) — queue one world-space 3D line for THIS frame (immediate mode: re-draw every lateUpdate — the camera pass — while wanted). Drawn OVER the scene, never occluded, so an orbit reads through its planet — unless draw.depthTest(true) came first, which hides lines behind what is in front of them.
 
 ### `draw.nativeLines`
 
-draw.nativeLines(true) — draw.line / ring / sphere / box / polyline / conic lines over the finished picture, one pixel wide at the window's own resolution and in exactly the colour given, instead of into the 3D scene. At a render scale below 1 scene lines are drawn at the lowered resolution and go soft; these do not. They skip the post effects (bloom, depth of field, grain). Persistent until switched off; draw.nativeLines() answers the setting.
+draw.nativeLines(true) — draw.line / ring / sphere / box / polyline / conic lines over the finished picture, one pixel wide at the window's own resolution and in exactly the colour given, instead of into the 3D scene. At a render scale below 1 scene lines are drawn at the lowered resolution and go soft; these do not. They skip the post effects (bloom, depth of field, grain). draw.depthTest(true) still hides them behind the scene, tested against the depth the scene was drawn with. Persistent until switched off; draw.nativeLines() answers the setting.
 
 ### `draw.polyline`
 

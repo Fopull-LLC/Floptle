@@ -299,6 +299,18 @@ resolution and in exactly the colour given, whatever the render scale; the
 post effects (bloom, depth of field, grain) no longer touch them. An orbit map
 or an aim reticle wants that.
 
+Lines draw through the scene by default, so an orbit reads through its planet.
+`draw.depthTest(true)` hides the lines queued after it behind whatever is in
+front of them, native or not; switch it back with `draw.depthTest(false)` for
+the ones that should stay on top:
+
+```lua
+draw.depthTest(true)
+draw.ring(ground.x, ground.y, ground.z, 0, 1, 0, 0.5, 1, 1, 1)  -- hides behind the player
+draw.depthTest(false)
+draw.polyline(orbit, 0.6, 0.8, 1)                               -- reads through the planet
+```
+
 ### What `app.quit()` does depends on where the game is running
 
 There is one honest answer per host, and they are different things:

@@ -114,3 +114,79 @@ fn native_lines_are_one_pixel_and_their_own_colour_at_half_render_scale() {
         let _ = std::fs::remove_dir_all(d);
     }
 }
+
+/// A project with a cube in front of a red line, drawn native or in the scene,
+/// with or without `draw.depthTest`.
+fn occluded_project(d: &Path, native: bool, depth: bool) {
+    project(d, native);
+    std::fs::write(
+        d.join("scenes/lines.ron"),
+        "(name: \"lines\", nodes: [\
+           (name: \"Camera\", matter: Camera(fov_y: 1.0, active: true)), \
+           (name: \"Wall\", transform: (translation: (0.0, 0.0, -3.0)), matter: Primitive(shape: Cube, color: (0.4, 0.4, 0.4))), \
+           (name: \"Drawer\", scripts: [(kind: \"lines\", enabled: true, params: [])])\
+         ])",
+    )
+    .expect("write the scene");
+    std::fs::write(
+        d.join("scripts/lines.lua"),
+        format!(
+            "function start(node)\n  app.setRenderScale(0.5)\n  draw.nativeLines({native})\n  draw.depthTest({depth})\nend\n\
+             function lateUpdate(node, dt)\n  draw.line(-20, 0, -5, 20, 0, -5, 1, 0, 0)\nend\n"
+        ),
+    )
+    .expect("write the script");
+}
+
+/// Red pixels in the middle tenth of the picture (behind the cube) and in the
+/// outer fifths (beside it).
+fn red_behind_and_beside(img: &image::RgbaImage) -> (usize, usize) {
+    let (w, h) = img.dimensions();
+    let red = |x: u32, y: u32| {
+        let p = img.get_pixel(x, y);
+        p[0] > 120 && p[0] as i32 > p[1] as i32 * 2 + 40
+    };
+    let (mut behind, mut beside) = (0, 0);
+    for y in 0..h {
+        for x in 0..w {
+            if !red(x, y) {
+                continue;
+            }
+            if x > w * 9 / 20 && x < w * 11 / 20 {
+                behind += 1;
+            } else if x < w / 5 || x > w * 4 / 5 {
+                beside += 1;
+            }
+        }
+    }
+    (behind, beside)
+}
+
+/// **`draw.depthTest(true)` hides a line behind what is in front of it**, in
+/// the scene and drawn native over the upscaled picture alike: the line shows
+/// either side of the cube and not through it. Without it the line draws
+/// through, as an orbit through its planet always has.
+#[test]
+fn a_depth_tested_line_hides_behind_the_scene_native_or_not() {
+    for native in [true, false] {
+        let mut seen = Vec::new();
+        for depth in [false, true] {
+            let d = temp(&format!("occl-{native}-{depth}"));
+            occluded_project(&d, native, depth);
+            let img = match shoot(&d) {
+                Ok(i) => i,
+                Err(why) => {
+                    assert!(cannot_render(&why), "shot failed for a reason that is not the adapter:\n{why}");
+                    let _ = std::fs::remove_dir_all(&d);
+                    return;
+                }
+            };
+            seen.push(red_behind_and_beside(&img));
+            let _ = std::fs::remove_dir_all(&d);
+        }
+        let ((through_behind, through_beside), (tested_behind, tested_beside)) = (seen[0], seen[1]);
+        assert!(through_behind > 0 && through_beside > 0, "native {native}: without depthTest the line draws through: {seen:?}");
+        assert_eq!(tested_behind, 0, "native {native}: with depthTest the line showed through the cube: {seen:?}");
+        assert!(tested_beside > 0, "native {native}: with depthTest the line vanished beside the cube too: {seen:?}");
+    }
+}

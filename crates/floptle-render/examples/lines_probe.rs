@@ -40,7 +40,7 @@ fn main() {
         LineVertex { pos: [-0.8, 0.8, 0.5], color: [0.1, 1.0, 0.2, 1.0] },
         LineVertex { pos: [0.8, -0.8, 0.5], color: [0.1, 1.0, 0.2, 1.0] },
     ];
-    lines.draw(&gpu, &color_view, gpu.depth_view(), Mat4::IDENTITY, &verts);
+    lines.draw(&gpu, &color_view, gpu.depth_view(), Mat4::IDENTITY, &verts, false);
 
     let px = readback(&gpu, &color_tex);
     let red = px.iter().filter(|p| p[0] > 180 && p[1] < 120).count();

@@ -13,6 +13,9 @@ use crate::device::Gpu;
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct LineGlobals {
     view_proj: [[f32; 4]; 4],
+    /// The picture being drawn into, in pixels (xy): where a native line looks
+    /// up the scene depth under it.
+    target: [f32; 4],
 }
 
 /// One line endpoint: camera-relative position + RGBA color.
@@ -41,19 +44,38 @@ const VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayou
 };
 
 const WGSL: &str = r#"
-struct Globals { view_proj: mat4x4<f32> };
+struct Globals { view_proj: mat4x4<f32>, size: vec4<f32> };
 @group(0) @binding(0) var<uniform> g: Globals;
+@group(1) @binding(0) var scene_depth: texture_depth_2d;
+
+// How far in front of the surface under it a depth-tested line may be and
+// still show, as a share of its distance: a reticle lying on the ground
+// neither flickers into it nor floats visibly above it.
+const DEPTH_SLOP: f32 = 0.001;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) color: vec4<f32>,
 };
 
-@vertex
-fn vs(@location(0) pos: vec3<f32>, @location(1) color: vec4<f32>) -> VsOut {
+fn project(pos: vec3<f32>, color: vec4<f32>) -> VsOut {
     var out: VsOut;
     out.clip = g.view_proj * vec4<f32>(pos, 1.0);
     out.color = color;
+    return out;
+}
+
+@vertex
+fn vs(@location(0) pos: vec3<f32>, @location(1) color: vec4<f32>) -> VsOut {
+    return project(pos, color);
+}
+
+// For the depth-tested pass inside the scene: pulled toward the camera by the
+// slop, so a line on a surface passes the test against that surface.
+@vertex
+fn vs_depth(@location(0) pos: vec3<f32>, @location(1) color: vec4<f32>) -> VsOut {
+    var out = project(pos, color);
+    out.clip.z = out.clip.z - DEPTH_SLOP * (out.clip.w - out.clip.z);
     return out;
 }
 
@@ -61,10 +83,29 @@ fn vs(@location(0) pos: vec3<f32>, @location(1) color: vec4<f32>) -> VsOut {
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return in.color;
 }
+
+// Over the finished picture: the scene depth under this pixel, read from the
+// (lower-resolution) depth the scene was drawn with.
+@fragment
+fn fs_depth(in: VsOut) -> @location(0) vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(scene_depth));
+    let at = clamp(in.clip.xy * dims / max(g.size.xy, vec2<f32>(1.0)), vec2<f32>(0.0), dims - 1.0);
+    let d = textureLoad(scene_depth, vec2<i32>(at), 0);
+    if (in.clip.z - DEPTH_SLOP * (1.0 - in.clip.z) > d) {
+        discard;
+    }
+    return in.color;
+}
 "#;
 
 pub struct Lines {
     pipeline: wgpu::RenderPipeline,
+    /// The same, hidden behind the surfaces already drawn (`draw.depthTest`).
+    pipeline_depth: wgpu::RenderPipeline,
+    /// The scene depth a depth-tested native line reads.
+    depth_layout: wgpu::BindGroupLayout,
+    depth_pipeline_layout: wgpu::PipelineLayout,
+    overlay_depth: Option<(wgpu::TextureFormat, wgpu::RenderPipeline)>,
     globals_buf: wgpu::Buffer,
     bind: wgpu::BindGroup,
     vbuf: wgpu::Buffer,
@@ -77,19 +118,29 @@ pub struct Lines {
     overlay: Option<(wgpu::TextureFormat, wgpu::RenderPipeline)>,
 }
 
+/// The in-scene depth compare: `Always` draws through (the default, so an
+/// orbit reads through a planet), `LessEqual` hides behind what is drawn.
+#[derive(Clone, Copy)]
+enum LineDepth {
+    None,
+    Through,
+    Tested,
+}
+
 fn line_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     module: &wgpu::ShaderModule,
     format: wgpu::TextureFormat,
-    with_depth: bool,
+    depth: LineDepth,
+    (vs, fs): (&str, &str),
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("lines"),
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module,
-            entry_point: Some("vs"),
+            entry_point: Some(vs),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             buffers: &[VERTEX_LAYOUT],
         },
@@ -98,17 +149,20 @@ fn line_pipeline(
         // thousands of units, where the depth buffer's precision made
         // segments flicker in and out against far geometry — and KSP-style
         // orbit lines should read through planets anyway. Never writes depth.
-        depth_stencil: with_depth.then(|| wgpu::DepthStencilState {
+        depth_stencil: (!matches!(depth, LineDepth::None)).then(|| wgpu::DepthStencilState {
             format: Gpu::DEPTH_FORMAT,
             depth_write_enabled: Some(false),
-            depth_compare: Some(wgpu::CompareFunction::Always),
+            depth_compare: Some(match depth {
+                LineDepth::Tested => wgpu::CompareFunction::LessEqual,
+                _ => wgpu::CompareFunction::Always,
+            }),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module,
-            entry_point: Some("fs"),
+            entry_point: Some(fs),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
@@ -132,7 +186,9 @@ impl Lines {
             label: Some("lines"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                // The fragment stage reads the picture size to find the scene
+                // depth under a native line.
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -146,7 +202,27 @@ impl Lines {
             bind_group_layouts: &[Some(&bind_layout)],
             immediate_size: 0,
         });
-        let pipeline = line_pipeline(device, &layout, &module, gpu.scene_format(), true);
+        let pipeline = line_pipeline(device, &layout, &module, gpu.scene_format(), LineDepth::Through, ("vs", "fs"));
+        let pipeline_depth =
+            line_pipeline(device, &layout, &module, gpu.scene_format(), LineDepth::Tested, ("vs_depth", "fs"));
+        let depth_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("lines-scene-depth"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let depth_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("lines-overlay-depth"),
+            bind_group_layouts: &[Some(&bind_layout), Some(&depth_layout)],
+            immediate_size: 0,
+        });
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("lines-globals"),
@@ -169,10 +245,27 @@ impl Lines {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        Self { pipeline, globals_buf, bind, vbuf, vcap, module, layout, overlay: None }
+        Self {
+            pipeline,
+            pipeline_depth,
+            depth_layout,
+            depth_pipeline_layout,
+            overlay_depth: None,
+            globals_buf,
+            bind,
+            vbuf,
+            vcap,
+            module,
+            layout,
+            overlay: None,
+        }
     }
 
     fn upload(&mut self, gpu: &Gpu, view_proj: Mat4, verts: &[LineVertex]) {
+        self.upload_for(gpu, view_proj, verts, [0.0, 0.0]);
+    }
+
+    fn upload_for(&mut self, gpu: &Gpu, view_proj: Mat4, verts: &[LineVertex], target: [f32; 2]) {
         let device = &gpu.device;
         if verts.len() as u32 > self.vcap {
             self.vcap = (verts.len() as u32).next_power_of_two();
@@ -187,30 +280,62 @@ impl Lines {
         gpu.queue.write_buffer(
             &self.globals_buf,
             0,
-            bytemuck::bytes_of(&LineGlobals { view_proj: view_proj.to_cols_array_2d() }),
+            bytemuck::bytes_of(&LineGlobals {
+                view_proj: view_proj.to_cols_array_2d(),
+                target: [target[0], target[1], 0.0, 0.0],
+            }),
         );
     }
 
     /// Draw `verts` over a finished picture of format `format` (after the
     /// post chain and any upscale), at that picture's resolution. The colours
     /// land as given: no tonemap, no bloom. No-op on an empty list.
+    ///
+    /// With `scene_depth` (the depth the scene was drawn with, at whatever
+    /// resolution) the lines hide behind what is in front of them; without it
+    /// they draw over everything.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_overlay(
         &mut self,
         gpu: &Gpu,
         color: &wgpu::TextureView,
         format: wgpu::TextureFormat,
+        target: [f32; 2],
         view_proj: Mat4,
         verts: &[LineVertex],
+        scene_depth: Option<&wgpu::TextureView>,
     ) {
         if verts.len() < 2 {
             return;
         }
-        if self.overlay.as_ref().is_none_or(|(f, _)| *f != format) {
-            let p = line_pipeline(&gpu.device, &self.layout, &self.module, format, false);
+        if scene_depth.is_some() && self.overlay_depth.as_ref().is_none_or(|(f, _)| *f != format) {
+            let p = line_pipeline(
+                &gpu.device,
+                &self.depth_pipeline_layout,
+                &self.module,
+                format,
+                LineDepth::None,
+                ("vs", "fs_depth"),
+            );
+            self.overlay_depth = Some((format, p));
+        }
+        if scene_depth.is_none() && self.overlay.as_ref().is_none_or(|(f, _)| *f != format) {
+            let p = line_pipeline(&gpu.device, &self.layout, &self.module, format, LineDepth::None, ("vs", "fs"));
             self.overlay = Some((format, p));
         }
-        self.upload(gpu, view_proj, verts);
-        let Some((_, pipeline)) = &self.overlay else { return };
+        self.upload_for(gpu, view_proj, verts, target);
+        let depth_bind = scene_depth.map(|view| {
+            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("lines-scene-depth"),
+                layout: &self.depth_layout,
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) }],
+            })
+        });
+        let pipeline = match &depth_bind {
+            Some(_) => self.overlay_depth.as_ref().map(|(_, p)| p),
+            None => self.overlay.as_ref().map(|(_, p)| p),
+        };
+        let Some(pipeline) = pipeline else { return };
         let mut enc =
             gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("lines-overlay") });
         {
@@ -229,6 +354,9 @@ impl Lines {
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &self.bind, &[]);
+            if let Some(b) = &depth_bind {
+                pass.set_bind_group(1, b, &[]);
+            }
             pass.set_vertex_buffer(0, self.vbuf.slice(..));
             pass.draw(0..verts.len() as u32 & !1, 0..1);
         }
@@ -236,7 +364,8 @@ impl Lines {
     }
 
     /// Draw `verts` (pairs of camera-relative endpoints) into the already-filled
-    /// color + depth targets. No-op on an empty list.
+    /// color + depth targets. No-op on an empty list. `depth_tested` hides them
+    /// behind the surfaces already drawn; otherwise they draw through.
     pub fn draw(
         &mut self,
         gpu: &Gpu,
@@ -244,6 +373,7 @@ impl Lines {
         depth: &wgpu::TextureView,
         view_proj: Mat4,
         verts: &[LineVertex],
+        depth_tested: bool,
     ) {
         if verts.len() < 2 {
             return;
@@ -276,7 +406,7 @@ impl Lines {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(if depth_tested { &self.pipeline_depth } else { &self.pipeline });
             pass.set_bind_group(0, &self.bind, &[]);
             pass.set_vertex_buffer(0, self.vbuf.slice(..));
             pass.draw(0..verts.len() as u32 & !1, 0..1);
