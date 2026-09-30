@@ -79,7 +79,7 @@ impl Default for TextureLoads {
 const NO_GPU: &str = "this host draws nothing (a dedicated server, or floptle run), so it makes no textures";
 
 impl TextureLoads {
-    fn start(&mut self, cb: Function) -> u64 {
+    pub(crate) fn start(&mut self, cb: Function) -> u64 {
         let id = self.next;
         self.next += 1;
         self.waiting.insert(id, vec![cb]);

@@ -57,6 +57,11 @@ pub struct Region {
     pub name: String,
     /// `host:port` of the managed relay.
     pub relay: String,
+    /// The relay's browser leg, `wss://host:port/` — where a page joins, since
+    /// it cannot speak QUIC. `None` for a region that takes no browser
+    /// players yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_ws: Option<String>,
     /// `planned` until a lobby has actually been joined from another network;
     /// `up` once it has. **A build must not host on a region that is not `up`**
     /// — see [`Region::is_live`].
@@ -124,6 +129,7 @@ pub fn shipped() -> Regions {
             letter: 'U',
             name: "US East (Ashburn)".into(),
             relay: "us-east.relay.fopull.com:7788".into(),
+            relay_ws: Some("wss://us-east.relay.fopull.com:7789/".into()),
             status: "planned".into(),
         }],
     }
@@ -283,6 +289,7 @@ mod tests {
                     letter: 'U',
                     name: "US East".into(),
                     relay: "us-east.relay.fopull.com:7788".into(),
+                    relay_ws: None,
                     status: "up".into(),
                 },
                 Region {
@@ -290,6 +297,7 @@ mod tests {
                     letter: 'E',
                     name: "Frankfurt".into(),
                     relay: "eu-central.relay.fopull.com:7788".into(),
+                    relay_ws: None,
                     status: "planned".into(),
                 },
             ],
@@ -388,6 +396,7 @@ mod tests {
                 letter: 'U',
                 name: "US East".into(),
                 relay: "us-east.relay.fopull.com:7788".into(),
+                relay_ws: None,
                 status: "planned".into(),
             }],
         };

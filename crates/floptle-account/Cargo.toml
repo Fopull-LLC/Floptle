@@ -64,6 +64,8 @@ js-sys = "0.3"
 web-sys = { version = "0.3", features = [
     "Window", "Storage", "Location", "History",
     "Request", "RequestInit", "RequestMode", "Response", "Headers",
+    # `web_fetch`: bytes both ways, a timeout, and no cookies.
+    "RequestCredentials", "AbortController", "AbortSignal",
 ] }
 # PKCE's 32 random bytes. `getrandom` 0.2 has no default source on
 # wasm32-unknown-unknown — there is no OS to ask — and refuses to build without

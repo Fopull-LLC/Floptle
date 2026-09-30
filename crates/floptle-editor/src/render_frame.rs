@@ -436,6 +436,7 @@ impl Editor {
         // A1 target cameras render first, so every later pass (previews, game
         // viewport, the surface itself) samples this frame's feed.
         self.update_render_targets(elapsed);
+        self.pump_captures();
         self.update_camera_preview(elapsed);
         self.update_game_viewport(elapsed);
         // The ◫ UI tab's canvas — the selected layer through the real UI

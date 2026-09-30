@@ -361,6 +361,12 @@ net.host{ relay = "relay.example:7788" }
 net.join("relay://relay.example:7788/ABCDE")
 ```
 
+**Browser players join through the relay too.** A page cannot speak QUIC, so a
+relay started with `--ws-port 7789` also takes WebSockets, and a web build
+joins the same lobby with `net.join("wss://relay.example:7789/ABCDE")`
+(`cloud://` codes find their region's browser leg by themselves). A page joins;
+it cannot host. See [web-export.md](web-export.md#networking-in-a-page).
+
 **Direct (LAN or a self-hosted box).** Host on a UDP port, joiner uses
 `quic://ip:port`. Needs the port reachable.
 

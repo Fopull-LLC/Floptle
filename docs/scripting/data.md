@@ -16,8 +16,11 @@ Part of the [scripting guide](../scripting.md) · [every call, as a reference](.
 
 ## 23. Saving: `save.set`, `save.get` & slots
 
-Persistent game data — survives Play sessions, editor restarts, and ships with
-exported builds. One key→value store per **slot** (its own file under `save/`).
+Persistent game data — survives Play sessions, editor restarts, and installing a
+new version of an exported game. One key→value store per **slot** (its own file
+under `save/`). In the editor that is the project's `save/`; in an exported build
+it is `save/` inside the player's own data folder, which outlives the build (see
+[Where a player's data lives](../export-builds.md#where-a-players-data-lives)).
 
 ```lua
 save.set("gold", save.get("gold", 0) + 10)
@@ -88,6 +91,28 @@ http.post(url, body [, opts], function(res) end)   -- a TABLE body is sent as JS
 json.encode(t)   json.decode(s)   -- decode returns nil, err rather than raising
 openUrl(url)     -- open the player's own browser (the sign-in flow needs it)
 ```
+
+The same calls work in a browser build, through the page's own `fetch`. There
+the server has to allow the page's address (CORS), redirects are followed
+rather than handed back, and a few headers are the browser's to set; see
+[web-export.md](../web-export.md#networking-in-a-page).
+
+**Bytes made small, and bytes as text: `data.*`.** A level, a ghost or a
+picture saved inside JSON is smaller and survives the trip as text:
+
+```lua
+local packed = data.deflate(json.encode(level))          -- zlib, level 6
+local text   = data.base64Encode(packed)                  -- safe inside JSON or a URL
+local bytes, err = data.base64Decode(text)
+local plain, err = data.inflate(bytes)                    -- nil, why for bad data
+```
+
+`data.deflate(bytes [, { level, format }])` takes `format = "zlib"` (the
+default), `"raw"` or `"gzip"`, and `level` 0–9. `data.inflate` reads what
+someone else sent, so bad data answers `nil, why` rather than raising, and it
+stops at `maxSize` bytes (64 MB unless you say otherwise) so a small hostile
+blob cannot expand to fill memory. `data.base64Encode(bytes, { url = true })`
+uses the URL-safe alphabet; `data.base64Decode` reads either.
 
 Play only; Stop and `scene.load` cancel everything in flight; a call from
 `fixedUpdate` warns, because a reply's timing can never be replayed.
@@ -260,6 +285,9 @@ this page; `app.*` is the rest.
 | `app.quit()` | end the game |
 | `app.title()` | the game's title, for the top of a menu |
 | `app.version()` | the engine version this build was made with |
+| `app.platform()` | `"windows"`, `"macos"`, `"linux"` or `"web"` |
+| `app.isWeb()` | `true` in a browser build, to hide what a page cannot do |
+| `app.dataPath()` | the folder the player's `user://` files are in, for "your files are in …" (`nil` in a browser) |
 | `app.vsync()` / `app.setVsync(mode)` | `"On"`, `"Adaptive"` or `"Off"` |
 | `app.retro()` / `app.setRetro(on)` | the retro presentation — compositing small and upscaling |
 | `app.retroHeight()` / `app.setRetroHeight(px)` | the height it composites at, for a pixel-art game |

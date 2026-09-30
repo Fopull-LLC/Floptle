@@ -35,6 +35,11 @@ struct Args {
     /// `--tls-cert` + `--tls-key`: the certificate to present instead of a
     /// self-signed one, watched for renewal (see `tls`).
     tls: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    /// `--ws-port`: also take browsers, over WebSockets on this TCP port.
+    ws_port: Option<u16>,
+    /// `--ws-plain`: serve that port as `ws://` even with a certificate, for
+    /// a proxy in front that ends TLS itself.
+    ws_plain: bool,
 }
 
 impl Args {
@@ -84,6 +89,14 @@ FLAGS
                         paths is presented to new connections within ten
                         seconds and drops nobody. A renewal that will not load
                         is said once and the old certificate stays.
+  --ws-port <n>         also accept browser players, over WebSockets on this TCP
+                        port — a page cannot speak QUIC. With --tls-cert it is
+                        wss:// on the same certificate, which a page served
+                        over https: requires; a browser will not accept the
+                        self-signed one. Desktop and browser players meet in
+                        the same lobbies.
+  --ws-plain            serve --ws-port as plain ws:// even with --tls-cert,
+                        for a proxy in front that ends TLS itself.
   --help, -h            this table.
 
 Without --control and --token this is the open relay and nothing else: no keys,
@@ -101,6 +114,8 @@ was missing is the untracked path that refuses to start instead.
             no_address_limits: false,
             token: None,
             tls: None,
+            ws_port: None,
+            ws_plain: false,
         };
         let mut tls_cert: Option<String> = None;
         let mut tls_key: Option<String> = None;
@@ -155,6 +170,15 @@ was missing is the untracked path that refuses to start instead.
                     tls_key = Some(need(val, "--tls-key")?);
                     i += 2;
                 }
+                "--ws-port" => {
+                    let v = need(val, "--ws-port")?;
+                    out.ws_port = Some(v.parse().map_err(|_| format!("--ws-port: '{v}' is not a port"))?);
+                    i += 2;
+                }
+                "--ws-plain" => {
+                    out.ws_plain = true;
+                    i += 1;
+                }
                 // Printed and exit 0, rather than refused as an unknown flag
                 // or — as the July binary did — parsed as a port number, which
                 // is how the two builds were told apart on the box.
@@ -206,12 +230,15 @@ fn main() {
     // half-configuration that refuses to start, like a token with no control
     // plane.
     let mut cert_watch: Option<tls::CertWatch> = None;
+    let mut loaded: Option<floptle_net::ServerCertificate> = None;
     let bound = match &args.tls {
         None => RelayServer::bind(args.port),
         Some((cert_path, key_path)) => match tls::CertWatch::load(cert_path, key_path) {
             Ok((watch, cert)) => {
                 cert_watch = Some(watch);
-                RelayServer::bind_with_certificate(args.port, &cert)
+                let bound = RelayServer::bind_with_certificate(args.port, &cert);
+                loaded = Some(cert);
+                bound
             }
             Err(e) => Err(format!("certificate: {e}")),
         },
@@ -235,6 +262,21 @@ fn main() {
             }
         }
         None => println!("socket buffers: kernel default (nothing asked)"),
+    }
+    // The browser leg. Same certificate as the QUIC leg unless a proxy in
+    // front is ending TLS for it.
+    if let Some(ws_port) = args.ws_port {
+        let cert = if args.ws_plain { None } else { loaded.take() };
+        match relay.listen_websocket(ws_port, cert.as_ref()) {
+            Ok(p) => println!(
+                "browsers: {} on TCP {p}",
+                if cert.is_some() { "wss://" } else { "ws:// (no TLS — a page served over https: cannot reach it without a proxy)" }
+            ),
+            Err(e) => {
+                eprintln!("floptle-relay: --ws-port: {e}");
+                std::process::exit(1);
+            }
+        }
     }
     match (&cert_watch, &args.tls) {
         (Some(w), Some((cert_path, _))) => println!(

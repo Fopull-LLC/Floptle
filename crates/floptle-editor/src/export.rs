@@ -43,6 +43,14 @@ pub(crate) struct GameManifest {
     /// player's own binary can read its Steam App ID from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) steam: Option<floptle_scene::SteamProjectSettings>,
+    /// Copied from `ProjectConfigDoc::data_id` / `studio`: the name of the
+    /// per-user folder the build keeps a player's data in. Absent in a build
+    /// exported before it existed, which falls back to the title — see
+    /// [`crate::user_data`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) data_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) studio: Option<String>,
 }
 
 /// A `floptle-game.ron` beside the running binary, if any → (manifest, its dir).
@@ -994,6 +1002,8 @@ struct Staged {
     port: Portability,
     skipped: Skipped,
     unnamed: Vec<(String, u64)>,
+    /// The data folder name this export gave a project that had none.
+    new_data_id: Option<String>,
 }
 
 #[cfg(feature = "editor-ui")]
@@ -1001,6 +1011,12 @@ impl Staged {
     /// The status line's tail: what was bundled, rewritten, or left dangling.
     fn tail(&self) -> String {
         let mut msg = String::new();
+        if let Some(id) = &self.new_data_id {
+            msg.push_str(&format!(
+                " — named the players' data folder \"{id}\" (data_id in project.ron); keep it, \
+                 or every new build loses its players' saves"
+            ));
+        }
         if self.skipped.files > 0 {
             msg.push_str(&format!(
                 " — left out {} authoring file(s), {:.1} MB the engine has no loader for",
@@ -1108,11 +1124,37 @@ fn stage_game(proj: &Path, out_c: &Path, title: &str) -> Result<Staged, String> 
     let linked = ship_linked_packages(proj, &ship_assets)?;
     let port = make_portable(&ship_assets, proj);
     let unnamed = heaviest_unnamed(&ship_assets, 5);
-    let manifest = GameManifest { title: title.to_string(), project: "assets".into(), steam: cfg.steam };
+    let (data_id, new_data_id) = project_data_id(proj, &cfg, title);
+    let manifest = GameManifest {
+        title: title.to_string(),
+        project: "assets".into(),
+        steam: cfg.steam,
+        data_id: Some(data_id),
+        studio: cfg.studio.clone().filter(|s| floptle_scene::valid_data_id(s)),
+    };
     let text = ron::ser::to_string_pretty(&manifest, ron::ser::PrettyConfig::default())
         .map_err(|e| format!("manifest: {e}"))?;
     floptle_vfs::write(out_c.join("floptle-game.ron"), text).map_err(|e| format!("write manifest: {e}"))?;
-    Ok(Staged { files, linked, port, skipped, unnamed })
+    Ok(Staged { files, linked, port, skipped, unnamed, new_data_id })
+}
+
+/// The project's data folder name, and whether this export just chose it.
+///
+/// The name has to outlive the build, so the first export writes the one it
+/// derives back into `project.ron`: a later title change must not move every
+/// player's saves. An invalid hand-written one is replaced the same way.
+#[cfg(feature = "editor-ui")]
+fn project_data_id(proj: &Path, cfg: &floptle_scene::ProjectConfigDoc, title: &str) -> (String, Option<String>) {
+    if let Some(id) = cfg.data_id.as_deref().filter(|id| floptle_scene::valid_data_id(id)) {
+        return (id.to_string(), None);
+    }
+    let id = floptle_scene::data_id_from_title(title);
+    let path = proj.join("project.ron");
+    if let Ok(Some(mut on_disk)) = floptle_scene::try_load_project(&path) {
+        on_disk.data_id = Some(id.clone());
+        let _ = floptle_scene::save_project(&on_disk, &path);
+    }
+    (id.clone(), Some(id))
 }
 
 /// Media files whose every use is a path written in a script, scene or data

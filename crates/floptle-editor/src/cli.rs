@@ -254,7 +254,15 @@ pub(crate) const VERBS: &[Verb] = &[
                  project with everything nobody on a server can see or hear left out, plus a \
                  manifest pinning the engine version and the scene to host. It carries no \
                  binary — a fleet box runs its own `floptle serve` against it — and it is \
-                 refused, with the reason, for a project that cannot run headless.",
+                 refused, with the reason, for a project that cannot run headless.\n\n\
+                 WHERE A PLAYER'S DATA LIVES. A build keeps saves, replays and `user://` \
+                 files in a per-user folder named by `data_id` in project.ron, so a new \
+                 version finds them: %APPDATA%\\<studio>\\<data_id> on Windows, \
+                 ~/Library/Application Support/<data_id> on macOS, $XDG_DATA_HOME/<data_id> \
+                 on Linux (FLOPTLE_DATA_DIR overrides it). The first export writes a \
+                 data_id made from the title; keep it, or every new build starts its \
+                 players over. `run`, `shot` and the editor keep all of it in the project's \
+                 save/.",
         args: &[
             Arg {
                 name: "PROJECT",

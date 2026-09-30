@@ -1295,6 +1295,41 @@ function camera.worldToScreen(x, y, z) end
 ---@param sy number
 ---@return number, number, number, number, number, number
 function camera.screenToRay(sx, sy) end
+---Photograph the world through a camera (the active one when `cam` is left out)
+---into an encoded PNG or JPEG, answered on a later frame: `fn(bytes, err)`.
+---`opts`: `w`, `h` (1–4096), `format` (\"png\"|\"jpeg\"), `quality` (1–100, JPEG),
+---`ui` (include the screen UI), `draws` (include draw.line/draw.tri shapes).
+---@param cam any a camera node, a camera's name, or nil
+---@param opts table
+---@param fn fun(bytes: string?, err: string?)
+function camera.capture(cam, opts, fn) end
+---`camera.capture` answered as a texture name (`\"img:<n>\"`) instead of bytes.
+---@param cam any a camera node, a camera's name, or nil
+---@param opts table
+---@param fn fun(tex: string?, err: string?)
+function camera.captureTexture(cam, opts, fn) end
+
+---Bytes made small, and bytes carried as text.
+data = {}
+---Compress a string. `opts`: `level` (0–9), `format` (\"zlib\"|\"raw\"|\"gzip\").
+---@param bytes string
+---@param opts? table
+---@return string
+function data.deflate(bytes, opts) end
+---Undo `data.deflate`: the bytes, or nil and why. `opts`: `format`, `maxSize`.
+---@param bytes string
+---@param opts? table
+---@return string?, string?
+function data.inflate(bytes, opts) end
+---Bytes as base64 text. `opts.url` picks the URL-safe alphabet.
+---@param bytes string
+---@param opts? table
+---@return string
+function data.base64Encode(bytes, opts) end
+---Base64 text back to bytes, or nil and why.
+---@param text string
+---@return string?, string?
+function data.base64Decode(text) end
 
 ---Cast a ray against the world's colliders (terrain + meshes + primitives)
 ---AND every physics body (players, crates). Returns a hit table

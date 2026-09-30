@@ -21,7 +21,7 @@ impl Editor {
     pub(crate) fn run_editor_action(&mut self, e: floptle_core::Entity, kind: &str, func: &str) {
         // One undo step for the whole action (record() no-ops during Play).
         self.record();
-        self.script_host.set_project_root(self.project_root.clone());
+        self.point_scripts_at_project();
         let scripts_dir = self.project_root.join("scripts");
         let ran =
             self.script_host.call_action(&mut self.world, &scripts_dir, e.index(), kind, func);

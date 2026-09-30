@@ -182,6 +182,8 @@ mod net;
 mod voice;
 mod worker;
 mod runtime_textures;
+mod capture;
+mod user_data;
 mod node_bounds;
 mod paint_io;
 mod paint_mesh;
@@ -1660,15 +1662,23 @@ pub fn run() {
     // Only a shipped build hands its launch back to Steam when it wasn't
     // started through it — see `steam_boot::boot`.
     let mut shipped = false;
+    let mut data_root: Option<PathBuf> = None;
     if !player_mode
         && project_path.is_none()
         && let Some((manifest, dir)) = export::load_game_manifest()
     {
         player_mode = true;
         shipped = true;
+        let project = dir.join(manifest.project);
+        data_root = user_data::open_for_build(
+            manifest.data_id.as_deref(),
+            manifest.studio.as_deref(),
+            &manifest.title,
+            &project,
+        );
         game_title = manifest.title;
         steam_settings = manifest.steam;
-        project_path = Some(dir.join(manifest.project));
+        project_path = Some(project);
     }
     // A player_mode launch with no manifest (`floptle play <project>`, `--play
     // <project>`) has its Steam settings in the project's own project.ron
@@ -1731,6 +1741,7 @@ pub fn run() {
     if let Some(p) = project_path {
         editor.project_root = p;
     }
+    editor.data_root = data_root;
     if let Some(platform) = steam_platform {
         editor.script_host.set_platform(platform);
     }
@@ -1968,6 +1979,13 @@ struct Editor {
     /// This frame's script lines are drawn over the finished picture, after
     /// post and any upscale, not in the scene pass (`draw.nativeLines`).
     pub(crate) lines_deferred: bool,
+    /// While `camera.capture` renders a picture without them: skip the
+    /// script's `draw.line` / `draw.tri` shapes.
+    pub(crate) hide_script_shapes: bool,
+    /// `camera.capture` pictures waiting for their GPU readback, and ones
+    /// being encoded. See [`capture`].
+    capture_jobs: Vec<capture::CaptureJob>,
+    capture_encodes: Vec<capture::CaptureEncode>,
     retro: Option<Retro>,
     /// Post-processing stack (bloom + vignette), full frame res.
     post: Option<floptle_render::PostStack>,
@@ -2621,6 +2639,11 @@ struct Editor {
     project: ProjectConfigDoc,
     /// The open project's root folder (holds `scenes/`, `models/`, `scripts/`…).
     project_root: PathBuf,
+    /// An exported build's per-user data folder: where `save.*`, `replays/`,
+    /// `user://` and a crash report go instead of the install folder. `None`
+    /// everywhere else (the editor, `run`, `shot`, `play`, a browser), which
+    /// keeps them in the project. See [`user_data`].
+    data_root: Option<PathBuf>,
     /// Whether the Project Settings window is open.
     show_project_settings: bool,
     /// Whether the Preferences (user-wide editor settings) window is open.

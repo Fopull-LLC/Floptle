@@ -25,7 +25,6 @@ use crate::auth::Entitlements;
 // `auth::WebStore` and `auth::OfflineProvider` instead — see `Account::new`.
 #[cfg(not(target_arch = "wasm32"))]
 use crate::auth::KeyringStore;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::cloud;
 use crate::cloud::CloudReply;
 
@@ -532,14 +531,17 @@ impl Account {
             let reply = match me.access_token() {
                 #[cfg(not(target_arch = "wasm32"))]
                 Ok(token) => cloud::request(&me.base, &token, &method, &path, body, timeout),
-                // A browser cannot reach the Cloud API, and the reason has
-                // nothing to do with having a token — see
-                // `auth::OfflineProvider`. Reply with it rather than leaving the
-                // script's callback pending forever.
+                // A page has no worker to block on: the request goes out on
+                // the page's own event loop and answers through the same
+                // channel when it lands.
                 #[cfg(target_arch = "wasm32")]
-                Ok(_token) => {
-                    let _ = (&me.base, &method, &path, body, timeout);
-                    CloudReply::failed(auth::NO_WEB_AUTH)
+                Ok(token) => {
+                    let base = me.base.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let reply = cloud::request_web(&base, &token, &method, &path, body, timeout).await;
+                        let _ = tx.send((id, reply));
+                    });
+                    return;
                 }
                 Err(e) => CloudReply::failed(e),
             };

@@ -283,9 +283,13 @@ mod host;
 mod http_api;
 mod preload_api;
 mod texture_api;
+mod capture_api;
+pub mod paths;
+pub mod data_api;
 mod cloud_api;
 pub mod decal_api;
 pub use texture_api::TextureRequest;
+pub use capture_api::{CaptureCamera, CaptureFormat, CaptureRequest, MAX_CAPTURE_SIDE, NO_RENDERER};
 pub use account_api::keep_account_signed_out;
 pub use preload_api::PreloadKind;
 pub use http_api::{browser_url, open_in_browser};
@@ -783,6 +787,10 @@ pub struct ScriptHost {
     /// The project root, so `assets.getFile` / `assets.getContents` can resolve paths the
     /// dev writes relative to it (the `Assets/` folder). Set by the editor each frame.
     project_root: Rc<RefCell<PathBuf>>,
+    /// The project root and the per-user data root together: what `user://`,
+    /// `save.*` and `app.dataPath` resolve against. `paths.project` is the
+    /// same cell as `project_root`.
+    paths: crate::paths::Paths,
     /// The `save.*` persistent store (roadmap A2): per-slot key→NetValue map,
     /// lazily loaded, flushed by the editor on Stop + periodically during Play.
     save_state: Rc<RefCell<save_api::SaveState>>,
@@ -945,6 +953,8 @@ pub struct ScriptHost {
     http: Rc<RefCell<http_api::HttpState>>,
     /// `assets.textureFromUrl` / `textureFromBytes`: the book of runtime textures.
     textures: Rc<RefCell<texture_api::TextureLoads>>,
+    /// `camera.capture` / `captureTexture`: pictures waiting for the driver.
+    captures: Rc<RefCell<capture_api::Captures>>,
     /// `cloud.*`: the game this project is connected to, set by the driver.
     cloud: cloud_api::CloudState,
     /// How long one pass into Lua may run — see [`budget`].

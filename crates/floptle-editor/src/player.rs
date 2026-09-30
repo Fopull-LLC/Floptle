@@ -92,18 +92,18 @@ pub fn run_player() {
     // it, and the Steam App ID (`project.ron` is not shipped, so the manifest is
     // the only place a build can read that from).
     let manifest = crate::export::load_game_manifest();
-    let (title, project, steam_settings, shipped) = match (explicit, manifest) {
+    let (title, project, steam_settings, shipped, data_names) = match (explicit, manifest) {
         (Some(p), _) => {
             let title = p
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "game".into());
             let steam = floptle_scene::load_project(&p.join("project.ron")).steam;
-            (title, p, steam, false)
+            (title, p, steam, false, None)
         }
         (None, Some((m, dir))) => {
             let project = dir.join(&m.project);
-            (m.title, project, m.steam, true)
+            (m.title, project, m.steam, true, Some((m.data_id, m.studio)))
         }
         (None, None) => {
             floptle_say::say_err!(
@@ -123,9 +123,18 @@ pub fn run_player() {
         std::process::exit(1);
     }
 
+    // An exported build keeps the player's data in a per-user folder that
+    // outlives the build; a project played directly keeps it in the project.
+    let data_root = data_names.and_then(|(id, studio)| {
+        crate::user_data::open_for_build(id.as_deref(), studio.as_deref(), &title, &project)
+    });
+
     // Before anything can crash. Beside the game's `save.*` files: see the
     // hook for why a build needs its own.
-    crate::report::install_player_panic_hook(project.join("save"), title.clone());
+    crate::report::install_player_panic_hook(
+        data_root.as_deref().unwrap_or(&project).join("save"),
+        title.clone(),
+    );
 
     // Steam's lifecycle activates before any window or GPU exists, so
     // `RestartAppIfNecessary` can still exit the process.
@@ -139,6 +148,7 @@ pub fn run_player() {
     let event_loop = crate::build_event_loop(steam_platform.is_some());
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = Player::new(title, project);
+    app.ed.data_root = data_root;
     app.shot = shot;
     app.shot_at = shot_at;
     // The platform capability boundary (achievements, overlay, rich presence)

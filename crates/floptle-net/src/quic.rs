@@ -379,6 +379,20 @@ impl ServerCertificate {
         fingerprint_of(&self.chain[0])
     }
 
+    /// The same chain and key as a TLS server config for a TCP listener —
+    /// the relay's `wss://` leg ([`crate::ws::WsServer`]).
+    pub fn tls_config(&self) -> Result<Arc<rustls::ServerConfig>, String> {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let mut cfg = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(|e| format!("server tls: {e}"))?
+            .with_no_client_auth()
+            .with_single_cert(self.chain.clone(), self.key.clone_key())
+            .map_err(|e| format!("server tls: {e}"))?;
+        cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+        Ok(Arc::new(cfg))
+    }
+
     fn server_config(&self) -> Result<quinn::ServerConfig, String> {
         let mut server_config =
             quinn::ServerConfig::with_single_cert(self.chain.clone(), self.key.clone_key())

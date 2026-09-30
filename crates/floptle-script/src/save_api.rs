@@ -127,7 +127,7 @@ pub(crate) fn flush(state: &mut SaveState, root: &std::path::Path) -> Result<(),
 pub(crate) fn install_save_api(
     lua: &Lua,
     state: Rc<RefCell<SaveState>>,
-    root: Rc<RefCell<PathBuf>>,
+    paths: crate::paths::Paths,
     logs: Rc<RefCell<Vec<crate::ScriptLog>>>,
 ) {
     let Ok(t) = lua.create_table() else { return };
@@ -136,12 +136,12 @@ pub(crate) fn install_save_api(
     // ≤ 1 KB, no functions/userdata); a violation is a loud script error.
     {
         let state = state.clone();
-        let root = root.clone();
+        let paths = paths.clone();
         if let Ok(f) = lua.create_function(move |_, (key, value): (String, Value)| {
             let nv = crate::net_api::lua_to_netvalue(&value, 0)
                 .map_err(|e| mlua::Error::RuntimeError(format!("save.set(\"{key}\"): {e}")))?;
             let mut s = state.borrow_mut();
-            ensure_loaded(&mut s, &root.borrow());
+            ensure_loaded(&mut s, &paths.runtime_base());
             s.insert(key.clone(), nv)
                 .map_err(|e| mlua::Error::RuntimeError(format!("save.set(\"{key}\"): {e}")))
         }) {
@@ -152,10 +152,10 @@ pub(crate) fn install_save_api(
     // save.get(key [, default]) — the stored value, else the default, else nil.
     {
         let state = state.clone();
-        let root = root.clone();
+        let paths = paths.clone();
         if let Ok(f) = lua.create_function(move |lua, (key, default): (String, Option<Value>)| {
             let mut s = state.borrow_mut();
-            ensure_loaded(&mut s, &root.borrow());
+            ensure_loaded(&mut s, &paths.runtime_base());
             match s.store.get(&key) {
                 Some(v) => crate::net_api::netvalue_to_lua(lua, v),
                 None => Ok(default.unwrap_or(Value::Nil)),
@@ -168,10 +168,10 @@ pub(crate) fn install_save_api(
     // save.delete(key) — true if something was removed.
     {
         let state = state.clone();
-        let root = root.clone();
+        let paths = paths.clone();
         if let Ok(f) = lua.create_function(move |_, key: String| {
             let mut s = state.borrow_mut();
-            ensure_loaded(&mut s, &root.borrow());
+            ensure_loaded(&mut s, &paths.runtime_base());
             Ok(s.remove(&key).is_some())
         }) {
             let _ = t.set("delete", f);
@@ -185,7 +185,7 @@ pub(crate) fn install_save_api(
     // slot is its own directory — see terrain.deleteSaveDir.
     {
         let state = state.clone();
-        let root = root.clone();
+        let paths = paths.clone();
         if let Ok(f) = lua.create_function(move |_, name: String| {
             if !valid_slot(&name) {
                 return Err(mlua::Error::RuntimeError(format!(
@@ -199,7 +199,7 @@ pub(crate) fn install_save_api(
                 s.loaded = true; // a fresh, empty store — nothing to lazily read back
                 s.dirty = false;
             }
-            Ok(floptle_vfs::remove_file(slot_path(&root.borrow(), &name)).is_ok())
+            Ok(floptle_vfs::remove_file(slot_path(&paths.runtime_base(), &name)).is_ok())
         }) {
             let _ = t.set("deleteSlot", f);
         }
@@ -209,7 +209,7 @@ pub(crate) fn install_save_api(
     // with no argument, returns the current slot's name.
     {
         let state = state.clone();
-        let root = root.clone();
+        let paths = paths.clone();
         let logs = logs.clone();
         if let Ok(f) = lua.create_function(move |_, name: Option<String>| {
             let mut s = state.borrow_mut();
@@ -220,7 +220,7 @@ pub(crate) fn install_save_api(
                 )));
             }
             if name != s.slot {
-                if let Err(e) = flush(&mut s, &root.borrow()) {
+                if let Err(e) = flush(&mut s, &paths.runtime_base()) {
                     logs.borrow_mut().push(crate::ScriptLog {
                         level: crate::LogLevel::Error,
                         msg: e,
@@ -245,7 +245,7 @@ pub(crate) fn install_save_api(
         let logs = logs.clone();
         if let Ok(f) = lua.create_function(move |_, ()| {
             let mut s = state.borrow_mut();
-            if let Err(e) = flush(&mut s, &root.borrow()) {
+            if let Err(e) = flush(&mut s, &paths.runtime_base()) {
                 logs.borrow_mut().push(crate::ScriptLog {
                     level: crate::LogLevel::Error,
                     msg: e.clone(),
@@ -270,7 +270,7 @@ mod tests {
         let lua = Lua::new();
         let state = Rc::new(RefCell::new(SaveState::default()));
         let logs = Rc::new(RefCell::new(Vec::new()));
-        install_save_api(&lua, state.clone(), Rc::new(RefCell::new(root.to_path_buf())), logs);
+        install_save_api(&lua, state.clone(), crate::paths::Paths::at(root.to_path_buf()), logs);
         (lua, state)
     }
 

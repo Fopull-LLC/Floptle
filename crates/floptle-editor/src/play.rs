@@ -784,11 +784,9 @@ impl Editor {
                 continue;
             };
             if self.terrain_disk_dirty.contains(&e)
-                && let Some(sd) = self.script_host.terrain_save_dir()
+                && let Some(sd) = self.script_host.terrain_save_path()
             {
-                let path = self
-                    .project_root
-                    .join(&sd)
+                let path = sd
                     .join(format!("{}.{id}.cfield", self.scene_name));
                 if let Some(dir) = path.parent() {
                     let _ = floptle_vfs::create_dir_all(dir);
@@ -910,6 +908,7 @@ impl Editor {
             self.script_host.set_playing(false);
             // So did every picture it downloaded.
             self.release_runtime_textures();
+            self.drop_captures();
             self.play_stream_hold = false;
             // Make the revert explicit — "where did my tweaks go" is a classic
             // lost-work surprise: Play-mode changes are a simulation, not edits.

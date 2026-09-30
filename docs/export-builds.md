@@ -130,9 +130,8 @@ The export owns the `assets/` copy, and deliberately leaves things out:
 - **`replays/`** — recorded match logs.
 
 Only at the project root: a nested folder named `save/` is content and ships.
-The game writes those two folders beside its own `assets/` when it runs, so a
-build you have played from its export folder carries your save the next time
-you zip that folder. Export again, or zip a fresh export, before you upload.
+An exported build writes neither folder into itself; a player's data lives in
+a folder of its own, described next.
 
 **Anything else you name in `.floptleignore`.** A file beside `project.ron`,
 one pattern per line, read the way `.gitignore` reads them:
@@ -194,6 +193,57 @@ The **entry scene** is resolved the way `scene.load` resolves names: a path
 (`scenes/menu.ron`) or a bare scene name (`menu`) both work. If it resolves to
 nothing the export fails rather than shipping a build that boots somewhere else.
 
+## Where a player's data lives
+
+A player's data outlives the build that wrote it. An exported game keeps its
+saves, replays and everything a script writes under `user://` in a per-user
+folder, so installing a new version (unzipped beside the old one, updated by
+Steam, or re-exported by you) finds everything the last one wrote:
+
+| OS | Folder |
+|---|---|
+| Windows | `%APPDATA%\<studio>\<data_id>\` (just `%APPDATA%\<data_id>\` with no studio) |
+| macOS | `~/Library/Application Support/<data_id>/` |
+| Linux | `$XDG_DATA_HOME/<data_id>/`, which is `~/.local/share/<data_id>/` by default |
+
+Inside it are `save/` (the `save.*` slots, and `crash.txt` if the game has
+crashed), `replays/`, and `user/` (the files a script writes as `user://…`).
+`FLOPTLE_DATA_DIR` set in the environment overrides the folder, for a portable
+install. A script can show the path with `app.dataPath()`.
+
+**`data_id` names the folder, and it must not change.** It is in `project.ron`.
+The first export writes one made from the title (`"Free Flier"` becomes
+`free-flier`) and says so; after that it stays as it is, even if the title
+changes, because a new build finds the last one's data by it. Rename it and
+every player starts over. `studio`, also in `project.ron`, is the publisher
+folder the game's folder sits in on Windows; macOS and Linux do not use one.
+
+**Builds made before this kept their saves beside the game.** The first time a
+new build runs, if its data folder is empty and its own folder has a `save/` or
+`replays/`, it copies them over, so a player who updates in place keeps their
+progress. It copies rather than moves: the install folder may be read-only,
+and the old build still finds its files if the player goes back to it. A player
+who unzipped the new build somewhere else has their old saves in the old
+folder, and nothing reads them from there.
+
+**The editor and the command line keep all of it in the project.** Play in the
+editor, `floptle run`, `floptle shot` and `floptle play` use the project's
+`save/`, with `user://` at `save/user/`, which the export leaves out. A test run
+never touches a player's real files, and a build never ships yours. A browser
+build keeps it in the page's storage, as below.
+
+**Steam Auto-Cloud.** Because the folder no longer moves between versions, Steam
+can sync it. In the Steamworks Auto-Cloud settings, add one root per platform,
+with the path below and pattern `*`, recursive:
+
+| Platform | Root | Subdirectory |
+|---|---|---|
+| Windows | `WinAppDataRoaming` | `<studio>/<data_id>/save` (or `<data_id>/save`) |
+| macOS | `MacAppSupport` | `<data_id>/save` |
+| Linux | `LinuxXdgDataHome` | `<data_id>/save` |
+
+Add the same with `user` in place of `save` to sync player-made files too.
+
 ## Web builds
 
 **Target ⏵ Web (browser)** stamps a folder that plays in a browser:
@@ -240,9 +290,17 @@ What is different from a desktop build, and deliberately so:
   machine and browser. Browsers cap this at a few megabytes.
 - **Sound starts on a click.** Browsers only allow audio after the player has
   interacted with the page; the Play button is that click.
-- **No networking, no Steam, no `http.*`.** Each refuses in one sentence
-  rather than hanging — the same as the desktop's rules for a feature that is
-  not there.
+- **`http.*`, `cloud.*` and `assets.textureFromUrl` work through the page's
+  `fetch`**, provided the server allows the page's address (CORS). Floptle
+  Cloud allowing web builds is its own step; see
+  [web-export.md](web-export.md#networking-in-a-page).
+- **Online play joins, it does not host.** A page joins a relay lobby over the
+  relay's browser leg (`net.join("cloud://CODE")`, or `wss://relay:port/CODE`
+  for your own relay), in the same lobby as desktop players. It cannot host,
+  and it cannot join a server directly; both are refused in one sentence.
+  `app.isWeb()` tells a script it is in a page, so it can hide those buttons.
+- **No Steam, and no voice chat.** Each refuses in one sentence rather than
+  hanging.
 - **Background work runs on the frame that asked for it.** A navmesh bake or a
   planet being generated stalls the frame it starts on instead of running on a
   thread, because a page has none without headers most hosts do not send. A

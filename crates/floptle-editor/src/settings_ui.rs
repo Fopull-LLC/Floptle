@@ -690,6 +690,48 @@ impl<'a> SettingsCtx<'a> {
                 }
             },
         );
+
+        // The name of the folder an exported game keeps its players' data in.
+        // Only the characters a folder name takes on every OS reach the field,
+        // so what is typed is always what is saved.
+        let id_chars = |t: &mut String| t.retain(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+        let derived = floptle_scene::data_id_from_title(project.title.as_deref().unwrap_or("game"));
+        row(
+            ui,
+            "Data folder",
+            Some("the folder an exported game keeps its players' saves, replays and user:// files \
+                  in, per user (%APPDATA%, ~/Library/Application Support, ~/.local/share). A new \
+                  build finds the last one's data by this name — change it and every player \
+                  starts over. Empty until the first export, which fills it in from the title"),
+            |ui| {
+                let mut t = project.data_id.clone().unwrap_or_default();
+                if ui
+                    .add_sized([fit(ui, 220.0), 20.0], egui::TextEdit::singleline(&mut t).hint_text(derived.as_str()))
+                    .changed()
+                {
+                    id_chars(&mut t);
+                    project.data_id = floptle_scene::valid_data_id(&t).then_some(t);
+                    out.save_project = true;
+                }
+            },
+        );
+        row(
+            ui,
+            "Studio",
+            Some("optional: the publisher folder the data folder sits in on Windows \
+                  (%APPDATA%\\<studio>\\<data folder>). macOS and Linux do not use one"),
+            |ui| {
+                let mut t = project.studio.clone().unwrap_or_default();
+                if ui
+                    .add_sized([fit(ui, 220.0), 20.0], egui::TextEdit::singleline(&mut t).hint_text("MyStudio"))
+                    .changed()
+                {
+                    id_chars(&mut t);
+                    project.studio = floptle_scene::valid_data_id(&t).then_some(t);
+                    out.save_project = true;
+                }
+            },
+        );
     }
 
     // --- Rendering ------------------------------------------------------

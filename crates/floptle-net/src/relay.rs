@@ -21,180 +21,11 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime};
 
-use serde::{Deserialize, Serialize};
-
 use crate::quic::{QuicClient, QuicServer, ServerCertificate};
+use crate::relay_wire::{channel_tag, tag_channel, RelayMsg, SeqState};
+pub use crate::relay_client::RelayClient;
+pub use crate::relay_wire::JOIN_RETRY_EVERY;
 use crate::transport::{Channel, Incoming, LinkStats, PeerId, Transport, SERVER};
-
-/// Wire channel tags inside relay messages.
-const CH_RELIABLE: u8 = 0;
-const CH_UNRELIABLE: u8 = 1;
-const CH_SEQUENCED: u8 = 2;
-
-fn channel_tag(c: Channel) -> u8 {
-    match c {
-        Channel::Reliable => CH_RELIABLE,
-        Channel::Unreliable => CH_UNRELIABLE,
-        Channel::UnreliableSequenced => CH_SEQUENCED,
-    }
-}
-
-fn tag_channel(t: u8) -> Channel {
-    match t {
-        CH_RELIABLE => Channel::Reliable,
-        CH_SEQUENCED => Channel::UnreliableSequenced,
-        _ => Channel::Unreliable,
-    }
-}
-
-/// Everything that crosses a relay leg.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-enum RelayMsg {
-    /// Endpoint → relay: host a new lobby, presenting nothing.
-    ///
-    /// **Kept as a unit variant on purpose.** A managed relay refuses this with
-    /// a sentence telling the developer to connect their project, and that
-    /// message is far more use than the silence a re-shaped variant would
-    /// produce: postcard indexes variants by declaration order, so widening
-    /// `Host` would make every game already in the wild fail to decode here and
-    /// hang with nothing said. [`RelayMsg::HostKeyed`] is appended at the end
-    /// instead, which old builds never send and new ones only send when the
-    /// project actually carries a key.
-    Host,
-    /// Endpoint → relay: join a lobby by code.
-    Join { code: String },
-    /// Relay → host: your lobby is live.
-    Hosted { code: String },
-    /// Relay → client: you're in.
-    JoinOk,
-    /// Relay → endpoint: no.
-    Refused { reason: String },
-    /// Relay → host: a client attached / detached (its game peer id).
-    PeerJoined { peer: u64 },
-    PeerLeft { peer: u64 },
-    /// Host → relay: deliver to one client. `seq` is the end-to-end
-    /// sequenced-drop stamp (0 on non-sequenced channels).
-    ToPeer { peer: u64, channel: u8, seq: u64, bytes: Vec<u8> },
-    /// Relay → host: a client's traffic.
-    FromPeer { peer: u64, channel: u8, seq: u64, bytes: Vec<u8> },
-    /// Client → relay: deliver to the host.
-    ToHost { channel: u8, seq: u64, bytes: Vec<u8> },
-    /// Relay → client: the host's traffic.
-    FromHost { channel: u8, seq: u64, bytes: Vec<u8> },
-    /// Endpoint → relay: host a lobby **as a registered game**, presenting the
-    /// game key from `project.ron` and the build hash if there is one.
-    ///
-    /// **Appended last, and that placement is the compatibility story.**
-    /// Postcard numbers enum variants by declaration order, so a new relay
-    /// decodes every message an old build sends exactly as before, and this one
-    /// is simply a variant old relays have never heard of. The other direction
-    /// — a new build meeting an old relay — is what
-    /// [`RelayHost::host_keyed`]'s fallback is for.
-    HostKeyed { key: String, build: Option<String> },
-    /// Relay → host: something the developer should hear, once per episode.
-    ///
-    /// **Not a refusal and not an error** — the session is fine and nobody was
-    /// disconnected. It exists because a managed relay runs on somebody else's
-    /// machine, so the only way a developer learns that their game filled up is
-    /// if the relay tells their process.
-    ///
-    /// Appended after `HostKeyed` for the same compatibility reason that one
-    /// was: postcard numbers variants by declaration order, so an older host
-    /// simply fails to decode this and skips it, exactly as it would any
-    /// message it has never heard of.
-    Notice { text: String },
-    /// Endpoint → relay: **this host is a dedicated server, not a player.**
-    ///
-    /// Sent immediately after the host request, on the same connection. The
-    /// relay counts a lobby's occupancy as its clients plus its host, which is
-    /// right for a listen host — that person is playing — and wrong for a box
-    /// nobody is sitting at: an idle dedicated server reported one concurrent
-    /// player, showed "1 in this game right now" on its developer's page, and
-    /// consumed one of the account's ceiling forever.
-    ///
-    /// A separate marker rather than a field on [`RelayMsg::HostKeyed`],
-    /// because widening a shipped variant changes its encoding and every host
-    /// already in the wild would fail to decode — and rather than a new host
-    /// variant, because a dedicated server may host keyless on a self-hosted
-    /// relay too. Appended last, for the reason every variant above it says.
-    HostIsDedicated,
-    /// Relay → client: the lobby exists, and its server is waking up.
-    ///
-    /// Not a refusal. [`RelayMsg::Refused`] means this will never succeed; a
-    /// dedicated server slept to free its machine is "not yet", and a player
-    /// holding a good code must not be told their friend's game does not
-    /// exist.
-    ///
-    /// `detail` is words for a human, not a status noun: "about 20 seconds"
-    /// renders as a sentence, where "starting" makes every developer invent
-    /// one.
-    ///
-    /// Appended last. A build already in players' hands decodes this variant
-    /// to nothing and stays in `connecting`, showing the spinner it already
-    /// draws; a new build reads the state and says something better. No
-    /// version negotiation, no flag.
-    Starting { detail: String },
-    /// Endpoint → relay: reclaim this lobby code rather than minting one.
-    ///
-    /// Sent immediately after the host request, on the same connection, the
-    /// same shape as [`RelayMsg::HostIsDedicated`]: widening a shipped variant
-    /// changes its encoding, and every host in the wild would fail to decode.
-    ///
-    /// A request, never an instruction. The relay hands the code over only
-    /// when its policy says this key owns it, so a host that asks for somebody
-    /// else's code is minted a fresh one. The game key is the proof of
-    /// ownership and is already validated at registration; the worst a liar
-    /// achieves is the code they would have got anyway.
-    ///
-    /// This is what makes six characters survive a restart, a sleep and a
-    /// relay upgrade: a managed server brings its code with it.
-    WantCode { code: String },
-    /// Endpoint → relay: **this host is the managed deployment `id`.**
-    ///
-    /// Sent ahead of the host request, with [`RelayMsg::WantCode`]. A fleet box
-    /// restarts a server by starting a new process while the relay may still
-    /// hold the old one's connection: systemd stops and starts inside a few
-    /// milliseconds, and a connection that went without a goodbye stays live
-    /// until it times out. The new process asks for its own code 0.02 s later
-    /// and, with the lobby apparently still hosted, was minted a different one.
-    /// The same game key *and* the same deployment is the same server, so the
-    /// relay hands it the lobby, players and all, and lets the stale
-    /// connection go.
-    ///
-    /// Appended last, for the reason every variant above it gives; a relay
-    /// that has never heard of it skips it and behaves as before.
-    Deployment { id: String },
-    /// Relay → host, right after [`RelayMsg::Hosted`]: the secret that proves
-    /// this host is the one that opened lobby `code`.
-    ///
-    /// A host that drops keeps its lobby for [`HOST_GRACE`], and getting it
-    /// back has to be possible without a reservation (a listen host has none)
-    /// and impossible for anyone else. The code cannot be the proof, since
-    /// every player who joined knows it, and neither can the game key, which
-    /// is in every copy of the game. Sixteen random bytes only this connection
-    /// was told are.
-    ///
-    /// Appended last: a host that has never heard of it skips it.
-    ReclaimToken { code: String, token: [u8; 16] },
-    /// Host → relay, ahead of the host request with [`RelayMsg::WantCode`]:
-    /// the token this host was given for the code it wants back. A held lobby
-    /// whose token matches is handed back, players and all, with or without a
-    /// reservation.
-    ///
-    /// Appended last: a relay that has never heard of it skips it, and the
-    /// host is minted a fresh code as it always was.
-    Reclaim { token: [u8; 16] },
-}
-
-impl RelayMsg {
-    fn encode(&self) -> Vec<u8> {
-        postcard::to_allocvec(self).expect("relay messages always encode")
-    }
-
-    fn decode(bytes: &[u8]) -> Option<Self> {
-        postcard::from_bytes(bytes).ok()
-    }
-}
 
 /// What a relay decides about a request to host.
 #[derive(Clone, Debug, PartialEq)]
@@ -264,14 +95,6 @@ impl LobbyEnd {
     }
 }
 
-/// **How often a joiner asks again while a server wakes**.
-///
-/// A waking server hosts a lobby; it has no idea anybody is queued for it, so
-/// nothing pushes the good news and the joiner has to ask. Two seconds is
-/// frequent enough that the wait feels like a wait rather than a hang, and
-/// sparse enough that a lobby's worth of friends retrying costs the relay
-/// nothing next to the traffic it forwards.
-pub const JOIN_RETRY_EVERY: Duration = Duration::from_secs(2);
 
 /// **What a host is told by a relay that has just restarted** and has not yet
 /// learned which codes are spoken for.
@@ -587,7 +410,7 @@ fn reclaim_token() -> [u8; 16] {
 /// The relay: step it forever (the `floptle-relay` binary) or from a test
 /// thread. One instance serves many lobbies.
 pub struct RelayServer {
-    transport: QuicServer,
+    transport: Legs,
     conns: HashMap<PeerId, Role>,
     lobbies: HashMap<String, Lobby>,
     rng: u64,
@@ -673,18 +496,39 @@ impl RelayServer {
     /// The socket buffers the kernel granted against [`RELAY_SOCKET_BUFFER`].
     /// Always `Some` for a relay that came up through [`Self::bind`].
     pub fn socket_buffers(&self) -> Option<crate::quic::SocketBuffers> {
-        self.transport.socket_buffers()
+        self.transport.quic.socket_buffers()
     }
 
     /// Present a renewed certificate from now on. Every lobby stays up: only
     /// handshakes from here take the new chain (see
     /// [`QuicServer::set_certificate`]).
+    /// The WebSocket leg, when it serves `wss://`, takes it too.
     pub fn set_certificate(&self, cert: &ServerCertificate) -> Result<(), String> {
-        self.transport.set_certificate(cert)
+        self.transport.quic.set_certificate(cert)?;
+        if let Some(ws) = self.transport.ws.as_ref().filter(|_| self.transport.ws_tls) {
+            ws.set_tls(Some(cert.tls_config()?));
+        }
+        Ok(())
     }
 
-    fn with_transport(transport: QuicServer) -> Result<Self, String> {
-        let port = transport.local_port();
+    /// Also accept WebSocket connections on `port` (0 = ephemeral) — the leg
+    /// a browser joins over, since a page cannot speak QUIC. With `cert` the
+    /// port serves `wss://`, which is what a page served over `https:` must
+    /// use; without, plain `ws://`, for a relay behind a proxy that ends TLS
+    /// for it. A peer on either leg is the same to every lobby. Returns the
+    /// bound port.
+    pub fn listen_websocket(&mut self, port: u16, cert: Option<&ServerCertificate>) -> Result<u16, String> {
+        let tls = cert.map(ServerCertificate::tls_config).transpose()?;
+        self.transport.ws_tls = tls.is_some();
+        let ws = crate::ws::WsServer::bind(&format!("0.0.0.0:{port}"), tls)?;
+        let bound = ws.local_addr().port();
+        self.transport.ws = Some(ws);
+        Ok(bound)
+    }
+
+    fn with_transport(quic: QuicServer) -> Result<Self, String> {
+        let port = quic.local_port();
+        let transport = Legs { quic, ws: None, ws_tls: false };
         let seed = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
@@ -1369,24 +1213,56 @@ impl RelayServer {
 // Endpoint transports
 // ---------------------------------------------------------------------------
 
-/// End-to-end sequenced-drop state: last seq delivered per (peer, channel).
-#[derive(Default)]
-struct SeqState {
-    last: HashMap<(u64, u8), u64>,
+/// Every leg a relay listens on: QUIC always, and a WebSocket port when one
+/// was asked for. WebSocket peers are numbered from
+/// [`crate::ws::WS_PEER_BASE`], so a peer id says which leg it is on.
+struct Legs {
+    quic: QuicServer,
+    ws: Option<crate::ws::WsServer>,
+    /// Whether the WebSocket leg serves `wss://`, and so takes a renewal.
+    ws_tls: bool,
 }
 
-impl SeqState {
-    /// True when the message should be dropped (stale sequenced).
-    fn stale(&mut self, peer: u64, channel: u8, seq: u64) -> bool {
-        if channel != CH_SEQUENCED {
-            return false;
+impl Legs {
+    fn is_ws(peer: PeerId) -> bool {
+        peer > crate::ws::WS_PEER_BASE
+    }
+
+    fn remote_addr(&self, peer: PeerId) -> Option<std::net::SocketAddr> {
+        if Self::is_ws(peer) { self.ws.as_ref()?.remote_addr(peer) } else { self.quic.remote_addr(peer) }
+    }
+}
+
+impl Transport for Legs {
+    fn send(&mut self, peer: PeerId, channel: Channel, bytes: &[u8]) {
+        match (&mut self.ws, Self::is_ws(peer)) {
+            (Some(ws), true) => ws.send(peer, channel, bytes),
+            (_, true) => {}
+            (_, false) => self.quic.send(peer, channel, bytes),
         }
-        let last = self.last.entry((peer, channel)).or_insert(0);
-        if seq <= *last {
-            return true;
+    }
+
+    fn poll(&mut self) -> Vec<Incoming> {
+        let mut out = self.quic.poll();
+        if let Some(ws) = &mut self.ws {
+            out.extend(ws.poll());
         }
-        *last = seq;
-        false
+        out
+    }
+
+    fn stats(&self, peer: PeerId) -> LinkStats {
+        match (&self.ws, Self::is_ws(peer)) {
+            (Some(ws), true) => ws.stats(peer),
+            _ => self.quic.stats(peer),
+        }
+    }
+
+    fn disconnect(&mut self, peer: PeerId) {
+        match (&mut self.ws, Self::is_ws(peer)) {
+            (Some(ws), true) => ws.disconnect(peer),
+            (_, true) => {}
+            (_, false) => self.quic.disconnect(peer),
+        }
     }
 }
 
@@ -1864,126 +1740,6 @@ impl Transport for RelayHost {
     }
 }
 
-/// A client's end of a relayed session: joins by lobby code; the host appears
-/// as [`SERVER`], exactly like a direct connection.
-pub struct RelayClient {
-    inner: QuicClient,
-    seq: u64,
-    dedup: SeqState,
-    /// The relay's last word on a join that has not landed yet — see
-    /// [`RelayMsg::Starting`]. Drained by [`Transport::take_join_progress`].
-    starting: Option<String>,
-    /// The code this client is joining, kept so the join can be asked again
-    /// while a server wakes.
-    code: String,
-    /// When to ask again, set only once the relay has said the server is
-    /// starting. `None` for an ordinary join, which is answered immediately and
-    /// must never be re-sent.
-    retry_at: Option<Instant>,
-}
-
-impl RelayClient {
-    /// Connect to a relay and join lobby `code`. Non-blocking: the session's
-    /// `Hello` rides the same ordered stream right behind the `Join`, so the
-    /// handshake completes as soon as the relay lets us in ([`Incoming`]
-    /// carries a `Disconnected` if it refuses).
-    pub fn join(relay_addr: &str, code: &str) -> Result<Self, String> {
-        let mut inner = QuicClient::connect(relay_addr)?;
-        inner.send(SERVER, Channel::Reliable, &RelayMsg::Join { code: code.to_uppercase() }.encode());
-        Ok(Self {
-            inner,
-            seq: 0,
-            dedup: SeqState::default(),
-            starting: None,
-            code: code.to_uppercase(),
-            retry_at: None,
-        })
-    }
-}
-
-impl Transport for RelayClient {
-    fn take_notices(&mut self) -> Vec<String> {
-        self.inner.take_warnings()
-    }
-
-    fn take_join_progress(&mut self) -> Option<String> {
-        self.starting.take()
-    }
-
-    fn send(&mut self, _peer: PeerId, channel: Channel, bytes: &[u8]) {
-        let seq = if channel == Channel::UnreliableSequenced {
-            self.seq += 1;
-            self.seq
-        } else {
-            0
-        };
-        let msg = RelayMsg::ToHost { channel: channel_tag(channel), seq, bytes: bytes.to_vec() };
-        let leg = if channel == Channel::Reliable { Channel::Reliable } else { Channel::Unreliable };
-        self.inner.send(SERVER, leg, &msg.encode());
-    }
-
-    fn poll(&mut self) -> Vec<Incoming> {
-        if let Some(at) = self.retry_at
-            && Instant::now() >= at
-        {
-            self.retry_at = Some(Instant::now() + JOIN_RETRY_EVERY);
-            let code = self.code.clone();
-            self.inner.send(SERVER, Channel::Reliable, &RelayMsg::Join { code }.encode());
-        }
-        let mut out = Vec::new();
-        for inc in self.inner.poll() {
-            match inc {
-                Incoming::Message(_, _, bytes) => match RelayMsg::decode(&bytes) {
-                    Some(RelayMsg::JoinOk) => {
-                        // In. Stop asking.
-                        self.retry_at = None;
-                        out.push(Incoming::Connected(SERVER));
-                    }
-                    // The relay told us exactly what was wrong — usually that
-                    // the code doesn't match a lobby. Carry it: mistyping the
-                    // code is the most common thing that will ever go wrong in
-                    // an online session, and it must not arrive at the game
-                    // indistinguishable from the host closing their laptop.
-                    Some(RelayMsg::Refused { reason }) => {
-                        // Never, rather than not yet. Stop asking.
-                        self.retry_at = None;
-                        out.push(Incoming::refused(SERVER, reason));
-                    }
-                    // ⚠ Deliberately not an `Incoming` — the link is fine and
-                    // nobody is disconnected. A refusal ends the attempt; this
-                    // says to keep waiting, so it rides the same side channel
-                    // `Notice` uses rather than widening a transport enum whose
-                    // every variant means something happened to the connection.
-                    Some(RelayMsg::Starting { detail }) => {
-                        self.starting = Some(detail);
-                        // **Ask again shortly.** The relay answered "not yet",
-                        // and nothing will tell us when it becomes "yes" — the
-                        // waking server hosts a lobby, it does not know anybody
-                        // is waiting. So the joiner polls, and the retry only
-                        // ever starts after the relay has said the server is
-                        // coming, so an ordinary join is never re-sent.
-                        self.retry_at = Some(Instant::now() + JOIN_RETRY_EVERY);
-                    }
-                    Some(RelayMsg::FromHost { channel, seq, bytes })
-                        if !self.dedup.stale(SERVER, channel, seq) =>
-                    {
-                        out.push(Incoming::Message(SERVER, tag_channel(channel), bytes));
-                    }
-                    _ => {}
-                },
-                // Whatever the leg below knew, if anything.
-                Incoming::Disconnected(_, why) => out.push(Incoming::Disconnected(SERVER, why)),
-                Incoming::Connected(_) => {}
-            }
-        }
-        out
-    }
-
-    fn stats(&self, _peer: PeerId) -> LinkStats {
-        self.inner.stats(SERVER)
-    }
-}
-
 #[cfg(test)]
 mod tests {
 
@@ -2456,6 +2212,90 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].sender, 1, "the relay-assigned game peer id");
         assert!(got[0].tick.is_some());
+    }
+
+    /// **A browser player and a desktop player meet in one lobby.** The host
+    /// and one client come in over QUIC, the other client over the relay's
+    /// WebSocket leg, the way a page does. Both clients handshake, both see
+    /// the host's world move, and the browser client's RPC reaches the host.
+    #[test]
+    fn a_browser_and_a_desktop_player_share_one_lobby() {
+        use floptle_core::math::DVec3;
+        use floptle_core::transform::Transform;
+        use floptle_core::{Replicated, World};
+
+        let mut relay = RelayServer::bind(0).expect("relay bind");
+        relay.set_grace(Duration::from_millis(150));
+        let ws_port = relay.listen_websocket(0, None).expect("websocket leg");
+        let relay = TestRelay::run(relay);
+        let addr = relay.addr();
+
+        let (host_t, code) = RelayHost::host(&addr).expect("host via relay");
+        let desktop = RelayClient::join(&addr, &code).expect("desktop joins");
+        let leg = crate::ws::WsClient::connect(&format!("ws://127.0.0.1:{ws_port}/")).expect("websocket");
+        let browser = RelayClient::join_over(Box::new(leg), &code);
+
+        let world_with = || {
+            let mut w = World::default();
+            let e = w.spawn();
+            w.insert(e, Transform::from_translation(DVec3::ZERO));
+            w.insert(e, Replicated::default());
+            (w, e)
+        };
+        let mut server = crate::NetSession::server(Box::new(host_t), 0);
+        let mut clients = [
+            crate::NetSession::client(Box::new(desktop), 0),
+            crate::NetSession::client(Box::new(browser), 0),
+        ];
+        let (mut sw, se) = world_with();
+        server.register_scene(&sw);
+        let mut cws: Vec<(World, floptle_core::Entity)> = (0..2).map(|_| world_with()).collect();
+        for (c, (w, _)) in clients.iter_mut().zip(&cws) {
+            c.register_scene(w);
+        }
+        for t in 1..=120u64 {
+            sw.get_mut::<Transform>(se).unwrap().translation.x = t as f64 * 0.1;
+            server.tick_server(&sw, t);
+            for (c, (w, _)) in clients.iter_mut().zip(cws.iter_mut()) {
+                c.tick_client(w);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        for (i, (c, (w, e))) in clients.iter().zip(&cws).enumerate() {
+            let leg = ["QUIC", "WebSocket"][i];
+            assert!(c.is_connected(), "the {leg} client never handshook");
+            let x = w.get::<Transform>(*e).unwrap().translation.x;
+            assert!(x > 1.0, "the {leg} client never saw the host's world move (x = {x})");
+        }
+
+        clients[1]
+            .send_rpc_stamped("wave", crate::NetValue::Num(2.0), crate::RpcTarget::Server, true)
+            .unwrap();
+        let mut got = Vec::new();
+        for t in 121..=220u64 {
+            server.tick_server(&sw, t);
+            for (c, (w, _)) in clients.iter_mut().zip(cws.iter_mut()) {
+                c.tick_client(w);
+            }
+            got.extend(server.take_rpcs());
+            if !got.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(got.len(), 1, "the browser client's RPC never reached the host");
+        assert_eq!(got[0].name, "wave");
+    }
+
+    /// A WebSocket leg can serve `wss://` with the relay's certificate, and a
+    /// renewal reaches it as well as the QUIC leg.
+    #[test]
+    fn the_websocket_leg_takes_the_relays_certificate() {
+        let cert = ServerCertificate::self_signed().unwrap();
+        let mut relay = RelayServer::bind_with_certificate(0, &cert).expect("relay bind");
+        relay.listen_websocket(0, Some(&cert)).expect("wss leg");
+        assert!(relay.transport.ws_tls);
+        relay.set_certificate(&ServerCertificate::self_signed().unwrap()).expect("renewal");
     }
 
     /// Rollback inputs must cross a real relay in both directions, through the

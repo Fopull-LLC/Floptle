@@ -43,11 +43,76 @@ shrinking every quarter. **The decision on record: WebGPU only. A WebGL2
 fallback is declined at a cost of four shader modules including the main raster
 path, and will be revisited only if a real population of players demands it.**
 
-Also out of scope for the first version: the editor in a browser, threads (so
-no cross-origin isolation headers to fight with your host), Steam, gamepads via
-`gilrs`, and HTTP requests from scripts. The last three will say so out loud
-rather than hanging — an unavailable feature that fails silently is worse than
-one that isn't there.
+Also out of scope for now: the editor in a browser, threads (so no
+cross-origin isolation headers to fight with your host), Steam, gamepads via
+`gilrs`, hosting an online session, and voice chat. The ones a script can
+call say so out loud rather than hanging — an unavailable feature that fails
+silently is worse than one that isn't there. `app.isWeb()` tells a script it
+is in a page, so it can hide those instead of showing a button that does
+nothing.
+
+HTTP from scripts, Floptle Cloud and joining an online lobby were on this list
+and are not any more — see [Networking in a page](#networking-in-a-page).
+
+---
+
+## Networking in a page
+
+A page has no sockets of its own. It has `fetch` and WebSockets, and the
+engine uses both, so a browser build plays online beside the desktop build
+rather than as a single-player cut of it.
+
+| | In a page |
+|---|---|
+| `http.*`, `assets.textureFromUrl` | Yes, through `fetch`. |
+| `cloud.*`, `account.*` requests | Yes, through `fetch`, once Floptle Cloud allows the page's address. |
+| `net.join("cloud://CODE")` | Yes, through the region's browser leg. |
+| `net.join("wss://relay:port/CODE")` | Yes: your own relay's browser leg. |
+| `net.join("relay://…")`, `net.join("quic://…")` | No: QUIC, which a page cannot speak. Refused with the address to use. |
+| `net.host{…}` | No. A desktop build or a dedicated server hosts; the page joins it. |
+| `net.local` | Yes, as on the desktop. |
+| Voice chat | Not yet. |
+
+**Requests go through the page's `fetch`, and three things differ from the
+desktop**, each because it is the browser's rule:
+
+- **The server has to allow the page's address.** A browser only lets a page
+  read a reply from another site if that site says so (CORS, the
+  `Access-Control-Allow-Origin` header). A refusal reaches the page as a bare
+  network error, so the message says CORS is the likely cause. Your own server
+  needs that header for the address your game is served from.
+- **Redirects are followed.** A page may not read where a redirect pointed, so
+  the reply is the last hop's and `res.location` is never set.
+- **Some headers are the browser's.** `User-Agent`, `Cookie`, `Host` and a few
+  others cannot be set by a page; asking is refused by name.
+
+No cookies are sent: a page signs requests with the token it holds.
+
+**Online play goes through a relay's WebSocket leg.** A page cannot speak QUIC,
+which is what a relay and a directly hosted server listen on, but a relay
+started with `--ws-port` also accepts WebSockets, and a browser player on that
+port and a desktop player on the QUIC port meet in the same lobby. The relay
+does not know or care which leg a player came in on.
+
+A WebSocket carries everything on one ordered stream. On a clean connection
+that is invisible; on a lossy one, a lost packet delays what follows it
+instead of being dropped, so a browser player sees late snapshots rather than
+missing ones. WebTransport, which is QUIC from a page and would carry the
+unreliable channel, is the upgrade; it needs a server stack that is still
+settling, and a WebSocket works in every browser today.
+
+A page served over `https:` can only open `wss://`, and a browser will not
+accept a self-signed certificate for it. `floptle-relay --ws-port 7789
+--tls-cert … --tls-key …` serves `wss://` on the relay's own certificate
+(renewals included); `--ws-plain` serves `ws://` for a proxy in front that ends
+TLS itself. `ws://` works for a page served over plain `http:`, which is what
+testing on `localhost` looks like.
+
+**Floptle Cloud from a page** needs two things on fopull.com's side that are
+not engine changes: the Cloud API allowing the addresses web builds are served
+from, and each region's relay serving its browser leg with a real certificate.
+The engine already knows where that leg will be (`wss://us-east.relay.fopull.com:7789/`
+for us-east), so `cloud://` joins from a page work the day it is up.
 
 ---
 
@@ -226,9 +291,10 @@ to. The rule that keeps it that way is a lint on the browser target, in CI,
 that refuses a direct disk, clock, thread or process call in the engine — the
 gate is a build failure rather than a bug report from a tab.
 
-Signing in on a page is still not available, and that one is not the engine's
-to fix: a page may only talk to fopull.com once fopull.com allows the game's
-origin and offers a sign-in a page can redirect to.
+Signing in on a page is a redirect: the page sends the player to fopull.com and
+the game starts again when they come back signed in. The engine's half of that
+is built, and so is the Cloud call made as the player afterwards; both reach
+fopull.com only once it allows the game's address.
 
 ---
 

@@ -249,6 +249,12 @@ pub const RENDER_SCALE_MIN: f32 = 0.25;
 pub const RETRO_HEIGHT_MIN: u32 = 32;
 pub const RETRO_HEIGHT_MAX: u32 = 4320;
 
+/// `app.platform()`: `"windows"`, `"macos"`, `"linux"` or `"web"`, else the
+/// operating system's own name.
+pub fn platform() -> &'static str {
+    if cfg!(target_arch = "wasm32") { "web" } else { std::env::consts::OS }
+}
+
 /// Install the `app` global.
 pub fn install(lua: &Lua, info: &SharedAppInfo, req: &SharedAppRequests) -> mlua::Result<()> {
     let t = lua.create_table()?;
@@ -266,6 +272,11 @@ pub fn install(lua: &Lua, info: &SharedAppInfo, req: &SharedAppRequests) -> mlua
     }
 
     // --- what this game is --------------------------------------------------
+    // Where it is running. A browser build has no sockets of its own and no
+    // file system a player can open, so a game hides what a page cannot do
+    // instead of showing a button that does nothing.
+    t.set("platform", lua.create_function(|_, ()| Ok(platform()))?)?;
+    t.set("isWeb", lua.create_function(|_, ()| Ok(cfg!(target_arch = "wasm32")))?)?;
     {
         let i = info.clone();
         t.set("title", lua.create_function(move |_, ()| Ok(i.borrow().title.clone()))?)?;

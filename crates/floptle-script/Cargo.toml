@@ -58,12 +58,17 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # `openUrl` parses what it is handed before anything opens it.
 url = "2"
+# `data.deflate` / `inflate` / `base64Encode` / `base64Decode`: a game saving
+# a compact blob or a picture as text should not have to write a compressor in
+# Lua. flate2's default backend is pure Rust, so it builds for the browser too.
+flate2 = "1"
+base64 = "0.22"
 
 # **`http.*`, on the platforms that have sockets.** Blocking requests on worker
 # threads, never on the frame thread; ureq is already what the Hub and the dist
-# pipeline use. A browser has none of that shape available to it — see `dispatch` in
-# `src/http_api.rs`, which refuses the call there rather than hanging on it — and
-# ureq's TLS stack alone is a large slice of a wasm module nothing could call.
+# pipeline use. A browser has none of that shape available to it — its `dispatch`
+# in `src/http_api.rs` goes through the page's own `fetch` instead — and ureq's
+# TLS stack alone is a large slice of a wasm module nothing could call.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ureq = { workspace = true }
 
@@ -78,3 +83,6 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_Shel
 # `open_in_browser` in `src/http_api.rs`.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys = { version = "0.3", features = ["Window"] }
+# `http.*` in a page: the request goes out through `floptle_account::web_fetch`
+# on the page's own event loop.
+wasm-bindgen-futures = "0.4"

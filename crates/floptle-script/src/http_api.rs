@@ -628,35 +628,51 @@ fn dispatch(
     Ok(())
 }
 
-/// The browser has no answer for this one yet — and says so, in the call, at the
-/// moment the script makes it.
+/// The browser's `fetch`, answering through the same channel the desktop's
+/// worker threads use, so `drain` cannot tell the two apart.
 ///
-/// A browser can fetch; what it cannot do is any of it the way the rest of this
-/// file assumes — a blocking agent on a thread of its own, with no regard for
-/// the origin the page was served from. That is `fetch` plus cors plus an async
-/// reply, which is Phase 5 of the web plan and a real piece of work rather than
-/// a swapped dependency. Until it exists this refuses out loud: the one thing a
-/// stub must never do here is accept the call and leave the callback pending
-/// forever, which reads to the author as the server being slow.
+/// See `floptle_account::web_fetch` for what a page does differently: the
+/// server must allow the page's origin (CORS), redirects are followed (a page
+/// may not read where one pointed, so `res.location` is never set), and a few
+/// headers are the browser's to set. The address policy above still applies —
+/// a page could reach its own machine's services otherwise.
 #[cfg(target_arch = "wasm32")]
 #[allow(clippy::too_many_arguments)]
 fn dispatch(
-    _id: u64,
-    _generation: u64,
-    _tx: std::sync::mpsc::Sender<HttpReply>,
+    id: u64,
+    generation: u64,
+    tx: std::sync::mpsc::Sender<HttpReply>,
     method: &'static str,
-    _url: String,
-    _headers: Vec<(String, String)>,
-    _body: Option<Vec<u8>>,
-    _timeout: f64,
+    url: String,
+    headers: Vec<(String, String)>,
+    body: Option<Vec<u8>>,
+    timeout: f64,
     _policy: HttpPolicy,
 ) -> mlua::Result<()> {
-    Err(mlua::Error::RuntimeError(format!(
-        "http.{} is not available in a browser build yet — the request was not sent, and your \
-         callback will not run. Everything else in the engine works the same here; this one \
-         call does not. See docs/web-export.md.",
-        method.to_ascii_lowercase()
-    )))
+    wasm_bindgen_futures::spawn_local(async move {
+        let reply = match floptle_account::web_fetch::fetch(method, &url, &headers, body, timeout, MAX_BODY).await {
+            Ok(r) => HttpReply {
+                id,
+                generation,
+                status: r.status,
+                said_json: r.content_type.is_some_and(|c| c.to_ascii_lowercase().contains("json")),
+                body: r.body,
+                error: None,
+                location: None,
+            },
+            Err(e) => HttpReply {
+                id,
+                generation,
+                status: 0,
+                body: Vec::new(),
+                error: Some(e),
+                said_json: false,
+                location: None,
+            },
+        };
+        let _ = tx.send(reply);
+    });
+    Ok(())
 }
 
 /// What [`parse_args`] pulls out of a call: (url, body, opts, callback).

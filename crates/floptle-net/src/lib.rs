@@ -27,6 +27,11 @@ pub mod predict;
 pub mod quic;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod relay;
+// What a relay leg carries, and a client's end of one: both compile for a
+// browser, which joins a relayed lobby over a WebSocket (see `ws`).
+pub mod relay_client;
+mod relay_wire;
+pub mod ws;
 pub mod replay;
 pub mod rollback;
 pub mod session;
@@ -44,9 +49,10 @@ pub use lagcomp::{HistEntry, LagHistory, MAX_REWIND_TICKS};
 pub use quic::{QuicClient, QuicServer, ServerCertificate, SocketBuffers};
 #[cfg(not(target_arch = "wasm32"))]
 pub use relay::{
-    HostAdmission, JoinAdmission, LobbyEnd, RelayClient, RelayHost, RelayLimits, RelayPolicy,
+    HostAdmission, JoinAdmission, LobbyEnd, RelayHost, RelayLimits, RelayPolicy,
     RelayServer, HOST_DECISION_DEADLINE, HOST_GRACE, MAX_CLIENT_RELIABLE, MAX_HOST_RELIABLE,
 };
+pub use relay_client::RelayClient;
 pub use predict::{PredictedState, Predictor, DEFAULT_EPSILON};
 pub use replay::{InputLog, LogEntry, LogError};
 pub use rollback::{

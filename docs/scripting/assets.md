@@ -32,6 +32,9 @@ empty list) and one Console line naming the rule. `getContents` walks at most
 | `assets.readJson("charts/neon.json")` | the file decoded as JSON (`json.decode` rules), or `nil, why` |
 | `assets.writeText(path, text)` | write a text file under `Assets/` (folders created) — `ok, why` |
 | `assets.writeJson(path, value [, {pretty=true}])` | encode and write a JSON file — `ok, why` |
+| `assets.readBytes(path)` | the file's raw bytes as a Lua string (a picture, a compressed level), or `nil, why` |
+| `assets.writeBytes(path, bytes)` | write bytes exactly as given — `ok, why` |
+| `assets.remove("user://…")` | delete one of the **player's** files — `ok, why` |
 
 ```lua
 -- Build a database of armor models once, then swap between them.
@@ -66,6 +69,33 @@ way back, `null` → `nil`); a file that is missing, not text or not JSON answer
 path is relative to `Assets/` and stays inside it. The same calls work in an
 exported build and in a browser, where a write lands in the page's own storage.
 
+**The player's own files: `user://`.** A path that starts `user://` names the
+player's files instead of the game's: settings, progress, levels they built,
+replays, screenshots. The same calls read and write them.
+
+```lua
+assets.writeJson("user://levels/" .. name .. ".json", level)
+for _, path in ipairs(assets.getContents("user://levels")) do
+  addToMenu(path)                      -- "user://levels/…json", ready for readJson
+end
+assets.remove("user://levels/old.json")
+```
+
+In an exported build `user://` is a per-user data folder that outlives the
+build, so installing a new version keeps everything a player made (see
+[Where a player's data lives](../export-builds.md#where-a-players-data-lives)).
+In the editor, `floptle run` and `floptle shot` it is the project's
+`save/user/`, which an export leaves out: a test run never touches a player's
+real files, and a build never ships yours. `app.dataPath()` answers the full
+path, for a screen that says where the files are.
+
+Keep the game's files and the player's apart this way. An exported build that
+writes a plain path writes into its own install folder, which the next build
+will not look in and which an installed game may not be allowed to write at
+all. It still works, so an older game keeps running, and the Console says so
+once. `assets.remove` only takes `user://` paths: the game's files ship with
+it.
+
 **Pictures from the internet.** A player's profile picture, or an image another
 player shared, becomes a texture while the game runs:
 
@@ -94,6 +124,34 @@ the same rate limits), and a URL already loaded this session answers from
 memory without downloading again. Pictures are kept until `assets.release` or
 Stop. A host that draws nothing, such as a dedicated server, answers every one
 with an error and downloads nothing.
+
+**Pictures of your own world: `camera.capture`.** A level's cover, a photo mode,
+a thumbnail for a save slot: render what a camera sees into a PNG or JPEG.
+
+```lua
+camera.capture("CoverCam", { w = 480, h = 270 }, function(png, err)
+  if not png then return log("no cover: " .. err) end
+  assets.writeBytes("user://levels/" .. name .. ".png", png)
+end)
+```
+
+| Call | What it does |
+|---|---|
+| `camera.capture([cam,] opts, cb)` | `cb(bytes, err)` with an encoded picture; `opts`: `w`, `h`, `format` (`"png"` or `"jpeg"`), `quality` (1–100, JPEG), `ui`, `draws` |
+| `camera.captureTexture([cam,] opts, cb)` | the same picture as a texture name, `cb(tex, err)`, for showing without saving |
+
+`cam` is a camera node, a camera's name, or left out for the active camera. A
+camera that is not the active one renders off-screen, so the player's view does
+not change. The picture is the game's own: post-processing, fog, retro and
+render scale are all in it. The screen UI is left out unless `ui = true`, and
+`draw.line` / `draw.tri` shapes unless `draws = true`, because a HUD or a debug
+line in a cover spoils it. `draw.quad` trails are part of the world and always
+appear.
+
+The render happens on a later frame and the picture is read back without
+waiting on the GPU, so a capture costs one extra render of the scene and never
+a stall. At most four wait at once. A host that draws nothing (a dedicated
+server, `floptle run`) answers `nil, "no renderer"`.
 
 ### `node.model` — swap a mesh's model
 

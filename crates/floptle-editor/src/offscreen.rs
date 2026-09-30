@@ -243,6 +243,7 @@ impl Editor {
         self.step_reflection_probes();
         self.sync_field_shapes();
         self.update_render_targets(elapsed);
+        self.pump_captures();
 
         // ---- draw ----
         self.apply_project_vsync();
@@ -1179,14 +1180,14 @@ impl Editor {
                 }
             }
             // Script-drawn 3D lines (draw.line — the map's orbit conics).
-            if !self.script_lines.is_empty() && !self.lines_deferred {
+            if !self.script_lines.is_empty() && !self.lines_deferred && !self.hide_script_shapes {
                 let (through, tested) = script_line_batches(&self.script_lines, cam.world_position);
                 headless_mark!("lines");
                 line_layer.draw(gpu, color, depth, view_proj, &through, false);
                 line_layer.draw(gpu, color, depth, view_proj, &tested, true);
             }
             // Script-drawn FILLED triangles (draw.tri/cone/disc — solid gizmos).
-            if !self.script_tris.is_empty() {
+            if !self.script_tris.is_empty() && !self.hide_script_shapes {
                 let verts: Vec<floptle_render::TriVertex> = self
                     .script_tris
                     .iter()

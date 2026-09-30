@@ -8,9 +8,6 @@
 //!
 //! So the host is fixed, the path is validated, and the token stays in Rust.
 
-// Only the native transport measures a timeout; a browser build has no
-// transport to bound.
-#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 /// Production. There is no other one — `dev-auth.fopull.com` is retired.
@@ -22,7 +19,6 @@ pub const DEFAULT_BASE: &str = "https://fopull.com";
 pub const API_PREFIX: &str = "/api/floptle/v1";
 
 // Native transport only — the browser build has no ureq call to parse for.
-#[cfg(not(target_arch = "wasm32"))]
 /// Largest reply accepted. The biggest documented Cloud payload is a 4 MB blob
 /// (the blobs ceiling in the data-primitives contract), so this is twice the
 /// largest legitimate answer: big enough to never be the reason something
@@ -183,6 +179,48 @@ pub fn request(
             CloudReply { status, body: buf, error, said_json }
         }
         Err(e) => CloudReply::failed(format!("could not reach fopull.com: {e}")),
+    }
+}
+
+/// The same request from a page, through `fetch` — see
+/// [`crate::web_fetch`] for what a browser does differently. The Cloud API
+/// has to allow the page's origin for this to reach it.
+#[cfg(target_arch = "wasm32")]
+pub async fn request_web(
+    base: &str,
+    access_token: &str,
+    method: &str,
+    path: &str,
+    body: Option<Vec<u8>>,
+    timeout: Duration,
+) -> CloudReply {
+    let url = match resolve(base, path) {
+        Ok(u) => u,
+        Err(e) => return CloudReply::failed(e),
+    };
+    let blob = is_blob_path(path);
+    let mut headers = vec![
+        ("Authorization".to_string(), format!("Bearer {access_token}")),
+        (
+            "Accept".to_string(),
+            if blob { "application/octet-stream, application/json" } else { "application/json" }.to_string(),
+        ),
+    ];
+    if body.is_some() {
+        headers.push((
+            "Content-Type".to_string(),
+            if blob { "application/octet-stream" } else { "application/json" }.to_string(),
+        ));
+    }
+    let method = method.to_ascii_uppercase();
+    match crate::web_fetch::fetch(&method, &url, &headers, body, timeout.as_secs_f64(), MAX_BODY).await {
+        Ok(r) => CloudReply {
+            status: r.status,
+            said_json: r.content_type.is_some_and(|c| c.to_ascii_lowercase().contains("json")),
+            body: r.body,
+            error: None,
+        },
+        Err(e) => CloudReply::failed(e),
     }
 }
 

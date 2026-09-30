@@ -148,6 +148,8 @@ fn play_for(ed: &mut crate::Editor, seconds: f32, anchor: DVec3, view: (Option<&
         feed_view(ed, view.0, view.1, view.2);
         ed.tick_headless_ui_clock(crate::run::DT);
         ed.play_step(crate::run::DT, true);
+        // `camera.capture` asked for in a shot is answered like in a game.
+        ed.pump_captures();
         ed.drain_script_logs();
         // A script that asked to quit has said the session is over, and stepping
         // past it would photograph a world nobody is in.
@@ -434,6 +436,7 @@ pub(crate) fn run(args: Args) -> i32 {
                 feed_view(&mut ed, camera, w, h);
                 ed.tick_headless_ui_clock(crate::run::DT);
                 ed.play_step(crate::run::DT, true);
+                ed.pump_captures();
                 ed.drain_script_logs();
             }
             let f = i as f32 / (frames - 1).max(1) as f32;
@@ -568,18 +571,10 @@ fn median_timing(frames: &[(f32, Vec<(String, f32)>)]) -> Option<(f32, Vec<(Stri
     Some((total, passes))
 }
 
-/// Draw one frame of `ed`'s world from `cam` and read it back as RGBA8.
-///
-/// **The whole presentation, not the tonemap**: the project's post chain, its
-/// depth-of-field focus resolved against the scene, screen ambient occlusion,
-/// its `stage post` shaders, and — because a pixel-art project composites at its
-/// own resolution and upscales — the retro presentation on its own pixel grid.
-///
-/// Shared with `floptle vfx` rather than copied into it. That is the same rule
-/// `offscreen_draws_the_same_world` exists for one level down: the editor's
-/// gathers have drifted apart five times, each time with the same symptom, and a
-/// second verb assembling its own post chain would be a sixth place for the
-/// picture to quietly stop being the editor's.
+/// Draw one frame of `ed`'s world from `cam` and read it back as RGBA8,
+/// waiting on the device. The frame itself is [`crate::capture::render_frame_texture`],
+/// shared with `camera.capture` and `floptle vfx` so there is one picture of
+/// the editor's, not three that drift apart.
 ///
 /// `ui` draws the game's UI as the Game view does: world canvases into the
 /// scene before post, every screen-space layer over the finished picture.
@@ -595,168 +590,10 @@ pub(crate) fn render_frame_pixels(
     cull_mask: u32,
     ui: bool,
 ) -> Option<Vec<u8>> {
-    // The frame loop's GPU prelude, which this path has no frame loop to run:
-    // UI shaders, `stage post` shaders and Field Shape SDFs compile and bind
-    // here, or a shot draws each of them as its fallback look and says nothing.
-    // (`.flsl` materials, scene textures and effect assets are pre-warmed inside
-    // `render_world_into`, which reflection captures reach without this.)
-    ed.ensure_ui_shaders();
-    ed.ensure_post_shaders();
-    ed.sync_field_shapes();
-    let gpu = ed.gpu.take()?;
-    let aspect = w as f32 / h as f32;
-    // **Retro composites at the retro resolution and upscales**, exactly as the
-    // Game view does — post, AO and dither have to land on the same chunky
-    // pixel grid the game uses, or a pixel-art project photographs as a crisp
-    // picture of itself that no player will ever see.
-    // A render scale below 1 takes the same route with a smooth upscale, so a
-    // `shot --timing` of a scaled game measures what the game costs.
-    let retro_on = ed.project.retro;
-    let lowres = ed.project.composite_size(w, h);
-    let (cw, ch) = lowres.unwrap_or((w, h));
-    let retro = lowres.map(|_| {
-        let mut r = floptle_render::Retro::new(&gpu, ch);
-        r.resize_to(&gpu, cw, ch);
-        r.set_smooth(&gpu, !retro_on);
-        r.set_sharpness(&gpu, ed.render_sharpness());
-        r
-    });
-    // The picture that gets written. In retro mode the scene never draws into
-    // it — the upscale blit does — so only its depth half goes unused.
-    let (color, depth) = crate::viewports::offscreen_textures(
-        &gpu,
-        w,
-        h,
-        "shot",
-        wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
-    );
-    let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
-    let own_depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
-    let mut post = floptle_render::PostStack::new(&gpu, cw, ch);
-    // Always configured, not only when an effect is on: the chain is the only
-    // route from the scene's floating-point target down to an sRGB texture.
-    post.configure(&gpu, cw, ch, retro_on);
-    ed.gpu = Some(gpu);
-
-    let (depth_view, depth_tex) = match &retro {
-        Some(r) => (r.depth_view().clone(), r.depth_texture().clone()),
-        None => (own_depth_view, depth.clone()),
-    };
-
-    // ⏱ Open the timing frame. The marks themselves are inside
-    // `render_world_into` and below, one per pass; `end` closes the last region
-    // before the readback, whose device wait is what lands the numbers.
-    if ed.gpu_timing_headless
-        && let Some(t) = ed.gpu_timer.as_mut()
-    {
-        t.poll();
-        t.begin();
-    }
-    // The depth texture is handed over, not just its view: that is what lets the
-    // opaque prepass run, and without it contact shadows, shoreline foam,
-    // screen-space reflections and lamp shadows all quietly draw nothing. A
-    // picture missing four effects still looks like a picture, which is exactly
-    // why this is easy to get wrong and hard to notice.
-    let defer_lines = ed.script_host.native_lines();
-    ed.lines_deferred = defer_lines;
-    ed.render_world_into(
-        post.input_view(),
-        &depth_view,
-        cam,
-        aspect,
-        0.0,
-        cull_mask,
-        None,
-        (cw, ch),
-        crate::offscreen::OffscreenOpts {
-            depth_tex: Some(&depth_tex),
-            ..Default::default()
-        },
-    );
-    ed.lines_deferred = false;
-    // World-space UI canvases are geometry: into the scene, with its depth,
-    // before post — exactly where the Game view puts them.
-    if ui {
-        ed.draw_world_canvases(post.input_view(), &depth_view, cam, aspect);
-    }
-
-    // The whole chain, not the tonemap: the one promise this verb makes is
-    // that the picture is the editor's, bloom, vignette, AO, posterise and
-    // custom post shaders included.
-    // Built the way the Game view builds it: the PostProcess node's own
-    // settings, the depth-of-field focus resolved against the scene, screen
-    // ambient occlusion, and any `stage post` shaders the project compiled.
-    //
-    // Two are left out. **Motion blur** needs a previous frame and
-    // this is a single one, so a shutter here would smear against a frame that
-    // does not exist. **The accessibility filters** are one person's display
-    // preference, and a PNG of a project should not carry them.
-    let mut look = crate::shading::post_process_uniforms(&ed.world).0;
-    look.time = ed.fog_time;
-    if let Some(d) = crate::shading::dof_focus_distance(&ed.world, cam.world_position) {
-        look.dof_focus = d;
-    }
-    let gpu = ed.gpu.as_ref()?;
-    let proj = cam.proj_matrix(aspect);
-    let ssao = floptle_render::SsaoFrame {
-        depth: &depth_view,
-        proj: proj.to_cols_array_2d(),
-        inv_proj: proj.inverse().to_cols_array_2d(),
-        fog: crate::shading::ao_fog(&ed.world, cam.world_position),
-    };
-    // Where the chain lands: the retro target when there is one, the picture
-    // itself otherwise. (`out` is the file; this is the texture.)
-    let composite = match &retro {
-        Some(r) => r.color_view().clone(),
-        None => color_view.clone(),
-    };
-    if ed.gpu_timing_headless
-        && let Some(t) = ed.gpu_timer.as_mut()
-    {
-        t.mark(gpu, "post");
-    }
-    post.run_with(gpu, &look, Some(&ssao), &composite, ed.post_shaders.as_ref());
-    if ed.gpu_timing_headless
-        && let Some(t) = ed.gpu_timer.as_mut()
-    {
-        t.mark(gpu, "retro upscale");
-    }
-    // …and the chunky upscale, the way the game presents it.
-    if let Some(r) = &retro {
-        let dest = [w as f32, h as f32];
-        if retro_on && ed.project.retro_integer_scale {
-            r.blit_integer(gpu, &color_view, dest);
-        } else {
-            r.blit_to(gpu, &color_view);
-        }
-    }
-
-    // **The UI, last, over the finished picture** — every enabled
-    // screen-space layer in `z` order at the scale its `scale_mode` gives
-    // this size, the script's `draw.*`, captions: the same composite the Game
-    // view shows. After the retro upscale on purpose, because that is where
-    // the game draws it: a pixel-art project's HUD is crisp at window
-    // resolution, not chunky with the world. The picture's own texture was
-    // made samplable above, so `backdrop()` shaders frost the real scene.
-    //
-    // A UI-first scene photographed without its UI is wrong on first sight,
-    // and nothing else would say so.
-    if defer_lines {
-        ed.draw_lines_over(&color_view, [w, h], cam.view_proj(aspect), cam.world_position, &depth_view);
-    }
-    if ui {
-        ed.draw_game_ui_overlay(&color_view, w, h, true);
-    }
-
-    let gpu = ed.gpu.as_ref()?;
-    if ed.gpu_timing_headless
-        && let Some(t) = ed.gpu_timer.as_mut()
-    {
-        t.end(gpu);
-    }
+    let color = crate::capture::render_frame_texture(ed, cam, w, h, cull_mask, ui, true)?;
     // The readback waits on the device, which is also what lands the timing
     // query's own readback — `run` polls it after this returns.
-    Some(readback(gpu, &color, w, h))
+    Some(readback(ed.gpu.as_ref()?, &color, w, h))
 }
 
 /// Copy the rendered texture back into RGBA8, un-swizzling if the adapter's
@@ -800,19 +637,7 @@ fn readback(gpu: &Gpu, tex: &wgpu::Texture, w: u32, h: u32) -> Vec<u8> {
         gpu.surface_format(),
         wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
     );
-    let mut out = Vec::with_capacity((w * h * 4) as usize);
-    for y in 0..h {
-        let row = (y * padded) as usize;
-        for x in 0..w {
-            let p = row + (x * 4) as usize;
-            let (r, g, b, a) = (view[p], view[p + 1], view[p + 2], view[p + 3]);
-            if bgra {
-                out.extend_from_slice(&[b, g, r, a]);
-            } else {
-                out.extend_from_slice(&[r, g, b, a]);
-            }
-        }
-    }
+    let out = crate::capture::unpad_rgba(&view, w, h, padded, bgra);
     drop(view);
     buf.unmap();
     out

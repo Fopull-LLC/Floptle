@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 191
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 195
 - [node — transform & body fields](#node--transform--body-fields) — 40
 - [node — methods & handles](#node--methods--handles) — 31
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -22,7 +22,7 @@ each group, and meant to be searched.
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
 - [input — keyboard & mouse](#input--keyboard--mouse) — 42
 - [drawing — draw.*](#drawing--draw) — 18
-- [the web — http.*, json.*](#the-web--http-json) — 11
+- [the web — http.*, json.*](#the-web--http-json) — 15
 - [the player's account — account.*](#the-players-account--account) — 13
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 71
 - [networking — net.*, synced](#networking--net-synced) — 41
@@ -33,7 +33,7 @@ each group, and meant to be searched.
 - [scatter — instanced props](#scatter--instanced-props) — 8
 - [2D — sprites, sorting & the flat camera](#2d--sprites-sorting--the-flat-camera) — 36
 - [vessels — assembly.*](#vessels--assembly) — 14
-- [the camera & the screen](#the-camera--the-screen) — 7
+- [the camera & the screen](#the-camera--the-screen) — 9
 - [physics controls — pause & step](#physics-controls--pause--step) — 4
 - [frame cost — perf.*](#frame-cost--perf) — 16
 - [accessibility — access.*](#accessibility--access) — 11
@@ -44,7 +44,7 @@ each group, and meant to be searched.
 - [animation — node:animator](#animation--nodeanimator) — 26
 - [particles — effects from script](#particles--effects-from-script) — 10
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 32
-- [assets](#assets) — 11
+- [assets](#assets) — 14
 - [debug gizmos](#debug-gizmos) — 5
 - [lua stdlib](#lua-stdlib) — 43
 
@@ -146,6 +146,10 @@ agent:teleport(point) — put it AND its node somewhere without walking there, a
 
 The settings a game offers the person playing it, and the one thing every main menu needs: quit. app.quit(), app.title(), app.version(), and the video settings — app.vsync/setVsync, app.retro/setRetro, app.retroHeight/setRetroHeight, app.retroIntegerScale/setRetroIntegerScale. A setting you change here is for THIS SESSION: it lives in project.ron, the file that ships to every player, so Stop puts it back — persist the player's choice yourself with save.*, the same rule access.* follows. Window resolution and fullscreen are NOT here yet; that is one question (windowing) waiting to be answered properly. See docs/scripting.md §30.
 
+### `app.dataPath`
+
+app.dataPath() — the folder a player's own files are in, as a full path: where `user://` points, for a screen that says "your levels are in …". In an exported build that is the per-user data folder (%APPDATA%\<studio>\<data_id>\user on Windows, ~/Library/Application Support/<data_id>/user on macOS, ~/.local/share/<data_id>/user on Linux); in the editor, floptle run and shot it is the project's save/user. nil in a browser, where the files live in the page's storage and there is no folder to show.
+
 ### `app.dynamicResolution`
 
 app.dynamicResolution() → whether the engine is choosing the render scale itself (app.setDynamicResolution).
@@ -157,6 +161,14 @@ app.frameCap() → the frame cap in frames a second, 0 when there is none.
 ### `app.fullscreen`
 
 app.fullscreen() → whether the game's window covers the screen. The real state, not the last thing asked for — so a Video tab shows what the player sees, including after F11 or Alt+Enter, which a build answers on its own.
+
+### `app.isWeb`
+
+app.isWeb() — true in a browser build. The same answer as app.platform() == "web", for the common question.
+
+### `app.platform`
+
+app.platform() — where the game is running: "windows", "macos", "linux" or "web" (else the operating system's own name). For a settings screen that differs per platform, and for a browser build to hide what a page cannot do (it can join an online lobby but not host one) instead of showing a button that does nothing.
 
 ### `app.quit`
 
@@ -273,6 +285,10 @@ cloud.rank(board) — a leaderboard by name ("laps" or "laps:canyon"; its collec
 ### `createNode`
 
 createNode(name [, parent] [, fn]) — create a PLAIN node (Empty matter). It does NOT return the node: the create is queued and the node is made after this pass, so the handle arrives ONLY through the callback — `local n = createNode("Stain")` gives you something that says so the moment you touch it, rather than a nil that fails a line later. fn(n) gets its handle: combine with n:setTerrain(id) / n:setCelestial{...} / n:setPrimitive(shape, color) / n:setMaterial{...} + transform writes to build content from script (procgen, editor actions). Nested creates inside callbacks are fine.
+
+### `data`
+
+data.deflate / data.inflate and data.base64Encode / data.base64Decode — bytes made small, and bytes carried as text. A game that saves a picture or a level in JSON no longer writes its own compressor in Lua.
 
 ### `decals`
 
@@ -1898,6 +1914,22 @@ draw.tri(x1,y1,z1, x2,y2,z2, x3,y3,z3, r,g,b [,a]) — one filled triangle. The 
 
 ## the web — http.*, json.*
 
+### `data.base64Decode`
+
+data.base64Decode(text) -> bytes, err — base64 back to bytes. Reads either alphabet, padded or not, and ignores line breaks. Refuses: text that is not base64 in either alphabet (as nil, err, never a raise).
+
+### `data.base64Encode`
+
+data.base64Encode(bytes [, { url = true }]) -> text — bytes as base64 text, to carry a picture or a blob inside JSON or a URL. url = true uses the URL-safe alphabet with no padding.
+
+### `data.deflate`
+
+data.deflate(bytes [, { level = 6, format = "zlib"|"raw"|"gzip" }]) -> bytes — compress a Lua string. A level, a ghost or a picture saved as text shrinks many times over; pair it with data.base64Encode to keep it in JSON. zlib is the default and what most servers mean by "deflate"; raw has no header, gzip is what a .gz file is. level 0 stores, 9 is smallest. Refuses: a level outside 0–9; an unknown format; an unknown option.
+
+### `data.inflate`
+
+data.inflate(bytes [, { format = "zlib", maxSize = 64 MB }]) -> bytes, err — undo data.deflate. It reads what somebody else sent, so bad data answers nil and why rather than raising, and it stops at maxSize bytes of output so a small hostile blob cannot expand to fill memory. Answers nil, err: the bytes are not that format; the output would pass maxSize. Refuses: an unknown format or option.
+
 ### `http.cancelAll`
 
 http.cancelAll() — forget every pending callback. Stop and scene.load do this for you: a callback closes over nodes from the scene that asked, and delivering it into a fresh session is how one run inherits the previous one's network.
@@ -2386,7 +2418,7 @@ net.isServer() — true on the authoritative host.
 
 ### `net.join`
 
-net.join(addr) — join a session: "cloud://UABCDE" = a Floptle Cloud lobby code (six characters; the first names the region, so it resolves with no call to fopull.com and works during an outage), "relay://relayaddr/CODE" = a lobby code through any relay (no port-forwarding), "quic://host:port" = a server directly, "local://" = the in-editor test harness. Optional second argument is an options table: net.join(addr, {timeout = 30}) sets how long to wait on a server that is WAKING UP (default 90 s) before giving up with "refused". It bounds only a wake — an ordinary join is answered in one relay round trip.
+net.join(addr) — join a session: "cloud://UABCDE" = a Floptle Cloud lobby code (six characters; the first names the region, so it resolves with no call to fopull.com and works during an outage), "relay://relayaddr/CODE" = a lobby code through any relay (no port-forwarding), "wss://relayaddr/CODE" = the same lobby through the relay's browser leg (how a web build joins: a page cannot speak QUIC, so in a browser cloud:// goes this way by itself and relay:// / quic:// are refused with the address to use instead), "quic://host:port" = a server directly, "local://" = the in-editor test harness. A browser build joins; it cannot host. Optional second argument is an options table: net.join(addr, {timeout = 30}) sets how long to wait on a server that is WAKING UP (default 90 s) before giving up with "refused". It bounds only a wake — an ordinary join is answered in one relay round trip.
 
 ### `net.joinState`
 
@@ -2988,6 +3020,14 @@ assembly.torque(node, t) — a held PURE torque, no linear push: reaction wheels
 ### `camera`
 
 The game camera's projection: viewport size and rect, world↔screen conversion, and picking rays. camera.screenRect shares its space with input.mouse(), which is why hit-testing works.
+
+### `camera.capture`
+
+camera.capture([cam,] { w = 640, h = 360 [, format = "png"|"jpeg", quality = 90, ui = false, draws = false] }, function(bytes, err) end) — photograph the world through a camera: a level cover, a photo mode, a save-slot thumbnail. `cam` is a camera node, a camera's name, or left out for the active one; a camera that is not the active one is drawn off-screen, so the player's view never changes. The picture is the game's own (post-processing, fog, retro and render scale included). The screen UI is left out unless ui = true, and draw.line / draw.tri shapes unless draws = true, so a HUD or a debug line never lands in a cover; draw.quad trails are part of the world and always in. `bytes` is an encoded PNG (or JPEG, quality 1–100), ready for assets.writeBytes, a Cloud blob or assets.textureFromBytes. It renders on a later frame and answers on the one after without waiting on the GPU: one extra scene render, never a stall. At most 4 captures wait at once; a fifth answers nil and why. Refuses: w or h missing or outside 1–4096; an unknown option; a format other than png/jpeg; quality on a PNG. Answers nil, err: "no renderer" on a host that draws nothing (floptle run, a dedicated server); a camera name that matches none; a node that is not a camera; a size past the GPU's limit.
+
+### `camera.captureTexture`
+
+camera.captureTexture([cam,] { w, h [, ui, draws] }, function(tex, err) end) — camera.capture without the encode, for a picture you only want to show: `tex` is a name like "img:7" that goes anywhere a texture path does (draw.quad, a UI image, a material), exactly as assets.textureFromBytes answers. Kept until assets.release(tex) or Stop. Same cameras, options and refusals as camera.capture, minus format and quality.
 
 ### `camera.exists`
 
@@ -4015,17 +4055,25 @@ assets.getFile("models/armor.glb") — the asset's path (or nil), to hand to nod
 
 assets.preload({ "models/arm.glb", "models/leg.glb" } [, function(failed) end]) — load models in the background ahead of the moment a node needs them, and call back once every one is in. A sound file (.wav/.ogg/.mp3/.flac) in the list is preloaded as audio.preload would. `failed` lists any path that could not load (empty when all did); a single path works too. Warm a ragdoll's parts on a menu or a loading screen, so the death that spawns them draws them on its first frame. Without a GPU (floptle run, a dedicated server) there is nothing to load and it calls back straight away. Stop and scene.load drop a waiting callback; the models stay loaded.
 
+### `assets.readBytes`
+
+assets.readBytes("user://covers/intro.png") -> bytes, err — a file's contents as raw bytes in a Lua string: a picture, a compressed level, a replay. assets.readText refuses what is not UTF-8; this reads anything. Same paths as readText, `user://` included. Refuses: the path leaves its folder (absolute, or containing `..`); no such file; bigger than 64 MB. Each one names the call and the path.
+
 ### `assets.readJson`
 
 assets.readJson("charts/neon.json") -> value, err — a JSON file decoded straight to a Lua value (json.decode rules: objects are tables, arrays are 1-based lists tagged with json.array, null is nil). nil and a message for a missing, unreadable or malformed file, plus one Console line. The way a rhythm chart, a dialogue tree or a level table gets into a script without being rewritten as Lua. Refuses: everything `assets.readText` refuses, plus: the bytes are not valid JSON. Each one names the call and the path.
 
 ### `assets.readText`
 
-assets.readText("data/intro.txt") -> text, err — a text file's whole contents (UTF-8), or nil and why: missing, not text, over 64 MB, or a path outside the project. Relative to Assets/ and inside it. Works the same from an exported build and in a browser (it reads the bundle). Refuses: the path leaves the project (absolute, or containing `..`); no such file; the file is bigger than 64 MB; the bytes are not UTF-8 text. Each one names the call and the path.
+assets.readText("data/intro.txt") -> text, err — a text file's whole contents (UTF-8), or nil and why: missing, not text, over 64 MB, or a path outside the project. Relative to Assets/ and inside it, or a `user://` path for the player's own files (see assets.writeText). Works the same from an exported build and in a browser (it reads the bundle). Refuses: the path leaves the project (absolute, or containing `..`); no such file; the file is bigger than 64 MB; the bytes are not UTF-8 text. Each one names the call and the path.
 
 ### `assets.release`
 
 assets.release(tex) -> bool — let go of a texture made by assets.textureFromUrl / textureFromBytes; anything still drawing it draws nothing. true if it was one of those; false for anything else (a project texture is never released).
+
+### `assets.remove`
+
+assets.remove("user://levels/mine.json") -> ok, err — delete one of the PLAYER's files: a level they made, a replay, a screenshot. Only `user://` paths: the game's own files ship with it and are not a script's to delete. Refuses: a path without `user://`; one that leaves the player's folder; no such file.
 
 ### `assets.textureFromBytes`
 
@@ -4035,13 +4083,17 @@ assets.textureFromBytes(bytes, function(tex, err) end) — assets.textureFromUrl
 
 assets.textureFromUrl(url [, opts], function(tex, err) end) — download a picture (a profile picture, a shared image) and make it a texture. `tex` is a name like "img:3" that goes anywhere a texture path does: draw.quad, a UI image's texture, a material's texture; a UI image with radius = half its size draws round. PNG, JPEG and WebP only, told apart by the bytes' own signature, at most 4096 pixels a side; anything else answers nil, why. The download is exactly http.get (same opts, Play only, public addresses, the same rate limits), and a URL already loaded this session answers from memory. The callback runs on a later frame. Kept until assets.release(tex) or Stop. A host that draws nothing (a dedicated server) answers with an error and downloads nothing. Refuses: what http.get refuses, at the call.
 
+### `assets.writeBytes`
+
+assets.writeBytes("user://covers/intro.png", bytes) -> ok, err — write a Lua string's bytes exactly, creating the folders on the way. The pair to readBytes: a camera.capture PNG, a data.deflate blob. Same paths as assets.writeText. Refuses: the path leaves its folder (absolute, or containing `..`); the path is an existing FOLDER; the folder could not be created; the write itself failed (permissions, a full disk).
+
 ### `assets.writeJson`
 
 assets.writeJson("charts/neon.json", value [, { pretty = true }]) -> ok, err — encode a Lua value as JSON (json.encode rules; json.array{} for an empty list) and write it under Assets/. `pretty` indents it for a person or a git diff. A chart editor built IN the game saves straight into the project, and the file it wrote is one the Asset Browser shows and the export ships. Refuses: everything `assets.writeText` refuses, plus: the value contains something JSON cannot hold (a function, a cycle).
 
 ### `assets.writeText`
 
-assets.writeText("charts/neon.txt", text) -> ok, err — write a file under Assets/, creating the folders on the way and replacing what was there. A path outside the project is refused (false and why). Editor or exported build alike; in a browser the write lands in the page's own storage and survives a reload. Refuses: the path leaves the project (absolute, or containing `..`); the path is an existing FOLDER; the folder could not be created; the write itself failed (permissions, a full disk).
+assets.writeText("charts/neon.txt", text) -> ok, err — write a file under Assets/, creating the folders on the way and replacing what was there. A path starting `user://` is the PLAYER's instead (settings, progress, levels they made, replays): in an exported build it lives in a per-user data folder that survives installing a new version, apart from the game's files; in the editor and floptle run it is the project's save/user. An exported build that writes a plain path writes into its own install folder, which a new build will not see and an installed game may not be allowed to write — it still works, and the Console says so once. A path outside the project is refused (false and why). Editor or exported build alike; in a browser the write lands in the page's own storage and survives a reload. Refuses: the path leaves the project (absolute, or containing `..`); the path is an existing FOLDER; the folder could not be created; the write itself failed (permissions, a full disk).
 
 ## debug gizmos
 

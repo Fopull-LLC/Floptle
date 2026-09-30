@@ -1928,7 +1928,7 @@ impl Editor {
             return;
         }
         let Some(t) = self.terrains.get(&e) else { return };
-        let Some(sd) = self.script_host.terrain_save_dir() else { return };
+        let Some(sd) = self.script_host.terrain_save_path() else { return };
         let Some(Matter::Terrain { id, .. }) = self.world.get::<Matter>(e).cloned() else { return };
         let name = self
             .world
@@ -1936,7 +1936,7 @@ impl Editor {
             .map(|n| n.0.clone())
             .unwrap_or_else(|| format!("terrain {id}"));
         let path =
-            self.project_root.join(&sd).join(format!("{}.{id}.cfield", self.scene_name));
+            sd.join(format!("{}.{id}.cfield", self.scene_name));
         let stamp = self.terrain_edit_stamps.get(&e).map(|(s, _)| *s).unwrap_or(0);
         self.terrain_save_job = Some(TerrainSaveJob {
             e,
@@ -1981,7 +1981,7 @@ impl Editor {
     /// background pipeline was mid-way through, the player's edits are on disk
     /// when this returns. No-op without a slot.
     pub(crate) fn flush_slot_terrains_sync(&mut self) {
-        let Some(sd) = self.script_host.terrain_save_dir() else { return };
+        let Some(sd) = self.script_host.terrain_save_path() else { return };
         self.settle_terrain_checkpoint();
         self.terrain_flush_queue.clear();
         let _ = self.script_host.take_terrain_flush(); // absorbed: all writes now
@@ -1997,7 +1997,7 @@ impl Editor {
         let mut wrote = 0usize;
         for (e, id) in dirty {
             let path =
-                self.project_root.join(&sd).join(format!("{}.{id}.cfield", self.scene_name));
+                sd.join(format!("{}.{id}.cfield", self.scene_name));
             if let Some(dir) = path.parent() {
                 let _ = floptle_vfs::create_dir_all(dir);
             }
@@ -2427,10 +2427,8 @@ impl Editor {
     fn resolve_terrain_source(&self, e: Entity, id: u32) -> Vec<TerrainSource> {
         let mut out = Vec::new();
         let genspec = self.world.get::<floptle_core::TerrainGen>(e).map(|g| g.0.clone());
-        if let Some(sd) = self.script_host.terrain_save_dir() {
-            let p = self
-                .project_root
-                .join(&sd)
+        if let Some(sd) = self.script_host.terrain_save_path() {
+            let p = sd
                 .join(format!("{}.{id}.cfield", self.scene_name));
             if floptle_vfs::exists(&p) {
                 out.push(TerrainSource::File(p));
@@ -2454,8 +2452,8 @@ impl Editor {
 
     /// The save-slot destination for an edited field, when the game set one.
     fn terrain_save_slot_path(&self, id: u32) -> Option<PathBuf> {
-        self.script_host.terrain_save_dir().map(|sd| {
-            self.project_root.join(sd).join(format!("{}.{id}.cfield", self.scene_name))
+        self.script_host.terrain_save_path().map(|sd| {
+            sd.join(format!("{}.{id}.cfield", self.scene_name))
         })
     }
 

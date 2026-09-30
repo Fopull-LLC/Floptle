@@ -528,7 +528,7 @@ impl Editor {
         if log.entries.is_empty() {
             return;
         }
-        let dir = crate::shadow::replay_dir(&self.project_root);
+        let dir = crate::shadow::replay_dir(self.runtime_base());
         if let Err(e) = floptle_vfs::create_dir_all(&dir) {
             self.console.push(
                 floptle_script::LogLevel::Warn,

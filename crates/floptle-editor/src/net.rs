@@ -875,9 +875,27 @@ impl Editor {
             // during an outage exactly as they would on a good day.
             self.net_join_timeout = timeout_s;
             let code = code.trim().to_string();
-            match Self::cloud_relay_for_code(&code) {
+            // A page joins the same region over its browser leg.
+            #[cfg(not(target_arch = "wasm32"))]
+            let target = Self::cloud_relay_for_code(&code);
+            #[cfg(target_arch = "wasm32")]
+            let target = Self::browser_relay_for_code(&Self::cloud_regions(), &code);
+            match target {
+                #[cfg(not(target_arch = "wasm32"))]
                 Ok(raddr) => self.net_join_relay(&raddr, &code),
+                #[cfg(target_arch = "wasm32")]
+                Ok(url) => self.net_join_ws(&url, &code),
                 Err(why) => self.console.push(floptle_script::LogLevel::Warn, why, None),
+            }
+        } else if addr.starts_with("ws://") || addr.starts_with("wss://") {
+            self.net_join_timeout = timeout_s;
+            match split_ws_target(addr) {
+                Some((url, code)) => self.net_join_ws(&url, &code),
+                None => self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    format!("net.join(\"{addr}\"): expected wss://host:port/CODE"),
+                    None,
+                ),
             }
         } else if let Some(rest) = addr.strip_prefix("relay://") {
             self.net_join_timeout = timeout_s;
@@ -898,6 +916,7 @@ impl Editor {
                 format!(
                     "net.join(\"{addr}\"): use cloud://CODE (a Floptle Cloud lobby code), \
                      relay://relayaddr/CODE (a code through your own relay), \
+                     wss://relayaddr/CODE (the same, over a relay's browser leg), \
                      quic://host:port (a server directly), or local:// (the in-editor \
                      harness)"
                 ),
@@ -2102,6 +2121,7 @@ impl Editor {
         }
         let host = floptle_script::ScriptHost::new();
         host.set_project_root(self.project_root.clone());
+        host.set_data_root(self.data_root.clone());
         // The hidden server runs the same controller scripts, so it needs the
         // same action map — its own ScriptHost starts with an empty one, and an
         // empty map resolves every `input.action(...)` to false. The server
@@ -2192,6 +2212,7 @@ impl Editor {
         }
         hs.host.set_bodies(states);
         hs.host.set_project_root(self.project_root.clone());
+        hs.host.set_data_root(self.data_root.clone());
         hs.host
             .set_colliders(std::mem::take(&mut hs.sim.world.colliders), hs.sim.world.origin);
         hs.host.set_hulls(hs.sim.body_hulls(&hs.world));
@@ -3396,44 +3417,91 @@ mod tests {
     }
 }
 
-/// **Multiplayer over the network, in a browser: not yet.**
+/// `wss://host:port/CODE` → the leg's URL and the lobby code.
+fn split_ws_target(addr: &str) -> Option<(String, String)> {
+    let (scheme, rest) = addr.split_once("://")?;
+    let (host, code) = rest.trim_end_matches('/').rsplit_once('/')?;
+    (!host.is_empty() && !code.is_empty()).then(|| (format!("{scheme}://{host}/"), code.to_string()))
+}
+
+impl Editor {
+    /// Join a relay lobby over the relay's WebSocket leg — how a page joins,
+    /// since it cannot speak QUIC. On the desktop only plain `ws://` is
+    /// spoken, for testing a relay's browser leg; a desktop game joins over
+    /// QUIC.
+    pub(crate) fn net_join_ws(&mut self, url: &str, code: &str) {
+        let what = format!("net.join(\"{url}{code}\")");
+        if !self.playing {
+            self.console.push(floptle_script::LogLevel::Warn, "net.join: enter Play mode first".into(), None);
+            return;
+        }
+        if self.refuse_second_session(&what) {
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if url.starts_with("wss://") {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!("{what}: the desktop joins a relay over QUIC — relay://host:port/{code}"),
+                None,
+            );
+            return;
+        }
+        match floptle_net::ws::WsClient::connect(url) {
+            Ok(leg) => {
+                let transport = floptle_net::RelayClient::join_over(Box::new(leg), code);
+                self.net_join_with(Box::new(transport), &format!("{url}{code}"));
+            }
+            Err(e) => self.console.push(floptle_script::LogLevel::Warn, format!("{what}: {e}"), None),
+        }
+    }
+}
+
+/// **Networking in a browser: joining, not hosting.**
 ///
-/// Both transports this editor offers are UDP quic — direct, or through a relay
-/// — and a page cannot open a UDP socket at all. The browser's answer is
-/// WebTransport, which is quic over HTTP/3 and would be a third `Transport`
-/// impl beside the two in `floptle-net`; it is not a gate that can be flipped.
-/// `net.local` (same-process sessions) is unaffected and works here.
+/// A page cannot open a UDP socket, so it speaks neither transport the
+/// desktop hosts over. It joins a relay lobby over the relay's WebSocket leg
+/// instead ([`Editor::net_join_ws`], and `cloud://CODE` through the region's
+/// browser leg). It cannot host: hosting in a page would need the relay to
+/// carry the host's leg too, and nobody should run a game server in a browser
+/// tab. A desktop build or a dedicated server hosts; a page joins it.
 ///
-/// Each refusal names the transport it refused, because "net.join did nothing"
-/// is the report this exists to prevent.
+/// Each refusal names the call it refused, because "net.host did nothing" is
+/// the report this exists to prevent.
 #[cfg(target_arch = "wasm32")]
 impl Editor {
-    fn net_no_transport(&mut self, call: &str) {
-        self.console.push(
-            floptle_script::LogLevel::Warn,
-            format!(
-                "{call}: a browser build cannot open a QUIC socket, so hosting and joining over \
-                 the network are not available yet — see docs/web-export.md. net.local still \
-                 works."
-            ),
-            None,
-        );
+    fn net_page_cannot(&mut self, call: &str, instead: &str) {
+        self.console.push(floptle_script::LogLevel::Warn, format!("{call}: {instead} — see docs/web-export.md"), None);
     }
 
     pub(crate) fn net_host_quic(&mut self, port: u16) {
-        self.net_no_transport(&format!("net.host{{port = {port}}}"));
+        self.net_page_cannot(
+            &format!("net.host{{port = {port}}}"),
+            "a browser build cannot host; a desktop build or a dedicated server hosts, and the page joins it",
+        );
     }
 
     pub(crate) fn net_host_relay(&mut self, relay_addr: &str) {
-        self.net_no_transport(&format!("net.host{{relay = \"{relay_addr}\"}}"));
+        self.net_page_cannot(
+            &format!("net.host{{relay = \"{relay_addr}\"}}"),
+            "a browser build cannot host; a desktop build or a dedicated server hosts, and the page joins it",
+        );
     }
 
     pub(crate) fn net_join_quic(&mut self, addr: &str) {
-        self.net_no_transport(&format!("net.join(\"quic://{addr}\")"));
+        self.net_page_cannot(
+            &format!("net.join(\"quic://{addr}\")"),
+            "a page cannot speak QUIC, so it cannot join a server directly — join a relay lobby with \
+             cloud://CODE or wss://relay:port/CODE",
+        );
     }
 
     pub(crate) fn net_join_relay(&mut self, relay_addr: &str, code: &str) {
-        self.net_no_transport(&format!("net.join(\"relay://{relay_addr}/{code}\")"));
+        self.net_page_cannot(
+            &format!("net.join(\"relay://{relay_addr}/{code}\")"),
+            "that is the relay's QUIC address, which a page cannot speak — join its browser leg with \
+             wss://relay:port/CODE (the relay's --ws-port)",
+        );
     }
 }
 
@@ -3569,6 +3637,31 @@ impl Editor {
         }
     }
 
+    /// Where a page joins a Floptle Cloud lobby: the region's browser leg.
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub(crate) fn browser_relay_for_code(
+        regions: &floptle_account::Regions,
+        code: &str,
+    ) -> Result<String, String> {
+        let Some(letter) = code.chars().next() else {
+            return Err("net.join(\"cloud://…\"): that is not a lobby code — it is empty".into());
+        };
+        match regions.by_letter(letter) {
+            Some(r) => r.relay_ws.clone().ok_or_else(|| {
+                format!(
+                    "net.join(\"cloud://{code}\"): the {} region does not take browser players \
+                     yet — join from the desktop build",
+                    r.name
+                )
+            }),
+            None => Err(format!(
+                "net.join(\"cloud://{code}\"): no Floptle Cloud region uses codes starting \
+                 \"{letter}\". Check the code — a managed code is six characters and the first \
+                 one names the region."
+            )),
+        }
+    }
+
     /// The region list: a fresh-enough disk cache, else a fetch, else what this
     /// build shipped with. Never empty, and never a network call on the path a
     /// player waits behind when the cache is warm.
@@ -3602,6 +3695,7 @@ mod cloud_project_tests {
             letter,
             name: format!("{id} name"),
             relay: format!("{id}.relay.fopull.com:7788"),
+            relay_ws: None,
             status: status.into(),
         }
     }
@@ -3613,6 +3707,37 @@ mod cloud_project_tests {
         Regions {
             regions: vec![region("eu-central", 'E', "planned"), region("us-east", 'U', "up")],
         }
+    }
+
+    /// A page joins a cloud lobby through the region's browser leg, and is
+    /// told plainly when the region has none.
+    #[test]
+    fn a_page_joins_a_cloud_code_over_the_regions_browser_leg() {
+        let mut regions = two_regions();
+        regions.regions[0].relay_ws = Some("wss://a.example:7789/".into());
+        let first = regions.regions[0].letter;
+        let second = regions.regions[1].letter;
+        assert_eq!(
+            Editor::browser_relay_for_code(&regions, &format!("{first}ABCDE")).unwrap(),
+            "wss://a.example:7789/"
+        );
+        let why = Editor::browser_relay_for_code(&regions, &format!("{second}ABCDE")).unwrap_err();
+        assert!(why.contains("does not take browser players"), "{why}");
+        // The build's own list names where us-east's browser leg will be.
+        assert!(floptle_account::regions::shipped().by_letter('U').unwrap().relay_ws.is_some());
+    }
+
+    #[test]
+    fn a_websocket_join_address_splits_into_the_leg_and_the_code() {
+        assert_eq!(
+            super::split_ws_target("wss://relay.example:7789/UABCDE"),
+            Some(("wss://relay.example:7789/".to_string(), "UABCDE".to_string()))
+        );
+        assert_eq!(
+            super::split_ws_target("ws://127.0.0.1:9000/ABCDE/"),
+            Some(("ws://127.0.0.1:9000/".to_string(), "ABCDE".to_string()))
+        );
+        assert_eq!(super::split_ws_target("wss://relay.example:7789"), None);
     }
 
     /// `relay = "cloud"` picks a region a game may actually host on — not

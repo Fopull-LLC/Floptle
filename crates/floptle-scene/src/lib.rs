@@ -2513,6 +2513,37 @@ impl CloudProjectSettings {
     }
 }
 
+/// Whether `id` can name a player's data folder on every platform: 1–64
+/// letters, digits, `.`, `-` or `_`, not starting with a `.`, and not a name
+/// Windows reserves.
+pub fn valid_data_id(id: &str) -> bool {
+    const RESERVED: &[&str] = &["con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "lpt1", "lpt2", "lpt3"];
+    !id.is_empty()
+        && id.len() <= 64
+        && !id.starts_with('.')
+        && !id.ends_with('.')
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        && !RESERVED.contains(&id.split('.').next().unwrap_or("").to_ascii_lowercase().as_str())
+}
+
+/// A data folder name made from a game's title: lower case, runs of anything
+/// else turned into one `-`. `"Free Flier!"` → `"free-flier"`.
+pub fn data_id_from_title(title: &str) -> String {
+    let mut out = String::new();
+    for c in title.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('-') && !out.is_empty() {
+            out.push('-');
+        }
+    }
+    let mut id: String = out.trim_end_matches('-').chars().take(64).collect();
+    while id.ends_with(['-', '.']) {
+        id.pop();
+    }
+    if valid_data_id(&id) { id } else { format!("game-{id}").chars().take(64).collect::<String>().trim_end_matches('-').to_string() }
+}
+
 /// Project-wide Steam integration settings. `None` = not a Steam build —
 /// Steam lifecycle never activates and every `steam.*` Lua call answers
 /// through `NullPlatform`. See the Steam integration plan.
@@ -2666,6 +2697,19 @@ pub struct ProjectConfigDoc {
     /// `None` on projects created before the Hub existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_version: Option<String>,
+    /// The name of the folder an exported game keeps a player's data in:
+    /// saves, `replays/`, and everything a script writes under `user://`.
+    /// Stable across versions and titles on purpose — a new build finds the
+    /// last one's data by it, so changing it leaves every player's progress
+    /// behind. Letters, digits, `.`, `-`, `_`. `None` until the first export,
+    /// which derives one from the title and writes it here. See
+    /// [`valid_data_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_id: Option<String>,
+    /// An optional publisher folder the data folder sits inside on Windows
+    /// (`%APPDATA%\<studio>\<data_id>`). Same characters as `data_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub studio: Option<String>,
     /// Steam integration settings. `None` = not a Steam build. Copied forward
     /// into the exported `GameManifest` at export time, since `project.ron`
     /// itself isn't part of the shipped bundle.
@@ -2782,6 +2826,8 @@ impl ProjectConfigDoc {
             title: None,
             entry_scene: None,
             engine_version: None,
+            data_id: None,
+            studio: None,
             steam: None,
             cloud: None,
             layers: Vec::new(),

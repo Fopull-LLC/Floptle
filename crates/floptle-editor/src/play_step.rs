@@ -478,7 +478,7 @@ impl Editor {
         }
         // Lend the asset root (for `assets.getFile/getContents`) and the material
         // presets (so `node.material = "Gold"` resolves) for this frame's scripts.
-        self.script_host.set_project_root(self.project_root.clone());
+        self.point_scripts_at_project();
         // The running scene's name, for `scene.current()`.
         self.script_host.set_scene_name(&self.scene_name);
         // The scene's bodies of water, in world coordinates — `water.depthAt`

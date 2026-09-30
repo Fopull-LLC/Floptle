@@ -112,9 +112,30 @@ pub(crate) struct TerrainStreamShared {
     /// being generated, or one streaming in. Published so a game that creates
     /// worlds on demand can wait its turn.
     pub busy: Rc<std::cell::Cell<bool>>,
-    /// Project root — `terrain.deleteSaveDir` resolves its (validated,
-    /// relative) path against this.
-    pub root: Rc<RefCell<std::path::PathBuf>>,
+    /// What `terrain.deleteSaveDir` resolves its (validated, relative) path
+    /// against — see [`save_dir_path`].
+    pub(crate) paths: crate::paths::Paths,
+}
+
+/// Where a `terrain.saveDir` path is on disk. A save slot is the player's
+/// progress, so a plain path sits beside the `save.*` slots — the project in
+/// development, the per-user data folder in an exported build — and a
+/// `user://` path is under the player's own folder.
+pub(crate) fn save_dir_path(paths: &crate::paths::Paths, sd: &str) -> std::path::PathBuf {
+    match sd.strip_prefix(crate::paths::USER_PREFIX) {
+        Some(rest) => paths.user_dir().join(rest),
+        None => paths.runtime_base().join(sd),
+    }
+}
+
+/// A save-slot path a script may name: relative, no `..`, optionally
+/// `user://`.
+fn valid_save_dir(p: &str) -> bool {
+    let rel = p.strip_prefix(crate::paths::USER_PREFIX).unwrap_or(p);
+    !rel.is_empty()
+        && !std::path::Path::new(rel).is_absolute()
+        && !rel.split(['/', '\\']).any(|c| c == ".." || c.is_empty())
+        && floptle_vfs::contain(std::path::Path::new(""), rel).is_some()
 }
 
 pub(crate) fn install_terrain_api(
@@ -126,7 +147,7 @@ pub(crate) fn install_terrain_api(
     stream: TerrainStreamShared,
     receipts: TerrainReceipts,
 ) {
-    let TerrainStreamShared { save_dir, lod_anchor, warm, flush, busy, root } = stream;
+    let TerrainStreamShared { save_dir, lod_anchor, warm, flush, busy, paths } = stream;
     let TerrainReceipts { yields, next_op_id } = receipts;
     let Ok(t) = lua.create_table() else { return };
 
@@ -139,12 +160,9 @@ pub(crate) fn install_terrain_api(
     // Returns the number of files removed.
     {
         let sd = save_dir.clone();
-        let root = root.clone();
+        let paths = paths.clone();
         if let Ok(f) = lua.create_function(move |_, path: String| {
-            let bad = path.is_empty()
-                || std::path::Path::new(&path).is_absolute()
-                || path.split(['/', '\\']).any(|c| c == ".." || c.is_empty());
-            if bad {
+            if !valid_save_dir(&path) {
                 return Err(mlua::Error::RuntimeError(format!(
                     "terrain.deleteSaveDir(\"{path}\"): needs a relative project path with no \"..\""
                 )));
@@ -155,7 +173,7 @@ pub(crate) fn install_terrain_api(
                      clear it (terrain.saveDir(\"\")) before deleting the slot"
                 )));
             }
-            let dir = root.borrow().join(&path);
+            let dir = save_dir_path(&paths, &path);
             let Ok(entries) = floptle_vfs::read_dir(&dir) else { return Ok(0) };
             let mut removed = 0u32;
             for entry in entries {
@@ -275,7 +293,7 @@ pub(crate) fn install_terrain_api(
                     // The same rule as `deleteSaveDir`, for the same reason:
                     // edited fields are written here, and a directory outside
                     // the project is not a save slot.
-                    if !p.is_empty() && floptle_vfs::contain(std::path::Path::new(""), &p).is_none() {
+                    if !p.is_empty() && !valid_save_dir(&p) {
                         return Err(mlua::Error::RuntimeError(format!(
                             "terrain.saveDir(\"{p}\"): needs a relative project path with no \"..\""
                         )));

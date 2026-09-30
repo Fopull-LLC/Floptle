@@ -41,6 +41,10 @@ pub mod regions;
 // The browser sign-in (contract §6). Compiled everywhere so its protocol
 // tests run on the desktop; only its `fetch`/`location` layer is wasm-only.
 pub mod web_auth;
+/// One HTTP request from a page, through `fetch`: what every Cloud and
+/// `http.*` call uses in a browser build.
+#[cfg(target_arch = "wasm32")]
+pub mod web_fetch;
 
 mod account;
 

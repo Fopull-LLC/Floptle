@@ -958,7 +958,7 @@ fn install_assets(
     lua: &Lua,
     logs: &Rc<RefCell<Vec<ScriptLog>>>,
     preloads: Rc<RefCell<crate::preload_api::Preloads>>,
-) -> Rc<RefCell<PathBuf>> {
+) -> crate::paths::Paths {
     // `assets.getFile(path)` / `assets.getContents(dir)`: resolve files in the project's
     // `Assets/` folder by a path the dev writes relative to it (e.g. "models/armor.glb").
     // getFile returns the full asset path (or nil if missing); getContents returns an
@@ -970,14 +970,19 @@ fn install_assets(
     // empty list and one Console line naming the rule. A game runs on a
     // machine that is not the developer's, and "list everything under
     // `../../..`" is not a question about its assets.
-    let project_root: Rc<RefCell<PathBuf>> = Rc::new(RefCell::new(PathBuf::from("assets")));
+    //
+    // A path that starts `user://` is the player's own files instead — see
+    // `crate::paths` for where that is on each host.
+    let paths = crate::paths::Paths::new();
+    let project_root = paths.project.clone();
     if let Ok(t) = lua.create_table() {
-        let pr = project_root.clone();
+        let pp = paths.clone();
         let sink = logs.clone();
         let _ = t.set(
             "getFile",
             lua.create_function(move |lua, path: String| {
-                let Some(full) = floptle_vfs::contain(&pr.borrow(), &path) else {
+                let (root, rel, _) = pp.split(&path);
+                let Some(full) = floptle_vfs::contain(&root, rel) else {
                     refuse_outside(&sink, "assets.getFile", &path);
                     return Ok(Value::Nil);
                 };
@@ -989,13 +994,14 @@ fn install_assets(
             })
             .ok(),
         );
-        let pr2 = project_root.clone();
+        let pp = paths.clone();
         let sink = logs.clone();
         let _ = t.set(
             "getContents",
             lua.create_function(move |lua, dir: String| {
                 let arr = lua.create_table()?;
-                let Some(base) = floptle_vfs::contain(&pr2.borrow(), &dir) else {
+                let (root, rel, user) = pp.split(&dir);
+                let Some(base) = floptle_vfs::contain(&root, rel) else {
                     refuse_outside(&sink, "assets.getContents", &dir);
                     return Ok(arr);
                 };
@@ -1010,8 +1016,14 @@ fn install_assets(
                         source: None,
                     });
                 }
+                // The player's files come back as `user://` paths, so what
+                // the list names is what the reads take.
                 for (i, f) in files.iter().enumerate() {
-                    arr.set(i + 1, lua.create_string(f.as_bytes())?)?;
+                    let shown = match user.then(|| Path::new(f).strip_prefix(&root).ok()).flatten() {
+                        Some(r) => format!("{}{}", crate::paths::USER_PREFIX, r.to_string_lossy().replace('\\', "/")),
+                        None => f.clone(),
+                    };
+                    arr.set(i + 1, lua.create_string(shown.as_bytes())?)?;
                 }
                 Ok(arr)
             })
@@ -1032,12 +1044,12 @@ fn install_assets(
         // Console, not a script that stops loading. They go through
         // `floptle_vfs`, so the same script reads from the bundle in a
         // browser and its writes land in the page's overlay.
-        let pr = project_root.clone();
+        let pp = paths.clone();
         let sink = logs.clone();
         let _ = t.set(
             "readText",
             lua.create_function(move |lua, path: String| {
-                match read_project_text(&pr.borrow(), &path, "assets.readText") {
+                match read_project_text(&pp, &path, "assets.readText") {
                     Ok(text) => Ok((Value::String(lua.create_string(text.as_bytes())?), Value::Nil)),
                     Err(why) => {
                         refuse_read(&sink, &why);
@@ -1047,12 +1059,12 @@ fn install_assets(
             })
             .ok(),
         );
-        let pr = project_root.clone();
+        let pp = paths.clone();
         let sink = logs.clone();
         let _ = t.set(
             "readJson",
             lua.create_function(move |lua, path: String| {
-                let text = match read_project_text(&pr.borrow(), &path, "assets.readJson") {
+                let text = match read_project_text(&pp, &path, "assets.readJson") {
                     Ok(text) => text,
                     Err(why) => {
                         refuse_read(&sink, &why);
@@ -1070,12 +1082,12 @@ fn install_assets(
             })
             .ok(),
         );
-        let pr = project_root.clone();
+        let pp = paths.clone();
         let sink = logs.clone();
         let _ = t.set(
             "writeText",
             lua.create_function(move |lua, (path, text): (String, mlua::String)| {
-                match write_project_bytes(&pr.borrow(), &path, &text.as_bytes(), "assets.writeText") {
+                match write_project_bytes(&pp, &path, &text.as_bytes(), "assets.writeText", &sink) {
                     Ok(()) => Ok((Value::Boolean(true), Value::Nil)),
                     Err(why) => {
                         refuse_read(&sink, &why);
@@ -1085,7 +1097,7 @@ fn install_assets(
             })
             .ok(),
         );
-        let pr = project_root.clone();
+        let pp = paths.clone();
         let sink = logs.clone();
         let _ = t.set(
             "writeJson",
@@ -1105,7 +1117,7 @@ fn install_assets(
                 let j = crate::http_api::lua_to_json(&value)?;
                 let text = if pretty { serde_json::to_string_pretty(&j) } else { serde_json::to_string(&j) }
                     .map_err(|e| mlua::Error::RuntimeError(format!("assets.writeJson: {e}")))?;
-                match write_project_bytes(&pr.borrow(), &path, text.as_bytes(), "assets.writeJson") {
+                match write_project_bytes(&pp, &path, text.as_bytes(), "assets.writeJson", &sink) {
                     Ok(()) => Ok((Value::Boolean(true), Value::Nil)),
                     Err(why) => {
                         refuse_read(&sink, &why);
@@ -1115,11 +1127,58 @@ fn install_assets(
             })
             .ok(),
         );
+        // `readBytes` / `writeBytes`: the same files as bytes. A PNG, a
+        // compressed level or a replay goes through a Lua string untouched;
+        // `readText` would refuse it as not UTF-8.
+        let pp = paths.clone();
+        let sink = logs.clone();
+        let _ = t.set(
+            "readBytes",
+            lua.create_function(move |lua, path: String| match read_project_bytes(&pp, &path, "assets.readBytes") {
+                Ok(bytes) => Ok((Value::String(lua.create_string(&bytes)?), Value::Nil)),
+                Err(why) => {
+                    refuse_read(&sink, &why);
+                    Ok((Value::Nil, Value::String(lua.create_string(why.as_bytes())?)))
+                }
+            })
+            .ok(),
+        );
+        let pp = paths.clone();
+        let sink = logs.clone();
+        let _ = t.set(
+            "writeBytes",
+            lua.create_function(move |lua, (path, bytes): (String, mlua::String)| {
+                match write_project_bytes(&pp, &path, &bytes.as_bytes(), "assets.writeBytes", &sink) {
+                    Ok(()) => Ok((Value::Boolean(true), Value::Nil)),
+                    Err(why) => {
+                        refuse_read(&sink, &why);
+                        Ok((Value::Boolean(false), Value::String(lua.create_string(why.as_bytes())?)))
+                    }
+                }
+            })
+            .ok(),
+        );
+        // `remove`: a player deleting their own level or replay. Only
+        // `user://` — the game's own files are not the script's to delete.
+        let pp = paths.clone();
+        let sink = logs.clone();
+        let _ = t.set(
+            "remove",
+            lua.create_function(move |lua, path: String| match remove_user_file(&pp, &path) {
+                Ok(()) => Ok((Value::Boolean(true), Value::Nil)),
+                Err(why) => {
+                    refuse_read(&sink, &why);
+                    Ok((Value::Boolean(false), Value::String(lua.create_string(why.as_bytes())?)))
+                }
+            })
+            .ok(),
+        );
         let _ = crate::preload_api::install(lua, &t, preloads);
         let _ = lua.globals().set("assets", t);
     }
 
-    project_root
+    let _ = project_root;
+    paths
 }
 
 /// What [`install_scene`] hands back to the host.
@@ -2450,7 +2509,8 @@ impl ScriptHost {
 
         let gizmos = install_gizmos(&lua);
         let preloads: Rc<RefCell<crate::preload_api::Preloads>> = Rc::default();
-        let project_root = install_assets(&lua, &logs, preloads.clone());
+        let paths = install_assets(&lua, &logs, preloads.clone());
+        let project_root = paths.project.clone();
         let SceneCells {
             scene_request,
             scene_loaded,
@@ -2554,6 +2614,26 @@ impl ScriptHost {
             Rc::new(RefCell::new(Default::default()));
         if let Err(e) = crate::app_api::install(&lua, &app_info, &app_requests) {
             floptle_say::say_err!("[lua] failed to install the app API: {e}");
+        }
+        // `app.dataPath()`: the folder `user://` is, for a game to show
+        // "your files are in …". A page has no folder a player can open.
+        if let Ok(app) = lua.globals().get::<Table>("app") {
+            let pp = paths.clone();
+            let _ = lua
+                .create_function(move |lua, ()| {
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        let _ = (&pp, lua);
+                        Ok(Value::Nil)
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        let dir = pp.user_dir();
+                        let dir = std::path::absolute(&dir).unwrap_or(dir);
+                        Ok(Value::String(lua.create_string(dir.to_string_lossy().as_bytes())?))
+                    }
+                })
+                .and_then(|f| app.set("dataPath", f));
         }
         // The `audio` API (one-shots, sound handles, mixer tracks) + `node:sound()`.
         // Must come after the handle API: it extends the node methods table.
@@ -2670,7 +2750,7 @@ impl ScriptHost {
                 warm: terrain_warm.clone(),
                 flush: terrain_flush.clone(),
                 busy: terrain_busy.clone(),
-                root: project_root.clone(),
+                paths: paths.clone(),
             },
             crate::terrain_api::TerrainReceipts {
                 yields: terrain_yields.clone(),
@@ -2695,12 +2775,7 @@ impl ScriptHost {
         // The `save.*` persistent store (roadmap A2).
         let save_state: Rc<RefCell<crate::save_api::SaveState>> =
             Rc::new(RefCell::new(crate::save_api::SaveState::default()));
-        crate::save_api::install_save_api(
-            &lua,
-            save_state.clone(),
-            project_root.clone(),
-            logs.clone(),
-        );
+        crate::save_api::install_save_api(&lua, save_state.clone(), paths.clone(), logs.clone());
         // The `after`/`every`/`tween` scheduler (roadmap A4).
         let sched: Rc<RefCell<crate::sched_api::SchedState>> =
             Rc::new(RefCell::new(crate::sched_api::SchedState::default()));
@@ -2793,6 +2868,13 @@ impl ScriptHost {
         let view_info: Rc<RefCell<crate::view_api::ViewInfo>> =
             Rc::new(RefCell::new(crate::view_api::ViewInfo::default()));
         crate::view_api::install_camera_api(&lua, view_info.clone());
+        if let Err(e) = crate::data_api::install(&lua) {
+            floptle_say::say_err!("[lua] failed to install the data API: {e}");
+        }
+        let captures: Rc<RefCell<crate::capture_api::Captures>> = Rc::default();
+        if let Err(e) = crate::capture_api::install(&lua, captures.clone(), textures.clone()) {
+            floptle_say::say_err!("[lua] failed to install camera.capture: {e}");
+        }
 
         Self {
             lua,
@@ -2853,6 +2935,7 @@ impl ScriptHost {
             component_strs: shared.component_strs.clone(),
             materials: Rc::new(RefCell::new(HashMap::new())),
             project_root,
+            paths,
             save_state,
             sched,
             sleepers,
@@ -2935,6 +3018,7 @@ impl ScriptHost {
             account,
             preloads,
             textures,
+            captures,
             cloud,
             http_in_fixed,
             platform,
@@ -3951,6 +4035,13 @@ impl ScriptHost {
         self.terrain_save_dir.borrow().clone()
     }
 
+    /// [`terrain_save_dir`](Self::terrain_save_dir) on disk: beside the
+    /// `save.*` slots, or under the player's folder for a `user://` path.
+    pub fn terrain_save_path(&self) -> Option<PathBuf> {
+        let sd = self.terrain_save_dir.borrow().clone()?;
+        Some(crate::terrain_api::save_dir_path(&self.paths, &sd))
+    }
+
     /// Reset the save-slot terrain dir (Play stop — a slot never outlives its run).
     pub fn clear_terrain_save_dir(&self) {
         *self.terrain_save_dir.borrow_mut() = None;
@@ -4049,6 +4140,7 @@ impl ScriptHost {
         if !playing {
             self.preloads.borrow_mut().cancel_all();
             self.textures.borrow_mut().reset();
+            self.captures.borrow_mut().cancel_all();
         }
         // Stop drops every leaderboard callback still waiting, for the same
         // reason as `http.*` — the backend's own request stays in flight and
@@ -4065,6 +4157,7 @@ impl ScriptHost {
         self.account.borrow_mut().cancel_all();
         self.preloads.borrow_mut().cancel_all();
         self.textures.borrow_mut().cancel_all();
+        self.captures.borrow_mut().cancel_all();
         self.steam_state.borrow_mut().cancel_all();
     }
 
@@ -4858,7 +4951,7 @@ impl ScriptHost {
     /// the Console via the script log channel.
     pub fn flush_save(&self) {
         let mut s = self.save_state.borrow_mut();
-        if let Err(e) = crate::save_api::flush(&mut s, &self.project_root.borrow()) {
+        if let Err(e) = crate::save_api::flush(&mut s, &self.paths.runtime_base()) {
             self.logs.borrow_mut().push(crate::ScriptLog {
                 level: crate::LogLevel::Error,
                 msg: e,
@@ -5277,6 +5370,19 @@ impl ScriptHost {
         *self.project_root.borrow_mut() = root;
     }
 
+    /// An exported build's per-user data folder, or `None` to keep the
+    /// player's files inside the project (the editor, `floptle run` /
+    /// `shot` / `play`, a browser build). Moves `save.*` and `user://`; the
+    /// game's own `assets.*` paths stay on the project. See [`crate::paths`].
+    pub fn set_data_root(&self, root: Option<PathBuf>) {
+        *self.paths.data.borrow_mut() = root;
+    }
+
+    /// Where `user://` points right now, for `app.dataPath` and the driver.
+    pub fn user_dir(&self) -> PathBuf {
+        self.paths.user_dir()
+    }
+
     /// Drain the mesh model swaps scripts wrote this frame (entity index → new asset
     /// path), so the editor can re-import the GPU mesh. The `Matter::Mesh` component is
     /// already updated by [`run`](Self::run); this only signals which paths to load.
@@ -5335,6 +5441,27 @@ impl ScriptHost {
     /// request at once with an error and downloads nothing.
     pub fn set_can_draw(&self, can: bool) {
         self.textures.borrow_mut().set_can_draw(can);
+        self.captures.borrow_mut().set_can_draw(can);
+    }
+
+    /// Pictures scripts asked for since the last call (`camera.capture` /
+    /// `captureTexture`), for the driver to render on a later frame.
+    pub fn take_capture_requests(&self) -> Vec<crate::CaptureRequest> {
+        self.captures.borrow_mut().take_requests()
+    }
+
+    /// The driver's answer for a `camera.capture`: the encoded picture, or why
+    /// not. The callback runs in the next frame pass.
+    pub fn answer_capture(&self, id: u64, result: Result<Vec<u8>, String>) {
+        self.captures.borrow_mut().answer(id, result);
+    }
+
+    /// The driver's answer for a `camera.captureTexture`: the texture's name
+    /// once it is registered, or why not. Answered through the texture book,
+    /// so the name is released like any runtime texture.
+    pub fn answer_capture_texture(&self, id: u64, result: Result<String, String>) {
+        self.captures.borrow_mut().texture_done(id);
+        self.textures.borrow_mut().answer(id, result);
     }
 
     /// Errors raised by the most recent [`run`](Self::run) (one per failing script).
@@ -5446,6 +5573,7 @@ impl ScriptHost {
         crate::http_api::drain(&self.lua, &self.http, &self.logs);
         crate::account_api::drain(&self.lua, &self.account, &self.logs);
         crate::preload_api::drain(&self.lua, &self.preloads, &self.logs);
+        crate::capture_api::drain(&self.lua, &self.captures, &self.logs);
         crate::texture_api::drain(&self.lua, &self.textures, &self.logs);
         // Pumps the platform backend's callbacks and fires
         // `steam.onPersonaChanged` — a no-op under `NullPlatform`.
@@ -7967,52 +8095,86 @@ fn list_files_under(base: &Path) -> (Vec<String>, bool) {
 /// distinct `(call, path)` is what a script that asks every frame deserves,
 /// and `ScriptLog` de-duplicates identical lines downstream.
 /// The most a script may read as one string through `assets.readText` /
-/// `readJson`. A chart, a dialogue tree or a level table is kilobytes; the
-/// only thing past this is a model handed to the wrong call, and reading a
-/// 300 MB `.glb` into a Lua string before saying "not text" is a stall.
+/// `readJson` / `readBytes`. A chart, a dialogue tree or a level table is
+/// kilobytes; the only thing past this is a model handed to the wrong call,
+/// and reading a 300 MB `.glb` into a Lua string before saying "not data" is
+/// a stall.
 const MAX_TEXT_READ_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Read a text file the script named, contained to the project. The error is
-/// the whole Console line: which call, which path, and which rule or failure.
-fn read_project_text(root: &Path, path: &str, call: &str) -> Result<String, String> {
-    let Some(full) = floptle_vfs::contain(root, path) else {
-        return Err(format!(
+/// The containment rule, in the words of whichever root the path named.
+fn outside_rule(call: &str, path: &str, user: bool) -> String {
+    if user {
+        format!(
+            "{call}(\"{path}\"): a `user://` path stays inside the player's folder — an absolute \
+             path or `..` is refused"
+        )
+    } else {
+        format!(
             "{call}(\"{path}\"): a path is relative to the project and stays inside it — an \
              absolute path or `..` is refused"
-        ));
+        )
+    }
+}
+
+/// Find a file the script named, contained to its root, and check its size.
+fn readable_file(paths: &crate::paths::Paths, path: &str, call: &str) -> Result<PathBuf, String> {
+    let (root, rel, user) = paths.split(path);
+    let Some(full) = floptle_vfs::contain(&root, rel) else {
+        return Err(outside_rule(call, path, user));
     };
     if !floptle_vfs::is_file(&full) {
-        return Err(format!("{call}(\"{path}\"): no such file in the project"));
+        return Err(if user {
+            format!("{call}(\"{path}\"): no such file in the player's folder")
+        } else {
+            format!("{call}(\"{path}\"): no such file in the project")
+        });
     }
     if let Some(n) = floptle_vfs::size(&full)
         && n > MAX_TEXT_READ_BYTES
     {
         return Err(format!(
-            "{call}(\"{path}\"): {n} bytes is more than the {} MB a text read allows — is this \
+            "{call}(\"{path}\"): {n} bytes is more than the {} MB a script read allows — is this \
              a data file?",
             MAX_TEXT_READ_BYTES / (1024 * 1024)
         ));
     }
+    Ok(full)
+}
+
+/// Read a text file the script named. The error is the whole Console line:
+/// which call, which path, and which rule or failure.
+fn read_project_text(paths: &crate::paths::Paths, path: &str, call: &str) -> Result<String, String> {
+    let full = readable_file(paths, path, call)?;
     floptle_vfs::read_to_string(&full).map_err(|e| {
         if e.kind() == std::io::ErrorKind::InvalidData {
-            format!("{call}(\"{path}\"): not UTF-8 text")
+            format!("{call}(\"{path}\"): not UTF-8 text — `assets.readBytes` reads any file")
         } else {
             format!("{call}(\"{path}\"): {e}")
         }
     })
 }
 
-/// Write a file the script named, contained to the project, creating the
+/// Read a file the script named as bytes.
+fn read_project_bytes(paths: &crate::paths::Paths, path: &str, call: &str) -> Result<Vec<u8>, String> {
+    let full = readable_file(paths, path, call)?;
+    floptle_vfs::read(&full).map_err(|e| format!("{call}(\"{path}\"): {e}"))
+}
+
+/// Write a file the script named, contained to its root, creating the
 /// folders on the way. Same containment rule as the reads: a game runs on a
 /// machine that is not the developer's, and `../../.bashrc` is not its data.
-fn write_project_bytes(root: &Path, path: &str, bytes: &[u8], call: &str) -> Result<(), String> {
-    let Some(full) = floptle_vfs::contain(root, path) else {
-        return Err(format!(
-            "{call}(\"{path}\"): a path is relative to the project and stays inside it — an \
-             absolute path or `..` is refused"
-        ));
+fn write_project_bytes(
+    paths: &crate::paths::Paths,
+    path: &str,
+    bytes: &[u8],
+    call: &str,
+    sink: &Rc<RefCell<Vec<ScriptLog>>>,
+) -> Result<(), String> {
+    let (root, rel, user) = paths.split(path);
+    let Some(full) = floptle_vfs::contain(&root, rel) else {
+        return Err(outside_rule(call, path, user));
     };
-    if path.is_empty() || full == root || floptle_vfs::is_dir(&full) {
+    if rel.is_empty() || full == root || floptle_vfs::is_dir(&full) {
         return Err(format!("{call}(\"{path}\"): that is a folder, not a file"));
     }
     if let Some(parent) = full.parent()
@@ -8020,7 +8182,47 @@ fn write_project_bytes(root: &Path, path: &str, bytes: &[u8], call: &str) -> Res
     {
         return Err(format!("{call}(\"{path}\"): could not create its folder — {e}"));
     }
-    floptle_vfs::write(&full, bytes).map_err(|e| format!("{call}(\"{path}\"): {e}"))
+    floptle_vfs::write(&full, bytes).map_err(|e| format!("{call}(\"{path}\"): {e}"))?;
+    // An exported build that writes into its own install folder has written
+    // somewhere the next build will not look, and that may not be writable
+    // on a player's machine at all. It still works, so a game made before
+    // `user://` existed keeps running; the Console says where it belongs.
+    if !user && paths.data.borrow().is_some() && !WARNED_INSTALL_WRITE.with(|w| w.replace(true)) {
+        sink.borrow_mut().push(ScriptLog {
+            level: LogLevel::Warn,
+            msg: format!(
+                "{call}(\"{path}\"): written into the game's install folder. A new build will \
+                 not see it, and an installed game may not be allowed to write there — a \
+                 player's own files belong under `user://`"
+            ),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
+thread_local! {
+    /// Once per process: the install-folder write notice above.
+    static WARNED_INSTALL_WRITE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Delete one of the player's own files.
+fn remove_user_file(paths: &crate::paths::Paths, path: &str) -> Result<(), String> {
+    const CALL: &str = "assets.remove";
+    let (root, rel, user) = paths.split(path);
+    if !user {
+        return Err(format!(
+            "{CALL}(\"{path}\"): only the player's own files can be removed — a `user://` path. \
+             The game's files ship with it"
+        ));
+    }
+    let Some(full) = floptle_vfs::contain(&root, rel) else {
+        return Err(outside_rule(CALL, path, true));
+    };
+    if !floptle_vfs::is_file(&full) {
+        return Err(format!("{CALL}(\"{path}\"): no such file in the player's folder"));
+    }
+    floptle_vfs::remove_file(&full).map_err(|e| format!("{CALL}(\"{path}\"): {e}"))
 }
 
 /// One Console line for a read or write that answered `nil, err` — the
@@ -8245,6 +8447,79 @@ mod host_tests {
         ] {
             assert!(said.iter().any(|m| m == want), "missing {want} in:\n{joined}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A player's files live under `user://`, apart from the game's.** In
+    /// development that is the project's `save/user/` (which an export leaves
+    /// out); with a data root it is `<data>/user/`, and `save.*` slots move to
+    /// `<data>/save/` beside it. Bytes survive the trip untouched, a listing
+    /// names what the reads take, and only the player's files can be removed.
+    #[test]
+    fn a_players_files_live_under_user_and_follow_the_data_root() {
+        let dir = std::env::temp_dir().join(format!("floptle-user-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("proj");
+        let data = dir.join("data");
+        floptle_vfs::create_dir_all(root.join("scripts")).unwrap();
+        floptle_vfs::write(
+            root.join("scripts/player.lua"),
+            "function start()\n\
+             \x20 local blob = '\\0\\255\\1png' .. string.rep('\\200', 3)\n\
+             \x20 print('w=' .. tostring(assets.writeBytes('user://levels/a.lvl', blob)))\n\
+             \x20 local back = assets.readBytes('user://levels/a.lvl')\n\
+             \x20 print('same=' .. tostring(back == blob) .. ' len=' .. #back)\n\
+             \x20 local list = assets.getContents('user://levels')\n\
+             \x20 print('list=' .. table.concat(list, ','))\n\
+             \x20 local ok, err = assets.remove('levels/shipped.lvl')\n\
+             \x20 print('rmGame=' .. tostring(ok))\n\
+             \x20 print('rm=' .. tostring(assets.remove('user://levels/a.lvl')))\n\
+             \x20 print('gone=' .. tostring(assets.readBytes('user://levels/a.lvl') == nil))\n\
+             \x20 assets.writeText('user://keep.txt', 'mine')\n\
+             \x20 print('esc=' .. tostring(assets.writeText('user://../x.txt', 'no')))\n\
+             \x20 save.set('best', 12)\n\
+             \x20 print('path=' .. tostring(app.dataPath() ~= nil))\n\
+             end\n",
+        )
+        .unwrap();
+        floptle_vfs::create_dir_all(root.join("levels")).unwrap();
+        floptle_vfs::write(root.join("levels/shipped.lvl"), "game").unwrap();
+        let run = |data_root: Option<std::path::PathBuf>| -> Vec<String> {
+            let mut world = world_with_script("player");
+            let mut host = ScriptHost::new();
+            host.set_project_root(root.clone());
+            host.set_data_root(data_root);
+            host.set_playing(true);
+            host.run(&mut world, &root.join("scripts"), 1.0 / 60.0, 0.0);
+            assert!(host.errors().is_empty(), "{:?}", host.errors());
+            host.flush_save();
+            host.drain_logs().into_iter().map(|l| l.msg).collect()
+        };
+        let want = [
+            "w=true",
+            "same=true len=9",
+            "list=user://levels/a.lvl",
+            "rmGame=false",
+            "rm=true",
+            "gone=true",
+            "esc=false",
+            "path=true",
+        ];
+        let said = run(None);
+        for w in want {
+            assert!(said.iter().any(|m| m == w), "missing {w} in:\n{}", said.join("\n"));
+        }
+        assert!(root.join("save/user/keep.txt").is_file(), "user:// is the project's save/user in development");
+        assert!(root.join("save/main.ron").is_file());
+        assert!(root.join("levels/shipped.lvl").is_file(), "a game file was removed");
+
+        let said = run(Some(data.clone()));
+        for w in want {
+            assert!(said.iter().any(|m| m == w), "with a data root, missing {w} in:\n{}", said.join("\n"));
+        }
+        assert!(data.join("user/keep.txt").is_file(), "user:// did not follow the data root");
+        assert!(data.join("save/main.ron").is_file(), "save.* did not follow the data root");
+        assert!(!dir.join("x.txt").exists() && !data.join("x.txt").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

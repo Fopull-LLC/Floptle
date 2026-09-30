@@ -126,7 +126,7 @@ impl Editor {
             .map(|h| h.session.late_inputs())
             .or_else(|| self.net_server.as_ref().map(|s| s.late_inputs()))
             .unwrap_or(0);
-        let replays = crate::shadow::list_replays(&self.project_root);
+        let replays = crate::shadow::list_replays(self.runtime_base());
         // A real session (quic) has no hub: the link is the actual network, so
         // the simulated latency/loss sliders and ghost worlds don't apply.
         let net_is_real = (self.net_server.is_some() || self.net_play_client.is_some())
