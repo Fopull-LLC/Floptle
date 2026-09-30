@@ -64,9 +64,11 @@ use mlua::{Lua, Table, Value};
 
 use crate::{LogLevel, ScriptLog};
 use floptle_services::{
-    Achievements, Cloud, LeaderboardDisplay, LeaderboardInfo, LeaderboardOutcome, LeaderboardScope,
+    Achievements, ClipPriority, Cloud, LeaderboardDisplay, LeaderboardInfo, LeaderboardOutcome,
+    LeaderboardScope,
     LeaderboardSort, LobbyCompare, LobbyDistance, LobbyEvent, LobbyFilters, LobbyInfo, LobbyKind,
-    JoinRequest, LobbyMemberChange, LobbyOutcome, Platform, Social, UploadMethod, OVERLAY_PAGES,
+    JoinRequest, LobbyMemberChange, LobbyOutcome, Platform, Social, TimelineEvent, TimelineMode,
+    UploadMethod, OVERLAY_PAGES,
     OVERLAY_USER_DIALOGS,
 };
 
@@ -392,6 +394,82 @@ fn board_table(lua: &Lua, info: &LeaderboardInfo) -> mlua::Result<Table> {
     t.set("sort", info.sort.map(sort_str))?;
     t.set("display", info.display.map(display_str))?;
     Ok(t)
+}
+
+/// Keys `steam.timelineEvent`'s options table reads.
+pub(crate) const TIMELINE_EVENT_KEYS: &[&str] =
+    &["title", "description", "icon", "priority", "ago", "duration", "clip"];
+const TIMELINE_MODES: &[&str] = &["playing", "staging", "menus", "loading"];
+const CLIP_PRIORITIES: &[&str] = &["none", "standard", "featured"];
+
+/// What a Steam client older than game recording answers every timeline call
+/// with, where Steam itself would ignore the call without a word.
+const NO_TIMELINE: &str = "this Steam client has no game-recording timeline — it predates the feature";
+
+fn parse_timeline_mode(s: &str) -> Option<TimelineMode> {
+    match s {
+        "playing" => Some(TimelineMode::Playing),
+        "staging" => Some(TimelineMode::Staging),
+        "menus" => Some(TimelineMode::Menus),
+        "loading" => Some(TimelineMode::Loading),
+        _ => None,
+    }
+}
+
+fn parse_clip(s: &str) -> Option<ClipPriority> {
+    match s {
+        "none" => Some(ClipPriority::None),
+        "standard" => Some(ClipPriority::Standard),
+        "featured" => Some(ClipPriority::Featured),
+        _ => None,
+    }
+}
+
+/// Steam takes these strings as C strings: one with a NUL in it would be
+/// refused by the binding with a panic, or cut short.
+fn no_nul(call: &str, what: &str, s: &str) -> mlua::Result<()> {
+    if s.contains('\0') {
+        return Err(mlua::Error::RuntimeError(format!("{call}: `{what}` contains a NUL character")));
+    }
+    Ok(())
+}
+
+/// Read `steam.timelineEvent`'s options into an event.
+fn read_timeline_event(call: &str, t: &Table) -> mlua::Result<TimelineEvent> {
+    crate::opts::check_keys(t, TIMELINE_EVENT_KEYS, call)?;
+    let title = crate::opts::opt_str(t, call, "title")?
+        .ok_or_else(|| mlua::Error::RuntimeError(format!("{call}: `title` is required")))?;
+    let description = crate::opts::opt_str(t, call, "description")?.unwrap_or_default();
+    let icon = crate::opts::opt_str(t, call, "icon")?.unwrap_or_else(|| "steam_marker".into());
+    for (what, v) in [("title", &title), ("description", &description), ("icon", &icon)] {
+        no_nul(call, what, v)?;
+    }
+    let clip = match crate::opts::opt_str(t, call, "clip")? {
+        Some(c) => crate::opts::parse_enum(call, "clip", &c, CLIP_PRIORITIES, parse_clip)?,
+        None => ClipPriority::None,
+    };
+    Ok(TimelineEvent {
+        icon,
+        title,
+        description,
+        priority: crate::opts::opt_num(t, call, "priority", 0.0, 1000.0)?.unwrap_or(0.0) as u32,
+        start_offset: -(crate::opts::opt_num(t, call, "ago", 0.0, 86_400.0)?.unwrap_or(0.0) as f32),
+        duration: crate::opts::opt_num(t, call, "duration", 0.0, 86_400.0)?.unwrap_or(0.0) as f32,
+        clip,
+    })
+}
+
+/// Run `f` against the timeline, or say why there is none.
+fn with_timeline(p: &SharedPlatform, f: impl FnOnce(&dyn floptle_services::Media)) -> Result<(), String> {
+    let backend = p.borrow();
+    match backend.media() {
+        None => Err(NO_STEAM.into()),
+        Some(m) if !m.timeline_available() => Err(NO_TIMELINE.into()),
+        Some(m) => {
+            f(m);
+            Ok(())
+        }
+    }
 }
 
 /// Keys `steam.createLobby`'s options table reads.
@@ -1431,6 +1509,52 @@ pub(crate) fn install_steam_api(
                     e.uninstall(id);
                     Ok(())
                 }
+            };
+            result_tuple(lua, r)
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "timelineMode",
+        lua.create_function(move |lua, mode: String| {
+            let call = "steam.timelineMode";
+            let mode = crate::opts::parse_enum(call, "mode", &mode, TIMELINE_MODES, parse_timeline_mode)?;
+            result_tuple(lua, with_timeline(&p, |m| m.set_timeline_mode(mode)))
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "timelineState",
+        lua.create_function(move |lua, text: Option<String>| {
+            if let Some(t) = &text {
+                no_nul("steam.timelineState", "text", t)?;
+            }
+            result_tuple(lua, with_timeline(&p, |m| m.set_timeline_state(text.as_deref())))
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "timelineEvent",
+        lua.create_function(move |lua, opts: Table| {
+            let event = read_timeline_event("steam.timelineEvent", &opts)?;
+            result_tuple(lua, with_timeline(&p, |m| m.add_timeline_event(&event)))
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "screenshot",
+        lua.create_function(move |lua, ()| {
+            let backend = p.borrow();
+            let r = match backend.media() {
+                Some(m) => {
+                    m.trigger_screenshot();
+                    Ok(())
+                }
+                None => Err(NO_STEAM.to_string()),
             };
             result_tuple(lua, r)
         })?,
@@ -2709,6 +2833,129 @@ mod tests {
     }
 
     // ---- overlay ----
+
+    /// A media backend that records every call; `old` plays a Steam client
+    /// that predates the timeline.
+    #[derive(Default)]
+    struct FakeMedia {
+        old: bool,
+        calls: RefCell<Vec<String>>,
+        events: RefCell<Vec<TimelineEvent>>,
+    }
+
+    impl floptle_services::Media for FakeMedia {
+        fn timeline_available(&self) -> bool {
+            !self.old
+        }
+        fn set_timeline_mode(&self, mode: TimelineMode) {
+            self.calls.borrow_mut().push(format!("mode:{mode:?}"));
+        }
+        fn set_timeline_state(&self, text: Option<&str>) {
+            self.calls.borrow_mut().push(format!("state:{text:?}"));
+        }
+        fn add_timeline_event(&self, event: &TimelineEvent) {
+            self.events.borrow_mut().push(event.clone());
+        }
+        fn trigger_screenshot(&self) {
+            self.calls.borrow_mut().push("screenshot".into());
+        }
+    }
+
+    struct MediaPlatform(Rc<FakeMedia>);
+
+    impl Platform for MediaPlatform {
+        fn available(&self) -> bool {
+            true
+        }
+        fn media(&self) -> Option<&dyn floptle_services::Media> {
+            Some(&*self.0)
+        }
+    }
+
+    fn with_media(old: bool) -> (Fixture, Rc<FakeMedia>) {
+        let f = fresh();
+        let media = Rc::new(FakeMedia { old, ..Default::default() });
+        *f.platform.borrow_mut() = Rc::new(MediaPlatform(media.clone()));
+        (f, media)
+    }
+
+    /// An event reaches Steam with what the script wrote, `ago` turned into
+    /// an offset into the past, and the defaults filled in.
+    #[test]
+    fn a_timeline_event_reaches_the_backend_as_written() {
+        let (f, media) = with_media(false);
+        f.lua
+            .load("assert(steam.timelineEvent{ title = 'Boss down', description = 'Round 3', icon = 'steam_combat', priority = 200, ago = 4, duration = 6, clip = 'featured' })
+                   assert(steam.timelineEvent{ title = 'Checkpoint' })")
+            .exec()
+            .unwrap();
+        let events = media.events.borrow();
+        assert_eq!(
+            events[0],
+            TimelineEvent {
+                icon: "steam_combat".into(),
+                title: "Boss down".into(),
+                description: "Round 3".into(),
+                priority: 200,
+                start_offset: -4.0,
+                duration: 6.0,
+                clip: ClipPriority::Featured,
+            }
+        );
+        assert_eq!(
+            (events[1].icon.as_str(), events[1].description.as_str(), events[1].priority, events[1].start_offset, events[1].clip),
+            ("steam_marker", "", 0, 0.0, ClipPriority::None)
+        );
+    }
+
+    /// A malformed event is refused by name whether or not Steam is there,
+    /// and never reaches the backend.
+    #[test]
+    fn a_malformed_timeline_event_is_refused_by_name() {
+        for (f, media) in [with_media(false), (fresh(), Rc::new(FakeMedia::default()))] {
+            for (code, says) in [
+                ("steam.timelineEvent{ description = 'x' }", "`title` is required"),
+                ("steam.timelineEvent{ title = 'x', clip = 'best' }", "featured"),
+                ("steam.timelineEvent{ title = 'x', priority = 5000 }", "outside 0 – 1000"),
+                ("steam.timelineEvent{ title = 'x', ago = -3 }", "outside 0 – 86400"),
+                ("steam.timelineEvent{ title = 'x', tittle = 'y' }", "tittle"),
+                ("steam.timelineEvent{ title = 'a\\0b' }", "NUL"),
+                ("steam.timelineMode('paused')", "menus"),
+            ] {
+                let err = f.lua.load(code).exec().expect_err(code).to_string();
+                assert!(err.contains(says), "{code}: {err}");
+            }
+            assert!(media.events.borrow().is_empty() && media.calls.borrow().is_empty());
+        }
+    }
+
+    /// A Steam client that predates the timeline would ignore every call
+    /// without a word; the script is told instead.
+    #[test]
+    fn an_old_steam_client_says_it_has_no_timeline() {
+        let (f, media) = with_media(true);
+        for code in ["return steam.timelineMode('playing')", "return steam.timelineState('x')", "return steam.timelineEvent{ title = 'x' }"] {
+            let (ok, err): (bool, String) = f.lua.load(code).eval().unwrap();
+            assert!(!ok && err.contains("predates"), "{code}: {err}");
+        }
+        assert!(media.events.borrow().is_empty() && media.calls.borrow().is_empty());
+        let g = fresh();
+        let (ok, err): (bool, String) = g.lua.load("return steam.timelineMode('playing')").eval().unwrap();
+        assert!(!ok && err.contains("isn't available"), "{err}");
+    }
+
+    #[test]
+    fn timeline_mode_state_and_screenshot_reach_the_backend() {
+        let (f, media) = with_media(false);
+        f.lua
+            .load("assert(steam.timelineMode('loading')) assert(steam.timelineState('Level 2')) assert(steam.timelineState(nil)) assert(steam.screenshot())")
+            .exec()
+            .unwrap();
+        assert_eq!(
+            &*media.calls.borrow(),
+            &["mode:Loading", "state:Some(\"Level 2\")", "state:None", "screenshot"].map(String::from)
+        );
+    }
 
     /// An entitlements backend: the test decides what is owned and
     /// installed, and queues install events.

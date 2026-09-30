@@ -205,6 +205,72 @@ pub trait Entitlements {
     fn poll_installed(&self) -> Vec<u32>;
 }
 
+/// What the player is doing, for the colour of Steam's game-recording
+/// timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineMode {
+    /// In the game, playing.
+    Playing,
+    /// In a multiplayer lobby, waiting to start.
+    Staging,
+    /// In a menu or paused.
+    Menus,
+    /// On a loading screen.
+    Loading,
+}
+
+/// How strongly a timeline event suggests itself as a clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipPriority {
+    /// Not a clip.
+    None,
+    /// Worth offering as a clip.
+    Standard,
+    /// A highlight: offered ahead of standard clips.
+    Featured,
+}
+
+/// A marker on Steam's game-recording timeline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineEvent {
+    /// A built-in icon (`steam_marker`, `steam_death`, `steam_combat`…) or
+    /// one uploaded for the app on the Steamworks site.
+    pub icon: String,
+    /// The event's title.
+    pub title: String,
+    /// A line under the title.
+    pub description: String,
+    /// 0–1000: which of several overlapping events shows.
+    pub priority: u32,
+    /// When it started, in seconds relative to now: negative for the past.
+    pub start_offset: f32,
+    /// How long it lasted, in seconds; 0 for an instant.
+    pub duration: f32,
+    /// Whether to offer it as a clip.
+    pub clip: ClipPriority,
+}
+
+/// Game recording and screenshots. Landed Phase 12.
+///
+/// Strings reaching this surface have been checked by the caller: no NUL,
+/// which the backend would have to refuse or truncate.
+pub trait Media {
+    /// Whether this platform client supports the game-recording timeline. A
+    /// Steam client older than the feature does not, and would otherwise
+    /// ignore every timeline call without a word.
+    fn timeline_available(&self) -> bool;
+    /// Sets what the player is doing, which colours the timeline.
+    fn set_timeline_mode(&self, mode: TimelineMode);
+    /// Describes the current moment on the timeline, replacing the last
+    /// description; `None` clears it.
+    fn set_timeline_state(&self, text: Option<&str>);
+    /// Marks an event on the timeline.
+    fn add_timeline_event(&self, event: &TimelineEvent);
+    /// Asks the platform to take a screenshot of the game now, as its own
+    /// screenshot key would.
+    fn trigger_screenshot(&self);
+}
+
 /// Workshop/UGC item surface. Empty until Phase 10.
 pub trait Ugc {}
 
@@ -774,6 +840,10 @@ pub trait Platform {
     fn identity(&self) -> Option<&dyn Identity> {
         None
     }
+    /// The [`Media`] surface, if this backend has one.
+    fn media(&self) -> Option<&dyn Media> {
+        None
+    }
     /// The [`Entitlements`] surface, if this backend has one.
     fn entitlements(&self) -> Option<&dyn Entitlements> {
         None
@@ -856,6 +926,7 @@ mod tests {
         assert!(p.social().is_none());
         assert!(p.leaderboards().is_none());
         assert!(p.lobbies().is_none());
+        assert!(p.media().is_none());
     }
 
     /// `Platform` must be usable as `&dyn Platform` (call sites hold a boxed

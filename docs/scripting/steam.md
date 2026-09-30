@@ -1,6 +1,6 @@
 # Steam
 
-Leaderboards, lobbies, the overlay, invites, DLC, and shipping a game on Steam.
+Leaderboards, lobbies, the overlay, invites, DLC, game recording, and shipping a game on Steam.
 
 Part of the [scripting guide](../scripting.md) · [every call, as a reference](../lua-api.md)
 
@@ -12,6 +12,7 @@ Part of the [scripting guide](../scripting.md) · [every call, as a reference](.
 - [28d. Shipping a Steam game](#28d-shipping-a-steam-game)
 - [28e. Invites and joining a friend](#28e-invites-and-joining-a-friend)
 - [28f. DLC](#28f-dlc)
+- [28g. Game recording and screenshots](#28g-game-recording-and-screenshots)
 
 ---
 
@@ -293,3 +294,45 @@ end)
   own, which Steam itself would ignore without a word.
 - Every read is `nil` with no Steam, which is falsy, so a game that is not
   running on Steam simply sees nothing owned.
+
+---
+
+## 28g. Game recording and screenshots
+
+Steam can record play in the background and lay it along a timeline the
+player scrubs through afterwards. The game's part is to mark what happened,
+so the moments worth keeping are easy to find and to clip.
+
+```lua
+steam.timelineMode("loading")
+-- ...
+steam.timelineMode("playing")
+steam.timelineState("Level 3 — the tower")
+
+-- The boss fight started 40 seconds ago and just ended: a highlight.
+steam.timelineEvent{
+  title = "Tower warden defeated",
+  icon = "steam_combat",
+  ago = 40, duration = 40,
+  clip = "featured",
+}
+```
+
+- `steam.timelineMode(mode)` colours the timeline by what the player is
+  doing: `"playing"`, `"staging"` (a multiplayer lobby), `"menus"`,
+  `"loading"`.
+- `steam.timelineState(text)` says where the player is, until the next call;
+  `nil` clears it.
+- `steam.timelineEvent{ ... }` marks a moment. `title` is required. `icon` is
+  one of Steam's own (`steam_marker` by default, `steam_death`,
+  `steam_combat`, and more) or one uploaded for the game on the Steamworks
+  site. `ago` is how many seconds back it started and `duration` how long it
+  lasted. `priority` (0 to 1000) decides which of several overlapping events
+  shows. `clip` is `"none"`, `"standard"` or `"featured"`: whether to offer
+  it as a clip, and how prominently.
+- A Steam client from before game recording existed answers every timeline
+  call `(false, why)` rather than ignoring it.
+
+`steam.screenshot()` takes a screenshot into the player's Steam library, as
+their own screenshot key would: the shutter button of a photo mode. Steam
+captures the frame itself, so it needs the overlay working (see 28c).

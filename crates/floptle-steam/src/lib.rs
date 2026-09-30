@@ -55,7 +55,8 @@ use std::sync::Mutex;
 
 #[cfg(feature = "steam")]
 use floptle_services::{
-    Achievements, Cloud, DlcInfo, Entitlements, FriendInfo, Identity, JoinRequest, LeaderboardDisplay, LeaderboardEntry,
+    Achievements, ClipPriority, Cloud, DlcInfo, Entitlements, FriendInfo, Identity, JoinRequest,
+    LeaderboardDisplay, Media, TimelineEvent, TimelineMode, LeaderboardEntry,
     LeaderboardInfo, LeaderboardOutcome, LeaderboardResult, LeaderboardScope, LeaderboardSort,
     Leaderboards, Lobbies, LobbyCompare, LobbyDistance, LobbyEvent, LobbyFilters, LobbyInfo,
     LobbyKind, LobbyMemberChange, LobbyOutcome, LobbyResult, Overlay, Platform, ScoreUploaded,
@@ -108,7 +109,7 @@ pub fn restart_app_if_necessary(app_id: u32) -> bool {
 
 /// The Steamworks-backed platform backend: a live `SteamAPI_Init`'d client.
 /// Implements every landed capability trait ([`Identity`], [`Achievements`],
-/// [`Cloud`], [`Social`], [`Entitlements`], [`Leaderboards`], [`Lobbies`], [`Overlay`]); the
+/// [`Cloud`], [`Social`], [`Entitlements`], [`Leaderboards`], [`Lobbies`], [`Overlay`], [`Media`]); the
 /// accessors for phases that haven't landed still answer `None`.
 #[cfg(feature = "steam")]
 pub struct SteamPlatform {
@@ -422,6 +423,9 @@ impl Platform for SteamPlatform {
     fn entitlements(&self) -> Option<&dyn Entitlements> {
         Some(self)
     }
+    fn media(&self) -> Option<&dyn Media> {
+        Some(self)
+    }
     fn leaderboards(&self) -> Option<&dyn Leaderboards> {
         Some(self)
     }
@@ -719,6 +723,47 @@ impl Entitlements for SteamPlatform {
     }
     fn poll_installed(&self) -> Vec<u32> {
         std::mem::take(&mut *lock(&self.dlc_installed))
+    }
+}
+
+#[cfg(feature = "steam")]
+impl Media for SteamPlatform {
+    fn timeline_available(&self) -> bool {
+        // SAFETY: a plain interface lookup, on the thread that owns the client.
+        !unsafe { steamworks::sys::SteamAPI_SteamTimeline_v004() }.is_null()
+    }
+    fn set_timeline_mode(&self, mode: TimelineMode) {
+        self.client.timeline().set_timeline_game_mode(match mode {
+            TimelineMode::Playing => steamworks::TimelineGameMode::Playing,
+            TimelineMode::Staging => steamworks::TimelineGameMode::Staging,
+            TimelineMode::Menus => steamworks::TimelineGameMode::Menus,
+            TimelineMode::Loading => steamworks::TimelineGameMode::LoadingScreen,
+        });
+    }
+    fn set_timeline_state(&self, text: Option<&str>) {
+        let timeline = self.client.timeline();
+        match text {
+            Some(t) => timeline.set_timeline_state_description(t, Duration::ZERO),
+            None => timeline.clear_timeline_state_description(Duration::ZERO),
+        }
+    }
+    fn add_timeline_event(&self, e: &TimelineEvent) {
+        self.client.timeline().add_timeline_event(
+            &e.icon,
+            &e.title,
+            &e.description,
+            e.priority,
+            e.start_offset,
+            Duration::from_secs_f32(e.duration.max(0.0)),
+            match e.clip {
+                ClipPriority::None => steamworks::TimelineEventClipPriority::None,
+                ClipPriority::Standard => steamworks::TimelineEventClipPriority::Standard,
+                ClipPriority::Featured => steamworks::TimelineEventClipPriority::Featured,
+            },
+        );
+    }
+    fn trigger_screenshot(&self) {
+        self.client.screenshots().trigger_screenshot();
     }
 }
 

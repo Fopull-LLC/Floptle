@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 186
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 190
 - [node — transform & body fields](#node--transform--body-fields) — 40
 - [node — methods & handles](#node--methods--handles) — 31
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -703,6 +703,10 @@ steam.personaName() — the local user's current display name. nil when steam.av
 
 steam.resetAllStats(achievementsToo) -> ok, err — wipes every stat, and every achievement if achievementsToo. Development/QA only — never call this from a shipping build's own normal logic. Refuses: Steam isn't available in this session (no client running, or a session that never had one).
 
+### `steam.screenshot`
+
+steam.screenshot() -> ok, err — takes a screenshot into the player's Steam library, as their screenshot key would. A photo mode's shutter button. Refuses: Steam isn't available in this session.
+
 ### `steam.setCloudEnabled`
 
 steam.setCloudEnabled(enabled) -> ok, err — toggles steam.cloudEnabled(). Refuses: the player has turned Cloud off for this app in their own Steam settings, which no game may override; Steam isn't available in this session (no client running, or a session that never had one).
@@ -742,6 +746,18 @@ steam.statInt(name) — an integer stat's current value, or nil before stats are
 ### `steam.statsReady`
 
 steam.statsReady() — true once achievements/stats have finished loading from Steam. Every achievement/stat call below answers nil (reads) or false with a message (writes) before this, rather than guessing.
+
+### `steam.timelineEvent`
+
+steam.timelineEvent{ title, description, icon, priority, ago, duration, clip } -> ok, err — marks a moment on Steam's game-recording timeline, so a player can find it and clip it. icon = a Steam built-in ("steam_marker" by default, "steam_death", "steam_combat", …) or one uploaded on the Steamworks site. priority 0–1000 picks between overlapping events. ago = how many seconds back it started; duration = how long it lasted (0 = an instant). clip = "none" (default), "standard" or "featured" (a highlight, offered first). Refuses: a Steam client too old for game recording; Steam isn't available in this session. A missing title, an unknown key or clip name, or a number out of range is an error.
+
+### `steam.timelineMode`
+
+steam.timelineMode(mode) -> ok, err — what the player is doing, which colours Steam's game-recording timeline: "playing", "staging" (a multiplayer lobby), "menus" or "loading". Set it as the game moves between them. Refuses: a Steam client too old for game recording; Steam isn't available in this session. An unknown mode is an error.
+
+### `steam.timelineState`
+
+steam.timelineState(text) -> ok, err — describes where the player is now ("Level 3 — the tower") on Steam's game-recording timeline, replacing the last description; steam.timelineState(nil) clears it. Refuses: a Steam client too old for game recording; Steam isn't available in this session.
 
 ### `steam.uiLanguage`
 

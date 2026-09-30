@@ -103,6 +103,7 @@ Leaderboards, lobbies, and the overlay.
 - [28d. Shipping a Steam game](scripting/steam.md#28d-shipping-a-steam-game)
 - [28e. Invites and joining a friend](scripting/steam.md#28e-invites-and-joining-a-friend)
 - [28f. DLC](scripting/steam.md#28f-dlc)
+- [28g. Game recording and screenshots](scripting/steam.md#28g-game-recording-and-screenshots)
 
 ### [Working in the editor](scripting/workflow.md)
 
