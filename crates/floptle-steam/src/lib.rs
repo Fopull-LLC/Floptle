@@ -55,7 +55,7 @@ use std::sync::Mutex;
 
 #[cfg(feature = "steam")]
 use floptle_services::{
-    Achievements, Cloud, FriendInfo, Identity, LeaderboardDisplay, LeaderboardEntry,
+    Achievements, Cloud, FriendInfo, Identity, JoinRequest, LeaderboardDisplay, LeaderboardEntry,
     LeaderboardInfo, LeaderboardOutcome, LeaderboardResult, LeaderboardScope, LeaderboardSort,
     Leaderboards, Lobbies, LobbyCompare, LobbyDistance, LobbyEvent, LobbyFilters, LobbyInfo,
     LobbyKind, LobbyMemberChange, LobbyOutcome, LobbyResult, Overlay, Platform, ScoreUploaded,
@@ -183,6 +183,9 @@ pub struct SteamPlatform {
     /// Every overlay shown/hidden flip since last drained, oldest first.
     /// Same `Send` reasoning as [`lb_results`](Self::lb_results).
     overlay_flips: Arc<Mutex<Vec<bool>>>,
+    /// Join requests waiting for [`Social::poll_join_requests`]: the one the
+    /// game was launched with, then every accepted invite or "Join Game".
+    join_requests: Arc<Mutex<Vec<JoinRequest>>>,
     /// When `init` returned, for the overlay-hook diagnostic in `pump`.
     booted_at: Instant,
     /// What `pump` has said about the overlay so far: nothing, "hooked", or
@@ -197,6 +200,8 @@ pub struct SteamPlatform {
     _stats_received_cb: steamworks::CallbackHandle,
     _stats_stored_cb: steamworks::CallbackHandle,
     _overlay_cb: steamworks::CallbackHandle,
+    _lobby_join_cb: steamworks::CallbackHandle,
+    _presence_join_cb: steamworks::CallbackHandle,
 }
 
 #[cfg(feature = "steam")]
@@ -271,6 +276,39 @@ impl SteamPlatform {
                 lock(&flips).push(cb.active);
             });
 
+        // A cold launch from an invite carries its request on the command
+        // line, or in the launch command a steam:// URL gave. It goes first,
+        // ahead of anything that arrives while the game runs.
+        let mut first = Vec::new();
+        let args: Vec<String> = std::env::args().collect();
+        if let Some(r) = floptle_services::launch_join_request(&args) {
+            first.push(r);
+        } else {
+            let line = client.apps().launch_command_line();
+            let words: Vec<String> = line.split_whitespace().map(str::to_string).collect();
+            if let Some(r) = floptle_services::launch_join_request(&words) {
+                first.push(r);
+            }
+        }
+        let join_requests = Arc::new(Mutex::new(first));
+        let joins = join_requests.clone();
+        let _lobby_join_cb =
+            client.register_callback::<steamworks::GameLobbyJoinRequested, _>(move |cb| {
+                lock(&joins).push(JoinRequest::Lobby {
+                    lobby: cb.lobby_steam_id.raw(),
+                    friend: Some(cb.friend_steam_id.raw()),
+                });
+            });
+        let joins = join_requests.clone();
+        let _presence_join_cb =
+            client.register_callback::<steamworks::GameRichPresenceJoinRequested, _>(move |cb| {
+                lock(&joins).push(JoinRequest::Connect {
+                    connect: cb.connect,
+                    // An invalid id means the request came from no friend.
+                    friend: (!cb.friend_steam_id.is_invalid()).then(|| cb.friend_steam_id.raw()),
+                });
+            });
+
         let lobby_enter_errors: Arc<Mutex<HashMap<u64, &'static str>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let errors = lobby_enter_errors.clone();
@@ -300,6 +338,7 @@ impl SteamPlatform {
             lobby_next_request: Cell::new(1),
             overlay_active,
             overlay_flips,
+            join_requests,
             booted_at: Instant::now(),
             overlay_reported: Cell::new(OverlayReport::Nothing),
             _persona_cb,
@@ -309,6 +348,8 @@ impl SteamPlatform {
             _stats_received_cb,
             _stats_stored_cb,
             _overlay_cb,
+            _lobby_join_cb,
+            _presence_join_cb,
         })
     }
 }
@@ -580,6 +621,28 @@ impl Social for SteamPlatform {
     fn friend_rich_presence(&self, friend_id: u64, key: &str) -> Option<String> {
         self.client.friends().get_friend(steamworks::SteamId::from_raw(friend_id)).rich_presence(key)
     }
+    fn invite_to_game(&self, friend: u64, connect: &str) -> Result<(), String> {
+        check_connect(connect)?;
+        self.client.friends().get_friend(steamworks::SteamId::from_raw(friend)).invite_user_to_game(connect);
+        Ok(())
+    }
+    fn poll_join_requests(&self) -> Vec<JoinRequest> {
+        std::mem::take(&mut *lock(&self.join_requests))
+    }
+}
+
+/// Whether Steam can carry `connect`. The binding hands it to C as a
+/// NUL-terminated string and panics on an interior NUL, and Steam's own limit
+/// is a rich-presence value's 256 bytes, terminator included.
+#[cfg(feature = "steam")]
+fn check_connect(connect: &str) -> Result<(), String> {
+    if connect.contains('\0') {
+        return Err("a connect string cannot contain a NUL character".into());
+    }
+    if connect.len() > 255 {
+        return Err(format!("a connect string is at most 255 bytes, and this one is {}", connect.len()));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "steam")]

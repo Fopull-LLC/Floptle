@@ -1,6 +1,6 @@
 # Steam
 
-Leaderboards, lobbies, the overlay, and shipping a game on Steam.
+Leaderboards, lobbies, the overlay, invites, and shipping a game on Steam.
 
 Part of the [scripting guide](../scripting.md) · [every call, as a reference](../lua-api.md)
 
@@ -10,6 +10,7 @@ Part of the [scripting guide](../scripting.md) · [every call, as a reference](.
 - [28b. Steam lobbies: finding other players](#28b-steam-lobbies-finding-other-players)
 - [28c. The Steam overlay](#28c-the-steam-overlay)
 - [28d. Shipping a Steam game](#28d-shipping-a-steam-game)
+- [28e. Invites and joining a friend](#28e-invites-and-joining-a-friend)
 
 ---
 
@@ -197,3 +198,61 @@ that file out of what you upload.
 An export for a version of the engine that predates Steam exports refuses a
 project with an App ID, naming the missing Steam player, rather than shipping
 a game with no Steam in it. The web build has no Steam.
+
+---
+
+## 28e. Invites and joining a friend
+
+Steam has two ways into a friend's game: accepting an invite, and clicking
+**Join Game** on them in the friend list. Either one reaches the game as
+`steam.onJoinRequested`. When the game was not running, Steam launches it
+first, and the same request is delivered once the handler registers.
+
+The engine does not join anything itself. What a request carries is only as
+meaningful as the game that advertised it, so the game joins the way it
+already knows how:
+
+```lua
+-- Every player's game, in the first scene: answer a join, whether it came
+-- while running or launched the game.
+steam.onJoinRequested(function(req)
+  if req.connect then
+    local code = req.connect:match("^%+join (%w+)$")
+    if code then net.join("cloud://" .. code) end
+  elseif req.lobby then
+    steam.joinLobby(req.lobby, function(lobby, err)
+      -- read the lobby's data for how to reach the host
+    end)
+  end
+end)
+
+-- The host, once the relay has given it a code: make Join Game work.
+function update()
+  local code = net.lobbyCode()
+  if code and code ~= advertised then
+    steam.setRichPresence("connect", "+join " .. code)
+    advertised = code
+  end
+end
+
+-- Inviting someone straight from your own friends screen.
+local code = net.lobbyCode()
+if code then steam.inviteFriend(friend.id, "+join " .. code) end
+```
+
+- `req` is `{ lobby = id }` for a Steam lobby (an invite from
+  `steam.openInviteDialog`, or Join Game on a friend who is in one), or
+  `{ connect = "..." }` for a connect string (a friend's `connect` rich
+  presence, or `steam.inviteFriend`). `friend` is their id when Steam says.
+  Ids are strings.
+- **Start a connect string with `+`**, as `+join ABC123` does. When Steam
+  launches the game to join, it puts the string on the command line, and a
+  leading `+` is how the game tells it apart from its own arguments.
+- A connect string is at most 255 bytes.
+- A request is held until a handler takes it, and a scene change keeps it.
+  Register the handler in the first scene that runs, or a player launched
+  from an invite waits in your menu with nothing happening.
+- To test a launch from an invite without inviting anyone, run the export
+  with Steam open and a `steam_appid.txt` beside it (see 28d), and the
+  request on its command line: `./MyGame +join ABC123`. The request is read
+  when Steam starts up, so without Steam there is none.

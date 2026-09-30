@@ -266,11 +266,53 @@ pub struct FriendInfo {
     pub playing_this_game: bool,
 }
 
-/// Friends and presence. Landed Phase 5a — **not** invites/join (5b, which
-/// needs Phase 6's transport to route a cold launch into the right session)
-/// and **not** the overlay dialogs that open a friend/invite UI (those are
-/// `Overlay`/Phase 3 calls, gated on the swapchain spike the source spec
-/// calls a go/no-go check before that phase lands).
+/// A request to join someone, from outside the game: the player accepted an
+/// invite, clicked "Join Game" on a friend in the Steam friend list, or was
+/// launched by Steam to do either.
+///
+/// The engine does not join anything itself. A lobby id or a connect string is
+/// only as meaningful as the game that advertised it, so the request is handed
+/// to the game, which joins the way it already knows how (a relay lobby code
+/// kept in the Steam lobby's data, say).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JoinRequest {
+    /// Join this lobby (a [`Lobbies`] id).
+    Lobby {
+        /// The lobby to join.
+        lobby: u64,
+        /// Who sent the invite or was clicked on, when the platform says.
+        friend: Option<u64>,
+    },
+    /// Join using this connect string: what a friend's game set as its
+    /// `connect` rich-presence value, or sent with
+    /// [`Social::invite_to_game`].
+    Connect {
+        /// The string, exactly as the other game wrote it.
+        connect: String,
+        /// Who it came from, when the platform says.
+        friend: Option<u64>,
+    },
+}
+
+/// The join request a game was launched with, from the part of its command
+/// line Steam wrote: everything from the first argument that starts with `+`.
+///
+/// A lobby invite launches the game with `+connect_lobby <id>`. A rich-presence
+/// join or a [`Social::invite_to_game`] invite appends the connect string
+/// itself, which is why a connect string should start with `+` too: that is
+/// how it is told apart from the game's own arguments.
+pub fn launch_join_request(args: &[String]) -> Option<JoinRequest> {
+    let start = args.iter().position(|a| a.starts_with('+'))?;
+    let steam = &args[start..];
+    if steam[0] == "+connect_lobby" {
+        return steam.get(1).and_then(|id| id.parse().ok()).map(|lobby| JoinRequest::Lobby { lobby, friend: None });
+    }
+    Some(JoinRequest::Connect { connect: steam.join(" "), friend: None })
+}
+
+/// Friends, presence, invites and joins. Friends and presence landed in
+/// Phase 5a, invites and joins in 5b. The overlay dialogs that open a
+/// friend/invite UI are [`Overlay`] calls.
 ///
 /// **Group/clan membership is out of scope.** The Steamworks binding this
 /// engine uses doesn't wrap clan enumeration at all — a real gap, not an
@@ -291,6 +333,13 @@ pub trait Social {
     /// friend, or aren't currently in a session the backend can read it
     /// from.
     fn friend_rich_presence(&self, friend_id: u64, key: &str) -> Option<String>;
+    /// Invites `friend` to the game with `connect`: if they accept, their
+    /// game receives it as a [`JoinRequest::Connect`], or is launched with
+    /// it. `Err` for a string the platform cannot carry.
+    fn invite_to_game(&self, friend: u64, connect: &str) -> Result<(), String>;
+    /// Every join request since the last poll, oldest first, the one the
+    /// game was launched with included. Drained.
+    fn poll_join_requests(&self) -> Vec<JoinRequest>;
 }
 
 /// Which direction a leaderboard ranks scores — fixed when the board is
@@ -731,6 +780,32 @@ impl Platform for NullPlatform {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lobby_invite_launch_names_the_lobby() {
+        let args: Vec<String> = ["game", "+connect_lobby", "109775241021923456"].map(String::from).into();
+        assert_eq!(
+            launch_join_request(&args),
+            Some(JoinRequest::Lobby { lobby: 109775241021923456, friend: None })
+        );
+    }
+
+    #[test]
+    fn a_connect_string_launch_is_everything_steam_appended() {
+        let args: Vec<String> = ["game", "--shot", "a.png", "+join", "ABC123"].map(String::from).into();
+        assert_eq!(
+            launch_join_request(&args),
+            Some(JoinRequest::Connect { connect: "+join ABC123".into(), friend: None })
+        );
+    }
+
+    #[test]
+    fn an_ordinary_launch_is_no_join_request() {
+        let args: Vec<String> = ["game", "--shot", "a.png"].map(String::from).into();
+        assert_eq!(launch_join_request(&args), None);
+        let bad: Vec<String> = ["game", "+connect_lobby", "not-a-number"].map(String::from).into();
+        assert_eq!(launch_join_request(&bad), None, "a malformed lobby id is not a join");
+    }
 
     #[test]
     fn null_platform_answers_none_for_every_capability() {

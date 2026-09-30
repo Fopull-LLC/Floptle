@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 178
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 180
 - [node — transform & body fields](#node--transform--body-fields) — 40
 - [node — methods & handles](#node--methods--handles) — 31
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -571,6 +571,10 @@ steam.friends() — the local user's friend list, as a list of { id, name, state
 
 steam.installDir() — this app's install directory, as Steam reports it. nil when steam.available() is false.
 
+### `steam.inviteFriend`
+
+steam.inviteFriend(friendId, connect) -> ok, err — invites a friend (id from steam.friends(), a string) with a connect string of your own: their game gets it as steam.onJoinRequested { connect }, or is launched with it. Start it with + ("+join ABC123"): that is how a launch tells it apart from the game's own arguments. Refuses: the id isn't a friend id; the string is over 255 bytes or holds a NUL; Steam isn't available in this session.
+
 ### `steam.isBigPictureMode`
 
 steam.isBigPictureMode() — true if Steam's own full-screen "10-foot" mode is active. nil when steam.available() is false.
@@ -627,6 +631,10 @@ steam.lobbyOwner(id) — the lobby's owner (the host) as an id string, or nil. O
 
 steam.localUserId() — the signed-in local user's SteamID64, as a STRING (it exceeds what an f64 represents exactly). nil when steam.available() is false.
 
+### `steam.onJoinRequested`
+
+steam.onJoinRequested(fn) — fn(req) runs when the player accepts an invite or clicks Join Game on a friend in Steam, and once for the invite the game was launched from. req is { lobby = id } (join it with steam.joinLobby) or { connect = "..." } (the string the other game advertised or sent), with friend = their id when Steam says. Ids are strings. A request that arrives before any handler is held until one registers, so register it in your first scene. One handler; registering again replaces it.
+
 ### `steam.onLobbyEvent`
 
 steam.onLobbyEvent(fn) — fires for each thing that happens in a lobby you're in. e.kind is "member" — with e.user and e.change of "entered", "left", "disconnected", "kicked" or "banned" — or "data", with e.whose telling you whether the LOBBY's data or a MEMBER's changed, so re-read the right one. Who did the kicking is deliberately not reported: Steam's binding fills that field from the wrong id. One handler; registering again replaces it, and Stop clears it.
@@ -641,7 +649,7 @@ steam.onPersonaChanged(fn) — fires once when the local user's persona (name or
 
 ### `steam.openInviteDialog`
 
-steam.openInviteDialog(lobbyId) -> ok, err — opens Steam's invite-friends dialog for a lobby you're in (the id from steam.createLobby / joinLobby). Friends who accept still need YOUR lobby screen to bring them in — put the join in steam.onLobbyEvent. (false, why) when the overlay can't open: show the lobby code instead. Refuses: the id isn't a lobby id — pass the `id` from a lobby table, as a string; the overlay cannot open; Steam isn't available in this session (no client running, or a session that never had one).
+steam.openInviteDialog(lobbyId) -> ok, err — opens Steam's invite-friends dialog for a lobby you're in (the id from steam.createLobby / joinLobby). A friend who accepts gets steam.onJoinRequested in their own game with this lobby's id, and joins it there. (false, why) when the overlay can't open: show the lobby code instead. Refuses: the id isn't a lobby id — pass the `id` from a lobby table, as a string; the overlay cannot open; Steam isn't available in this session (no client running, or a session that never had one).
 
 ### `steam.openOverlay`
 

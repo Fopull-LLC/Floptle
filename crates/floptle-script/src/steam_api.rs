@@ -66,7 +66,7 @@ use crate::{LogLevel, ScriptLog};
 use floptle_services::{
     Achievements, Cloud, LeaderboardDisplay, LeaderboardInfo, LeaderboardOutcome, LeaderboardScope,
     LeaderboardSort, LobbyCompare, LobbyDistance, LobbyEvent, LobbyFilters, LobbyInfo, LobbyKind,
-    LobbyMemberChange, LobbyOutcome, Platform, Social, UploadMethod, OVERLAY_PAGES,
+    JoinRequest, LobbyMemberChange, LobbyOutcome, Platform, Social, UploadMethod, OVERLAY_PAGES,
     OVERLAY_USER_DIALOGS,
 };
 
@@ -108,6 +108,13 @@ pub(crate) struct SteamState {
     /// `steam.onOverlayChanged` — one handler, called with `true`/`false` per
     /// overlay shown/hidden flip, drained per frame like the rest.
     overlay_cb: Option<mlua::Function>,
+    /// `steam.onJoinRequested` — one handler for invites accepted and "Join
+    /// Game" clicks, the launch's own request included.
+    join_cb: Option<mlua::Function>,
+    /// Join requests no handler has taken yet. Held, not dropped: the request
+    /// a game was launched with is there before any script has run, and one
+    /// that lands during a scene change belongs to the next scene's handler.
+    join_held: Vec<JoinRequest>,
 }
 
 impl SteamState {
@@ -125,6 +132,9 @@ impl SteamState {
         self.lobby_event_cb = None;
         self.persona_changed_cb = None;
         self.overlay_cb = None;
+        // The handler closes over this session's nodes; the requests do not,
+        // so `join_held` stays for whoever registers next.
+        self.join_cb = None;
     }
 
     /// How many leaderboard requests are still waiting
@@ -1355,6 +1365,37 @@ pub(crate) fn install_steam_api(
         })?,
     )?;
 
+    let st = state.clone();
+    t.set(
+        "onJoinRequested",
+        lua.create_function(move |_, f: mlua::Function| {
+            st.borrow_mut().join_cb = Some(f);
+            Ok(())
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "inviteFriend",
+        lua.create_function(move |lua, (friend, connect): (String, String)| {
+            let Ok(friend) = friend.parse::<u64>() else {
+                return result_tuple(
+                    lua,
+                    Err(format!(
+                        "steam.inviteFriend: \"{friend}\" isn't a friend id — pass the `id` from \
+                         steam.friends(), as a string"
+                    )),
+                );
+            };
+            let backend = p.borrow();
+            let r = match backend.social() {
+                Some(s) => s.invite_to_game(friend, &connect),
+                None => Err(NO_STEAM.into()),
+            };
+            result_tuple(lua, r)
+        })?,
+    )?;
+
     t.set(
         "onPersonaChanged",
         lua.create_function(move |_, f: mlua::Function| {
@@ -1407,7 +1448,7 @@ pub(crate) fn drain(
 ) {
     // `pump` is what runs the backend's own callbacks, so leaderboard results
     // land during this borrow and are waiting by the time it is released.
-    let (changed, results, lobby_results, lobby_events, overlay_flips) = {
+    let (changed, results, lobby_results, lobby_events, overlay_flips, joins) = {
         let backend = platform.borrow();
         backend.pump();
         (
@@ -1416,8 +1457,10 @@ pub(crate) fn drain(
             backend.lobbies().map(|l| l.poll()).unwrap_or_default(),
             backend.lobbies().map(|l| l.poll_events()).unwrap_or_default(),
             backend.overlay().map(|o| o.poll_activation()).unwrap_or_default(),
+            backend.social().map(|s| s.poll_join_requests()).unwrap_or_default(),
         )
     };
+    state.borrow_mut().join_held.extend(joins);
 
     // Match results to callbacks with the state borrow held, and call with it
     // released — a callback that starts another request re-borrows the state.
@@ -1492,6 +1535,37 @@ pub(crate) fn drain(
             }
         }
     }
+
+    let join_cb = state.borrow().join_cb.clone();
+    if let Some(cb) = join_cb {
+        let held = std::mem::take(&mut state.borrow_mut().join_held);
+        for req in held {
+            if let Err(err) = fire_join(lua, &cb, req) {
+                log(logs, LogLevel::Error, format!("steam.onJoinRequested callback: {err}"));
+            }
+        }
+    }
+}
+
+/// Call `steam.onJoinRequested`'s handler with one request as a table:
+/// `{ lobby = id }` or `{ connect = "..." }`, with `friend` when known. Ids are
+/// strings, as everywhere else in this API.
+fn fire_join(lua: &Lua, cb: &mlua::Function, req: JoinRequest) -> mlua::Result<()> {
+    let t = lua.create_table()?;
+    let friend = match req {
+        JoinRequest::Lobby { lobby, friend } => {
+            t.set("lobby", lobby.to_string())?;
+            friend
+        }
+        JoinRequest::Connect { connect, friend } => {
+            t.set("connect", connect)?;
+            friend
+        }
+    };
+    if let Some(f) = friend {
+        t.set("friend", f.to_string())?;
+    }
+    cb.call::<()>(t)
 }
 
 /// Call one lobby callback with `(value, err)` — the same shape as every
@@ -2538,6 +2612,122 @@ mod tests {
     }
 
     // ---- overlay ----
+
+    /// A social backend that records invites and hands out whatever join
+    /// requests the test queues.
+    #[derive(Default)]
+    struct FakeSocial {
+        invited: RefCell<Vec<(u64, String)>>,
+        joins: RefCell<Vec<JoinRequest>>,
+    }
+
+    impl Social for FakeSocial {
+        fn set_rich_presence(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn clear_rich_presence(&self) {}
+        fn friends(&self) -> Vec<floptle_services::FriendInfo> {
+            Vec::new()
+        }
+        fn friend_rich_presence(&self, _: u64, _: &str) -> Option<String> {
+            None
+        }
+        fn invite_to_game(&self, friend: u64, connect: &str) -> Result<(), String> {
+            self.invited.borrow_mut().push((friend, connect.to_string()));
+            Ok(())
+        }
+        fn poll_join_requests(&self) -> Vec<JoinRequest> {
+            std::mem::take(&mut *self.joins.borrow_mut())
+        }
+    }
+
+    struct SocialPlatform(Rc<FakeSocial>);
+
+    impl Platform for SocialPlatform {
+        fn available(&self) -> bool {
+            true
+        }
+        fn social(&self) -> Option<&dyn Social> {
+            Some(&*self.0)
+        }
+    }
+
+    fn with_social() -> (Fixture, Rc<FakeSocial>) {
+        let f = fresh();
+        let social = Rc::new(FakeSocial::default());
+        *f.platform.borrow_mut() = Rc::new(SocialPlatform(social.clone()));
+        (f, social)
+    }
+
+    /// The request a game was launched with is waiting before any script
+    /// runs. It is held until a handler registers, then delivered once.
+    #[test]
+    fn a_join_request_waits_for_a_handler_and_arrives_once() {
+        let (f, social) = with_social();
+        social.joins.borrow_mut().push(JoinRequest::Lobby { lobby: 109775241021923456, friend: None });
+        drain(&f.lua, &f.platform, &f.state, &f.logs);
+        f.lua.load("seen = {} steam.onJoinRequested(function(r) seen[#seen+1] = r end)").exec().unwrap();
+        drain(&f.lua, &f.platform, &f.state, &f.logs);
+        drain(&f.lua, &f.platform, &f.state, &f.logs);
+        let (n, lobby, friend): (i64, String, Option<String>) =
+            f.lua.load("return #seen, seen[1].lobby, seen[1].friend").eval().unwrap();
+        assert_eq!(n, 1, "held once, delivered once");
+        assert_eq!(lobby, "109775241021923456", "a lobby id is a string, exact past 2^53");
+        assert_eq!(friend, None);
+    }
+
+    /// Each kind of request reads as its own table, in the order they came.
+    #[test]
+    fn join_requests_arrive_in_order_as_tables() {
+        let (f, social) = with_social();
+        f.lua.load("seen = {} steam.onJoinRequested(function(r) seen[#seen+1] = r end)").exec().unwrap();
+        social.joins.borrow_mut().extend([
+            JoinRequest::Connect { connect: "+join ABC123".into(), friend: Some(76561197960287930) },
+            JoinRequest::Lobby { lobby: 7, friend: Some(76561197960287931) },
+        ]);
+        drain(&f.lua, &f.platform, &f.state, &f.logs);
+        let (c, cf, l, lf, cl): (String, String, String, String, bool) = f
+            .lua
+            .load("return seen[1].connect, seen[1].friend, seen[2].lobby, seen[2].friend, seen[1].lobby == nil")
+            .eval()
+            .unwrap();
+        assert_eq!((c.as_str(), cf.as_str()), ("+join ABC123", "76561197960287930"));
+        assert_eq!((l.as_str(), lf.as_str()), ("7", "76561197960287931"));
+        assert!(cl, "a connect request carries no lobby");
+    }
+
+    /// Stop or a scene change drops the handler, which closes over the old
+    /// scene, but not a request that has not been handled yet.
+    #[test]
+    fn a_scene_change_keeps_an_unhandled_join_request() {
+        let (f, social) = with_social();
+        social.joins.borrow_mut().push(JoinRequest::Connect { connect: "+join XYZ".into(), friend: None });
+        drain(&f.lua, &f.platform, &f.state, &f.logs);
+        f.state.borrow_mut().cancel_all();
+        f.lua.load("seen = {} steam.onJoinRequested(function(r) seen[#seen+1] = r.connect end)").exec().unwrap();
+        drain(&f.lua, &f.platform, &f.state, &f.logs);
+        let got: Vec<String> = f.lua.load("return seen").eval().unwrap();
+        assert_eq!(got, vec!["+join XYZ".to_string()]);
+    }
+
+    #[test]
+    fn invite_friend_reaches_the_backend_or_says_why_not() {
+        let (f, social) = with_social();
+        let (ok, _): (bool, Value) =
+            f.lua.load("return steam.inviteFriend(\"76561197960287930\", \"+join ABC123\")").eval().unwrap();
+        assert!(ok);
+        assert_eq!(&*social.invited.borrow(), &[(76561197960287930, "+join ABC123".to_string())]);
+
+        let (ok, err): (bool, String) =
+            f.lua.load("return steam.inviteFriend(\"bob\", \"+join ABC123\")").eval().unwrap();
+        assert!(!ok && err.contains("isn't a friend id"), "{err}");
+        assert_eq!(social.invited.borrow().len(), 1, "a bad id never reaches the backend");
+
+        let g = fresh();
+        let (ok, err): (bool, String) =
+            g.lua.load("return steam.inviteFriend(\"76561197960287930\", \"+join ABC123\")").eval().unwrap();
+        assert!(!ok && err.contains("isn't available"), "{err}");
+    }
 
     /// An overlay backend that records every open it was asked for and
     /// reports whatever flips the test queues.

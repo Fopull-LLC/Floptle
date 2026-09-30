@@ -37,6 +37,26 @@ use crate::Editor;
 
 /// Run a shipped game and return when its window closes.
 ///
+/// The project path given on the command line, if any: the first argument
+/// that is neither a flag nor a flag's value, looked for only before the first
+/// argument starting with `+`. Everything from there on is Steam's: a game
+/// launched from an invite gets `+connect_lobby <id>` or a connect string
+/// appended, and read as a project path it would stop the game before it
+/// opened. So would `--shot out.png` on an exported build, read the same way.
+#[cfg(not(target_arch = "wasm32"))]
+fn project_arg(args: &[String]) -> Option<PathBuf> {
+    const TAKES_VALUE: [&str; 2] = ["--shot", "--frames"];
+    let mut it = args.iter().skip(1).take_while(|a| !a.starts_with('+'));
+    while let Some(a) = it.next() {
+        if TAKES_VALUE.contains(&a.as_str()) {
+            it.next();
+        } else if !a.starts_with('-') {
+            return Some(PathBuf::from(a));
+        }
+    }
+    None
+}
+
 /// The project comes from a `floptle-game.ron` manifest beside the binary —
 /// what **File ⏵ Export Game…** writes. A path argument overrides it, which is
 /// how the player is run against a project during development
@@ -57,7 +77,7 @@ pub fn run_player() {
         );
         return;
     }
-    let explicit = args.iter().skip(1).find(|a| !a.starts_with('-')).map(PathBuf::from);
+    let explicit = project_arg(&args);
     // `--shot <png> [--frames N]`: play for N frames, photograph the frame that
     // was actually presented, and exit. The way a build gets verified — by CI,
     // and by anyone asking "does the export still draw the game" without
@@ -732,5 +752,33 @@ pub mod web {
             let bgra = format.remove_srgb_suffix() == wgpu::TextureFormat::Bgra8Unorm;
             self.pending_shot = Some(PendingShot { buf, w, h, padded, bgra, due: self.frames + 3 });
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::project_arg;
+    use std::path::PathBuf;
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_project_path_is_found_among_flags() {
+        assert_eq!(project_arg(&args(&["game", "--shot", "a.png", "proj"])), Some(PathBuf::from("proj")));
+        assert_eq!(project_arg(&args(&["game", "proj", "--frames", "30"])), Some(PathBuf::from("proj")));
+    }
+
+    #[test]
+    fn a_flag_value_is_not_a_project() {
+        assert_eq!(project_arg(&args(&["game", "--shot", "a.png", "--frames", "30"])), None);
+    }
+
+    #[test]
+    fn what_steam_appends_to_an_invited_launch_is_not_a_project() {
+        assert_eq!(project_arg(&args(&["game", "+connect_lobby", "109775241021923456"])), None);
+        assert_eq!(project_arg(&args(&["game", "+join", "ABC123"])), None);
+        assert_eq!(project_arg(&args(&["game", "proj", "+join", "ABC123"])), Some(PathBuf::from("proj")));
     }
 }
