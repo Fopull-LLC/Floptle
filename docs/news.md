@@ -1,5 +1,11 @@
 ## Just shipped
 
+**v0.105.1 — "Keeps You Posted"** (stable). A browser build no longer shows a
+black page after Play while the game starts. The loading screen stays up until
+the game is running, names each step as it goes, and keeps moving while the
+game loads. The engine and the game download on one bar, and a web build
+learns about new Floptle Cloud regions without being exported again.
+
 **v0.105.0 — "Plays Anywhere"** (stable). A browser build can play online: it
 reaches the web and Floptle Cloud, and joins the same relay lobbies as desktop
 players. `camera.capture` photographs the game's own world for a level cover or
