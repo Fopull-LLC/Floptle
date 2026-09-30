@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mirror a release from the private engine repo to the PUBLIC releases repo
+# Mirror a release from the engine repo to the releases repo
 # (Fopull-LLC/Floptle-releases) — the manual fallback for the release
 # workflow's "Publish to the public releases repo" step when the
 # RELEASES_TOKEN secret isn't configured. Needs a locally-authed `gh` with

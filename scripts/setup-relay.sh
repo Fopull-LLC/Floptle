@@ -7,8 +7,8 @@
 #
 #     bash setup-relay.sh https://github.com/Fopull-LLC/Floptle.git
 #
-# The repo is PRIVATE, so either pass an authenticated URL, or clone it
-# yourself first and run this from inside the checkout with no argument.
+# Pass the clone URL, or clone the repo yourself and run this from inside the
+# checkout with no argument.
 set -euo pipefail
 
 PORT="${PORT:-7788}"

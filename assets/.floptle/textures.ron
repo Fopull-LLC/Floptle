@@ -1,5 +1,5 @@
 {
-    "/mnt/disks/3tb/GithubRepositories/Floptle/assets/textures/UI/Hand/FP Hand Keypad-Sheet.png": (
+    "textures/UI/Hand/FP Hand Keypad-Sheet.png": (
         filter: Pixelated,
         wrap: Repeat,
         sheet_cols: 9,

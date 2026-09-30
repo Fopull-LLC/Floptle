@@ -45,13 +45,3 @@ In the editor: **Inspector ⏵ ◆ Material ⏵ texture**. Tiling sits next to i
 The particle sets are for the **❋ Particles** tab: a track's texture takes any
 of them. Reach for `VFXPX` in a retro-resolution scene — soft sprites turn to
 mush when the whole frame is 320 px wide.
-
-## Temporary test assets (Ocarina of Time)
-
-During development we use Ocarina of Time textures **only** as local placeholders.
-Place them under `assets/textures/_oot_temp/` — that folder is **git-ignored**
-on purpose so the copyrighted files never enter version history (we plan to
-open-source later, and scrubbing history is painful).
-
-Before any public release these must be replaced with original Fopull textures.
-See ADR-0010.
