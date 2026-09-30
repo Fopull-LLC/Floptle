@@ -34,6 +34,8 @@ pub(crate) const HOST_KEYS: &[&str] =
         "deny",
     ];
 pub(crate) const RPC_KEYS: &[&str] = &["to", "withInput"];
+/// Keys `net.send`'s options table reads.
+pub(crate) const SEND_KEYS: &[&str] = &["to"];
 pub(crate) const SPAWN_KEYS: &[&str] = &["x", "y", "z", "owner"];
 
 /// A queued session command from Lua, drained by the editor each tick.
@@ -107,6 +109,9 @@ pub enum NetCmd {
     /// (role decides direction). `with_input` stamps the sender's perceived
     /// tick for lag compensation (§7) — client → server intents only.
     Rpc { name: String, args: NetValue, to: Option<u64>, with_input: bool },
+    /// `net.send(name, data, { to = peer })` — a bulk message: any bytes, cut
+    /// into slices and put back together on arrival, in order with RPCs.
+    Send { name: String, data: Vec<u8>, to: Option<u64> },
     /// `net.spawn(path, { x, y, z, owner })` — server-only replicated spawn.
     Spawn { path: String, pos: Option<[f64; 3]>, owner: Option<u64> },
     /// `net.despawn(node)` — server-only replicated despawn (entity index).
@@ -209,6 +214,9 @@ pub struct NetState {
     /// `None` offline, on a client, and on a direct/LAN host (there is no code
     /// to show — joiners use the address).
     pub lobby_code: Option<String>,
+    /// Bulk messages still arriving: (sender, name, bytes so far, total), for
+    /// `net.receiving()` — a joiner's loading bar.
+    pub receiving: Vec<(u64, String, u32, u32)>,
     /// **Is this a server with nobody sitting at it?**
     ///
     /// `net.isServer()` is true for both shapes of host and that is usually the
@@ -254,6 +262,7 @@ impl Default for NetState {
             join_error: None,
             lobby_code: None,
             identities: std::collections::HashMap::new(),
+            receiving: Vec::new(),
         }
     }
 }
@@ -895,6 +904,41 @@ pub(crate) fn install_net_api(
                 }
                 n.cmds.borrow_mut().push(NetCmd::Rpc { name, args: nv, to, with_input });
                 Ok(())
+            })?,
+        )?;
+    }
+
+    // --- send (bulk) -------------------------------------------------------
+    {
+        let n = net.clone();
+        t.set(
+            "send",
+            lua.create_function(move |_, (name, data, opts): (String, mlua::String, Option<Table>)| {
+                let mut to = None;
+                if let Some(o) = opts {
+                    crate::opts::check_keys(&o, SEND_KEYS, "net.send")?;
+                    to = o.get::<Option<u64>>("to").ok().flatten();
+                }
+                n.cmds.borrow_mut().push(NetCmd::Send { name, data: data.as_bytes().to_vec(), to });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let n = net.clone();
+        t.set(
+            "receiving",
+            lua.create_function(move |lua, ()| {
+                let list = lua.create_table()?;
+                for (i, (from, name, got, total)) in n.state.borrow().receiving.iter().enumerate() {
+                    let row = lua.create_table()?;
+                    row.set("from", *from)?;
+                    row.set("name", name.as_str())?;
+                    row.set("got", *got)?;
+                    row.set("total", *total)?;
+                    list.set(i + 1, row)?;
+                }
+                Ok(list)
             })?,
         )?;
     }

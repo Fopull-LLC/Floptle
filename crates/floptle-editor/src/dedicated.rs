@@ -2093,6 +2093,55 @@ mod server_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A player-made level goes from the server to a joined client's scripts
+    /// whole the moment they join, and an RPC sent after it is handled after
+    /// it. The client can send one back.
+    #[test]
+    fn a_bulk_message_reaches_the_other_side_whole_and_in_order() {
+        let root = temp("bulk");
+        write(&root, "project.ron", "(title: Some(\"bulk\"), entry_scene: Some(\"scenes/hub.ron\"))");
+        write(
+            &root,
+            "scripts/workshop.lua",
+            "local frames = 0\n\
+             onData = {}\n\
+             onRpc = {}\n\
+             function onData.level(data, sender) print('level ' .. #data .. ' ' .. data:sub(-3) .. ' from ' .. sender) end\n\
+             function onRpc.after(args, sender) print('after the level') end\n\
+             function onData.drawing(data, sender) print('drawing ' .. data .. ' from ' .. sender) end\n\
+             function start(node)\n\
+             \x20 net.on('playerJoined', function(peer)\n\
+             \x20   net.send('level', string.rep('ab', 50000) .. 'end', { to = peer })\n\
+             \x20   net.rpc('after', 1, { to = peer })\n\
+             \x20 end)\n\
+             end\n\
+             function update(node, dt)\n\
+             \x20 frames = frames + 1\n\
+             \x20 if net.isClient() and frames == 20 then net.send('drawing', 'cat') end\n\
+             end\n",
+        );
+        write(&root, "scenes/hub.ron", "(name: \"hub\", nodes: [(name: \"Workshop\", scripts: [(kind: \"workshop\")])])");
+
+        let mut server = serve(&root, "scenes/hub.ron");
+        let mut viewer = super::open(&root, &root.join("scenes/hub.ron"), 1.0 / STEP);
+        viewer.toggle_play();
+        viewer.net_play_client =
+            Some(NetSession::client(Box::new(server.hub.connect()), viewer.input_map_hash()));
+        let mut seen: Vec<String> = Vec::new();
+        for _ in 0..60 {
+            server.pump(1, &mut []);
+            viewer.play_step(STEP, false);
+            seen.extend(viewer.script_host.drain_logs().into_iter().map(|l| l.msg));
+        }
+        let level = seen.iter().position(|m| m == "level 100003 end from 0");
+        let after = seen.iter().position(|m| m == "after the level");
+        assert!(level.is_some() && after.is_some(), "the client's scripts did not hear both: {seen:?}");
+        assert!(level < after, "the rpc sent after the level was handled first: {seen:?}");
+        let console = server.console();
+        assert!(console.contains("drawing cat from 1"), "the server did not hear the client's message:\n{console}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// **A layer the server loads reaches every client, and so do its unload
     /// and its colliders.** The server's script loads a cave additively at an
     /// offset: its floor answers rays there, a client session is told to load

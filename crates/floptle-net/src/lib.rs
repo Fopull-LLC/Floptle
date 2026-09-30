@@ -286,6 +286,89 @@ mod tests {
         assert_eq!(server.refused_from_clients(), 2);
     }
 
+    /// A level's worth of bytes (bigger than one slice several times over,
+    /// with a ragged last slice and every byte value) arrives whole, from the
+    /// right sender, and an RPC sent after it arrives after it.
+    #[test]
+    fn a_bulk_message_arrives_whole_and_in_order_with_rpcs() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        let (mut sw, _) = world_with(0);
+        let (mut cw, _) = world_with(0);
+        let level: Vec<u8> = (0..(3 * session::DATA_SLICE + 1234)).map(|i| (i * 31 % 256) as u8).collect();
+
+        server.send_rpc("before", NetValue::Num(1.0), RpcTarget::All).unwrap();
+        server.send_data("level", level.clone(), RpcTarget::All).unwrap();
+        server.send_rpc("after", NetValue::Num(2.0), RpcTarget::All).unwrap();
+        let t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 3, |_, _| {});
+        let got = client.take_rpcs();
+        let names: Vec<&str> = got.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["before", "level", "after"], "one message, in the order sent");
+        assert_eq!(got[1].sender, SERVER);
+        assert!(got[1].data.as_deref() == Some(&level[..]), "the bytes changed on the way");
+        assert!(got[0].data.is_none() && got[2].data.is_none());
+        assert!(client.data_progress().is_empty(), "a finished transfer is still listed");
+
+        // Client → server: stamped with the transport identity.
+        client.send_data("drawing", vec![7; 10], RpcTarget::Server).unwrap();
+        let _ = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 3, |_, _| {});
+        let got = server.take_rpcs();
+        assert_eq!((got[0].name.as_str(), got[0].sender, got[0].data.as_ref().map(Vec::len)), ("drawing", 1, Some(10)));
+
+        // An empty message is still a message.
+        server.send_data("nothing", Vec::new(), RpcTarget::All).unwrap();
+        let _ = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t + 3, 3, |_, _| {});
+        let got = client.take_rpcs();
+        assert_eq!((got.len(), got[0].data.as_ref().map(Vec::len)), (1, Some(0)));
+    }
+
+    /// The server refuses a slice that fits no transfer — out of order, past
+    /// its own end, or over the size cap — counts it, and hands nothing on.
+    #[test]
+    fn the_server_refuses_a_bulk_slice_that_does_not_fit() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        let (mut sw, _) = world_with(0);
+        let (mut cw, _) = world_with(0);
+        let t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 3, |_, _| {});
+        let slice = |id, total, offset, n| {
+            wire::Msg::Data { id, name: "x".into(), total, offset, bytes: vec![0; n], sender: 1 }.encode()
+        };
+        client.send_raw_to_server(&slice(1, 100, 50, 10)); // starts in the middle
+        client.send_raw_to_server(&slice(2, 10, 0, 20)); // longer than it says
+        client.send_raw_to_server(&slice(3, (session::MAX_DATA_BYTES + 1) as u32, 0, 1)); // too big
+        let _ = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 3, |_, _| {});
+        assert!(server.take_rpcs().is_empty());
+        assert_eq!(server.refused_from_clients(), 3);
+        assert!(server.data_progress().is_empty(), "a refused transfer is still held");
+
+        // Over the cap is refused at the sender too, with the reason.
+        let err = client.send_data("huge", vec![0; session::MAX_DATA_BYTES + 1], RpcTarget::Server).unwrap_err();
+        assert!(err.contains("MB"), "{err}");
+    }
+
+    /// A transfer still arriving is listed with how much of it is here — what
+    /// a joiner's loading bar reads — and a sender who leaves takes theirs
+    /// with them.
+    #[test]
+    fn a_transfer_in_flight_reports_its_progress_and_goes_with_its_sender() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        let (mut sw, _) = world_with(0);
+        let (mut cw, _) = world_with(0);
+        let t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 3, |_, _| {});
+        let first = wire::Msg::Data { id: 9, name: "level".into(), total: 1000, offset: 0, bytes: vec![1; 400], sender: 1 };
+        client.send_raw_to_server(&first.encode());
+        let t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 3, |_, _| {});
+        assert_eq!(
+            server.data_progress(),
+            vec![session::DataProgress { sender: 1, name: "level".into(), got: 400, total: 1000 }]
+        );
+        hub.disconnect(1);
+        let _ = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 3, |_, _| {});
+        assert!(server.data_progress().is_empty(), "a departed client's half-transfer is still held");
+    }
+
     #[test]
     fn synced_vars_reach_the_client_changed_only() {
         let hub = MemoryHub::new();

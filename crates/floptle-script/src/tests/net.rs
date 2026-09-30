@@ -1007,3 +1007,58 @@ fn a_replay_never_suppresses_an_error() {
         "…but the print must not: {logs:?}"
     );
 }
+
+/// `net.send` queues the bytes exactly (a Lua string can hold any byte, a NUL
+/// included), with its target; `onData.<name>` hears the whole message as a
+/// string with the sender; `net.receiving()` lists what is still arriving.
+#[test]
+fn a_bulk_message_goes_out_whole_and_comes_back_as_a_string() {
+    let dir = std::env::temp_dir().join("floptle_script_test_net_send");
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "workshop",
+        "onData = {}\n\
+         function onData.level(data, sender)\n\
+           log('level ' .. #data .. ' from ' .. sender .. ' ' .. string.byte(data, 2))\n\
+         end\n\
+         function update(node, dt)\n\
+           if sent then return end\n\
+           sent = true\n\
+           net.send('level', 'a\\0b', { to = 3 })\n\
+           net.send('all', 'x')\n\
+           local r = net.receiving()[1]\n\
+           log('arriving ' .. r.name .. ' ' .. r.got .. '/' .. r.total .. ' from ' .. r.from)\n\
+         end\n",
+    );
+    let (mut world, _e) = world_with_script("workshop");
+    let mut host = ScriptHost::new();
+    host.set_net_state(NetState {
+        role: NetRoleState::Server,
+        receiving: vec![(2, "level".into(), 400, 1000)],
+        ..Default::default()
+    });
+    host.run(&mut world, &dir, 0.01, 0.01);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    let sends: Vec<(String, Vec<u8>, Option<u64>)> = host
+        .take_net_commands()
+        .into_iter()
+        .filter_map(|c| match c {
+            NetCmd::Send { name, data, to } => Some((name, data, to)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sends,
+        vec![("level".into(), b"a\0b".to_vec(), Some(3)), ("all".into(), b"x".to_vec(), None)]
+    );
+    let logs: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    assert!(logs.contains(&"arriving level 400/1000 from 2".to_string()), "{logs:?}");
+
+    host.dispatch_data(&mut world, "level", b"a\0b", 5);
+    let logs: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    assert!(logs.contains(&"level 3 from 5 0".to_string()), "the bytes did not arrive intact: {logs:?}");
+    // A name nobody handles is simply unheard, not an error.
+    host.dispatch_data(&mut world, "unknown", b"x", 5);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+}

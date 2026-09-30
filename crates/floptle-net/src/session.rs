@@ -108,6 +108,53 @@ pub struct ReceivedRpc {
     pub args: NetValue,
     pub sender: PeerId,
     pub tick: Option<u64>,
+    /// A whole bulk message (`net.send`) rather than an RPC, for `onData`.
+    /// Carried in the same queue so RPCs and bulk messages reach scripts in
+    /// the order they were sent: an RPC sent after a level is handled after
+    /// the level.
+    pub data: Option<Vec<u8>>,
+}
+
+/// A bulk message on its way in: who from, its name, and how much of it has
+/// arrived — what a loading bar for a joiner reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DataProgress {
+    pub sender: PeerId,
+    pub name: String,
+    pub got: u32,
+    pub total: u32,
+}
+
+/// The largest bulk message, bytes. A level, a drawing or a character is
+/// kilobytes to a few megabytes; the cap is what stops one peer asking
+/// another to hold arbitrary memory.
+pub const MAX_DATA_BYTES: usize = 16 << 20;
+
+/// The largest slice a bulk message is cut into, well inside the relay's
+/// per-message limit for a host ([`crate::relay::MAX_HOST_RELIABLE`]).
+pub const DATA_SLICE: usize = 32 * 1024;
+
+/// One slice of a bulk message as it came off the wire.
+struct DataSlice {
+    id: u32,
+    name: String,
+    total: u32,
+    offset: u32,
+    bytes: Vec<u8>,
+}
+
+/// A transfer being reassembled.
+struct PartialData {
+    name: String,
+    total: u32,
+    buf: Vec<u8>,
+}
+
+/// One queued outgoing message. RPCs and bulk messages share a queue so they
+/// leave, and arrive, in the order the script sent them.
+enum Outgoing {
+    Rpc { target: RpcTarget, name: String, args: NetValue, stamp: Option<u64> },
+    Data { target: RpcTarget, id: u32, name: String, bytes: Vec<u8> },
 }
 
 /// Per-entity `synced` script vars: (entity, script kind, name→value pairs).
@@ -563,7 +610,11 @@ pub struct NetSession {
     /// Queued outgoing RPCs; the `Option<u64>` is the perceived-tick stamp
     /// (`withInput` on a client — captured at queue time, when the caller's
     /// view of the world is exactly what it acted on).
-    rpcs_out: Vec<(RpcTarget, String, NetValue, Option<u64>)>,
+    rpcs_out: Vec<Outgoing>,
+    /// Bulk messages still arriving, by (sender, transfer id).
+    data_partial: HashMap<(PeerId, u32), PartialData>,
+    /// The next outgoing transfer's id.
+    next_data_id: u32,
     synced_in: SyncedVars,
 }
 
@@ -758,6 +809,8 @@ impl NetSession {
             events: Vec::new(),
             rpcs_in: Vec::new(),
             rpcs_out: Vec::new(),
+            data_partial: HashMap::new(),
+            next_data_id: 1,
             synced_in: Vec::new(),
             anims_now: Vec::new(),
             last_anim: HashMap::new(),
@@ -1137,11 +1190,99 @@ impl NetSession {
         args.validate().map_err(|e| format!("net.rpc(\"{name}\"): {e}"))?;
         let stamp = (with_input && self.role == NetRole::Client && self.latest_server_tick > 0)
             .then_some(self.latest_server_tick);
-        self.rpcs_out.push((target, name.to_string(), args, stamp));
+        self.rpcs_out.push(Outgoing::Rpc { target, name: name.to_string(), args, stamp });
         Ok(())
     }
 
-    /// Received RPCs since the last drain, for `onRpc` dispatch.
+    /// Queue a bulk message (`net.send`): any bytes up to [`MAX_DATA_BYTES`],
+    /// cut into slices on the way out and put back together on arrival. It
+    /// takes its place in the same queue as RPCs, so an RPC sent after it
+    /// arrives after it.
+    pub fn send_data(&mut self, name: &str, bytes: Vec<u8>, target: RpcTarget) -> Result<(), String> {
+        if name.len() > MAX_RPC_NAME {
+            return Err(format!("net.send: a name is at most {MAX_RPC_NAME} bytes"));
+        }
+        if bytes.len() > MAX_DATA_BYTES {
+            return Err(format!(
+                "net.send(\"{name}\"): {} bytes is over the {} MB a single message may be",
+                bytes.len(),
+                MAX_DATA_BYTES >> 20
+            ));
+        }
+        let id = self.next_data_id;
+        self.next_data_id = self.next_data_id.wrapping_add(1).max(1);
+        self.rpcs_out.push(Outgoing::Data { target, id, name: name.to_string(), bytes });
+        Ok(())
+    }
+
+    /// Bulk messages still on their way in.
+    pub fn data_progress(&self) -> Vec<DataProgress> {
+        let mut out: Vec<DataProgress> = self
+            .data_partial
+            .iter()
+            .map(|(&(sender, _), p)| DataProgress {
+                sender,
+                name: p.name.clone(),
+                got: p.buf.len() as u32,
+                total: p.total,
+            })
+            .collect();
+        out.sort_by(|a, b| (a.sender, &a.name).cmp(&(b.sender, &b.name)));
+        out
+    }
+
+    /// The slices of one outgoing bulk message, encoded.
+    fn data_slices(id: u32, name: &str, bytes: &[u8], sender: PeerId) -> Vec<Vec<u8>> {
+        let total = bytes.len() as u32;
+        let mut out = Vec::new();
+        let mut offset = 0usize;
+        loop {
+            let end = (offset + DATA_SLICE).min(bytes.len());
+            out.push(
+                Msg::Data {
+                    id,
+                    name: name.to_string(),
+                    total,
+                    offset: offset as u32,
+                    bytes: bytes[offset..end].to_vec(),
+                    sender,
+                }
+                .encode(),
+            );
+            offset = end;
+            if offset >= bytes.len() {
+                return out;
+            }
+        }
+    }
+
+    /// Take in one slice from `from`. `false` for a slice that does not fit
+    /// the transfer it claims to belong to: over the size cap, out of order,
+    /// or past its own end.
+    fn receive_data_slice(&mut self, from: PeerId, slice: DataSlice, sender: PeerId) -> bool {
+        let DataSlice { id, name, total, offset, bytes } = slice;
+        if total as usize > MAX_DATA_BYTES || name.len() > MAX_RPC_NAME {
+            return false;
+        }
+        let key = (from, id);
+        let p = self
+            .data_partial
+            .entry(key)
+            .or_insert_with(|| PartialData { name: name.clone(), total, buf: Vec::new() });
+        if p.total != total || p.name != name || offset as usize != p.buf.len() || p.buf.len() + bytes.len() > total as usize {
+            self.data_partial.remove(&key);
+            return false;
+        }
+        p.buf.extend_from_slice(&bytes);
+        if p.buf.len() == total as usize {
+            let p = self.data_partial.remove(&key).expect("just inserted");
+            self.rpcs_in.push(ReceivedRpc { name: p.name, args: NetValue::Nil, sender, tick: None, data: Some(p.buf) });
+        }
+        true
+    }
+
+    /// Received RPCs and whole bulk messages since the last drain, in the
+    /// order they arrived, for `onRpc` and `onData` dispatch.
     pub fn take_rpcs(&mut self) -> Vec<ReceivedRpc> {
         std::mem::take(&mut self.rpcs_in)
     }
@@ -2243,19 +2384,33 @@ impl NetSession {
         self.pump_server(world, tick);
         // Flush queued RPCs (server → clients; no perceived-tick stamp — the
         // server's view is the authority).
-        for (target, name, args, _) in std::mem::take(&mut self.rpcs_out) {
-            let msg = Msg::Rpc { name, args, sender: SERVER, tick: None }.encode();
-            match target {
-                RpcTarget::All => {
-                    for &p in &self.peers {
-                        self.transport.send(p, Channel::Reliable, &msg);
+        for out in std::mem::take(&mut self.rpcs_out) {
+            let (target, msgs) = match out {
+                Outgoing::Rpc { target, name, args, .. } => {
+                    if target == RpcTarget::Server {
+                        // server → server: loop back locally
+                        self.rpcs_in.push(ReceivedRpc { name, args, sender: SERVER, tick: None, data: None });
+                        continue;
                     }
+                    (target, vec![Msg::Rpc { name, args, sender: SERVER, tick: None }.encode()])
                 }
-                RpcTarget::Peer(p) => self.transport.send(p, Channel::Reliable, &msg),
-                RpcTarget::Server => { /* server → server: loop back locally */
-                    if let Some(Msg::Rpc { name, args, .. }) = Msg::decode(&msg) {
-                        self.rpcs_in.push(ReceivedRpc { name, args, sender: SERVER, tick: None });
+                Outgoing::Data { target, id, name, bytes } => {
+                    if target == RpcTarget::Server {
+                        self.rpcs_in.push(ReceivedRpc { name, args: NetValue::Nil, sender: SERVER, tick: None, data: Some(bytes) });
+                        continue;
                     }
+                    (target, Self::data_slices(id, &name, &bytes, SERVER))
+                }
+            };
+            for msg in &msgs {
+                match target {
+                    RpcTarget::All => {
+                        for &p in &self.peers {
+                            self.transport.send(p, Channel::Reliable, msg);
+                        }
+                    }
+                    RpcTarget::Peer(p) => self.transport.send(p, Channel::Reliable, msg),
+                    RpcTarget::Server => {}
                 }
             }
         }
@@ -2700,7 +2855,14 @@ impl NetSession {
                 }
                 // Stamp the true sender — never trust the payload's claim. The
                 // perceived tick is clamped at rewind time, not here.
-                self.rpcs_in.push(ReceivedRpc { name, args, sender: from, tick: perceived });
+                self.rpcs_in.push(ReceivedRpc { name, args, sender: from, tick: perceived, data: None });
+            }
+            Msg::Data { id, name, total, offset, bytes, .. } => {
+                // The true sender again, and the same refusal count: a client
+                // that sends a slice that fits no transfer is not a stock one.
+                if !self.receive_data_slice(from, DataSlice { id, name, total, offset, bytes }, from) {
+                    self.refused_from_clients += 1;
+                }
             }
             Msg::Input { entries, confirmed } => {
                 if self.rollback {
@@ -2789,6 +2951,7 @@ impl NetSession {
             self.last_sent.retain(|(a, _), _| *a != Some(p));
             self.last_synced.retain(|(a, _, _, _), _| *a != Some(p));
             self.last_anim.retain(|(a, _, _), _| *a != Some(p));
+            self.data_partial.retain(|(from, _), _| *from != p);
             self.events.push(NetEvent::PeerLeft(p, why));
             let left = Msg::PeerLeft { peer: p }.encode();
             for &q in &self.peers {
@@ -3054,9 +3217,18 @@ impl NetSession {
             }
         }
         // Flush queued client → server RPCs (perceived-tick stamps ride along).
-        for (_, name, args, stamp) in std::mem::take(&mut self.rpcs_out) {
-            let msg = Msg::Rpc { name, args, sender: SERVER /* stamped by server */, tick: stamp };
-            self.transport.send(SERVER, Channel::Reliable, &msg.encode());
+        for out in std::mem::take(&mut self.rpcs_out) {
+            match out {
+                Outgoing::Rpc { name, args, stamp, .. } => {
+                    let msg = Msg::Rpc { name, args, sender: SERVER /* stamped by server */, tick: stamp };
+                    self.transport.send(SERVER, Channel::Reliable, &msg.encode());
+                }
+                Outgoing::Data { id, name, bytes, .. } => {
+                    for msg in Self::data_slices(id, &name, &bytes, SERVER) {
+                        self.transport.send(SERVER, Channel::Reliable, &msg);
+                    }
+                }
+            }
         }
         // Retune the input lead from the server's latest margin feedback
         // (window entries are already stamped — a nudge takes effect on the
@@ -3432,7 +3604,10 @@ impl NetSession {
             }
             Msg::Pong { id } => self.note_pong(id, SERVER),
             Msg::Rpc { name, args, sender, tick } => {
-                self.rpcs_in.push(ReceivedRpc { name, args, sender, tick });
+                self.rpcs_in.push(ReceivedRpc { name, args, sender, tick, data: None });
+            }
+            Msg::Data { id, name, total, offset, bytes, sender } => {
+                let _ = self.receive_data_slice(SERVER, DataSlice { id, name, total, offset, bytes }, sender);
             }
             Msg::PeerJoined { peer } => self.events.push(NetEvent::PeerJoined(peer)),
             Msg::PeerLeft { peer } => self.events.push(NetEvent::PeerLeft(peer, None)),

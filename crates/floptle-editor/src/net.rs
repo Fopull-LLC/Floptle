@@ -446,6 +446,18 @@ impl Editor {
                         }
                     }
                 }
+                NetCmd::Send { name, data, to } => {
+                    let r = if let Some(s) = self.net_server.as_mut() {
+                        s.send_data(&name, data, to.map(RpcTarget::Peer).unwrap_or(RpcTarget::All))
+                    } else if let Some(c) = self.net_play_client.as_mut() {
+                        c.send_data(&name, data, RpcTarget::Server)
+                    } else {
+                        Ok(())
+                    };
+                    if let Err(e) = r {
+                        self.console.push(floptle_script::LogLevel::Warn, e, None);
+                    }
+                }
                 NetCmd::Spawn { path, pos, owner } => self.net_spawn_path(&path, pos, owner),
                 NetCmd::Despawn { eid } => {
                     if self.net_server.is_some() {
@@ -639,7 +651,10 @@ impl Editor {
                     _ => None,
                 };
                 self.script_host.set_rewind(scope);
-                self.script_host.dispatch_rpc(&mut self.world, &r.name, &r.args, r.sender);
+                match &r.data {
+                    Some(data) => self.script_host.dispatch_data(&mut self.world, &r.name, data, r.sender),
+                    None => self.script_host.dispatch_rpc(&mut self.world, &r.name, &r.args, r.sender),
+                }
                 self.script_host.set_rewind(None);
             }
             for ev in events {
@@ -806,6 +821,7 @@ impl Editor {
                 // lobby screen instead of sending players to the 🌐 panel.
                 lobby_code: self.net_lobby_code.clone(),
                 identities,
+                receiving: Self::mirror_receiving(s),
             }
         } else {
             NetState::default()
@@ -1353,6 +1369,12 @@ impl Editor {
             tier: who.tier.clone(),
             proof: None,
         })
+    }
+
+    /// The bulk messages a session is still receiving, as `net.receiving()`
+    /// reads them.
+    fn mirror_receiving(s: &floptle_net::NetSession) -> Vec<(u64, String, u32, u32)> {
+        s.data_progress().into_iter().map(|p| (p.sender, p.name, p.got, p.total)).collect()
     }
 
     /// Each connected peer's account identity, mirrored into Lua for
@@ -2160,6 +2182,7 @@ impl Editor {
             // The hidden harness server is loopback: no relay, no code.
             lobby_code: None,
             identities: Self::mirror_identities(&hs.session),
+            receiving: Self::mirror_receiving(&hs.session),
         });
         hs.host.set_net_owners(Self::collect_net_owners(&hs.world));
         // Feed body state + lend colliders, run scripts (server frame = tick).
@@ -2184,7 +2207,10 @@ impl Editor {
                 .tick
                 .map(|stamp| build_rewind_scope(&hs.world, &hs.session, &hs.history, st, r.sender, stamp));
             hs.host.set_rewind(scope);
-            hs.host.dispatch_rpc(&mut hs.world, &r.name, &r.args, r.sender);
+            match &r.data {
+                Some(data) => hs.host.dispatch_data(&mut hs.world, &r.name, data, r.sender),
+                None => hs.host.dispatch_rpc(&mut hs.world, &r.name, &r.args, r.sender),
+            }
             hs.host.set_rewind(None);
         }
         let dir = self.project_root.join("scripts");
@@ -2246,6 +2272,9 @@ impl Editor {
                 NetCmd::Rpc { name, args, to, .. } => {
                     let target = to.map(RpcTarget::Peer).unwrap_or(RpcTarget::All);
                     let _ = hs.session.send_rpc(&name, args, target);
+                }
+                NetCmd::Send { name, data, to } => {
+                    let _ = hs.session.send_data(&name, data, to.map(RpcTarget::Peer).unwrap_or(RpcTarget::All));
                 }
                 NetCmd::Despawn { eid } => {
                     let ent =
@@ -2638,7 +2667,10 @@ impl Editor {
             }
         }
         for r in rpcs {
-            self.script_host.dispatch_rpc(&mut self.world, &r.name, &r.args, r.sender);
+            match &r.data {
+                Some(data) => self.script_host.dispatch_data(&mut self.world, &r.name, data, r.sender),
+                None => self.script_host.dispatch_rpc(&mut self.world, &r.name, &r.args, r.sender),
+            }
         }
         for ev in events {
             match ev {
@@ -2842,6 +2874,7 @@ impl Editor {
             // holds none. `net.identity` answers `verified = false` here rather
             // than repeating whatever the client would like to be true.
             identities: HashMap::new(),
+            receiving: self.net_play_client.as_ref().map(Self::mirror_receiving).unwrap_or_default(),
         });
         self.script_host.set_net_owners(Self::collect_net_owners(&self.world));
     }

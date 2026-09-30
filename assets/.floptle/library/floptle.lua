@@ -822,6 +822,17 @@ function net.lobbyCode() end
 ---@param args any|nil
 ---@param opts { to: integer, withInput: boolean }|nil
 function net.rpc(name, args, opts) end
+---Send a bulk message: any bytes (a Lua string) up to 16 MB, such as a whole
+---player-built level. It arrives whole, reliably, and in order with RPCs.
+---Same directions as `net.rpc`. Handle with
+---`onData = {}` + `function onData.name(data, sender) end`.
+---@param name string
+---@param data string
+---@param opts { to: integer }|nil
+function net.send(name, data, opts) end
+---Bulk messages still arriving, bytes so far and in all: a loading bar.
+---@return { from: integer, name: string, got: integer, total: integer }[]
+function net.receiving() end
 ---SERVER ONLY, inside an `onRpc` handler for an rpc sent `{withInput = true}`:
 ---run `fn` against the world as `peer` PERCEIVED it — raycasts see every
 ---networked body where that player saw it (their interp-delayed view), and

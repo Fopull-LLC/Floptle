@@ -868,6 +868,17 @@ function net.lobbyCode() end
 ---@param args any|nil
 ---@param opts { to: integer, withInput: boolean }|nil
 function net.rpc(name, args, opts) end
+---Send a bulk message: any bytes (a Lua string) up to 16 MB, such as a whole
+---player-built level. It arrives whole, reliably, and in order with RPCs.
+---Same directions as `net.rpc`. Handle with
+---`onData = {}` + `function onData.name(data, sender) end`.
+---@param name string
+---@param data string
+---@param opts { to: integer }|nil
+function net.send(name, data, opts) end
+---Bulk messages still arriving, bytes so far and in all: a loading bar.
+---@return { from: integer, name: string, got: integer, total: integer }[]
+function net.receiving() end
 ---SERVER ONLY, inside an `onRpc` handler for an rpc sent `{withInput = true}`:
 ---run `fn` against the world as `peer` PERCEIVED it — raycasts see every
 ---networked body where that player saw it (their interp-delayed view), and
@@ -2087,12 +2098,13 @@ function space.propagate(px, py, pz, vx, vy, vz, mu, dt) end
 
 /// `.luarc.json` pointing the Lua language server at the annotation library and
 /// declaring the engine globals (so they aren't flagged undefined).
-pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"camera\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"access\", \"caption\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"createNode\", \"destroy\", \"spawnEffect\", \"draw\", \"scene\", \"terrain\", \"rng\", \"save\", \"after\", \"every\", \"tween\", \"space\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\", \"snapshot\", \"restore\"]\n}\n";
+pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"camera\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"access\", \"caption\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"createNode\", \"destroy\", \"spawnEffect\", \"draw\", \"scene\", \"terrain\", \"rng\", \"save\", \"after\", \"every\", \"tween\", \"space\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\", \"onData\", \"onDestroy\", \"snapshot\", \"restore\"]\n}\n";
 
 /// Byte-exact previous engine-generated `.luarc.json` versions: a project file
 /// matching one of these was never hand-edited, so it's safe to migrate to the
 /// current `LUARC_JSON` (a customized file is always left alone).
 const LUARC_JSON_OLD: &[&str] = &[
+    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"camera\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"access\", \"caption\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"createNode\", \"destroy\", \"spawnEffect\", \"draw\", \"scene\", \"terrain\", \"rng\", \"save\", \"after\", \"every\", \"tween\", \"space\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\", \"snapshot\", \"restore\"]\n}\n",
     "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"access\", \"caption\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"createNode\", \"destroy\", \"spawnEffect\", \"draw\", \"scene\", \"terrain\", \"rng\", \"save\", \"after\", \"every\", \"tween\", \"space\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
     "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"access\", \"caption\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"createNode\", \"destroy\", \"spawnEffect\", \"draw\", \"scene\", \"terrain\", \"rng\", \"save\", \"after\", \"every\", \"tween\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
     "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"access\", \"caption\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"createNode\", \"destroy\", \"spawnEffect\", \"draw\", \"scene\", \"terrain\", \"rng\", \"save\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",

@@ -48,6 +48,7 @@ pub const TABLES: &[OptTable] = &[
     OptTable { call: "audio.play", keys: crate::audio_api::PLAY_KEYS },
     OptTable { call: "net.host", keys: crate::net_api::HOST_KEYS },
     OptTable { call: "net.rpc", keys: crate::net_api::RPC_KEYS },
+    OptTable { call: "net.send", keys: crate::net_api::SEND_KEYS },
     OptTable { call: "net.spawn", keys: crate::net_api::SPAWN_KEYS },
     OptTable { call: "input.pushContext", keys: crate::input_api::CONTEXT_KEYS },
     OptTable { call: "scene.load", keys: crate::host::SCENE_LOAD_KEYS },
@@ -368,6 +369,7 @@ mod tests {
             "steam.createLobby" => "steam.createLobby({ nonesuch = 1 }, function() end)",
             "steam.findLobbies" => "steam.findLobbies({ nonesuch = 1 }, function() end)",
             "steam.timelineEvent" => "steam.timelineEvent{ title = 'x', nonesuch = 1 }",
+            "net.send" => "net.send('x', 'y', { nonesuch = 1 })",
             other => panic!(
                 "opts::TABLES lists `{other}` but no test calls it — add a line to \
                  `bogus_call` so the registry entry is a promise the code has to keep"

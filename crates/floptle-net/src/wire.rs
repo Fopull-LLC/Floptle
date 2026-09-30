@@ -371,6 +371,12 @@ pub enum Msg {
     LayerLoad { epoch: u8, tag: String, scene: String, offset: [f64; 3], environment: bool, id_base: u64 },
     /// Server → client: the layer `tag` is gone.
     LayerUnload { epoch: u8, tag: String },
+    /// One slice of a bulk message (`net.send`): `total` bytes in all, this
+    /// slice holding `bytes` from `offset`. It rides the reliable channel,
+    /// which delivers in order, so the slices of a transfer arrive one after
+    /// another and it is whole when `offset + bytes.len() == total`.
+    /// Appended at the end, for the reason `LayerLoad` gives.
+    Data { id: u32, name: String, total: u32, offset: u32, bytes: Vec<u8>, sender: PeerId },
 }
 
 /// **What each kind of message is costing on the wire**.
@@ -462,6 +468,7 @@ impl Msg {
             Msg::Pong { .. } => "Pong",
             Msg::LayerLoad { .. } => "LayerLoad",
             Msg::LayerUnload { .. } => "LayerUnload",
+            Msg::Data { .. } => "Data",
         }
     }
 
@@ -472,6 +479,17 @@ impl Msg {
 
 #[cfg(test)]
 mod tests {
+    /// Postcard numbers variants by position. `Data` was appended after
+    /// `LayerUnload`, so it must encode one past it, and inserting anything
+    /// above either renumbers every message a shipped game already sends.
+    #[test]
+    fn data_is_numbered_after_every_message_that_shipped_before_it() {
+        let unload = Msg::LayerUnload { epoch: 0, tag: String::new() }.encode()[0];
+        let data = Msg::Data { id: 0, name: String::new(), total: 0, offset: 0, bytes: Vec::new(), sender: 0 }.encode()[0];
+        assert_eq!(unload, 25, "a variant was inserted above LayerUnload");
+        assert_eq!(data, unload + 1);
+    }
+
     use super::*;
 
     /// **A message's number is its place in the enum**, and postcard sends

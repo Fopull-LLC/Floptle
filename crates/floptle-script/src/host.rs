@@ -4593,6 +4593,32 @@ impl ScriptHost {
         }
     }
 
+    /// Dispatch a whole bulk message (`net.send`) to every script defining
+    /// `onData.<name>` — `function onData.level(data, sender) ... end`, with
+    /// `data` a Lua string of the bytes sent. The same rules as
+    /// [`Self::dispatch_rpc`].
+    pub fn dispatch_data(&mut self, world: &mut World, name: &str, data: &[u8], sender: u64) {
+        let _budget = self.budget.arm();
+        let targets: Vec<((u32, String), Table)> =
+            self.envs.borrow().iter().filter_map(|(k, key)| Some((k.clone(), self.env_of(key)?))).collect();
+        let mut called = false;
+        for ((eid, kind), env) in targets {
+            let Ok(Some(handlers)) = env.raw_get::<Option<Table>>("onData") else { continue };
+            let Ok(Some(f)) = handlers.raw_get::<Option<mlua::Function>>(name) else { continue };
+            let Ok(bytes) = self.lua.create_string(data) else { continue };
+            *self.net.current.borrow_mut() = Some((eid, kind.clone()));
+            let r = f.call::<()>((bytes, sender));
+            *self.net.current.borrow_mut() = None;
+            called = true;
+            if let Err(err) = r {
+                self.record_error(&kind, format!("{kind}: onData.{name}: {err}"));
+            }
+        }
+        if called {
+            self.flush_scene(world);
+        }
+    }
+
     /// Fire a `net.on(event, fn)` handler set — `playerJoined`/`playerLeft`
     /// carry the peer id, `disconnected` a reason string, `connected` nothing.
     /// Fire `net.on("desync")` with a table the game can actually act on:

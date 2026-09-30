@@ -25,7 +25,7 @@ each group, and meant to be searched.
 - [the web — http.*, json.*](#the-web--http-json) — 11
 - [the player's account — account.*](#the-players-account--account) — 13
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 71
-- [networking — net.*, synced](#networking--net-synced) — 38
+- [networking — net.*, synced](#networking--net-synced) — 41
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 16
 - [pathfinding — nav.*](#pathfinding--nav) — 26
@@ -2430,6 +2430,10 @@ net.ping(peer?) — round-trip time in ms.
 
 net.random(a?, b?) — deterministic RNG for a rollback match, drawn from (match seed, tick, draw index): every peer rolls the same number AND a re-simulated tick rolls it again. Use this instead of rng() in anything a rollback node reads — an unseeded roll comes from the clock, and two peers drawing differently is a match that quietly forks in two. No args → [0,1); one → integer 1..a; two → a..b.
 
+### `net.receiving`
+
+net.receiving() — bulk messages still on their way in: { {from, name, got, total}, ... }, bytes so far and in all. What a joiner's loading bar reads while the level arrives. Empty when nothing is arriving.
+
 ### `net.replaying`
 
 net.replaying() — true while the engine is RE-SIMULATING ticks it already ran after a correction. For cosmetics the engine can't gate for you (a screen shake, a UI poke). NEVER branch simulation on it: a replayed tick that computes something different from the live one is the definition of a desync.
@@ -2458,6 +2462,10 @@ net.rollbackMax() — the deepest rollback this session has had to perform: its 
 
 net.rpc(name, args, {to=peer, withInput=true}) — remote call: server→clients or client→server. withInput stamps a client intent with the tick it was seeing (for net.rewind). Handle with function onRpc.name(args, sender). Args: scalars + tables (≤4 deep, ≤1KB).
 
+### `net.send`
+
+net.send(name, data, {to=peer}) — a bulk message: any bytes (a Lua string) up to 16 MB, such as a whole player-built level for someone who just joined. The engine cuts it into slices and puts it back together; it arrives whole, reliably, and in order with RPCs, so an rpc sent after it is handled after it. Server→one peer (to) or everyone; client→server. Handle with function onData.name(data, sender). Over 16 MB is refused with a Console warning.
+
 ### `net.setInputDelay`
 
 net.setInputDelay(ticks) — the rollback input delay for the NEXT match, in ticks, clamped to 6. Too low and the opponent's input lands after the tick that needed it on every tick, so the driver guesses and re-simulates: correct, and five times the work. Fixed for a session on purpose — adaptive delay hides a bad connection by changing how the game FEELS while you are playing it. Call it between matches; the roster re-announce restarts the driver.
@@ -2481,6 +2489,10 @@ net.stalled() — true while the sim is waiting for a peer's input rather than g
 ### `net.traffic`
 
 net.traffic() -> {{kind=, count=, bytes=}, ...} — what this peer has SENT since the last call, broken down by message kind, biggest first. RESETS on read, so successive calls measure the interval between them. Use it to find out where your bandwidth goes: a rollback game should be almost entirely "Input"/"Inputs" and a few hundred bytes a second — a large "Snapshot" row in a rollback match means state is going out where inputs should.
+
+### `onData`
+
+onData.<name>(data, sender) — handles net.send("name", data): data is the whole message as a Lua string, sender the verified peer id (0 = server).
 
 ### `onRpc`
 

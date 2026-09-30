@@ -3229,7 +3229,7 @@ pub(crate) const LUA_API_WORDS: &[&str] = &[
     "vec2", "vec3", "distance", "onCollisionEnter", "onCollisionStay", "onCollisionExit",
     "onTriggerEnter", "onTriggerStay", "onTriggerExit", "onDestroy",
     "assets", "gizmo",
-    "net", "synced", "replicated", "onRpc", "audio", "terrain", "rng", "save",
+    "net", "synced", "replicated", "onRpc", "onData", "audio", "terrain", "rng", "save",
     // Rollback: the two hooks a Rollback node's scripts must implement.
     "snapshot", "restore",
     "after", "every", "tween", "space", "camera",
@@ -3443,7 +3443,7 @@ fn api_category(label: &str) -> &'static str {
     } else if label.starts_with("input") {
         "input — keyboard & mouse"
     } else if label.starts_with("net")
-        || matches!(label, "synced" | "replicated" | "onRpc" | "snapshot" | "restore")
+        || matches!(label, "synced" | "replicated" | "onRpc" | "onData" | "snapshot" | "restore")
     {
         "networking — net.*, synced"
     } else if label == "save" || label.starts_with("save.") {
@@ -4117,6 +4117,9 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "net.mispredictRate", insert: "net.mispredictRate()", doc: "net.mispredictRate() — 0..1, the fraction of simulated ticks that had to guess a peer's input. Rises with latency; what the input delay is chosen against." },
     ApiEntry { label: "replicated", insert: "replicated = {  }", doc: "replicated = { hp = 100 } — declare synced script vars (top level). Read/write them as synced.hp; the server's writes replicate to every client." },
     ApiEntry { label: "synced", insert: "synced", doc: "The synced-vars table (declared via replicated = {...}). Server writes replicate; client writes warn and get overwritten." },
+    ApiEntry { label: "net.send", insert: "net.send(\"name\", data)", doc: "net.send(name, data, {to=peer}) — a bulk message: any bytes (a Lua string) up to 16 MB, such as a whole player-built level for someone who just joined. The engine cuts it into slices and puts it back together; it arrives whole, reliably, and in order with RPCs, so an rpc sent after it is handled after it. Server→one peer (to) or everyone; client→server. Handle with function onData.name(data, sender). Over 16 MB is refused with a Console warning." },
+    ApiEntry { label: "net.receiving", insert: "net.receiving()", doc: "net.receiving() — bulk messages still on their way in: { {from, name, got, total}, ... }, bytes so far and in all. What a joiner's loading bar reads while the level arrives. Empty when nothing is arriving." },
+    ApiEntry { label: "onData", insert: "onData = {}\nfunction onData.name(data, sender)\n  \nend", doc: "onData.<name>(data, sender) — handles net.send(\"name\", data): data is the whole message as a Lua string, sender the verified peer id (0 = server)." },
     ApiEntry { label: "onRpc", insert: "onRpc = {}\nfunction onRpc.name(args, sender)\n  \nend", doc: "onRpc.<name>(args, sender) — handles net.rpc(\"name\", args). sender is the verified peer id (0 = server)." },
     ApiEntry { label: "params", insert: "params", doc: "This instance's tunables, a table seeded from `defaults` (params.speed, …). NUMBERS and STRINGS both work — a string default (destination = \"arena\") becomes an Inspector text field, so two portals can share one script with different destinations. TWO-WAY: writing a declared key persists across frames, shows live in the Inspector during Play, and is readable by other scripts through a handle (Stop reverts it). Undeclared keys stay frame-local; reference params (noderef & friends) never round-trip." },
     ApiEntry { label: "node", insert: "node", doc: "The node's transform: x/y/z, scale, scale_x/y/z, yaw/pitch/roll." },

@@ -50,6 +50,8 @@ end
 | `net.role()` / `net.isServer()` / `net.isClient()` | `"offline" \| "server" \| "client"` |
 | `net.peers()` / `net.ping(peer)` | connected peer ids · round-trip ms |
 | `net.rpc(name, args, {to=peer, withInput=true})` | remote call — server→clients, or client→server; `withInput` stamps the tick you were seeing (for `net.rewind`) |
+| `net.send(name, data, {to=peer})` | a **bulk message**: any bytes (a Lua string) up to 16 MB — a player-built level, a drawing, a custom character. The engine cuts it up and puts it back together, and it arrives whole. Same directions as `net.rpc`; handled by `onData.name(data, sender)` |
+| `net.receiving()` | bulk messages still arriving: `{ {from, name, got, total}, … }` in bytes — a joiner's loading bar |
 | `net.on(event, fn)` | `"playerJoined"/"playerLeft"` (peer id — `playerLeft` also gets the kick reason, when there was one), `"connected"`, `"disconnected"`, `"kicked"` (why the server removed you) |
 | `net.identity(peer)` | `{ id, name, tier, verified }` — who that peer is. **Check `verified`**: it is `false` for everyone today (see below) |
 | `net.kick(peer, reason)` | SERVER: remove a player, with words that reach them |
@@ -138,6 +140,28 @@ the current values automatically.
 **RPC handlers** live in an `onRpc` table: `function onRpc.use(args, sender)`.
 `sender` is the *verified* peer id (`0` = the server) — clients can't spoof it.
 Args follow the same size/type rules as `synced`.
+
+**RPCs are reliable and ordered.** Every RPC from one peer reaches the other,
+in the order it was sent; none is dropped and none overtakes another. A bulk
+message from `net.send` takes its place in that same order, so a level sent
+before a stream of edits to it is handled before the first edit:
+
+```lua
+-- The host: a joiner gets the level as it stands, then every change after.
+net.on("playerJoined", function(peer)
+  net.send("level", encodeLevel(), { to = peer })
+end)
+
+-- The joiner.
+onData = {}
+function onData.level(data, sender)   -- data: the whole message, a Lua string
+  loadLevel(data)
+end
+```
+
+Args to an RPC are capped at about 1 KB, so anything bigger goes by
+`net.send`. It is cut into slices and reassembled for you; `onData` runs once,
+with all of it. A message over 16 MB is refused with a warning.
 
 > **Test it without a second machine:** press Play, then the **🌐** toolbar
 > button → *Host + join a local client*. A hidden ghost client joins over a
