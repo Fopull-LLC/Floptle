@@ -94,6 +94,15 @@ gravity:
 | **Kinematic** | **Transform-driven**: never falls or gets pushed — your scripts/animation move the node and the body follows. Dynamic bodies collide **with** it (a moving platform *carries and pushes* the player), raycasts hit it, touch events fire. | near zero |
 | **Static** | **Baked collider** in the body's shape — no body at all. The cheapest way to make something solid (walls, floors, props). | zero per tick |
 
+A **Collidable** node with no Rigidbody (a wall, a building, a piece a level
+editor places) is baked the same way, and its collider follows the node when a
+script moves, turns or scales it. There is no need to destroy and spawn it
+again. A move shifts the collider for nothing; a turn or a resize rebuilds it,
+from geometry the engine reads once per model and keeps. In a level of more
+than about a thousand such pieces they are checked a slice a frame, so a moved
+piece can take a few frames to follow. Something that moves all the time
+belongs in **Kinematic**, which follows every tick.
+
 ```lua
 -- a moving platform: Kinematic mode + plain transform writes
 defaults = { dz = 6.0, speed = 0.5 }

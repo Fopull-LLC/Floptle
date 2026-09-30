@@ -1303,7 +1303,7 @@ impl Editor {
             }
             if !self.mesh_wire_cache.contains_key(&path) {
                 let file = crate::project::resolve_asset_path(&self.project_root, &path);
-                let edges = floptle_assets::gltf_import::import(&file)
+                let edges = floptle_assets::gltf_import::geometry(&file)
                     .map(|m| mesh_collider_wire_local(&m))
                     .unwrap_or_default();
                 self.mesh_wire_cache.insert(path.clone(), edges);

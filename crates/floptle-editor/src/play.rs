@@ -292,6 +292,9 @@ impl Editor {
     }
 
     pub(crate) fn add_static_colliders(&self, sim: &mut floptle_physics::Sim) {
+        // A fresh sim: every record of an earlier bake describes a collider
+        // that no longer exists.
+        self.static_baked.borrow_mut().clear();
         // Union of Collidable + legacy MeshCollider entities (dedup; a node flagged both
         // is added once). A node with a RigidBody is a *dynamic* body (Sim::build made it
         // one) — skip it here so its dynamic body doesn't fight a static collider sitting at
@@ -323,6 +326,9 @@ impl Editor {
     /// would re-import every collidable model in the level.
     pub(crate) fn add_static_collider_for(&self, sim: &mut floptle_physics::Sim, e: Entity) {
         let wt = floptle_core::world_transform(&self.world, e);
+        // Remembered so a collider can follow its node when a script moves it
+        // — see `follow_static_colliders`.
+        self.static_baked.borrow_mut().insert(e.index(), BakedStatic::of(wt));
         // Anchor each collider on its own node (full f64) and bake geometry
         // relative to it — the residuals stay small and exact no matter how far
         // out the node sits; the sim re-anchors them per rebase.
@@ -342,7 +348,7 @@ impl Editor {
                 // to load — a level whose floors and walls are simply not
                 // there, on a stderr nobody sees.
                 let file = crate::project::resolve_asset_path(&self.project_root, &path);
-                let Ok(model) = floptle_assets::gltf_import::import(&file) else {
+                let Ok(model) = floptle_assets::gltf_import::geometry(&file) else {
                     floptle_say::say_err!("collidable mesh: failed to load {path}");
                     return;
                 };
@@ -414,6 +420,72 @@ impl Editor {
             },
             _ => {}
         }
+    }
+
+    /// Keep each static collider where its node is. A script that moves,
+    /// turns or scales a static piece (a wall a level editor drags, a door
+    /// that swings shut) moves what it collides with too, without the node
+    /// having to be destroyed and spawned again.
+    ///
+    /// A move is a shift of the baked collider, which costs nothing. A turn or
+    /// a resize re-bakes it, from the cached geometry for a model.
+    pub(crate) fn follow_static_colliders(&mut self) {
+        if self.sim.is_none() {
+            return;
+        }
+        // This frame's turn: every piece in a level of up to `FOLLOW_BUDGET`,
+        // else the next slice of a list refreshed each time round.
+        if self.follow_cursor >= self.follow_keys.len() {
+            self.follow_keys = self.static_baked.borrow().keys().copied().collect();
+            self.follow_cursor = 0;
+        }
+        let end = (self.follow_cursor + FOLLOW_BUDGET).min(self.follow_keys.len());
+        enum Change {
+            Gone,
+            Moved(floptle_core::math::DVec3),
+            Turned(Entity),
+        }
+        let changes: Vec<(u32, Change)> = {
+            let baked = self.static_baked.borrow();
+            self.follow_keys[self.follow_cursor..end]
+                .iter()
+                .filter_map(|&eid| {
+                    let b = baked.get(&eid)?;
+                    let Some(e) = self.world.entity_at(eid) else { return Some((eid, Change::Gone)) };
+                    let wt = floptle_core::world_transform(&self.world, e);
+                    if wt.rotation.dot(b.rot).abs() < 1.0 - 1e-7 || (wt.scale - b.scale).abs().max_element() > 1e-6 {
+                        Some((eid, Change::Turned(e)))
+                    } else if (wt.translation - b.pos).length_squared() > 1e-12 {
+                        Some((eid, Change::Moved(wt.translation - b.pos)))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        self.follow_cursor = end;
+        if changes.is_empty() {
+            return;
+        }
+        let Some(mut sim) = self.sim.take() else { return };
+        for (eid, change) in changes {
+            match change {
+                Change::Gone => {
+                    self.static_baked.borrow_mut().remove(&eid);
+                }
+                Change::Moved(delta) => {
+                    sim.shift_statics_of(eid, delta);
+                    if let Some(b) = self.static_baked.borrow_mut().get_mut(&eid) {
+                        b.pos += delta;
+                    }
+                }
+                Change::Turned(e) => {
+                    sim.remove_statics_of(eid);
+                    self.add_static_collider_for(&mut sim, e);
+                }
+            }
+        }
+        self.sim = Some(sim);
     }
 
     /// Give every node in `ents` that is static world geometry (Collidable or
@@ -2017,3 +2089,115 @@ mod script_vec3_tests {
         ed.toggle_play();
     }
 }
+
+#[cfg(test)]
+mod static_follow_tests {
+    use floptle_core::math::{DVec3, Quat, Vec3};
+    use floptle_core::transform::Transform;
+    use floptle_core::{Collidable, Matter, Shape};
+
+    /// An editor with one static cube wall at `x`, its collider baked.
+    fn wall_at(x: f64) -> (crate::Editor, floptle_core::Entity) {
+        let mut ed = crate::Editor::default();
+        let e = ed.world.spawn();
+        ed.world.insert(e, Transform::from_translation(DVec3::new(x, 0.0, 0.0)));
+        ed.world.insert(e, Matter::Primitive { shape: Shape::Cube, color: [1.0; 3] });
+        ed.world.insert(e, Collidable);
+        let mut sim = floptle_physics::Sim::build(
+            &ed.world,
+            &[],
+            floptle_physics::GravityField::uniform(Vec3::ZERO),
+            DVec3::ZERO,
+        );
+        ed.add_static_colliders(&mut sim);
+        ed.sim = Some(sim);
+        (ed, e)
+    }
+
+    /// Where a ray down the x axis from the origin first meets something.
+    fn hit_x(ed: &crate::Editor) -> Option<f32> {
+        ed.sim.as_ref().unwrap().raycast(DVec3::ZERO, Vec3::X, 100.0).map(|h| h.point[0])
+    }
+
+    #[test]
+    fn a_moved_static_wall_takes_its_collider_with_it() {
+        let (mut ed, e) = wall_at(10.0);
+        let near = hit_x(&ed).expect("the wall is there");
+        assert!((near - 9.3).abs() < 0.05, "a cube of half 0.7 at x=10: {near}");
+        ed.world.get_mut::<Transform>(e).unwrap().translation = DVec3::new(20.0, 0.0, 0.0);
+        ed.follow_static_colliders();
+        let moved = hit_x(&ed).expect("the wall is still solid");
+        assert!((moved - 19.3).abs() < 0.05, "the collider stayed behind: {moved}");
+        assert_eq!(ed.sim.as_ref().unwrap().world.colliders.len(), 1, "a move must not add a second collider");
+    }
+
+    #[test]
+    fn a_turned_or_resized_static_wall_is_rebaked() {
+        let (mut ed, e) = wall_at(10.0);
+        // Turned 45° about y: the near face becomes an edge, 0.7·√2 in front.
+        ed.world.get_mut::<Transform>(e).unwrap().rotation = Quat::from_rotation_y(std::f32::consts::FRAC_PI_4);
+        ed.follow_static_colliders();
+        let edge = hit_x(&ed).unwrap();
+        assert!((edge - (10.0 - 0.7 * std::f32::consts::SQRT_2)).abs() < 0.05, "not rebaked turned: {edge}");
+        // Doubled in size: the face comes twice as far forward.
+        let t = ed.world.get_mut::<Transform>(e).unwrap();
+        t.rotation = Quat::IDENTITY;
+        t.scale = Vec3::splat(2.0);
+        ed.follow_static_colliders();
+        let face = hit_x(&ed).unwrap();
+        assert!((face - 8.6).abs() < 0.05, "not rebaked at the new size: {face}");
+        assert_eq!(ed.sim.as_ref().unwrap().world.colliders.len(), 1, "the old collider must go");
+    }
+
+    /// A level bigger than one frame's budget takes turns, and a moved piece
+    /// in it still follows within the few frames a full round takes.
+    #[test]
+    fn a_piece_in_a_huge_level_follows_within_a_round() {
+        let (mut ed, wall) = wall_at(10.0);
+        for i in 0..3000 {
+            let e = ed.world.spawn();
+            ed.world.insert(e, Transform::from_translation(DVec3::new(0.0, 100.0 + i as f64 * 2.0, 0.0)));
+            ed.world.insert(e, Matter::Primitive { shape: Shape::Cube, color: [1.0; 3] });
+            ed.world.insert(e, Collidable);
+        }
+        let mut sim = ed.sim.take().unwrap();
+        ed.add_static_colliders(&mut sim);
+        ed.sim = Some(sim);
+        ed.world.get_mut::<Transform>(wall).unwrap().translation = DVec3::new(20.0, 0.0, 0.0);
+        let rounds = 3001usize.div_ceil(super::FOLLOW_BUDGET);
+        for _ in 0..rounds {
+            ed.follow_static_colliders();
+        }
+        let x = hit_x(&ed).unwrap();
+        assert!((x - 19.3).abs() < 0.05, "still at the old place after a full round: {x}");
+    }
+
+    #[test]
+    fn a_wall_nobody_touched_is_left_alone_and_a_deleted_one_is_forgotten() {
+        let (mut ed, e) = wall_at(10.0);
+        ed.follow_static_colliders();
+        assert_eq!(hit_x(&ed).map(|x| (x * 100.0).round()), Some(930.0));
+        ed.world.despawn(e);
+        ed.follow_static_colliders();
+        assert!(ed.static_baked.borrow().is_empty(), "a deleted node's record was kept");
+    }
+}
+
+/// Where a static collider was baked: the world pose it was built at.
+#[derive(Clone, Copy)]
+pub(crate) struct BakedStatic {
+    pub(crate) pos: floptle_core::math::DVec3,
+    pub(crate) rot: floptle_core::math::Quat,
+    pub(crate) scale: Vec3,
+}
+
+impl BakedStatic {
+    pub(crate) fn of(wt: floptle_core::transform::Transform) -> Self {
+        Self { pos: wt.translation, rot: wt.rotation, scale: wt.scale }
+    }
+}
+
+/// How many static pieces [`Editor::follow_static_colliders`] checks a frame.
+/// A level with more takes turns, a slice a frame, so a huge level pays a
+/// bounded cost and a moved piece in it follows within a few frames.
+const FOLLOW_BUDGET: usize = 1024;

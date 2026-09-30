@@ -615,6 +615,8 @@ impl Editor {
         // already updated by run; re-importing here means the new mesh renders
         // this frame).
         self.load_script_swapped_models();
+        // A static piece a script moved takes its collider with it.
+        self.follow_static_colliders();
         // `physics.step([n])` from a script — the same frame-stepper as ⏭. Drained
         // in the frame pass, not inside the tick loop: once the tick is frozen that
         // loop doesn't run, so a request drained there could never be the thing that

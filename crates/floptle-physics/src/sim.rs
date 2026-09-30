@@ -675,6 +675,13 @@ impl Sim {
         true
     }
 
+    /// Remove every static collider entity `eid` baked, and nothing else: a
+    /// static piece that moved is re-baked where it is now.
+    pub fn remove_statics_of(&mut self, eid: u32) {
+        self.world.colliders.retain(|c| c.eid != Some(eid));
+        self.world.contacts.clear();
+    }
+
     /// Remove a runtime-despawned entity's body. Swap-remove keeps the body
     /// array dense; the displaced (last) body's link is re-pointed. Also drops
     /// any static collider the entity baked (a static-mode body, or a spawned

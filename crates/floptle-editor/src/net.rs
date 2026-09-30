@@ -2875,7 +2875,7 @@ impl Editor {
                     let path = asset_path.clone();
                     // Project-resolved — see `Editor::add_static_colliders`.
                     let file = crate::project::resolve_asset_path(&self.project_root, &path);
-                    let Ok(model) = floptle_assets::gltf_import::import(&file) else {
+                    let Ok(model) = floptle_assets::gltf_import::geometry(&file) else {
                         continue;
                     };
                     let m = Mat4::from_scale_rotation_translation(s, wt.rotation, Vec3::ZERO);

@@ -2604,6 +2604,14 @@ struct Editor {
     /// Model-local deduped triangle edges per mesh asset path (built once on demand),
     /// transformed by each node's world matrix + projected per frame for collider wires.
     mesh_wire_cache: HashMap<String, Vec<(Vec3, Vec3)>>,
+    /// Where each static collider was baked: node index → the world
+    /// translation, rotation and scale it was built at. A `RefCell` because
+    /// the bake runs from `&self` paths. See `follow_static_colliders`.
+    static_baked: std::cell::RefCell<HashMap<u32, crate::play::BakedStatic>>,
+    /// The pieces `follow_static_colliders` is working through, and where it
+    /// is in them.
+    follow_keys: Vec<u32>,
+    follow_cursor: usize,
     /// This frame's projected mesh-collider wireframe segments (screen space).
     mesh_wire_gizmo: Vec<(Vec2, Vec2)>,
     /// This frame's projected particle-emitter gizmo: the selected track's birth shape,
