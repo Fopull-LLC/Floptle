@@ -36,9 +36,9 @@ pub(crate) fn map_key_id(key: &str) -> Option<u32> {
 /// UVs are 1 unit = 1 tile, so this grid measures the level for you.
 pub(crate) const MAP_DEFAULT_TEXTURE: &str = "textures/Tile4.png";
 
-/// Where that texture ships in the engine's own asset folder — the source we
-/// seed a project from when it hasn't got one yet.
-const MAP_DEFAULT_TEXTURE_SHIPPED: &str = "assets/textures/Tile4.png";
+/// That texture, compiled into the editor, which is what a project is seeded
+/// from when it hasn't got one yet.
+const MAP_DEFAULT_TEXTURE_BYTES: &[u8] = include_bytes!("../builtin/textures/Tile4.png");
 
 /// Editor-side authority for map-mesh geometry.
 #[derive(Default)]
@@ -285,29 +285,10 @@ pub(crate) fn map_collision_geometry(
     (verts, indices, tri_slot, mesh.slots.clone())
 }
 
-/// Copy the engine's shipped blockout texture to `dest`, from the source
-/// checkout this editor was built from or from the bundle beside the
-/// executable. `None` when neither has one.
-#[cfg(not(target_arch = "wasm32"))]
+/// Write the editor's own copy of the blockout texture to `dest`.
 fn seed_shipped_texture(dest: &std::path::Path) -> Option<()> {
-    let shipped = crate::export::repo_root()
-        .map(|r| r.join(MAP_DEFAULT_TEXTURE_SHIPPED))
-        .filter(|p| floptle_vfs::is_file(p))
-        .or_else(|| {
-            std::env::current_exe()
-                .ok()
-                .and_then(|e| Some(e.parent()?.join(MAP_DEFAULT_TEXTURE_SHIPPED)))
-                .filter(|p| floptle_vfs::is_file(p))
-        })?;
     floptle_vfs::create_dir_all(dest.parent()?).ok()?;
-    std::fs::copy(&shipped, dest).ok()?;
-    Some(())
-}
-
-/// A page has nothing to seed from.
-#[cfg(target_arch = "wasm32")]
-fn seed_shipped_texture(_dest: &std::path::Path) -> Option<()> {
-    None
+    floptle_vfs::write(dest, MAP_DEFAULT_TEXTURE_BYTES).ok()
 }
 
 impl Editor {
@@ -377,8 +358,8 @@ impl Editor {
         })
     }
 
-    /// Make sure `<project>/textures/Tile4.png` exists, copying the engine's
-    /// shipped copy in when it doesn't. Asset refs are project-relative, so a
+    /// Make sure `<project>/textures/Tile4.png` exists, writing the editor's
+    /// own copy in when it doesn't. Asset refs are project-relative, so a
     /// default texture has to actually live in the project it is referenced
     /// from; this is the one place that is true of.
     fn ensure_map_default_texture(&mut self) -> Option<()> {
@@ -389,10 +370,6 @@ impl Editor {
         if floptle_vfs::is_file(self.resolve_asset_path(MAP_DEFAULT_TEXTURE)) {
             return Some(());
         }
-        // Seed from the engine checkout this editor was built from, or from a
-        // packaged bundle's assets beside the executable. A browser build
-        // ships what the export packed and has nothing to seed from; there
-        // the reference simply resolves to nothing, as any missing texture does.
         let dest = self.project_root.join(MAP_DEFAULT_TEXTURE);
         seed_shipped_texture(&dest)?;
         self.asset_tree = crate::assets::build_assets(&self.project_root);

@@ -15,28 +15,6 @@ InputMap(
             ],
         ),
         Action(
-            name: "Block",
-            bindings: [
-                Binding(
-                    source: Key(KeyF),
-                ),
-            ],
-        ),
-        Action(
-            name: "Punch",
-            bindings: [
-                Binding(
-                    source: Mouse(Left),
-                ),
-                Binding(
-                    source: Pad(
-                        id: Any,
-                        ctrl: Button(South),
-                    ),
-                ),
-            ],
-        ),
-        Action(
             name: "Fire",
             bindings: [
                 Binding(
@@ -155,6 +133,34 @@ InputMap(
                         ctrl: Button(DPadUp),
                     ),
                 ),
+                Keys(
+                    minus: Key(ArrowDown),
+                    plus: Key(ArrowUp),
+                ),
+            ],
+        ),
+        Axis1(
+            name: "Turn",
+            socd: Neutral,
+            bindings: [
+                Keys(
+                    minus: Key(KeyQ),
+                    plus: Key(KeyE),
+                ),
+                Keys(
+                    minus: Key(ArrowLeft),
+                    plus: Key(ArrowRight),
+                ),
+                Keys(
+                    minus: Pad(
+                        id: Any,
+                        ctrl: Button(LeftBumper),
+                    ),
+                    plus: Pad(
+                        id: Any,
+                        ctrl: Button(RightBumper),
+                    ),
+                ),
             ],
         ),
         Axis1(
@@ -184,31 +190,11 @@ InputMap(
                 ),
             ],
         ),
-        Axis1(
-            name: "Turn",
-            socd: Neutral,
-            bindings: [
-                Keys(
-                    minus: Key(KeyQ),
-                    plus: Key(KeyE),
-                ),
-                Keys(
-                    minus: Pad(
-                        id: Any,
-                        ctrl: Button(LeftBumper),
-                    ),
-                    plus: Pad(
-                        id: Any,
-                        ctrl: Button(RightBumper),
-                    ),
-                ),
-            ],
-        ),
     ],
     axes2: [
         Axis2(
             name: "Move",
-            socd: Positive,
+            socd: Neutral,
             bindings: [
                 Keys(
                     up: Key(KeyW),

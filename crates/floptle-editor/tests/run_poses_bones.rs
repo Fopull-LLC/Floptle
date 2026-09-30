@@ -17,7 +17,7 @@ fn a_run_answers_bone_world_for_a_rigged_model() {
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(d.join("scenes")).unwrap();
     std::fs::create_dir_all(d.join("scripts")).unwrap();
-    let sae = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/Sae.glb");
+    let sae = concat!(env!("CARGO_MANIFEST_DIR"), "/../floptle-assets/tests/fixtures/Sae.glb");
     std::fs::copy(sae, d.join("Sae.glb")).unwrap();
     std::fs::write(d.join("project.ron"), "(title: Some(\"b\"), entry_scene: Some(\"scenes/first.ron\"))").unwrap();
     std::fs::write(
@@ -65,7 +65,7 @@ fn a_run_reaches_a_chain_to_a_point_and_the_recipe_runs() {
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(d.join("scenes")).unwrap();
     std::fs::create_dir_all(d.join("scripts")).unwrap();
-    let sae = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/models/Sae.mirrored.rigged.glb");
+    let sae = concat!(env!("CARGO_MANIFEST_DIR"), "/../floptle-assets/tests/fixtures/Sae.mirrored.rigged.glb");
     std::fs::copy(sae, d.join("Sae.glb")).unwrap();
     std::fs::write(d.join("project.ron"), "(title: Some(\"r\"), entry_scene: Some(\"scenes/first.ron\"))").unwrap();
     std::fs::write(

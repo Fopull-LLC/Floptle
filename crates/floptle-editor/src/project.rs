@@ -2260,7 +2260,7 @@ pub(crate) fn open_in_file_manager(path: &Path) {
 pub(crate) fn seed_default_effects(project_root: &Path) {
     const DEFAULT_EFFECTS: &[(&str, &str)] = &[(
         "MoveMarker.vfx.ron",
-        include_str!("../../../assets/vfx/MoveMarker.vfx.ron"),
+        include_str!("../builtin/vfx/MoveMarker.vfx.ron"),
     )];
     let dir = project_root.join("vfx");
     if floptle_vfs::create_dir_all(&dir).is_err() {
@@ -3252,7 +3252,7 @@ mod model_import_tests {
     #[test]
     fn a_requested_model_arrives_through_the_pump_not_the_request() {
         let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
-        ed.project_root = std::path::PathBuf::from("../../assets");
+        ed.project_root = std::path::PathBuf::from("../floptle-assets/tests/fixtures");
         let path = "SaesRapier.glb";
         ed.request_model(path);
         assert!(!ed.mesh_registry.contains_key(path), "the request imported on the calling thread");

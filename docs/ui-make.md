@@ -38,10 +38,6 @@ Call it **when the data changes**, not every frame. It is safe every frame — i
 reconciles rather than rebuilds — but it re-reads your table each time, and
 nothing about the screen needs that.
 
-This is a live demo, not a sketch: it is the right-hand panel of
-`assets/scenes/ui_demo.ron`, whose entire contents are in `ui_demo.lua`. The
-scene holds one empty node saying where the panel sits.
-
 ---
 
 ## An element
@@ -288,5 +284,4 @@ Colours take a `color(...)`, a `"#rrggbb"` string, a plain number (a grey), or a
 - [ui-styles.md](ui-styles.md) — tokens, styles, states, transitions
 - [ui-tab.md](ui-tab.md) — the authoring canvas
 - [ui-navigation.md](ui-navigation.md) — focus, fields, drag & drop, tooltips
-- [ui-demo.md](ui-demo.md) — the demo scene, including the crew panel above
 - [scripting.md](scripting.md) — `ui.bind`, colours, the repeater

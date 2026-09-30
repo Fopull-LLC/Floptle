@@ -1,0 +1,119 @@
+# Working in this project
+
+This is a [Floptle](https://fopull.com) project. The `floptle` command drives the
+engine from a terminal — you do not need to open the editor to find out whether
+something works.
+
+## Before you change anything
+
+```sh
+floptle help --json        # every command, its arguments, its exit codes, what it returns
+floptle inspect            # what this project is: scenes, node counts, engine version
+```
+
+`help --json` is the authority on the command line, and it is generated from the
+same table the parser is, so it cannot describe a command that does not exist.
+Read it once instead of guessing at flags.
+
+## While you are changing things
+
+```sh
+floptle check              # does it still load? run this after every edit
+floptle inspect --scene first
+floptle inspect --select Player --json     # the whole node document, ready to patch
+floptle api node:setSprite                 # what a call does, before you write it
+```
+
+## Seeing whether it actually works
+
+```sh
+floptle run --frames 120           # play it headlessly; reports what raised, and where
+floptle run --frames 600 --timing   # …and what the steps cost: p50/p95/p99, in real ms
+floptle run --frames 600 --alloc    # …and what a frame allocates, and which scripts allocate it
+floptle run --frames 600 --timing --seed 7   # the SAME run twice: rng() and math.random pinned
+floptle shot --out look.png        # one frame through the active camera, as a PNG
+floptle vfx --effect Sparks        # a particle effect, across its own timeline, as PNGs
+```
+
+If a render fails, ask the machine before you conclude the project is wrong:
+
+```sh
+floptle doctor              # can this machine render at all? exits non-zero if not
+```
+
+Neither `run` nor `check` needs a graphics adapter. `shot` does, and on a
+machine without one it says so and stops rather than looking like a crash.
+
+`run` executes the real scripts and
+physics for a fixed number of steps and reports every warning, error and
+`print` with its file and line — a `.ron` that loads is not a game that runs.
+`shot` renders through the same path the editor's Game view uses, so the picture
+is what the editor would show. **Look at it.** A render that came out wrong is
+something no assertion will tell you.
+
+`vfx` is the same idea for a particle effect, which a single frame cannot show:
+it renders several moments across the effect's own timeline — through one fixed
+camera, so they can be compared — and tiles them into a contact sheet. Look at
+the sheet first, then `--at <seconds>` for a close look at the moment that turns
+out to be the interesting one. Editing a `.vfx.ron` without doing this is
+guessing.
+
+## Changing it from a script
+
+```sh
+floptle exec fix.lua               # the editor's own API, headless
+```
+
+`scene.find`, `scene.setPos`, `scene.add`, `scene.destroy`, `ed.saveScene()` and
+the rest of `docs/editor-scripting.md`. Use this instead of hand-editing `.ron`
+when the change is structural — it goes through the same code the editor's own
+panels do, so node ids, parent links and defaults come out right.
+
+**It does not save unless you call `ed.saveScene()`.** If you change something
+and forget, the run says so rather than losing it quietly.
+
+**`floptle check` is the one to build a habit around.** A `.ron` file that parses
+is not a scene that works: a parent link can point at the wrong node, a material
+can name a texture that is not there, a node can carry a script with no file
+behind it. Parsing is the only part of that a text editor can tell you about.
+
+**`floptle api` before you call anything.** Every name a script can reach is in
+there with its description, searchable by part of a name or by a word from what
+it does. It exits 1 when nothing matches, so `floptle api node:doesNotExist`
+answers a yes/no question.
+
+## What lives where
+
+| | |
+| --- | --- |
+| `project.ron` | the project: title, entry scene, layers, the engine version it was stamped with |
+| `scenes/` | scenes — the node graph, as text |
+| `scripts/` | Lua. A node names a script by its path here, without the `.lua` |
+| `materials/` | materials shared between nodes |
+| `textures/`, `models/`, `audio/` | assets, referenced project-relative |
+
+Hand-editing any of these is fine and expected. `floptle check` is how you know
+it worked.
+
+## Two things that will otherwise cost you an afternoon
+
+**A scene's `params:` list silently overrides a script's own defaults.** If a
+value you changed in the `.lua` has no effect, look for it pinned in the scene
+file — the authored value wins, and nothing says so.
+
+**A node's `parent_id` beats its positional `parent`.** When you are reading a
+scene by hand, follow the id. The index is a fallback that a later insertion can
+quietly re-point at a different node.
+
+**`v.x = 5` on a vec3 raises in a project whose `script_vec3` is `Fast`** — which
+is every new project; older ones are pinned to `Exact`, where it still works.
+Write `v = v:withX(5)` and it is right in both. `node.x = 5` is a NODE and is
+fine everywhere. `project.ron` says which one a project is on, and
+`floptle lint --vec3` lists every line that would need changing to switch.
+
+## Running it
+
+`floptle play` runs the project as a game, and `floptle open` opens the editor.
+`floptle serve` runs it as a dedicated server for a networked scene.
+Both need a display — check `needsGpu` in `floptle help --json` before reaching
+for a command in an environment that has none.

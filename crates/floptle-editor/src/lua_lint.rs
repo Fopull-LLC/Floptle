@@ -871,7 +871,7 @@ print(used)
         let api_refs: Vec<&str> = api.iter().map(|s| s.as_str()).collect();
         let mut noisy: Vec<String> = Vec::new();
         let mut files = 0;
-        for dir in ["assets/scripts"] {
+        for dir in ["crates/floptle-editor/builtin/scripts"] {
             let Ok(rd) = std::fs::read_dir(root.join(dir)) else { continue };
             for entry in rd.flatten() {
                 let path = entry.path();
@@ -894,7 +894,7 @@ print(used)
                 }
             }
         }
-        assert!(files > 20, "expected the real scripts, saw {files}");
+        assert!(files >= 12, "expected the real scripts, saw {files}");
         assert!(noisy.is_empty(), "the lint is too noisy on real code:\n{}", noisy.join("\n"));
     }
 
@@ -933,7 +933,7 @@ end
     /// avoid.
     #[test]
     fn the_shipped_example_scripts_are_lint_clean() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/scripts");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("builtin/scripts");
         let api = crate::ide::api_labels();
         let api_refs: Vec<&str> = api.iter().map(|s| s.as_str()).collect();
         let mut bad: Vec<String> = Vec::new();
@@ -950,7 +950,7 @@ end
                 bad.push(format!("{name}:{}: {}", l.line, l.message));
             }
         }
-        assert!(files >= 15, "expected the shipped examples, saw {files}");
+        assert!(files >= 12, "expected the shipped examples, saw {files}");
         assert!(bad.is_empty(), "shipped examples must be lint-clean:\n{}", bad.join("\n"));
     }
 }

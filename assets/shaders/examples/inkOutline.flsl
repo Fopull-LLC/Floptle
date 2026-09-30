@@ -1,0 +1,61 @@
+// Ink Outline — the comic-book look, drawn over the finished frame.
+// Drop it on the PostProcess node (Inspector -> Post Processing -> Screen
+// shaders -> +), and every object in the scene gets a drawn edge.
+//
+// Nothing in the scene has to change: the lines come from what the camera
+// already knows. `sceneDepth` says how far away each pixel is, `sceneNormal`
+// says which way it faces, and an edge is where either one breaks.
+//
+// This is also the worked example for writing your own — `stage post` shaders
+// read the frame at any pixel, not just their own, which is what makes an edge
+// detect (or a blur, or a warp) possible at all.
+shader inkOutline {
+  stage post
+  uniform inkColor: color = #14100E
+  uniform thickness: float = 1 range(0.5, 4)
+  // How eagerly a silhouette draws — where the surface in front stops and
+  // something much further away begins.
+  uniform silhouette: float = 8 range(0, 40)
+  // How eagerly a crease draws — where one flat face folds into another at the
+  // same distance. Depth alone can barely see these; the normals can.
+  uniform crease: float = 1 range(0, 4)
+  // 0 is a hard aliased line, 1 fades it in like a brush.
+  uniform softness: float = 0.4 range(0, 1)
+
+  // One pixel, in uv. `thickness` steps further out for a fatter line, and it
+  // follows the retro resolution, so a 1-pixel line stays 1 pixel.
+  let px = screenTexel() * thickness
+
+  // A cross of four neighbours — the cheapest kernel that finds an edge running
+  // in any direction.
+  let d0 = sceneDepth()
+  let dl = sceneDepth(uv - vec2(px.x, 0))
+  let dr = sceneDepth(uv + vec2(px.x, 0))
+  let du = sceneDepth(uv - vec2(0, px.y))
+  let dd = sceneDepth(uv + vec2(0, px.y))
+
+  // The bend in depth, not the difference. `dl + dr - 2*d0` is zero across any
+  // flat surface however steeply it is tilted away from the camera — which is
+  // the whole trick. A plain difference would paint a floor seen at a grazing
+  // angle solid black, because a distant floor's depth changes fast per pixel
+  // even though nothing about it is an edge. Divided by this pixel's own depth
+  // so a line looks the same width close up and far away, and the sky (a huge
+  // depth) makes every silhouette against it enormous.
+  let bend = (abs(dl + dr - d0 * 2) + abs(du + dd - d0 * 2)) / max(d0, 0.01)
+
+  // Where the surface folds. Four dot products against the neighbours' normals:
+  // 0 on a flat wall, 1 per right-angle turn, and gentle on a curve so a sphere
+  // doesn't fill in with ink.
+  let n0 = sceneNormal()
+  let fold = 4
+    - dot(n0, sceneNormal(uv - vec2(px.x, 0)))
+    - dot(n0, sceneNormal(uv + vec2(px.x, 0)))
+    - dot(n0, sceneNormal(uv - vec2(0, px.y)))
+    - dot(n0, sceneNormal(uv + vec2(0, px.y)))
+
+  let edge = saturate(bend * silhouette + fold * crease * 0.5)
+  let ink = smoothstep(0.5 - softness * 0.5, 0.5 + softness * 0.5 + 0.001, edge)
+
+  // `inkColor`'s alpha is how black the line goes — pull it down for a sketch.
+  output color = vec4(mix(sceneColor().rgb, inkColor.rgb, ink * inkColor.a), 1)
+}

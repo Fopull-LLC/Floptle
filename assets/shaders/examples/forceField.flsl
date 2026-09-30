@@ -15,4 +15,4 @@ shader forceField {
 
   output color = vec4(fieldColor.rgb * energy, 0.6)
 }
-//@layout { rim: (-684, 0), web: (-684, 140), wave: (-684, 280), energy: (-342, 120), out: (0, 140) }
+//@layout { energy: (-684, 256), in.normal: (-2052, 0), in.time: (-2736, 0), in.uv: (-2508, 0), in.viewDir: (-2052, 212), out: (0, 0), rim: (-1140, 0), u.cells: (-2508, 212), u.fieldColor: (-912, 0), u.pulse: (-2508, 614), wave: (-1140, 512), web: (-1596, 234) }

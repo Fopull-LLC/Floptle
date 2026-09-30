@@ -1945,7 +1945,6 @@ dependencies = [
  "floptle-nav",
  "floptle-rules",
  "floptle-say",
- "floptle-scene",
  "floptle-script",
  "floptle-shader",
  "floptle-ui",
@@ -1955,7 +1954,6 @@ dependencies = [
  "naga",
  "png",
  "pollster",
- "ron",
  "wgpu",
  "winit",
 ]

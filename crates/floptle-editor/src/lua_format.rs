@@ -395,7 +395,7 @@ mod real_script_tests {
     fn formatting_the_real_scripts_moves_only_whitespace() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut checked = 0;
-        for dir in ["assets/scripts"] {
+        for dir in ["crates/floptle-editor/builtin/scripts"] {
             let Ok(rd) = std::fs::read_dir(root.join(dir)) else { continue };
             for entry in rd.flatten() {
                 let path = entry.path();
@@ -417,7 +417,7 @@ mod real_script_tests {
                 checked += 1;
             }
         }
-        assert!(checked > 20, "expected to check the real scripts, only saw {checked}");
+        assert!(checked >= 12, "expected to check the real scripts, only saw {checked}");
         println!("formatted {checked} real scripts, whitespace-only");
     }
 }

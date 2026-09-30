@@ -16,4 +16,4 @@ shader ringTower {
   output sdf = solid
   output color = mix(vec3(0.9, 0.6, 0.2), vec3(0.3, 0.2, 0.5), stripes)
 }
-//@layout { stack: (-684, 0), rings: (-456, 0), bound: (-456, 140), solid: (-228, 60), stripes: (-456, 280), out: (0, 100) }
+//@layout { bound: (-456, 278), in.worldPos: (-1368, 0), out: (0, 0), rings: (-456, 0), solid: (-228, 0), stack: (-684, 0), stripes: (-456, 534), u.major: (-684, 256), u.minor: (-684, 402), u.spacing: (-1140, 0) }

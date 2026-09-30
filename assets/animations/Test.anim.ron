@@ -1,7 +1,0 @@
-(
-    name: "Test",
-    duration: 2.0,
-    source_model: "",
-    channels: [],
-    events: [],
-)

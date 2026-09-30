@@ -1,0 +1,28 @@
+// CRT Scanlines — the small one. Read this first if you want to write your own
+// screen shader: it is the whole shape of a `stage post` pass in a dozen lines.
+//
+// A post shader gets the finished frame and returns a new colour for each pixel.
+// `uv` is 0..1 across the screen, `sceneColor()` is the pixel it lands on, and
+// `sceneColor(somewhere else)` is any other pixel — which is how you blur, warp
+// or outline. Add it under the PostProcess node's screen shaders.
+shader crtScanlines {
+  stage post
+  uniform lines: float = 240 range(60, 1080)
+  uniform darkness: float = 0.35 range(0, 1)
+  // How far the picture bulges outward, like glass.
+  uniform bulge: float = 0.06 range(0, 0.3)
+  uniform roll: float = 0.15 range(0, 2)
+
+  // Bend the sampling point away from the centre and the picture curves.
+  let c = uv * 2 - 1
+  let warped = (c * (1 + bulge * dot(c, c))) * 0.5 + 0.5
+
+  // One dark band per scan line, drifting slowly so it reads as a live signal.
+  let band = sin((warped.y + time * roll * 0.01) * lines * 3.14159265) * 0.5 + 0.5
+  let dim = 1 - darkness * band
+
+  // Off the edge of the tube after the bulge — that is the bezel.
+  let inside = step(0, warped.x) * step(warped.x, 1) * step(0, warped.y) * step(warped.y, 1)
+
+  output color = vec4(sceneColor(warped).rgb * dim * inside, 1)
+}

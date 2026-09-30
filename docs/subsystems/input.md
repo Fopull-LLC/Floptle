@@ -433,7 +433,7 @@ direction takes over with no neutral frame, so a player can pivot), or
 `Positive`/`Negative` priority.
 
 What stays out: the **move list**. Which motion plus which button makes which
-attack is the game's business — see `assets/scripts/fighter.lua` for a worked
+attack is the game's business — see `scripts/fighter.lua` in a new project for a worked
 example including local versus off a single script.
 
 ## The shipped default scripts

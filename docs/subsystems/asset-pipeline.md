@@ -188,7 +188,6 @@ than a habit.
 The rule that makes this safe is that the engine never hard-depends on any of
 them. Built-in defaults ([`./materials-and-textures.md`](./materials-and-textures.md) §4)
 cover real content, so a checkout with no placeholders in it renders correctly.
-`assets/textures/README.md` says where to put your own.
 
 ## 6. Editor UX — the Asset Browser
 

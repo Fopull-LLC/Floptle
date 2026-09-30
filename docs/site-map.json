@@ -65,7 +65,7 @@
       "id": "interface",
       "title": "Menus and HUDs",
       "blurb": "The UI layer, from the tab that draws it to the code that binds it.",
-      "pages": ["ui-tab.md", "ui-styles.md", "ui-make.md", "ui-navigation.md", "ui-demo.md"]
+      "pages": ["ui-tab.md", "ui-styles.md", "ui-make.md", "ui-navigation.md"]
     },
     {
       "id": "shipping",

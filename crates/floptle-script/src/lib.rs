@@ -2159,35 +2159,24 @@ impl Default for BodyState {
 /// the crate that would actually have to run it.
 #[cfg(test)]
 const SHIPPED_SCRIPTS: &[(&str, &str)] = &[
-    ("freelook.lua", include_str!("../../../assets/scripts/freelook.lua")),
-    ("first_person.lua", include_str!("../../../assets/scripts/first_person.lua")),
-    ("third_person.lua", include_str!("../../../assets/scripts/third_person.lua")),
+    ("freelook.lua", include_str!("../../floptle-editor/builtin/scripts/freelook.lua")),
+    ("first_person.lua", include_str!("../../floptle-editor/builtin/scripts/first_person.lua")),
+    ("third_person.lua", include_str!("../../floptle-editor/builtin/scripts/third_person.lua")),
     (
         "third_person_camera.lua",
-        include_str!("../../../assets/scripts/third_person_camera.lua"),
+        include_str!("../../floptle-editor/builtin/scripts/third_person_camera.lua"),
     ),
-    ("fighter.lua", include_str!("../../../assets/scripts/fighter.lua")),
+    ("fighter.lua", include_str!("../../floptle-editor/builtin/scripts/fighter.lua")),
     // A starting point for strategy games: an isometric camera you pan with
     // Wasd or the screen edge, commandable units, and the mouse layer that
     // selects and orders them.
-    ("rts_camera.lua", include_str!("../../../assets/scripts/rts_camera.lua")),
-    ("rts_unit.lua", include_str!("../../../assets/scripts/rts_unit.lua")),
-    ("rts_commander.lua", include_str!("../../../assets/scripts/rts_commander.lua")),
-    ("sword.lua", include_str!("../../../assets/scripts/sword.lua")),
-    ("rotate.lua", include_str!("../../../assets/scripts/rotate.lua")),
-    ("pulsate.lua", include_str!("../../../assets/scripts/pulsate.lua")),
-    ("float.lua", include_str!("../../../assets/scripts/float.lua")),
-    ("hand.lua", include_str!("../../../assets/scripts/hand.lua")),
-    ("portal.lua", include_str!("../../../assets/scripts/portal.lua")),
-    ("parry_dummy.lua", include_str!("../../../assets/scripts/parry_dummy.lua")),
-    ("player_spawner.lua", include_str!("../../../assets/scripts/player_spawner.lua")),
-    ("fixedTest.lua", include_str!("../../../assets/scripts/fixedTest.lua")),
-    ("ui_demo.lua", include_str!("../../../assets/scripts/ui_demo.lua")),
-    ("ui_demo_button.lua", include_str!("../../../assets/scripts/ui_demo_button.lua")),
-    ("ui_demo_field.lua", include_str!("../../../assets/scripts/ui_demo_field.lua")),
-    ("ui_demo_row.lua", include_str!("../../../assets/scripts/ui_demo_row.lua")),
-    ("ui_demo_slot.lua", include_str!("../../../assets/scripts/ui_demo_slot.lua")),
-    ("web_login.lua", include_str!("../../../assets/scripts/web_login.lua")),
+    ("rts_camera.lua", include_str!("../../floptle-editor/builtin/scripts/rts_camera.lua")),
+    ("rts_unit.lua", include_str!("../../floptle-editor/builtin/scripts/rts_unit.lua")),
+    ("rts_commander.lua", include_str!("../../floptle-editor/builtin/scripts/rts_commander.lua")),
+    ("rotate.lua", include_str!("../../floptle-editor/builtin/scripts/rotate.lua")),
+    ("pulsate.lua", include_str!("../../floptle-editor/builtin/scripts/pulsate.lua")),
+    ("float.lua", include_str!("../../floptle-editor/builtin/scripts/float.lua")),
+    ("web_login.lua", include_str!("../../floptle-editor/builtin/scripts/web_login.lua")),
 ];
 
 #[cfg(test)]

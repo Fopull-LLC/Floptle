@@ -15,4 +15,4 @@ shader fieldGlow {
 
   output color = vec4(lit + aura, albedo.a)
 }
-//@layout { albedo: (-912, 0), lit: (-684, 0), near: (-684, 140), cavity: (-684, 280), aura: (-342, 180), out: (0, 90) }
+//@layout { albedo: (-1140, 0), aura: (-684, 234), cavity: (-1368, 848), in.instanceColor: (-1368, 234), in.normal: (-2736, 0), in.worldPos: (-2508, 0), lit: (-684, 0), near: (-1368, 592), out: (0, 0), u.auraColor: (-1368, 446), u.reach: (-2052, 234) }

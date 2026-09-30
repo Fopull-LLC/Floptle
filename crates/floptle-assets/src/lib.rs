@@ -76,7 +76,7 @@ mod tests {
     /// branch, as the two importers it replaces.
     #[test]
     fn one_read_imports_what_two_did() {
-        let prop = Path::new("../../assets/SaesRapier.glb");
+        let prop = Path::new("tests/fixtures/SaesRapier.glb");
         assert!(crate::import_rigged(prop).unwrap().is_none(), "the fixture is a lone static mesh");
         let old = crate::import(prop).unwrap();
         let crate::Model::Static(new) = crate::import_model(prop).unwrap() else {
@@ -87,7 +87,7 @@ mod tests {
         assert_eq!(new.parts[0].mesh.vertices.len(), old.parts[0].mesh.vertices.len());
         assert_eq!(new.size, old.size);
 
-        let rigged = Path::new("../../assets/models/Sae.glb");
+        let rigged = Path::new("tests/fixtures/Sae.glb");
         let old = crate::import_rigged(rigged).unwrap().expect("the fixture keeps its tree");
         let crate::Model::Rigged(new) = crate::import_model(rigged).unwrap() else {
             panic!("a rigged model took the static branch")

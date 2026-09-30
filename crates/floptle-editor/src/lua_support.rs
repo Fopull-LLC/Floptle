@@ -11,33 +11,33 @@ pub(crate) const DEFAULT_SCRIPTS: &[(&str, &str)] = &[
     // The default new-scene camera's flycam (hold RMB to look, wasd to move) —
     // default_camera_node() attaches `freelook`, so this must ship or a fresh
     // project's camera references a script that doesn't exist.
-    ("freelook.lua", include_str!("../../../assets/scripts/freelook.lua")),
-    ("rotate.lua", include_str!("../../../assets/scripts/rotate.lua")),
-    ("pulsate.lua", include_str!("../../../assets/scripts/pulsate.lua")),
-    ("float.lua", include_str!("../../../assets/scripts/float.lua")),
+    ("freelook.lua", include_str!("../builtin/scripts/freelook.lua")),
+    ("rotate.lua", include_str!("../builtin/scripts/rotate.lua")),
+    ("pulsate.lua", include_str!("../builtin/scripts/pulsate.lua")),
+    ("float.lua", include_str!("../builtin/scripts/float.lua")),
     // Ready-made character setups: an FPS body-camera, and a third-person
     // pair (body controller + orbit camera with first-person zoom).
-    ("first_person.lua", include_str!("../../../assets/scripts/first_person.lua")),
-    ("third_person.lua", include_str!("../../../assets/scripts/third_person.lua")),
+    ("first_person.lua", include_str!("../builtin/scripts/first_person.lua")),
+    ("third_person.lua", include_str!("../builtin/scripts/third_person.lua")),
     (
         "third_person_camera.lua",
-        include_str!("../../../assets/scripts/third_person_camera.lua"),
+        include_str!("../builtin/scripts/third_person_camera.lua"),
     ),
     // An arcade fighter on named actions: local versus off one script, with
     // input buffering and motion inputs. The worked example for the whole
     // action layer.
-    ("fighter.lua", include_str!("../../../assets/scripts/fighter.lua")),
+    ("fighter.lua", include_str!("../builtin/scripts/fighter.lua")),
     // A starting point for strategy games: an isometric camera you pan with
     // Wasd or the screen edge, commandable units, and the mouse layer that
     // selects and orders them.
-    ("rts_camera.lua", include_str!("../../../assets/scripts/rts_camera.lua")),
-    ("rts_unit.lua", include_str!("../../../assets/scripts/rts_unit.lua")),
-    ("rts_commander.lua", include_str!("../../../assets/scripts/rts_commander.lua")),
+    ("rts_camera.lua", include_str!("../builtin/scripts/rts_camera.lua")),
+    ("rts_unit.lua", include_str!("../builtin/scripts/rts_unit.lua")),
+    ("rts_commander.lua", include_str!("../builtin/scripts/rts_commander.lua")),
     // Talking to a website: the device-code sign-in flow, written against a
     // configurable `api` param so it points at your server. The worked example
     // for `http.*` and for the one rule that makes an account-backed game
     // possible at all — the server decides what the player owns.
-    ("web_login.lua", include_str!("../../../assets/scripts/web_login.lua")),
+    ("web_login.lua", include_str!("../builtin/scripts/web_login.lua")),
 ];
 
 /// EmmyLua type annotations for the engine API, so an external Lua language server

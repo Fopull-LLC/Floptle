@@ -93,7 +93,7 @@ Play only; Stop and `scene.load` cancel everything in flight; a call from
 `fixedUpdate` warns, because a reply's timing can never be replayed.
 
 **[docs/web-api.md](../web-api.md) is the full page** — the `res` table in detail,
-the device-code sign-in flow (`assets/scripts/web_login.lua`), the rate limits,
+the device-code sign-in flow (`scripts/web_login.lua` in a new project), the rate limits,
 and the one rule that makes an account-backed game possible at all:
 
 > **The server decides what the player owns.** The client asks; it never

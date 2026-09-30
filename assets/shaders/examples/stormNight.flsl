@@ -1,6 +1,6 @@
 // Storm night — a churning storm deck with real lightning. Each strike picks
 // a random moment AND a random direction (valueNoise seeded by the cycle
-// number is the poor man's random), double-flashes, and lights the THIN
+// number is the poor man's random), double-flashes, and lights the thin
 // parts of the clouds from behind — the way a real storm silhouettes itself.
 shader stormNight {
   stage sky

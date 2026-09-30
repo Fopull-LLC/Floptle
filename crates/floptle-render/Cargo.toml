@@ -50,17 +50,12 @@ naga = { version = "29", features = ["wgsl-in", "glsl-out"] }
 # Offscreen render tests (examples/blob_probe.rs) write PNGs to inspect the look.
 # examples/shader_probe.rs compiles .flsl through the production path.
 floptle-shader = { path = "../floptle-shader" }
-# examples/ui_demo_probe.rs renders a real .ron scene's UI layer, so the demo
-# is checked as the FILE the editor loads rather than as a Rust rebuild of it.
-floptle-scene = { path = "../floptle-scene" }
 # examples/nav_overlay_probe.rs draws a real bake, because "is this navmesh
 # readable" is a question about a picture and only a picture answers it.
 floptle-nav = { path = "../floptle-nav" }
 # examples/model_shot.rs renders a real .glb through the production importer, so
 # the picture a package ships is the model the editor would load.
 floptle-assets = { path = "../floptle-assets" }
-# …and the same example runs the demo's OWN Lua, so the `ui.make` panel in the
-# picture is the one the game builds rather than a Rust restatement of it.
+# The script VM switch in [features] forwards to it.
 floptle-script = { path = "../floptle-script", default-features = false }
 floptle-core = { path = "../floptle-core" }
-ron = { workspace = true }

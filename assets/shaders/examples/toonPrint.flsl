@@ -15,4 +15,4 @@ shader toonPrint {
 
   output color = vec4(inked, albedo.a)
 }
-//@layout { albedo: (-912, 30), lit: (-684, 30), toon: (-456, 30), edge: (-456, 170), inked: (-228, 80), out: (0, 80) }
+//@layout { albedo: (-1596, 0), edge: (-912, 512), in.instanceColor: (-1824, 256), in.normal: (-1824, 468), in.viewDir: (-1824, 680), inked: (-456, 0), lit: (-1140, 0), out: (0, 0), toon: (-912, 0), u.bands: (-1140, 234), u.ink: (-1368, 256), u.tint: (-2052, 234) }

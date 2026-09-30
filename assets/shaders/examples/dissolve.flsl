@@ -1,3 +1,6 @@
+// Dissolve — a burn-away cutout. Noise decides which pixels survive as
+// `progress` sweeps 0 → 1 (animate it from Lua or scrub it in the Inspector),
+// and the surviving rim right at the threshold glows hot.
 shader dissolve {
   stage fragment
   blend alpha
@@ -5,22 +8,13 @@ shader dissolve {
   uniform edgeColor: color = #FF9A3C
   uniform edgeWidth: float = 0.08 range(0.01, 0.3)
 
-  let baseTexture1 = baseTexture()
-  let albedo = baseTexture1 * instanceColor
-  let fbm1 = fbm(uv * 6, octaves: 4)
-  let grain = fbm1 * 0.5 + 0.5
+  let grain = fbm(uv * 6, octaves: 4) * 0.5 + 0.5
   let alive = step(progress, grain)
-  let part1 = edgeColor.rgb
-  let mixdown1 = progress + edgeWidth
-  let edge = smoothstep(progress, mixdown1, grain)
-  let mixdown3 = part1 * 2.5
-  let part2 = albedo.a
-  let mixdown2 = part2 * alive
-  let part3 = albedo.rgb
-  let lit = litSurface(part3)
-  let burning = mix(mixdown3, lit, edge)
-  let node1 = vec4(burning, mixdown2)
+  let edge = smoothstep(progress, progress + edgeWidth, grain)
+  let albedo = baseTexture() * instanceColor
+  let lit = litSurface(albedo.rgb)
+  let burning = mix(edgeColor.rgb * 2.5, lit, edge)
 
-  output color = node1
+  output color = vec4(burning, albedo.a * alive)
 }
-//@layout { albedo: (-1099, -386), alive: (-384, -363), baseTexture1: (-1367, -282), burning: (40, 318), edge: (-426, 0), fbm1: (-1399, 338), grain: (-806, 147), lit: (-485, 349), mixdown1: (-690, 432), mixdown2: (-120, -104), mixdown3: (-188, 181), node1: (150, -23), out: (432, 12), part1: (-791, -122), part2: (-608, -536), part3: (-792, -394) }
+//@layout { albedo: (-1140, 146), alive: (-684, 1024), burning: (-456, 0), edge: (-684, 490), grain: (-912, 768), in.instanceColor: (-1368, 234), in.uv: (-1824, 0), lit: (-684, 256), out: (0, 0), u.edgeColor: (-1140, 0), u.edgeWidth: (-1140, 548), u.progress: (-1140, 402) }

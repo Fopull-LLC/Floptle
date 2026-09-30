@@ -118,8 +118,6 @@ The build-something guides. Each one is a path from nothing to a working result.
   isn't mouse-only.
 - [ui-make.md](ui-make.md) — **screens from data** (`ui.make`): a roster of four fighters
   or nine, an inventory of whatever the player is carrying.
-- [ui-demo.md](ui-demo.md) — the demo scene that uses all of it at once. Open it and press
-  Play.
 
 ## Design docs (how it's built and why)
 
