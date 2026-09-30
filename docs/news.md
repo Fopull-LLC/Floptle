@@ -1,5 +1,14 @@
 ## Just shipped
 
+**v0.104.0 — "Ready For Steam"** (stable). An exported game can talk to
+Steam: give the project a Steam App ID and the build ships with it. Friends
+can invite each other and join from the Steam friend list, a game can see
+which DLC the player owns and unlock one bought mid-game, and it can mark its
+highlights on Steam's game recording. Vessels collide with each other and with
+the people walking on them, `net.send` hands a whole player-made level to
+someone who has just joined, `onDestroy` lets a script tidy up after itself,
+and a static piece a script moves takes its collider with it.
+
 **v0.103.0 — "Holds Steady"** (stable). A game can hold a steady frame rate:
 `app.setFrameCap` holds it to a rate it can always make, and
 `app.setDynamicResolution` lowers the render resolution whenever the graphics
