@@ -887,6 +887,10 @@ impl Editor {
                 doomed.push(e);
                 queue.extend(kids.get(&e).map(|v| v.as_slice()).unwrap_or(&[]));
             }
+            // Every script in the subtree hears `onDestroy` while it and its
+            // node still exist, so it can tidy up what it made elsewhere.
+            let ids: Vec<u32> = doomed.iter().map(|e| e.index()).collect();
+            self.script_host.call_on_destroy_nodes(&mut self.world, &ids);
             for e in doomed {
                 let idx = e.index();
                 gone.push(idx);
@@ -1317,6 +1321,54 @@ end
             authored,
             "a node queued in the previous session must not appear in this one"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `destroy()` tells every script in the subtree before any of it goes: a
+    /// script on a child still reads its own node, and can remove a helper it
+    /// parented to the world.
+    #[test]
+    fn destroy_tells_the_whole_subtree_before_it_goes() {
+        let dir = std::env::temp_dir().join(format!("floptle-on-destroy-{}", std::process::id()));
+        let scripts = dir.join("scripts");
+        let _ = floptle_vfs::create_dir_all(&scripts);
+        floptle_vfs::write(
+            scripts.join("tidy.lua"),
+            "function onDestroy(node)\n  log('bye ' .. tostring(node.name))\n  local b = find('Bar')\n  if b then destroy(b) end\nend\n",
+        )
+        .unwrap();
+        let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+        let node = |ed: &mut crate::Editor, name: &str| {
+            let e = ed.world.spawn();
+            ed.world.insert(e, Transform::IDENTITY);
+            ed.world.insert(e, Name(name.into()));
+            ed.world.insert(e, Matter::Empty);
+            e
+        };
+        let pulley = node(&mut ed, "Pulley");
+        let wheel = node(&mut ed, "Wheel");
+        ed.world.insert(wheel, floptle_core::Parent(pulley));
+        ed.world.insert(
+            wheel,
+            Scripts(vec![ScriptInst {
+                kind: "tidy".into(),
+                enabled: true,
+                params: Vec::new(),
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let bar = node(&mut ed, "Bar");
+        ed.script_host.run(&mut ed.world, &scripts, 1.0 / 60.0, 0.0);
+        ed.script_host.drain_logs();
+
+        ed.apply_destroys(vec![pulley.index()]);
+        let byes: Vec<String> =
+            ed.script_host.drain_logs().into_iter().map(|l| l.msg).filter(|m| m.starts_with("bye")).collect();
+        assert_eq!(byes, vec!["bye Wheel".to_string()], "the child's script ran while its node was there");
+        assert!(!ed.world.is_alive(pulley) && !ed.world.is_alive(wheel), "the subtree went");
+        assert_eq!(ed.script_host.take_destroy_requests(), vec![bar.index()], "the helper was queued to go");
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

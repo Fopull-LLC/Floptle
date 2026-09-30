@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 190
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 191
 - [node — transform & body fields](#node--transform--body-fields) — 40
 - [node — methods & handles](#node--methods--handles) — 31
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -398,6 +398,10 @@ end
 ### `onCollisionExit`
 
 function onCollisionExit(node, other, hit) — fires the tick the touch ends (hit = the last known contact).
+
+### `onDestroy`
+
+function onDestroy(node) — runs once when this script's node goes: destroy() on it or an ancestor, a scene.unload of its layer, a scene switch (unless it is persistent). The node is still there, so read what you need and destroy() anything you made outside your own subtree. Not when the script is merely switched off, nor when you press Stop. A node removed without warning (deleted in the editor during Play) is told afterwards: its fields then read nil, but your script's own variables are all still there.
 
 ### `onTriggerEnter`
 

@@ -51,6 +51,9 @@ end
 
 function lateUpdate(node, dt)    -- runs after physics each frame (the camera pass)
 end
+
+function onDestroy(node)         -- runs once, when the node goes
+end
 ```
 
 Each attached script keeps its **own state across frames** — assign a variable in
@@ -71,6 +74,15 @@ frame's physics — one frame stale, a follow error of `velocity × dt` that
 turns frame-time noise into visible movement jitter. In `lateUpdate` the
 target's pose is final for the frame, so the follow is exact. The stock
 `third_person_camera.lua` does this.
+
+`onDestroy` runs once when the script's node goes: `destroy()` on it or on
+anything above it, a `scene.unload` of its layer, or a scene switch it is not
+persistent through. The node is still there when it runs, so it is the place to
+`destroy()` anything the script made outside its own subtree: a helper node it
+parented to the world, say, which would otherwise be left behind. It does not
+run when the script is switched off or when you press Stop. A node deleted by
+hand during Play is told afterwards instead: its fields read `nil` by then,
+while the script's own variables are all still there.
 
 `fixedUpdate` runs on the same fixed clock physics steps on, right before each
 physics tick — so gameplay code behaves identically at 30 fps and 240 fps, and

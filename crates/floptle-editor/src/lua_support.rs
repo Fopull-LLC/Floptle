@@ -1501,6 +1501,11 @@ function onTriggerStay(node, other, hit) end
 ---@param hit Hit
 function onTriggerExit(node, other, hit) end
 
+---Runs once when this script's node goes: destroy(), a layer unloading, a
+---scene switch. The node is still there: tidy up what you made elsewhere.
+---@param node Node
+function onDestroy(node) end
+
 ---Immediate-mode debug drawing (play mode): shapes show for ONE frame in the
 ---viewport, Scene AND Game views. Call every frame you want a shape visible.
 ---Colors are optional 0-1 floats (default green).

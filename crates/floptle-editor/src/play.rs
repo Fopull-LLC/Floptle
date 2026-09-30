@@ -1226,6 +1226,9 @@ impl Editor {
         self.anim.clear_instances();
         self.vfx.clear_instances();
         self.script_host.clear_anim_state();
+        // Every script not coming along hears `onDestroy`, in the world it is
+        // leaving, before that world goes.
+        self.script_host.call_on_destroy_all_except(&mut self.world, &keep_ids);
         self.script_host.reset_instances_keeping(&keep_ids);
         // A scatter source names a region of the world that is about to stop
         // existing, and its resolved chunks were dropped onto ground that is
@@ -1592,6 +1595,8 @@ impl Editor {
                 sim.remove_body(e.index());
             }
         }
+        let ids: Vec<u32> = doomed.iter().map(|e| e.index()).collect();
+        self.script_host.call_on_destroy_nodes(&mut self.world, &ids);
         self.audio_forget(&gone);
         self.vfx.forget_entities(&gone);
         self.anim.forget_entities(&gone);

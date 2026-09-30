@@ -2856,6 +2856,7 @@ impl ScriptHost {
             save_state,
             sched,
             sleepers,
+            destroy_told: std::collections::HashSet::new(),
             kinds_this_frame: HashMap::new(),
             script_clock,
             space_info,
@@ -3505,6 +3506,7 @@ impl ScriptHost {
             agents.crowd.clear();
             agents.bound.clear();
         }
+        self.destroy_told.retain(|(e, _)| keep.contains(e));
         let all: Vec<_> = self.instances.drain().collect();
         for (k, inst) in all {
             if keep.contains(&k.0) {
@@ -4477,6 +4479,50 @@ impl ScriptHost {
         }
     }
 
+    /// Run `onDestroy(node)` for every script on the nodes in `ids`, which are
+    /// about to go: a `destroy()`, a layer unloading. Called while the nodes
+    /// still exist, so the script can read them and tidy up after itself.
+    pub fn call_on_destroy_nodes(&mut self, world: &mut World, ids: &[u32]) {
+        let ids: std::collections::HashSet<u32> = ids.iter().copied().collect();
+        let keys: Vec<(u32, String)> =
+            self.envs.borrow().keys().filter(|(id, _)| ids.contains(id)).cloned().collect();
+        self.call_on_destroy(world, &keys);
+    }
+
+    /// [`Self::call_on_destroy_nodes`] for every script except those on the
+    /// nodes in `keep`: a scene switch, where only persistent nodes stay.
+    pub fn call_on_destroy_all_except(&mut self, world: &mut World, keep: &std::collections::HashSet<u32>) {
+        let keys: Vec<(u32, String)> =
+            self.envs.borrow().keys().filter(|(id, _)| !keep.contains(id)).cloned().collect();
+        self.call_on_destroy(world, &keys);
+    }
+
+    /// `onDestroy(node)` once per (node, script) in `keys`, skipping any
+    /// already told.
+    fn call_on_destroy(&mut self, world: &mut World, keys: &[(u32, String)]) {
+        let _budget = self.budget.arm();
+        let mut called = false;
+        for (eid, kind) in keys {
+            if !self.destroy_told.insert((*eid, kind.clone())) {
+                continue;
+            }
+            let key = (*eid, kind.clone());
+            let Some(env) = self.envs.borrow().get(&key).and_then(|k| self.env_of(k)) else { continue };
+            let Ok(Some(f)) = env.raw_get::<Option<mlua::Function>>("onDestroy") else { continue };
+            let Ok(node) = new_node_handle(&self.lua, *eid) else { continue };
+            called = true;
+            *self.net.current.borrow_mut() = Some(key.clone());
+            let result = f.call::<()>(node);
+            *self.net.current.borrow_mut() = None;
+            if let Err(err) = result {
+                self.record_error(kind, format!("{kind}: onDestroy: {err}"));
+            }
+        }
+        if called {
+            self.flush_scene(world);
+        }
+    }
+
     // -------------------------------------------------------------------
     // net.* bridge (docs/multiplayer.md §8)
     // -------------------------------------------------------------------
@@ -5403,10 +5449,17 @@ impl ScriptHost {
         self.flush_writes(world);
         self.check_ui_listeners(world);
 
-        // Drop environments whose (node, script) no longer exists.
+        // Drop environments whose (node, script) no longer exists — a node
+        // deleted some way that did not call `onDestroy` first, or a script
+        // taken off its node. Told now, with the environment still intact;
+        // the node itself may already be gone.
         let stale: Vec<(u32, String)> =
             self.instances.iter().filter(|(_, i)| !i.seen).map(|(k, _)| k.clone()).collect();
+        if !stale.is_empty() {
+            self.call_on_destroy(world, &stale);
+        }
         for k in stale {
+            self.destroy_told.remove(&k);
             if let Some(inst) = self.instances.remove(&k) {
                 let _ = self.lua.remove_registry_value(inst.env);
             }
@@ -6881,6 +6934,9 @@ impl ScriptHost {
                     self.setup_synced(&env, &key);
                     let hooks = Hooks::of(&env);
                     let writes_params = source_writes_params(&src);
+                    // A fresh instance has told nobody anything yet, even
+                    // under an entity index a destroyed node used to hold.
+                    self.destroy_told.remove(&key);
                     match self.lua.create_registry_value(env) {
                         Ok(reg) => {
                             self.instances.insert(

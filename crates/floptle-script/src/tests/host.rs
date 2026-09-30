@@ -811,3 +811,149 @@ fn a_component_added_by_a_create_callback_reaches_the_mirror() {
     let fov = s.components.get(&cam.index()).and_then(|c| c.get("Camera")).and_then(|c| c.get("fovY"));
     assert_eq!(fov.map(|v| (v * 1e4).round() / 1e4), Some(1.2), "the callback's camera never reached the mirror");
 }
+
+/// A node with a script that made a helper somewhere else, and says goodbye.
+fn tidy_world(dir: &Path, enabled: bool) -> (World, Entity) {
+    write_script(
+        dir,
+        "tidy",
+        "function start(node) helperName = 'Bar' end\n\
+         function update(node, dt) end\n\
+         function onDestroy(node)\n\
+           log('bye ' .. tostring(node.name))\n\
+           local h = find(helperName)\n\
+           if h then destroy(h) end\n\
+         end\n",
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(e, floptle_core::Name("Pulley".into()));
+    world.insert(e, floptle_core::Matter::Empty);
+    world.insert(
+        e,
+        Scripts(vec![floptle_core::ScriptInst {
+            kind: "tidy".into(),
+            enabled,
+            params: vec![],
+            refs: Vec::new(),
+            strs: Vec::new(),
+        }]),
+    );
+    let bar = world.spawn();
+    world.insert(bar, Transform::IDENTITY);
+    world.insert(bar, floptle_core::Name("Bar".into()));
+    world.insert(bar, floptle_core::Matter::Empty);
+    (world, e)
+}
+
+fn byes(host: &mut ScriptHost) -> Vec<String> {
+    host.drain_logs().into_iter().filter(|l| l.msg.starts_with("bye")).map(|l| l.msg).collect()
+}
+
+/// `onDestroy` runs while the node is still there, can reach what the script
+/// made elsewhere, and runs once however many ways the node then goes.
+#[test]
+fn on_destroy_runs_once_while_the_node_still_exists() {
+    let dir = std::env::temp_dir().join("floptle_script_test_on_destroy");
+    let _ = std::fs::create_dir_all(&dir);
+    let (mut world, e) = tidy_world(&dir, true);
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 0.016, 0.0);
+    host.drain_logs();
+    let _ = host.take_destroy_requests();
+
+    host.call_on_destroy_nodes(&mut world, &[e.index()]);
+    assert_eq!(byes(&mut host), vec!["bye Pulley".to_string()], "the node's name is still readable");
+    let bar = world.query::<floptle_core::Name>().find(|(_, n)| n.0 == "Bar").map(|(b, _)| b.index()).unwrap();
+    assert_eq!(host.take_destroy_requests(), vec![bar], "the helper it made is tidied up");
+
+    host.call_on_destroy_nodes(&mut world, &[e.index()]);
+    world.despawn(e);
+    host.run(&mut world, &dir, 0.016, 0.016);
+    assert!(byes(&mut host).is_empty(), "told twice");
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+}
+
+/// A node that goes without anyone calling `onDestroy` first is still told,
+/// by the pass that notices its script has nothing to run on.
+#[test]
+fn a_node_removed_any_other_way_is_still_told() {
+    let dir = std::env::temp_dir().join("floptle_script_test_on_destroy_sweep");
+    let _ = std::fs::create_dir_all(&dir);
+    let (mut world, e) = tidy_world(&dir, true);
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 0.016, 0.0);
+    host.drain_logs();
+    world.despawn(e);
+    host.run(&mut world, &dir, 0.016, 0.016);
+    // The node is gone by now, so its fields read nil; what the script kept
+    // is still there, which is what tidying up needs.
+    assert_eq!(byes(&mut host), vec!["bye nil".to_string()]);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    host.run(&mut world, &dir, 0.016, 0.032);
+    assert!(byes(&mut host).is_empty(), "told again on the next frame");
+}
+
+/// A scene switch tells every script that is not coming along, and none that
+/// is.
+#[test]
+fn a_scene_switch_tells_everything_but_what_it_keeps() {
+    let dir = std::env::temp_dir().join("floptle_script_test_on_destroy_switch");
+    let _ = std::fs::create_dir_all(&dir);
+    let (mut world, e) = tidy_world(&dir, true);
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 0.016, 0.0);
+    host.drain_logs();
+    let keep: std::collections::HashSet<u32> = [e.index()].into();
+    host.call_on_destroy_all_except(&mut world, &keep);
+    assert!(byes(&mut host).is_empty(), "a persistent node was told it was going");
+    host.call_on_destroy_all_except(&mut world, &Default::default());
+    assert_eq!(byes(&mut host).len(), 1);
+}
+
+/// Switching a script off is not destroying it.
+#[test]
+fn a_switched_off_script_is_not_told_it_was_destroyed() {
+    let dir = std::env::temp_dir().join("floptle_script_test_on_destroy_off");
+    let _ = std::fs::create_dir_all(&dir);
+    let (mut world, e) = tidy_world(&dir, true);
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 0.016, 0.0);
+    host.drain_logs();
+    world.get_mut::<Scripts>(e).unwrap().0[0].enabled = false;
+    host.run(&mut world, &dir, 0.016, 0.016);
+    host.run(&mut world, &dir, 0.016, 0.032);
+    assert!(byes(&mut host).is_empty(), "switching a script off ran onDestroy");
+}
+
+/// A new node under a destroyed node's entity index has its own `onDestroy`.
+#[test]
+fn a_reused_entity_index_gets_its_own_goodbye() {
+    let dir = std::env::temp_dir().join("floptle_script_test_on_destroy_reuse");
+    let _ = std::fs::create_dir_all(&dir);
+    let (mut world, e) = tidy_world(&dir, true);
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 0.016, 0.0);
+    host.call_on_destroy_nodes(&mut world, &[e.index()]);
+    world.despawn(e);
+    let e2 = world.spawn();
+    assert_eq!(e2.index(), e.index(), "the fixture needs the index reused");
+    world.insert(e2, Transform::IDENTITY);
+    world.insert(e2, floptle_core::Name("Pulley2".into()));
+    world.insert(e2, floptle_core::Matter::Empty);
+    world.insert(
+        e2,
+        Scripts(vec![floptle_core::ScriptInst {
+            kind: "tidy".into(),
+            enabled: true,
+            params: vec![],
+            refs: Vec::new(),
+            strs: Vec::new(),
+        }]),
+    );
+    host.run(&mut world, &dir, 0.016, 0.016);
+    host.drain_logs();
+    host.call_on_destroy_nodes(&mut world, &[e2.index()]);
+    assert_eq!(byes(&mut host), vec!["bye Pulley2".to_string()]);
+}

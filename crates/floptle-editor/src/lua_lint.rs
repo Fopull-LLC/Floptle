@@ -101,6 +101,7 @@ const HOOKS: &[&str] = &[
     "onTriggerEnter",
     "onTriggerStay",
     "onTriggerExit",
+    "onDestroy",
     "defaults",
     "params",
 ];

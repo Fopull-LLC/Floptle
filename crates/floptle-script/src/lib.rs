@@ -792,6 +792,9 @@ pub struct ScriptHost {
     sched: Rc<RefCell<sched_api::SchedState>>,
     /// Instances put to sleep or slowed down by `script.*` — see `sleep_api`.
     sleepers: Rc<RefCell<sleep_api::Sleepers>>,
+    /// Every (node, script) whose `onDestroy` has already run, so the several
+    /// ways a node can go never tell it twice.
+    destroy_told: std::collections::HashSet<(u32, String)>,
     /// Each script kind's source generation as of this frame (`None`: no such
     /// file), so the file is looked at once per kind rather than once per
     /// instance. Cleared at the start of every frame pass.

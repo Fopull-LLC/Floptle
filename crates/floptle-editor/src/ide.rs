@@ -3227,7 +3227,7 @@ pub(crate) const LUA_API_WORDS: &[&str] = &[
     "raycast", "find", "findAll", "findScript", "findScriptInScene", "findScripts", "findTagged",
     "spawn", "destroy", "spawnEffect",
     "vec2", "vec3", "distance", "onCollisionEnter", "onCollisionStay", "onCollisionExit",
-    "onTriggerEnter", "onTriggerStay", "onTriggerExit",
+    "onTriggerEnter", "onTriggerStay", "onTriggerExit", "onDestroy",
     "assets", "gizmo",
     "net", "synced", "replicated", "onRpc", "audio", "terrain", "rng", "save",
     // Rollback: the two hooks a Rollback node's scripts must implement.
@@ -4337,6 +4337,7 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "onCollisionExit", insert: "function onCollisionExit(node, other, hit)\n  \nend", doc: "function onCollisionExit(node, other, hit) — fires the tick the touch ends (hit = the last known contact)." },
     ApiEntry { label: "onTriggerEnter", insert: "function onTriggerEnter(node, other, hit)\n  \nend", doc: "function onTriggerEnter(node, other, hit) — fires the tick a body enters a TRIGGER (the \"trigger\" switch on a Collider or Rigidbody: it stops blocking, events still fire — a Kinematic trigger rigidbody = a moving pickup). The portal/pickup/checkpoint hook — pair with a string param: scene.load(params.destination). Also onTriggerStay / onTriggerExit." },
     ApiEntry { label: "onTriggerExit", insert: "function onTriggerExit(node, other, hit)\n  \nend", doc: "function onTriggerExit(node, other, hit) — fires the tick a body leaves the trigger." },
+    ApiEntry { label: "onDestroy", insert: "function onDestroy(node)\n  \nend", doc: "function onDestroy(node) — runs once when this script's node goes: destroy() on it or an ancestor, a scene.unload of its layer, a scene switch (unless it is persistent). The node is still there, so read what you need and destroy() anything you made outside your own subtree. Not when the script is merely switched off, nor when you press Stop. A node removed without warning (deleted in the editor during Play) is told afterwards: its fields then read nil, but your script's own variables are all still there." },
     ApiEntry { label: "node.name", insert: "node.name", doc: "The node's name (string)." },
     ApiEntry { label: "node.id", insert: "node.id", doc: "A stable numeric id for this node." },
     ApiEntry { label: "node.parent", insert: "node.parent", doc: "The parent node handle, or nil. A handle has the same fields (x/y/z, …) so you can read/write another node." },
