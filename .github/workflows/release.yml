@@ -55,11 +55,14 @@ jobs:
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       # The editor (what the Hub runs), the player (what Export Game ships,
-      # with no authoring half), and the Hub itself.
-      - name: Build editor + player + hub
+      # with no authoring half), the Steam player (what it ships for a project
+      # with a Steam App ID), and the Hub itself. The Steam player is its own
+      # invocation: built with the plain one, the feature would reach both.
+      - name: Build editor + players + hub
         run: |
           cargo build --release -p floptle-editor --target ${{ matrix.rust }}
           cargo build --release -p floptle-player --target ${{ matrix.rust }}
+          cargo build --release -p floptle-player --features steam --bin floptle-player-steam --target ${{ matrix.rust }}
           cargo build --release -p floptle-hub --target ${{ matrix.rust }}
 
       # The managed relay, x86_64 Linux only, shipped as a bare binary beside
@@ -124,6 +127,11 @@ jobs:
           cp "target/${{ matrix.rust }}/release/floptle" "$B/floptle"
           # An export for this platform copies this binary out of the bundle.
           cp "target/${{ matrix.rust }}/release/floptle-player" "$B/floptle-player"
+          # The Steam player and Valve's runtime library, which it loads from
+          # beside itself. steamworks-sys leaves the library in its build output.
+          cp "target/${{ matrix.rust }}/release/floptle-player-steam" "$B/floptle-player-steam"
+          LIB=$(ls target/${{ matrix.rust }}/release/build/steamworks-sys-*/out/libsteam_api.* | head -1)
+          cp "$LIB" "$B/"
           printf '{ "version": "%s", "target": "%s", "commit": "%s" }\n' "$VER" "$T" "${GITHUB_SHA:0:7}" > "$B/version.json"
           tar -C "$B" -czf "$B.tar.gz" .
           if command -v sha256sum >/dev/null 2>&1; then SHA=$(sha256sum "$B.tar.gz" | cut -d' ' -f1)
@@ -149,6 +157,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path $b | Out-Null
           Copy-Item "target/${{ matrix.rust }}/release/floptle.exe" "$b/floptle.exe"
           Copy-Item "target/${{ matrix.rust }}/release/floptle-player.exe" "$b/floptle-player.exe"
+          # See the unix step: the Steam player and the library it loads.
+          Copy-Item "target/${{ matrix.rust }}/release/floptle-player-steam.exe" "$b/floptle-player-steam.exe"
+          $dll = Get-ChildItem "target/${{ matrix.rust }}/release/build/steamworks-sys-*/out/steam_api64.dll" | Select-Object -First 1
+          if (-not $dll) { throw "steamworks-sys left no steam_api64.dll in its build output" }
+          Copy-Item $dll.FullName "$b/steam_api64.dll"
           $commit = $env:GITHUB_SHA.Substring(0,7)
           "{ ""version"": ""$ver"", ""target"": ""$t"", ""commit"": ""$commit"" }" | Set-Content -NoNewline "$b/version.json"
           Compress-Archive -Path "$b/*" -DestinationPath "$b.zip" -Force

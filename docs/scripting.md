@@ -100,6 +100,7 @@ Leaderboards, lobbies, and the overlay.
 - [28a. Steam leaderboards: `steam.*`](scripting/steam.md#28a-steam-leaderboards-steam)
 - [28b. Steam lobbies: finding other players](scripting/steam.md#28b-steam-lobbies-finding-other-players)
 - [28c. The Steam overlay](scripting/steam.md#28c-the-steam-overlay)
+- [28d. Shipping a Steam game](scripting/steam.md#28d-shipping-a-steam-game)
 
 ### [Working in the editor](scripting/workflow.md)
 

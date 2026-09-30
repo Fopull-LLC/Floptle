@@ -12,6 +12,20 @@ publish = false
 name = "floptle-player"
 path = "src/main.rs"
 
+# The same player with Steam compiled in, for a project with a Steam App ID.
+# A separate binary rather than the one above with the feature on: Steam's
+# runtime library is linked dynamically, so a binary built with it will not
+# start without Valve's library beside it, and a game that is not on Steam
+# should not carry one. Built on its own:
+#   cargo build --release -p floptle-player --features steam --bin floptle-player-steam
+[[bin]]
+name = "floptle-player-steam"
+path = "src/steam_main.rs"
+required-features = ["steam"]
+
+[features]
+steam = ["floptle-editor/steam"]
+
 [dependencies]
 # `default-features = false` is the whole point of this crate: it turns OFF the
 # editor half — egui, the dock, the Inspector, the asset browser, the file

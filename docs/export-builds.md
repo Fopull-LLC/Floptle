@@ -102,6 +102,14 @@ macOS builds ship a `README.txt` for the recipient: the build is unsigned, so
 they clear the quarantine flag once (`xattr -dr com.apple.quarantine <exe>`)
 before launching. Signing/notarization is a Hub-pipeline concern.
 
+## A Steam game
+
+A project with a Steam App ID (**Project Settings ▸ Game ▸ Steam App ID**) ships the
+Steam player and Valve's runtime library beside it, in place of the plain
+player. Every other project ships exactly as below, with no Valve binary in it.
+The details, including testing an export outside Steam, are in
+[Shipping a Steam game](scripting/steam.md#28d-shipping-a-steam-game).
+
 ## What ships, and what doesn't
 
 The export owns the `assets/` copy, and deliberately leaves things out:

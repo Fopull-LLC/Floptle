@@ -180,11 +180,17 @@ jobs:
     # `gate` never turns the `steam` feature on. `steamworks-sys` builds with
     # no Steamworks SDK present; this covers the binding surface, not a live
     # Steam client.
-    name: steam feature (services + steam crates)
+    name: steam feature (services + steam crates + Steam player)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - name: Linux build deps
+        run: |
+          sudo apt-get update || true
+          sudo apt-get install -y \
+            libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxkbcommon-dev \
+            libwayland-dev libgl1-mesa-dev libasound2-dev libudev-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -195,6 +201,11 @@ jobs:
 
       - name: test (steam feature on)
         run: cargo test -p floptle-services -p floptle-steam --features floptle-steam/steam
+
+      # The binary a Steam game ships. Linted here so a break in the engine's
+      # Steam-only code shows on the push, not on a release tag.
+      - name: clippy (the Steam player)
+        run: cargo clippy -p floptle-player --features steam --bin floptle-player-steam -- -D warnings
 
   fleet:
     # The fleet agent and server ship as bare aarch64 binaries from release.yml

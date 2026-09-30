@@ -1180,6 +1180,10 @@ pub(crate) fn export_game_with(
     binary: &Path,
     target: &ExportTarget,
 ) -> Result<(String, PathBuf), String> {
+    // Decided before anything is written: a Steam project refused for want of
+    // the Steam player leaves no folder behind.
+    let (binary, steam_lib) = shipped_player(project_root, binary, target)?;
+    let binary = binary.as_path();
     let (proj, out_c) = prepare_out(project_root, out)?;
     // Binary name from the title: filesystem-safe, the target's suffix.
     let stem: String = title
@@ -1203,6 +1207,10 @@ pub(crate) fn export_game_with(
         floptle_vfs::write(out_c.join("README.txt"), tpl.replace("{exe}", &exe_name))
             .map_err(|e| format!("write README: {e}"))?;
     }
+    if let Some(lib) = &steam_lib {
+        let name = lib.file_name().ok_or("the Steam library has no file name")?;
+        std::fs::copy(lib, out_c.join(name)).map_err(|e| format!("copy the Steam library: {e}"))?;
+    }
     let shipped = out_c.join(&exe_name);
     std::fs::copy(binary, &shipped).map_err(|e| format!("copy binary: {e}"))?;
     // A CI artifact may have lost its executable bit in transit — restore it
@@ -1210,8 +1218,70 @@ pub(crate) fn export_game_with(
     floptle_dist::set_executable(&shipped);
 
     let mut msg = format!("exported {exe_name} + {} asset file(s) to {}", staged.files, out_c.display());
+    if steam_lib.is_some() {
+        msg.push_str(", with Steam");
+    }
     msg.push_str(&staged.tail());
     Ok((msg, out_c))
+}
+
+/// The executable a native build ships, and Valve's runtime library to put
+/// beside it when there is one.
+///
+/// A project with a Steam App ID ships the Steam player, which sits beside the
+/// plain one (`binary`) wherever that came from: a Hub install, a downloaded
+/// template, or a source checkout's target directory. It is refused by name
+/// when missing, never swapped for the plain player: a Steam game that ships
+/// without Steam starts, shows no overlay and unlocks no achievement, and
+/// nothing says why.
+#[cfg(feature = "editor-ui")]
+fn shipped_player(
+    project_root: &Path,
+    binary: &Path,
+    target: &ExportTarget,
+) -> Result<(PathBuf, Option<PathBuf>), String> {
+    let cfg = floptle_scene::load_project(&project_root.join("project.ron"));
+    if cfg.steam.is_none() {
+        return Ok((binary.to_path_buf(), None));
+    }
+    let platform = match target.kind {
+        ExportKind::Template { platform, .. } => platform.to_string(),
+        _ => floptle_dist::platform_target(),
+    };
+    let Some(lib_name) = floptle_dist::steam_api_lib_for(&platform) else {
+        return Err(format!("this project uses Steam, and Steam does not run on {platform}"));
+    };
+    let dir = binary.parent().ok_or("the player binary has no parent directory")?;
+    let steam_bin = dir.join(floptle_dist::steam_player_bin_name_for(&platform));
+    // Beside the player in a bundle; under the target directory's build
+    // outputs in a source checkout, where Cargo left it.
+    let lib = std::iter::once(dir.join(lib_name))
+        .chain(
+            std::fs::read_dir(dir.join("build"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().starts_with("steamworks-sys-"))
+                .map(|e| e.path().join("out").join(lib_name)),
+        )
+        .find(|p| p.is_file());
+    match (steam_bin.is_file(), lib) {
+        (true, Some(lib)) => Ok((steam_bin, Some(lib))),
+        (has_bin, lib) => {
+            let missing = match (has_bin, lib.is_some()) {
+                (false, false) => format!("{} and {lib_name} are", steam_bin.display()),
+                (false, true) => format!("{} is", steam_bin.display()),
+                _ => format!("{lib_name} beside {} is", steam_bin.display()),
+            };
+            Err(format!(
+                "this project has a Steam App ID (Project Settings ⏵ Game), so its build ships \
+                 the Steam player, and {missing} missing. Engine bundles carry both for every \
+                 desktop platform; a bundle without them predates Steam exports, so export from \
+                 a newer engine version. In a source checkout, build it with \
+                 `cargo build --release -p floptle-player --features steam --bin floptle-player-steam`."
+            ))
+        }
+    }
 }
 
 /// **A dedicated-server bundle**: the project a fleet box runs,
@@ -2675,24 +2745,132 @@ mod tests {
         }
     }
 
-    /// `ProjectConfigDoc::steam` is copied into the exported manifest — the
-    /// player's own binary has no other way to learn its Steamworks App ID,
-    /// since `project.ron` itself isn't part of the shipped bundle.
+    /// A fake bundle directory: a plain player, and optionally the Steam
+    /// player and Valve's library beside it, each file holding its own name
+    /// so a test can tell which one shipped.
+    fn fake_bundle(tag: &str, platform: &str, steam_player: bool, lib: bool) -> (PathBuf, PathBuf) {
+        let dir = temp(tag);
+        let plain = dir.join(floptle_dist::player_bin_name_for(platform));
+        floptle_vfs::write(&plain, "plain player").unwrap();
+        if steam_player {
+            floptle_vfs::write(dir.join(floptle_dist::steam_player_bin_name_for(platform)), "steam player").unwrap();
+        }
+        if lib {
+            let name = floptle_dist::steam_api_lib_for(platform).unwrap();
+            floptle_vfs::write(dir.join(name), "valve library").unwrap();
+        }
+        (dir, plain)
+    }
+
+    /// A project with a Steam App ID ships the Steam player with Valve's
+    /// library beside it, and carries the App ID in its manifest: the player
+    /// has no other way to learn it, since `project.ron` is not shipped.
     #[test]
-    fn export_carries_the_steam_app_id_into_the_manifest() {
+    fn a_steam_project_ships_the_steam_player_and_its_library() {
+        let host = floptle_dist::platform_target();
         let proj = temp("proj-steam");
         floptle_vfs::write(proj.join("project.ron"), "(steam: Some((app_id: 480)))").unwrap();
+        let (bundle, plain) = fake_bundle("bundle-steam", &host, true, true);
         let out = temp("out-steam");
 
-        let me = std::env::current_exe().unwrap();
-        export_game_with(&proj, &out, "Steam Game", &me, &EXPORT_TARGETS[0])
+        let (msg, _) = export_game_with(&proj, &out, "Steam Game", &plain, &EXPORT_TARGETS[0])
             .expect("export succeeds");
         let manifest: GameManifest =
             ron::from_str(&floptle_vfs::read_to_string(out.join("floptle-game.ron")).unwrap())
                 .expect("manifest parses");
         assert_eq!(manifest.steam.map(|s| s.app_id), Some(480));
+        let exe = format!("Steam_Game{}", std::env::consts::EXE_SUFFIX);
+        assert_eq!(floptle_vfs::read_to_string(out.join(&exe)).unwrap(), "steam player");
+        let lib = floptle_dist::steam_api_lib_for(&host).unwrap();
+        assert_eq!(floptle_vfs::read_to_string(out.join(lib)).unwrap(), "valve library");
+        assert!(msg.contains("with Steam"), "the result should say Steam shipped: {msg}");
 
-        for d in [&proj, &out] {
+        for d in [&proj, &out, &bundle] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    /// Without the Steam player the export is refused by name, and refused
+    /// before anything is written. Shipping the plain player instead would be
+    /// a Steam game with no Steam in it and nothing saying so.
+    #[test]
+    fn a_steam_project_without_the_steam_player_is_refused_before_anything_is_written() {
+        let host = floptle_dist::platform_target();
+        let proj = temp("proj-steam-missing");
+        floptle_vfs::write(proj.join("project.ron"), "(steam: Some((app_id: 480)))").unwrap();
+        for (tag, steam_player, lib, names) in [
+            ("no-player", false, true, "floptle-player-steam"),
+            ("no-lib", true, false, floptle_dist::steam_api_lib_for(&host).unwrap()),
+        ] {
+            let (bundle, plain) = fake_bundle(&format!("bundle-{tag}"), &host, steam_player, lib);
+            let out = temp(&format!("out-{tag}")).join("build");
+            let err = export_game_with(&proj, &out, "Steam Game", &plain, &EXPORT_TARGETS[0])
+                .expect_err("a Steam project must not ship without the Steam player");
+            assert!(err.contains(names), "the refusal should name {names}: {err}");
+            assert!(!out.exists(), "a refused export left {} behind", out.display());
+            let _ = std::fs::remove_dir_all(&bundle);
+        }
+        let _ = std::fs::remove_dir_all(&proj);
+    }
+
+    /// In a source checkout the library is where Cargo left it, under the
+    /// target directory's build outputs, not beside the player.
+    #[test]
+    fn a_source_checkout_finds_the_steam_library_in_its_build_outputs() {
+        let host = floptle_dist::platform_target();
+        let proj = temp("proj-steam-checkout");
+        floptle_vfs::write(proj.join("project.ron"), "(steam: Some((app_id: 480)))").unwrap();
+        let (bundle, plain) = fake_bundle("bundle-checkout", &host, true, false);
+        let lib = floptle_dist::steam_api_lib_for(&host).unwrap();
+        let built = bundle.join("build/steamworks-sys-0123abcd/out");
+        floptle_vfs::create_dir_all(&built).unwrap();
+        floptle_vfs::write(built.join(lib), "cargo's copy").unwrap();
+        let out = temp("out-checkout");
+
+        export_game_with(&proj, &out, "Steam Game", &plain, &EXPORT_TARGETS[0]).expect("export succeeds");
+        assert_eq!(floptle_vfs::read_to_string(out.join(lib)).unwrap(), "cargo's copy");
+
+        for d in [&proj, &out, &bundle] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    /// A game that is not on Steam ships the plain player and no Valve
+    /// library, even when both sit right beside it.
+    #[test]
+    fn a_project_without_steam_ships_the_plain_player_and_no_valve_library() {
+        let host = floptle_dist::platform_target();
+        let proj = temp("proj-no-steam");
+        floptle_vfs::write(proj.join("project.ron"), "()").unwrap();
+        let (bundle, plain) = fake_bundle("bundle-no-steam", &host, true, true);
+        let out = temp("out-no-steam");
+
+        let (msg, _) = export_game_with(&proj, &out, "Plain", &plain, &EXPORT_TARGETS[0]).expect("export succeeds");
+        let exe = format!("Plain{}", std::env::consts::EXE_SUFFIX);
+        assert_eq!(floptle_vfs::read_to_string(out.join(&exe)).unwrap(), "plain player");
+        let lib = floptle_dist::steam_api_lib_for(&host).unwrap();
+        assert!(!out.join(lib).exists(), "a game not on Steam shipped Valve's library");
+        assert!(!msg.contains("Steam"), "{msg}");
+
+        for d in [&proj, &out, &bundle] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    /// The library is picked by the export's target, not the machine it runs
+    /// on: a Windows build from Linux ships `steam_api64.dll`.
+    #[test]
+    fn a_windows_steam_export_ships_the_windows_library() {
+        let proj = temp("proj-steam-win");
+        floptle_vfs::write(proj.join("project.ron"), "(steam: Some((app_id: 480)))").unwrap();
+        let (bundle, plain) = fake_bundle("bundle-win", "windows-x86_64", true, true);
+        let out = temp("out-steam-win");
+
+        export_game_with(&proj, &out, "Steam Game", &plain, target("Windows (x86_64)")).expect("export succeeds");
+        assert_eq!(floptle_vfs::read_to_string(out.join("Steam_Game.exe")).unwrap(), "steam player");
+        assert!(out.join("steam_api64.dll").is_file());
+
+        for d in [&proj, &out, &bundle] {
             let _ = std::fs::remove_dir_all(d);
         }
     }

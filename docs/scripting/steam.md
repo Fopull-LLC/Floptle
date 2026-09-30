@@ -1,6 +1,6 @@
 # Steam
 
-Leaderboards, lobbies, and the overlay.
+Leaderboards, lobbies, the overlay, and shipping a game on Steam.
 
 Part of the [scripting guide](../scripting.md) · [every call, as a reference](../lua-api.md)
 
@@ -9,6 +9,7 @@ Part of the [scripting guide](../scripting.md) · [every call, as a reference](.
 - [28a. Steam leaderboards: `steam.*`](#28a-steam-leaderboards-steam)
 - [28b. Steam lobbies: finding other players](#28b-steam-lobbies-finding-other-players)
 - [28c. The Steam overlay](#28c-the-steam-overlay)
+- [28d. Shipping a Steam game](#28d-shipping-a-steam-game)
 
 ---
 
@@ -170,3 +171,29 @@ Three things worth knowing:
   not stuck down. The simulation keeps running — a networked session cannot
   pause for one player — so pausing a single-player game is yours to do, from
   `steam.onOverlayChanged` or `steam.overlayActive()`.
+
+---
+
+## 28d. Shipping a Steam game
+
+Give the project a Steam App ID in **Project Settings ▸ Game ▸ Steam App ID**, and
+**File ⏵ Export Game…** ships the Steam player instead of the plain one, with
+Valve's runtime library beside it: `libsteam_api.so` on Linux,
+`libsteam_api.dylib` on macOS, `steam_api64.dll` on Windows. Upload the whole
+export folder to your depot; the library has to stay next to the executable.
+A project with no App ID ships no Valve library at all.
+
+Before you have a partner account, use `480`: Spacewar, Valve's test app.
+Everything above works against it. `0` means the project is not a Steam game.
+
+**A shipped build hands itself to Steam.** Double-click the exported game
+while Steam is not the one launching it and it exits at once, asking Steam to
+start it instead. That is Valve's `RestartAppIfNecessary`, and it is what makes
+a copied executable behave like the installed game. To run an export straight
+from its folder while you test, put a file named `steam_appid.txt` beside the
+executable containing just the App ID. Steam then skips the hand-off. Leave
+that file out of what you upload.
+
+An export for a version of the engine that predates Steam exports refuses a
+project with an App ID, naming the missing Steam player, rather than shipping
+a game with no Steam in it. The web build has no Steam.
