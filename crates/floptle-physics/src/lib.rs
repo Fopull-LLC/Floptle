@@ -28,6 +28,7 @@ mod body;
 mod character;
 mod compound;
 mod gravity;
+mod pairs;
 mod shapes;
 mod sim;
 mod water;
@@ -665,8 +666,9 @@ mod tests {
     /// runs `step_body_tick` both live and during a re-simulation, so if that
     /// disagreed with `step_tick` by even an ULP, every correction would nudge
     /// the fighter and the two machines would drift apart with nothing to
-    /// blame. It holds because the solver has no body-vs-body pass — stepping
-    /// one body is what the world step does to it.
+    /// blame. It holds because nothing in the world step moves a driven body
+    /// except its own solo step: the pair pass pushes other things off it and
+    /// never pushes it.
     #[test]
     fn a_driven_body_steps_identically_to_the_whole_world_step() {
         let build = || {
@@ -1109,6 +1111,47 @@ mod tests {
         assert!(root_x.abs() < 0.1, "kept half unaffected, x={root_x}");
         // Degenerate: splitting a non-assembly entity fails cleanly.
         assert!(!sim.split_compound(9999, &[1], new_root, &mut ecs));
+    }
+
+    #[test]
+    fn a_vessel_landing_on_another_is_a_touch_and_an_impact_for_both() {
+        // Two rockets, one parked on the pad and one dropped onto its nose.
+        // The pair pass must stop the second on the first, raise a touch
+        // between the two roots, and give each an impact on the right part.
+        let mut ecs = World::default();
+        let (low, _, _, low_nose) = spawn_rocket(&mut ecs, DVec3::new(0.0, 0.5, 0.0));
+        let (high, high_engine, ..) = spawn_rocket(&mut ecs, DVec3::new(0.0, 5.0, 0.0));
+        let mut sim =
+            Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO);
+        sim.add_static_box(
+            DVec3::ZERO,
+            Vec3::new(20.0, 0.5, 20.0),
+            Quat::IDENTITY,
+            StaticTag { layer: 0, eid: 0, sensor: false },
+        );
+        let key = (low.index().min(high.index()), low.index().max(high.index()));
+        let mut entered = false;
+        let (mut low_nose_hit, mut high_engine_hit) = (false, false);
+        for _ in 0..300 {
+            sim.step_tick(1.0 / 60.0, None);
+            for e in sim.take_touch_events() {
+                if (e.a.min(e.b), e.a.max(e.b)) == key && e.phase == TouchPhase::Enter {
+                    entered = true;
+                }
+            }
+            for (root, part, ..) in sim.compound_impacts() {
+                low_nose_hit |= root == low.index() && part == low_nose.index();
+                high_engine_hit |= root == high.index() && part == high_engine.index();
+            }
+        }
+        assert!(entered, "the two vessels met without a touch event");
+        assert!(low_nose_hit, "the parked rocket's nose took no impact");
+        assert!(high_engine_hit, "the falling rocket's engine took no impact");
+        // An engine box landing on a round nose tips off it, so the falling
+        // rocket ends either on top or beside, never through.
+        let (lo, hi) = (sim.compound_of(low.index()).unwrap().pos, sim.compound_of(high.index()).unwrap().pos);
+        let apart = Vec3::new(hi.x - lo.x, 0.0, hi.z - lo.z).length();
+        assert!(apart > 0.8 || hi.y > lo.y + 2.0, "the falling rocket ended inside the parked one: {lo:?} vs {hi:?}");
     }
 
     #[test]

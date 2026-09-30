@@ -1154,12 +1154,13 @@ impl Sim {
     }
 
     /// Diff this tick's touching pairs against the last tick's into
-    /// enter / stay / exit [`TouchEvent`]s. Three sources, all matrix-gated:
+    /// enter / stay / exit [`TouchEvent`]s. Four sources, all matrix-gated:
     /// the solver's resolved contacts (body vs solid collider), body-vs-sensor
-    /// overlap (triggers — the solver never resolves those), and body-vs-body
-    /// hull overlap (the solver has no body-body response, but games still
-    /// need to know two bodies met). Costs O(contacts + bodies×sensors +
-    /// bodies²) per tick — trivial at gameplay body counts.
+    /// overlap (triggers — the solver never resolves those), body-vs-body
+    /// hull overlap (plain bodies do not push each other, but games still
+    /// need to know two bodies met), and the pair pass's compound contacts.
+    /// Costs O(contacts + bodies×sensors + bodies²) per tick — trivial at
+    /// gameplay body counts.
     fn detect_touches(
         &mut self,
         tick_contacts: &[crate::body::Contact],
@@ -1320,6 +1321,20 @@ impl Sim {
                     }
                 }
             }
+        }
+        // 4. Compounds against compounds and bodies, from the pair pass. Each
+        // contact has a row per compound side; the pair key dedupes them.
+        let compound_eid = |ci: usize| {
+            self.cmap.iter().find(|l| l.compound == ci).map(|l| l.entity.index())
+        };
+        for cc in &self.tick_cc {
+            let other = match cc.peer {
+                crate::compound::ContactPeer::Collider(_) => continue,
+                crate::compound::ContactPeer::Body(bi) => body_eid.get(bi).copied().flatten(),
+                crate::compound::ContactPeer::Compound(ci) => compound_eid(ci),
+            };
+            let (Some(a), Some(b)) = (compound_eid(cc.compound), other) else { continue };
+            record(a, b, TouchInfo { point: to_world(cc.point), normal: cc.normal, sensor: false });
         }
         // Diff → events.
         for (&(a, b), info) in &now {
@@ -1648,7 +1663,10 @@ impl Sim {
 
     /// Advance one body by one gameplay tick (the prediction-replay driver,
     /// `docs/multiplayer.md` §6): runs the tick's physics substeps for just
-    /// that body — exact, because the solver has no body-vs-body pass. No
+    /// that body — exact for a driven body, which the pair pass never moves,
+    /// and for any body touching nothing that moves. A predicted body pushed
+    /// by a compound in the live step is not pushed in its replay, so that
+    /// contact corrects like any other misprediction. No
     /// floating-origin rebase, no transform writeback. The render anchor
     /// (`tick_prev`) advances with each replayed tick: [`Self::restore_body`]
     /// parked it at the (rtt-old) server pose, and leaving it there would make

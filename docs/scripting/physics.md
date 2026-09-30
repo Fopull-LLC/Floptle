@@ -185,6 +185,18 @@ if range < 0.5 and align > 0.8 and closingSpeed < 1.5 then
 end
 ```
 
+**Vessels collide with each other.** Two assemblies, or an assembly and a
+Dynamic rigidbody, push each other apart part by part, through each side's
+mass and inertia, so a glancing hit spins both. A rigidbody standing on a deck
+is grounded and is carried by friction. The layer matrix decides who is pushed:
+each side is pushed only if its own layer collides with the other's, so a
+one-way row makes a one-way contact. An anchored assembly is never moved, and
+neither is a rigidbody under rollback, so a fighter's trajectory never depends
+on a crate. Two plain rigidbodies still do not push each other. Layers are per
+assembly, not per part: a docking probe meant to slide *into* its drogue stops
+at the drogue's surface, so latch within reach of touching rather than after
+overlapping.
+
 `assembly.force(node, f)` pushes through the CoM; `assembly.impulseAt` is a
 one-shot kick (explosions, docking bumps). All vectors are world-space
 `vec3`s. Forces are **held per tick** and applied through every physics
@@ -253,8 +265,10 @@ tick the call returns an array of `{ part, impulse, speed, x, y, z }` —
 `part` is the part node's entity id (match `child.id` over `node:children()`
 or `info.parts`), `impulse` the total normal impulse that part absorbed this
 tick (mass·Δv), `speed` the peak closing speed it hit at this tick (m/s),
-`x/y/z` its hardest contact point in world space. Empty between contacts;
-anchored assemblies make no contacts at all. Poll it from `fixedUpdate` and
+`x/y/z` its hardest contact point in world space. Hits from other assemblies
+and from rigidbodies count, on both sides. Empty between contacts. An anchored
+assembly makes no contacts with the static world, but a vessel striking it
+still registers on both. Poll it from `fixedUpdate` and
 compare against per-part strength — that is a damage model in ten lines:
 
 ```lua
@@ -332,8 +346,9 @@ end
   `other:getscript("health")` all work.
 - `hit` is `{ x, y, z, nx, ny, nz }`: the world contact point and the unit
   normal out of the surface that was hit.
-- Fires for body-vs-collider **and body-vs-body** (two rigidbodies detect each
-  other even though the solver doesn't push them apart).
+- Fires for body-vs-collider, body-vs-body and assemblies. Two plain
+  rigidbodies detect each other but are not pushed apart; an assembly pushes
+  and is pushed by other assemblies and by rigidbodies (see §4.1).
 - The events fire on **both** nodes' scripts, and the collision matrix
   (Project Settings → Layers) gates them: pairs that don't collide don't event.
 - A body resting on the floor reports `onCollisionStay` against the floor node

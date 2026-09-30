@@ -960,6 +960,9 @@ impl PhysicsWorld {
         for ci in 0..self.compounds.len() {
             self.step_compound(ci, dt);
         }
+        // Compounds against each other and against bodies, once everything
+        // has made its own move. Never moves a driven body; see `pairs.rs`.
+        self.resolve_pairs();
         // Safety net for geometry that changed in place under a sleeping
         // body — terrain sculpting, a map edit — which `set_colliders`
         // cannot see because nothing replaced the collider list.
@@ -1064,8 +1067,9 @@ impl PhysicsWorld {
         }
     }
 
-    /// Step one compound by `dt`, under the same solo-equals-full contract as
-    /// [`Self::step_body`]: compounds couple to nothing dynamic. Does not clear
+    /// Step one compound by `dt` against the static world. What it hits that
+    /// moves (other compounds, bodies) is resolved afterwards by
+    /// `resolve_pairs`, in [`Self::step`]. Does not clear
     /// `compound_contacts`; the frame driver owns that.
     ///
     /// Semi-implicit Euler for linear and angular state (force and torque
@@ -1247,7 +1251,7 @@ impl PhysicsWorld {
                             compound: ci,
                             shape: si,
                             shape_id,
-                            collider: coli,
+                            peer: crate::compound::ContactPeer::Collider(coli),
                             point: contact_pt,
                             normal: n,
                             impulse: j,

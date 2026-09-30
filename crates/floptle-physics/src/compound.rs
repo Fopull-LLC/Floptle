@@ -4,10 +4,11 @@
 //! physics half of assemblies that come apart: multi-part vehicles, rocket
 //! stages, cranes, breakable structures.
 //!
-//! Shapes are depenetrated against the collider set by sample points, there
-//! is no body-vs-body pass, and stepping one compound alone is exactly its
-//! trajectory inside a full step, which is what netcode prediction relies on.
-//! Over [`crate::Body`], contacts apply positional and velocity corrections
+//! Shapes are depenetrated against the collider set by sample points. A
+//! compound also collides with other compounds and with dynamic bodies, in a
+//! pass that runs after every solo step (`pairs.rs`), so stepping one compound
+//! alone matches its full-step trajectory only while it touches nothing that
+//! moves. Over [`crate::Body`], contacts apply positional and velocity corrections
 //! through the inverse inertia, so an off-centre touch torques the assembly:
 //! a rocket landing on one leg tips over.
 
@@ -73,6 +74,17 @@ pub struct CompoundShape {
     pub id: u64,
 }
 
+/// The other side of a compound's contact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContactPeer {
+    /// A static collider, by index into `PhysicsWorld::colliders`.
+    Collider(usize),
+    /// A dynamic body, by index into `PhysicsWorld::bodies`.
+    Body(usize),
+    /// Another compound, by index into `PhysicsWorld::compounds`.
+    Compound(usize),
+}
+
 /// A contact a compound resolved this step — attributed to the shape that took
 /// it, with the normal impulse magnitude applied (the raw material for damage
 /// and structural-stress systems).
@@ -84,11 +96,11 @@ pub struct CompoundContact {
     pub shape: usize,
     /// The shape's stable tag (`CompoundShape::id`).
     pub shape_id: u64,
-    /// Index of the static collider hit (into `PhysicsWorld::colliders`).
-    pub collider: usize,
+    /// What the shape hit.
+    pub peer: ContactPeer,
     /// Contact point, sim frame.
     pub point: Vec3,
-    /// Contact normal (out of the collider).
+    /// Contact normal, pointing out of the peer into this compound.
     pub normal: Vec3,
     /// Normal impulse magnitude applied (kg·m/s in sim units) — 0 for a
     /// purely positional resolve of an already-separating contact.
