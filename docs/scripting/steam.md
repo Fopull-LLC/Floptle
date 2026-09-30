@@ -1,6 +1,6 @@
 # Steam
 
-Leaderboards, lobbies, the overlay, invites, and shipping a game on Steam.
+Leaderboards, lobbies, the overlay, invites, DLC, and shipping a game on Steam.
 
 Part of the [scripting guide](../scripting.md) · [every call, as a reference](../lua-api.md)
 
@@ -11,6 +11,7 @@ Part of the [scripting guide](../scripting.md) · [every call, as a reference](.
 - [28c. The Steam overlay](#28c-the-steam-overlay)
 - [28d. Shipping a Steam game](#28d-shipping-a-steam-game)
 - [28e. Invites and joining a friend](#28e-invites-and-joining-a-friend)
+- [28f. DLC](#28f-dlc)
 
 ---
 
@@ -256,3 +257,39 @@ if code then steam.inviteFriend(friend.id, "+join " .. code) end
   with Steam open and a `steam_appid.txt` beside it (see 28d), and the
   request on its command line: `./MyGame +join ABC123`. The request is read
   when Steam starts up, so without Steam there is none.
+
+---
+
+## 28f. DLC
+
+A DLC is a Steam app of its own, and its app id is how a script names it.
+
+```lua
+local NIGHT_LEVELS = 1002   -- the DLC's app id, from the Steamworks site
+
+-- Your own functions: what owning it unlocks, and your Buy button's action.
+local function unlockNight() nightUnlocked = true end
+local function buyNight() steam.openOverlayStore(NIGHT_LEVELS) end
+
+if steam.ownsDlc(NIGHT_LEVELS) then unlockNight() end
+
+-- Bought while the game was running: unlock it now, no restart.
+steam.onDlcInstalled(function(id)
+  if id == NIGHT_LEVELS then unlockNight() end
+end)
+```
+
+- **Nothing to cache.** `steam.ownsDlc` and `steam.dlcInstalled` ask the
+  Steam client on this machine, not the network, so ask whenever you need the
+  answer. A purchase made during play arrives as `steam.onDlcInstalled`.
+- **Owned and installed are different questions.** A DLC with content of its
+  own to download is owned before it is installed; `steam.dlcInstalled` is
+  the one to check before loading that content. For a DLC that only unlocks
+  something, owning it is installing it.
+- `steam.dlc()` lists every DLC the game declares, with `owned`, `installed`
+  and `available` (on sale) for each: what a DLC screen is built from.
+- `steam.installDlc(id)` asks Steam to download an owned DLC's content, and
+  `steam.uninstallDlc(id)` to remove it. Both refuse DLC the player does not
+  own, which Steam itself would ignore without a word.
+- Every read is `nil` with no Steam, which is falsy, so a game that is not
+  running on Steam simply sees nothing owned.

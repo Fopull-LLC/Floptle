@@ -26,4 +26,6 @@ steam = ["dep:floptle-services", "dep:steamworks"]
 [dependencies]
 floptle-say = { path = "../floptle-say" }
 floptle-services = { path = "../floptle-services", optional = true }
-steamworks = { version = "0.13.1", optional = true }
+# `raw-bindings` exposes the flat C API for what the binding does not wrap:
+# DLC enumeration and install, and the DLC-installed callback.
+steamworks = { version = "0.13.1", optional = true, features = ["raw-bindings"] }

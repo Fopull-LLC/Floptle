@@ -115,6 +115,10 @@ pub(crate) struct SteamState {
     /// a game was launched with is there before any script has run, and one
     /// that lands during a scene change belongs to the next scene's handler.
     join_held: Vec<JoinRequest>,
+    /// `steam.onDlcInstalled` — one handler, called with each DLC's app id
+    /// as it finishes installing. Not held when nobody listens: the reads
+    /// already answer what is installed now.
+    dlc_cb: Option<mlua::Function>,
 }
 
 impl SteamState {
@@ -135,6 +139,7 @@ impl SteamState {
         // The handler closes over this session's nodes; the requests do not,
         // so `join_held` stays for whoever registers next.
         self.join_cb = None;
+        self.dlc_cb = None;
     }
 
     /// How many leaderboard requests are still waiting
@@ -1365,6 +1370,81 @@ pub(crate) fn install_steam_api(
         })?,
     )?;
 
+    let p = platform.clone();
+    t.set(
+        "ownsDlc",
+        lua.create_function(move |_, id: u32| Ok(p.borrow().entitlements().map(|e| e.owns(id))))?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "dlcInstalled",
+        lua.create_function(move |_, id: u32| Ok(p.borrow().entitlements().map(|e| e.installed(id))))?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "dlc",
+        lua.create_function(move |lua, ()| {
+            let backend = p.borrow();
+            let Some(e) = backend.entitlements() else { return Ok(Value::Nil) };
+            let list = lua.create_table()?;
+            for (i, d) in e.dlc().into_iter().enumerate() {
+                let row = lua.create_table()?;
+                row.set("id", d.app_id)?;
+                row.set("name", d.name)?;
+                row.set("available", d.available)?;
+                row.set("owned", e.owns(d.app_id))?;
+                row.set("installed", e.installed(d.app_id))?;
+                list.set(i + 1, row)?;
+            }
+            Ok(Value::Table(list))
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "installDlc",
+        lua.create_function(move |lua, id: u32| {
+            let backend = p.borrow();
+            let r = match backend.entitlements() {
+                None => Err(NO_STEAM.to_string()),
+                Some(e) if !e.owns(id) => Err(not_owned("steam.installDlc", id)),
+                Some(e) => {
+                    e.install(id);
+                    Ok(())
+                }
+            };
+            result_tuple(lua, r)
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "uninstallDlc",
+        lua.create_function(move |lua, id: u32| {
+            let backend = p.borrow();
+            let r = match backend.entitlements() {
+                None => Err(NO_STEAM.to_string()),
+                Some(e) if !e.owns(id) => Err(not_owned("steam.uninstallDlc", id)),
+                Some(e) => {
+                    e.uninstall(id);
+                    Ok(())
+                }
+            };
+            result_tuple(lua, r)
+        })?,
+    )?;
+
+    let st = state.clone();
+    t.set(
+        "onDlcInstalled",
+        lua.create_function(move |_, f: mlua::Function| {
+            st.borrow_mut().dlc_cb = Some(f);
+            Ok(())
+        })?,
+    )?;
+
     let st = state.clone();
     t.set(
         "onJoinRequested",
@@ -1423,6 +1503,13 @@ fn known_name(call: &str, what: &str, got: &str, valid: &[&str]) -> Result<(), S
     ))
 }
 
+/// Steam's install and uninstall calls do nothing, and say nothing, for DLC
+/// the player does not own. Refusing by name is what makes a Buy-then-install
+/// flow debuggable.
+fn not_owned(call: &str, id: u32) -> String {
+    format!("{call}: the player doesn't own DLC {id} — check steam.ownsDlc first, or open its store page with steam.openOverlayStore({id})")
+}
+
 /// The message for a board handle that isn't even a number — distinct from
 /// the backend's own "not from this session", because the cause is different
 /// and so is the fix.
@@ -1448,7 +1535,7 @@ pub(crate) fn drain(
 ) {
     // `pump` is what runs the backend's own callbacks, so leaderboard results
     // land during this borrow and are waiting by the time it is released.
-    let (changed, results, lobby_results, lobby_events, overlay_flips, joins) = {
+    let (changed, results, lobby_results, lobby_events, overlay_flips, joins, dlc_installed) = {
         let backend = platform.borrow();
         backend.pump();
         (
@@ -1458,6 +1545,7 @@ pub(crate) fn drain(
             backend.lobbies().map(|l| l.poll_events()).unwrap_or_default(),
             backend.overlay().map(|o| o.poll_activation()).unwrap_or_default(),
             backend.social().map(|s| s.poll_join_requests()).unwrap_or_default(),
+            backend.entitlements().map(|e| e.poll_installed()).unwrap_or_default(),
         )
     };
     state.borrow_mut().join_held.extend(joins);
@@ -1532,6 +1620,15 @@ pub(crate) fn drain(
         for active in overlay_flips {
             if let Err(err) = cb.call::<()>(active) {
                 log(logs, LogLevel::Error, format!("steam.onOverlayChanged callback: {err}"));
+            }
+        }
+    }
+
+    let dlc_cb = state.borrow().dlc_cb.clone();
+    if let Some(cb) = dlc_cb {
+        for id in dlc_installed {
+            if let Err(err) = cb.call::<()>(id) {
+                log(logs, LogLevel::Error, format!("steam.onDlcInstalled callback: {err}"));
             }
         }
     }
@@ -2612,6 +2709,126 @@ mod tests {
     }
 
     // ---- overlay ----
+
+    /// An entitlements backend: the test decides what is owned and
+    /// installed, and queues install events.
+    #[derive(Default)]
+    struct FakeDlc {
+        owned: RefCell<Vec<u32>>,
+        installed: RefCell<Vec<u32>>,
+        asked: RefCell<Vec<String>>,
+        events: RefCell<Vec<u32>>,
+    }
+
+    impl floptle_services::Entitlements for FakeDlc {
+        fn owns(&self, id: u32) -> bool {
+            self.owned.borrow().contains(&id)
+        }
+        fn installed(&self, id: u32) -> bool {
+            self.installed.borrow().contains(&id)
+        }
+        fn dlc(&self) -> Vec<floptle_services::DlcInfo> {
+            vec![
+                floptle_services::DlcInfo { app_id: 1001, name: "Soundtrack".into(), available: true },
+                floptle_services::DlcInfo { app_id: 1002, name: "Night Levels".into(), available: false },
+            ]
+        }
+        fn install(&self, id: u32) {
+            self.asked.borrow_mut().push(format!("install:{id}"));
+        }
+        fn uninstall(&self, id: u32) {
+            self.asked.borrow_mut().push(format!("uninstall:{id}"));
+        }
+        fn poll_installed(&self) -> Vec<u32> {
+            std::mem::take(&mut *self.events.borrow_mut())
+        }
+    }
+
+    struct DlcPlatform(Rc<FakeDlc>);
+
+    impl Platform for DlcPlatform {
+        fn available(&self) -> bool {
+            true
+        }
+        fn entitlements(&self) -> Option<&dyn floptle_services::Entitlements> {
+            Some(&*self.0)
+        }
+    }
+
+    fn with_dlc() -> (Fixture, Rc<FakeDlc>) {
+        let f = fresh();
+        let dlc = Rc::new(FakeDlc::default());
+        *f.platform.borrow_mut() = Rc::new(DlcPlatform(dlc.clone()));
+        (f, dlc)
+    }
+
+    /// With no Steam the reads are nil, falsy, so `if steam.ownsDlc(id)`
+    /// is the one line a game writes, and the writes say why.
+    #[test]
+    fn dlc_reads_are_nil_and_writes_refuse_without_steam() {
+        let f = fresh();
+        let nil: bool = f
+            .lua
+            .load("return steam.ownsDlc(1001) == nil and steam.dlcInstalled(1001) == nil and steam.dlc() == nil")
+            .eval()
+            .unwrap();
+        assert!(nil);
+        let (ok, err): (bool, String) = f.lua.load("return steam.installDlc(1001)").eval().unwrap();
+        assert!(!ok && err.contains("isn't available"), "{err}");
+    }
+
+    /// Ownership and installation are separate answers, and the list carries
+    /// both for every DLC, owned or not.
+    #[test]
+    fn dlc_reads_answer_ownership_and_installation_separately() {
+        let (f, dlc) = with_dlc();
+        dlc.owned.borrow_mut().extend([1001, 1002]);
+        dlc.installed.borrow_mut().push(1001);
+        let (o1, i1, o2, i2, o3): (bool, bool, bool, bool, bool) = f
+            .lua
+            .load("return steam.ownsDlc(1001), steam.dlcInstalled(1001), steam.ownsDlc(1002), steam.dlcInstalled(1002), steam.ownsDlc(1003)")
+            .eval()
+            .unwrap();
+        assert_eq!((o1, i1, o2, i2, o3), (true, true, true, false, false));
+        let (n, id, name, avail, owned, inst): (i64, u32, String, bool, bool, bool) = f
+            .lua
+            .load("local l = steam.dlc() return #l, l[2].id, l[2].name, l[2].available, l[2].owned, l[2].installed")
+            .eval()
+            .unwrap();
+        assert_eq!((n, id, name.as_str(), avail, owned, inst), (2, 1002, "Night Levels", false, true, false));
+    }
+
+    /// Steam silently ignores an install of DLC the player doesn't own; the
+    /// script is told instead, and pointed at the store.
+    #[test]
+    fn installing_dlc_the_player_does_not_own_is_refused_by_name() {
+        let (f, dlc) = with_dlc();
+        dlc.owned.borrow_mut().push(1001);
+        let (ok, err): (bool, String) = f.lua.load("return steam.installDlc(1002)").eval().unwrap();
+        assert!(!ok && err.contains("doesn't own DLC 1002") && err.contains("openOverlayStore(1002)"), "{err}");
+        let (ok, err): (bool, String) = f.lua.load("return steam.uninstallDlc(1002)").eval().unwrap();
+        assert!(!ok && err.contains("doesn't own DLC 1002"), "{err}");
+        assert!(dlc.asked.borrow().is_empty(), "the backend was asked about DLC nobody owns");
+        let ok: bool = f.lua.load("return (steam.installDlc(1001))").eval().unwrap();
+        assert!(ok);
+        let ok: bool = f.lua.load("return (steam.uninstallDlc(1001))").eval().unwrap();
+        assert!(ok);
+        assert_eq!(&*dlc.asked.borrow(), &["install:1001".to_string(), "uninstall:1001".to_string()]);
+    }
+
+    /// Installs reach the handler in order. With nobody listening they are
+    /// not held: the reads already say what is installed now.
+    #[test]
+    fn dlc_installs_reach_the_handler_in_order_and_are_not_held() {
+        let (f, dlc) = with_dlc();
+        dlc.events.borrow_mut().push(999);
+        drain(&f.lua, &f.platform, &f.state, &f.logs);
+        f.lua.load("seen = {} steam.onDlcInstalled(function(id) seen[#seen+1] = id end)").exec().unwrap();
+        dlc.events.borrow_mut().extend([1001, 1002]);
+        drain(&f.lua, &f.platform, &f.state, &f.logs);
+        let seen: Vec<u32> = f.lua.load("return seen").eval().unwrap();
+        assert_eq!(seen, vec![1001, 1002]);
+    }
 
     /// A social backend that records invites and hands out whatever join
     /// requests the test queues.

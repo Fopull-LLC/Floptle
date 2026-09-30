@@ -55,7 +55,7 @@ use std::sync::Mutex;
 
 #[cfg(feature = "steam")]
 use floptle_services::{
-    Achievements, Cloud, FriendInfo, Identity, JoinRequest, LeaderboardDisplay, LeaderboardEntry,
+    Achievements, Cloud, DlcInfo, Entitlements, FriendInfo, Identity, JoinRequest, LeaderboardDisplay, LeaderboardEntry,
     LeaderboardInfo, LeaderboardOutcome, LeaderboardResult, LeaderboardScope, LeaderboardSort,
     Leaderboards, Lobbies, LobbyCompare, LobbyDistance, LobbyEvent, LobbyFilters, LobbyInfo,
     LobbyKind, LobbyMemberChange, LobbyOutcome, LobbyResult, Overlay, Platform, ScoreUploaded,
@@ -108,7 +108,7 @@ pub fn restart_app_if_necessary(app_id: u32) -> bool {
 
 /// The Steamworks-backed platform backend: a live `SteamAPI_Init`'d client.
 /// Implements every landed capability trait ([`Identity`], [`Achievements`],
-/// [`Cloud`], [`Social`], [`Leaderboards`], [`Lobbies`], [`Overlay`]); the
+/// [`Cloud`], [`Social`], [`Entitlements`], [`Leaderboards`], [`Lobbies`], [`Overlay`]); the
 /// accessors for phases that haven't landed still answer `None`.
 #[cfg(feature = "steam")]
 pub struct SteamPlatform {
@@ -186,6 +186,9 @@ pub struct SteamPlatform {
     /// Join requests waiting for [`Social::poll_join_requests`]: the one the
     /// game was launched with, then every accepted invite or "Join Game".
     join_requests: Arc<Mutex<Vec<JoinRequest>>>,
+    /// DLC that became installed since [`Entitlements::poll_installed`] last
+    /// drained it.
+    dlc_installed: Arc<Mutex<Vec<u32>>>,
     /// When `init` returned, for the overlay-hook diagnostic in `pump`.
     booted_at: Instant,
     /// What `pump` has said about the overlay so far: nothing, "hooked", or
@@ -202,6 +205,27 @@ pub struct SteamPlatform {
     _overlay_cb: steamworks::CallbackHandle,
     _lobby_join_cb: steamworks::CallbackHandle,
     _presence_join_cb: steamworks::CallbackHandle,
+    _dlc_installed_cb: steamworks::CallbackHandle,
+}
+
+/// Steam's `DlcInstalled_t`: a DLC finished installing, a purchase made during
+/// play included. The binding carries the struct but no callback type for it,
+/// so it is wrapped here the way the binding wraps its own.
+#[cfg(feature = "steam")]
+struct DlcInstalled {
+    app_id: u32,
+}
+
+// SAFETY: `ID` is the callback id Steam delivers `DlcInstalled_t` under, and
+// `from_raw` reads exactly that struct from the pointer Steam hands over.
+#[cfg(feature = "steam")]
+unsafe impl steamworks::Callback for DlcInstalled {
+    const ID: i32 = steamworks::sys::DlcInstalled_t_k_iCallback as i32;
+    unsafe fn from_raw(raw: *mut std::ffi::c_void) -> Self {
+        // SAFETY: Steam passes a valid `DlcInstalled_t` for this callback id.
+        let cb = unsafe { raw.cast::<steamworks::sys::DlcInstalled_t>().read_unaligned() };
+        Self { app_id: cb.m_nAppID }
+    }
 }
 
 #[cfg(feature = "steam")]
@@ -309,6 +333,12 @@ impl SteamPlatform {
                 });
             });
 
+        let dlc_installed: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let installed = dlc_installed.clone();
+        let _dlc_installed_cb = client.register_callback::<DlcInstalled, _>(move |cb| {
+            lock(&installed).push(cb.app_id);
+        });
+
         let lobby_enter_errors: Arc<Mutex<HashMap<u64, &'static str>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let errors = lobby_enter_errors.clone();
@@ -339,6 +369,7 @@ impl SteamPlatform {
             overlay_active,
             overlay_flips,
             join_requests,
+            dlc_installed,
             booted_at: Instant::now(),
             overlay_reported: Cell::new(OverlayReport::Nothing),
             _persona_cb,
@@ -350,6 +381,7 @@ impl SteamPlatform {
             _overlay_cb,
             _lobby_join_cb,
             _presence_join_cb,
+            _dlc_installed_cb,
         })
     }
 }
@@ -385,6 +417,9 @@ impl Platform for SteamPlatform {
         Some(self)
     }
     fn social(&self) -> Option<&dyn Social> {
+        Some(self)
+    }
+    fn entitlements(&self) -> Option<&dyn Entitlements> {
         Some(self)
     }
     fn leaderboards(&self) -> Option<&dyn Leaderboards> {
@@ -628,6 +663,62 @@ impl Social for SteamPlatform {
     }
     fn poll_join_requests(&self) -> Vec<JoinRequest> {
         std::mem::take(&mut *lock(&self.join_requests))
+    }
+}
+
+/// The DLC calls the binding does not wrap go through Steam's flat C API,
+/// against the same `ISteamApps` interface the binding itself uses.
+#[cfg(feature = "steam")]
+impl Entitlements for SteamPlatform {
+    fn owns(&self, app_id: u32) -> bool {
+        self.client.apps().is_subscribed_app(app_id.into())
+    }
+    fn installed(&self, app_id: u32) -> bool {
+        self.client.apps().is_dlc_installed(app_id.into())
+    }
+    fn dlc(&self) -> Vec<DlcInfo> {
+        // SAFETY: Steam is initialised for as long as `self.client` lives, and
+        // every call here is on the thread that owns it. The name buffer is
+        // sized by the length passed with it, and Steam NUL-terminates it.
+        unsafe {
+            let apps = steamworks::sys::SteamAPI_SteamApps_v009();
+            let count = steamworks::sys::SteamAPI_ISteamApps_GetDLCCount(apps).max(0);
+            (0..count)
+                .filter_map(|i| {
+                    let mut app_id = 0;
+                    let mut available = false;
+                    let mut name = [0 as std::os::raw::c_char; 128];
+                    steamworks::sys::SteamAPI_ISteamApps_BGetDLCDataByIndex(
+                        apps,
+                        i,
+                        &mut app_id,
+                        &mut available,
+                        name.as_mut_ptr(),
+                        name.len() as i32,
+                    )
+                    .then(|| DlcInfo {
+                        app_id,
+                        name: std::ffi::CStr::from_ptr(name.as_ptr()).to_string_lossy().into_owned(),
+                        available,
+                    })
+                })
+                .collect()
+        }
+    }
+    fn install(&self, app_id: u32) {
+        // SAFETY: as in `dlc`.
+        unsafe {
+            steamworks::sys::SteamAPI_ISteamApps_InstallDLC(steamworks::sys::SteamAPI_SteamApps_v009(), app_id);
+        }
+    }
+    fn uninstall(&self, app_id: u32) {
+        // SAFETY: as in `dlc`.
+        unsafe {
+            steamworks::sys::SteamAPI_ISteamApps_UninstallDLC(steamworks::sys::SteamAPI_SteamApps_v009(), app_id);
+        }
+    }
+    fn poll_installed(&self) -> Vec<u32> {
+        std::mem::take(&mut *lock(&self.dlc_installed))
     }
 }
 

@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 180
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 186
 - [node — transform & body fields](#node--transform--body-fields) — 40
 - [node — methods & handles](#node--methods--handles) — 31
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -539,6 +539,14 @@ steam.cloudWrite(name, data) -> ok, err — writes data (a binary-safe Lua strin
 
 steam.createLobby(opts, cb) — creates a lobby and puts you in it. A lobby is DISCOVERY, not transport: it's how players find each other and agree what they're about to play, and it decides nothing about how the game's packets travel. opts (optional): kind = "public" (default; anyone can find it), "friendsOnly", "private" (invite only) or "invisible" (joinable by id but never returned by a search); maxMembers = 8 by default, 1 to 250. cb(lobby, err) on a later frame, exactly once — lobby is { id, memberCount, memberLimit, owner, data }.
 
+### `steam.dlc`
+
+steam.dlc() — every DLC this game declares on Steam, owned or not: { {id, name, available, owned, installed}, ... }. available = on sale (false for DLC Steam lists but keeps off the store). What a DLC screen is built from. nil without Steam.
+
+### `steam.dlcInstalled`
+
+steam.dlcInstalled(appId) — true if the player owns that DLC AND its content is installed. For DLC with no download of its own, owning it is installing it. nil without Steam.
+
 ### `steam.downloadScores`
 
 steam.downloadScores(boardId, opts, cb) — downloads leaderboard rows. opts (optional): scope = "global" (default, ranks from the top), "friends" (only your friends) or "aroundUser" (ranks RELATIVE to your own — start = -4 with count = 9 gives you plus the four either side); start (default 1) and count (default 10). cb(rows, err) with rows a list of { userId, rank, score, details }; userId is a STRING and details is an empty list when none was uploaded.
@@ -570,6 +578,10 @@ steam.friends() — the local user's friend list, as a list of { id, name, state
 ### `steam.installDir`
 
 steam.installDir() — this app's install directory, as Steam reports it. nil when steam.available() is false.
+
+### `steam.installDlc`
+
+steam.installDlc(appId) -> ok, err — asks Steam to download an owned DLC's content; steam.onDlcInstalled fires when it lands. Refuses: the player doesn't own it (open its store page with steam.openOverlayStore(appId)); Steam isn't available in this session.
 
 ### `steam.inviteFriend`
 
@@ -631,6 +643,10 @@ steam.lobbyOwner(id) — the lobby's owner (the host) as an id string, or nil. O
 
 steam.localUserId() — the signed-in local user's SteamID64, as a STRING (it exceeds what an f64 represents exactly). nil when steam.available() is false.
 
+### `steam.onDlcInstalled`
+
+steam.onDlcInstalled(fn) — fn(appId) runs when a DLC finishes installing, a purchase made during play included, so a game can unlock it without restarting. Not held when no handler is registered: steam.dlcInstalled already answers what is installed now. One handler; registering again replaces it.
+
 ### `steam.onJoinRequested`
 
 steam.onJoinRequested(fn) — fn(req) runs when the player accepts an invite or clicks Join Game on a friend in Steam, and once for the invite the game was launched from. req is { lobby = id } (join it with steam.joinLobby) or { connect = "..." } (the string the other game advertised or sent), with friend = their id when Steam says. Ids are strings. A request that arrives before any handler is held until one registers, so register it in your first scene. One handler; registering again replaces it.
@@ -674,6 +690,10 @@ steam.overlayActive() — true while the overlay is being shown over the game (S
 ### `steam.overlayEnabled`
 
 steam.overlayEnabled() — true once the Steam overlay has hooked this game and can open; false while it's still attaching at startup, when the player has it disabled in Steam's settings, or on a setup where it can't inject (some Linux/Proton configurations). nil when steam.available() is false. Every steam.openOverlay* call answers (false, why) in the same situations, so you rarely need to poll this yourself.
+
+### `steam.ownsDlc`
+
+steam.ownsDlc(appId) — true if the player owns that DLC (its Steam app id, a number). Asks the Steam client on this machine, not the network, so call it whenever you need the answer; nothing to cache. nil when steam.available() is false — falsy, so `if steam.ownsDlc(id) then` is safe everywhere.
 
 ### `steam.personaName`
 
@@ -726,6 +746,10 @@ steam.statsReady() — true once achievements/stats have finished loading from S
 ### `steam.uiLanguage`
 
 steam.uiLanguage() — Steam's own UI language right now (e.g. "english", "french") — a reasonable default for your own localization. nil when steam.available() is false.
+
+### `steam.uninstallDlc`
+
+steam.uninstallDlc(appId) -> ok, err — asks Steam to remove an installed DLC's content. Refuses: the player doesn't own it; Steam isn't available in this session.
 
 ### `steam.unlockAchievement`
 

@@ -167,8 +167,43 @@ pub trait Identity {
     fn is_big_picture_mode(&self) -> bool;
 }
 
-/// DLC/entitlement ownership surface. Empty until Phase 8.
-pub trait Entitlements {}
+/// One piece of DLC the app declares on its platform backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DlcInfo {
+    /// The DLC's own app id.
+    pub app_id: u32,
+    /// Its name, as the backend lists it.
+    pub name: String,
+    /// Whether it can be bought: `false` for DLC the backend lists but keeps
+    /// off the store.
+    pub available: bool,
+}
+
+/// DLC ownership and installs. Landed Phase 8.
+///
+/// **No cache, on purpose.** Every read answers from the platform client's own
+/// license list on this machine, not the network, so it is cheap enough to ask
+/// whenever the answer is needed and can never be stale. A purchase or install
+/// made while the game runs arrives through
+/// [`poll_installed`](Self::poll_installed), so a game can react to it without
+/// polling.
+pub trait Entitlements {
+    /// Whether the local user owns `app_id` (a DLC, or any app).
+    fn owns(&self, app_id: u32) -> bool;
+    /// Whether the local user owns DLC `app_id` and it is installed. For DLC
+    /// with no content of its own to download, owning it is installing it.
+    fn installed(&self, app_id: u32) -> bool;
+    /// Every DLC the app declares, owned or not.
+    fn dlc(&self) -> Vec<DlcInfo>;
+    /// Asks the platform to download and install an owned DLC's content.
+    /// Completion arrives through [`poll_installed`](Self::poll_installed).
+    fn install(&self, app_id: u32);
+    /// Asks the platform to remove an installed DLC's content.
+    fn uninstall(&self, app_id: u32);
+    /// Every DLC that became installed since the last poll, a purchase made
+    /// during play included. Drained.
+    fn poll_installed(&self) -> Vec<u32>;
+}
 
 /// Workshop/UGC item surface. Empty until Phase 10.
 pub trait Ugc {}
