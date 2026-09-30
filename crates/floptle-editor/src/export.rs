@@ -1225,6 +1225,28 @@ pub(crate) fn export_game_with(
     Ok((msg, out_c))
 }
 
+/// The Steam player's name inside a bundle, for `platform`: the player with
+/// Steam compiled in, which an export ships for a project with a Steam App ID.
+#[cfg(feature = "editor-ui")]
+fn steam_player_bin_name_for(platform: &str) -> String {
+    format!("floptle-player-steam{}", floptle_dist::exe_suffix_for(platform))
+}
+
+/// Valve's runtime library the Steam player loads, by the file name it looks
+/// for beside itself. `None` for a platform Steam does not run on.
+#[cfg(feature = "editor-ui")]
+fn steam_api_lib_for(platform: &str) -> Option<&'static str> {
+    if platform.starts_with("windows") {
+        Some("steam_api64.dll")
+    } else if platform.starts_with("linux") {
+        Some("libsteam_api.so")
+    } else if platform.starts_with("macos") {
+        Some("libsteam_api.dylib")
+    } else {
+        None
+    }
+}
+
 /// The executable a native build ships, and Valve's runtime library to put
 /// beside it when there is one.
 ///
@@ -1248,11 +1270,11 @@ fn shipped_player(
         ExportKind::Template { platform, .. } => platform.to_string(),
         _ => floptle_dist::platform_target(),
     };
-    let Some(lib_name) = floptle_dist::steam_api_lib_for(&platform) else {
+    let Some(lib_name) = steam_api_lib_for(&platform) else {
         return Err(format!("this project uses Steam, and Steam does not run on {platform}"));
     };
     let dir = binary.parent().ok_or("the player binary has no parent directory")?;
-    let steam_bin = dir.join(floptle_dist::steam_player_bin_name_for(&platform));
+    let steam_bin = dir.join(steam_player_bin_name_for(&platform));
     // Beside the player in a bundle; under the target directory's build
     // outputs in a source checkout, where Cargo left it.
     let lib = std::iter::once(dir.join(lib_name))
@@ -2753,10 +2775,10 @@ mod tests {
         let plain = dir.join(floptle_dist::player_bin_name_for(platform));
         floptle_vfs::write(&plain, "plain player").unwrap();
         if steam_player {
-            floptle_vfs::write(dir.join(floptle_dist::steam_player_bin_name_for(platform)), "steam player").unwrap();
+            floptle_vfs::write(dir.join(steam_player_bin_name_for(platform)), "steam player").unwrap();
         }
         if lib {
-            let name = floptle_dist::steam_api_lib_for(platform).unwrap();
+            let name = steam_api_lib_for(platform).unwrap();
             floptle_vfs::write(dir.join(name), "valve library").unwrap();
         }
         (dir, plain)
@@ -2781,7 +2803,7 @@ mod tests {
         assert_eq!(manifest.steam.map(|s| s.app_id), Some(480));
         let exe = format!("Steam_Game{}", std::env::consts::EXE_SUFFIX);
         assert_eq!(floptle_vfs::read_to_string(out.join(&exe)).unwrap(), "steam player");
-        let lib = floptle_dist::steam_api_lib_for(&host).unwrap();
+        let lib = steam_api_lib_for(&host).unwrap();
         assert_eq!(floptle_vfs::read_to_string(out.join(lib)).unwrap(), "valve library");
         assert!(msg.contains("with Steam"), "the result should say Steam shipped: {msg}");
 
@@ -2800,7 +2822,7 @@ mod tests {
         floptle_vfs::write(proj.join("project.ron"), "(steam: Some((app_id: 480)))").unwrap();
         for (tag, steam_player, lib, names) in [
             ("no-player", false, true, "floptle-player-steam"),
-            ("no-lib", true, false, floptle_dist::steam_api_lib_for(&host).unwrap()),
+            ("no-lib", true, false, steam_api_lib_for(&host).unwrap()),
         ] {
             let (bundle, plain) = fake_bundle(&format!("bundle-{tag}"), &host, steam_player, lib);
             let out = temp(&format!("out-{tag}")).join("build");
@@ -2821,7 +2843,7 @@ mod tests {
         let proj = temp("proj-steam-checkout");
         floptle_vfs::write(proj.join("project.ron"), "(steam: Some((app_id: 480)))").unwrap();
         let (bundle, plain) = fake_bundle("bundle-checkout", &host, true, false);
-        let lib = floptle_dist::steam_api_lib_for(&host).unwrap();
+        let lib = steam_api_lib_for(&host).unwrap();
         let built = bundle.join("build/steamworks-sys-0123abcd/out");
         floptle_vfs::create_dir_all(&built).unwrap();
         floptle_vfs::write(built.join(lib), "cargo's copy").unwrap();
@@ -2848,7 +2870,7 @@ mod tests {
         let (msg, _) = export_game_with(&proj, &out, "Plain", &plain, &EXPORT_TARGETS[0]).expect("export succeeds");
         let exe = format!("Plain{}", std::env::consts::EXE_SUFFIX);
         assert_eq!(floptle_vfs::read_to_string(out.join(&exe)).unwrap(), "plain player");
-        let lib = floptle_dist::steam_api_lib_for(&host).unwrap();
+        let lib = steam_api_lib_for(&host).unwrap();
         assert!(!out.join(lib).exists(), "a game not on Steam shipped Valve's library");
         assert!(!msg.contains("Steam"), "{msg}");
 

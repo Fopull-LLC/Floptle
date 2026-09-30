@@ -115,26 +115,6 @@ pub fn player_bin_name_for(platform: &str) -> String {
     format!("floptle-player{}", exe_suffix_for(platform))
 }
 
-/// The Steam player's name inside a bundle, for `platform`: the player with
-/// Steam compiled in, which an export ships for a project with a Steam App ID.
-pub fn steam_player_bin_name_for(platform: &str) -> String {
-    format!("floptle-player-steam{}", exe_suffix_for(platform))
-}
-
-/// Valve's runtime library the Steam player loads, by the file name it looks
-/// for beside itself. `None` for a platform Steam does not run on.
-pub fn steam_api_lib_for(platform: &str) -> Option<&'static str> {
-    if platform.starts_with("windows") {
-        Some("steam_api64.dll")
-    } else if platform.starts_with("linux") {
-        Some("libsteam_api.so")
-    } else if platform.starts_with("macos") {
-        Some("libsteam_api.dylib")
-    } else {
-        None
-    }
-}
-
 /// The file that proves an unpacked template for `platform` is whole — the
 /// player binary, or for the web the wasm module. An export refuses a template
 /// missing it by name rather than shipping half a build.
