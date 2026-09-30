@@ -202,6 +202,10 @@ struct Player {
     /// to ask for — see [`Player::capture_web`].
     #[cfg(target_arch = "wasm32")]
     pending_shot: Option<web::PendingShot>,
+    /// How far the browser's boot has got, and whether the page has been told
+    /// the game is on screen — see [`web::Boot`].
+    #[cfg(target_arch = "wasm32")]
+    web_boot: web::Boot,
 }
 
 impl Player {
@@ -237,6 +241,8 @@ impl Player {
             pending_gpu: Default::default(),
             #[cfg(target_arch = "wasm32")]
             pending_shot: None,
+            #[cfg(target_arch = "wasm32")]
+            web_boot: web::Boot::default(),
         }
     }
 
@@ -245,13 +251,22 @@ impl Player {
     /// works: `open_project` imports models and adopts paint, and both need a
     /// device. The same order `floptle shot` uses, and the reason it is the
     /// tested one.
+    ///
+    /// A browser runs the same three steps one frame apart (see
+    /// [`Player::web_boot`]), so its page can say which one it is on.
+    #[cfg(not(target_arch = "wasm32"))]
     fn boot(&mut self, gpu: Gpu) {
         self.ed.attach_gpu(gpu);
         self.ed.open_project(self.project.clone());
+        self.start_game();
+    }
+
+    /// The last of the three: the clock starts and so does the game. There is
+    /// no Play button in a build.
+    fn start_game(&mut self) {
         let now = Instant::now();
         self.ed.started = Some(now);
         self.ed.last = Some(now);
-        // Straight into the game. There is no Play button in a build.
         self.ed.toggle_play();
     }
 }
@@ -292,6 +307,7 @@ impl ApplicationHandler for Player {
             // A browser answers a device request asynchronously. The window
             // keeps asking to be redrawn until the device lands, and the
             // redraw that finds it boots the game.
+            web::status("preparing the graphics…");
             let slot = self.pending_gpu.clone();
             let w = window.clone();
             wasm_bindgen_futures::spawn_local(async move {
@@ -378,27 +394,8 @@ impl Player {
     /// request for the pointer, and re-centre a confine-only grab.
     fn frame(&mut self, event_loop: &ActiveEventLoop) {
         #[cfg(target_arch = "wasm32")]
-        if self.ed.gpu.is_none() {
-            let Some(gpu) = self.pending_gpu.borrow_mut().take() else { return };
-            let mut gpu = gpu;
-            // The canvas reached its CSS size while the device request was in
-            // flight, and the `Resized` that announced it found no device to
-            // apply to — so ask the window now, or the surface stays at the
-            // 1x1 it was configured with.
-            if let Some(w) = self.ed.window.as_ref() {
-                let size = w.inner_size();
-                if (size.width, size.height) != (gpu.config.width, gpu.config.height) {
-                    gpu.resize(size.width, size.height);
-                }
-            }
-            self.boot(gpu);
-            web::log(&format!(
-                "booted: {} at {}x{}, {} nodes",
-                self.title,
-                self.ed.gpu.as_ref().map_or(0, |g| g.config.width),
-                self.ed.gpu.as_ref().map_or(0, |g| g.config.height),
-                self.ed.world.len()
-            ));
+        if !self.web_boot() {
+            return;
         }
         self.frames += 1;
         #[cfg(target_arch = "wasm32")]
@@ -435,6 +432,7 @@ impl Player {
         }
         #[cfg(target_arch = "wasm32")]
         {
+            self.web_reveal();
             if self.shot.is_some() && self.frames == self.shot_at {
                 self.capture_web();
             }
@@ -583,6 +581,131 @@ impl Player {
     }
 }
 
+/// When a browser build's loading screen comes down: the decision, apart
+/// from the clock and the page, so it can be tested off the web.
+#[cfg(any(target_arch = "wasm32", test))]
+mod reveal {
+    /// Frames the game must have drawn before the loading screen comes down.
+    /// A browser compiles a pipeline the first time it is drawn with, so the
+    /// first frames of a game are its slowest, and they are drawn under the
+    /// loading screen rather than as a stutter the player watches.
+    const REVEAL_MIN_FRAMES: u32 = 3;
+    /// Quiet frames in a row before the game is shown. More than one, because
+    /// terrain looks for missing chunks only every few frames and a single
+    /// quiet frame can come right before it finds more.
+    const REVEAL_QUIET_FRAMES: u32 = 5;
+    /// A frame that took longer than this was spent loading. A page has no
+    /// threads, so a model a game asks for in its first frames is decoded
+    /// inside the frame, and a freshly started game can spend a dozen seconds
+    /// in frames like that before its first smooth one.
+    const REVEAL_LOADING_FRAME_MS: f32 = 250.0;
+    /// The longest the loading screen waits for quiet once the game is
+    /// running. A game that streams its world forever is never quiet, nor is
+    /// one on a machine too slow for it; past this the player sees it anyway.
+    const REVEAL_CAP_SECS: f32 = 20.0;
+    /// …but not in the middle of a load: the cap only lifts the screen over
+    /// frames that are arriving, never over one that is still being held.
+    const REVEAL_CAP_FRAME_MS: f32 = 1000.0;
+
+    /// The frames the game has drawn so far, as the loading screen sees them.
+    #[derive(Default)]
+    pub(super) struct Reveal {
+        frames: u32,
+        /// Quiet frames in a row: nothing of the world left to arrive and
+        /// nothing loaded inside the frame.
+        quiet: u32,
+    }
+
+    /// Why the loading screen came down.
+    #[derive(Debug, PartialEq)]
+    pub(super) enum Shown {
+        /// The game drew several smooth frames with nothing left to load.
+        Settled,
+        /// It waited the longest it waits, and the game is drawing frames.
+        Waited,
+    }
+
+    impl Reveal {
+        /// One drawn frame: whether it `loaded` anything (the world arriving,
+        /// a model registered), how long since the last one, and how long the
+        /// game has been running. `Some` once the screen should come down.
+        pub(super) fn frame(&mut self, loaded: bool, frame_ms: f32, running_secs: f32) -> Option<Shown> {
+            self.frames += 1;
+            if loaded || frame_ms > REVEAL_LOADING_FRAME_MS {
+                self.quiet = 0;
+            } else {
+                self.quiet += 1;
+            }
+            if self.frames >= REVEAL_MIN_FRAMES && self.quiet >= REVEAL_QUIET_FRAMES {
+                Some(Shown::Settled)
+            } else if running_secs >= REVEAL_CAP_SECS && frame_ms < REVEAL_CAP_FRAME_MS {
+                Some(Shown::Waited)
+            } else {
+                None
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// A 60 Hz frame.
+        const SMOOTH: f32 = 16.7;
+
+        #[test]
+        fn smooth_frames_with_nothing_loading_take_it_down() {
+            let mut r = Reveal::default();
+            let shown: Vec<_> = (0..REVEAL_QUIET_FRAMES).map(|i| r.frame(false, SMOOTH, i as f32 * 0.017)).collect();
+            assert!(shown[..shown.len() - 1].iter().all(Option::is_none), "{shown:?}");
+            assert_eq!(shown.last().unwrap(), &Some(Shown::Settled));
+        }
+
+        #[test]
+        fn a_frame_spent_loading_starts_the_count_again() {
+            // Freeflier's first frames on the web: a few smooth ones, then a
+            // model decoded inside a frame, then smooth again.
+            let mut r = Reveal::default();
+            for _ in 0..REVEAL_QUIET_FRAMES - 1 {
+                assert_eq!(r.frame(false, SMOOTH, 1.0), None);
+            }
+            assert_eq!(r.frame(false, 7000.0, 8.0), None, "a seven-second frame is not a quiet one");
+            for _ in 0..REVEAL_QUIET_FRAMES - 1 {
+                assert_eq!(r.frame(false, SMOOTH, 8.1), None);
+            }
+            assert_eq!(r.frame(false, SMOOTH, 8.2), Some(Shown::Settled));
+        }
+
+        #[test]
+        fn the_world_still_arriving_holds_it_up() {
+            let mut r = Reveal::default();
+            for _ in 0..REVEAL_QUIET_FRAMES * 4 {
+                assert_eq!(r.frame(true, SMOOTH, 1.0), None);
+            }
+        }
+
+        #[test]
+        fn the_cap_shows_a_game_that_never_goes_quiet() {
+            let mut r = Reveal::default();
+            assert_eq!(r.frame(true, SMOOTH, REVEAL_CAP_SECS - 0.1), None);
+            assert_eq!(r.frame(true, SMOOTH, REVEAL_CAP_SECS), Some(Shown::Waited));
+            // A machine too slow for the game: 4 fps, forever.
+            let mut r = Reveal::default();
+            assert_eq!(r.frame(false, 300.0, REVEAL_CAP_SECS + 1.0), Some(Shown::Waited));
+        }
+
+        #[test]
+        fn the_cap_never_lifts_it_over_a_frame_still_loading() {
+            let mut r = Reveal::default();
+            assert_eq!(
+                r.frame(true, 9000.0, REVEAL_CAP_SECS + 5.0),
+                None,
+                "a nine-second frame is a load in progress, whatever the clock says"
+            );
+        }
+    }
+}
+
 /// The browser: the same [`Player`], started from a page.
 #[cfg(target_arch = "wasm32")]
 pub mod web {
@@ -605,6 +728,53 @@ pub mod web {
         /// `window.floptleLog(line)`: the page's transcript.
         #[wasm_bindgen(js_namespace = window, js_name = floptleLog, catch)]
         fn page_log(line: &str) -> Result<(), JsValue>;
+        /// `window.floptleStatus(text)`: what the loading screen says now.
+        #[wasm_bindgen(js_namespace = window, js_name = floptleStatus, catch)]
+        fn page_status(text: &str) -> Result<(), JsValue>;
+        /// `window.floptleReady()`: the game is on screen; take the loading
+        /// screen down.
+        #[wasm_bindgen(js_namespace = window, js_name = floptleReady, catch)]
+        fn page_ready() -> Result<(), JsValue>;
+    }
+
+    /// Where the browser's boot has got. The desktop runs the three steps
+    /// back to back ([`Player::boot`]); here each is a frame of its own, so
+    /// the page gets a frame to paint what it is waiting on before a step
+    /// that can hold the tab for seconds.
+    #[derive(Default)]
+    pub(super) struct Boot {
+        step: Step,
+        /// The frames drawn so far, as the loading screen counts them.
+        reveal: super::reveal::Reveal,
+        /// When the game drew its first frame.
+        running_since: Option<floptle_core::time::Instant>,
+        /// When the last frame ended, and how many models were registered
+        /// then — a frame that registered one loaded it.
+        last_frame: Option<floptle_core::time::Instant>,
+        models: usize,
+        /// The page has been told the game is on screen.
+        revealed: bool,
+    }
+
+    #[derive(Default, PartialEq)]
+    enum Step {
+        /// Waiting on the browser's device.
+        #[default]
+        Device,
+        /// The device is attached; the project opens next.
+        Project,
+        /// The project is open; the game starts next.
+        Start,
+        /// The game is running; the loading screen is up until
+        /// [`Player::web_reveal`] takes it down.
+        Running,
+    }
+
+    /// Say on the loading screen what is being waited on, and in the
+    /// transcript when it started.
+    pub(super) fn status(text: &str) {
+        let _ = page_status(text);
+        log(&format!("loading: {text}"));
     }
 
     /// Does the document hold a pointer lock right now?
@@ -688,6 +858,9 @@ pub mod web {
             ));
         }
         floptle_vfs::open_saves(&manifest.title)?;
+        // The Cloud's live region list, so it has arrived by the time the
+        // player presses Join. Nothing waits on it.
+        floptle_account::regions::prefetch(floptle_account::DEFAULT_BASE);
         let event_loop = EventLoop::new().map_err(|e| format!("no event loop: {e}"))?;
         let mut app = Player::new(manifest.title, project);
         app.canvas = Some(canvas);
@@ -702,6 +875,79 @@ pub mod web {
     }
 
     impl Player {
+        /// One step of the boot per frame, and whether the game is running —
+        /// the frame goes on to draw it only then.
+        ///
+        /// A step that holds the tab (opening the project imports every model;
+        /// starting the game runs every script's `start`) is taken in the
+        /// frame after the one that announced it, because the page cannot
+        /// paint the announcement until control comes back to the browser.
+        pub(super) fn web_boot(&mut self) -> bool {
+            match self.web_boot.step {
+                Step::Running => return true,
+                Step::Device => {
+                    let Some(mut gpu) = self.pending_gpu.borrow_mut().take() else { return false };
+                    // The canvas reached its CSS size while the device request
+                    // was in flight, and the `Resized` that announced it found
+                    // no device to apply to — so ask the window now, or the
+                    // surface stays at the 1x1 it was configured with.
+                    if let Some(w) = self.ed.window.as_ref() {
+                        let size = w.inner_size();
+                        if (size.width, size.height) != (gpu.config.width, gpu.config.height) {
+                            gpu.resize(size.width, size.height);
+                        }
+                    }
+                    self.ed.attach_gpu(gpu);
+                    status("loading the game…");
+                    self.web_boot.step = Step::Project;
+                }
+                Step::Project => {
+                    self.ed.open_project(self.project.clone());
+                    status("starting the game…");
+                    self.web_boot.step = Step::Start;
+                }
+                Step::Start => {
+                    self.start_game();
+                    log(&format!(
+                        "booted: {} at {}x{}, {} nodes",
+                        self.title,
+                        self.ed.gpu.as_ref().map_or(0, |g| g.config.width),
+                        self.ed.gpu.as_ref().map_or(0, |g| g.config.height),
+                        self.ed.world.len()
+                    ));
+                    // The game's first frames load what its scripts asked for
+                    // as they started, and can be as long as the start was.
+                    status("loading the world…");
+                    self.web_boot.step = Step::Running;
+                }
+            }
+            false
+        }
+
+        /// After a drawn frame: take the loading screen down once the game
+        /// has drawn a few frames and its world has stopped arriving.
+        pub(super) fn web_reveal(&mut self) {
+            use floptle_core::time::Instant;
+            let b = &mut self.web_boot;
+            if b.revealed {
+                return;
+            }
+            let now = Instant::now();
+            let since = *b.running_since.get_or_insert(now);
+            let frame_ms = b.last_frame.map_or(0.0, |t| (now - t).as_secs_f32() * 1000.0);
+            b.last_frame = Some(now);
+            let models = self.ed.mesh_registry.len();
+            let loaded = self.ed.world_loading() || models != b.models;
+            b.models = models;
+            let Some(shown) = b.reveal.frame(loaded, frame_ms, (now - since).as_secs_f32()) else { return };
+            b.revealed = true;
+            if shown == super::reveal::Shown::Waited {
+                log("loading: still loading after the longest wait; showing the game anyway");
+            }
+            log(&format!("ready: frame {}", self.frames));
+            let _ = page_ready();
+        }
+
         /// The browser's `--shot`: render this frame again into a texture the
         /// engine owns and copy it into a mappable buffer. The map itself is
         /// asked for a few frames later ([`read_shot`], driven from `frame`) —

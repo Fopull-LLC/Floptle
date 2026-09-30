@@ -111,8 +111,12 @@ testing on `localhost` looks like.
 **Floptle Cloud from a page** needs two things on fopull.com's side that are
 not engine changes: the Cloud API allowing the addresses web builds are served
 from, and each region's relay serving its browser leg with a real certificate.
-The engine already knows where that leg will be (`wss://us-east.relay.fopull.com:7789/`
-for us-east), so `cloud://` joins from a page work the day it is up.
+A page asks Floptle Cloud for its current region list when the game starts,
+so a region's browser leg reaches builds already on the web the day it opens,
+with no re-export. Until a region has one, a `cloud://` join from a page says
+the region does not take browser players yet. A page that cannot read the list
+(one on an address the Cloud does not allow) uses the list it was exported
+with, which names `wss://us-east.relay.fopull.com:7789/` for us-east.
 
 ---
 

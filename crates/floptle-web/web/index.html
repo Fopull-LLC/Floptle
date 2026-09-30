@@ -14,6 +14,13 @@
   #title { font-size: 22px; letter-spacing: 0.02em; color: #fff; }
   #bar { width: min(420px, 80vw); height: 6px; background: #1c1c24; border-radius: 3px; overflow: hidden; }
   #fill { height: 100%; width: 0; background: #d8d8e0; transition: width 120ms linear; }
+  /* Working, with no fraction to show: a sliver that keeps crossing the bar.
+     A transform animation runs on the browser's compositor, so it keeps
+     moving while the engine holds the page for a long step — which is the
+     moment a still bar would read as a stalled one. */
+  #bar.busy #fill { width: 30% !important; transition: none; animation: busy 1.1s ease-in-out infinite; }
+  @keyframes busy { from { transform: translateX(-100%); } to { transform: translateX(334%); } }
+  #panel.leaving { opacity: 0; transition: opacity 250ms ease-out; pointer-events: none; }
   #status { color: #8a8a96; min-height: 1.5em; text-align: center; max-width: 80vw; white-space: pre-wrap; }
   #play { display: none; font: inherit; font-size: 16px; padding: 10px 28px; border: 1px solid #d8d8e0; border-radius: 4px; background: transparent; color: #fff; cursor: pointer; }
   #play:hover { background: #d8d8e0; color: #000; }
@@ -33,15 +40,24 @@
   const $ = id => document.getElementById(id);
   const status = s => { $('status').textContent = s; };
   const fill = f => { $('fill').style.width = Math.round(Math.max(0, Math.min(1, f)) * 100) + '%'; };
+  const busy = on => $('bar').classList.toggle('busy', on);
+  // The panel's three states: loading (up, bar moving), failed (up, the
+  // reason in place of the bar), and gone once the engine says the game is on
+  // screen. Once failed it stays failed; a late "ready" does not hide the
+  // reason the player needs to read.
+  let failed = false, shown = false;
   const fail = why => {
-    // **Show the panel.** It is hidden the moment `play()` returns, so
-    // anything that goes wrong after that — and losing the GPU adapter is the
-    // common one, on a Linux Chrome without the WebGPU flag or a blocklisted
-    // card — wrote its explanation into a hidden element. The player got a
+    // **Show the panel.** Anything that goes wrong once the game is on
+    // screen — and losing the GPU adapter is the common one, on a Linux
+    // Chrome without the WebGPU flag or a blocklisted card — would otherwise
+    // write its explanation into a hidden element, and the player would get a
     // black page that named nothing, which is exactly the failure this panel
     // exists to prevent.
+    failed = true;
     $('panel').hidden = false;
+    $('panel').classList.remove('leaving');
     $('play').classList.remove('ready');
+    busy(false);
     status(why);
     $('bar').style.visibility = 'hidden';
     console.error(why);
@@ -63,6 +79,36 @@
     shotAt > 0 ? fetch(path, { method: 'POST', body }).catch(() => {}) : Promise.resolve();
   window.floptleLog = s => { console.log(s); post('/report', s); };
   window.floptleFatal = s => { fail('The game stopped:\n' + s); post('/report', 'FATAL ' + s); };
+  // The engine's boot, step by step. The panel stays up from the Play click
+  // until `floptleReady`: the engine still has a graphics device to get, the
+  // project to open and the world to load, and every second of that used to
+  // be a black page with nothing on it saying the game was on its way.
+  const since = () => `${(performance.now() / 1000).toFixed(2)} s`;
+  window.floptleStatus = s => {
+    if (failed || shown) return;
+    status(s);
+    console.log(`loading: ${s}`);
+    post('/report', `page ${since()}: ${s}`);
+  };
+  window.floptleReady = () => {
+    if (failed || shown) return;
+    shown = true;
+    post('/report', `page ${since()}: the game is on screen`);
+    const panel = $('panel');
+    panel.classList.add('leaving');
+    setTimeout(() => {
+      if (!failed) { panel.hidden = true; panel.classList.remove('leaving'); busy(false); }
+    }, 300);
+    $('game').focus();
+  };
+  // A trap inside the engine that is not a Rust panic (the scripting VM's C++
+  // aborting, say) never reaches `floptleFatal`, and would leave the loading
+  // bar moving over a game that has stopped. Only the engine's own errors,
+  // and only while the panel is up: a page's other scripts are not ours.
+  window.addEventListener('error', e => {
+    const ours = e.error instanceof WebAssembly.RuntimeError || String(e.filename || '').includes('/pkg/');
+    if (ours && !shown && !failed) fail('The game stopped while loading:\n' + (e.message || e.error));
+  });
   // The picture comes from the engine's own render target, not the canvas: a
   // WebGPU canvas hands `toDataURL` a blank image outside the task that drew it.
   // wgpu reports a rejected buffer map as one fixed sentence and drops the
@@ -110,52 +156,90 @@
     run().catch(e => fail(String((e && e.stack) || e)));
   }
 
+  // Hand control back to the browser for one painted frame. A status set
+  // just before a long synchronous call is otherwise never seen: the page
+  // cannot paint until the call returns.
+  const painted = () => new Promise(r => requestAnimationFrame(() => setTimeout(r)));
+
   async function run() {
-    // The module first, so its own failure to load is reported as itself.
+    // The glue first (a few kilobytes), so its own failure to load is
+    // reported as itself.
+    busy(true);
+    status('loading…');
     const { default: init, play } = await import('./pkg/floptle_web.js');
-    await init();
-    // Then the game: one fetch, with a bar driven by the bytes that have
-    // arrived. A host that compresses on the fly may not say how many are
-    // coming; the bar then shows activity rather than a fraction.
-    status('downloading the game…');
-    const res = await fetch('game.flpk');
-    if (!res.ok) throw new Error(`game.flpk: HTTP ${res.status}`);
-    const total = Number(res.headers.get('Content-Length')) || 0;
-    const reader = res.body.getReader();
-    const chunks = [];
+    // Then the engine and the game together, on one bar. Both are large —
+    // the engine's module is tens of megabytes — and the engine's used to
+    // download under a bare "loading…" with the bar standing still.
+    const [wasmRes, gameRes] = await Promise.all([
+      fetch(new URL('./pkg/floptle_web_bg.wasm', import.meta.url)),
+      fetch('game.flpk'),
+    ]);
+    if (!wasmRes.ok) throw new Error(`floptle_web_bg.wasm: HTTP ${wasmRes.status}`);
+    if (!gameRes.ok) throw new Error(`game.flpk: HTTP ${gameRes.status}`);
+    // A host that compresses on the fly either does not say how many bytes
+    // are coming or states the compressed count while the body arrives
+    // decompressed. Either way there is no fraction to show, and the bar
+    // shows activity instead.
+    const size = r => {
+      const enc = r.headers.get('Content-Encoding');
+      return enc && enc !== 'identity' ? 0 : Number(r.headers.get('Content-Length')) || 0;
+    };
+    const sizes = [size(wasmRes), size(gameRes)];
+    const total = sizes.every(n => n > 0) ? sizes[0] + sizes[1] : 0;
+    busy(!total);
     let got = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      got += value.length;
-      if (total) {
+    const mb = n => (n / 1048576).toFixed(1);
+    const progress = n => {
+      got += n;
+      if (total && got <= total) {
         fill(got / total);
-        status(`downloading the game… ${(got / 1048576).toFixed(1)} / ${(total / 1048576).toFixed(1)} MB`);
+        status(`downloading the game… ${mb(got)} / ${mb(total)} MB`);
       } else {
-        fill((got % 5242880) / 5242880);
-        status(`downloading the game… ${(got / 1048576).toFixed(1)} MB`);
+        busy(true);
+        status(`downloading the game… ${mb(got)} MB`);
       }
-    }
-    const bytes = new Uint8Array(got);
-    let at = 0;
-    for (const c of chunks) { bytes.set(c, at); at += c.length; }
+    };
+    // The engine's module is counted on its way into the compiler rather
+    // than read first, so it still compiles as it streams in.
+    const counted = new Response(
+      wasmRes.body.pipeThrough(new TransformStream({ transform(c, out) { progress(c.length); out.enqueue(c); } })),
+      { headers: { 'Content-Type': 'application/wasm' } },
+    );
+    const readGame = async () => {
+      const reader = gameRes.body.getReader();
+      const chunks = [];
+      let n = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        n += value.length;
+        progress(value.length);
+      }
+      const bytes = new Uint8Array(n);
+      let at = 0;
+      for (const c of chunks) { bytes.set(c, at); at += c.length; }
+      return bytes;
+    };
+    const [, bytes] = await Promise.all([init({ module_or_path: counted }), readGame()]);
+    busy(false);
     fill(1);
     // A click before the game starts, on purpose: browsers allow sound only
     // after the player has interacted with the page, and a game that starts
     // silent and stays silent is a bug report. The harness has no hand to
     // click with, so a `?shot` run starts on its own (and stays silent).
     status('');
-    const start = () => {
+    const start = async () => {
+      // From here to `floptleReady` the panel stays up with the bar moving,
+      // and the engine names each step on it as it gets there.
+      busy(true);
       status('starting…');
+      await painted();
       try {
         play(bytes);
       } catch (e) {
         fail('The game could not start:\n' + ((e && e.stack) || e));
-        return;
       }
-      $('panel').hidden = true;
-      $('game').focus();
     };
     if (shotAt > 0) {
       start();

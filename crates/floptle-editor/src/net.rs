@@ -3675,7 +3675,8 @@ impl Editor {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            floptle_account::regions::shipped()
+            floptle_account::regions::prefetch(floptle_account::DEFAULT_BASE);
+            floptle_account::regions::current()
         }
     }
 }

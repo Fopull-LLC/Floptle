@@ -270,9 +270,9 @@ What is different from a desktop build, and deliberately so:
   showing a black canvas. There is no WebGL2 fallback — the engine's main mesh
   shader cannot be expressed in it ([web-export.md](web-export.md) has the
   table).
-- **The whole project downloads before the game starts.** The loading bar is
-  that download. There is no streaming in this version, so a build's size is a
-  player's wait. The export says how big the bundle came out and which kinds
+- **The whole project downloads before the game starts.** The loading bar
+  counts the engine and your project together. There is no streaming in this
+  version, so a build's size is a player's wait. The export says how big the bundle came out and which kinds
   of file fill it, e.g.:
 
   ```
@@ -290,6 +290,12 @@ What is different from a desktop build, and deliberately so:
   machine and browser. Browsers cap this at a few megabytes.
 - **Sound starts on a click.** Browsers only allow audio after the player has
   interacted with the page; the Play button is that click.
+- **The loading screen stays up until the game is running.** After Play it
+  says what it is waiting on (the graphics, opening the game, the world) and
+  keeps moving while it waits. It comes down once the game draws smooth frames
+  with nothing left to load: terrain still meshing, or models your scripts ask
+  for in their first frames, are loaded behind it. A game that streams its
+  world without end is shown after 20 seconds.
 - **`http.*`, `cloud.*` and `assets.textureFromUrl` work through the page's
   `fetch`**, provided the server allows the page's address (CORS). Floptle
   Cloud allowing web builds is its own step; see

@@ -244,15 +244,67 @@ pub fn fetch(base: &str, timeout: std::time::Duration) -> Result<Regions, String
         .map_err(|e| format!("could not read the region list: {e}"))?
         .into_string()
         .map_err(|e| format!("unreadable region list: {e}"))?;
+    parse(&text)
+}
+
+/// Read the control plane's answer, desktop and page alike.
+///
+/// An empty list is refused rather than returned: taken over the shipped one
+/// it would turn every Host button in every build into a dead one for a day,
+/// which is a far worse failure than a stale address.
+pub fn parse(text: &str) -> Result<Regions, String> {
     let out: Regions =
-        serde_json::from_str(&text).map_err(|e| format!("region list did not parse: {e}"))?;
+        serde_json::from_str(text).map_err(|e| format!("region list did not parse: {e}"))?;
     if out.regions.is_empty() {
-        // An empty list is not an answer worth caching over the shipped one: it
-        // would turn every Host button in every build into a dead one for a
-        // day, which is a far worse failure than a stale address.
         return Err("the region list came back empty".into());
     }
     Ok(out)
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    /// The list the control plane answered this page with, once it has.
+    static LIVE: std::cell::RefCell<Option<Regions>> = const { std::cell::RefCell::new(None) };
+    static ASKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Ask the control plane for the list, once per page, without waiting.
+///
+/// A page has no disk to cache into, so without this a browser build only
+/// ever knew [`shipped`]: a region opened after the export, or a region's
+/// browser leg (`relay_ws`) added after it, never reached a game already on a
+/// web page. The player boots, this goes out, and by the time anyone presses
+/// Join the answer is in. Until then, and whenever it fails (a page on an
+/// origin the Cloud does not allow cannot read it), [`current`] is
+/// [`shipped`].
+#[cfg(target_arch = "wasm32")]
+pub fn prefetch(base: &str) {
+    if ASKED.with(|a| a.replace(true)) {
+        return;
+    }
+    if !crate::auth::is_fopull_host(base) && !crate::auth::is_local_host(base) {
+        return;
+    }
+    let url = format!("{}{}/cloud/regions", base.trim_end_matches('/'), crate::cloud::API_PREFIX);
+    wasm_bindgen_futures::spawn_local(async move {
+        let got = crate::web_fetch::fetch("GET", &url, &[], None, 10.0, 256 * 1024).await.and_then(|r| {
+            if r.status != 200 {
+                return Err(format!("HTTP {}", r.status));
+            }
+            parse(&String::from_utf8_lossy(&r.body))
+        });
+        match got {
+            Ok(list) => LIVE.with(|l| *l.borrow_mut() = Some(list)),
+            Err(e) => log::info!("the Cloud region list could not be read ({e}); using the one this build shipped with"),
+        }
+    });
+}
+
+/// The list a page joins by: the control plane's answer once [`prefetch`]
+/// has it, and [`shipped`] until then.
+#[cfg(target_arch = "wasm32")]
+pub fn current() -> Regions {
+    LIVE.with(|l| l.borrow().clone()).unwrap_or_else(shipped)
 }
 
 /// The list to use right now: cache, else fetch, else what the build shipped
@@ -410,5 +462,27 @@ mod tests {
             is_usable(&Cached { fetched_unix: now, regions: list() }, now),
             "one live region and the cache still answers without a fetch"
         );
+    }
+
+    /// The control plane's answer as it reads today — with fields this
+    /// build does not know (`fleet`) and no browser leg — and the same list
+    /// once the leg is published. A page now joins by this answer rather
+    /// than by what it shipped with, so it has to read both.
+    #[test]
+    fn the_live_answer_parses_with_and_without_a_browser_leg() {
+        let today = r#"{"regions":[{"id":"us-east","letter":"U","name":"US East (Ashburn)","relay":"us-east.relay.fopull.com:7788","fleet":["us-east-1.fleet.fopull.com"],"status":"up"}]}"#;
+        let r = parse(today).unwrap();
+        assert_eq!(r.by_letter('U').unwrap().relay_ws, None, "no leg published: the page says so rather than dialling one");
+        let later = today.replace(r#""status":"up""#, r#""status":"up","relay_ws":"wss://us-east.relay.fopull.com:7789/""#);
+        assert_eq!(
+            parse(&later).unwrap().by_letter('U').unwrap().relay_ws.as_deref(),
+            Some("wss://us-east.relay.fopull.com:7789/")
+        );
+    }
+
+    #[test]
+    fn an_empty_answer_is_not_taken_over_the_shipped_list() {
+        assert!(parse(r#"{"regions":[]}"#).is_err());
+        assert!(parse("not json").is_err());
     }
 }

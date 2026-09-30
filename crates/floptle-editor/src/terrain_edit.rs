@@ -2081,6 +2081,18 @@ impl Editor {
             || !self.terrain_load_jobs.is_empty()
     }
 
+    /// Is the world still arriving — terrain generating or streaming, or
+    /// chunk meshes queued that the view will show?
+    ///
+    /// What a browser build holds its loading screen up for: the first
+    /// frames of a terrain scene otherwise show the sky with the ground
+    /// filling in under it, which reads as a game that is broken rather than
+    /// one that is still loading.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn world_loading(&self) -> bool {
+        self.terrain_worker_busy() || self.terrain_render.values().any(|r| !r.pending.is_empty())
+    }
+
     /// Hold a headless loop while the background terrain threads work, until
     /// they are idle or `deadline` passes, and answer how long it held.
     ///
