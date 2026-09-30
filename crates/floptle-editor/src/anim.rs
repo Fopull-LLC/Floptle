@@ -3306,11 +3306,15 @@ mod tests {
     /// is hidden. These fixture animators are light (24 translation lanes, no
     /// skinning), so that bookkeeping weighs more here than beside a real
     /// skinned character, whose hidden skinning is saved too.
+    ///
+    /// Each side is timed five times, alternating, and keeps its fastest:
+    /// interference on a shared machine only ever adds time, and a single
+    /// sample caught during it read 0.27 on CI against a ratio near 0.15.
     #[test]
     fn ninety_hidden_animators_of_a_hundred_cost_a_fraction() {
         use floptle_scene::AnimCullingDoc as C;
         let reg: HashMap<String, crate::MeshAsset> = HashMap::new();
-        let run = |hidden: usize| {
+        let setup = |hidden: usize| {
             let mut system = door_system(C::WhenVisible, 24);
             let mut world = World::new();
             let roots: Vec<Entity> = (0..100)
@@ -3320,15 +3324,22 @@ mod tests {
                 world.insert(*r, floptle_core::Visible(false));
             }
             advance_animators(&mut system, &mut world, &reg, 0.016, Vec::new(), CullBy::Camera(None));
+            (system, world)
+        };
+        let time = |(system, world): &mut (AnimSystem, World)| {
             let t0 = std::time::Instant::now();
             for _ in 0..40 {
-                advance_animators(&mut system, &mut world, &reg, 0.016, Vec::new(), CullBy::Camera(None));
+                advance_animators(system, world, &reg, 0.016, Vec::new(), CullBy::Camera(None));
             }
-            (t0.elapsed().as_secs_f64(), system.counts)
+            t0.elapsed().as_secs_f64()
         };
-        let (all, _) = run(0);
-        let (most, counts) = run(90);
-        assert_eq!(counts, (100, 90));
+        let (mut shown, mut hidden) = (setup(0), setup(90));
+        let (mut all, mut most) = (f64::MAX, f64::MAX);
+        for _ in 0..5 {
+            all = all.min(time(&mut shown));
+            most = most.min(time(&mut hidden));
+        }
+        assert_eq!(hidden.0.counts, (100, 90));
         assert!(most < all * 0.2, "90 hidden cost {:.2} ms, all shown {:.2} ms", most * 1e3, all * 1e3);
     }
 
