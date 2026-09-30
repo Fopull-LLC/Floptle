@@ -209,6 +209,13 @@ The sets are listed below.
 | `"left"` | `"center"` | `"right"` |
 | `"bottomLeft"` | `"bottom"` | `"bottomRight"` |
 
+`margin` insets a pinned element from the corner or edge it is pinned to:
+`{ pin = "topRight", margin = 28 }` sits 28 in from the right and 28 down from
+the top. Give it one number, or `{left, top, right, bottom}`; only the sides the
+element is pinned to count, so a centred axis stays centred. It adds to `x` and
+`y`, which move a pinned element as plain offsets. On an `inset` or `stretch`
+element, `margin` is the gap to the parent's edges.
+
 The four middle edges also answer to the longer spelling people reach for —
 `"topCenter"`, `"bottomCenter"`, `"leftCenter"`, `"rightCenter"` — and `centre`
 works anywhere `center` does.

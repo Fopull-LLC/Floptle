@@ -354,6 +354,13 @@ impl Editor {
     /// Pre-register every font any UI text references (before the immutable
     /// renderer borrow the measure callback needs).
     pub(crate) fn ensure_ui_fonts(&mut self) {
+        // What the renderer noticed while drawing last frame, a character a
+        // font has no glyph for, goes to the Console, where a box on screen
+        // would otherwise be the only sign of it.
+        let notes = self.ui_render.as_mut().map(|u| u.take_notes()).unwrap_or_default();
+        for n in notes {
+            self.console.push(floptle_script::LogLevel::Warn, n, None);
+        }
         // The project's own font first — it is what an empty
         // font name resolves to, so it has to be registered before anything
         // measures with one, which is most things.

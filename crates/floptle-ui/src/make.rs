@@ -278,14 +278,19 @@ impl MadeNode {
     /// The spec this description asks for, from scratch.
     pub fn build(&self) -> ElementSpec {
         let mut spec = self.kind.base();
-        // Two passes so the table's key order can't matter. The first sets the
-        // placement mode and the second fills in numbers within it; written as
-        // one pass, `{ margin = 8, inset = 0 }` and `{ inset = 0, margin = 8 }`
-        // would quietly mean different things.
+        // Three passes so the table's key order can't matter. The first sets
+        // the placement mode and the second fills in numbers within it; written
+        // as one pass, `{ margin = 8, inset = 0 }` and `{ inset = 0, margin = 8 }`
+        // would quietly mean different things. `margin` goes last because on a
+        // pinned or free element it insets on top of `x`/`y`, which set the
+        // offset outright.
         for (name, v) in self.props.iter().filter(|(n, _)| is_place_mode(n)) {
             apply_prop(&mut spec, name, v);
         }
-        for (name, v) in self.props.iter().filter(|(n, _)| !is_place_mode(n)) {
+        for (name, v) in self.props.iter().filter(|(n, _)| !is_place_mode(n) && n != "margin") {
+            apply_prop(&mut spec, name, v);
+        }
+        for (name, v) in self.props.iter().filter(|(n, _)| n == "margin") {
             apply_prop(&mut spec, name, v);
         }
         spec
@@ -417,8 +422,27 @@ pub fn apply_prop(spec: &mut ElementSpec, name: &str, v: &PropVal) -> Applied {
             spec.place = Place::Stretch { min: [q[0], q[1]], max: [q[2], q[3]], margin };
         }
         "margin" => {
-            if let Place::Stretch { margin, .. } = &mut spec.place {
-                *margin = v.quad();
+            let q = v.quad();
+            match &mut spec.place {
+                Place::Stretch { margin, .. } => *margin = q,
+                // Inset from the corner or edge it is pinned to: away from the
+                // right edge for a right anchor, down from the top for a top
+                // one. A centred axis has no edge to inset from and stays put.
+                Place::Pin { anchor, offset } => {
+                    let f = anchor.factors();
+                    for axis in 0..2 {
+                        let (lead, trail) = (q[axis], q[axis + 2]);
+                        if f[axis] == 0.0 {
+                            offset[axis] += lead;
+                        } else if f[axis] == 1.0 {
+                            offset[axis] -= trail;
+                        }
+                    }
+                }
+                Place::Free { pos } => {
+                    pos[0] += q[0];
+                    pos[1] += q[1];
+                }
             }
         }
         "x" | "y" | "posX" | "posY" => {
@@ -1002,6 +1026,34 @@ mod tests {
             Place::Stretch { margin, .. } => assert_eq!(margin, [12.0; 4]),
             p => panic!("expected a stretch, got {p:?}"),
         }
+    }
+
+    /// `margin` on a pinned element insets it from the corner it is pinned
+    /// to, whichever way that is, on top of any `x`/`y`, in any key order.
+    #[test]
+    fn margin_insets_a_pinned_element_from_its_corner() {
+        let pinned = |anchor: &str, extra: Vec<(String, PropVal)>| {
+            let mut props = vec![
+                ("pin".to_string(), PropVal::Str(anchor.into())),
+                ("margin".to_string(), PropVal::List(vec![1.0, 2.0, 3.0, 4.0])),
+            ];
+            props.extend(extra);
+            let a = MadeNode { props, ..Default::default() };
+            let b = MadeNode { props: a.props.iter().rev().cloned().collect(), ..a.clone() };
+            assert_eq!(a.build(), b.build(), "{anchor}: key order changed the result");
+            match a.build().place {
+                Place::Pin { offset, .. } => offset,
+                p => panic!("expected a pin, got {p:?}"),
+            }
+        };
+        // [left, top, right, bottom] = [1, 2, 3, 4]
+        assert_eq!(pinned("topLeft", vec![]), [1.0, 2.0]);
+        assert_eq!(pinned("topRight", vec![]), [-3.0, 2.0]);
+        assert_eq!(pinned("bottomRight", vec![]), [-3.0, -4.0]);
+        assert_eq!(pinned("bottomLeft", vec![]), [1.0, -4.0]);
+        assert_eq!(pinned("center", vec![]), [0.0, 0.0], "a centred axis has no edge to inset from");
+        assert_eq!(pinned("top", vec![]), [0.0, 2.0]);
+        assert_eq!(pinned("topRight", vec![("x".into(), PropVal::Num(-10.0))]), [-13.0, 2.0]);
     }
 
     /// Every value the error message promises actually works. A list that

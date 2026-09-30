@@ -435,6 +435,12 @@ pub struct Ui {
     /// Pixel sizes already warned about, so a full atlas reports each size once
     /// instead of once per process.
     warned_sizes: HashSet<u32>,
+    /// Every (font, character) the font had no glyph for, so each is
+    /// reported once.
+    missing_noted: HashSet<(usize, char)>,
+    /// What the renderer has to say to the developer, waiting for
+    /// [`Self::take_notes`].
+    notes: Vec<String>,
     instance_buf: wgpu::Buffer,
     instance_cap: u32,
     quad_vbuf: wgpu::Buffer,
@@ -866,6 +872,8 @@ impl Ui {
             maintained_frame: 0,
             last_sweep: 0,
             warned_sizes: HashSet::new(),
+            missing_noted: HashSet::new(),
+            notes: Vec::new(),
             instance_buf,
             instance_cap: 1024,
             quad_vbuf,
@@ -1240,11 +1248,51 @@ impl Ui {
         floptle_ui::text::measure_run(t, wrap_at, &|s| self.measure_font(fid, s, t.size)[0], natural_h)
     }
 
+    /// Which font a character is drawn from: the one asked for, or the
+    /// built-in font (slot 0) when the one asked for has no glyph for it and
+    /// the built-in does. A missing character in a game's own font then draws
+    /// as itself rather than as an empty box. Measuring, drawing and every
+    /// atlas repack ask this same question, so they always agree.
+    fn source_font(&self, fid: usize, c: char) -> usize {
+        source_font_in(&self.fonts, fid, c)
+    }
+
+    /// Say once that `fid` has no glyph for `c`, naming the text it was in.
+    fn note_missing(&mut self, fid: usize, c: char, text: &str) {
+        if fid == 0 || c.is_whitespace() || c.is_control() || self.fonts[fid].lookup_glyph_index(c) != 0 {
+            return;
+        }
+        if !self.missing_noted.insert((fid, c)) {
+            return;
+        }
+        let name = self
+            .font_ids
+            .iter()
+            .find(|(_, id)| **id == Some(fid))
+            .map(|(p, _)| p.as_str())
+            .unwrap_or("this font");
+        let how = if self.fonts[0].lookup_glyph_index(c) != 0 {
+            "drawn from the built-in font instead"
+        } else {
+            "and neither has the built-in font, so it draws as an empty box"
+        };
+        self.notes.push(format!(
+            "font {name} has no '{c}' (U+{:04X}), used in \"{text}\" — {how}",
+            c as u32
+        ));
+    }
+
+    /// Everything the renderer has noted since the last call: a character a
+    /// font lacks, once per font and character.
+    pub fn take_notes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.notes)
+    }
+
     fn measure_font(&self, fid: usize, text: &str, size: f32) -> [f32; 2] {
         let font = &self.fonts[fid];
         let mut w = 0.0f32;
         for c in text.chars() {
-            w += font.metrics(c, size).advance_width;
+            w += self.fonts[self.source_font(fid, c)].metrics(c, size).advance_width;
         }
         let lm = font.horizontal_line_metrics(size);
         let h = lm.map(|l| l.ascent - l.descent).unwrap_or(size);
@@ -1253,7 +1301,7 @@ impl Ui {
 
     /// Rasterize `c` and place it in the atlas. `None` when it will not fit.
     fn rasterize_into_atlas(&mut self, gpu: &Gpu, fid: usize, c: char, px: u32) -> Option<Glyph> {
-        let (metrics, bitmap) = self.fonts[fid].rasterize(c, px as f32);
+        let (metrics, bitmap) = self.fonts[self.source_font(fid, c)].rasterize(c, px as f32);
         if metrics.width == 0 || metrics.height == 0 {
             // Whitespace: advance only, no atlas space at all.
             return Some(Glyph {
@@ -1746,7 +1794,7 @@ impl Ui {
                     line0
                         .chars()
                         .take(chars)
-                        .map(|c| self.fonts[fid].metrics(c, size).advance_width * scale + track_px)
+                        .map(|c| self.fonts[self.source_font(fid, c)].metrics(c, size).advance_width * scale + track_px)
                         .sum()
                 };
                 let run_w = widths.first().copied().unwrap_or(0.0);
@@ -1821,6 +1869,7 @@ impl Ui {
                             .and_then(|i| t.glyph_offsets.get(i))
                             .map(|o| [o[0] * scale, o[1] * scale])
                             .unwrap_or([0.0, 0.0]);
+                        self.note_missing(fid, c, line);
                         let g = self.glyph(gpu, fid, c, px);
                         if g.size[0] > 0.0 {
                             let rect = [
@@ -2127,6 +2176,19 @@ fn write_notdef(queue: &wgpu::Queue, atlas: &wgpu::Texture) {
 /// worth stating in one place: **empty means the project's font**, and anything
 /// unknown or unparseable falls back to the same one rather than drawing
 /// nothing. `default` is 0 — the embedded Roboto — until a project names one.
+/// [`UiRenderer::source_font`] over a plain font list, so it can be tested
+/// without a GPU.
+fn source_font_in(fonts: &[fontdue::Font], fid: usize, c: char) -> usize {
+    if fid == 0 || c.is_whitespace() || c.is_control() {
+        return fid;
+    }
+    if fonts[fid].lookup_glyph_index(c) == 0 && fonts[0].lookup_glyph_index(c) != 0 {
+        0
+    } else {
+        fid
+    }
+}
+
 fn resolve_font(ids: &HashMap<String, Option<usize>>, default: usize, path: &str) -> usize {
     if path.is_empty() {
         return default;
@@ -2136,6 +2198,24 @@ fn resolve_font(ids: &HashMap<String, Option<usize>>, default: usize, path: &str
 
 #[cfg(test)]
 mod tests {
+    /// A character the game's own font lacks is drawn from the built-in font,
+    /// and one it has stays in the game's font. U+2212 (the minus sign) is the
+    /// case a game hit: its font had "-" but not "−".
+    #[test]
+    fn a_character_the_game_font_lacks_comes_from_the_built_in_font() {
+        let load = |b: &[u8]| fontdue::Font::from_bytes(b, fontdue::FontSettings::default()).unwrap();
+        let fonts = [
+            load(include_bytes!("../fonts/Roboto-Regular.ttf")),
+            load(include_bytes!("../../../packages/fofighter-kit/assets/fonts/Fofighter.ttf")),
+        ];
+        assert_eq!(fonts[1].lookup_glyph_index('\u{2212}'), 0, "the fixture font must lack the minus sign");
+        assert_eq!(super::source_font_in(&fonts, 1, '\u{2212}'), 0, "a missing glyph falls back");
+        assert_eq!(super::source_font_in(&fonts, 1, 'A'), 1, "a glyph the font has stays in it");
+        assert_eq!(super::source_font_in(&fonts, 1, '\u{2192}'), 1, "the game font's own arrow, which Roboto lacks");
+        assert_eq!(super::source_font_in(&fonts, 1, '\u{1F642}'), 1, "neither has it: no better choice");
+        assert_eq!(super::source_font_in(&fonts, 1, ' '), 1, "whitespace keeps the game font's spacing");
+    }
+
     use super::*;
 
     /// Spans colour a word inside a run — a proper noun in the speaker's
