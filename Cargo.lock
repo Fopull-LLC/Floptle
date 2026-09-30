@@ -222,7 +222,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
  "x11rb",
 ]
 
@@ -992,6 +992,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
+name = "data-encoding"
+version = "2.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
+
+[[package]]
 name = "dbus"
 version = "0.9.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1586,7 +1592,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-account"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
@@ -1605,14 +1611,14 @@ dependencies = [
 
 [[package]]
 name = "floptle-anim"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "floptle-core",
 ]
 
 [[package]]
 name = "floptle-assets"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "base64 0.22.1",
  "floptle-anim",
@@ -1627,7 +1633,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-audio"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "cpal",
  "env_logger",
@@ -1644,14 +1650,14 @@ dependencies = [
 
 [[package]]
 name = "floptle-brand"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "png",
 ]
 
 [[package]]
 name = "floptle-convert"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "floptle-assets",
  "floptle-render",
@@ -1664,7 +1670,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-core"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "glam",
  "web-time",
@@ -1672,7 +1678,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-dist"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "directories",
  "flate2",
@@ -1687,10 +1693,11 @@ dependencies = [
 
 [[package]]
 name = "floptle-editor"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "arboard",
  "clap",
+ "directories",
  "egui",
  "egui-wgpu",
  "egui-winit",
@@ -1755,7 +1762,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-field"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "floptle-core",
  "serde",
@@ -1763,7 +1770,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-fleet"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "flate2",
  "floptle-say",
@@ -1776,14 +1783,14 @@ dependencies = [
 
 [[package]]
 name = "floptle-gi"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "floptle-core",
 ]
 
 [[package]]
 name = "floptle-hub"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "directories",
  "eframe",
@@ -1807,7 +1814,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-image"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "floptle-vfs",
  "image",
@@ -1817,7 +1824,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-input"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "env_logger",
  "floptle-core",
@@ -1830,7 +1837,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-map"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "glam",
  "serde",
@@ -1838,7 +1845,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-matter"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "floptle-core",
  "floptle-field",
@@ -1848,7 +1855,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-nav"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "postcard",
  "serde",
@@ -1856,13 +1863,15 @@ dependencies = [
 
 [[package]]
 name = "floptle-net"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "bytes",
  "floptle-audio",
  "floptle-core",
  "floptle-say",
  "floptle-scene",
+ "futures-util",
+ "js-sys",
  "postcard",
  "quinn",
  "rcgen",
@@ -1872,12 +1881,16 @@ dependencies = [
  "serde",
  "socket2",
  "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
+ "wasm-bindgen",
+ "web-sys",
  "webpki-roots 0.26.11",
 ]
 
 [[package]]
 name = "floptle-package"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "floptle-vfs",
  "ron",
@@ -1887,7 +1900,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-physics"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "floptle-core",
  "floptle-field",
@@ -1896,7 +1909,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-player"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "floptle-editor",
  "winresource",
@@ -1904,7 +1917,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-proof"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "bytemuck",
  "env_logger",
@@ -1917,7 +1930,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-relay"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "floptle-net",
  "rcgen",
@@ -1928,14 +1941,14 @@ dependencies = [
 
 [[package]]
 name = "floptle-relay-bench"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "floptle-net",
 ]
 
 [[package]]
 name = "floptle-render"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "bytemuck",
  "floptle-assets",
@@ -1960,7 +1973,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-rules"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "floptle-core",
  "floptle-field",
@@ -1968,7 +1981,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-runtime"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "env_logger",
  "floptle-anim",
@@ -1994,11 +2007,11 @@ dependencies = [
 
 [[package]]
 name = "floptle-say"
-version = "0.104.0"
+version = "0.105.0"
 
 [[package]]
 name = "floptle-scene"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "floptle-audio",
  "floptle-core",
@@ -2011,8 +2024,10 @@ dependencies = [
 
 [[package]]
 name = "floptle-script"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
+ "base64 0.22.1",
+ "flate2",
  "floptle-account",
  "floptle-audio",
  "floptle-core",
@@ -2033,31 +2048,32 @@ dependencies = [
  "serde_json",
  "ureq",
  "url",
+ "wasm-bindgen-futures",
  "web-sys",
  "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "floptle-server"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "floptle-editor",
 ]
 
 [[package]]
 name = "floptle-services"
-version = "0.104.0"
+version = "0.105.0"
 
 [[package]]
 name = "floptle-shader"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "naga",
 ]
 
 [[package]]
 name = "floptle-steam"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "floptle-say",
  "floptle-services",
@@ -2066,7 +2082,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-tiles"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "floptle-core",
  "ron",
@@ -2075,7 +2091,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-ui"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "ron",
  "serde",
@@ -2083,7 +2099,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-vfs"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "floptle-core",
  "wasm-bindgen",
@@ -2092,7 +2108,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-vfx"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "floptle-core",
  "floptle-render",
@@ -2102,7 +2118,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-web"
-version = "0.104.0"
+version = "0.105.0"
 dependencies = [
  "floptle-editor",
  "floptle-render",
@@ -2693,6 +2709,22 @@ checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest",
 ]
+
+[[package]]
+name = "http"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "918d3568bebf352712bc2ef3d46a8bcf1a75b373be6539de198e9105cbbf9ce0"
+dependencies = [
+ "bytes",
+ "itoa",
+]
+
+[[package]]
+name = "httparse"
+version = "1.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
 name = "icu_collections"
@@ -5446,6 +5478,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-rustls"
+version = "0.26.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
+dependencies = [
+ "rustls",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d25a406cddcc431a75d3d9afc6a7c0f7428d4891dd973e4d54c56b46127bf857"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite",
+]
+
+[[package]]
 name = "toml"
 version = "1.1.4+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5539,6 +5593,23 @@ name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
+
+[[package]]
+name = "tungstenite"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8628dcc84e5a09eb3d8423d6cb682965dea9133204e8fb3efee74c2a0c259442"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.9.5",
+ "sha1",
+ "thiserror 2.0.18",
+ "utf-8",
+]
 
 [[package]]
 name = "type-map"
@@ -5647,6 +5718,12 @@ name = "urlencoding"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
+
+[[package]]
+name = "utf-8"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
 
 [[package]]
 name = "utf8_iter"

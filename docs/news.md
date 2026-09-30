@@ -1,5 +1,12 @@
 ## Just shipped
 
+**v0.105.0 — "Plays Anywhere"** (stable). A browser build can play online: it
+reaches the web and Floptle Cloud, and joins the same relay lobbies as desktop
+players. `camera.capture` photographs the game's own world for a level cover or
+a photo mode. An exported game keeps its players' saves, replays and files in a
+folder of their own, so installing a new version no longer resets them, and
+`user://` paths keep a player's files apart from the game's.
+
 **v0.104.0 — "Ready For Steam"** (stable). An exported game can talk to
 Steam: give the project a Steam App ID and the build ships with it. Friends
 can invite each other and join from the Steam friend list, a game can see
