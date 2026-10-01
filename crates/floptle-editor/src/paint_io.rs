@@ -136,7 +136,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<Vec<StoredPaint>> {
 
 impl Editor {
     pub(crate) fn paint_file_path(&self) -> PathBuf {
-        self.project_root.join("paint").join(format!("{}.vpaint", self.scene_name))
+        self.sidecar_root().join("paint").join(format!("{}.vpaint", self.scene_name))
     }
 
     /// Write every painted node's colors beside the scene. Called from `save_scene`.

@@ -165,6 +165,30 @@ impl crate::Editor {
     pub(crate) fn runtime_base(&self) -> &Path {
         self.data_root.as_deref().unwrap_or(&self.project_root)
     }
+
+    /// The folder `user://` names: the player's own files.
+    pub(crate) fn user_dir(&self) -> PathBuf {
+        floptle_script::paths::user_dir_for(&self.project_root, self.data_root.as_deref())
+    }
+
+    /// Where the open scene's sidecars live — its map geometry, paint and
+    /// terrain fields. A scene from the player's files (`user://`) keeps them
+    /// under `user://`, laid out the way a project lays them out
+    /// (`user://maps/<scene>.map.ron`): a downloaded level must not pick up the
+    /// game's own `maps/<scene>` just because the names match.
+    pub(crate) fn sidecar_root(&self) -> PathBuf {
+        if self.scene_rel.starts_with(floptle_script::paths::USER_PREFIX) {
+            self.user_dir()
+        } else {
+            self.project_root.clone()
+        }
+    }
+
+    /// [`Self::sidecar_root`] for a scene file that is not the open one.
+    pub(crate) fn sidecar_root_of(&self, scene: &Path) -> PathBuf {
+        let user = self.user_dir();
+        if scene.starts_with(&user) { user } else { self.project_root.clone() }
+    }
 }
 
 #[cfg(test)]

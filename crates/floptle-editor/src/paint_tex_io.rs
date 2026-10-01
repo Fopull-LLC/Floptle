@@ -118,7 +118,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<Vec<StoredTexPaint>> {
 
 impl Editor {
     pub(crate) fn tex_paint_file_path(&self) -> PathBuf {
-        self.project_root.join("paint").join(format!("{}.tpaint", self.scene_name))
+        self.sidecar_root().join("paint").join(format!("{}.tpaint", self.scene_name))
     }
 
     /// Write every texture-painted node's images beside the scene. Called from `save_scene`.

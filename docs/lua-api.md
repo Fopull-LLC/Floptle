@@ -2562,7 +2562,7 @@ scene.list() — every scene in the project as names scene.load accepts (sorted;
 
 ### `scene.load`
 
-scene.load("arena") — switch to another scene at the next frame boundary: the world swaps, physics/animators/particles/audio rebuild, every start re-fires (like the scene booting fresh). Accepts a name, a scenes-relative path ("arenas/desert"), or "scenes/arena.ron". Multiplayer: only the SERVER may call it — every client follows automatically; a client's call is refused (send the server an RPC instead). scene.load("cave", { additive = true }) layers a scene over this one instead of replacing it; add offset = vec3(...) to place it, and on a hosting server every client (and every late joiner) loads the same layer, its Networked nodes replicating — replicate = false keeps it on the server. A client's own additive loads stay its own.
+scene.load("arena") — switch to another scene at the next frame boundary: the world swaps, physics/animators/particles/audio rebuild, every start re-fires (like the scene booting fresh). Accepts a name, a scenes-relative path ("arenas/desert"), "scenes/arena.ron", or a scene in the player's own files ("user://stages/arena"), whose map is user://maps/arena.map.ron. Multiplayer: only the SERVER may call it — every client follows automatically; a client's call is refused (send the server an RPC instead). scene.load("cave", { additive = true }) layers a scene over this one instead of replacing it; add offset = vec3(...) to place it, and on a hosting server every client (and every late joiner) loads the same layer, its Networked nodes replicating — replicate = false keeps it on the server. A client's own additive loads stay its own.
 
 ### `scene.onLoaded`
 

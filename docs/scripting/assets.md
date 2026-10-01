@@ -96,6 +96,26 @@ all. It still works, so an older game keeps running, and the Console says so
 once. `assets.remove` only takes `user://` paths: the game's files ship with
 it.
 
+**Scenes a player downloaded.** A level shared by another player is a scene
+file, and it belongs in `user://` like everything else a player owns.
+`scene.load("user://stages/" .. id)` loads it, and `{ additive = true }`
+layers it the same way. Its models, materials and scripts still come from
+the game. `user://` is laid out like a project: a scene's map geometry is
+`user://maps/<scene>.map.ron`, beside the game's own `maps/` folder rather than
+inside it, so a downloaded `arena` never picks up the map of the game's own
+`arena`.
+
+```lua
+assets.writeBytes("user://stages/" .. id .. ".ron", sceneBytes)
+assets.writeBytes("user://maps/" .. id .. ".map.ron", mapBytes)
+scene.load("user://stages/" .. id)
+```
+
+In a session, a server that loads a `user://` scene names it to every
+client, and each client loads its own copy from its own files. Send the scene
+to each player first (`net.send`) and have them write it to the same path. A
+client without it says which scene it could not find.
+
 **Pictures from the internet.** A player's profile picture, or an image another
 player shared, becomes a texture while the game runs:
 

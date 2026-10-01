@@ -2263,4 +2263,40 @@ mod server_tests {
         assert_eq!(ed.maps.meshes.get(&hub_id), Some(&block));
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// **A scene from the player's files loads, with its own map.** A level a
+    /// player downloaded lives under `user://`, and its map sidecar beside it
+    /// under `user://maps/` — never the game's `maps/` file of the same name.
+    /// Here the game ships an `arena` with a box and the player saved an
+    /// `arena` with a wedge; loading `user://stages/arena` gets the wedge.
+    #[test]
+    fn a_scene_loads_from_the_players_files_with_its_own_map() {
+        use crate::map_edit::MapShape;
+        let root = temp("user-scene");
+        for d in ["maps", "scenes", "save/user/stages", "save/user/maps"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        write(&root, "project.ron", "(title: Some(\"u\"), entry_scene: Some(\"scenes/arena.ron\"))");
+        write(&root, "scenes/arena.ron", "(name: \"arena\", nodes: [(name: \"GameBlock\", matter: MapMesh(id: 1))])");
+        write(&root, "save/user/stages/arena.ron", "(name: \"arena\", nodes: [(name: \"PlayerRamp\", matter: MapMesh(id: 1))])");
+        let probe = super::open(&root, &root.join("scenes/arena.ron"), 1.0 / STEP);
+        let (block, ramp) = (MapShape::Box.mesh(probe.map_opts), MapShape::Wedge.mesh(probe.map_opts));
+        let sidecar = |m: &floptle_map::MapMesh| {
+            let mut one = std::collections::BTreeMap::new();
+            one.insert(1u32, m.clone());
+            ron::to_string(&one).unwrap()
+        };
+        write(&root, "maps/arena.map.ron", &sidecar(&block));
+        write(&root, "save/user/maps/arena.map.ron", &sidecar(&ramp));
+
+        let mut ed = super::open(&root, &root.join("scenes/arena.ron"), 1.0 / STEP);
+        ed.toggle_play();
+        assert_eq!(ed.switch_scene_during_play("user://stages/arena").as_deref(), Some("user://stages/arena.ron"));
+        assert!(find(&ed.world, "PlayerRamp").is_some(), "the player's scene did not load");
+        assert_eq!(ed.maps.meshes.get(&1), Some(&ramp), "the player's scene wore the game's map of the same name");
+        // Escapes stay refused: the name can arrive over the wire.
+        assert_eq!(ed.resolve_scene_request("user://../scenes/arena"), None);
+        assert_eq!(ed.resolve_scene_request("user:///etc/passwd"), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

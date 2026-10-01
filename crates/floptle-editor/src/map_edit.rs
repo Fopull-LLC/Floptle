@@ -293,7 +293,7 @@ fn seed_shipped_texture(dest: &std::path::Path) -> Option<()> {
 
 impl Editor {
     pub(crate) fn maps_file_path(&self) -> PathBuf {
-        self.project_root.join("maps").join(format!("{}.map.ron", self.scene_name))
+        self.sidecar_root().join("maps").join(format!("{}.map.ron", self.scene_name))
     }
 
     /// A fresh stable map-mesh id: one past the max over the store and live
@@ -561,7 +561,7 @@ impl Editor {
             return;
         }
         let stem = scene.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        let file = self.project_root.join("maps").join(format!("{stem}.map.ron"));
+        let file = self.sidecar_root_of(scene).join("maps").join(format!("{stem}.map.ron"));
         let loaded: BTreeMap<u32, MapMesh> = match floptle_vfs::read_to_string(&file) {
             Ok(text) => match ron::from_str(&text) {
                 Ok(m) => m,

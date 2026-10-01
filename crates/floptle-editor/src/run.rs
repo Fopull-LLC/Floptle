@@ -409,6 +409,8 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
     }
 
     let mut ed = crate::Editor {
+        // The game, as a player runs it: no editor tools from packages.
+        game_packages_only: true,
         // Nothing draws, so gizmos and overlays would only cost work.
         show_gizmos: false,
         // The Console is the report. Mirroring to stderr as well would print

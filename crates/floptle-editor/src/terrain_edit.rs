@@ -1715,7 +1715,7 @@ impl Editor {
     /// Where a terrain node's field is stored — one `.cfield` per terrain id, per
     /// scene (the Terrain 2.0 sparse format).
     pub(crate) fn terrain_field_path_id(&self, id: u32) -> PathBuf {
-        self.project_root.join("terrain").join(format!("{}.{id}.cfield", self.scene_name))
+        self.sidecar_root().join("terrain").join(format!("{}.{id}.cfield", self.scene_name))
     }
 
     /// Stems of `.cfield` files carrying this terrain id under a different scene
@@ -1725,7 +1725,7 @@ impl Editor {
     /// is one rename away".
     pub(crate) fn orphaned_field_stems(&self, id: u32) -> Vec<String> {
         let suffix = format!(".{id}.cfield");
-        let Ok(entries) = floptle_vfs::read_dir(self.project_root.join("terrain")) else {
+        let Ok(entries) = floptle_vfs::read_dir(self.sidecar_root().join("terrain")) else {
             return Vec::new();
         };
         let mut out: Vec<String> = entries
@@ -1742,14 +1742,14 @@ impl Editor {
 
     /// The legacy dense field path for the same terrain — read-only migration source.
     pub(crate) fn terrain_tfield_path_id(&self, id: u32) -> PathBuf {
-        self.project_root.join("terrain").join(format!("{}.{id}.tfield", self.scene_name))
+        self.sidecar_root().join("terrain").join(format!("{}.{id}.tfield", self.scene_name))
     }
 
     /// The tiny residency sidecar next to a terrain's `.cfield`: the impostor
     /// color ("r g b", linear floats), so a cold body can draw its sphere
     /// without ever touching the multi-MB field.
     pub(crate) fn terrain_meta_path_id(&self, id: u32) -> PathBuf {
-        self.project_root.join("terrain").join(format!("{}.{id}.meta", self.scene_name))
+        self.sidecar_root().join("terrain").join(format!("{}.{id}.meta", self.scene_name))
     }
 
     /// Meta v2: line 1 = "r g b" (impostor color), line 2 = the genspec hash the

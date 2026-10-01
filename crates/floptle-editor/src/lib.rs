@@ -1964,6 +1964,12 @@ struct Editor {
     /// Game view, a render target), and marking it there would split the
     /// window's regions into pieces the panel was not written to show.
     gpu_timing_headless: bool,
+    /// Load packages the way a shipped player does: their scripts and assets,
+    /// never their editor tools. `floptle run` and `shot` play the game, and a
+    /// package's `editor/` Lua is an editor panel — run there it asked for
+    /// permissions nobody could grant and raised on every scene.
+    #[cfg(feature = "editor-ui")]
+    game_packages_only: bool,
     /// `app.setFullscreen` under the editor has explained itself once.
     fullscreen_explained: bool,
     /// How hard a render-scale upscale sharpens (`app.setRenderSharpness`);

@@ -2937,3 +2937,22 @@ fn a_projects_packages_run_with_no_permissions_until_the_project_is_trusted() {
     assert!(matches!(changed.project_trust, Trust::Untrusted { .. }), "a changed manifest was still trusted: {:?}", changed.project_trust);
     let _ = std::fs::remove_dir_all(&proj);
 }
+
+/// `floptle run` and `shot` play the game, and load packages the way a
+/// shipped player does: the editor's tools stay out. A package's `editor/`
+/// Lua run there asked for permissions nobody could grant and raised on every
+/// scene of a headless test.
+#[test]
+fn a_headless_game_verb_runs_no_package_editor_tools() {
+    let proj = temp("game-only");
+    install(&proj, "com.example.tool", "", "ranEditor = true\n");
+    let load = |game_only: bool| {
+        let mut ed = crate::Editor { game_packages_only: game_only, ..Default::default() };
+        ed.project_root = proj.clone();
+        ed.load_packages();
+        ed.ext.packages.len()
+    };
+    assert_eq!(load(false), 1, "the editor loads the package's tools");
+    assert_eq!(load(true), 0, "a game verb must not");
+    let _ = std::fs::remove_dir_all(&proj);
+}

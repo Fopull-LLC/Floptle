@@ -165,6 +165,14 @@ build's `packages/` folder, and the build's `packages.ron` lists it as an
 ordinary package. A switched-off link is not copied and is taken off the
 build's list, so no path on your disk ends up in the build.
 
+**Editor tools stay out.** A package's `editor` folders are panels and tools
+for you, not for your players, so no build carries them. A package that has
+nothing else (no file under its `scripts` or `assets` folders) is left out
+altogether and taken off the build's list, and the report names it. There is
+no flag to set: what a package ships is read from its folders. `floptle run`
+and `floptle shot` load packages the way a build does, so a package's editor
+tools do not run there either.
+
 **Absolute asset paths are rewritten.** An absolute path is taken as written
 when it exists, so a build carrying one is broken on every machine except the
 one that exported it — silently, because a missing model simply doesn't
@@ -173,7 +181,10 @@ appear. Paths that point *into* the project are made relative automatically
 names a file the build carries — a reference written where the project used to
 live, on another disk or another operating system — is redirected to the
 build's own copy, and the report lists each one. A path with no such file in
-the build can't be repaired, so it's listed as a warning.
+the build can't be repaired, so it's listed as a warning, with the file it was
+found in. Only strings that name a kind of file the engine loads (or that
+exist on your disk) count as paths, so an HTTP route or a field path in a
+request body is not reported.
 
 The project itself shouldn't hold them either, because a teammate who opens
 it has the same problem a player would. The editor saves every path to a file
@@ -543,8 +554,8 @@ What the export does, so you know what you are shipping:
   text file stays, because a script may read its own data through
   `assets.getContents` and the strip list does not get to guess which file that
   is.
-- **Materialises linked packages and makes paths portable**, the same as a
-  native export.
+- **Materialises linked packages, leaves out editor tools and makes paths
+  portable**, the same as a native export.
 - **Refuses a project that cannot run headless**, at your machine with the
   reason in front of you, rather than as a deployment that goes `failed` on a
   box you cannot see. A `Rollback` scene is the common one: every peer simulates

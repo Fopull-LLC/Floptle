@@ -751,7 +751,11 @@ impl Editor {
     /// `scene_rel` records the true relative path — multiplayer names scenes by
     /// it on the wire — so it is what the save uses.
     pub(crate) fn scene_path(&self) -> PathBuf {
-        self.project_root.join(self.scene_rel_or_default())
+        let rel = self.scene_rel_or_default();
+        match rel.strip_prefix(floptle_script::paths::USER_PREFIX) {
+            Some(rest) => self.user_dir().join(rest),
+            None => self.project_root.join(rel),
+        }
     }
 
     /// Load this scene's sidecar bakes — the baked GI (`.fgi`) and the navmesh
@@ -1499,10 +1503,17 @@ impl Editor {
     /// the wire — `scene_rel`).
     pub(crate) fn set_scene_file(&mut self, path: &Path) {
         self.scene_name = Self::scene_name_of(path);
-        self.scene_rel = path
-            .strip_prefix(&self.project_root)
-            .map(|r| r.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_else(|_| format!("scenes/{}.ron", self.scene_name));
+        // A scene from the player's files is named `user://…`, first: in
+        // development `user://` is inside the project (`save/user/`), and a
+        // project-relative name would lose what makes it the player's.
+        let user = self.user_dir();
+        self.scene_rel = match path.strip_prefix(&user) {
+            Ok(r) => format!("{}{}", floptle_script::paths::USER_PREFIX, r.to_string_lossy().replace('\\', "/")),
+            Err(_) => path
+                .strip_prefix(&self.project_root)
+                .map(|r| r.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| format!("scenes/{}.ron", self.scene_name)),
+        };
         // A new scene's tree starts folded. Every path that replaces the world comes
         // through here, so this is the one place that has to say so — the alternative was
         // six call sites and a seventh added later that forgot.
@@ -1604,11 +1615,21 @@ impl Editor {
     /// the same two things; it just has no Lua state to run the editor half in.
     #[cfg(feature = "editor-ui")]
     pub(crate) fn load_packages(&mut self) {
-        self.ext_reload();
+        if self.game_packages_only {
+            self.load_game_packages();
+        } else {
+            self.ext_reload();
+        }
     }
 
     #[cfg(not(feature = "editor-ui"))]
     pub(crate) fn load_packages(&mut self) {
+        self.load_game_packages();
+    }
+
+    /// The game's half of every package — the folders its scripts and assets
+    /// resolve from — and none of the editor's.
+    fn load_game_packages(&mut self) {
         if self.project_root.as_os_str().is_empty() {
             return;
         }
@@ -2130,7 +2151,7 @@ impl Editor {
 
     /// Where the scene's terrain texture palette (slot→image paths) is stored.
     pub(crate) fn terrain_palette_path(&self) -> PathBuf {
-        self.project_root.join("terrain").join(format!("{}.palette", self.scene_name))
+        self.sidecar_root().join("terrain").join(format!("{}.palette", self.scene_name))
     }
 
     /// Is there work that would be lost by closing right now?

@@ -179,13 +179,10 @@ struct Player {
     /// one made too soon after the player pressed Escape is refused and logged
     /// — so the ask is made when the answer changes rather than every frame.
     grab_asked: bool,
-    /// Web only: has the browser been seen to actually grant the lock?
-    ///
-    /// The request is asynchronous, so "not locked" in the frame after asking
-    /// means "no answer yet", not "refused". Once the lock has been observed,
-    /// losing it means the player took it back.
+    /// Web only: the browser's pointer lock as last seen — see
+    /// [`web_lock::WebLock`].
     #[cfg(target_arch = "wasm32")]
-    web_lock_held: bool,
+    web_lock: web_lock::WebLock,
     /// `--shot`: where to write the photographed frame, and which frame.
     shot: Option<PathBuf>,
     shot_at: u32,
@@ -230,7 +227,7 @@ impl Player {
             grabbed_soft: false,
             grab_asked: false,
             #[cfg(target_arch = "wasm32")]
-            web_lock_held: false,
+            web_lock: Default::default(),
             shot: None,
             shot_at: 60,
             frames: 0,
@@ -352,8 +349,11 @@ impl ApplicationHandler for Player {
                 };
                 // A click is how the pointer goes back to the game after
                 // Escape — and on the web it is the only thing that can, since
-                // `requestPointerLock` needs a gesture to hang off.
-                if pressed && i == 0 {
+                // `requestPointerLock` needs a gesture to hang off. Any button:
+                // a game that looks around on a held right button is asking
+                // for the pointer with that press, and a browser takes any
+                // press as the gesture.
+                if pressed {
                     self.ed.set_cursor_freed(false);
                 }
                 self.ed.track_mouse_button(i, pressed);
@@ -458,11 +458,7 @@ impl Player {
         // as the player asking for their pointer back.
         #[cfg(target_arch = "wasm32")]
         {
-            let locked = web::pointer_locked();
-            if locked {
-                self.web_lock_held = true;
-            } else if self.web_lock_held {
-                self.web_lock_held = false;
+            if self.web_lock.observe(web::pointer_locked(), self.ed.game_holds_cursor()) {
                 self.ed.set_cursor_freed(true);
             }
         }
@@ -577,6 +573,68 @@ impl Player {
         self.fullscreen = !self.fullscreen;
         if let Some(w) = self.ed.window.as_ref() {
             w.set_fullscreen(self.fullscreen.then_some(Fullscreen::Borderless(None)));
+        }
+    }
+}
+
+/// Telling the player's Escape from the game's own unlock, in a browser.
+///
+/// A page never sees the Escape that ends a pointer lock (the browser keeps
+/// it), so the only sign is the lock going away. The game letting go looks
+/// the same, one frame late: `exitPointerLock` settles after the frame that
+/// asked for it. Read as Escape, a game that unlocks on a released right
+/// button froze its own mouse until the next left click.
+#[cfg(any(target_arch = "wasm32", test))]
+mod web_lock {
+    #[derive(Default)]
+    pub(super) struct WebLock {
+        /// The browser has been seen to grant the lock. Asking is
+        /// asynchronous, so "not locked" just after asking means "no answer
+        /// yet", not "refused".
+        held: bool,
+    }
+
+    impl WebLock {
+        /// One frame's look at the document: is the pointer `locked`, and
+        /// does the game still want it? `true` when the player took it back.
+        pub(super) fn observe(&mut self, locked: bool, game_wants: bool) -> bool {
+            if locked {
+                self.held = true;
+                return false;
+            }
+            // A lock lost while the game wanted it is the player's Escape; one
+            // lost after the game let go is the game's own doing.
+            std::mem::take(&mut self.held) && game_wants
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::WebLock;
+
+        #[test]
+        fn the_game_letting_go_is_not_the_players_escape() {
+            let mut l = WebLock::default();
+            assert!(!l.observe(true, true), "granted");
+            // The game unlocks; the browser still reports the lock this frame…
+            assert!(!l.observe(true, false));
+            // …and has let go by the next one.
+            assert!(!l.observe(false, false), "the game unlocked: its mouse must keep working");
+        }
+
+        #[test]
+        fn a_lock_lost_while_the_game_wants_it_is_escape() {
+            let mut l = WebLock::default();
+            assert!(!l.observe(true, true));
+            assert!(l.observe(false, true));
+            assert!(!l.observe(false, true), "said once, not every frame after");
+        }
+
+        #[test]
+        fn a_lock_not_granted_yet_is_not_escape() {
+            let mut l = WebLock::default();
+            assert!(!l.observe(false, true));
+            assert!(!l.observe(false, true));
         }
     }
 }

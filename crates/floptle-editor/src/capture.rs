@@ -57,6 +57,14 @@ pub(crate) fn render_frame_texture(
     ed.ensure_ui_shaders();
     ed.ensure_post_shaders();
     ed.sync_field_shapes();
+    // The sky's shader and texture, and the map's geometry, likewise: each
+    // is a no-op once the frame loop has done it, and without it a capture
+    // taken before that (`shot --after`, a script's first frames) drew the
+    // Skybox's plain colour where the sky and its fog belonged.
+    ed.sync_sky_shader();
+    ed.sync_sky_texture();
+    ed.sync_map_meshes();
+    ed.sync_map_paint();
     let gpu = ed.gpu.take()?;
     let aspect = w as f32 / h as f32;
     // **Retro composites at the retro resolution and upscales**, exactly as the
@@ -564,6 +572,43 @@ end
         assert_eq!(ed.raster.as_ref().unwrap().texture_size(id), Some([48.0, 20.0]));
         ed.release_runtime_textures();
         assert_eq!(ed.ensure_texture(&tex), None, "Stop kept a captured texture");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The sky a capture draws is the scene's sky shader, not the Skybox's
+    /// plain base colour — asked for from a loop that has run no frame, the
+    /// way `shot --after` and a script's first frames ask. It used to come
+    /// out flat grey there, fog on the sky and all missing, because the sky
+    /// shader is compiled by the frame loop and the capture did not ask for it.
+    #[test]
+    fn a_capture_draws_the_sky_shader() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let (asker, dir) = scene(&mut ed, "sky");
+        std::fs::write(
+            dir.join("red.flsl"),
+            "shader red {\n  stage sky\n  output color = vec3(1, 0, 0)\n}\n",
+        )
+        .unwrap();
+        ed.project_root = dir.clone();
+        let sky = ed.world.spawn();
+        ed.world.insert(sky, Transform::IDENTITY);
+        ed.world.insert(
+            sky,
+            Matter::Skybox {
+                color: [0.14; 3],
+                size: 500.0,
+                texture: None,
+                tint: [1.0; 3],
+                shader: Some(dir.join("red.flsl").to_string_lossy().into_owned()),
+                shader_params: Default::default(),
+            },
+        );
+        frames(&mut ed, &dir, |ed| get::<mlua::String>(ed, asker, "front").is_some());
+        let png = get::<mlua::String>(&ed, asker, "front").expect("no PNG came back");
+        let png = image::load_from_memory_with_format(&png.as_bytes(), image::ImageFormat::Png).unwrap().to_rgba8();
+        // A corner is sky: the cube sits in the middle.
+        let [r, g, b, _] = png.get_pixel(1, 1).0;
+        assert!(r > 150 && g < 60 && b < 60, "the sky came out ({r}, {g}, {b}), not the shader's red");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

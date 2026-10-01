@@ -245,6 +245,8 @@ pub(crate) fn run(args: Args) -> i32 {
     // reads. That last one is the diagnostic added *because* this verb once
     // wrote a black PNG and exited 0. stderr, so `--json` still owns stdout.
     let mut ed = crate::Editor {
+        // The game, as a player runs it: no editor tools from packages.
+        game_packages_only: true,
         show_gizmos: false,
         console: crate::console::ConsoleState { mirror_to_stderr: true, ..Default::default() },
         ..Default::default()

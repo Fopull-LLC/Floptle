@@ -1236,11 +1236,21 @@ impl Editor {
     }
 
     /// Resolve a `scene.load(...)` argument to a scene file: a name ("arena"),
-    /// a scenes-relative name ("arenas/desert"), or a project-relative path
-    /// ("scenes/arena.ron"). Escapes are rejected — in multiplayer the string
-    /// arrives over the wire, so it must never reach outside the project.
+    /// a scenes-relative name ("arenas/desert"), a project-relative path
+    /// ("scenes/arena.ron"), or a scene in the player's own files
+    /// ("user://stages/arena"). Escapes are rejected — in multiplayer the
+    /// string arrives over the wire, so it must never reach outside the
+    /// project or the player's folder.
     pub(crate) fn resolve_scene_request(&self, req: &str) -> Option<std::path::PathBuf> {
         let r = req.trim().replace('\\', "/");
+        if let Some(rest) = r.strip_prefix(floptle_script::paths::USER_PREFIX) {
+            if rest.is_empty() || rest.contains("..") || rest.starts_with('/') || rest.contains(':') {
+                return None;
+            }
+            let with_ext = if rest.ends_with(".ron") { rest.to_string() } else { format!("{rest}.ron") };
+            let p = self.user_dir().join(with_ext);
+            return floptle_vfs::is_file(&p).then_some(p);
+        }
         if r.is_empty() || r.contains("..") || r.starts_with('/') || r.contains(':') {
             return None;
         }
@@ -1249,6 +1259,23 @@ impl Editor {
             .into_iter()
             .map(|c| self.project_root.join(c))
             .find(|p| floptle_vfs::is_file(p))
+    }
+
+    /// Why a `scene.load` found nothing, in the words that fit where it looked.
+    ///
+    /// A `user://` scene is one player's file. A server that loads one names
+    /// it to every client, and each client looks in its own files — so a
+    /// client without it is the likely reader of this, and the fix is on the
+    /// server's side: send the scene first.
+    fn no_such_scene(req: &str) -> String {
+        if req.trim().starts_with(floptle_script::paths::USER_PREFIX) {
+            "no such scene in this player's files. A user:// scene exists only on the machine \
+             that saved it: in a session, send it to each player first (net.send) and have them \
+             write it to the same user:// path before the server loads it"
+                .into()
+        } else {
+            "no such scene (looked in scenes/)".into()
+        }
     }
 
     /// Perform a scene transition while Play runs: swap the world to the new
@@ -1264,7 +1291,7 @@ impl Editor {
         let Some(path) = self.resolve_scene_request(req) else {
             self.console.push(
                 floptle_script::LogLevel::Error,
-                format!("scene.load(\"{req}\"): no such scene (looked in scenes/)"),
+                format!("scene.load(\"{req}\"): {}", Self::no_such_scene(req)),
                 None,
             );
             return None;
@@ -1460,7 +1487,7 @@ impl Editor {
         let Some(path) = self.resolve_scene_request(req) else {
             self.console.push(
                 floptle_script::LogLevel::Error,
-                format!("scene.load(\"{req}\", {{additive = true}}): no such scene (looked in scenes/)"),
+                format!("scene.load(\"{req}\", {{additive = true}}): {}", Self::no_such_scene(req)),
                 None,
             );
             return Vec::new();

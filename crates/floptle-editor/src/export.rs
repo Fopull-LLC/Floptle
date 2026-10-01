@@ -857,8 +857,12 @@ pub(crate) fn make_portable(shipped: &Path, project_root: &Path) -> Portability 
                         }
                     }
                     None => {
-                        if !out.foreign.contains(&abs) {
-                            out.foreign.push(abs);
+                        // Where it was found, so a real miss can be told from a
+                        // string that only looks like one.
+                        let at = p.strip_prefix(shipped).unwrap_or(&p).to_string_lossy().replace('\\', "/");
+                        let named = format!("{abs} (in {at})");
+                        if !out.foreign.contains(&named) {
+                            out.foreign.push(named);
                         }
                     }
                 }
@@ -888,16 +892,19 @@ fn stranded_tail(shipped: &Path, abs: &str) -> Option<String> {
 /// Quoted absolute-looking paths in a text file (`"/x/y"`, `"C:\x"`).
 /// Could this absolute string be a file the exporting machine resolved?
 ///
-/// Either its last segment carries an extension (`tree.glb`, `hit.wav`) or the
-/// path is really there. A route like `/api/v1.2/session` has a dot in the
-/// Middle and none at the end, and points at nothing on disk.
+/// Either its last segment carries an extension of a file the engine loads
+/// (`tree.glb`, `hit.wav`, `level.json`) or the path is really there. A route
+/// like `/api/v1.2/session` has a dot in the middle and none at the end, and a
+/// JSON field path in a request body (`/chat body.engine`) ends in a word no
+/// loader reads; neither points at anything on disk.
 #[cfg(feature = "editor-ui")]
 fn looks_like_a_file(abs: &str) -> bool {
     let last = abs.rsplit(['/', '\\']).next().unwrap_or("");
     let has_ext = last
         .rsplit_once('.')
         .is_some_and(|(stem, ext)| !stem.is_empty() && !ext.is_empty() && ext.chars().all(|c| c.is_ascii_alphanumeric()));
-    has_ext || Path::new(abs).exists()
+    let loadable = crate::assets::asset_kind(abs).label != "file" || is_texty(Path::new(abs));
+    (has_ext && loadable) || Path::new(abs).exists()
 }
 
 #[cfg(feature = "editor-ui")]
@@ -992,6 +999,55 @@ fn ship_linked_packages(proj: &Path, ship_assets: &Path) -> Result<usize, String
     Ok(n)
 }
 
+/// Take the editor's half out of every package the build carries: each
+/// package's `editor` folders, and a package with nothing else in it
+/// altogether. Returns the ids of the packages left out whole.
+///
+/// A package's editor Lua is a panel for the person making the game. A
+/// player has no host to run it in, so shipped it was dead weight; worse, it
+/// was read by the reference scan (a tool's request bodies came out as
+/// "points OUTSIDE the project"), and `floptle run` on the build ran it.
+/// "Nothing else" is read off the manifest: no file under any of its
+/// `scripts` or `assets` folders.
+#[cfg(feature = "editor-ui")]
+fn strip_editor_tools(ship_assets: &Path) -> Result<Vec<String>, String> {
+    let Ok(mut reg) = floptle_package::Registry::load(ship_assets) else { return Ok(Vec::new()) };
+    let has_a_file = |dir: &Path| {
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            for e in rd.flatten() {
+                match e.file_type() {
+                    Ok(t) if t.is_dir() => stack.push(e.path()),
+                    Ok(_) => return true,
+                    Err(_) => {}
+                }
+            }
+        }
+        false
+    };
+    let mut dropped = Vec::new();
+    for entry in &reg.packages {
+        let root = entry.root_in(ship_assets);
+        let Ok(m) = floptle_package::Manifest::load(&root) else { continue };
+        for dir in &m.editor {
+            let d = root.join(dir);
+            if d.is_dir() {
+                std::fs::remove_dir_all(&d).map_err(|e| format!("leave out {}'s editor part: {e}", entry.id))?;
+            }
+        }
+        if !m.scripts.iter().chain(&m.assets).any(|d| has_a_file(&root.join(d))) {
+            std::fs::remove_dir_all(&root).map_err(|e| format!("leave out {}: {e}", entry.id))?;
+            dropped.push(entry.id.clone());
+        }
+    }
+    if !dropped.is_empty() {
+        reg.packages.retain(|e| !dropped.contains(&e.id));
+        reg.save(ship_assets).map_err(|e| format!("write the build's packages.ron: {e}"))?;
+    }
+    Ok(dropped)
+}
+
 /// Stamp out a runnable build: an engine binary + the project's assets + the
 /// `floptle-game.ron` manifest that flips it into player mode.
 /// What staging a project into a build folder produced.
@@ -999,6 +1055,8 @@ fn ship_linked_packages(proj: &Path, ship_assets: &Path) -> Result<usize, String
 struct Staged {
     files: u64,
     linked: usize,
+    /// Packages that were only editor tools, left out.
+    editor_only: Vec<String>,
     port: Portability,
     skipped: Skipped,
     unnamed: Vec<(String, u64)>,
@@ -1044,6 +1102,13 @@ impl Staged {
         }
         if self.linked > 0 {
             msg.push_str(&format!(" — bundled {} linked package(s)", self.linked));
+        }
+        if !self.editor_only.is_empty() {
+            msg.push_str(&format!(
+                " — left out {} package(s) that only extend the editor: {}",
+                self.editor_only.len(),
+                self.editor_only.join(", ")
+            ));
         }
         if self.port.rewritten > 0 {
             msg.push_str(&format!(
@@ -1122,6 +1187,8 @@ fn stage_game(proj: &Path, out_c: &Path, title: &str) -> Result<Staged, String> 
     // also what makes `pkg://` resolve in a player with no package host: the
     // scheme falls back to `<project>/packages/<id>/`.
     let linked = ship_linked_packages(proj, &ship_assets)?;
+    // Before the reference scan: an editor tool's files are not the game's.
+    let editor_only = strip_editor_tools(&ship_assets)?;
     let port = make_portable(&ship_assets, proj);
     let unnamed = heaviest_unnamed(&ship_assets, 5);
     let (data_id, new_data_id) = project_data_id(proj, &cfg, title);
@@ -1135,7 +1202,7 @@ fn stage_game(proj: &Path, out_c: &Path, title: &str) -> Result<Staged, String> 
     let text = ron::ser::to_string_pretty(&manifest, ron::ser::PrettyConfig::default())
         .map_err(|e| format!("manifest: {e}"))?;
     floptle_vfs::write(out_c.join("floptle-game.ron"), text).map_err(|e| format!("write manifest: {e}"))?;
-    Ok(Staged { files, linked, port, skipped, unnamed, new_data_id })
+    Ok(Staged { files, linked, editor_only, port, skipped, unnamed, new_data_id })
 }
 
 /// The project's data folder name, and whether this export just chose it.
@@ -1468,6 +1535,7 @@ pub(crate) fn export_server(
     let files = copy_tree_with(&proj, &ship, "", &ExportIgnore::load(&proj), &mut skipped, &serves_file)
         .map_err(|e| format!("copy project: {e}"))?;
     let linked = ship_linked_packages(&proj, &ship)?;
+    let editor_only = strip_editor_tools(&ship)?;
     let port = make_portable(&ship, &proj);
 
     let rel = scene_path
@@ -1536,6 +1604,9 @@ pub(crate) fn export_server(
             skipped.ignored_files,
             human_bytes(skipped.ignored_bytes)
         ));
+    }
+    if !editor_only.is_empty() {
+        msg.push_str(&format!("\n  left out {} editor-only package(s): {}", editor_only.len(), editor_only.join(", ")));
     }
     if linked > 0 {
         msg.push_str(&format!("\n  materialised {linked} linked package(s)"));
@@ -2996,6 +3067,55 @@ mod tests {
         }
     }
 
+    /// A package's editor tools stay out of a build: a package that is only a
+    /// tool is left out whole, and one that also gives the game scripts ships
+    /// those without its editor Lua — whose request bodies the reference scan
+    /// used to report as paths outside the project.
+    #[test]
+    fn a_build_carries_no_package_editor_tools() {
+        let proj = temp("proj-edtools");
+        floptle_vfs::write(proj.join("project.ron"), "()").unwrap();
+        let mut reg = floptle_package::Registry::default();
+        for (id, game) in [("com.example.tool", false), ("com.example.both", true)] {
+            let root = proj.join("packages").join(id);
+            floptle_vfs::create_dir_all(root.join("editor")).unwrap();
+            floptle_vfs::write(
+                root.join("package.ron"),
+                format!(r#"( id: "{id}", name: "{id}", version: "1.0.0" )"#),
+            )
+            .unwrap();
+            floptle_vfs::write(root.join("editor/main.lua"), "http.post(\"/chat body.engine\")\n").unwrap();
+            if game {
+                floptle_vfs::create_dir_all(root.join("scripts")).unwrap();
+                floptle_vfs::write(root.join("scripts/helper.lua"), "").unwrap();
+            }
+            reg.upsert(floptle_package::Entry {
+                id: id.into(),
+                version: "1.0.0".parse().unwrap(),
+                source: floptle_package::Source::Authored,
+                enabled: true,
+            });
+        }
+        reg.save(&proj).unwrap();
+        let out = temp("out-edtools");
+
+        let me = std::env::current_exe().unwrap();
+        let (msg, _) = export_game_with(&proj, &out, "G", &me, &EXPORT_TARGETS[0]).expect("export");
+        let shipped = out.join("assets/packages");
+        assert!(!shipped.join("com.example.tool").exists(), "a tool-only package ships: {msg}");
+        assert!(shipped.join("com.example.both/scripts/helper.lua").is_file(), "the game's half must ship");
+        assert!(!shipped.join("com.example.both/editor").exists(), "the editor half must not");
+        let reg = floptle_package::Registry::load(&out.join("assets")).unwrap();
+        assert!(reg.find("com.example.tool").is_none(), "the build's packages.ron still lists it");
+        assert!(reg.find("com.example.both").is_some());
+        assert!(msg.contains("only extend the editor: com.example.tool"), "{msg}");
+        assert!(!msg.contains("OUTSIDE the project"), "{msg}");
+
+        for d in [&proj, &out] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
     /// The engine writes `save/` and `replays/` into a project at runtime.
     /// Shipping the developer's copies hands every player a pre-populated save —
     /// in the field this made a build boot straight into a match instead of its
@@ -3120,7 +3240,8 @@ mod tests {
         floptle_vfs::write(
             proj.join("stage.ron"),
             "(mesh: \"/elsewhere/on/disk/tree.glb\", url: \"https://example.com/x\", \
-             endpoint: \"/api/login\", version: \"/api/v1.2/session\")",
+             endpoint: \"/api/login\", version: \"/api/v1.2/session\", \
+             field: \"/chat body.engine\")",
         )
         .unwrap();
         // A ref written where the project used to live (a copy on another disk,
@@ -3142,7 +3263,9 @@ mod tests {
         assert!(msg.contains("portable"), "the report mentions the rewrite: {msg}");
 
         assert!(msg.contains("OUTSIDE the project"), "foreign refs are reported: {msg}");
-        assert!(msg.contains("/elsewhere/on/disk/tree.glb"), "and named: {msg}");
+        assert!(msg.contains("/elsewhere/on/disk/tree.glb (in stage.ron)"), "and named, with where: {msg}");
+        // A JSON field path in a request body ends in a word, not a file type.
+        assert!(!msg.contains("body.engine"), "a field path is not an asset path: {msg}");
         let hall = floptle_vfs::read_to_string(out.join("assets/scenes/hall.ron")).unwrap();
         assert_eq!(
             hall, "(a: \"models/hero.glb\", b: \"models/hero.glb\")",
