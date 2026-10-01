@@ -623,6 +623,7 @@ impl Editor {
             gizmo_tool: _,
             globals,
             instances,
+            shadow_casters,
             light_node,
             lights_2d,
             mask_blob,
@@ -727,7 +728,8 @@ impl Editor {
                     Some(clear.map(|c| c as f64))
                 };
                 gpu_mark!("sun shadow map");
-                raster.sun_shadow_pass(gpu, globals, &instances, &flsl_draws, &skin_draws);
+                let map_draws = crate::shading::with_shadow_casters(&instances, &shadow_casters);
+                raster.sun_shadow_pass(gpu, globals, &map_draws, &flsl_draws, &skin_draws);
                 gpu_mark!("opaque + lighting");
                 raster.draw_scene_with(
                     gpu, color, depth, globals, &instances, &flsl_draws, &skin_draws,

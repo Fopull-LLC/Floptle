@@ -1506,8 +1506,11 @@ fn field_vis(ro: vec3<f32>, l: vec3<f32>, max_d: f32, k: f32, pen_t0: f32, lift:
     // (a character standing inside its own capsule) — skip it so meshes don't
     // blanket-shadow themselves; it still casts on everything else.
     var skip = 0u;
-    for (var i = 0u; i < pc; i = i + 1u) {
-        if ((pmask & (1u << i)) != 0u && prox_d(i, ro) < lift) { skip = skip | (1u << i); }
+    var near = pmask;
+    while (near != 0u) {
+        let i = firstTrailingBit(near);
+        near = near & (near - 1u);
+        if (prox_d(i, ro) < lift) { skip = skip | (1u << i); }
     }
     let march = pmask & ~skip;
     // Everything the sweep found was this fragment's OWN proxy, and the field
@@ -1539,10 +1542,15 @@ fn field_vis(ro: vec3<f32>, l: vec3<f32>, max_d: f32, k: f32, pen_t0: f32, lift:
         if (shapes) {
             d = min(d, custom_d(q));
         }
-        for (var i = 0u; i < pc; i = i + 1u) {
-            if ((march & (1u << i)) != 0u) {
-                d = min(d, prox_d(i, q));
-            }
+        // Only the proxies this ray passes near, found by their set bits: a
+        // loop over all 32 slots testing each bit cost a lit floor beside a
+        // building several times what the same floor cost in the open, even
+        // when the ray was near three boxes.
+        var m = march;
+        while (m != 0u) {
+            let i = firstTrailingBit(m);
+            m = m & (m - 1u);
+            d = min(d, prox_d(i, q));
         }
         if (d < 0.001) { return 0.0; }   // hard hit — fully occluded
         if (d > 1e8) { escaped = true; break; } // nothing along this ray — fully lit
@@ -1802,13 +1810,23 @@ fn shadow_post(vis_in: f32, pix: vec2<u32>) -> vec3<f32> {
     return mix(vec3<f32>(1.0), G.shadow_tint.rgb, G.shadow_params.z * (1.0 - vis));
 }
 
-// Marched shadow toward star `i`.
+// Shadow toward star `i`. Star 0 is the brightest at the camera, and the host
+// draws the shadow map toward it when the scene asks for one; it reads the map
+// as the sun does, and marches only where the map has no answer. The others
+// always march. A branch, not `select`, for the reason `sun_shadow` gives.
 fn star_shadow(i: u32, p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
     if (G.shadow_params.x < 0.5) {
         return vec3<f32>(1.0);
     }
     let l = star_dir_at(i, p);
-    return shadow_post(min(light_vis(p, n, l), contact_vis(p, n, l, pix)), pix);
+    var far = -1.0;
+    if (i == 0u) {
+        far = sun_map_vis(p, n);
+    }
+    if (far < 0.0) {
+        far = light_vis(p, n, l);
+    }
+    return shadow_post(min(far, contact_vis(p, n, l, pix)), pix);
 }
 
 // The full key-light response at a point: Σ over stars (or the one legacy

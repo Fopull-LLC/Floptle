@@ -450,7 +450,12 @@ impl Editor {
             cam.world_position,
             light_node.shadows || point_shadows,
         );
-        let (sun_vp, sun_map, sun_extra) = crate::shading::sun_map_lanes(&light_node, sun, view_proj);
+        let (sun_vp, sun_map, sun_extra) = crate::shading::sun_map_lanes(
+            &light_node,
+            sun,
+            (star_meta[0] >= 1.0).then_some(star_pos[0]),
+            view_proj,
+        );
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             sun_vp,
@@ -478,6 +483,9 @@ impl Editor {
 
         // Camera-relative instances + blobs, exactly like the main gather —
         // including the frustum cull, built from this camera's matrix.
+        // The sun map's casters the camera culls, before the draw loop takes
+        // the renderer: see `shadow_map_casters`.
+        let shadow_casters = self.shadow_map_casters(&globals, cam.world_position, view_proj);
         let off_frustum = floptle_render::Frustum::from_view_proj(view_proj);
         let ents: Vec<(Entity, Matter)> =
             self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
@@ -890,6 +898,8 @@ impl Editor {
                 lights_dropped,
                 voices,
                 flat2d: flat2d.len(),
+                // Filled in once the volumes are known: `note_shadow_casters`.
+                ..Default::default()
             });
         }
         let show_blobs = self.project.matter && !blobs.is_empty();
@@ -1030,6 +1040,7 @@ impl Editor {
             }
             g
         };
+        crate::shading::note_shadow_casters(&mut self.script_host.profile().borrow_mut(), prox_count, &rm);
 
         // Live particles render in offscreen views too (the split Game viewport
         // must show what the game shows).
@@ -1122,7 +1133,8 @@ impl Editor {
                 Some(clear.map(|c| c as f64))
             };
             headless_mark!("sun shadow map");
-            raster.sun_shadow_pass(gpu, globals, &instances, &flsl_draws, &skin_draws);
+            let map_draws = crate::shading::with_shadow_casters(&instances, &shadow_casters);
+            raster.sun_shadow_pass(gpu, globals, &map_draws, &flsl_draws, &skin_draws);
             headless_mark!("opaque + lighting");
             raster.draw_scene_with(
                 gpu, color, depth, globals, &instances, &flsl_draws, &skin_draws,

@@ -209,6 +209,15 @@ pub struct Counts {
     /// bullet hell was paying ~500 of these a frame against lights that could
     /// reach none of them, and had no number to see it with.
     pub flat2d: usize,
+    /// Shadow proxies the march was given: the collider boxes, spheres and
+    /// capsules nearest the camera, of the 32 slots it has. Each one is tested
+    /// along every shadow ray that passes near it, so beside a building made of
+    /// many boxes this is where lighting time goes.
+    pub shadow_proxies: usize,
+    /// …and how many casters were left out because more than 32 qualified.
+    pub shadow_proxies_dropped: usize,
+    /// Baked volumes the shadow march reads: terrain and mesh occluder bakes.
+    pub shadow_volumes: usize,
 }
 
 /// A frame's cost, per bucket and per script.

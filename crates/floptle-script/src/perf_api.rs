@@ -202,6 +202,13 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
             // can reach them, which is the answer a 2D game most wants to be
             // able to check.
             out.set("flat2d", c.flat2d)?;
+            // What the shadow march tests along each ray: collider proxies
+            // (32 at most, the nearest) and baked volumes. A room built from
+            // many boxes costs lighting time per box, and this is the number
+            // that says so.
+            out.set("shadowProxies", c.shadow_proxies)?;
+            out.set("shadowProxiesDropped", c.shadow_proxies_dropped)?;
+            out.set("shadowVolumes", c.shadow_volumes)?;
             // The script mirror, last frame: whole rebuilds (O(scene) each)
             // and single nodes re-read because a component of theirs changed.
             // Rebuilds climbing every frame is something structural changing

@@ -485,17 +485,36 @@ pub(crate) fn shadow_uniforms(l: &Light) -> ([f32; 4], [f32; 4], [f32; 4]) {
 /// The sun shadow map's lanes for this view (`Light::shadow_map`): the
 /// matrix, then [on, filter radius in texels, normal offset, one texel in uv],
 /// then [depth bias]. All zero, and the march decides, unless the sun casts
-/// and the map is asked for. Stars mode keeps the march: it has many suns.
+/// and the map is asked for.
+///
+/// In stars mode the map is drawn toward the brightest star at the camera,
+/// `star0` (its position relative to the camera, from [`star_uniforms`]), and
+/// only that star reads it; the others keep the march. A system has several
+/// stars, but one lights the ground at a time, and marching it for every lit
+/// pixel cost a room three times what the same view cost outdoors.
 #[allow(clippy::type_complexity)]
 pub(crate) fn sun_map_lanes(
     l: &Light,
     sun: [f32; 4],
+    star0: Option<[f32; 4]>,
     view_proj: floptle_core::math::Mat4,
 ) -> ([[f32; 4]; 4], [f32; 4], [f32; 4]) {
-    if !(l.shadows && l.shadow_map && !l.stars) {
-        return ([[0.0; 4]; 4], [0.0; 4], [0.0; 4]);
+    let off = ([[0.0; 4]; 4], [0.0; 4], [0.0; 4]);
+    if !(l.shadows && l.shadow_map) {
+        return off;
     }
-    let to_sun = floptle_core::math::Vec3::new(sun[0], sun[1], sun[2]);
+    let toward = if l.stars {
+        match star0 {
+            Some(s) => s,
+            None => return off,
+        }
+    } else {
+        sun
+    };
+    let to_sun = floptle_core::math::Vec3::new(toward[0], toward[1], toward[2]).normalize_or_zero();
+    if to_sun == floptle_core::math::Vec3::ZERO {
+        return off;
+    }
     let (vp, texel) = floptle_render::sun_shadow_matrix(to_sun, view_proj, l.shadow_distance);
     let size = floptle_render::SUN_MAP_SIZE as f32;
     // Softness widens the filter: 1.5 texels hard, about 7.5 at full softness.
@@ -815,9 +834,13 @@ pub(crate) fn collect_shadow_proxies(world: &World, cam_world: DVec3, enabled: b
                 let (p0, p1) = (c - up * half, c + up * half);
                 ([p0.x, p0.y, p0.z, rb.radius], [p1.x, p1.y, p1.z, 1.0], no_rot, half + rb.radius)
             }
+            // At the size the body collides at: physics scales a box's half
+            // extents by the node's world scale (and a sphere or capsule not
+            // at all). Raw, a box under a scaled parent cast a shadow a sixth
+            // of its size and the sun lit the inside of the building.
             floptle_core::BodyKind::Box => {
-                let h = rb.half_extents;
-                ([c.x, c.y, c.z, 0.0], [h[0], h[1], h[2], 2.0], [q.x, q.y, q.z, q.w], Vec3::from(h).length())
+                let h = Vec3::from(rb.half_extents) * wt.scale;
+                ([c.x, c.y, c.z, 0.0], [h.x, h.y, h.z, 2.0], [q.x, q.y, q.z, q.w], h.length())
             }
         };
         found.push(((c.length() - reach).max(0.0), pa, pb, rot));
@@ -861,12 +884,30 @@ pub(crate) fn collect_shadow_proxies(world: &World, cam_world: DVec3, enabled: b
     // Stable, so equal distances keep scene order and a frame is repeatable.
     found.sort_by(|x, y| x.0.total_cmp(&y.0));
     let n = found.len().min(floptle_render::MAX_SHADOW_PROXIES);
+    // The shader reads `x`; `y` is how many qualified, for `perf.counts()`.
+    let candidates = found.len();
     for (i, (_, pa, pb, rot)) in found.into_iter().take(n).enumerate() {
         a[i] = pa;
         b[i] = pb;
         r[i] = rot;
     }
-    ([n as f32, 0.0, 0.0, 0.0], a, b, r)
+    ([n as f32, candidates as f32, 0.0, 0.0], a, b, r)
+}
+
+/// What the shadow march is given this frame, into the counts a game reads
+/// (`perf.counts()`): proxies sent and left out, and the volumes it reads.
+/// After the frame's other counts, because the volumes are only known once
+/// the raymarch globals are filled.
+pub(crate) fn note_shadow_casters(
+    prof: &mut floptle_core::profile::FrameProfile,
+    prox_count: [f32; 4],
+    rm: &floptle_render::RaymarchGlobals,
+) {
+    let mut c = prof.counts();
+    c.shadow_proxies = prox_count[0] as usize;
+    c.shadow_proxies_dropped = (prox_count[1] as usize).saturating_sub(c.shadow_proxies);
+    c.shadow_volumes = rm.vol_center.iter().filter(|v| v[3] >= 0.5).count();
+    prof.set_counts(c);
 }
 
 /// Cache key for a mesh shadow-occluder bake: the asset path + the node's world
@@ -1409,6 +1450,103 @@ mod light_split_tests {
     }
 }
 
+impl crate::Editor {
+    /// Opaque meshes the camera culled that the sun shadow map can still see:
+    /// the roof over a camera looking at a wall, a tower behind it. The map
+    /// is drawn from the camera's own draw list, so without these anything out
+    /// of view cast nothing, and a room lit by the map had sun on its floor.
+    /// Drawn into the map only, never into the picture.
+    ///
+    /// Static models, map meshes and primitives. A rigged model out of view
+    /// (a character behind the camera) is left out: posing it costs a skin
+    /// update for a shadow that is rarely in the frame.
+    pub(crate) fn shadow_map_casters(
+        &self,
+        globals: &floptle_render::Globals,
+        cam_world: DVec3,
+        view_proj: floptle_core::math::Mat4,
+    ) -> Vec<ShadowDraw> {
+        let mut out = Vec::new();
+        if globals.sun_map[0] < 0.5 {
+            return out;
+        }
+        let camera = floptle_render::Frustum::from_view_proj(view_proj);
+        let sun = floptle_render::Frustum::from_view_proj(floptle_core::math::Mat4::from_cols_array_2d(&globals.sun_vp));
+        for (e, matter) in self.world.query::<Matter>() {
+            if !matches!(matter, Matter::Mesh { .. } | Matter::MapMesh { .. } | Matter::Primitive { .. })
+                || matches!(self.world.get::<floptle_core::Visible>(e), Some(floptle_core::Visible(false)))
+                || self.world.get::<floptle_core::CastShadow>(e).is_some_and(|c| !c.0)
+                || floptle_core::is_disabled(&self.world, e)
+            {
+                continue;
+            }
+            let t = floptle_core::world_transform(&self.world, e);
+            let off = |f: &floptle_render::Frustum| {
+                crate::node_bounds::node_is_off_screen(
+                    &self.world, &self.mesh_registry, &self.anim.poses, e, matter, &t, cam_world, f, None,
+                )
+            };
+            // On screen it is in the camera's list already; outside the map it
+            // casts on nothing the camera can see.
+            if !off(&camera) || off(&sun) {
+                continue;
+            }
+            let model = t.render_matrix(cam_world);
+            let mat = self.world.get::<floptle_core::Material>(e);
+            match matter {
+                Matter::Primitive { shape, color } => {
+                    if let Some((mesh, raw)) =
+                        crate::draw_2d::primitive_draw(*shape, *color, mat, model, &self.mesh_ids, None, None)
+                    {
+                        out.push((mesh, None, raw));
+                    }
+                }
+                Matter::Mesh { asset_path } => {
+                    if let Some(asset) = self.mesh_registry.get(asset_path).filter(|a| a.rig.is_none()) {
+                        let raw = shadow_instance(model, mat);
+                        out.extend(asset.parts.iter().map(|&mid| (mid, None, raw)));
+                    }
+                }
+                Matter::MapMesh { id } => {
+                    if let Some(asset) = self.mesh_registry.get(&crate::map_edit::map_key(*id)) {
+                        let raw = shadow_instance(model, mat);
+                        out.extend(asset.parts.iter().map(|&mid| (mid, None, raw)));
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+}
+
+/// A depth-only stand-in for a model drawn into the sun shadow map: its
+/// placement and its opacity, which decides whether the map takes it at all.
+fn shadow_instance(model: floptle_core::math::Mat4, mat: Option<&floptle_core::Material>) -> floptle_render::InstanceRaw {
+    let mut mp = floptle_render::MaterialParams::flat([1.0; 3]);
+    if let Some(m) = mat {
+        mp.alpha = material_params(m).alpha;
+    }
+    floptle_render::instance_of_mat(model, &mp)
+}
+
+/// What the sun shadow map draws: the camera's opaque list, and the casters
+/// it culled ([`Editor::shadow_map_casters`]). Borrowed when there are none.
+pub(crate) fn with_shadow_casters<'a>(
+    instances: &'a [ShadowDraw],
+    casters: &[ShadowDraw],
+) -> std::borrow::Cow<'a, [ShadowDraw]> {
+    if casters.is_empty() {
+        std::borrow::Cow::Borrowed(instances)
+    } else {
+        std::borrow::Cow::Owned(instances.iter().chain(casters).copied().collect())
+    }
+}
+
+/// One raster draw: mesh, texture, instance.
+pub(crate) type ShadowDraw = (floptle_render::MeshId, Option<floptle_render::TexId>, floptle_render::InstanceRaw);
+
 #[cfg(test)]
 mod proxy_tests {
     use super::*;
@@ -1418,6 +1556,60 @@ mod proxy_tests {
         world.insert(e, floptle_core::Transform::from_translation(DVec3::new(0.0, 1.0, z)));
         world.insert(e, floptle_core::RigidBody { kind: floptle_core::BodyKind::Capsule, radius: 0.4, height: 1.8, ..Default::default() });
         e
+    }
+
+    /// `perf.counts()` says how many casters the shadow march was given, how
+    /// many were left out past its 32 slots, and how many baked volumes it
+    /// reads. Forty bodies: thirty-two sent, eight dropped.
+    #[test]
+    fn the_shadow_counts_are_what_the_march_was_given() {
+        let mut world = World::default();
+        for i in 0..40 {
+            body(&mut world, 5.0 + i as f64);
+        }
+        let (count, ..) = collect_shadow_proxies(&world, DVec3::ZERO, true);
+        let mut rm = floptle_render::RaymarchGlobals::default();
+        rm.vol_center[0][3] = 1.0; // a drawn terrain volume
+        rm.vol_center[3][3] = 2.0; // a mesh occluder bake
+        let mut prof = floptle_core::profile::FrameProfile::default();
+        prof.enable(true);
+        note_shadow_casters(&mut prof, count, &rm);
+        let c = prof.counts();
+        assert_eq!((c.shadow_proxies, c.shadow_proxies_dropped, c.shadow_volumes), (32, 8, 2));
+
+        let (none, ..) = collect_shadow_proxies(&world, DVec3::ZERO, false);
+        note_shadow_casters(&mut prof, none, &floptle_render::RaymarchGlobals::default());
+        let c = prof.counts();
+        assert_eq!((c.shadow_proxies, c.shadow_proxies_dropped, c.shadow_volumes), (0, 0, 0), "shadows off sends nothing");
+    }
+
+    /// A box body casts at the size it collides at. Physics scales its half
+    /// extents by the world scale, so a building's wall under a parent at scale
+    /// 6 must cast six times larger than its raw half extents say.
+    #[test]
+    fn a_box_body_casts_at_the_size_physics_gives_it() {
+        let mut world = World::default();
+        let parent = world.spawn();
+        world.insert(parent, floptle_core::Transform { scale: Vec3::splat(6.0), ..floptle_core::Transform::IDENTITY });
+        let wall = world.spawn();
+        world.insert(wall, floptle_core::Transform::from_translation(DVec3::new(0.0, 0.0, 3.0)));
+        world.insert(wall, floptle_core::Parent(parent));
+        world.insert(
+            wall,
+            floptle_core::RigidBody {
+                kind: floptle_core::BodyKind::Box,
+                half_extents: [1.0, 0.5, 0.25],
+                ..Default::default()
+            },
+        );
+        let (count, _, b, _) = collect_shadow_proxies(&world, DVec3::ZERO, true);
+        assert_eq!(count[0], 1.0);
+        let sim = floptle_physics::Sim::build(&world, &[], Default::default(), DVec3::ZERO);
+        let floptle_physics::BodyShape::Box { half } = sim.world.bodies[0].shape else {
+            panic!("physics built a box: {:?}", sim.world.bodies[0].shape)
+        };
+        assert_eq!([b[0][0], b[0][1], b[0][2]], [half.x, half.y, half.z], "the shadow and the collider are one size");
+        assert_eq!(half, Vec3::new(6.0, 3.0, 1.5));
     }
 
     /// **The bodies that cast are the ones near the camera.** Sixty

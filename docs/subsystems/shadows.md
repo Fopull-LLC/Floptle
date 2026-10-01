@@ -196,6 +196,17 @@ long before the cap, so the step budget trims rather than halves. The enemy
 proxies were 0.2 ms of it there. The next lever is still the SSAO-style
 half-res + depth-aware upsample path.
 
+**Per step, only the proxies the ray is near.** The march walks the relevance
+mask's set bits (`firstTrailingBit`) instead of all 32 slots. Under a lattice
+of 32 box colliders at 720p that took opaque + lighting from 2.3 ms to
+0.95 ms, with the picture bit-identical; 2 casters cost 0.25 ms before and
+after. Two things that did not help, kept here so nobody tries them again:
+holding each proxy's entry and exit along the ray in two 32-entry arrays was
+slower everywhere (private arrays in a shader this size cost more than the
+tests they skip), and skipping a proxy whose bounding sphere is farther than
+the current distance saved 4%. `perf.counts()` reports `shadowProxies`,
+`shadowProxiesDropped` and `shadowVolumes`.
+
 ## 5b. Contact shadows (v0.48.0)
 
 The field march knows about terrain, blobs, baked level meshes and collider
@@ -371,7 +382,11 @@ opaque + lighting pass fell from 9.5 ms to 4.1 ms, and the map itself costs
 
 - `raster.rs` `sun_shadow_pass` draws the depth prepass's own opaque draw
   list, skinned parts included, into a 2048² depth map, using the prepass
-  pipelines and a view from `sun_shadow_matrix`.
+  pipelines and a view from `sun_shadow_matrix`. The camera culls that list,
+  so `gather.rs` `shadow_map_casters` adds the static models, map meshes and
+  primitives it culled that still fall in the map's box: the roof over a
+  camera looking at a wall. Those go to the map only. A rigged model out of
+  view is left out.
 - The map is an orthographic box along the sun, centred a third of
   `shadow_distance` ahead of the camera, reaching 0.85 of it around the
   camera and 300 m toward the sun. It's snapped to whole texels so edges
@@ -392,8 +407,11 @@ pixel: 16 ms instead of 4.
 
 **Limits:** one cascade, so detail is set by `shadow_distance` (about 10 cm a
 texel at 120). Blobs that are only a distance field cast only in the march.
-Stars mode keeps the march, since it has many suns. Cached static casters and
-more cascades are the next levers.
+In stars mode the map is drawn toward star 0, the brightest at the camera
+(`star_uniforms` sorts them), and only that star reads it; the others march.
+Over a shadow distance the direction to a star thousands of metres away
+barely turns, so one direction serves. Cached static casters and more
+cascades are the next levers.
 
 ## 6. Not yet
 

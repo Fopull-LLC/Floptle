@@ -49,6 +49,9 @@ pub(crate) struct FrameGather {
     pub(crate) gizmo_tool: Tool,
     pub(crate) globals: Globals,
     pub(crate) instances: Vec<(MeshId, Option<TexId>, InstanceRaw)>,
+    /// Meshes the camera culled that still cast into the sun shadow map: drawn
+    /// in that pass only. See [`Editor::shadow_map_casters`].
+    pub(crate) shadow_casters: Vec<(MeshId, Option<TexId>, InstanceRaw)>,
     pub(crate) light_node: Light,
     pub(crate) lights_2d: floptle_render::Light2dUniform,
     pub(crate) mask_blob: Option<RaymarchGlobals>,
@@ -622,8 +625,11 @@ impl Editor {
             raymarch.gi().apply(&mut g, cam.world_position.into());
             g
         };
+        crate::shading::note_shadow_casters(&mut profile.borrow_mut(), prox_count, &rm);
 
+        let shadow_casters = self.shadow_map_casters(&globals, cam.world_position, view_proj);
         Some(FrameGather {
+            shadow_casters,
             aspect,
             cam,
             clear,
@@ -1556,7 +1562,12 @@ impl Editor {
             cam.world_position,
             light_node.shadows || point_shadows,
         );
-        let (sun_vp, sun_map, sun_extra) = crate::shading::sun_map_lanes(&light_node, sun, view_proj);
+        let (sun_vp, sun_map, sun_extra) = crate::shading::sun_map_lanes(
+            &light_node,
+            sun,
+            (star_meta[0] >= 1.0).then_some(star_pos[0]),
+            view_proj,
+        );
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             sun_vp,
@@ -2198,6 +2209,8 @@ impl Editor {
                 // What the 2D lighting pass will actually rasterize a second
                 // time — 0 when no light can reach anything.
                 flat2d: flat2d.len(),
+                // Filled in once the volumes are known: `note_shadow_casters`.
+                ..Default::default()
             });
             prof.record(floptle_core::profile::Bucket::Render, gather_t.ms());
         }
@@ -2412,3 +2425,4 @@ impl Editor {
         (mask_mesh, mask_skins, mask_blob)
     }
 }
+
