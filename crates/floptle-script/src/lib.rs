@@ -427,6 +427,33 @@ pub struct InputSnapshot {
     /// command, so the server and any replay use exactly the angle the player
     /// saw (a local camera node can never match across machines).
     pub aim: Option<[f32; 2]>,
+    /// Every finger on the screen this frame, in `mouse`'s pixel space —
+    /// `input.touches()`. A finger that lifted this frame is still listed,
+    /// once, as `ended` or `cancelled`.
+    pub touches: Vec<TouchPoint>,
+}
+
+/// One finger, as `input.touches()` reports it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TouchPoint {
+    /// Stable for the life of the touch; a new touch gets a new id.
+    pub id: u64,
+    pub x: f32,
+    pub y: f32,
+    /// How far it moved this frame, in pixels.
+    pub dx: f32,
+    pub dy: f32,
+    /// `"began"`, `"moved"`, `"held"` (on the screen and still),
+    /// `"ended"` or `"cancelled"`.
+    pub phase: &'static str,
+    /// 0..1 where the screen reports it, else 1 while touching.
+    pub pressure: f32,
+    /// It went down this frame (also true for a tap that began and ended
+    /// inside one frame).
+    pub began: bool,
+    /// It landed on an interactive game-UI element and is driving the UI as
+    /// the mouse would — a game's own touch controls should skip it.
+    pub ui: bool,
 }
 
 /// A script source file's reload state: a generation that bumps whenever the file

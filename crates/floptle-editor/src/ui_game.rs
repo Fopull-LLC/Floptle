@@ -1157,10 +1157,10 @@ impl Editor {
     /// `self.ui_events`, dispatched to Lua after the script run.
     pub(crate) fn ui_interact(&mut self) {
         self.ui_events.clear();
-        let down = self.input_buttons[0];
+        let mut down = self.input_buttons[0];
         // Edges come from banked events (never missed, even when a whole click
         // fits inside one slow frame) or the sampled state transition.
-        let pressed_edge = std::mem::take(&mut self.ui_lmb_pressed_evt) || (down && !self.ui_lmb_was);
+        let mut pressed_edge = std::mem::take(&mut self.ui_lmb_pressed_evt) || (down && !self.ui_lmb_was);
         let released_edge =
             std::mem::take(&mut self.ui_lmb_released_evt) || (!down && self.ui_lmb_was);
         self.ui_lmb_was = down;
@@ -1465,6 +1465,24 @@ impl Editor {
                 self.ui_events.push((new, "hoverStart"));
             }
             self.ui_hover = hover;
+        }
+        // A finger that just landed is the UI's if it landed on something
+        // interactive (it presses it, here, this frame), and the game's
+        // otherwise — see `touch`.
+        if let Some(id) = self.touches.pending.take()
+            && hover.is_some()
+        {
+            self.touches.set_ui(id);
+            self.track_mouse_button(0, true);
+            self.ui_lmb_pressed_evt = false;
+            self.ui_lmb_was = true;
+            down = true;
+            pressed_edge = true;
+            // A tap that lifted inside the frame lets go on the next one,
+            // still over what it pressed, so it clicks.
+            if self.touches.lifted(id) {
+                self.track_mouse_button(0, false);
+            }
         }
         if pressed_edge && let Some(h) = hover {
             self.ui_active = Some(h);
@@ -3435,6 +3453,51 @@ mod tests {
 
         ed.ui_style_dt = 0.0;
         assert_eq!(text_size(&mut ed), 10.0, "the new element drew the destroyed one's text size");
+    }
+
+    /// **A finger works the game's UI the way a mouse does.** A phone sends
+    /// nothing but touches: a tap on a button has to press and click it with
+    /// no game code, and a finger that lands off the UI (a stick, a look drag)
+    /// must be the game's alone and click nothing it passes over.
+    #[test]
+    fn a_tap_on_a_button_clicks_it_and_a_finger_elsewhere_is_the_games() {
+        use crate::touch::Phase;
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        ed.player_mode = true;
+        ed.playing = true;
+        let layer = ed.world.spawn();
+        ed.world.insert(layer, Transform::IDENTITY);
+        ed.world.insert(layer, UiLayer::default());
+        let b = ed.world.spawn();
+        ed.world.insert(b, Transform::IDENTITY);
+        ed.world.insert(b, Parent(layer));
+        // The left half of the screen.
+        ed.world.insert(b, ElementSpec { button: true, size: [Size::Pct(0.5), Size::Pct(1.0)], ..Default::default() });
+        let (w, h) = ed.game_surface_px().expect("a player has a surface").1.into();
+        let frame = |ed: &mut crate::Editor| {
+            ed.ui_interact();
+            let ev = std::mem::take(&mut ed.ui_events);
+            ed.touches.end_frame();
+            ev
+        };
+
+        ed.note_touch(1, Phase::Began, w * 0.1, h * 0.5, None);
+        let ev = frame(&mut ed);
+        assert!(ev.contains(&(b.index(), "pressed")), "a finger on a button presses it: {ev:?}");
+        ed.note_touch(1, Phase::Ended, w * 0.1, h * 0.5, None);
+        let ev = frame(&mut ed);
+        assert!(ev.contains(&(b.index(), "clicked")), "and lifting clicks it: {ev:?}");
+
+        ed.note_touch(2, Phase::Began, w * 0.9, h * 0.5, None);
+        let ev = frame(&mut ed);
+        assert!(!ev.iter().any(|(_, e)| *e == "pressed"), "a finger off the UI pressed something: {ev:?}");
+        assert!(!ed.input_buttons[0], "a game's finger holds the mouse button while it drags");
+        assert_eq!(ed.touches.ui_finger, None, "a game's finger was handed to the UI");
+        ed.note_touch(2, Phase::Moved, w * 0.1, h * 0.5, None);
+        ed.note_touch(2, Phase::Ended, w * 0.1, h * 0.5, None);
+        let ev = frame(&mut ed);
+        assert!(!ev.iter().any(|(_, e)| *e == "clicked"), "a game's finger clicked the button it crossed: {ev:?}");
+        assert!(!ed.input_buttons[0], "the game's finger held the mouse button");
     }
 
     /// A drag tells the game the value moved: once per frame it moved, never

@@ -56,6 +56,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 mod agents_guide;
 mod anim;
 mod app_settings;
+mod touch;
 mod frame_pace;
 mod model_textures;
 #[cfg(feature = "editor-ui")]
@@ -149,6 +150,8 @@ mod input_actions;
 mod input_scan;
 #[cfg(feature = "editor-ui")]
 mod input_ui;
+#[cfg(feature = "editor-ui")]
+mod input_editor;
 #[cfg(feature = "editor-ui")]
 mod inspect;
 #[cfg(feature = "editor-ui")]
@@ -1663,6 +1666,7 @@ pub fn run() {
     // started through it — see `steam_boot::boot`.
     let mut shipped = false;
     let mut data_root: Option<PathBuf> = None;
+    let mut build_id: Option<String> = None;
     if !player_mode
         && project_path.is_none()
         && let Some((manifest, dir)) = export::load_game_manifest()
@@ -1678,6 +1682,7 @@ pub fn run() {
         );
         game_title = manifest.title;
         steam_settings = manifest.steam;
+        build_id = manifest.build;
         project_path = Some(project);
     }
     // A player_mode launch with no manifest (`floptle play <project>`, `--play
@@ -1742,6 +1747,7 @@ pub fn run() {
         editor.project_root = p;
     }
     editor.data_root = data_root;
+    editor.build_id = build_id;
     if let Some(platform) = steam_platform {
         editor.script_host.set_platform(platform);
     }
@@ -2329,6 +2335,11 @@ struct Editor {
     ui_design_guides_scene: Option<String>,
     /// Last frame's LMB, for press/release edges in the UI interact pass.
     ui_lmb_was: bool,
+    /// Fingers on the screen — `input.touches()`, and the one working the UI.
+    touches: touch::Touches,
+    /// The player's main pointer is a finger: a coarse-pointer page, or a
+    /// screen that has been touched. `app.isTouch()`.
+    touch_device: bool,
     /// Event-banked left-button edges for the game-UI pass: set by the raw
     /// mouse events, consumed once per `ui_interact`. Sampled edges alone miss
     /// a click whose press and release fit inside one slow frame.
@@ -2790,7 +2801,12 @@ struct Editor {
     /// Input settings list is driven by this rather than by memory.
     input_scan: crate::input_scan::InputScan,
     /// "new action…" text in the Input settings.
-    input_new_action: String,
+    /// The Input settings' open entry and half-typed name.
+    #[cfg(feature = "editor-ui")]
+    input_ui_state: crate::input_editor::InputUiState,
+    /// Where an armed press-to-bind will put what is pressed.
+    #[cfg(feature = "editor-ui")]
+    input_capture: Option<crate::input_editor::CaptureTarget>,
     /// Which ⚙ Settings section is showing, and the cross-section search box.
     #[cfg(feature = "editor-ui")]
     settings_section: crate::settings_ui::SettingsSection,
@@ -2983,6 +2999,9 @@ struct Editor {
     /// The managed deployment a fleet server is (`FLOPTLE_DEPLOYMENT_ID`),
     /// told to the relay with every host request. `None` outside the fleet.
     pub(crate) net_deployment: Option<String>,
+    /// The exported build this is (`floptle-game.ron`'s `build`), told to the
+    /// relay with every keyed host request. `None` outside an exported build.
+    pub(crate) build_id: Option<String>,
     /// `net.join(addr, {timeout = …})` — how long the next join waits on a
     /// waking server. Applied when the client session is created.
     pub(crate) net_join_timeout: Option<f32>,

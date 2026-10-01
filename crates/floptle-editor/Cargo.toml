@@ -202,7 +202,7 @@ getrandom = { version = "0.2", features = ["js"] }
 # page, and the window is a canvas the page already holds.
 wasm-bindgen = "0.2.126"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement", "console"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement", "console", "MediaQueryList"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -647,6 +647,11 @@ impl RelayPolicy for CloudPolicy {
         self.keys.primed
     }
 
+    fn bytes_per_window(&self, code: &str) -> Option<u64> {
+        let key = self.of_lobby.get(code)?;
+        self.keys.get(key)?.bytes_per_window
+    }
+
     fn admit_join(&mut self, code: &str) -> JoinAdmission {
         // **A code with no lobby may still be somebody's**.
         // This runs before the relay's own "no lobby" refusal, which is the
@@ -1081,6 +1086,7 @@ mod tests {
             account_over_limit: false,
             max_lobbies: None,
             blocked_builds: Vec::new(),
+            bytes_per_window: None,
         }
     }
 

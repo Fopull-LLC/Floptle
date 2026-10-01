@@ -175,7 +175,8 @@ pub(crate) struct SettingsCtx<'a> {
     pub(crate) input_scan: &'a crate::input_scan::InputScan,
     pub(crate) input_test: &'a floptle_input::ActionState,
     pub(crate) pad_names: &'a [Option<String>],
-    pub(crate) input_new_action: &'a mut String,
+    pub(crate) input_ui: &'a mut crate::input_editor::InputUiState,
+    pub(crate) input_capture: Option<&'a crate::input_editor::CaptureTarget>,
     /// The player's accessibility settings, by value — `Accessibility` is `Copy`,
     /// so the tab edits a copy and reports the change through
     /// [`SettingsOut::access`], the same deferral every other panel here uses.
@@ -1338,7 +1339,8 @@ impl<'a> SettingsCtx<'a> {
             self.input_scan,
             self.input_test,
             self.pad_names,
-            self.input_new_action,
+            self.input_ui,
+            self.input_capture,
             query,
         );
     }
@@ -1418,7 +1420,6 @@ mod tests {
             let mut layer_new = String::new();
             let mut section = *section;
             let mut search = String::new();
-            let mut new_action = String::new();
             let mut input_map = floptle_input::InputMap::starter();
             input_map.actions.push(floptle_input::Action::new("InteractWithTheThingInFront"));
             let scan = crate::input_scan::InputScan::default();
@@ -1437,7 +1438,8 @@ mod tests {
                         input_scan: &scan,
                         input_test: &test,
                         pad_names: &pads,
-                        input_new_action: &mut new_action,
+                        input_ui: &mut Default::default(),
+                        input_capture: None,
                         access: Default::default(),
                     shipping: false,
                     }
@@ -1513,7 +1515,6 @@ mod tests {
         for section in SettingsSection::ALL.iter().copied() {
             for search in ["", "jump", "zzz-no-match"] {
                 let mut layer_new = String::new();
-                let mut new_action = String::new();
                 let mut sec = section;
                 let mut query = search.to_string();
                 // Two frames: the first lays out, the second reads back state.
@@ -1529,7 +1530,8 @@ mod tests {
                             input_scan: &scan,
                             input_test: &test_state,
                             pad_names: &pad_names,
-                            input_new_action: &mut new_action,
+                            input_ui: &mut Default::default(),
+                            input_capture: None,
                             access: Default::default(),
                     shipping: false,
                         };
@@ -1590,7 +1592,7 @@ mod tests {
         let scan = crate::input_scan::InputScan::default();
         let test_state = floptle_input::ActionState::default();
         let pad_names: Vec<Option<String>> = vec![None];
-        let (mut layer_new, mut new_action) = (String::new(), String::new());
+        let mut layer_new = String::new();
         let mut sec = SettingsSection::Input;
         let mut query = String::new();
 
@@ -1607,7 +1609,8 @@ mod tests {
                     input_scan: &scan,
                     input_test: &test_state,
                     pad_names: &pad_names,
-                    input_new_action: &mut new_action,
+                    input_ui: &mut Default::default(),
+                    input_capture: None,
                     access: Default::default(),
                     shipping: false,
                 };
@@ -1638,7 +1641,7 @@ mod tests {
             filter: floptle_input::BindFilter::AnyButton,
             captured: None,
         };
-        let (mut layer_new, mut new_action) = (String::new(), String::new());
+        let mut layer_new = String::new();
         let mut sec = SettingsSection::Input;
         let mut query = String::new();
         for _ in 0..2 {
@@ -1653,7 +1656,8 @@ mod tests {
                     input_scan: &scan,
                     input_test: &test_state,
                     pad_names: &pad_names,
-                    input_new_action: &mut new_action,
+                    input_ui: &mut Default::default(),
+                    input_capture: None,
                     access: Default::default(),
                     shipping: false,
                 };

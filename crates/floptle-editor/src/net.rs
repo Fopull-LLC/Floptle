@@ -1776,12 +1776,14 @@ impl Editor {
                 floptle_net::RelayHost::host_keyed_as(
                     relay_addr,
                     &c.key,
-                    None,
+                    self.build_id.as_deref(),
                     code,
                     self.net_deployment.as_deref(),
                 )
             }
-            (Some(c), _) => floptle_net::RelayHost::host_keyed(relay_addr, &c.key, None),
+            // An exported build names itself, so one leaked copy of the key
+            // can be switched off by build rather than by rotating the key.
+            (Some(c), _) => floptle_net::RelayHost::host_keyed(relay_addr, &c.key, self.build_id.as_deref()),
             // A code without a key is not a claim anybody can honour — the key
             // is the proof of ownership — so it is ignored rather than sent.
             (None, _) => floptle_net::RelayHost::host(relay_addr),
@@ -2528,11 +2530,16 @@ impl Editor {
         let my_peer = cs.my_peer();
         let scene_switch = cs.take_scene_switch();
         for (delta, margin) in lead_events {
-            self.console.push(
-                floptle_script::LogLevel::Debug,
-                format!("🌐 input lead retuned by {delta:+} tick(s) — server margin was {margin}"),
-                None,
-            );
+            let line = if delta == 0 {
+                format!(
+                    "🌐 input lead stopped growing at its {}-tick cap — the server's margin \
+                     (still {margin}) never answered more lead, so it is mis-measured, not short",
+                    floptle_net::MAX_AUTO_LEAD
+                )
+            } else {
+                format!("🌐 input lead retuned by {delta:+} tick(s) — server margin was {margin}")
+            };
+            self.console.push(floptle_script::LogLevel::Debug, line, None);
         }
         // Replicated spawns/despawns materialize live: bodies register or go,
         // and ownership re-evaluates — a spawn owned by us becomes the

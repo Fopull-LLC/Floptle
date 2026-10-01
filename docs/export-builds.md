@@ -165,6 +165,13 @@ build's `packages/` folder, and the build's `packages.ron` lists it as an
 ordinary package. A switched-off link is not copied and is taken off the
 build's list, so no path on your disk ends up in the build.
 
+**Every build has a name.** Each export writes a fresh build name into
+`floptle-game.ron` (`build: "20261001-0231-3fa9c1"`: when it was exported, and
+six characters that differ between two exports in the same minute). A game
+that hosts on Floptle Cloud presents it with its key. If one build's copy of the
+key is being misused, that build can be switched off on fopull.com without
+rotating the key for every other build.
+
 **Editor tools stay out.** A package's `editor` folders are panels and tools
 for you, not for your players, so no build carries them. A package that has
 nothing else (no file under its `scripts` or `assets` folders) is left out

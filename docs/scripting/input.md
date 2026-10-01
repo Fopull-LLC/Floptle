@@ -27,6 +27,8 @@ Available while playing.
 | `local x, y = input.mouse()` | cursor position, pixels |
 | `input.scroll()` | wheel delta this frame |
 | `input.setMouseLocked(true)` | pin + hide the cursor (FPS mouselook); `false` releases. Also `input.lockMouse()` / `input.unlockMouse()` |
+| `input.touches()` | every finger on the screen this frame (see below) |
+| `input.touchBegan(id)` / `input.touchEnded(id)` | that finger went down / lifted this frame |
 
 ### Getting the cursor back for your own menus
 
@@ -139,6 +141,67 @@ keyboard. For anything more than a few characters, use a **UI text field** —
 it brings a caret, selection, the clipboard and key repeat with it
 ([ui-navigation.md](../ui-navigation.md)). `input.typed()` is empty while a field
 has focus, because the field consumed them.
+
+### Touch: phones, tablets and touchscreens
+
+A phone has no mouse and no keyboard: a game played on one reads fingers.
+`input.touches()` lists every finger on the screen this frame, each a table:
+
+| Field | Meaning |
+|---|---|
+| `id` | the same number for the whole life of one touch |
+| `x`, `y` | where it is, in `input.mouse()`'s pixels |
+| `dx`, `dy` | how far it moved this frame |
+| `phase` | `"began"`, `"moved"`, `"held"` (down and still), `"ended"` or `"cancelled"` |
+| `pressure` | 0..1 where the screen reports it, else 1 while down |
+| `began` | it went down this frame (true even for a tap that also ended in it) |
+| `ui` | it landed on your UI and is working it, so your own controls should skip it |
+
+A finger that lifts is listed once more, as `ended` (or `cancelled`, when the
+system took it away), and then it is gone. Several fingers are independent: a
+move stick, a look drag and a fire button work at the same time.
+
+**Your UI works by touch with no code.** A finger that lands on an interactive
+element (a button, a slider, a field) works it as the mouse would: a tap fires
+`onClicked`, a drag moves a slider. A finger that lands anywhere else is only
+the game's, so a stick dragged across a button never presses it.
+
+`app.isTouch()` is true when the player's main pointer is a finger: a phone or
+a tablet in a browser, or any screen that has been touched. Use it to start in
+your touch layout. Looking around with a finger needs no `lockMouse`; read the
+finger's `dx`, `dy` instead.
+
+A move stick, the recipe every touch game starts from:
+
+```lua
+local stick = { id = nil, cx = 0, cy = 0, x = 0, y = 0 }
+local RADIUS = 90
+
+function update(self, dt)
+  local x0, y0, w = camera.screenRect()
+  for _, t in ipairs(input.touches()) do
+    if t.began and not t.ui and t.x < x0 + w * 0.4 and stick.id == nil then
+      stick.id, stick.cx, stick.cy = t.id, t.x, t.y        -- the stick appears under the thumb
+    end
+    if t.id == stick.id then
+      local dx, dy = t.x - stick.cx, t.y - stick.cy
+      local len = math.sqrt(dx * dx + dy * dy)
+      local k = len > RADIUS and RADIUS / len or 1
+      stick.x, stick.y = dx * k / RADIUS, dy * k / RADIUS   -- -1..1 each way
+      if t.phase == "ended" or t.phase == "cancelled" then
+        stick.id, stick.x, stick.y = nil, 0, 0
+      end
+    end
+  end
+  -- move by stick.x, stick.y the way you would by input.axis
+end
+```
+
+In a browser build the page keeps the browser's own gestures off the game: a
+drag does not scroll the page or pull it to refresh, and two fingers do not
+zoom it. `app.setFullscreen(true)` works from a phone too: when the browser
+wants a tap first, the game goes fullscreen on the player's next one. iPhone
+Safari has no fullscreen for a web page, and there it does nothing.
 
 ### Gamepads a script can actually see
 

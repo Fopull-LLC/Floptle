@@ -340,51 +340,56 @@ resolving the same edges.
 
 ## Editor UX — the action-map editor
 
-A single panel in the editor (egui, dark/retro theme — ADR-0004), deliberately
-**not** a property-soup inspector. One row per action/axis; bindings are chips.
+**Settings ▸ Input** edits the whole map in place. Two panes: the list of every
+entry on the left, and the selected entry on the right. In a narrow dock they
+stack.
 
 ```
- ┌─ Project Settings ▸ Input ────────────────────────── input.ron ── [⟲] ┐
- │ ACTIONS                                                                │
- │  Jump      [⌨ Space] [🎮 South]                            [✚] [🗑]  │
- │  Punch     [⌨ J    ] [🎮 West ]                            [✚] [🗑]  │
- │  Taunt   ⚪ ⚠ unbound                                      [✚] [🗑]  │
- │ USED IN SCRIPTS, NOT IN THE MAP                                        │
- │  ⚠ Block                            fighter.lua:42  action     [add]   │
- │ AXES 2D                                                                │
- │  Move      [⌨ WASD] [🎮 L-Stick dz0.15]        SOCD: Neutral ⏷        │
- │ MOTIONS                                                                │
- │  qcf  qcb  dp  rdp  hcf  hcb  dd  ff  bb  chargeF  chargeU             │
- ├─ LIVE ─────────────────────────────────────────────────────────────────┤
- │ ● Jump  ○ Punch  ○ Taunt     Move: (+0.82, -0.11)     P1 🎮 Xbox pad   │
- └────────────────────────────────────────────────────────────────────────┘
+ ┌─ ⚙ Settings ▸ Input ───────────────────────────────────────────────────┐
+ │ + New ▾       │ Move                                                   │
+ │ Actions  8    │ local x, y = input.axis2("Move") · read 3× — p.lua:12  │
+ │ ● Jump        │ ⬆ ⬇  Duplicate  🗑 Delete                              │
+ │ ○ Fire        │  ( · )  x +0.00  y +0.00   opposites held [cancel ▾]   │
+ │ Directions 3  │ ┌ ⌨ Four keys ───────────────────────── ⬆ ⬇ 🗑 ┐        │
+ │ ○ Move  ◀     │ │ up [W]  down [S]  left [A]  right [D]        │        │
+ │ ○ Look        │ └──────────────────────────────────────────────┘        │
+ │ Amounts  3    │ ┌ ◉ Stick ───────────────────────────── ⬆ ⬇ 🗑 ┐        │
+ │ Motions 11    │ │ stick (left|right)  gamepad [any ▾]          │        │
+ │               │ │ deadzone ━━●━━ 0.15  sensitivity 1.00        │        │
+ │               │ │ response [linear ▾]  invert up/down ☐        │        │
+ │               │ └──────────────────────────────────────────────┘        │
+ │               │ + Add ▾  (WASD, arrows, left/right stick, mouse…)      │
+ └───────────────┴────────────────────────────────────────────────────────┘
 ```
 
-- **The action list is scanned out of your scripts.** Every action, axis and
-  motion the project's Lua references, deduped, with the first `file:line` on
-  hover. An entry a script uses but the map doesn't define is flagged with ⚠ and
-  one click adds it — that's a control which silently does nothing, and it's the
-  failure worth surfacing above all others. `⚪` marks the reverse: bound, but
-  nothing references it.
-- **Add a binding** two ways. `✚` arms **press-to-bind** — the fast path when
-  the device is in your hand, through the same code path a shipped game's
-  settings menu uses; Escape always cancels. `▾` opens a **picker** listing
-  every key, mouse button, pad button and pad axis, which needs **no hardware
-  connected at all**: laying out controller bindings on a laptop, or adding
-  P2's while only one pad is plugged in, is entirely normal. Click a chip to
-  remove it.
-- **add missing starter bindings** fills gaps only — it binds an entry that was
-  created from the ⚠ warning (those land *unbound* by design) and adds any
-  starter action the map lacks, while leaving your own actions, bindings and
-  SOCD choices exactly as they are.
-- **Live tester** lights up as you mash, *without* entering Play. It resolves
-  the real devices independently of gameplay input, which is deliberate: you
-  edit bindings with the game view unfocused, which is exactly when gameplay
-  input is neutral.
+- **Every entry is editable**: actions, 2D directions, 1D amounts and motions,
+  including the ones the starter set put there. ✚ New adds one; the header
+  renames it (and says how many script calls still read the old name), moves
+  it, duplicates it with every binding, or deletes it.
+- **A binding is changed, not deleted and re-added.** Every input is a
+  button: click it to press a new one, or pick one from the device lists (no
+  hardware needed). Removing a binding is its own 🗑, never a click on the
+  binding itself.
+- **Each binding shows its own settings and no one else's.** A key has its
+  chord ("held with" Ctrl, Shift, Alt or any key) and a player; an analog
+  source has the point it counts as pressed; a stick has its side, pad,
+  deadzone, sensitivity, response curve and invert; mouse look has its
+  sensitivity, invert, per-second rate and the buttons it waits for ("only
+  while held" — the right button for a hold-to-look camera); a key pair has
+  its minus and plus keys; a motion is built on a numpad, with its window
+  and charge.
+- **Presets are starting points.** ✚ Add on a direction offers WASD, arrows,
+  either stick or the mouse, already filled in, and then edited like anything
+  else.
+- **The entry shows what it is doing now**: an action's light, a direction's
+  vector, an amount's bar, live as you press, without entering Play. Every row
+  in the list lights too, so pressing a control shows where it lands.
+- **The action list is scanned out of your scripts.** An entry a script uses
+  but the map doesn't define is flagged with ⚠ and one click adds it.
+- **Fill in the standard ones** fills gaps only, leaving your own entries and
+  settings exactly as they are.
 - **Still polling raw keys** lists every legacy `input.key(...)` call site — the
   migration worklist, and the set of calls that read neutral under prediction.
-- The window is a **constant** width and the list scrolls at a fixed height, so
-  adding actions never resizes it under you.
 
 ## The fighter layer — buffering, motions, SOCD
 

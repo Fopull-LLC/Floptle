@@ -2,13 +2,17 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>{{TITLE}}</title>
 <style>
   /* The page is the game's. Nothing here is the engine's look: a black ground,
      the canvas filling it, and one panel that exists until the game starts. */
   html, body { margin: 0; height: 100%; background: #000; color: #d8d8e0; font: 14px/1.5 system-ui, sans-serif; overflow: hidden; }
-  #game { display: block; width: 100vw; height: 100vh; outline: none; background: #000; }
+  /* A finger over the game is the game's. Without these, a drag on a phone
+     scrolls or pulls the page to refresh, two fingers zoom it, a double tap
+     zooms in and a long press opens a menu or selects text. */
+  html, body { overscroll-behavior: none; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+  #game { display: block; width: 100vw; height: 100vh; outline: none; background: #000; touch-action: none; }
   #panel { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: #000; }
   #panel[hidden] { display: none; }
   #title { font-size: 22px; letter-spacing: 0.02em; color: #fff; }
@@ -101,6 +105,29 @@
     }, 300);
     $('game').focus();
   };
+  // Fullscreen for the game, from `app.setFullscreen`. A browser grants it
+  // only inside a tap or a click, and the game asks from its own frame: on a
+  // phone that is usually too late, so a refused request is made again inside
+  // the player's next tap. iPhone Safari has no fullscreen for a page at all,
+  // and then this does nothing. The canvas, as the window's own request
+  // would, so `app.fullscreen()` keeps answering truthfully.
+  window.floptleFullscreen = on => {
+    const el = $('game');
+    if (!on) {
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+      if ((document.fullscreenElement || document.webkitFullscreenElement) && exit) {
+        Promise.resolve(exit.call(document)).catch(() => {});
+      }
+      return;
+    }
+    const req = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (!req) return;
+    Promise.resolve(req.call(el, { navigationUI: 'hide' })).catch(() => {
+      window.addEventListener('pointerup', () => {
+        Promise.resolve(req.call(el, { navigationUI: 'hide' })).catch(() => {});
+      }, { once: true, capture: true });
+    });
+  };
   // A trap inside the engine that is not a Rust panic (the scripting VM's C++
   // aborting, say) never reaches `floptleFatal`, and would leave the loading
   // bar moving over a game that has stopped. Only the engine's own errors,
@@ -131,6 +158,45 @@
     requestAnimationFrame(tick);
     setInterval(() => post('/report', `page: ${document.visibilityState}, ${raf} animation frames so far`), 5000);
   }
+  // The canvas, read inside the frame that drew it (the engine calls this
+  // straight after presenting). Outside that task a WebGPU canvas reads
+  // blank, and a mapped readback is aborted by a headless browser, so this is
+  // the picture's first route and the readback below its fallback.
+  //
+  // A browser that does not composite the canvas (a headless one) hands back
+  // a blank picture without complaint, and a blank picture reported as the
+  // game's would pass a check it should fail. So it is copied to a 2D canvas
+  // here, in the same task, and a picture with no two pixels different is
+  // turned down: the readback gets its turn, and failing that the harness is
+  // told plainly that there is no picture.
+  window.floptleCaptureCanvas = () => {
+    try {
+      const src = $('game');
+      const c = document.createElement('canvas');
+      c.width = src.width; c.height = src.height;
+      const ctx = c.getContext('2d');
+      ctx.drawImage(src, 0, 0);
+      const px = ctx.getImageData(0, 0, c.width, c.height).data;
+      // A real frame is opaque somewhere and has more in it than dither
+      // noise; a canvas the browser never composited is transparent, with the
+      // dither's 0/1 left in it.
+      let lo = 255, hi = 0, opaque = false;
+      for (let i = 0; i < px.length; i += 4 * 97) {
+        const l = px[i] + px[i + 1] + px[i + 2];
+        lo = Math.min(lo, l); hi = Math.max(hi, l);
+        opaque = opaque || px[i + 3] > 0;
+      }
+      if (!opaque || hi - lo < 24) {
+        post('/report', 'canvas capture: the canvas reads as one flat colour here — trying the readback');
+        return false;
+      }
+      post('/shot', c.toDataURL('image/png')).then(() => post('/report', 'SHOT SENT'));
+      return true;
+    } catch (e) {
+      post('/report', `canvas capture failed: ${e}`);
+      return false;
+    }
+  };
   window.floptleCapture = async (rgba, w, h) => {
     if (!w || !h) {
       // The readback did not complete — a headless browser aborts the map.

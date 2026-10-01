@@ -63,6 +63,14 @@ pub struct KeyRow {
     /// without rotating the key for every other build.
     #[serde(default)]
     pub blocked_builds: Vec<String>,
+    /// Payload bytes one connection in this key's lobbies may send a second,
+    /// when the control plane grants more (or less) than the relay's own
+    /// [`floptle_net::RelayLimits::bytes_per_window`]. Absent means the
+    /// relay's. Per key rather than relay-wide, because the relay's ceiling is
+    /// its receive buffer: one game moving songs should not spend every other
+    /// game's headroom.
+    #[serde(default)]
+    pub bytes_per_window: Option<u64>,
 }
 
 fn active() -> KeyState {
@@ -110,6 +118,8 @@ pub struct AuthorizeReply {
     pub max_lobbies: Option<u32>,
     #[serde(default)]
     pub blocked_builds: Vec<String>,
+    #[serde(default)]
+    pub bytes_per_window: Option<u64>,
 }
 
 impl AuthorizeReply {
@@ -126,6 +136,7 @@ impl AuthorizeReply {
             account_over_limit: self.over_limit,
             max_lobbies: self.max_lobbies,
             blocked_builds: self.blocked_builds,
+            bytes_per_window: self.bytes_per_window,
         }
     }
 }
@@ -802,5 +813,16 @@ mod shape_tests {
         let row: KeyRow =
             serde_json::from_str(r#"{"key":"fk_live_OLD","state":"deprecated"}"#).expect("parses");
         assert!(row.may_host(), "rotation has a grace window and this is it");
+    }
+
+    /// The per-key byte budget is optional both ways: absent on every key the
+    /// control plane grants nothing, and read when it is there.
+    #[test]
+    fn a_keys_byte_budget_is_read_when_published_and_absent_otherwise() {
+        let plain: KeyRow = serde_json::from_str(r#"{"key":"fk_live_A"}"#).expect("parses");
+        assert_eq!(plain.bytes_per_window, None);
+        let granted: KeyRow =
+            serde_json::from_str(r#"{"key":"fk_live_B","bytes_per_window":2097152}"#).expect("parses");
+        assert_eq!(granted.bytes_per_window, Some(2 * 1024 * 1024));
     }
 }

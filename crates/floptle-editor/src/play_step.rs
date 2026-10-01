@@ -455,6 +455,7 @@ impl Editor {
                     self.input_buttons_pressed
                 },
                 aim,
+                touches: self.touches.snapshot(),
             }
         } else {
             floptle_script::InputSnapshot { aim, ..Default::default() }
@@ -799,6 +800,9 @@ impl Editor {
                         buttons_down: if mine { [false; 3] } else { self.input_buttons },
                         buttons_pressed: if mine { [false; 3] } else { pressed },
                         aim,
+                        // The frame's fingers: a touch is read per frame, so
+                        // every tick inside one sees the same list.
+                        touches: self.touches.snapshot(),
                     }
                 } else {
                     self.tick_keys_pressed.clear();
@@ -1347,6 +1351,7 @@ impl Editor {
         self.input_buttons_pressed = [false; 3];
         self.input_mouse_delta = (0.0, 0.0);
         self.input_scroll = 0.0;
+        self.touches.end_frame();
         // The per-tick accumulators are consumed by the gameplay-tick loop while
         // playing; outside play they'd grow unbounded, so drain them here instead.
         if !self.playing {

@@ -99,6 +99,9 @@ pub struct AppInfo {
     pub refresh_hz: Option<f32>,
     /// Whether the engine is choosing the render scale itself.
     pub dynamic_resolution: bool,
+    /// Whether the player's main pointer is a finger: a phone or tablet in a
+    /// browser, or any screen that has been touched.
+    pub touch: bool,
 }
 
 /// What a script asked the driver to change or do this frame.
@@ -277,6 +280,10 @@ pub fn install(lua: &Lua, info: &SharedAppInfo, req: &SharedAppRequests) -> mlua
     // instead of showing a button that does nothing.
     t.set("platform", lua.create_function(|_, ()| Ok(platform()))?)?;
     t.set("isWeb", lua.create_function(|_, ()| Ok(cfg!(target_arch = "wasm32")))?)?;
+    {
+        let i = info.clone();
+        t.set("isTouch", lua.create_function(move |_, ()| Ok(i.borrow().touch))?)?;
+    }
     {
         let i = info.clone();
         t.set("title", lua.create_function(move |_, ()| Ok(i.borrow().title.clone()))?)?;

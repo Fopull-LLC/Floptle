@@ -292,6 +292,14 @@ pub enum LayerEvent {
     Unload { tag: String },
 }
 
+/// The most the auto-lead may add to a client's input lead, in ticks (half a
+/// second at 60 Hz). Past it the margin is mis-measured, not short.
+pub const MAX_AUTO_LEAD: i64 = 30;
+
+/// A Hello-to-Welcome round trip longer than this measured a server waking
+/// up, not the link, and is not used as the RTT.
+const HANDSHAKE_RTT_MAX_MS: f32 = 2000.0;
+
 pub struct NetSession {
     role: NetRole,
     transport: Box<dyn Transport>,
@@ -475,6 +483,12 @@ pub struct NetSession {
     ack: Option<(i32, u64)>,
     /// Auto-lead adjustments since the last drain: (new offset, margin seen).
     lead_events: Vec<(i64, i32)>,
+    /// Ticks the auto-lead has added in all, capped at [`MAX_AUTO_LEAD`].
+    lead_added: i64,
+    /// Client: when the Hello went out, and the round trip to the Welcome —
+    /// a real RTT on a transport that reports none of its own (WebSocket).
+    hello_sent_at: Option<floptle_core::time::Instant>,
+    handshake_rtt_ms: Option<f32>,
     interp: HashMap<u64, InterpBuf>,
     latest_server_tick: u64,
     /// Outgoing input window (last few ticks, resent redundantly).
@@ -715,6 +729,7 @@ impl NetSession {
         transport.send(SERVER, Channel::Reliable, &hello.encode());
         let mut s = Self::new(NetRole::Client, transport);
         s.input_map_hash = input_map_hash;
+        s.hello_sent_at = Some(floptle_core::time::Instant::now());
         s
     }
 
@@ -773,6 +788,9 @@ impl NetSession {
             last_lead_change: 0,
             ack: None,
             lead_events: Vec::new(),
+            lead_added: 0,
+            hello_sent_at: None,
+            handshake_rtt_ms: None,
             interp: HashMap::new(),
             latest_server_tick: 0,
             input_window: VecDeque::new(),
@@ -1045,8 +1063,19 @@ impl NetSession {
         }
     }
 
+    ///
+    /// A transport that measures no round trip of its own (a page's
+    /// WebSocket leg reports 0) is answered from the session's own end-to-end
+    /// pings, and before the first of those from the join handshake itself:
+    /// Hello out to Welcome back is one round trip through the same relay.
     pub fn stats(&self, peer: PeerId) -> LinkStats {
-        self.transport.stats(peer)
+        let mut s = self.transport.stats(peer);
+        if s.rtt_ms <= 0.0
+            && let Some(rtt) = self.peer_rtt_ms(peer).or(if peer == SERVER { self.handshake_rtt_ms } else { None })
+        {
+            s.rtt_ms = rtt;
+        }
+        s
     }
 
     /// Assign deterministic ids to the scene-authored `Replicated` nodes. Both
@@ -1395,13 +1424,25 @@ impl NetSession {
         if !self.auto_lead || self.last_local_tick.saturating_sub(self.last_lead_change) < 60 {
             return;
         }
-        let delta: i64 = match margin {
+        let mut delta: i64 = match margin {
             m if m < 1 => i64::from(1 - m).min(10),
             m if m > 6 => -1,
             _ => 0,
         };
+        // A lead that keeps climbing is answering a margin that does not
+        // move — added runway that never shows up is not runway. Stop at the
+        // cap and say so once (a 0 event), rather than adding latency forever.
+        if delta > 0 {
+            delta = delta.min(MAX_AUTO_LEAD - self.lead_added);
+            if delta <= 0 {
+                self.auto_lead = false;
+                self.lead_events.push((0, margin));
+                return;
+            }
+        }
         if delta != 0 {
             self.stamp_offset += delta;
+            self.lead_added += delta;
             self.last_lead_change = self.last_local_tick;
             self.lead_events.push((delta, margin));
         }
@@ -2436,10 +2477,16 @@ impl NetSession {
             let now = floptle_core::time::Instant::now();
             for i in 0..self.peers.len() {
                 let p = self.peers[i];
-                let margin = self.peer_margin.get(&p).map(|m| m.round() as i32).unwrap_or(0);
-                let late = self.peer_late.get(&p).copied().unwrap_or(0);
-                let ack = Msg::InputAck { margin, late }.encode();
-                self.transport.send(p, Channel::UnreliableSequenced, &ack);
+                // Only a margin that was measured. A peer whose input the
+                // server never consumes (no predicted node of theirs — a game
+                // that sends its own poses) has none, and an ack of 0 for it
+                // read as "late" and raised that client's lead a tick every
+                // second for as long as it stayed.
+                if let Some(m) = self.peer_margin.get(&p) {
+                    let late = self.peer_late.get(&p).copied().unwrap_or(0);
+                    let ack = Msg::InputAck { margin: m.round() as i32, late }.encode();
+                    self.transport.send(p, Channel::UnreliableSequenced, &ack);
+                }
                 // Unreliable on purpose: a probe that was retransmitted would
                 // measure the retransmission, not the link.
                 self.transport.send(p, Channel::Unreliable, &probe);
@@ -3366,6 +3413,14 @@ impl NetSession {
     fn client_message(&mut self, world: &mut World, msg: Msg) {
         match msg {
             Msg::Welcome { peer, tick, scene, epoch, input_delay, .. } => {
+                // The handshake's round trip — unless the join waited on a
+                // server that was starting, which measures the wait instead.
+                if let Some(at) = self.hello_sent_at.take() {
+                    let ms = at.elapsed().as_secs_f32() * 1000.0;
+                    if ms < HANDSHAKE_RTT_MAX_MS {
+                        self.handshake_rtt_ms = Some(ms);
+                    }
+                }
                 self.connected = true;
                 self.join_state = JoinState::Joined;
                 self.my_peer = Some(peer);
@@ -3382,7 +3437,11 @@ impl NetSession {
                 self.events.push(NetEvent::Connected);
             }
             Msg::Refused { reason } => {
+                // The join state too, not only the event: through a relay the
+                // link stays open after a refusal, so nothing else would ever
+                // move it off "connecting".
                 self.connected = false;
+                self.join_state = JoinState::Refused(reason.clone());
                 self.events.push(NetEvent::Disconnected(reason));
             }
             Msg::Voice { speaker, seq, frame } => {
@@ -3398,6 +3457,7 @@ impl NetSession {
                 // first would leave a game that listens for the second sitting
                 // in a session that no longer exists.
                 self.connected = false;
+                self.join_state = JoinState::Refused(reason.clone());
                 self.events.push(NetEvent::Kicked(reason.clone()));
                 self.events.push(NetEvent::Disconnected(reason));
             }

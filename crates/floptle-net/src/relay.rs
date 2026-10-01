@@ -288,6 +288,15 @@ pub trait RelayPolicy: Send {
     fn peer_joined(&mut self, _code: &str) {}
     fn peer_left(&mut self, _code: &str) {}
 
+    /// **This lobby's byte budget per connection, when its key has its own.**
+    ///
+    /// `None` keeps [`RelayLimits::bytes_per_window`]. A managed relay answers
+    /// from the key that opened the lobby, so one game can be granted the room
+    /// its traffic needs without raising every game's.
+    fn bytes_per_window(&self, _code: &str) -> Option<u64> {
+        None
+    }
+
     /// Messages the relay should push to a lobby's **host**, drained each step.
     ///
     /// **The developer never reads the relay's journal.** A managed relay runs
@@ -1105,7 +1114,15 @@ impl RelayServer {
     /// Account one message against its connection's window; `false` means it
     /// is dropped. The strikes are consecutive: a window under budget resets.
     fn charge_ingress(&mut self, c: PeerId, bytes: u64) -> bool {
-        let limits = self.limits;
+        let mut limits = self.limits;
+        // The lobby's own budget, when its key has one.
+        let code = match self.conns.get(&c) {
+            Some(Role::Host { code }) | Some(Role::Client { code, .. }) => Some(code.as_str()),
+            _ => None,
+        };
+        if let Some(b) = code.zip(self.policy.as_ref()).and_then(|(code, p)| p.bytes_per_window(code)) {
+            limits.bytes_per_window = b;
+        }
         let now = Instant::now();
         let e = self.ingress.entry(c).or_insert(Ingress { window_start: now, bytes: 0, msgs: 0, strikes: 0 });
         if now.duration_since(e.window_start) >= limits.window {
@@ -1828,6 +1845,8 @@ mod tests {
         /// Has this policy pulled a snapshot? A relay that has not must not
         /// invent codes it cannot vet.
         primed: bool,
+        /// The byte budget every lobby's key is granted, if any.
+        budget: Option<u64>,
     }
 
     impl TablePolicy {
@@ -1841,7 +1860,14 @@ mod tests {
                 dedicated: Arc::new(Mutex::new(Vec::new())),
                 reserved: HashMap::new(),
                 primed: true,
+                budget: None,
             }
+        }
+
+        /// Grant every lobby this byte budget per connection.
+        pub(super) fn granting(mut self, bytes_per_window: u64) -> Self {
+            self.budget = Some(bytes_per_window);
+            self
         }
 
         /// A handle on what the policy was told, for a test that hands the
@@ -1870,6 +1896,9 @@ mod tests {
     }
 
     impl RelayPolicy for TablePolicy {
+        fn bytes_per_window(&self, code: &str) -> Option<u64> {
+            self.budget.filter(|_| self.of_lobby.contains_key(code))
+        }
         fn claim_code(&mut self, key: Option<&str>, code: &str) -> bool {
             key.is_some_and(|k| self.reserved.get(code).is_some_and(|owner| owner == k))
         }
@@ -2490,6 +2519,36 @@ mod managed_tests {
     use std::sync::atomic::Ordering;
 
     const KEY: &str = "fk_live_ATESTKEYTHATISNOTREAL0000000";
+
+    /// **A key's own budget replaces the relay's for its lobbies.** Fontelle
+    /// moves songs: a relay-wide raise would spend every game's share of the
+    /// receive buffer, so the grant rides the key instead. The same traffic
+    /// that the relay's budget drops gets through on a lobby whose key is
+    /// granted more.
+    #[test]
+    fn a_keys_own_byte_budget_replaces_the_relays_for_its_lobbies() {
+        let limits = RelayLimits { bytes_per_window: 4096, window: Duration::from_millis(200), strikes: 100, ..RelayLimits::default() };
+        let forwarded = |policy: TablePolicy| {
+            let relay = TestRelay::managed_limited(policy, Duration::from_secs(5), limits);
+            let (mut host, code) = RelayHost::host_keyed(&relay.addr(), KEY, None).expect("hosts");
+            let mut c = RelayClient::join(&relay.addr(), &code).expect("joins");
+            for _ in 0..40 {
+                let _ = host.poll();
+                let _ = c.poll();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let _ = drain(&mut host);
+            // Twelve kilobytes inside one window: three times the relay's budget.
+            for _ in 0..4 {
+                c.send(SERVER, Channel::Reliable, &[7u8; 3000]);
+            }
+            std::thread::sleep(Duration::from_millis(40));
+            drain(&mut host).iter().filter(|i| matches!(i, Incoming::Message(..))).count()
+        };
+        assert_eq!(forwarded(TablePolicy::with(KEY, 64)), 1, "the fixture must be over the relay's own budget");
+        assert_eq!(forwarded(TablePolicy::with(KEY, 64).granting(64 * 1024)), 4, "the key's grant was not used");
+    }
+
 
     /// Poll a host for a moment and return everything it was told.
     fn drain(host: &mut RelayHost) -> Vec<Incoming> {

@@ -60,6 +60,7 @@ pub use rollback::{
 };
 pub use session::{
     AnimSrcLayer, AnimStates, BodyStates, JoinState, LayerEvent, NetEvent, NetRole, NetSession, ReceivedRpc, RpcTarget,
+    MAX_AUTO_LEAD,
     SyncedVars,
 };
 pub use wire::{
@@ -149,6 +150,15 @@ mod tests {
             .into_iter()
             .any(|e| matches!(e, NetEvent::Disconnected(r) if r.contains("input.ron")));
         assert!(refused, "a differing action map must refuse the connection");
+        // …and say so where a game looks. Through a relay the link stays open
+        // after a refusal, so `net.joinState()` read "connecting" for the rest
+        // of the session: a player on an old build waited on a join that had
+        // already been turned down.
+        assert!(
+            matches!(client.join_state(), JoinState::Refused(r) if r.contains("input.ron")),
+            "the join state never left {:?}",
+            client.join_state()
+        );
     }
 
     #[test]
@@ -668,6 +678,75 @@ mod tests {
         let last_local = mid + 119;
         let stamp = (last_local as i64 + client.input_stamp_offset()) as u64;
         assert_eq!(client.local_tick_for_stamp(stamp), Some(last_local));
+    }
+
+    /// A client the server never takes input from — no predicted node of
+    /// its own; the game sends its poses itself — has no margin to report.
+    /// It was told 0 a few times a second, read that as "late", and raised its
+    /// lead a tick every second for as long as it stayed.
+    #[test]
+    fn a_client_whose_input_is_never_consumed_is_not_retuned() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        let (mut sw, _) = world_with(0);
+        let (mut cw, _) = world_with(0);
+        let t0 = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 3, |_, _| {});
+        client.set_auto_input_lead(true);
+        let start = client.input_stamp_offset();
+        for t in t0..t0 + 600 {
+            hub.set_now(t);
+            client.send_input(t, NetInput::default());
+            client.tick_client(&mut cw);
+            server.tick_server(&sw, t);
+        }
+        assert!(client.take_lead_events().is_empty(), "retuned against a margin nobody measured");
+        assert_eq!(client.input_stamp_offset(), start);
+        assert_eq!(client.input_ack(), None, "the server acked a margin it never measured");
+    }
+
+    /// A lead that never moves the margin stops at its cap, once, instead of
+    /// adding latency for the rest of the session.
+    #[test]
+    fn an_auto_lead_that_never_helps_stops_at_its_cap() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        let (mut sw, _) = world_with(0);
+        let (mut cw, _) = world_with(0);
+        let t0 = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 3, |_, _| {});
+        let peer = server.peers()[0];
+        client.set_auto_input_lead(true);
+        let start = client.input_stamp_offset();
+        // The server reads a thousand ticks ahead of anything the client
+        // stamps: the margin is late however much lead is added.
+        let mut events = Vec::new();
+        for t in t0..t0 + 60 * 40 {
+            hub.set_now(t);
+            client.send_input(t, NetInput::default());
+            client.tick_client(&mut cw);
+            server.pump_server(&sw, t);
+            let _ = server.input_for(peer, t + 1000);
+            server.tick_server(&sw, t);
+            events.extend(client.take_lead_events());
+        }
+        assert_eq!(client.input_stamp_offset() - start, session::MAX_AUTO_LEAD, "{events:?}");
+        assert_eq!(events.iter().filter(|(d, _)| *d == 0).count(), 1, "the stop is said once: {events:?}");
+        assert_eq!(events.last().map(|e| e.0), Some(0), "nothing retuned after it stopped: {events:?}");
+    }
+
+    /// A transport with no RTT of its own (a page's WebSocket leg reports 0)
+    /// still has one: the join handshake is a round trip.
+    #[test]
+    fn a_link_with_no_rtt_of_its_own_reports_the_handshakes() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        let (mut sw, _) = world_with(0);
+        let (mut cw, _) = world_with(0);
+        assert_eq!(client.stats(SERVER).rtt_ms, 0.0, "the fixture's transport must report no RTT");
+        let _ = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 3, |_, _| {});
+        // In process the round trip is microseconds, and honestly so; what
+        // matters is that it is measured rather than reported as nothing.
+        let rtt = client.stats(SERVER).rtt_ms;
+        assert!(rtt > 0.0, "a link with no RTT of its own still reported none: {rtt}");
     }
 
     #[test]

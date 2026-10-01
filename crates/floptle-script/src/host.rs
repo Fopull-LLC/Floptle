@@ -498,6 +498,44 @@ fn install_input(lua: &Lua, logs: &Rc<RefCell<Vec<ScriptLog>>>) -> InputCells {
             })
             .ok(),
         );
+        // Fingers on the screen: every active touch, with its edge flags, so a
+        // game can draw its own sticks and buttons. One table per finger.
+        let tc = input.clone();
+        let _ = t.set(
+            "touches",
+            lua.create_function(move |lua, ()| {
+                let d = tc.borrow();
+                let out = lua.create_table()?;
+                for (i, p) in d.touches.iter().enumerate() {
+                    let f = lua.create_table()?;
+                    f.set("id", p.id)?;
+                    f.set("x", p.x)?;
+                    f.set("y", p.y)?;
+                    f.set("dx", p.dx)?;
+                    f.set("dy", p.dy)?;
+                    f.set("phase", p.phase)?;
+                    f.set("pressure", p.pressure)?;
+                    f.set("began", p.began)?;
+                    f.set("ui", p.ui)?;
+                    out.set(i + 1, f)?;
+                }
+                Ok(out)
+            })
+            .ok(),
+        );
+        let tb = input.clone();
+        let _ = t.set(
+            "touchBegan",
+            lua.create_function(move |_, id: u64| Ok(tb.borrow().touches.iter().any(|p| p.id == id && p.began))).ok(),
+        );
+        let te = input.clone();
+        let _ = t.set(
+            "touchEnded",
+            lua.create_function(move |_, id: u64| {
+                Ok(te.borrow().touches.iter().any(|p| p.id == id && matches!(p.phase, "ended" | "cancelled")))
+            })
+            .ok(),
+        );
         // A convenience -1..1 axis from a negative/positive key pair.
         let ax = input.clone();
         let _ = t.set(

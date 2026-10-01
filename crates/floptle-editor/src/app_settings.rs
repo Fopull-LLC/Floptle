@@ -78,6 +78,7 @@ impl crate::Editor {
             frame_cap: self.frame_cap,
             refresh_hz: (self.refresh_period > 0.0).then(|| 1.0 / self.refresh_period),
             dynamic_resolution: self.dyn_res.is_some(),
+            touch: self.touch_device,
         };
         self.script_host.set_app_info(info);
     }
@@ -151,6 +152,12 @@ impl crate::Editor {
                     None,
                 );
             }
+            return;
+        }
+        // A browser grants fullscreen only inside a tap or a click, and a
+        // game asks from its frame; the page knows to wait for the next one.
+        #[cfg(target_arch = "wasm32")]
+        if crate::player::web::page_fullscreen(on) {
             return;
         }
         let Some(window) = self.window.as_ref() else { return };

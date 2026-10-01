@@ -69,7 +69,7 @@ def handler_for(web):
             if self.path == "/report":
                 State.lines.append(body)
                 print(body, flush=True)
-                if body == "SHOT SENT" or body.startswith(("RUNG", "FATAL", "PANIC")) and "OK" not in body:
+                if body in ("SHOT SENT", "CAPTURE FAILED — the frame could not be read back") or body.startswith(("RUNG", "FATAL", "PANIC")) and "OK" not in body:
                     State.done.set()
             elif self.path == "/shot" and body.startswith("data:image/png;base64,"):
                 State.png = base64.b64decode(body.split(",", 1)[1])

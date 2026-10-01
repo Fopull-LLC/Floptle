@@ -28,7 +28,7 @@ use floptle_core::time::Instant;
 use floptle_core::math::Vec2;
 use floptle_render::Gpu;
 use winit::application::ApplicationHandler;
-use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Fullscreen, Window, WindowId};
@@ -92,6 +92,7 @@ pub fn run_player() {
     // it, and the Steam App ID (`project.ron` is not shipped, so the manifest is
     // the only place a build can read that from).
     let manifest = crate::export::load_game_manifest();
+    let build_id = manifest.as_ref().and_then(|(m, _)| m.build.clone()).filter(|_| explicit.is_none());
     let (title, project, steam_settings, shipped, data_names) = match (explicit, manifest) {
         (Some(p), _) => {
             let title = p
@@ -149,6 +150,7 @@ pub fn run_player() {
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = Player::new(title, project);
     app.ed.data_root = data_root;
+    app.ed.build_id = build_id;
     app.shot = shot;
     app.shot_at = shot_at;
     // The platform capability boundary (achievements, overlay, rich presence)
@@ -364,6 +366,17 @@ impl ApplicationHandler for Player {
                     MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
                 };
             }
+            // A finger. A phone reports nothing else: no cursor, no button.
+            WindowEvent::Touch(t) => {
+                let phase = match t.phase {
+                    TouchPhase::Started => crate::touch::Phase::Began,
+                    TouchPhase::Moved => crate::touch::Phase::Moved,
+                    TouchPhase::Ended => crate::touch::Phase::Ended,
+                    TouchPhase::Cancelled => crate::touch::Phase::Cancelled,
+                };
+                let pressure = t.force.map(|f| f.normalized() as f32);
+                self.ed.note_touch(t.id, phase, t.location.x as f32, t.location.y as f32, pressure);
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 let PhysicalKey::Code(code) = event.physical_key else { return };
                 let pressed = event.state == ElementState::Pressed;
@@ -433,7 +446,7 @@ impl Player {
         #[cfg(target_arch = "wasm32")]
         {
             self.web_reveal();
-            if self.shot.is_some() && self.frames == self.shot_at {
+            if self.shot.is_some() && self.frames == self.shot_at && !web::capture_canvas() {
                 self.capture_web();
             }
             // The map is asked for a few frames after the copy — never in the
@@ -793,6 +806,29 @@ pub mod web {
         /// screen down.
         #[wasm_bindgen(js_namespace = window, js_name = floptleReady, catch)]
         fn page_ready() -> Result<(), JsValue>;
+        /// `window.floptleFullscreen(on)`: the page's own fullscreen, which
+        /// can wait for the player's next tap when a browser wants a gesture.
+        #[wasm_bindgen(js_namespace = window, js_name = floptleFullscreen, catch)]
+        fn page_fullscreen_hook(on: bool) -> Result<(), JsValue>;
+        /// `window.floptleCaptureCanvas()`: photograph the canvas now, in the
+        /// task that drew it. `false` when the page cannot.
+        #[wasm_bindgen(js_namespace = window, js_name = floptleCaptureCanvas, catch)]
+        fn page_capture_canvas() -> Result<bool, JsValue>;
+    }
+
+    /// The harness's picture, taken from the canvas inside the frame that
+    /// drew it — the one moment a page can read its own WebGPU canvas. A
+    /// mapped readback of a copy is the other way, and a headless browser
+    /// aborts every map. `false` when the page has no such hook or it failed,
+    /// and the readback is tried instead.
+    pub(super) fn capture_canvas() -> bool {
+        page_capture_canvas().unwrap_or(false)
+    }
+
+    /// Ask the page for fullscreen. `false` when the page has no hook (a host
+    /// page of someone's own), and the window's own request is the fallback.
+    pub(crate) fn page_fullscreen(on: bool) -> bool {
+        page_fullscreen_hook(on).is_ok()
     }
 
     /// Where the browser's boot has got. The desktop runs the three steps
@@ -920,8 +956,15 @@ pub mod web {
         // player presses Join. Nothing waits on it.
         floptle_account::regions::prefetch(floptle_account::DEFAULT_BASE);
         let event_loop = EventLoop::new().map_err(|e| format!("no event loop: {e}"))?;
+        let build_id = manifest.build.clone();
         let mut app = Player::new(manifest.title, project);
+        app.ed.build_id = build_id;
         app.canvas = Some(canvas);
+        // A phone or a tablet: the page's main pointer is a finger, so the
+        // game can start in its touch layout before the first tap.
+        app.ed.touch_device = web_sys::window()
+            .and_then(|w| w.match_media("(pointer: coarse)").ok().flatten())
+            .is_some_and(|m| m.matches());
         // The harness's frame to photograph, if the page names one.
         let shot_at = page_shot_at().unwrap_or(0);
         if shot_at > 0 {

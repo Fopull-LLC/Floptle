@@ -14,7 +14,7 @@
 //! proves a binding works without entering Play.
 
 use floptle_input::{
-    ActionState, Axis1Binding, Axis2Binding, BindFilter, Device, InputMap, PadId, PendingRebind,
+    ActionState, Axis1Binding, Axis2Binding, InputMap, PendingRebind,
     Socd, Source,
 };
 
@@ -38,38 +38,17 @@ pub(crate) struct InputEdits {
 }
 
 pub(crate) enum InputCmd {
-    AddAction(String),
-    /// A binding chosen from the picker rather than pressed.
-    AddBinding {
-        action: String,
-        source: Source,
-    },
+    /// The editor's edited copy of the whole map.
+    SetMap(Box<InputMap>),
+    /// Arm press-to-bind for one slot of one binding.
+    Capture(crate::input_editor::CaptureTarget),
     /// Add whatever kind of entry a script call site implies.
     AddEntry {
         name: String,
         kind: UsageKind,
     },
-    RemoveAction(String),
-    RemoveBinding {
-        action: String,
-        index: usize,
-    },
-    /// Scope a binding to one local player (`None` = every player).
-    SetBindingPlayer {
-        action: String,
-        index: usize,
-        player: Option<u8>,
-    },
-    StartRebind {
-        action: String,
-        filter: BindFilter,
-    },
     CancelRebind,
     SeedStarter,
-    SetSocd {
-        axis: usize,
-        socd: Socd,
-    },
     SetPlayers(u8),
 }
 
@@ -86,7 +65,8 @@ pub(crate) fn input_section(
     scan: &InputScan,
     test: &ActionState,
     pad_names: &[Option<String>],
-    new_action: &mut String,
+    state: &mut crate::input_editor::InputUiState,
+    capture: Option<&crate::input_editor::CaptureTarget>,
     query: &str,
 ) -> InputEdits {
     let mut edits = InputEdits::default();
@@ -103,80 +83,11 @@ pub(crate) fn input_section(
         });
     });
     primer(ui);
-    rebind_banner(ui, pending, &mut edits);
+    rebind_banner(ui, pending, capture, &mut edits);
     gaps_banner(ui, map, &mut edits);
 
-    let show = |name: &str| crate::settings_ui::matches(query, name);
-
-    // ---- actions -------------------------------------------------------
-    let actions: Vec<_> = map.actions.iter().filter(|a| show(&a.name)).collect();
-    if !actions.is_empty() {
-        group_header(
-            ui,
-            "Actions",
-            "Buttons: pressed, held, released. Read with input.action(\"Name\").",
-        );
-        for action in actions {
-            let idx = map.action_index(&action.name).unwrap_or(0);
-            action_row(ui, action, idx, scan, test, map.players, &mut edits);
-        }
-        ui.add_space(4.0);
-        add_action_row(ui, map, new_action, &mut edits);
-    }
-
-    // ---- axes ----------------------------------------------------------
-    let axes2: Vec<_> =
-        map.axes2.iter().enumerate().filter(|(_, a)| show(&a.name)).collect();
-    if !axes2.is_empty() {
-        group_header(
-            ui,
-            "Directions (2D)",
-            "A stick or WASD, as one value. Read with local x, y = input.axis2(\"Name\").",
-        );
-        for (i, ax) in axes2 {
-            axis2_row(ui, i, ax, scan, test, &mut edits);
-        }
-    }
-
-    let axes1: Vec<_> = map.axes1.iter().enumerate().filter(|(_, a)| show(&a.name)).collect();
-    if !axes1.is_empty() {
-        group_header(
-            ui,
-            "Amounts (1D)",
-            "A trigger, the wheel, or a key pair. Read with input.axis1(\"Name\").",
-        );
-        for (i, ax) in axes1 {
-            axis1_row(ui, i, ax, scan, test, &mut edits);
-        }
-    }
-
-    // ---- motions -------------------------------------------------------
-    let motions: Vec<_> = map.motions.iter().filter(|m| show(&m.name)).collect();
-    if !motions.is_empty() {
-        group_header(
-            ui,
-            "Motions",
-            "Fighting-game direction sequences. Read with input.motion(\"qcf\") inside fixedUpdate.",
-        );
-        ui.horizontal_wrapped(|ui| {
-            ui.add_space(NAME_W);
-            for m in motions {
-                let dirs: Vec<String> = m.dirs.iter().map(|d| d.to_string()).collect();
-                let charge =
-                    if m.charge > 0 { format!("\nhold {} for {} ticks first", m.dirs[0], m.charge) } else { String::new() };
-                let shown = wrap_before_chip(ui, &m.name);
-                ui.label(egui::RichText::new(shown).monospace()).on_hover_text(format!(
-                    "{} within {} ticks{charge}\n\nNumpad directions: 5 is neutral, 6 is forward.",
-                    dirs.join(" → "),
-                    m.window
-                ));
-            }
-        });
-        crate::responsive::para(
-            ui,
-            egui::RichText::new("Edit their directions and windows in input.ron.").weak().small(),
-        );
-    }
+    // Every entry and every binding, editable — see `input_editor`.
+    crate::input_editor::editor(ui, map, state, capture, scan, test, query, &mut edits);
 
     // ---- scripts referencing things the map doesn't define ---------------
     missing_entries(ui, map, scan, &mut edits);
@@ -271,7 +182,12 @@ fn primer(ui: &mut egui::Ui) {
 }
 
 /// The armed press-to-bind prompt.
-fn rebind_banner(ui: &mut egui::Ui, pending: Option<&PendingRebind>, edits: &mut InputEdits) {
+fn rebind_banner(
+    ui: &mut egui::Ui,
+    pending: Option<&PendingRebind>,
+    capture: Option<&crate::input_editor::CaptureTarget>,
+    edits: &mut InputEdits,
+) {
     let Some(p) = pending else { return };
     egui::Frame::group(ui.style())
         .fill(ui.visuals().faint_bg_color)
@@ -287,8 +203,8 @@ fn rebind_banner(ui: &mut egui::Ui, pending: Option<&PendingRebind>, edits: &mut
                     None => {
                         ui.label(
                             egui::RichText::new(format!(
-                                "Press any key, mouse button or gamepad control for “{}”…",
-                                p.action
+                                "Press any key, mouse button or gamepad control for {}…",
+                                capture.map_or_else(|| format!("“{}”", p.action), |c| c.describe())
                             ))
                             .strong(),
                         );
@@ -351,248 +267,10 @@ fn group_header(ui: &mut egui::Ui, title: &str, blurb: &str) {
     ui.add_space(4.0);
 }
 
-/// The Lua call that reads an entry, and where scripts use it.
-fn usage_hint(scan: &InputScan, name: &str, kind: UsageKind, call: &str) -> String {
-    match scan.entries().find(|u| u.name == name && u.kind == kind) {
-        Some(u) => format!("{call}\n\nused {} time(s) — first at {}:{}", u.count, u.file, u.line),
-        None => format!("{call}\n\nNo script reads this yet."),
-    }
-}
 
-fn action_row(
-    ui: &mut egui::Ui,
-    action: &floptle_input::Action,
-    idx: usize,
-    scan: &InputScan,
-    test: &ActionState,
-    players: u8,
-    edits: &mut InputEdits,
-) {
-    let multiplayer = players > 1;
-    // Every widget in this row is namespaced by the action name. Without it,
-    // two rows' menus share an egui id and fight, and the pickers refuse to
-    // stay open.
-    ui.push_id(("action", &action.name), |ui| {
-        // **Wrapped.** A row is a fixed prefix (the live dot and the action's
-        // name) followed by however many bindings the action has, each as wide
-        // as the input it names — "◉ R-Trigger" is three times "◉ A". That is
-        // not a width a panel can be sized for, so past the edge the chips go
-        // onto the next line rather than out of the dock. Two bindings and a
-        // docked Settings pane was enough to lose the ✕ that deletes the action.
-        ui.horizontal_wrapped(|ui| {
-            ui.set_min_height(ROW_H);
 
-            // Live state, then the name.
-            let held = test.is_held(idx);
-            ui.label(
-                egui::RichText::new(if held { icons::ON } else { icons::OFF })
-                    .color(if held {
-                        egui::Color32::LIGHT_GREEN
-                    } else {
-                        ui.visuals().weak_text_color()
-                    }),
-            )
-            .on_hover_text("lights up while the action is triggered");
 
-            let used = scan.entries().any(|u| u.name == action.name && u.kind == UsageKind::Action);
-            // Elided rather than allowed to extend: a `Label` draws its whole
-            // string however wide the box it was given is, so a long action name
-            // pushed the ✕ that deletes it off the edge of a docked panel.
-            let w = crate::responsive::usable_width(ui).min(NAME_W - 20.0);
-            let shown = crate::responsive::elide(ui, &action.name, w);
-            let name = if used {
-                egui::RichText::new(&shown)
-            } else {
-                egui::RichText::new(&shown).weak()
-            };
-            ui.add_sized([w, 20.0], egui::Label::new(name).selectable(false))
-                .on_hover_text(usage_hint(
-                    scan,
-                    &action.name,
-                    UsageKind::Action,
-                    &format!("input.action(\"{}\")", action.name),
-                ));
-            if !used {
-                ui.label(egui::RichText::new(icons::UNUSED).weak())
-                    .on_hover_text("no script reads this action");
-            }
-            // There is only ever one keyboard. In a local-multiplayer project an
-            // unscoped key binding therefore fires this action for every player at
-            // once — both characters jump off one press. A pad binding has no such
-            // problem (`Any` resolves per slot), so only flag the keyboard half.
-            if multiplayer
-                && action.bindings.iter().any(|b| {
-                    b.player.is_none()
-                        && matches!(b.source, Source::Key(_) | Source::Mouse(_))
-                })
-            {
-                ui.colored_label(egui::Color32::from_rgb(224, 168, 64), icons::WARN)
-                    .on_hover_text(
-                        "a keyboard binding here is not scoped to a player, so it fires \
-                         this action for BOTH local players at once. Right-click the chip \
-                         to give it a player.",
-                    );
-            }
 
-            binding_chips(ui, &action.bindings, &action.name, players, edits);
-            bind_buttons(ui, &action.name, multiplayer, edits);
-            // The one control that must never be pushed off the edge: it is how
-            // an action is deleted, and there is no other route to it.
-            wrap_before(ui, 28.0);
-            if ui
-                .small_button(icons::REMOVE)
-                .on_hover_text("delete this action from the map")
-                .clicked()
-            {
-                edits.commands.push(InputCmd::RemoveAction(action.name.clone()));
-                edits.save = true;
-            }
-        });
-        // Call out a device with nothing bound — the single most common way to
-        // ship a control that works for you and not for someone on a pad.
-        let has = |d: Device| action.bindings.iter().any(|b| b.source.device() == d);
-        let kb = has(Device::Keyboard) || has(Device::Mouse);
-        let pad = has(Device::Pad);
-        if !action.bindings.is_empty() && (!kb || !pad) {
-            ui.horizontal(|ui| {
-                ui.add_space(NAME_W);
-                let what = if kb { "no gamepad binding" } else { "no keyboard or mouse binding" };
-                ui.label(egui::RichText::new(what).weak().small());
-            });
-        }
-    });
-}
-
-fn axis2_row(
-    ui: &mut egui::Ui,
-    i: usize,
-    ax: &floptle_input::Axis2,
-    scan: &InputScan,
-    test: &ActionState,
-    edits: &mut InputEdits,
-) {
-    ui.push_id(("axis2", &ax.name), |ui| {
-        // Wrapped, for the reason in `action_row`: a row's width is the sum of
-        // its bindings, and a binding is as wide as the control it names.
-        ui.horizontal_wrapped(|ui| {
-            ui.set_min_height(ROW_H);
-            let (x, y) = test.axis2(i);
-            let live = x.abs() > 0.01 || y.abs() > 0.01;
-            ui.label(
-                egui::RichText::new(if live { icons::ON } else { icons::OFF }).color(if live {
-                    egui::Color32::LIGHT_GREEN
-                } else {
-                    ui.visuals().weak_text_color()
-                }),
-            );
-            ui.add_sized(
-                [crate::responsive::usable_width(ui).min(NAME_W - 20.0), 20.0],
-                egui::Label::new(crate::responsive::elide(
-                    ui,
-                    &ax.name,
-                    crate::responsive::usable_width(ui).min(NAME_W - 20.0),
-                ))
-                .selectable(false),
-            )
-                .on_hover_text(usage_hint(
-                    scan,
-                    &ax.name,
-                    UsageKind::Axis2,
-                    &format!("local x, y = input.axis2(\"{}\")", ax.name),
-                ));
-            if ax.bindings.is_empty() {
-                ui.colored_label(
-                    egui::Color32::from_rgb(224, 168, 64),
-                    format!("{} unbound", icons::WARN),
-                );
-            }
-            for b in &ax.bindings {
-                chip_label(ui, &axis2_chip(b));
-            }
-            let mut socd = ax.socd;
-            // `ComboBox::width` is the text width; egui adds its arrow and the
-            // button's padding outside it, so the box asked for is wider than
-            // the number given. Take that off before asking, and break the line
-            // first if the whole thing will not fit on what is left of it.
-            const COMBO_CHROME: f32 = 20.0;
-            let socd_w = crate::responsive::usable_width(ui).min(92.0);
-            wrap_before(ui, socd_w + ui.spacing().item_spacing.x);
-            let socd_w = crate::responsive::usable_width(ui).min(92.0);
-            egui::ComboBox::from_id_salt("socd")
-                .width((socd_w - COMBO_CHROME).max(24.0))
-                .selected_text(socd_label(socd))
-                .show_ui(ui, |ui| {
-                    for s in [Socd::Neutral, Socd::LastWins, Socd::Positive, Socd::Negative] {
-                        ui.selectable_value(&mut socd, s, socd_label(s));
-                    }
-                });
-            if socd != ax.socd {
-                edits.commands.push(InputCmd::SetSocd { axis: i, socd });
-                edits.save = true;
-            }
-        })
-        .response
-        .on_hover_text(
-            "SOCD decides what happens when opposing directions are held at once.\n\
-             Neutral cancels (the tournament standard); Last wins lets a player pivot \
-             with no neutral frame.",
-        );
-    });
-}
-
-fn axis1_row(
-    ui: &mut egui::Ui,
-    i: usize,
-    ax: &floptle_input::Axis1,
-    scan: &InputScan,
-    test: &ActionState,
-    _edits: &mut InputEdits,
-) {
-    ui.push_id(("axis1", &ax.name), |ui| {
-        // Wrapped, for the reason in `action_row`.
-        ui.horizontal_wrapped(|ui| {
-            ui.set_min_height(ROW_H);
-            let v = test.axis1(i);
-            let live = v.abs() > 0.01;
-            ui.label(
-                egui::RichText::new(if live { icons::ON } else { icons::OFF }).color(if live {
-                    egui::Color32::LIGHT_GREEN
-                } else {
-                    ui.visuals().weak_text_color()
-                }),
-            );
-            ui.add_sized(
-                [crate::responsive::usable_width(ui).min(NAME_W - 20.0), 20.0],
-                egui::Label::new(crate::responsive::elide(
-                    ui,
-                    &ax.name,
-                    crate::responsive::usable_width(ui).min(NAME_W - 20.0),
-                ))
-                .selectable(false),
-            )
-                .on_hover_text(usage_hint(
-                    scan,
-                    &ax.name,
-                    UsageKind::Axis1,
-                    &format!("input.axis1(\"{}\")", ax.name),
-                ));
-            if ax.bindings.is_empty() {
-                ui.colored_label(
-                    egui::Color32::from_rgb(224, 168, 64),
-                    format!("{} unbound", icons::WARN),
-                );
-            }
-            for b in &ax.bindings {
-                chip_label(ui, &axis1_chip(b));
-            }
-        });
-    });
-}
-
-/// Chips read better as monospace — they're device labels, not prose.
-fn chip_frame(ui: &egui::Ui, text: &str) -> egui::RichText {
-    egui::RichText::new(text).monospace().background_color(ui.visuals().faint_bg_color)
-}
 
 /// How wide a chip carrying `text` will be, including the padding a button puts
 /// round it and the gap before the next widget.
@@ -607,7 +285,7 @@ fn chip_w(ui: &egui::Ui, text: &str) -> f32 {
 ///
 /// See `binding_chips` for why measuring is necessary rather than trusting the
 /// wrapped layout to break by itself.
-fn wrap_before(ui: &mut egui::Ui, want: f32) {
+pub(crate) fn wrap_before(ui: &mut egui::Ui, want: f32) {
     // Guarded on `main_wrap` for the reason in `responsive::fit_here_wrapping`:
     // `end_row` is also how a `Grid` row ends, and breaking one of those would
     // move every later control into the wrong column.
@@ -645,140 +323,9 @@ fn wrapped_label(ui: &mut egui::Ui, text: egui::RichText, plain: &str) -> egui::
     ui.label(text)
 }
 
-/// A read-only chip — what an axis binding is, since it is edited elsewhere.
-fn chip_label(ui: &mut egui::Ui, text: &str) {
-    let shown = wrap_before_chip(ui, text);
-    let r = ui.label(chip_frame(ui, &shown));
-    if shown != text {
-        r.on_hover_text(text);
-    }
-}
 
-fn binding_chips(
-    ui: &mut egui::Ui,
-    bindings: &[floptle_input::Binding],
-    action: &str,
-    players: u8,
-    edits: &mut InputEdits,
-) {
-    if bindings.is_empty() {
-        ui.colored_label(
-            egui::Color32::from_rgb(224, 168, 64),
-            format!("{} unbound", icons::WARN),
-        );
-        return;
-    }
-    for (i, b) in bindings.iter().enumerate() {
-        // Namespaced per index: two identical chips on one row would otherwise
-        // share an id and the wrong one would answer the click.
-        let label = match b.player {
-            Some(p) => format!("{}  P{}", b.chip(), p + 1),
-            None => b.chip(),
-        };
-        // **Break the line before a chip that will not fit on it.** A wrapped
-        // layout only breaks between widgets it can size, and a button sizes
-        // itself from its own text: past the edge egui wraps the label inside
-        // the chip and draws the chip over the border anyway. Measuring first is
-        // what turns "nearly fits" into "next line", and the chips are exactly
-        // the widgets whose width the panel cannot be sized for — "◉ R-Trigger"
-        // is three times "◉ A".
-        //
-        // Measured on this ui and not inside the `push_id` below: a child ui
-        // reports the whole panel as available. And measured with
-        // `usable_width`, not `available_width` — in a wrapped horizontal layout
-        // the latter answers with the row's whole width however far along the
-        // row the cursor already is, so it says "240 left" with sixteen pixels
-        // to the border.
-        let shown = wrap_before_chip(ui, &label);
-        let resp = ui.push_id(i, |ui| {
-            let resp = ui.button(chip_frame(ui, &shown)).on_hover_text(format!(
-                "{label}\n\nclick to remove this binding · right-click to scope it to \
-                 one player"
-            ));
-            // Which player a binding belongs to only exists as a question with more
-            // than one of them — and it's the answer to "why does P2's key punch for
-            // both fighters", since there is only ever one keyboard.
-            if players > 1 {
-                resp.context_menu(|ui| {
-                    let mut set = |ui: &mut egui::Ui, label: &str, player: Option<u8>| {
-                        if ui.radio(b.player == player, label).clicked() {
-                            edits.commands.push(InputCmd::SetBindingPlayer {
-                                action: action.into(),
-                                index: i,
-                                player,
-                            });
-                            edits.save = true;
-                            ui.close();
-                        }
-                    };
-                    set(ui, "every player", None);
-                    for p in 0..players {
-                        set(ui, &format!("player {}", p + 1), Some(p));
-                    }
-                });
-            }
-            resp
-        });
-        if resp.inner.clicked() {
-            edits.commands.push(InputCmd::RemoveBinding { action: action.into(), index: i });
-            edits.save = true;
-        }
-    }
-}
 
-fn bind_buttons(ui: &mut egui::Ui, action: &str, multiplayer: bool, edits: &mut InputEdits) {
-    if ui
-        .small_button(icons::ADD)
-        .on_hover_text("bind by PRESSING an input — key, mouse or gamepad")
-        .clicked()
-    {
-        edits.commands.push(InputCmd::StartRebind {
-            action: action.into(),
-            filter: BindFilter::AnyButton,
-        });
-    }
-    if let Some(src) = source_picker(ui, multiplayer) {
-        edits.commands.push(InputCmd::AddBinding { action: action.into(), source: src });
-        edits.save = true;
-    }
-}
 
-fn add_action_row(
-    ui: &mut egui::Ui,
-    map: &InputMap,
-    new_action: &mut String,
-    edits: &mut InputEdits,
-) {
-    let full = map.actions.len() >= floptle_input::MAX_ACTIONS;
-    ui.horizontal_wrapped(|ui| {
-        ui.add_space(NAME_W);
-        // Capped at what is left of the line: the field is a fixed 160 in a wide
-        // dock and whatever remains in a narrow one, rather than 160 that starts
-        // past the border.
-        let w = crate::responsive::usable_width(ui).clamp(40.0, 160.0);
-        let resp = ui.add_sized(
-            [w, 20.0],
-            egui::TextEdit::singleline(new_action).hint_text("new action…"),
-        );
-        let commit = (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-            || ui.small_button(icons::ADD).clicked();
-        if commit && !new_action.trim().is_empty() {
-            let name = new_action.trim().to_string();
-            if !full && map.action_index(&name).is_none() {
-                edits.commands.push(InputCmd::AddAction(name));
-                edits.save = true;
-            }
-            new_action.clear();
-        }
-        if full {
-            ui.colored_label(
-                egui::Color32::from_rgb(224, 168, 64),
-                format!("{}-action max", floptle_input::MAX_ACTIONS),
-            )
-            .on_hover_text("multiplayer packs actions into a 64-bit mask");
-        }
-    });
-}
 
 fn missing_entries(
     ui: &mut egui::Ui,
@@ -926,75 +473,6 @@ fn live_tester(
     });
 }
 
-/// A menu that picks any bindable source from a list — **no hardware required**.
-///
-/// Press-to-bind is the fast path when the device is in your hand; this is the
-/// one that always works. Gamepad comes first and is never greyed out: laying
-/// out pad controls with nothing plugged in is entirely normal.
-fn source_picker(ui: &mut egui::Ui, multiplayer: bool) -> Option<Source> {
-    use floptle_input::{KeyGroup, MouseAxis, MouseButton, PadAxis, PadButton, PadControl};
-
-    let mut picked = None;
-    ui.menu_button(icons::MENU, |ui| {
-        ui.set_min_width(190.0);
-        ui.label(egui::RichText::new("Add a binding").strong());
-        ui.separator();
-        ui.menu_button(format!("{}  Gamepad", icons::PAD), |ui| {
-            if multiplayer {
-                ui.label(
-                    egui::RichText::new("binds to this player's own pad").weak().small(),
-                );
-                ui.separator();
-            }
-            for &b in PadButton::ALL {
-                if ui.button(b.label()).clicked() {
-                    picked = Some(Source::Pad { id: PadId::Any, ctrl: PadControl::Button(b) });
-                    ui.close();
-                }
-            }
-            ui.separator();
-            ui.label(egui::RichText::new("sticks & triggers").weak().small());
-            for &a in PadAxis::ALL {
-                if ui.button(a.label()).clicked() {
-                    picked = Some(Source::Pad { id: PadId::Any, ctrl: PadControl::Axis(a) });
-                    ui.close();
-                }
-            }
-        });
-        ui.menu_button(format!("{}  Keyboard", icons::KEYBOARD), |ui| {
-            for &g in KeyGroup::ALL {
-                ui.menu_button(g.label(), |ui| {
-                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                        for k in g.keys() {
-                            if ui.button(k.label()).clicked() {
-                                picked = Some(Source::Key(k));
-                                ui.close();
-                            }
-                        }
-                    });
-                });
-            }
-        });
-        ui.menu_button(format!("{}  Mouse", icons::MOUSE), |ui| {
-            for &b in MouseButton::ALL {
-                if ui.button(b.label()).clicked() {
-                    picked = Some(Source::Mouse(b));
-                    ui.close();
-                }
-            }
-            ui.separator();
-            for &a in MouseAxis::ALL {
-                if ui.button(a.label()).clicked() {
-                    picked = Some(Source::MouseAxis(a));
-                    ui.close();
-                }
-            }
-        });
-    })
-    .response
-    .on_hover_text("pick a binding from a list — works with nothing plugged in");
-    picked
-}
 
 /// Does the map already define this scanned reference?
 fn defined(map: &InputMap, kind: UsageKind, name: &str) -> bool {
@@ -1008,12 +486,13 @@ fn defined(map: &InputMap, kind: UsageKind, name: &str) -> bool {
     }
 }
 
-fn socd_label(s: Socd) -> &'static str {
+/// What a direction does when opposites are held at once, in words.
+pub(crate) fn socd_label(s: Socd) -> &'static str {
     match s {
-        Socd::Neutral => "Neutral",
-        Socd::LastWins => "Last wins",
-        Socd::Positive => "Up/right",
-        Socd::Negative => "Dn/left",
+        Socd::Neutral => "cancel out",
+        Socd::LastWins => "last pressed wins",
+        Socd::Positive => "up / right wins",
+        Socd::Negative => "down / left wins",
     }
 }
 
@@ -1023,7 +502,7 @@ fn player_suffix(player: Option<u8>) -> String {
 }
 
 /// A compact one-chip summary of a 2D axis binding.
-fn axis2_chip(b: &Axis2Binding) -> String {
+pub(crate) fn axis2_chip(b: &Axis2Binding) -> String {
     match b {
         Axis2Binding::Keys { up, down, left, right, player } => {
             let l = |s: &Source| s.label();
@@ -1053,7 +532,7 @@ fn axis2_chip(b: &Axis2Binding) -> String {
     }
 }
 
-fn axis1_chip(b: &Axis1Binding) -> String {
+pub(crate) fn axis1_chip(b: &Axis1Binding) -> String {
     match b {
         Axis1Binding::Keys { minus, plus, player } => {
             format!(
@@ -1074,7 +553,7 @@ fn axis1_chip(b: &Axis1Binding) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use floptle_input::{Key, PadAxis};
+    use floptle_input::{Key, PadAxis, PadId};
 
     #[test]
     fn axis_chips_name_their_device() {

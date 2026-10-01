@@ -14,13 +14,13 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 195
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 196
 - [node — transform & body fields](#node--transform--body-fields) — 40
 - [node — methods & handles](#node--methods--handles) — 31
 - [vectors, directions & easing](#vectors-directions--easing) — 49
 - [scene lookups & raycast](#scene-lookups--raycast) — 16
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
-- [input — keyboard & mouse](#input--keyboard--mouse) — 42
+- [input — keyboard & mouse](#input--keyboard--mouse) — 45
 - [drawing — draw.*](#drawing--draw) — 18
 - [the web — http.*, json.*](#the-web--http-json) — 15
 - [the player's account — account.*](#the-players-account--account) — 13
@@ -161,6 +161,10 @@ app.frameCap() → the frame cap in frames a second, 0 when there is none.
 ### `app.fullscreen`
 
 app.fullscreen() → whether the game's window covers the screen. The real state, not the last thing asked for — so a Video tab shows what the player sees, including after F11 or Alt+Enter, which a build answers on its own.
+
+### `app.isTouch`
+
+app.isTouch() — true when the player's main pointer is a finger: a phone or tablet in a browser, or any screen that has been touched. Start in your touch layout on it.
 
 ### `app.isWeb`
 
@@ -1795,6 +1799,18 @@ input.setMouseLocked(true/false) — lock or unlock the mouse from a boolean (e.
 ### `input.startRebind`
 
 input.startRebind("Jump", "pad") — arm press-to-bind from a settings menu. Poll input.pendingRebind() for the captured chip, then input.commitRebind(). Filters: "keyboard", "pad", "axis", or nil for any button. Escape always cancels.
+
+### `input.touchBegan`
+
+input.touchBegan(id) — true on the frame that finger went down.
+
+### `input.touchEnded`
+
+input.touchEnded(id) — true on the frame that finger lifted (or was cancelled).
+
+### `input.touches`
+
+input.touches() — every finger on the screen this frame: a list of { id, x, y, dx, dy, phase, pressure, began, ui }. x/y are input.mouse() pixels, dx/dy this frame's movement, phase "began" | "moved" | "held" | "ended" | "cancelled" (a lifted finger is listed once more, then gone), pressure 0..1 (1 where the screen does not say), began = it went down this frame, ui = it landed on an interactive UI element and is working it like the mouse (skip it in your own controls). A finger that lands off the UI is only the game's and clicks nothing.
 
 ### `input.typed`
 

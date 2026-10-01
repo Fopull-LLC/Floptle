@@ -316,6 +316,15 @@ impl Editor {
         for cmd in edits.commands {
             let mut sys = sys.borrow_mut();
             match cmd {
+                InputCmd::SetMap(map) => {
+                    let mut map = *map;
+                    crate::input_editor::settle_sticks(&mut map);
+                    sys.set_map(map);
+                }
+                InputCmd::Capture(target) => {
+                    sys.start_rebind("", 0, target.filter());
+                    self.input_capture = Some(target);
+                }
                 // Fill gaps, never replace: someone who already bound half a
                 // game must not lose it to a button labelled "starter".
                 InputCmd::SeedStarter => {
@@ -323,54 +332,10 @@ impl Editor {
                     map.merge_missing(&InputMap::starter());
                     sys.set_map(map);
                 }
-                InputCmd::AddAction(name) => {
-                    let map = sys.map_mut();
-                    if map.action_index(&name).is_none() && map.actions.len() < floptle_input::MAX_ACTIONS {
-                        map.actions.push(floptle_input::Action::new(name));
-                    }
-                }
                 InputCmd::AddEntry { name, kind } => add_entry(sys.map_mut(), kind, name),
-                InputCmd::AddBinding { action, source } => {
-                    // A picked pad source binds to this player's pad when the
-                    // project has several, matching what press-to-bind does —
-                    // otherwise P2's binding would read P1's controller.
-                    let multiplayer = sys.players() > 1;
-                    let source = match (multiplayer, source) {
-                        (true, floptle_input::Source::Pad { ctrl, .. }) => {
-                            floptle_input::Source::Pad { id: floptle_input::PadId::Slot(0), ctrl }
-                        }
-                        (_, s) => s,
-                    };
-                    let binding = floptle_input::Binding::new(source);
-                    if let Some(a) = sys.map_mut().actions.iter_mut().find(|a| a.name == action)
-                        && !a.bindings.contains(&binding)
-                    {
-                        a.bindings.push(binding);
-                    }
-                }
-                InputCmd::RemoveAction(name) => {
-                    sys.map_mut().actions.retain(|a| a.name != name);
-                }
-                InputCmd::RemoveBinding { action, index } => {
-                    if let Some(a) = sys.map_mut().actions.iter_mut().find(|a| a.name == action)
-                        && index < a.bindings.len()
-                    {
-                        a.bindings.remove(index);
-                    }
-                }
-                InputCmd::SetBindingPlayer { action, index, player } => {
-                    if let Some(a) = sys.map_mut().actions.iter_mut().find(|a| a.name == action)
-                        && let Some(b) = a.bindings.get_mut(index)
-                    {
-                        b.player = player;
-                    }
-                }
-                InputCmd::StartRebind { action, filter } => sys.start_rebind(action, 0, filter),
-                InputCmd::CancelRebind => sys.cancel_rebind(),
-                InputCmd::SetSocd { axis, socd } => {
-                    if let Some(a) = sys.map_mut().axes2.get_mut(axis) {
-                        a.socd = socd;
-                    }
+                InputCmd::CancelRebind => {
+                    sys.cancel_rebind();
+                    self.input_capture = None;
                 }
                 InputCmd::SetPlayers(n) => {
                     sys.map_mut().players = n.max(1);
@@ -395,7 +360,23 @@ impl Editor {
             sys.borrow_mut().cancel_rebind();
             return;
         }
+        #[cfg(feature = "editor-ui")]
+        if cancel {
+            self.input_capture = None;
+        }
         let Some(c) = captured else { return };
+        // A press for one slot of one binding: the editor's target says where
+        // it goes, and the map takes it like any other edit.
+        #[cfg(feature = "editor-ui")]
+        if let Some(target) = self.input_capture.take() {
+            let mut map = sys.borrow().map().clone();
+            sys.borrow_mut().cancel_rebind();
+            if target.apply(&mut map, c.source, c.modifiers) {
+                sys.borrow_mut().set_map(map);
+                self.save_input_map();
+            }
+            return;
+        }
         let changed = sys.borrow_mut().commit_rebind(c);
         if changed {
             self.save_input_map();

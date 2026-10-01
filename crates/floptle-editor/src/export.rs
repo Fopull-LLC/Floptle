@@ -51,6 +51,30 @@ pub(crate) struct GameManifest {
     pub(crate) data_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) studio: Option<String>,
+    /// This export's own name, new every time a build is made
+    /// (`20261001-0231-3fa9c1`). A game hosting on Floptle Cloud presents it
+    /// with its key, so one shipped build whose copy of the key is being
+    /// abused can be switched off without rotating the key for every other
+    /// build. Absent in a build exported before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) build: Option<String>,
+}
+
+/// A fresh build name: when it was exported, to the minute, and six hex
+/// digits that differ between two exports in the same minute.
+#[cfg(feature = "editor-ui")]
+pub(crate) fn new_build_id(title: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let stamp = rfc3339_utc_now();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (nanos, title, std::process::id()).hash(&mut h);
+    // `2026-10-01T02:31:07Z` → `20261001-0231`.
+    let digits: String = stamp.chars().filter(|c| c.is_ascii_digit()).collect();
+    format!("{}-{}-{:06x}", &digits[..8.min(digits.len())], &digits[8.min(digits.len())..12.min(digits.len())], h.finish() & 0xff_ffff)
 }
 
 /// A `floptle-game.ron` beside the running binary, if any → (manifest, its dir).
@@ -1198,6 +1222,7 @@ fn stage_game(proj: &Path, out_c: &Path, title: &str) -> Result<Staged, String> 
         steam: cfg.steam,
         data_id: Some(data_id),
         studio: cfg.studio.clone().filter(|s| floptle_scene::valid_data_id(s)),
+        build: Some(new_build_id(title)),
     };
     let text = ron::ser::to_string_pretty(&manifest, ron::ser::PrettyConfig::default())
         .map_err(|e| format!("manifest: {e}"))?;
@@ -3112,6 +3137,28 @@ mod tests {
         assert!(!msg.contains("OUTSIDE the project"), "{msg}");
 
         for d in [&proj, &out] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    /// Every export names itself, freshly, so a hosting build can be told
+    /// apart from every other build of the same game on the same key.
+    #[test]
+    fn every_export_is_given_its_own_build_name() {
+        let proj = temp("proj-build");
+        floptle_vfs::write(proj.join("project.ron"), "()").unwrap();
+        let me = std::env::current_exe().unwrap();
+        let read = |out: &std::path::Path| -> GameManifest {
+            ron::from_str(&floptle_vfs::read_to_string(out.join("floptle-game.ron")).unwrap()).unwrap()
+        };
+        let (a, b) = (temp("out-build-a"), temp("out-build-b"));
+        export_game_with(&proj, &a, "G", &me, &EXPORT_TARGETS[0]).expect("export");
+        export_game_with(&proj, &b, "G", &me, &EXPORT_TARGETS[0]).expect("export");
+        let (ba, bb) = (read(&a).build.expect("a build name"), read(&b).build.expect("a build name"));
+        assert_ne!(ba, bb, "two exports share a build name");
+        let parts: Vec<&str> = ba.split('-').collect();
+        assert_eq!(parts.iter().map(|p| p.len()).collect::<Vec<_>>(), vec![8, 4, 6], "{ba}");
+        for d in [&proj, &a, &b] {
             let _ = std::fs::remove_dir_all(d);
         }
     }

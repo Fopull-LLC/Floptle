@@ -133,3 +133,32 @@ fn snapshot_docs_layout() {
     h.render().expect("no GPU?").save(&out).unwrap();
     floptle_say::say!("wrote {}", out.display());
 }
+
+/// The Input settings' editor on the starter map: the Move direction open in a
+/// wide dock, and the Jump action open in a narrow one.
+#[test]
+#[ignore]
+fn snapshot_input_editor() {
+    use crate::input_editor::{InputUiState, Sel, editor};
+    let map = floptle_input::InputMap::starter();
+    let scan = crate::input_scan::InputScan::default();
+    let test = floptle_input::ActionState::default();
+    for (name, size, sel) in [
+        ("input-editor-wide", egui::vec2(900.0, 900.0), Sel::Axis2("Move".into())),
+        ("input-editor-narrow", egui::vec2(340.0, 1500.0), Sel::Action("Jump".into())),
+    ] {
+        let mut state = InputUiState::default();
+        state.selected = Some(sel);
+        let map = map.clone();
+        let mut h = harness(size, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                let mut edits = crate::input_ui::InputEdits::default();
+                editor(ui, &map, &mut state, None, &scan, &test, "", &mut edits);
+            });
+        });
+        let out = out_path(name);
+        h.run();
+        h.render().expect("no GPU?").save(&out).unwrap();
+        floptle_say::say!("wrote {}", out.display());
+    }
+}
