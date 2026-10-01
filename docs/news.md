@@ -1,5 +1,12 @@
 ## Just shipped
 
+**v0.111.0 — "Make It Yours"** (stable). The editor and the Hub look like
+Floptle: a new default theme in the brand's colours and type, and the Hub
+matching fopull.com. Twelve themes come built in, from High Contrast to a
+moving Galaxy, and you can make your own in Edit ▸ Preferences…, with
+pictures and moving backdrops behind any panel. A theme is one
+`.floptletheme` file you can share.
+
 **v0.110.0 — "Travels Light"** (stable). A big web game fits on a phone:
 its page holds about 0.95 GB where a 384 MB game used to need 2.2 GB, so a
 game an iPhone closed while loading now plays. Models load a few at a time,
