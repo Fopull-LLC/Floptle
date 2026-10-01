@@ -238,6 +238,29 @@ pub fn parse_token_response(status: u16, body: &str) -> Result<Tokens, String> {
     })
 }
 
+/// What `/oauth/token` said to a refresh. Only `invalid_grant` means the
+/// refresh token is dead and the player must sign in again, which is the rule
+/// the desktop's refresh keeps too; anything else (a 5xx, a proxy's page, a
+/// reply that will not parse) leaves the session for the next try, because a
+/// bad minute on the network must not sign anybody out.
+pub fn parse_refresh_response(status: u16, body: &str) -> Result<Tokens, crate::auth::RefreshError> {
+    use crate::auth::RefreshError;
+    if !(200..300).contains(&status) {
+        #[derive(Deserialize, Default)]
+        struct E {
+            #[serde(default)]
+            error: String,
+        }
+        let e: E = serde_json::from_str(body).unwrap_or_default();
+        return Err(if e.error == "invalid_grant" {
+            RefreshError::Invalid
+        } else {
+            RefreshError::Transient(parse_token_response(status, body).err().unwrap_or_default())
+        });
+    }
+    parse_token_response(status, body).map_err(RefreshError::Transient)
+}
+
 // ---- small pure helpers -------------------------------------------------------------
 
 /// Percent-encode for a query value: everything outside RFC 3986's unreserved
@@ -320,6 +343,34 @@ mod tests {
 
     fn client() -> WebClient {
         WebClient::new("https://fopull.com/", "https://orbit-racer.example.com/auth.html")
+    }
+
+    /// **Only a dead refresh token signs a player out.** A page renews its
+    /// sign-in every fifteen minutes; if a server error or a proxy's page
+    /// counted as a dead token, one bad minute would sign out everybody who
+    /// happened to renew in it.
+    #[test]
+    fn a_refresh_ends_the_session_only_for_invalid_grant() {
+        use crate::auth::RefreshError;
+        let ok = r#"{"access_token":"a2","refresh_token":"r2","token_type":"Bearer","expires_in":900}"#;
+        let t = parse_refresh_response(200, ok).ok().expect("a 200 with tokens renews");
+        assert_eq!((t.access_token.as_str(), t.refresh_token.as_deref()), ("a2", Some("r2")));
+        assert!(matches!(
+            parse_refresh_response(400, r#"{"error":"invalid_grant","error_description":"rotated"}"#),
+            Err(RefreshError::Invalid)
+        ));
+        for (status, body) in [
+            (400, r#"{"error":"invalid_request"}"#),
+            (500, "upstream exploded"),
+            (502, "<html>Bad Gateway</html>"),
+            (429, r#"{"error":"slow_down"}"#),
+            (200, "not json"),
+        ] {
+            assert!(
+                matches!(parse_refresh_response(status, body), Err(RefreshError::Transient(_))),
+                "{status} {body} signed the player out"
+            );
+        }
     }
 
     /// **The client id must be on every request.** `client_id` is optional at
@@ -686,13 +737,12 @@ pub mod browser {
     /// moment it is used** (§6.2, rotation with reuse detection) — so the caller
     /// must persist what comes back before making another call, or the next
     /// refresh presents a rotated token and revokes the whole session.
-    pub async fn refresh(client: &WebClient, session: &Session) -> Result<Session, String> {
-        let rt = session
-            .refresh_token
-            .as_deref()
-            .ok_or("your sign-in expired — sign in again")?;
-        let (status, body) = post_form(&client.token_url(), &client.refresh_form(rt)).await?;
-        let tokens = super::parse_token_response(status, &body)?;
+    pub async fn refresh(client: &WebClient, session: &Session) -> Result<Session, crate::auth::RefreshError> {
+        use crate::auth::RefreshError;
+        let rt = session.refresh_token.as_deref().ok_or(RefreshError::Invalid)?;
+        let (status, body) =
+            post_form(&client.token_url(), &client.refresh_form(rt)).await.map_err(RefreshError::Transient)?;
+        let tokens = super::parse_refresh_response(status, &body)?;
         let mut fresh = session.clone();
         fresh.access_token = tokens.access_token;
         // Only replace the refresh token if a new one came back; a provider that

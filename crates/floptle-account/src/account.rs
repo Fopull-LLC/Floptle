@@ -16,7 +16,9 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::auth::{self, Provider, RefreshError, Session, TokenStore};
+use crate::auth::{self, Provider, Session, TokenStore};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::auth::RefreshError;
 // Only the device flow's `Provider` reads entitlements synchronously; the
 // browser fetches them in `web_auth::browser::identify`.
 #[cfg(not(target_arch = "wasm32"))]
@@ -75,7 +77,9 @@ pub struct Account {
     make_provider: MakeProvider,
     /// Held across a token refresh so two concurrent requests don't both spend
     /// the refresh token — the second one waits, then finds the session already
-    /// fresh and uses it.
+    /// fresh and uses it. A page renews another way
+    /// ([`web_access_token`](Self::web_access_token)).
+    #[cfg(not(target_arch = "wasm32"))]
     refreshing: Arc<Mutex<()>>,
     /// A [`restore`](Self::restore) is still reading the stored session. The
     /// phase says `SignedOut` until it lands, which is true of the session and
@@ -172,6 +176,7 @@ impl Account {
             cancel: Arc::new(AtomicBool::new(false)),
             store,
             make_provider,
+            #[cfg(not(target_arch = "wasm32"))]
             refreshing: Arc::new(Mutex::new(())),
             restoring: Arc::new(AtomicBool::new(false)),
         }
@@ -308,27 +313,81 @@ impl Account {
         });
     }
 
-    /// A stored session whose access token has expired is refreshed once, at
-    /// boot. The browser's access token is 900s (§6.5), so this is the ordinary
+    /// A stored session whose access token has expired is refreshed at boot.
+    /// The browser's access token is 900s (§6.5), so this is the ordinary
     /// path on any return visit, not an edge case.
     #[cfg(target_arch = "wasm32")]
-    async fn web_refresh_if_stale(&self, client: &crate::web_auth::WebClient) {
-        let now = unix_now();
-        let Some(session) = self.session().filter(|s| s.needs_refresh(now)) else { return };
-        match crate::web_auth::browser::refresh(client, &session).await {
-            // Persist before anything else can call: the old refresh token died
-            // the moment this succeeded, so a crash between here and the save
-            // costs the session.
-            Ok(fresh) => self.adopt(fresh),
-            // A refresh that fails is a sign-out, not a retry — the token is
-            // either rotated away or revoked, and both are terminal.
-            Err(e) => {
+    async fn web_refresh_if_stale(&self, _client: &crate::web_auth::WebClient) {
+        self.web_access_token(|r| {
+            if let Err(e) = r {
+                log::warn!("could not renew the sign-in: {e}");
+            }
+        });
+    }
+
+    /// The browser's [`access_token`](Self::access_token), answered through
+    /// `then`: a page cannot block on the network, so a token at or near
+    /// expiry is renewed with `fetch` and `then` runs when that lands.
+    ///
+    /// This used to happen only when the page loaded. The browser's token
+    /// lasts fifteen minutes, so every signed-in call made more than fifteen
+    /// minutes after the page opened went to the device provider, which a
+    /// page does not have, and failed: a player who spent twenty minutes
+    /// building a level could not publish it.
+    ///
+    /// One renewal at a time. The server rotates the refresh token, and
+    /// presenting one it has already rotated away ends the session, so a
+    /// second caller waits for the first one's answer rather than starting
+    /// its own.
+    #[cfg(target_arch = "wasm32")]
+    fn web_access_token(&self, then: impl FnOnce(Result<String, String>) + 'static) {
+        let Some(session) = self.session() else { return then(Err("nobody is signed in".into())) };
+        if !session.needs_refresh(unix_now()) {
+            return then(Ok(session.access_token));
+        }
+        let first = WEB_RENEWAL.with(|w| {
+            let mut w = w.borrow_mut();
+            let first = w.is_none();
+            w.get_or_insert_with(Vec::new).push(Box::new(then));
+            first
+        });
+        if !first {
+            return;
+        }
+        let me = self.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let answer = me.web_renew().await;
+            for waiting in WEB_RENEWAL.with(|w| w.borrow_mut().take()).unwrap_or_default() {
+                waiting(answer.clone());
+            }
+        });
+    }
+
+    /// Renew the session through the page's own token call, keep it, and
+    /// answer the new access token.
+    #[cfg(target_arch = "wasm32")]
+    async fn web_renew(&self) -> Result<String, String> {
+        let session = self.session().ok_or("nobody is signed in")?;
+        match crate::web_auth::browser::refresh(&self.web_client(), &session).await {
+            // Kept before anything else can call: the old refresh token died
+            // the moment this succeeded.
+            Ok(fresh) => {
+                let token = fresh.access_token.clone();
+                self.adopt(fresh);
+                Ok(token)
+            }
+            // The refresh token is spent or revoked: the session is over.
+            Err(auth::RefreshError::Invalid) => {
+                let why = "your sign-in expired — sign in again".to_string();
                 let _ = self.store.clear();
                 if let Ok(mut i) = self.inner.lock() {
                     i.session = None;
-                    i.phase = Phase::Failed(e);
+                    i.phase = Phase::Failed(why.clone());
                 }
+                Err(why)
             }
+            // The network's fault: the session stays for the next call.
+            Err(auth::RefreshError::Transient(e)) => Err(format!("could not renew the sign-in: {e}")),
         }
     }
 
@@ -462,7 +521,8 @@ impl Account {
     ///
     /// Returns the token by value and the caller is expected to drop it: it goes
     /// to [`cloud::request`] and nowhere else. Nothing above this crate ever
-    /// sees one.
+    /// sees one. A page's is [`web_access_token`](Self::web_access_token).
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn access_token(&self) -> Result<String, String> {
         let session = self.session().ok_or("nobody is signed in")?;
         let now = unix_now();
@@ -524,31 +584,38 @@ impl Account {
         timeout: Duration,
         tx: Sender<(u64, CloudReply)>,
     ) -> Result<(), String> {
-        let me = self.clone();
         let method = method.to_string();
         let path = path.to_string();
-        detach("floptle-account-request", move || {
-            let reply = match me.access_token() {
-                #[cfg(not(target_arch = "wasm32"))]
-                Ok(token) => cloud::request(&me.base, &token, &method, &path, body, timeout),
-                // A page has no worker to block on: the request goes out on
-                // the page's own event loop and answers through the same
-                // channel when it lands.
-                #[cfg(target_arch = "wasm32")]
-                Ok(token) => {
-                    let base = me.base.clone();
-                    wasm_bindgen_futures::spawn_local(async move {
-                        let reply = cloud::request_web(&base, &token, &method, &path, body, timeout).await;
-                        let _ = tx.send((id, reply));
-                    });
-                    return;
+        // A page has no worker to block on: the token is renewed and the
+        // request sent on the page's own event loop, and both answer through
+        // the same channel when they land.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let base = self.base.clone();
+            self.web_access_token(move |token| match token {
+                Ok(token) => wasm_bindgen_futures::spawn_local(async move {
+                    let reply = cloud::request_web(&base, &token, &method, &path, body, timeout).await;
+                    let _ = tx.send((id, reply));
+                }),
+                Err(e) => {
+                    let _ = tx.send((id, CloudReply::failed(e)));
                 }
-                Err(e) => CloudReply::failed(e),
-            };
-            // The receiver is gone only when the host itself has.
-            let _ = tx.send((id, reply));
-        })
+            });
+            Ok(())
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let me = self.clone();
+            detach("floptle-account-request", move || {
+                let reply = match me.access_token() {
+                    Ok(token) => cloud::request(&me.base, &token, &method, &path, body, timeout),
+                    Err(e) => CloudReply::failed(e),
+                };
+                // The receiver is gone only when the host itself has.
+                let _ = tx.send((id, reply));
+            })
             .map_err(|e| format!("could not start a worker: {e}"))
+        }
     }
 }
 
@@ -559,28 +626,42 @@ impl Account {
     /// Not reachable from a script. The token goes into the join handshake
     /// and nowhere else.
     pub fn join_token(&self, audience: &str, timeout: Duration, tx: Sender<Result<String, String>>) {
-        let me = self.clone();
         let audience = audience.to_string();
-        let started = detach("floptle-join-token", move || {
-            let token = match me.access_token() {
-                Ok(t) => t,
+        #[cfg(target_arch = "wasm32")]
+        {
+            let base = self.base.clone();
+            self.web_access_token(move |token| match token {
+                Ok(token) => wasm_bindgen_futures::spawn_local(async move {
+                    let _ = tx.send(crate::join_token::mint_web(&base, &token, &audience, timeout).await);
+                }),
                 Err(e) => {
                     let _ = tx.send(Err(e));
-                    return;
                 }
-            };
-            #[cfg(not(target_arch = "wasm32"))]
-            let _ = tx.send(crate::join_token::mint(&me.base, &token, &audience, timeout));
-            #[cfg(target_arch = "wasm32")]
-            wasm_bindgen_futures::spawn_local(async move {
-                let _ = tx.send(crate::join_token::mint_web(&me.base, &token, &audience, timeout).await);
             });
-        });
-        if let Err(e) = started {
-            // The receiver gives up on its own clock; this only saves it the wait.
-            log::warn!("could not start the join-token worker: {e}");
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let me = self.clone();
+            let started = detach("floptle-join-token", move || {
+                let _ = tx.send(me.access_token().and_then(|token| {
+                    crate::join_token::mint(&me.base, &token, &audience, timeout)
+                }));
+            });
+            if let Err(e) = started {
+                // The receiver gives up on its own clock; this only saves it the wait.
+                log::warn!("could not start the join-token worker: {e}");
+            }
         }
     }
+}
+
+/// Callers waiting on the page's one sign-in renewal in flight, or `None`
+/// when none is ([`Account::web_access_token`]). A page has one thread.
+#[cfg(target_arch = "wasm32")]
+type Waiting = Vec<Box<dyn FnOnce(Result<String, String>)>>;
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static WEB_RENEWAL: std::cell::RefCell<Option<Waiting>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Seconds since the Unix epoch, from a clock that exists on every target —
