@@ -1,5 +1,12 @@
 ## Just shipped
 
+**v0.108.0 — "Knows Who You Are"** (stable). A game server can be sure who a
+player is: a signed-in player arrives with a short-lived join token from
+fopull.com that names that one server, and `net.identity(peer).verified` is
+true. `net.host{ requireVerified = true }` admits only proven accounts. Your
+sign-in itself never reaches the server. A closed lobby's code is no longer
+handed to a new lobby for ten minutes.
+
 **v0.107.0 — "Fits In Your Hand"** (stable). A browser game can be played on a
 phone: `input.touches()` reads every finger, a tap works the game's UI with no
 code, and `app.isTouch()` picks the touch layout. ⚙ Settings ▸ Input is rebuilt
