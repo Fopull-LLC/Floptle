@@ -37,6 +37,25 @@ pub enum Model {
     Static(ImportedModel),
 }
 
+impl Model {
+    /// About how many bytes putting this model on the GPU writes: its
+    /// vertices, indices and paint, and its pictures as decoded pixels. A
+    /// picture is the large part, and it is several times its size in the
+    /// file, so the file's size is no guide to it.
+    pub fn upload_bytes(&self) -> u64 {
+        let mesh = |m: &floptle_render::MeshData| {
+            std::mem::size_of_val(m.vertices.as_slice())
+                + std::mem::size_of_val(m.indices.as_slice())
+                + m.colors.as_ref().map_or(0, |c| std::mem::size_of_val(c.as_slice()))
+        };
+        let (meshes, textures): (usize, &[floptle_render::TextureData]) = match self {
+            Model::Rigged(r) => (r.parts.iter().map(|p| mesh(&p.mesh)).sum(), &r.textures),
+            Model::Static(s) => (s.parts.iter().map(|p| mesh(&p.mesh)).sum(), &s.textures),
+        };
+        (meshes + textures.iter().map(|t| t.pixels.len()).sum::<usize>()) as u64
+    }
+}
+
 /// Import a model, reading and decoding the file **once**.
 ///
 /// [`import_rigged`] followed by [`import`] reads the file and decodes every
@@ -94,5 +113,26 @@ mod tests {
         };
         assert_eq!(new.parts.len(), old.parts.len());
         assert_eq!(new.clips.len(), old.clips.len());
+    }
+
+    /// What a model writes to the GPU counts its pictures as pixels, which is
+    /// what a browser has to find room for: a picture is a few kilobytes of
+    /// PNG in the file and megabytes once decoded.
+    #[test]
+    fn upload_bytes_counts_the_pictures_as_pixels() {
+        for f in ["tests/fixtures/SaesRapier.glb", "tests/fixtures/Sae.glb"] {
+            let m = crate::import_model(Path::new(f)).unwrap();
+            let (parts, textures) = match &m {
+                crate::Model::Static(s) => (s.parts.iter().map(|p| &p.mesh).collect::<Vec<_>>(), &s.textures),
+                crate::Model::Rigged(r) => (r.parts.iter().map(|p| &p.mesh).collect(), &r.textures),
+            };
+            assert!(!textures.is_empty(), "{f} has a picture");
+            let pixels: usize = textures.iter().map(|t| t.width as usize * t.height as usize * 4).sum();
+            let verts: usize = parts.iter().map(|p| p.vertices.len() * std::mem::size_of::<floptle_render::Vertex>()).sum();
+            let indices: usize = parts.iter().map(|p| p.indices.len() * 4).sum();
+            assert_eq!(m.upload_bytes(), (pixels + verts + indices) as u64, "{f}");
+            let file = std::fs::metadata(f).unwrap().len();
+            assert!(m.upload_bytes() > file, "{f}: {} bytes to upload from a {file}-byte file", m.upload_bytes());
+        }
     }
 }

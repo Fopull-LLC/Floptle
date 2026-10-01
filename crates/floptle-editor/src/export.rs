@@ -2785,10 +2785,10 @@ mod tests {
         let paths: Vec<&str> = bundle.paths().collect();
         assert_eq!(paths, vec!["assets/project.ron", "assets/scenes/first.ron", "floptle-game.ron"], "{paths:?}");
         let manifest: GameManifest =
-            ron::from_str(std::str::from_utf8(bundle.get("floptle-game.ron").unwrap()).unwrap()).unwrap();
+            ron::from_str(std::str::from_utf8(&bundle.get("floptle-game.ron").unwrap()).unwrap()).unwrap();
         assert_eq!(manifest.title, "Tom & Jerry's <Game>");
         assert_eq!(manifest.project, "assets");
-        assert_eq!(bundle.get("assets/scenes/first.ron"), Some(&b"(nodes: [])"[..]));
+        assert_eq!(bundle.get("assets/scenes/first.ron").as_deref(), Some(&b"(nodes: [])"[..]));
 
         // A template with no module is refused by name, before anything is written.
         let broken = temp("web-tpl-broken");

@@ -2115,9 +2115,23 @@ struct Editor {
     mesh_ids: Vec<MeshId>,
     /// Imported glTF models, keyed by asset path ⏵ registered mesh parts.
     mesh_registry: HashMap<String, MeshAsset>,
+    /// The key each model file was first put on the GPU under, by the file it
+    /// resolves to, folded (`floptle_vfs::normalize`). A game can name one file two ways (`models/a.glb`, and the
+    /// `/assets/models/a.glb` that `assets.getFile` answers), and each way was
+    /// imported and uploaded on its own. See `share_loaded_model`.
+    model_files: HashMap<std::path::PathBuf, String>,
     /// Models being read and decoded off the main thread, by the same key —
     /// see `request_model`. Installed by `pump_model_imports`.
     model_jobs: HashMap<String, std::sync::mpsc::Receiver<Result<floptle_assets::Model, String>>>,
+    /// The browser's `model_jobs`: models waiting their turn, oldest first.
+    /// A page has no thread to decode on, so `pump_model_imports` imports a
+    /// few of these each frame.
+    #[cfg(target_arch = "wasm32")]
+    model_queue: std::collections::VecDeque<String>,
+    /// Models and GPU bytes the queue has put in since it was last empty,
+    /// for the line that says so when it empties.
+    #[cfg(target_arch = "wasm32")]
+    model_queue_done: (usize, u64),
     /// Runtime pictures (`assets.textureFromUrl` / `textureFromBytes`) being
     /// decoded on a worker.
     texture_jobs: Vec<crate::runtime_textures::TextureJob>,

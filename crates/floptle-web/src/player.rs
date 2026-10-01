@@ -48,11 +48,15 @@ static LOGGER: ConsoleLogger = ConsoleLogger;
 
 /// Start the game in `bundle` on the page's `<canvas id="game">`.
 ///
+/// The bundle stays where the page put it. Taken as a `Vec`, it was copied
+/// into the engine's memory, which never shrinks: a 384 MB game held 384 MB
+/// there for the whole session, beside the page's own copy.
+///
 /// Returns once the event loop is handed to the browser; the game runs from
 /// its animation frames. A `JsValue` error is one sentence for the page to
 /// show: not a bundle, no manifest, no canvas.
 #[wasm_bindgen]
-pub fn play(bundle: Vec<u8>) -> Result<(), JsValue> {
+pub fn play(bundle: js_sys::Uint8Array) -> Result<(), JsValue> {
     let _ = log::set_logger(&LOGGER).map(|()| log::set_max_level(log::LevelFilter::Info));
     let n = floptle_vfs::mount(bundle).map_err(|e| JsValue::from_str(&e))?;
     crate::probe::log(&format!("floptle-web {} — {n} files in the bundle", env!("CARGO_PKG_VERSION")));

@@ -50,10 +50,12 @@ fn from_latin1(s: &str) -> Vec<u8> {
     s.chars().map(|c| c as u32 as u8).collect()
 }
 
-/// Make `data` the filesystem. Nothing persists until [`open_saves`] names
-/// the game — the manifest that names it is inside this very bundle.
-pub fn mount(data: Vec<u8>) -> Result<usize, String> {
-    let bundle = Bundle::parse(data)?;
+/// Make `data`, the bundle the page fetched, the filesystem. It stays the
+/// page's: a read copies out the one file it names. Nothing persists until
+/// [`open_saves`] names the game — the manifest that names it is inside this
+/// very bundle.
+pub fn mount(data: js_sys::Uint8Array) -> Result<usize, String> {
+    let bundle = Bundle::from_page(data)?;
     let n = bundle.len();
     *lock() = Some(Web { fs: MemFs::new(bundle), prefix: String::new() });
     Ok(n)

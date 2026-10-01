@@ -1969,6 +1969,7 @@ dependencies = [
  "naga",
  "png",
  "pollster",
+ "rustc-hash 2.1.2",
  "wgpu",
  "winit",
 ]
@@ -2104,6 +2105,7 @@ name = "floptle-vfs"
 version = "0.109.1"
 dependencies = [
  "floptle-core",
+ "js-sys",
  "wasm-bindgen",
  "web-sys",
 ]

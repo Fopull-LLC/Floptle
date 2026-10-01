@@ -39,6 +39,8 @@ log = { workspace = true }
 # Game-UI text: tiny pure-Rust TTF rasterizer feeding the ui pass's glyph atlas.
 fontdue = "0.9"
 png = "0.18"
+# Keys the pictures already on the GPU by their pixels; fast over megabytes.
+rustc-hash = "2"
 
 [dev-dependencies]
 # The GLSL backend, for the test that holds every shader against OpenGL's rules.

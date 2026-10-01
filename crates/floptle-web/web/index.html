@@ -29,6 +29,11 @@
   #play { display: none; font: inherit; font-size: 16px; padding: 10px 28px; border: 1px solid #d8d8e0; border-radius: 4px; background: transparent; color: #fff; cursor: pointer; }
   #play:hover { background: #d8d8e0; color: #000; }
   #play.ready { display: inline-block; }
+  #crash { display: none; max-width: min(520px, 90vw); text-align: center; color: #8a8a96; }
+  #crash.shown { display: block; }
+  #crash button { font: inherit; margin-top: 6px; padding: 4px 14px; border: 1px solid #5a5a66; border-radius: 4px; background: transparent; color: #d8d8e0; cursor: pointer; }
+  #crash textarea { display: none; width: 100%; height: 30vh; margin-top: 8px; background: #101016; color: #d8d8e0; border: 1px solid #2a2a34; font: 12px/1.4 ui-monospace, monospace; -webkit-user-select: text; user-select: text; }
+  #crash.open textarea { display: block; }
   a { color: #d8d8e0; }
 </style>
 </head>
@@ -39,9 +44,45 @@
   <div id="bar"><div id="fill"></div></div>
   <div id="status">loading…</div>
   <button id="play">▶ Play</button>
+  <div id="crash">The game stopped unexpectedly last time.<br><button id="crashShow">Show what it said</button><textarea id="crashText" readonly></textarea></div>
 </div>
 <script type="module">
   const $ = id => document.getElementById(id);
+
+  // What the game said last, kept where a crash cannot take it. A tab the
+  // browser closes for memory, or a GPU process that dies, ends the page
+  // with no event and no log: the console goes with it. So the last lines
+  // are written to the page's storage as they happen (at most once a
+  // second, at once for anything fatal), and a run that ends properly marks
+  // itself ended. One that never did is shown on the next visit, and
+  // `window.floptleLastCrash()` hands it to a script that wants to send it.
+  const recordKey = 'floptle:lastRun:' + location.pathname;
+  const record = { running: true, stopped: '', lines: [] };
+  let unsaved = false;
+  const saveRun = () => {
+    unsaved = false;
+    try { localStorage.setItem(recordKey, JSON.stringify(record)); } catch (e) { /* storage off or full */ }
+  };
+  const crumb = (line, now) => {
+    record.lines.push(`${new Date().toISOString().slice(11, 23)} ${line}`);
+    if (record.lines.length > 200) record.lines.splice(0, record.lines.length - 200);
+    if (now) saveRun(); else unsaved = true;
+  };
+  let lastRun = null;
+  try { lastRun = JSON.parse(localStorage.getItem(recordKey) || 'null'); } catch (e) { /* none, or unreadable */ }
+  const lastCrash = lastRun && (lastRun.running || lastRun.stopped)
+    ? `${lastRun.stopped || 'The page ended without closing: the browser stopped it, most often for memory.'}\n\n${(lastRun.lines || []).join('\n')}`
+    : null;
+  window.floptleLastCrash = () => lastCrash;
+  saveRun();
+  setInterval(() => { if (unsaved) saveRun(); }, 1000);
+  addEventListener('pagehide', () => { record.running = false; saveRun(); });
+  addEventListener('pageshow', e => { if (e.persisted) { record.running = true; saveRun(); } });
+  for (const level of ['warn', 'error']) {
+    const original = console[level].bind(console);
+    console[level] = (...args) => { crumb(`${level}: ${args.join(' ')}`, level === 'error'); original(...args); };
+  }
+  addEventListener('unhandledrejection', e => crumb(`unhandled: ${(e.reason && e.reason.stack) || e.reason}`, true));
   const status = s => { $('status').textContent = s; };
   const fill = f => { $('fill').style.width = Math.round(Math.max(0, Math.min(1, f)) * 100) + '%'; };
   const busy = on => $('bar').classList.toggle('busy', on);
@@ -58,6 +99,8 @@
     // black page that named nothing, which is exactly the failure this panel
     // exists to prevent.
     failed = true;
+    record.stopped = why;
+    crumb(why, true);
     $('panel').hidden = false;
     $('panel').classList.remove('leaving');
     $('play').classList.remove('ready');
@@ -81,23 +124,36 @@
   // failures, all of it for a harness that was not listening.
   const post = (path, body) =>
     shotAt > 0 ? fetch(path, { method: 'POST', body }).catch(() => {}) : Promise.resolve();
-  window.floptleLog = s => { console.log(s); post('/report', s); };
+  window.floptleLog = s => { console.log(s); crumb(s); post('/report', s); };
   window.floptleFatal = s => { fail('The game stopped:\n' + s); post('/report', 'FATAL ' + s); };
+  // The browser took the graphics device back. To a player that is the end
+  // of the game, and they are told. Under the harness it is a line and the
+  // run goes on: a headless browser takes the device from a page about ten
+  // seconds in, and a long run there measures everything but the picture.
+  window.floptleDeviceLost = s => {
+    if (shotAt > 0) { crumb(s, true); post('/report', 'DEVICE LOST ' + s); } else window.floptleFatal(s);
+  };
   // The engine's boot, step by step. The panel stays up from the Play click
   // until `floptleReady`: the engine still has a graphics device to get, the
   // project to open and the world to load, and every second of that used to
   // be a black page with nothing on it saying the game was on its way.
   const since = () => `${(performance.now() / 1000).toFixed(2)} s`;
+  // The engine's memory: one block the browser grows and never shrinks, so
+  // its size is the most it has ever needed. A phone closes a tab that holds
+  // too much; this is the number to watch against that.
+  let heap = () => 0;
+  const mb = n => (n / 1048576).toFixed(1);
   window.floptleStatus = s => {
     if (failed || shown) return;
     status(s);
+    crumb(`loading: ${s} (engine memory ${mb(heap())} MB)`);
     console.log(`loading: ${s}`);
-    post('/report', `page ${since()}: ${s}`);
+    post('/report', `page ${since()}: ${s} (engine memory ${mb(heap())} MB)`);
   };
   window.floptleReady = () => {
     if (failed || shown) return;
     shown = true;
-    post('/report', `page ${since()}: the game is on screen`);
+    post('/report', `page ${since()}: the game is on screen (engine memory ${mb(heap())} MB)`);
     const panel = $('panel');
     panel.classList.add('leaving');
     setTimeout(() => {
@@ -133,6 +189,7 @@
   // bar moving over a game that has stopped. Only the engine's own errors,
   // and only while the panel is up: a page's other scripts are not ours.
   window.addEventListener('error', e => {
+    crumb(`error: ${e.message || e.error}`, true);
     const ours = e.error instanceof WebAssembly.RuntimeError || String(e.filename || '').includes('/pkg/');
     if (ours && !shown && !failed) fail('The game stopped while loading:\n' + (e.message || e.error));
   });
@@ -156,7 +213,7 @@
     let raf = 0;
     const tick = () => { raf++; requestAnimationFrame(tick); };
     requestAnimationFrame(tick);
-    setInterval(() => post('/report', `page: ${document.visibilityState}, ${raf} animation frames so far`), 5000);
+    setInterval(() => post('/report', `page: ${document.visibilityState}, ${raf} animation frames so far, engine memory ${mb(heap())} MB`), 5000);
   }
   // The canvas, read inside the frame that drew it (the engine calls this
   // straight after presenting). Outside that task a WebGPU canvas reads
@@ -218,6 +275,17 @@
   // instead. document.baseURI honours <base> everywhere.
   const here = path => new URL(path, document.baseURI).href;
 
+  if (lastCrash) {
+    post('/report', `LAST RUN STOPPED: ${lastCrash.split('\n')[0]}`);
+    $('crash').classList.add('shown');
+    $('crashShow').addEventListener('click', () => {
+      $('crash').classList.toggle('open');
+      $('crashText').value = lastCrash;
+      $('crashText').select();
+      if (navigator.clipboard) navigator.clipboard.writeText(lastCrash).catch(() => {});
+    });
+  }
+
   // Two things a browser must have, checked up front and named when missing,
   // rather than a blank canvas: WebGPU (the renderer's only backend on the
   // web), and WebAssembly exception handling (the scripting engine's C++
@@ -262,7 +330,6 @@
     const total = sizes.every(n => n > 0) ? sizes[0] + sizes[1] : 0;
     busy(!total);
     let got = 0;
-    const mb = n => (n / 1048576).toFixed(1);
     const progress = n => {
       got += n;
       if (total && got <= total) {
@@ -279,8 +346,27 @@
       wasmRes.body.pipeThrough(new TransformStream({ transform(c, out) { progress(c.length); out.enqueue(c); } })),
       { headers: { 'Content-Type': 'application/wasm' } },
     );
+    // The game, into one buffer the engine reads from where it is. With its
+    // size known, straight into a buffer of that size: holding the pieces
+    // and joining them made a second whole copy of the game at the moment
+    // the page needed the most memory, and a phone closes a page for that.
     const readGame = async () => {
       const reader = gameRes.body.getReader();
+      const want = sizes[1];
+      if (want) {
+        const bytes = new Uint8Array(want);
+        let at = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (at + value.length > want) throw new Error(`game.flpk: more than the ${want} bytes the server said`);
+          bytes.set(value, at);
+          at += value.length;
+          progress(value.length);
+        }
+        if (at !== want) throw new Error(`game.flpk: ${at} of ${want} bytes arrived`);
+        return bytes;
+      }
       const chunks = [];
       let n = 0;
       for (;;) {
@@ -295,7 +381,14 @@
       for (const c of chunks) { bytes.set(c, at); at += c.length; }
       return bytes;
     };
-    const [, bytes] = await Promise.all([init({ module_or_path: counted }), readGame()]);
+    const [wasm, bytes] = await Promise.all([init({ module_or_path: counted }), readGame()]);
+    heap = () => wasm.memory.buffer.byteLength;
+    // The engine's memory, into the record each time it grows: the line
+    // before a page the browser closed for memory says how much it held.
+    let heapSeen = 0;
+    setInterval(() => {
+      if (heap() !== heapSeen) { heapSeen = heap(); crumb(`engine memory ${mb(heapSeen)} MB`); }
+    }, 2000);
     busy(false);
     fill(1);
     // A click before the game starts, on purpose: browsers allow sound only

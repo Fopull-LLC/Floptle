@@ -79,13 +79,20 @@ def handler_for(web):
     return H
 
 
-def browser_cmd(name, url, headless):
+def browser_cmd(name, url, headless, keep_profile=False):
     if name in ("brave", "chrome", "chromium"):
         exe = shutil.which(name) or shutil.which("brave") or shutil.which("google-chrome") or shutil.which("chromium")
         if not exe:
             sys.exit("no Chromium-family browser found")
+        # A fresh profile every run. The browser restores the last session's
+        # tabs from its profile, so every earlier run's page opened again
+        # beside this one: a dozen copies of a game sharing one GPU process,
+        # each with its own memory, and every measurement counted them all.
+        prof = Path(os.environ.get("TMPDIR", "/tmp")) / "floptle-web-probe-profile"
+        if not keep_profile:
+            shutil.rmtree(prof, ignore_errors=True)
         cmd = [exe, "--no-first-run", "--no-default-browser-check", "--enable-unsafe-webgpu",
-               "--user-data-dir=" + str(Path(os.environ.get("TMPDIR", "/tmp")) / "floptle-web-probe-profile")]
+               "--user-data-dir=" + str(prof)]
         if headless:
             cmd += ["--headless=new", "--no-sandbox", "--use-angle=vulkan", "--enable-features=Vulkan"]
         else:
@@ -127,6 +134,8 @@ def main():
     ap.add_argument("--game", metavar="DIR", help="a web export folder to play instead of the probe")
     ap.add_argument("--console", metavar="FILE", help="write the browser's own console/stderr here (Chromium family)")
     ap.add_argument("--frames", type=int, default=60, help="--game: which frame to photograph")
+    ap.add_argument("--keep-profile", action="store_true",
+                    help="keep the last run's browser profile: what a page stored survives, as after a crash")
     a = ap.parse_args()
 
     web = Path(a.game).resolve() if a.game else target_dir() / "web"
@@ -143,7 +152,7 @@ def main():
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{port}/index.html?shot={a.frames}" if a.game else f"http://127.0.0.1:{port}/probe.html"
 
-    cmd = browser_cmd(a.browser, url, not a.display)
+    cmd = browser_cmd(a.browser, url, not a.display, a.keep_profile)
     # Extra browser flags, for the machine this runs on: a compositor that
     # keeps a new window behind the terminal starves it of animation frames,
     # and `--kiosk --window-position=0,0` puts it in front.

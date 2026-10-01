@@ -21,6 +21,12 @@ use crate::lua_support::{seed_default_scripts, write_lua_support};
 use crate::prefs::{open_external_editor};
 use crate::{anim, Editor, History, MeshAsset};
 
+/// How many bytes of model a browser frame puts on the GPU before it hands
+/// the page back. The browser's memory for those writes grows to the
+/// largest frame's worth; 32 MB a frame was measured to keep it there.
+#[cfg(target_arch = "wasm32")]
+const WEB_UPLOAD_BUDGET: u64 = 32 << 20;
+
 impl Editor {
     /// Decode a model's embedded textures and write them to `<project>/textures/`
     /// as PNGs (so they can be reused as material textures — e.g. a grass material
@@ -279,6 +285,9 @@ impl Editor {
         if self.gpu.is_none() || self.raster.is_none() {
             return self.import_rig_headless(path, &file);
         }
+        if self.share_loaded_model(path, &file) {
+            return true;
+        }
         let t = floptle_core::profile::Span::new();
         let decoded = floptle_assets::import_model(&file).map_err(|e| e.to_string());
         let ok = self.install_model(path, &file, decoded);
@@ -300,6 +309,7 @@ impl Editor {
         if self.mesh_registry.contains_key(path)
             || self.model_jobs.contains_key(path)
             || self.model_failed.contains(path)
+            || self.model_queued(path)
         {
             return;
         }
@@ -314,13 +324,13 @@ impl Editor {
             self.model_failed.insert(path.to_string());
             return;
         }
-        // No threads in a browser, and nothing to hand the decode to.
-        #[cfg(target_arch = "wasm32")]
-        {
-            if !self.import_model(path) {
-                self.model_failed.insert(path.to_string());
-            }
+        if self.share_loaded_model(path, &file) {
+            return;
         }
+        // No threads in a browser, and nothing to hand the decode to: it
+        // waits its turn, and the pump imports a few a frame.
+        #[cfg(target_arch = "wasm32")]
+        self.model_queue.push_back(path.to_string());
         #[cfg(not(target_arch = "wasm32"))]
         {
             let (tx, rx) = std::sync::mpsc::channel();
@@ -344,6 +354,8 @@ impl Editor {
     /// in every host that plays the game. The upload is the cheap half; it is
     /// timed into the `models` bucket with the synchronous imports.
     pub(crate) fn pump_model_imports(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        self.pump_model_queue();
         if self.model_jobs.is_empty() || self.gpu.is_none() || self.raster.is_none() {
             return;
         }
@@ -372,6 +384,100 @@ impl Editor {
         self.profile_record(floptle_core::profile::Bucket::Models, t.ms());
     }
 
+    /// The browser's half of the pump: import queued models until this frame
+    /// has written [`WEB_UPLOAD_BUDGET`] bytes to the GPU, and at least one.
+    ///
+    /// A browser keeps the memory it moved a frame's GPU writes through, and
+    /// sizes it to the largest frame it has seen. Every model a menu preloads,
+    /// imported in one frame, made that 800 MB and more, held for the rest of
+    /// the session in the page's own process: on an iPhone the page was
+    /// closed for it before the world finished loading. A frame's worth at a
+    /// time, the browser reuses the same few megabytes.
+    #[cfg(target_arch = "wasm32")]
+    fn pump_model_queue(&mut self) {
+        if self.gpu.is_none() || self.raster.is_none() {
+            return;
+        }
+        let t = floptle_core::profile::Span::new();
+        let mut spent = 0u64;
+        while spent < WEB_UPLOAD_BUDGET
+            && let Some(path) = self.model_queue.pop_front()
+        {
+            if self.mesh_registry.contains_key(&path) || self.model_failed.contains(&path) {
+                continue;
+            }
+            let file = resolve_asset_path(&self.project_root, &path);
+            if self.share_loaded_model(&path, &file) {
+                continue;
+            }
+            let decoded = floptle_assets::import_model(&file).map_err(|e| e.to_string());
+            spent += decoded.as_ref().map_or(0, floptle_assets::Model::upload_bytes);
+            if !self.install_model(&path, &file, decoded) {
+                self.model_failed.insert(path);
+            }
+            self.model_queue_done.0 += 1;
+        }
+        self.model_queue_done.1 += spent;
+        if spent > 0 && self.model_queue.is_empty() {
+            let (n, bytes) = std::mem::take(&mut self.model_queue_done);
+            let (pictures, picture_bytes) =
+                self.raster.as_ref().map_or((0, 0), |r| (r.mesh_texture_count(), r.mesh_texture_bytes()));
+            log::info!(
+                "models: {n} loaded ({:.1} MB as imported); {pictures} distinct pictures, {:.1} MB on the GPU",
+                bytes as f64 / 1048576.0,
+                picture_bytes as f64 / 1048576.0
+            );
+        }
+        self.profile_record(floptle_core::profile::Bucket::Models, t.ms());
+    }
+
+    /// File `path` under the model already on the GPU from the same `file`
+    /// by another name, sharing its parts, and answer whether there was one.
+    /// Only a model without a rig: a rig is posed per model.
+    fn share_loaded_model(&mut self, path: &str, file: &Path) -> bool {
+        let Some(shared) = self
+            .model_files
+            .get(&floptle_vfs::normalize(file))
+            .and_then(|first| self.mesh_registry.get(first))
+            .filter(|a| a.rig.is_none())
+            .map(|a| MeshAsset {
+                parts: a.parts.clone(),
+                part_meta: a.part_meta.clone(),
+                tex_filter: a.tex_filter,
+                size: a.size,
+                rig: None,
+            })
+        else {
+            return false;
+        };
+        self.mesh_registry.insert(path.to_string(), shared);
+        true
+    }
+
+    /// Whether `path` is waiting in the browser's model queue.
+    fn model_queued(&self, path: &str) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        return self.model_queue.iter().any(|p| p == path);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = path;
+            false
+        }
+    }
+
+    /// A model a scene being opened names. In a browser it joins the queue:
+    /// a whole scene's models imported at once are one frame's GPU writes,
+    /// and the browser keeps memory the size of that frame (see
+    /// `pump_model_queue`). Everywhere else it is imported now.
+    fn scene_model(&mut self, path: &str) {
+        #[cfg(target_arch = "wasm32")]
+        if self.gpu.is_some() && self.raster.is_some() {
+            self.request_model(path);
+            return;
+        }
+        self.import_model(path);
+    }
+
     /// Whether a model is ready to draw (`Some(true)`), failed (`Some(false)`),
     /// or still on its way (`None`) — what `assets.preload` waits on.
     ///
@@ -383,7 +489,7 @@ impl Editor {
             Some(true)
         } else if self.model_failed.contains(path) {
             Some(false)
-        } else if self.model_jobs.contains_key(path) {
+        } else if self.model_jobs.contains_key(path) || self.model_queued(path) {
             None
         } else {
             // Never asked for: a path that has not been requested cannot be
@@ -533,6 +639,7 @@ impl Editor {
                         rig: None,
                     },
                 );
+                self.model_files.entry(floptle_vfs::normalize(file)).or_insert_with(|| path.to_string());
                 floptle_say::say_err!("  imported {path}");
             }
             Err(e) => {
@@ -610,6 +717,7 @@ impl Editor {
         self.selection.clear();
         self.history = History::default();
         self.mesh_registry.clear();
+        self.model_files.clear();
         self.paint_meshes.clear(); // stale CPU geometry would paint the wrong vertices
         self.mesh_wire_cache.clear(); // keep the collider-wire cache in lockstep
         self.scene_dirty = false;
@@ -731,7 +839,7 @@ impl Editor {
             })
             .collect();
         for p in mesh_paths {
-            self.import_model(&p);
+            self.scene_model(&p);
         }
     }
 
@@ -1730,6 +1838,7 @@ impl Editor {
         // A different project's models live behind the same path strings, so drop the
         // old GPU-mesh cache before re-importing (else import_model early-returns).
         self.mesh_registry.clear();
+        self.model_files.clear();
         self.paint_meshes.clear(); // stale CPU geometry would paint the wrong vertices
         self.mesh_wire_cache.clear(); // keep the collider-wire cache in lockstep
         // Re-register any meshes the new scene references.
@@ -1742,7 +1851,7 @@ impl Editor {
             })
             .collect();
         for p in mesh_paths {
-            self.import_model(&p);
+            self.scene_model(&p);
         }
         // stderr, not stdout. This is progress chatter, and stdout belongs to
         // whatever the caller asked for — a command-line verb's `--json`
@@ -1833,6 +1942,7 @@ impl Editor {
         self.playing = false;
         self.paused = false;
         self.mesh_registry.clear();
+        self.model_files.clear();
         self.paint_meshes.clear(); // stale CPU geometry would paint the wrong vertices
         self.mesh_wire_cache.clear(); // keep the collider-wire cache in lockstep
     }
@@ -3293,6 +3403,27 @@ mod model_import_tests {
         // is told rather than left waiting.
         ed.request_model("models/_test/NotThere.glb");
         assert_eq!(ed.model_status("models/_test/NotThere.glb"), Some(false));
+    }
+
+    /// **One file is one model, however a game spells it.** freeflier named
+    /// its buildings `models/…` in a preload list and set them with
+    /// `assets.getFile`, which answers another spelling of the same file,
+    /// and each spelling was imported and uploaded on its own: fourteen
+    /// models on the GPU twice. The second spelling shares the first's parts.
+    #[test]
+    fn a_second_spelling_of_a_loaded_model_shares_its_parts() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        ed.project_root = std::path::PathBuf::from("../floptle-assets/tests/fixtures");
+        assert!(ed.import_model("SaesRapier.glb"));
+        assert!(ed.import_model("./SaesRapier.glb"));
+        let absolute = std::fs::canonicalize(&ed.project_root).unwrap().join("SaesRapier.glb");
+        let absolute = absolute.to_string_lossy().to_string();
+        ed.request_model(&absolute);
+        let parts = |k: &str| ed.mesh_registry.get(k).map(|a| a.parts.iter().map(|m| m.0).collect::<Vec<_>>());
+        let first = parts("SaesRapier.glb").expect("the first spelling is loaded");
+        assert_eq!(parts("./SaesRapier.glb"), Some(first.clone()), "a second import of the same file");
+        assert_eq!(parts(&absolute), Some(first), "a request is answered at once, with nothing to decode");
+        assert!(ed.model_jobs.is_empty());
     }
 
     /// **A model that cannot be read says so on the Console, once.** It used to

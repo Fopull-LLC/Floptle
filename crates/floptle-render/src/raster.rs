@@ -853,6 +853,12 @@ pub struct Raster {
     instance_buf: wgpu::Buffer,
     instance_cap: u32,
     meshes: Vec<RegisteredMesh>,
+    /// Every model picture on the GPU, by its pixels, so a picture is put
+    /// there once however many meshes wear it. Models often embed one picture
+    /// per file and one material per part: a ragdoll of eleven parts, each
+    /// its own file carrying the same 4096×4096 skin, was eleven copies of
+    /// 64 MB. Kept as long as the meshes are, which is the session.
+    mesh_textures: HashMap<u64, wgpu::Texture>,
     /// Standalone material textures (decoupled from meshes), bound per-instance so
     /// a Material can re-texture any shape. Indexed by [`TexId`].
     textures: Vec<TexBind>,
@@ -1500,6 +1506,7 @@ impl Raster {
             instance_buf,
             instance_cap,
             meshes: Vec::new(),
+            mesh_textures: HashMap::new(),
             textures: Vec::new(),
             flsl_shaders: Vec::new(),
             flsl_bindings: Vec::new(),
@@ -3056,7 +3063,7 @@ impl Raster {
             None => 0,
         };
 
-        let owned = texture.map(|t| upload_texture(gpu, t));
+        let owned = texture.map(|t| self.mesh_texture(gpu, t));
         let view = owned
             .as_ref()
             .unwrap_or(&self.default_tex)
@@ -3072,6 +3079,27 @@ impl Raster {
             dynamic: None,
         });
         id
+    }
+
+    /// The GPU copy of a model's picture: the one already there when another
+    /// mesh brought the same pixels, otherwise a new one.
+    fn mesh_texture(&mut self, gpu: &Gpu, t: &TextureData) -> wgpu::Texture {
+        use std::hash::Hasher;
+        let mut h = rustc_hash::FxHasher::default();
+        h.write_u32(t.width);
+        h.write_u32(t.height);
+        h.write(&t.pixels);
+        self.mesh_textures.entry(h.finish()).or_insert_with(|| upload_texture(gpu, t)).clone()
+    }
+
+    /// How many distinct model pictures are on the GPU.
+    pub fn mesh_texture_count(&self) -> usize {
+        self.mesh_textures.len()
+    }
+
+    /// The bytes those pictures hold on the GPU.
+    pub fn mesh_texture_bytes(&self) -> u64 {
+        self.mesh_textures.values().map(|t| u64::from(t.width()) * u64::from(t.height()) * 4).sum()
     }
 
     /// Re-derive a registered mesh's texture bind group with different sampling —

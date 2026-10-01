@@ -118,6 +118,60 @@ the region does not take browser players yet. A page that cannot read the list
 (one on an address the Cloud does not allow) uses the list it was exported
 with, which names `wss://us-east.relay.fopull.com:7789/` for us-east.
 
+A page's sign-in lasts fifteen minutes and renews itself before the call that
+needs it, so a player who signed in at the start can still publish an hour
+later. Only fopull.com refusing the renewal signs them out; a failed request
+leaves them signed in for the next try.
+
+---
+
+## Memory in a page
+
+A phone closes a tab that holds too much, with no warning and no message, and
+usually reloads it, which reads as a game stuck in a loop. On an iPhone the
+limit is around 1–1.5 GB for the whole page, depending on the model. A desktop
+browser allows far more, so a game can be fine everywhere it was tested and
+never load on a phone.
+
+What the engine does about it:
+
+- **The bundle is held once.** The page downloads `game.flpk` into one buffer
+  and the engine reads each file from there when it is asked for. It used to
+  be copied into the engine's own memory as well, which never shrinks, so a
+  384 MB game held at least 768 MB from the moment it started.
+- **Models load a few a frame.** All of a scene's models, or everything an
+  `assets.preload` list names, used to go to the GPU in one frame. A browser
+  keeps the memory it moved one frame's GPU writes through, sized to the
+  largest frame it has seen, so one big frame cost hundreds of megabytes for
+  the rest of the session. The loading screen stays up until the last one is
+  in.
+- **A picture goes to the GPU once.** Model files that embed the same picture
+  share one copy, however many files or parts carry it.
+- **One file is one model**, however a game spells its path.
+
+A freeflier menu that needed 2.2 GB in its page now needs about 0.95 GB.
+
+What is still yours:
+
+- **Pictures are the largest part.** A 4096×4096 picture is 64 MB once
+  decoded, whatever size its PNG is. For a web build, 1024 or 2048 is usually
+  enough.
+- **Preload what the next minute needs**, not the whole game from the menu.
+- The page's transcript says how much memory the engine holds at each loading
+  step, and `models: N loaded … MB on the GPU` once a scene's models are in.
+
+### When a page stops
+
+A browser that takes the graphics device back now gets a message on the page
+("the graphics device was lost — reload") rather than a black canvas. A page
+the browser closes leaves nothing behind it, so the page writes its last 200
+log lines, warnings, errors and memory readings to its own storage as they
+happen. On the next visit after a run that never closed properly, the loading
+screen says *the game stopped unexpectedly last time* and can show the record.
+A site that hosts the page can read the same text from
+`window.floptleLastCrash()` (`null` when the last run closed properly) and
+send it with the player's agreement.
+
 ---
 
 ## The part that affects you today: the scripting engine

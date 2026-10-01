@@ -11,10 +11,16 @@
 //! the whole bundle stays as one allocation the page handed over and nothing
 //! is copied until a read asks for it. Little-endian throughout.
 //!
+//! In a browser that allocation is the page's, not the engine's
+//! ([`Bundle::from_page`]): the engine's memory only ever grows, so a bundle
+//! copied into it would hold its full size there for the whole session, on
+//! top of the page's own copy. A read copies out the one file it asks for.
+//!
 //! There is a version byte, and it is checked: a compact format is not
 //! self-describing, and a bundle written by a newer engine must be refused by
 //! name rather than misread.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 const MAGIC: &[u8; 4] = b"FLPK";
@@ -43,44 +49,65 @@ pub fn pack<'a>(entries: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> Vec<u
     out
 }
 
+/// Where a bundle's bytes are.
+#[derive(Debug)]
+enum Store {
+    /// In this program's own memory.
+    Owned(Vec<u8>),
+    /// In the page's memory, outside the engine's.
+    #[cfg(target_arch = "wasm32")]
+    Page(js_sys::Uint8Array),
+}
+
+impl Store {
+    fn bytes(&self, start: usize, end: usize) -> Cow<'_, [u8]> {
+        match self {
+            Store::Owned(v) => Cow::Borrowed(&v[start..end]),
+            #[cfg(target_arch = "wasm32")]
+            Store::Page(a) => Cow::Owned(a.subarray(start as u32, end as u32).to_vec()),
+        }
+    }
+}
+
+/// path → (start, end) into a bundle's bytes.
+type Index = BTreeMap<String, (usize, usize)>;
+
 /// A parsed bundle: an index over one buffer.
 #[derive(Debug)]
 pub struct Bundle {
-    data: Vec<u8>,
-    /// path → (start, end) into `data`.
-    index: BTreeMap<String, (usize, usize)>,
+    data: Store,
+    index: Index,
 }
 
-impl Bundle {
-    /// An empty bundle — what is mounted before any fetch completes.
-    pub fn empty() -> Self {
-        Self { data: Vec::new(), index: BTreeMap::new() }
-    }
-
-    pub fn parse(data: Vec<u8>) -> Result<Self, String> {
-        let mut at = 0usize;
-        let take = |at: &mut usize, n: usize| -> Result<&[u8], String> {
-            let s = data.get(*at..*at + n).ok_or_else(|| format!("bundle truncated at byte {at}"))?;
-            *at += n;
-            Ok(s)
-        };
+/// The index read from the front of a bundle `total` bytes long, of which
+/// `head` is the first part. `None` when `head` ends before the index does.
+fn parse_index(head: &[u8], total: usize) -> Result<Option<Index>, String> {
+    struct Short;
+    let mut at = 0usize;
+    let take = |at: &mut usize, n: usize| -> Result<&[u8], Short> {
+        let s = head.get(*at..*at + n).ok_or(Short)?;
+        *at += n;
+        Ok(s)
+    };
+    let index = (|| -> Result<Result<_, String>, Short> {
         if take(&mut at, 4)? != MAGIC {
-            return Err("not a Floptle bundle (bad magic)".into());
+            return Ok(Err("not a Floptle bundle (bad magic)".into()));
         }
         let version = take(&mut at, 1)?[0];
         if version != VERSION {
-            return Err(format!(
+            return Ok(Err(format!(
                 "bundle version {version} — this engine reads version {VERSION}; the export and the \
                  player come from different engine releases"
-            ));
+            )));
         }
         let count = u32::from_le_bytes(take(&mut at, 4)?.try_into().unwrap()) as usize;
-        let mut raw = Vec::with_capacity(count);
+        let mut raw = Vec::with_capacity(count.min(1 << 16));
         for _ in 0..count {
             let len = u32::from_le_bytes(take(&mut at, 4)?.try_into().unwrap()) as usize;
-            let path = std::str::from_utf8(take(&mut at, len)?)
-                .map_err(|e| format!("bundle path is not UTF-8: {e}"))?
-                .to_string();
+            let path = match std::str::from_utf8(take(&mut at, len)?) {
+                Ok(p) => p.to_string(),
+                Err(e) => return Ok(Err(format!("bundle path is not UTF-8: {e}"))),
+            };
             let offset = u64::from_le_bytes(take(&mut at, 8)?.try_into().unwrap()) as usize;
             let size = u64::from_le_bytes(take(&mut at, 8)?.try_into().unwrap()) as usize;
             raw.push((path, offset, size));
@@ -90,12 +117,46 @@ impl Bundle {
         for (path, offset, size) in raw {
             let start = blob + offset;
             let end = start + size;
-            if end > data.len() {
-                return Err(format!("bundle entry {path} runs past the end ({end} > {})", data.len()));
+            if end > total {
+                return Ok(Err(format!("bundle entry {path} runs past the end ({end} > {total})")));
             }
             index.insert(path, (start, end));
         }
-        Ok(Self { data, index })
+        Ok(Ok(index))
+    })();
+    match index {
+        Ok(Ok(index)) => Ok(Some(index)),
+        Ok(Err(e)) => Err(e),
+        Err(Short) => Ok(None),
+    }
+}
+
+impl Bundle {
+    /// An empty bundle — what is mounted before any fetch completes.
+    pub fn empty() -> Self {
+        Self { data: Store::Owned(Vec::new()), index: BTreeMap::new() }
+    }
+
+    pub fn parse(data: Vec<u8>) -> Result<Self, String> {
+        let index = parse_index(&data, data.len())?.ok_or("bundle truncated inside its index")?;
+        Ok(Self { data: Store::Owned(data), index })
+    }
+
+    /// A bundle the page holds, read where it is. Only the index is copied
+    /// in, and it is found by reading the front of the bundle in growing
+    /// pieces until a piece holds all of it.
+    #[cfg(target_arch = "wasm32")]
+    pub fn from_page(data: js_sys::Uint8Array) -> Result<Self, String> {
+        let total = data.length() as usize;
+        let mut n = total.min(64 << 10);
+        loop {
+            let head = data.subarray(0, n as u32).to_vec();
+            match parse_index(&head, total)? {
+                Some(index) => return Ok(Self { data: Store::Page(data), index }),
+                None if n == total => return Err("bundle truncated inside its index".into()),
+                None => n = (n * 4).min(total),
+            }
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -107,8 +168,15 @@ impl Bundle {
     }
 
     /// The bytes of `path` (already normalised), if the bundle holds it.
-    pub fn get(&self, path: &str) -> Option<&[u8]> {
-        self.index.get(path).map(|&(s, e)| &self.data[s..e])
+    /// Borrowed where the bundle is in this program's memory, and a copy of
+    /// that one file where the page holds it.
+    pub fn get(&self, path: &str) -> Option<Cow<'_, [u8]>> {
+        self.index.get(path).map(|&(s, e)| self.data.bytes(s, e))
+    }
+
+    /// The size of `path` in bytes, without reading it.
+    pub fn size(&self, path: &str) -> Option<usize> {
+        self.index.get(path).map(|&(s, e)| e - s)
     }
 
     pub fn contains(&self, path: &str) -> bool {
@@ -157,9 +225,9 @@ mod tests {
         let packed = pack([("scenes/first.ron", &b"(nodes: [])"[..]), ("project.ron", b"()"), ("a/b/c.bin", &[1, 2, 3])]);
         let b = Bundle::parse(packed).unwrap();
         assert_eq!(b.len(), 3);
-        assert_eq!(b.get("scenes/first.ron"), Some(&b"(nodes: [])"[..]));
-        assert_eq!(b.get("a/b/c.bin"), Some(&[1u8, 2, 3][..]));
-        assert_eq!(b.get("missing"), None);
+        assert_eq!(b.get("scenes/first.ron").as_deref(), Some(&b"(nodes: [])"[..]));
+        assert_eq!(b.get("a/b/c.bin").as_deref(), Some(&[1u8, 2, 3][..]));
+        assert_eq!(b.get("missing").as_deref(), None);
         assert!(b.is_dir("a") && b.is_dir("a/b") && b.is_dir(""));
         assert!(!b.is_dir("a/b/c.bin") && !b.is_dir("scenes/first"));
         assert_eq!(b.paths().collect::<Vec<_>>(), vec!["a/b/c.bin", "project.ron", "scenes/first.ron"]);
@@ -168,7 +236,7 @@ mod tests {
     #[test]
     fn an_empty_file_and_an_empty_bundle_are_fine() {
         let b = Bundle::parse(pack([("empty", &[][..])])).unwrap();
-        assert_eq!(b.get("empty"), Some(&[][..]));
+        assert_eq!(b.get("empty").as_deref(), Some(&[][..]));
         let e = Bundle::parse(pack([])).unwrap();
         assert!(e.is_empty());
     }
@@ -183,6 +251,20 @@ mod tests {
         let mut short = pack([("x", &b"y"[..])]);
         short.truncate(short.len() - 1);
         assert!(Bundle::parse(short).unwrap_err().contains("past the end"));
+    }
+
+    /// A bundle the page holds is read from its front in growing pieces until
+    /// one holds the whole index. A piece that stops short must ask for more,
+    /// whatever byte it stops on, and never be mistaken for a broken bundle.
+    #[test]
+    fn a_short_read_of_the_index_asks_for_more() {
+        let packed = pack([("scenes/first.ron", &b"(nodes: [])"[..]), ("ünïcode/päth.bin", &[9; 300]), ("a", b"1")]);
+        let whole = parse_index(&packed, packed.len()).unwrap().expect("the whole bundle holds its index");
+        let end = whole.values().map(|&(s, _)| s).min().unwrap();
+        for n in 0..end {
+            assert_eq!(parse_index(&packed[..n], packed.len()), Ok(None), "{n} bytes of a {end}-byte index");
+        }
+        assert_eq!(parse_index(&packed[..end], packed.len()), Ok(Some(whole)));
     }
 
     #[test]

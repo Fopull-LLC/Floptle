@@ -35,7 +35,7 @@ impl MemFs {
         if let Some(v) = self.overlay.get(&k) {
             return Ok(v.clone());
         }
-        self.bundle.get(&k).map(<[u8]>::to_vec).ok_or_else(|| not_found(path))
+        self.bundle.get(&k).map(std::borrow::Cow::into_owned).ok_or_else(|| not_found(path))
     }
 
     /// Write into the overlay. Returns the key, for whoever persists it.
@@ -57,7 +57,7 @@ impl MemFs {
         if let Some(v) = self.overlay.get(&k) {
             return Some(v.len() as u64);
         }
-        self.bundle.get(&k).map(|b| b.len() as u64)
+        self.bundle.size(&k).map(|n| n as u64)
     }
 
     pub(crate) fn is_file(&self, path: &Path) -> bool {

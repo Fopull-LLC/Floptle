@@ -814,6 +814,14 @@ pub mod web {
         /// task that drew it. `false` when the page cannot.
         #[wasm_bindgen(js_namespace = window, js_name = floptleCaptureCanvas, catch)]
         fn page_capture_canvas() -> Result<bool, JsValue>;
+        /// `window.floptleDeviceLost(text)`: the browser took the graphics
+        /// device back, and this is what it said.
+        #[wasm_bindgen(js_namespace = window, js_name = floptleDeviceLost, catch)]
+        fn page_device_lost(text: &str) -> Result<(), JsValue>;
+        /// `window.floptleFatal(text)`: the game has stopped, and this is why.
+        /// For a page that has no `floptleDeviceLost`.
+        #[wasm_bindgen(js_namespace = window, js_name = floptleFatal, catch)]
+        fn page_fatal(text: &str) -> Result<(), JsValue>;
     }
 
     /// The harness's picture, taken from the canvas inside the frame that
@@ -998,6 +1006,21 @@ pub mod web {
                             gpu.resize(size.width, size.height);
                         }
                     }
+                    // A browser takes the device back when the GPU process
+                    // restarts or runs short of memory, and every frame after
+                    // that draws nothing: a black page that says nothing. It
+                    // says so instead.
+                    gpu.device.set_device_lost_callback(|reason, message| {
+                        if reason != wgpu::DeviceLostReason::Destroyed {
+                            let text = format!(
+                                "The graphics device was lost ({}). Reload the page to play again.",
+                                if message.is_empty() { "no reason given" } else { message.as_str() }
+                            );
+                            if page_device_lost(&text).is_err() {
+                                let _ = page_fatal(&text);
+                            }
+                        }
+                    });
                     self.ed.attach_gpu(gpu);
                     status("loading the game…");
                     self.web_boot.step = Step::Project;
