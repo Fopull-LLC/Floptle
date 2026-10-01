@@ -2317,10 +2317,10 @@ impl Editor {
         // live so the cut is aimed before it is made, not discovered after.
         if self.map_knife_on {
             let pending = self.map_knife;
-            viz.knife_from = pending.and_then(|k| k.at.position(mesh)).and_then(&project);
+            viz.knife_from = pending.and_then(|k| k.at.position(mesh)).and_then(project);
             if let Some(cursor) = self.cursor.filter(|_| self.cursor_over_scene())
                 && let Some((face, at)) = self.map_knife_pick(cursor, pending.map(|k| k.face))
-                && let Some(p) = at.position(mesh).and_then(&project)
+                && let Some(p) = at.position(mesh).and_then(project)
             {
                 // Ask the CUT itself whether it would happen, every frame, so
                 // the line greys out and says why while you are still aiming
