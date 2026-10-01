@@ -1,5 +1,12 @@
 ## Just shipped
 
+**v0.106.0 — "Plays Your Levels"** (stable). `scene.load("user://…")` loads a
+level the player downloaded from their own files, with its map beside it, so
+community levels no longer go into the game's install folder. A browser game
+keeps its mouse after it lets go of the pointer, `camera.capture` draws the
+scene's real sky, and an exported game leaves out the editor tools that came
+with its packages.
+
 **v0.105.1 — "Keeps You Posted"** (stable). A browser build no longer shows a
 black page after Play while the game starts. The loading screen stays up until
 the game is running, names each step as it goes, and keeps moving while the
