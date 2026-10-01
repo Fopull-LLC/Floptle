@@ -1,6 +1,6 @@
 ## Just shipped
 
-**v0.109.0 — "Solid Ground"** (stable). Distant terrain no longer shows caves
+**v0.109.1 — "Solid Ground"** (stable). Distant terrain no longer shows caves
 through thin rock or slivers of sky where detail levels meet, and its mesh no
 longer folds into shards. Sunlight stays out of scaled buildings, a game lit
 by stars uses the shadow map, and the map now includes casters off screen.
