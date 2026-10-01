@@ -707,9 +707,9 @@ impl ChunkTerrain {
 }
 
 /// The triangles of one chunk as drawn: stride 1, no skirt — the LOD-0
-/// extraction, which is what the renderer draws up close (`skirt: lod > 0` in
-/// the remesh queue). A skirt is a curtain hung over the crack between two
-/// LODs; as collision it would be an invisible wall around every chunk.
+/// surface, which is what the renderer draws up close (it adds skirts to every
+/// chunk it draws). A skirt is a curtain hung over the crack between two LODs;
+/// as collision it would be an invisible wall around every chunk.
 ///
 /// One function, because two callers must not disagree about it: the
 /// collider meshes through this, and so does [`drawn_surface`], which is what

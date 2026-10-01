@@ -377,7 +377,6 @@ pub(crate) struct RemeshJob {
     pub entity: Entity,
     pub coord: [i32; 3],
     pub lod: u8,
-    pub skirt: bool,
     pub epoch: u64,
     pub scratch: floptle_field::MeshScratch,
 }
@@ -405,8 +404,8 @@ pub(crate) struct TerrainWorker {
     pub in_flight: usize,
 }
 
-/// At most this many queued-but-unfinished jobs. Each job's scratch is ~0.5–1.2 MB,
-/// so the cap also bounds transient memory.
+/// At most this many queued-but-unfinished jobs. Each job's scratch is ~1 MB at full
+/// detail and ~4 MB at stride 8, so the cap also bounds transient memory.
 const WORKER_IN_FLIGHT_CAP: usize = 16;
 
 /// Subtracted from a dirty (brush/script-edited) chunk's queue priority: edits sort
@@ -479,7 +478,7 @@ impl TerrainWorker {
     /// One job: mesh the scratch and hand the result back. `false` when the
     /// receiving side is gone.
     fn run(job: RemeshJob, done: &std::sync::mpsc::Sender<RemeshDone>) -> bool {
-        let mesh = floptle_field::mesh_scratch(&job.scratch, job.skirt);
+        let mesh = floptle_field::mesh_scratch(&job.scratch, true);
         done.send(RemeshDone { entity: job.entity, coord: job.coord, lod: job.lod, epoch: job.epoch, mesh })
             .is_ok()
     }
@@ -737,7 +736,9 @@ impl Editor {
                     let lod = cur.unwrap_or_else(|| raw_lod(dist, rings));
                     if lod == 0 {
                         render.pending.remove(&coord); // a sync mesh supersedes any job
-                        let cm = floptle_field::mesh_chunk(&terrain.field, coord, 1, false);
+                        // Skirted like every drawn chunk: a full-detail chunk next to a
+                        // coarse one needs its own curtain to close the seam from its side.
+                        let cm = floptle_field::mesh_chunk(&terrain.field, coord, 1, true);
                         if cm.is_empty() {
                             if let Some((mid, _)) = render.slots.remove(&coord) {
                                 raster.free_dynamic(mid);
@@ -782,7 +783,7 @@ impl Editor {
                             // The ground around the player never streams: a fresh
                             // load (or a dig that created a chunk) meshes it now.
                             let cm =
-                                floptle_field::mesh_chunk(&terrain.field, coord, 1, false);
+                                floptle_field::mesh_chunk(&terrain.field, coord, 1, true);
                             if cm.is_empty() {
                                 render.empty.insert(coord);
                             } else {
@@ -818,7 +819,6 @@ impl Editor {
                     entity: e,
                     coord,
                     lod,
-                    skirt: lod > 0,
                     epoch: self.terrain_epoch,
                     scratch: floptle_field::scratch_for_chunk(
                         &terrain.field,
@@ -949,13 +949,17 @@ pub(crate) fn push_terrain_instances(
         // terrain (physics converts through the same frame — see ChunkTerrain).
         let model = Mat4::from_scale_rotation_translation(Vec3::splat(scale), rot, rel);
         // Per-chunk culling geometry: chunk edge in world units, bounding-sphere
-        // radius padded for skirts, and the body's occluder ball when declared.
+        // radius padded for skirts and the coarse overlap layer, and the body's occluder
+        // ball when declared.
         let chunk_units = terrains
             .get(&e)
             .map(|t| floptle_field::CHUNK as f32 * t.field.voxel())
             .unwrap_or(0.0)
             * scale;
-        let chunk_r = chunk_units * 0.95; // half-diagonal (0.866) + skirt pad
+        // A coarse chunk meshes up to a quarter chunk past its + faces and hangs skirts
+        // below its rim, so its bound is the half-diagonal of a chunk grown by a
+        // quarter on every side: 0.866 × 1.5.
+        let chunk_r = chunk_units * 1.3;
         let occ_r = world
             .get::<floptle_core::CelestialBody>(e)
             .map(|cb| cb.occluder_radius as f32 * scale)

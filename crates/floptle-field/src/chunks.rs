@@ -217,6 +217,11 @@ impl ChunkField {
             .collect()
     }
 
+    /// Whether a chunk holds data — the chunks `chunk_coords` lists and a mesher meshes.
+    pub fn has_data(&self, c: [i32; 3]) -> bool {
+        matches!(self.chunks.get(&c), Some(Chunk::Data(_)))
+    }
+
     /// World position of a chunk's `(0,0,0)` voxel — the origin its mesh is relative to.
     pub fn chunk_origin(&self, c: [i32; 3]) -> Vec3 {
         Vec3::new(
