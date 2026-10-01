@@ -1,5 +1,11 @@
 ## Just shipped
 
+**v0.111.1 — "Says Why"** (stable). A web game that stops while it is
+running now shows what stopped it, instead of leaving its last frame on
+screen. What the browser's graphics refused reaches the page's log, and the
+next visit offers what a run with errors said. A loading level puts half as
+much on the graphics card in one frame, which phones have the least room for.
+
 **v0.111.0 — "Make It Yours"** (stable). The editor and the Hub look like
 Floptle: a new default theme in the brand's colours and type, and the Hub
 matching fopull.com. Twelve themes come built in, from High Contrast to a
