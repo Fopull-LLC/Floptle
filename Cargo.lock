@@ -1731,6 +1731,7 @@ dependencies = [
  "floptle-services",
  "floptle-shader",
  "floptle-steam",
+ "floptle-theme",
  "floptle-tiles",
  "floptle-ui",
  "floptle-vfs",
@@ -1801,6 +1802,7 @@ dependencies = [
  "floptle-brand",
  "floptle-dist",
  "floptle-scene",
+ "floptle-theme",
  "image",
  "log",
  "serde",
@@ -2081,6 +2083,23 @@ dependencies = [
  "floptle-say",
  "floptle-services",
  "steamworks",
+]
+
+[[package]]
+name = "floptle-theme"
+version = "0.110.0"
+dependencies = [
+ "bytemuck",
+ "egui",
+ "egui-wgpu",
+ "image",
+ "log",
+ "naga",
+ "pollster",
+ "ron",
+ "serde",
+ "wgpu",
+ "zip",
 ]
 
 [[package]]

@@ -235,27 +235,28 @@ pub(crate) fn save_grid(g: &GridConfig) {
     }
 }
 
-pub(crate) fn engine_theme_path() -> Option<PathBuf> {
-    floptle_config_dir().map(|d| d.join("engine_theme"))
-}
 pub(crate) fn code_theme_path() -> Option<PathBuf> {
     floptle_config_dir().map(|d| d.join("code_theme"))
 }
 
-/// A persisted theme index, clamped to a valid entry (0 if unset/out of range).
-pub(crate) fn load_theme_index(path: Option<PathBuf>, count: usize) -> usize {
-    path.and_then(|p| floptle_vfs::read_to_string(p).ok())
-        .and_then(|s| s.trim().parse::<usize>().ok())
-        .filter(|&i| i < count)
-        .unwrap_or(0)
+/// The code editor's colours, saved **by name**. An older editor saved a
+/// position in the list (0 was "Floptle Dark", which is now "Match the
+/// theme"); a number is still read, as the position it meant.
+pub(crate) fn load_code_theme(names: &[&str]) -> usize {
+    let Some(s) = code_theme_path().and_then(|p| floptle_vfs::read_to_string(p).ok()) else { return 0 };
+    let s = s.trim();
+    if let Ok(i) = s.parse::<usize>() {
+        return if i < names.len() { i } else { 0 };
+    }
+    names.iter().position(|n| *n == s).unwrap_or(0)
 }
 
-pub(crate) fn save_theme_index(path: Option<PathBuf>, idx: usize) {
-    if let Some(p) = path {
+pub(crate) fn save_code_theme(name: &str) {
+    if let Some(p) = code_theme_path() {
         if let Some(parent) = p.parent() {
             let _ = floptle_vfs::create_dir_all(parent);
         }
-        let _ = floptle_vfs::write(p, idx.to_string());
+        let _ = floptle_vfs::write(p, name);
     }
 }
 

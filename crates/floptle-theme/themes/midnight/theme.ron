@@ -1,0 +1,32 @@
+// Midnight: deep blue-black, a cool periwinkle accent.
+(
+    format: 1,
+    id: "midnight",
+    name: "Midnight",
+    author: "Fopull",
+    description: "Deep navy surfaces and a cool blue accent.",
+    colors: (
+        ground: "#10121b",
+        surface: "#161925",
+        surface_2: "#1c2030",
+        well: "#0b0c13",
+        hairline: "#2a2f43",
+        hairline_quiet: "#20243a",
+        text: "#e5e8f3",
+        dim: "#959aaf",
+        faint: "#666b82",
+        accent: "#7090ff",
+        accent_hi: "#b0c0ff",
+        on_accent: "#080c22",
+        backdrop: "#080a10",
+    ),
+    code: (
+        gutter: "#4a5070",
+        keyword: "#b0c0ff",
+        api: "#7fd6e8",
+        string: "#e8c98f",
+        number: "#f0a3c8",
+        comment: "#666b82",
+        text: "#e5e8f3",
+    ),
+)

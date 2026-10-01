@@ -3,36 +3,10 @@
 
 use crate::ide::{LUA_API_WORDS, LUA_KEYWORDS};
 
-/// The three colours that mean something, shared with fopull.com.
-///
-/// Colour is a signal, not decoration. A resting panel is monochrome; these
-/// appear for a rating, a permission, a compatibility warning, or the one
-/// primary action, and nowhere else. A page where everything is coloured
-/// says nothing.
-///
-/// They are the same values the website uses, in one named place. Change one
-/// and it changes everywhere in the editor; then tell the site, or "the same
-/// green" stops being the same green.
-///
-/// Not theme-derived. A rating being good and a package asking for the
-/// network are facts about the thing, not about the chrome around it, and
-/// they keep meaning the same under every theme. Everything that is about the
-/// chrome (panel fills, text, hairlines) comes from `ui.visuals()`.
-///
-/// The accent stays with the theme. Somebody who chose GitHub Light gets that
-/// theme's accent, not a fixed teal sitting in it, so the editor reads
-/// `ui.visuals().selection.stroke.color` for "switched on" and "the primary
-/// action", and only the three signals below are pinned.
-pub(crate) mod signal {
-    use egui::Color32;
-
-    /// Good: a healthy rating, a check that passed, a save that landed.
-    pub(crate) const GOOD: Color32 = Color32::from_rgb(0x82, 0xd2, 0x96);
-    /// Warn: a permission, an unsaved change, something that wants a look.
-    pub(crate) const WARN: Color32 = Color32::from_rgb(0xe0, 0xb0, 0x50);
-    /// Bad: a failure, an incompatibility, a refusal.
-    pub(crate) const BAD: Color32 = Color32::from_rgb(0xe6, 0x78, 0x6e);
-}
+/// The three colours that mean something, shared with fopull.com. They live
+/// in `floptle-theme` now, beside the themes they are deliberately not part
+/// of, so the Hub reads the same three.
+pub(crate) use floptle_theme::signal;
 
 /// The type scale, and the one panel treatment, that the package browser is
 /// built from.
@@ -43,36 +17,25 @@ pub(crate) mod signal {
 /// but four unrelated decisions repeated; a reader gets no help from it about
 /// what to read first.
 ///
-/// Sizes are derived from the theme's own body text rather than written down,
-/// so somebody who has turned the editor's font size up gets a scale that goes
-/// up with it instead of a title that ends up smaller than its own body.
+/// The components themselves are `floptle_theme::look`, shared with the Hub
+/// so the two cannot drift. These are the editor's names for them.
 ///
-/// **Nothing here names a colour that is not `ui.visuals()`.** Ground, surface,
-/// text and hairline are the user's theme — the editor ships Floptle Dark,
-/// Midnight, Slate, Carbon and Light, and hardcoding a hex is exactly how the
-/// browser came to look like a stranger inside all five. The three [`signal`]
-/// colours above are the only pinned values, because good, warn and bad are
-/// facts about the thing rather than about the chrome.
+/// **Nothing here names a colour of its own.** Ground, surface, text and
+/// hairline are the user's theme; the three [`signal`] colours are the only
+/// pinned values, because good, warn and bad are facts about the thing rather
+/// than about the chrome.
 pub(crate) mod look {
-    use egui::{Color32, RichText, Stroke, Ui};
-
-    /// The theme's body size — every step is a multiple of it.
-    fn base(ui: &Ui) -> f32 {
-        ui.style()
-            .text_styles
-            .get(&egui::TextStyle::Body)
-            .map(|f| f.size)
-            .unwrap_or(12.5)
-    }
+    use egui::{Color32, RichText, Ui};
+    use floptle_theme::look as shared;
 
     /// The one biggest thing in a view, and there is one. A package's name.
     pub(crate) fn title(ui: &Ui, s: impl Into<String>) -> RichText {
-        RichText::new(s).size((base(ui) * 1.5).round()).strong()
+        shared::title(ui, s)
     }
 
     /// What a group of rows is. Sits above a run of body text and stops.
     pub(crate) fn section(ui: &Ui, s: impl Into<String>) -> RichText {
-        RichText::new(s).size((base(ui) * 1.15).round()).strong()
+        shared::section(ui, s)
     }
 
     /// The words. The default, and the step that needs no helper — it is here
@@ -81,69 +44,47 @@ pub(crate) mod look {
         RichText::new(s)
     }
 
-    /// Labels, counts, timestamps, the quiet half of a row. Dimmed by default:
-    /// fine print that is the same colour as the text is not fine print.
+    /// Labels, counts, timestamps, the quiet half of a row.
     pub(crate) fn fine(ui: &Ui, s: impl Into<String>) -> RichText {
-        RichText::new(s).size((base(ui) * 0.85).round()).color(ui.visuals().weak_text_color())
+        shared::fine(ui, s)
     }
 
     /// …in the full text colour, for fine print that is the point rather than
     /// the aside — a refusal, a permission, the line under a primary action.
     pub(crate) fn fine_strong(ui: &Ui, s: impl Into<String>) -> RichText {
-        RichText::new(s).size((base(ui) * 0.85).round()).strong()
+        shared::fine_strong(ui, s)
     }
 
     /// **Identity and data**: package ids, versions, engine ranges, revisions,
-    /// file paths, URLs. Monospace, at the fine size, in the ordinary text
-    /// colour — an id is content, not an aside, and it is the thing somebody
-    /// copies, compares character by character, or reads out loud.
+    /// file paths, URLs. Monospace, in the ordinary text colour.
     pub(crate) fn data(ui: &Ui, s: impl Into<String>) -> RichText {
-        RichText::new(s).size((base(ui) * 0.85).round()).monospace()
+        shared::data(ui, s)
     }
 
-    /// The accent, which stays the user's. "Switched on", focus, and the one
-    /// primary action all read it, so a GitHub Light user gets GitHub Light's
-    /// accent rather than a fixed teal sitting in a pale panel.
+    /// The accent, which is the theme's. "Switched on", focus, and the one
+    /// primary action all read it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn accent(ui: &Ui) -> Color32 {
-        ui.visuals().selection.stroke.color
+        shared::accent(ui)
     }
 
-    /// One hairline. How two surfaces are separated — not a shadow, and not a
-    /// widget stroke that changes width with the theme's widget styling.
-    pub(crate) fn hairline(ui: &Ui) -> Stroke {
-        Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)
-    }
-
-    /// A panel: one small fill step up from the ground it sits on, separated by
-    /// a hairline. **The** panel — every card, row group and callout in the
-    /// browser is this, so there is one treatment to change rather than one per
-    /// call site.
+    /// A panel: one fill step up from the ground it sits on, a hairline.
     pub(crate) fn panel(ui: &Ui) -> egui::Frame {
-        egui::Frame::new()
-            .inner_margin(8)
-            .corner_radius(3.0)
-            .fill(ui.visuals().faint_bg_color)
-            .stroke(hairline(ui))
+        shared::panel(ui)
     }
 
     /// …the one you have chosen, marked by the accent rather than by a
     /// different treatment.
     pub(crate) fn panel_selected(ui: &Ui) -> egui::Frame {
-        panel(ui)
-            .fill(accent(ui).gamma_multiply(0.10))
-            .stroke(Stroke::new(1.0, accent(ui)))
+        shared::panel_selected(ui)
     }
 
-    /// **The one primary action in a view.** Accent-outlined over a wash of it,
-    /// rather than accent-filled: a solid fill has to pick its own text colour,
-    /// and the colour that reads on one of five themes reads as a bruise on
-    /// another. Everything else in the view is an ordinary button, and a view
-    /// with two of these has a design problem rather than a styling one.
+    /// **The one primary action in a view**: filled with the accent, its text
+    /// in the theme's `on_accent`. Every theme declares that colour, which is
+    /// what makes a fill safe under all of them. A view with two of these has
+    /// a design problem rather than a styling one.
     pub(crate) fn primary(ui: &Ui, label: impl Into<String>) -> egui::Button<'static> {
-        let a = accent(ui);
-        egui::Button::new(RichText::new(label).strong())
-            .fill(a.gamma_multiply(0.22))
-            .stroke(Stroke::new(1.0, a))
+        shared::primary(ui, label)
     }
 }
 
@@ -182,10 +123,13 @@ impl CodeTheme {
     }
 }
 
-/// The selectable code-editor themes (Preferences → Editor theme). Index 0 is the default.
+/// The selectable code-editor themes (Preferences → Code colours). Index 0
+/// is "the engine theme's own", whose colours come from the theme at draw
+/// time ([`code_theme`]); the values written here are only its fallback.
+/// Saved by name, never by position.
 pub(crate) const CODE_THEMES: &[CodeTheme] = &[
     CodeTheme {
-        name: "Floptle Dark",
+        name: "Match the theme",
         bg: [30, 30, 30],
         gutter: [100, 100, 100],
         kw: [86, 156, 214],
@@ -246,70 +190,30 @@ pub(crate) const CODE_THEMES: &[CodeTheme] = &[
     },
 ];
 
-/// An editor/engine chrome theme (Preferences → Engine theme). Built on egui's dark/light
-/// base, then key surfaces are overridden. Index 0 is the default (egui dark).
-#[derive(Clone, Copy)]
-pub(crate) struct EngineTheme {
-    pub(crate) name: &'static str,
-    pub(crate) dark: bool,
-    /// Override panel/window/extreme backgrounds; `None` keeps the egui base value.
-    pub(crate) panel: Option<[u8; 3]>,
-    pub(crate) window: Option<[u8; 3]>,
-    pub(crate) extreme: Option<[u8; 3]>,
-    /// Selection / hyperlink accent.
-    pub(crate) accent: Option<[u8; 3]>,
-}
-
-pub(crate) const ENGINE_THEMES: &[EngineTheme] = &[
-    EngineTheme { name: "Floptle Dark", dark: true, panel: None, window: None, extreme: None, accent: None },
-    EngineTheme {
-        name: "Midnight",
-        dark: true,
-        panel: Some([18, 20, 30]),
-        window: Some([22, 25, 37]),
-        extreme: Some([12, 13, 20]),
-        accent: Some([90, 130, 245]),
-    },
-    EngineTheme {
-        name: "Slate",
-        dark: true,
-        panel: Some([38, 42, 50]),
-        window: Some([44, 49, 58]),
-        extreme: Some([28, 31, 37]),
-        accent: Some([120, 160, 200]),
-    },
-    EngineTheme {
-        name: "Carbon (OLED)",
-        dark: true,
-        panel: Some([8, 8, 8]),
-        window: Some([14, 14, 14]),
-        extreme: Some([0, 0, 0]),
-        accent: Some([0, 200, 160]),
-    },
-    EngineTheme { name: "Light", dark: false, panel: None, window: None, extreme: None, accent: None },
-];
-
-impl EngineTheme {
-    /// The egui visuals for this theme (base + overrides).
-    pub(crate) fn visuals(&self) -> egui::Visuals {
-        let mut v = if self.dark { egui::Visuals::dark() } else { egui::Visuals::light() };
-        let c = |rgb: [u8; 3]| egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-        if let Some(p) = self.panel {
-            v.panel_fill = c(p);
-        }
-        if let Some(w) = self.window {
-            v.window_fill = c(w);
-            v.widgets.noninteractive.bg_fill = c(w);
-        }
-        if let Some(e) = self.extreme {
-            v.extreme_bg_color = c(e);
-        }
-        if let Some(a) = self.accent {
-            v.selection.bg_fill = c(a).gamma_multiply(0.55);
-            v.hyperlink_color = c(a);
-        }
-        v
+/// The code editor's colours: the engine theme's own (index 0, the default),
+/// or one of the classic editor palettes.
+pub(crate) fn code_theme(index: usize, ctx: &egui::Context) -> CodeTheme {
+    if index == 0 || index >= CODE_THEMES.len() {
+        let t = floptle_theme::theme(ctx);
+        let c = &t.code;
+        let rgb = |r: floptle_theme::Rgba| {
+            let o = t.tokens.solid(r).0;
+            [o[0], o[1], o[2]]
+        };
+        return CodeTheme {
+            name: CODE_THEMES[0].name,
+            bg: rgb(c.background),
+            gutter: rgb(c.gutter),
+            kw: rgb(c.keyword),
+            api: rgb(c.api),
+            string: rgb(c.string),
+            num: rgb(c.number),
+            comment: rgb(c.comment),
+            text: rgb(c.text),
+            cur_line: c.current_line.0,
+        };
     }
+    CODE_THEMES[index]
 }
 
 pub(crate) fn lua_highlight(text: &str, font: egui::FontId, theme: &CodeTheme) -> egui::text::LayoutJob {
@@ -500,6 +404,89 @@ pub(crate) fn flsl_highlight(
     }
     job
 }
+/// The dock in the theme's terms: tab bars and bodies are left clear so the
+/// regions painted under them show (`tab_bar`, `tab.<name>`); tabs are plain
+/// text, the active one outlined by a hairline, the focused panel's active
+/// tab in the accent's wash and edge.
+pub(crate) fn dock_style(ui: &egui::Ui) -> egui_dock::Style {
+    use egui::Color32;
+    let t = floptle_theme::theme(ui.ctx());
+    let k = &t.tokens;
+    let mut s = egui_dock::Style::from_egui(ui.style());
+    let r = egui::CornerRadius { nw: t.shape.radius_small as u8, ne: t.shape.radius_small as u8, sw: 0, se: 0 };
+    s.tab_bar.bg_fill = Color32::TRANSPARENT;
+    s.tab_bar.hline_color = k.hairline.to_egui();
+    s.tab_bar.corner_radius = egui::CornerRadius::ZERO;
+    s.tab_bar.height = (t.fonts.size * 2.0).round().max(22.0);
+    s.tab.tab_body.bg_fill = t.tokens.solid(k.ground).to_egui();
+    s.tab.tab_body.stroke = egui::Stroke::new(t.shape.stroke, k.hairline.to_egui());
+    s.tab.tab_body.corner_radius = egui::CornerRadius::ZERO;
+    let plain = |text: Color32, bg: Color32, outline: Color32| egui_dock::TabInteractionStyle {
+        outline_color: outline,
+        corner_radius: r,
+        bg_fill: bg,
+        text_color: text,
+    };
+    s.tab.inactive = plain(k.dim.to_egui(), Color32::TRANSPARENT, Color32::TRANSPARENT);
+    s.tab.inactive_with_kb_focus = plain(k.text.to_egui(), Color32::TRANSPARENT, k.accent_edge.to_egui());
+    s.tab.hovered = plain(k.text.to_egui(), k.surface_2.to_egui(), Color32::TRANSPARENT);
+    s.tab.active = plain(k.text.to_egui(), t.tokens.solid(k.ground).to_egui(), k.hairline.to_egui());
+    s.tab.active_with_kb_focus = plain(k.text.to_egui(), t.tokens.solid(k.ground).to_egui(), k.accent_edge.to_egui());
+    s.tab.focused = plain(k.text.to_egui(), k.accent_wash.over(t.tokens.solid(k.ground)).to_egui(), k.accent_edge.to_egui());
+    s.tab.focused_with_kb_focus = s.tab.focused.clone();
+    s.separator.color_idle = k.hairline.to_egui();
+    s.separator.color_hovered = k.accent_edge.to_egui();
+    s.separator.color_dragged = k.accent.to_egui();
+    s.overlay.selection_color = k.accent.to_egui().gamma_multiply(0.4);
+    s.overlay.button_color = k.surface_2.to_egui();
+    s.main_surface_border_stroke = egui::Stroke::NONE;
+    s
+}
+
+/// The theme region a dock tab's body is: `tab.<name>`, falling back to the
+/// panel's.
+pub(crate) fn tab_region(tab: crate::dock::EditorTab) -> &'static str {
+    use crate::dock::EditorTab as T;
+    match tab {
+        T::Hierarchy => "tab.hierarchy",
+        T::Inspector => "tab.inspector",
+        T::Terrain => "tab.terrain",
+        T::Map => "tab.model",
+        T::Tiles => "tab.tiles",
+        T::Assets => "tab.assets",
+        T::Console => "tab.console",
+        T::Scene => "tab.scene",
+        T::Game => "tab.game",
+        T::Scripting => "tab.scripting",
+        T::Animation => "tab.animation",
+        T::AnimGraph => "tab.controller",
+        T::Particles => "tab.particles",
+        T::Mixer => "tab.mixer",
+        T::ShaderGraph => "tab.shaders",
+        T::Paint => "tab.paint",
+        T::Image => "tab.image",
+        T::UiDesign => "tab.ui",
+        T::Learn => "tab.learn",
+        T::Settings => "tab.settings",
+        T::Packages => "tab.packages",
+        T::Package(_) => "tab.package",
+    }
+}
+
+/// A top or bottom panel's frame with no fill of its own, and the region to
+/// paint under it with [`paint_panel`].
+pub(crate) fn clear_panel_frame(ctx: &egui::Context) -> egui::Frame {
+    egui::Frame::side_top_panel(&ctx.global_style()).fill(egui::Color32::TRANSPARENT)
+}
+
+/// Paint `region` under a panel whose frame is [`clear_panel_frame`]. Call
+/// first thing inside the panel, before any widget.
+pub(crate) fn paint_panel(ui: &egui::Ui, region: &str) {
+    let frame = clear_panel_frame(ui.ctx());
+    let rect = ui.max_rect() + frame.inner_margin;
+    floptle_theme::paint_region(ui, region, rect);
+}
+
 #[cfg(test)]
 mod look_tests {
     use super::*;
@@ -530,38 +517,31 @@ mod look_tests {
         );
     }
 
-    /// Chrome comes from the user's theme and nowhere else. The editor ships
-    /// five, and a panel fill written down as a hex is one that looks borrowed
-    /// in four of them — which is how the browser came to ignore the theme in
-    /// the first place.
+    /// Chrome comes from the user's theme and nowhere else. A panel fill
+    /// written down as a hex is one that looks borrowed in every other
+    /// theme, which is how the browser came to ignore the theme in the first
+    /// place.
     ///
-    /// The accent is checked by *varying*: it is the one a theme actually
-    /// chooses, so two themes must not answer the same. The panel is checked
-    /// against `visuals` directly, because its fill is egui's own additive
-    /// lift — the same value on every theme, since "one step
-    /// brighter than whatever is underneath" is the same instruction
-    /// everywhere. What the assertion catches is somebody replacing it with a
-    /// number.
+    /// Checked across every built-in: the panel is the theme's surface with
+    /// its hairline, and the accent *varies*, because it is the one value a
+    /// theme actually chooses and two themes must not answer the same.
     #[test]
     fn the_panel_and_the_accent_follow_the_users_theme() {
-        let read = |v: egui::Visuals| {
+        let lib = floptle_theme::Library::scan(None, &[]);
+        let mut seen = Vec::new();
+        for e in &lib.entries {
+            let t = std::sync::Arc::new(lib.load(&e.id).expect("a built-in loads"));
             let ctx = egui::Context::default();
-            ctx.set_visuals(v);
-            let mut out = None;
+            floptle_theme::apply(&ctx, t.clone(), &floptle_theme::Prefs::default());
             let _ = ctx.run_ui(crate::icons::test_input(), |ui| {
                 let p = look::panel(ui);
-                assert_eq!(p.fill, ui.visuals().faint_bg_color, "the panel fill is written down");
-                assert_eq!(
-                    p.stroke.color,
-                    ui.visuals().widgets.noninteractive.bg_stroke.color,
-                    "the hairline is written down",
-                );
+                assert_eq!(p.fill, t.tokens.surface.to_egui(), "{}: the panel fill is written down", e.id);
+                assert_eq!(p.stroke.color, t.tokens.hairline.to_egui(), "{}: the hairline is written down", e.id);
                 assert_eq!(p.shadow, egui::epaint::Shadow::NONE, "hairlines, not shadows");
-                out = Some(look::accent(ui));
+                seen.push(look::accent(ui));
             });
-            out.expect("a frame ran")
-        };
-        let seen: Vec<_> = ENGINE_THEMES.iter().map(|t| read(t.visuals())).collect();
+        }
+        assert!(seen.len() >= 5, "the built-ins did not load: {seen:?}");
         assert!(
             seen.iter().any(|a| *a != seen[0]),
             "every theme got the same accent — it is not being read from one: {seen:?}",
@@ -607,3 +587,4 @@ mod look_tests {
         }
     }
 }
+

@@ -1365,7 +1365,7 @@ impl ExtHost {
     /// fonts' character maps sixty times a second would be the most expensive
     /// thing a panel did.
     fn drawable_glyphs(&self) -> &std::collections::HashSet<char> {
-        self.glyphs.get_or_init(|| crate::fonts::drawable(&crate::fonts::definitions(&self.fonts)))
+        self.glyphs.get_or_init(|| crate::fonts::drawable(&crate::fonts::fallback_definitions(&self.fonts)))
     }
 
     fn call_with_ui(&self, pkg: usize, func: &mlua::Function, ui: &mut egui::Ui) -> mlua::Result<()> {

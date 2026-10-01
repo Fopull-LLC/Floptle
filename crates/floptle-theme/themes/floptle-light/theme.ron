@@ -1,0 +1,37 @@
+// Floptle Light: the same room with the lights on. The teal is darkened so
+// it still reads on white.
+(
+    format: 1,
+    id: "floptle-light",
+    name: "Floptle Light",
+    author: "Fopull",
+    description: "The Floptle look for bright rooms and daylight.",
+    dark: false,
+    colors: (
+        ground: "#f1f1ee",
+        surface: "#fafaf8",
+        surface_2: "#e8e8e4",
+        well: "#ffffff",
+        hairline: "#d3d3cd",
+        hairline_quiet: "#e2e2dd",
+        text: "#18191b",
+        dim: "#55575c",
+        faint: "#85878c",
+        accent: "#007a62",
+        accent_hi: "#006350",
+        on_accent: "#ffffff",
+        backdrop: "#e4e4df",
+        selection: "$accent/20%",
+    ),
+    code: (
+        background: "#ffffff",
+        gutter: "#a4a6aa",
+        keyword: "#b4235a",
+        api: "#0b5cad",
+        string: "#0d6b3a",
+        number: "#6b3bb3",
+        comment: "#7b7e84",
+        text: "#18191b",
+        current_line: "#0000000a",
+    ),
+)

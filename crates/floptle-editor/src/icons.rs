@@ -127,7 +127,8 @@ pub(crate) const ALL: &[(&str, &str)] = &[
 #[cfg(test)]
 pub(crate) fn test_context() -> egui::Context {
     let ctx = egui::Context::default();
-    ctx.set_fonts(crate::fonts::definitions(&[]));
+    ctx.set_fonts(crate::fonts::definitions(&floptle_theme::default_theme(), &[]));
+    floptle_theme::apply(&ctx, floptle_theme::default_theme(), &floptle_theme::Prefs::default());
     // Fonts don't exist until a frame has run.
     let _ = ctx.run_ui(test_input(), |_| {});
     ctx
@@ -163,7 +164,7 @@ mod tests {
         // The editor's real stack, from the one builder that makes it — and the
         // same function `gui.hasGlyph` answers packages with, so the guard here
         // and the answer a package gets can never drift apart.
-        crate::fonts::drawable(&crate::fonts::definitions(&[]))
+        crate::fonts::drawable(&crate::fonts::definitions(&floptle_theme::default_theme(), &[]))
     }
 
     /// **Every** non-ASCII character in a string literal anywhere in the editor

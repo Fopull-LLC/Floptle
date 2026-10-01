@@ -813,7 +813,7 @@ fn draw_once(host: &mut ExtHost, which: usize) {
     // The same stack the editor gives it, package faces included — otherwise a
     // test draws against a font set the editor never has, and `gui.font` is
     // exercised only on its fallback path.
-    ctx.set_fonts(crate::fonts::definitions(&host.fonts));
+    ctx.set_fonts(crate::fonts::definitions(&floptle_theme::default_theme(), &host.fonts));
     let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
         host.draw_window(which, ui);
     });
@@ -829,7 +829,7 @@ fn draw_once(host: &mut ExtHost, which: usize) {
 /// and a ratchet is precisely a thing that spans frames.
 fn draw_bounded(host: &mut ExtHost, which: usize, width: f32, frames: usize) -> Vec<f32> {
     let ctx = egui::Context::default();
-    ctx.set_fonts(crate::fonts::definitions(&host.fonts));
+    ctx.set_fonts(crate::fonts::definitions(&floptle_theme::default_theme(), &host.fonts));
     let mut out = Vec::new();
     for _ in 0..frames {
         let mut got = 0.0;
@@ -1061,7 +1061,7 @@ fn a_package_can_ask_whether_a_glyph_will_draw() {
 /// Draw one package window with the pointer at a known place inside it.
 fn draw_with_pointer(host: &mut ExtHost, which: usize, width: f32, at: egui::Pos2, frames: usize) {
     let ctx = egui::Context::default();
-    ctx.set_fonts(crate::fonts::definitions(&host.fonts));
+    ctx.set_fonts(crate::fonts::definitions(&floptle_theme::default_theme(), &host.fonts));
     for _ in 0..frames {
         let input = egui::RawInput {
             events: vec![egui::Event::PointerMoved(at)],

@@ -1,0 +1,29 @@
+// Aurora: northern lights behind deep teal glass.
+(
+    format: 1,
+    id: "aurora",
+    name: "Aurora",
+    author: "Fopull",
+    description: "Northern lights drifting behind deep teal glass.",
+    colors: (
+        ground: "#04100f70",
+        surface: "#08191ae8",
+        surface_2: "#0f2626cc",
+        well: "#030b0ae6",
+        hairline: "#1d3a39",
+        hairline_quiet: "#142d2c",
+        text: "#e6fbf6",
+        dim: "#94c2b9",
+        faint: "#5f8f86",
+        accent: "#3ef0b4",
+        accent_hi: "#9cf8d8",
+        on_accent: "#012017",
+        backdrop: "#020807",
+        selection: "$accent/26%",
+    ),
+    code: (background: "#030b0a", keyword: "#9cf8d8", comment: "#5f8f86", text: "#e6fbf6"),
+    shape: (radius: 8, radius_small: 5, widget_radius: 5),
+    surfaces: {
+        "ground": (layers: [Shader(shader: "builtin:aurora", colors: ["#2ff5a8", "#9a6bff", "#041214", "#ffffff"])]),
+    },
+)

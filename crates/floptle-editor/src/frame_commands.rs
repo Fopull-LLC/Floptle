@@ -14,7 +14,7 @@ use crate::assets::{AssetPayload, build_assets, is_model};
 use crate::dock::{EditorTab, focus_scripting_tab};
 #[cfg(feature = "editor-ui")]
 use crate::gizmo::Tool;
-use crate::prefs::{code_theme_path, engine_theme_path, open_external_editor, save_external_editor, save_grid, save_play_tint, save_prefer_external, save_theme_index};
+use crate::prefs::{open_external_editor, save_code_theme, save_external_editor, save_grid, save_play_tint, save_prefer_external};
 #[cfg(feature = "editor-ui")]
 use crate::terrain_ui::{NewTerrainCfg, TerrainFill};
 use crate::{Editor, ProjectAction, Snapshot, anim};
@@ -582,13 +582,9 @@ impl Editor {
         if cmd.save_grid {
             save_grid(&self.grid);
         }
-        if let Some(i) = cmd.set_engine_theme.take() {
-            self.engine_theme = i;
-            save_theme_index(engine_theme_path(), i);
-        }
         if let Some(i) = cmd.set_code_theme.take() {
             self.code_theme = i;
-            save_theme_index(code_theme_path(), i);
+            save_code_theme(crate::theme::CODE_THEMES[i.min(crate::theme::CODE_THEMES.len() - 1)].name);
         }
     }
 

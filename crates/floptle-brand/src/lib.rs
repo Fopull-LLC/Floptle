@@ -42,6 +42,14 @@ pub const LOGO_PNG: &[u8] = include_bytes!("../../../branding/floptle-logo.png")
 
 /// The app icon at each size the platforms ask for, PNG. The mark on a dark
 /// rounded tile. `ICON_SIZES` lists them.
+/// The mark alone: white line art on transparency, for a dark ground. Shown
+/// on the ground with a soft glow, never on a tile (contract `floptle-brand`
+/// §5). The same file fopull.com serves.
+pub const MARK_PNG: &[u8] = include_bytes!("../../../branding/floptle-mark.png");
+
+/// The mark over the "Floptle Game Engine" wordmark, white on transparency.
+pub const LOCKUP_PNG: &[u8] = include_bytes!("../../../branding/floptle-lockup.png");
+
 pub const ICON_SIZES: [u32; 9] = [16, 24, 32, 48, 64, 128, 256, 512, 1024];
 
 pub fn icon_png(size: u32) -> Option<&'static [u8]> {

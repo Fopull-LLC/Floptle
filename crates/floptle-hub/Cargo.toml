@@ -32,6 +32,9 @@ floptle-account = { path = "../floptle-account" }
 floptle-scene = { path = "../floptle-scene" }
 floptle-dist = { path = "../floptle-dist" }
 floptle-brand = { path = "../floptle-brand" }
+# The theme the editor uses, read from the same place, so the two cannot drift.
+floptle-theme = { path = "../floptle-theme" }
+image = { workspace = true }
 
 [dev-dependencies]
 flate2 = "1"
@@ -41,7 +44,6 @@ tempfile = "3"
 # about — the same rule as the render crate's `*_probe` examples. Only used by
 # `#[ignore]`d snapshot tests, which need a GPU and so never run in CI.
 egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }
-image = { workspace = true }
 
 # The Windows executable icon (`build.rs`); a no-op build script elsewhere.
 [build-dependencies]

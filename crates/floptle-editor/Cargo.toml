@@ -56,6 +56,7 @@ editor-ui = [
     "dep:egui-wgpu",
     "dep:egui-winit",
     "dep:egui_dock",
+    "dep:floptle-theme",
     "dep:skrifa",
     "dep:rfd",
     "dep:tokio",
@@ -152,6 +153,9 @@ image = { workspace = true }
 
 winit = { workspace = true }
 floptle-brand = { path = "../floptle-brand" }
+# Themes: the .floptletheme format, the brand fonts and the panel backdrops.
+# Shared with the Hub. Authoring only, so a game build carries none of it.
+floptle-theme = { path = "../floptle-theme", optional = true }
 wgpu = { workspace = true }
 pollster = { workspace = true }
 log = { workspace = true }

@@ -1,0 +1,43 @@
+// Galaxy: the panels float over a slowly turning nebula. The ground is a
+// veil (its alpha is how much of the sky shows through), and the editor's
+// windows and code stay solid so nothing you read sits on stars.
+(
+    format: 1,
+    id: "galaxy",
+    name: "Galaxy",
+    author: "Fopull",
+    description: "Panels over a slowly turning spiral nebula.",
+    colors: (
+        ground: "#0806135c",
+        surface: "#120f24f0",
+        surface_2: "#1f1a3acc",
+        well: "#06050ce6",
+        hairline: "#3a3260",
+        hairline_quiet: "#2a2448",
+        text: "#efecff",
+        dim: "#aaa4d4",
+        faint: "#7a73a8",
+        accent: "#a48bff",
+        accent_hi: "#d4c7ff",
+        on_accent: "#140b33",
+        backdrop: "#04030a",
+        selection: "$accent/32%",
+    ),
+    code: (
+        background: "#0a0816",
+        gutter: "#5d568c",
+        keyword: "#d4c7ff",
+        api: "#7fe0f0",
+        string: "#ffc6a8",
+        number: "#ff9fd6",
+        comment: "#7a73a8",
+        text: "#efecff",
+    ),
+    fonts: (display_weight: 720),
+    shape: (radius: 8, radius_small: 5, widget_radius: 5, shadow: (blur: 24, offset: (0, 8), color: "#3d2a9055")),
+    surfaces: {
+        "ground": (layers: [Shader(shader: "builtin:galaxy", colors: ["#7a52ff", "#3fd0e8", "#05040e", "#ffe9d6"], params: [0, 0, 0.8, 0.72])]),
+        "menu_bar": (fill: "#08061399"),
+        "tab_bar": (fill: "#0806137a"),
+    },
+)

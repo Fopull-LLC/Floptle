@@ -36,6 +36,7 @@ linked here, it isn't finished — a test enforces that.
 | Talk to a website / sell something | [web-api.md](web-api.md) |
 | Install a package, or write one to share | [packages.md](packages.md) |
 | Add my own tools to the editor | [editor-scripting.md](editor-scripting.md) |
+| Change how the editor and Hub look, or share a theme | [themes.md](themes.md) |
 | Understand *why* it's built this way | [VISION.md](VISION.md) |
 | Light a 2D scene | [2d.md](2d.md#2d-lighting) |
 
@@ -99,6 +100,8 @@ The build-something guides. Each one is a path from nothing to a working result.
 - [packages.md](packages.md) — **packages**: modular expansions anybody can write and
   share — editor tools, scripts, art — installed from a folder, a repository or the
   browser, and how to write and publish one of your own.
+- [themes.md](themes.md) — **themes**: colours, type, shape and moving backdrops for the
+  editor and the Hub, shared as `.floptletheme` files or inside a package.
 - [editor-scripting.md](editor-scripting.md) — the **editor API** a package gets: menus,
   panels, Scene-view overlays, world-space handles, scene edits with undo, preferences,
   and talking to a server.

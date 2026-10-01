@@ -1,0 +1,24 @@
+// Slate: a lighter, softer dark for long sessions.
+(
+    format: 1,
+    id: "slate",
+    name: "Slate",
+    author: "Fopull",
+    description: "Soft grey-blue, gentler on the eyes than black.",
+    colors: (
+        ground: "#262a31",
+        surface: "#2c3139",
+        surface_2: "#333943",
+        well: "#1f2228",
+        hairline: "#414854",
+        hairline_quiet: "#373d47",
+        text: "#e9ecf0",
+        dim: "#a6aeb9",
+        faint: "#7a828e",
+        accent: "#7aa6d0",
+        accent_hi: "#aecbe8",
+        on_accent: "#0c1925",
+        backdrop: "#1b1e23",
+    ),
+    shape: (radius: 7, radius_small: 5, widget_radius: 5),
+)

@@ -15,7 +15,7 @@ fn out_path(name: &str) -> std::path::PathBuf {
 
 fn harness<'a>(size: egui::Vec2, ui: impl FnMut(&mut egui::Ui) + 'a) -> egui_kittest::Harness<'a> {
     let mut h = egui_kittest::Harness::builder().with_size(size).build_ui(ui);
-    h.ctx.set_fonts(crate::fonts::definitions(&[]));
+    h.ctx.set_fonts(crate::fonts::definitions(&floptle_theme::default_theme(), &[]));
     h.ctx.set_visuals(egui::Visuals::dark());
     h.run();
     h

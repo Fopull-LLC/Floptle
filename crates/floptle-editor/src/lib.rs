@@ -259,6 +259,8 @@ mod tile_ui;
 #[cfg(feature = "editor-ui")]
 mod theme;
 #[cfg(feature = "editor-ui")]
+mod theme_host;
+#[cfg(feature = "editor-ui")]
 mod ui_design;
 #[cfg(feature = "editor-ui")]
 mod ui_design_ui;
@@ -720,8 +722,6 @@ struct EditorCmd {
     set_play_tint: Option<(bool, [u8; 3])>,
     /// Persist the grid settings (any Grid Settings control changed).
     save_grid: bool,
-    /// Select + persist the engine chrome theme (index into `ENGINE_THEMES`).
-    set_engine_theme: Option<usize>,
     /// Select + persist the code-editor theme (index into `CODE_THEMES`).
     set_code_theme: Option<usize>,
     /// Open the rename modal for this asset (absolute path).
@@ -1295,6 +1295,12 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut EditorTab) {
+        // The tab's region under everything it draws: its own backdrop if the
+        // theme gives it one, the panel's otherwise. The Scene and Game tabs
+        // are the 3D view and get nothing.
+        if !matches!(tab, EditorTab::Scene | EditorTab::Game) {
+            floptle_theme::paint_region(ui, crate::theme::tab_region(*tab), ui.clip_rect());
+        }
         match tab {
             EditorTab::Hierarchy => self.hierarchy_ui(ui),
             EditorTab::Inspector => self.inspector_ui(ui),
@@ -3576,8 +3582,13 @@ struct Editor {
     play_tint_enabled: bool,
     /// Additive RGB offset applied to the chrome bg in play mode (a user preference).
     play_tint: [u8; 3],
-    /// Selected engine (chrome) theme — index into `ENGINE_THEMES` (a user preference).
-    engine_theme: usize,
+    /// The editor's theme: the chosen one, the library of them, and their
+    /// settings. Shared with the Hub through `floptle-theme`.
+    #[cfg(feature = "editor-ui")]
+    themes: theme_host::ThemeHost,
+    /// The theme fonts last given to egui ([`theme_host::ThemeHost::fonts_fingerprint`]).
+    #[cfg(feature = "editor-ui")]
+    themes_fonts_set: u64,
     /// Selected code-editor theme — index into `CODE_THEMES` (a user preference).
     code_theme: usize,
     /// Smoothed frames-per-second + a throttle so the window title isn't rewritten
@@ -3750,6 +3761,9 @@ struct Egui {
     state: egui_winit::State,
     #[cfg(feature = "editor-ui")]
     renderer: egui_wgpu::Renderer,
+    /// The theme's moving backdrops, drawn before egui each frame.
+    #[cfg(feature = "editor-ui")]
+    backdrop: floptle_theme::BackdropRenderer,
 }
 
 /// An imported model's registered GPU mesh parts + its rough world size.
@@ -4012,8 +4026,9 @@ impl ApplicationHandler for Editor {
         self.panels = prefs::load_viewport_panels();
         self.panels_saved = self.panels;
         self.map_keys = map_keys::load_map_keys();
-        self.engine_theme = load_theme_index(engine_theme_path(), ENGINE_THEMES.len());
-        self.code_theme = load_theme_index(code_theme_path(), CODE_THEMES.len());
+        self.themes = theme_host::ThemeHost::load();
+        self.code_theme =
+            prefs::load_code_theme(&CODE_THEMES.iter().map(|t| t.name).collect::<Vec<_>>());
         self.preview_spinning = true;
         self.preview_zoom = 1.0;
         self.assets_grid_dir = self.project_root.clone();
@@ -4125,10 +4140,11 @@ impl ApplicationHandler for Editor {
         self.grid_render = Some(Grid::new(&gpu));
 
         let ctx = egui::Context::default();
-        // No package has loaded yet, so this is the editor's own stack. Any
-        // package faces are merged in and `set_fonts` called again by
-        // `apply_package_fonts` after the package pass — see `fonts.rs`.
-        ctx.set_fonts(fonts::definitions(&[]));
+        // No package has loaded yet, so this is the theme's stack alone. Any
+        // package faces are merged in and `set_fonts` called again after the
+        // package pass — see `fonts.rs`.
+        ctx.set_fonts(fonts::definitions(&self.themes.theme, &[]));
+        self.themes_fonts_set = self.themes.fonts_fingerprint;
         let state = egui_winit::State::new(
             ctx.clone(),
             egui::ViewportId::ROOT,
@@ -4147,7 +4163,8 @@ impl ApplicationHandler for Editor {
                 predictable_texture_filtering: false,
             },
         );
-        self.egui = Some(Egui { ctx, state, renderer });
+        let backdrop = floptle_theme::BackdropRenderer::new(&gpu.device, &gpu.queue);
+        self.egui = Some(Egui { ctx, state, renderer, backdrop });
 
         self.gpu = Some(gpu);
         self.raster = Some(raster);

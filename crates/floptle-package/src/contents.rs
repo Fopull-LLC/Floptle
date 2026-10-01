@@ -59,6 +59,9 @@ pub enum Facet {
     Editor,
     Animations,
     Tilesets,
+    /// Editor and Hub themes: `themes/<id>/theme.ron` or
+    /// `themes/<name>.floptletheme` at the package root (`floptle-theme`).
+    Themes,
 }
 
 impl Facet {
@@ -78,6 +81,8 @@ impl Facet {
         Facet::Editor,
         Facet::Animations,
         Facet::Tilesets,
+        // Appended, never inserted: the site mirrors this order (0353).
+        Facet::Themes,
     ];
 
     /// The name in `index.json` and in a filter's query string.
@@ -96,6 +101,7 @@ impl Facet {
             Facet::Editor => "editor",
             Facet::Animations => "animations",
             Facet::Tilesets => "tilesets",
+            Facet::Themes => "themes",
         }
     }
 
@@ -115,6 +121,7 @@ impl Facet {
             Facet::Editor => "editor tools",
             Facet::Animations => "animations",
             Facet::Tilesets => "tilesets",
+            Facet::Themes => "editor themes",
         }
     }
 
@@ -223,6 +230,10 @@ impl Contents {
                 walk(&dir, &dir, kind, &mut counts, &mut 0);
             }
         }
+        let themes = count_themes(&root.join("themes"));
+        if themes > 0 {
+            counts.insert(Facet::Themes, themes);
+        }
         Contents { counts }
     }
 
@@ -274,6 +285,26 @@ impl Contents {
 /// interesting long before this; what matters past it is only *whether* a facet
 /// is present, and by then it is.
 const MAX_FILES: u32 = 20_000;
+
+/// Themes are not files in a content folder but folders of their own, at
+/// the package root: each `themes/<id>/` holding a `theme.ron`, and each
+/// `themes/*.floptletheme`, is one theme. The images and shaders inside a
+/// theme belong to it, so they are not counted as textures or anything else.
+fn count_themes(dir: &Path) -> u32 {
+    let Ok(entries) = floptle_vfs::read_dir(dir) else { return 0 };
+    let mut n = 0;
+    for e in entries {
+        let path = e.path();
+        if e.is_dir() {
+            if floptle_vfs::read(path.join("theme.ron")).is_ok() {
+                n += 1;
+            }
+        } else if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("floptletheme")) {
+            n += 1;
+        }
+    }
+    n
+}
 
 fn walk(dir: &Path, base: &Path, kind: DirKind, out: &mut BTreeMap<Facet, u32>, seen: &mut u32) {
     let Ok(entries) = floptle_vfs::read_dir(dir) else { return };
@@ -412,6 +443,25 @@ mod tests {
         let c = Contents::scan(&m, &root);
         assert_eq!(c.count(Facet::Editor), 1);
         assert_eq!(c.count(Facet::Scripts), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A theme is a folder with a `theme.ron`, or a `.floptletheme`, in the
+    /// package's `themes/`. Its pictures are part of it, not textures, and a
+    /// folder there without a `theme.ron` is not a theme.
+    #[test]
+    fn themes_are_counted_by_folder_and_their_pictures_are_not_textures() {
+        let root = temp("themes");
+        touch(&root, "themes/sunset/theme.ron");
+        touch(&root, "themes/sunset/images/sky.png");
+        touch(&root, "themes/night.floptletheme");
+        touch(&root, "themes/notes/README.md");
+        let m = Manifest::new("com.e.themes", "Themes", Version::new(1, 0, 0));
+        let c = Contents::scan(&m, &root);
+        assert_eq!(c.count(Facet::Themes), 2);
+        assert!(!c.has(Facet::Textures), "a theme's picture is part of the theme");
+        assert_eq!(c.keys(), vec!["themes"]);
+        assert_eq!(Facet::ALL.last(), Some(&Facet::Themes), "themes joins the table at the end");
         let _ = std::fs::remove_dir_all(&root);
     }
 

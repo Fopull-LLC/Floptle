@@ -1104,6 +1104,19 @@ impl Editor {
                 for (id, delta) in &textures_delta.set {
                     egui.renderer.update_texture(&gpu.device, &gpu.queue, *id, delta);
                 }
+                // The theme's moving backdrops, into the textures the panels
+                // just asked for: before egui draws, after the UI has said
+                // where they are. Nothing at all when no visible panel has one.
+                gpu_mark!("theme backdrops");
+                egui.backdrop.render(
+                    &gpu.device,
+                    &gpu.queue,
+                    &mut egui.renderer,
+                    &ctx,
+                    [gpu.config.width, gpu.config.height],
+                    &self.themes.prefs,
+                    self.playing && self.themes.prefs.pause_while_playing,
+                );
                 gpu_mark!("editor UI");
                 let mut encoder = gpu
                     .device

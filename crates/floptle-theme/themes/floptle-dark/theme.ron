@@ -1,0 +1,63 @@
+// Floptle Dark: the default, and the brand. A precise tool in a quiet dark
+// room: near-black ground, surfaces one step lighter, 1px hairlines and no
+// shadows, colour only where it means something.
+//
+// Every other theme starts from this one, so it sets every key. The colours
+// are contracts/floptle-brand/tokens.json in the floptle-platform repo, and
+// fopull.com uses the same values; change one in both places.
+(
+    format: 1,
+    id: "floptle-dark",
+    name: "Floptle Dark",
+    author: "Fopull",
+    description: "The Floptle look: near-black, hairlines, one teal accent.",
+    dark: true,
+    colors: (
+        ground: "#141517",
+        surface: "#1b1b1b",
+        surface_2: "#202020",
+        well: "#101112",
+        hairline: "#2c2e31",
+        hairline_quiet: "#232426",
+        text: "#e8e8ea",
+        dim: "#9a9ba0",
+        faint: "#6b6d72",
+        accent: "#00c8a0",
+        accent_hi: "#7fe4cd",
+        accent_wash: "$accent/10%",
+        accent_edge: "$accent/45%",
+        on_accent: "#07120f",
+        backdrop: "#0c0d0e",
+        selection: "$accent/24%",
+    ),
+    code: (
+        background: "$well",
+        gutter: "#4a4c51",
+        keyword: "#7fe4cd",
+        api: "#8fb4f0",
+        string: "#e2b98c",
+        number: "#c7a3f2",
+        comment: "#6b6d72",
+        text: "#e8e8ea",
+        current_line: "#ffffff0b",
+    ),
+    fonts: (
+        ui: "IBM Plex Sans",
+        mono: "IBM Plex Mono",
+        display: "Bricolage Grotesque",
+        ui_weight: 400,
+        display_weight: 640,
+        size: 13,
+        mono_size: 12.5,
+    ),
+    shape: (
+        radius: 6,
+        radius_small: 4,
+        widget_radius: 4,
+        stroke: 1,
+        density: 1,
+    ),
+    motion: (
+        animation_ms: 120,
+    ),
+)

@@ -65,5 +65,16 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native("Floptle Hub", options, Box::new(move |_cc| Ok(Box::new(HubApp::new(paths)))))
+    eframe::run_native(
+        "Floptle Hub",
+        options,
+        Box::new(move |cc| {
+            let mut app = HubApp::new(paths);
+            // The theme's moving backdrops draw with the window's own device.
+            if let Some(rs) = cc.wgpu_render_state.as_ref() {
+                app.attach_gpu(&rs.device, &rs.queue);
+            }
+            Ok(Box::new(app))
+        }),
+    )
 }

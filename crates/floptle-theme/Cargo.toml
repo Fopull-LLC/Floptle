@@ -1,0 +1,25 @@
+[package]
+name = "floptle-theme"
+description = "Editor and Hub themes: the .floptletheme format, the brand fonts, and animated panel backdrops."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+egui = { workspace = true }
+egui-wgpu = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+naga = { workspace = true }
+serde = { workspace = true }
+ron = { workspace = true }
+image = { workspace = true }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+log = { workspace = true }
+
+
+[dev-dependencies]
+pollster = { workspace = true }

@@ -72,17 +72,15 @@ pub(crate) fn drawable(defs: &egui::FontDefinitions) -> std::collections::HashSe
     out
 }
 
-/// The editor's own stack, plus any package faces.
+/// The theme's stack, plus any package faces.
 ///
-/// egui's proportional fallback (Ubuntu + the two emoji fonts) is missing many
-/// of the arrow/geometry glyphs the editor uses as icons (→ ● ◌ ⊘ ⊕ …); Hack
-/// covers them and already ships with egui, so it is appended or those labels
+/// The theme's faces go first and egui's own stay behind them
+/// (`floptle_theme::fonts::definitions`): egui's proportional fallback is
+/// missing many of the arrow/geometry glyphs the editor uses as icons
+/// (→ ● ◌ ⊘ ⊕ …), and Hack, which covers them, is appended, or those labels
 /// render as tofu squares.
-pub(crate) fn definitions(packages: &[PackageFont]) -> egui::FontDefinitions {
-    let mut fonts = egui::FontDefinitions::default();
-    if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-        fam.push("Hack".into());
-    }
+pub(crate) fn definitions(theme: &floptle_theme::Theme, packages: &[PackageFont]) -> egui::FontDefinitions {
+    let mut fonts = floptle_theme::fonts::definitions(theme);
     for f in packages {
         fonts.font_data.insert(
             f.family.clone(),
@@ -104,6 +102,30 @@ pub(crate) fn definitions(packages: &[PackageFont]) -> egui::FontDefinitions {
             .insert(egui::FontFamily::Name(f.family.clone().into()), chain);
     }
     fonts
+}
+
+/// The stack every theme falls back to (egui's faces and Hack), plus any
+/// package faces, without the theme's own.
+///
+/// What `gui.hasGlyph` answers from. A theme's face can carry more than the
+/// fallback (IBM Plex Sans has ✓, egui's faces do not), but a package asking
+/// "will this draw" must get the same answer whichever theme its user chose,
+/// so the question is put to the faces that are always there.
+pub(crate) fn fallback_definitions(packages: &[PackageFont]) -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+    if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        fam.push("Hack".into());
+    }
+    let mut t = (*floptle_theme::default_theme()).clone();
+    t.fonts.ui = "Ubuntu".into();
+    t.fonts.display = "Ubuntu".into();
+    t.fonts.mono = "Hack".into();
+    let mut with_pkgs = definitions(&t, packages);
+    with_pkgs.families.insert(
+        egui::FontFamily::Proportional,
+        fonts.families[&egui::FontFamily::Proportional].clone(),
+    );
+    with_pkgs
 }
 
 /// Read the faces a package declared, reporting each failure once.
@@ -188,8 +210,8 @@ mod tests {
 
     #[test]
     fn a_project_with_no_package_fonts_gets_exactly_the_editors_stack() {
-        let plain = definitions(&[]);
-        let base = egui::FontDefinitions::default();
+        let plain = definitions(&floptle_theme::default_theme(), &[]);
+        let base = floptle_theme::fonts::definitions(&floptle_theme::default_theme());
         assert_eq!(
             plain.font_data.len(),
             base.font_data.len(),
@@ -213,7 +235,7 @@ mod tests {
                 bytes: a_real_font(),
             },
         ];
-        let defs = definitions(&faces);
+        let defs = definitions(&floptle_theme::default_theme(), &faces);
         assert!(defs
             .families
             .contains_key(&egui::FontFamily::Name("com.example.lumen:Heading".into())));
@@ -224,7 +246,7 @@ mod tests {
 
     #[test]
     fn a_package_face_falls_back_to_the_editors_stack_for_glyphs_it_lacks() {
-        let defs = definitions(&[PackageFont {
+        let defs = definitions(&floptle_theme::default_theme(), &[PackageFont {
             family: family_key("com.a.b", "Display"),
             bytes: a_real_font(),
         }]);
@@ -283,7 +305,7 @@ mod tests {
         let bytes = base.font_data[&mono].font.to_vec();
 
         let ctx = egui::Context::default();
-        ctx.set_fonts(definitions(&[PackageFont {
+        ctx.set_fonts(definitions(&floptle_theme::default_theme(), &[PackageFont {
             family: family_key("com.a.b", "Display"),
             bytes,
         }]));

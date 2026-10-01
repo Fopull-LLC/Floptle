@@ -1,0 +1,22 @@
+// Carbon: true black for OLED screens. Pixels that are off cost nothing and
+// glow nowhere.
+(
+    format: 1,
+    id: "carbon",
+    name: "Carbon (OLED)",
+    author: "Fopull",
+    description: "True black for OLED screens, with the brand teal.",
+    colors: (
+        ground: "#000000",
+        surface: "#0a0a0a",
+        surface_2: "#121212",
+        well: "#000000",
+        hairline: "#202020",
+        hairline_quiet: "#151515",
+        text: "#e6e6e8",
+        dim: "#8e8f94",
+        faint: "#5f6166",
+        backdrop: "#000000",
+    ),
+    code: (background: "#000000", current_line: "#ffffff09"),
+)

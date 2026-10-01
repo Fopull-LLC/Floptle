@@ -79,6 +79,19 @@ pub(crate) fn pick_files_filtered(
     })
 }
 
+/// Ask where to save a file, suggesting `name`.
+pub(crate) fn save_file(title: &str, name: &str) -> Receiver<PathBuf> {
+    let (title, name) = (title.to_string(), name.to_string());
+    spawn(move || async move {
+        rfd::AsyncFileDialog::new()
+            .set_title(title)
+            .set_file_name(name)
+            .save_file()
+            .await
+            .map(|h| h.path().to_path_buf())
+    })
+}
+
 /// Run a dialog on a thread that actually has a runtime, and hand back the
 /// channel its answer arrives on.
 ///

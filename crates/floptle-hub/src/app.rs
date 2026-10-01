@@ -7,6 +7,8 @@ use crate::registry::{self, Install, Project};
 use crate::releases::{GithubReleases, LocalBuilds, Manifest, VersionSource};
 use crate::{install, launch};
 use eframe::egui;
+use floptle_theme::look;
+use floptle_theme::signal;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,7 +33,6 @@ const ISSUES_URL: &str = "https://github.com/Fopull-LLC/Floptle/issues";
 /// checked claim rather than a warning to be careful — a warning lets a glyph ship
 /// as a box.
 mod ico {
-    pub const NEWS: &str = "📰";
     pub const NEW: &str = "➕";
     pub const OPEN: &str = "▶";
     pub const UPGRADE: &str = "⬆";
@@ -45,13 +46,9 @@ mod ico {
     pub const STAR: &str = "⭐";
     pub const PROJECTS: &str = "📁";
     pub const INSTALLS: &str = "📦";
-    pub const SETTINGS: &str = "⚙";
-    pub const ABOUT: &str = "ℹ";
     pub const GLOBE: &str = "🌐";
     pub const BUG: &str = "🐛";
     pub const BOOK: &str = "📖";
-    pub const ACCOUNT: &str = "👤";
-    pub const SIGNIN: &str = "🔑";
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -258,6 +255,13 @@ pub struct HubApp {
     /// bar never goes away at all.
     hub_update_job: Option<HubUpdateJob>,
     hub_update_hidden: bool,
+    /// The theme, shared with the editor (`floptle-theme`): the same choice,
+    /// the same files, the same look.
+    themes: floptle_theme::host::Host,
+    /// The theme fonts egui has now, by [`floptle_theme::host::Host::fonts_fingerprint`].
+    fonts_set: Option<u64>,
+    /// Draws a theme's moving backdrops; absent until the window's GPU is known.
+    backdrop: Option<floptle_theme::BackdropRenderer>,
 }
 
 /// A running self-update. Same shape as [`InstallJob`] — the UI renders them alike.
@@ -337,6 +341,9 @@ impl HubApp {
             selected_version: None,
             hub_update_job: None,
             hub_update_hidden: false,
+            themes: floptle_theme::host::Host::load(floptle_theme::source::config_dir()),
+            fonts_set: None,
+            backdrop: None,
         };
         app.refresh_projects();
         // Fetch the available-versions list up front so the Installs tab is populated without
@@ -345,6 +352,68 @@ impl HubApp {
         // Proactively refresh a restored session whose access token is near expiry.
         app.refresh_session_if_stale();
         app
+    }
+
+    /// `FLOPTLE_HUB_SCREENSHOT=<file.png>`: four seconds after start, save the
+    /// window as drawn (backdrops included) and close. For checking a theme
+    /// by looking at it, the same job the editor's `FLOPTLE_FRAME_DUMP` does.
+    /// `FLOPTLE_HUB_TAB=projects|news|installs|settings|about` picks the view.
+    fn screenshot_hook(&mut self, ctx: &egui::Context) {
+        let Ok(path) = std::env::var("FLOPTLE_HUB_SCREENSHOT") else { return };
+        if let Ok(tab) = std::env::var("FLOPTLE_HUB_TAB") {
+            self.tab = match tab.as_str() {
+                "news" => Tab::News,
+                "installs" => Tab::Installs,
+                "settings" => Tab::Settings,
+                "about" => Tab::About,
+                _ => Tab::Projects,
+            };
+        }
+        let shot = ctx.input(|i| {
+            i.raw.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(img) = shot {
+            let [w, h] = img.size;
+            let px: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_srgba_unmultiplied()).collect();
+            if let Some(buf) = image::RgbaImage::from_raw(w as u32, h as u32, px) {
+                let _ = buf.save(&path);
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        let asked = egui::Id::new("floptle-hub-screenshot-asked");
+        if ctx.input(|i| i.time) > 4.0 && !ctx.data(|d| d.get_temp::<bool>(asked).unwrap_or(false)) {
+            ctx.data_mut(|d| d.insert_temp(asked, true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+        }
+        ctx.request_repaint();
+    }
+
+    /// Give the theme the window's GPU, for its moving backdrops.
+    pub fn attach_gpu(&mut self, device: &eframe::wgpu::Device, queue: &eframe::wgpu::Queue) {
+        self.backdrop = Some(floptle_theme::BackdropRenderer::new(device, queue));
+    }
+
+    /// The theme on `ctx`, its fonts when they changed, and a `.floptletheme`
+    /// dropped on the window added. Every frame: it is a style write, and the
+    /// fonts only when they changed.
+    fn apply_theme(&mut self, ctx: &egui::Context) {
+        self.themes.poll();
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect()
+        });
+        for p in dropped.iter().filter(|p| floptle_theme::host::Host::is_theme_file(p)) {
+            self.themes.import_path(p);
+            self.tab = Tab::Settings;
+        }
+        if self.fonts_set != Some(self.themes.fonts_fingerprint) {
+            self.fonts_set = Some(self.themes.fonts_fingerprint);
+            ctx.set_fonts(floptle_theme::fonts::definitions(&self.themes.theme));
+        }
+        floptle_theme::apply(ctx, self.themes.theme.clone(), &self.themes.prefs);
     }
 
     fn refresh_projects(&mut self) {
@@ -589,17 +658,22 @@ impl HubApp {
         let mut cancel = false;
         // Only an interactive sign-in takes over the panel; a silent refresh does not.
         let signing_in = matches!(&self.auth_job, Some(j) if j.kind == AuthKind::SignIn);
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(ico::ACCOUNT).size(16.0));
-                ui.strong("Account");
-            });
+        look::panel(ui).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(look::label(ui, "Account"));
             if signing_in {
                 match self.auth_job.as_ref().and_then(|j| j.prompt.as_ref()) {
                     Some((code, url)) => {
                         ui.label("Approve this code in your browser to finish signing in:");
                         ui.horizontal(|ui| {
-                            ui.strong(egui::RichText::new(code).monospace().size(20.0));
+                            // The code, the way the site shows one: big, mono, wide, in the accent.
+                            ui.label(
+                                egui::RichText::new(code)
+                                    .monospace()
+                                    .size(26.0)
+                                    .extra_letter_spacing(4.0)
+                                    .color(look::accent(ui)),
+                            );
                             ui.hyperlink_to("open approval page", url);
                         });
                         ui.small("waiting for approval…");
@@ -642,7 +716,7 @@ impl HubApp {
                 }
             } else {
                 ui.small("Sign in to fopull.com to use Floptle Cloud (managed relay, matchmaking, hosting).");
-                if ui.button(format!("{} Sign in", ico::SIGNIN)).clicked() {
+                if ui.add(look::primary(ui, "Sign in")).clicked() {
                     sign_in = true;
                 }
             }
@@ -1137,10 +1211,28 @@ impl HubApp {
     }
 }
 
+/// A banner: the accent's wash under a hairline. One quiet strip, with the
+/// one filled button in it.
+fn banner_frame(ui: &egui::Ui) -> egui::Frame {
+    let t = floptle_theme::theme(ui.ctx());
+    let k = &t.tokens;
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(18, 8))
+        .fill(k.accent_wash.over(k.solid(k.ground)).to_egui())
+        .stroke(egui::Stroke::new(t.shape.stroke, k.accent_edge.to_egui()))
+}
+
+/// A PNG compiled into the binary, as an egui image.
+fn decode_png(bytes: &[u8]) -> egui::ColorImage {
+    let i = image::load_from_memory(bytes).expect("a committed brand image decodes").to_rgba8();
+    egui::ColorImage::from_rgba_unmultiplied([i.width() as usize, i.height() as usize], i.as_raw())
+}
+
 impl eframe::App for HubApp {
     // Pre-paint state update (egui 0.35 splits logic from ui). Poll the background jobs
     // and keep repainting while one runs so its progress animates.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.screenshot_hook(ctx);
         self.poll_manifest();
         self.poll_install();
         self.poll_hub_update(ctx);
@@ -1174,40 +1266,62 @@ impl eframe::App for HubApp {
         } else if self.auth_job.is_some() || self.toast.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
+        // A moving theme keeps the window ticking at its backdrop rate, and only
+        // while the window has focus: a Hub left open behind other windows
+        // costs nothing. A theme that draws still never asks.
+        if ctx.input(|i| i.focused)
+            && let Some(d) = floptle_theme::repaint_after(ctx, &self.themes.prefs)
+        {
+            ctx.request_repaint_after(d);
+        }
+        // The other program changing the shared theme choice is seen within a second.
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
     }
 
     // egui 0.35 hands the root `Ui`; panels are shown into it (top/bottom first, then the
     // central content).
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::Panel::top("tabs").show(ui, |ui| {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.apply_theme(ui.ctx());
+        let header_margin = egui::Margin::symmetric(18, 10);
+        egui::Panel::top("tabs").frame(egui::Frame::NONE.inner_margin(header_margin)).show(ui, |ui| {
+            let full = ui.max_rect() + header_margin;
+            floptle_theme::paint_region(ui, "hub.header", full);
+            ui.painter().hline(full.x_range(), full.bottom() - 0.5, look::hairline(ui));
             ui.horizontal(|ui| {
-                // The mark, then the name — the logo is the Hub's icon here too.
+                // The mark on the ground with its soft teal glow, never on a
+                // tile (contract floptle-brand §5), then the name.
                 let mark = self.mark_texture(ui.ctx());
-                ui.add(egui::Image::new((mark.id(), egui::vec2(22.0, 22.0))));
-                ui.heading("Floptle Hub");
+                let (r, _) = ui.allocate_exact_size(egui::vec2(30.0, 28.0), egui::Sense::hover());
+                look::glow(ui, r.expand(6.0), 1.0);
+                let ink = look::token(ui, |t| t.text);
+                ui.painter().image(mark.id(), r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), ink);
+                ui.add_space(4.0);
+                ui.label(look::title(ui, "Floptle"));
                 // the HUB'S own version, always in view. Three different things share one
                 // version number here — the Hub, the engine, and the engine a project is
                 // pinned to — and until this line the only one with its name attached was
-                // on the About tab. Somebody reading "0.22.1" in the Installs list had
-                // nothing on screen telling them it was a different 0.22.1 from the window
-                // they were reading it in.
-                if let Some(v) = Self::hub_version() {
-                    ui.weak(v).on_hover_text(
-                        "the version of the Hub itself — the engine versions in Installs are numbered separately",
-                    );
+                // on the About tab.
+                let v = Self::hub_version().map_or_else(|| "Hub".to_string(), |v| format!("Hub {v}"));
+                ui.label(look::data(ui, v)).on_hover_text(
+                    "the version of the Hub itself — the engine versions in Installs are numbered separately",
+                );
+                ui.add_space(20.0);
+                ui.spacing_mut().item_spacing.x = 18.0;
+                for (t, name) in [
+                    (Tab::Projects, "Projects"),
+                    (Tab::News, "News"),
+                    (Tab::Installs, "Installs"),
+                    (Tab::Settings, "Settings"),
+                    (Tab::About, "About"),
+                ] {
+                    if look::tab(ui, self.tab == t, name).clicked() {
+                        self.tab = t;
+                    }
                 }
-                ui.separator();
-                ui.selectable_value(&mut self.tab, Tab::Projects, format!("{} Projects", ico::PROJECTS));
-                ui.selectable_value(&mut self.tab, Tab::News, format!("{} News", ico::NEWS));
-                ui.selectable_value(&mut self.tab, Tab::Installs, format!("{} Installs", ico::INSTALLS));
-                ui.selectable_value(&mut self.tab, Tab::Settings, format!("{} Settings", ico::SETTINGS));
-                ui.selectable_value(&mut self.tab, Tab::About, format!("{} About", ico::ABOUT));
 
                 // the chip that never goes away. Both banners below can be put away — one
                 // for the session, one for a version — and this cannot be put away at
-                // all. It stays until the update is actually installed. That is the
-                // difference between "we told you once" and "you cannot be running
-                // something out of date without knowing it".
+                // all. It stays until the update is actually installed.
                 //
                 // The Hub outranks the engine when both are stale, because an old Hub is
                 // what would stop you fixing the other one.
@@ -1215,35 +1329,20 @@ impl eframe::App for HubApp {
                 let engine_new = hub_new.is_none().then(|| self.update_available()).flatten();
                 if let Some((label, hint, tab)) = hub_new
                     .as_ref()
-                    .map(|r| {
-                        (
-                            format!("{} Hub {} ready", ico::UPGRADE, r.version),
-                            "a newer Floptle Hub is available — click for what's in it",
-                            Tab::About,
-                        )
-                    })
+                    .map(|r| (format!("Hub {} ready", r.version), "a newer Floptle Hub is available — click for what's in it", Tab::About))
                     .or_else(|| {
                         engine_new.as_ref().map(|r| {
-                            // "Engine", not "Floptle". This chip sits a few pixels from the
-                            // heading — which now reads "Floptle Hub <its own version>" —
-                            // and "Floptle 0.22.1" beside that is the whole confusion in a
-                            // single line.
-                            (
-                                format!("{} Engine {}", ico::UPGRADE, r.version),
-                                "a newer engine is available — click to see what's in it",
-                                Tab::Installs,
-                            )
+                            // "Engine", not "Floptle": beside "Floptle Hub <version>",
+                            // "Floptle 0.22.1" is the whole confusion in one line.
+                            (format!("Engine {}", r.version), "a newer engine is available — click to see what's in it", Tab::Installs)
                         })
                     })
                 {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(4.0);
-                        if ui
-                            .button(
-                                egui::RichText::new(label)
-                                    .color(egui::Color32::from_rgb(120, 200, 130)),
-                            )
+                        if look::chip(ui, format!("{} {label}", ico::UPGRADE), look::Chip::On)
+                            .interact(egui::Sense::click())
                             .on_hover_text(hint)
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
                             .clicked()
                         {
                             self.tab = tab;
@@ -1267,12 +1366,9 @@ impl eframe::App for HubApp {
         {
             let mut go: Option<crate::releases::Artifact> = None;
             let blocked = crate::selfupdate::can_self_update().err();
-            egui::Panel::top("hub-update-banner").show(ui, |ui| {
+            egui::Panel::top("hub-update-banner").frame(banner_frame(ui)).show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(120, 200, 130),
-                        format!("{} Floptle Hub {} is available", ico::UPGRADE, r.version),
-                    );
+                    ui.label(look::section(ui, format!("Floptle Hub {} is available", r.version)));
                     if !r.title.is_empty() {
                         ui.small(format!("“{}”", r.title));
                     }
@@ -1322,18 +1418,15 @@ impl eframe::App for HubApp {
             && self.config.settings.dismissed_update.as_deref() != Some(r.version.as_str())
         {
             let mut act: Option<(bool, String)> = None; // (install?, version)
-            egui::Panel::top("update-banner").show(ui, |ui| {
+            egui::Panel::top("update-banner").frame(banner_frame(ui)).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.colored_label(
-                        egui::Color32::LIGHT_GREEN,
-                        format!("{} Floptle engine {} is available", ico::UPGRADE, r.version),
-                    );
+                    ui.label(look::section(ui, format!("Floptle engine {} is available", r.version)));
                     if !r.date.is_empty() {
-                        ui.small(&r.date);
+                        ui.label(look::data(ui, &r.date));
                     }
-                    if self.job.is_none()
-                        && ui.button(format!("{} Install now", ico::INSTALL)).clicked()
-                    {
+                    // An ordinary button: the view below the banner has its own
+                    // one filled action, and two would be none.
+                    if self.job.is_none() && ui.button(format!("{} Install now", ico::INSTALL)).clicked() {
                         act = Some((true, r.version.clone()));
                     }
                     if !r.notes_url.is_empty() {
@@ -1364,15 +1457,15 @@ impl eframe::App for HubApp {
 
         if let Some((msg, is_err)) = self.toast.clone() {
             let mut dismiss = false;
-            egui::Panel::bottom("toast").show(ui, |ui| {
+            egui::Panel::bottom("toast").frame(banner_frame(ui)).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if ui.small_button(ico::CLOSE).clicked() {
                         dismiss = true;
                     }
                     let (color, mark) = if is_err {
-                        (egui::Color32::LIGHT_RED, ico::WARN)
+                        (signal::BAD, ico::WARN)
                     } else {
-                        (egui::Color32::LIGHT_GREEN, ico::OK)
+                        (signal::GOOD, ico::OK)
                     };
                     ui.colored_label(color, format!("{mark} {msg}"));
                 });
@@ -1383,13 +1476,27 @@ impl eframe::App for HubApp {
             }
         }
 
-        egui::CentralPanel::default().show(ui, |ui| match self.tab {
-            Tab::Projects => self.projects_tab(ui),
-            Tab::News => self.news_tab(ui),
-            Tab::Installs => self.installs_tab(ui),
-            Tab::Settings => self.settings_tab(ui),
-            Tab::About => self.about_tab(ui),
+        let body_margin = egui::Margin::symmetric(18, 12);
+        egui::CentralPanel::default().frame(egui::Frame::NONE.inner_margin(body_margin)).show(ui, |ui| {
+            floptle_theme::paint_region(ui, "hub.content", ui.max_rect() + body_margin);
+            match self.tab {
+                Tab::Projects => self.projects_tab(ui),
+                Tab::News => self.news_tab(ui),
+                Tab::Installs => self.installs_tab(ui),
+                Tab::Settings => self.settings_tab(ui),
+                Tab::About => self.about_tab(ui),
+            }
         });
+
+        // The theme's backdrops, into the textures the panels above just asked
+        // for, before eframe draws the frame.
+        if let (Some(bd), Some(rs)) = (self.backdrop.as_mut(), frame.wgpu_render_state()) {
+            let ctx = ui.ctx().clone();
+            let ppp = ctx.pixels_per_point();
+            let size = ctx.content_rect().size() * ppp;
+            let mut renderer = rs.renderer.write();
+            bd.render(&rs.device, &rs.queue, &mut renderer, &ctx, [size.x.round() as u32, size.y.round() as u32], &self.themes.prefs, false);
+        }
     }
 }
 
@@ -1406,7 +1513,7 @@ impl HubApp {
         let busy = self.proc.is_some();
         // New / add controls.
         ui.horizontal(|ui| {
-            if ui.add_enabled(!busy, egui::Button::new(format!("{} New project", ico::NEW))).clicked() {
+            if ui.add_enabled(!busy, look::primary(ui, "New project")).clicked() {
                 let version = self
                     .config
                     .settings
@@ -1420,7 +1527,7 @@ impl HubApp {
                     Some(NewProjectForm { version, location, examples: true, ..Default::default() });
             }
             ui.separator();
-            ui.label("or add existing:");
+            ui.label(look::fine(ui, "or add an existing folder"));
             ui.text_edit_singleline(&mut self.add_path);
             if ui.button(format!("{} Add", ico::NEW)).clicked() {
                 match self.add_existing(&self.add_path.clone()) {
@@ -1439,8 +1546,9 @@ impl HubApp {
         if let Some(mut form) = self.new_project.take() {
             let mut keep = true;
             let mut reveal_loc = false;
-            egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.strong(format!("{} New project", ico::NEW));
+            ui.add_space(8.0);
+            look::panel(ui).show(ui, |ui| {
+                ui.label(look::section(ui, "New project"));
                 egui::Grid::new("new-proj-form").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
                     ui.label("Name");
                     ui.text_edit_singleline(&mut form.name);
@@ -1519,7 +1627,7 @@ impl HubApp {
                 }
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(!busy, egui::Button::new(format!("{} Create", ico::OK))).clicked()
+                    if ui.add_enabled(!busy, look::primary(ui, "Create")).clicked()
                         && self.start_create(&form)
                     {
                         keep = false;
@@ -1583,27 +1691,28 @@ impl HubApp {
         let mut upgrade: Option<(usize, Install)> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (idx, p) in self.config.projects.iter().enumerate() {
-                egui::Frame::group(ui.style()).show(ui, |ui| {
+                look::panel(ui).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
-                            ui.strong(&p.name);
-                            ui.small(p.path.display().to_string());
+                            ui.label(look::section(ui, &p.name));
+                            ui.label(look::data(ui, p.path.display().to_string()));
                             let ver = p.engine_version.clone().unwrap_or_else(|| "unpinned".into());
                             let installed = p
                                 .engine_version
                                 .as_deref()
                                 .map(|v| self.installs.iter().any(|i| i.version == v))
                                 .unwrap_or(!self.installs.is_empty());
-                            let (mark, color) = if !p.exists() {
-                                (format!("{} folder missing", ico::WARN), egui::Color32::LIGHT_RED)
+                            let (mark, kind) = if !p.exists() {
+                                ("folder missing", look::Chip::Bad)
                             } else if installed {
-                                (format!("engine {}", ico::OK), egui::Color32::LIGHT_GREEN)
+                                ("installed", look::Chip::Good)
                             } else {
-                                (format!("{} engine not installed", ico::WARN), egui::Color32::from_rgb(230, 180, 90))
+                                ("engine not installed", look::Chip::Warn)
                             };
                             ui.horizontal(|ui| {
-                                ui.small(format!("engine: {ver}  ·"));
-                                ui.small(egui::RichText::new(mark).color(color));
+                                look::chip(ui, format!("engine {ver}"), look::Chip::Neutral);
+                                look::chip(ui, mark, kind);
                             });
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1616,7 +1725,10 @@ impl HubApp {
                             {
                                 reveal_idx = Some(idx);
                             }
-                            if ui.add_enabled(p.exists(), egui::Button::new(format!("{} Open", ico::OPEN))).clicked() {
+                            if ui
+                                .add_enabled(p.exists(), egui::Button::new(format!("{} Open", ico::OPEN)).min_size(egui::vec2(84.0, 0.0)))
+                                .clicked()
+                            {
                                 launch_idx = Some(idx);
                             }
                             if let Some(target) = &upgrades[idx]
@@ -1634,6 +1746,7 @@ impl HubApp {
                         });
                     });
                 });
+                ui.add_space(6.0);
             }
         });
         if let Some(idx) = launch_idx {
@@ -1674,7 +1787,7 @@ impl HubApp {
 
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.strong("Engine versions");
+            ui.label(look::section(ui, "Engine versions"));
             let loading = matches!(self.manifest, ManifestState::Loading(_));
             if ui
                 .add_enabled(!loading, egui::Button::new(format!("{} Check for versions", ico::REFRESH)))
@@ -1687,7 +1800,7 @@ impl HubApp {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(6.0);
-                ui.small(format!("{} channel", self.config.settings.channel));
+                look::chip(ui, format!("{} channel", self.config.settings.channel), look::Chip::Neutral);
             });
         });
         // say which versions these are. "Engine versions" alone left the reader to work out
@@ -1704,7 +1817,7 @@ impl HubApp {
             ui.add(egui::ProgressBar::new(job.frac).desired_height(6.0));
         }
         if let ManifestState::Error(e) = &self.manifest {
-            ui.colored_label(egui::Color32::LIGHT_RED, format!("{} could not load versions: {e}", ico::WARN));
+            ui.colored_label(signal::BAD, format!("{} could not load versions: {e}", ico::WARN));
         }
         ui.add_space(6.0);
 
@@ -1779,30 +1892,19 @@ impl HubApp {
                         );
                         inner.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
-                            let mut label = egui::RichText::new(&r.version);
-                            if r.installed.is_some() {
-                                label = label.strong();
-                            }
-                            ui.label(label);
+                            ui.label(look::data(ui, &r.version).size(ui.style().text_styles[&egui::TextStyle::Body].size));
                             // words, not glyphs. The Hub ships egui's default fonts, which
                             // have no ● and no ✔ — both draw as an empty box, and a list of
                             // empty boxes is worse than no marker at all. "installed" also
                             // needs no legend.
                             if r.is_default {
-                                ui.small(
-                                    egui::RichText::new("default")
-                                        .color(ui.visuals().hyperlink_color)
-                                        .strong(),
-                                );
+                                look::chip(ui, "default", look::Chip::On);
                             } else if r.installed.is_some() {
-                                ui.small(egui::RichText::new("installed").strong());
+                                look::chip(ui, "installed", look::Chip::Neutral);
                             } else if is_new {
-                                ui.small(
-                                    egui::RichText::new("new")
-                                        .color(egui::Color32::from_rgb(120, 200, 130)),
-                                );
+                                look::chip(ui, "new", look::Chip::Good);
                             } else if r.hub_only {
-                                ui.small(egui::RichText::new("Hub only").weak());
+                                ui.label(look::fine(ui, "Hub only"));
                             }
                         });
                         // The release name, which the column had no room for before — it is
@@ -1837,14 +1939,14 @@ impl HubApp {
             ui.set_max_width((ui.available_width() - 8.0).max(120.0));
 
             ui.horizontal(|ui| {
-                ui.heading(&r.version);
+                ui.label(look::title(ui, &r.version));
                 if !r.title.is_empty() {
-                    ui.heading(egui::RichText::new(format!("“{}”", r.title)).weak());
+                    ui.label(look::title(ui, format!("“{}”", r.title)).color(look::token(ui, |t| t.dim)));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(6.0);
                     if !r.date.is_empty() {
-                        ui.small(&r.date);
+                        ui.label(look::data(ui, &r.date));
                     }
                 });
             });
@@ -1875,7 +1977,7 @@ impl HubApp {
             {
                 ui.add_space(6.0);
                 ui.colored_label(
-                    egui::Color32::LIGHT_RED,
+                    signal::BAD,
                     format!("{} this install is incomplete — uninstall it and install it again", ico::WARN),
                 );
             }
@@ -1904,13 +2006,7 @@ impl HubApp {
                     (None, Some(art)) => {
                         if ui
                             .add_enabled_ui(!busy, |ui| {
-                                ui.add_sized(
-                                    [132.0, 30.0],
-                                    egui::Button::new(
-                                        egui::RichText::new(format!("{} Install", ico::INSTALL))
-                                            .strong(),
-                                    ),
-                                )
+                                ui.add_sized([132.0, 30.0], look::primary(ui, format!("{} Install", ico::INSTALL)))
                             })
                             .inner
                             .clicked()
@@ -2018,7 +2114,7 @@ impl HubApp {
 
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.strong(format!("{} What's happening", ico::NEWS));
+            ui.label(look::section(ui, "What's happening"));
             let loading = matches!(self.manifest, ManifestState::Loading(_));
             if ui
                 .add_enabled(!loading, egui::Button::new(format!("{} Refresh", ico::REFRESH)))
@@ -2039,12 +2135,13 @@ impl HubApp {
             // from reading about it. News that tells you a version exists and then makes
             // you find the Installs tab yourself is news that wasted your time.
             if let Some((version, title, _)) = &latest {
-                egui::Frame::group(ui.style()).show(ui, |ui| {
+                look::panel(ui).show(ui, |ui| {
                     ui.set_width(ui.available_width() - 16.0);
+                    ui.label(look::label(ui, "Latest release"));
                     ui.horizontal_wrapped(|ui| {
-                        ui.heading(format!("Floptle {version}"));
+                        ui.label(look::title(ui, format!("Floptle {version}")));
                         if !title.is_empty() {
-                            ui.heading(egui::RichText::new(format!("“{title}”")).weak());
+                            ui.label(look::title(ui, format!("“{title}”")).color(look::token(ui, |t| t.dim)));
                         }
                     });
                     ui.add_space(6.0);
@@ -2053,13 +2150,7 @@ impl HubApp {
                         if installed_latest {
                             ui.weak("This is the newest release, and you have it.");
                         } else if ui
-                            .add_sized(
-                                [176.0, 32.0],
-                                egui::Button::new(
-                                    egui::RichText::new(format!("{} Get {version}", ico::INSTALL))
-                                        .strong(),
-                                ),
-                            )
+                            .add_sized([176.0, 32.0], look::primary(ui, format!("{} Get {version}", ico::INSTALL)))
                             .clicked()
                         {
                             go_installs = true;
@@ -2111,10 +2202,58 @@ impl HubApp {
     }
 
     fn settings_tab(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical().id_salt("settings").auto_shrink([false, false]).show(ui, |ui| {
+            ui.set_max_width((ui.available_width() - 8.0).max(200.0));
+            self.settings_body(ui);
+        });
+    }
+
+    /// The theme picker, shared with the editor: choosing here changes an open
+    /// editor too, within a second.
+    fn appearance_section(&mut self, ui: &mut egui::Ui) {
+        use floptle_theme::host::Request;
+        look::panel(ui).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            for r in self.themes.settings_ui(ui, false) {
+                match r {
+                    // The Hub has no file pickers: a theme arrives by being dropped
+                    // on the window, or put in the folder.
+                    Request::Import => {
+                        self.themes.settings.notice = Some((
+                            "Drop a .floptletheme file on this window to add it, or put it in the themes folder.".into(),
+                            false,
+                        ));
+                    }
+                    Request::Export(id) => {
+                        let dir = directories::UserDirs::new()
+                            .and_then(|u| u.download_dir().map(|d| d.to_path_buf()))
+                            .unwrap_or_else(|| self.paths.data.clone());
+                        let dest = dir.join(format!("{id}.{}", floptle_theme::source::EXTENSION));
+                        self.themes.export_to(&id, &dest);
+                    }
+                    Request::PickImage(_) => {
+                        self.themes.settings.notice = Some((
+                            "Pictures are added in the editor's theme editor (Edit ⏵ Preferences).".into(),
+                            false,
+                        ));
+                    }
+                    Request::OpenFolder(d) => {
+                        if let Err(e) = launch::reveal(&d) {
+                            self.toast = Some((e, true));
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    fn settings_body(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         self.account_section(ui);
-        ui.add_space(6.0);
-        ui.strong(format!("{} Settings", ico::SETTINGS));
+        ui.add_space(12.0);
+        self.appearance_section(ui);
+        ui.add_space(12.0);
+        ui.label(look::label(ui, "Engine and downloads"));
         let mut changed = false;
         let mut reveal_data = false;
         egui::Grid::new("settings").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
@@ -2188,12 +2327,12 @@ impl HubApp {
         ui.small("Token is used only this session (a keyring store is a later hardening step). Point the manifest URL at a local releases.json to test against a locally-packaged bundle.");
     }
 
-    /// The app icon as a texture, uploaded on first use.
+    /// The mark (white line art), uploaded on first use. Drawn tinted with the
+    /// theme's text colour, so it reads on a light theme as well as a dark one.
     fn mark_texture(&mut self, ctx: &egui::Context) -> egui::TextureHandle {
         self.mark
             .get_or_insert_with(|| {
-                let i = floptle_brand::Icon::at(64).expect("the committed icon decodes");
-                let img = egui::ColorImage::from_rgba_unmultiplied([i.width as usize, i.height as usize], &i.rgba);
+                let img = decode_png(floptle_brand::MARK_PNG);
                 ctx.load_texture("floptle-mark", img, egui::TextureOptions::LINEAR)
             })
             .clone()
@@ -2203,16 +2342,20 @@ impl HubApp {
         ui.add_space(10.0);
         ui.vertical_centered(|ui| {
             // The logo — white line art, so it wants the dark ground the Hub has.
+            // The lockup, on the ground with its glow (contract §5).
             let logo = self.logo.get_or_insert_with(|| {
-                let l = floptle_brand::Icon::logo();
-                let img = egui::ColorImage::from_rgba_unmultiplied([l.width as usize, l.height as usize], &l.rgba);
-                ui.ctx().load_texture("floptle-logo", img, egui::TextureOptions::LINEAR)
+                let img = decode_png(floptle_brand::LOCKUP_PNG);
+                ui.ctx().load_texture("floptle-lockup", img, egui::TextureOptions::LINEAR)
             });
-            ui.add(egui::Image::new((logo.id(), egui::vec2(180.0, 180.0))));
-            ui.heading("Floptle Hub");
+            let id = logo.id();
+            let (r, _) = ui.allocate_exact_size(egui::vec2(150.0, 180.0), egui::Sense::hover());
+            look::glow(ui, r, 0.9);
+            ui.painter().image(id, r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), look::token(ui, |t| t.text));
+            ui.add_space(6.0);
+            ui.label(look::title(ui, "Floptle Hub"));
             let v = env!("CARGO_PKG_VERSION");
-            ui.label(if v == "0.0.0" { "dev build".to_string() } else { format!("version {v}") });
-            ui.small(format!("platform: {}", crate::releases::platform_target()));
+            ui.label(look::data(ui, if v == "0.0.0" { "dev build".to_string() } else { format!("version {v}") }));
+            ui.label(look::data(ui, format!("platform {}", crate::releases::platform_target())).color(look::token(ui, |t| t.dim)));
         });
         ui.add_space(8.0);
 
@@ -2220,13 +2363,13 @@ impl HubApp {
         // nobody can act on — it only means something next to the version that exists.
         let update = self.hub_update_available();
         let mut go: Option<crate::releases::Artifact> = None;
-        egui::Frame::group(ui.style()).show(ui, |ui| {
+        look::panel(ui).show(ui, |ui| {
             ui.set_width(ui.available_width());
             match (&update, Self::hub_version()) {
                 (None, Some(_)) => match self.manifest {
                     ManifestState::Loaded(_) => {
                         ui.horizontal(|ui| {
-                            ui.colored_label(egui::Color32::LIGHT_GREEN, ico::OK);
+                            ui.colored_label(signal::GOOD, ico::OK);
                             ui.label("This is the newest Hub.");
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.add_space(4.0);
@@ -2250,10 +2393,7 @@ impl HubApp {
                 }
                 (Some(r), _) => {
                     ui.horizontal_wrapped(|ui| {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(120, 200, 130),
-                            egui::RichText::new(format!("Hub {} is available", r.version)).strong(),
-                        );
+                        ui.label(look::section(ui, format!("Hub {} is available", r.version)));
                         if !r.title.is_empty() {
                             ui.label(egui::RichText::new(format!("“{}”", r.title)).weak());
                         }
@@ -2263,7 +2403,7 @@ impl HubApp {
                                 ui.add(egui::ProgressBar::new(job.frac).desired_width(140.0).desired_height(8.0));
                             }
                             (Ok(_), None) => {
-                                if ui.button(format!("{} Update and restart", ico::INSTALL)).clicked()
+                                if ui.add(look::primary(ui, "Update and restart")).clicked()
                                     && let Some(a) = r.hub_artifact_here().cloned()
                                 {
                                     go = Some(a);
@@ -2464,6 +2604,87 @@ mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/about-update.png");
         harness.render().expect("no GPU?").save(&out).unwrap();
         println!("wrote {}", out.display());
+    }
+
+    /// Every view of the Hub, whole window, in a few themes, as PNGs to look at.
+    /// `FLOPTLE_HUB_SNAP_THEMES=a,b` picks the themes (default: the brand pair).
+    ///
+    /// Ignored for the same reason as the snapshot above: it needs a GPU.
+    #[test]
+    #[ignore = "renders PNGs for eyeballing; needs a GPU"]
+    fn snapshot_every_view() {
+        use super::*;
+        let themes = std::env::var("FLOPTLE_HUB_SNAP_THEMES").unwrap_or_else(|_| "floptle-dark,floptle-light".into());
+        for theme in themes.split(',') {
+            for (tab, name) in [
+                (Tab::Projects, "projects"),
+                (Tab::News, "news"),
+                (Tab::Installs, "installs"),
+                (Tab::Settings, "settings"),
+                (Tab::About, "about"),
+            ] {
+                let tmp = tempfile::tempdir().unwrap();
+                let cfg = tmp.path().join("cfg");
+                std::fs::create_dir_all(&cfg).unwrap();
+                floptle_theme::source::save_prefs(&cfg, &floptle_theme::Prefs { theme: theme.into(), ..Default::default() });
+                let mut app = HubApp::new(Paths::at(tmp.path()));
+                app.themes = floptle_theme::host::Host::load(Some(cfg));
+                // Signed out, whatever this machine's keyring holds: a picture
+                // for review must not carry somebody's account.
+                app.session = None;
+                let mut m = Manifest { schema: 1, ..Default::default() };
+                for (v, date, title) in [("0.111.0", "2026-10-02", "Make It Yours"), ("0.110.0", "2026-10-01", "Travels Light")] {
+                    m.versions.push(crate::releases::ReleaseInfo {
+                        version: v.into(),
+                        channel: "stable".into(),
+                        date: date.into(),
+                        notes_url: format!("https://example.invalid/v{v}"),
+                        title: title.into(),
+                        changed: vec!["engine".into(), "hub".into()],
+                        notes: "Themes are files now.\n\n- Pick one in Settings.\n- Share it as a `.floptletheme`.".into(),
+                        artifacts: [(
+                            crate::releases::platform_target(),
+                            crate::releases::Artifact { url: "u".into(), sha256: "s".into(), size: 13_400_000 },
+                        )]
+                        .into_iter()
+                        .collect(),
+                        hub_artifacts: Default::default(),
+                    });
+                }
+                m.news = "## Working on\n\nThemes you can share.".into();
+                app.manifest = ManifestState::Loaded(m);
+                app.installs = vec![Install { version: "0.110.0".into(), path: tmp.path().join("versions/0.110.0") }];
+                app.config.settings.default_version = Some("0.110.0".into());
+                app.config.projects = vec![
+                    Project {
+                        name: "Freeflier".into(),
+                        path: tmp.path().to_path_buf(),
+                        engine_version: Some("0.110.0".into()),
+                        last_opened: None,
+                    },
+                    Project {
+                        name: "Solar".into(),
+                        path: tmp.path().join("missing"),
+                        engine_version: Some("0.109.1".into()),
+                        last_opened: None,
+                    },
+                ];
+                app.tab = tab;
+                let mut harness = egui_kittest::Harness::builder()
+                    .with_size(egui::vec2(980.0, 640.0))
+                    .build_ui(move |ui| {
+                        use eframe::App as _;
+                        let mut frame = eframe::Frame::_new_kittest();
+                        app.ui(ui, &mut frame);
+                    });
+                harness.run();
+                let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join(format!("../../target/hub-{theme}-{name}.png"));
+                std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+                harness.render().expect("no GPU?").save(&out).unwrap();
+                println!("wrote {}", out.display());
+            }
+        }
     }
 
     /// The report, exactly: 0.22.1 changed only the Hub, and the Projects tab offered to

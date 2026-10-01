@@ -15,7 +15,7 @@ use crate::gizmo::Tool;
 use crate::hierarchy::{node_new_menu};
 use crate::prefs::{DEFAULT_PLAY_TINT, GridConfig};
 #[cfg(feature = "editor-ui")]
-use crate::theme::{CODE_THEMES, ENGINE_THEMES};
+use crate::theme::CODE_THEMES;
 #[cfg(feature = "editor-ui")]
 use crate::export::EXPORT_TARGETS;
 use crate::{Editor, ProjectAction};
@@ -181,53 +181,37 @@ impl Editor {
             crate::game_keys::claim_keys_for_game(&mut raw_input, &egui.ctx);
         }
         let ctx = egui.ctx.clone();
-        // A package that shipped a typeface gets it registered here — after the
-        // load pass, before anything draws with it. `set_fonts` rebuilds egui's
-        // glyph atlas, so it is gated on the flag and not run per frame; a
-        // project whose packages ship no fonts never reaches it at all.
-        if self.ext.fonts_dirty {
+        // The theme: a choice made in the Hub, or a theme file saved in a
+        // text editor, shows up here within a second. The loaded packages'
+        // themes are listed beside yours.
+        self.themes.set_packages(
+            self.ext.report.loaded.iter().map(|l| (l.id().to_string(), l.root.clone())).collect(),
+        );
+        self.themes.poll();
+        // A `.floptletheme` dropped on the window is a theme to add.
+        let dropped: Vec<std::path::PathBuf> = raw_input
+            .dropped_files
+            .iter()
+            .filter_map(|f| f.path.clone())
+            .filter(|p| floptle_theme::host::Host::is_theme_file(p))
+            .collect();
+        for p in &dropped {
+            self.themes.import_path(p);
+            self.show_preferences = true;
+        }
+        // Fonts: the theme's faces, plus any a package shipped. `set_fonts`
+        // rebuilds egui's glyph atlas, so it runs only when one of the two
+        // changed, never per frame.
+        if self.ext.fonts_dirty || self.themes.fonts_fingerprint != self.themes_fonts_set {
             self.ext.fonts_dirty = false;
-            ctx.set_fonts(crate::fonts::definitions(&self.ext.fonts));
+            self.themes_fonts_set = self.themes.fonts_fingerprint;
+            ctx.set_fonts(crate::fonts::definitions(&self.themes.theme, &self.ext.fonts));
         }
-        // Apply the selected engine (chrome) theme, then a play-mode tint on top so you
-        // never mistake play mode for edit mode (and lose edits on Stop). Reapplied each
-        // frame so switching the theme in Preferences takes effect immediately.
-        {
-            let theme = ENGINE_THEMES[self.engine_theme.min(ENGINE_THEMES.len() - 1)];
-            let mut vis = theme.visuals();
-            if self.playing && self.play_tint_enabled {
-                let [tr, tg, tb] = self.play_tint;
-                let tint = |c: egui::Color32| {
-                    egui::Color32::from_rgb(
-                        (c.r() as u16 + tr as u16).min(255) as u8,
-                        (c.g() as u16 + tg as u16).min(255) as u8,
-                        (c.b() as u16 + tb as u16).min(255) as u8,
-                    )
-                };
-                vis.panel_fill = tint(vis.panel_fill);
-                vis.window_fill = tint(vis.window_fill);
-                vis.extreme_bg_color = tint(vis.extreme_bg_color);
-            }
-            ctx.all_styles_mut(|s| {
-                s.visuals = vis.clone();
-                // **Leave the scrollbar its own gutter.**
-                //
-                // egui's scroll bars float by default: they are drawn over the
-                // contents and allocate no width. So the last few pixels of
-                // every scrolling panel are behind a bar — a slider's label
-                // ellipsised down to its first letter, a `…` menu half over the
-                // edge — and the panel looks a little bit cut off everywhere,
-                // which is exactly what it is. The controls are laid out to the
-                // panel's edge correctly; the edge is simply not where the
-                // visible area ends.
-                //
-                // Allocating the bar's width moves that edge in to where things
-                // can actually be seen, and every widget follows it — egui's own
-                // truncation as much as `responsive::fit_here`. The bar still
-                // floats and still looks the same.
-                s.spacing.scroll.floating_allocated_width = s.spacing.scroll.bar_width;
-            });
-        }
+        // The theme, then the play-mode tint on top so you never mistake play
+        // mode for edit mode (and lose edits on Stop). Applied each frame, so
+        // a theme switched in Preferences shows at once.
+        let tint = (self.playing && self.play_tint_enabled).then_some(self.play_tint);
+        self.themes.apply(&ctx, tint);
         let ppp = ctx.pixels_per_point();
         // Prefill the export title from the project's title (Project Settings
         // ⏵ Game); the folder name is a poor fallback (the conventional root is
@@ -270,7 +254,6 @@ impl Editor {
         // groups are hours of work.
         let scene_dirty_now = self.scene_dirty || !self.tiles.dirty.is_empty();
         // Current theme selections (changes are routed through `cmd`, then saved + applied).
-        let engine_theme = self.engine_theme;
         let code_theme = self.code_theme;
         let project_root = self.project_root.clone();
         let playing = self.playing;
@@ -345,7 +328,7 @@ impl Editor {
             self.ui_export_game(ui, &mut out, &export_base);
             self.ui_crash_prompt(ui, &mut out);
             self.ui_autosave_prompt(ui, &mut out);
-            self.ui_preferences_window(ui, &mut out, code_theme, engine_theme);
+            self.ui_preferences_window(ui, &mut out, code_theme);
             self.ui_frame_timing_window(ui, &gpu_spans, gpu_timing_supported, gpu_total);
             self.ui_grid_settings_window(ui, &mut out);
             self.ui_viewport_context_menu(ui, &mut out, map_mode, tool);
@@ -547,7 +530,8 @@ impl Editor {
         if let (true, Some(answer)) = crate::ext::trust::banner(ui, &project_trust) {
             out.cmd.project_trust = Some(answer);
         }
-        egui::Panel::top("menu_bar").show(ui, |ui| {
+        egui::Panel::top("menu_bar").frame(crate::theme::clear_panel_frame(ui.ctx())).show(ui, |ui| {
+            crate::theme::paint_panel(ui, "menu_bar");
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("New / Open Project…").clicked() {
@@ -1683,9 +1667,20 @@ impl Editor {
                 *viewer.fullscreen_tab = None;
             }
         } else {
-            egui_dock::DockArea::new(dock_state)
-                .style(egui_dock::Style::from_egui(ui.style()))
-                .show_inside(ui, &mut viewer);
+            // The tab bars' region is painted under the dock, into a slot
+            // reserved before it draws: where the bars are is only known once
+            // the dock has laid itself out, and painting after would cover
+            // the tabs.
+            let under = ui.painter().add(egui::Shape::Noop);
+            let style = crate::theme::dock_style(ui);
+            egui_dock::DockArea::new(dock_state).style(style).show_inside(ui, &mut viewer);
+            let bars: Vec<egui::Shape> = dock_state
+                .iter_leaves()
+                .map(|(_, leaf)| egui::Rect::from_min_max(leaf.rect.min, egui::pos2(leaf.rect.max.x, leaf.viewport.min.y)))
+                .filter(|r| r.is_positive())
+                .flat_map(|r| floptle_theme::region_shapes(ui.ctx(), "tab_bar", r))
+                .collect();
+            ui.painter().set(under, egui::Shape::Vec(bars));
         }
 
         if *viewer.game_gizmos != game_gizmos_before {
@@ -2021,14 +2016,17 @@ impl Editor {
         ui: &mut egui::Ui,
         out: &mut UiOut,
         code_theme: usize,
-        engine_theme: usize,
     ) {
         // ---- preferences window (user-wide editor settings) ----
+        // Wide enough for three theme cards in a row, and a fixed height that
+        // scrolls inside, so opening a section does not grow the window under
+        // the pointer.
         egui::Window::new("Preferences")
             .open(&mut self.show_preferences)
-            .resizable(false)
-            .default_width(320.0)
-            .show(ui.ctx(), |ui| {
+            .resizable(true)
+            .default_width(600.0)
+            .default_height(560.0)
+            .show(ui.ctx(), |ui| egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 ui.label("External editor — \"Open in IDE\"");
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -2080,26 +2078,11 @@ impl Editor {
                 }
 
                 ui.add_space(12.0);
-                ui.label("Themes");
-                ui.separator();
-                // Engine (chrome) theme.
+                self.themes.settings_ui(ui, true);
+
+                ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    ui.label("Engine theme");
-                    let cur = engine_theme.min(ENGINE_THEMES.len() - 1);
-                    egui::ComboBox::from_id_salt("engine_theme_combo")
-                        .selected_text(ENGINE_THEMES[cur].name)
-                        .show_ui(ui, |ui| {
-                            for (i, t) in ENGINE_THEMES.iter().enumerate() {
-                                if ui.selectable_label(i == cur, t.name).clicked() {
-                                    out.cmd.set_engine_theme = Some(i);
-                                }
-                            }
-                        });
-                });
-                ui.small("Recolors the editor windows, panels and menus.");
-                // Code-editor theme.
-                ui.horizontal(|ui| {
-                    ui.label("Editor theme");
+                    ui.label("Code colours");
                     let cur = code_theme.min(CODE_THEMES.len() - 1);
                     egui::ComboBox::from_id_salt("code_theme_combo")
                         .selected_text(CODE_THEMES[cur].name)
@@ -2111,8 +2094,8 @@ impl Editor {
                             }
                         });
                 });
-                ui.small("Syntax colors + background of the in-engine script editor.");
-            });
+                ui.small("The script editor's syntax colours. \"Match the theme\" uses the theme's own.");
+            }));
 
     }
 

@@ -8,7 +8,6 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::theme::CODE_THEMES;
 use crate::{lua_highlight, plain_job, EditorTabViewer};
 
 /// One script file open in the in-engine IDE.
@@ -1985,7 +1984,7 @@ impl EditorTabViewer<'_> {
         let is_flsl = crate::assets::is_shader(&self.ide.open[i].path);
         let font = egui::FontId::monospace(13.0);
         let lfont = font.clone();
-        let theme = CODE_THEMES[self.code_theme.min(CODE_THEMES.len() - 1)];
+        let theme = crate::theme::code_theme(self.code_theme, ui.ctx());
         let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
             // No wrap (code editor) — logical lines == rows, so the gutter aligns.
             let mut job = if is_lua {
@@ -2629,7 +2628,7 @@ impl EditorTabViewer<'_> {
     /// heavier would rot. Prose wraps to the panel, so the Scripting tab is
     /// readable docked narrow, which the old fixed-width monospace was not.
     pub(crate) fn doc_body_ui(&self, ui: &mut egui::Ui, body: &str) {
-        let theme = CODE_THEMES[self.code_theme.min(CODE_THEMES.len() - 1)];
+        let theme = crate::theme::code_theme(self.code_theme, ui.ctx());
         let mono = egui::FontId::monospace(12.5);
         let mut code: Vec<&str> = Vec::new();
         let mut fenced = false;

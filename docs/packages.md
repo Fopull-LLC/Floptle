@@ -86,6 +86,11 @@ Only `id`, `name` and `version` are required.
 )
 ```
 
+**Themes go beside the manifest, not in it.** A folder `themes/<id>/` holding
+a `theme.ron` (or a `themes/<name>.floptletheme`) at the package root is an
+editor theme, listed in the theme picker once the package is installed. See
+[themes.md](themes.md).
+
 **The id is the identity.** Reverse-DNS, at least two parts, lowercase. It is
 what a dependency names, what `pkg://` addresses resolve through, and what tells
 your `grass` apart from somebody else's.

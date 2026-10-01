@@ -59,7 +59,7 @@
       "id": "packages",
       "title": "Packages",
       "blurb": "Modular expansions anybody can write and share: editor tools, scripts, art. Install one, or publish your own.",
-      "pages": ["packages.md", "editor-scripting.md"]
+      "pages": ["packages.md", "editor-scripting.md", "themes.md"]
     },
     {
       "id": "interface",
