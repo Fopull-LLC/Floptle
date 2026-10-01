@@ -24,7 +24,7 @@ use crate::{anim, Editor, History, MeshAsset};
 /// How many bytes of model a browser frame puts on the GPU before it hands
 /// the page back. The browser's memory for those writes grows to the
 /// largest frame's worth; 32 MB a frame was measured to keep it there.
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 const WEB_UPLOAD_BUDGET: u64 = 32 << 20;
 
 impl Editor {
@@ -354,7 +354,7 @@ impl Editor {
     /// in every host that plays the game. The upload is the cheap half; it is
     /// timed into the `models` bucket with the synchronous imports.
     pub(crate) fn pump_model_imports(&mut self) {
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(any(target_arch = "wasm32", test))]
         self.pump_model_queue();
         if self.model_jobs.is_empty() || self.gpu.is_none() || self.raster.is_none() {
             return;
@@ -386,6 +386,8 @@ impl Editor {
 
     /// The browser's half of the pump: import queued models until this frame
     /// has written [`WEB_UPLOAD_BUDGET`] bytes to the GPU, and at least one.
+    /// "This frame" runs from [`Editor::begin_draw_frame`], however many
+    /// times the queue is pumped in between.
     ///
     /// A browser keeps the memory it moved a frame's GPU writes through, and
     /// sizes it to the largest frame it has seen. Every model a menu preloads,
@@ -393,14 +395,18 @@ impl Editor {
     /// the session in the page's own process: on an iPhone the page was
     /// closed for it before the world finished loading. A frame's worth at a
     /// time, the browser reuses the same few megabytes.
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", test))]
     fn pump_model_queue(&mut self) {
         if self.gpu.is_none() || self.raster.is_none() {
             return;
         }
         let t = floptle_core::profile::Span::new();
+        // Counted across the frame, not this call: the queue is pumped more
+        // than once a frame, and each pump spending a whole budget made the
+        // budget a multiple of itself.
+        let budget = self.model_queue_budget();
         let mut spent = 0u64;
-        while spent < WEB_UPLOAD_BUDGET
+        while self.model_queue_frame_spent < budget
             && let Some(path) = self.model_queue.pop_front()
         {
             if self.mesh_registry.contains_key(&path) || self.model_failed.contains(&path) {
@@ -411,7 +417,9 @@ impl Editor {
                 continue;
             }
             let decoded = floptle_assets::import_model(&file).map_err(|e| e.to_string());
-            spent += decoded.as_ref().map_or(0, floptle_assets::Model::upload_bytes);
+            let bytes = decoded.as_ref().map_or(0, floptle_assets::Model::upload_bytes);
+            spent += bytes;
+            self.model_queue_frame_spent += bytes;
             if !self.install_model(&path, &file, decoded) {
                 self.model_failed.insert(path);
             }
@@ -429,6 +437,16 @@ impl Editor {
             );
         }
         self.profile_record(floptle_core::profile::Bucket::Models, t.ms());
+    }
+
+    /// The GPU bytes a frame may put in from the browser's model queue.
+    #[cfg(any(target_arch = "wasm32", test))]
+    fn model_queue_budget(&self) -> u64 {
+        #[cfg(test)]
+        if let Some(b) = self.model_queue_test_budget {
+            return b;
+        }
+        WEB_UPLOAD_BUDGET
     }
 
     /// File `path` under the model already on the GPU from the same `file`
@@ -456,9 +474,9 @@ impl Editor {
 
     /// Whether `path` is waiting in the browser's model queue.
     fn model_queued(&self, path: &str) -> bool {
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(any(target_arch = "wasm32", test))]
         return self.model_queue.iter().any(|p| p == path);
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(any(target_arch = "wasm32", test)))]
         {
             let _ = path;
             false
@@ -3403,6 +3421,36 @@ mod model_import_tests {
         // is told rather than left waiting.
         ed.request_model("models/_test/NotThere.glb");
         assert_eq!(ed.model_status("models/_test/NotThere.glb"), Some(false));
+    }
+
+    /// **A browser frame puts one budget of models on the GPU, however often
+    /// the queue is pumped.** A build's frame pumps it twice: after the
+    /// scripts, inside the step, and again after the step. Counted per pump,
+    /// the 32 MB a frame was 64 MB, and the browser holds memory the size of
+    /// its largest frame of GPU writes for the rest of the session. That is
+    /// the memory a phone closes a page for. The budget here is one byte, so
+    /// every model is over it and a frame takes exactly one.
+    #[test]
+    fn the_browser_model_queue_spends_one_budget_a_frame() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        ed.project_root = std::path::PathBuf::from("../floptle-assets/tests/fixtures");
+        ed.model_queue_test_budget = Some(1);
+        for path in ["Sae.glb", "SaesRapier.glb", "Sae.mirrored.rigged.glb"] {
+            ed.model_queue.push_back(path.to_string());
+        }
+        // One frame of a build: the reset, then the pump the step runs and
+        // the one the frame runs after it.
+        ed.begin_draw_frame();
+        ed.load_script_swapped_models();
+        ed.load_script_swapped_models();
+        assert_eq!(ed.model_queue.len(), 2, "one frame imported more than one over-budget model");
+        assert!(ed.mesh_registry.contains_key("Sae.glb"), "the frame's one model is the oldest");
+        // The next frame takes the next one.
+        ed.begin_draw_frame();
+        ed.load_script_swapped_models();
+        ed.load_script_swapped_models();
+        assert_eq!(ed.model_queue.len(), 1);
+        assert!(ed.mesh_registry.contains_key("SaesRapier.glb"));
     }
 
     /// **One file is one model, however a game spells it.** freeflier named

@@ -137,12 +137,33 @@ impl Editor {
     /// - The project's era artefacts, before any gather, so every view has the
     ///   same look.
     /// - Skinned-buffer copies of destroyed entities go back.
+    /// - In a browser, the frame's model upload budget starts again (see
+    ///   `pump_model_queue`).
     pub(crate) fn begin_draw_frame(&mut self) {
         if let Some(raster) = self.raster.as_mut() {
             raster.begin_skin_frame();
             raster.set_retro_defaults(self.project.retro_artefacts());
         }
         self.skin_variants.prune(&self.world);
+        #[cfg(any(target_arch = "wasm32", test))]
+        {
+            self.model_queue_frame_spent = 0;
+        }
+    }
+
+    /// Put what the GPU rejected since the last frame into the Console.
+    ///
+    /// A rejected pipeline or command does not end the session (see
+    /// `Gpu::new`), so this is the only place it becomes visible. The editor's
+    /// frame and a shipped game's both call it. A build has no Console tab,
+    /// but its console writes errors to stderr, and in a browser to the
+    /// page's log and crash record. A browser has no stderr. Before a build's
+    /// frame called this, a shader a phone's browser refused left no trace
+    /// anywhere: the error was written to a stderr that does not exist there.
+    pub(crate) fn report_gpu_errors(&mut self) {
+        for e in floptle_render::take_gpu_errors() {
+            self.console.push(floptle_script::LogLevel::Error, format!("GPU: {e}"), None);
+        }
     }
 
     /// **One frame of a shipped game** — the standalone player's whole loop.
@@ -239,6 +260,7 @@ impl Editor {
         self.ensure_flsl_materials();
         self.ensure_ui_shaders();
         self.ensure_post_shaders();
+        self.report_gpu_errors();
         self.refresh_gi();
         self.step_reflection_probes();
         self.sync_field_shapes();
@@ -1379,5 +1401,40 @@ mod tests {
             let poses = ed.raster.as_ref().unwrap().skin_pose_count();
             assert_eq!(poses, 0, "frame {frame}: the build's frame must start a fresh pose table");
         }
+    }
+
+    /// **What the GPU refused reaches a build's console.**
+    ///
+    /// The editor's frame moved GPU errors into its Console; a build's frame
+    /// did not, and their only other way out was stderr. A browser has no
+    /// stderr, so on a phone a refused shader or pipeline was invisible: not
+    /// in the page's log, not in its crash record. A build's console sends
+    /// errors to stderr on the desktop and to the page in a browser, so
+    /// reaching the console is reaching the player's report.
+    #[test]
+    fn a_builds_frame_reports_what_the_gpu_refused() {
+        let Some(mut ed) = super::test_editor_with_gpu() else { return };
+        let label = "a-builds-frame-reports-this-buffer";
+        {
+            let gpu = ed.gpu.as_ref().unwrap();
+            // The handler a game's device has (`Gpu::new`); the test device
+            // was given a sink of its own.
+            gpu.device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| floptle_render::report_gpu_error(&e)));
+            // A write into a buffer that was not made to be written to.
+            let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: 16,
+                usage: wgpu::BufferUsages::VERTEX,
+                mapped_at_creation: false,
+            });
+            gpu.queue.write_buffer(&buf, 0, &[0u8; 16]);
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        let _ = ed.player_frame(false);
+        let reported = ed.console.entries.iter().any(|e| {
+            e.level == floptle_script::LogLevel::Error && e.msg.starts_with("GPU: ") && e.msg.contains(label)
+        });
+        let said: Vec<&str> = ed.console.entries.iter().map(|e| e.msg.as_str()).collect();
+        assert!(reported, "the build's frame never put the GPU's error in its console: {said:?}");
     }
 }

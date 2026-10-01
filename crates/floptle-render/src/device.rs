@@ -63,7 +63,10 @@ pub fn backends_from_env() -> wgpu::Backends {
     }
 }
 
-fn gpu_error(e: &wgpu::Error) {
+/// Record a GPU error for the host to pick up with [`take_gpu_errors`]: the
+/// handler [`Gpu::new`] installs on its device. Public so a test's own
+/// headless device can report through the same path a game's does.
+pub fn report_gpu_error(e: &wgpu::Error) {
     let message = describe(e);
     if let Ok(mut g) = GPU_ERRORS.lock() {
         let (queue, seen) = &mut *g;
@@ -243,7 +246,7 @@ impl Gpu {
         // kept, and the editor says so. Not installed on the headless path
         // (`headless_with`): a probe that swallowed a validation error would
         // report a pass it never made.
-        device.on_uncaptured_error(Arc::new(|e: wgpu::Error| gpu_error(&e)));
+        device.on_uncaptured_error(Arc::new(|e: wgpu::Error| report_gpu_error(&e)));
 
         let caps = surface.get_capabilities(&adapter);
         let format =

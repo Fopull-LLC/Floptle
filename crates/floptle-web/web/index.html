@@ -44,7 +44,7 @@
   <div id="bar"><div id="fill"></div></div>
   <div id="status">loading…</div>
   <button id="play">▶ Play</button>
-  <div id="crash">The game stopped unexpectedly last time.<br><button id="crashShow">Show what it said</button><textarea id="crashText" readonly></textarea></div>
+  <div id="crash"><span id="crashWhy">The game stopped unexpectedly last time.</span><br><button id="crashShow">Show what it said</button><textarea id="crashText" readonly></textarea></div>
 </div>
 <script type="module">
   const $ = id => document.getElementById(id);
@@ -56,8 +56,13 @@
   // second, at once for anything fatal), and a run that ends properly marks
   // itself ended. One that never did is shown on the next visit, and
   // `window.floptleLastCrash()` hands it to a script that wants to send it.
+  //
+  // A run that ended properly but where the engine reported errors is
+  // offered too. A shader or pipeline the browser refuses does not stop the
+  // game, but it can leave the screen black or stuck on its last picture,
+  // and on a phone the page's log is the only place that says why.
   const recordKey = 'floptle:lastRun:' + location.pathname;
-  const record = { running: true, stopped: '', lines: [] };
+  const record = { running: true, stopped: '', problems: 0, lines: [] };
   let unsaved = false;
   const saveRun = () => {
     unsaved = false;
@@ -70,9 +75,13 @@
   };
   let lastRun = null;
   try { lastRun = JSON.parse(localStorage.getItem(recordKey) || 'null'); } catch (e) { /* none, or unreadable */ }
-  const lastCrash = lastRun && (lastRun.running || lastRun.stopped)
-    ? `${lastRun.stopped || 'The page ended without closing: the browser stopped it, most often for memory.'}\n\n${(lastRun.lines || []).join('\n')}`
+  const crashed = !!(lastRun && (lastRun.running || lastRun.stopped));
+  const lastReport = lastRun && (crashed || lastRun.problems > 0)
+    ? `${lastRun.stopped || (lastRun.running
+        ? 'The page ended without closing: the browser stopped it, most often for memory.'
+        : `The game reported ${lastRun.problems} error${lastRun.problems === 1 ? '' : 's'}.`)}\n\n${(lastRun.lines || []).join('\n')}`
     : null;
+  const lastCrash = crashed ? lastReport : null;
   window.floptleLastCrash = () => lastCrash;
   saveRun();
   setInterval(() => { if (unsaved) saveRun(); }, 1000);
@@ -124,7 +133,15 @@
   // failures, all of it for a harness that was not listening.
   const post = (path, body) =>
     shotAt > 0 ? fetch(path, { method: 'POST', body }).catch(() => {}) : Promise.resolve();
-  window.floptleLog = s => { console.log(s); crumb(s); post('/report', s); };
+  // An error the engine reports is written to the record at once: the
+  // next thing the page does may be stop.
+  window.floptleLog = s => {
+    console.log(s);
+    const error = s.startsWith('floptle: error:');
+    if (error) record.problems += 1;
+    crumb(s, error);
+    post('/report', s);
+  };
   window.floptleFatal = s => { fail('The game stopped:\n' + s); post('/report', 'FATAL ' + s); };
   // The browser took the graphics device back. To a player that is the end
   // of the game, and they are told. Under the harness it is a line and the
@@ -185,13 +202,27 @@
     });
   };
   // A trap inside the engine that is not a Rust panic (the scripting VM's C++
-  // aborting, say) never reaches `floptleFatal`, and would leave the loading
-  // bar moving over a game that has stopped. Only the engine's own errors,
-  // and only while the panel is up: a page's other scripts are not ours.
+  // aborting, say, or an allocation the engine's memory could not grow for)
+  // never reaches `floptleFatal`. Only the engine's own errors: a page's
+  // other scripts are not ours.
+  //
+  // **After the game is on screen as well as before.** This used to act only
+  // while the panel was up. A trap during a level load, after the menu had
+  // been shown, then stopped the game without a word: the canvas kept its
+  // last frame, which is the game's own loading screen, and the record of
+  // the run was closed as a clean exit when the player gave up and left.
   window.addEventListener('error', e => {
     crumb(`error: ${e.message || e.error}`, true);
     const ours = e.error instanceof WebAssembly.RuntimeError || String(e.filename || '').includes('/pkg/');
-    if (ours && !shown && !failed) fail('The game stopped while loading:\n' + (e.message || e.error));
+    if (!ours || failed) return;
+    let why = String(e.message || e.error);
+    // A Rust panic says why through `floptleFatal` before it traps, so a
+    // trap that arrives here alone is the engine aborting, and the abort
+    // an engine reaches without a panic is an allocation that failed.
+    if (e.error instanceof WebAssembly.RuntimeError && /unreachable/.test(why)) {
+      why += `\nThe engine stopped with ${mb(heap())} MB of memory in use. On a phone this is most often the browser refusing it more.`;
+    }
+    fail((shown ? 'The game stopped:\n' : 'The game stopped while loading:\n') + why);
   });
   // The picture comes from the engine's own render target, not the canvas: a
   // WebGPU canvas hands `toDataURL` a blank image outside the task that drew it.
@@ -275,14 +306,15 @@
   // instead. document.baseURI honours <base> everywhere.
   const here = path => new URL(path, document.baseURI).href;
 
-  if (lastCrash) {
-    post('/report', `LAST RUN STOPPED: ${lastCrash.split('\n')[0]}`);
+  if (lastReport) {
+    post('/report', `${crashed ? 'LAST RUN STOPPED' : 'LAST RUN REPORTED ERRORS'}: ${lastReport.split('\n')[0]}`);
+    if (!crashed) $('crashWhy').textContent = 'The game reported errors last time.';
     $('crash').classList.add('shown');
     $('crashShow').addEventListener('click', () => {
       $('crash').classList.toggle('open');
-      $('crashText').value = lastCrash;
+      $('crashText').value = lastReport;
       $('crashText').select();
-      if (navigator.clipboard) navigator.clipboard.writeText(lastCrash).catch(() => {});
+      if (navigator.clipboard) navigator.clipboard.writeText(lastReport).catch(() => {});
     });
   }
 

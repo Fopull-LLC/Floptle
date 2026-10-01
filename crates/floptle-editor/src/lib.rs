@@ -2131,13 +2131,22 @@ struct Editor {
     model_jobs: HashMap<String, std::sync::mpsc::Receiver<Result<floptle_assets::Model, String>>>,
     /// The browser's `model_jobs`: models waiting their turn, oldest first.
     /// A page has no thread to decode on, so `pump_model_imports` imports a
-    /// few of these each frame.
-    #[cfg(target_arch = "wasm32")]
+    /// few of these each frame. Built for tests too, which drive it on the
+    /// desktop.
+    #[cfg(any(target_arch = "wasm32", test))]
     model_queue: std::collections::VecDeque<String>,
     /// Models and GPU bytes the queue has put in since it was last empty,
     /// for the line that says so when it empties.
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", test))]
     model_queue_done: (usize, u64),
+    /// GPU bytes the queue has put in during this frame. `begin_draw_frame`
+    /// resets it. The queue is pumped more than once a frame, so a budget
+    /// counted per pump would be spent once per pump.
+    #[cfg(any(target_arch = "wasm32", test))]
+    model_queue_frame_spent: u64,
+    /// A test's own per-frame budget, in place of `WEB_UPLOAD_BUDGET`.
+    #[cfg(test)]
+    model_queue_test_budget: Option<u64>,
     /// Runtime pictures (`assets.textureFromUrl` / `textureFromBytes`) being
     /// decoded on a worker.
     texture_jobs: Vec<crate::runtime_textures::TextureJob>,
