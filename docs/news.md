@@ -1,5 +1,12 @@
 ## Just shipped
 
+**v0.110.0 — "Travels Light"** (stable). A big web game fits on a phone:
+its page holds about 0.95 GB where a 384 MB game used to need 2.2 GB, so a
+game an iPhone closed while loading now plays. Models load a few at a time,
+a shared picture goes to the graphics card once, and the game's files are
+held once. A web game that stops says why, and the next visit says it
+stopped. A player signed in on the web stays signed in to publish.
+
 **v0.109.1 — "Solid Ground"** (stable). Distant terrain no longer shows caves
 through thin rock or slivers of sky where detail levels meet, and its mesh no
 longer folds into shards. Sunlight stays out of scaled buildings, a game lit
