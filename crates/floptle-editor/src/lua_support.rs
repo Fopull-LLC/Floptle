@@ -1004,8 +1004,8 @@ function voice.setForward(peer, peers) end
 function net.kick(peer, reason) end
 ---Who a connected peer is: `{ id, name, tier, verified }`. An anonymous peer
 ---has no `id`, which is a normal state. **Check `verified` before acting on
----`id`** — it is false for everyone today, because the engine carries what a
----client says about itself and cannot yet check it with the provider.
+---`id`**: true means fopull.com proved the account with a join token; false
+---means the fields are whatever the client said.
 ---@param peer integer
 ---@return { id: string|nil, name: string, tier: string, verified: boolean }
 function net.identity(peer) end

@@ -16,6 +16,7 @@
 //! game-facing API.
 
 pub mod identity;
+pub mod join_token;
 pub mod impair;
 pub mod interest;
 pub mod lagcomp;
@@ -41,6 +42,9 @@ pub mod wire;
 
 pub use impair::{ImpairHandle, Impaired, Impairment, IMPAIR_ENV};
 pub use identity::{AssertedOnly, Identity, JoinPolicy, Verifier};
+#[cfg(not(target_arch = "wasm32"))]
+pub use join_token::{JoinTokenCheck, Verified};
+pub use join_token::{normalise_audience, CLOCK_SKEW_S, JOIN_TOKEN_TYP, MAX_LIFETIME_S};
 pub use interest::{
     Candidate, InterestConfig, InterestSets, InterestStat, NoOcclusion, Occluder, PeerInterest,
 };

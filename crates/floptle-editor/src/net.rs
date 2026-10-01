@@ -191,6 +191,7 @@ impl Editor {
     pub(crate) fn net_tick(&mut self, tick: u64) {
         self.voice_tick();
         self.net_relay_notices();
+        self.net_identity_server_tick();
         if let Some(s) = self.net_server.as_mut() {
             let said = s.take_notices();
             if let Some(last) = said.last() {
@@ -214,6 +215,7 @@ impl Editor {
         }
         // --- "Test as remote player" (2c): client prediction + hidden server ---
         if self.net_play_client.is_some() {
+            self.net_identity_client_tick();
             self.net_client_tick(tick);
             self.net_hidden_tick(tick);
             return; // this mode owns the state mirror; 2b paths don't apply
@@ -291,6 +293,8 @@ impl Editor {
                     interest_occlusion,
                     input_delay,
                     require_identity,
+                    require_verified,
+                    address,
                     allow: allow_ids,
                     deny: deny_ids,
                     ..
@@ -298,6 +302,8 @@ impl Editor {
                     // Recorded before the session comes up: `net_rollback_host_setup`
                     // runs inside the host call and reads it.
                     self.net_input_delay = input_delay;
+                    self.net_ident.address = address.map(|a| a.trim().trim_start_matches("quic://").to_string());
+                    self.net_ident.required = require_verified;
                     match (relay, port) {
                         (Some(addr), _) => self.net_host_relay_addr(&addr),
                         (None, Some(p)) => self.net_host_quic(p),
@@ -336,20 +342,30 @@ impl Editor {
                     if let Some(s) = self.net_server.as_mut() {
                         let policy = floptle_net::JoinPolicy {
                             require_identity,
+                            require_verified,
                             allow: allow_ids.iter().cloned().collect(),
                             deny: deny_ids.iter().cloned().collect(),
                         };
-                        let active = policy.is_active();
+                        let unproven_ids_count = policy.is_active() && !require_verified;
                         s.set_join_policy(policy);
-                        if active {
+                        if unproven_ids_count {
                             self.console.push(
                                 floptle_script::LogLevel::Warn,
-                                "🌐 a join policy is in force, and account claims are \
-                                 UNVERIFIED — the engine carries what a client says about \
-                                 itself and has no way to check it yet, so allow/deny lists \
-                                 and requireIdentity keep out the careless, not the \
-                                 determined. net.identity(peer).verified is false for \
-                                 everyone until that lands."
+                                "🌐 a join policy is in force without requireVerified, so an \
+                                 account claim counts whether or not fopull.com proved it. \
+                                 allow/deny lists then keep out the careless, not the \
+                                 determined: add requireVerified = true to net.host{} to \
+                                 accept only proven accounts."
+                                    .into(),
+                                None,
+                            );
+                        }
+                        if require_verified && port.is_some() && self.net_ident.address.is_none() {
+                            self.console.push(
+                                floptle_script::LogLevel::Warn,
+                                "🌐 requireVerified on a direct host needs address = \"host:port\" \
+                                 (the address players join), or no join token can name this \
+                                 server and every player is refused."
                                     .into(),
                                 None,
                             );
@@ -864,6 +880,10 @@ impl Editor {
     /// address form the docs name, and one line naming them all for anything
     /// else.
     pub(crate) fn net_join_addr(&mut self, addr: &str, timeout_s: Option<f32>) {
+        // What a join token for this join names: the address as the player
+        // typed it, before `cloud://` is resolved to a relay. `None` for the
+        // forms a token cannot name, which join without one.
+        self.net_ident.next_audience = floptle_net::normalise_audience(addr);
         if addr.starts_with("local") {
             self.net_join_timeout = timeout_s;
             self.net_join_local();
@@ -1365,14 +1385,11 @@ impl Editor {
     /// friends game works exactly as it always has, and the server decides for
     /// itself whether it will admit an anonymous peer.
     ///
-    /// **No token travels.** What goes out is the account's public claim — the
-    /// subject id, the display name, the tier — and `proof: None`, because
-    /// there is nothing a server could check it against that would not also let
-    /// that server act AS this account. The moment the provider can mint an
-    /// audience-scoped credential, it goes in `proof` and the claim starts
-    /// arriving verified; until then the server is told plainly that this is an
-    /// assertion. See `crates/floptle-net/src/identity.rs`.
-    fn net_identity_claim(&self) -> Option<floptle_net::IdentityClaim> {
+    /// **The access token never travels.** What goes out is the account's
+    /// public claim (subject id, display name, tier) with `proof: None`. The
+    /// join then fills `proof` with a join token naming this one server, minted
+    /// by fopull.com; see `net_identity.rs`.
+    pub(crate) fn net_identity_claim(&self) -> Option<floptle_net::IdentityClaim> {
         let who = self.account.as_ref()?.session()?;
         Some(floptle_net::IdentityClaim {
             id: who.sub.clone(),
@@ -1890,6 +1907,8 @@ impl Editor {
         s.set_tick_dt(self.game_tick.step); // the animator time predictor's clock
         s.set_scene(&self.scene_rel_or_default()); // joiners land in OUR scene
         s.register_scene(&self.world);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.net_identity_server_setup(&mut s);
         self.net_server = Some(s);
         self.net_scene_doc = Some(floptle_scene::to_doc("net-baseline", &self.world));
         self.net_rollback_host_setup();
@@ -1998,8 +2017,7 @@ impl Editor {
         let transport = Self::net_impair_wrap(transport);
         self.net_impair_note();
         Self::net_assign_scene_owners(&mut self.world, self.dedicated);
-        let mut client =
-            NetSession::client_as(transport, self.input_map_hash(), self.net_identity_claim());
+        let mut client = self.net_identity_client(transport);
         // `net.join(addr, {timeout = …})` — only ever bounds a waking server
         //; an ordinary join is answered in a round trip.
         if let Some(t) = self.net_join_timeout.take() {
@@ -3013,6 +3031,7 @@ impl Editor {
         // state that must never survive a stop, and this path is reached with
         // no session precisely when something went wrong on the way up.
         self.net_lobby_code = None;
+        self.net_ident = Default::default();
         // Also ahead of the early-out: the microphone must close when the
         // session does, whatever state the session got into. A live mic left
         // open after a failed host is the one bug in this feature nobody would
@@ -3622,7 +3641,7 @@ impl Editor {
     }
 
     /// The relay a `cloud://` lobby code belongs to, from its first letter.
-    fn cloud_relay_for_code(code: &str) -> Result<String, String> {
+    pub(crate) fn cloud_relay_for_code(code: &str) -> Result<String, String> {
         Self::relay_for_code(&Self::cloud_regions(), code)
     }
 

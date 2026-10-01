@@ -68,6 +68,15 @@ pub enum HostAdmission {
 /// room full of people indefinitely.
 pub const HOST_GRACE: Duration = Duration::from_secs(20);
 
+/// How long a code stays out of the draw after its lobby closes.
+///
+/// A join token names the lobby it was minted for (`cloud://UBDQBY`) and lives
+/// five minutes. If the code went straight back into the draw, a token minted
+/// for a lobby that just closed would be valid at whichever new lobby drew the
+/// same six characters. The identity contract asks for at least 600 seconds,
+/// twice the token's life, so no token outlives the hold.
+pub const RETIRED_CODE_HOLD: Duration = Duration::from_secs(600);
+
 /// Why a lobby ended, for the operator's journal.
 ///
 /// A bare count — "lobbies: 1" — cannot say which lobby died or what killed
@@ -444,6 +453,9 @@ pub struct RelayServer {
     tokens: HashMap<PeerId, [u8; 16]>,
     /// The managed deployment each host connection says it is.
     deployments: HashMap<PeerId, String>,
+    /// Codes whose lobby closed, with when. Not drawn again until
+    /// [`RETIRED_CODE_HOLD`] has passed.
+    retired: HashMap<String, Instant>,
     /// How long a lobby outlives its host's connection. [`HOST_GRACE`] in
     /// production; shortened by tests that would otherwise sleep for it.
     grace: Duration,
@@ -555,6 +567,7 @@ impl RelayServer {
             wanted: HashMap::new(),
             tokens: HashMap::new(),
             deployments: HashMap::new(),
+            retired: HashMap::new(),
             grace: HOST_GRACE,
             limits: RelayLimits::default(),
             ingress: HashMap::new(),
@@ -617,6 +630,7 @@ impl RelayServer {
         }
         self.sweep_lost_hosts();
         self.sweep_idle_lobbies();
+        self.retired.retain(|_, at| at.elapsed() < RETIRED_CODE_HOLD);
         // **The policy has words for a developer and no way to reach one.** It
         // knows lobby codes; only the relay knows which connection a code
         // belongs to, so the routing is here.
@@ -990,14 +1004,7 @@ impl RelayServer {
                     );
                     return;
                 }
-                loop {
-                    let c = lobby_code(&mut self.rng, prefix);
-                    let reserved =
-                        self.policy.as_ref().is_some_and(|p| p.code_is_reserved(&c));
-                    if !reserved && !self.lobbies.contains_key(&c) {
-                        break c;
-                    }
-                }
+                self.fresh_code(prefix)
             }
         };
         self.lobbies.insert(
@@ -1050,9 +1057,23 @@ impl RelayServer {
         }
     }
 
+    /// A code for a new lobby: not live, not promised to a sleeping
+    /// deployment, and not closed within [`RETIRED_CODE_HOLD`].
+    fn fresh_code(&mut self, prefix: Option<char>) -> String {
+        loop {
+            let c = lobby_code(&mut self.rng, prefix);
+            let reserved = self.policy.as_ref().is_some_and(|p| p.code_is_reserved(&c));
+            let held = self.retired.get(&c).is_some_and(|at| at.elapsed() < RETIRED_CODE_HOLD);
+            if !reserved && !held && !self.lobbies.contains_key(&c) {
+                break c;
+            }
+        }
+    }
+
     /// Destroy a lobby and tell everybody still in it why.
     fn end_lobby(&mut self, code: &str, why: LobbyEnd) {
         let Some(lobby) = self.lobbies.remove(code) else { return };
+        self.retired.insert(code.to_string(), Instant::now());
         if let Some(p) = self.policy.as_mut() {
             p.lobby_ended(code, why);
             p.lobby_closed(code);
@@ -1798,6 +1819,47 @@ mod tests {
         assert_eq!(index(&RelayMsg::Deployment { id: String::new() }), 16);
         assert_eq!(index(&RelayMsg::ReclaimToken { code: String::new(), token: [0; 16] }), 17);
         assert_eq!(index(&RelayMsg::Reclaim { token: [0; 16] }), 18);
+    }
+
+    /// **A closed lobby's code is not handed out again for ten minutes.**
+    ///
+    /// A join token is minted for one lobby code and lives five minutes. Drawn
+    /// again any sooner, a code would let a token for the closed lobby verify
+    /// at a stranger's new one. The test closes a lobby through the same path
+    /// every close takes, rewinds the code generator so its next draw IS that
+    /// code, and asserts the relay draws something else. It then ages the hold
+    /// past its end and asserts the code comes back, so the test can tell the
+    /// hold apart from a generator that simply never repeats.
+    #[test]
+    fn a_closed_lobbys_code_is_held_back_from_the_draw() {
+        let mut relay = RelayServer::bind(0).expect("relay bind");
+        let seed = relay.rng;
+        let first = relay.fresh_code(Some('U'));
+        relay.lobbies.insert(
+            first.clone(),
+            Lobby {
+                host: 7,
+                clients: HashMap::new(),
+                next_peer: 1,
+                host_lost_at: None,
+                empty_since: Instant::now(),
+                key: None,
+                deployment: None,
+                token: [0; 16],
+            },
+        );
+        relay.end_lobby(&first, LobbyEnd::Idle);
+
+        relay.rng = seed;
+        let next = relay.fresh_code(Some('U'));
+        assert_ne!(next, first, "a token for the closed lobby would verify at this new one");
+
+        let Some(long_ago) = Instant::now().checked_sub(RETIRED_CODE_HOLD + Duration::from_secs(1)) else {
+            return; // a machine up for less than ten minutes cannot express the past
+        };
+        relay.retired.insert(first.clone(), long_ago);
+        relay.rng = seed;
+        assert_eq!(relay.fresh_code(Some('U')), first, "the hold ends, and the code is drawable again");
     }
 
     /// A relay that has never heard of a message skips it rather than dying,

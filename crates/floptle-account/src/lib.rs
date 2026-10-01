@@ -28,6 +28,8 @@
 
 pub mod auth;
 pub mod cloud;
+/// Join tokens: a player proving who they are to one game server.
+pub mod join_token;
 /// `floptle ship`: a server bundle uploaded as the developer. Desktop only.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod builds;

@@ -30,6 +30,8 @@ pub(crate) const HOST_KEYS: &[&str] =
         "interestOcclusion",
         "inputDelay",
         "requireIdentity",
+        "requireVerified",
+        "address",
         "allow",
         "deny",
     ];
@@ -71,6 +73,16 @@ pub enum NetCmd {
         /// default: a LAN or friends game with nobody signed in has to keep
         /// working exactly as it does.
         require_identity: bool,
+        /// `requireVerified = true` — refuse anyone whose account a join
+        /// token from fopull.com did not prove: the anonymous, and a claim
+        /// that came without a valid token.
+        require_verified: bool,
+        /// `address = "host:port"` — where players reach a direct
+        /// (`port = …`) host. A direct host cannot learn its own public
+        /// address, and a join token names the address the player used, so
+        /// without this a direct host cannot check one. A relay host needs
+        /// nothing: its lobby code is its address.
+        address: Option<String>,
         /// `allow = { ids }` — if non-empty, only these accounts may join.
         allow: Vec<String>,
         /// `deny = { ids }` — these accounts may never join. Consulted before
@@ -644,6 +656,7 @@ pub(crate) fn install_net_api(
                 let (mut interest, mut interest_budget) = (None, None);
                 let mut interest_occlusion = None;
                 let (mut require_identity, mut allow, mut deny) = (false, Vec::new(), Vec::new());
+                let (mut require_verified, mut address) = (false, None);
                 let mut input_delay = None;
                 if let Some(o) = opts {
                     crate::opts::check_keys(&o, HOST_KEYS, "net.host")?;
@@ -657,6 +670,9 @@ pub(crate) fn install_net_api(
                         o.get::<Option<String>>("interestOcclusion").ok().flatten();
                     require_identity =
                         o.get::<Option<bool>>("requireIdentity").ok().flatten().unwrap_or(false);
+                    require_verified =
+                        o.get::<Option<bool>>("requireVerified").ok().flatten().unwrap_or(false);
+                    address = o.get::<Option<String>>("address").ok().flatten();
                     allow = id_list(&o, "allow")?;
                     deny = id_list(&o, "deny")?;
                     input_delay = o
@@ -674,6 +690,8 @@ pub(crate) fn install_net_api(
                     interest_occlusion,
                     input_delay,
                     require_identity,
+                    require_verified,
+                    address,
                     allow,
                     deny,
                 });

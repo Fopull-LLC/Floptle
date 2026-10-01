@@ -651,28 +651,56 @@ net.host{ requireIdentity = true,
           allow = { "user_a", "user_b" }} -- if non-empty, invite-only
 ```
 
-All three are consulted **before** the join is accepted, which is the difference
+All of these are consulted **before** the join is accepted, which is the difference
 between a ban and a chore. Refusals carry a reason the client can show. Every
 refusal and kick is printed by `floptle serve`, because a dedicated server has
 nobody watching a Console and a moderation action nobody can audit is not a
 moderation tool.
 
-### What `verified` means, and why it is false
+### What `verified` means
 
-> **Today `net.identity(peer).verified` is `false` for every peer.** The engine
-> carries what a client *says* about itself. Turning that into an identity means
-> checking it with the provider, and doing that needs a credential scoped to the
-> server you are joining — a full-scope access token would let any server you
-> join spend your Fobucks and read your mail, so the engine deliberately does
-> not send one. `contracts/identity-auth.md` has no such credential yet; it is
-> filed as engine task `0184`.
+`verified = true` means fopull.com proved the account to this server. A
+signed-in player joining a server first asks fopull.com for a **join token**
+that names that one server and lasts five minutes. The server checks the
+token's signature against fopull.com's published keys, which it fetches once
+when it starts hosting. There is no call to fopull.com per join. A verified
+peer's `id`, `name` and `tier` come from the token, not from the client.
 
-So: allow lists, deny lists and `requireIdentity` all work, and what they buy
-today is keeping out the careless rather than the determined. The engine reports
-its own confidence honestly instead of dressing an assertion up as proof,
-because a server operator *acts* on that flag — and a moderation tool that lies
-about how sure it is, is worse than none. When the credential lands, the same
-code starts seeing `verified = true` and nothing else changes.
+The player's own sign-in never reaches the server. A join token proves who they
+are to that server and does nothing else anywhere: it cannot spend their
+Fobucks, read their account, or get them into a different server.
+
+`verified = false` means the fields are whatever the client said. That is
+always the case for an anonymous peer, and also for a signed-in one whose token
+was missing or failed, for example because fopull.com was unreachable or their
+clock is far out. They still join, unless the server asks for proof:
+
+```lua
+net.host{ relay = "cloud", requireVerified = true,
+          deny = { "user_griefer" } }
+```
+
+With `requireVerified`, allow and deny lists match only accounts fopull.com
+vouched for. Without it they match what clients claim, which keeps out the
+careless rather than the determined, and the Console says so.
+
+**A server is checked against the address players use to reach it.**
+
+| How you host | What players' tokens name | You need |
+|---|---|---|
+| `relay = "cloud"` | `cloud://CODE` | nothing |
+| `relay = "host:port"` | `relay://host:port/CODE` | nothing |
+| `port = 30000` | `quic://host:port` | `address = "play.example.com:30000"` |
+
+A direct host cannot learn its own public address, so it has to be told. Without
+`address`, its players join unverified. Players must also use the same host
+name you give: a token for `quic://203.0.113.5:30000` does not verify at a server
+told it is `play.example.com:30000`. A browser joining over `wss://` cannot get a
+token, so it joins unverified.
+
+The server's log (the Console, or `floptle serve`'s output) says why each
+refused token was refused: another server's address, expired, already used, or
+signed by a key the server is still fetching.
 
 ---
 

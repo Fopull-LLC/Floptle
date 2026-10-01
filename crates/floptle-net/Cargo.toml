@@ -49,6 +49,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net"] }
 # before quinn takes it. Already under quinn; here for
 # `SO_RCVBUF`/`SO_SNDBUF`, which std's `UdpSocket` cannot set.
 socket2 = "0.6"
+# Reading a join token and the provider's key set (`src/join_token.rs`). The
+# signature itself is checked with the `ring` above.
+base64 = "0.22"
+serde_json = { workspace = true }
 # **The WebSocket leg** (`src/ws.rs`): how a browser reaches a relay. A page
 # has no UDP socket, so it cannot speak QUIC; it can open a WebSocket, and the
 # relay accepts one beside its QUIC port. TLS for `wss://` reuses the relay's

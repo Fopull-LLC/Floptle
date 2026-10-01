@@ -181,6 +181,7 @@ mod map_ui;
 mod matter_catalog;
 mod multi_edit;
 mod net;
+mod net_identity;
 #[cfg(feature = "devices")]
 mod voice;
 mod worker;
@@ -3005,6 +3006,8 @@ struct Editor {
     /// `net.join(addr, {timeout = …})` — how long the next join waits on a
     /// waking server. Applied when the client session is created.
     pub(crate) net_join_timeout: Option<f32>,
+    /// Join tokens: the client's held Hello, the server's token check.
+    pub(crate) net_ident: net_identity::NetIdentity,
     /// The relay address this session is actually hosted through, when it is.
     ///
     /// Distinct from `net_relay_addr`, which is the 🌐 panel's text buffer. It

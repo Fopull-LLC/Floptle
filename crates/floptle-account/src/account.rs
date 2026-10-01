@@ -552,6 +552,37 @@ impl Account {
     }
 }
 
+impl Account {
+    /// Mint a join token for `audience` (a normalised join target) on a worker,
+    /// and post the result through `tx`. Never blocks the caller.
+    ///
+    /// Not reachable from a script. The token goes into the join handshake
+    /// and nowhere else.
+    pub fn join_token(&self, audience: &str, timeout: Duration, tx: Sender<Result<String, String>>) {
+        let me = self.clone();
+        let audience = audience.to_string();
+        let started = detach("floptle-join-token", move || {
+            let token = match me.access_token() {
+                Ok(t) => t,
+                Err(e) => {
+                    let _ = tx.send(Err(e));
+                    return;
+                }
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            let _ = tx.send(crate::join_token::mint(&me.base, &token, &audience, timeout));
+            #[cfg(target_arch = "wasm32")]
+            wasm_bindgen_futures::spawn_local(async move {
+                let _ = tx.send(crate::join_token::mint_web(&me.base, &token, &audience, timeout).await);
+            });
+        });
+        if let Err(e) = started {
+            // The receiver gives up on its own clock; this only saves it the wait.
+            log::warn!("could not start the join-token worker: {e}");
+        }
+    }
+}
+
 /// Seconds since the Unix epoch, from a clock that exists on every target —
 /// `std::time::SystemTime::now()` compiles for a page and panics there.
 fn unix_now() -> u64 {

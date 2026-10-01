@@ -1865,6 +1865,7 @@ dependencies = [
 name = "floptle-net"
 version = "0.107.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "floptle-audio",
  "floptle-core",
@@ -1879,6 +1880,7 @@ dependencies = [
  "ron",
  "rustls",
  "serde",
+ "serde_json",
  "socket2",
  "tokio",
  "tokio-rustls",

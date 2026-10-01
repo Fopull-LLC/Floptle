@@ -488,6 +488,8 @@ pub struct NetSession {
     /// Client: when the Hello went out, and the round trip to the Welcome —
     /// a real RTT on a transport that reports none of its own (WebSocket).
     hello_sent_at: Option<floptle_core::time::Instant>,
+    /// Client: the Hello is held for [`Self::present_identity`].
+    hello_unsent: bool,
     handshake_rtt_ms: Option<f32>,
     interp: HashMap<u64, InterpBuf>,
     latest_server_tick: u64,
@@ -720,17 +722,40 @@ impl NetSession {
     /// state and not an error. The server decides whether it will admit one
     /// (`net.host{ requireIdentity = true }`).
     pub fn client_as(
-        mut transport: Box<dyn Transport>,
+        transport: Box<dyn Transport>,
         input_map_hash: u64,
         identity: Option<crate::wire::IdentityClaim>,
     ) -> Self {
-        let hello =
-            Msg::Hello { proto: PROTO_VERSION, input_map: input_map_hash, identity };
-        transport.send(SERVER, Channel::Reliable, &hello.encode());
+        let mut s = Self::client_awaiting_identity(transport, input_map_hash);
+        s.present_identity(identity);
+        s
+    }
+
+    /// A client whose handshake waits for [`Self::present_identity`]: the
+    /// join is under way, but the Hello is held while the player's join token
+    /// is fetched. The session reads as connecting meanwhile.
+    pub fn client_awaiting_identity(transport: Box<dyn Transport>, input_map_hash: u64) -> Self {
         let mut s = Self::new(NetRole::Client, transport);
         s.input_map_hash = input_map_hash;
-        s.hello_sent_at = Some(floptle_core::time::Instant::now());
+        s.hello_unsent = true;
         s
+    }
+
+    /// Send the held Hello with this identity. Once only; later calls do
+    /// nothing, so a token that arrives after a timeout gave up on it is
+    /// harmless.
+    pub fn present_identity(&mut self, identity: Option<crate::wire::IdentityClaim>) {
+        if !std::mem::take(&mut self.hello_unsent) {
+            return;
+        }
+        let hello = Msg::Hello { proto: PROTO_VERSION, input_map: self.input_map_hash, identity };
+        self.transport.send(SERVER, Channel::Reliable, &hello.encode());
+        self.hello_sent_at = Some(floptle_core::time::Instant::now());
+    }
+
+    /// Is the Hello still held for an identity?
+    pub fn awaiting_identity(&self) -> bool {
+        self.hello_unsent
     }
 
     fn new(role: NetRole, transport: Box<dyn Transport>) -> Self {
@@ -790,6 +815,7 @@ impl NetSession {
             lead_events: Vec::new(),
             lead_added: 0,
             hello_sent_at: None,
+            hello_unsent: false,
             handshake_rtt_ms: None,
             interp: HashMap::new(),
             latest_server_tick: 0,
@@ -2795,7 +2821,10 @@ impl NetSession {
                 // Who is this, and will this server have them? Both questions
                 // are answered before the peer is on the roster, so a refused
                 // join never becomes a `playerJoined` the game has to undo.
-                let who = self.verifier.verify(identity.as_ref());
+                let (who, note) = self.verifier.verify_noting(identity.as_ref());
+                if let Some(note) = note {
+                    self.log_join(format!("peer {from}: {note}"));
+                }
                 if let Some(reason) = self.join_policy.refuse(&who) {
                     self.log_join(format!(
                         "refused peer {from} ({}): {reason}",
