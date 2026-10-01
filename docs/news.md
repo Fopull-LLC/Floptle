@@ -1,5 +1,12 @@
 ## Just shipped
 
+**v0.109.0 — "Solid Ground"** (stable). Distant terrain no longer shows caves
+through thin rock or slivers of sky where detail levels meet, and its mesh no
+longer folds into shards. Sunlight stays out of scaled buildings, a game lit
+by stars uses the shadow map, and the map now includes casters off screen.
+Shadows beside many colliders cost far less, and a web game starts in Safari
+and on iPhone when its page is served apart from its files.
+
 **v0.108.0 — "Knows Who You Are"** (stable). A game server can be sure who a
 player is: a signed-in player arrives with a short-lived join token from
 fopull.com that names that one server, and `net.identity(peer).verified` is
