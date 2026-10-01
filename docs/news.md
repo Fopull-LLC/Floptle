@@ -1,5 +1,12 @@
 ## Just shipped
 
+**v0.107.0 — "Fits In Your Hand"** (stable). A browser game can be played on a
+phone: `input.touches()` reads every finger, a tap works the game's UI with no
+code, and `app.isTouch()` picks the touch layout. ⚙ Settings ▸ Input is rebuilt
+so every binding and every setting, the standard controls included, can be
+changed in place. A client's input delay no longer creeps up during online
+play, and a player on an outdated build is told the join was refused.
+
 **v0.106.0 — "Plays Your Levels"** (stable). `scene.load("user://…")` loads a
 level the player downloaded from their own files, with its map beside it, so
 community levels no longer go into the game's install folder. A browser game
