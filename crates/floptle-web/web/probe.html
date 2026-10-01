@@ -64,7 +64,9 @@
   // The module's start runs the C++ constructors and installs the panic hook;
   // the ladder itself is `probe()`, so the same module can be a game's player
   // (index.html) without running the probe first.
-  const { default: init, probe } = await import('./pkg/floptle_web.js');
+  // Beside the page's files even under a <base> tag, which Safari ignores
+  // for a relative import(); see index.html.
+  const { default: init, probe } = await import(new URL('pkg/floptle_web.js', document.baseURI).href);
   init().then(() => probe()).catch(fatal);
 </script>
 </body>

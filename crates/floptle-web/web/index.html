@@ -210,6 +210,14 @@
     await post('/report', 'SHOT SENT');
   };
 
+  // Every file the page loads, as an absolute address beside the page's
+  // files. A site can serve this page from one address and its files from
+  // another, with a <base> tag saying where the files are. Safari, and every
+  // browser on an iPhone, ignores <base> for a relative import() and for this
+  // script's import.meta.url, and asks for the engine beside the page
+  // instead. document.baseURI honours <base> everywhere.
+  const here = path => new URL(path, document.baseURI).href;
+
   // Two things a browser must have, checked up front and named when missing,
   // rather than a blank canvas: WebGPU (the renderer's only backend on the
   // web), and WebAssembly exception handling (the scripting engine's C++
@@ -232,13 +240,13 @@
     // reported as itself.
     busy(true);
     status('loading…');
-    const { default: init, play } = await import('./pkg/floptle_web.js');
+    const { default: init, play } = await import(here('pkg/floptle_web.js'));
     // Then the engine and the game together, on one bar. Both are large —
     // the engine's module is tens of megabytes — and the engine's used to
     // download under a bare "loading…" with the bar standing still.
     const [wasmRes, gameRes] = await Promise.all([
-      fetch(new URL('./pkg/floptle_web_bg.wasm', import.meta.url)),
-      fetch('game.flpk'),
+      fetch(here('pkg/floptle_web_bg.wasm')),
+      fetch(here('game.flpk')),
     ]);
     if (!wasmRes.ok) throw new Error(`floptle_web_bg.wasm: HTTP ${wasmRes.status}`);
     if (!gameRes.ok) throw new Error(`game.flpk: HTTP ${gameRes.status}`);
