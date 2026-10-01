@@ -771,7 +771,7 @@ pub fn resolve(merged: &ThemeFile, file: &str, assets: Assets, origin: Origin) -
             None => Err(format!("${t} is not a colour token")),
         }
     }
-    let tok = |t: &str| follow(t, &exprs, 0).map_err(&err);
+    let tok = |t: &str| follow(t, &exprs, 0).map_err(err);
     let tokens = Tokens {
         ground: tok("ground")?,
         surface: tok("surface")?,

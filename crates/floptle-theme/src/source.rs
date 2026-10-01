@@ -110,7 +110,7 @@ impl Source {
         let mut out = Assets::default();
         let mut total = 0u64;
         for p in paths {
-            safe_rel(p).map_err(&err)?;
+            safe_rel(p).map_err(err)?;
             let bytes: Vec<u8> = match self {
                 Source::Builtin(_) => {
                     return Err(err(format!("names the file {p:?}, and a built-in theme ships no files")));
@@ -125,7 +125,7 @@ impl Source {
                     if contents { std::fs::read(&f).map_err(|e| err(format!("{p}: {e}")))? } else { Vec::new() }
                 }
                 Source::Zip(z) => {
-                    let (mut zip, prefix) = open_zip(z).map_err(&err)?;
+                    let (mut zip, prefix) = open_zip(z).map_err(err)?;
                     let name = format!("{prefix}{p}");
                     let size = zip
                         .by_name(&name)
@@ -135,7 +135,7 @@ impl Source {
                         return Err(err(format!("{p:?} is {} MB; a theme's files are at most 32 MB each", size / 1_000_000)));
                     }
                     total += size;
-                    if contents { read_zip_entry(&mut zip, &name, MAX_FILE).map_err(&err)? } else { Vec::new() }
+                    if contents { read_zip_entry(&mut zip, &name, MAX_FILE).map_err(err)? } else { Vec::new() }
                 }
             };
             if total > MAX_TOTAL {
@@ -237,7 +237,7 @@ pub fn load(src: &Source, origin: Origin, contents: bool) -> Result<Theme, Theme
                 BUILTINS.iter().map(|b| b.0).collect::<Vec<_>>().join(", ")
             )));
         }
-        model::merge(&file, &builtin_merged(&parent, 0).map_err(&err)?)
+        model::merge(&file, &builtin_merged(&parent, 0).map_err(err)?)
     };
     // Only this file's own paths are read from this source: a built-in parent
     // names none.
