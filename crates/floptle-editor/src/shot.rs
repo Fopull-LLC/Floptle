@@ -354,8 +354,9 @@ pub(crate) fn run(args: Args) -> i32 {
     // GPU through the pump the frame loop runs before every draw, and this verb
     // has no frame loop: the collider was live, the character stood on the
     // ground, and the picture showed it standing on the sky — not one chunk had
-    // been meshed. Anchored on the camera like the streaming settle above.
-    if !ed.settle_terrain_meshes(wt.translation, std::time::Duration::from_secs(45)) {
+    // been meshed. Anchored where the frame loop centres terrain detail: the
+    // game's `terrain.lodAnchor` when a script named one, else the camera.
+    if !ed.settle_terrain_meshes(ed.lod_center(wt.translation), std::time::Duration::from_secs(45)) {
         floptle_say::say_err!(
             "warning: the terrain was still meshing after 45s — some ground in this \
              shot is missing"
