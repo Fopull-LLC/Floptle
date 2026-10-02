@@ -209,10 +209,10 @@ pub struct HubApp {
     paths: Paths,
     config: HubConfig,
     installs: Vec<Install>,
-    /// The logo, uploaded once for the About page.
-    logo: Option<egui::TextureHandle>,
-    /// The icon mark, uploaded once for the title bar.
-    mark: Option<egui::TextureHandle>,
+    /// The lockup for the About page, at the pixel size it was last drawn.
+    logo: Option<BrandTexture>,
+    /// The icon mark for the header, at the pixel size it was last drawn.
+    mark: Option<BrandTexture>,
     tab: Tab,
     manifest: ManifestState,
     job: Option<InstallJob>,
@@ -1223,9 +1223,46 @@ fn banner_frame(ui: &egui::Ui) -> egui::Frame {
 }
 
 /// A PNG compiled into the binary, as an egui image.
-fn decode_png(bytes: &[u8]) -> egui::ColorImage {
-    let i = image::load_from_memory(bytes).expect("a committed brand image decodes").to_rgba8();
-    egui::ColorImage::from_rgba_unmultiplied([i.width() as usize, i.height() as usize], i.as_raw())
+/// A brand image uploaded at the exact pixel size it is drawn at.
+///
+/// The mark is thin line art several hundred pixels across. Drawn into a
+/// header-sized rect straight from the full-size texture, the GPU's linear
+/// filter reads only the few source pixels nearest each screen pixel — egui
+/// makes no mipmaps — and the strokes fall apart into scattered dots. So the
+/// image is shrunk once on the CPU with a proper filter, and again only when
+/// the size on screen changes (a new scale factor, a different layout).
+struct BrandTexture {
+    px: [usize; 2],
+    handle: egui::TextureHandle,
+}
+
+impl BrandTexture {
+    /// The texture for `bytes` at `size` points, reusing `slot` when it is
+    /// already that size.
+    fn at(slot: &mut Option<Self>, ctx: &egui::Context, name: &str, bytes: &[u8], size: egui::Vec2) -> egui::TextureId {
+        let ppp = ctx.pixels_per_point();
+        let px = [(size.x * ppp).round().max(1.0) as usize, (size.y * ppp).round().max(1.0) as usize];
+        if slot.as_ref().is_none_or(|t| t.px != px) {
+            let img = resample_png(bytes, px);
+            *slot = Some(Self { px, handle: ctx.load_texture(name, img, egui::TextureOptions::LINEAR) });
+        }
+        slot.as_ref().expect("filled above").handle.id()
+    }
+}
+
+/// Decode a committed brand PNG and shrink it to `px` with Lanczos.
+/// Premultiplied first: resampling straight alpha drags the colour of fully
+/// transparent pixels into the edge of every stroke.
+fn resample_png(bytes: &[u8], px: [usize; 2]) -> egui::ColorImage {
+    let mut i = image::load_from_memory(bytes).expect("a committed brand image decodes").to_rgba8();
+    for p in i.pixels_mut() {
+        let a = u16::from(p[3]);
+        for c in &mut p.0[..3] {
+            *c = ((u16::from(*c) * a + 127) / 255) as u8;
+        }
+    }
+    let i = image::imageops::resize(&i, px[0] as u32, px[1] as u32, image::imageops::FilterType::Lanczos3);
+    egui::ColorImage::from_rgba_premultiplied(px, i.as_raw())
 }
 
 impl eframe::App for HubApp {
@@ -1282,30 +1319,36 @@ impl eframe::App for HubApp {
     // central content).
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.apply_theme(ui.ctx());
-        let header_margin = egui::Margin::symmetric(18, 10);
+        let header_margin = egui::Margin::symmetric(18, 8);
         egui::Panel::top("tabs").frame(egui::Frame::NONE.inner_margin(header_margin)).show(ui, |ui| {
             let full = ui.max_rect() + header_margin;
             floptle_theme::paint_region(ui, "hub.header", full);
             ui.painter().hline(full.x_range(), full.bottom() - 0.5, look::hairline(ui));
             ui.horizontal(|ui| {
                 // The mark on the ground with its soft teal glow, never on a
-                // tile (contract floptle-brand §5), then the name.
-                let mark = self.mark_texture(ui.ctx());
-                let (r, _) = ui.allocate_exact_size(egui::vec2(30.0, 28.0), egui::Sense::hover());
-                look::glow(ui, r.expand(6.0), 1.0);
+                // tile (contract floptle-brand §5), then the name. 46 points
+                // tall: the strokes are hairlines, and below about 40 they
+                // thin to a pixel and the mark stops reading as a drawing.
+                let size = egui::vec2(49.0, 46.0); // the mark's own 504 × 471
+                let mark = BrandTexture::at(&mut self.mark, ui.ctx(), "floptle-mark", floptle_brand::MARK_PNG, size);
+                let (r, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                look::glow(ui, r.shrink(4.0), 1.0);
                 let ink = look::token(ui, |t| t.text);
-                ui.painter().image(mark.id(), r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), ink);
-                ui.add_space(4.0);
-                ui.label(look::title(ui, "Floptle"));
-                // the HUB'S own version, always in view. Three different things share one
-                // version number here — the Hub, the engine, and the engine a project is
-                // pinned to — and until this line the only one with its name attached was
-                // on the About tab.
-                let v = Self::hub_version().map_or_else(|| "Hub".to_string(), |v| format!("Hub {v}"));
-                ui.label(look::data(ui, v)).on_hover_text(
-                    "the version of the Hub itself — the engine versions in Installs are numbered separately",
-                );
-                ui.add_space(20.0);
+                ui.painter().image(mark, r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), ink);
+                ui.add_space(8.0);
+                // The name with the HUB'S own version under it, always in view.
+                // Three different things share one version number here — the
+                // Hub, the engine, and the engine a project is pinned to — and
+                // this is the one that says which it is.
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.label(look::title(ui, "Floptle"));
+                    let v = Self::hub_version().map_or_else(|| "Hub".to_string(), |v| format!("Hub {v}"));
+                    ui.label(look::data(ui, v).color(look::token(ui, |t| t.dim))).on_hover_text(
+                        "the version of the Hub itself — the engine versions in Installs are numbered separately",
+                    );
+                });
+                ui.add_space(28.0);
                 ui.spacing_mut().item_spacing.x = 18.0;
                 for (t, name) in [
                     (Tab::Projects, "Projects"),
@@ -2327,28 +2370,14 @@ impl HubApp {
         ui.small("Token is used only this session (a keyring store is a later hardening step). Point the manifest URL at a local releases.json to test against a locally-packaged bundle.");
     }
 
-    /// The mark (white line art), uploaded on first use. Drawn tinted with the
-    /// theme's text colour, so it reads on a light theme as well as a dark one.
-    fn mark_texture(&mut self, ctx: &egui::Context) -> egui::TextureHandle {
-        self.mark
-            .get_or_insert_with(|| {
-                let img = decode_png(floptle_brand::MARK_PNG);
-                ctx.load_texture("floptle-mark", img, egui::TextureOptions::LINEAR)
-            })
-            .clone()
-    }
-
     fn about_tab(&mut self, ui: &mut egui::Ui) {
         ui.add_space(10.0);
         ui.vertical_centered(|ui| {
             // The logo — white line art, so it wants the dark ground the Hub has.
             // The lockup, on the ground with its glow (contract §5).
-            let logo = self.logo.get_or_insert_with(|| {
-                let img = decode_png(floptle_brand::LOCKUP_PNG);
-                ui.ctx().load_texture("floptle-lockup", img, egui::TextureOptions::LINEAR)
-            });
-            let id = logo.id();
-            let (r, _) = ui.allocate_exact_size(egui::vec2(150.0, 180.0), egui::Sense::hover());
+            let size = egui::vec2(150.0, 180.0);
+            let id = BrandTexture::at(&mut self.logo, ui.ctx(), "floptle-lockup", floptle_brand::LOCKUP_PNG, size);
+            let (r, _) = ui.allocate_exact_size(size, egui::Sense::hover());
             look::glow(ui, r, 0.9);
             ui.painter().image(id, r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), look::token(ui, |t| t.text));
             ui.add_space(6.0);
