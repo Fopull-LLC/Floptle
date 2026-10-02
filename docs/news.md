@@ -1,5 +1,13 @@
 ## Just shipped
 
+**v0.112.0 — "Moves With You"** (stable). A game on an orbiting planet
+plays as if the ground held still: smoke stays over its spot, marks stay on
+the rock, and `spawnEffect` takes a frame to ride, a normal, a scale and a
+tint. Smoke can be lit and darkens on the night side, flipbooks can blend
+their frames, and heat haze bends the scene. Generated caves are rounded
+rock, a pilot no longer flings their own craft, `physics.ignorePair` lets two
+bodies pass through each other, and a finger scrolls a list full of buttons.
+
 **v0.111.3 — "Asks First"** (stable). A web game no longer stops on an
 iPhone when it takes the mouse or goes fullscreen. Safari on an iPhone has
 neither, and the game now checks before it asks, so the same build plays on
