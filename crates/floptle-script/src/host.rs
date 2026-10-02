@@ -2852,6 +2852,7 @@ impl ScriptHost {
         // The `physics.*` sim controls: pause/resume the whole physics step
         // while scripts keep running (loading screens, cutscenes, pause menus).
         let physics_pause_request: Rc<RefCell<Option<bool>>> = Rc::new(RefCell::new(None));
+        let ignore_pairs: crate::IgnorePairs = Rc::default();
         let physics_paused: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
         let frame_step_request: Rc<std::cell::Cell<u32>> = Rc::new(std::cell::Cell::new(0));
         {
@@ -2883,6 +2884,24 @@ impl ScriptHost {
                 })
                 .expect("physics.step");
             t.set("step", f).expect("physics.step");
+            // `physics.ignorePair(a, b [, seconds])`: two nodes pass through each
+            // other, each a dynamic body or any node of an assembly (which
+            // stands for the whole assembly). For good without `seconds`; 0
+            // lifts it. Applied at the next tick's physics step.
+            let pairs = ignore_pairs.clone();
+            let f = lua
+                .create_function(move |_, (a, b, secs): (mlua::Value, mlua::Value, Option<f32>)| {
+                    let (Some(a), Some(b)) = (crate::env::node_id_of(&a), crate::env::node_id_of(&b)) else {
+                        return Err(mlua::Error::runtime("physics.ignorePair(a, b [, seconds]): a and b must be nodes"));
+                    };
+                    if secs.is_some_and(|s| s.is_nan()) {
+                        return Err(mlua::Error::runtime("physics.ignorePair: seconds is NaN"));
+                    }
+                    pairs.borrow_mut().push((a, b, secs));
+                    Ok(())
+                })
+                .expect("physics.ignorePair");
+            t.set("ignorePair", f).expect("physics.ignorePair");
             lua.globals().set("physics", t).expect("physics global");
         }
         // The `assembly.*` API: compound-vessel forces/splits out, per-frame
@@ -2986,6 +3005,7 @@ impl ScriptHost {
             view_info,
             warp_request,
             physics_pause_request,
+            ignore_pairs,
             frame_step_request,
             physics_paused,
             mouse_lock,
@@ -3940,6 +3960,11 @@ impl ScriptHost {
         *self.space_info.borrow_mut() = info;
     }
 
+    /// The names `space.bodies()` lists right now, in its order.
+    pub fn space_body_names(&self) -> Vec<String> {
+        self.space_info.borrow().bodies.iter().map(|b| b.name.clone()).collect()
+    }
+
     /// Feed this frame's active game camera + viewport (`camera.worldToScreen`
     /// reads it). Fed every frame regardless of focus, so the map can pick.
     pub fn set_view(&self, info: crate::view_api::ViewInfo) {
@@ -3967,6 +3992,11 @@ impl ScriptHost {
     }
 
     /// Drain a pending `physics.pause(on)` request (the editor gates its step).
+    /// `physics.ignorePair` requests since the last call, in call order.
+    pub fn take_ignore_pairs(&self) -> Vec<(u32, u32, Option<f32>)> {
+        std::mem::take(&mut *self.ignore_pairs.borrow_mut())
+    }
+
     pub fn take_physics_pause_request(&self) -> Option<bool> {
         self.physics_pause_request.borrow_mut().take()
     }

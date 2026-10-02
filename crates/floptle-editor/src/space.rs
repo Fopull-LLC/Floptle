@@ -37,6 +37,28 @@ const LOD_FAR: f64 = 700.0;
 const LOD_NEAR: f64 = 500.0;
 
 impl Editor {
+    /// Republish `space.*` without advancing the clock when the set of
+    /// celestial bodies has changed since the last rails tick. A no-op before
+    /// the first tick (Play start snaps every body on that tick) and when
+    /// nothing was added or removed.
+    pub(crate) fn refresh_space_listing(&mut self) {
+        if self.space_rails_prev.is_empty() {
+            return;
+        }
+        let mut n = 0usize;
+        let mut same = true;
+        for (e, _) in self.world.query::<CelestialBody>() {
+            n += 1;
+            same &= self.space_rails_prev.contains_key(&e);
+        }
+        if same && n == self.space_rails_prev.len() {
+            return;
+        }
+        // Zero time: every body already on the rails moves nowhere and carries
+        // nothing; a new one takes the rails position its first tick would.
+        self.update_space_rails(0.0);
+    }
+
     /// Advance rails one gameplay tick. No-op unless Playing with celestial bodies.
     pub(crate) fn update_space_rails(&mut self, tick_dt: f64) {
         let cb: Vec<(Entity, CelestialBody)> = self
@@ -759,6 +781,43 @@ mod tests {
         ed.play_step(1.0 / 60.0, true);
         let moved = (crew_at(&ed) - before).length();
         assert!(moved < 5.0, "the crew moved {moved} units the tick a planet appeared elsewhere");
+    }
+
+    /// **A celestial a script makes is in `space.*` before the next frame's
+    /// scripts run, tick or no tick.** The listing used to be written only by a
+    /// rails tick, so on a frame that ran none a planet whose terrain had
+    /// already landed answered a raycast while `space.bodies()` did not have
+    /// it. A launch pad sited off that raycast spawned unparented, with world
+    /// up, and its craft fell through.
+    #[test]
+    fn a_celestial_made_on_a_frame_is_listed_by_the_next_without_a_tick() {
+        use floptle_core::Name;
+        let mut ed = crate::Editor::default();
+        let celestial = |ed: &mut crate::Editor, name: &str, body: CelestialBody| {
+            let e = ed.world.spawn();
+            ed.world.insert(e, Name(name.into()));
+            ed.world.insert(e, Transform::IDENTITY);
+            ed.world.insert(e, body);
+            e
+        };
+        celestial(&mut ed, "Sun", CelestialBody { mu: 1.0e6, ..Default::default() });
+        ed.toggle_play();
+        assert!(ed.playing);
+        for _ in 0..3 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        assert_eq!(ed.script_host.space_body_names(), vec!["Sun".to_string()]);
+        let clock = ed.space_time;
+
+        celestial(&mut ed, "Home", CelestialBody { parent: "Sun".into(), a: 1000.0, mu: 1.0e4, ..Default::default() });
+        // A frame too short to run a tick.
+        ed.play_step(0.0, true);
+        assert_eq!(
+            ed.script_host.space_body_names(),
+            vec!["Sun".to_string(), "Home".to_string()],
+            "a planet made this frame must be listed before the next frame's scripts"
+        );
+        assert_eq!(ed.space_time, clock, "listing it must not move the clock");
     }
 
     /// **At Play start the crew rides its planet onto the rails.** A planet is

@@ -326,7 +326,8 @@ impl Sim {
                 Self::add_static_body_collider(&mut world, ecs, e, &rb, &layers);
                 continue;
             }
-            let (b, rot0) = Self::body_from(ecs, e, &rb, world.origin, &layers);
+            let (mut b, rot0) = Self::body_from(ecs, e, &rb, world.origin, &layers);
+            b.owner = e.index();
             map.push(BodyLink {
                 entity: e,
                 body: world.add_body(b),
@@ -456,7 +457,8 @@ impl Sim {
             if parts[ri].is_empty() {
                 continue;
             }
-            let c = Self::compound_from(ecs, *root, root_rb, &parts[ri], world.origin, layers);
+            let mut c = Self::compound_from(ecs, *root, root_rb, &parts[ri], world.origin, layers);
+            c.owner = root.index();
             let idx = world.add_compound(c);
             cmap.push(CompoundLink { entity: *root, compound: idx });
         }
@@ -656,7 +658,8 @@ impl Sim {
             Self::add_static_body_collider(&mut self.world, ecs, e, &rb, &self.layers);
             return true;
         }
-        let (b, rot0) = Self::body_from(ecs, e, &rb, self.world.origin, &self.layers);
+        let (mut b, rot0) = Self::body_from(ecs, e, &rb, self.world.origin, &self.layers);
+        b.owner = e.index();
         let pos = b.pos;
         let bi = self.world.add_body(b);
         self.map.push(BodyLink {
@@ -1223,7 +1226,7 @@ impl Sim {
             let col_bound = col.bounds();
             for (bi, body) in self.world.bodies.iter().enumerate() {
                 let Some(Some(a_eid)) = body_eid.get(bi) else { continue };
-                if !body.active
+                if !body.live()
                     || (self.world.matrix[body.layer as usize] >> col.layer) & 1 == 0
                 {
                     continue;
@@ -1258,7 +1261,7 @@ impl Sim {
         // skips sensors entirely (they never block), so a kinematic trigger
         // sweeping through a wall/terrain still gets its events here.
         for (bi, body) in self.world.bodies.iter().enumerate() {
-            if !body.sensor || !body.active {
+            if !body.sensor || !body.live() {
                 continue;
             }
             let Some(Some(a_eid)) = body_eid.get(bi) else { continue };
@@ -1292,13 +1295,13 @@ impl Sim {
         for i in 0..self.world.bodies.len() {
             let Some(Some(a_eid)) = body_eid.get(i).copied() else { continue };
             let a = &self.world.bodies[i];
-            if !a.active {
+            if !a.live() {
                 continue;
             }
             for j in (i + 1)..self.world.bodies.len() {
                 let Some(Some(b_eid)) = body_eid.get(j).copied() else { continue };
                 let b = &self.world.bodies[j];
-                if !b.active || (self.world.matrix[a.layer as usize] >> b.layer) & 1 == 0 {
+                if !b.live() || (self.world.matrix[a.layer as usize] >> b.layer) & 1 == 0 {
                     continue;
                 }
                 let hull = crate::world::BodyHull {
@@ -1425,7 +1428,7 @@ impl Sim {
         let alpha = alpha.clamp(0.0, 1.0);
         for link in &self.map {
             let b = &self.world.bodies[link.body];
-            if !b.active || b.kinematic {
+            if !b.live() || b.kinematic {
                 // Snapshot-driven / kinematic: the transform is authoritative
                 // (interp or scripts own it) — never write the body pose back.
                 continue;
@@ -1445,7 +1448,7 @@ impl Sim {
     fn writeback_compounds(&self, ecs: &mut World, alpha: f32, ticked: bool) {
         for link in &self.cmap {
             let c = &self.world.compounds[link.compound];
-            if !c.active {
+            if !c.live() {
                 continue;
             }
             let (from_pos, from_rot) = if ticked {
@@ -1507,6 +1510,8 @@ impl Sim {
             t.translation = local;
             t.rotation = local_rot;
         }
+        let mut detached = detached;
+        detached.owner = new_root.index();
         let idx = self.world.add_compound(detached);
         self.cmap.push(CompoundLink { entity: new_root, compound: idx });
         if self.tick_prev_c.len() == idx {
@@ -1588,7 +1593,8 @@ impl Sim {
         if parts.is_empty() {
             return false;
         }
-        let c = Self::compound_from(ecs, root, &rb, &parts, self.world.origin, &self.layers);
+        let mut c = Self::compound_from(ecs, root, &rb, &parts, self.world.origin, &self.layers);
+        c.owner = root.index();
         let idx = self.world.add_compound(c);
         self.cmap.push(CompoundLink { entity: root, compound: idx });
         if self.tick_prev_c.len() == idx {
@@ -1791,7 +1797,7 @@ impl Sim {
             // Sensor (trigger) bodies are invisible to rays, exactly like
             // static trigger colliders — a ray through a pickup zone hits
             // what's behind it.
-            .filter(|l| !self.world.bodies[l.body].sensor)
+            .filter(|l| !self.world.bodies[l.body].sensor && !self.world.bodies[l.body].off)
             .map(|l| {
                 let b = &self.world.bodies[l.body];
                 let pos = if b.active {
@@ -1816,6 +1822,87 @@ impl Sim {
     /// Activate/deactivate a body by entity index. Inactive bodies neither
     /// step nor write back transforms — a networked client deactivates
     /// server-authoritative bodies so snapshots own their transforms.
+    /// Let two nodes pass through each other: each a dynamic body's node, an
+    /// assembly's root, or any part of an assembly (which stands for the
+    /// whole assembly). `seconds` as in [`PhysicsWorld::ignore_pair`]. Returns
+    /// false, changing nothing, when either node is neither a body nor in an
+    /// assembly.
+    pub fn ignore_pair(&mut self, a: u32, b: u32, seconds: Option<f32>) -> bool {
+        let (Some(a), Some(b)) = (self.pair_owner_of(a), self.pair_owner_of(b)) else {
+            return false;
+        };
+        self.world.ignore_pair(a, b, seconds);
+        true
+    }
+
+    /// The pair-pass owner a node answers to: its own body, or the assembly it
+    /// is the root or a part of.
+    fn pair_owner_of(&self, eid: u32) -> Option<u32> {
+        if self.map.iter().any(|l| l.entity.index() == eid) {
+            return Some(eid);
+        }
+        self.world
+            .compounds
+            .iter()
+            .find(|c| c.owner == eid || c.shapes.iter().any(|s| s.id == eid as u64))
+            .map(|c| c.owner)
+    }
+
+    /// Switch bodies and assemblies off or on with their nodes. `off` answers
+    /// for a node by entity index; an assembly follows its root. Returns
+    /// whether anything changed. Called when a script toggles `enabled`,
+    /// alongside [`Self::sync_parked_colliders`].
+    pub fn sync_switched_off(&mut self, off: impl Fn(u32) -> bool) -> bool {
+        let mut changed = false;
+        for l in &self.map {
+            let b = &mut self.world.bodies[l.body];
+            let now = off(l.entity.index());
+            if b.off != now {
+                b.off = now;
+                b.asleep = false;
+                b.sleep_time = 0.0;
+                changed = true;
+            }
+        }
+        for l in &self.cmap {
+            let c = &mut self.world.compounds[l.compound];
+            let now = off(l.entity.index());
+            if c.off != now {
+                c.off = now;
+                changed = true;
+            }
+        }
+        if changed {
+            self.world.contacts.clear();
+            self.world.compound_contacts.clear();
+        }
+        changed
+    }
+
+    /// Give a body to every switched-on Dynamic or Kinematic node that has
+    /// none: one that started the scene switched off is left out of the build,
+    /// so switching it on is the first time it is simulated. Static nodes are
+    /// not touched; their colliders come back through
+    /// [`Self::sync_parked_colliders`].
+    pub fn adopt_switched_on(&mut self, ecs: &World) {
+        let have: std::collections::HashSet<Entity> =
+            self.map.iter().map(|l| l.entity).chain(self.cmap.iter().map(|l| l.entity)).collect();
+        let late: Vec<Entity> = ecs
+            .query::<RigidBody>()
+            .filter(|(e, rb)| {
+                rb.mode != floptle_core::BodyMode::Static
+                    && !have.contains(e)
+                    && !floptle_core::is_disabled(ecs, *e)
+            })
+            .map(|(e, _)| e)
+            .collect();
+        for e in late {
+            if !self.add_body_for(e, ecs) {
+                self.add_compound_for(e, ecs);
+            }
+        }
+    }
+
     pub fn set_body_active(&mut self, eid: u32, active: bool) {
         for l in &self.map {
             if l.entity.index() == eid {
@@ -2029,7 +2116,7 @@ impl Sim {
             .bodies
             .iter()
             .enumerate()
-            .filter(|(_, b)| b.kinematic && !b.sensor)
+            .filter(|(_, b)| b.kinematic && !b.sensor && !b.off)
             .filter_map(|(bi, b)| {
                 let eid = self.map.iter().find(|l| l.body == bi)?.entity.index();
                 Some(BodyHull {
@@ -2074,7 +2161,7 @@ impl Sim {
     fn writeback_transforms(&self, ecs: &mut World, alpha: f32) {
         for link in &self.map {
             let b = &self.world.bodies[link.body];
-            if !b.active || b.kinematic {
+            if !b.live() || b.kinematic {
                 continue;
             }
             let p = b.prev_pos.lerp(b.pos, alpha);

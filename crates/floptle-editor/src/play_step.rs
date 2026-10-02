@@ -946,16 +946,34 @@ impl Editor {
                     self.physics_paused = on;
                     self.script_host.set_physics_paused(on);
                 }
-                // A node a script switched off takes its static colliders with
-                // it, and brings them back when switched on.
+                // A node a script switched off takes its colliders and its
+                // body with it, and brings them back when switched on.
                 if self.script_host.take_enabled_toggled()
                     && let Some(sim) = self.sim.as_mut()
                 {
                     let world = &self.world;
-                    sim.sync_parked_colliders(|eid| {
+                    let off = |eid| {
                         world.entity_with::<floptle_core::transform::Transform>(eid)
                             .is_some_and(|e| floptle_core::is_disabled(world, e))
-                    });
+                    };
+                    sim.sync_parked_colliders(off);
+                    sim.sync_switched_off(off);
+                    sim.adopt_switched_on(world);
+                }
+                // `physics.ignorePair` requests from this tick's scripts.
+                if let Some(sim) = self.sim.as_mut() {
+                    for (a, b, secs) in self.script_host.take_ignore_pairs() {
+                        if !sim.ignore_pair(a, b, secs) {
+                            self.console.push(
+                                floptle_script::LogLevel::Warn,
+                                format!(
+                                    "physics.ignorePair: node {a} or node {b} has no dynamic body and is in no \
+                                     assembly, so there is no pair to ignore"
+                                ),
+                                None,
+                            );
+                        }
+                    }
                 }
                 if let Some(sim) = self.sim.as_mut() {
                     if self.physics_paused {
@@ -1189,6 +1207,11 @@ impl Editor {
         // before attachments/particles so a spawned node is complete (body,
         // meshes, callback-configured) within this same frame.
         self.apply_script_spawns();
+        // A celestial a script made this frame is listed in `space.*` before the
+        // next frame's scripts run, whether or not that frame runs a tick. Its
+        // terrain can land and answer a raycast on a frame with no tick, and a
+        // game that sites something off that raycast found no body under it.
+        self.refresh_space_listing();
         // Scatter prototypes: resolved here, before the frame's GPU borrow,
         // because baking a prefab imports models and that needs `&mut self`.
         self.bake_scatter_prototypes();

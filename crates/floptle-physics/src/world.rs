@@ -226,6 +226,18 @@ pub struct PhysicsWorld {
     /// meaning "never checked, so don't skip." See [`Self::set_colliders`]
     /// for why this exists — only that call site consults it.
     last_revalidated_collider_count: usize,
+    /// Body/assembly pairs that pass through each other, by owner; see
+    /// [`Self::ignore_pair`].
+    pub ignored_pairs: Vec<IgnoredPair>,
+}
+
+/// Two owners (a body's node or an assembly's root, by entity index) the pair
+/// pass leaves alone, for `left` more seconds (`f32::INFINITY` for good).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IgnoredPair {
+    pub a: u32,
+    pub b: u32,
+    pub left: f32,
 }
 
 impl Default for PhysicsWorld {
@@ -238,6 +250,7 @@ impl Default for PhysicsWorld {
             contacts: Vec::new(),
             origin: DVec3::ZERO,
             matrix: [!0u32; 32],
+            ignored_pairs: Vec::new(),
             kin_hulls: Vec::new(),
             kin_contacts: Vec::new(),
             compounds: Vec::new(),
@@ -963,6 +976,7 @@ impl PhysicsWorld {
         // Compounds against each other and against bodies, once everything
         // has made its own move. Never moves a driven body; see `pairs.rs`.
         self.resolve_pairs();
+        self.age_ignored_pairs(dt);
         // Safety net for geometry that changed in place under a sleeping
         // body — terrain sculpting, a map edit — which `set_colliders`
         // cannot see because nothing replaced the collider list.
@@ -974,6 +988,38 @@ impl PhysicsWorld {
             self.revalidate_sleeping_bodies();
         }
         self.index_fresh = false;
+    }
+
+    /// Let two owners pass through each other, a body or an assembly on each
+    /// side, named by the entity index in `Body::owner` / `Compound::owner`.
+    /// `seconds` of `None` holds until it is lifted; `Some(0.0)` or less lifts
+    /// it now. Asking again for the same pair replaces the time left.
+    ///
+    /// Only the pair pass consults it: a body or an assembly still meets the
+    /// static world and every other mover.
+    pub fn ignore_pair(&mut self, a: u32, b: u32, seconds: Option<f32>) {
+        let (a, b) = (a.min(b), a.max(b));
+        self.ignored_pairs.retain(|p| !(p.a == a && p.b == b));
+        let left = seconds.unwrap_or(f32::INFINITY);
+        if a != b && left > 0.0 {
+            self.ignored_pairs.push(IgnoredPair { a, b, left });
+        }
+    }
+
+    /// Whether the pair pass leaves these two owners alone.
+    pub fn pair_ignored(&self, a: u32, b: u32) -> bool {
+        let (a, b) = (a.min(b), a.max(b));
+        self.ignored_pairs.iter().any(|p| p.a == a && p.b == b)
+    }
+
+    fn age_ignored_pairs(&mut self, dt: f32) {
+        if self.ignored_pairs.is_empty() {
+            return;
+        }
+        for p in &mut self.ignored_pairs {
+            p.left -= dt;
+        }
+        self.ignored_pairs.retain(|p| p.left > 0.0);
     }
 
     /// Put body `bi` to sleep now (stopped where it is, resting on whatever it
@@ -1080,7 +1126,7 @@ impl PhysicsWorld {
     /// the body.
     pub fn step_compound(&mut self, ci: usize, dt: f32) {
         let dt = dt.clamp(0.0, 0.1);
-        if !self.compounds[ci].active {
+        if !self.compounds[ci].live() {
             return;
         }
         if self.compounds[ci].anchored {
@@ -1199,15 +1245,10 @@ impl PhysicsWorld {
                         // reads even deeper, and the assembly explodes off
                         // into the sky ("cloud of scattered parts").
                         let lambda = pen / w;
-                        let push = (lambda / c.mass).min(push_budget);
-                        push_budget -= push;
+                        let push = (lambda / c.mass).clamp(0.0, push_budget.max(0.0));
+                        push_budget = (push_budget - push).max(0.0);
                         c.pos += n * push;
-                        let mut rot_corr = inv_i * r.cross(n * lambda);
-                        let rc_len = rot_corr.length();
-                        if rc_len > rot_budget {
-                            rot_corr *= rot_budget / rc_len.max(1e-9);
-                        }
-                        rot_budget -= rot_corr.length();
+                        let rot_corr = crate::pairs::spend(inv_i * r.cross(n * lambda), &mut rot_budget);
                         if rot_corr.length_squared() > 1e-14 {
                             c.orient = (Quat::from_scaled_axis(rot_corr) * c.orient).normalize();
                         }
@@ -1619,8 +1660,8 @@ impl PhysicsWorld {
             self.reindex_colliders();
             self.index_fresh = false; // one body only; the next one rebuilds too
         }
-        if !self.bodies[bi].active {
-            return; // snapshot-driven (networked authority on a client)
+        if !self.bodies[bi].live() {
+            return; // snapshot-driven or switched off; (networked authority on a client)
         }
         if self.bodies[bi].kinematic {
             // Transform-driven: no gravity, no depenetration, no locks — the

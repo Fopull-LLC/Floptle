@@ -631,6 +631,9 @@ fn seed_fingerprint(
     h.finish().max(1)
 }
 
+/// `physics.ignorePair` requests: (node, node, seconds or `None` for good).
+pub(crate) type IgnorePairs = Rc<RefCell<Vec<(u32, u32, Option<f32>)>>>;
+
 /// Embeds Lua and runs the scripts attached to a world's nodes.
 pub struct ScriptHost {
     lua: Lua,
@@ -851,6 +854,8 @@ pub struct ScriptHost {
     warp_request: Rc<RefCell<Option<f64>>>,
     /// A pending `physics.pause(on)` request the editor drains + applies.
     physics_pause_request: Rc<RefCell<Option<bool>>>,
+    /// `physics.ignorePair` requests.
+    ignore_pairs: IgnorePairs,
     /// Gameplay ticks requested by `physics.step([n])` — the scriptable frame-stepper.
     frame_step_request: Rc<std::cell::Cell<u32>>,
     /// Mirror of the editor's physics-paused state (`physics.isPaused()`).

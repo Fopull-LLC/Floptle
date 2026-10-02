@@ -85,6 +85,11 @@ pub struct Body {
     /// physics never fights the interpolated snapshots driving their
     /// transforms (`docs/multiplayer.md` §6). Default true.
     pub active: bool,
+    /// Its node is switched off (`node.enabled = false`): out of the step, the
+    /// pair pass, touch events, rays and writeback until it is switched on,
+    /// when it carries on from where it stopped. Separate from `active`, which
+    /// networking owns.
+    pub off: bool,
     /// Collision-layer bit index (resolved from the node's named layer by
     /// `floptle_core::Layers`). The solver only resolves this body against
     /// colliders whose layer bit is set in `PhysicsWorld::matrix[layer]`.
@@ -123,6 +128,9 @@ pub struct Body {
     /// that genuinely need it: buoyancy compares the body's density against the
     /// water's, which is the difference between a cork and a cannonball.
     pub mass: f32,
+    /// The node this body belongs to, by entity index; `u32::MAX` when it
+    /// belongs to none. [`crate::PhysicsWorld::ignore_pair`] names bodies by it.
+    pub owner: u32,
     /// Sleeping: grounded and below rest speed for long enough that the step
     /// skips it entirely (no gravity, no depenetration, no ground detection),
     /// the same near-zero cost `kinematic` gets. Woken by a kinematic hull
@@ -189,6 +197,8 @@ impl Body {
             pushbox_only: false,
             mass: 1.0,
             asleep: false,
+            owner: u32::MAX,
+            off: false,
             sleep_time: 0.0,
             feet: false,
         }
@@ -196,6 +206,11 @@ impl Body {
 
     /// The radius of a sphere enclosing this body — what displaces water when
     /// the shape has no radius of its own (a box).
+    /// In the simulation: neither frozen by networking nor switched off.
+    pub fn live(&self) -> bool {
+        self.active && !self.off
+    }
+
     pub(crate) fn bounding_radius(&self) -> f32 {
         match self.shape {
             BodyShape::Sphere => self.radius,

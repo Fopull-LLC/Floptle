@@ -23,6 +23,22 @@ use crate::body::BodyShape;
 use crate::compound::{CompoundContact, ContactPeer, ShapeGeom};
 use crate::world::PhysicsWorld;
 
+/// Scale a correction down to what is left of `budget`, and take its length off
+/// the budget.
+///
+/// The budget never goes below zero. Scaling a correction to the budget and
+/// subtracting its length can land a hair under zero from rounding, and a
+/// negative budget turns the next correction round: `d * budget / |d|` points
+/// backwards, its deficit doubles the budget's, and a few contacts later one
+/// step has flipped a vessel or thrown it metres.
+pub(crate) fn spend(d: Vec3, budget: &mut f32) -> Vec3 {
+    let have = budget.max(0.0);
+    let len = d.length();
+    let d = if len > have { d * (have / len.max(1e-9)) } else { d };
+    *budget = (have - d.length()).max(0.0);
+    d
+}
+
 /// One shape in world space, with an exact signed distance.
 #[derive(Clone, Copy, Debug)]
 enum Solid {
@@ -177,6 +193,13 @@ impl PhysicsWorld {
         }
     }
 
+    fn pair_owner(&self, s: Side) -> u32 {
+        match s {
+            Side::Body(i) => self.bodies[i].owner,
+            Side::Compound(i) => self.compounds[i].owner,
+        }
+    }
+
     fn pair_layer(&self, s: Side) -> u8 {
         match s {
             Side::Body(i) => self.bodies[i].layer,
@@ -285,12 +308,7 @@ impl PhysicsWorld {
             Side::Body(i) => {
                 let b = &mut self.bodies[i];
                 let inv_m = 1.0 / b.mass.max(1e-4);
-                let mut d = shift * inv_m;
-                let len = d.length();
-                if len > budget.0 {
-                    d *= budget.0 / len.max(1e-9);
-                }
-                budget.0 -= d.length();
+                let mut d = spend(shift * inv_m, &mut budget.0);
                 let mut dv = impulse * inv_m;
                 for axis in 0..3 {
                     if b.lock_pos[axis] {
@@ -310,19 +328,9 @@ impl PhysicsWorld {
                 let inv_m = 1.0 / c.mass.max(1e-4);
                 let inv_i = c.world_inv_inertia();
                 let r = p - c.pos;
-                let mut d = shift * inv_m;
-                let len = d.length();
-                if len > budget.0 {
-                    d *= budget.0 / len.max(1e-9);
-                }
-                budget.0 -= d.length();
+                let d = spend(shift * inv_m, &mut budget.0);
                 c.pos += d;
-                let mut rot = inv_i * r.cross(shift);
-                let rl = rot.length();
-                if rl > budget.1 {
-                    rot *= budget.1 / rl.max(1e-9);
-                }
-                budget.1 -= rot.length();
+                let rot = spend(inv_i * r.cross(shift), &mut budget.1);
                 if rot.length_squared() > 1e-14 {
                     c.orient = (Quat::from_scaled_axis(rot) * c.orient).normalize();
                 }
@@ -362,7 +370,7 @@ impl PhysicsWorld {
         }
         let mut sides: Vec<Side> = Vec::new();
         for (ci, c) in self.compounds.iter().enumerate() {
-            if c.active && !c.shapes.is_empty() {
+            if c.live() && !c.shapes.is_empty() {
                 sides.push(Side::Compound(ci));
             }
         }
@@ -371,7 +379,7 @@ impl PhysicsWorld {
         }
         let n_compounds = sides.len();
         for (bi, b) in self.bodies.iter().enumerate() {
-            if b.active && !b.sensor && !b.kinematic && !b.pushbox_only {
+            if b.live() && !b.sensor && !b.kinematic && !b.pushbox_only {
                 sides.push(Side::Body(bi));
             }
         }
@@ -385,6 +393,11 @@ impl PhysicsWorld {
                 let (ci, ri) = bounds[i];
                 let (cj, rj) = bounds[j];
                 if (ci - cj).length_squared() > (ri + rj) * (ri + rj) {
+                    continue;
+                }
+                if !self.ignored_pairs.is_empty()
+                    && self.pair_ignored(self.pair_owner(sides[i]), self.pair_owner(sides[j]))
+                {
                     continue;
                 }
                 pairs.push((i, j));
@@ -791,5 +804,68 @@ mod tests {
         assert!(w.compound_contacts.is_empty());
         let after: Vec<_> = w.compounds.iter().map(|c| c.pos).collect();
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn a_budget_rounded_below_zero_spends_nothing_rather_than_pushing_backwards() {
+        let mut budget = -1e-9;
+        let d = spend(Vec3::new(0.25, 0.0, 0.0), &mut budget);
+        assert_eq!(d, Vec3::ZERO, "a spent budget pushed {d:?}");
+        assert_eq!(budget, 0.0);
+        // A second contact on the same exhausted budget is still nothing, not
+        // a correction twice the size of the deficit.
+        let d = spend(Vec3::new(0.0, 0.0, -0.5), &mut budget);
+        assert_eq!(d, Vec3::ZERO, "the second contact pushed {d:?}");
+    }
+
+    #[test]
+    fn a_partly_spent_budget_scales_the_correction_and_lands_on_zero() {
+        let mut budget = 0.1;
+        let d = spend(Vec3::new(0.3, 0.4, 0.0), &mut budget);
+        assert!((d.length() - 0.1).abs() < 1e-6, "pushed {}", d.length());
+        assert!(d.x > 0.0 && d.y > 0.0, "the push turned round: {d:?}");
+        assert!(budget >= 0.0, "budget left at {budget}");
+    }
+
+    #[test]
+    fn a_body_held_inside_an_assembly_never_moves_it_past_a_steps_limits() {
+        // A seated pilot: a heavy, fat capsule put back inside a four-part
+        // stack every step, deep enough that its contacts drain the budget
+        // and round it below zero. Before the clamp this moved the stack
+        // 0.86 m in one step and overshot on 27 steps of the 100. Each
+        // step may move the stack at most the push budget and turn it at most
+        // the rotation budget, however many contacts there are.
+        let mut w = space();
+        let shapes = vec![
+            boxs(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.9, 0.6, 0.9), 400.0, 1),
+            boxs(Vec3::new(0.0, -1.4, 0.0), Vec3::new(0.8, 0.8, 0.8), 600.0, 2),
+            boxs(Vec3::new(0.0, -2.8, 0.0), Vec3::new(0.7, 0.6, 0.7), 500.0, 3),
+            boxs(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.4, 0.4, 0.4), 50.0, 4),
+        ];
+        let mut stack = Compound::new(Vec3::ZERO, Quat::IDENTITY, shapes);
+        stack.use_gravity = false;
+        let ci = w.add_compound(stack);
+        let mut pilot = Body::capsule(Vec3::ZERO, 0.8, 2.0);
+        pilot.use_gravity = false;
+        pilot.mass = 50_000.0;
+        let bi = w.add_body(pilot);
+        let dt = 1.0 / 60.0;
+        for step in 0..100 {
+            let c = &mut w.compounds[ci];
+            c.vel = Vec3::ZERO;
+            c.ang_vel = Vec3::ZERO;
+            let (pos, orient) = (c.pos, c.orient);
+            // Back in the seat, off-centre so the contacts are uneven.
+            let seat = pos + orient * Vec3::new(0.2, -0.3, 0.1);
+            w.bodies[bi].pos = seat;
+            w.bodies[bi].vel = Vec3::ZERO;
+            w.step(dt);
+            let c = &w.compounds[ci];
+            let moved = (c.pos - pos).length();
+            let turned = (c.orient * orient.inverse()).to_axis_angle().1;
+            let turned = turned.min(std::f32::consts::TAU - turned);
+            assert!(moved <= PUSH_BUDGET + 1e-4, "step {step} moved the stack {moved} m");
+            assert!(turned <= ROT_BUDGET + 1e-4, "step {step} turned the stack {turned} rad");
+        }
     }
 }

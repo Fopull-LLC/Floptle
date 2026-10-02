@@ -34,7 +34,7 @@ each group, and meant to be searched.
 - [2D — sprites, sorting & the flat camera](#2d--sprites-sorting--the-flat-camera) — 36
 - [vessels — assembly.*](#vessels--assembly) — 14
 - [the camera & the screen](#the-camera--the-screen) — 9
-- [physics controls — pause & step](#physics-controls--pause--step) — 4
+- [physics controls — pause & step](#physics-controls--pause--step) — 5
 - [frame cost — perf.*](#frame-cost--perf) — 16
 - [accessibility — access.*](#accessibility--access) — 11
 - [persistence — save.*](#persistence--save) — 7
@@ -897,7 +897,7 @@ Whether the node casts sun shadows (read/write, default true) — the Inspector'
 
 ### `node.enabled`
 
-Whether the node is switched on (read/write). node.enabled = false takes it and everything under it out of the game: not drawn, not simulated (its static colliders leave physics and rays too, and come back when it does), and its scripts stop running. A switched-off script keeps its state, so a call made into it through a handle is still there when it is switched back on. find() skips switched-off nodes unless asked with { scope = "all" }.
+Whether the node is switched on (read/write). node.enabled = false takes it and everything under it out of the game: not drawn, not simulated (its body or assembly stops where it is and leaves contacts, touches and rays; its static colliders leave physics and rays too; all of it comes back when the node does, and a body carries on from where it stopped), and its scripts stop running. A node that starts the scene switched off gets its body the first time it is switched on. A switched-off script keeps its state, so a call made into it through a handle is still there when it is switched back on. find() skips switched-off nodes unless asked with { scope = "all" }.
 
 ### `node.forward`
 
@@ -3078,6 +3078,10 @@ camera.worldToScreen(x,y,z) → sx, sy, depth, onscreen — project a world poin
 ### `physics`
 
 Sim controls: physics.pause(true) freezes the whole gameplay tick while scripts keep running (pause menus, cutscenes, loading screens), and physics.step() advances it one tick at a time.
+
+### `physics.ignorePair`
+
+physics.ignorePair(a, b [, seconds]) — let two nodes pass through each other: each a node with a dynamic body, or any node of an assembly (it stands for the whole assembly). Without seconds it holds until lifted; physics.ignorePair(a, b, 0) lifts it. Both still meet the ground and everything else. A seated passenger inside its own ship, or debris kept off the hull it broke from, is this call: assembly.split(ship, parts, function(piece) physics.ignorePair(piece, ship, 0.5) end). A node with neither a body nor an assembly is reported in the Console and changes nothing. Applied at the next tick.
 
 ### `physics.isPaused`
 

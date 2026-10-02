@@ -152,6 +152,8 @@ pub struct Compound {
     pub use_gravity: bool,
     /// Inactive compounds are skipped entirely (networked-client authority).
     pub active: bool,
+    /// Its root node is switched off; see [`crate::Body::off`].
+    pub off: bool,
     /// An anchored compound is pinned where it stands: no gravity, no
     /// integration, no contact response — velocities read zero and the pose
     /// only moves when something external teleports it (launch clamps, docking
@@ -162,6 +164,9 @@ pub struct Compound {
     pub layer: u8,
     /// Set each step when any contact opposes gravity.
     pub grounded: bool,
+    /// The assembly's root node, by entity index; `u32::MAX` when it belongs
+    /// to none. [`crate::PhysicsWorld::ignore_pair`] names compounds by it.
+    pub owner: u32,
     /// Force accumulator (sim frame, applied at the CoM), cleared each step.
     pub(crate) force: Vec3,
     /// Torque accumulator (sim frame), cleared each step.
@@ -169,6 +174,11 @@ pub struct Compound {
 }
 
 impl Compound {
+    /// In the simulation: neither frozen by networking nor switched off.
+    pub fn live(&self) -> bool {
+        self.active && !self.off
+    }
+
     /// Build a compound from shapes authored around an assembly origin at the
     /// given sim-frame pose. Computes total mass, center of mass and inertia,
     /// and re-centers the shape offsets about the CoM. Shapes with
@@ -210,6 +220,8 @@ impl Compound {
             anchored: false,
             layer: 0,
             grounded: false,
+            owner: u32::MAX,
+            off: false,
             force: Vec3::ZERO,
             torque: Vec3::ZERO,
         }
@@ -333,6 +345,8 @@ impl Compound {
         kept.layer = self.layer;
         kept.active = self.active;
         detached.active = self.active;
+        kept.off = self.off;
+        detached.off = self.off;
         *self = kept;
         Some(detached)
     }
@@ -399,6 +413,7 @@ impl Compound {
         merged.use_gravity = self.use_gravity;
         merged.layer = self.layer;
         merged.active = self.active;
+        merged.off = self.off;
         // Latching onto something pinned pins the pair (docking at a launch
         // clamp / a construction hold): the anchor is the stronger claim.
         merged.anchored = self.anchored || other.anchored;

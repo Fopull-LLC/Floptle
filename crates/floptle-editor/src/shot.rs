@@ -30,7 +30,6 @@
 
 use std::path::{Path, PathBuf};
 
-use floptle_core::math::DVec3;
 use floptle_core::Matter;
 use floptle_render::{Gpu, Projection, RenderCamera};
 
@@ -110,7 +109,7 @@ fn feed_view(ed: &mut crate::Editor, named: Option<&str>, w: u32, h: u32) {
     });
 }
 
-fn play_for(ed: &mut crate::Editor, seconds: f32, anchor: DVec3, view: (Option<&str>, u32, u32)) -> Option<f32> {
+fn play_for(ed: &mut crate::Editor, seconds: f32, view: (Option<&str>, u32, u32)) -> Option<f32> {
     // How long this is allowed to spend waiting on the background terrain
     // threads, in total — the same budget `shot` already gives its pre-render
     // settle, for the same reason: a world that never finishes streaming must
@@ -118,12 +117,15 @@ fn play_for(ed: &mut crate::Editor, seconds: f32, anchor: DVec3, view: (Option<&
     const STREAM_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
     let deadline = floptle_core::time::Instant::now() + STREAM_BUDGET;
 
-    // **Load the world around the view before pressing Play.** Play holds the
-    // fixed tick until the ground exists, and a held session is a paused one:
-    // it steps happily with `dt = 0`, so scripts see no time pass and nothing
-    // moves. Outside Play residency anchors on the editor camera, so settling
-    // here is what puts terrain under the session before it starts.
-    ed.settle_world_streaming(anchor, STREAM_BUDGET);
+    // **Press Play on a cold world, exactly as `run` does.** Loading the
+    // ground around the view first looked like a kindness, but it made a
+    // different game: Play's terrain hold never engaged, a script's first
+    // ground probe answered a frame or more earlier than under `run`, and a
+    // game that sites things off that probe sited them against a world `run`
+    // never shows it (a launch pad spawned before its planet was listed in
+    // `space.*`, unparented, and the craft fell through). The loop below pumps
+    // streaming and waits for the workers each step, so the hold lifts here
+    // the same way it lifts there.
 
     ed.toggle_play();
     if !ed.playing {
@@ -297,12 +299,7 @@ pub(crate) fn run(args: Args) -> i32 {
         if let Some(seed) = seed {
             ed.script_host.set_seed(seed);
         }
-        // Anchored on the camera the file names, which is the only presence
-        // the world has before anything has run.
-        let anchor = find_camera(&ed, camera)
-            .map(|(e, ..)| floptle_core::world_transform(&ed.world, e).translation)
-            .unwrap_or(DVec3::ZERO);
-        let Some(played) = play_for(&mut ed, seconds, anchor, (camera, w, h)) else {
+        let Some(played) = play_for(&mut ed, seconds, (camera, w, h)) else {
             floptle_say::say_err!("the project did not enter play mode, so there is nothing to photograph");
             return 1;
         };
@@ -854,7 +851,7 @@ mod tests {
         let (authored, ..) = find_camera(&ed, None).expect("the file's own camera");
 
         let played =
-            play_for(&mut ed, 0.25, DVec3::ZERO, (None, 160, 90)).expect("the project must enter play mode");
+            play_for(&mut ed, 0.25, (None, 160, 90)).expect("the project must enter play mode");
         assert!(played > 0.0, "the span has to actually simulate — a held session steps at dt=0");
 
         // …and after playing it is, which is the whole card.
@@ -930,7 +927,7 @@ mod tests {
         let mut ed = crate::Editor::default();
         ed.open_project(d.clone());
         ed.open_scene_file(&d.join("scenes/first.ron").to_string_lossy());
-        play_for(&mut ed, 0.1, DVec3::ZERO, (None, 1920, 1080)).expect("the project must enter play mode");
+        play_for(&mut ed, 0.1, (None, 1920, 1080)).expect("the project must enter play mode");
         let said: Vec<String> = ed
             .console
             .entries
