@@ -75,14 +75,67 @@ pub struct VfxPreview {
 /// bound to any node: it plays once at a fixed world point and drops itself when done.
 pub struct DetachedEffect {
     pub inst: EffectInstance,
-    /// The world spawn point — a static emitter transform for the effect.
+    /// The emit point in the world as of the last advance.
     pub pos: DVec3,
+    /// The emitter's turn and size in the world: its +Y is the effect's up
+    /// (`spawnEffect`'s `normal`).
+    pub rot: floptle_core::math::Quat,
+    pub scale: f32,
+    /// What it rides, if anything: a planet on rails, a ship. Its emit point is
+    /// kept in that frame, and its World-track particles move with it.
+    pub frame: Option<FrameLink>,
     /// Emitter world velocity at spawn (m/s), passed by `spawnEffect`'s optional
     /// velocity args. Newborns on World tracks with `inherit_velocity > 0` keep a
     /// fraction of it, so a puff off a fast vessel rides its momentum instead of being
     /// stranded in world space. The point also drifts by this each frame so a streaming
     /// effect keeps emitting from where the emitter now is.
     pub vel: Vec3,
+}
+
+impl DetachedEffect {
+    /// The emitter's world transform as of the last advance.
+    pub fn emitter(&self) -> floptle_core::transform::Transform {
+        floptle_core::transform::Transform { translation: self.pos, rotation: self.rot, scale: Vec3::splat(self.scale) }
+    }
+}
+
+/// A detached effect's place on the node it rides.
+pub struct FrameLink {
+    pub entity: Entity,
+    /// The emitter in the frame's own space.
+    pub local: floptle_core::transform::Transform,
+    /// The frame's world pose at the last advance.
+    pub last: floptle_core::transform::Transform,
+}
+
+/// How a one-shot is placed: the emitter's world pose, the frame it rides
+/// (with the frame's pose at the moment the emitter was placed against it),
+/// and its look.
+pub struct DetachedSpawn {
+    pub emitter: floptle_core::transform::Transform,
+    pub vel: Vec3,
+    pub frame: Option<(Entity, floptle_core::transform::Transform)>,
+    pub intensity: Option<f32>,
+    pub tint: Option<[f32; 4]>,
+    pub up: Option<Vec3>,
+}
+
+/// The world's own up where an effect plays, if anything defines one:
+/// against the field gravity there.
+fn up_against(g: Vec3) -> Option<Vec3> {
+    (g.length_squared() > 1e-6).then(|| -g.normalize())
+}
+
+/// The nearest celestial body at or above `e`: the world a node on it is on.
+fn celestial_ancestor(world: &World, e: Entity) -> Option<Entity> {
+    let mut cur = e;
+    for _ in 0..64 {
+        if world.get::<floptle_core::CelestialBody>(cur).is_some() {
+            return Some(cur);
+        }
+        cur = world.get::<floptle_core::Parent>(cur)?.0;
+    }
+    None
 }
 
 /// Everything particles the editor owns. One field on `Editor`.
@@ -124,6 +177,9 @@ pub struct VfxSystem {
     detached_seq: u32,
     /// The Particles tab's edit-mode preview (drawn only outside Play).
     pub preview: Option<VfxPreview>,
+    /// Each node instance's frame and the frame's pose at its last advance,
+    /// so its World-track particles ride the world it is on.
+    node_frames: HashMap<Entity, (Entity, floptle_core::transform::Transform)>,
 }
 
 impl Default for VfxSystem {
@@ -136,6 +192,7 @@ impl Default for VfxSystem {
             detached_dropped: 0,
             detached_seq: 0,
             preview: None,
+            node_frames: HashMap::new(),
         }
     }
 }
@@ -246,10 +303,12 @@ impl VfxSystem {
         self.detached.clear();
     }
 
-    /// Spawn a fire-and-forget one-shot at a world point (`spawnEffect(...)` from a
-    /// script). It plays once and is reaped when it finishes — no node needed. `vel` is
-    /// the emitter's world velocity for inherit-velocity tracks (zero if the caller has none).
-    pub fn spawn_detached(&mut self, key: &str, pos: DVec3, vel: Vec3) {
+    /// Fire a one-shot effect (`spawnEffect`): it plays once and is reaped when
+    /// it finishes, no node needed. The emitter can be turned and sized, ride
+    /// a frame, and carry an intensity and a tint.
+    pub fn spawn_detached_with(&mut self, key: &str, spawn: DetachedSpawn) {
+        let DetachedSpawn { emitter, vel, frame, intensity, tint, up } = spawn;
+        let pos = emitter.translation;
         if let Some(fx) = self.effect(key) {
             // Fire-and-forget contract: coerce to a self-destructing one-shot even if
             // the asset was authored Looping/Persist, so is_done() reaps it in advance()
@@ -283,7 +342,23 @@ impl VfxSystem {
                 self.detached.pop_front();
                 self.detached_dropped = self.detached_dropped.saturating_add(1);
             }
-            self.detached.push_back(DetachedEffect { inst: EffectInstance::new(fx, seed), pos, vel });
+            let mut inst = EffectInstance::new(fx, seed);
+            if let Some(i) = intensity {
+                inst.set_intensity(i);
+            }
+            if let Some(t) = tint {
+                inst.tint = t;
+            }
+            inst.up = up.unwrap_or(emitter.rotation * Vec3::Y);
+            let frame = frame.map(|(entity, at)| FrameLink { entity, local: at.inv_mul(&emitter), last: at });
+            self.detached.push_back(DetachedEffect {
+                inst,
+                pos,
+                rot: emitter.rotation,
+                scale: emitter.scale.x,
+                frame,
+                vel,
+            });
         }
     }
 
@@ -318,7 +393,17 @@ impl VfxSystem {
     /// component or swapped its asset are dropped (a swap re-spawns below — the
     /// physics live-sync discipline). Finished one-shots stay as inert entries so
     /// the re-spawn scan can't resurrect them into a loop.
-    pub fn advance(&mut self, world: &World, dt: f32, grav: Option<VfxGravity<'_>>) {
+    ///
+    /// `frame_at` names the moving world (a celestial on rails) a point is in,
+    /// if any: a node's World-track particles and a one-shot with no frame of
+    /// its own ride it.
+    pub fn advance(
+        &mut self,
+        world: &World,
+        dt: f32,
+        grav: Option<VfxGravity<'_>>,
+        frame_at: &dyn Fn(DVec3) -> Option<Entity>,
+    ) {
         // The gravity vector an effect feels at a world point, honoring its gravity mode.
         let grav_at = |world_pos: DVec3, mode: floptle_vfx::GravityMode| -> Vec3 {
             match (mode, &grav) {
@@ -331,10 +416,33 @@ impl VfxSystem {
         self.instances.retain(|e, (key, _)| {
             world.get::<ParticleSystem>(*e).is_some_and(|ps| ps.asset == *key)
         });
+        self.node_frames.retain(|e, _| self.instances.contains_key(e));
         for (e, (_, inst)) in self.instances.iter_mut() {
             // Feed the emitter's world transform so World-space tracks anchor correctly.
             let emitter = floptle_core::world_transform(world, *e);
             let g = grav_at(emitter.translation, inst.gravity_mode());
+            // The world it is on: a celestial it hangs under, or the one whose
+            // sphere of influence it is in. Its World-track particles ride it.
+            let frame = celestial_ancestor(world, *e).or_else(|| frame_at(emitter.translation));
+            match frame {
+                Some(f) => {
+                    let now = floptle_core::world_transform(world, f);
+                    if let Some((was, last)) = self.node_frames.get(e)
+                        && *was == f
+                    {
+                        inst.carry(last, &now);
+                    }
+                    self.node_frames.insert(*e, (f, now));
+                }
+                None => {
+                    self.node_frames.remove(e);
+                }
+            }
+            inst.up = match inst.gravity_mode() {
+                floptle_vfx::GravityMode::Field => up_against(g),
+                _ => None,
+            }
+            .unwrap_or(emitter.rotation * Vec3::Y);
             inst.advance_at(dt, g, emitter);
         }
         // Spawn for play-on-start systems without an instance: an asset swapped
@@ -350,12 +458,42 @@ impl VfxSystem {
         // Detached one-shots: tick at their (drifting) world point with inherited
         // emitter velocity, then reap the finished.
         for d in &mut self.detached {
+            // Riding a frame: the emitter is where its place on the frame is now,
+            // and the World-track particles move with the frame. A frame that
+            // has gone leaves the effect where it was.
+            if let Some(link) = &d.frame
+                && !world.is_alive(link.entity)
+            {
+                d.frame = None;
+            }
+            let emitter = match &mut d.frame {
+                Some(link) => {
+                    let now = floptle_core::world_transform(world, link.entity);
+                    d.inst.carry(&link.last, &now);
+                    link.last = now;
+                    now.mul_transform(&link.local)
+                }
+                None => floptle_core::transform::Transform {
+                    translation: d.pos,
+                    rotation: d.rot,
+                    scale: Vec3::splat(d.scale),
+                },
+            };
+            d.pos = emitter.translation;
+            d.rot = emitter.rotation;
+            d.scale = emitter.scale.x;
             let g = grav_at(d.pos, d.inst.gravity_mode());
-            let emitter = floptle_core::transform::Transform::from_translation(d.pos);
             d.inst.advance_at_moving(dt, g, emitter, d.vel);
             // Carry the emit point along with the inherited motion so a still-emitting
-            // effect keeps pace with the vessel it was fired from.
-            d.pos += (d.vel * dt).as_dvec3();
+            // effect keeps pace with the vessel it was fired from. In a frame the
+            // velocity is relative to it, so the point moves in the frame.
+            match &mut d.frame {
+                Some(link) => {
+                    let step = link.last.rotation.inverse() * (d.vel * dt);
+                    link.local.translation += step.as_dvec3();
+                }
+                None => d.pos += (d.vel * dt).as_dvec3(),
+            }
         }
         self.detached.retain(|d| !d.inst.is_done());
     }
@@ -476,14 +614,11 @@ impl VfxSystem {
         };
         let node_xf =
             |e: Entity| floptle_core::world_transform(world, e).render_matrix(cam.world_position);
-        let point_xf = |p: DVec3| {
-            floptle_core::transform::Transform::from_translation(p).render_matrix(cam.world_position)
-        };
         for (e, (_, inst)) in &self.instances {
             pack(inst, node_xf(*e));
         }
         for d in &self.detached {
-            pack(&d.inst, point_xf(d.pos));
+            pack(&d.inst, d.emitter().render_matrix(cam.world_position));
         }
         if include_preview
             && let Some(p) = &self.preview
@@ -562,14 +697,11 @@ impl VfxSystem {
         };
         let node_xf =
             |e: Entity| floptle_core::world_transform(world, e).render_matrix(cam.world_position);
-        let point_xf = |p: DVec3| {
-            floptle_core::transform::Transform::from_translation(p).render_matrix(cam.world_position)
-        };
         for (e, (_, inst)) in &self.instances {
             pack(inst, node_xf(*e));
         }
         for d in &self.detached {
-            pack(&d.inst, point_xf(d.pos));
+            pack(&d.inst, d.emitter().render_matrix(cam.world_position));
         }
         if include_preview
             && let Some(p) = &self.preview

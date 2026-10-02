@@ -697,9 +697,36 @@ fn spawn_effect_global_queues_a_one_shot() {
     host.run(&mut world, &dir, 0.1, 0.1);
     let spawns = host.take_spawn_effects();
     assert_eq!(spawns.len(), 1, "one spawnEffect call = one queued one-shot");
-    assert_eq!(spawns[0].0, "vfx/Impact");
-    assert_eq!(spawns[0].1, [1.0, 2.0, 3.0]);
+    assert_eq!(spawns[0].key, "vfx/Impact");
+    assert_eq!(spawns[0].pos, [1.0, 2.0, 3.0]);
     assert!(host.take_spawn_effects().is_empty(), "drained");
+}
+
+/// The full form reads every option, and the frame is the node passed.
+#[test]
+fn spawn_effect_reads_a_point_and_its_options() {
+    let dir = std::env::temp_dir().join(format!("floptle_spawnfx_opts_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "boom",
+        "function update(node, dt)\n\
+         \x20 spawnEffect('vfx/Dust', vec3(1, 2, 3), { normal = vec3(0, 0, 1), scale = 2, intensity = 0.5,\n\
+         \x20   tint = color(0.5, 0.25, 1), vel = vec3(4, 0, 0), frame = node })\n\
+         end\n",
+    );
+    let (mut world, e) = world_with_script("boom");
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 0.1, 0.1);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let fx = host.take_spawn_effects().pop().expect("queued");
+    assert_eq!(fx.pos, [1.0, 2.0, 3.0]);
+    assert_eq!(fx.normal, Some([0.0, 0.0, 1.0]));
+    assert_eq!(fx.scale, Some(2.0));
+    assert_eq!(fx.intensity, Some(0.5));
+    assert_eq!(fx.tint, Some([0.5, 0.25, 1.0, 1.0]));
+    assert_eq!(fx.vel, [4.0, 0.0, 0.0]);
+    assert_eq!(fx.frame, Some(e.index()));
 }
 
 #[test]

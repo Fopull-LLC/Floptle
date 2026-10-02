@@ -348,6 +348,7 @@ impl Editor {
             }
             let FrameFeed { sdt, dir, aim, frame_input } = self.feed_frame_scripts(dt, game_focused);
             self.run_frame_scripts(sdt, &dir);
+            self.queue_script_effects();
             self.tick_loop(sdt, aim, game_focused);
             self.late_pass(sdt, frame_input);
             self.settle_frame(sdt);
@@ -910,6 +911,7 @@ impl Editor {
                 self.timed_script_pass(|s| {
                     s.script_host.run_fixed(&mut s.world, s.game_tick.step, tick_time)
                 });
+                self.queue_script_effects();
                 if let Some(sim) = self.sim.as_mut() {
                     sim.world.set_colliders(self.script_host.take_colliders()); // reclaim
                     // Apply the tick's writes, then step physics exactly one tick.
@@ -1202,6 +1204,74 @@ impl Editor {
 
     /// The end of the step: spawns, scatter, attachments, particles, audio,
     /// and the `app.*` requests.
+    /// Take the one-shot effects the script pass just asked for and place each
+    /// against the frame it rides, as that frame is NOW. A point a script
+    /// worked out in `update` is a point on the world as it was then; the
+    /// ticks that follow move a planet on rails a metre and a half each, and
+    /// the effect must land where the script meant on the planet, not where
+    /// that point is in space by the time the frame settles.
+    pub(crate) fn queue_script_effects(&mut self) {
+        self.place_script_decals();
+        let asked = self.script_host.take_spawn_effects();
+        if asked.is_empty() {
+            return;
+        }
+        use floptle_core::math::{DVec3, Quat, Vec3};
+        let spheres = self.moving_world_spheres();
+        for fx in asked {
+            let pos = DVec3::from_array(fx.pos);
+            let to_vec = |a: [f64; 3]| DVec3::from_array(a).as_vec3().normalize_or_zero();
+            let g = self.sim.as_ref().map_or(Vec3::ZERO, |s| {
+                s.world.gravity.accel_at((pos - s.world.origin).as_vec3(), &s.world.colliders)
+            });
+            // +Y along `normal`; without one, against gravity on a world whose
+            // down is not world −Y (a planet), else unturned.
+            let up = fx.normal.map(to_vec).filter(|v| *v != Vec3::ZERO).or_else(|| {
+                let up = -g.normalize_or_zero();
+                (up != Vec3::ZERO && up.dot(Vec3::Y) < 0.999).then_some(up)
+            });
+            let rotation = up.map_or(Quat::IDENTITY, |u| Quat::from_rotation_arc(Vec3::Y, u));
+            let emitter = floptle_core::transform::Transform {
+                translation: pos,
+                rotation,
+                scale: Vec3::splat(fx.scale.unwrap_or(1.0)),
+            };
+            let frame = fx
+                .frame
+                .and_then(|id| self.world.entity_with::<floptle_core::transform::Transform>(id))
+                .or_else(|| moving_world_at(&spheres, pos))
+                .map(|f| (f, floptle_core::world_transform(&self.world, f)));
+            let spawn = crate::vfx::DetachedSpawn {
+                emitter,
+                vel: DVec3::from_array(fx.vel).as_vec3(),
+                frame,
+                intensity: fx.intensity,
+                tint: fx.tint,
+                up: fx.up.map(to_vec).filter(|v| *v != Vec3::ZERO),
+            };
+            self.pending_effects.push((fx.key, spawn));
+        }
+    }
+
+    /// The celestial bodies on rails and the reach of each: (node, where it
+    /// is, sphere of influence). What a free-floating effect rides is read
+    /// from these.
+    pub(crate) fn moving_world_spheres(&self) -> Vec<(floptle_core::Entity, floptle_core::math::DVec3, f64)> {
+        let listed = self.script_host.space_body_spheres();
+        self.world
+            .query::<floptle_core::CelestialBody>()
+            .filter_map(|(e, cb)| {
+                let name = self.world.get::<floptle_core::Name>(e).map(|n| n.0.as_str()).unwrap_or("");
+                let soi = if cb.soi > 0.0 {
+                    cb.soi
+                } else {
+                    listed.iter().find(|(n, _)| n == name).map(|(_, s)| *s)?
+                };
+                Some((e, floptle_core::world_transform(&self.world, e).translation, soi))
+            })
+            .collect()
+    }
+
     fn settle_frame(&mut self, sdt: f32) {
         // Prefab spawns + node destroys scripts queued this frame — applied
         // before attachments/particles so a spawned node is complete (body,
@@ -1234,10 +1304,11 @@ impl Editor {
         let vfx_t = floptle_core::profile::Span::new();
         let vfx_cmds = self.script_host.take_vfx_commands();
         self.vfx.apply_script_commands(&self.world, vfx_cmds);
-        // Fire-and-forget one-shots a script requested this frame (spawnEffect).
-        for (key, p, v) in self.script_host.take_spawn_effects() {
-            let vel = floptle_core::math::Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32);
-            self.vfx.spawn_detached(&key, floptle_core::math::DVec3::from_array(p), vel);
+        // Fire-and-forget one-shots a script requested this frame (spawnEffect),
+        // lateUpdate's included.
+        self.queue_script_effects();
+        for (key, spawn) in std::mem::take(&mut self.pending_effects) {
+            self.vfx.spawn_detached_with(&key, spawn);
         }
         // Hand particles the live gravity field so `GravityMode::Field` effects fall
         // toward planets (same field the rigidbodies use), not world −Y.
@@ -1246,7 +1317,9 @@ impl Editor {
             colliders: &s.world.colliders,
             origin: s.world.origin,
         });
-        self.vfx.advance(&self.world, sdt, vfx_grav);
+        let spheres = self.moving_world_spheres();
+        let frame_at = |p: floptle_core::math::DVec3| moving_world_at(&spheres, p);
+        self.vfx.advance(&self.world, sdt, vfx_grav, &frame_at);
         self.profile_record(floptle_core::profile::Bucket::Particles, vfx_t.ms());
         // Audio: apply queued Lua commands, then tick voices against the
         // final node transforms (same ordering rationale as particles).
@@ -1470,4 +1543,17 @@ impl Editor {
             self.console.push(l.level, l.msg, l.source);
         }
     }
+}
+
+/// The innermost moving world whose sphere of influence holds `p`: what a
+/// free-floating effect there rides, the same frame physics carries a body in.
+pub(crate) fn moving_world_at(
+    spheres: &[(floptle_core::Entity, floptle_core::math::DVec3, f64)],
+    p: floptle_core::math::DVec3,
+) -> Option<floptle_core::Entity> {
+    spheres
+        .iter()
+        .filter(|(_, at, soi)| (p - *at).length() < *soi)
+        .min_by(|a, b| a.2.total_cmp(&b.2))
+        .map(|(e, ..)| *e)
 }

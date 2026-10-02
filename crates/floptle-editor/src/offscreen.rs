@@ -872,7 +872,7 @@ impl Editor {
                 self.now(),
                 &mut instances,
             );
-            crate::decals::push_decal_instances(&self.decal_batches, raster, cam.world_position, &mut instances);
+            crate::decals::push_decal_instances(&self.decal_batches, &self.world, raster, cam.world_position, &mut instances);
         }
         // …and the counts a game can read via `perf.counts()`. Every view that
         // comes through this gather — the docked or split Game view, `floptle

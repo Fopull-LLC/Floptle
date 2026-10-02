@@ -300,7 +300,7 @@ Pictures laid on the world's static surfaces: blood, scorch marks, bullet holes,
 
 ### `decals.add`
 
-decals.add{ texture, pos, normal, size [, height, depth, up, rotation, color = {r,g,b}, alpha, sheetCols, sheetRows, cell, layers, maxAngle] } → id — lay a picture on the static surfaces under a box standing at pos, facing normal (a raycast hit's point and normal). It folds over edges and into corners, follows curves, and is lit, shadowed and fogged like the surface. No node: every decal sharing a picture is one mesh and one draw. nil when nothing under it can take a mark (the sky, or a sphere or capsule collider, which has no faces). maxAngle (default 100°) is how far a face may turn from normal and still take it. Cleared by a new Play or a scene switch.
+decals.add{ texture, pos, normal, size [, height, depth, up, rotation, color = {r,g,b}, alpha, sheetCols, sheetRows, cell, layers, maxAngle, frame] } → id — lay a picture on the static surfaces under a box standing at pos, facing normal (a raycast hit's point and normal). It folds over edges and into corners, follows curves, and is lit, shadowed and fogged like the surface. No node: every decal sharing a picture is one mesh and one draw. nil when nothing under it can take a mark (the sky, or a sphere or capsule collider, which has no faces). maxAngle (default 100°) is how far a face may turn from normal and still take it. A mark rides what it was laid on as that moves: frame = a node (a ship), or by default the planet on rails whose sphere of influence it is in. Cleared by a new Play or a scene switch.
 
 ### `decals.clear`
 
@@ -3921,7 +3921,7 @@ particles:stop() — stop + despawn the effect; its live particles vanish.
 
 ### `spawnEffect`
 
-spawnEffect(key, x, y, z) — fire a one-shot particle effect at a world point, no node needed. It plays once and despawns itself. Local to this machine: in a session, spawn it from state that replicates (a synced counter every peer watches), or the server's sparks stay on the server. e.g. local h = raycast(...); if h then spawnEffect("vfx/Impact", h.x, h.y, h.z) end.
+spawnEffect(key, pos [, opts]) or spawnEffect(key, x, y, z [, vx, vy, vz]) — fire a one-shot particle effect at a world point, no node needed. It plays once and despawns itself. opts: normal (vec3: the effect's +Y, so a ring lies across it and a cone fires along it; default world up, or against gravity on a round world), up (vec3: which way Vertical and Horizontal billboards stand; default normal), scale, intensity, tint (a color), vel (vec3: the emitter's velocity, which inherit-velocity tracks keep a share of), frame (a node the effect rides: its emit point and its World-track particles move with it). With no frame it rides the planet on rails whose sphere of influence it is in, so dust on a moving world stays over its spot; vel is then relative to that. The point is placed against the world as it was when you asked, so a point worked out in update lands where you meant on a moving planet. Local to this machine: in a session, spawn it from state that replicates (a synced counter every peer watches), or the server's sparks stay on the server. e.g. local h = raycast(...); if h then spawnEffect("vfx/Impact", vec3(h.x, h.y, h.z), { normal = vec3(h.nx, h.ny, h.nz) }) end.
 
 ## audio — sounds & the mixer
 

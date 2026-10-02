@@ -820,6 +820,53 @@ mod tests {
         assert_eq!(ed.space_time, clock, "listing it must not move the clock");
     }
 
+    /// **A body resting on a planet that moves on rails stays put on its
+    /// ground at any frame rate.** Under a frame clock that runs 0, 1, 2 and 6
+    /// ticks a frame, the planet jumps 0 to 8.7 m between frames; the body on it
+    /// must jump with it, never lag or lead, or everything standing on a
+    /// moving world jitters against it.
+    #[test]
+    fn a_body_on_a_planet_on_rails_never_jitters_against_its_ground() {
+        use floptle_core::{BodyKind, BodyMode, Name, Parent, RigidBody};
+        let mut ed = crate::Editor::default();
+        let celestial = |ed: &mut crate::Editor, name: &str, at: DVec3, body: CelestialBody| {
+            let e = ed.world.spawn();
+            ed.world.insert(e, Name(name.into()));
+            ed.world.insert(e, Transform { translation: at, ..Transform::IDENTITY });
+            ed.world.insert(e, body);
+            e
+        };
+        // 87 m/s: sqrt(mu / a).
+        celestial(&mut ed, "Sun", DVec3::ZERO, CelestialBody { mu: 3.78e7, ..Default::default() });
+        let home = CelestialBody { parent: "Sun".into(), a: 5000.0, mu: 1.0e4, soi: 500.0, ..Default::default() };
+        let home = celestial(&mut ed, "Home", DVec3::new(5000.0, 0.0, 0.0), home);
+        let floor = ed.world.spawn();
+        ed.world.insert(floor, Transform { translation: DVec3::new(0.0, 58.0, 0.0), ..Transform::IDENTITY });
+        ed.world.insert(floor, Parent(home));
+        let slab = RigidBody { kind: BodyKind::Box, mode: BodyMode::Static, half_extents: [20.0, 1.0, 20.0], ..Default::default() };
+        ed.world.insert(floor, slab);
+        let crew = ed.world.spawn();
+        ed.world.insert(crew, Name("Crew".into()));
+        ed.world.insert(crew, Transform { translation: DVec3::new(5000.0, 60.0, 0.0), ..Transform::IDENTITY });
+        ed.world.insert(crew, RigidBody { gravity: true, ..Default::default() });
+        ed.toggle_play();
+        // Settle onto the floor.
+        for _ in 0..240 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        let world = |ed: &crate::Editor, e| floptle_core::world_transform(&ed.world, e).translation;
+        let rel0 = world(&ed, crew) - world(&ed, home);
+        let mut moved = 0.0f64;
+        for dt in [0.005f32, 0.016, 0.03, 0.008, 0.1, 0.0167, 0.004, 0.02, 0.033, 0.011].repeat(6) {
+            let before = world(&ed, home);
+            ed.play_step(dt, true);
+            moved = moved.max((world(&ed, home) - before).length());
+            let dev = (world(&ed, crew) - world(&ed, home) - rel0).length();
+            assert!(dev < 0.01, "the body moved {dev} m against its planet on a {dt} s frame");
+        }
+        assert!(moved > 5.0, "the fixture needs frames that run several ticks, the planet moved at most {moved} m");
+    }
+
     /// **At Play start the crew rides its planet onto the rails.** A planet is
     /// authored wherever the author put it, and its first tick snaps it to its
     /// orbit; the crew standing on it goes with it rather than being left in

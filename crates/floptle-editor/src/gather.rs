@@ -2073,7 +2073,7 @@ impl Editor {
             &mut instances,
         );
         // Decals: one blended surface per picture, over the ground they lie on.
-        crate::decals::push_decal_instances(&self.decal_batches, raster, cam.world_position, &mut instances);
+        crate::decals::push_decal_instances(&self.decal_batches, &self.world, raster, cam.world_position, &mut instances);
 
         // Scatter: thousands of props from a seed, resolved to
         // instances and drawn through the ordinary raster path — so they get the

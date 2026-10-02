@@ -63,8 +63,14 @@ pub fn collect_billboards(
             // over the squash (velocity stretch rides the up-vector length, so the
             // shader needs no stretch term).
             let (w, h) = (base * aspect * s.squash, base / s.squash);
-            let (right, up, spin) =
-                billboard_basis(orient, &xf, world, &s, cam_right, cam_up, (stretch, speed_stretch));
+            let (right, up, spin) = billboard_basis(
+                orient,
+                &xf,
+                world,
+                &s,
+                (cam_right, cam_up, inst.up),
+                (stretch, speed_stretch),
+            );
             // Flipbook UV sub-rect [min_u, min_v, du, dv] packed into the spare
             // channels (full quad [0,0,1,1] when there's no flipbook).
             let uv = flipbook_uv(flip, &s);
@@ -361,10 +367,10 @@ fn billboard_basis(
     xf: &Mat4,
     world_pos: Vec3,
     s: &ParticleSample,
-    cam_right: Vec3,
-    cam_up: Vec3,
+    (cam_right, cam_up, world_up): (Vec3, Vec3, Vec3),
     (stretch, speed_stretch): (f32, f32),
 ) -> (Vec3, Vec3, f32) {
+    let world_up = world_up.normalize_or(Vec3::Y);
     const EPS: f32 = 1e-6;
     let view_dir = world_pos.normalize_or_zero();
     match orient {
@@ -387,21 +393,27 @@ fn billboard_basis(
             }
             (right.normalize(), up * stretch, 0.0)
         }
-        // Upright: locked to world up, yawing to the camera. Roll would tip it, so 0.
+        // Upright: along the effect's up (world +Y unless the host says
+        // otherwise, as on a round world), yawing to the camera. Roll would tip
+        // it, so 0.
         BillboardOrient::Vertical => {
-            let up = Vec3::Y;
+            let up = world_up;
             let mut right = up.cross(view_dir);
             if right.length_squared() < EPS {
                 // Looking straight down the up axis — use the camera right, flattened.
-                right = Vec3::new(cam_right.x, 0.0, cam_right.z);
+                right = cam_right - up * cam_right.dot(up);
                 if right.length_squared() < EPS {
-                    right = Vec3::X;
+                    right = up.any_orthonormal_vector();
                 }
             }
             (right.normalize(), up, 0.0)
         }
-        // Flat on the ground (normal = world up); roll spins it in the ground plane.
-        BillboardOrient::Horizontal => (Vec3::X, Vec3::Z, s.rotation.z),
+        // Flat on the ground (normal = the effect's up); roll spins it in the
+        // ground plane.
+        BillboardOrient::Horizontal => {
+            let lay = Quat::from_rotation_arc(Vec3::Y, world_up);
+            (lay * Vec3::X, lay * Vec3::Z, s.rotation.z)
+        }
         // Fixed to the birth (emit-direction) frame; rotate it into world space. For
         // World-space tracks `xf` is a pure translation, so the world-baked frame is
         // used as-is.
@@ -577,6 +589,44 @@ mod tests {
                     assert!(r.length() > 1e-4 && u.length() > 1e-4, "{orient:?} zero basis");
                     // Non-parallel: the cross product (the quad normal) is non-zero.
                     assert!(r.cross(u).length() > 1e-4, "{orient:?} collapsed basis");
+                }
+            }
+        }
+    }
+
+    /// On a round world the effect's up is not world +Y: an upright billboard
+    /// stands along it and a flat one lies across it, rather than tipping over.
+    #[test]
+    fn upright_and_flat_billboards_follow_the_effects_up() {
+        use crate::effect::{BillboardOrient, Look};
+        let up = Vec3::new(1.0, 0.0, 0.0);
+        for orient in [BillboardOrient::Vertical, BillboardOrient::Horizontal] {
+            let fx = Arc::new(
+                ParticleEffect {
+                    lifetime: 1.0,
+                    playback: Playback::OneShot,
+                    tracks: vec![Track {
+                        clips: vec![burst_clip(4, 5.0)],
+                        shape: crate::effect::EmitShape::Sphere { radius: 1.0, shell: true },
+                        look: Look { orient, ..Look::default() },
+                        ..Track::default()
+                    }],
+                    ..ParticleEffect::default()
+                }
+                .compile(),
+            );
+            let mut inst = EffectInstance::new(fx, 3);
+            inst.up = up;
+            inst.simulate_to(0.1, Vec3::ZERO);
+            let (mut packed, mut draws) = (Vec::new(), Vec::new());
+            let at = Mat4::from_translation(Vec3::new(0.0, 0.0, -10.0));
+            collect_billboards(&inst, at, at, Vec3::NEG_Z, Vec3::X, Vec3::Y, &mut packed, &mut draws);
+            for p in &packed {
+                let r = Vec3::new(p.basis_right[0], p.basis_right[1], p.basis_right[2]).normalize();
+                let u = Vec3::new(p.basis_up[0], p.basis_up[1], p.basis_up[2]).normalize();
+                match orient {
+                    BillboardOrient::Vertical => assert!(u.dot(up) > 0.999, "upright along {u}, not the effect's up"),
+                    _ => assert!(r.cross(u).normalize().dot(up).abs() > 0.999, "flat across {}, not the effect's up", r.cross(u)),
                 }
             }
         }

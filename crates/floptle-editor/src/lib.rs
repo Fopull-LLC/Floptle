@@ -168,6 +168,8 @@ mod sprite2d;
 mod spawn_scaling;
 #[cfg(test)]
 mod tick_overload_tests;
+#[cfg(test)]
+mod vfx_frame_tests;
 #[cfg(feature = "editor-ui")]
 mod lua_format;
 #[cfg(feature = "editor-ui")]
@@ -2343,6 +2345,10 @@ struct Editor {
     /// A press inside a pannable scroll view that landed on an element and has
     /// not yet decided whether it works that element or pans the view.
     ui_scroll_arm: Option<ui_game::ScrollArm>,
+    /// One-shot effects the scripts asked for this frame, each placed against
+    /// the frame it rides as of the script pass that asked (see
+    /// `queue_script_effects`).
+    pending_effects: Vec<(String, vfx::DetachedSpawn)>,
     /// The slider the current press grabbed and its value before the press,
     /// so a press that turns into a pan can put it back.
     ui_press_slider: Option<(u32, f32)>,

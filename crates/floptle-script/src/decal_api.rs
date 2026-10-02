@@ -22,7 +22,7 @@ use mlua::{Lua, Table, Value};
 /// The keys `decals.add` reads.
 pub(crate) const ADD_KEYS: &[&str] = &[
     "texture", "pos", "normal", "size", "height", "depth", "up", "rotation", "color", "alpha", "cell",
-    "sheetCols", "sheetRows", "layers", "maxAngle",
+    "sheetCols", "sheetRows", "layers", "maxAngle", "frame",
 ];
 
 /// The keys `decals.set` reads.
@@ -64,6 +64,22 @@ pub struct Decal {
     pub indices: Vec<u32>,
     pub color: [f32; 3],
     pub alpha: f32,
+    /// What the mark rides, so it stays on the rock it was put on as that
+    /// moves.
+    pub frame: DecalFrame,
+}
+
+/// The node a decal rides, if any.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DecalFrame {
+    /// Not yet placed: the node `decals.add` named, or `None` for the moving
+    /// world the mark is in, if any. The editor places it after the script
+    /// pass that laid it.
+    Asked(Option<u32>),
+    /// Rides this node, which stood here when the mark was laid.
+    On(u32, floptle_core::transform::Transform),
+    /// Stays where it was laid.
+    World,
 }
 
 /// Every decal in the world, oldest first, and which pictures changed.
@@ -124,6 +140,26 @@ impl DecalStore {
     /// Every decal showing `texture`, oldest first.
     pub fn with_texture<'a>(&'a self, texture: &'a str) -> impl Iterator<Item = &'a Decal> + 'a {
         self.decals.values().filter(move |d| d.texture == texture)
+    }
+
+    /// Decals laid since the last call that are waiting to be told what they
+    /// ride: (id, what was asked, centre).
+    pub fn unplaced(&self) -> Vec<(u32, Option<u32>, DVec3)> {
+        self.decals
+            .iter()
+            .filter_map(|(&id, d)| match d.frame {
+                DecalFrame::Asked(f) => Some((id, f, d.pos)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Settle what a decal rides.
+    pub fn place(&mut self, id: u32, frame: DecalFrame) {
+        if let Some(d) = self.decals.get_mut(&id) {
+            d.frame = frame;
+            self.dirty.insert(d.texture.clone());
+        }
     }
 
     /// The pictures changed since the last call.
@@ -434,6 +470,12 @@ pub(crate) fn install_decal_api(lua: &Lua, shared: DecalShared) -> mlua::Result<
             let (cx, cy) = (cell % cols, (cell / cols).floor().min(rows - 1.0));
             let uv = [cx / cols, cy / rows, (cx + 1.0) / cols, (cy + 1.0) / rows];
             let max_angle = number(&opts, "maxAngle", call)?.unwrap_or(DEFAULT_MAX_ANGLE).clamp(0.0, 170.0);
+            let frame = match opts.get::<Value>("frame")? {
+                Value::Nil => None,
+                v => Some(crate::env::node_id_of(&v).ok_or_else(|| {
+                    mlua::Error::runtime(format!("decals.add: `frame` is the node the mark rides, got {}", v.type_name()))
+                })?),
+            };
             let mask = match opts.get::<Value>("layers")? {
                 Value::Nil => !0u32,
                 v => {
@@ -496,7 +538,15 @@ pub(crate) fn install_decal_api(lua: &Lua, shared: DecalShared) -> mlua::Result<
                 }
                 return Ok(None);
             }
-            let id = store.insert(Decal { texture, pos, verts: laid.verts, indices: laid.indices, color, alpha });
+            let id = store.insert(Decal {
+                texture,
+                pos,
+                verts: laid.verts,
+                indices: laid.indices,
+                color,
+                alpha,
+                frame: DecalFrame::Asked(frame),
+            });
             publish_counts(&s, &store);
             Ok(Some(id))
         })?,

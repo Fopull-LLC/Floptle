@@ -1709,6 +1709,71 @@ fn install_ui(lua: &Lua, net: &crate::net_api::SharedNet) -> UiCells {
     }
 }
 
+/// Every key `spawnEffect`'s options table reads.
+pub const SPAWN_EFFECT_KEYS: &[&str] = &["normal", "up", "scale", "intensity", "vel", "tint", "frame"];
+
+/// Read `spawnEffect`'s arguments in either form: `x, y, z [, vx, vy, vz]`, or
+/// `pos [, opts]`.
+fn spawn_effect_args(key: String, args: Vec<mlua::Value>) -> mlua::Result<crate::SpawnedEffect> {
+    const CALL: &str = "spawnEffect";
+    let num = |v: Option<&mlua::Value>| -> Option<f64> {
+        match v {
+            Some(mlua::Value::Number(n)) => Some(*n),
+            Some(mlua::Value::Integer(i)) => Some(*i as f64),
+            _ => None,
+        }
+    };
+    if let Some(x) = num(args.first()) {
+        let (Some(y), Some(z)) = (num(args.get(1)), num(args.get(2))) else {
+            return Err(mlua::Error::runtime("spawnEffect(key, x, y, z [, vx, vy, vz]): x, y and z are numbers"));
+        };
+        let v = |i| num(args.get(i)).unwrap_or(0.0);
+        return Ok(crate::SpawnedEffect { key, pos: [x, y, z], vel: [v(3), v(4), v(5)], ..Default::default() });
+    }
+    let Some(pos) = args.first().and_then(crate::vec3_of) else {
+        return Err(mlua::Error::runtime(
+            "spawnEffect(key, pos [, opts]) or spawnEffect(key, x, y, z [, vx, vy, vz]): give a point",
+        ));
+    };
+    let mut fx = crate::SpawnedEffect { key, pos: pos.to_array(), ..Default::default() };
+    let opts = match args.get(1) {
+        None | Some(mlua::Value::Nil) => return Ok(fx),
+        Some(mlua::Value::Table(t)) => t.clone(),
+        Some(other) => {
+            return Err(mlua::Error::runtime(format!(
+                "spawnEffect(key, pos, opts): opts is a table, got {}",
+                other.type_name()
+            )));
+        }
+    };
+    crate::opts::check_keys(&opts, SPAWN_EFFECT_KEYS, CALL)?;
+    let vec = |name: &str| -> mlua::Result<Option<[f64; 3]>> {
+        match opts.get::<mlua::Value>(name)? {
+            mlua::Value::Nil => Ok(None),
+            v => crate::vec3_of(&v).map(|d| Some(d.to_array())).ok_or_else(|| {
+                mlua::Error::runtime(format!("spawnEffect: `{name}` takes a vec3, got {}", v.type_name()))
+            }),
+        }
+    };
+    fx.normal = vec("normal")?;
+    fx.up = vec("up")?;
+    fx.vel = vec("vel")?.unwrap_or([0.0; 3]);
+    fx.scale = crate::opts::opt_num(&opts, CALL, "scale", 0.0, 1.0e4)?.map(|v| v as f32);
+    fx.intensity = crate::opts::opt_num(&opts, CALL, "intensity", 0.0, 100.0)?.map(|v| v as f32);
+    fx.tint = match opts.get::<mlua::Value>("tint")? {
+        mlua::Value::Nil => None,
+        mlua::Value::Table(t) => Some(crate::api::read_color(&t)?),
+        v => return Err(mlua::Error::runtime(format!("spawnEffect: `tint` takes a color, got {}", v.type_name()))),
+    };
+    fx.frame = match opts.get::<mlua::Value>("frame")? {
+        mlua::Value::Nil => None,
+        v => Some(crate::env::node_id_of(&v).ok_or_else(|| {
+            mlua::Error::runtime(format!("spawnEffect: `frame` takes a node, got {}", v.type_name()))
+        })?),
+    };
+    Ok(fx)
+}
+
 /// `spawnEffect(...)`: a one-shot particle effect at a point.
 fn install_spawn_effect(lua: &Lua) -> Rc<RefCell<Vec<crate::SpawnedEffect>>> {
     // `spawnEffect(key, x, y, z [, vx, vy, vz])` — fire a one-shot particle effect at
@@ -1716,17 +1781,16 @@ fn install_spawn_effect(lua: &Lua) -> Rc<RefCell<Vec<crate::SpawnedEffect>>> {
     // plays once and auto-despawns (the fire-and-forget path for hits, pickups,
     // poofs). The optional velocity is the emitter's world velocity: inherit-velocity
     // tracks (smoke/dust off a fast vessel) ride it so they aren't stranded in space.
+    //
+    // `spawnEffect(key, pos [, opts])` is the full form: `opts` turns, sizes,
+    // tints and anchors the effect (see `SPAWN_EFFECT_KEYS`).
     let spawn_effects: Rc<RefCell<Vec<crate::SpawnedEffect>>> =
         Rc::new(RefCell::new(Vec::new()));
     {
         let q = spawn_effects.clone();
-        type Args = (String, f64, f64, f64, Option<f64>, Option<f64>, Option<f64>);
-        if let Ok(f) = lua.create_function(move |_, (key, x, y, z, vx, vy, vz): Args| {
-            q.borrow_mut().push((
-                key,
-                [x, y, z],
-                [vx.unwrap_or(0.0), vy.unwrap_or(0.0), vz.unwrap_or(0.0)],
-            ));
+        if let Ok(f) = lua.create_function(move |_, (key, args): (String, mlua::MultiValue)| {
+            let fx = spawn_effect_args(key, args.into_vec())?;
+            q.borrow_mut().push(fx);
             Ok(())
         }) {
             let _ = lua.globals().set("spawnEffect", f);
@@ -3963,6 +4027,11 @@ impl ScriptHost {
     /// The names `space.bodies()` lists right now, in its order.
     pub fn space_body_names(&self) -> Vec<String> {
         self.space_info.borrow().bodies.iter().map(|b| b.name.clone()).collect()
+    }
+
+    /// Each body `space.bodies()` lists: (name, sphere of influence).
+    pub fn space_body_spheres(&self) -> Vec<(String, f64)> {
+        self.space_info.borrow().bodies.iter().map(|b| (b.name.clone(), b.soi)).collect()
     }
 
     /// Feed this frame's active game camera + viewport (`camera.worldToScreen`

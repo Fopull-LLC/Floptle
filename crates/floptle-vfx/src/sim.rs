@@ -260,6 +260,14 @@ pub struct EffectInstance {
     /// Script override for every Beam track's endpoint (effect-local offset), set
     /// via [`Self::set_beam_end`]. `None` = each track's authored `beam_end`.
     beam_end_override: Option<Vec3>,
+    /// The way up where the effect plays, in world space: what Vertical
+    /// billboards stand along and Horizontal ones lie across. The host sets it
+    /// (the emitter's up, or against gravity on a round world); world +Y until
+    /// it does.
+    pub up: Vec3,
+    /// A colour every particle of this instance is multiplied by: one dust
+    /// effect matching each world's ground. White until the host sets it.
+    pub tint: [f32; 4],
 }
 
 /// Epsilon the playhead starts *before*, so events placed exactly at `t = 0`
@@ -290,6 +298,49 @@ impl EffectInstance {
             anchored: false,
             pending_emit_vel: Vec3::ZERO,
             beam_end_override: None,
+            up: Vec3::Y,
+            tint: [1.0; 4],
+        }
+    }
+
+    /// Carry the effect's World-space particles with a moving frame, from its
+    /// pose `from` to its pose `to`: a planet on rails, a ship. They move with
+    /// it rigidly, positions, velocities, birth orientations and trails alike,
+    /// so smoke over a spot on a moving world stays over that spot. Call
+    /// before the frame's [`Self::advance_at`].
+    pub fn carry(&mut self, from: &Transform, to: &Transform) {
+        if !self.anchored {
+            return;
+        }
+        let turn = (to.rotation * from.rotation.inverse()).normalize();
+        let turns = turn.dot(Quat::IDENTITY).abs() < 1.0 - 1e-7;
+        self.anchor = to.translation + turn.as_dquat() * (self.anchor - from.translation);
+        if !turns {
+            return;
+        }
+        let effect = Arc::clone(&self.effect);
+        for (ti, ct) in effect.tracks.iter().enumerate() {
+            let p = &mut self.tracks[ti].particles;
+            if ct.space == Space::World {
+                for i in 0..p.count {
+                    let pa = p.pos_age[i];
+                    p.pos_age[i] = (turn * pa.truncate()).extend(pa.w);
+                    let vl = p.vel_life[i];
+                    p.vel_life[i] = (turn * vl.truncate()).extend(vl.w);
+                    let q = p.frame[i];
+                    let q = (turn * Quat::from_xyzw(q.x, q.y, q.z, q.w)).normalize();
+                    p.frame[i] = Vec4::new(q.x, q.y, q.z, q.w);
+                }
+            }
+            if ct.trail_in_world()
+                && let Some(trails) = &mut p.trail
+            {
+                for hist in trails {
+                    for pt in hist {
+                        *pt = (turn * pt.truncate()).extend(pt.w);
+                    }
+                }
+            }
         }
     }
 
@@ -577,7 +628,7 @@ impl EffectInstance {
         for (ti, ct) in self.effect.tracks.iter().enumerate() {
             let p = &mut self.tracks[ti].particles;
             let damp = (-ct.drag * dt).exp();
-            let g = gravity * ct.gravity * dt;
+            let g = track_gravity(ct, gravity, emitter) * dt;
             let is_world = ct.space == Space::World;
             // An emitter-path trail records where the particle IS in the world: the
             // anchor sits at the emitter, so that is the local point rotated and
@@ -643,6 +694,21 @@ impl EffectInstance {
             }
         }
     }
+}
+
+/// The gravity a track's particles fall by, in the space they live in. World
+/// gravity as is for a World track; for a Local track, turned and scaled into
+/// the emitter's own frame, so a cone tipped to the ground of a round world
+/// still falls toward it rather than toward world −Y.
+fn track_gravity(ct: &CompiledTrack, gravity: Vec3, emitter: &Transform) -> Vec3 {
+    let g = gravity * ct.gravity;
+    if ct.space == Space::World || g == Vec3::ZERO {
+        return g;
+    }
+    let s = emitter.scale;
+    let local = emitter.rotation.inverse() * g;
+    let inv = |v: f32| if v.abs() > 1e-6 { 1.0 / v } else { 0.0 };
+    local * Vec3::new(inv(s.x), inv(s.y), inv(s.z))
 }
 
 /// Birth one particle at effect-time `tau`, aged forward to `now`. `clip_life` /
@@ -713,7 +779,7 @@ fn spawn(
     // Constant-velocity particles carry their full velocity in the integrated
     // state; kinematic (curve) ones carry only the gravity-accumulated part and
     // re-sample their base velocity each step.
-    let g0 = gravity * ct.gravity * age0;
+    let g0 = track_gravity(ct, gravity, emitter) * age0;
     let (vel, carried) = if ct.velocity_is_curve {
         (g0 + inherit, v0)
     } else {
@@ -823,7 +889,7 @@ impl EffectInstance {
             // life); `Const`/`Lut` properties ignore the random argument.
             let mut color = ct.color.sample_rand(u, rand01(seed, SALT_COLOR));
             for c in 0..4 {
-                color[c] *= tint[c];
+                color[c] *= tint[c] * self.tint[c];
             }
             // Rotation = base Euler over life + angular velocity integrated over age.
             let rotation = ct.rotation.sample_vec3_rand(u, rand01(seed, SALT_ROTATION))
@@ -1162,6 +1228,65 @@ mod tests {
         inst.advance_at(0.05, NO_G, Transform::from_translation(DVec3::new(10.0, 0.0, 0.0)));
         let p1 = inst.track_particles(0).pos_age[0].truncate();
         assert!((p1.x - (p0.x - 10.0)).abs() < 1e-3, "offset must re-anchor by the delta: {p0} -> {p1}");
+    }
+
+    /// World particles ride a frame that moves (a planet on rails, a ship):
+    /// carried along with it, and turned with it, they keep their place on it
+    /// rather than streaming off at its speed.
+    #[test]
+    fn world_space_particles_ride_a_moving_frame() {
+        use crate::effect::Space;
+        let mut track = Track {
+            clips: vec![burst_clip(0.0, 4, 100.0)],
+            velocity: ValueOrCurve::Const(Value::Vec3(Vec3::new(0.0, 1.0, 0.0))),
+            ..Track::default()
+        };
+        track.space = Space::World;
+        let fx = one_track_effect(track, 1.0, Playback::Looping);
+        let mut inst = EffectInstance::new(fx, 1);
+        // The emitter sits 2 m above a frame (a planet) at the origin.
+        let mut frame = Transform::IDENTITY;
+        let local = DVec3::new(0.0, 2.0, 0.0);
+        inst.advance_at(0.05, NO_G, Transform::from_translation(local));
+        let world_of = |inst: &EffectInstance| inst.anchor() + inst.track_particles(0).pos_age[0].truncate().as_dvec3();
+        let rel0 = world_of(&inst) - frame.translation;
+        // The frame moves 87 m and turns a quarter round Z; the emitter rides it.
+        let to = Transform {
+            translation: DVec3::new(87.0, 0.0, 0.0),
+            rotation: Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+            ..Transform::IDENTITY
+        };
+        inst.carry(&frame, &to);
+        frame = to;
+        let rel1 = frame.rotation.inverse().as_dquat() * (world_of(&inst) - frame.translation);
+        assert!((rel1 - rel0).length() < 1e-4, "the particle left its spot on the frame: {rel0} -> {rel1}");
+        // Its velocity turned with the frame: still away from the frame's up.
+        let v = inst.track_particles(0).vel_life[0].truncate();
+        assert!((v - frame.rotation * Vec3::Y).length() < 1e-4, "velocity {v} did not turn with the frame");
+    }
+
+    /// A Local-track cone on a node rolled onto its side falls toward the
+    /// world's down, not toward the node's own −Y.
+    #[test]
+    fn local_track_gravity_falls_toward_the_worlds_down() {
+        let fx = one_track_effect(
+            Track {
+                clips: vec![burst_clip(0.0, 1, 2.0)],
+                velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
+                gravity: 1.0,
+                ..Track::default()
+            },
+            2.0,
+            Playback::OneShot,
+        );
+        let mut inst = EffectInstance::new(fx, 4);
+        // Rolled 90° about Z: the node's +X points along world +Y.
+        let rolled = Transform { rotation: Quat::from_rotation_z(std::f32::consts::FRAC_PI_2), ..Transform::IDENTITY };
+        inst.simulate_to_at(1.0, Vec3::new(0.0, -10.0, 0.0), rolled);
+        let local = inst.track_particles(0).pos_age[0].truncate();
+        let world = rolled.rotation * local;
+        assert!(world.y < -4.5, "it should have fallen toward world −Y, at {world}");
+        assert!(world.x.abs() < 0.1, "and not sideways, at {world}");
     }
 
     #[test]

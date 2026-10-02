@@ -1276,11 +1276,29 @@ pub struct VfxInfo {
     pub asset: String,
 }
 
-/// A one-shot effect a script requested via `spawnEffect(...)`: (asset key, world
-/// position). The editor spawns a detached instance for each.
-/// `(effect key, world point, emitter world velocity)`. The velocity (default 0) lets
-/// inherit-velocity tracks ride the emitter's momentum — see `spawnEffect`.
-pub type SpawnedEffect = (String, [f64; 3], [f64; 3]);
+/// A one-shot effect a script requested via `spawnEffect(...)`. The editor
+/// spawns a detached instance for each.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SpawnedEffect {
+    /// The effect asset key.
+    pub key: String,
+    /// The world point it plays at.
+    pub pos: [f64; 3],
+    /// The emitter's velocity, which inherit-velocity tracks keep a share of.
+    /// Relative to `frame` when the effect has one.
+    pub vel: [f64; 3],
+    /// The effect's +Y in the world: a ring lies across it, a cone fires along
+    /// it. `None` is world +Y, or against gravity on a round world.
+    pub normal: Option<[f64; 3]>,
+    /// The way up for Vertical and Horizontal billboards. `None` is `normal`.
+    pub up: Option<[f64; 3]>,
+    pub scale: Option<f32>,
+    pub intensity: Option<f32>,
+    pub tint: Option<[f32; 4]>,
+    /// The node the effect rides (a planet, a ship). `None` is the moving
+    /// world it is in, if any.
+    pub frame: Option<u32>,
+}
 
 /// One queued `node:particles()` command, drained by the editor and applied to the
 /// live VFX instances before they advance (so intent set this frame lands this frame).
