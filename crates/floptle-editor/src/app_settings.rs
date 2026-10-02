@@ -154,17 +154,9 @@ impl crate::Editor {
             }
             return;
         }
-        // A browser grants fullscreen only inside a tap or a click, and a
-        // game asks from its frame; the page knows to wait for the next one.
-        #[cfg(target_arch = "wasm32")]
-        if crate::player::web::page_fullscreen(on) {
-            return;
+        if let Some(window) = self.window.as_ref() {
+            crate::set_fullscreen(window, on);
         }
-        let Some(window) = self.window.as_ref() else { return };
-        // Borderless on the current monitor: no mode switch, no resolution
-        // change, the thing every game means by the word. `None` picks the
-        // monitor the window is on.
-        window.set_fullscreen(on.then_some(winit::window::Fullscreen::Borderless(None)));
     }
 
     /// End the game — see the module docs for why this is three different things.

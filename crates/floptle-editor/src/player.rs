@@ -31,7 +31,7 @@ use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{Fullscreen, Window, WindowId};
+use winit::window::{Window, WindowId};
 
 use crate::Editor;
 
@@ -585,7 +585,7 @@ impl Player {
     fn toggle_fullscreen(&mut self) {
         self.fullscreen = !self.fullscreen;
         if let Some(w) = self.ed.window.as_ref() {
-            w.set_fullscreen(self.fullscreen.then_some(Fullscreen::Borderless(None)));
+            crate::set_fullscreen(w, self.fullscreen);
         }
     }
 }

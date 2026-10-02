@@ -1937,6 +1937,14 @@ struct FocusAnim {
 /// to the window (X11, which has no lock). Returns true when only the confine
 /// took, so the caller re-centers the cursor every frame to emulate the pin.
 pub(crate) fn grab_cursor(window: &Window, want: bool) -> bool {
+    // A browser without pointer lock — Safari on an iPhone — is told nothing.
+    // winit calls `requestPointerLock` and `exitPointerLock` without looking
+    // for them first, and calling one that is not there stops the game.
+    #[cfg(target_arch = "wasm32")]
+    if !web_pointer_lock_supported(window) {
+        window.set_cursor_visible(!want);
+        return false;
+    }
     if !want {
         let _ = window.set_cursor_grab(CursorGrabMode::None);
         window.set_cursor_visible(true);
@@ -1948,6 +1956,52 @@ pub(crate) fn grab_cursor(window: &Window, want: bool) -> bool {
     }
     let _ = window.set_cursor_grab(CursorGrabMode::Confined);
     true
+}
+
+/// Fill the screen with the game's window, or give it back.
+///
+/// Borderless on the current monitor: no mode switch, no resolution change,
+/// the thing every game means by the word. In a browser the page's own hook
+/// goes first, since a browser grants fullscreen only inside a tap or a click
+/// and the page knows to wait for the next one. Without the hook, a browser
+/// with no fullscreen for a canvas — Safari on an iPhone — is not asked:
+/// winit falls back to `webkitRequestFullscreen` without looking for it, and
+/// calling one that is not there stops the game.
+pub(crate) fn set_fullscreen(window: &Window, on: bool) {
+    #[cfg(target_arch = "wasm32")]
+    if crate::player::web::page_fullscreen(on) || !web_fullscreen_supported(window) {
+        return;
+    }
+    window.set_fullscreen(on.then_some(winit::window::Fullscreen::Borderless(None)));
+}
+
+/// Whether winit's fullscreen will find what it calls: the standard pair, or
+/// failing that both of the prefixed ones it falls back to.
+#[cfg(target_arch = "wasm32")]
+fn web_fullscreen_supported(window: &Window) -> bool {
+    use winit::platform::web::WindowExtWebSys;
+    let Some(canvas) = window.canvas() else { return false };
+    let document = web_sys::window().and_then(|w| w.document());
+    let doc_has = |name: &str| document.as_ref().is_some_and(|d| web_has_method(d, name));
+    (web_has_method(&canvas, "requestFullscreen") && doc_has("exitFullscreen"))
+        || (web_has_method(&canvas, "webkitRequestFullscreen") && doc_has("webkitExitFullscreen"))
+}
+
+/// Whether `object.name` is a function — a browser API that is really there.
+#[cfg(target_arch = "wasm32")]
+fn web_has_method(object: &wasm_bindgen::JsValue, name: &str) -> bool {
+    web_sys::js_sys::Reflect::get(object, &name.into()).is_ok_and(|f| f.is_function())
+}
+
+/// Whether this browser has pointer lock at all: both halves, on the canvas
+/// and on the document, since winit calls each one bare. An iPad has it from
+/// iPadOS 16.4; an iPhone does not.
+#[cfg(target_arch = "wasm32")]
+fn web_pointer_lock_supported(window: &Window) -> bool {
+    use winit::platform::web::WindowExtWebSys;
+    let canvas = window.canvas().is_some_and(|c| web_has_method(&c, "requestPointerLock"));
+    let document = web_sys::window().and_then(|w| w.document()).is_some_and(|d| web_has_method(&d, "exitPointerLock"));
+    canvas && document
 }
 
 /// One terrain's cached collider wireframe: the node, whether it was built
