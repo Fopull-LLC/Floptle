@@ -64,6 +64,9 @@ pub enum VfxPropDoc {
     /// Uniform random per particle, resolved at birth and held for its life.
     Range(VfxValueDoc, VfxValueDoc),
     Curve(VfxCurveDoc),
+    /// Random between two curves per particle: each particle draws where it
+    /// sits between them at birth and follows that blend over its life.
+    CurveRange(VfxCurveDoc, VfxCurveDoc),
 }
 
 /// How a track's particles are drawn.
@@ -100,6 +103,8 @@ pub enum VfxBlendDoc {
     Premultiplied,
     Screen,
     Multiply,
+    /// Heat haze: bends the scene behind by the texture's red and green.
+    Distortion,
 }
 
 /// How a flipbook advances through its frames.
@@ -121,6 +126,9 @@ pub struct VfxFlipbookDoc {
     pub mode: VfxFlipModeDoc,
     #[serde(default = "twelve_f32")]
     pub fps: f32,
+    /// Crossfade each frame into the next instead of stepping.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blend: bool,
 }
 
 /// A ribbon each particle drags behind itself (billboard tracks only) — sword
@@ -360,6 +368,10 @@ pub struct VfxTrackDoc {
     /// The track's cloud casts field shadows via an aggregate proxy (default off).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cast_shadows: bool,
+    /// The Distortion blend's strength: how far the scene behind is pushed at
+    /// full red/green, as a share of the screen.
+    #[serde(default = "default_distortion", skip_serializing_if = "is_default_distortion")]
+    pub distortion: f32,
     #[serde(default)]
     pub space: VfxSpaceDoc,
 
@@ -503,6 +515,14 @@ fn is_true(b: &bool) -> bool {
 /// default is the same number.
 pub const DEFAULT_SOFT: f32 = 0.5;
 
+fn default_distortion() -> f32 {
+    0.015
+}
+
+fn is_default_distortion(v: &f32) -> bool {
+    *v == default_distortion()
+}
+
 fn default_soft() -> f32 {
     DEFAULT_SOFT
 }
@@ -596,6 +616,9 @@ fn upgrade_rotation(prop: &mut VfxPropDoc) {
             up(b);
         }
         VfxPropDoc::Curve(c) => c.keys.iter_mut().for_each(|k| up(&mut k.v)),
+        VfxPropDoc::CurveRange(a, b) => {
+            a.keys.iter_mut().chain(b.keys.iter_mut()).for_each(|k| up(&mut k.v));
+        }
     }
 }
 fn default_color() -> VfxPropDoc {
@@ -697,6 +720,7 @@ mod tests {
                     rows: 4,
                     mode: VfxFlipModeDoc::LoopFps,
                     fps: 24.0,
+                    blend: false,
                 }),
                 trail: Some(VfxTrailDoc {
                     time: 0.3,
@@ -714,6 +738,7 @@ mod tests {
                 lit: false,
                 soft: DEFAULT_SOFT,
                 cast_shadows: false,
+                distortion: 0.015,
                 space: VfxSpaceDoc::Local,
                 clips: vec![
                     VfxClipDoc {

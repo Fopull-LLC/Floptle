@@ -63,6 +63,7 @@ fn centre_brightness(gpu: &Gpu, particles: &mut Particles, raster: &Raster, quad
             fog_color: [0.0; 4],
             fog_params: [0.0; 4],
             proj_z: ParticleGlobals::proj_z(&proj, false),
+            ..Default::default()
         },
         &[ParticleInstance {
             pos_rot: [0.0, 0.0, -quad_dist, 0.0],
@@ -71,9 +72,11 @@ fn centre_brightness(gpu: &Gpu, particles: &mut Particles, raster: &Raster, quad
             basis_right: [1.0, 0.0, 0.0, 1.0],
             basis_up: [0.0, 1.0, 0.0, 1.0],
             params: [soft, 0.0, 0.0, 0.0],
+            ..Default::default()
         }],
         &[ParticleBatch { texture: None, blend: ParticleBlend::Alpha, range: 0..1 }],
         raster,
+        None,
     );
     let px = floptle_render::probe::readback(gpu, &color);
     px[(SIZE / 2 * SIZE + SIZE / 2) as usize][0]

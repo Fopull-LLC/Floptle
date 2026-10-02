@@ -143,6 +143,10 @@ pub enum ValueOrCurve {
     Const(Value),
     Range(Value, Value),
     Curve(Curve),
+    /// Random between two curves per particle: each particle draws where it
+    /// sits between them once, at birth, and follows that blend over its life.
+    /// One track of puffs that all grow, but not all alike.
+    CurveRange(Curve, Curve),
 }
 
 impl ValueOrCurve {
@@ -162,6 +166,8 @@ pub enum Prop1 {
     Const(f32),
     Range(f32, f32),
     Lut(Box<[f32; LUT_N]>),
+    /// Two LUTs, lerped by the particle's random.
+    LutRange(Box<[f32; LUT_N]>, Box<[f32; LUT_N]>),
 }
 
 /// A baked 4-channel property (Vec3 uses xyz, Rgba uses all four).
@@ -170,6 +176,8 @@ pub enum Prop4 {
     Const([f32; 4]),
     Range([f32; 4], [f32; 4]),
     Lut(Box<[[f32; 4]; LUT_N]>),
+    /// Two LUTs, lerped by the particle's random.
+    LutRange(Box<[[f32; 4]; LUT_N]>, Box<[[f32; 4]; LUT_N]>),
 }
 
 /// Map `u ∈ [0,1]` onto the LUT's fractional index space.
@@ -200,6 +208,12 @@ impl Prop1 {
                 let (i, j, f) = lut_pos(u);
                 s[i] + (s[j] - s[i]) * f
             }
+            Prop1::LutRange(a, b) => {
+                let (i, j, f) = lut_pos(u);
+                let lo = a[i] + (a[j] - a[i]) * f;
+                let hi = b[i] + (b[j] - b[i]) * f;
+                lo + (hi - lo) * r
+            }
         }
     }
 }
@@ -222,15 +236,10 @@ impl Prop4 {
                 a[2] + (b[2] - a[2]) * r,
                 a[3] + (b[3] - a[3]) * r,
             ],
-            Prop4::Lut(s) => {
-                let (i, j, f) = lut_pos(u);
-                let (a, b) = (s[i], s[j]);
-                [
-                    a[0] + (b[0] - a[0]) * f,
-                    a[1] + (b[1] - a[1]) * f,
-                    a[2] + (b[2] - a[2]) * f,
-                    a[3] + (b[3] - a[3]) * f,
-                ]
+            Prop4::Lut(s) => lut4(s, u),
+            Prop4::LutRange(a, b) => {
+                let (lo, hi) = (lut4(a, u), lut4(b, u));
+                std::array::from_fn(|c| lo[c] + (hi[c] - lo[c]) * r)
             }
         }
     }
@@ -247,6 +256,32 @@ impl Prop4 {
     }
 }
 
+/// A 4-channel LUT at life-fraction `u`.
+#[inline]
+fn lut4(s: &[[f32; 4]; LUT_N], u: f32) -> [f32; 4] {
+    let (i, j, f) = lut_pos(u);
+    let (a, b) = (s[i], s[j]);
+    std::array::from_fn(|c| a[c] + (b[c] - a[c]) * f)
+}
+
+fn lut1_of(c: &Curve, domain: f32) -> Box<[f32; LUT_N]> {
+    let mut s = Box::new([0.0f32; LUT_N]);
+    for (i, out) in s.iter_mut().enumerate() {
+        let u = i as f32 / (LUT_N - 1) as f32;
+        *out = c.eval(u * domain)[0];
+    }
+    s
+}
+
+fn lut4_of(c: &Curve, domain: f32) -> Box<[[f32; 4]; LUT_N]> {
+    let mut s = Box::new([[0.0f32; 4]; LUT_N]);
+    for (i, out) in s.iter_mut().enumerate() {
+        let u = i as f32 / (LUT_N - 1) as f32;
+        *out = c.eval(u * domain);
+    }
+    s
+}
+
 /// Bake a value-or-curve to a scalar property. `domain` rescales key times
 /// (life curves pass 1.0; automation lanes pass the effect lifetime so lane keys
 /// authored in seconds land on the shared `[0,1]` LUT domain).
@@ -254,14 +289,8 @@ pub fn bake1(p: &ValueOrCurve, domain: f32) -> Prop1 {
     match p {
         ValueOrCurve::Const(v) => Prop1::Const(v.channels()[0]),
         ValueOrCurve::Range(a, b) => Prop1::Range(a.channels()[0], b.channels()[0]),
-        ValueOrCurve::Curve(c) => {
-            let mut s = Box::new([0.0f32; LUT_N]);
-            for (i, out) in s.iter_mut().enumerate() {
-                let u = i as f32 / (LUT_N - 1) as f32;
-                *out = c.eval(u * domain)[0];
-            }
-            Prop1::Lut(s)
-        }
+        ValueOrCurve::Curve(c) => Prop1::Lut(lut1_of(c, domain)),
+        ValueOrCurve::CurveRange(a, b) => Prop1::LutRange(lut1_of(a, domain), lut1_of(b, domain)),
     }
 }
 
@@ -270,14 +299,8 @@ pub fn bake4(p: &ValueOrCurve, domain: f32) -> Prop4 {
     match p {
         ValueOrCurve::Const(v) => Prop4::Const(v.channels()),
         ValueOrCurve::Range(a, b) => Prop4::Range(a.channels(), b.channels()),
-        ValueOrCurve::Curve(c) => {
-            let mut s = Box::new([[0.0f32; 4]; LUT_N]);
-            for (i, out) in s.iter_mut().enumerate() {
-                let u = i as f32 / (LUT_N - 1) as f32;
-                *out = c.eval(u * domain);
-            }
-            Prop4::Lut(s)
-        }
+        ValueOrCurve::Curve(c) => Prop4::Lut(lut4_of(c, domain)),
+        ValueOrCurve::CurveRange(a, b) => Prop4::LutRange(lut4_of(a, domain), lut4_of(b, domain)),
     }
 }
 
@@ -287,6 +310,23 @@ mod tests {
 
     fn key(t: f32, v: f32) -> Key {
         Key::new(t, Value::F32(v))
+    }
+
+    /// Random between two curves: one particle follows the low curve, another
+    /// the high one, a third sits between, and each keeps its place over its
+    /// whole life. Puffs in one track grow, but not alike.
+    #[test]
+    fn a_curve_range_holds_each_particle_between_its_curves_for_life() {
+        let grow = |to: f32| Curve { keys: vec![key(0.0, 0.1), key(1.0, to)], extrapolate: Extrapolate::Clamp };
+        let p = bake1(&ValueOrCurve::CurveRange(grow(1.0), grow(3.0)), 1.0);
+        for u in [0.0, 0.5, 1.0] {
+            let (lo, hi) = (grow(1.0).eval(u)[0], grow(3.0).eval(u)[0]);
+            assert!((p.sample_rand(u, 0.0) - lo).abs() < 1e-3, "r = 0 follows the low curve at {u}");
+            assert!((p.sample_rand(u, 1.0) - hi).abs() < 1e-3, "r = 1 follows the high curve at {u}");
+            let mid = p.sample_rand(u, 0.25);
+            assert!((mid - (lo + (hi - lo) * 0.25)).abs() < 1e-3, "r = 0.25 sits a quarter of the way at {u}");
+        }
+        assert!(p.sample_rand(1.0, 1.0) > p.sample_rand(1.0, 0.0) + 1.5, "the two ends must differ");
     }
 
     #[test]

@@ -42,13 +42,16 @@ pub enum Blend {
     Screen,
     /// Multiply — darkens what's behind (smoke that occludes, stains; order-dependent).
     Multiply,
+    /// Heat haze — bends the scene behind by the texture's red and green
+    /// (0.5 = no push), by [`Look::distortion`]. Order-dependent.
+    Distortion,
 }
 
 impl Blend {
     /// Order-dependent modes must be depth-sorted back-to-front; light-accumulating
     /// ones (additive / screen) composite the same in any order.
     pub fn needs_sort(self) -> bool {
-        matches!(self, Blend::Alpha | Blend::Premultiplied | Blend::Multiply)
+        matches!(self, Blend::Alpha | Blend::Premultiplied | Blend::Multiply | Blend::Distortion)
     }
 }
 
@@ -256,11 +259,14 @@ pub struct Flipbook {
     pub mode: FlipMode,
     /// Frames per second for [`FlipMode::LoopFps`] (ignored for `OverLife`).
     pub fps: f32,
+    /// Crossfade each frame into the next, so a slow flipbook plays smoothly
+    /// instead of stepping.
+    pub blend: bool,
 }
 
 impl Default for Flipbook {
     fn default() -> Self {
-        Self { cols: 1, rows: 1, mode: FlipMode::default(), fps: 12.0 }
+        Self { cols: 1, rows: 1, mode: FlipMode::default(), fps: 12.0, blend: false }
     }
 }
 
@@ -301,6 +307,9 @@ impl Default for Trail {
 /// The soft-edge distance a track starts with.
 pub const DEFAULT_SOFT: f32 = 0.5;
 
+/// [`Look::distortion`] unless authored: a gentle shimmer.
+pub const DEFAULT_DISTORTION: f32 = 0.015;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Look {
     pub render: RenderMode,
@@ -328,6 +337,9 @@ pub struct Look {
     pub soft: f32,
     /// The track's live cloud casts into the field shadow march (aggregate proxy).
     pub cast_shadows: bool,
+    /// [`Blend::Distortion`]'s strength: how far the scene behind is pushed at
+    /// full red/green, as a share of the screen.
+    pub distortion: f32,
 }
 
 impl Default for Look {
@@ -343,6 +355,7 @@ impl Default for Look {
             lit: false,
             soft: DEFAULT_SOFT,
             cast_shadows: false,
+            distortion: DEFAULT_DISTORTION,
         }
     }
 }
@@ -596,6 +609,7 @@ fn prop1_peak(p: &Prop1) -> f32 {
         Prop1::Const(v) => *v,
         Prop1::Range(a, b) => a.max(*b),
         Prop1::Lut(s) => s.iter().copied().fold(0.0f32, f32::max),
+        Prop1::LutRange(a, b) => a.iter().chain(b.iter()).copied().fold(0.0f32, f32::max),
     };
     m.max(1.0)
 }

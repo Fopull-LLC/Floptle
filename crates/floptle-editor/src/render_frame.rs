@@ -637,6 +637,7 @@ impl Editor {
             vfx_instances,
             view_proj,
         } = gather;
+        let particle_light = crate::shading::particle_light(&self.world, &light_node, cam.world_position);
         let FrameUi {
             ctx,
             shapes,
@@ -848,17 +849,32 @@ impl Editor {
                 // Live particles: after all opaque work (they depth-test against
                 // meshes and raymarched matter), before post/retro — so they're
                 // AO'd/bloomed and pixelate with the scene.
+                //
+                // Their own region of the GPU timings, so what they cost is a
+                // number and not a difference between two runs.
+                gpu_mark!("particles");
                 if !vfx_batches.is_empty() {
+                    // Heat haze bends a picture of everything drawn so far,
+                    // taken here for the same reason the glass takes its own.
+                    let scene = match scene_history.as_mut() {
+                        Some(h) if vfx_batches.iter().any(|b| b.blend == floptle_render::particles::ParticleBlend::Distortion) => {
+                            h.capture(gpu, color, view_proj, cam.world_position);
+                            Some(&*h)
+                        }
+                        _ => None,
+                    };
                     particles.draw(
                         gpu,
                         color,
                         depth,
-                        crate::vfx::particle_globals(&cam, aspect, fog_color, particle_fog),
+                        crate::vfx::particle_globals(&cam, aspect, fog_color, particle_fog, particle_light),
                         &vfx_instances,
                         &vfx_batches,
                         raster,
+                        scene.map(|h| (h.view(), h.sampler())),
                     );
                 }
+                gpu_mark!("reflection capture + overlays");
                 // Keep this frame's picture, for the next frame's reflections.
                 //
                 // Here and not later: everything that belongs to the scene has

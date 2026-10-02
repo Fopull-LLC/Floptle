@@ -596,7 +596,7 @@ fn promote_to_curve(prop: &mut VfxPropDoc) {
     let seed = match prop {
         VfxPropDoc::Const(v) => *v,
         VfxPropDoc::Range(a, _) => *a,
-        VfxPropDoc::Curve(_) => return,
+        VfxPropDoc::Curve(_) | VfxPropDoc::CurveRange(..) => return,
     };
     let key = |t: f32| VfxKeyDoc { t, v: seed, interp: VfxInterpDoc::Linear, in_tan: 0.0, out_tan: 0.0 };
     *prop = VfxPropDoc::Curve(VfxCurveDoc {

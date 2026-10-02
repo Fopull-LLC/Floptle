@@ -180,6 +180,8 @@ pub struct VfxSystem {
     /// Each node instance's frame and the frame's pose at its last advance,
     /// so its World-track particles ride the world it is on.
     node_frames: HashMap<Entity, (Entity, floptle_core::transform::Transform)>,
+    /// Each node's `setTint`, given to every instance it plays.
+    node_tints: HashMap<Entity, [f32; 4]>,
 }
 
 impl Default for VfxSystem {
@@ -193,6 +195,7 @@ impl Default for VfxSystem {
             detached_seq: 0,
             preview: None,
             node_frames: HashMap::new(),
+            node_tints: HashMap::new(),
         }
     }
 }
@@ -301,6 +304,7 @@ impl VfxSystem {
     pub fn clear_instances(&mut self) {
         self.instances.clear();
         self.detached.clear();
+        self.node_tints.clear();
     }
 
     /// Fire a one-shot effect (`spawnEffect`): it plays once and is reaped when
@@ -384,7 +388,10 @@ impl VfxSystem {
     /// Seeded by the entity index so two campfires don't march in lockstep.
     pub fn spawn(&mut self, entity: Entity, key: &str) {
         if let Some(fx) = self.effect(key) {
-            let inst = EffectInstance::new(fx, entity.index().wrapping_add(1));
+            let mut inst = EffectInstance::new(fx, entity.index().wrapping_add(1));
+            if let Some(t) = self.node_tints.get(&entity) {
+                inst.tint = *t;
+            }
             self.instances.insert(entity, (key.to_string(), inst));
         }
     }
@@ -555,6 +562,12 @@ impl VfxSystem {
                         inst.set_intensity(i);
                     }
                 }
+                floptle_script::VfxCmd::Tint(t) => {
+                    self.node_tints.insert(e, t);
+                    if let Some((_, inst)) = self.instances.get_mut(&e) {
+                        inst.tint = t;
+                    }
+                }
                 // Aim every Beam track at a world point: convert to effect-local
                 // (undo the emitter's rotation/scale) so the beam keeps tracking the
                 // target as the node moves — the sim/draw side only knows local.
@@ -712,13 +725,25 @@ impl VfxSystem {
     }
 }
 
+/// The light lit particles take: the key light (the way to the sun, or the
+/// brightest star's camera-relative position), its colour, and the ambient.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ParticleLight {
+    pub dir: [f32; 4],
+    pub color: [f32; 4],
+    pub ambient: [f32; 4],
+}
+
+
 /// The particle pass's frame globals for `cam` (billboard basis from its rotation),
-/// plus the scene's depth-fog uniforms so distant particles fade into the fog.
+/// plus the scene's depth-fog uniforms so distant particles fade into the fog, and
+/// the light lit particles take.
 pub fn particle_globals(
     cam: &RenderCamera,
     aspect: f32,
     fog_color: [f32; 4],
     fog_params: [f32; 4],
+    light: ParticleLight,
 ) -> ParticleGlobals {
     let (r, u) = (cam.rotation * Vec3::X, cam.rotation * Vec3::Y);
     ParticleGlobals {
@@ -728,6 +753,9 @@ pub fn particle_globals(
         fog_color,
         fog_params,
         proj_z: ParticleGlobals::proj_z(&cam.proj_matrix(aspect), cam.projection.is_ortho()),
+        light_dir: light.dir,
+        light_color: light.color,
+        ambient: light.ambient,
     }
 }
 
@@ -789,6 +817,7 @@ pub fn starter_effect_doc(name: &str) -> VfxEffectDoc {
         lit: false,
         soft: floptle_scene::vfx::DEFAULT_SOFT,
         cast_shadows: false,
+        distortion: 0.015,
         space: floptle_scene::VfxSpaceDoc::Local,
         // A continuous stream over the whole 1 s loop; each particle lives the clip's
         // length (1 s), so it loops seamlessly. Deprecated track-level fields stay at
@@ -921,6 +950,7 @@ fn prop_from_doc(p: &VfxPropDoc) -> ValueOrCurve {
         VfxPropDoc::Const(v) => ValueOrCurve::Const(value_from_doc(v)),
         VfxPropDoc::Range(a, b) => ValueOrCurve::Range(value_from_doc(a), value_from_doc(b)),
         VfxPropDoc::Curve(c) => ValueOrCurve::Curve(curve_from_doc(c)),
+        VfxPropDoc::CurveRange(a, b) => ValueOrCurve::CurveRange(curve_from_doc(a), curve_from_doc(b)),
     }
 }
 
@@ -962,6 +992,7 @@ pub fn effect_from_doc(doc: &VfxEffectDoc) -> ParticleEffect {
                         VfxBlendDoc::Premultiplied => Blend::Premultiplied,
                         VfxBlendDoc::Screen => Blend::Screen,
                         VfxBlendDoc::Multiply => Blend::Multiply,
+                        VfxBlendDoc::Distortion => Blend::Distortion,
                     },
                     orient: match t.orient {
                         VfxOrientDoc::FaceCamera => BillboardOrient::FaceCamera,
@@ -977,6 +1008,7 @@ pub fn effect_from_doc(doc: &VfxEffectDoc) -> ParticleEffect {
                     lit: t.lit,
                     soft: t.soft,
                     cast_shadows: t.cast_shadows,
+                    distortion: t.distortion,
                 },
                 space: match t.space {
                     floptle_scene::VfxSpaceDoc::Local => Space::Local,
@@ -1053,6 +1085,7 @@ fn flipbook_from_doc(f: &VfxFlipbookDoc) -> Flipbook {
             VfxFlipModeDoc::LoopFps => FlipMode::LoopFps,
         },
         fps: f.fps,
+        blend: f.blend,
     }
 }
 

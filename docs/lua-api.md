@@ -42,7 +42,7 @@ each group, and meant to be searched.
 - [space — orbits & time-warp](#space--orbits--time-warp) — 19
 - [components — getcomponent](#components--getcomponent) — 104
 - [animation — node:animator](#animation--nodeanimator) — 26
-- [particles — effects from script](#particles--effects-from-script) — 10
+- [particles — effects from script](#particles--effects-from-script) — 11
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 32
 - [assets](#assets) — 14
 - [debug gizmos](#debug-gizmos) — 5
@@ -3119,7 +3119,7 @@ perf.enabled() — is anything being measured? Safe to call while off, so a scri
 
 ### `perf.gpu`
 
-perf.gpu() → { total = ms, passes = { {name=, ms=}, … } } — the GPU's own time for each render pass of the last frame it finished timing, in the order they ran ("depth prepass", "opaque + lighting", "post", …). nil when nothing has been timed yet: the first frames after perf.enable(true), or a GPU whose driver cannot time passes. For a game's own quality governor on the player's machine, which the CPU-side buckets cannot see. Raises while collection is off, like perf.ms.
+perf.gpu() → { total = ms, passes = { {name=, ms=}, … } } — the GPU's own time for each render pass of the last frame it finished timing, in the order they ran ("depth prepass", "opaque + lighting", "glass", "particles", "post", …). nil when nothing has been timed yet: the first frames after perf.enable(true), or a GPU whose driver cannot time passes. For a game's own quality governor on the player's machine, which the CPU-side buckets cannot see. Raises while collection is off, like perf.ms.
 
 ### `perf.gpuMs`
 
@@ -3914,6 +3914,10 @@ particles:setBeamEnd(x, y, z) — aim every Beam track's endpoint at a WORLD-spa
 ### `particles:setIntensity`
 
 particles:setIntensity(i) — live emission scale (0..~2): multiplies rates/burst counts and shades particle size. Drive an engine plume off the throttle without touching the asset.
+
+### `particles:setTint`
+
+particles:setTint(r, g, b [, a]) or particles:setTint(color) — multiply every particle of the node's effect by a colour, on top of the colours the effect authors. Kept for the node, so a restart keeps it. One dust effect matching each world's ground: p:setTint(0.8, 0.55, 0.4).
 
 ### `particles:stop`
 

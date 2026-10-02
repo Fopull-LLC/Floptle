@@ -201,6 +201,14 @@ For a ribbon that lies in the blade's own plane rather than facing the camera
 last — the Lua `draw.quad` draws a textured, depth-tested quad in the world;
 see [lua-api.md](../lua-api.md#drawquad) for the copyable ribbon.
 
+### Random between two curves
+
+A size or a colour can be a constant, a random between two values (drawn per
+particle at birth), a curve over the particle's life, or a random between two
+curves: each particle picks where it sits between them at birth and follows
+that blend for its whole life. One track of puffs then grows, but not all
+alike. In the Inspector it is the 🎲 on a curve row.
+
 ### Look
 
 `RenderMode` decides what a track draws:
@@ -219,10 +227,23 @@ see [lua-api.md](../lua-api.md#drawquad) for the copyable ribbon.
   time, and `wave_amplitude` / `wave_frequency` / `scroll` animate it. Lasers,
   tethers, a mining beam.
 
-`blend` is `Alpha`, `Additive`, `Premultiplied`, `Screen` or `Multiply`.
-`flipbook` plays a sprite sheet over a particle's life. `lit` puts a particle
-through the full scene lighting — sun, point lights, field shadow, AO — and
-`cast_shadows` lets the track's live cloud cast into the field shadow march.
+`blend` is `Alpha`, `Additive`, `Premultiplied`, `Screen`, `Multiply` or
+`Distortion`. `Distortion` is heat haze: it bends a picture of the scene behind
+the particle by the texture's red and green (0.5 is no push), by `distortion`
+(a share of the screen), faded by the particle's alpha. Use a noise or
+normal-map texture; a plain quad bends nothing.
+
+`flipbook` plays a sprite sheet over a particle's life or at a fixed rate, and
+with `blend: true` each frame crossfades into the next, so a slow flipbook
+plays smoothly instead of stepping.
+
+`lit` lights the track. A mesh particle goes through the full scene lighting:
+sun, point lights, field shadow, AO. A billboard takes the sun (or the brightest
+star) and the ambient on a rounded normal, so a puff reads as a ball and not a
+card, and over a planet's night side, where the ground faces away from the
+light, it takes only the ambient. Use it for smoke and dust, and leave glow
+and fire unlit. `cast_shadows` lets a mesh track's live cloud cast into the
+field shadow march.
 `soft` is the distance, in world units, over which a billboard fades out in
 front of whatever it intersects — the *soft edges* field in the Inspector — so
 smoke crossing a floor or a wall shows no hard line where the depth test cuts
@@ -298,6 +319,7 @@ An effect is a **Particle System** component on a node, and
 local fx = node:particles()
 fx:restart()                     -- re-fire a one-shot burst on every hit
 fx:setIntensity(throttle)        -- live emission scale off a control input
+fx:setTint(0.8, 0.55, 0.4)       -- one dust effect, each world's ground colour
 fx:setBeamEnd(target:pos())      -- aim every Beam track, in WORLD space
 if fx:isPlaying() then … end     -- and :alive(), :asset(), :play(), :stop()
 ```

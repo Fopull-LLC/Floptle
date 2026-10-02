@@ -1316,6 +1316,10 @@ pub enum VfxCmd {
     /// Aim every Beam track's endpoint at a world-space point — the editor
     /// converts it to effect-local before applying (`ps:setBeamEnd(x, y, z)`).
     SetBeamEnd([f64; 3]),
+    /// A colour every particle of the node's effect is multiplied by
+    /// (`ps:setTint(r, g, b [, a])`). Kept for the node, so it holds across a
+    /// restart.
+    Tint([f32; 4]),
 }
 
 /// Where a script-spawned sound sits: nowhere (flat), a fixed world point, or

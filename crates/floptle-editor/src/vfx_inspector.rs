@@ -392,6 +392,7 @@ fn look_section(
                 VfxBlendDoc::Premultiplied => "blend: premultiplied",
                 VfxBlendDoc::Screen => "blend: screen (lighten)",
                 VfxBlendDoc::Multiply => "blend: multiply (darken)",
+                VfxBlendDoc::Distortion => "blend: distortion (heat haze)",
             })
             .show_ui(ui, |ui| {
                 for (v, l) in [
@@ -400,6 +401,7 @@ fn look_section(
                     (VfxBlendDoc::Premultiplied, "premultiplied"),
                     (VfxBlendDoc::Screen, "screen (lighten)"),
                     (VfxBlendDoc::Multiply, "multiply (darken)"),
+                    (VfxBlendDoc::Distortion, "distortion (heat haze)"),
                 ] {
                     if ui.selectable_label(track.blend == v, l).clicked() && track.blend != v {
                         track.blend = v;
@@ -407,6 +409,19 @@ fn look_section(
                     }
                 }
             });
+        if track.blend == VfxBlendDoc::Distortion {
+            ui.horizontal(|ui| {
+                ui.label("strength");
+                *dirty |= ui
+                    .add(egui::DragValue::new(&mut track.distortion).speed(0.001).range(0.0..=0.2).max_decimals(3))
+                    .on_hover_text(
+                        "how far the scene behind is pushed, as a share of the screen. The texture's \
+                         red and green push it (0.5 is no push), and the particle's alpha fades it. \
+                         A plain white quad bends nothing; use a noise or normal-map texture",
+                    )
+                    .changed();
+            });
+        }
     }
     if is_beam {
         beam_editor(ui, track, dirty);
@@ -430,13 +445,24 @@ fn look_section(
                 .changed();
         });
     }
-    // Lighting / shadow opt-ins (off by default — proposal §5). They only affect
-    // Mesh particles — the billboard pass draws unlit textured quads — so grey them
-    // out for billboards rather than offering a dead knob.
-    ui.add_enabled_ui(is_mesh, |ui| {
-        ui.horizontal(|ui| {
-            *dirty |= ui.checkbox(&mut track.lit, "lit").on_hover_text("full scene lighting per particle (mesh particles only)").changed();
-            *dirty |= ui.checkbox(&mut track.cast_shadows, "casts shadow").on_hover_text("the track's cloud darkens the ground — aggregate proxy (mesh particles only)").changed();
+    // Lighting / shadow opt-ins (off by default — proposal §5). Lit works on
+    // billboards too; the shadow proxy is mesh particles only, so it greys out
+    // for billboards rather than offering a dead knob.
+    ui.horizontal(|ui| {
+        *dirty |= ui
+            .checkbox(&mut track.lit, "lit")
+            .on_hover_text(if is_mesh {
+                "full scene lighting per particle"
+            } else {
+                "the sun or star and the ambient light each puff, rounded like a ball, and dark on \
+                 the night side of a planet. For smoke and dust; leave glow and fire unlit"
+            })
+            .changed();
+        ui.add_enabled_ui(is_mesh, |ui| {
+            *dirty |= ui
+                .checkbox(&mut track.cast_shadows, "casts shadow")
+                .on_hover_text("the track's cloud darkens the ground — aggregate proxy (mesh particles only)")
+                .changed();
         });
     });
     egui::ComboBox::from_id_salt("vfx_space")
@@ -646,6 +672,7 @@ fn flipbook_editor(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, di
             rows: 4,
             mode: VfxFlipModeDoc::OverLife,
             fps: 12.0,
+            blend: false,
         });
         *dirty = true;
     }
@@ -678,6 +705,10 @@ fn flipbook_editor(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, di
                 .changed();
         }
     });
+    *dirty |= ui
+        .checkbox(&mut f.blend, "blend frames")
+        .on_hover_text("crossfade each frame into the next, so a slow flipbook plays smoothly instead of stepping")
+        .changed();
 }
 
 fn emission_section(ui: &mut egui::Ui, ti: usize, track: &mut floptle_scene::VfxTrackDoc, dirty: &mut bool) {

@@ -143,6 +143,14 @@ pub(crate) fn value_or_curve(
                         Some(label.to_string())
                     };
                 }
+                if ui
+                    .small_button("🎲")
+                    .on_hover_text("random per particle between this curve and a second one")
+                    .clicked()
+                {
+                    // The second starts as a copy; the artist pulls it apart.
+                    replace = Some(VfxPropDoc::CurveRange(c.clone(), c.clone()));
+                }
                 if ui.small_button("•").on_hover_text("back to a constant (value at t=0)").clicked() {
                     let v0 = c.keys.first().map(|k| k.v).unwrap_or(VfxValueDoc::F32(0.0));
                     replace = Some(VfxPropDoc::Const(v0));
@@ -152,17 +160,63 @@ pub(crate) fn value_or_curve(
                 }
             });
         }
+        VfxPropDoc::CurveRange(lo, hi) => {
+            // Each curve on its own row, each opening its own editor below.
+            let high = high_label(label);
+            for (row, c, key) in [(label, &*lo, label.to_string()), ("   to", &*hi, high.clone())] {
+                ui.horizontal(|ui| {
+                    row_label(ui, row);
+                    let kind = c.keys.first().map(|k| kind_of(&k.v)).unwrap_or(CurveKind::Scalar);
+                    let w = (ui.available_width() - 30.0).clamp(60.0, 160.0);
+                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 18.0), Sense::click());
+                    sparkline(ui, c, kind, rect);
+                    if resp.on_hover_text("click to edit this curve").clicked() {
+                        *vrange = None;
+                        *expanded = if expanded.as_deref() == Some(key.as_str()) {
+                            None
+                        } else {
+                            *sel_key = None;
+                            Some(key.clone())
+                        };
+                    }
+                    if key == high
+                        && ui
+                            .small_button("•")
+                            .on_hover_text("back to one curve (the first)")
+                            .clicked()
+                    {
+                        replace = Some(VfxPropDoc::Curve(lo.clone()));
+                    }
+                });
+            }
+            if replace.is_none() {
+                ui.label("🎲").on_hover_text("each particle follows a blend of these two curves, picked at birth");
+            }
+        }
     }
     if let Some(p) = replace {
         *prop = p;
         changed = true;
     }
-    if let VfxPropDoc::Curve(c) = prop
-        && expanded.as_deref() == Some(label)
-    {
-        changed |= curve_editor(ui, c, sel_key, vrange, floor);
+    match prop {
+        VfxPropDoc::Curve(c) if expanded.as_deref() == Some(label) => {
+            changed |= curve_editor(ui, c, sel_key, vrange, floor);
+        }
+        VfxPropDoc::CurveRange(lo, hi) => {
+            if expanded.as_deref() == Some(label) {
+                changed |= curve_editor(ui, lo, sel_key, vrange, floor);
+            } else if expanded.as_deref() == Some(high_label(label).as_str()) {
+                changed |= curve_editor(ui, hi, sel_key, vrange, floor);
+            }
+        }
+        _ => {}
     }
     changed
+}
+
+/// The expanded-editor key for a curve range's second curve.
+fn high_label(label: &str) -> String {
+    format!("{label} (to)")
 }
 
 /// How many drag fields a constant needs on its row.

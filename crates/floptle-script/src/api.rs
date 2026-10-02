@@ -6876,6 +6876,31 @@ fn node_particles_method(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::R
         )?;
     }
     {
+        // ps:setTint(r, g, b [, a]) — or one colour: one dust effect matching
+        // each world's ground.
+        let cmds = shared.vfx_commands.clone();
+        vfx_methods.set(
+            "setTint",
+            lua.create_function(move |_, (this, r, g, b, a): (Table, mlua::Value, Option<f32>, Option<f32>, Option<f32>)| {
+                let e: u32 = this.raw_get("__id")?;
+                let tint = match (r, g, b) {
+                    (mlua::Value::Table(t), None, None) => read_color(&t)?,
+                    (r, Some(g), Some(b)) => {
+                        let r = match r {
+                            mlua::Value::Number(n) => n as f32,
+                            mlua::Value::Integer(i) => i as f32,
+                            _ => return Err(mlua::Error::runtime("ps:setTint(r, g, b [, a]) or ps:setTint(color)")),
+                        };
+                        [r, g, b, a.unwrap_or(1.0)]
+                    }
+                    _ => return Err(mlua::Error::runtime("ps:setTint(r, g, b [, a]) or ps:setTint(color)")),
+                };
+                cmds.borrow_mut().push((e, VfxCmd::Tint(tint)));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
         // ps:setBeamEnd(x, y, z) — aim every Beam track of the node's effect at a
         // World-space point (the engine converts it to effect-local, so the beam
         // tracks the target as the emitter moves/rotates).

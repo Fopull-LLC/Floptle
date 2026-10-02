@@ -254,7 +254,7 @@ impl Harness {
             (&self.color_view, self.gpu.depth_view())
         };
         self.raster.draw_scene(&self.gpu, color, depth, self.globals, &self.scene, clear, None);
-        self.particles.draw(&self.gpu, color, depth, self.pglobals, &packed, &batches, &self.raster);
+        self.particles.draw(&self.gpu, color, depth, self.pglobals, &packed, &batches, &self.raster, None);
         if retro_mode {
             self.retro.blit_to(&self.gpu, &self.color_view);
         }
@@ -308,6 +308,9 @@ fn main() {
         fog_color: [0.0; 4],
         fog_params: [0.0; 4], // fog off in the probe
         proj_z: ParticleGlobals::proj_z(&cam.proj_matrix(aspect), cam.projection.is_ortho()),
+        light_dir: globals.light_dir,
+        light_color: globals.light_color,
+        ambient: globals.ambient,
     };
     let (cam_right, cam_up) = (r, u);
 

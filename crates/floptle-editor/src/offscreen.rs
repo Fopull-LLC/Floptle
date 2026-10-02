@@ -416,6 +416,7 @@ impl Editor {
 
         let light_node = self.world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
         let sun = crate::shading::sun_vec(&self.world, &light_node, cam.world_position);
+        let particle_light = crate::shading::particle_light(&self.world, &light_node, cam.world_position);
         let li = light_node.intensity;
         // Whether `Auto` reads as 2D in this scene, asked once rather than per node.
         let flat_camera = floptle_core::active_camera(&self.world).is_some_and(|ce| {
@@ -1251,10 +1252,11 @@ impl Editor {
                     gpu,
                     color,
                     depth,
-                    crate::vfx::particle_globals(cam, aspect, fog_color, particle_fog),
+                    crate::vfx::particle_globals(cam, aspect, fog_color, particle_fog, particle_light),
                     &vfx_instances,
                     &vfx_batches,
                     raster,
+                    None,
                 );
             }
         } else {

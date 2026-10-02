@@ -472,6 +472,20 @@ pub(crate) fn star_uniforms(
     (meta, pos, col)
 }
 
+/// The Lighting node's light as lit particles see it, for this camera.
+pub(crate) fn particle_light(world: &World, light: &Light, cam_world: DVec3) -> crate::vfx::ParticleLight {
+    let dir = sun_vec(world, light, cam_world);
+    let mut color = Vec3::from(light.color) * light.intensity;
+    if light.stars {
+        let (meta, _, col) = star_uniforms(world, light, cam_world);
+        if meta[0] > 0.0 {
+            color *= Vec3::new(col[0][0], col[0][1], col[0][2]);
+        }
+    }
+    let a = light.ambient;
+    crate::vfx::ParticleLight { dir, color: color.extend(0.0).to_array(), ambient: [a[0], a[1], a[2], 0.0] }
+}
+
 /// The Lighting node's shadow knobs as the raymarch-globals uniform vec4s
 /// (`shadow_params` / `shadow_tint` / `shadow_extra`). Softness 0..1 maps to the
 /// penumbra sharpness `k` on a log ramp (0 → 64 razor-hard, 1 → 2 dreamy-soft) so

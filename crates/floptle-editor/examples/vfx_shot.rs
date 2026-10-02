@@ -199,6 +199,9 @@ fn main() {
         fog_color: [0.0; 4],
         fog_params: [0.0; 4],
         proj_z: ParticleGlobals::proj_z(&cam.proj_matrix(aspect), cam.projection.is_ortho()),
+        light_dir: globals.light_dir,
+        light_color: globals.light_color,
+        ambient: globals.ambient,
     };
 
     // the SCALE REFERENCE, and the reason this probe is worth having. A floor, a
@@ -283,7 +286,7 @@ fn main() {
                 Some([0.06, 0.07, 0.10, 1.0]),
                 None,
             );
-            particles.draw(&gpu, &color_view, gpu.depth_view(), pglobals, &packed, &batches, &raster);
+            particles.draw(&gpu, &color_view, gpu.depth_view(), pglobals, &packed, &batches, &raster, None);
             frames.push(read_pixels(&gpu, &color_tex));
         }
         sheets.push((doc.name.clone(), frames));

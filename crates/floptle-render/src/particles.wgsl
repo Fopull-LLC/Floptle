@@ -25,6 +25,11 @@ struct ParticleGlobals {
     fog_color: vec4<f32>,   // rgb = fog color
     fog_params: vec4<f32>,  // x start, y end, z on (0/1)
     proj_z: vec4<f32>,      // x P[2][2], y P[3][2], z 1 = orthographic
+    // The key light for lit particles: xyz = the way TO it (w = 0), or its
+    // camera-relative position (w = 1, a star).
+    light_dir: vec4<f32>,
+    light_color: vec4<f32>, // rgb, already scaled by intensity
+    ambient: vec4<f32>,     // rgb
 };
 
 @group(0) @binding(0) var<uniform> g: ParticleGlobals;
@@ -66,6 +71,12 @@ struct VsIn {
     @location(5) basis_up: vec4<f32>,
     // Instance: x = soft-edge distance in world units (0 = hard).
     @location(6) params: vec4<f32>,
+    // Instance: xyz = the effect's up (the ground's, for a night-side test),
+    // w = how lit the particle is (0 = unlit, as authored; 1 = fully lit).
+    @location(7) light: vec4<f32>,
+    // Instance: xy = the next flipbook frame's UV min, z = how far into it
+    // (0 = this frame only), w = distortion strength (Distortion blend).
+    @location(8) extra: vec4<f32>,
 };
 
 struct VsOut {
@@ -75,6 +86,14 @@ struct VsOut {
     // Camera-relative position, so the fragment can compute its own view distance.
     @location(2) view_pos: vec3<f32>,
     @location(3) @interpolate(flat) soft: f32,
+    // The quad's corner in [-0.5, 0.5]², un-spun, for the rounded normal.
+    @location(4) corner: vec2<f32>,
+    @location(5) @interpolate(flat) right: vec3<f32>,
+    @location(6) @interpolate(flat) up: vec3<f32>,
+    @location(7) @interpolate(flat) light: vec4<f32>,
+    // The next flipbook frame's UV, and how far into it.
+    @location(8) uv_next: vec2<f32>,
+    @location(9) @interpolate(flat) extra: vec2<f32>,
 };
 
 @vertex
@@ -100,10 +119,47 @@ fn vs(in: VsIn) -> VsOut {
     let base_uv = vec2<f32>(in.corner.x + 0.5, 0.5 - in.corner.y);
     let rect = vec4<f32>(in.size.z, in.size.w, in.basis_right.w, in.basis_up.w);
     out.uv = base_uv * rect.zw + rect.xy;
+    out.uv_next = base_uv * rect.zw + in.extra.xy;
+    out.extra = in.extra.zw;
     out.color = in.color;
     out.view_pos = world;
     out.soft = in.params.x;
+    out.corner = in.corner;
+    // The spun basis, so the rounded normal turns with the picture.
+    out.right = normalize(in.basis_right.xyz) * ca + normalize(in.basis_up.xyz) * sa;
+    out.up = normalize(in.basis_up.xyz) * ca - normalize(in.basis_right.xyz) * sa;
+    out.light = in.light;
     return out;
+}
+
+// The particle's texel: this flipbook frame, crossfaded into the next one
+// when the track blends its frames.
+fn texel_of(in: VsOut) -> vec4<f32> {
+    let here = textureSample(tex, samp, in.uv);
+    let next = textureSample(tex, samp, in.uv_next);
+    return mix(here, next, in.extra.x);
+}
+
+// How a lit particle is shaded: ambient plus the key light on a rounded
+// normal (a puff reads as a ball, not a card), wrapped so the dark side keeps
+// some light, and cut by the ground's own day and night: a particle whose
+// ground faces away from the light is in that ground's shadow.
+fn lighting(in: VsOut) -> vec3<f32> {
+    let c = in.corner * 2.0;
+    let toward_cam = normalize(cross(in.right, in.up)) * sign(dot(cross(in.right, in.up), -in.view_pos));
+    let bulge = sqrt(max(1.0 - dot(c, c), 0.0));
+    let n = normalize(in.right * c.x + in.up * c.y + toward_cam * (bulge + 0.35));
+    var l = g.light_dir.xyz;
+    if (g.light_dir.w > 0.5) {
+        l = g.light_dir.xyz - in.view_pos;
+    }
+    l = normalize(l);
+    let wrap = clamp(dot(n, l) * 0.6 + 0.4, 0.0, 1.0);
+    var day = 1.0;
+    if (dot(in.light.xyz, in.light.xyz) > 0.25) {
+        day = smoothstep(-0.12, 0.2, dot(normalize(in.light.xyz), l));
+    }
+    return g.ambient.rgb + g.light_color.rgb * wrap * day;
 }
 
 // A depth-buffer value as a distance in front of the camera.
@@ -127,8 +183,11 @@ fn ign(pix: vec2<u32>) -> f32 {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-    let texel = textureSample(tex, samp, in.uv);
+    let texel = texel_of(in);
     var col = texel * in.color;
+    if (in.light.w > 0.0) {
+        col = vec4<f32>(col.rgb * mix(vec3<f32>(1.0), lighting(in), in.light.w), col.a);
+    }
     // Fully transparent texels are discarded so depth-adjacent particles don't
     // fog each other's edges with invisible quads.
     if (col.a <= 0.001) {
@@ -158,4 +217,31 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         col = attenuate(col, 1.0 - f);
     }
     return col;
+}
+
+// The scene as drawn before the particles, half resolution: what heat haze
+// bends. Bound only for the Distortion pipeline.
+@group(3) @binding(0) var scene_tex: texture_2d<f32>;
+@group(3) @binding(1) var scene_samp: sampler;
+
+// Heat haze: the scene behind the particle, pushed sideways by the texture's
+// red and green (0.5 = no push) times the strength, faded by the particle's
+// alpha. A plain white quad bends nothing but still shimmers with its alpha.
+@fragment
+fn fs_distort(in: VsOut) -> @location(0) vec4<f32> {
+    let texel = texel_of(in);
+    let a = texel.a * in.color.a;
+    if (a <= 0.001) {
+        discard;
+    }
+    let size = vec2<f32>(textureDimensions(scene_depth));
+    let screen = in.clip.xy / size;
+    let push = (texel.rg - vec2<f32>(0.5)) * 2.0 * in.extra.y * a;
+    let behind = textureSampleLevel(scene_tex, scene_samp, screen + push, 0.0);
+    var keep = 1.0;
+    if (in.soft > 0.0) {
+        let d = textureLoad(scene_depth, vec2<i32>(in.clip.xy), 0).x;
+        keep = clamp((view_distance(d) - view_distance(in.clip.z)) / in.soft, 0.0, 1.0);
+    }
+    return vec4<f32>(behind.rgb, a * keep);
 }

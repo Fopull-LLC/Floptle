@@ -55,6 +55,8 @@ pub fn collect_billboards(
         let speed_stretch = ct.look.speed_stretch.max(0.0);
         let flip = ct.look.flipbook;
         let soft = ct.look.soft.max(0.0);
+        let lit = if ct.look.lit { 1.0 } else { 0.0 };
+        let distortion = ct.look.distortion;
         let start = instances.len();
         inst.sample_track(ti, |s| {
             let world = xf.transform_point3(s.pos);
@@ -73,7 +75,8 @@ pub fn collect_billboards(
             );
             // Flipbook UV sub-rect [min_u, min_v, du, dv] packed into the spare
             // channels (full quad [0,0,1,1] when there's no flipbook).
-            let uv = flipbook_uv(flip, &s);
+            let (uv, next, t) = flipbook_uv(flip, &s);
+            let effect_up = inst.up;
             instances.push(ParticleInstance {
                 pos_rot: [world.x, world.y, world.z, spin],
                 size: [w, h, uv[0], uv[1]],
@@ -81,6 +84,8 @@ pub fn collect_billboards(
                 basis_right: [right.x, right.y, right.z, uv[2]],
                 basis_up: [up.x, up.y, up.z, uv[3]],
                 params: [soft, 0.0, 0.0, 0.0],
+                light: [effect_up.x, effect_up.y, effect_up.z, lit],
+                extra: [next[0], next[1], t, distortion],
             });
         });
         if instances.len() == start {
@@ -147,6 +152,7 @@ fn ribbon_segment(
         basis_right: [right.x, right.y, right.z, 1.0],
         basis_up: [seg.x, seg.y, seg.z, r0 - r1],
         params: [soft, 0.0, 0.0, 0.0],
+        ..Default::default()
     }
 }
 
@@ -331,27 +337,34 @@ fn particle_blend(b: Blend) -> ParticleBlend {
         Blend::Premultiplied => ParticleBlend::Premultiplied,
         Blend::Screen => ParticleBlend::Screen,
         Blend::Multiply => ParticleBlend::Multiply,
+        Blend::Distortion => ParticleBlend::Distortion,
     }
 }
 
 /// The UV sub-rect `[min_u, min_v, du, dv]` a particle samples from a flipbook atlas
-/// this frame — the full quad `[0, 0, 1, 1]` when the track has no flipbook. The
-/// frame index comes from the particle's age (over its life, or a fixed-fps loop).
-fn flipbook_uv(flip: Option<Flipbook>, s: &ParticleSample) -> [f32; 4] {
-    let Some(fb) = flip else { return [0.0, 0.0, 1.0, 1.0] };
+/// this frame — the full quad `[0, 0, 1, 1]` when the track has no flipbook — with
+/// the next frame's UV min and how far into it the particle is, for a track that
+/// crossfades its frames (`0` for one that steps). The frame comes from the
+/// particle's age (over its life, or a fixed-fps loop).
+fn flipbook_uv(flip: Option<Flipbook>, s: &ParticleSample) -> ([f32; 4], [f32; 2], f32) {
+    let Some(fb) = flip else { return ([0.0, 0.0, 1.0, 1.0], [0.0, 0.0], 0.0) };
     let (cols, rows) = (fb.cols.max(1), fb.rows.max(1));
     let n = cols * rows;
     if n <= 1 {
-        return [0.0, 0.0, 1.0, 1.0];
+        return ([0.0, 0.0, 1.0, 1.0], [0.0, 0.0], 0.0);
     }
-    let raw = match fb.mode {
-        FlipMode::OverLife => (s.age01.clamp(0.0, 1.0) * n as f32) as u32,
-        FlipMode::LoopFps => (s.age.max(0.0) * fb.fps.max(0.0)) as u32,
+    let (pos, looping) = match fb.mode {
+        FlipMode::OverLife => (s.age01.clamp(0.0, 1.0) * n as f32, false),
+        FlipMode::LoopFps => (s.age.max(0.0) * fb.fps.max(0.0), true),
     };
-    let f = (raw % n).min(n - 1);
-    let (cx, cy) = (f % cols, f / cols);
+    let f = (pos as u32 % n).min(n - 1);
+    // Over a life the last frame holds; a loop wraps to the first.
+    let next = if looping { (f + 1) % n } else { (f + 1).min(n - 1) };
+    let t = if fb.blend && next != f { pos.fract() } else { 0.0 };
     let (du, dv) = (1.0 / cols as f32, 1.0 / rows as f32);
-    [cx as f32 * du, cy as f32 * dv, du, dv]
+    let min = |f: u32| [(f % cols) as f32 * du, (f / cols) as f32 * dv];
+    let here = min(f);
+    ([here[0], here[1], du, dv], min(next), t)
 }
 
 /// The world-space in-plane basis (+X width axis, +Y height axis) a particle's quad
@@ -688,16 +701,50 @@ mod tests {
             age01,
         };
         // No flipbook → the full quad.
-        assert_eq!(flipbook_uv(None, &s(0.5)), [0.0, 0.0, 1.0, 1.0]);
-        let fb = Some(Flipbook { cols: 4, rows: 4, mode: FlipMode::OverLife, fps: 12.0 });
+        assert_eq!(flipbook_uv(None, &s(0.5)).0, [0.0, 0.0, 1.0, 1.0]);
+        let fb = Some(Flipbook { cols: 4, rows: 4, mode: FlipMode::OverLife, fps: 12.0, blend: false });
         // Frame 0 at birth: top-left cell, 1/4 wide/tall.
-        assert_eq!(flipbook_uv(fb, &s(0.0)), [0.0, 0.0, 0.25, 0.25]);
+        assert_eq!(flipbook_uv(fb, &s(0.0)).0, [0.0, 0.0, 0.25, 0.25]);
         // Just before death: last cell (frame 15) → col 3, row 3.
-        let last = flipbook_uv(fb, &s(0.999));
+        let last = flipbook_uv(fb, &s(0.999)).0;
         assert!((last[0] - 0.75).abs() < 1e-6 && (last[1] - 0.75).abs() < 1e-6, "{last:?}");
         // Mid-life (frame 8) → col 0, row 2.
-        let mid = flipbook_uv(fb, &s(0.5));
+        let mid = flipbook_uv(fb, &s(0.5)).0;
         assert!((mid[0] - 0.0).abs() < 1e-6 && (mid[1] - 0.5).abs() < 1e-6, "{mid:?}");
+        // Stepping, a frame never crossfades.
+        assert_eq!(flipbook_uv(fb, &s(0.53)).2, 0.0);
+    }
+
+    /// A blending flipbook crossfades each frame into the next, so a slow
+    /// flipbook plays smoothly: partway through frame 8 it names frame 9 and
+    /// how far in it is. The last frame of a life holds; a loop wraps.
+    #[test]
+    fn a_blending_flipbook_crossfades_into_the_next_frame() {
+        use crate::effect::{FlipMode, Flipbook};
+        let s = |age: f32, age01: f32| ParticleSample {
+            pos: Vec3::ZERO,
+            velocity: Vec3::ZERO,
+            frame: Quat::IDENTITY,
+            size: 1.0,
+            squash: 1.0,
+            rotation: Vec3::ZERO,
+            color: [1.0; 4],
+            age,
+            age01,
+        };
+        let life = Some(Flipbook { cols: 4, rows: 4, mode: FlipMode::OverLife, fps: 12.0, blend: true });
+        // 8.25 frames in: frame 8 (col 0, row 2) a quarter of the way to 9.
+        let (here, next, t) = flipbook_uv(life, &s(0.0, 8.25 / 16.0));
+        assert!((here[0], here[1]) == (0.0, 0.5), "{here:?}");
+        assert!((next[0] - 0.25).abs() < 1e-6 && (next[1] - 0.5).abs() < 1e-6, "{next:?}");
+        assert!((t - 0.25).abs() < 1e-4, "{t}");
+        // The last frame of a life has nothing after it.
+        assert_eq!(flipbook_uv(life, &s(0.0, 0.999)).2, 0.0);
+        // A loop at 12 fps, 15.5 frames in: frame 15 halfway back to frame 0.
+        let looped = Some(Flipbook { cols: 4, rows: 4, mode: FlipMode::LoopFps, fps: 12.0, blend: true });
+        let (_, next, t) = flipbook_uv(looped, &s(15.5 / 12.0, 0.0));
+        assert_eq!(next, [0.0, 0.0]);
+        assert!((t - 0.5).abs() < 1e-3, "{t}");
     }
 
     /// Reconstruct a ribbon segment's endpoints from its packed instance: the up

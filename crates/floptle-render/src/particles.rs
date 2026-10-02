@@ -32,16 +32,21 @@ pub enum ParticleBlend {
     Screen = 3,
     /// Multiply (darken) — order-dependent.
     Multiply = 4,
+    /// Heat haze: the scene behind, bent by the texture — order-dependent.
+    /// Drawn only when the caller hands [`Particles::draw`] a picture of the
+    /// scene to bend.
+    Distortion = 5,
 }
 
 impl ParticleBlend {
     /// Every mode, in discriminant order — one pipeline is built per entry.
-    pub const ALL: [ParticleBlend; 5] = [
+    pub const ALL: [ParticleBlend; 6] = [
         ParticleBlend::Alpha,
         ParticleBlend::Additive,
         ParticleBlend::Premultiplied,
         ParticleBlend::Screen,
         ParticleBlend::Multiply,
+        ParticleBlend::Distortion,
     ];
 
     /// The wgpu blend state this mode composites with.
@@ -49,7 +54,7 @@ impl ParticleBlend {
         use wgpu::{BlendComponent as C, BlendFactor as F, BlendOperation as Op};
         let add = |src, dst| C { src_factor: src, dst_factor: dst, operation: Op::Add };
         match self {
-            ParticleBlend::Alpha => wgpu::BlendState::ALPHA_BLENDING,
+            ParticleBlend::Alpha | ParticleBlend::Distortion => wgpu::BlendState::ALPHA_BLENDING,
             // Light accumulation: SrcAlpha·color summed into the target.
             ParticleBlend::Additive => wgpu::BlendState {
                 color: add(F::SrcAlpha, F::One),
@@ -86,7 +91,7 @@ impl ParticleBlend {
     /// twice. The other modes carry their weight in the colour.
     fn fades_by_alpha(self) -> f64 {
         match self {
-            ParticleBlend::Alpha | ParticleBlend::Additive => 1.0,
+            ParticleBlend::Alpha | ParticleBlend::Additive | ParticleBlend::Distortion => 1.0,
             _ => 0.0,
         }
     }
@@ -99,7 +104,7 @@ impl ParticleBlend {
 /// write the very same buffer on-device (proposal §4.4 — the sim's output is the
 /// instance buffer).
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ParticleInstance {
     /// xyz = camera-relative position, w = spin angle (radians).
     pub pos_rot: [f32; 4],
@@ -117,6 +122,13 @@ pub struct ParticleInstance {
     /// much depth in front of whatever it intersects, so a sprite crossing a
     /// floor has no hard line. 0 = a hard edge. yzw unused.
     pub params: [f32; 4],
+    /// xyz = the effect's up, so a lit particle over a planet's night side is
+    /// in its shadow (zero = no ground to ask); w = how lit it is, 0 for a
+    /// track that is not lit.
+    pub light: [f32; 4],
+    /// xy = the next flipbook frame's UV min, z = how far into it (0 = this
+    /// frame only), w = the Distortion blend's strength.
+    pub extra: [f32; 4],
 }
 
 /// One instanced draw: a contiguous `range` of this frame's instance array, with
@@ -134,7 +146,7 @@ pub struct ParticleBatch {
 /// itself spans the per-instance basis and does not read them — they stay
 /// for the packer's convenience and the future on-device backend).
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ParticleGlobals {
     pub view_proj: [[f32; 4]; 4],
     /// The camera's world right vector (w unused).
@@ -149,6 +161,13 @@ pub struct ParticleGlobals {
     /// x, y = the projection's `[2][2]` and `[3][2]`, z = 1 for an orthographic
     /// projection (0 for perspective), w unused.
     pub proj_z: [f32; 4],
+    /// The key light for lit particles: xyz = the way to it, w = 0; or, w = 1,
+    /// its camera-relative position (a star).
+    pub light_dir: [f32; 4],
+    /// The key light's colour times its intensity (w unused).
+    pub light_color: [f32; 4],
+    /// Ambient light on lit particles (w unused).
+    pub ambient: [f32; 4],
 }
 
 impl ParticleGlobals {
@@ -167,6 +186,9 @@ pub struct Particles {
     /// The depth view bound last frame and its bind group, remade when the
     /// view changes (a resize, or a different target).
     depth_bind: Option<(wgpu::TextureView, wgpu::BindGroup)>,
+    /// The Distortion pipeline's picture of the scene, bound the same way.
+    scene_layout: wgpu::BindGroupLayout,
+    scene_bind: Option<(wgpu::TextureView, wgpu::BindGroup)>,
     /// White 1×1 for untextured tracks (the tint shows through unchanged).
     default_bind: wgpu::BindGroup,
     quad_vbuf: wgpu::Buffer,
@@ -188,13 +210,15 @@ const CORNER_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayou
     }],
 };
 
-const INSTANCE_ATTRS: [wgpu::VertexAttribute; 6] = [
+const INSTANCE_ATTRS: [wgpu::VertexAttribute; 8] = [
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 0, shader_location: 1 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 2 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 3 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 48, shader_location: 4 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 64, shader_location: 5 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 80, shader_location: 6 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 96, shader_location: 7 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 112, shader_location: 8 },
 ];
 
 const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
@@ -255,14 +279,49 @@ impl Particles {
             bind_group_layouts: &[Some(&globals_layout), Some(&tex_layout), Some(&depth_layout)],
             immediate_size: 0,
         });
+        // Group 3, the Distortion pipeline's alone: the scene as drawn before the
+        // particles, which heat haze samples and bends.
+        let scene_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("particles-scene"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let distort_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("particles-distortion"),
+            bind_group_layouts: &[
+                Some(&globals_layout),
+                Some(&tex_layout),
+                Some(&depth_layout),
+                Some(&scene_layout),
+            ],
+            immediate_size: 0,
+        });
 
-        let make_pipeline = |label: &str, blend: wgpu::BlendState, fog_identity: f64, fades_by_alpha: f64| {
+        let make_pipeline = |label: &str, b: ParticleBlend| {
+            let (blend, fog_identity, fades_by_alpha) = (b.state(), b.fog_identity(), b.fades_by_alpha());
+            let distort = b == ParticleBlend::Distortion;
             // Per-pipeline fog identity (see ParticleBlend::fog_identity) via a WGSL
             // override constant on the fragment stage.
             let fs_consts = [("fog_identity", fog_identity), ("fades_by_alpha", fades_by_alpha)];
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
-                layout: Some(&layout),
+                layout: Some(if distort { &distort_layout } else { &layout }),
                 vertex: wgpu::VertexState {
                     module: &module,
                     entry_point: Some("vs"),
@@ -282,7 +341,7 @@ impl Particles {
                 multisample: wgpu::MultisampleState::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &module,
-                    entry_point: Some("fs"),
+                    entry_point: Some(if distort { "fs_distort" } else { "fs" }),
                     compilation_options: wgpu::PipelineCompilationOptions {
                         constants: &fs_consts,
                         ..Default::default()
@@ -300,7 +359,7 @@ impl Particles {
         // One pipeline per blend mode, in discriminant order (indexed by `blend as usize`).
         let pipelines: Vec<wgpu::RenderPipeline> = ParticleBlend::ALL
             .iter()
-            .map(|b| make_pipeline(&format!("particles-{b:?}"), b.state(), b.fog_identity(), b.fades_by_alpha()))
+            .map(|b| make_pipeline(&format!("particles-{b:?}"), *b))
             .collect();
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -373,6 +432,8 @@ impl Particles {
             globals_bind,
             depth_layout,
             depth_bind: None,
+            scene_layout,
+            scene_bind: None,
             default_bind,
             quad_vbuf,
             quad_ibuf,
@@ -401,6 +462,9 @@ impl Particles {
     /// already there). `instances` is the packed per-frame array; each batch draws
     /// its `range` with its texture (resolved through `raster`'s material registry)
     /// and blend. Batches draw in order — put Alpha (pre-sorted) before Additive.
+    ///
+    /// `scene` is a picture of the scene as drawn so far, for Distortion
+    /// batches to bend; without one they are skipped.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
@@ -411,6 +475,7 @@ impl Particles {
         instances: &[ParticleInstance],
         batches: &[ParticleBatch],
         raster: &Raster,
+        scene: Option<(&wgpu::TextureView, &wgpu::Sampler)>,
     ) {
         if instances.is_empty() || batches.is_empty() {
             return;
@@ -430,6 +495,20 @@ impl Particles {
             self.depth_bind = Some((depth.clone(), bind));
         }
         let depth_bind = &self.depth_bind.as_ref().expect("bound above").1;
+        if let Some((view, sampler)) = scene
+            && self.scene_bind.as_ref().is_none_or(|(v, _)| v != view)
+        {
+            let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("particles-scene"),
+                layout: &self.scene_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+                ],
+            });
+            self.scene_bind = Some((view.clone(), bind));
+        }
+        let scene_bind = scene.and(self.scene_bind.as_ref()).map(|(_, b)| b);
 
         let mut encoder = gpu
             .device
@@ -462,6 +541,10 @@ impl Particles {
             for batch in batches {
                 if batch.range.is_empty() {
                     continue;
+                }
+                if batch.blend == ParticleBlend::Distortion {
+                    let Some(sb) = scene_bind else { continue };
+                    rp.set_bind_group(3, sb, &[]);
                 }
                 rp.set_pipeline(&self.pipelines[batch.blend as usize]);
                 let bind = batch
