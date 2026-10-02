@@ -626,10 +626,10 @@ pub struct ScrollSpec {
     /// Design units per wheel notch.
     #[serde(default = "default_scroll_speed")]
     pub speed: f32,
-    /// Dragging the view's background pans the content — the touch/kinetic
-    /// idiom, and the only way to scroll a list with a thumbstick-less pointer
-    /// device. Off by default: on a view full of buttons, a drag that scrolled
-    /// would fight every press.
+    /// Dragging the content with the mouse pans it, even from a button or a
+    /// slider once the drag has gone past a small slop along the scroll axis.
+    /// Off by default for the mouse. A finger pans every scroll view, since a
+    /// phone has no wheel.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub drag: bool,
 }

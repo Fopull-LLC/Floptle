@@ -335,6 +335,21 @@ fn layer_masks(
     out
 }
 
+
+/// How far a press inside a scroll view travels, in the view's design units,
+/// before it is a pan rather than a press. About a fingertip's wobble.
+const SCROLL_SLOP: f32 = 12.0;
+
+/// A press on an element inside a pannable scroll view, waiting to find out
+/// whether it is a press or the start of a pan.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ScrollArm {
+    view: u32,
+    /// The pointer when the press began, in the view's design units.
+    start: [f32; 2],
+    /// How far the view can scroll on each axis.
+    max: [f32; 2],
+}
 impl Editor {
     /// Register a project font with the UI renderer (reads the file once; the
     /// renderer remembers parse failures and falls back to the embedded font).
@@ -1135,6 +1150,16 @@ impl Editor {
         true
     }
 
+    /// Whether a scroll view pans when the mouse drags its content
+    /// (`scroll.drag`). A finger pans any scroll view.
+    fn ui_scroll_drags(&self, view: u32) -> bool {
+        self.world
+            .entity_with::<Transform>(view)
+            .and_then(|e| self.world.get::<ElementSpec>(e))
+            .and_then(|s| s.scroll)
+            .is_some_and(|sc| sc.drag)
+    }
+
     /// Move an interactive slider to `value`, and say so.
     ///
     /// `changed` once per frame the value moved, not every held frame: a
@@ -1469,8 +1494,10 @@ impl Editor {
         // A finger that just landed is the UI's if it landed on something
         // interactive (it presses it, here, this frame), and the game's
         // otherwise — see `touch`.
+        // A finger on anything inside a scroll view is the UI's too, interactive
+        // or not: it may be the start of a pan, and a phone has no wheel.
         if let Some(id) = self.touches.pending.take()
-            && hover.is_some()
+            && (hover.is_some() || !scroll_hits.is_empty())
         {
             self.touches.set_ui(id);
             self.track_mouse_button(0, true);
@@ -1483,6 +1510,12 @@ impl Editor {
             if self.touches.lifted(id) {
                 self.track_mouse_button(0, false);
             }
+        }
+        if pressed_edge {
+            self.ui_press_slider = hover.and_then(|h| {
+                let e = self.world.entity_with::<Transform>(h)?;
+                Some((h, self.world.get::<ElementSpec>(e)?.slider.as_ref()?.value))
+            });
         }
         if pressed_edge && let Some(h) = hover {
             self.ui_active = Some(h);
@@ -1543,6 +1576,47 @@ impl Editor {
             }
             self.ui_slider_to(id, s.min + t * (s.max - s.min));
         }
+        // ---- a press that turns into a pan ------------------------------------
+        // Inside a pannable scroll view a press on a button or a slider might be
+        // the start of a scroll, as on every phone. Once it has travelled past
+        // the slop, mostly along an axis the view scrolls, it is one: the
+        // element is let go without a click (a slider goes back to where it
+        // was) and the content follows the pointer. Mostly across the axis, the
+        // element keeps the gesture, so a slider in a list still slides.
+        let finger = self.touches.ui_finger.is_some();
+        if pressed_edge
+            && self.ui_active.is_some()
+            && let Some(&(view, max)) = scroll_hits.last()
+            && (finger || self.ui_scroll_drags(view))
+            && let Some(p) = scroll_ptr
+        {
+            self.ui_scroll_arm = Some(ScrollArm { view, start: p, max });
+        }
+        if !down {
+            self.ui_scroll_arm = None;
+        } else if let Some(arm) = self.ui_scroll_arm
+            && let Some(p) = scroll_ptr
+        {
+            let d = [p[0] - arm.start[0], p[1] - arm.start[1]];
+            if d[0].hypot(d[1]) > SCROLL_SLOP {
+                self.ui_scroll_arm = None;
+                let pans = (arm.max[1] > 0.0 && d[1].abs() >= d[0].abs())
+                    || (arm.max[0] > 0.0 && d[0].abs() >= d[1].abs());
+                if pans {
+                    if let Some(a) = self.ui_active.take() {
+                        self.ui_events.push((a, "released"));
+                        if let Some((id, was)) = self.ui_press_slider
+                            && id == a
+                        {
+                            self.ui_slider_to(a, was);
+                        }
+                    }
+                    // From where the press began, so the content catches up
+                    // with the slop on this same frame.
+                    self.ui_scroll_drag = Some((arm.view, arm.start));
+                }
+            }
+        }
         if released_edge && let Some(a) = self.ui_active.take() {
             self.ui_events.push((a, "released"));
             if hover == Some(a) {
@@ -1579,12 +1653,7 @@ impl Editor {
         if pressed_edge
             && self.ui_active.is_none()
             && let Some(&(view, _)) = scroll_hits.last()
-            && self
-                .world
-                .entity_with::<Transform>(view)
-                .and_then(|e| self.world.get::<ElementSpec>(e))
-                .and_then(|s| s.scroll)
-                .is_some_and(|sc| sc.drag)
+            && (finger || self.ui_scroll_drags(view))
             && let Some(p) = scroll_ptr
         {
             self.ui_scroll_drag = Some((view, p));
@@ -3498,6 +3567,130 @@ mod tests {
         let ev = frame(&mut ed);
         assert!(!ev.iter().any(|(_, e)| *e == "clicked"), "a game's finger clicked the button it crossed: {ev:?}");
         assert!(!ed.input_buttons[0], "the game's finger held the mouse button");
+    }
+
+    /// **A finger scrolls a list full of buttons.** Put a finger on a row's
+    /// button and drag up: the list follows, and the button is let go without
+    /// a click. A tap still clicks, and a slider in the list still slides
+    /// sideways. No `scroll.drag` on the view: a finger pans any scroll view.
+    #[test]
+    fn a_finger_dragging_over_a_button_scrolls_the_list_and_clicks_nothing() {
+        use crate::touch::Phase;
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        ed.player_mode = true;
+        ed.playing = true;
+        let layer = ed.world.spawn();
+        ed.world.insert(layer, Transform::IDENTITY);
+        ed.world.insert(layer, UiLayer::default());
+        let view = ed.world.spawn();
+        ed.world.insert(view, Transform::IDENTITY);
+        ed.world.insert(view, Parent(layer));
+        ed.world.insert(
+            view,
+            ElementSpec {
+                size: [Size::Pct(1.0), Size::Pct(1.0)],
+                scroll: Some(floptle_ui::ScrollSpec::default()),
+                ..Default::default()
+            },
+        );
+        let mut rows = Vec::new();
+        for i in 0..30 {
+            let r = ed.world.spawn();
+            ed.world.insert(r, Transform::IDENTITY);
+            ed.world.insert(r, Parent(view));
+            let slider = (i == 0).then(|| SliderSpec { value: 0.5, interact: true, ..Default::default() });
+            ed.world.insert(
+                r,
+                ElementSpec {
+                    place: floptle_ui::Place::Free { pos: [0.0, i as f32 * 100.0] },
+                    size: [Size::Pct(1.0), Size::Fixed(100.0)],
+                    // Row 1 is a plain label: nothing to press.
+                    button: i > 1,
+                    slider,
+                    ..Default::default()
+                },
+            );
+            rows.push(r);
+        }
+        let (w, h) = ed.game_surface_px().expect("a player has a surface").1.into();
+        let frame = |ed: &mut crate::Editor| {
+            ed.ui_interact();
+            let ev = std::mem::take(&mut ed.ui_events);
+            ed.touches.end_frame();
+            ev
+        };
+        let offset = |ed: &crate::Editor| ed.world.get::<ElementSpec>(view).unwrap().scroll.unwrap().offset;
+        let slider_value = |ed: &crate::Editor| ed.world.get::<ElementSpec>(rows[0]).unwrap().slider.unwrap().value;
+
+        // A tap on a row's button clicks it.
+        let y = h * 0.6;
+        ed.note_touch(1, Phase::Began, w * 0.5, y, None);
+        frame(&mut ed);
+        ed.note_touch(1, Phase::Ended, w * 0.5, y, None);
+        let ev = frame(&mut ed);
+        assert!(ev.iter().any(|(_, e)| *e == "clicked"), "a tap must still click: {ev:?}");
+        frame(&mut ed);
+
+        // A drag up from the same button scrolls and clicks nothing.
+        ed.note_touch(2, Phase::Began, w * 0.5, y, None);
+        let ev = frame(&mut ed);
+        assert!(ev.iter().any(|(_, e)| *e == "pressed"), "the finger lands on a button: {ev:?}");
+        let mut all = Vec::new();
+        for k in 1..=10 {
+            ed.note_touch(2, Phase::Moved, w * 0.5, y - k as f32 * h * 0.03, None);
+            all.extend(frame(&mut ed));
+        }
+        ed.note_touch(2, Phase::Ended, w * 0.5, y - h * 0.3, None);
+        all.extend(frame(&mut ed));
+        frame(&mut ed);
+        assert!(!all.iter().any(|(_, e)| *e == "clicked"), "a drag that scrolled clicked a button: {all:?}");
+        assert!(all.iter().any(|(_, e)| *e == "released"), "the pressed button is let go: {all:?}");
+        let scrolled = offset(&ed);
+        assert!(scrolled > 50.0, "the list should have followed the finger, offset {scrolled}");
+
+        // Back to the top. A finger on the plain label row scrolls too: it lands
+        // on nothing interactive, and is still the list's.
+        ed.world.get_mut::<ElementSpec>(view).unwrap().scroll.as_mut().unwrap().offset = 0.0;
+        frame(&mut ed);
+        let label = ed.script_host.ui_rect(rows[1].index()).expect("the label row was placed");
+        let ly = label[1] + label[3] * 0.5;
+        ed.note_touch(5, Phase::Began, w * 0.5, ly, None);
+        frame(&mut ed);
+        for k in 1..=10 {
+            ed.note_touch(5, Phase::Moved, w * 0.5, ly - k as f32 * h * 0.03, None);
+            frame(&mut ed);
+        }
+        ed.note_touch(5, Phase::Ended, w * 0.5, ly - h * 0.3, None);
+        frame(&mut ed);
+        frame(&mut ed);
+        assert!(offset(&ed) > 50.0, "a finger on a label should scroll the list, offset {}", offset(&ed));
+        ed.world.get_mut::<ElementSpec>(view).unwrap().scroll.as_mut().unwrap().offset = 0.0;
+        frame(&mut ed);
+
+        // The slider row: a sideways drag slides it.
+        let sy = h * 0.02;
+        ed.note_touch(3, Phase::Began, w * 0.5, sy, None);
+        frame(&mut ed);
+        ed.note_touch(3, Phase::Moved, w * 0.8, sy, None);
+        frame(&mut ed);
+        ed.note_touch(3, Phase::Ended, w * 0.8, sy, None);
+        frame(&mut ed);
+        frame(&mut ed);
+        assert!(slider_value(&ed) > 0.7, "a sideways drag must slide the slider, value {}", slider_value(&ed));
+        assert_eq!(offset(&ed), 0.0, "and not scroll the list");
+
+        // A drag down the slider row is a scroll, and the slider goes back.
+        let before = slider_value(&ed);
+        ed.note_touch(4, Phase::Began, w * 0.3, sy, None);
+        frame(&mut ed);
+        for k in 1..=10 {
+            ed.note_touch(4, Phase::Moved, w * 0.3, sy + k as f32 * h * 0.03, None);
+            frame(&mut ed);
+        }
+        ed.note_touch(4, Phase::Ended, w * 0.3, sy + h * 0.3, None);
+        frame(&mut ed);
+        frame(&mut ed);
+        assert_eq!(slider_value(&ed), before, "a press that became a pan must put the slider back");
     }
 
     /// A drag tells the game the value moved: once per frame it moved, never

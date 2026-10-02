@@ -396,8 +396,7 @@ impl ApplicationHandler for Player {
         // Raw motion, so a look never stalls against a window edge while the
         // pointer is grabbed.
         if let DeviceEvent::MouseMotion { delta } = event {
-            self.ed.input_mouse_delta.0 += delta.0 as f32;
-            self.ed.input_mouse_delta.1 += delta.1 as f32;
+            self.ed.note_raw_mouse_motion(delta.0 as f32, delta.1 as f32);
         }
     }
 }

@@ -2340,6 +2340,12 @@ struct Editor {
     /// gesture in flight: (scroll view, last pointer position in design units).
     ui_scroll_grab: Option<u32>,
     ui_scroll_drag: Option<(u32, [f32; 2])>,
+    /// A press inside a pannable scroll view that landed on an element and has
+    /// not yet decided whether it works that element or pans the view.
+    ui_scroll_arm: Option<ui_game::ScrollArm>,
+    /// The slider the current press grabbed and its value before the press,
+    /// so a press that turns into a pan can put it back.
+    ui_press_slider: Option<(u32, f32)>,
     /// Auto-repeat for a held direction (see `floptle_ui::nav::Repeat`).
     ui_nav_repeat: floptle_ui::nav::Repeat,
     /// This frame's delta, for UI navigation auto-repeat.

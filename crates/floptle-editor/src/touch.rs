@@ -87,6 +87,17 @@ impl Touches {
         }
     }
 
+    /// Whether any finger is down, or lifted this frame.
+    ///
+    /// While one is, raw mouse motion is not the mouse: a browser reports
+    /// every pointer's movement as device motion, a finger's included, so a
+    /// touch stick also turned a mouse-look camera and a look drag turned it
+    /// twice as fast. The frame a finger lifts counts, because its last
+    /// movement and its lift arrive together.
+    pub(crate) fn any(&self) -> bool {
+        !self.fingers.is_empty()
+    }
+
     /// Whether a finger has lifted (or never existed).
     pub(crate) fn lifted(&self, id: u64) -> bool {
         self.fingers.get(&id).is_none_or(|f| f.lifted.is_some())
@@ -143,6 +154,18 @@ impl Touches {
 }
 
 impl crate::Editor {
+    /// Raw mouse motion from the device, for the game's mouse delta. Dropped
+    /// while a finger is on the screen: a browser sends a finger's movement as
+    /// mouse motion too, and a finger reaches the game through
+    /// `input.touches()` alone.
+    pub(crate) fn note_raw_mouse_motion(&mut self, dx: f32, dy: f32) {
+        if self.touches.any() {
+            return;
+        }
+        self.input_mouse_delta.0 += dx;
+        self.input_mouse_delta.1 += dy;
+    }
+
     /// One touch event from the window, in the window's pixel space.
     ///
     /// A finger landing while no other finger works the UI moves the pointer
@@ -199,6 +222,39 @@ mod tests {
         t.note(1, Phase::Ended, 0.0, 0.0, None);
         let s = t.snapshot();
         assert_eq!((s[0].phase, s[0].began), ("ended", true));
+    }
+
+    /// A touch stick must not also turn a mouse-look camera: the browser's
+    /// copy of a finger's movement as mouse motion is dropped, and a real
+    /// mouse still moves the delta once the finger is gone.
+    #[test]
+    fn a_fingers_movement_is_never_also_mouse_motion() {
+        let mut ed = crate::Editor::default();
+        ed.note_touch(3, Phase::Began, 100.0, 100.0, None);
+        ed.note_touch(3, Phase::Moved, 140.0, 100.0, None);
+        ed.note_raw_mouse_motion(40.0, 0.0);
+        assert_eq!(ed.input_mouse_delta, (0.0, 0.0), "a finger drag reached the mouse delta");
+        assert_eq!(ed.touches.snapshot()[0].dx, 40.0, "the drag is still a touch");
+        ed.note_touch(3, Phase::Ended, 140.0, 100.0, None);
+        ed.touches.end_frame();
+        ed.note_raw_mouse_motion(5.0, -2.0);
+        assert_eq!(ed.input_mouse_delta, (5.0, -2.0), "with no finger down the mouse is the mouse");
+    }
+
+    #[test]
+    fn a_finger_down_or_lifting_this_frame_is_on_the_screen() {
+        let mut t = Touches::default();
+        assert!(!t.any());
+        t.note(7, Phase::Began, 10.0, 10.0, None);
+        assert!(t.any(), "a finger that just landed");
+        t.end_frame();
+        t.note(7, Phase::Moved, 20.0, 10.0, None);
+        assert!(t.any(), "a finger dragging");
+        t.end_frame();
+        t.note(7, Phase::Ended, 25.0, 10.0, None);
+        assert!(t.any(), "the frame it lifts still counts: its last move came with the lift");
+        t.end_frame();
+        assert!(!t.any(), "and the frame after, the mouse is the mouse again");
     }
 
     #[test]

@@ -4246,6 +4246,11 @@ impl ScriptHost {
         *self.ui_rects.borrow_mut() = map;
     }
 
+    /// An element's screen rect from the last UI pass (`node:uiRect()`).
+    pub fn ui_rect(&self, id: u32) -> Option<[f32; 4]> {
+        self.ui_rects.borrow().get(&id).copied()
+    }
+
     /// Drain the nodes scripts asked to remove via `destroy(...)` (entity indices).
     pub fn take_destroy_requests(&self) -> Vec<u32> {
         std::mem::take(&mut *self.destroy_queue.borrow_mut())

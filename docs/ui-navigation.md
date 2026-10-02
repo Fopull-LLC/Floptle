@@ -239,8 +239,16 @@ nobody has to know why — and shift forces sideways.
 scroll: ( speed: 48.0, drag: true ),
 ```
 
-`drag` pans the content by dragging its background. Off by default: in a view
-full of buttons, a drag that scrolled would fight every press.
+`drag` lets the mouse pan the content by dragging it. Off by default, so a
+desktop menu behaves like a desktop menu.
+
+**A finger pans every scroll view**, `drag` or not: a phone has no wheel. It
+works the way phone lists do. Put a finger anywhere in the view, on a row's
+label, button or slider, and drag along the scroll axis: once it has moved
+about 12 design units, it is a scroll. The button it landed on gets `released`
+and no `clicked`, and a slider it grabbed goes back to where it was. A drag
+mostly across the axis stays with the element, so a slider in a list still
+slides. A tap still clicks. With `drag` on, the mouse does all of this too.
 
 Scripts read and write `UiElement.scrollX` / `scrollY`.
 
