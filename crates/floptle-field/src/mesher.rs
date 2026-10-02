@@ -898,6 +898,75 @@ pub fn mesh_scratch(s: &MeshScratch, skirt: bool) -> ChunkMesh {
         }
     }
 
+    // A skirted coarse chunk caps, on its own faces, a passage its minimum closed.
+    // A passage narrower than a coarse cell that runs out of a finer neighbour is
+    // shut by the minimum at the shared face; the neighbour sees it open at full
+    // detail and its tunnel simply stops at the face, with nothing on this side to
+    // meet it, so you looked down the passage into the rock. The cap is a square
+    // a stride across, on the face, wherever a corner there reads solid to this
+    // chunk but open at full detail on both sides of the face, and only where its
+    // four neighbours on the face are rock at full detail, so it closes a passage
+    // and shows only through the neighbour's opening. A neighbour at
+    // this same stride closes the passage just the same, which leaves the cap
+    // buried.
+    if overlap {
+        let solid = |c: [i32; 3]| cv[corner_idx(c[0], c[1], c[2])] < 0.0;
+        let open = |c: [i32; 3]| {
+            s.at_fast([base[0] + c[0] * stride, base[1] + c[1] * stride, base[2] + c[2] * stride]) >= 0.0
+        };
+        let h = 0.5 * stride as f32 * voxel;
+        for axis in 0..3 {
+            let (e1, e2) = ((axis + 1) % 3, (axis + 2) % 3);
+            for (layer, out, toward) in [(0, -1, -1.0f32), (n, n + 1, 1.0)] {
+                for u in 0..=n {
+                    for w in 0..=n {
+                        let at = |l: i32, u: i32, w: i32| {
+                            let mut c = [0; 3];
+                            c[axis] = l;
+                            c[e1] = u;
+                            c[e2] = w;
+                            c
+                        };
+                        let c = at(layer, u, w);
+                        if !solid(c) || !open(c) || !open(at(out, u, w)) {
+                            continue;
+                        }
+                        // Rock at full detail all round it on the face: a passage
+                        // narrower than a cell, not the open air over a slope,
+                        // where a cap would stand up out of the ground.
+                        if ![(u - 1, w), (u + 1, w), (u, w - 1), (u, w + 1)].iter().all(|&(a, b)| !open(at(layer, a, b))) {
+                            continue;
+                        }
+                        let unit = |k: usize| {
+                            let mut v = Vec3::ZERO;
+                            v[k] = 1.0;
+                            v
+                        };
+                        let (x1, x2, nrm) = (unit(e1) * h, unit(e2) * h, unit(axis) * toward);
+                        let centre = Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32) * (stride as f32 * voxel);
+                        let col = s.color_at([base[0] + c[0] * stride, base[1] + c[1] * stride, base[2] + c[2] * stride]);
+                        let first = m.positions.len() as u32;
+                        for p in [centre - x1 - x2, centre + x1 - x2, centre + x1 + x2, centre - x1 + x2] {
+                            m.positions.push(p.to_array());
+                            m.normals.push(nrm.to_array());
+                            m.colors.push(col);
+                            // Its edges end the mesh like a seam's: hung with a
+                            // skirt back into the rock behind.
+                            rim.push(true);
+                        }
+                        // x1 × x2 runs along +axis: wind that way to face +axis.
+                        let [a, b, c, d] = [first, first + 1, first + 2, first + 3];
+                        if toward > 0.0 {
+                            m.indices.extend_from_slice(&[a, b, c, a, c, d]);
+                        } else {
+                            m.indices.extend_from_slice(&[a, c, b, a, d, c]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if skirt {
         add_skirt(&mut m, s, &rim);
     }
@@ -1667,6 +1736,71 @@ mod tests {
                 "stride {stride}: {against} of {tris} triangles ({:.3}%) face against their \
                  vertex normals (limit 0.05%)",
                 against as f64 * 100.0 / tris as f64
+            );
+        }
+    }
+
+    /// The nearest triangle a ray from `o` along `d` meets, front or back.
+    fn first_triangle(meshes: &[ChunkMesh], o: Vec3, d: Vec3) -> Option<f32> {
+        let mut best: Option<f32> = None;
+        for m in meshes {
+            let org = Vec3::from(m.origin);
+            for t in m.indices.as_chunks::<3>().0 {
+                let [a, b, c] = t.map(|i| Vec3::from(m.positions[i as usize]) + org);
+                let (e1, e2) = (b - a, c - a);
+                let p = d.cross(e2);
+                let det = e1.dot(p);
+                if det.abs() < 1e-9 {
+                    continue;
+                }
+                let s = o - a;
+                let u = s.dot(p) / det;
+                let q = s.cross(e1);
+                let v = d.dot(q) / det;
+                let t = e2.dot(q) / det;
+                if u >= 0.0 && v >= 0.0 && u + v <= 1.0 && t > 1e-4 && best.is_none_or(|b| t < b) {
+                    best = Some(t);
+                }
+            }
+        }
+        best
+    }
+
+    /// **A passage narrower than a coarse cell is capped where it meets a coarser
+    /// chunk.** The coarse chunk's minimum shuts it at the shared face, the finer
+    /// chunk's tunnel stops there, and the face belonged to the finer side, which
+    /// sees it open. Neither drew it, and from inside the passage you looked into
+    /// the rock. Rays down the passage now meet a surface within a coarse cell of
+    /// the face, at stride 1 against 2 and at 2 against 4.
+    #[test]
+    fn a_narrow_passage_into_a_coarser_chunk_is_capped_at_the_face() {
+        for (fine, coarse, half_width) in [(1, 2, 0.75f32), (2, 4, 1.5)] {
+            let mut f = ChunkField::new(1.0);
+            f.fill_with(
+                Vec3::new(-14.0, -14.0, -40.0),
+                Vec3::new(14.0, 14.0, 40.0),
+                |p| {
+                    let block = (p.abs() - Vec3::new(10.0, 10.0, 34.0)).max_element();
+                    let tube = (Vec3::new(p.x, p.y, 0.0).abs() - Vec3::new(half_width, half_width, 0.0)).max_element();
+                    block.max(-tube.max(p.z.abs() - 30.0))
+                },
+                |_| [0.5, 0.5, 0.5],
+            );
+            // The face between chunk z = -1 and chunk z = 0 is at z = 0.
+            let meshes: Vec<ChunkMesh> = f
+                .chunk_coords()
+                .into_iter()
+                .map(|c| mesh_chunk(&f, c, if c[2] < 0 { fine } else { coarse }, true))
+                .collect();
+            let mut worst = 0.0f32;
+            for (dx, dy) in [(0.0, 0.0), (0.2, 0.1), (-0.2, 0.15), (0.1, -0.2)] {
+                let o = Vec3::new(dx * half_width, dy * half_width, -12.0);
+                let to = first_triangle(&meshes, o, Vec3::Z).map_or(f32::INFINITY, |t| o.z + t);
+                worst = worst.max(to);
+            }
+            assert!(
+                worst <= coarse as f32 + 0.5,
+                "stride {fine} against {coarse}: a ray down the passage went to z = {worst} before meeting anything"
             );
         }
     }

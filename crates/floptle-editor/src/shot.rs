@@ -450,7 +450,9 @@ pub(crate) fn run(args: Args) -> i32 {
                 Projection::of_camera(fov_y, ortho, ortho_height, 0.05, 300_000.0),
             );
             ed.sync_terrain_gpu();
-            ed.settle_terrain_meshes(pos, std::time::Duration::from_secs(5));
+            // Centred where the frame loop centres terrain detail, as the first
+            // picture is: the game's `terrain.lodAnchor` when it names one.
+            ed.settle_terrain_meshes(ed.lod_center(pos), std::time::Duration::from_secs(5));
             ed.sync_map_meshes();
             ed.sync_map_paint();
             ed.sync_sky_shader();
