@@ -55,6 +55,10 @@ const CHUNK_VOXELS: usize = CHUNK_U * CHUNK_U * CHUNK_U;
 /// 4 gives the mesher and gradient stencils plenty of room either side of the surface.
 pub const BAND_VOXELS: f32 = 4.0;
 
+/// How many voxels past the band a flatten fades out over, along the plane's
+/// normal. Nothing further from the plane than band + this is touched.
+pub const FLATTEN_FALLOFF_VOXELS: f32 = 2.0;
+
 /// A chunk's contents. Absent from the map == `Uniform(+band)` (open air).
 #[derive(Clone, Debug)]
 enum Chunk {
@@ -876,7 +880,17 @@ impl ChunkField {
                         if across > radius {
                             continue;
                         }
-                        let w = s * profile.weight(across, radius);
+                        // Only near the plane. Rock or a cave further from it
+                        // than the band is left as it was: the plane's own SDF
+                        // is clamped to the band there, so pulling toward it
+                        // filled a cave under a pad solid down to the edge of
+                        // the brush's box, and left a flat wall where that edge
+                        // cut the cave.
+                        let reach = (along.abs() - band) / (FLATTEN_FALLOFF_VOXELS * self.voxel);
+                        if reach >= 1.0 {
+                            continue;
+                        }
+                        let w = s * profile.weight(across, radius) * (1.0 - reach.clamp(0.0, 1.0));
                         if w <= 0.0 {
                             continue;
                         }
@@ -2019,7 +2033,71 @@ mod tests {
         assert!(bad < 0.01, "the pad left {:.2}% of band voxels steeper than a distance field (worst {worst:.2})", bad * 100.0);
     }
 
-    /// Per-write-path |∇d| report. This is the diagnostic that found the real culprit:
+    /// **A pad over a cave leaves the cave alone.** A flatten used to pull every
+    /// voxel of its box toward the plane however far below it was, so a cave
+    /// under a pad filled solid down to the box's bottom face and was cut there
+    /// by a flat wall: a cliff in the field, which a planet shows as an
+    /// axis-aligned plug. Five pads at radius 15 over a cave 15 m down now touch
+    /// nothing more than the band plus two voxels from the plane, and leave no
+    /// cliff across a sign change.
+    #[test]
+    fn a_flatten_over_a_cave_changes_nothing_far_from_its_plane() {
+        let voxel = 1.5;
+        let mut f = ChunkField::new(voxel);
+        // A cave whose roof is 15 m under the pad, which the old brush's box
+        // (radius + 5 voxels deep) cut through its middle.
+        let cave = Vec3::new(0.0, -25.0, 0.0);
+        f.fill_with(
+            Vec3::new(-40.0, -45.0, -40.0),
+            Vec3::new(40.0, 6.0, 40.0),
+            |p| p.y.max(-((p - cave).length() - 10.0)),
+            |_| [0.5, 0.5, 0.5],
+        );
+        let plane = Vec3::new(0.0, 0.5, 0.0);
+        let (lo, hi) = ([-26, -28, -26], [26, 4, 26]);
+        let snapshot = |f: &ChunkField| {
+            let mut v = Vec::new();
+            for z in lo[2]..=hi[2] {
+                for y in lo[1]..=hi[1] {
+                    for x in lo[0]..=hi[0] {
+                        v.push(([x, y, z], f.voxel_at([x, y, z])));
+                    }
+                }
+            }
+            v
+        };
+        let before = snapshot(&f);
+        for _ in 0..5 {
+            f.flatten_to_plane(plane, Vec3::Y, 15.0, 1.0, BrushProfile::default());
+        }
+        let after = snapshot(&f);
+        let reach = f.band() + FLATTEN_FALLOFF_VOXELS * voxel;
+        let mut far_changed = 0;
+        for ((i, b), (_, a)) in before.iter().zip(&after) {
+            let along = i[1] as f32 * voxel - plane.y;
+            if along.abs() > reach + voxel && (a - b).abs() > 1e-4 {
+                far_changed += 1;
+            }
+        }
+        assert_eq!(far_changed, 0, "{far_changed} voxels further than the band + 2 voxels from the plane changed");
+        let mut cliffs = 0;
+        for &([x, y, z], d) in &after {
+            for n in [[x + 1, y, z], [x, y + 1, z], [x, y, z + 1]] {
+                let e = f.voxel_at(n);
+                if (d < 0.0) != (e < 0.0) && (d - e).abs() > 1.6 * voxel {
+                    cliffs += 1;
+                }
+            }
+        }
+        assert_eq!(cliffs, 0, "the pads left {cliffs} field cliffs across the surface");
+        // And the pad itself is level.
+        for x in [-6.0f32, 0.0, 6.0] {
+            let d = f.d(Vec3::new(x, plane.y, 4.0));
+            assert!(d.abs() < 0.6 * voxel, "the pad is not on its plane at x = {x}: d {d}");
+        }
+    }
+
+    /// Per-write-path |∇d| report.    /// Per-write-path |∇d| report. This is the diagnostic that found the real culprit:
     /// `fill_slab` was writing a plane clipped to a box, so the slab's rim jumped from
     /// -band to +band across one voxel (worst 4.36, 4.9% bad) — before any brush ran. A
     /// real box SDF took that to 1.04 / 0.0%. Keep it: it tells you which path regressed.

@@ -137,6 +137,79 @@ fn rgba(rgb: [u8; 3], slot: u8) -> [u8; 4] {
     [rgb[0], rgb[1], rgb[2], slot]
 }
 
+/// Smooth minimum: `min(a, b)` with the corner rounded over about `k`. Never
+/// above `min(a, b)`.
+fn smin(a: f32, b: f32, k: f32) -> f32 {
+    let h = (0.5 + 0.5 * (b - a) / k).clamp(0.0, 1.0);
+    b + (a - b) * h - k * h * (1.0 - h)
+}
+
+/// Smooth maximum: `max(a, b)` with the corner rounded over about `k`. Never
+/// below `max(a, b)`.
+fn smax(a: f32, b: f32, k: f32) -> f32 {
+    -smin(-a, -b, k)
+}
+
+/// A planet's shape before it is voxelized: the ground, the craters and the
+/// caves, as a signed distance (negative is rock).
+pub(crate) struct PlanetShape {
+    noise: Noise,
+    radius: f32,
+    relief: f32,
+    cave_depth: f32,
+    core_r: f32,
+    bump_freq: f32,
+    voxel: f32,
+    craters: Vec<(Vec3, f32)>,
+}
+
+impl PlanetShape {
+    /// The ground alone: negative under it.
+    pub(crate) fn body(&self, p: Vec3) -> f32 {
+        let r = p.length();
+        let dir = if r > 1e-3 { p / r } else { Vec3::X };
+        let bump = self.noise.fbm(dir * self.bump_freq, 5) * self.relief;
+        let mut body = r - (self.radius + bump);
+        for (c, cr) in &self.craters {
+            body = body.max(-((p - *c).length() - cr));
+        }
+        body
+    }
+
+    /// The whole shape, caves included.
+    ///
+    /// Caves are where two noise fields are both near zero. Their cross-section
+    /// is round (the length of the pair, not the larger of the two, which made
+    /// a rhombus of four flat walls and four creases), galleries widen with
+    /// depth, a larger-scale chamber field opens rooms further down, and a
+    /// solid core survives at the centre. Every join is smooth, so tunnels meet
+    /// rooms and the ceiling in rounded junctions, and a metre of noise at wall
+    /// scale keeps a wall from being a plane over tens of metres. The crust
+    /// gate is a smooth maximum, never below the hard one: no cave comes within
+    /// three voxels of the surface.
+    pub(crate) fn d(&self, p: Vec3) -> f32 {
+        let body = self.body(p);
+        if self.cave_depth <= 0.0 {
+            return body;
+        }
+        let noise = &self.noise;
+        let r = p.length();
+        let a = noise.fbm(p * 0.018, 3);
+        let b = noise.fbm(p * 0.018 + Vec3::splat(51.7), 3);
+        let w = 0.1 + (-body * 0.0006).clamp(0.0, 0.07);
+        let tunnel = (a.hypot(b) - w) * 34.0;
+        let c1 = noise.fbm(p * 0.008 + Vec3::splat(113.0), 2);
+        let c2 = noise.fbm(p * 0.008 + Vec3::splat(7.9), 2);
+        let chamber = (c1.hypot(c2) - 0.14) * 70.0;
+        let ceiling = body + self.cave_depth * 0.42;
+        let detail = noise.fbm(p * 0.07 + Vec3::splat(3.3), 3) * 1.2;
+        let cave = smin(tunnel, smax(chamber, ceiling, 6.0), 4.0) + detail;
+        let gated = smax(smax(cave, self.voxel * 3.0 + body, 2.0), -(body + self.cave_depth), 4.0)
+            .max((self.core_r + self.voxel * 6.0) - r);
+        body.max(-gated)
+    }
+}
+
 /// Fill one planet into a fresh sparse field. Deterministic in `spec`.
 pub fn generate_planet(spec: &PlanetFill) -> ChunkField {
     let noise = Noise::new(spec.seed);
@@ -163,38 +236,12 @@ pub fn generate_planet(spec: &PlanetFill) -> ChunkField {
         .collect();
     let craters2 = craters.clone();
     let voxel = field.voxel();
+    let shape = PlanetShape { noise, radius, relief, cave_depth, core_r, bump_freq, voxel, craters };
 
     field.fill_with_rgba(
         Vec3::splat(-ext),
         Vec3::splat(ext),
-        move |p| {
-            let r = p.length();
-            let dir = if r > 1e-3 { p / r } else { Vec3::X };
-            let bump = noise.fbm(dir * bump_freq, 5) * relief;
-            let mut body = r - (radius + bump);
-            for (c, cr) in &craters {
-                body = body.max(-((p - *c).length() - cr));
-            }
-            if cave_depth <= 0.0 {
-                return body;
-            }
-            // Caves where two noise fields are both near zero; galleries widen
-            // with depth, a larger-scale chamber field opens rooms further
-            // down, and a solid core survives at the center.
-            let a = noise.fbm(p * 0.018, 3);
-            let b = noise.fbm(p * 0.018 + Vec3::splat(51.7), 3);
-            let w = 0.1 + (-body * 0.0006).clamp(0.0, 0.07);
-            let tunnel = (a.abs().max(b.abs()) - w) * 34.0;
-            let c1 = noise.fbm(p * 0.008 + Vec3::splat(113.0), 2);
-            let c2 = noise.fbm(p * 0.008 + Vec3::splat(7.9), 2);
-            let chamber = ((c1.abs().max(c2.abs())) - 0.14) * 70.0;
-            let cave = tunnel.min(chamber.max(body + cave_depth * 0.42));
-            let gated = cave
-                .max(voxel * 3.0 + body)
-                .max(-(body + cave_depth))
-                .max((core_r + voxel * 6.0) - r);
-            body.max(-gated)
-        },
+        move |p| shape.d(p),
         move |p| {
             let r = p.length();
             let dir = if r > 1e-3 { p / r } else { Vec3::X };
@@ -261,7 +308,150 @@ pub fn generate_planet(spec: &PlanetFill) -> ChunkField {
 mod tests {
     use super::*;
 
-    /// Same spec → byte-identical field; a different seed diverges.
+    /// The card's Bryolru-like world: radius 200, relief 13, caves to 0.35 r.
+    fn bryolru() -> PlanetShape {
+        let radius = 200.19;
+        PlanetShape {
+            noise: Noise::new(800921623),
+            radius,
+            relief: 13.11,
+            cave_depth: radius * 0.35,
+            core_r: radius * 0.07,
+            bump_freq: 4.5,
+            voxel: 1.5,
+            craters: Vec::new(),
+        }
+    }
+
+    /// Wall points of the shape, cave walls and the outer ground apart: for
+    /// each, how far the wall runs before it curves by a radian (its radius of
+    /// curvature), and the sharpest normal change to a wall point 1.5 m away.
+    fn wall_samples(shape: &PlanetShape, n: usize) -> [Vec<(f32, f32)>; 2] {
+        let f = |p: Vec3| shape.d(p);
+        let grad = |p: Vec3| {
+            let h = 0.25;
+            Vec3::new(
+                f(p + Vec3::X * h) - f(p - Vec3::X * h),
+                f(p + Vec3::Y * h) - f(p - Vec3::Y * h),
+                f(p + Vec3::Z * h) - f(p - Vec3::Z * h),
+            )
+            .normalize_or_zero()
+        };
+        let mut seed = 7u64;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 33) as f32) / (1u64 << 31) as f32
+        };
+        let mut out: [Vec<(f32, f32)>; 2] = [Vec::new(), Vec::new()];
+        let mut tries = 0;
+        while out[0].len() + out[1].len() < n && tries < n * 200 {
+            tries += 1;
+            // A random open point in the cave zone or just above the ground,
+            // then the nearest wall along a random ray.
+            let d = Vec3::new(rnd() * 2.0 - 1.0, rnd() * 2.0 - 1.0, rnd() * 2.0 - 1.0).normalize_or_zero();
+            let r0 = shape.radius - shape.cave_depth + rnd() * (shape.cave_depth + shape.relief + 5.0);
+            let p0 = d * r0;
+            if d == Vec3::ZERO || f(p0) <= 0.2 {
+                continue;
+            }
+            let rd = Vec3::new(rnd() * 2.0 - 1.0, rnd() * 2.0 - 1.0, rnd() * 2.0 - 1.0).normalize_or_zero();
+            let mut t = 0.0;
+            let mut hit = None;
+            while t < 30.0 {
+                let v = f(p0 + rd * t);
+                if v < 0.0 {
+                    hit = Some(t);
+                    break;
+                }
+                t += (v * 0.3).max(0.05);
+            }
+            let Some(t) = hit else { continue };
+            let p = p0 + rd * t;
+            // Cave wall or open ground: is the ground what makes the wall here?
+            let outer = shape.body(p) >= f(p) - 1e-3;
+            let nrm = grad(p);
+            let t1 = nrm.cross(Vec3::new(0.3, 0.8, 0.5)).normalize_or_zero();
+            let t2 = nrm.cross(t1);
+            let k1 = (grad(p + t1 * 0.75) - grad(p - t1 * 0.75)).length() / 1.5;
+            let k2 = (grad(p + t2 * 0.75) - grad(p - t2 * 0.75)).length() / 1.5;
+            let mut crease = 0.0f32;
+            for step in [t1, t2, -t1, -t2] {
+                let mut q = p + step * 1.5;
+                for _ in 0..8 {
+                    q -= grad(q) * f(q);
+                }
+                crease = crease.max(nrm.dot(grad(q)).clamp(-1.0, 1.0).acos().to_degrees());
+            }
+            out[outer as usize].push((1.0 / k1.max(k2).max(1e-4), crease));
+        }
+        out
+    }
+
+    /// **Cave walls are rock, not panels.** On the Bryolru-like spec, no more of
+    /// the cave walls is flat over 20 m than twice the outer ground's share (it
+    /// was 27% against 6%), and under 2% of them sit within 1.5 m of a crease
+    /// sharper than 60°.
+    #[test]
+    fn cave_walls_curve_like_the_ground_and_have_no_creases() {
+        let [caves, ground] = wall_samples(&bryolru(), 2500);
+        assert!(caves.len() > 300 && ground.len() > 300, "too few samples: {} caves, {} ground", caves.len(), ground.len());
+        let flat = |s: &[(f32, f32)]| s.iter().filter(|x| x.0 > 20.0).count() as f32 / s.len() as f32;
+        let sharp = |s: &[(f32, f32)], deg: f32| s.iter().filter(|x| x.1 > deg).count() as f32 / s.len() as f32;
+        let (fc, fg) = (flat(&caves), flat(&ground));
+        let creased = sharp(&caves, 60.0);
+        eprintln!(
+            "caves {}: {:.1}% flat over 20 m, {:.1}% by a crease > 30°, {:.1}% > 60°; ground {}: {:.1}% flat",
+            caves.len(),
+            fc * 100.0,
+            sharp(&caves, 30.0) * 100.0,
+            creased * 100.0,
+            ground.len(),
+            fg * 100.0
+        );
+        assert!(fc <= 2.0 * fg.max(0.01), "{:.1}% of cave walls are flat over 20 m against {:.1}% of the ground", fc * 100.0, fg * 100.0);
+        assert!(creased < 0.02, "{:.1}% of cave walls sit by a crease sharper than 60°", creased * 100.0);
+    }
+
+    /// **The crust holds.** No cave opens within three voxels of the surface,
+    /// however the joins are smoothed.
+    #[test]
+    fn no_cave_comes_within_three_voxels_of_the_surface() {
+        let shape = bryolru();
+        let mut seed = 3u64;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 33) as f32) / (1u64 << 31) as f32
+        };
+        let mut checked = 0;
+        for _ in 0..20000 {
+            let d = Vec3::new(rnd() * 2.0 - 1.0, rnd() * 2.0 - 1.0, rnd() * 2.0 - 1.0).normalize_or_zero();
+            if d == Vec3::ZERO {
+                continue;
+            }
+            // Walk in from above the ground to three voxels under it.
+            let mut r = shape.radius + shape.relief + 1.0;
+            while shape.body(d * r) > 0.0 {
+                r -= 0.25;
+            }
+            // Down through the crust, by the ground's own depth: from just
+            // under the surface (which is zero) to three voxels below it.
+            loop {
+                let p = d * r;
+                let depth = -shape.body(p);
+                if depth >= shape.voxel * 3.0 {
+                    break;
+                }
+                if depth > 0.01 {
+                    assert!(shape.d(p) < 0.0, "open space {depth:.2} m under the surface at {p}");
+                    checked += 1;
+                }
+                r -= 0.25;
+            }
+        }
+        assert!(checked > 100_000);
+    }
+
+    /// Same spec → byte-identical field; a different seed diverges.    /// Same spec → byte-identical field; a different seed diverges.
     #[test]
     fn generate_planet_is_deterministic() {
         let spec = PlanetFill { radius: 24.0, voxel: 1.0, cave_depth: 10.0, ..Default::default() };
