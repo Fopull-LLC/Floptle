@@ -3516,7 +3516,7 @@ Bayer-dither the penumbra (1/0) — the classic PS1 dithered shadow edge.
 
 ### `env.shadowMap`
 
-Sun shadows from a shadow map instead of the field march (read/write, true/false; the Lighting panel's "shadow map"). Every drawn mesh casts — map-tool geometry, models, characters, terrain chunks — whether or not it collides, and the cost stays flat as a level grows: on a dense city at 1080p the lighting pass fell from 9.5 ms to 4.1 ms plus 0.65 ms for the map. shadowSoftness widens the filter; shadowDistance is how far around the camera the map reaches. Distance-field matter that is not drawn as a mesh (blobs) casts only in the march, and Stars mode keeps the march. Off by default.
+Sun shadows from a shadow map instead of the field march (read/write, true/false; the Lighting panel's "shadow map"). Every drawn mesh casts — map-tool geometry, models, characters, terrain chunks — whether or not it collides, and the cost stays flat as a level grows: on a dense city at 1080p the lighting pass fell from 9.5 ms to 4.1 ms plus 0.65 ms for the map. shadowSoftness widens the filter; shadowDistance is how far around the camera the map reaches. Distance-field matter that is not drawn as a mesh (blobs) casts only in the march. In Stars mode the brightest star at the camera takes its shadows from the map and the others march, and a star giving under 1% of the brightest one's light is left out of the lighting altogether, so it costs nothing. Off by default.
 
 ### `env.shadowQuantize`
 

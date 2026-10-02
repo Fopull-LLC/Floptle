@@ -424,9 +424,16 @@ pub(crate) fn atmo_uniforms(world: &World, cam_world: DVec3) -> AtmoUniforms {
     (meta, color, body, params)
 }
 
+/// A star giving less than this share of the brightest star's light at the
+/// camera is left out of the lighting. At 1% it cannot be seen, and each star
+/// kept costs every lit pixel a shadow march: three neighbour stars at 1e-4
+/// made a room lit by one star cost four.
+const FAINT_STAR: f64 = 0.01;
+
 /// Stars mode: the luminous celestial bodies as the `star_*` uniform arrays,
-/// brightest-at-camera first (irradiance = luminosity × 1e6 / d²). Zero count
-/// when the Lighting node isn't in stars mode.
+/// brightest-at-camera first (irradiance = luminosity × 1e6 / d²), leaving out
+/// any under [`FAINT_STAR`] of the brightest. Zero count when the Lighting
+/// node isn't in stars mode.
 pub(crate) fn star_uniforms(
     world: &World,
     light: &Light,
@@ -456,7 +463,8 @@ pub(crate) fn star_uniforms(
         ));
     }
     items.sort_by(|a, b| b.0.total_cmp(&a.0));
-    for (i, it) in items.iter().take(4).enumerate() {
+    let floor = items.first().map_or(0.0, |it| it.0 * FAINT_STAR);
+    for (i, it) in items.iter().take_while(|it| it.0 >= floor).take(4).enumerate() {
         pos[i] = it.1;
         col[i] = it.2;
         meta[0] = (i + 1) as f32;
@@ -1161,6 +1169,39 @@ pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_ren
         }
     }
     (off, [0.0; 4])
+}
+
+#[cfg(test)]
+mod star_tests {
+    use super::*;
+    use floptle_core::{CelestialBody, World};
+
+    fn star(world: &mut World, at: DVec3, luminosity: f32) {
+        let e = world.spawn();
+        world.insert(e, floptle_core::transform::Transform { translation: at, ..Default::default() });
+        world.insert(e, CelestialBody { luminosity, ..Default::default() });
+    }
+
+    /// Three neighbour stars at about 1e-4 of the home star's light at the
+    /// camera are left out, so a room lit by one star marches one shadow ray.
+    #[test]
+    fn a_star_too_faint_to_see_is_left_out_of_the_lighting() {
+        let mut world = World::default();
+        star(&mut world, DVec3::new(10_000.0, 0.0, 0.0), 1.0);
+        for i in 0..3 {
+            // 100x the distance at the same luminosity: 1e-4 of the light.
+            star(&mut world, DVec3::new(0.0, 1.0e6, 1.0e5 * i as f64), 1.0);
+        }
+        let light = Light { stars: true, ..Default::default() };
+        let (meta, pos, _) = star_uniforms(&world, &light, DVec3::ZERO);
+        assert_eq!(meta[0], 1.0, "only the home star should light the scene");
+        assert!(pos[0][0] > 9_000.0, "and it is the home star: {:?}", pos[0]);
+
+        // A neighbour bright enough to see (a tenth of the home star) stays.
+        star(&mut world, DVec3::new(0.0, 0.0, 31_623.0), 1.0);
+        let (meta, ..) = star_uniforms(&world, &light, DVec3::ZERO);
+        assert_eq!(meta[0], 2.0, "a star at a tenth of the light must still be drawn");
+    }
 }
 
 #[cfg(test)]
