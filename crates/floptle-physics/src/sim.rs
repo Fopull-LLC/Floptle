@@ -1995,6 +1995,21 @@ impl Sim {
             })
     }
 
+    /// [`Self::terrain_field_mut`] for a write that knows which chunks it
+    /// changes: the collider forgets only the triangles those chunks could
+    /// have given it, rather than every chunk it had meshed.
+    pub fn terrain_chunks_mut(&mut self, eid: u32, written: &[[i32; 3]]) -> Option<&mut floptle_field::ChunkField> {
+        self.world
+            .colliders
+            .iter_mut()
+            .find(|c| c.eid == Some(eid))
+            .and_then(|c| c.shape.chunk_terrain_mut())
+            .map(|t| {
+                t.invalidate_chunks(written);
+                &mut t.field
+            })
+    }
+
     /// Put the body on node `eid` to sleep now, or wake it.
     ///
     /// Asleep, the solver skips it — no gravity, no contacts against the

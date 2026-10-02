@@ -3103,7 +3103,7 @@ perf.accountedMs() — the buckets added up. Called 'accounted' and not 'total' 
 
 ### `perf.buckets`
 
-perf.buckets() → the bucket names, in frame order: scripts, mirror, physics, terrain, scatter, particles, audio, animation, models, ui, render. Iterate this rather than keeping your own list, which could go stale. `scripts` is the WHOLE of every script pass — setup, reference params, write flush and hooks; `mirror` is the ECS-to-Lua sync each pass runs first, nested inside a pass and subtracted out of `scripts` so nothing is counted twice.
+perf.buckets() → the bucket names, in frame order: scripts, mirror, physics, terrain, scatter, particles, audio, animation, models, ui, render, other. Iterate this rather than keeping your own list, which could go stale. `scripts` is the WHOLE of every script pass — setup, reference params, write flush and hooks; `mirror` is the ECS-to-Lua sync each pass runs first, nested inside a pass and subtracted out of `scripts` so nothing is counted twice. `other` is the rest of the frame, the time between two frames that no other bucket measured: waiting on the GPU or the display, and work nothing times yet.
 
 ### `perf.counts`
 
@@ -3127,7 +3127,7 @@ perf.gpuMs(pass) → one pass's GPU milliseconds last frame ("opaque + lighting"
 
 ### `perf.hitches`
 
-perf.hitches() → every frame since the last call whose buckets added up to 50 ms or more, oldest first: { {frame=, ms=, top="terrain", buckets={terrain=157.4, scripts=30.1, ...}}, ... }. perf.worstMs looks back sixty frames, so a probe that reads every few seconds loses the spike it is hunting; this keeps each one (up to 64) until it is read, with the bucket that spent the time on top. Needs perf.enable(true).
+perf.hitches() → every frame since the last call that took 50 ms or more, oldest first: { {frame=, ms=, top="terrain", buckets={terrain=157.4, scripts=30.1, ...}}, ... }. perf.worstMs looks back sixty frames, so a probe that reads every few seconds loses the spike it is hunting; this keeps each one (up to 64) until it is read, with the bucket that spent the time on top. Time no bucket measured is named `other`, so a hitch the engine's buckets cannot explain still says so. Needs perf.enable(true).
 
 ### `perf.mirrorCause`
 

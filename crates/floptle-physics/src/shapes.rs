@@ -485,6 +485,8 @@ struct Surface {
 struct SurfaceTri {
     p: [Vec3; 3],
     n: [Vec3; 3],
+    /// The chunk it was meshed from, so an edit can forget just its chunks.
+    chunk: [i32; 3],
 }
 
 /// The terrain collider: collides against the triangles the mesher extracts,
@@ -595,6 +597,33 @@ impl ChunkTerrain {
         self.surface.get_mut().grid.clear();
     }
 
+    /// **Forget the meshed chunks an edit of `written` could have changed**:
+    /// those chunks and every chunk next to them, since a chunk's mesh reads a
+    /// layer into its neighbours. A dig re-meshes the few chunks it reached on
+    /// the next query near them, not every chunk any body was standing in.
+    pub fn invalidate_chunks(&mut self, written: &[[i32; 3]]) {
+        let mut gone: std::collections::HashSet<[i32; 3]> = std::collections::HashSet::new();
+        for c in written {
+            for dz in -1..=1 {
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        gone.insert([c[0] + dx, c[1] + dy, c[2] + dz]);
+                    }
+                }
+            }
+        }
+        let s = self.surface.get_mut();
+        let before = s.meshed.len();
+        s.meshed.retain(|c| !gone.contains(c));
+        if s.meshed.len() == before {
+            return;
+        }
+        s.grid.retain(|_, tris| {
+            tris.retain(|t| !gone.contains(&t.chunk));
+            !tris.is_empty()
+        });
+    }
+
     /// Make sure every chunk within `cell()` of `local` has been meshed.
     fn ensure_meshed(&self, local: Vec3, s: &mut Surface) {
         let r = Vec3::splat(self.reach());
@@ -624,7 +653,7 @@ impl ChunkTerrain {
             let nrm = |i: u32| {
                 Vec3::from(m.normals[i as usize]).try_normalize().unwrap_or(face)
             };
-            let entry = SurfaceTri { p: tri, n: [nrm(t[0]), nrm(t[1]), nrm(t[2])] };
+            let entry = SurfaceTri { p: tri, n: [nrm(t[0]), nrm(t[1]), nrm(t[2])], chunk: c };
             let lo = cell_coord(tri[0].min(tri[1]).min(tri[2]), cell);
             let hi = cell_coord(tri[0].max(tri[1]).max(tri[2]), cell);
             for cz in lo.2..=hi.2 {
@@ -2299,5 +2328,46 @@ mod drawn_surface_tests {
             fresh > before + 0.1,
             "digging under the probe did not open ground beneath it: {before} -> {fresh}"
         );
+    }
+
+    /// **A dig forgets only the chunks it could have changed.** Dropping the
+    /// whole cache made the next query near every body re-mesh every chunk it
+    /// stood in, a few milliseconds of physics on each bite of a mining laser.
+    /// Two hills four chunks apart: a dig on one leaves the other's triangles
+    /// cached, and the dug ground still reads open.
+    #[test]
+    fn a_dig_forgets_only_the_chunks_it_reached() {
+        let mut f = ChunkField::new(0.5);
+        let (a, b) = (Vec3::new(0.0, 0.0, 0.0), Vec3::new(64.0, 0.0, 0.0));
+        for _ in 0..30 {
+            f.sculpt(Brush::Raise, a, 6.0, 1.0, BrushProfile::default());
+            f.sculpt(Brush::Raise, b, 6.0, 1.0, BrushProfile::default());
+        }
+        let mut t = ChunkTerrain::new(f);
+        let crown = |t: &ChunkTerrain, at: Vec3| {
+            let top = (0..400)
+                .map(|i| 8.0 - i as f32 * 0.05)
+                .find(|y| t.field.d(at + Vec3::Y * *y) <= 0.0)
+                .expect("the hill has a surface");
+            at + Vec3::Y * (top + t.field.voxel())
+        };
+        let (pa, pb) = (crown(&t, a), crown(&t, b));
+        let before = t.distance(pa);
+        t.distance(pb);
+        let far: Vec<[i32; 3]> = t.surface.borrow().meshed.iter().copied().filter(|c| c[0] >= 3).collect();
+        assert!(!far.is_empty(), "the far hill was never meshed");
+        let mut written = Vec::new();
+        for _ in 0..40 {
+            written.extend(t.field.sculpt(Brush::Lower, pa - Vec3::Y * 0.5, 3.0, 1.0, BrushProfile::default()));
+        }
+        written.sort_unstable();
+        written.dedup();
+        t.invalidate_chunks(&written);
+        let s = t.surface.borrow();
+        assert!(far.iter().all(|c| s.meshed.contains(c)), "the dig forgot the far hill's chunks too");
+        assert!(written.iter().all(|c| !s.meshed.contains(c)), "a chunk the dig wrote is still cached");
+        drop(s);
+        let fresh = t.distance(pa);
+        assert!(fresh > before + 0.1, "the dug ground still reads as it was: {before} -> {fresh}");
     }
 }

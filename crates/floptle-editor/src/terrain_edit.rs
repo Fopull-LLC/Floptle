@@ -723,9 +723,14 @@ impl Editor {
                 render.born.retain(|c, _| has.contains(c));
             }
 
-            // Brush / script edits: near chunks synchronously (sculpting must feel
-            // instant), far chunks through the worker — dirty jobs bypass the
-            // in-flight cap (a stale mesh is worse than a deep queue).
+            // Brush / script edits. The editor's brush meshes near chunks
+            // synchronously (sculpting must feel instant). In Play every edit
+            // goes through the worker, the chunk drawing its old mesh until the
+            // new one lands a frame or two later: a mining laser biting every
+            // eighth of a second spent 3+ ms of each bite's frame meshing on the
+            // main thread. Dirty jobs bypass the in-flight cap (a stale mesh is
+            // worse than a deep queue).
+            let sync_near = !self.playing;
             if let Some(mut d) = dirty {
                 d.sort_unstable();
                 d.dedup();
@@ -734,7 +739,7 @@ impl Editor {
                     let dist = dist_of(coord);
                     let cur = render.slots.get(&coord).map(|&(_, l)| l);
                     let lod = cur.unwrap_or_else(|| raw_lod(dist, rings));
-                    if lod == 0 {
+                    if lod == 0 && sync_near {
                         render.pending.remove(&coord); // a sync mesh supersedes any job
                         // Skirted like every drawn chunk: a full-detail chunk next to a
                         // coarse one needs its own curtain to close the seam from its side.
@@ -1586,7 +1591,7 @@ impl Editor {
         region.sort_unstable();
         region.dedup();
         let Some(t) = self.terrains.get(&e) else { return };
-        match self.sim.as_mut().and_then(|s| s.terrain_field_mut(e.index())) {
+        match self.sim.as_mut().and_then(|s| s.terrain_chunks_mut(e.index(), &region)) {
             Some(f) => f.copy_chunks_from(&t.field, &region),
             None => {
                 if !self.terrain_mirror_warned {
@@ -3467,6 +3472,55 @@ mod tests {
 #[cfg(test)]
 mod residency_tests {
     use super::*;
+
+    /// **In Play a dig is meshed off the main thread.** A mining laser biting
+    /// every eighth of a second spent 3+ ms of each bite's frame meshing the
+    /// chunks it reached. Now the chunk goes to the worker and keeps drawing
+    /// its old mesh until the new one lands; outside Play the editor's brush
+    /// still meshes on the spot, because sculpting has to feel instant.
+    #[test]
+    fn in_play_a_dig_remeshes_on_the_worker_and_the_old_mesh_stays_until_then() {
+        use floptle_field::{Brush, BrushProfile};
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let mut field = floptle_field::ChunkField::new(0.5);
+        for _ in 0..20 {
+            field.sculpt(Brush::Raise, Vec3::new(2.0, 0.0, 2.0), 5.0, 1.0, BrushProfile::default());
+        }
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        ed.terrains.insert(e, EditorTerrain::new(field));
+        let cam = DVec3::new(2.0, 6.0, 2.0);
+        ed.sync_terrain_meshes(true, cam);
+        let dig = |ed: &mut crate::Editor| {
+            let t = ed.terrains.get_mut(&e).unwrap();
+            let touched = t.field.sculpt(Brush::Lower, Vec3::new(2.0, 2.0, 2.0), 1.5, 1.0, BrushProfile::default());
+            ed.terrain_chunks_dirty.entry(e).or_default().extend(touched.iter().copied());
+            touched
+        };
+        let mesh_of = |ed: &crate::Editor, c: [i32; 3]| ed.terrain_render.get(&e).and_then(|r| r.slots.get(&c)).map(|s| s.0);
+
+        // Outside Play: meshed now, nothing left for the worker.
+        let touched = dig(&mut ed);
+        let c = *touched.iter().find(|c| mesh_of(&ed, **c).is_some()).expect("the dig reached a drawn chunk");
+        ed.sync_terrain_meshes(false, cam);
+        assert!(!ed.terrain_render[&e].pending.contains_key(&c), "outside Play the brush must mesh on the spot");
+
+        // In Play: queued for the worker, the old mesh still drawn.
+        ed.playing = true;
+        let old = mesh_of(&ed, c);
+        dig(&mut ed);
+        ed.sync_terrain_meshes(false, cam);
+        assert!(ed.terrain_render[&e].pending.contains_key(&c), "in Play a dig must go to the worker");
+        assert_eq!(mesh_of(&ed, c), old, "the old mesh must stay drawn until the new one lands");
+        // …and it does land.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while ed.terrain_render[&e].pending.contains_key(&c) && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            ed.sync_terrain_meshes(false, cam);
+        }
+        assert!(!ed.terrain_render[&e].pending.contains_key(&c), "the worker's mesh never landed");
+        assert!(mesh_of(&ed, c).is_some(), "the chunk is drawn after the remesh");
+    }
 
     /// The full genspec streaming pipeline, headless: a PlanetFill serialized
     /// exactly like `node:setTerrainGen` does (ron::to_string) must round-trip

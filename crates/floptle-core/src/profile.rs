@@ -54,12 +54,17 @@ pub enum Bucket {
     /// Everything from the gather to submit: instances, the raymarch, the raster
     /// passes, post.
     Render,
+    /// The rest of the frame: the time between two frames that no other bucket
+    /// measured. Waiting on the GPU or the display, and work nothing times yet.
+    /// Without it a slow frame whose buckets added up to little was not a
+    /// hitch at all, and a frame that was mostly unmeasured named nothing.
+    Other,
 }
 
 impl Bucket {
     /// Every bucket, in the order a readout should list them — roughly the order
     /// of a frame.
-    pub const ALL: [Bucket; 11] = [
+    pub const ALL: [Bucket; 12] = [
         Bucket::Scripts,
         Bucket::Mirror,
         Bucket::Physics,
@@ -71,6 +76,7 @@ impl Bucket {
         Bucket::Models,
         Bucket::Ui,
         Bucket::Render,
+        Bucket::Other,
     ];
 
     /// The name a script passes to `perf.ms(...)`, and the label a readout shows.
@@ -90,6 +96,7 @@ impl Bucket {
             Bucket::Models => "models",
             Bucket::Ui => "ui",
             Bucket::Render => "render",
+            Bucket::Other => "other",
         }
     }
 
@@ -101,8 +108,9 @@ impl Bucket {
     }
 }
 
-/// A frame whose buckets add up to this many milliseconds or more is a hitch,
-/// and is kept for [`FrameProfile::take_hitches`].
+/// A frame that takes this many milliseconds or more, by the time between
+/// frames or by its buckets, is a hitch, and is kept for
+/// [`FrameProfile::take_hitches`].
 pub const HITCH_MS: f32 = 50.0;
 /// The most hitches kept between two reads; past that the oldest go.
 pub const MAX_HITCHES: usize = 64;
@@ -261,6 +269,9 @@ pub struct FrameProfile {
     /// Frames whose buckets added up to [`HITCH_MS`] or more, kept until a
     /// script takes them: the one reading a probe polling every few seconds
     /// can still see, after the spike has rolled out of the window.
+    /// When the last frame ended, for the time between frames: what the
+    /// buckets add up to is set against it, and the rest is [`Bucket::Other`].
+    last_end: Option<crate::time::Instant>,
     hitches: std::collections::VecDeque<Hitch>,
     /// The GPU's own per-pass times for the last frame whose timestamps have
     /// landed, and their total. `None` when nothing measured them: timing off,
@@ -464,10 +475,21 @@ impl FrameProfile {
     /// frame, after everything has reported.
     pub fn end_frame(&mut self) {
         self.rebuild_streak = if self.mirror_frame.rebuilds > 0 { self.rebuild_streak.saturating_add(1) } else { 0 };
+        let now = crate::time::Instant::now();
+        let between = self.last_end.replace(now).map(|t| (now - t).as_secs_f32() * 1000.0);
         if !self.on {
             self.mirror_frame = MirrorWork::default();
             self.rays_frame = (0, 0.0);
             return;
+        }
+        // The frame's time no bucket measured. Recorded by whoever ended the
+        // frame calling here, so it is the real gap between two frames.
+        if let Some(between) = between {
+            let measured: f32 = self.frame.iter().filter(|(b, _)| **b != Bucket::Other).map(|(_, ms)| ms).sum();
+            let rest = between - measured;
+            if rest > 0.0 {
+                *self.frame.entry(Bucket::Other).or_insert(0.0) += rest;
+            }
         }
         self.mirror_last = std::mem::take(&mut self.mirror_frame);
         self.rays_last = std::mem::take(&mut self.rays_frame);
@@ -641,6 +663,28 @@ mod tests {
     /// window is sixty frames, so a probe reading every few seconds lost the
     /// frame it was hunting; the hitch log still has it, with the bucket that
     /// spent the time on top, and a read empties it.
+    /// **A slow frame is a hitch even when the buckets do not see why.** A
+    /// frame of 60 ms whose buckets add up to 10 is kept, and the 50 ms nothing
+    /// measured is named as `other` rather than left out, so a hitch always
+    /// says where its time went, even when the answer is "not in the engine's
+    /// buckets".
+    #[test]
+    fn a_slow_frame_the_buckets_miss_is_a_hitch_named_other() {
+        let mut p = FrameProfile::default();
+        p.enable(true);
+        p.end_frame();
+        p.take_hitches();
+        p.record(Bucket::Physics, 10.0);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        p.end_frame();
+        let h = p.take_hitches();
+        assert_eq!(h.len(), 1, "a 60 ms frame must be a hitch: {h:?}");
+        assert!(h[0].ms >= 60.0, "the hitch is the whole frame, got {}", h[0].ms);
+        let other = h[0].buckets.iter().find(|(b, _)| *b == Bucket::Other).map(|(_, ms)| *ms);
+        assert!(other.is_some_and(|ms| ms >= 45.0), "the unmeasured time must be named: {h:?}");
+        assert_eq!(h[0].buckets[0].0, Bucket::Other, "and it is the costliest part");
+    }
+
     #[test]
     fn a_hitch_is_kept_until_it_is_read() {
         let mut p = FrameProfile::default();
