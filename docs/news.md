@@ -1,5 +1,9 @@
 ## Just shipped
 
+**v0.111.2 — "Sharp Mark"** (stable, Hub only). The Floptle mark at the
+top of the Hub is drawn larger and shrunk smoothly to the size it is shown
+at, so its fine lines no longer break up into dots. The engine is unchanged.
+
 **v0.111.1 — "Says Why"** (stable). A web game that stops while it is
 running now shows what stopped it, instead of leaving its last frame on
 screen. What the browser's graphics refused reaches the page's log, and the
