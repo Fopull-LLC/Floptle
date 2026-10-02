@@ -1,5 +1,10 @@
 ## Just shipped
 
+**v0.111.3 — "Asks First"** (stable). A web game no longer stops on an
+iPhone when it takes the mouse or goes fullscreen. Safari on an iPhone has
+neither, and the game now checks before it asks, so the same build plays on
+a phone and on a desktop. Export your web build again to get it.
+
 **v0.111.2 — "Sharp Mark"** (stable, Hub only). The Floptle mark at the
 top of the Hub is drawn larger and shrunk smoothly to the size it is shown
 at, so its fine lines no longer break up into dots. The engine is unchanged.
