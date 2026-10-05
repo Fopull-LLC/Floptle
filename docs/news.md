@@ -1,5 +1,13 @@
 ## Just shipped
 
+**v0.113.0 — "Comes Alive"** (stable). A `.flsl` material can move the
+surface it is on with `output offset`, so flesh breathes and flags ripple with
+no rig, and a rigged model wearing one is animated on the graphics card.
+Every file the editor writes keeps its paths relative to the project, so a
+project built in the editor opens on any machine. A prop resized every frame
+no longer rebuilds its shadow each frame, and running out of video memory no
+longer blanks the world.
+
 **v0.112.0 — "Moves With You"** (stable). A game on an orbiting planet
 plays as if the ground held still: smoke stays over its spot, marks stay on
 the rock, and `spawnEffect` takes a frame to ride, a normal, a scale and a
