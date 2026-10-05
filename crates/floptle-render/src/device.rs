@@ -7,6 +7,7 @@
 //! live window, and a battle-tested implementation already exists in
 //! `crates/floptle-proof/src/main.rs` (wgpu 29) — Phase 1 lifts it here.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use winit::window::Window;
@@ -31,10 +32,30 @@ static GPU_ERRORS: Mutex<(Vec<String>, Vec<String>)> = Mutex::new((Vec::new(), V
 /// already said.)
 fn describe(e: &wgpu::Error) -> String {
     let text = match e {
-        wgpu::Error::OutOfMemory { .. } => "out of GPU memory".to_string(),
+        wgpu::Error::OutOfMemory { source } => format!(
+            "out of video memory ({source}). Another program is probably holding most of the \
+             GPU's memory: close it, or play in a smaller window. What does not fit is left out \
+             rather than drawn broken"
+        ),
         other => other.to_string(),
     };
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Has any GPU error been reported since the process started? Set once and
+/// never cleared. A pass that must not depend on anything that might have
+/// failed (the frame's clear) checks it, and pays for its caution only after
+/// something has gone wrong.
+static GPU_TROUBLE: AtomicBool = AtomicBool::new(false);
+
+/// Has the GPU been out of memory? Every texture or buffer that failed to be
+/// made then fails again as "invalid" in every pass that uses it, a few dozen
+/// messages a frame that all say the one thing already said.
+static OUT_OF_MEMORY: AtomicBool = AtomicBool::new(false);
+
+/// [`GPU_TROUBLE`]: has anything gone wrong on the GPU yet?
+pub fn gpu_trouble() -> bool {
+    GPU_TROUBLE.load(Ordering::Relaxed)
 }
 
 /// Which graphics backends to consider, honouring `WGPU_BACKEND`.
@@ -67,9 +88,31 @@ pub fn backends_from_env() -> wgpu::Backends {
 /// handler [`Gpu::new`] installs on its device. Public so a test's own
 /// headless device can report through the same path a game's does.
 pub fn report_gpu_error(e: &wgpu::Error) {
+    GPU_TROUBLE.store(true, Ordering::Relaxed);
+    let oom = matches!(e, wgpu::Error::OutOfMemory { .. });
     let message = describe(e);
+    // After running out of memory, "X is invalid" is that same failure seen
+    // again from a pass that uses X. Said once, here, and not again.
+    let follows_oom = !oom && OUT_OF_MEMORY.load(Ordering::Relaxed) && message.contains("is invalid");
+    if oom {
+        OUT_OF_MEMORY.store(true, Ordering::Relaxed);
+    }
     if let Ok(mut g) = GPU_ERRORS.lock() {
         let (queue, seen) = &mut *g;
+        // The first few still go through: they name what failed to be made.
+        // The rest are the same failure seen from every pass that uses it.
+        const SHOWN_AFTER_OOM: usize = 3;
+        let invalid_said = seen.iter().filter(|m| m.contains("is invalid")).count();
+        if follows_oom && invalid_said >= SHOWN_AFTER_OOM {
+            const AFTER: &str = "further GPU errors about invalid textures, buffers and bind groups \
+                                 follow from running out of video memory, and are not listed";
+            if !seen.iter().any(|m| m == AFTER) {
+                floptle_say::say_err!("GPU error: {AFTER}");
+                seen.push(AFTER.to_string());
+                queue.push(AFTER.to_string());
+            }
+            return;
+        }
         if seen.contains(&message) {
             return;
         }

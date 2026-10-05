@@ -464,6 +464,9 @@ pub struct Raymarch {
     /// shared 3D textures. Patched into the globals at draw time so callers only
     /// provide world data (`vol_center`/`vol_half`).
     slots: Vec<VolSlot>,
+    /// The atlas size the GPU last refused for lack of memory, in bytes, and
+    /// how many volumes were dropped to fit. `None` once one fits again.
+    atlas_refused: Option<AtlasRefused>,
     terrain_tex: wgpu::Texture,
     /// Equirectangular sky texture (1×1 white until a skybox texture is set).
     sky_tex: wgpu::Texture,
@@ -711,6 +714,7 @@ impl Raymarch {
             _dist_tex: dist_tex,
             _color_tex: color_tex,
             slots: Vec::new(),
+            atlas_refused: None,
             terrain_tex,
             sky_tex,
             bind,
@@ -1206,7 +1210,31 @@ impl Raymarch {
             }
         }
 
-        let (dist_tex, color_tex) = alloc_volume_textures(gpu, [aw, ah, ad]);
+        // Out of video memory, a smaller atlas is better than none: drop
+        // volumes from the end (occluders come after the terrains) until one
+        // fits, down to an empty atlas. Every one dropped casts no field shadow
+        // or AO; the world still draws, which a texture that failed to be made
+        // would have stopped.
+        let wanted = volume_bytes([aw, ah, ad]);
+        let mut refused = None;
+        let (dist_tex, color_tex) = loop {
+            let dims = atlas_dims(&accepted);
+            if let Some(t) = try_alloc_volume_textures(gpu, dims) {
+                break t;
+            }
+            refused.get_or_insert(wanted);
+            if accepted.is_empty() {
+                // Not even one voxel: nothing to fall back to but the
+                // textures we already have, which are valid.
+                self.slots.clear();
+                self.atlas_refused = Some(AtlasRefused { bytes: wanted, dropped: volumes.len() });
+                self.rebuild_binds(&gpu.device);
+                return 0;
+            }
+            let keep = accepted.len() / 2;
+            accepted.truncate(keep);
+        };
+        self.atlas_refused = refused.map(|bytes| AtlasRefused { bytes, dropped: volumes.len() - accepted.len() });
         self.slots.clear();
         for (b, origin) in &accepted {
             write_volume_data(gpu, &dist_tex, &color_tex, b, *origin);
@@ -1217,6 +1245,12 @@ impl Raymarch {
         self._color_tex = color_tex;
         self.rebuild_binds(&gpu.device);
         accepted.len()
+    }
+
+    /// The last atlas the GPU refused for lack of memory, while the atlas is
+    /// still short of what was asked: see [`set_volumes`](Self::set_volumes).
+    pub fn atlas_refused(&self) -> Option<AtlasRefused> {
+        self.atlas_refused
     }
 
     /// Upload only the sub-box `[min, max)` (voxel coords) of `baked` into atlas slot
@@ -1380,6 +1414,40 @@ impl Raymarch {
         // probe never hits it). Clearing to the sky colour makes that fallback the
         // sky instead of black, so the flicker is impossible by construction.
         let bg = globals.bg;
+        let clear = wgpu::LoadOp::Clear(wgpu::Color {
+            r: bg[0] as f64,
+            g: bg[1] as f64,
+            b: bg[2] as f64,
+            a: bg[3] as f64,
+        });
+        // The clear rides this pass, so a pass the GPU rejects (a texture it
+        // binds failed to be made) leaves last frame's picture underneath, and
+        // everything drawn after it piles up on top frame after frame. Once
+        // anything has gone wrong, the clear goes first on its own, binding
+        // nothing that could have failed.
+        if crate::device::gpu_trouble() {
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raymarch-clear") });
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("raymarch-clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: clear, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: (!primed).then_some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            gpu.queue.submit([encoder.finish()]);
+        }
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raymarch") });
@@ -1390,15 +1458,7 @@ impl Raymarch {
                     view: color,
                     depth_slice: None,
                     resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: bg[0] as f64,
-                            g: bg[1] as f64,
-                            b: bg[2] as f64,
-                            a: bg[3] as f64,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
+                    ops: wgpu::Operations { load: clear, store: wgpu::StoreOp::Store },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: depth,
@@ -1786,6 +1846,48 @@ pub(crate) fn make_terrain_array(gpu: &Gpu, layers: &[TextureData]) -> wgpu::Tex
 }
 
 /// Allocate the distance (R16Float) + color (Rgba8Unorm) 3D atlas textures.
+/// What an atlas of these dimensions costs: f16 distance + RGBA8 colour.
+fn volume_bytes(dims: [u32; 3]) -> u64 {
+    dims.iter().map(|&d| d as u64).product::<u64>() * (2 + 4)
+}
+
+/// The atlas the accepted volumes need: stacked along Z, as wide and tall as
+/// the widest and tallest.
+fn atlas_dims(accepted: &[(&BakedSdf, [u32; 3])]) -> [u32; 3] {
+    let (mut w, mut h, mut d) = (1u32, 1u32, 0u32);
+    for (b, _) in accepted {
+        w = w.max(b.dims[0]);
+        h = h.max(b.dims[1]);
+        d += b.dims[2];
+    }
+    [w, h, d.max(1)]
+}
+
+/// [`alloc_volume_textures`], or `None` when the GPU is out of memory for it.
+///
+/// Asked through an error scope, which native wgpu answers at once. A browser
+/// answers later; there the first poll comes back empty, the textures are
+/// taken as made, and a failure arrives as the reported error it always was.
+fn try_alloc_volume_textures(gpu: &Gpu, dims: [u32; 3]) -> Option<(wgpu::Texture, wgpu::Texture)> {
+    use std::task::{Context, Poll, Waker};
+    let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+    let made = alloc_volume_textures(gpu, dims);
+    let mut pop = std::pin::pin!(scope.pop());
+    match pop.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(Some(_)) => None,
+        _ => Some(made),
+    }
+}
+
+/// The GPU refused the volume atlas for lack of memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AtlasRefused {
+    /// What the full atlas would have needed.
+    pub bytes: u64,
+    /// Volumes left out to make it fit.
+    pub dropped: usize,
+}
+
 fn alloc_volume_textures(gpu: &Gpu, dims: [u32; 3]) -> (wgpu::Texture, wgpu::Texture) {
     let size = wgpu::Extent3d { width: dims[0], height: dims[1], depth_or_array_layers: dims[2] };
     let dist = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -1870,4 +1972,23 @@ fn f32_to_f16(v: f32) -> u16 {
 /// the real seam rather than a reconstruction of it.
 pub fn prelude() -> &'static str {
     concat!(include_str!("raymarch.wgsl"), "\n", include_str!("field.wgsl"))
+}
+
+#[cfg(test)]
+mod oom_tests {
+    /// **An atlas bigger than video memory is refused, not made broken.** A
+    /// 2048³ atlas is 48 GB: inside wgpu's 3D-texture limit, so only the GPU's
+    /// memory can say no. Ignored by default: a software rasteriser (CI's) may
+    /// promise memory it lazily never touches. Run it on a real GPU with
+    /// `cargo test -p floptle-render -- --ignored atlas_bigger`.
+    #[test]
+    #[ignore = "needs a real GPU with under 48 GB of memory"]
+    fn an_atlas_bigger_than_video_memory_is_refused() {
+        let gpu = crate::Gpu::headless(4, 4);
+        assert!(
+            super::try_alloc_volume_textures(&gpu, [2048, 2048, 2048]).is_none(),
+            "a 48 GB atlas came back as made"
+        );
+        assert!(super::try_alloc_volume_textures(&gpu, [64, 64, 64]).is_some(), "a small one must still be made");
+    }
 }

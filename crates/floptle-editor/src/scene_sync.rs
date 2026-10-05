@@ -51,7 +51,25 @@ impl Editor {
                 baked.extend(unique.values().copied());
                 let accepted = raymarch.set_volumes(gpu, &baked);
                 let total = baked.len();
-                if accepted < total {
+                if let Some(r) = raymarch.atlas_refused() {
+                    // Out of video memory, not out of room: say which, and
+                    // what it costs, so the fix (free the GPU) is the one tried.
+                    if !self.atlas_oom_said {
+                        self.atlas_oom_said = true;
+                        self.console.push(
+                            floptle_script::LogLevel::Warn,
+                            format!(
+                                "out of video memory: the shadow atlas needs {:.0} MB and the GPU refused it, so \
+                                 {} terrain / collidable-mesh shape(s) cast no distance-field shadow or AO. The \
+                                 world still draws and the sun's shadow map still works. Another program is \
+                                 probably holding most of the GPU's memory: close it, then reload the scene.",
+                                r.bytes as f64 / (1024.0 * 1024.0),
+                                r.dropped
+                            ),
+                            None,
+                        );
+                    }
+                } else if accepted < total {
                     // Never drop content silently: say what is missing, and
                     // that it is only the distance-field shadow.
                     self.console.push(

@@ -142,6 +142,9 @@ struct Timing {
     scripts: std::collections::HashMap<String, Vec<f32>>,
     /// Live nodes when the run ended.
     nodes: usize,
+    /// Static colliders rebuilt because a script turned or resized their node.
+    /// A move is a shift and costs nothing; a rebuild re-cooks the shape.
+    collider_rebuilds: u32,
 }
 
 impl Timing {
@@ -155,6 +158,7 @@ impl Timing {
                 .collect(),
             scripts: std::collections::HashMap::new(),
             nodes: 0,
+            collider_rebuilds: 0,
         }
     }
 
@@ -633,6 +637,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
     let terrain = TerrainHold { held: terrain_held, still_busy: ed.terrain_worker_busy() };
     if let Some(c) = clock.as_mut() {
         c.nodes = ed.world.len();
+        c.collider_rebuilds = ed.static_rebuilds;
     }
     report(
         &opened,
@@ -770,6 +775,13 @@ fn breakdown_lines(c: &Timing) -> Vec<String> {
         out.push(format!("  by script, p50/max ms: {}", row.join(" · ")));
     }
     out.push(format!("  nodes: {}", c.nodes));
+    if c.collider_rebuilds > 0 {
+        out.push(format!(
+            "  static colliders rebuilt: {} (a script turned or resized a Collidable node; a move \
+             costs nothing, a turn or resize re-cooks the shape)",
+            c.collider_rebuilds
+        ));
+    }
     out
 }
 
@@ -981,6 +993,7 @@ fn report(
                 "overloaded": c.overloaded(),
                 "tick_ms": DT * 1000.0,
                 "nodes": c.nodes,
+                "collider_rebuilds": c.collider_rebuilds,
                 "buckets": c.bucket_rows().iter().map(|(b, p50, max)| {
                     serde_json::json!({"bucket": b, "p50_ms": p50, "max_ms": max})
                 }).collect::<Vec<_>>(),

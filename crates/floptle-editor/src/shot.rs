@@ -427,6 +427,7 @@ pub(crate) fn run(args: Args) -> i32 {
     // through the same path the first one did, housekeeping included, because
     // the frame loop would have run it and a frame drawn without it is a
     // picture of a different engine.
+    let before = (ed.static_rebuilds, ed.occluder_bakes);
     if frames > 1 {
         let stem = out.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         let dir = out.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -480,6 +481,11 @@ pub(crate) fn run(args: Args) -> i32 {
         "median of {} frames, after {TIMING_WARMUP} untimed warm-up frames",
         timed.len()
     );
+    // What the sequence rebuilt after the first picture: the work a script
+    // can cause per frame that no GPU pass timing shows. Only a sequence has
+    // frames after the first to count over.
+    let rebuilt = (timing && frames > 1)
+        .then(|| (ed.static_rebuilds - before.0, ed.occluder_bakes - before.1));
     if json {
         floptle_say::say!(
             "{}",
@@ -499,6 +505,11 @@ pub(crate) fn run(args: Args) -> i32 {
                         .map(|(l, ms)| serde_json::json!({ "label": l, "ms": ms }))
                         .collect::<Vec<_>>(),
                 })),
+                "rebuilt": rebuilt.map(|(c, o)| serde_json::json!({
+                    "frames": frames - 1,
+                    "static_colliders": c,
+                    "shadow_occluders": o,
+                })),
             })
         );
     } else {
@@ -508,6 +519,13 @@ pub(crate) fn run(args: Args) -> i32 {
             for (label, ms) in passes {
                 floptle_say::say!("  {label:<20} {ms:7.3} ms");
             }
+        }
+        if let Some((c, o)) = rebuilt {
+            floptle_say::say!(
+                "over the {} frames after the first: {c} static collider rebuild(s), {o} shadow-occluder \
+                 bake(s) (a turned or resized Collidable mesh rebakes its shadow once it holds still)",
+                frames - 1
+            );
         }
     }
     0

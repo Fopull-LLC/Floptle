@@ -103,6 +103,16 @@ than about a thousand such pieces they are checked a slice a frame, so a moved
 piece can take a few frames to follow. Something that moves all the time
 belongs in **Kinematic**, which follows every tick.
 
+A Collidable **model** also casts a distance-field shadow, which is baked from
+its shape at its current turn and size. That bake costs around 100 ms, so it is
+not redone every frame: while a script keeps turning or resizing the node (a
+flinch, a throb, a door swinging), the shadow keeps its last shape and follows
+only the node's position. Once the node holds still for about a third of a
+second, the shadow is baked once at the new shape. A node that returns to a
+shape it already has a bake for costs nothing. `shot --timing` with `--frames`
+counts these bakes and the collider rebuilds, and `run --timing` counts the
+collider rebuilds.
+
 ```lua
 -- a moving platform: Kinematic mode + plain transform writes
 defaults = { dz = 6.0, speed = 0.5 }

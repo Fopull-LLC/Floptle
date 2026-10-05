@@ -480,6 +480,7 @@ impl Editor {
                     }
                 }
                 Change::Turned(e) => {
+                    self.static_rebuilds += 1;
                     sim.remove_statics_of(eid);
                     self.add_static_collider_for(&mut sim, e);
                 }

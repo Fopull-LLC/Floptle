@@ -2553,6 +2553,17 @@ struct Editor {
     occluder_regions: HashMap<OccKey, usize>,
     /// "More occluders want to cast than fit at once" has been said.
     occluder_overflow_said: bool,
+    /// "The GPU refused the shadow atlas for lack of memory" has been said.
+    atlas_oom_said: bool,
+    /// A node whose rotation or scale has changed since its bake: the shape it
+    /// is heading for, and for how many frames running it has held it. See
+    /// [`Editor::refresh_mesh_occluders`].
+    occluder_settling: HashMap<Entity, (OccKey, u32)>,
+    /// Shadow-occluder bakes since the editor started, for `--timing`.
+    occluder_bakes: u32,
+    /// Static colliders rebuilt because their node turned or resized, for
+    /// `--timing`. A move is a shift and is not counted.
+    static_rebuilds: u32,
     /// A paint/sculpt dab on a single terrain only dirties a small voxel box — uploaded
     /// to the GPU directly (no full re-clone + re-upload), so editing a big terrain stays
     /// smooth. `(entity, min inclusive, max exclusive, geometry-changed)`; `geometry` is

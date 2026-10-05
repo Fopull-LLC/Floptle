@@ -41,6 +41,10 @@ pub(crate) struct EditorTerrain {
 /// coarse field; primary visibility (the unforgiving part) is the chunk meshes.
 pub(crate) const TERRAIN_SHADOW_MAX_DIM: u32 = 192;
 
+/// Frames a turned or resized static mesh must hold its new shape before its
+/// shadow occluder is baked again: about a third of a second at 60 fps.
+pub(crate) const OCCLUDER_SETTLE_FRAMES: u32 = 20;
+
 /// What one frame's script terrain ops wrote to one terrain, applied together:
 /// one collider copy, and one shadow/remesh refresh per cluster of boxes.
 #[derive(Default)]
@@ -1145,12 +1149,6 @@ impl Editor {
         }
     }
 
-    /// Build every node's static collider into the sim at Play. A node is a static
-    /// collider if it carries `Collidable` (the "collidable" switch) or the legacy
-    /// `MeshCollider` marker. The collider is auto-shaped from the node's `Matter`:
-    /// a Mesh bakes its world-space triangles; a Cube/Sphere/Capsule primitive becomes
-    /// a box/sphere/capsule sized to the primitive geometry × the node's scale (and
-    /// oriented by its rotation). These are environment colliders, not dynamic bodies.
     /// Keep the shadow-occluder bakes in sync with the scene's static collider
     /// meshes (Collidable / MeshCollider on a `Matter::Mesh` node, no RigidBody —
     /// dynamic bodies cast via their shape proxies instead). Each eligible mesh
@@ -1158,6 +1156,13 @@ impl Editor {
     /// (`bake_occluder`), cached so duplicates and pure moves are free. Returns
     /// true when the set changed and the atlas needs re-uploading; per-node
     /// "casts shadows" / visibility toggles are applied at fill time (no rebake).
+    ///
+    /// A turn or resize waits until it settles. A bake is a 128-voxel pass over
+    /// the whole mesh plus a re-upload of the atlas, about 100 ms, so a script
+    /// that scales a prop every frame (a flinch, a throb) would pay it every
+    /// frame. While a node is still changing it keeps casting with its last
+    /// bake, and is baked once it has held still for [`OCCLUDER_SETTLE_FRAMES`].
+    /// A shape that is already baked (back to its old scale) is taken at once.
     pub(crate) fn refresh_mesh_occluders(&mut self) -> bool {
         // The desired (entity → key) set this frame.
         let mut desired: Vec<(Entity, OccKey)> = Vec::new();
@@ -1188,6 +1193,30 @@ impl Editor {
                 [q(wt.rotation.x), q(wt.rotation.y), q(wt.rotation.z), q(wt.rotation.w)],
                 [q(wt.scale.x), q(wt.scale.y), q(wt.scale.z)],
             );
+            let key = match self.mesh_occluders.get(&e) {
+                Some((old, _)) if *old != key && !self.occluder_cache.contains_key(&key) => {
+                    let held = match self.occluder_settling.get_mut(&e) {
+                        Some((k, n)) if *k == key => {
+                            *n += 1;
+                            *n
+                        }
+                        _ => {
+                            self.occluder_settling.insert(e, (key.clone(), 0));
+                            0
+                        }
+                    };
+                    if held < OCCLUDER_SETTLE_FRAMES {
+                        old.clone()
+                    } else {
+                        self.occluder_settling.remove(&e);
+                        key
+                    }
+                }
+                _ => {
+                    self.occluder_settling.remove(&e);
+                    key
+                }
+            };
             desired.push((e, key));
         }
         let unchanged = desired.len() == self.mesh_occluders.len()
@@ -1261,6 +1290,7 @@ impl Editor {
                     ),
                     None,
                 );
+                self.occluder_bakes += 1;
                 self.occluder_cache.insert(key.clone(), baked.clone());
                 baked
             };
@@ -1268,6 +1298,7 @@ impl Editor {
         }
         // Drop cache entries nothing references anymore (a resized/removed map).
         self.occluder_cache.retain(|k, _| next.values().any(|(nk, _)| nk == k));
+        self.occluder_settling.retain(|e, _| next.contains_key(e));
         self.mesh_occluders = next;
         true
     }
@@ -3125,6 +3156,61 @@ mod occluder_tests {
         crate::Editor::fill_terrain_volumes(&HashMap::new(), &[], &occluders, &regions, 64, &world, &mut g, DVec3::ZERO);
         let n = (0..floptle_render::MAX_VOLUMES).filter(|&i| g.vol_center[i][3] >= 0.5).count();
         assert_eq!(n, floptle_render::MAX_VOLUMES, "a budget past the shader's capacity must stop at it");
+    }
+
+    /// **A prop a script resizes every frame is baked once, not every frame.**
+    /// A collidable mesh flinching by a few percent a frame keeps its last
+    /// bake while it changes, is baked once at the size it settles on, and
+    /// going back to a size it already has costs nothing.
+    #[test]
+    fn a_resize_every_frame_bakes_once_it_settles() {
+        use floptle_assets::glb_write::{WriteMesh, WriteNode, write_glb};
+        use floptle_core::math::Vec3;
+        let root = std::env::temp_dir().join(format!("floptle_occ_settle_{}", std::process::id()));
+        std::fs::create_dir_all(root.join("models")).unwrap();
+        let mesh = WriteMesh {
+            positions: vec![[-1.0, 0.0, -1.0], [1.0, 0.0, -1.0], [0.0, 2.0, 1.0], [0.0, 0.0, 1.0]],
+            normals: vec![[0.0, 1.0, 0.0]; 4],
+            indices: vec![0, 1, 2, 1, 3, 2, 3, 0, 2, 0, 3, 1],
+            base_color: [1.0; 4],
+            ..Default::default()
+        };
+        std::fs::write(root.join("models/mound.glb"), write_glb(&[WriteNode::mesh_node("m", mesh)], &[], &[])).unwrap();
+
+        let mut ed = crate::Editor { project_root: root.clone(), ..Default::default() };
+        let e = ed.world.spawn();
+        ed.world.insert(e, Transform::from_translation(DVec3::ZERO));
+        ed.world.insert(e, floptle_core::Matter::Mesh { asset_path: "models/mound.glb".into() });
+        ed.world.insert(e, floptle_core::Collidable);
+        assert!(ed.refresh_mesh_occluders());
+        assert_eq!(ed.occluder_bakes, 1, "the first bake");
+
+        // Flinch: a different size every frame for a second and a half,
+        // decaying back to where it started.
+        let mut changed = 0;
+        for f in 0..90 {
+            let s = 1.0 + 0.05 * (1.0 - f as f32 / 89.0) * (f as f32 * 0.7).sin().abs();
+            ed.world.get_mut::<Transform>(e).unwrap().scale = Vec3::splat(s);
+            changed += ed.refresh_mesh_occluders() as u32;
+        }
+        for _ in 0..(super::OCCLUDER_SETTLE_FRAMES + 10) {
+            changed += ed.refresh_mesh_occluders() as u32;
+        }
+        assert_eq!(ed.occluder_bakes, 1, "a node still changing size was rebaked");
+        assert_eq!(changed, 0, "a flinch that comes back to rest re-uploaded the atlas");
+
+        // Held at one size: baked exactly once, then left alone.
+        ed.world.get_mut::<Transform>(e).unwrap().scale = Vec3::splat(1.2);
+        let mut changed = 0;
+        for _ in 0..(super::OCCLUDER_SETTLE_FRAMES + 10) {
+            changed += ed.refresh_mesh_occluders() as u32;
+        }
+        assert_eq!(ed.occluder_bakes, 2, "the settled size was not baked, or baked more than once");
+        assert_eq!(changed, 1, "the atlas should be re-uploaded once, when the new bake lands");
+        let (key, _) = &ed.mesh_occluders[&e];
+        assert_eq!(key.2, [1200; 3], "the occluder is not at the size the node settled on");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

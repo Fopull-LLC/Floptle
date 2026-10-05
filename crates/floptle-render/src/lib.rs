@@ -44,7 +44,7 @@ pub mod ui;
 
 pub use camera::{FlyCamera, Input, ViewLock};
 pub use cull::Frustum;
-pub use device::{Gpu, Vsync, report_gpu_error, take_gpu_errors};
+pub use device::{Gpu, Vsync, gpu_trouble, report_gpu_error, take_gpu_errors};
 pub use env::{EnvMap, ENV_H, ENV_W};
 pub use frame::{ORTHO_DEPTH, Projection, RenderCamera};
 pub use gi::GiVolume;
@@ -70,7 +70,7 @@ pub use raster::{
     SkinDraw, SurfaceExtras, TexFilter, TexId, TexSampling, TexWrap, sun_shadow_matrix, SUN_MAP_SIZE,
 };
 pub use raymarch::{
-    Raymarch, RaymarchGlobals, MAX_FIELD_SHAPES, MAX_SHADOW_PROXIES, MAX_VOLUMES, TERRAIN_SLOTS,
+    AtlasRefused, Raymarch, RaymarchGlobals, MAX_FIELD_SHAPES, MAX_SHADOW_PROXIES, MAX_VOLUMES, TERRAIN_SLOTS,
 };
 pub use retro::Retro;
 

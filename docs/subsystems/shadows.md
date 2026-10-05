@@ -94,6 +94,17 @@ skips, zero cost.
    that frame, so the shadows follow the player around a big level. A mesh
    whose **Casts shadows** is off is never baked and takes none of the budget,
    so switching it off on small props spends the budget on the buildings.
+
+   **A turn or resize is baked once it settles.** A bake takes around 100 ms,
+   so a node a script turns or resizes every frame keeps its last bake (it
+   still follows the node's position) and is baked again once it has held one
+   shape for 20 frames. A shape it already has a bake for is taken at once.
+
+   **Out of video memory, the atlas shrinks.** When the GPU refuses the atlas
+   (another program holding most of its memory), bakes are dropped from the end
+   until one fits, down to none. Whatever is dropped casts no distance-field
+   shadow or AO. The world still draws and the sun shadow map still works. The
+   Console says so once, with the size that was refused.
 2. **Dynamic meshes → proxy occluders.** The editor harvests up to 32 cheap
    analytic stand-ins per frame (`collect_shadow_proxies`): a `RigidBody`
    casts its body shape (sphere / capsule / oriented box), and a static
