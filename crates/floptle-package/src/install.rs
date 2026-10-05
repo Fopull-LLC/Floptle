@@ -135,7 +135,17 @@ pub fn link_dir(project_root: &Path, src: &Path, replace: bool) -> Result<Entry,
     let entry = Entry {
         id: manifest.id.clone(),
         version: manifest.version.clone(),
-        source: Source::Linked(src_canon.display().to_string()),
+        // A folder inside the project is linked by its place in the project,
+        // so the link still holds on another machine or in another checkout.
+        // One outside it can only be named absolutely.
+        source: Source::Linked(
+            project_root
+                .canonicalize()
+                .ok()
+                .and_then(|root| src_canon.strip_prefix(root).ok().map(|r| r.to_string_lossy().replace('\\', "/")))
+                .filter(|r| !r.is_empty())
+                .unwrap_or_else(|| src_canon.display().to_string()),
+        ),
         enabled: true,
     };
     reg.upsert(entry.clone());

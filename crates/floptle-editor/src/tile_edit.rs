@@ -415,7 +415,7 @@ impl Editor {
             if self.tiles.dirty.contains(&rel) {
                 continue; // unsaved edits win over what is on disk
             }
-            match floptle_vfs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| {
+            match floptle_scene::portable::read(&path).map_err(|e| e.to_string()).and_then(|t| {
                 TileSet::from_ron(&t).map_err(|e| e.to_string())
             }) {
                 Ok(set) => {
@@ -477,7 +477,7 @@ impl Editor {
                     continue;
                 }
             };
-            match floptle_vfs::write(dir.join(name), text) {
+            match floptle_scene::portable::write(&dir.join(name), &text) {
                 Ok(()) => {
                     self.tiles.dirty.remove(&rel);
                 }

@@ -266,6 +266,11 @@ enum Act {
 impl Editor {
     /// Open a `.flsl` in the graph tab (assets double-click / `cmd` intents).
     pub(crate) fn open_shader_in_graph(&mut self, path: &str) {
+        // Held as a ref, the spelling a Material or Skybox names it by, so
+        // "is this shader in the scene" compares like with like whether it was
+        // opened from the Assets panel (absolute) or a picker (relative).
+        let rel = crate::assets::asset_rel_path(path, &self.project_root);
+        let path = rel.as_str();
         if self.shader_graph.path.as_deref() != Some(path) {
             self.shader_graph.flush(&self.project_root, &mut self.ide, true, false);
             // The clipboard and the panel's open/closed state belong to the
@@ -423,7 +428,9 @@ impl ShaderGraphState {
             self.dirty = false;
             return;
         };
-        let printed = floptle_shader::print(ir);
+        // A texture default picked as an absolute path is written relative:
+        // this is the text the file, the undo stack and the IDE buffer all hold.
+        let printed = floptle_scene::portable::relativize(&floptle_shader::print(ir), project_root).0;
         let full = resolve_asset_path(project_root, &path);
         if let Err(e) = std::fs::write(&full, &printed) {
             self.status = Some((format!("save failed: {e}"), 4.0));
@@ -441,7 +448,7 @@ impl ShaderGraphState {
         self.dirty = false;
         // The Scripting tab's buffer follows (unless the user has unsaved
         // text edits there — those win when they save).
-        if let Some(f) = ide.open.iter_mut().find(|f| f.path == path && !f.dirty) {
+        if let Some(f) = ide.open.iter_mut().find(|f| crate::assets::same_asset(&f.path, &path, project_root) && !f.dirty) {
             f.text = printed;
         }
         self.reload(project_root);
@@ -454,7 +461,7 @@ impl ShaderGraphState {
         if std::fs::write(&full, &text).is_err() {
             return;
         }
-        if let Some(f) = ide.open.iter_mut().find(|f| f.path == path && !f.dirty) {
+        if let Some(f) = ide.open.iter_mut().find(|f| crate::assets::same_asset(&f.path, &path, project_root) && !f.dirty) {
             f.text = text;
         }
         self.dirty = false;

@@ -1670,7 +1670,7 @@ impl Editor {
                         gpu.config.height.max(1) as f32,
                         self.cursor,
                     );
-                    (p.path.clone(), pos)
+                    (crate::assets::asset_rel_path(&p.path, &self.project_root), pos)
                 },
             );
 

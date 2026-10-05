@@ -177,7 +177,7 @@ impl Editor {
         let dir = self.project_root.join(".floptle");
         let _ = floptle_vfs::create_dir_all(&dir);
         if let Ok(s) = ron::ser::to_string_pretty(&self.texture_settings, Default::default()) {
-            let _ = floptle_vfs::write(dir.join("textures.ron"), s);
+            let _ = floptle_scene::portable::write(&dir.join("textures.ron"), &s);
         }
     }
 
@@ -1257,8 +1257,8 @@ impl Editor {
                 f.name = final_name.clone();
             }
         }
-        if self.shader_graph.path.as_deref() == Some(from) {
-            self.shader_graph.path = Some(dst_str.clone());
+        if self.shader_graph.path.as_deref().is_some_and(|p| crate::assets::same_asset(p, from, &self.project_root)) {
+            self.shader_graph.path = Some(crate::assets::asset_rel_path(&dst_str, &self.project_root));
         }
         if self.selected_asset.as_deref() == Some(from) {
             self.selected_asset = Some(dst_str.clone());
@@ -1309,8 +1309,8 @@ impl Editor {
                     f.path = to.clone();
                 }
             }
-            if self.shader_graph.path.as_deref() == Some(from.as_str()) {
-                self.shader_graph.path = Some(to.clone());
+            if self.shader_graph.path.as_deref().is_some_and(|p| crate::assets::same_asset(p, from, &self.project_root)) {
+                self.shader_graph.path = Some(crate::assets::asset_rel_path(to, &self.project_root));
             }
             if self.selected_asset.as_deref() == Some(from.as_str()) {
                 self.selected_asset = Some(to.clone());
@@ -1466,7 +1466,8 @@ impl Editor {
                 // A deleted model: clear a bone/object selection or anim target riding it,
                 // then rebind everything fresh (orphaned instances simply drop).
                 let rides_deleted = |e| {
-                    matches!(self.world.get::<Matter>(e), Some(Matter::Mesh { asset_path }) if asset_path == rel)
+                    matches!(self.world.get::<Matter>(e), Some(Matter::Mesh { asset_path })
+                        if crate::assets::asset_rel_path(asset_path, &self.project_root) == rel)
                 };
                 if self.bone_selection.map(|(m, _)| rides_deleted(m)).unwrap_or(false) {
                     self.bone_selection = None;
@@ -2136,7 +2137,11 @@ impl Editor {
                     // order. Written only when it differs from the default, so
                     // an untouched palette is byte-identical to what every
                     // previous version of the editor wrote.
-                    let mut line = p.clone();
+                    let mut line = if p.is_empty() {
+                        String::new()
+                    } else {
+                        floptle_scene::portable::rel_path(p, &self.project_root)
+                    };
                     if self.terrain_glow_mask & (1 << i.min(31)) != 0 {
                         line.push_str("|glow");
                     }
@@ -3302,6 +3307,121 @@ mod path_tests {
              `resolve_asset_path(&self.project_root, path)` instead.",
             bad.join("\n  ")
         );
+    }
+
+    /// **Every RON file the editor writes into a project goes out portable.**
+    ///
+    /// An absolute path inside the project, written into a file a developer
+    /// authored (a clip's source model, a tileset's sheet, a material's
+    /// texture), loads on the machine that wrote it and nowhere else. Each
+    /// writer used to have to remember to relativize, and the clip, material,
+    /// effect, tileset and in-place prefab saves each forgot. Now the rule is
+    /// structural: a write of serialized RON goes through
+    /// `floptle_scene::portable::write`, which relativizes against the project
+    /// the file is in.
+    ///
+    /// Flags a raw `fs::write` / `floptle_vfs::write` with a RON serializer
+    /// in the fifteen lines above it, in the editor and scene crates' shipping
+    /// code. A file that lives outside any project, or that is not authored,
+    /// is listed here with the reason.
+    #[test]
+    fn authored_ron_is_written_through_portable() {
+        const WRITES: &[&str] = &["fs::write(", "floptle_vfs::write("];
+        const SERIALIZERS: &[&str] = &["to_string_pretty(", "ron::ser::", "to_ron(", "ron::to_string("];
+        const NOT_AUTHORED: &[(&str, &str)] = &[
+            ("prefs.rs", "editor preferences, in the user's config folder"),
+            ("layout.rs", "the dock layout, in the user's config folder"),
+            ("rollback_session.rs", "a rollback debug log"),
+            ("export.rs", "a build's own manifest, written into the build"),
+            ("ext/prefs.rs", "an extension's own settings"),
+            ("portable.rs", "the portable writer itself"),
+        ];
+        let mut sources: Vec<(String, String)> = Vec::new();
+        for dir in [concat!(env!("CARGO_MANIFEST_DIR"), "/src"), concat!(env!("CARGO_MANIFEST_DIR"), "/../floptle-scene/src")] {
+            let mut stack = vec![PathBuf::from(dir)];
+            while let Some(d) = stack.pop() {
+                for e in floptle_vfs::read_dir(&d).into_iter().flatten() {
+                    let p = e.path();
+                    if e.is_dir() {
+                        stack.push(p);
+                    } else if p.extension().is_some_and(|x| x == "rs") {
+                        let rel = p.strip_prefix(dir).unwrap_or(&p).to_string_lossy().replace('\\', "/");
+                        sources.push((rel, floptle_vfs::read_to_string(&p).unwrap_or_default()));
+                    }
+                }
+            }
+        }
+        assert!(sources.iter().any(|(n, _)| n == "anim.rs"), "the scene crate's sources were not found");
+        let mut bad = Vec::new();
+        for (name, src) in &sources {
+            if NOT_AUTHORED.iter().any(|(n, _)| name == n) {
+                continue;
+            }
+            let code = src.split("#[cfg(test)]").next().unwrap_or(src);
+            let lines: Vec<&str> = code.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                if !WRITES.iter().any(|w| line.contains(w)) || line.contains("portable") {
+                    continue;
+                }
+                let above = lines[i.saturating_sub(15)..=i].join("\n");
+                if SERIALIZERS.iter().any(|s| above.contains(s)) && !above.contains("relativize(") {
+                    bad.push(format!("{name}:{} — {}", i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "these write serialized RON straight to disk, so an absolute path in it reaches \
+             the file:\n  {}\n\nWrite it with `floptle_scene::portable::write(path, &text)`, or, \
+             if the file is not in a project, add it to NOT_AUTHORED with the reason.",
+            bad.join("\n  ")
+        );
+    }
+
+    /// **A clip made for a model dropped from the Assets panel is portable,
+    /// and stays listed for that model.** The Assets panel hands over the
+    /// file's absolute path; the node, the new clip's `source_model` and the
+    /// file on disk all have to come out project-relative, and a clip an older
+    /// editor saved absolute must still list for the model after a reload.
+    #[test]
+    fn a_clip_for_a_dropped_model_saves_relative_and_stays_listed() {
+        let root = std::env::temp_dir().join(format!("floptle_clip_rel_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("models/Player")).unwrap();
+        std::fs::create_dir_all(root.join("animations")).unwrap();
+        std::fs::write(root.join("project.ron"), "()").unwrap();
+        let abs_model = root.join("models/Player/rebel.glb").to_string_lossy().into_owned();
+        std::fs::write(&abs_model, b"not really a glb").unwrap();
+
+        // The path the editor's own registry and nodes use for it.
+        assert_eq!(crate::assets::asset_rel_path(&abs_model, &root), "models/Player/rebel.glb");
+
+        // Saving a clip that carries the absolute spelling writes it relative,
+        // and the registry's copy matches the disk.
+        let mut ed = crate::Editor { project_root: root.clone(), ..Default::default() };
+        let doc = floptle_scene::AnimClipDoc {
+            name: "pose".into(),
+            duration: 1.0,
+            source_model: abs_model.clone(),
+            channels: Vec::new(),
+            events: Vec::new(),
+        };
+        ed.anim.save_clip(&root, "animations/pose", &doc);
+        let text = std::fs::read_to_string(root.join("animations/pose.anim.ron")).unwrap();
+        assert!(text.contains(r#"source_model: "models/Player/rebel.glb""#), "{text}");
+        assert!(!text.contains(&*root.to_string_lossy()), "the project's own path leaked: {text}");
+        let kept = ed.anim.clips.iter().find(|(k, _)| k == "animations/pose").map(|(_, d)| d.source_model.clone());
+        assert_eq!(kept.as_deref(), Some("models/Player/rebel.glb"), "memory disagrees with the disk");
+
+        // A file an older editor wrote absolute comes back relative.
+        std::fs::write(
+            root.join("animations/old.anim.ron"),
+            format!("(name: \"old\", duration: 1.0, source_model: \"{abs_model}\", channels: [], events: [])"),
+        )
+        .unwrap();
+        let back = floptle_scene::load_anim_clip(&root.join("animations/old.anim.ron")).unwrap();
+        assert_eq!(back.source_model, "models/Player/rebel.glb");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

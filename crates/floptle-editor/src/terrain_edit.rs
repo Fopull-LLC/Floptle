@@ -1712,11 +1712,12 @@ impl Editor {
         if path.is_empty() {
             return None;
         }
-        if let Some(i) = self.terrain_textures.iter().position(|p| p == path) {
+        let path = crate::assets::asset_rel_path(path, &self.project_root);
+        if let Some(i) = self.terrain_textures.iter().position(|p| *p == path) {
             return Some(i as u8);
         }
         let i = self.terrain_textures.iter().position(|p| p.is_empty())?;
-        self.terrain_textures[i] = path.to_string();
+        self.terrain_textures[i] = path;
         self.terrain_textures_dirty = true;
         Some(i as u8)
     }
@@ -2855,7 +2856,13 @@ impl Editor {
                     .enumerate()
                     .map(|(i, line)| {
                         let mut parts = line.split('|');
-                        let path = parts.next().unwrap_or("").to_string();
+                        // An older editor wrote absolute paths here; one inside
+                        // the project is read back relative, so it matches the
+                        // slot a picker would give and saves portable.
+                        let path = match parts.next().unwrap_or("") {
+                            "" => String::new(),
+                            p => floptle_scene::portable::rel_path(p, &self.project_root),
+                        };
                         let mut scale = 1.0f32;
                         for flag in parts {
                             if flag == "glow" {

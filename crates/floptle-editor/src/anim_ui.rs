@@ -1416,8 +1416,14 @@ impl EditorTabViewer<'_> {
                         .and_then(|m| m.rig.as_ref())
                         .map(|r| r.clips.iter().map(|c| (c.name.clone(), c.name.clone())).collect())
                         .unwrap_or_default();
+                    // Both sides as refs: a node or clip still carrying an
+                    // absolute spelling is the same model, and its clips list.
+                    let model = crate::assets::asset_rel_path(asset_path, self.project_root);
                     for (key, doc) in &self.anim.clips {
-                        if &doc.source_model == asset_path && !out.iter().any(|(_, k)| k == key) {
+                        if !doc.source_model.is_empty()
+                            && crate::assets::asset_rel_path(&doc.source_model, self.project_root) == model
+                            && !out.iter().any(|(_, k)| k == key)
+                        {
                             out.push((doc.name.clone(), key.clone()));
                         }
                     }
@@ -1784,8 +1790,10 @@ impl EditorTabViewer<'_> {
                 let clip_key = anim::new_clip_key(self.project_root, &name);
                 // Tie the clip to the target model so a controller-less rigged mesh can
                 // list + edit it (the no-controller states pick up source_model matches).
+                // Project-relative whatever spelling the node holds: the clip
+                // is a file that has to load on the next machine too.
                 let source_model = match self.world.get::<Matter>(target) {
-                    Some(Matter::Mesh { asset_path }) => asset_path.clone(),
+                    Some(Matter::Mesh { asset_path }) => crate::assets::asset_rel_path(asset_path, self.project_root),
                     _ => String::new(),
                 };
                 let doc = AnimClipDoc {

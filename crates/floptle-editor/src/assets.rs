@@ -252,6 +252,12 @@ pub(crate) fn canonical(p: &Path) -> Option<std::path::PathBuf> {
     }
 }
 
+/// Do two spellings name the same project file? One may be the Assets
+/// panel's absolute path and the other a node's project-relative ref.
+pub(crate) fn same_asset(a: &str, b: &str, project_root: &Path) -> bool {
+    a == b || asset_rel_path(a, project_root) == asset_rel_path(b, project_root)
+}
+
 pub(crate) fn asset_rel_path(path: &str, project_root: &Path) -> String {
     let slashed = path.replace('\\', "/");
     if let Ok(p) = Path::new(&slashed).strip_prefix(project_root) {

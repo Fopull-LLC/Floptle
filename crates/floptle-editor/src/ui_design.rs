@@ -281,7 +281,7 @@ pub(crate) fn save_guides(
         let _ = std::fs::create_dir_all(dir);
     }
     if let Ok(text) = ron::ser::to_string_pretty(&by_name, ron::ser::PrettyConfig::default()) {
-        let _ = std::fs::write(&path, text);
+        let _ = floptle_scene::portable::write(&path, &text);
     }
 }
 
@@ -699,7 +699,7 @@ pub(crate) fn append_style(
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    std::fs::write(path, text).map_err(|e| e.to_string())
+    floptle_scene::portable::write(path, &text).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------

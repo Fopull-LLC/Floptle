@@ -525,7 +525,7 @@ impl Editor {
             Ok(text) => {
                 let dir = self.project_root.join("maps");
                 let _ = floptle_vfs::create_dir_all(&dir);
-                if let Err(e) = floptle_vfs::write(self.maps_file_path(), text) {
+                if let Err(e) = floptle_scene::portable::write(&self.maps_file_path(), &text) {
                     self.console.push(
                         floptle_script::LogLevel::Error,
                         format!("💾 save map meshes failed: {e}"),

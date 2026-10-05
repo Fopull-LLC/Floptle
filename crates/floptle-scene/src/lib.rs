@@ -19,6 +19,7 @@ use floptle_core::{
 use serde::{Deserialize, Serialize};
 
 pub mod anim;
+pub mod portable;
 pub use anim::{
     key_mode_at, load_anim_clip, load_anim_controller, move_key_mode, same_key_time, save_anim_clip,
     save_anim_controller, set_key_mode, AnimChannelDoc, AnimInterpDoc, AnimKeyModeDoc,
@@ -3044,7 +3045,7 @@ impl std::error::Error for SceneError {}
 
 /// Parse a scene from a RON file.
 pub fn load(path: &Path) -> Result<SceneDoc, SceneError> {
-    let text = floptle_vfs::read_to_string(path).map_err(SceneError::Io)?;
+    let text = crate::portable::read(path).map_err(SceneError::Io)?;
     from_ron(&text)
 }
 
@@ -3155,7 +3156,7 @@ mod migrate_tests {
 /// Serialize a scene to a pretty RON file.
 pub fn save(doc: &SceneDoc, path: &Path) -> Result<(), SceneError> {
     let text = to_ron(doc)?;
-    floptle_vfs::write(path, text).map_err(SceneError::Io)
+    crate::portable::write(path, &text).map_err(SceneError::Io)
 }
 
 /// Serialize a scene to pretty RON text.
@@ -3565,7 +3566,7 @@ pub fn load_materials(dir: &Path) -> Vec<(String, MaterialDoc)> {
             continue;
         }
         let Some(name) = p.file_stem().map(|s| s.to_string_lossy().to_string()) else { continue };
-        if let Ok(mat) = floptle_vfs::read_to_string(&p).ok().map(|t| ron::from_str(&t)).transpose()
+        if let Ok(mat) = crate::portable::read(&p).ok().map(|t| ron::from_str(&t)).transpose()
             && let Some(mat) = mat {
                 out.push((name, mat));
             }
@@ -3579,7 +3580,7 @@ pub fn save_material(name: &str, mat: &MaterialDoc, dir: &Path) -> Result<(), Sc
     let _ = floptle_vfs::create_dir_all(dir);
     let text = ron::ser::to_string_pretty(mat, ron::ser::PrettyConfig::default())
         .map_err(SceneError::Serialize)?;
-    floptle_vfs::write(dir.join(format!("{name}.ron")), text).map_err(SceneError::Io)
+    crate::portable::write(&dir.join(format!("{name}.ron")), &text).map_err(SceneError::Io)
 }
 
 /// Load the project-wide render config, or the default if the file is missing.
@@ -3603,7 +3604,7 @@ pub fn load_project(path: &Path) -> ProjectConfigDoc {
 /// absent, `Ok(Some(cfg))` = present + parsed, `Err` = present but won't parse. Lets a
 /// migrate/upgrade step avoid clobbering a broken config or fabricating a missing one.
 pub fn try_load_project(path: &Path) -> Result<Option<ProjectConfigDoc>, SceneError> {
-    match floptle_vfs::read_to_string(path) {
+    match crate::portable::read(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(SceneError::Io(e)),
         Ok(text) => ron::from_str(&text).map(Some).map_err(SceneError::Ron),
@@ -3614,7 +3615,7 @@ pub fn try_load_project(path: &Path) -> Result<Option<ProjectConfigDoc>, SceneEr
 pub fn save_project(cfg: &ProjectConfigDoc, path: &Path) -> Result<(), SceneError> {
     let text = ron::ser::to_string_pretty(cfg, ron::ser::PrettyConfig::default())
         .map_err(SceneError::Serialize)?;
-    floptle_vfs::write(path, text).map_err(SceneError::Io)
+    crate::portable::write(path, &text).map_err(SceneError::Io)
 }
 
 /// Spawn every node into `world` as an entity with `Transform` + `Name` + `Matter`,

@@ -2122,7 +2122,10 @@ fn skybox_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
         if ui.selectable_label(textured, "▦ Texture").clicked() && !textured {
             let mut tl = Vec::new();
             collect_texture_paths(ctx.asset_tree, &mut tl);
-            *texture = Some(tl.first().cloned().unwrap_or_default());
+            // The tree's paths are on-disk spellings; the node keeps a ref.
+            *texture = Some(
+                tl.first().map(|p| crate::assets::asset_rel_path(p, ctx.project_root)).unwrap_or_default(),
+            );
             cmd.inspector_changed = true;
         }
     });
@@ -4013,7 +4016,10 @@ impl EditorTabViewer<'_> {
     fn model_asset_materials_ui(&mut self, ui: &mut egui::Ui, path: &str) {
         ui.separator();
         ui.strong("◑ Materials");
-        let Some(asset) = self.mesh_registry.get(path) else {
+        // The Assets panel's path is absolute; models are registered under
+        // their project-relative ref, which is what a scene names them by.
+        let rel = crate::assets::asset_rel_path(path, self.project_root);
+        let Some(asset) = self.mesh_registry.get(path).or_else(|| self.mesh_registry.get(&rel)) else {
             ui.small("drag the model into a scene once to inspect its materials");
             return;
         };

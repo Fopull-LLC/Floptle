@@ -55,6 +55,6 @@ impl RigOverrides {
         }
         let s = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
             .map_err(std::io::Error::other)?;
-        floptle_vfs::write(&p, s)
+        floptle_scene::portable::write(&p, &s)
     }
 }

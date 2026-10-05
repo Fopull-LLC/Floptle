@@ -682,6 +682,12 @@ impl Editor {
                 self.world.insert(e, m);
             }
         } else if is_model(path) {
+            // The Assets panel hands over the file's absolute path. The node
+            // keeps the project-relative one: it is what the scene saves, what
+            // a reload reads back, and what everything copying it out (a new
+            // clip's source model, an extracted texture) has to be portable.
+            let rel = crate::assets::asset_rel_path(path, &self.project_root);
+            let path = rel.as_str();
             if !self.import_model(path) {
                 return;
             }

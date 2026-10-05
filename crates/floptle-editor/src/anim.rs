@@ -469,7 +469,10 @@ impl AnimSystem {
                 }
                 let Some(fname) = p.file_name().and_then(|s| s.to_str()) else { continue };
                 if has_ext(fname, ANIM_CLIP_EXT) {
-                    if let Ok(doc) = floptle_scene::load_anim_clip(&p) {
+                    if let Ok(mut doc) = floptle_scene::load_anim_clip(&p) {
+                        // A clip an older editor saved with an absolute model
+                        // path still belongs to that model.
+                        doc.source_model = floptle_scene::portable::rel_path(&doc.source_model, &root);
                         self.clips.push((asset_key(&p, &root, ANIM_CLIP_EXT), doc));
                     }
                 } else if has_ext(fname, floptle_scene::SPRITE_ANIM_EXT) {
@@ -607,11 +610,16 @@ impl AnimSystem {
             return;
         }
         let path = project_root.join(format!("{key}{ANIM_CLIP_EXT}"));
-        if let Err(e) = floptle_scene::save_anim_clip(doc, &path) {
+        // The file is written portable whatever it holds (`portable::write`);
+        // the copy kept in memory is made to match, or a model's clip list,
+        // which compares against it, would disagree with the disk.
+        let mut doc = doc.clone();
+        doc.source_model = floptle_scene::portable::rel_path(&doc.source_model, project_root);
+        if let Err(e) = floptle_scene::save_anim_clip(&doc, &path) {
             floptle_say::say_err!("  save clip {key} failed: {e}");
             return;
         }
-        self.register_clip(key, doc);
+        self.register_clip(key, &doc);
     }
 
     /// One frame per cell of a sliced sheet, in reading order — the clip a
@@ -753,8 +761,7 @@ pub fn strip_ext<'a>(path: &'a str, ext: &str) -> Option<&'a str> {
 /// stripping it exactly would leave `.SpriteAnim.ron` **in** the key, and a key
 /// that still carries its extension matches nothing that the scan produced.
 pub fn asset_key(path: &Path, project_root: &Path, ext: &str) -> String {
-    let rel = path.strip_prefix(project_root).unwrap_or(path);
-    let s = rel.to_string_lossy().replace('\\', "/");
+    let s = floptle_scene::portable::rel_path(&path.to_string_lossy(), project_root);
     strip_ext(&s, ext).map(str::to_string).unwrap_or(s)
 }
 
@@ -1013,10 +1020,11 @@ pub fn extract_clips(
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "model".into());
-    let rel_model = Path::new(model_path)
-        .strip_prefix(project_root)
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|_| model_path.to_string());
+    // The model and the project reach here independently (from the CLI, one
+    // can be absolute and the other relative), so the plain prefix strip is
+    // not enough: `rel_path` also matches the root's absolute and resolved
+    // spellings.
+    let rel_model = floptle_scene::portable::rel_path(model_path, project_root);
     let mut written: Vec<String> = Vec::new();
     for clip in &rigged.clips {
         let mut doc = bake_clip_doc(clip, &rigged.skeleton, &rel_model);

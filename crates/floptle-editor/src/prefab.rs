@@ -19,7 +19,7 @@ use crate::Editor;
 /// Parse a prefab file: pretty RON of `Vec<NodeDoc>`, tolerant of the node
 /// clipboard's `//floptle-nodes-v1` tag line (a pasted clipboard is a prefab).
 pub(crate) fn load_prefab_docs(path: &Path) -> Result<Vec<NodeDoc>, String> {
-    let text = floptle_vfs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let text = floptle_scene::portable::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let body = text.trim_start().strip_prefix("//floptle-nodes-v1").unwrap_or(&text);
     ron::from_str::<Vec<NodeDoc>>(body.trim_start())
         .map_err(|e| format!("{}: not a prefab ({e})", path.display()))
@@ -142,7 +142,7 @@ impl Editor {
         }
         match ron::ser::to_string_pretty(&docs, ron::ser::PrettyConfig::default())
             .map_err(|e| e.to_string())
-            .and_then(|ron| floptle_vfs::write(&path, ron).map_err(|e| e.to_string()))
+            .and_then(|ron| floptle_scene::portable::write(&path, &ron).map_err(|e| e.to_string()))
         {
             Ok(()) => {
                 self.console.push(
@@ -190,8 +190,7 @@ impl Editor {
         let path = unique_path(dir, &stem, Some("prefab.ron"));
         match ron::ser::to_string_pretty(&docs, ron::ser::PrettyConfig::default()) {
             Ok(ron) => {
-                let (ron, _) = crate::abs_paths::relativize(&ron, &self.project_root);
-                if let Err(e) = floptle_vfs::write(&path, ron) {
+                if let Err(e) = floptle_scene::portable::write(&path, &ron) {
                     self.console.push(
                         floptle_script::LogLevel::Error,
                         format!("save prefab failed: {e}"),

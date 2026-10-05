@@ -215,8 +215,11 @@ pub(crate) fn examine(root: &Path) -> Report {
     for path in &files {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let where_ = rel(root, path);
-        if name.ends_with(".ron") && where_ != "packages.ron" {
+        if (name.ends_with(".ron") && where_ != "packages.ron") || name.ends_with(".flsl") {
             check_absolute_paths(root, path, &where_, &mut r);
+        }
+        if name.ends_with(".palette") {
+            check_palette_paths(root, path, &where_, &mut r);
         }
         if name.ends_with(".vfx.ron") {
             r.effects += 1;
@@ -347,19 +350,73 @@ fn check_absolute_paths(root: &Path, path: &Path, where_: &str, r: &mut Report) 
     }
 }
 
-/// Rewrite every in-project absolute path in the project's `.ron` files to a
-/// project-relative one: `(file, how many)` per file changed.
+/// **A terrain palette naming an image only this machine has.** One `path`
+/// (then `|flags`) per line, not quoted, so [`check_absolute_paths`] cannot
+/// see it.
+fn check_palette_paths(root: &Path, path: &Path, where_: &str, r: &mut Report) {
+    let Ok(text) = std::fs::read_to_string(path) else { return };
+    for (i, line) in text.lines().enumerate() {
+        let value = line.split('|').next().unwrap_or("");
+        if !(value.starts_with('/') || value.starts_with("\\\\") || value.get(1..3) == Some(":\\") || value.get(1..3) == Some(":/")) {
+            continue;
+        }
+        let rel = floptle_scene::portable::rel_path(value, root);
+        let file = format!("{where_}:{}", i + 1);
+        if rel != value.replace('\\', "/") {
+            r.error(
+                Some(file),
+                format!(
+                    "terrain texture slot {} is an absolute path ({value}) — it loads on this machine and will \
+                     be missing in an export or anywhere else. It should be \"{rel}\". Fix: floptle check --fix",
+                    i + 1
+                ),
+            );
+        } else {
+            r.error(
+                Some(file),
+                format!(
+                    "terrain texture slot {} is {value} — outside the project, so an export will not include \
+                     it at all. Copy it into the project and point at the copy.",
+                    i + 1
+                ),
+            );
+        }
+    }
+}
+
+/// Rewrite every in-project absolute path in the project's `.ron` and `.flsl`
+/// files and terrain palettes to a project-relative one: `(file, how many)`
+/// per file changed.
 fn fix_absolute_paths(root: &Path) -> Vec<(String, usize)> {
     let mut files = Vec::new();
     walk(root, &mut files);
     let mut out = Vec::new();
     for path in files {
         let where_ = rel(root, &path);
-        if !where_.ends_with(".ron") || where_ == "packages.ron" {
-            continue;
-        }
         let Ok(text) = std::fs::read_to_string(&path) else { continue };
-        let (fixed, n) = crate::abs_paths::relativize(&text, root);
+        let (fixed, n) = if where_.ends_with(".palette") {
+            let mut n = 0;
+            let lines: Vec<String> = text
+                .lines()
+                .map(|line| {
+                    let (value, flags) = line.split_once('|').map_or((line, None), |(v, f)| (v, Some(f)));
+                    let rel = floptle_scene::portable::rel_path(value, root);
+                    if rel == value {
+                        return line.to_string();
+                    }
+                    n += 1;
+                    match flags {
+                        Some(f) => format!("{rel}|{f}"),
+                        None => rel,
+                    }
+                })
+                .collect();
+            (lines.join("\n"), n)
+        } else if (where_.ends_with(".ron") && where_ != "packages.ron") || where_.ends_with(".flsl") {
+            crate::abs_paths::relativize(&text, root)
+        } else {
+            continue;
+        };
         if n > 0 && std::fs::write(&path, fixed).is_ok() {
             out.push((where_, n));
         }
@@ -910,6 +967,34 @@ mod tests {
         assert!(text.contains("asset_path: \"models/tower.glb\""), "{text}");
         let r = examine(&d);
         assert_eq!(r.errors(), 0, "still failing after --fix: {:?}", r.findings);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **A terrain palette naming an image by its absolute path.** The palette
+    /// is `path|flags` per line, not quoted RON, so it needs its own check and
+    /// its own fix, and the fix keeps the flags.
+    #[test]
+    fn an_absolute_terrain_palette_slot_fails_the_check_and_fix_keeps_its_flags() {
+        let d = temp("palette");
+        std::fs::create_dir_all(d.join("textures")).unwrap();
+        std::fs::create_dir_all(d.join("terrain")).unwrap();
+        std::fs::write(d.join("scenes/first.ron"), scene("")).unwrap();
+        let abs = d.join("textures/grass.png");
+        std::fs::write(&abs, b"png").unwrap();
+        std::fs::write(d.join("terrain/first.palette"), format!("{}|glow\ntextures/rock.png", abs.display())).unwrap();
+        let r = examine(&d);
+        let hit = r
+            .findings
+            .iter()
+            .find(|f| f.message.contains("terrain texture slot 1"))
+            .unwrap_or_else(|| panic!("no finding for the palette: {:?}", r.findings));
+        assert!(hit.message.contains("\"textures/grass.png\""), "{}", hit.message);
+        assert!(!r.findings.iter().any(|f| f.message.contains("slot 2")), "a relative slot was reported");
+
+        let fixed = fix_absolute_paths(&d);
+        assert_eq!(fixed, vec![("terrain/first.palette".to_string(), 1)]);
+        let text = std::fs::read_to_string(d.join("terrain/first.palette")).unwrap();
+        assert_eq!(text, "textures/grass.png|glow\ntextures/rock.png");
         let _ = std::fs::remove_dir_all(&d);
     }
 

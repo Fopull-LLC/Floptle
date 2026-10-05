@@ -741,6 +741,8 @@ impl TileCtx<'_> {
             return;
         }
         if changed {
+            // A path typed or pasted whole is taken back to its ref.
+            let path = crate::assets::asset_rel_path(&path, self.project_root);
             self.cmds.push(TileCmd::SetPage(p, path, cols, rows));
         }
     }
@@ -1942,7 +1944,7 @@ impl TileCtx<'_> {
             );
         }
         let p = resp.dnd_release_payload::<crate::assets::AssetPayload>()?;
-        crate::assets::is_texture(&p.path).then(|| p.path.clone())
+        crate::assets::is_texture(&p.path).then(|| crate::assets::asset_rel_path(&p.path, self.project_root))
     }
 
     /// A texture dropped anywhere on the panel — so "drag it in from my assets"
@@ -1950,7 +1952,7 @@ impl TileCtx<'_> {
     fn dropped_texture(&self, ui: &egui::Ui) -> Option<String> {
         let resp = ui.response();
         let p = resp.dnd_release_payload::<crate::assets::AssetPayload>()?;
-        crate::assets::is_texture(&p.path).then(|| p.path.clone())
+        crate::assets::is_texture(&p.path).then(|| crate::assets::asset_rel_path(&p.path, self.project_root))
     }
 
     /// An egui handle on the active layer's texture.

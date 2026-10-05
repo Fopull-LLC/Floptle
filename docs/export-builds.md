@@ -194,11 +194,17 @@ exist on your disk) count as paths, so an HTTP route or a field path in a
 request body is not reported.
 
 The project itself shouldn't hold them either, because a teammate who opens
-it has the same problem a player would. The editor saves every path to a file
-inside the project as project-relative, whichever way it got into the scene.
-`floptle check` fails on any absolute path it finds in a `.ron` file, naming
-the file, line, node and field, and `floptle check --fix` rewrites the ones
-inside the project to relative ones. A path outside the project has no
+it has the same problem a player would. Every file the editor writes into a
+project stores a path to a file inside the project as project-relative,
+whichever way the path got there: scenes, prefabs, animation clips and
+controllers, sprite animations, materials, particle effects, tilesets, UI
+styles, shader-graph `.flsl` files, map and texture settings, terrain
+palettes, `project.ron`, and a package linked from a folder inside the
+project. A file an older version saved with absolute paths is read back with
+relative ones, and its next save fixes the file. `floptle check` fails on any
+absolute path it finds in a `.ron` or `.flsl` file or a terrain palette,
+naming the file, line, node and field, and `floptle check --fix` rewrites the
+ones inside the project to relative ones. A path outside the project has no
 relative form, so `check` says the export won't include that file at all.
 
 The player applies the same rescue at load time: an absolute reference that

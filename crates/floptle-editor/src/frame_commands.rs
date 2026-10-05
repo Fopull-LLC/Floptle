@@ -648,6 +648,9 @@ impl Editor {
         // texture draws untextured and "override" must not mean "go blank").
         if let Some((e, key, model)) = cmd.override_object_material.take() {
             self.record();
+            // A node still holding an absolute model path would name the
+            // extracted texture absolutely too; both are taken as refs.
+            let model = crate::assets::asset_rel_path(&model, &self.project_root);
             let (base, textured, material) = self
                 .mesh_registry
                 .get(&model)
@@ -690,6 +693,7 @@ impl Editor {
                         }
                     },
                 };
+                mat.texture = mat.texture.map(|t| crate::assets::asset_rel_path(&t, &self.project_root));
             }
             let mut om =
                 self.world.get::<floptle_core::ObjectMaterials>(e).cloned().unwrap_or_default();
@@ -1126,6 +1130,7 @@ impl Editor {
                 );
             }
             self.mesh_registry.remove(&path);
+            self.mesh_registry.remove(&crate::assets::asset_rel_path(&path, &self.project_root));
         }
         if let Some(mesh) = cmd.mirror_model.take()
             && let Some(Matter::Mesh { asset_path }) = self.world.get::<Matter>(mesh).cloned()
@@ -1692,9 +1697,12 @@ impl Editor {
         // (the gather can't import — gpu/raster are borrowed there).
         if let Some(p) =
             self.egui.as_ref().and_then(|e| egui::DragAndDrop::payload::<AssetPayload>(&e.ctx))
-            && is_model(&p.path) && !self.mesh_registry.contains_key(&p.path) {
-                let path = p.path.clone();
-                self.import_model(&path);
+            && is_model(&p.path) {
+                // Keyed as the drop will key it (see `drop_asset`).
+                let path = crate::assets::asset_rel_path(&p.path, &self.project_root);
+                if !self.mesh_registry.contains_key(&path) {
+                    self.import_model(&path);
+                }
             }
     }
 }
