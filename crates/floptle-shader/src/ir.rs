@@ -472,10 +472,14 @@ pub fn check(ir: &ShaderIr) -> Result<Checked, Vec<IrError>> {
     match stage {
         Stage::Fragment => {
             expect_output(ir, "color", &[Ty::Vec3, Ty::Vec4], &let_ty, &mut ck, &mut errors);
+            if let Some(&off) = ir.outputs.get("offset") {
+                expect_output(ir, "offset", &[Ty::Vec3], &let_ty, &mut ck, &mut errors);
+                check_per_vertex(ir, off, &mut errors);
+            }
             for name in ir.outputs.keys() {
-                if name != "color" {
+                if name != "color" && name != "offset" {
                     errors.push(IrError::new(
-                        format!("fragment shaders output `color` only (got `{name}`)"),
+                        format!("fragment shaders output `color` (and optionally `offset`), got `{name}`"),
                         ir.expr(ir.outputs[name]).span,
                     ));
                 }
@@ -543,6 +547,68 @@ pub fn check(ir: &ShaderIr) -> Result<Checked, Vec<IrError>> {
     }
 
     if errors.is_empty() { Ok(ck) } else { Err(errors) }
+}
+
+/// Inputs `output offset` can read: the ones that exist for a vertex before
+/// it is placed. Everything else in a fragment shader describes a lit pixel.
+pub const OFFSET_INPUTS: &[Input] = &[Input::ObjectPos, Input::Normal, Input::Uv, Input::Time, Input::InstanceColor];
+
+/// Stdlib categories `output offset` can call: pure functions of their
+/// arguments. Textures, the screen and the engine's lighting are not there
+/// for a vertex.
+pub const OFFSET_CATEGORIES: &[&str] = &["math", "noise", "color", "sdf"];
+
+/// `output offset` runs in the vertex shader, once per vertex, so it may only
+/// reach what a vertex has: see [`OFFSET_INPUTS`] and [`OFFSET_CATEGORIES`].
+/// Walks the expression and every `let` it reads.
+fn check_per_vertex(ir: &ShaderIr, root: ExprId, errors: &mut Vec<IrError>) {
+    let mut stack = vec![root];
+    let mut seen_lets = std::collections::BTreeSet::new();
+    while let Some(id) = stack.pop() {
+        let e = ir.expr(id);
+        match &e.kind {
+            ExprKind::Num(_) | ExprKind::ColorLit(_) | ExprKind::Str(_) | ExprKind::Uniform(_) => {}
+            ExprKind::Input(i) => {
+                if !OFFSET_INPUTS.contains(i) {
+                    errors.push(IrError::new(
+                        format!(
+                            "`output offset` moves vertices, and `{}` is not known per vertex. It can \
+                             read objectPos, normal, uv, time, instanceColor and the shader's uniforms",
+                            i.name()
+                        ),
+                        e.span,
+                    ));
+                }
+            }
+            ExprKind::Texture(_) => errors.push(IrError::new(
+                "`output offset` cannot read a texture: it runs per vertex, before there is a pixel to sample for",
+                e.span,
+            )),
+            ExprKind::Let(l) => {
+                if seen_lets.insert(*l) {
+                    stack.push(ir.lets[*l].1);
+                }
+            }
+            ExprKind::Call { op, args } => {
+                if let Some(spec) = crate::stdlib::op(op)
+                    && !OFFSET_CATEGORIES.contains(&spec.category)
+                    && !matches!(op.as_str(), "vec2" | "vec3" | "vec4")
+                {
+                    errors.push(IrError::new(
+                        format!(
+                            "`output offset` cannot call `{op}` ({} ops run per pixel). Math, noise, \
+                             colour and sdf functions work per vertex",
+                            spec.category
+                        ),
+                        e.span,
+                    ));
+                }
+                stack.extend(args.iter().map(|a| a.value));
+            }
+            ExprKind::Binary(_, a, b) => stack.extend([*a, *b]),
+            ExprKind::Neg(a) | ExprKind::Swizzle(a, _) => stack.push(*a),
+        }
+    }
 }
 
 fn expect_output(

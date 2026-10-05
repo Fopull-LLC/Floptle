@@ -80,7 +80,7 @@ fn main() {
     let mut frame = |pose: Mat4| -> Vec<u8> {
         raster.begin_skin_frame();
         let idx = raster.push_skin_pose(skin_base, pose, &[pose]);
-        let skins = vec![SkinDraw { mesh, tex: None, instance: raw, pose: idx }];
+        let skins = vec![SkinDraw { mesh, tex: None, instance: raw, pose: idx, flsl: None }];
         let plain: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
         // The editor's order: prepass primes the main depth, the color pass
         // loads it under LessEqual.

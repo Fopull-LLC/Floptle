@@ -350,9 +350,9 @@ pub(crate) fn push_mesh_instances(
         if let Some(Some(skin)) = rig.skins.get(i) {
             let raw = instance_of_mat(model, &painted(raster, mid, i, pmp));
             let skin_base = rig.skin_bases.get(i).copied().unwrap_or(0);
-            // A custom `.flsl` material routes the part through its own pipeline,
-            // which has no skinned variant — those parts keep the CPU deform.
-            if skin_base != 0 && this_flsl.is_none() {
+            // A custom `.flsl` material draws through that shader's own skinned
+            // pipeline, so it stays on the GPU too.
+            if skin_base != 0 {
                 // GPU skinning: hand the pose over and draw the shared bind-pose
                 // buffer. `push_skin_pose` is the same arithmetic `cpu_skin_part`
                 // applies per vertex, done once per draw instead of once per vertex.
@@ -364,11 +364,10 @@ pub(crate) fn push_mesh_instances(
                     .collect();
                 let fallback = node_world.get(part_node).copied().unwrap_or(Mat4::IDENTITY);
                 let pose = raster.push_skin_pose(skin_base, fallback, &palette);
-                skins.push(floptle_render::SkinDraw { mesh: mid, tex: ptex, instance: raw, pose });
+                skins.push(floptle_render::SkinDraw { mesh: mid, tex: ptex, instance: raw, pose, flsl: this_flsl });
             } else {
                 // Fallback: the skinning store refused this part (it is bounded by
-                // the instance lane that addresses it), or a custom shader owns the
-                // draw. CPU-skin into this entity's private clone, as before —
+                // the instance lane that addresses it). CPU-skin into this entity's private clone, as before —
                 // paint lives in `vpaint`, keyed by vertex_index, so the re-upload
                 // can't stomp it, and paint/texture lookups stay on `mid`.
                 let draw_mid = variants.variant_for(gpu, raster, entity, i, mid);
@@ -460,6 +459,7 @@ mod tint_tests {
             tex: None,
             instance: floptle_render::instance_of_mat(Mat4::IDENTITY, &mat),
             pose: 0,
+            flsl: None,
         }];
         let tiling_before = inst[0].2.rim[3];
 

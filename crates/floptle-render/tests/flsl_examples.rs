@@ -49,3 +49,28 @@ fn sdf_examples_splice_into_both_real_passes() {
             .unwrap_or_else(|e| panic!("{name}: raster splice rejected: {}", e.message));
     }
 }
+
+/// A surface that moves its vertices (`output offset`) compiles against the
+/// real raster prelude: its generated `vs_flsl` / `vs_flsl_skin` entry points
+/// lean on `build_vs`, `skin_vertex`, `VsIn` and the globals' `time`, so a
+/// rename on either side breaks here rather than at a user's first throb.
+#[test]
+fn a_surface_that_moves_its_vertices_validates_against_the_real_raster_prelude() {
+    let src = r#"
+shader throb {
+  stage fragment
+  uniform amount: float = 0.1
+  let beat = sin(time * 6.0) * 0.5 + 0.5
+  let swell = fbm(objectPos * 2.0) * beat
+  output color = vec4(litSurface(vec3(0.6, 0.15, 0.2)), 1)
+  output offset = normal * swell * amount
+}
+"#;
+    let compiled = floptle_shader::compile_fragment(src).unwrap_or_else(|e| panic!("{e}"));
+    assert!(compiled.displaced, "`output offset` did not make a displaced shader");
+    for entry in ["fn vs_flsl(", "fn vs_flsl_skin(", "fn flsl_offset("] {
+        assert!(compiled.chunk.contains(entry), "the chunk has no {entry}");
+    }
+    floptle_shader::validate(floptle_render::pass_prelude(), &compiled.chunk)
+        .unwrap_or_else(|e| panic!("naga rejects a displaced surface: {}", e.message));
+}

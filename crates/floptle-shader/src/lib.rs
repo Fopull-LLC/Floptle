@@ -564,3 +564,39 @@ shader s {
         assert!(uses_uniform, "speed resolves to a Uniform reference");
     }
 }
+
+#[cfg(test)]
+mod offset_tests {
+    /// `output offset` survives print → parse, so a graph edit (which
+    /// re-prints the file) cannot drop it.
+    #[test]
+    fn an_offset_survives_a_print_and_a_parse() {
+        let src = "shader s {\n  stage fragment\n  output color = vec3(1, 0, 0)\n  output offset = normal * 0.1\n}\n";
+        let ir = crate::parse(src).expect("parses");
+        let again = crate::parse(&crate::print(&ir)).expect("re-parses");
+        assert!(again.outputs.contains_key("offset"), "printed:\n{}", crate::print(&ir));
+        assert!(crate::compile_fragment(src).expect("compiles").displaced);
+        assert!(!crate::compile_fragment("shader s {\n  stage fragment\n  output color = vec3(1, 0, 0)\n}\n")
+            .expect("compiles")
+            .displaced);
+    }
+
+    /// The offset runs per vertex: what only a lit pixel has is refused, with
+    /// a reason, including when it arrives through a `let`.
+    #[test]
+    fn an_offset_that_reads_a_pixel_only_value_is_refused() {
+        for (body, says) in [
+            ("output offset = viewDir * 0.1", "viewDir"),
+            ("let v = lightDir\n  output offset = v * 0.1", "lightDir"),
+            ("texture t\n  output offset = sample(t, uv).rgb", "texture"),
+        ] {
+            let src = format!("shader s {{\n  stage fragment\n  output color = vec3(1)\n  {body}\n}}\n");
+            let err = crate::compile_fragment(&src).expect_err(body);
+            assert!(err.contains(says) && err.contains("offset"), "{body}: {err}");
+        }
+        // A `let` the colour reads may use anything; only the offset's own
+        // inputs are restricted.
+        let ok = "shader s {\n  stage fragment\n  let shade = dot(normal, viewDir)\n  output color = vec3(shade)\n  output offset = normal * 0.1\n}\n";
+        crate::compile_fragment(ok).expect("a per-pixel let the offset does not read is fine");
+    }
+}

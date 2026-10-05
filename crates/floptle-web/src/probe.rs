@@ -450,7 +450,7 @@ impl App {
         let mut mp = MaterialParams::flat([1.0, 1.0, 1.0]);
         mp.paint_base = s.paint_base;
         let raw = instance_of_mat(Mat4::from_translation(-eye), &mp);
-        let skins = [SkinDraw { mesh: s.mesh, tex: None, instance: raw, pose }];
+        let skins = [SkinDraw { mesh: s.mesh, tex: None, instance: raw, pose, flsl: None }];
         let l = Vec3::new(0.5, 0.7, 0.55).normalize();
         let globals = Globals {
             view_proj: cam.view_proj(rw as f32 / rh as f32).to_cols_array_2d(),

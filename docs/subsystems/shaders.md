@@ -25,7 +25,10 @@
 > a stdlib Docs section in the Scripting tab; `◈ New Shader` in Assets.
 > Two names below differ from what shipped: stdlib identifiers are
 > **camelCase**, and the stage is named `sdf` rather than raymarch. The
-> `Vertex` and light stages are reserved and not built. Probes: `shader_probe`, `field_shape_probe`.
+> light stage is reserved and not built. Moving vertices is not a stage of its
+> own: a fragment shader's optional `output offset` (§4.5) is transpiled into
+> its vertex entry points. Probes: `shader_probe`, `field_shape_probe`,
+> `vertex_offset_probe`.
 >
 > **`stage post` is live** (v0.44): full-screen passes over the finished frame,
 > carried as an ORDERED LIST on the PostProcess node rather than as one slot, so
@@ -305,6 +308,47 @@ For light the engine does not do for you, such as a glint or a subsurface glow,
 `lightDir` is the unit vector toward the key light (the sun, or in a scene lit
 by stars the dominant one) and `lightColor` is its colour times its intensity.
 Both are fragment-stage inputs, in the same space as `normal`.
+
+### 4.5 Moving the surface: `output offset`
+
+A surface shader can move the geometry it is on. `output offset` is a `vec3`
+added to each vertex, in the node's own space at world scale (the space
+`objectPos` is in), so `normal * 0.1` pushes the surface out a tenth of a unit
+however the node is scaled. Flesh that breathes, a flag that ripples, a heart
+that throbs, with nothing else set up:
+
+```
+shader flesh {
+  stage fragment
+  uniform swell: float = 0.08
+  let beat = sin(time * 5.0) * 0.5 + 0.5
+  output color = vec4(litSurface(vec3(0.6, 0.15, 0.2)), 1)
+  output offset = normal * fbm(objectPos * 2.0) * beat * swell
+}
+```
+
+It runs once per vertex, before the vertex is placed, so it can read only what
+a vertex has: `objectPos`, `normal` (in the same space as the offset), `uv`,
+`time`, `instanceColor`, the shader's uniforms, and math, noise, colour and sdf
+functions. A texture, the screen and the engine's lighting are per pixel; the
+checker refuses them in an offset and says why. `let`s the colour reads are not
+restricted, only the ones the offset reads.
+
+- **`objectPos` in the colour stays where it was.** The colour half reads the
+  position before the move, so a pattern stays stuck to the surface while it
+  heaves instead of sliding across it.
+- **The surface moves after skinning.** A rigged mesh wearing the shader keeps
+  GPU skinning, and the offset is added to the posed vertex.
+- **The depth prepass and the sun shadow map follow the moved surface.**
+- **Lighting uses the unmoved normal.** A bulge is lit as if it were not
+  there. Bend the normal yourself with `litSurface(albedo, n)` (§4.4) where it
+  matters.
+- **What does not follow:** a mesh collider, the distance-field shadow a
+  collidable model casts, and the selection outline all keep the unmoved
+  shape.
+
+The ◈ graph shows `offset` as a second port on the output node; unwiring it
+removes it.
 
 ## 5. Materials reference a compiled shader
 

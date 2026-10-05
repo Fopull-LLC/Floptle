@@ -94,6 +94,8 @@ pub struct Globals {
     pub sun_map: [f32; 4],
     /// x = depth bias (in the map's depth units).
     pub sun_extra: [f32; 4],
+    /// x = scene time in seconds, for a `.flsl` that moves its vertices.
+    pub time: [f32; 4],
 }
 
 impl Default for Globals {
@@ -115,6 +117,7 @@ impl Default for Globals {
             sun_vp: [[0.0; 4]; 4],
             sun_map: [0.0; 4],
             sun_extra: [0.0; 4],
+            time: [0.0; 4],
         }
     }
 }
@@ -968,6 +971,16 @@ pub enum FlslBlend {
 
 struct FlslShader {
     pipeline: wgpu::RenderPipeline,
+    /// The same shader on GPU-skinned parts: `vs_skin` (or `vs_flsl_skin`)
+    /// in front of the same fragment stage.
+    skin_pipeline: wgpu::RenderPipeline,
+    /// Depth-only pipelines (plain, skinned) for a shader with `output
+    /// offset`. The depth prepass and the sun shadow map draw its surfaces
+    /// where they have MOVED to; the built-in depth pipelines would draw them
+    /// where they were, and the colour pass would then be depth-rejected
+    /// behind its own unmoved silhouette. `None` for a shader that moves
+    /// nothing, which the built-in ones draw correctly.
+    displaced_depth: Option<(wgpu::RenderPipeline, wgpu::RenderPipeline)>,
     group3_layout: wgpu::BindGroupLayout,
     tex_slots: usize,
     /// Opaque-phase shaders draw with the opaque bucket (depth write on);
@@ -993,6 +1006,10 @@ struct FlslBinding {
 /// also what the depth prepass alpha-tests) + the material's flsl binding.
 pub type FlslDraw = (MeshId, Option<TexId>, FlslBindingId, InstanceRaw);
 
+/// One bucket of `.flsl` draws: (mesh, texture, binding, skinned, first
+/// instance, count).
+type FlslBucket = (usize, Option<u32>, u32, bool, u32, u32);
+
 /// One GPU-skinned draw: a mesh part whose vertices are deformed
 /// in the vertex shader by the pose in `pose`, rather than on the CPU and
 /// re-uploaded.
@@ -1011,6 +1028,10 @@ pub struct SkinDraw {
     /// This draw's pose, from [`Raster::push_skin_pose`]. Several instances of
     /// one character model each carry their own — same mesh, same draw call.
     pub pose: u32,
+    /// A `.flsl` material this part wears. It draws through that shader's
+    /// skinned pipeline, so a rigged mesh with a custom material keeps GPU
+    /// skinning.
+    pub flsl: Option<FlslBindingId>,
 }
 
 impl Raster {
@@ -1736,10 +1757,12 @@ impl Raster {
             source: wgpu::ShaderSource::Wgsl(format!("{base}\n{chunk}").into()),
         });
 
-        // Group 3: the shader's param UBO + its declared texture slots.
+        // Group 3: the shader's param UBO + its declared texture slots. The
+        // params are vertex-visible too: `output offset` reads its uniforms
+        // per vertex.
         let mut entries = vec![wgpu::BindGroupLayoutEntry {
             binding: 0,
-            visibility: wgpu::ShaderStages::FRAGMENT,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
@@ -1781,12 +1804,16 @@ impl Raster {
         });
 
         let opaque = matches!(blend, FlslBlend::Opaque);
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        // The transpiler emits these entry points for `output offset` and
+        // nothing else defines them, so their presence is the question.
+        let displaced = chunk.contains("fn vs_flsl(");
+        let (vs_plain, vs_skinned) = if displaced { ("vs_flsl", "vs_flsl_skin") } else { ("vs", "vs_skin") };
+        let color_pipeline = |vs_entry: &str| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("raster-flsl"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &module,
-                entry_point: Some("vs"),
+                entry_point: Some(vs_entry),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
             },
@@ -1831,9 +1858,52 @@ impl Raster {
             multiview_mask: None,
             cache: None,
         });
+        let pipeline = color_pipeline(vs_plain);
+        let skin_pipeline = color_pipeline(vs_skinned);
+        let displaced_depth = displaced.then(|| {
+            // Groups 0, 1 and 3: the prepass's own two, and the params the
+            // offset reads. Group 2 (the field) is fragment-only and unused.
+            let depth_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("raster-flsl-depth"),
+                bind_group_layouts: &[Some(&self.globals_layout), Some(&self.tex_layout), None, Some(&group3_layout)],
+                immediate_size: 0,
+            });
+            let depth_pipeline = |vs_entry: &str| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("raster-flsl-depth"),
+                    layout: Some(&depth_layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some(vs_entry),
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
+                    },
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: Gpu::DEPTH_FORMAT,
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                    multisample: wgpu::MultisampleState::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some("fs_depth"),
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        targets: &[],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
+            (depth_pipeline(vs_plain), depth_pipeline(vs_skinned))
+        });
 
         let shader = FlslShader {
             pipeline,
+            skin_pipeline,
+            displaced_depth,
             group3_layout,
             tex_slots,
             opaque,
@@ -2829,16 +2899,70 @@ impl Raster {
     /// Group the skinned draws `keep` accepts by (mesh, texture), appending their
     /// instance data to `raws` — the same bucketing the unskinned lists get, so
     /// twenty copies of one character are still one draw call.
+    /// `.flsl` draws, plain and skinned, whose shader passes `keep`, bucketed
+    /// by (mesh, texture, binding, skinned).
+    fn bucket_flsl(
+        &self,
+        flsl: &[FlslDraw],
+        skins: &[SkinDraw],
+        raws: &mut Vec<InstanceRaw>,
+        keep: impl Fn(&FlslShader) -> bool,
+    ) -> Vec<FlslBucket> {
+        let wanted = |bind: &FlslBindingId| {
+            self.flsl_bindings
+                .get(bind.0 as usize)
+                .and_then(|b| self.flsl_shaders.get(b.shader.0 as usize))
+                .is_some_and(&keep)
+        };
+        let groups = group_by_key(
+            flsl.iter()
+                .filter(|(_, _, bind, _)| wanted(bind))
+                .map(|(id, tex, bind, raw)| ((id.0 as usize, tex.map(|t| t.0), bind.0, false), *raw))
+                .chain(skins.iter().filter_map(|d| {
+                    let bind = d.flsl?;
+                    wanted(&bind).then(|| ((d.mesh.0 as usize, d.tex.map(|t| t.0), bind.0, true), Self::skin_instance(d)))
+                })),
+        );
+        let mut buckets = Vec::with_capacity(groups.len());
+        for ((mesh_idx, tex_key, bind_id, skinned), members) in groups {
+            let start = raws.len() as u32;
+            raws.extend_from_slice(&members);
+            buckets.push((mesh_idx, tex_key, bind_id, skinned, start, members.len() as u32));
+        }
+        buckets
+    }
+
+    /// Skinned draws that wear no `.flsl` — those go through their shader's
+    /// own skinned pipeline ([`Self::bucket_flsl`]). The selection mask, which
+    /// draws a silhouette and no surface, takes them all with
+    /// [`Self::bucket_all_skins`].
     fn bucket_skins(
         &self,
         skins: &[SkinDraw],
         raws: &mut Vec<InstanceRaw>,
         keep: impl Fn(&InstanceRaw) -> bool,
     ) -> Vec<(usize, Option<u32>, u32, u32)> {
+        self.bucket_skins_where(skins, raws, |d| d.flsl.is_none() && keep(&d.instance))
+    }
+
+    fn bucket_all_skins(
+        &self,
+        skins: &[SkinDraw],
+        raws: &mut Vec<InstanceRaw>,
+    ) -> Vec<(usize, Option<u32>, u32, u32)> {
+        self.bucket_skins_where(skins, raws, |_| true)
+    }
+
+    fn bucket_skins_where(
+        &self,
+        skins: &[SkinDraw],
+        raws: &mut Vec<InstanceRaw>,
+        keep: impl Fn(&SkinDraw) -> bool,
+    ) -> Vec<(usize, Option<u32>, u32, u32)> {
         let groups = group_by_key(
             skins
                 .iter()
-                .filter(|d| keep(&d.instance))
+                .filter(|d| keep(d))
                 .map(|d| ((d.mesh.0 as usize, d.tex.map(|t| t.0)), Self::skin_instance(d))),
         );
         let mut out = Vec::with_capacity(groups.len());
@@ -3197,7 +3321,7 @@ impl Raster {
         // The silhouette must hug the POSE. Under the CPU path the outline had to
         // reach for the entity's private baked buffer to manage it; here it is the
         // same skinned pipeline the character shades with.
-        let skin_buckets = self.bucket_skins(skins, &mut raws, |_| true);
+        let skin_buckets = self.bucket_all_skins(skins, &mut raws);
         self.ensure_instances(gpu, raws.len().max(1) as u32);
         if !raws.is_empty() {
             gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
@@ -3360,31 +3484,8 @@ impl Raster {
 
         // flsl buckets: (mesh, texture, binding) — phase comes from the SHADER
         // (its blend declaration), not the instance alpha.
-        let flsl_bucketize = |want_opaque: bool,
-                              raws: &mut Vec<InstanceRaw>|
-         -> Vec<(usize, Option<u32>, u32, u32, u32)> {
-            let groups = group_by_key(
-                flsl.iter()
-                    .filter(|(_, _, bind, _)| {
-                        self.flsl_bindings
-                            .get(bind.0 as usize)
-                            .and_then(|b| self.flsl_shaders.get(b.shader.0 as usize))
-                            .is_some_and(|sh| sh.opaque == want_opaque)
-                    })
-                    .map(|(id, tex, bind, raw)| {
-                        ((id.0 as usize, tex.map(|t| t.0), bind.0), *raw)
-                    }),
-            );
-            let mut buckets = Vec::with_capacity(groups.len());
-            for ((mesh_idx, tex_key, bind_id), members) in groups {
-                let start = raws.len() as u32;
-                raws.extend_from_slice(&members);
-                buckets.push((mesh_idx, tex_key, bind_id, start, members.len() as u32));
-            }
-            buckets
-        };
-        let flsl_opaque = flsl_bucketize(true, &mut raws);
-        let flsl_blended = flsl_bucketize(false, &mut raws);
+        let flsl_opaque = self.bucket_flsl(flsl, skins, &mut raws, |sh| sh.opaque);
+        let flsl_blended = self.bucket_flsl(flsl, skins, &mut raws, |sh| !sh.opaque);
         // Skinned draws split opaque/blended on the same rule and draw in the same
         // two phases — a translucent character is still a translucent character.
         let skin_opaque = self.bucket_skins(skins, &mut raws, is_opaque);
@@ -3434,8 +3535,8 @@ impl Raster {
                 }
             };
             let draw_flsl =
-                |rp: &mut wgpu::RenderPass<'_>, buckets: &[(usize, Option<u32>, u32, u32, u32)]| {
-                    for &(mesh_idx, tex_key, bind_id, start, count) in buckets {
+                |rp: &mut wgpu::RenderPass<'_>, buckets: &[FlslBucket]| {
+                    for &(mesh_idx, tex_key, bind_id, skinned, start, count) in buckets {
                         let binding = &self.flsl_bindings[bind_id as usize];
                         let shader = &self.flsl_shaders[binding.shader.0 as usize];
                         let mesh = &self.meshes[mesh_idx];
@@ -3443,7 +3544,7 @@ impl Raster {
                             Some(t) => &self.textures[t as usize].bind,
                             None => &mesh.tex_bind,
                         };
-                        rp.set_pipeline(&shader.pipeline);
+                        rp.set_pipeline(if skinned { &shader.skin_pipeline } else { &shader.pipeline });
                         rp.set_bind_group(1, bind, &[]);
                         rp.set_bind_group(3, &binding.bind, &[]);
                         rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
@@ -3875,17 +3976,20 @@ impl Raster {
         instances: &[(MeshId, Option<TexId>, InstanceRaw)],
         flsl: &[FlslDraw],
         skins: &[SkinDraw],
-    ) -> (Vec<(usize, Option<u32>, u32, u32)>, Vec<(usize, Option<u32>, u32, u32)>) {
+    ) -> (Vec<(usize, Option<u32>, u32, u32)>, Vec<(usize, Option<u32>, u32, u32)>, Vec<FlslBucket>) {
         // Opaque instances only, bucketed by (mesh, texture) exactly like
         // `draw_scene` (the texture is bound for the per-texel alpha discard).
         // Opaque-SHADER flsl draws join in — their phase comes from the shader,
         // not the instance alpha. Hash-grouped O(N) — see `group_by_key`.
         const OPAQUE_CUTOFF: f32 = 0.999;
+        // A shader that moves its vertices draws depth through its own
+        // pipelines (`displaced` below); the built-in ones would put it where
+        // it was.
         let flsl_opaque = |bind: &FlslBindingId| {
             self.flsl_bindings
                 .get(bind.0 as usize)
                 .and_then(|b| self.flsl_shaders.get(b.shader.0 as usize))
-                .is_some_and(|s| s.opaque)
+                .is_some_and(|s| s.opaque && s.displaced_depth.is_none())
         };
         // Glass is absent from the prepass. It is drawn last, after
         // the scene behind it has been captured — and if it primed depth here,
@@ -3919,14 +4023,39 @@ impl Raster {
         // shades — `vs_skin` is `@invariant` through the shared tail, so the two
         // agree bit for bit. Priming from the bind pose instead would depth-reject
         // the pose, and a character would vanish behind its own T-stance.
-        let skin_buckets = self.bucket_skins(skins, &mut raws, |raw| {
-            is_terrain(raw) || raw.color[3] >= OPAQUE_CUTOFF
+        let skin_buckets = self.bucket_skins_where(skins, &mut raws, |d| match &d.flsl {
+            None => is_terrain(&d.instance) || d.instance.color[3] >= OPAQUE_CUTOFF,
+            Some(bind) => flsl_opaque(bind),
         });
+        let displaced =
+            self.bucket_flsl(flsl, skins, &mut raws, |sh| sh.opaque && sh.displaced_depth.is_some());
         self.ensure_instances(gpu, raws.len() as u32);
         if !raws.is_empty() {
             gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
         }
-        (buckets, skin_buckets)
+        (buckets, skin_buckets, displaced)
+    }
+
+    /// Depth for the surfaces of shaders with `output offset`, where they
+    /// have moved to. The pass's group(0) is already bound.
+    fn draw_displaced_depth(&self, rp: &mut wgpu::RenderPass<'_>, buckets: &[FlslBucket]) {
+        for &(mesh_idx, tex_key, bind_id, skinned, start, count) in buckets {
+            let binding = &self.flsl_bindings[bind_id as usize];
+            let Some((plain, skin)) = &self.flsl_shaders[binding.shader.0 as usize].displaced_depth else {
+                continue;
+            };
+            let mesh = &self.meshes[mesh_idx];
+            let bind = match tex_key {
+                Some(t) => &self.textures[t as usize].bind,
+                None => &mesh.tex_bind,
+            };
+            rp.set_pipeline(if skinned { skin } else { plain });
+            rp.set_bind_group(1, bind, &[]);
+            rp.set_bind_group(3, &binding.bind, &[]);
+            rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
+            rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+        }
     }
 
     /// Draw the sun shadow map for this view: every opaque draw, depth only,
@@ -3946,7 +4075,7 @@ impl Raster {
         let mut g = globals;
         g.view_proj = g.sun_vp;
         self.begin_pass(gpu, g);
-        let (buckets, skin_buckets) = self.upload_opaque_depth_draws(gpu, instances, flsl, skins);
+        let (buckets, skin_buckets, displaced) = self.upload_opaque_depth_draws(gpu, instances, flsl, skins);
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster-sun-map") });
@@ -3984,6 +4113,7 @@ impl Raster {
                 rp.set_pipeline(&self.skin_prepass_pipeline);
                 draw(&mut rp, &skin_buckets);
             }
+            self.draw_displaced_depth(&mut rp, &displaced);
         }
         gpu.queue.submit([encoder.finish()]);
     }
@@ -4008,7 +4138,7 @@ impl Raster {
         self.claim_prepass(gpu, size);
         self.begin_pass(gpu, globals);
 
-        let (buckets, skin_buckets) = self.upload_opaque_depth_draws(gpu, instances, flsl, skins);
+        let (buckets, skin_buckets, displaced) = self.upload_opaque_depth_draws(gpu, instances, flsl, skins);
         let slot = &self.prepass[self.prepass_active.expect("claim_prepass ran")];
         let (prepass_tex, prepass_view) = (&slot.tex, &slot.view);
 
@@ -4052,6 +4182,7 @@ impl Raster {
                 rp.set_pipeline(&self.skin_prepass_pipeline);
                 draw(&mut rp, &skin_buckets);
             }
+            self.draw_displaced_depth(&mut rp, &displaced);
         }
         // Prime the frame's depth buffer with the prepass result.
         encoder.copy_texture_to_texture(

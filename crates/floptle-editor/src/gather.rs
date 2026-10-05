@@ -384,7 +384,7 @@ impl Editor {
         // If something made a second anyway, say so once: a script writing "the"
         // 2D base light and this reading "the" 2D base light would then be
         // whichever the ECS happened to yield first.
-        let lighting = self.gather_lighting(&cam, view_proj);
+        let lighting = self.gather_lighting(&cam, view_proj, elapsed);
         let FrameLighting {
             light_node,
             sun,
@@ -1453,7 +1453,7 @@ impl Editor {
 
     /// The Lighting node's uniforms for this frame: sun, lamps, shadows,
     /// reflections, fog, atmosphere, stars and the shadow proxies.
-    fn gather_lighting(&mut self, cam: &RenderCamera, view_proj: Mat4) -> FrameLighting {
+    fn gather_lighting(&mut self, cam: &RenderCamera, view_proj: Mat4, elapsed: f32) -> FrameLighting {
         let lighting_nodes = self.world.query::<Light>().count();
         if lighting_nodes > 1 && lighting_nodes != self.lighting_nodes_warned {
             self.lighting_nodes_warned = lighting_nodes;
@@ -1573,6 +1573,7 @@ impl Editor {
             sun_vp,
             sun_map,
             sun_extra,
+            time: [elapsed, 0.0, 0.0, 0.0],
             light_dir: sun,
             light_color: [light_node.color[0] * li, light_node.color[1] * li, light_node.color[2] * li, 0.0],
             ambient: [light_node.ambient[0], light_node.ambient[1], light_node.ambient[2], 0.0],
@@ -2353,6 +2354,7 @@ impl Editor {
                                             tex: None,
                                             instance: raw,
                                             pose,
+                                            flsl: None,
                                         });
                                     } else {
                                         // CPU fallback: the visible draw baked the

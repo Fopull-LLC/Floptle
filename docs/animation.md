@@ -453,7 +453,8 @@ each, and because they share one buffer again they are **one draw call**.
 
 The CPU deform is still there, and still tested, as the fallback for a part the
 skinning store cannot take (it is bounded at ~8.3M skinned vertices per scene by
-the instance lane that addresses it) and for a part drawn by a custom `.flsl`
-material, whose pipeline has no skinned variant. The two paths are held to
-producing the same picture by `cargo run -p floptle-render --example skin_probe`,
-which renders one posed mesh both ways and fails if they disagree.
+the instance lane that addresses it). A part wearing a custom `.flsl` material
+skins on the GPU too, through that shader's own skinned pipeline. The two paths
+are held to producing the same picture by `cargo run -p floptle-render --example
+skin_probe`, which renders one posed mesh both ways, with the built-in look and
+with a `.flsl` material, and fails if they disagree.

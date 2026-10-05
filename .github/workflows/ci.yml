@@ -134,6 +134,7 @@ jobs:
           run() { echo "::group::$1"; shift; cargo run -q -p floptle-render --example "$@" || exit 1; echo "::endgroup::"; }
           run skin_prepass_probe  skin_prepass_probe  -- "$P/skin_prepass"
           run skin_probe          skin_probe          -- "$P/skin.png"
+          run vertex_offset_probe vertex_offset_probe -- "$P/vertex_offset.png"
           run ortho_camera_probe  ortho_camera_probe  -- "$P"
           run tilemap_pages_probe tilemap_pages_probe -- "$P"
           run light2d_probe       light2d_probe       -- "$P"

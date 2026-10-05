@@ -102,6 +102,8 @@ pub enum Site {
 pub enum OutName {
     Color,
     Sdf,
+    /// A surface shader's optional `output offset`: how far each vertex moves.
+    Offset,
 }
 
 impl OutName {
@@ -109,6 +111,7 @@ impl OutName {
         match self {
             OutName::Color => "color",
             OutName::Sdf => "sdf",
+            OutName::Offset => "offset",
         }
     }
 
@@ -116,6 +119,7 @@ impl OutName {
         match s {
             "color" => Some(OutName::Color),
             "sdf" => Some(OutName::Sdf),
+            "offset" => Some(OutName::Offset),
             _ => None,
         }
     }
@@ -314,7 +318,8 @@ pub fn build_view_padded(
     // The sink first (so it exists even with no outputs wired).
     let stage = ir.stage.unwrap_or(Stage::Fragment);
     let out_names: &[OutName] = match stage {
-        Stage::Fragment | Stage::Sky | Stage::Ui | Stage::Post => &[OutName::Color],
+        Stage::Fragment => &[OutName::Color, OutName::Offset],
+        Stage::Sky | Stage::Ui | Stage::Post => &[OutName::Color],
         Stage::Sdf => &[OutName::Sdf, OutName::Color],
     };
     let mut sink_ports = Vec::new();
@@ -986,6 +991,11 @@ pub fn disconnect(ir: &mut ShaderIr, site: Site) -> Result<(), EditError> {
         // missing-ness); the sdf stage's `color` is genuinely optional.
         if ir.stage == Some(Stage::Sdf) && name == OutName::Color {
             ir.outputs.remove("color");
+            return Ok(());
+        }
+        // A surface shader's `offset` is optional too: unwired, nothing moves.
+        if name == OutName::Offset {
+            ir.outputs.remove("offset");
             return Ok(());
         }
     }

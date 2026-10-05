@@ -51,6 +51,9 @@ pub struct CompiledFragment {
     pub texture_defaults: Vec<Option<String>>,
     /// chunk line (0-based) → `.flsl` source span, for naga error mapping.
     pub line_map: Vec<(u32, Span)>,
+    /// The shader declares `output offset`: the chunk carries the `vs_flsl`
+    /// and `vs_flsl_skin` vertex entry points that move each vertex.
+    pub displaced: bool,
 }
 
 /// A texture slot's tiling packed into its two param-block lanes (mirrors the
@@ -175,6 +178,11 @@ pub fn transpile_fragment(ir: &ShaderIr, ck: &Checked) -> Result<CompiledFragmen
     w.line("    return vec4<f32>(apply_fog(c.rgb, in.view_pos, pix), c.a * in.color.a);".into(), None);
     w.line("}".into(), None);
 
+    let displaced = ir.outputs.contains_key("offset");
+    if displaced {
+        emit_offset(ir, ck, &mut w)?;
+    }
+
     Ok(CompiledFragment {
         name: ir.name.clone(),
         blend: ir.blend,
@@ -187,8 +195,79 @@ pub fn transpile_fragment(ir: &ShaderIr, ck: &Checked) -> Result<CompiledFragmen
             .map(|t| ir.texture_defaults.get(t).cloned())
             .collect(),
         line_map: w.line_map,
+        displaced,
     })
 }
+
+/// `output offset`: the vertex half of a surface shader.
+///
+/// The offset is in the node's own space at world scale (the space `objectPos`
+/// is in), so `normal * 0.1` pushes a surface out a tenth of a unit however
+/// the node is scaled. It is applied after skinning, and `objectPos` handed on
+/// to the fragment stage is the position BEFORE the move, so a pattern stays
+/// stuck to the surface while it heaves.
+///
+/// Only the `let`s the offset reads are emitted here: the rest may read
+/// things a vertex does not have, which the checker allows for the fragment
+/// half.
+fn emit_offset(ir: &ShaderIr, ck: &Checked, w: &mut Writer) -> Result<(), TranspileError> {
+    let root = ir.outputs["offset"];
+    let mut needed = std::collections::BTreeSet::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        match &ir.expr(id).kind {
+            ExprKind::Let(l) => {
+                if needed.insert(*l) {
+                    stack.push(ir.lets[*l].1);
+                }
+            }
+            ExprKind::Call { args, .. } => stack.extend(args.iter().map(|a| a.value)),
+            ExprKind::Binary(_, a, b) => stack.extend([*a, *b]),
+            ExprKind::Neg(a) | ExprKind::Swizzle(a, _) => stack.push(*a),
+            _ => {}
+        }
+    }
+    let saved = w.ctx;
+    w.ctx = EmitCtx::Vertex;
+    w.line(String::new(), None);
+    w.line("fn flsl_offset(in: VsIn, opos: vec3<f32>, onrm: vec3<f32>) -> vec3<f32> {".into(), None);
+    for &i in &needed {
+        let (name, root) = &ir.lets[i];
+        let expr = w.emit(*root)?;
+        let ty = ck.ty(*root).wgsl();
+        w.line(format!("    let l{i}_{name}: {ty} = {expr};"), Some(ir.expr(*root).span));
+    }
+    let expr = w.emit(root)?;
+    w.line(format!("    return {expr};"), Some(ir.expr(root).span));
+    w.line("}".into(), None);
+    w.ctx = saved;
+    w.raw(DISPLACE_WGSL);
+    Ok(())
+}
+
+/// The vertex entry points of a shader with `output offset`: one for plain
+/// meshes and one for skinned ones, both ending in the raster's own `build_vs`
+/// so a moved surface shades exactly like an unmoved one.
+const DISPLACE_WGSL: &str = r#"
+fn flsl_displace(in: VsIn, pos: vec3<f32>, nrm: vec3<f32>, tbase: u32, tsplat: f32) -> VsOut {
+    let mscale = max(vec3<f32>(length(in.m0.xyz), length(in.m1.xyz), length(in.m2.xyz)), vec3<f32>(1e-6));
+    let off = flsl_offset(in, pos * mscale, normalize(nrm));
+    var o = build_vs(in, pos + off / mscale, nrm, tbase, tsplat);
+    o.lpos = pos * mscale;
+    return o;
+}
+
+@vertex
+fn vs_flsl(in: VsIn) -> VsOut {
+    return flsl_displace(in, in.pos, in.normal, u32(in.n0.w), in.n2.w);
+}
+
+@vertex
+fn vs_flsl_skin(in: VsIn) -> VsOut {
+    let s = skin_vertex(in);
+    return flsl_displace(in, s.pos, s.normal, 0u, 0.0);
+}
+"#;
 
 /// The engine-lighting helper included in every fragment chunk: the built-in
 /// surface path (raster.wgsl `fs`) refactored over an authored albedo — sun +
@@ -235,6 +314,10 @@ pub(crate) enum EmitCtx {
     /// UI-element shaders: the UI pass's `VsOut` (uv across the element rect,
     /// its tint) + a group(2) param block; time rides `globals.viewport.w`.
     Ui,
+    /// The vertex half of a surface shader (`output offset`): the vertex's
+    /// object-space position and normal, its uv and colour, the raster
+    /// globals' clock, and the same group(3) param block.
+    Vertex,
     /// Full-screen post passes: the post chain's `VsOut` (screen uv), the frame
     /// and its depth on groups 0 and 1, and the shader's own knobs in a group(2)
     /// param block. Time rides the chain's own params (`p.e.w`).
@@ -338,6 +421,17 @@ impl<'a> Writer<'a> {
                 return Err(TranspileError::new("internal: bare texture/string", e.span));
             }
             ExprKind::Input(i) => match (self.ctx, i) {
+                (EmitCtx::Vertex, Input::ObjectPos) => "opos".into(),
+                (EmitCtx::Vertex, Input::Normal) => "onrm".into(),
+                (EmitCtx::Vertex, Input::Uv) => "in.uv".into(),
+                (EmitCtx::Vertex, Input::Time) => "g.time.x".into(),
+                (EmitCtx::Vertex, Input::InstanceColor) => "in.color".into(),
+                (EmitCtx::Vertex, _) => {
+                    return Err(TranspileError::new(
+                        format!("`{}` is not known per vertex, so `output offset` cannot read it", i.name()),
+                        e.span,
+                    ));
+                }
                 (EmitCtx::Fragment, Input::Uv) => "in.uv".into(),
                 (EmitCtx::Fragment, Input::Normal) => {
                     "facing_normal(normalize(in.normal), front)".into()
@@ -414,7 +508,7 @@ impl<'a> Writer<'a> {
                 match self.ctx {
                     // Previews bind knobs at `P` for sky too (no globals array there).
                     // Ui and Post shaders bind their own `P` param block at group(2).
-                    EmitCtx::Fragment | EmitCtx::SkyPreview | EmitCtx::Ui | EmitCtx::Post => {
+                    EmitCtx::Fragment | EmitCtx::Vertex | EmitCtx::SkyPreview | EmitCtx::Ui | EmitCtx::Post => {
                         format!("P.u{u}{access}")
                     }
                     EmitCtx::Sdf { slot } => {

@@ -32,6 +32,10 @@ struct RasterGlobals {
     sun_vp: mat4x4<f32>,
     sun_map: vec4<f32>,
     sun_extra: vec4<f32>,
+    // x = scene time in seconds, the same clock `time` reads in a .flsl. Here
+    // because a .flsl `output offset` runs in the vertex stage, which cannot
+    // see the field globals the fragment stage reads it from.
+    time: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: RasterGlobals;
@@ -868,6 +872,21 @@ fn vs(in: VsIn) -> VsOut {
 /// palette, so that whole mechanism has nothing left to do.
 @vertex
 fn vs_skin(in: VsIn) -> VsOut {
+    let s = skin_vertex(in);
+    // A skinned instance spends `n0.w` on its skin table index, so it can carry
+    // no terrain color block — and terrain is never skinned, so the splat flag is
+    // constant here too.
+    return build_vs(in, s.pos, s.normal, 0u, 0.0);
+}
+
+struct Skinned {
+    pos: vec3<f32>,
+    normal: vec3<f32>,
+};
+
+/// The vertex deformed by its bone palette: `vs_skin`'s arithmetic, shared
+/// with a `.flsl` that moves its vertices after skinning.
+fn skin_vertex(in: VsIn) -> Skinned {
     let entry = skin_meta[min(u32(in.n0.w), arrayLength(&skin_meta) - 1u)];
     let sbase = entry.x;
     let pbase = entry.y;
@@ -890,10 +909,7 @@ fn vs_skin(in: VsIn) -> VsOut {
     // `normalize_or_zero`, matching the CPU path: a fully-collapsed bone would
     // otherwise produce a NaN normal and a black — or missing — triangle.
     let n = select(vec3<f32>(0.0), raw_n / len, len > 1e-6);
-    // A skinned instance spends `n0.w` on its skin table index, so it can carry
-    // no terrain color block — and terrain is never skinned, so the splat flag is
-    // constant here too.
-    return build_vs(in, p, n, 0u, 0.0);
+    return Skinned(p, n);
 }
 
 /// Everything after the vertex has its final object-space position and normal:

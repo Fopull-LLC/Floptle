@@ -136,7 +136,20 @@ enum How {
     Bind,
 }
 
-fn render(gpu: &Gpu, how: How, bend: f32) -> (wgpu::Texture, Vec<[u8; 4]>) {
+/// The custom surface the `.flsl` renders wear: one flat lit colour, so any
+/// disagreement between them is geometry.
+const FLAT: &str = r#"
+shader flat {
+  stage fragment
+  output color = vec4(litSurface(vec3(0.85, 0.82, 0.75)), 1)
+}
+"#;
+
+/// `flsl`: draw through a custom `.flsl` material instead of the built-in
+/// look. A rigged part wearing one used to fall back to the CPU deform; the
+/// GPU path now goes through the shader's own skinned pipeline, and the two
+/// must agree like the built-in pair does.
+fn render(gpu: &Gpu, how: How, bend: f32, flsl: bool) -> (wgpu::Texture, Vec<[u8; 4]>) {
     let color = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("skin-color"),
         size: wgpu::Extent3d { width: S, height: S, depth_or_array_layers: 1 },
@@ -198,15 +211,24 @@ fn render(gpu: &Gpu, how: How, bend: f32) -> (wgpu::Texture, Vec<[u8; 4]>) {
         ..Default::default()
     };
 
+    let binding = flsl.then(|| {
+        let compiled = floptle_shader::compile_fragment(FLAT).expect("compiles");
+        let chunk = format!("{}\n{}", floptle_shader::stdlib::SUPPORT_WGSL, compiled.chunk);
+        let id = raster.register_flsl_shader(gpu, &chunk, 0, floptle_render::FlslBlend::Opaque, None);
+        let params = compiled.pack_params(&|_| None, &|_| None);
+        raster.set_flsl_binding(gpu, None, id, &params, &[])
+    });
     let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
+    let mut flsl_draws: Vec<floptle_render::FlslDraw> = Vec::new();
     let mut skins: Vec<SkinDraw> = Vec::new();
     raster.begin_skin_frame();
-    match how {
-        How::Gpu => {
+    match (how, binding) {
+        (How::Gpu, _) => {
             let p = raster.push_skin_pose(skin_base, fallback, &palette);
-            skins.push(SkinDraw { mesh, tex: None, instance: raw, pose: p });
+            skins.push(SkinDraw { mesh, tex: None, instance: raw, pose: p, flsl: binding });
         }
-        How::Cpu | How::Bind => instances.push((mesh, None, raw)),
+        (How::Cpu | How::Bind, Some(b)) => flsl_draws.push((mesh, None, b, raw)),
+        (How::Cpu | How::Bind, None) => instances.push((mesh, None, raw)),
     }
     raster.draw_scene_with(
         gpu,
@@ -214,7 +236,7 @@ fn render(gpu: &Gpu, how: How, bend: f32) -> (wgpu::Texture, Vec<[u8; 4]>) {
         &depth_view,
         globals,
         &instances,
-        &[],
+        &flsl_draws,
         &skins,
         Some([0.02, 0.02, 0.05, 1.0]),
         None,
@@ -249,9 +271,9 @@ fn main() {
     let gpu = Gpu::headless(S, S);
     const BEND: f32 = 0.45;
 
-    let (_, cpu) = render(&gpu, How::Cpu, BEND);
-    let (gpu_tex, gpu_px) = render(&gpu, How::Gpu, BEND);
-    let (_, bind) = render(&gpu, How::Bind, BEND);
+    let (_, cpu) = render(&gpu, How::Cpu, BEND, false);
+    let (gpu_tex, gpu_px) = render(&gpu, How::Gpu, BEND, false);
+    let (_, bind) = render(&gpu, How::Bind, BEND, false);
 
     let vs_bind = disagreement(&gpu_px, &bind);
     let vs_cpu = disagreement(&gpu_px, &cpu);
@@ -275,6 +297,18 @@ fn main() {
          deform has drifted from `cpu_skin_part`",
         vs_cpu * 100.0
     );
+
+    // 3. The same two promises for a part wearing a `.flsl` material, which
+    //    now skins on the GPU through its shader's own skinned pipeline.
+    let (_, cpu_f) = render(&gpu, How::Cpu, BEND, true);
+    let (_, gpu_f) = render(&gpu, How::Gpu, BEND, true);
+    let (_, bind_f) = render(&gpu, How::Bind, BEND, true);
+    let f_bind = disagreement(&gpu_f, &bind_f);
+    let f_cpu = disagreement(&gpu_f, &cpu_f);
+    println!(".flsl GPU-skinned vs bind pose: {:.2}% of pixels differ", f_bind * 100.0);
+    println!(".flsl GPU-skinned vs CPU skin:  {:.2}% of pixels differ", f_cpu * 100.0);
+    assert!(f_bind > 0.02, "the .flsl GPU render is the bind pose — its skinned pipeline never deformed");
+    assert!(f_cpu < 0.01, "the .flsl GPU and CPU skinning disagree on {:.2}% of pixels", f_cpu * 100.0);
 
     save_png(&gpu, &gpu_tex, &out);
     println!("wrote {out} — a smoothly curling tapered bar, deformed in the vertex shader");
