@@ -379,6 +379,7 @@ fn matter_diff(before: &Matter, after: &Matter, target: &mut Matter) -> bool {
                 target_hz,
                 ortho,
                 ortho_height,
+                stack,
             },
             Matter::Camera {
                 fov_y: bf,
@@ -388,6 +389,7 @@ fn matter_diff(before: &Matter, after: &Matter, target: &mut Matter) -> bool {
                 target_hz: bhz,
                 ortho: bo,
                 ortho_height: boh,
+                stack: bs,
                 ..
             },
             Matter::Camera {
@@ -398,6 +400,7 @@ fn matter_diff(before: &Matter, after: &Matter, target: &mut Matter) -> bool {
                 target_hz: thz,
                 ortho: to,
                 ortho_height: toh,
+                stack: ts,
                 ..
             },
         ) => {
@@ -413,6 +416,7 @@ fn matter_diff(before: &Matter, after: &Matter, target: &mut Matter) -> bool {
             set(target_hz, bhz, thz, &mut hit);
             set(ortho, bo, to, &mut hit);
             set(ortho_height, boh, toh, &mut hit);
+            set(stack, bs, ts, &mut hit);
             hit
         }
         (
@@ -808,6 +812,7 @@ mod tests {
             target_hz: 0.0,
             ortho: false,
             ortho_height: 10.0,
+            stack: Vec::new(),
         });
         let a = w.spawn();
         let b = w.spawn();
@@ -848,6 +853,7 @@ mod tests {
                 target_hz: 0.0,
                 ortho: false,
                 ortho_height: 10.0,
+                stack: Vec::new(),
             });
             e
         };

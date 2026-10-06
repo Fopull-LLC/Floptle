@@ -1399,6 +1399,215 @@ struct TypeCtx<'a> {
     layer_names: &'a [String],
     entity_names: &'a [(floptle_core::Entity, String)],
     post_flsl_cache: &'a crate::shaders::PostFlslCache,
+    /// The scene's cameras as the stack editor sees them, read before the
+    /// Matter borrow.
+    cam_stack: &'a CameraStackFacts,
+}
+
+/// What the camera stack editor needs to know about the other cameras.
+#[derive(Default)]
+struct CameraStackFacts {
+    /// Every other camera's name, in scene order — what a stack can hold.
+    candidates: Vec<String>,
+    /// The cameras whose stack names this one.
+    under: Vec<String>,
+    /// Stacked cameras that carry a stack of their own, which is not drawn.
+    nested: Vec<String>,
+}
+
+impl CameraStackFacts {
+    fn read(world: &floptle_core::World, e: floptle_core::Entity) -> Self {
+        let mut f = Self::default();
+        let Some(Matter::Camera { stack: mine, .. }) = world.get::<Matter>(e) else { return f };
+        let me = world.get::<Name>(e).map(|n| n.0.as_str()).unwrap_or("");
+        for (c, m) in world.query::<Matter>() {
+            let Matter::Camera { stack, .. } = m else { continue };
+            let Some(name) = world.get::<Name>(c).map(|n| n.0.clone()) else { continue };
+            if c == e {
+                continue;
+            }
+            if !me.is_empty() && stack.iter().any(|s| s == me) {
+                f.under.push(name.clone());
+            }
+            if !stack.is_empty() && mine.contains(&name) {
+                f.nested.push(name.clone());
+            }
+            f.candidates.push(name);
+        }
+        f
+    }
+}
+
+/// A stack row being dragged: its index in the list.
+#[derive(Clone, Copy)]
+struct StackRowPayload(usize);
+
+/// Camera ▸ stack: the cameras drawn over this one, bottom first. Rows drag to
+/// reorder; a camera dragged in from the Hierarchy is added on top.
+fn camera_stack_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, stack: &mut Vec<String>) {
+    let cmd = &mut *ctx.cmd;
+    let facts = ctx.cam_stack;
+    let header = ui
+        .horizontal_wrapped(|ui| {
+            ui.label("stack").on_hover_text(
+                "cameras drawn on top of this one's picture, bottom row first. Each draws only \
+                 the layers it renders, over a cleared depth buffer — so first-person arms on \
+                 their own layer never push into a wall. Give the arms camera a cull mask of \
+                 just that layer, and take that layer out of this camera's.\n\nNo sky, terrain \
+                 or particles are drawn by a stacked camera, and a stacked camera's own stack \
+                 is not drawn. Drag a camera here from the Hierarchy to add it.",
+            );
+            if stack.is_empty() {
+                ui.weak("none");
+            }
+        })
+        .response;
+    let mut moved: Option<(usize, usize)> = None;
+    let mut removed: Option<usize> = None;
+    for (i, entry) in stack.iter_mut().enumerate() {
+        let row = ui
+            .horizontal(|ui| {
+                ui.dnd_drag_source(egui::Id::new(("cam_stack_row", ctx.e, i)), StackRowPayload(i), |ui| {
+                    ui.label("≣").on_hover_text("drag to change the order — lower rows draw on top");
+                });
+                ui.weak(format!("{}", i + 1));
+                let cur = entry.clone();
+                // Room kept for the remove button after it. A combo box cuts
+                // a long name against the space it is given, not against its
+                // `width`, so it gets a box of exactly that size.
+                const BUTTON: f32 = 32.0;
+                let w = (crate::responsive::fit_here(ui, 160.0 + BUTTON) - BUTTON).max(40.0);
+                let pick = ui
+                    .allocate_ui(egui::vec2(w, ui.spacing().interact_size.y), |ui| {
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                        crate::ui_widgets::searchable_picker(
+                            ui,
+                            egui::Id::new(("cam_stack_pick", ctx.e, i)),
+                            &cur,
+                            None,
+                            &facts.candidates,
+                            w,
+                        )
+                    })
+                    .inner;
+                if let Some(Some(name)) = pick
+                    && name != cur
+                {
+                    *entry = name;
+                    cmd.inspector_changed = true;
+                }
+                if ui
+                    .small_button(crate::icons::REMOVE)
+                    .on_hover_text("take this camera out of the stack")
+                    .clicked()
+                {
+                    removed = Some(i);
+                }
+            })
+            .response;
+        if let Some(from) = row.dnd_hover_payload::<StackRowPayload>()
+            && from.0 != i
+        {
+            let below = ui.ctx().pointer_hover_pos().is_some_and(|p| p.y > row.rect.center().y);
+            let y = if below { row.rect.bottom() } else { row.rect.top() };
+            ui.painter().hline(
+                row.rect.x_range(),
+                y,
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 220, 120)),
+            );
+        }
+        if let Some(from) = row.dnd_release_payload::<StackRowPayload>() {
+            let below = ui.ctx().pointer_interact_pos().is_some_and(|p| p.y > row.rect.center().y);
+            moved = Some((from.0, if below { i + 1 } else { i }));
+        }
+        if !facts.candidates.contains(entry) {
+            crate::responsive::para(
+                ui,
+                egui::RichText::new(format!(
+                    "⚠ no other camera named \"{}\" in this scene — nothing is drawn for it",
+                    entry
+                ))
+                .color(egui::Color32::from_rgb(220, 170, 90)),
+            );
+        } else if facts.nested.contains(entry) {
+            crate::responsive::para(
+                ui,
+                egui::RichText::new(format!(
+                    "\"{}\" has a stack of its own, which is not drawn here",
+                    entry
+                ))
+                .small(),
+            );
+        }
+    }
+    if let Some((from, to)) = moved
+        && let Some(to) = stack_move_target(stack.len(), from, to)
+    {
+        let item = stack.remove(from);
+        stack.insert(to, item);
+        cmd.inspector_changed = true;
+    }
+    if let Some(i) = removed {
+        stack.remove(i);
+        cmd.inspector_changed = true;
+    }
+    let free: Vec<String> =
+        facts.candidates.iter().filter(|c| !stack.contains(c)).cloned().collect();
+    let add = ui
+        .horizontal(|ui| {
+            if let Some(Some(name)) = crate::ui_widgets::searchable_picker(
+                ui,
+                egui::Id::new(("cam_stack_add", ctx.e)),
+                "+ add camera",
+                None,
+                &free,
+                crate::responsive::fit_here(ui, 160.0),
+            ) {
+                stack.push(name);
+                cmd.inspector_changed = true;
+            }
+        })
+        .response;
+    // A camera dragged in from the Hierarchy goes on top.
+    let zone = header.union(add);
+    if let Some(p) = zone.dnd_hover_payload::<crate::hierarchy::NodePayload>() {
+        let ok = ctx.entity_names.iter().any(|(e, n)| *e == p.0 && free.contains(n));
+        ui.painter().rect_stroke(
+            zone.rect.expand(2.0),
+            3.0,
+            egui::Stroke::new(
+                1.5,
+                if ok { egui::Color32::from_rgb(120, 220, 120) } else { egui::Color32::from_rgb(220, 120, 120) },
+            ),
+            egui::StrokeKind::Outside,
+        );
+    }
+    if let Some(p) = zone.dnd_release_payload::<crate::hierarchy::NodePayload>()
+        && let Some((_, n)) = ctx.entity_names.iter().find(|(e, n)| *e == p.0 && free.contains(n))
+    {
+        stack.push(n.clone());
+        cmd.inspector_changed = true;
+    }
+    if !facts.under.is_empty() {
+        crate::responsive::para(
+            ui,
+            egui::RichText::new(format!(
+                "drawn over {}'s picture — a stacked camera does not need to be active",
+                facts.under.join(", ")
+            ))
+            .small(),
+        );
+    }
+}
+
+/// Where a row dragged from `from` and dropped at insertion point `to` (0..=len,
+/// counted before the row is taken out) lands, or `None` when it stays put.
+fn stack_move_target(len: usize, from: usize, to: usize) -> Option<usize> {
+    if from >= len || to > len {
+        return None;
+    }
+    let to = if to > from { to - 1 } else { to };
+    (to != from).then_some(to)
 }
 
 /// Tilemap: the grid, its tileset, and the tile the brush paints.
@@ -1623,6 +1832,7 @@ fn camera_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
         target_hz,
         ortho,
         ortho_height,
+        stack,
     } = m else { return };
     let cmd = &mut *ctx.cmd;
     let e = ctx.e;
@@ -1777,6 +1987,7 @@ fn camera_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
     if ui.button("⎙ Snap to this view").on_hover_text("move the camera to the current editor viewpoint").clicked() {
         cmd.camera_from_view = Some(e);
     }
+    camera_stack_ui(ui, ctx, stack);
 }
 
 /// Point light: colour, range and shadow knobs, and where the scene stands against the light cap.
@@ -5081,6 +5292,7 @@ impl EditorTabViewer<'_> {
                 let mat = world.get::<Material>(e);
                 (mat.map(|m| m.sheet()), mat.is_some_and(|m| m.texture.is_some()))
             };
+            let cam_stack = CameraStackFacts::read(world, e);
             let mut ctx = TypeCtx {
                 cmd,
                 e,
@@ -5095,6 +5307,7 @@ impl EditorTabViewer<'_> {
                 layer_names: self.layer_names,
                 entity_names: self.entity_names,
                 post_flsl_cache: self.post_flsl_cache,
+                cam_stack: &cam_stack,
             };
             if let Some(m) = world.get_mut::<Matter>(e) {
                 match m {
@@ -7593,6 +7806,102 @@ fn light_slot_line((live, dropped): (usize, usize)) -> (String, bool) {
 mod tests {
     use super::*;
 
+    /// A picture of the camera stack editor: two rows, one naming a camera
+    /// that is not there, and the add picker. `#[ignore]`d — it needs a GPU.
+    /// Writes `target/ui-snapshots/camera-stack.png`.
+    #[test]
+    #[ignore]
+    fn snapshot_camera_stack() {
+        let mut cmd = crate::EditorCmd::default();
+        let nav = crate::nav_bake::NavStatus::default();
+        let post = crate::shaders::PostFlslCache::default();
+        let facts = CameraStackFacts {
+            candidates: vec!["ArmsCam".into(), "ScopeCam".into(), "MapEye".into()],
+            under: Vec::new(),
+            nested: vec!["ScopeCam".into()],
+        };
+        let mut w = floptle_core::World::default();
+        let e = w.spawn();
+        let mut stack = vec!["ArmsCam".to_string(), "ScopeCam".to_string(), "Hud".to_string()];
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(340.0, 230.0)).build_ui(|ui| {
+            let mut ctx = TypeCtx {
+                cmd: &mut cmd,
+                e,
+                sprite_facts: (None, false),
+                asset_tree: &[],
+                project_root: Path::new(""),
+                cam_preview: None,
+                light_counts: (0, 0),
+                sky_uniforms: &[],
+                nav: &nav,
+                gi: Default::default(),
+                layer_names: &[],
+                entity_names: &[],
+                post_flsl_cache: &post,
+                cam_stack: &facts,
+            };
+            camera_stack_ui(ui, &mut ctx, &mut stack);
+        });
+        h.ctx.set_fonts(crate::fonts::definitions(&floptle_theme::default_theme(), &[]));
+        h.ctx.set_visuals(egui::Visuals::dark());
+        h.run();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-snapshots");
+        std::fs::create_dir_all(&dir).unwrap();
+        h.render().expect("no GPU?").save(dir.join("camera-stack.png")).unwrap();
+    }
+
+    /// The stack editor in a thin dock: long camera names, a warning row and
+    /// a note row, none of which may push the panel wider than it is.
+    #[test]
+    fn the_camera_stack_fits_however_thin_the_dock_gets() {
+        let mut cmd = crate::EditorCmd::default();
+        let nav = crate::nav_bake::NavStatus::default();
+        let post = crate::shaders::PostFlslCache::default();
+        let facts = CameraStackFacts {
+            candidates: vec!["FirstPersonArmsCamera".into(), "WeaponScopeReticleCamera".into()],
+            under: vec!["PlayerViewCamera".into()],
+            nested: vec!["WeaponScopeReticleCamera".into()],
+        };
+        let mut w = floptle_core::World::default();
+        let e = w.spawn();
+        let names: Vec<(floptle_core::Entity, String)> = Vec::new();
+        crate::responsive::tests::assert_fits("the camera stack", |ui| {
+            let mut stack = vec![
+                "FirstPersonArmsCamera".to_string(),
+                "WeaponScopeReticleCamera".to_string(),
+                "SomeCameraThatIsNotInTheScene".to_string(),
+            ];
+            let mut ctx = TypeCtx {
+                cmd: &mut cmd,
+                e,
+                sprite_facts: (None, false),
+                asset_tree: &[],
+                project_root: Path::new(""),
+                cam_preview: None,
+                light_counts: (0, 0),
+                sky_uniforms: &[],
+                nav: &nav,
+                gi: Default::default(),
+                layer_names: &[],
+                entity_names: &names,
+                post_flsl_cache: &post,
+                cam_stack: &facts,
+            };
+            camera_stack_ui(ui, &mut ctx, &mut stack);
+        });
+    }
+
+    #[test]
+    fn a_dragged_stack_row_lands_where_it_was_dropped() {
+        // Insertion points count rows before the dragged one is taken out.
+        assert_eq!(stack_move_target(3, 0, 3), Some(2), "first row to the bottom");
+        assert_eq!(stack_move_target(3, 2, 0), Some(0), "last row to the top");
+        assert_eq!(stack_move_target(3, 0, 2), Some(1), "dropped above the third row");
+        assert_eq!(stack_move_target(3, 1, 1), None, "dropped above itself");
+        assert_eq!(stack_move_target(3, 1, 2), None, "dropped below itself");
+        assert_eq!(stack_move_target(3, 5, 0), None, "a row that is gone");
+    }
+
     /// **A cap the scene can see**.
     ///
     /// The load-bearing assertion is that the live count is in the string. The
@@ -7811,6 +8120,7 @@ mod tests {
                 target_hz: 0.0,
                 ortho: ortho_camera,
                 ortho_height: 10.0,
+                stack: Vec::new(),
             },
         );
         let e = world.spawn();
@@ -7919,6 +8229,7 @@ mod tests {
                 target_hz: 0.0,
                 ortho: true,
                 ortho_height: 10.0,
+                stack: Vec::new(),
             },
         );
         // Every optional part on: a follow target, a dead zone and limits. With

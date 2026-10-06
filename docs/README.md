@@ -20,6 +20,7 @@ linked here, it isn't finished — a test enforces that.
 | Make a **2D** game — tiles and sprites | [2d.md](2d.md) |
 | Paint a tile level: palettes, autotiling, collision | [tilemaps.md](tilemaps.md) |
 | Add a minimap, mirror, scope or split-screen | [render-targets.md](render-targets.md) |
+| Keep first-person arms out of walls | [camera-stacks.md](camera-stacks.md) |
 | Make your game playable by more people | [accessibility.md](accessibility.md) |
 | Sculpt terrain / build a planet | [subsystems/deformable-matter.md](subsystems/deformable-matter.md) |
 | Draw a texture | [image-editor.md](image-editor.md) |
@@ -89,6 +90,9 @@ The build-something guides. Each one is a path from nothing to a working result.
 - [render-targets.md](render-targets.md) — **a camera as a texture**: point a camera at
   a name and wear its picture on a material or a UI image — minimaps, mirrors, security
   monitors, scopes and split-screen, each at its own size and refresh rate.
+- [camera-stacks.md](camera-stacks.md) — **one camera drawn over another**: stack a
+  camera that renders only your first-person arms on top of the main view, so they
+  never clip into walls.
 - [accessibility.md](accessibility.md) — **text scale, colour-vision filters, reduced
   motion and captions**: four settings a game exposes and the engine honours, plus
   what only your game can do (your camera shake reads the flag).

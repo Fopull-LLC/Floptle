@@ -879,6 +879,9 @@ pub enum MatterDoc {
         /// does not carry a number that does nothing.
         #[serde(default = "default_ortho_height", skip_serializing_if = "is_default_ortho_height")]
         ortho_height: f32,
+        /// Overlay cameras drawn on top of this one, by node name, bottom first.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        stack: Vec<String>,
     },
     /// A placeable point/omni/area light (position = node transform).
     PointLight {
@@ -1624,6 +1627,7 @@ impl From<&Matter> for MatterDoc {
                 target_hz,
                 ortho,
                 ortho_height,
+                stack,
             } => MatterDoc::Camera {
                 fov_y: *fov_y,
                 active: *active,
@@ -1634,6 +1638,7 @@ impl From<&Matter> for MatterDoc {
                 target_hz: *target_hz,
                 ortho: *ortho,
                 ortho_height: *ortho_height,
+                stack: stack.clone(),
             },
             Matter::PointLight { color, intensity, range, shape, shadows, spot_angle, spot_softness } => {
                 MatterDoc::PointLight {
@@ -1890,6 +1895,7 @@ impl MatterDoc {
                 target_hz,
                 ortho,
                 ortho_height,
+                stack,
             } => {
                 let (w, h) = Matter::clamp_target_size(*target_w, *target_h);
                 Matter::Camera {
@@ -1905,6 +1911,7 @@ impl MatterDoc {
                     // height cannot hand a singular projection matrix to the
                     // renderer — every ray through its inverse would be NaN.
                     ortho_height: Matter::clamp_ortho_height(*ortho_height),
+                    stack: stack.clone(),
                 }
             }
             MatterDoc::PointLight { color, intensity, range, shape, shadows, spot } => Matter::PointLight {
@@ -4511,6 +4518,7 @@ mod tests {
                 target_hz: 0.0,
                 ortho: true,
                 ortho_height: 10.0,
+                stack: Vec::new(),
             },
         );
 
@@ -4529,6 +4537,7 @@ mod tests {
                 target_hz: 0.0,
                 ortho: true,
                 ortho_height: 10.0,
+                stack: Vec::new(),
             },
         );
         let mut c = Camera2D {
@@ -5043,7 +5052,7 @@ mod tests {
                     terrain_gen: None,
                     name: "eye".into(),
                     transform: TransformDoc::default(),
-                    matter: MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT },
+                    matter: MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT, stack: Vec::new() },
                     object_materials: Default::default(),
                     tint: None,
                     tint_rim: None,
@@ -5199,7 +5208,7 @@ mod tests {
         let eye = snap.nodes.iter().find(|n| n.name == "eye").unwrap();
         assert_eq!(
             eye.matter,
-            MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT }
+            MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT, stack: Vec::new() }
         );
     }
 

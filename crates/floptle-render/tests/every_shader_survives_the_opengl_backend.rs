@@ -35,6 +35,7 @@ fn modules() -> Vec<(&'static str, String)> {
     vec![
         ("raster.wgsl + field.wgsl", floptle_render::raster::pass_prelude().to_string()),
         ("raymarch.wgsl + field.wgsl", floptle_render::raymarch::prelude().to_string()),
+        ("camera_stack.wgsl", one("camera_stack.wgsl")),
         ("grid.wgsl", one("grid.wgsl")),
         ("light2d.wgsl", one("light2d.wgsl")),
         ("outline.wgsl", one("outline.wgsl")),

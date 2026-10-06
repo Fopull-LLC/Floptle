@@ -2168,6 +2168,7 @@ pub(crate) fn apply_rich_sets(
                 cull_mask,
                 ortho,
                 ortho_height,
+                stack,
             } => {
                 // A node that is not a camera becomes one, the way setPrimitive
                 // and setTerrain also set the node's Matter.
@@ -2184,6 +2185,7 @@ pub(crate) fn apply_rich_sets(
                             target_hz: 0.0,
                             ortho: false,
                             ortho_height: Matter::ORTHO_HEIGHT,
+                            stack: Vec::new(),
                         },
                     );
                 }
@@ -2214,6 +2216,7 @@ pub(crate) fn apply_rich_sets(
                     target_hz: thz,
                     ortho: orth,
                     ortho_height: oh,
+                    stack: st,
                 }) = world.get_mut::<Matter>(e)
                 else {
                     continue;
@@ -2244,6 +2247,9 @@ pub(crate) fn apply_rich_sets(
                 }
                 if let Some(v) = ortho_height {
                     *oh = Matter::clamp_ortho_height(v);
+                }
+                if let Some(v) = stack {
+                    *st = v;
                 }
             }
             // Both write the element's text spec, creating it if the element
@@ -2667,6 +2673,7 @@ pub const HANDLE_KEYS: &[(&str, &str)] = &[
 /// nearest real one.
 pub(crate) const CAMERA_KEYS: &[&str] = &[
     "fovY", "active", "target", "width", "height", "hz", "cullMask", "projection", "orthoHeight",
+    "stack",
 ];
 
 /// Every key `node:setMaterial{...}` reads.
@@ -6141,6 +6148,7 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                             floptle_core::Matter::ORTHO_MAX as f64,
                         )?
                         .map(|v| v as f32),
+                        stack: crate::opts::opt_str_list(&t, CALL, "stack")?,
                     },
                 ));
                 Ok(())

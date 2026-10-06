@@ -458,6 +458,7 @@ impl Editor {
                 (r.w, r.h),
                 Default::default(),
             );
+            self.draw_camera_stack_over(r.e, &cv, (r.w, r.h), r.w as f32 / r.h as f32, elapsed);
             self.render_target_last.insert(r.name, elapsed);
         }
     }
@@ -565,8 +566,8 @@ impl Editor {
         }
         // The active gameplay camera, or the editor camera if the scene has none.
         let mut cull_mask = u32::MAX;
+        let active = floptle_core::active_camera(&self.world);
         let cam = {
-            let active = floptle_core::active_camera(&self.world);
             match active {
                 Some(e) => {
                     let (fov_y, ortho, oh) = match self.world.get::<Matter>(e) {
@@ -700,6 +701,12 @@ impl Editor {
             dtex
         };
         self.lines_deferred = defer_lines;
+        // The stack renders first, into layers of its own, so the frame's
+        // counts and reflections are the base camera's; it is laid over below.
+        let stacked = match active {
+            Some(base) => self.render_camera_stack(base, (cw, ch), aspect, elapsed),
+            None => 0,
+        };
         self.render_world_into(
             &scene_target,
             &depth,
@@ -712,6 +719,7 @@ impl Editor {
             crate::offscreen::OffscreenOpts {
                 depth_tex: depth_tex.as_ref(),
                 history: crate::offscreen::HistorySlot::GamePanel,
+                overlay: false,
             },
         );
         self.lines_deferred = false;
@@ -721,6 +729,11 @@ impl Editor {
         // hanging in the world as authoring holograms. Without this the docked
         // tab drew no diegetic UI at all while still happily hit-testing it.
         self.draw_world_canvases(&scene_target, &depth, &cam, aspect);
+        if stacked > 0
+            && let Some(gpu) = self.gpu.as_ref()
+        {
+            self.camera_stacks.composite(gpu, (cw.max(1), ch.max(1)), stacked, &scene_target);
+        }
         if self.gpu_timing_headless
             && let (Some(t), Some(g)) = (self.gpu_timer.as_mut(), self.gpu.as_ref())
         {
@@ -937,6 +950,7 @@ impl Editor {
                 target_hz: 0.0,
                 ortho: false,
                 ortho_height: Matter::ORTHO_HEIGHT,
+                stack: Vec::new(),
             },
         );
         if let Some(p) = parent {

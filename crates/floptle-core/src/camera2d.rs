@@ -559,6 +559,7 @@ mod tests {
                 target_hz: 0.0,
                 ortho: true,
                 ortho_height: 10.0,
+                stack: Vec::new(),
             },
         );
         world.insert(cam, Camera2D { follow: "Player".into(), smoothing: 0.0, ..Default::default() });
@@ -596,6 +597,7 @@ mod tests {
             target_hz: 0.0,
             ortho: true,
             ortho_height: 10.0,
+            stack: Vec::new(),
         };
         let follower = world.spawn();
         world.insert(follower, crate::transform::Transform::default());
@@ -639,6 +641,7 @@ mod tests {
                 target_hz: 0.0,
                 ortho: true,
                 ortho_height: 10.0,
+                stack: Vec::new(),
             },
         );
         world.insert(cam, Camera2D::default());

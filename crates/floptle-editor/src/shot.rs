@@ -385,20 +385,20 @@ pub(crate) fn run(args: Args) -> i32 {
     if ed.gpu_timing_headless {
         ed.gpu_timing_headless = false;
         for _ in 0..TIMING_WARMUP {
-            if render_frame_pixels(&mut ed, &cam, w, h, cull_mask, !no_ui).is_none() {
+            if render_frame_pixels(&mut ed, &cam, Some(e), w, h, cull_mask, !no_ui).is_none() {
                 floptle_say::say_err!("no GPU: this machine has no adapter floptle can render on");
                 return 1;
             }
         }
         ed.gpu_timing_headless = true;
         for _ in 1..TIMING_FRAMES {
-            if render_frame_pixels(&mut ed, &cam, w, h, cull_mask, !no_ui).is_none() {
+            if render_frame_pixels(&mut ed, &cam, Some(e), w, h, cull_mask, !no_ui).is_none() {
                 return 1;
             }
             timed.extend(landed_timing(&mut ed));
         }
     }
-    let Some(pixels) = render_frame_pixels(&mut ed, &cam, w, h, cull_mask, !no_ui) else {
+    let Some(pixels) = render_frame_pixels(&mut ed, &cam, Some(e), w, h, cull_mask, !no_ui) else {
         floptle_say::say_err!("no GPU: this machine has no adapter floptle can render on");
         return 1;
     };
@@ -458,7 +458,7 @@ pub(crate) fn run(args: Args) -> i32 {
             ed.sync_map_paint();
             ed.sync_sky_shader();
             ed.sync_sky_texture();
-            let Some(px) = render_frame_pixels(&mut ed, &cam_i, w, h, cull_mask, !no_ui) else {
+            let Some(px) = render_frame_pixels(&mut ed, &cam_i, Some(e), w, h, cull_mask, !no_ui) else {
                 return 1;
             };
             let Some(buf) = image::RgbaImage::from_raw(w, h, px) else { return 1 };
@@ -605,12 +605,13 @@ fn median_timing(frames: &[(f32, Vec<(String, f32)>)]) -> Option<(f32, Vec<(Stri
 pub(crate) fn render_frame_pixels(
     ed: &mut crate::Editor,
     cam: &RenderCamera,
+    stack_of: Option<floptle_core::Entity>,
     w: u32,
     h: u32,
     cull_mask: u32,
     ui: bool,
 ) -> Option<Vec<u8>> {
-    let color = crate::capture::render_frame_texture(ed, cam, w, h, cull_mask, ui, true)?;
+    let color = crate::capture::render_frame_texture(ed, cam, stack_of, w, h, cull_mask, ui, true)?;
     // The readback waits on the device, which is also what lands the timing
     // query's own readback — `run` polls it after this returns.
     Some(readback(ed.gpu.as_ref()?, &color, w, h))
@@ -1138,6 +1139,7 @@ mod tests {
                 target_hz: 0.0,
                 ortho: false,
                 ortho_height: floptle_core::Matter::ORTHO_HEIGHT,
+                stack: Vec::new(),
             },
             ..blank_node()
         });

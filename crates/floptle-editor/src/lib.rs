@@ -188,6 +188,7 @@ mod net_identity;
 mod voice;
 mod worker;
 mod runtime_textures;
+mod camera_stack;
 mod capture;
 mod user_data;
 mod node_bounds;
@@ -2998,6 +2999,13 @@ struct Editor {
     /// Target names already warned about (over the limit, or claimed twice), so
     /// a scene-authoring mistake is reported once and not every frame.
     render_target_warned: std::collections::HashSet<String>,
+    /// The layers stacked cameras draw into, and the pass that lays them over
+    /// a frame. See [`crate::camera_stack`].
+    camera_stacks: crate::camera_stack::CameraStacks,
+    /// How many stack layers the fullscreen Game frame has ready this frame,
+    /// at what size: rendered in `render` before the surface is borrowed and
+    /// laid over in `draw_frame`.
+    surface_stack: Option<((u32, u32), usize)>,
     /// Each dynamic body's current dominant celestial (sim body eid → celestial
     /// node index): the carried patched-conic frame. On a dominance change the
     /// body's sim velocity is re-expressed in the new frame so its world

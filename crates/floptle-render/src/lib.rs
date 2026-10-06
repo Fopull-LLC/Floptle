@@ -18,6 +18,7 @@
 // Phase 1–2 modules. `material`, `raymarch`, `post`, `light` arrive in Phases 2/4.
 // `mesh` is the CPU/GPU geometry seam (Phase 2); `raster` is the forward pass.
 pub mod camera;
+pub mod camera_stack;
 pub mod cull;
 pub mod device;
 pub mod env;
@@ -43,6 +44,7 @@ pub mod tris;
 pub mod ui;
 
 pub use camera::{FlyCamera, Input, ViewLock};
+pub use camera_stack::{StackComposite, StackLayer};
 pub use cull::Frustum;
 pub use device::{Gpu, Vsync, gpu_trouble, report_gpu_error, take_gpu_errors};
 pub use env::{EnvMap, ENV_H, ENV_W};

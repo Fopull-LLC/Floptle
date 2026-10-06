@@ -94,6 +94,29 @@ impl Editor {
         }
     }
 
+    /// The fullscreen Game tab's camera stack, rendered here with the other
+    /// offscreen views because `draw_frame` holds the renderer whole; it lays
+    /// the layers over the surface's scene from [`Self::surface_stack`].
+    #[cfg(feature = "editor-ui")]
+    fn update_surface_stack(&mut self, elapsed: f32) {
+        self.surface_stack = None;
+        if self.fullscreen_tab != Some(crate::EditorTab::Game) {
+            return;
+        }
+        let Some(base) = floptle_core::active_camera(&self.world) else { return };
+        let Some((w, h)) = self.gpu.as_ref().map(|g| (g.config.width, g.config.height.max(1))) else {
+            return;
+        };
+        // The size and aspect the surface composites at — the same two
+        // questions `gather_frame` asks.
+        let size = self.project.composite_size(w, h).unwrap_or((w, h));
+        let aspect = self.project.render_aspect(w as f32 / h as f32);
+        let n = self.render_camera_stack(base, size, aspect, elapsed);
+        if n > 0 {
+            self.surface_stack = Some(((size.0.max(1), size.1.max(1)), n));
+        }
+    }
+
     #[cfg(feature = "editor-ui")]
     pub(crate) fn render(&mut self) {
         self.pace_frame();
@@ -437,6 +460,7 @@ impl Editor {
         self.pump_captures();
         self.update_camera_preview(elapsed);
         self.update_game_viewport(elapsed);
+        self.update_surface_stack(elapsed);
         // The ◫ UI tab's canvas — the selected layer through the real UI
         // pipeline. Runs alongside the other offscreen views, and no-ops (and
         // frees nothing but time) when the tab isn't showing.
@@ -950,6 +974,11 @@ impl Editor {
                     }
                 }
 
+                // The active camera's stack, over the finished scene and under
+                // post, exactly where the Game panel lays it.
+                if let Some((size, n)) = self.surface_stack.take() {
+                    self.camera_stacks.composite(gpu, size, n, color);
+                }
                 // Post runs before any retro upscale, at the scene's composited
                 // resolution. SSAO reads whichever depth the scene rendered with;
                 // in retro mode the chain outputs into the retro color target so

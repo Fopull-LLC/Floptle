@@ -1444,6 +1444,11 @@ pub enum Matter {
         ortho: bool,
         /// The world-space height the view covers when `ortho`. Ignored otherwise.
         ortho_height: f32,
+        /// Cameras drawn on top of this one's picture, by node name, bottom
+        /// first. Each draws only its own layers over a cleared depth buffer,
+        /// so what it shows is never hidden by the world behind it — the
+        /// first-person arms that would otherwise push into a wall.
+        stack: Vec<String>,
     },
     /// A placeable point/omni light. Its world position is the node's transform
     /// translation; `range` is the radius at which its contribution falls to ~zero.

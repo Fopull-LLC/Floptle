@@ -40,6 +40,11 @@ pub(crate) struct OffscreenOpts<'a> {
     /// Each view needs its own: the history carries the camera it was taken
     /// from, and two views sharing one would reproject each other's frames.
     pub history: HistorySlot,
+    /// A stacked camera's layer: only the nodes on its layers, over a
+    /// transparent clear — no sky, terrain, matter, particles or script
+    /// shapes, which the camera beneath has already drawn. The frame's counts
+    /// are left to that camera as well.
+    pub overlay: bool,
 }
 
 /// Which scene-colour history an offscreen render uses.
@@ -861,7 +866,9 @@ impl Editor {
         // Terrain 2.0 (P2): the meshed terrain draws in this offscreen/Game view too, or a
         // docked Game viewport would show empty ground (its volume is `w = 3`, not drawn by
         // the raymarch). Same instance push as the main Scene view.
-        if let Some(raster) = self.raster.as_ref() {
+        if !opts.overlay
+            && let Some(raster) = self.raster.as_ref()
+        {
             crate::terrain_edit::push_terrain_instances(
                 &self.terrain_render,
                 &self.terrains,
@@ -885,9 +892,9 @@ impl Editor {
         // number was never this camera's, it was whichever gather happened to
         // run last. `lights`/`lightsDropped` come from `off_split` above,
         // computed for this camera and this frame.
-        self.light_counts = (off_split.three_d.count + off_split.two_d.count, off_split.dropped);
-        self.warn_lights_dropped(off_split.dropped);
-        {
+        if !opts.overlay {
+            self.light_counts = (off_split.three_d.count + off_split.two_d.count, off_split.dropped);
+            self.warn_lights_dropped(off_split.dropped);
             let chunks: usize = self.terrain_render.values().map(|r| r.slots.len()).sum();
             let particles = self.vfx.live_particles();
             let (effects, effects_dropped) = self.vfx.detached_counts();
@@ -926,14 +933,15 @@ impl Editor {
                 ..Default::default()
             });
         }
-        let show_blobs = self.project.matter && !blobs.is_empty();
+        let show_blobs = !opts.overlay && self.project.matter && !blobs.is_empty();
         // A textured skybox is drawn by the raymarch pass (missed rays sample the
         // sky) — keep it running even with no terrain/blobs in the scene.
-        let rm_draw = show_blobs
-            || !self.terrains.is_empty()
-            || sky_params[0] >= 0.5
-            || self.sky_shader.is_some() // a procedural sky shader must run the raymarch (sky pass)
-            || !self.flsl_shape_slots.is_empty();
+        let rm_draw = !opts.overlay
+            && (show_blobs
+                || !self.terrains.is_empty()
+                || sky_params[0] >= 0.5
+                || self.sky_shader.is_some() // a procedural sky shader must run the raymarch (sky pass)
+                || !self.flsl_shape_slots.is_empty());
         // Reflections in an offscreen view, on exactly the terms the window gets
         // them: this view's own stored picture, allocated the first frame it is
         // asked for and dropped when it stops being. A view with no history slot
@@ -1079,16 +1087,20 @@ impl Editor {
         let vfx_preview_on = false;
         let mut vfx_instances: Vec<floptle_render::ParticleInstance> = Vec::new();
         let mut vfx_batches: Vec<floptle_render::ParticleBatch> = Vec::new();
-        self.vfx.collect(
-            &self.world,
-            cam,
-            &self.texture_registry,
-            vfx_preview_on,
-            &mut vfx_instances,
-            &mut vfx_batches,
-        );
-        let vfx_mesh_draws = self.vfx.collect_mesh_draws(&self.world, cam, vfx_preview_on);
-        resolve_mesh_particles(&self.mesh_registry, &vfx_mesh_draws, &mut instances);
+        // A stacked camera leaves effects to the camera beneath, which has
+        // already drawn every one of them.
+        if !opts.overlay {
+            self.vfx.collect(
+                &self.world,
+                cam,
+                &self.texture_registry,
+                vfx_preview_on,
+                &mut vfx_instances,
+                &mut vfx_batches,
+            );
+            let vfx_mesh_draws = self.vfx.collect_mesh_draws(&self.world, cam, vfx_preview_on);
+            resolve_mesh_particles(&self.mesh_registry, &vfx_mesh_draws, &mut instances);
+        }
 
         if let (
             Some(gpu),
@@ -1147,7 +1159,11 @@ impl Editor {
                 // size, which is worse than marching nothing.
                 raymarch.bind_frame_targets(gpu, None, None);
             }
-            let raster_clear = if rm_draw {
+            let raster_clear = if opts.overlay {
+                // Transparent, so the composite can tell what this layer drew.
+                raymarch.upload_globals(gpu, rm);
+                Some([0.0; 4])
+            } else if rm_draw {
                 raymarch.draw_into(gpu, color, depth, rm);
                 None
             } else {
@@ -1168,7 +1184,9 @@ impl Editor {
             // path uses, and it has to be the same or a docked Game view would
             // posterize its lighting while the Scene view did not; the two
             // gathers have drifted over exactly this shape before.
-            if let Some(q) = palette {
+            // Not over a layer: it would give the transparent clear a colour,
+            // and the composite would lay that over the whole frame.
+            if let Some(q) = palette.filter(|_| !opts.overlay) {
                 raster.quantize_palette(gpu, color, (size.0.max(1), size.1.max(1)), q);
             }
             headless_mark!("2D lighting");
@@ -1216,14 +1234,15 @@ impl Editor {
                 }
             }
             // Script-drawn 3D lines (draw.line — the map's orbit conics).
-            if !self.script_lines.is_empty() && !self.lines_deferred && !self.hide_script_shapes {
+            let shapes = !opts.overlay;
+            if shapes && !self.script_lines.is_empty() && !self.lines_deferred && !self.hide_script_shapes {
                 let (through, tested) = script_line_batches(&self.script_lines, cam.world_position);
                 headless_mark!("lines");
                 line_layer.draw(gpu, color, depth, view_proj, &through, false);
                 line_layer.draw(gpu, color, depth, view_proj, &tested, true);
             }
             // Script-drawn FILLED triangles (draw.tri/cone/disc — solid gizmos).
-            if !self.script_tris.is_empty() && !self.hide_script_shapes {
+            if shapes && !self.script_tris.is_empty() && !self.hide_script_shapes {
                 let verts: Vec<floptle_render::TriVertex> = self
                     .script_tris
                     .iter()
@@ -1241,7 +1260,7 @@ impl Editor {
                 tri_layer.draw(gpu, color, depth, view_proj, &verts);
             }
             // Script-drawn textured quads (draw.quad): in the world, depth-tested.
-            if !self.script_quads.is_empty() {
+            if shapes && !self.script_quads.is_empty() {
                 headless_mark!("script-quads");
                 let (verts, batches) =
                     crate::render_frame::pack_script_quads(&self.script_quads, cam.world_position);

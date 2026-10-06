@@ -1001,7 +1001,7 @@ fn a_sleeper_wakes_by_call_by_timer_by_distance_and_by_touch() {
     world.insert(cam, Transform::from_translation(glam::DVec3::new(100.0, 0.0, 0.0)));
     world.insert(
         cam,
-        Matter::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: 0, target_h: 0, target_hz: 0.0, ortho: false, ortho_height: 10.0 },
+        Matter::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: 0, target_h: 0, target_hz: 0.0, ortho: false, ortho_height: 10.0, stack: Vec::new() },
     );
     let mut host = ScriptHost::new();
     let y = |w: &World, i: usize| w.get::<Transform>(ents[i]).unwrap().translation.y;

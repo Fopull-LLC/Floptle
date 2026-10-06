@@ -39,10 +39,16 @@ use floptle_script::{CaptureCamera, CaptureFormat, CaptureRequest};
 /// them out, which is what a cover picture wants — they are usually a debug
 /// line or a gizmo. `draw.quad` trails are part of the world and always drawn.
 ///
+/// `stack_of` is the camera node `cam` was taken from, whose stack is laid over
+/// the picture as the Game view lays it; `None` for a viewpoint that is not a
+/// camera node.
+///
 /// `None` means no device — this machine has no adapter floptle can render on.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_frame_texture(
     ed: &mut crate::Editor,
     cam: &RenderCamera,
+    stack_of: Option<floptle_core::Entity>,
     w: u32,
     h: u32,
     cull_mask: u32,
@@ -143,6 +149,9 @@ pub(crate) fn render_frame_texture(
     if ui {
         ed.draw_world_canvases(post.input_view(), &depth_view, cam, aspect);
     }
+    if let Some(base) = stack_of {
+        ed.draw_camera_stack_over(base, post.input_view(), (cw, ch), aspect, 0.0);
+    }
 
     // The whole chain, not the tonemap: the one promise this verb makes is
     // that the picture is the editor's, bloom, vignette, AO, posterise and
@@ -241,7 +250,10 @@ pub(crate) struct CaptureEncode {
 const NOT_A_CAMERA: &str = "is not a camera";
 
 /// The camera a request names, as the render camera and its cull mask.
-fn resolve_camera(world: &floptle_core::World, which: &CaptureCamera) -> Result<(RenderCamera, u32), String> {
+fn resolve_camera(
+    world: &floptle_core::World,
+    which: &CaptureCamera,
+) -> Result<(RenderCamera, u32, floptle_core::Entity), String> {
     let e = match which {
         CaptureCamera::Active => floptle_core::active_camera(world)
             .ok_or_else(|| "the scene has no active camera — pass the camera to capture through".to_string())?,
@@ -266,7 +278,7 @@ fn resolve_camera(world: &floptle_core::World, which: &CaptureCamera) -> Result<
         wt.rotation,
         Projection::of_camera(*fov_y, *ortho, *ortho_height, 0.05, 300_000.0),
     );
-    Ok((cam, *cull_mask))
+    Ok((cam, *cull_mask, e))
 }
 
 impl crate::Editor {
@@ -322,7 +334,7 @@ impl crate::Editor {
         if self.gpu.is_none() || self.raster.is_none() {
             return self.refuse_capture(&req, floptle_script::NO_RENDERER.into());
         }
-        let (cam, mask) = match resolve_camera(&self.world, &req.camera) {
+        let (cam, mask, base) = match resolve_camera(&self.world, &req.camera) {
             Ok(c) => c,
             Err(why) => return self.refuse_capture(&req, why),
         };
@@ -333,7 +345,7 @@ impl crate::Editor {
                 format!("{}x{} is larger than this GPU's {max_side}-pixel limit", req.w, req.h),
             );
         }
-        let Some(tex) = render_frame_texture(self, &cam, req.w, req.h, mask, req.ui, req.draws) else {
+        let Some(tex) = render_frame_texture(self, &cam, Some(base), req.w, req.h, mask, req.ui, req.draws) else {
             return self.refuse_capture(&req, floptle_script::NO_RENDERER.into());
         };
         let Some(gpu) = self.gpu.as_ref() else {
@@ -472,6 +484,7 @@ end
             target_hz: 0.0,
             ortho: false,
             ortho_height: Matter::ORTHO_HEIGHT,
+            stack: Vec::new(),
         }
     }
 

@@ -1882,6 +1882,9 @@ pub enum RichSet {
         /// `projection = "orthographic" | "perspective"`, parsed at the call.
         ortho: Option<bool>,
         ortho_height: Option<f32>,
+        /// `stack = {"Arms", ...}` — the cameras drawn over this one, by node
+        /// name, bottom first. Replaces the whole list; `{}` clears it.
+        stack: Option<Vec<String>>,
     },
 }
 

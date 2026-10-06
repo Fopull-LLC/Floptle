@@ -233,6 +233,35 @@ pub fn opt_str(t: &Table, call: &str, key: &str) -> mlua::Result<Option<String>>
     }
 }
 
+/// Read an option as a list of strings — `{ "a", "b" }` — refusing anything
+/// else, and naming the position of the first entry that is not a string.
+/// `{}` is an empty list, which is how a caller clears one.
+pub fn opt_str_list(t: &Table, call: &str, key: &str) -> mlua::Result<Option<Vec<String>>> {
+    match t.get::<Value>(key)? {
+        Value::Nil => Ok(None),
+        Value::Table(list) => {
+            let mut out = Vec::new();
+            for (i, v) in list.sequence_values::<Value>().enumerate() {
+                match v? {
+                    Value::String(s) => out.push(s.to_str()?.to_string()),
+                    other => {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "{call}: `{key}[{}]` takes a string, got {}",
+                            i + 1,
+                            other.type_name()
+                        )));
+                    }
+                }
+            }
+            Ok(Some(out))
+        }
+        other => Err(mlua::Error::RuntimeError(format!(
+            "{call}: `{key}` takes a list of strings, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

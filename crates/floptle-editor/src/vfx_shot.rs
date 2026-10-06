@@ -203,7 +203,7 @@ fn visible_window(
         let mut inst = EffectInstance::new(std::sync::Arc::clone(compiled), 1);
         inst.simulate_to_at(t, crate::vfx::VFX_GRAVITY, emitter);
         ed.vfx.instances.insert(host, (key.to_string(), inst));
-        let px = crate::shot::render_frame_pixels(ed, cam, SIZE, SIZE, u32::MAX, false)?;
+        let px = crate::shot::render_frame_pixels(ed, cam, None, SIZE, SIZE, u32::MAX, false)?;
         if coverage_against(&px, &baseline) > 0.0 {
             first.get_or_insert(t);
             last = Some(t);
@@ -547,7 +547,7 @@ pub(crate) fn run(args: Args<'_>) -> i32 {
         inst.simulate_to_at(t, crate::vfx::VFX_GRAVITY, emitter);
         ed.vfx.instances.insert(host, (effect.to_string(), inst));
 
-        let Some(px) = crate::shot::render_frame_pixels(&mut ed, &cam, w, h, u32::MAX, false) else {
+        let Some(px) = crate::shot::render_frame_pixels(&mut ed, &cam, None, w, h, u32::MAX, false) else {
             floptle_say::say_err!("no GPU: this machine has no adapter floptle can render on");
             return 1;
         };
@@ -679,7 +679,7 @@ fn baseline_frame(
     h: u32,
 ) -> Option<Vec<u8>> {
     ed.vfx.instances.remove(&host);
-    crate::shot::render_frame_pixels(ed, cam, w, h, u32::MAX, false)
+    crate::shot::render_frame_pixels(ed, cam, None, w, h, u32::MAX, false)
 }
 
 /// Tile the frames into one image, in timeline order, left to right then down.

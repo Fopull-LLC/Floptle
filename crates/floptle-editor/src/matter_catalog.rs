@@ -166,6 +166,7 @@ pub(crate) fn type_catalog() -> Vec<(&'static str, Matter)> {
             target_hz: 0.0,
             ortho: false,
             ortho_height: Matter::ORTHO_HEIGHT,
+            stack: Vec::new(),
         }),
         ("●  Point Light", Matter::PointLight {
             color: [1.0, 0.95, 0.85],

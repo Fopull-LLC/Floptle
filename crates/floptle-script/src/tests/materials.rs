@@ -483,6 +483,9 @@ fn a_bad_camera_option_is_refused_where_it_was_written() {
         // would otherwise make a texture called `rt:rt:minimap`, which
         // resolves to nothing and says nothing.
         ("node:setCamera{ target = 'rt:minimap' }", &["rt:minimap", "target = \"minimap\""]),
+        // A single name is the commonest slip: a stack is a list.
+        ("node:setCamera{ stack = 'Arms' }", &["stack", "list of strings"]),
+        ("node:setCamera{ stack = { 'Arms', 3 } }", &["stack[2]", "string"]),
     ];
     for (i, (src, wants)) in cases.iter().enumerate() {
         let name = format!("bad{i}");
@@ -497,6 +500,41 @@ fn a_bad_camera_option_is_refused_where_it_was_written() {
             assert!(msg.contains(want), "`{src}` error is missing {want:?}: {msg}");
         }
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A script stacks a camera, reorders the stack, and clears it — the
+/// first-person arms a game switches off for a cutscene.
+#[test]
+fn a_script_stacks_a_camera_and_clears_it() {
+    let dir = std::env::temp_dir().join(format!("floptle_cam_stack_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "stacker",
+        "\
+local frame = 0
+function update(node, dt)
+  frame = frame + 1
+  if frame == 1 then node:setCamera{ stack = { 'Arms', 'Hud' } } end
+  if frame == 2 then node:setCamera{ fovY = 1.1 } end
+  if frame == 3 then node:setCamera{ stack = {} } end
+end
+",
+    );
+    let (mut world, e) = world_with_script("stacker");
+    let stack = |world: &World| match world.get::<Matter>(e) {
+        Some(Matter::Camera { stack, .. }) => stack.clone(),
+        _ => panic!("setCamera made the node a camera"),
+    };
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    assert_eq!(stack(&world), vec!["Arms".to_string(), "Hud".to_string()], "bottom first, as written");
+    host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+    assert_eq!(stack(&world).len(), 2, "a call that does not name the stack keeps it");
+    host.run(&mut world, &dir, 1.0 / 60.0, 2.0 / 60.0);
+    assert!(stack(&world).is_empty(), "`stack = {{}}` clears it");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
