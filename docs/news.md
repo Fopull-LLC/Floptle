@@ -1,5 +1,11 @@
 ## Just shipped
 
+**v0.114.0-rc1 — "Stays In Front"** (beta). A camera can stack other
+cameras on top of its picture, each drawing only its own layers over an empty
+depth buffer, so first-person arms on a layer of their own never clip into
+walls. Set it under **stack** in a camera's Inspector, or with
+`node:setCamera{ stack = { 'ArmsCam' } }`.
+
 **v0.113.0 — "Comes Alive"** (stable). A `.flsl` material can move the
 surface it is on with `output offset`, so flesh breathes and flags ripple with
 no rig, and a rigged model wearing one is animated on the graphics card.
