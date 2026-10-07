@@ -3124,6 +3124,7 @@ impl ScriptHost {
             synced_stores,
             synced_warned: std::collections::HashSet::new(),
             shader_warned: std::collections::HashSet::new(),
+            model_warned: std::collections::HashSet::new(),
             param_warned: std::collections::HashSet::new(),
             handle_key_warned: std::collections::HashSet::new(),
             load_failure_reported: std::collections::HashSet::new(),
@@ -6142,10 +6143,37 @@ impl ScriptHost {
         {
             let scene = self.scene.borrow();
             for (eid, path) in self.model_changes.borrow().iter() {
-                if let Some(&ent) = scene.ents.get(eid)
-                    && let Some(Matter::Mesh { asset_path }) = world.get_mut::<Matter>(ent) {
-                        *asset_path = path.clone();
+                let Some(&ent) = scene.ents.get(eid) else { continue };
+                match world.get_mut::<Matter>(ent) {
+                    Some(Matter::Mesh { asset_path }) => *asset_path = path.clone(),
+                    // An Empty — what `createNode` makes — becomes the model,
+                    // which is how a script assembles an object at runtime.
+                    None | Some(Matter::Empty) => {
+                        world.insert(ent, Matter::Mesh { asset_path: path.clone() });
                     }
+                    // Anything else already is something; swapping a light or a
+                    // camera for a model would throw that away. Said once.
+                    Some(other) => {
+                        if self.model_warned.insert(*eid) {
+                            let dbg = format!("{other:?}");
+                            let kind = dbg.split([' ', '{', '(']).next().unwrap_or("").to_string();
+                            let name = world
+                                .get::<floptle_core::Name>(ent)
+                                .map(|n| n.0.clone())
+                                .unwrap_or_default();
+                            self.logs.borrow_mut().push(crate::ScriptLog {
+                                level: crate::LogLevel::Warn,
+                                msg: format!(
+                                    "node.model = \"{path}\" on \"{name}\" does nothing: it is a \
+                                     {kind}, and only an Empty or a model node can wear a model. \
+                                     Make a child for it — createNode(\"Part\", node) then \
+                                     part.model = \"{path}\"."
+                                ),
+                                source: None,
+                            });
+                        }
+                    }
+                }
             }
             let mats = self.materials.borrow();
             for (eid, refstr) in self.material_changes.borrow().iter() {
@@ -6605,6 +6633,7 @@ impl ScriptHost {
         s.ui_styles.clear();
         s.ui_textures.clear();
         s.component_strings.clear();
+        s.material_sources.clear();
         s.component_colors.clear();
         s.shader_state.clear();
         s.repeat_index.clear();
@@ -6865,6 +6894,7 @@ impl ScriptHost {
         s.repeat_index.remove(&id);
         s.component_colors.remove(&id);
         s.component_strings.remove(&id);
+        s.material_sources.remove(&id);
         s.shader_state.remove(&id);
         s.visible.remove(&id);
         s.cast_shadow.remove(&id);
@@ -7043,6 +7073,10 @@ impl ScriptHost {
             let strs = crate::mirror_component_strings(world, e);
             if !strs.is_empty() {
                 s.component_strings.insert(id, strs);
+            }
+            let sources = crate::api::mirror_material_sources(world, e);
+            if !sources.is_empty() {
+                s.material_sources.insert(id, sources);
             }
             let knobs = crate::mirror_shader_state(world, e);
             if !knobs.is_empty() {

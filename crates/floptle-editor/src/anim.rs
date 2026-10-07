@@ -371,20 +371,6 @@ pub enum CullBy {
     Camera(Option<AnimView>),
 }
 
-/// Hidden, by its own `Visible(false)` or an ancestor's.
-fn hidden_in_tree(world: &World, e: Entity) -> bool {
-    let mut cur = e;
-    for _ in 0..64 {
-        if matches!(world.get::<floptle_core::Visible>(cur), Some(floptle_core::Visible(false))) {
-            return true;
-        }
-        match world.get::<floptle_core::Parent>(cur) {
-            Some(p) => cur = p.0,
-            None => return false,
-        }
-    }
-    false
-}
 
 impl AnimSystem {
     /// Hand this frame's skeleton poses to the scripts (`node:bonePos`).
@@ -1419,7 +1405,7 @@ pub fn advance_animators(
         };
         let mut reduce = false;
         if mode != floptle_scene::AnimCullingDoc::Always {
-            let hidden = hidden_in_tree(world, e);
+            let hidden = floptle_core::is_hidden(world, e);
             let (seen, far) = match view {
                 Some(v) if !hidden => {
                     let tr = floptle_core::world_transform(world, e);
@@ -2055,11 +2041,58 @@ pub fn apply_commands(
     world: &World,
     cmds: Vec<(u32, floptle_script::AnimCmd)>,
 ) {
-    use floptle_script::AnimCmd;
     // A pose change lasts the frame it was asked for.
     for inst in system.instances.values_mut() {
         inst.pose_ops.clear();
     }
+    apply_commands_keeping_pose_ops(system, world, cmds);
+}
+
+/// The commands `lateUpdate` queued, applied to THIS frame.
+///
+/// `lateUpdate` runs after the animation step, so a pose op from it — a
+/// `reach` onto something the camera holds — used to wait for the next
+/// frame's step, by which time the camera had moved: hands trailed the gun.
+/// Its pose ops are added to the ones `update` queued and each rig that got
+/// one is re-posed from where its animation already stands, against the
+/// transforms as they are now. Other commands (`play`, `setSpeed`, …) change
+/// the animator's state and are picked up by the next step, as before.
+pub fn apply_late_commands(
+    system: &mut AnimSystem,
+    world: &mut World,
+    mesh_registry: &HashMap<String, MeshAsset>,
+    cmds: Vec<(u32, floptle_script::AnimCmd)>,
+) {
+    if cmds.is_empty() {
+        return;
+    }
+    let posed: HashSet<u32> = cmds
+        .iter()
+        .filter(|(_, c)| matches!(c, floptle_script::AnimCmd::Pose(_)))
+        .map(|(e, _)| *e)
+        .collect();
+    apply_commands_keeping_pose_ops(system, world, cmds);
+    let rigs: Vec<Entity> = system
+        .instances
+        .iter()
+        .filter(|(e, inst)| {
+            posed.contains(&e.index())
+                && matches!(inst.binding, AnimBinding::Rig)
+                && system.overrides.get(*e).is_none_or(|o| o.enabled)
+        })
+        .map(|(e, _)| *e)
+        .collect();
+    for e in rigs {
+        apply_instance(system, world, mesh_registry, e);
+    }
+}
+
+fn apply_commands_keeping_pose_ops(
+    system: &mut AnimSystem,
+    world: &World,
+    cmds: Vec<(u32, floptle_script::AnimCmd)>,
+) {
+    use floptle_script::AnimCmd;
     if cmds.is_empty() {
         return;
     }
@@ -3287,6 +3320,98 @@ mod tests {
         assert_eq!(said.len(), 1, "a missing bone is said once: {:?}", system.warnings);
         let limbless: Vec<&String> = system.warnings.iter().filter(|w| w.contains("\"Elbow\" has no parent and grandparent")).collect();
         assert_eq!(limbless.len(), 1, "a reach with no limb to bend is said once: {:?}", system.warnings);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A reach from `lateUpdate` lands on this frame.** The arm moves after
+    /// the animation step (the camera turning with a held gun), then
+    /// `lateUpdate` reaches the hand onto a point. The hand is there the same
+    /// frame, not a frame behind, and `update`'s own pose op is kept.
+    #[test]
+    fn a_reach_from_late_update_lands_on_this_frame() {
+        use floptle_anim::{SkelNode, Skeleton, TransformTRS};
+        use floptle_core::math::DVec3;
+        let bone = |name: &str, parent: Option<usize>, t: Vec3| SkelNode {
+            name: name.to_string(),
+            parent,
+            rest: TransformTRS { t, r: Quat::IDENTITY, s: Vec3::ONE },
+            pivot: Vec3::ZERO,
+        };
+        let skeleton = Skeleton::new(vec![
+            bone("Shoulder", None, Vec3::ZERO),
+            bone("Elbow", Some(0), Vec3::X),
+            bone("Hand", Some(1), Vec3::X),
+            bone("Finger", Some(2), Vec3::X * 0.2),
+        ]);
+        let rig = RigAsset {
+            skeleton,
+            clips: Vec::new(),
+            part_nodes: Vec::new(),
+            rest_world: vec![Mat4::IDENTITY; 4],
+            offset: Mat4::IDENTITY,
+            skins: Vec::new(),
+            skin_bases: Vec::new(),
+            node_is_object: vec![false; 4],
+        };
+        let mut reg: HashMap<String, crate::MeshAsset> = HashMap::new();
+        reg.insert(
+            "models/arm.glb".to_string(),
+            crate::MeshAsset { parts: Vec::new(), part_meta: Vec::new(), tex_filter: None, size: 2.0, rig: Some(rig) },
+        );
+        let mut world = World::new();
+        let arm = world.spawn();
+        world.insert(arm, Name("Arm".to_string()));
+        world.insert(arm, Transform::IDENTITY);
+        world.insert(arm, Matter::Mesh { asset_path: "models/arm.glb".to_string() });
+        let dir = std::env::temp_dir().join(format!("floptle_late_reach_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        // The target is fixed relative to the ARM, wherever the arm is when
+        // lateUpdate runs — what a gun under the camera is.
+        std::fs::write(
+            dir.join("hold.lua"),
+            "function update(node, dt)\n  find('Arm'):animator():setBoneRot('Finger', 0.3, 0, 0)\nend\n\
+             function lateUpdate(node, dt)\n  local a = find('Arm')\n  \
+             a:animator():reach('Hand', a:toWorld(vec3(1.2, 0, 0.6)))\nend\n",
+        )
+        .unwrap();
+        let driver = world.spawn();
+        world.insert(driver, Transform::IDENTITY);
+        world.insert(
+            driver,
+            floptle_core::Scripts(vec![floptle_core::ScriptInst {
+                kind: "hold".into(),
+                enabled: true,
+                params: Vec::new(),
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = floptle_script::ScriptHost::new();
+        let mut system = AnimSystem::default();
+        let mut placed = Transform::IDENTITY;
+        for i in 0..3 {
+            let t = i as f32 / 60.0;
+            host.run(&mut world, &dir, 1.0 / 60.0, t);
+            advance_animators(&mut system, &mut world, &reg, 1.0 / 60.0, host.take_anim_commands(), CullBy::Nothing);
+            // After the animation step: the arm swings, as a held object
+            // does when the camera turns.
+            placed = Transform {
+                translation: DVec3::new(i as f64 * 3.0, 0.0, 0.0),
+                rotation: Quat::from_rotation_y(0.7 * (i + 1) as f32),
+                scale: Vec3::ONE,
+            };
+            world.insert(arm, placed);
+            host.run_late(&mut world, 1.0 / 60.0, t);
+            assert!(host.errors().is_empty(), "{:?}", host.errors());
+            apply_late_commands(&mut system, &mut world, &reg, host.take_anim_commands());
+        }
+        let pose = system.poses.get(&arm).expect("the arm was posed");
+        let to_world = |m: Mat4| placed.world_matrix() * m.as_dmat4();
+        let hand = to_world(pose[2]).w_axis.truncate();
+        let target = placed.translation + (placed.rotation * Vec3::new(1.2, 0.0, 0.6)).as_dvec3();
+        assert!(hand.distance(target) < 1e-3, "the hand is at {hand}, this frame's target at {target}");
+        let finger = (Quat::from_mat4(&pose[2]).inverse() * Quat::from_mat4(&pose[3])).normalize();
+        assert!(finger.angle_between(Quat::from_rotation_y(0.3)) < 1e-3, "update's setBoneRot was dropped");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -16,7 +16,7 @@ each group, and meant to be searched.
 
 - [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 196
 - [node — transform & body fields](#node--transform--body-fields) — 40
-- [node — methods & handles](#node--methods--handles) — 31
+- [node — methods & handles](#node--methods--handles) — 32
 - [vectors, directions & easing](#vectors-directions--easing) — 49
 - [scene lookups & raycast](#scene-lookups--raycast) — 16
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
@@ -375,7 +375,7 @@ json.encode(t) and json.decode(s) — the wire format for http.*. decode returns
 
 ### `lateUpdate`
 
-function lateUpdate(node, dt) — runs once per frame AFTER physics and the interpolated transform writeback: the CAMERA pass. Anything that follows something else (orbit cameras, name tags, listeners) belongs here so it samples this frame's FINAL poses. Following from update reads LAST frame's pose — a velocity × dt lag that turns frame-time noise into visible jitter.
+function lateUpdate(node, dt) — runs once per frame AFTER physics and the interpolated transform writeback: the CAMERA pass. Anything that follows something else (orbit cameras, name tags, listeners) belongs here so it samples this frame's FINAL poses. Following from update reads LAST frame's pose — a velocity × dt lag that turns frame-time noise into visible jitter. Animator pose ops queued here (reach, lookAt, setBoneRot, …) land on this frame's pose too.
 
 ```lua
 -- follow AFTER physics, so the camera samples this frame's final pose
@@ -901,7 +901,7 @@ Whether the node is switched on (read/write). node.enabled = false takes it and 
 
 ### `node.forward`
 
-The node's facing as a vec3, from its rotation (-Z forward, matching the camera). Works on anything with a transform, body or not.
+The node's facing as a vec3, from its OWN rotation (-Z forward, matching the camera), in its PARENT's space — the same space as node.pos, so node.pos = node.pos + node.forward * d moves it forward whatever its parent is doing. For the direction in the world (aiming, raycasts, a camera's right for panning), use node:worldForward(). On a node with no parent, or an unrotated one, the two are the same. Works on anything with a transform, body or not.
 
 ```lua
 -- facing, from the node's rotation: -Z forward, +X right
@@ -935,7 +935,7 @@ Apply a material — assign a preset name ("Gold") or an assets.getFile("materia
 
 ### `node.model`
 
-A Mesh node's model path — read it, or ASSIGN it to swap the model live (e.g. node.model = assets.getFile("models/x.glb")). A model not loaded yet loads in the background, and the node draws nothing until it is in: the frame never stops for it. When it has to be there on the frame you assign it, load it earlier with assets.preload.
+A Mesh node's model path — read it, or ASSIGN it to swap the model live (e.g. node.model = assets.getFile("models/x.glb")). Assigned to an Empty — what createNode makes — it turns the node into that model, which is how a script builds an object out of parts at runtime: createNode("Barrel", gun, function(n) n.model = "models/barrel.glb" end). On any other kind of node (a light, a camera, a primitive) it does nothing and the Console says so once. A model not loaded yet loads in the background, and the node draws nothing until it is in: the frame never stops for it. When it has to be there on the frame you assign it, load it earlier with assets.preload.
 
 ### `node.name`
 
@@ -959,7 +959,7 @@ node.pos = node.pos + node.forward * (params.walk * dt)
 
 ### `node.right`
 
-The node's +X axis as a vec3 (its rotation applied). Pairs with node.forward for camera-relative movement.
+The node's +X axis as a vec3, from its OWN rotation, in its PARENT's space (like node.forward and node.pos). Pairs with node.forward for movement. For the world direction — a camera's right under a turned parent — use node:worldRight().
 
 ### `node.roll`
 
@@ -1035,7 +1035,7 @@ end
 
 ### `node.visible`
 
-Whether the node's geometry is drawn — set node.visible = false to hide it (true to show).
+Whether the node's geometry is drawn — set node.visible = false to hide it and everything under it (true to show). A child of a hidden node is not drawn whatever its own flag says, and its own flag reads back unchanged, so showing the parent again brings back exactly what was shown before. Hiding keeps the node's transform and physics.
 
 ### `node.vx`
 
@@ -1128,6 +1128,8 @@ node:hasTag("enemy") — whether the node carries that exact tag. The classic hi
 
 node:material() / node:material("Clothing") — a material you can read AND assign, in code. With no name it is this node's OWN Material, which on a model covers every part of it. With a name — an object like "Torso#2" or a material like "Clothing", both from node:materials() — it is that part of the model alone, and the override is created the first time you write to it. Fields: texture (and normalMap/roughnessMap/metallicMap/occlusionMap) by path, color/emissive/specular/rim as colours, plus alpha, roughness, metallic, emissiveStrength, unlit, fog, cell. This is how a clothing system works: node:material("Clothing").texture = "art/shirt.png". A part's override starts as the engine's default material, not as the part's imported look — state what you want it to be.
 
+`m.source` is read-only: the project material file this one follows ("materials/Checkerboard.ron"), or nil for a material of its own. Key gameplay rules on it rather than on the texture, which survives the file being re-textured. From a raycast: `hit.node:material(hit.material).source` (or `hit.node:material().source` when hit.material is nil).
+
 ### `node:materials`
 
 node:materials() — what this model's parts are CALLED, which is what you need before you can address one: a list of { object =, material =, textured =, overridden = }. `object` names one sub-object exactly (import renames repeats, so a model with two Torso nodes has a "Torso#2" — which is why guessing does not work); `material` is the glTF material name and reaches every part wearing it, usually the grouping you mean. Empty on a node that is not an imported model.
@@ -1176,6 +1178,10 @@ Retro artefacts: jitter (screen-grid vertex snapping, 0 = follow the project), a
 -- setup-time; use setShaderParam for per-frame values
 node:setMaterial{ unlit = true, emissive = {1, 0.45, 0.15}, emissiveStrength = 2.5 }
 ```
+
+### `node:setParent`
+
+node:setParent(parent [, { keepWorld = false }]) — move this node under another node, or to the top level with nil. By default it stays exactly where it is in the world and its local position/rotation are recomputed for the new parent; keepWorld = false keeps its local numbers instead, so it jumps to the same spot relative to the new parent — what you want when a part is placed by its offset from a hand or a mount. A node pinned to a bone is unpinned. Applied after this pass; a move under its own child is ignored.
 
 ### `node:setPointLight`
 
@@ -1329,7 +1335,7 @@ if node:distanceTo(player) < params.aggro then chase(player) end
 
 ### `node:lookAt`
 
-node:lookAt(target [, up]) — point this node at another node or a world point. Sets yaw + pitch and leaves roll alone; pass an `up` and it sets the roll too, to whatever puts that up over the node's head (a level horizon on a planet — the twenty-line undo-yaw-then-pitch dance, in one call). Measured in WORLD space on both ends.
+node:lookAt(target [, up]) — point this node at another node or a world point. Sets yaw + pitch and leaves roll alone; pass an `up` and it sets the roll too, to whatever puts that up over the node's head (a level horizon on a planet — the twenty-line undo-yaw-then-pitch dance, in one call). Measured in WORLD space on both ends, and the node faces the target whatever its parent's rotation: the angles are worked out in the parent's frame, since yaw, pitch and roll are local.
 
 ```lua
 -- point at a node or a world point; the up makes the horizon level
@@ -2349,7 +2355,7 @@ find("Caption").text = over and over.name or ""
 
 ### `ui.make`
 
-ui.make(container, tree) — build a UI subtree from data and RECONCILE it with the one already there: call it again and only the difference is spawned and destroyed, so surviving rows keep their entity, their hover, their scroll and their in-flight transitions. An element is { "kind", prop = value, ..., children }, where kind is box/row/col/text/image/button/field/slider/scroll. A container (row, col, or any element given dir/gap/pad/justify/align) starts at pad = 8 and gap = 8; write pad = 0, gap = 0 for a flush stack. `items = {...}` plus a function child makes one child per item (the function gets (item, i); return nil to skip it). `key = "id"` is how a row is matched through a re-sort. `onClicked = function(node) ... end` (any UI hook, `on` + its name) carries behaviour inline — no prefab, no script file. Properties the table stops mentioning go back to default; what the PLAYER did (scroll, typing, a toggle, a dragged slider) is kept. Play only, and a mistyped property raises rather than being ignored. Elements you placed by hand under the same container are never touched.
+ui.make(container, tree) — build a UI subtree from data and RECONCILE it with the one already there: call it again and only the difference is spawned and destroyed, so surviving rows keep their entity, their hover, their scroll and their in-flight transitions. An element is { "kind", prop = value, ..., children }, where kind is box/row/col/text/image/button/field/slider/scroll. A container (row, col, or any element given dir/gap/pad/justify/align) starts at pad = 8 and gap = 8; write pad = 0, gap = 0 for a flush stack. `wrap = true` on a container flows its children onto new lines when a line is full — an inventory grid of fixed-size tiles whose column count follows the container's width (on a text element, `wrap` wraps the text). `items = {...}` plus a function child makes one child per item (the function gets (item, i); return nil to skip it). `key = "id"` is how a row is matched through a re-sort. `onClicked = function(node) ... end` (any UI hook, `on` + its name) carries behaviour inline — no prefab, no script file. Properties the table stops mentioning go back to default; what the PLAYER did (scroll, typing, a toggle, a dragged slider) is kept. Play only, and a mistyped property raises rather than being ignored. Elements you placed by hand under the same container are never touched.
 
 ```lua
 ui.make(find("Crew Panel"), {
@@ -3833,7 +3839,7 @@ anim:play("Run" [, fade [, layer]]) — transition to a state. The controller su
 
 ### `anim:reach`
 
-anim:reach("Hand", target [, { pole = vec3, weight = 1, root = "UpperArm", mid = "Forearm" }]) — two-bone IK: bend the tip's parent and grandparent (or the named root and mid) so the tip lands on a world-space point, for this frame only. pole is a world point the middle joint bends toward: in front of a knee, behind an elbow. A target out of reach straightens the limb toward it. Runs after the clips and the bone writes.
+anim:reach("Hand", target [, { pole = vec3, weight = 1, root = "UpperArm", mid = "Forearm" }]) — two-bone IK: bend the tip's parent and grandparent (or the named root and mid) so the tip lands on a world-space point, for this frame only. pole is a world point the middle joint bends toward: in front of a knee, behind an elbow. A target out of reach straightens the limb toward it. Runs after the clips and the bone writes. Call it from update or from lateUpdate: from lateUpdate it is solved the same frame against where the camera pass left everything, which is where hands that hold something under the camera belong.
 
 ### `anim:restart`
 

@@ -567,7 +567,7 @@ impl Editor {
         // ran this session.
         let mut culled_nodes = 0usize;
         for (ent, matter) in &ents {
-            if matches!(self.world.get::<floptle_core::Visible>(*ent), Some(floptle_core::Visible(false))) {
+            if floptle_core::is_hidden(&self.world, *ent) {
                 continue;
             }
             if floptle_core::is_disabled(&self.world, *ent) {

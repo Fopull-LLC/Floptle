@@ -175,6 +175,13 @@ pub(crate) fn world_transform_of_handle(
     parent_world_of(s, e).mul_transform(&live_local_of(s, this, e))
 }
 
+/// The rotation that turns a world direction into `e`'s parent's frame — the
+/// frame a node's own yaw/pitch/roll are measured in. Rotation only: a
+/// parent's scale does not change which way something points.
+fn parent_rotation_inverse(s: &crate::SceneMirror, e: u32) -> glam::DQuat {
+    parent_world_of(s, e).rotation.as_dquat().inverse()
+}
+
 /// The world position of whatever a Lua value refers to: a node handle (through
 /// its parent chain, live local included) or any plain `{x=,y=,z=}` / vec3,
 /// which is already a world point.
@@ -2266,6 +2273,49 @@ pub(crate) fn apply_rich_sets(
                     spec.text.get_or_insert_with(Default::default).glyph_offsets = offsets;
                 }
             }
+            RichSet::SetParent { parent, keep_world } => {
+                let parent = match parent {
+                    Some(p) => match ents.get(&p) {
+                        Some(&pe) => Some(pe),
+                        None => continue, // the parent is gone; leave the node be
+                    },
+                    None => None,
+                };
+                // Under itself or one of its own children would be a loop the
+                // transform walk never leaves.
+                if let Some(pe) = parent {
+                    let mut cur = Some(pe);
+                    let mut looped = false;
+                    for _ in 0..64 {
+                        let Some(c) = cur else { break };
+                        if c == e {
+                            looped = true;
+                            break;
+                        }
+                        cur = world.get::<floptle_core::Parent>(c).map(|p| p.0);
+                    }
+                    if looped {
+                        continue;
+                    }
+                }
+                let before = floptle_core::world_transform(world, e);
+                // A node moved in the hierarchy follows its new parent, not a
+                // bone it was pinned to.
+                world.remove::<floptle_core::BoneAttach>(e);
+                match parent {
+                    Some(pe) => world.insert(e, floptle_core::Parent(pe)),
+                    None => {
+                        world.remove::<floptle_core::Parent>(e);
+                    }
+                }
+                if keep_world {
+                    let local = match parent {
+                        Some(pe) => floptle_core::world_transform(world, pe).inv_mul(&before),
+                        None => before,
+                    };
+                    world.insert(e, local);
+                }
+            }
             RichSet::MatterPrimitive(shape, color) => {
                 world.insert(
                     e,
@@ -2668,6 +2718,9 @@ pub const HANDLE_KEYS: &[(&str, &str)] = &[
     ("kind", "which script this is (the file name)"),
     ("valid", "whether the script is still loaded"),
 ];
+
+/// Every key `node:setParent(other, {...})` reads.
+pub(crate) const SET_PARENT_KEYS: &[&str] = &["keepWorld"];
 
 /// Every key `node:setCamera{...}` reads. Anything else is refused, naming the
 /// nearest real one.
@@ -3312,6 +3365,23 @@ pub fn apply_component_field_str(world: &mut World, ent: Entity, comp: &str, fie
         }
         _ => {}
     }
+}
+
+/// Which project material file each of `e`'s materials follows, by component
+/// name. Materials of their own are absent.
+pub(crate) fn mirror_material_sources(world: &World, e: Entity) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    if let Some(src) = world.get::<floptle_core::Material>(e).and_then(|m| m.source.clone()) {
+        out.insert("Material".to_string(), src);
+    }
+    if let Some(om) = world.get::<floptle_core::ObjectMaterials>(e) {
+        for (key, m) in &om.0 {
+            if let Some(src) = &m.source {
+                out.insert(format!("{OBJECT_MATERIAL_PREFIX}{key}"), src.clone());
+            }
+        }
+    }
+    out
 }
 
 /// The **text** half of [`mirror_components`]: every path-or-name field a
@@ -4482,6 +4552,19 @@ fn install_component_metatable(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
                 if let Some(f) = method {
                     return Ok(Value::Function(f.clone()));
                 }
+                // The project material file this one follows, or nil for a
+                // material of its own. What a gameplay rule keys on: it
+                // survives the file being re-textured, which the texture
+                // path does not.
+                if key == "source" {
+                    let s = scene.borrow();
+                    return Ok(
+                        match s.material_sources.get(&e).and_then(|m| m.get(&comp)) {
+                            Some(p) => Value::String(lua.create_string(p)?),
+                            None => Value::Nil,
+                        },
+                    );
+                }
             }
             // Colours first: a colour field never has a numeric twin.
             if let Some(c) = colors.borrow().get(&(e, comp.clone(), key.clone())) {
@@ -4586,6 +4669,14 @@ fn install_component_metatable(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
             let key = snake_of(&key)
                 .filter(|alt| LEGACY_SNAKE_FIELDS.contains(&alt.as_str()))
                 .unwrap_or(key);
+            if key == "source" && (comp == "Material" || comp.starts_with(OBJECT_MATERIAL_PREFIX)) {
+                return Err(mlua::Error::RuntimeError(
+                    "a material's `source` is read-only: it names the project material file this \
+                     one follows, which is set in the editor. Change the look through the \
+                     material's own fields, or give the node a different material."
+                        .into(),
+                ));
+            }
             if let Value::Table(t) = &val {
                 let c = read_color(t)?;
                 colors.borrow_mut().insert((e, comp, key), c);
@@ -6075,6 +6166,49 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
         )?;
     }
     {
+        // node:setParent(other | nil [, { keepWorld = false }]) — re-parent at
+        // runtime: assemble a gun out of parts under a hand, drop a carried
+        // crate back into the level. Keeps the world pose unless told not to,
+        // which is the choice the editor's drag makes.
+        let q = q.clone();
+        methods.set(
+            "setParent",
+            lua.create_function(move |_, (this, target, opts): (Table, Value, Option<Table>)| {
+                const CALL: &str = "node:setParent";
+                let e: u32 = this.raw_get("__id")?;
+                let parent = match &target {
+                    Value::Nil => None,
+                    Value::Table(t) => match t.raw_get::<u32>("__id") {
+                        Ok(p) => Some(p),
+                        Err(_) => {
+                            return Err(mlua::Error::runtime(format!(
+                                "{CALL}(parent [, opts]): the parent is a node, or nil for the top level"
+                            )));
+                        }
+                    },
+                    other => {
+                        return Err(mlua::Error::runtime(format!(
+                            "{CALL}(parent [, opts]): the parent is a node, or nil for the top level — got a {}",
+                            other.type_name()
+                        )));
+                    }
+                };
+                if parent == Some(e) {
+                    return Err(mlua::Error::runtime(format!("{CALL}: a node cannot be its own parent")));
+                }
+                let keep_world = match &opts {
+                    Some(t) => {
+                        crate::opts::check_keys(t, SET_PARENT_KEYS, CALL)?;
+                        crate::opts::opt_bool(t, CALL, "keepWorld")?.unwrap_or(true)
+                    }
+                    None => true,
+                };
+                q.borrow_mut().push((e, crate::RichSet::SetParent { parent, keep_world }));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
         // node:setCamera{ fovY =, active =, target =, width =, height =,
         // hz =, cullMask = } — the whole camera surface a game needs.
         // With a `target` the camera renders into a live
@@ -7076,10 +7210,9 @@ fn node_motion_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
     // planet, in one call instead of twenty lines of undo-yaw-then-pitch).
     //
     // World space on both ends: the node's own world position against the
-    // target's, then the angles written back as the local yaw/pitch the
-    // fields are. Under an unrotated parent (the overwhelmingly common
-    // case) those coincide; under a rotated one, aim with `:lookAt` on the
-    // parent or read `node:worldForward()` to see what actually happened.
+    // target's. The direction (and `up`) is then turned into the parent's
+    // frame, because yaw/pitch/roll are local — so a node under a rotated
+    // parent still ends up facing the world target.
     let scene = shared.scene.clone();
     methods.set(
         "lookAt",
@@ -7087,14 +7220,14 @@ fn node_motion_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
             let e: u32 = this.raw_get("__id")?;
             // A node handle aims at where it world is; a bare vec3 is taken
             // as the world point it plainly is.
-            let (t, here) = {
+            let (t, here, to_parent) = {
                 let s = scene.borrow();
                 let Some(t) = world_pos_of_value(&s, &target) else {
                     return Err(mlua::Error::RuntimeError(
                         "node:lookAt(target [, up]) — target is a node or a vec3".into(),
                     ));
                 };
-                (t, world_transform_of_handle(&s, &this, e).translation)
+                (t, world_transform_of_handle(&s, &this, e).translation, parent_rotation_inverse(&s, e))
             };
             let up = match up {
                 Some(u) => Some(crate::math_api::vec3_of(&u).ok_or_else(|| {
@@ -7102,7 +7235,8 @@ fn node_motion_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
                 })?),
                 None => None,
             };
-            let (yaw, pitch, roll) = crate::math_api::look_rotation(t - here, up);
+            let (yaw, pitch, roll) =
+                crate::math_api::look_rotation(to_parent * (t - here), up.map(|u| to_parent * u));
             this.set("yaw", yaw)?;
             this.set("pitch", pitch)?;
             if up.is_some() {
@@ -7144,6 +7278,9 @@ fn node_motion_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
             if dir.length_squared() < 1e-18 {
                 return Ok(()); // nowhere to turn: leave the facing alone
             }
+            // Yaw and pitch are local, so a world direction is turned into the
+            // parent's frame first, as `lookAt` does.
+            let dir = parent_rotation_inverse(&scene.borrow(), e) * dir;
             let step = |cur: f64, want: f64| -> f64 {
                 let d = wrap_pi_f64(want - cur);
                 if d.abs() <= max.abs() { want } else { cur + d.signum() * max.abs() }

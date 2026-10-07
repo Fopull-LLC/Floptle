@@ -1048,6 +1048,8 @@ pub struct ScriptHost {
     /// to land on — a part with no override, an override wearing no shader —
     /// so a `setShaderParam` in `update` says so once, not every tick.
     shader_warned: std::collections::HashSet<(u32, String, String)>,
+    /// Nodes already told that `node.model` cannot turn them into a model.
+    model_warned: std::collections::HashSet<u32>,
     /// `(script kind, param name)` already reported as stored-but-unread this
     /// session, so a param carried on eighteen instances of the same script is
     /// one Console line rather than eighteen.
@@ -1498,6 +1500,12 @@ pub(crate) struct SceneMirror {
     /// ask what a material was wearing — only tell it. Which makes the obvious
     /// swap ("put the shirt on unless it is already on") impossible to write.
     component_strings: HashMap<u32, HashMap<String, HashMap<String, String>>>,
+    /// The project material file each material handle follows (`m.source`),
+    /// by component name (`Material`, or a part's `Material:<key>`). Kept apart
+    /// from `component_strings` because it is read-only: that map is also what
+    /// the timeline records, and a lane on a field nothing can write would
+    /// never play back.
+    material_sources: HashMap<u32, HashMap<String, String>>,
     /// …and each material's shader knobs — uniforms and texture slots — so a
     /// part handle's `:shaderParam("glow")` reads back what the part's
     /// override carries, the way `.color` does.
@@ -1864,6 +1872,11 @@ pub enum RichSet {
     /// On-demand generation spec (RON `PlanetFill`) for a Terrain node —
     /// `None` clears it. See `floptle_core::TerrainGen` (G2 galaxy streaming).
     TerrainGen(Option<String>),
+    /// `node:setParent(other | nil [, { keepWorld = false }])` — move the node
+    /// under another (or to the top level). `keep_world` holds it where it is
+    /// in the world; off, its local numbers are kept and it moves with the
+    /// new parent.
+    SetParent { parent: Option<u32>, keep_world: bool },
     /// `node:setCamera{...}` — aim a camera, hand it authority, and point it at
     /// a live `rt:<name>` texture at a chosen size and refresh rate.
     ///

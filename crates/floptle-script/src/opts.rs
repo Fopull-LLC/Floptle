@@ -40,6 +40,7 @@ pub struct OptTable {
 pub const TABLES: &[OptTable] = &[
     OptTable { call: "scatter.create", keys: crate::scatter_api::CREATE_KEYS },
     OptTable { call: "node:setCamera", keys: crate::api::CAMERA_KEYS },
+    OptTable { call: "node:setParent", keys: crate::api::SET_PARENT_KEYS },
     OptTable { call: "node:setMaterial", keys: crate::api::MATERIAL_KEYS },
     OptTable { call: "node:setCelestial", keys: crate::api::CELESTIAL_KEYS },
     OptTable { call: "node:setTilemap", keys: crate::api::TILEMAP_KEYS },
@@ -362,6 +363,7 @@ mod tests {
         match call {
             "scatter.create" => "scatter.create{ asset = 'a.glb', nonesuch = 1 }",
             "node:setCamera" => "node:setCamera{ nonesuch = 1 }",
+            "node:setParent" => "node:setParent(nil, { nonesuch = 1 })",
             "node:setMaterial" => "node:setMaterial{ nonesuch = 1 }",
             "node:setCelestial" => "node:setCelestial{ nonesuch = 1 }",
             "node:setTilemap" => "node:setTilemap{ cols = 2, rows = 2, nonesuch = 1 }",

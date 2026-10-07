@@ -660,6 +660,55 @@ fn look_at_faces_the_target_and_turn_towards_takes_the_short_way() {
     assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
 }
 
+/// Under a rotated parent, `lookAt` and `turnTowards` still face the WORLD
+/// target. Yaw and pitch are local, and the world angles used to be written
+/// into them as they were — a child of a parent turned 90 degrees pointed 90
+/// degrees off.
+#[test]
+fn look_at_under_a_rotated_parent_faces_the_world_target() {
+    use floptle_core::math::{DVec3, Quat, Vec3};
+    let dir = std::env::temp_dir().join(format!("floptle_lookat_parent_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    // Each child aims once, at a point straight ahead along world +X.
+    write_script(&dir, "look", "function start(node)\n  node:lookAt(vec3(10, 0, 0))\nend\n");
+    write_script(&dir, "turn", "function start(node)\n  node:turnTowards(vec3(10, 0, 0), math.pi)\nend\n");
+    let mut world = World::default();
+    let parent = world.spawn();
+    world.insert(
+        parent,
+        Transform { rotation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2) * Quat::from_rotation_x(0.3), ..Transform::IDENTITY },
+    );
+    let mut kids = Vec::new();
+    for kind in ["look", "turn"] {
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, floptle_core::Parent(parent));
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: kind.into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        kids.push((kind, e));
+    }
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 0.016, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    for (kind, e) in kids {
+        let fwd = floptle_core::world_transform(&world, e).rotation * Vec3::NEG_Z;
+        let want = DVec3::X.as_vec3();
+        assert!(
+            fwd.dot(want) > 0.999,
+            "{kind}: the child faces {fwd:?} in the world, not the target along +X"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn cross_script_reference_method_and_state() {
     let dir = std::env::temp_dir().join("floptle_script_test_xref");

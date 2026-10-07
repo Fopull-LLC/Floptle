@@ -66,7 +66,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field up_x number Physics: body up (−gravity) X — radial on a planet.
 ---@field up_y number Physics: body up (−gravity) Y.
 ---@field up_z number Physics: body up (−gravity) Z.
----@field visible boolean Show / hide this node's geometry (Inspector eye toggle).
+---@field visible boolean Show / hide this node's geometry and everything under it (Inspector eye toggle). Reads back the node's own flag.
 ---@field castShadow boolean Whether this node casts sun shadows (default true).
 ---@field persistent boolean Carry this node — and everything under it — across a `scene.load` swap. Its scripts keep RUNNING (`start` does not re-fire), because the node never stopped existing.
 ---@field pos Vec3 The node's position as a vec3 (read/write: `node.pos = node.pos + dir * dt`). Accepts any {x=,y=,z=} value.
@@ -74,8 +74,8 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field up Vec3 The body's up as a vec3 (−gravity): Y on flat ground, RADIAL on a planet. The direction to jump in wherever you're standing.
 ---@field groundNormal Vec3|nil The floor the body stands on (read-only) — nil while airborne. `groundNormal:dot(node.up)` is the cosine of the slope.
 ---@field wallNormal Vec3|nil The steepest surface the body is pressed against (read-only), or nil when there's only floor. Stop pushing into it and a walk into a cliff stops launching you into the sky.
----@field forward Vec3 The node's facing as a vec3, from its rotation (−Z forward, like the camera). Works on anything with a transform.
----@field right Vec3 The node's +X axis as a vec3. Pairs with `forward` for camera-relative movement.
+---@field forward Vec3 The node's facing from its OWN rotation (−Z forward, like the camera), in its PARENT's space — like `pos`. For the world direction use `node:worldForward()`.
+---@field right Vec3 The node's +X axis from its OWN rotation, in its PARENT's space — like `pos`. For the world direction use `node:worldRight()`.
 ---@field size Vec3 The whole scale as a vec3 (read/write). `node.scale` stays the uniform shortcut and also accepts a vec3.
 ---@field tickX number Physics: the BODY's world X at the start of this tick. Not node.x — that's the INTERPOLATED render pose between ticks, so reading it in fixedUpdate is frame-rate dependent and no rollback replay can reproduce it. Writing this teleports the body without touching the transform.
 ---@field tickY number Physics: the body's world Y at the start of this tick (read/write).
@@ -128,6 +128,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field worldUp fun(self: Node): Vec3 The node's +Y axis after the parent chain (not node.up, which is the body's -gravity up).
 ---@field distanceTo fun(self: Node, other: Node|Vec3): number Distance to a node or a world point, measured in WORLD space. distance(a, b) compares LOCAL positions, which stops being the same answer the moment one of the two is parented.
 ---@field distanceFlat fun(self: Node, other: Node|Vec3, up?: Vec3): number Distance ignoring the up axis (default +Y): the \"have I arrived?\" test for anything walking on ground it does not control the height of. Pass an up for a planet.
+---@field setParent fun(self: Node, parent: Node|nil, opts?: table) Move under another node (nil = top level). Keeps the world pose unless { keepWorld = false }, which keeps the local numbers.
 ---@field lookAt fun(self: Node, target: Node|Vec3, up?: Vec3) Point this node at another node or a world point. Sets yaw + pitch and leaves roll alone; pass an up and it sets roll too.
 ---@field turnTowards fun(self: Node, target: Node|Vec3, maxRadians: number) Turn toward something by at most that much, the SHORT way round. Pass rate * dt for a frame-rate-independent turn.
 ---@field moveTowards fun(self: Node, target: Node|Vec3, maxDelta: number) The method spelling of moveTowards(node, ...). World-space and placed through the parent inverse, so a node under a container arrives where you pointed.

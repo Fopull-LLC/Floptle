@@ -287,10 +287,10 @@ impl MadeNode {
         for (name, v) in self.props.iter().filter(|(n, _)| is_place_mode(n)) {
             apply_prop(&mut spec, name, v);
         }
-        for (name, v) in self.props.iter().filter(|(n, _)| !is_place_mode(n) && n != "margin") {
+        for (name, v) in self.props.iter().filter(|(n, _)| !is_place_mode(n) && n != "margin" && n != "wrap") {
             apply_prop(&mut spec, name, v);
         }
-        for (name, v) in self.props.iter().filter(|(n, _)| n == "margin") {
+        for (name, v) in self.props.iter().filter(|(n, _)| n == "margin" || n == "wrap") {
             apply_prop(&mut spec, name, v);
         }
         spec
@@ -516,7 +516,14 @@ pub fn apply_prop(spec: &mut ElementSpec, name: &str, v: &PropVal) -> Applied {
         "tracking" => text!().tracking = v.num(),
         "lineHeight" => text!().line_height = v.num(),
         "font" => text!().font = v.text(),
-        "wrap" => text!().wrap = v.bool(),
+        // On a stack with no text of its own, `wrap` flows the children onto
+        // new lines; anywhere else it wraps the element's text. Applied in
+        // `build`'s last pass, so whether a stack exists is already settled
+        // whatever order the keys were written in.
+        "wrap" => match spec.stack.as_mut() {
+            Some(st) if spec.text.is_none() => st.wrap = v.bool(),
+            _ => text!().wrap = v.bool(),
+        },
         "maxLines" => text!().max_lines = v.num().max(0.0) as u32,
         "textFit" => text!().fit = v.bool(),
         "case" => text!().case = case_of(&v.text()).unwrap_or_default(),
@@ -1025,6 +1032,32 @@ mod tests {
         match a.build().place {
             Place::Stretch { margin, .. } => assert_eq!(margin, [12.0; 4]),
             p => panic!("expected a stretch, got {p:?}"),
+        }
+    }
+
+    /// `wrap` on a stack flows its children; on text it wraps the text — and
+    /// on a `box` that a `gap` turns into a stack, in either key order.
+    #[test]
+    fn wrap_flows_a_stack_and_wraps_text() {
+        let made = |kind: Kind, props: Vec<(&str, PropVal)>| {
+            MadeNode {
+                kind,
+                props: props.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+                ..Default::default()
+            }
+            .build()
+        };
+        let row = made(Kind::Row, vec![("wrap", PropVal::Bool(true))]);
+        assert!(row.stack.is_some_and(|s| s.wrap) && row.text.is_none());
+        let text = made(Kind::Text, vec![("wrap", PropVal::Bool(true))]);
+        assert!(text.text.is_some_and(|t| t.wrap) && text.stack.is_none());
+        for props in [
+            vec![("wrap", PropVal::Bool(true)), ("gap", PropVal::Num(8.0))],
+            vec![("gap", PropVal::Num(8.0)), ("wrap", PropVal::Bool(true))],
+        ] {
+            let b = made(Kind::Box, props);
+            assert!(b.stack.is_some_and(|s| s.wrap), "a gapped box wraps its children: {:?}", b.stack);
+            assert!(b.text.is_none(), "and grows no text");
         }
     }
 

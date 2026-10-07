@@ -150,6 +150,9 @@ fn play_for(ed: &mut crate::Editor, seconds: f32, view: (Option<&str>, u32, u32)
         feed_view(ed, view.0, view.1, view.2);
         ed.tick_headless_ui_clock(crate::run::DT);
         ed.play_step(crate::run::DT, true);
+        // Render targets before captures, in the frame loop's order: a capture
+        // of a screen wearing `rt:<name>` shows that camera's picture.
+        ed.update_render_targets(ed.play_t);
         // `camera.capture` asked for in a shot is answered like in a game.
         ed.pump_captures();
         ed.drain_script_logs();
@@ -437,6 +440,7 @@ pub(crate) fn run(args: Args) -> i32 {
                 feed_view(&mut ed, camera, w, h);
                 ed.tick_headless_ui_clock(crate::run::DT);
                 ed.play_step(crate::run::DT, true);
+                ed.update_render_targets(ed.play_t);
                 ed.pump_captures();
                 ed.drain_script_logs();
             }
@@ -611,6 +615,10 @@ pub(crate) fn render_frame_pixels(
     cull_mask: u32,
     ui: bool,
 ) -> Option<Vec<u8>> {
+    // Every live render target first, as the window's frame does: without
+    // them a material or UI image wearing `rt:<name>` drew white, because the
+    // texture was never made.
+    ed.update_render_targets(ed.play_t);
     let color = crate::capture::render_frame_texture(ed, cam, stack_of, w, h, cull_mask, ui, true)?;
     // The readback waits on the device, which is also what lands the timing
     // query's own readback — `run` polls it after this returns.
@@ -780,6 +788,101 @@ pub(crate) fn exit_on_render_error(gpu: &Gpu, nothing: &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A hidden root hides the model under it.** A prefab whose model is a
+    /// child, hidden by its root, drew the model anyway.
+    #[test]
+    fn a_hidden_roots_child_model_is_not_drawn() {
+        use floptle_core::math::{DVec3, Vec3};
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let root = ed.world.spawn();
+        ed.world.insert(root, floptle_core::Transform { translation: DVec3::new(0.0, 0.0, -3.0), ..Default::default() });
+        let model = ed.world.spawn();
+        ed.world.insert(model, floptle_core::Transform { scale: Vec3::splat(2.0), ..Default::default() });
+        ed.world.insert(model, floptle_core::Parent(root));
+        ed.world.insert(model, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [0.0, 1.0, 0.0] });
+        let cam = RenderCamera::new(DVec3::ZERO, Default::default(), Projection::of_camera(1.0, false, 1.0, 0.05, 300000.0));
+        let (w, h) = (64u32, 36u32);
+        let centre = |ed: &mut crate::Editor| {
+            let px = render_frame_pixels(ed, &cam, None, w, h, u32::MAX, false).expect("no device");
+            let i = ((h / 2 * w + w / 2) * 4) as usize;
+            (px[i], px[i + 1], px[i + 2])
+        };
+        let (r, g, b) = centre(&mut ed);
+        assert!(g > r + 60 && g > b + 60, "the shown model should be green, got r{r} g{g} b{b}");
+        ed.world.insert(root, floptle_core::Visible(false));
+        let (r, g, b) = centre(&mut ed);
+        assert!(g < r + 30, "hiding the root left its model drawn: r{r} g{g} b{b}");
+    }
+
+    /// **A screen wearing a render target shows that camera's picture.** A
+    /// camera films a green cube into `rt:mon`; a white-lit quad in front of
+    /// the shot's camera wears it. Before render targets were drawn here the
+    /// texture never existed and the quad came out white.
+    #[test]
+    fn a_shot_draws_render_targets() {
+        use floptle_core::math::{DVec3, Vec3};
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let camera = |ed: &mut crate::Editor, at: DVec3, target: &str, active: bool| {
+            let e = ed.world.spawn();
+            ed.world.insert(e, floptle_core::Transform { translation: at, ..Default::default() });
+            ed.world.insert(
+                e,
+                Matter::Camera {
+                    fov_y: 1.0,
+                    active,
+                    target: target.into(),
+                    cull_mask: u32::MAX,
+                    target_w: 64,
+                    target_h: 64,
+                    target_hz: 0.0,
+                    ortho: false,
+                    ortho_height: Matter::ORTHO_HEIGHT,
+                    stack: Vec::new(),
+                },
+            );
+            e
+        };
+        // The filmed cube, far off to the side where the shot cannot see it.
+        let cube = ed.world.spawn();
+        ed.world.insert(
+            cube,
+            floptle_core::Transform {
+                translation: DVec3::new(100.0, 0.0, -3.0),
+                scale: Vec3::splat(4.0),
+                ..Default::default()
+            },
+        );
+        ed.world.insert(cube, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [0.0, 1.0, 0.0] });
+        camera(&mut ed, DVec3::new(100.0, 0.0, 0.0), "mon", false);
+        // The screen, filling the shot.
+        let screen = ed.world.spawn();
+        ed.world.insert(
+            screen,
+            floptle_core::Transform {
+                translation: DVec3::new(0.0, 0.0, -2.0),
+                scale: Vec3::new(6.0, 6.0, 0.1),
+                ..Default::default()
+            },
+        );
+        ed.world.insert(screen, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [1.0, 1.0, 1.0] });
+        ed.world.insert(
+            screen,
+            floptle_core::Material {
+                texture: Some("rt:mon".into()),
+                unlit: true,
+                ..Default::default()
+            },
+        );
+        let main = camera(&mut ed, DVec3::ZERO, "", true);
+        let wt = floptle_core::world_transform(&ed.world, main);
+        let cam = RenderCamera::new(wt.translation, wt.rotation, Projection::of_camera(1.0, false, 1.0, 0.05, 300000.0));
+        let (w, h) = (64u32, 36u32);
+        let px = render_frame_pixels(&mut ed, &cam, Some(main), w, h, u32::MAX, false).expect("no device");
+        let i = ((h / 2 * w + w / 2) * 4) as usize;
+        let (r, g, b) = (px[i], px[i + 1], px[i + 2]);
+        assert!(g > r + 60 && g > b + 60, "the screen shows r{r} g{g} b{b}, not the green its camera films");
+    }
 
     #[test]
     fn a_span_to_play_is_seconds_or_frames_and_never_a_quiet_zero() {

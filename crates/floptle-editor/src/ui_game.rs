@@ -2617,6 +2617,12 @@ fn spec_look_ui(ui: &mut egui::Ui, e: Entity, spec: &mut ElementSpec, styles: &f
                 c |= ui.selectable_value(&mut s.justify, v, l).changed();
             }
         });
+        c |= crate::responsive::check(ui, &mut s.wrap, "wrap onto new lines")
+            .on_hover_text(
+                "children that do not fit start a new line, gap apart — a row of tiles \
+                 becomes a grid whose column count follows this element's width",
+            )
+            .changed();
     }
     c
 }

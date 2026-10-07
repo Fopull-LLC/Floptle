@@ -538,6 +538,135 @@ end
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A material handle names the project material it follows, so a gameplay
+/// rule ("this surface cannot be grappled") keys on the material rather than
+/// on a texture that can be repainted. Read-only; nil for a material of its own.
+#[test]
+fn a_material_handle_names_the_file_it_follows() {
+    let dir = std::env::temp_dir().join(format!("floptle_mat_source_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "src",
+        "\
+function start(node)
+  local got = tostring(node:material().source) .. '|' ..
+              tostring(node:material('Sole').source) .. '|' ..
+              tostring(node:material('Lace').source) .. '|' ..
+              tostring(find('Plain'):material().source)
+  local want = 'materials/Checkerboard.ron|materials/Acid.ron|nil|nil'
+  if got ~= want then error('sources read ' .. got) end
+  local ok, err = pcall(function() node:material().source = 'materials/Other.ron' end)
+  if ok then error('writing source was accepted') end
+  if not tostring(err):find('read%-only') then error('unhelpful refusal: ' .. tostring(err)) end
+end
+",
+    );
+    let (mut world, e) = world_with_script("src");
+    let linked = |src: &str| floptle_core::Material { source: Some(src.into()), ..Default::default() };
+    world.insert(e, linked("materials/Checkerboard.ron"));
+    world.insert(
+        e,
+        floptle_core::ObjectMaterials(std::collections::BTreeMap::from([
+            ("Sole".to_string(), linked("materials/Acid.ron")),
+            ("Lace".to_string(), floptle_core::Material::default()),
+        ])),
+    );
+    let plain = world.spawn();
+    world.insert(plain, Transform::IDENTITY);
+    world.insert(plain, floptle_core::Name("Plain".into()));
+    world.insert(plain, floptle_core::Material::default());
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A script assembles an object at runtime: an Empty (what `createNode`
+/// makes) becomes a model when given one, a part moves under another node,
+/// and `node.model` on something that is already something else says so.
+#[test]
+fn a_script_builds_an_object_out_of_models_and_reparents_it() {
+    use floptle_core::math::{DVec3, Quat};
+    let dir = std::env::temp_dir().join(format!("floptle_assemble_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "build",
+        "\
+local frame = 0
+function update(node, dt)
+  frame = frame + 1
+  if frame == 1 then
+    find('Part').model = 'models/barrel.glb'
+    find('Lamp').model = 'models/barrel.glb'
+    find('Part'):setParent(find('Hand'))
+    find('Loose'):setParent(find('Hand'), { keepWorld = false })
+  elseif frame == 2 then
+    -- Under its own child: refused when applied, not a loop.
+    find('Hand'):setParent(find('Part'))
+    local ok, err = pcall(function() find('Part'):setParent(find('Hand'), { keepworld = true }) end)
+    if ok or not tostring(err):find('keepWorld') then error('a misspelt option was accepted: ' .. tostring(err)) end
+    ok = pcall(function() find('Part'):setParent(find('Part')) end)
+    if ok then error('a node became its own parent') end
+  end
+end
+",
+    );
+    let (mut world, _e) = world_with_script("build");
+    let node = |w: &mut World, name: &str, t: Transform, m: Matter| {
+        let n = w.spawn();
+        w.insert(n, t);
+        w.insert(n, floptle_core::Name(name.into()));
+        w.insert(n, m);
+        n
+    };
+    let hand_t = Transform {
+        translation: DVec3::new(5.0, 1.0, 0.0),
+        rotation: Quat::from_rotation_y(1.0),
+        ..Transform::IDENTITY
+    };
+    let hand = node(&mut world, "Hand", hand_t, Matter::Empty);
+    let part_t = Transform::from_translation(DVec3::new(2.0, 0.0, 3.0));
+    let part = node(&mut world, "Part", part_t, Matter::Empty);
+    let loose = node(&mut world, "Loose", part_t, Matter::Empty);
+    let lamp = node(
+        &mut world,
+        "Lamp",
+        Transform::IDENTITY,
+        Matter::PointLight {
+            color: [1.0; 3],
+            intensity: 1.0,
+            range: 5.0,
+            shape: Default::default(),
+            shadows: false,
+            spot_angle: floptle_core::OMNI_ANGLE,
+            spot_softness: 0.0,
+        },
+    );
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    assert!(
+        matches!(world.get::<Matter>(part), Some(Matter::Mesh { asset_path }) if asset_path == "models/barrel.glb"),
+        "the Empty became the model: {:?}",
+        world.get::<Matter>(part)
+    );
+    assert!(matches!(world.get::<Matter>(lamp), Some(Matter::PointLight { .. })), "a light stays a light");
+    let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).filter(|m| m.contains("Lamp")).collect();
+    assert_eq!(said.len(), 1, "node.model on a light is said once: {said:?}");
+    assert_eq!(world.get::<floptle_core::Parent>(part).map(|p| p.0), Some(hand));
+    let held = floptle_core::world_transform(&world, part).translation;
+    assert!(held.distance(part_t.translation) < 1e-6, "keepWorld (the default) left it where it was: {held}");
+    let carried = floptle_core::world_transform(&world, loose).translation;
+    let want = hand_t.mul_transform(&part_t).translation;
+    assert!(carried.distance(want) < 1e-6, "keepWorld = false keeps the local numbers: {carried} vs {want}");
+    host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    assert_eq!(world.get::<floptle_core::Parent>(hand), None, "a loop was refused");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn script_reads_and_swaps_mesh_model() {
     // node.model reflects the current Mesh asset; assigning it swaps the model

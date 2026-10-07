@@ -997,8 +997,8 @@ pub struct ParticleSystem {
 
 /// Whether a node's geometry is drawn. A node with **no** `Visible` component renders
 /// normally (visible is the default); attaching `Visible(false)` hides its mesh/shape
-/// (it still has a transform, physics, and children). Scripts toggle it with
-/// `node.visible = true/false` to show/hide visuals on the fly.
+/// and everything under it (see [`is_hidden`]) — it keeps its transform and physics.
+/// Scripts toggle it with `node.visible = true/false` to show/hide visuals on the fly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Visible(pub bool);
 
@@ -2376,7 +2376,25 @@ pub enum GravityMode {
 /// of the layer it is on: a pool of two hundred hidden projectiles would push
 /// every visible character in that layer into the tie floor.
 pub fn is_drawn(world: &crate::ecs::World, e: crate::ecs::Entity) -> bool {
-    world.get::<crate::Visible>(e).is_none_or(|v| v.0) && !is_disabled(world, e)
+    !is_hidden(world, e) && !is_disabled(world, e)
+}
+
+/// Is this node hidden — its own `Visible(false)`, or an ancestor's?
+///
+/// Hiding a node hides everything under it, the way the Hierarchy reads: a
+/// prefab whose model is a child is hidden by hiding its root. Each node's
+/// own flag is still its own, so showing the root again shows what was shown
+/// before.
+pub fn is_hidden(world: &crate::ecs::World, e: crate::ecs::Entity) -> bool {
+    let mut cur = e;
+    for _ in 0..64 {
+        if matches!(world.get::<crate::Visible>(cur), Some(crate::Visible(false))) {
+            return true;
+        }
+        let Some(Parent(p)) = world.get::<Parent>(cur).copied() else { break };
+        cur = p;
+    }
+    false
 }
 
 pub fn is_disabled(world: &crate::ecs::World, e: crate::ecs::Entity) -> bool {
@@ -2697,5 +2715,30 @@ mod lighting_2d_tests {
         assert_eq!(Lighting2D::default().mode, Lit2D::Auto);
         assert!(Lighting2D::default().layers.is_empty());
         assert_eq!(Shadow2D::default().0, Cast2D::Auto);
+    }
+}
+
+#[cfg(test)]
+mod visibility_tests {
+    use super::*;
+    use crate::ecs::World;
+
+    #[test]
+    fn hiding_a_node_hides_everything_under_it_and_keeps_their_own_flags() {
+        let mut w = World::default();
+        let root = w.spawn();
+        let arm = w.spawn();
+        let hand = w.spawn();
+        w.insert(arm, Parent(root));
+        w.insert(hand, Parent(arm));
+        assert!(!is_hidden(&w, hand));
+        w.insert(root, crate::Visible(false));
+        assert!(is_hidden(&w, arm) && is_hidden(&w, hand), "a hidden root hides its children");
+        assert!(!is_drawn(&w, hand));
+        assert_eq!(w.get::<crate::Visible>(hand), None, "the child's own flag is untouched");
+        w.insert(root, crate::Visible(true));
+        w.insert(hand, crate::Visible(false));
+        assert!(!is_hidden(&w, arm), "hiding a child does not hide its parent");
+        assert!(is_hidden(&w, hand));
     }
 }

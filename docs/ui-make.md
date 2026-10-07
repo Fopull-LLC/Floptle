@@ -233,6 +233,25 @@ element made a container by one of these keys. A nested row or column
 therefore sits 8 units inside its parent's edge and 8 from its neighbours
 until you say otherwise; write `pad = 0, gap = 0` for a flush stack.
 
+`wrap = true` makes a container flow onto a new line when the current one is
+full, so a row of fixed-size tiles becomes a grid. The number of columns
+follows the container's width, so the grid reflows when the panel is resized:
+
+```lua
+ui.make(find('Pack'), {
+  { 'row', wrap = true, gap = 8, w = '100%', h = 'fit',
+    items = inventory,
+    function(item)
+      return { 'image', key = item.id, texture = item.icon, size = {112, 112} }
+    end },
+})
+```
+
+Lines sit `gap` apart, and `justify` and `align` apply within each line. A
+wrapping container doesn't grow its children: a `"grow"` child keeps its
+fitted size. Put it in a `scroll` when the grid can be taller than the screen.
+On a text element, `wrap` still wraps the text.
+
 **Shape** — `fill`, `radius`, `border`, `borderColor`, plus the indexed forms
 (`fillR`, `radiusTL`, `borderB`, …). A quad takes a scalar for all four or a
 list: `radius = {8, 8, 0, 0}`.

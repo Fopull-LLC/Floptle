@@ -834,7 +834,7 @@ pub(crate) fn collect_shadow_proxies(world: &World, cam_world: DVec3, enabled: b
         let (has, shown) = meshes(world, &children, e, 0);
         world.get::<floptle_core::CastShadow>(e).map(|c| c.0).unwrap_or(true)
             && !floptle_core::is_disabled(world, e)
-            && !matches!(world.get::<floptle_core::Visible>(e), Some(floptle_core::Visible(false)))
+            && !floptle_core::is_hidden(world, e)
             && (shown || !has)
     };
     // (distance to the camera past its reach, a, b, rot)
@@ -1529,7 +1529,7 @@ impl crate::Editor {
         let sun = floptle_render::Frustum::from_view_proj(floptle_core::math::Mat4::from_cols_array_2d(&globals.sun_vp));
         for (e, matter) in self.world.query::<Matter>() {
             if !matches!(matter, Matter::Mesh { .. } | Matter::MapMesh { .. } | Matter::Primitive { .. })
-                || matches!(self.world.get::<floptle_core::Visible>(e), Some(floptle_core::Visible(false)))
+                || floptle_core::is_hidden(&self.world, e)
                 || self.world.get::<floptle_core::CastShadow>(e).is_some_and(|c| !c.0)
                 || floptle_core::is_disabled(&self.world, e)
             {

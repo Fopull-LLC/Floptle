@@ -1167,6 +1167,14 @@ impl Editor {
                 sim.set_body_velocity(eid, Vec3::new(v[0], v[1], v[2]));
             }
         }
+        // Pose ops `lateUpdate` queued (`reach` onto something the camera
+        // holds) land on THIS frame's pose, solved against where the camera
+        // pass just put everything — not a frame late, behind it.
+        let late_anim = self.script_host.take_anim_commands();
+        if !late_anim.is_empty() {
+            anim::apply_late_commands(&mut self.anim, &mut self.world, &self.mesh_registry, late_anim);
+            self.anim.publish_bones(&self.world, &self.mesh_registry, &mut self.script_host.bone_poses());
+        }
         // Surface fixedUpdate errors alongside the frame pass's.
         if !self.script_host.errors().is_empty() {
             self.script_errors = self.script_host.errors().to_vec();

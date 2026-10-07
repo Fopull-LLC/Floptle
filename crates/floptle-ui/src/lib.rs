@@ -170,6 +170,12 @@ pub struct StackCfg {
     pub pad: f32,
     pub align: Align,
     pub justify: Justify,
+    /// Flow onto a new line when this one is full — a row of tiles becomes a
+    /// grid whose column count follows the container's width. Lines are
+    /// `gap` apart; `justify` and `align` apply within each line. A wrapping
+    /// stack does not grow its children (`Grow` reads as `Fit`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wrap: bool,
 }
 
 impl Default for StackCfg {
@@ -180,8 +186,31 @@ impl Default for StackCfg {
             pad: 8.0,
             align: Align::Start,
             justify: Justify::Start,
+            wrap: false,
         }
     }
+}
+
+/// Break children of main-axis lengths `lens` into lines no longer than
+/// `limit`, `gap` apart. Greedy, and every line holds at least one child, so a
+/// child wider than the container gets a line to itself rather than vanishing.
+fn wrap_lines(lens: &[f32], limit: f32, gap: f32) -> Vec<std::ops::Range<usize>> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut extent = 0.0f32;
+    for (i, &len) in lens.iter().enumerate() {
+        if i > start && extent + gap + len > limit + 1e-3 {
+            lines.push(start..i);
+            start = i;
+            extent = len;
+        } else {
+            extent += if i > start { gap + len } else { len };
+        }
+    }
+    if start < lens.len() {
+        lines.push(start..lens.len());
+    }
+    lines
 }
 
 /// The visual primitive: a rounded rectangle. Radius 0 = sharp panel, radius
@@ -1456,6 +1485,25 @@ fn fit_size(n: &Node, avail: [f32; 2], measure: MeasureText, wrap_at: Option<f32
     if visible.is_empty() {
         return [0.0, 0.0];
     }
+    if let Some(s) = n.spec.stack.filter(|s| s.wrap) {
+        let (main, cross) = axes(s.dir);
+        let inner = [(avail[0] - s.pad * 2.0).max(0.0), (avail[1] - s.pad * 2.0).max(0.0)];
+        let sizes: Vec<[f32; 2]> = visible.iter().map(|c| measure_node(c, inner, measure)).collect();
+        let lens: Vec<f32> = sizes.iter().map(|cs| cs[main]).collect();
+        let mut longest = 0.0f32;
+        let mut cross_total = 0.0f32;
+        let lines = wrap_lines(&lens, inner[main], s.gap);
+        for line in &lines {
+            let len: f32 = lens[line.clone()].iter().sum::<f32>() + s.gap * (line.len() - 1) as f32;
+            longest = longest.max(len);
+            cross_total += sizes[line.clone()].iter().map(|cs| cs[cross]).fold(0.0, f32::max);
+        }
+        cross_total += s.gap * lines.len().saturating_sub(1) as f32;
+        let mut out = [0.0; 2];
+        out[main] = longest + s.pad * 2.0;
+        out[cross] = cross_total + s.pad * 2.0;
+        return out;
+    }
     if let Some(s) = n.spec.stack {
         let (main, cross) = axes(s.dir);
         let mut total_main = s.pad * 2.0 + s.gap * (visible.len().saturating_sub(1)) as f32;
@@ -1534,7 +1582,44 @@ fn layout_node(n: &Node, rect: [f32; 4], measure: MeasureText, out: &mut Vec<Pla
     let scroll_y = n.spec.scroll.map(|s| s.offset.max(0.0)).unwrap_or(0.0);
     let scroll_x = n.spec.scroll.map(|s| s.offset_x.max(0.0)).unwrap_or(0.0);
     let (px, py, pw, ph) = (rect[0] - scroll_x, rect[1] - scroll_y, rect[2], rect[3]);
-    if let Some(s) = n.spec.stack {
+    if let Some(s) = n.spec.stack.filter(|s| s.wrap) {
+        let (main, cross) = axes(s.dir);
+        let inner_pos = [px + s.pad, py + s.pad];
+        let inner_size = [(pw - s.pad * 2.0).max(0.0), (ph - s.pad * 2.0).max(0.0)];
+        let sizes: Vec<[f32; 2]> = visible.iter().map(|c| measure_node(c, inner_size, measure)).collect();
+        let lens: Vec<f32> = sizes.iter().map(|cs| cs[main]).collect();
+        let mut line_off = 0.0f32;
+        for line in wrap_lines(&lens, inner_size[main], s.gap) {
+            let cross_len = sizes[line.clone()].iter().map(|cs| cs[cross]).fold(0.0, f32::max);
+            let used: f32 = lens[line.clone()].iter().sum::<f32>() + s.gap * (line.len() - 1) as f32;
+            let free = (inner_size[main] - used).max(0.0);
+            let (mut cursor, extra_gap) = match s.justify {
+                Justify::Start => (0.0, 0.0),
+                Justify::Center => (free * 0.5, 0.0),
+                Justify::End => (free, 0.0),
+                Justify::SpaceBetween => {
+                    (0.0, if line.len() > 1 { free / (line.len() - 1) as f32 } else { 0.0 })
+                }
+            };
+            for i in line {
+                let mut cs = sizes[i];
+                if s.align == Align::Stretch {
+                    cs[cross] = cross_len;
+                }
+                let cross_off = match s.align {
+                    Align::Start | Align::Stretch => 0.0,
+                    Align::Center => (cross_len - cs[cross]) * 0.5,
+                    Align::End => cross_len - cs[cross],
+                };
+                let mut pos = [0.0f32; 2];
+                pos[main] = inner_pos[main] + cursor;
+                pos[cross] = inner_pos[cross] + line_off + cross_off;
+                layout_node(visible[i], [pos[0], pos[1], cs[0], cs[1]], measure, out);
+                cursor += cs[main] + s.gap + extra_gap;
+            }
+            line_off += cross_len + s.gap;
+        }
+    } else if let Some(s) = n.spec.stack {
         let (main, cross) = axes(s.dir);
         let inner_pos = [px + s.pad, py + s.pad];
         let inner_size = [(pw - s.pad * 2.0).max(0.0), (ph - s.pad * 2.0).max(0.0)];
@@ -2807,6 +2892,7 @@ mod tests {
                     pad: 5.0,
                     align: Align::Center,
                     justify: Justify::Start,
+                    wrap: false,
                 }),
                 ..Default::default()
             },
@@ -2821,6 +2907,38 @@ mod tests {
         assert_eq!([ra[1], rb[1]], [5.0, 45.0], "flow: pad, then gap");
         // Center align on a 190-wide inner: (190-100)/2+5 and (190-60)/2+5.
         assert_eq!([ra[0], rb[0]], [50.0, 70.0]);
+    }
+
+    /// **A wrapping row is a grid whose columns follow its width.** Five
+    /// 112-unit tiles in a 250-wide row, 8 apart: two fit per line, so three
+    /// lines — and a Fit-height row is exactly as tall as those lines.
+    #[test]
+    fn a_wrapping_row_flows_its_children_onto_new_lines() {
+        let tiles: Vec<Node> = (0..5)
+            .map(|_| el(ElementSpec { size: [Size::Fixed(112.0), Size::Fixed(112.0)], ..Default::default() }, vec![]))
+            .collect();
+        let ids: Vec<_> = tiles.iter().map(|t| t.id).collect();
+        let grid = |w: f32, tiles: Vec<Node>| {
+            el(
+                ElementSpec {
+                    size: [Size::Fixed(w), Size::Fit],
+                    stack: Some(StackCfg { dir: Dir::Row, gap: 8.0, pad: 0.0, wrap: true, ..Default::default() }),
+                    ..Default::default()
+                },
+                tiles,
+            )
+        };
+        let g = grid(250.0, tiles.clone());
+        let gid = g.id;
+        let placed = solve(&[g], [1280.0, 720.0], &m);
+        let at: Vec<[f32; 2]> = ids.iter().map(|&i| { let r = rect_of(&placed, i); [r[0], r[1]] }).collect();
+        assert_eq!(at, vec![[0.0, 0.0], [120.0, 0.0], [0.0, 120.0], [120.0, 120.0], [0.0, 240.0]]);
+        assert_eq!(rect_of(&placed, gid)[3], 352.0, "three lines of 112, two gaps of 8");
+        // Wider, and the same tiles reflow to four a line.
+        let g = grid(500.0, tiles);
+        let placed = solve(&[g], [1280.0, 720.0], &m);
+        assert_eq!(rect_of(&placed, ids[3])[..2], [360.0, 0.0]);
+        assert_eq!(rect_of(&placed, ids[4])[..2], [0.0, 120.0]);
     }
 
     #[test]
@@ -2847,6 +2965,7 @@ mod tests {
                     pad: 0.0,
                     align: Align::Start,
                     justify: Justify::Start,
+                    wrap: false,
                 }),
                 ..Default::default()
             },
@@ -2878,6 +2997,7 @@ mod tests {
                     pad: 0.0,
                     align: Align::Start,
                     justify: Justify::SpaceBetween,
+                    wrap: false,
                 }),
                 ..Default::default()
             },

@@ -3045,7 +3045,7 @@ impl Editor {
             .iter()
             .filter_map(|(&e, (key, b))| {
                 let casts = world.get::<floptle_core::CastShadow>(e).is_none_or(|c| c.0)
-                    && !matches!(world.get::<floptle_core::Visible>(e), Some(floptle_core::Visible(false)));
+                    && !floptle_core::is_hidden(world, e);
                 if !casts {
                     return None;
                 }

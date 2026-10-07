@@ -1764,9 +1764,10 @@ impl Editor {
         // Scatter props submitted this frame.
         let mut scatter_props = 0usize;
         for (e, matter) in &ents {
-            // Hidden nodes (Visible(false)) don't draw their geometry (a script or the
-            // Inspector can toggle this); they still keep transforms, physics, children.
-            if matches!(self.world.get::<floptle_core::Visible>(*e), Some(floptle_core::Visible(false))) {
+            // Hidden nodes (Visible(false), on the node or an ancestor) don't draw their
+            // geometry (a script or the Inspector can toggle this); they still keep
+            // transforms and physics.
+            if floptle_core::is_hidden(&self.world, *e) {
                 continue;
             }
             // Switched off (the Hierarchy/Inspector toggle) — this node or an ancestor.
