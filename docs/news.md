@@ -1,5 +1,14 @@
 ## Just shipped
 
+**v0.114.0 — "Stays In Front"** (stable). A camera can stack other cameras
+on top of its picture, so first-person arms on their own layer never clip
+into walls. Scripts can build objects out of models at runtime with
+`node.model` on a `createNode` Empty and `node:setParent`, `ui.make` rows wrap
+into inventory grids, hiding a node hides everything under it, `lookAt`
+works under a rotated parent, a `reach` from `lateUpdate` lands the same
+frame, a material handle names its project material as `m.source`, and
+`floptle shot` draws render targets.
+
 **v0.114.0-rc1 — "Stays In Front"** (beta). A camera can stack other
 cameras on top of its picture, each drawing only its own layers over an empty
 depth buffer, so first-person arms on a layer of their own never clip into
