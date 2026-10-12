@@ -677,6 +677,8 @@ pub struct ScriptHost {
     body_height_changes: Rc<RefCell<HashMap<u32, f32>>>,
     /// `node.asleep = …` writes this frame, drained and applied to the sim.
     body_sleep_changes: Rc<RefCell<HashMap<u32, bool>>>,
+    /// `node.dropThrough = …` writes this frame (entity index → seconds).
+    body_drop_changes: Rc<RefCell<HashMap<u32, f32>>>,
     /// Cross-node position writes on body entities → the driver teleports the
     /// body (see `Shared::body_pos_changes`).
     body_pos_changes: Rc<RefCell<HashMap<u32, [f64; 3]>>>,
@@ -2048,6 +2050,7 @@ struct Shared {
     body_changes: Rc<RefCell<HashMap<u32, [f32; 3]>>>,
     body_height_changes: Rc<RefCell<HashMap<u32, f32>>>,
     body_sleep_changes: Rc<RefCell<HashMap<u32, bool>>>,
+    body_drop_changes: Rc<RefCell<HashMap<u32, f32>>>,
     /// Cross-node position writes onto entities that have a physics body —
     /// the driver teleports the body there (otherwise the physics writeback
     /// stomps the transform next frame and the write silently vanishes).

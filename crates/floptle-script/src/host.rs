@@ -2656,6 +2656,7 @@ impl ScriptHost {
             body_changes: Rc::new(RefCell::new(HashMap::new())),
             body_height_changes: Rc::new(RefCell::new(HashMap::new())),
             body_sleep_changes: Rc::new(RefCell::new(HashMap::new())),
+            body_drop_changes: Rc::new(RefCell::new(HashMap::new())),
             body_pos_changes: Rc::new(RefCell::new(HashMap::new())),
             sprite_draws: Rc::new(RefCell::new(HashMap::new())),
             shader_param_sets: Rc::new(RefCell::new(Vec::new())),
@@ -3014,6 +3015,7 @@ impl ScriptHost {
             body_changes: shared.body_changes.clone(),
             body_height_changes: shared.body_height_changes.clone(),
             body_sleep_changes: shared.body_sleep_changes.clone(),
+            body_drop_changes: shared.body_drop_changes.clone(),
             body_pos_changes: shared.body_pos_changes.clone(),
             sprite_draws: shared.sprite_draws.clone(),
             sprites_written: None,
@@ -5498,6 +5500,11 @@ impl ScriptHost {
     /// driver to apply to the sim after the velocity writes.
     pub fn take_body_sleep_changes(&self) -> HashMap<u32, bool> {
         std::mem::take(&mut *self.body_sleep_changes.borrow_mut())
+    }
+
+    /// Drain the `node.dropThrough = …` writes (entity index → seconds).
+    pub fn take_body_drop_changes(&self) -> HashMap<u32, f32> {
+        std::mem::take(&mut *self.body_drop_changes.borrow_mut())
     }
 
     /// Drain cross-node position writes on body entities — the driver teleports

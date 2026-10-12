@@ -715,6 +715,9 @@ impl Editor {
             for (eid, on) in self.script_host.take_body_sleep_changes() {
                 sim.set_body_asleep(eid, on);
             }
+            for (eid, t) in self.script_host.take_body_drop_changes() {
+                sim.set_body_drop_through(eid, t);
+            }
             for (eid, p) in self.script_host.take_body_pos_changes() {
                 sim.set_body_position(eid, DVec3::new(p[0], p[1], p[2]));
             }
@@ -924,6 +927,9 @@ impl Editor {
                     }
                     for (eid, on) in self.script_host.take_body_sleep_changes() {
                         sim.set_body_asleep(eid, on);
+                    }
+                    for (eid, t) in self.script_host.take_body_drop_changes() {
+                        sim.set_body_drop_through(eid, t);
                     }
                     for (eid, p) in self.script_host.take_body_pos_changes() {
                         sim.set_body_position(eid, DVec3::new(p[0], p[1], p[2]));

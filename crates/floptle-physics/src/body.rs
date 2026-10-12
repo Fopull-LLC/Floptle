@@ -168,6 +168,10 @@ pub struct Body {
     /// character still hangs by its rim at an edge. Only a capsule has feet; a
     /// ball rolls on its curve.
     pub feet: bool,
+    /// Seconds left during which one-way platforms do not hold this body, so
+    /// it drops through the ledge it stands on. Counts down each step; a
+    /// script starts it (`node.dropThrough`) when the player presses down.
+    pub drop_through: f32,
 }
 
 impl Body {
@@ -201,6 +205,7 @@ impl Body {
             off: false,
             sleep_time: 0.0,
             feet: false,
+            drop_through: 0.0,
         }
     }
 

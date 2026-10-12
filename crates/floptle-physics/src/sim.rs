@@ -182,6 +182,9 @@ pub struct BodySnapshot {
     /// it is supposed to agree with.
     pub asleep: bool,
     pub sleep_time: f32,
+    /// What is left of a one-way drop-through (`Body::drop_through`), so a
+    /// replay falls through the same ledge on the same tick.
+    pub drop_through: f32,
 }
 
 /// What one dynamic body reports to the game each frame — see
@@ -1751,6 +1754,7 @@ impl Sim {
                 grounded: b.grounded,
                 asleep: b.asleep,
                 sleep_time: b.sleep_time,
+                drop_through: b.drop_through,
             }
         })
     }
@@ -1769,6 +1773,7 @@ impl Sim {
                 b.grounded = s.grounded;
                 b.asleep = s.asleep;
                 b.sleep_time = s.sleep_time;
+                b.drop_through = s.drop_through;
                 if let Some(tp) = self.tick_prev.get_mut(l.body) {
                     *tp = p;
                 }
@@ -2039,6 +2044,16 @@ impl Sim {
     /// or its ground going away (a body put to sleep in the air wakes and falls
     /// at the next check). Better than making it kinematic, which changes how
     /// it behaves rather than whether it is simulated.
+    /// Let the body fall through one-way platforms for `seconds`, and wake it
+    /// so a player standing still on a ledge drops at once.
+    pub fn set_body_drop_through(&mut self, eid: u32, seconds: f32) {
+        let Some(bi) = self.map.iter().find(|l| l.entity.index() == eid).map(|l| l.body) else { return };
+        self.world.bodies[bi].drop_through = seconds.max(0.0);
+        if seconds > 0.0 {
+            self.world.set_asleep(bi, false);
+        }
+    }
+
     pub fn set_body_asleep(&mut self, eid: u32, asleep: bool) {
         let Some(bi) = self.map.iter().find(|l| l.entity.index() == eid).map(|l| l.body) else { return };
         self.world.set_asleep(bi, asleep);
@@ -2593,6 +2608,7 @@ mod runtime_body_tests {
             grounded: false,
             asleep: false,
             sleep_time: 0.0,
+            drop_through: 0.0,
         };
         sim.restore_body(e.index(), &server);
         for _ in 0..6 {

@@ -1404,13 +1404,29 @@ impl PhysicsWorld {
     /// below is not suddenly shoved out of the top.
     fn one_way_holds(&self, bi: usize, ci: usize, c: Vec3, n: Vec3, up: Vec3) -> bool {
         let b = &self.bodies[bi];
-        if n.dot(up) < 0.7 || b.vel.dot(up) > 0.05 {
+        if b.drop_through > 0.0 || n.dot(up) < 0.7 || b.vel.dot(up) > 0.05 {
             return false;
         }
         let before = c - (b.pos - b.prev_pos);
         // A little inside counts as above: a body resting on the top sinks a
         // hair into it each step before it is pushed back out.
-        self.colliders[ci].distance(before) > -0.05
+        self.colliders[ci].distance(before) > -0.05 && self.clear_of_one_way(bi, ci)
+    }
+
+    /// No part of the body was inside this one-way collider last step. A body
+    /// that has started through one keeps going, so a drop-through finishes
+    /// once begun and a jump that does not clear a ledge falls back down
+    /// instead of snapping onto its top.
+    ///
+    /// Tested on the sample spheres rather than on points under them: a point
+    /// exactly on the platform's underside is as far outside it as one on its
+    /// top, and a body one tile tall in a level of one-tile ledges puts its
+    /// lowest points on those faces all the time.
+    fn clear_of_one_way(&self, bi: usize, ci: usize) -> bool {
+        let b = &self.bodies[bi];
+        let delta = b.pos - b.prev_pos;
+        let (centres, n, r) = b.sample_centers();
+        centres[..n].iter().all(|c| self.colliders[ci].distance(*c - delta) > r - 0.05)
     }
 
     fn foot_probe(
@@ -1425,7 +1441,8 @@ impl PhysicsWorld {
             return None;
         }
         let up = b.up;
-        let rising = b.vel.dot(up) > 0.05;
+        // Rising or dropping through, a one-way platform is not ground.
+        let rising = b.vel.dot(up) > 0.05 || b.drop_through > 0.0;
         let centre = b.pos - up * half_height;
         let reach = 2.0 * b.radius;
         let cos_walk = b.slope_limit.clamp(0.0, std::f32::consts::FRAC_PI_2).cos();
@@ -1435,7 +1452,10 @@ impl PhysicsWorld {
             for &ci in cand {
                 let ci = ci as usize;
                 let c = &self.colliders[ci];
-                if (row >> c.layer) & 1 == 0 || c.sensor || (rising && c.one_way.is_some()) {
+                if (row >> c.layer) & 1 == 0
+                    || c.sensor
+                    || c.one_way.is_some() && (rising || !self.clear_of_one_way(bi, ci))
+                {
                     continue;
                 }
                 let d = c.distance(p);
@@ -1603,10 +1623,16 @@ impl PhysicsWorld {
             cand.clear();
             self.collider_index.segment(pos, pos + left, reach + r + 0.01, &mut cand);
             cand.sort_unstable();
+            let dropping = self.bodies[bi].drop_through > 0.0;
             cand.retain(|&ci| {
                 let c = &self.colliders[ci as usize];
-                // A one-way platform only stops a body moving down onto it.
-                (row >> c.layer) & 1 == 1 && !c.sensor && c.one_way.is_none_or(|u| dir.dot(u) < 0.0)
+                // A one-way platform only stops a body moving down onto it,
+                // and not one dropping through it.
+                (row >> c.layer) & 1 == 1
+                    && !c.sensor
+                    && c.one_way.is_none_or(|u| {
+                        !dropping && dir.dot(u) < 0.0 && self.clear_of_one_way(bi, ci as usize)
+                    })
             });
             let nearest = |p: Vec3| {
                 let mut best = (f32::INFINITY, usize::MAX);
@@ -1772,6 +1798,8 @@ impl PhysicsWorld {
         }
         {
             self.bodies[bi].prev_pos = self.bodies[bi].pos; // interpolation anchor
+            let b = &mut self.bodies[bi];
+            b.drop_through = (b.drop_through - dt).max(0.0);
             // Semi-implicit Euler: orient up to −gravity, integrate gravity, then move.
             // A body with `use_gravity = false` isn't pulled (and keeps its up vector).
             let g = if self.bodies[bi].use_gravity {

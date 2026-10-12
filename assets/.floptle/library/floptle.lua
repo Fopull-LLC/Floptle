@@ -13,6 +13,7 @@
 ---@field pitch number Pitch about X, in radians.
 ---@field roll number Roll about Z, in radians.
 ---@field grounded boolean Physics (rigidbody nodes): resting on a surface this frame.
+---@field dropThrough number|boolean Physics: fall through one-way platforms for this many seconds (true = 0.25). Write-only.
 ---@field asleep boolean Physics: the solver is skipping this body. Set true to put it to sleep now, false to wake it.
 ---@field vx number Physics: body velocity X (read/write — set it to drive the body).
 ---@field vy number Physics: body velocity Y (read/write).

@@ -265,6 +265,20 @@ any collision shape, so a thin plank ledge stays thin. Above is the layer's up,
 whichever way an individual tile is turned. One-way tiles never merge with
 solid ones, so a ledge beside a wall does not make the wall one-way.
 
+To drop down through one, set `node.dropThrough = true` on the character's
+body (or a number of seconds; `true` is a quarter second). The Pixel
+Platformer does it when Jump is pressed while holding down:
+
+```lua
+if node.grounded and my < -0.5 and input.justPressed("Jump") then
+  node.dropThrough = true
+end
+```
+
+Solid tiles ignore it. A body that has started through a one-way tile always
+finishes passing through it, so a jump that does not clear a ledge falls back
+down rather than snapping up onto it.
+
 ### Tags
 
 Free strings a script reads — `"ice"`, `"water"`, `"damage"`, `"ladder"`. This is
@@ -506,8 +520,6 @@ Written down because "it does not exist" beats "it exists and does nothing":
   stack. Delete the file to start over.
 * **Chunked / infinite maps.** A tilemap is `cols × rows`; a very large world is
   several tilemap nodes.
-* **Dropping down through a one-way platform.** A character can jump up
-  through one and land on it, but there is no "press down to drop through" yet.
 * **Importing `.tmx` / `.ldtk`.** No importer yet.
 
 ## See also

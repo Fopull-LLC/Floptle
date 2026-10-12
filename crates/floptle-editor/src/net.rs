@@ -2613,6 +2613,7 @@ impl Editor {
                         // bit-exact contract with the server to begin with.
                         asleep: false,
                         sleep_time: 0.0,
+                        drop_through: 0.0,
                     },
                 );
             }

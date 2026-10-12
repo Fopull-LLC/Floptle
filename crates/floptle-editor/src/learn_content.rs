@@ -121,6 +121,8 @@ pub(crate) const PIXEL_PLAYER_LUA: &str = "\
 --   coyote time  a jump still works a moment after running off a ledge
 --   buffering    a jump pressed just before landing happens on landing
 --   cut-off      letting go of Jump early makes a shorter hop
+--
+-- Hold down and press Jump on a one-way plank to drop through it.
 
 defaults = {
   --@header Movement
@@ -146,14 +148,17 @@ defaults = {
 local sinceGround = 99
 
 function fixedUpdate(node, dt)
-  local mx = input.axis2(\"Move\")
+  local mx, my = input.axis2(\"Move\")
   local vy = node.vy
 
   -- On the ground: the contact flag, or a short probe under the feet.
   local grounded = node.grounded or raycast(node.pos, vec3(0, -1, 0), 0.6) ~= nil
   if grounded then sinceGround = 0 else sinceGround = sinceGround + dt end
 
-  if sinceGround <= params.coyote and input.buffered(\"Jump\", params.buffer) then
+  if grounded and my < -0.5 and input.justPressed(\"Jump\") then
+    input.consume(\"Jump\")
+    node.dropThrough = true -- solid ground ignores this
+  elseif sinceGround <= params.coyote and input.buffered(\"Jump\", params.buffer) then
     input.consume(\"Jump\")
     vy = params.jump
     sinceGround = 99 -- one jump per ledge
@@ -2073,7 +2078,12 @@ the ⌖ Scene view. Paint past the edge and the layer grows to fit.
 ## Check the collision
 
 Tick **GRID ▸ Collision** to see what the tiles collide as. To change one,
-click it in the palette and pick under **TILE ▸ collides**.",
+click it in the palette and pick under **TILE ▸ collides**.
+
+## Planks you can jump through
+
+Tick **TILE ▸ one-way** on a tile and it is solid only from above. The player
+jumps up through it from below and lands on its top.",
             code: None,
             check: Check::Node("Level"),
         },
@@ -2118,6 +2128,9 @@ Create the script below and attach it to `Player`. **A** and **D** run,
   uses it up, so it fires once.
 - **Cut-off.** Letting go of Jump on the way up keeps only part of the speed,
   so a tap is a hop and a hold is a full jump.
+
+Hold **S** (or down on the stick) and press Jump on a one-way plank to drop
+through it. The script sets `node.dropThrough`, and solid tiles ignore it.
 
 The script also flips the sprite to face the way it runs, and picks a frame:
 two for standing, four for running. Change the numbers in the Inspector while

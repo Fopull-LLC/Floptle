@@ -4018,6 +4018,7 @@ let node_mt = lua.create_table()?;
     let body_changes = shared.body_changes.clone();
     let body_height = shared.body_height_changes.clone();
     let body_sleep = shared.body_sleep_changes.clone();
+    let body_drop = shared.body_drop_changes.clone();
     let body_pos = shared.body_pos_changes.clone();
     let model_changes = shared.model_changes.clone();
     let material_changes = shared.material_changes.clone();
@@ -4250,6 +4251,24 @@ let node_mt = lua.create_table()?;
                 if let Some(b) = bodies.borrow_mut().get_mut(&e) {
                     b.asleep = on;
                 }
+                return Ok(());
+            }
+            // `node.dropThrough = 0.25` — one-way platforms let the body fall
+            // through them for that many seconds; `true` is a quarter second.
+            "dropThrough" => {
+                let secs = match val {
+                    Value::Boolean(true) => 0.25,
+                    Value::Boolean(false) => 0.0,
+                    ref v => match as_num(v) {
+                        Some(n) => n as f32,
+                        None => {
+                            return Err(mlua::Error::RuntimeError(
+                                "node.dropThrough takes seconds or true".into(),
+                            ))
+                        }
+                    },
+                };
+                body_drop.borrow_mut().insert(e, secs);
                 return Ok(());
             }
             _ => {}

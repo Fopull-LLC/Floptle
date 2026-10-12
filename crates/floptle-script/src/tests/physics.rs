@@ -884,3 +884,21 @@ fn a_terrain_lod_anchor_is_a_node_a_point_or_nothing() {
     assert_eq!(host.terrain_lod_anchor(), Some(crate::LodAnchor::Point([1.0, 2.0, 3.0])));
     let _ = e;
 }
+
+/// `node.dropThrough` queues seconds for the sim: a number as written, `true`
+/// as a quarter second.
+#[test]
+fn node_drop_through_queues_seconds_for_the_sim() {
+    let dir = std::env::temp_dir().join(format!("floptle_drop_through_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(&dir, "dropper", "function update(node, dt)\n  node.dropThrough = true\nend\n");
+    let (mut world, e) = world_with_script("dropper");
+    let mut host = ScriptHost::new();
+    let mut bodies = HashMap::new();
+    bodies.insert(e.index(), BodyState { grounded: true, ..Default::default() });
+    host.set_bodies(bodies);
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    assert_eq!(host.take_body_drop_changes().get(&e.index()), Some(&0.25));
+    let _ = std::fs::remove_dir_all(&dir);
+}

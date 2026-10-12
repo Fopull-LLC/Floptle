@@ -15,7 +15,7 @@ each group, and meant to be searched.
 ## Contents
 
 - [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 196
-- [node — transform & body fields](#node--transform--body-fields) — 40
+- [node — transform & body fields](#node--transform--body-fields) — 41
 - [node — methods & handles](#node--methods--handles) — 32
 - [vectors, directions & easing](#vectors-directions--easing) — 49
 - [scene lookups & raycast](#scene-lookups--raycast) — 16
@@ -894,6 +894,10 @@ True while the physics solver is skipping this rigidbody. Set it true to put the
 ### `node.castShadow`
 
 Whether the node casts sun shadows (read/write, default true) — the Inspector's casts-shadows checkbox. A body or collider's stand-in in the shadow march, or a mesh's baked shadow volume. Turn it off for bodies that are dormant or far away: the march takes the 32 casters nearest the camera, so a crowd of idle ones spends nothing once they are out of it.
+
+### `node.dropThrough`
+
+Let this rigidbody fall through one-way platforms for that many seconds; true means a quarter second. Write it when the player holds down and presses jump on a one-way ledge, and they drop through to the level below. A quarter second is long enough to clear a ledge one tile thick at walking speed. Write-only. Solid tiles still hold the body.
 
 ### `node.enabled`
 

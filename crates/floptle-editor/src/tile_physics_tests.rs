@@ -124,6 +124,49 @@ fn a_box_rises_through_a_one_way_ledge() {
     assert!(y > 3.0, "it must come out of the top and keep going; got {y:.3}");
 }
 
+/// A capsule — the usual character body — stands on a one-way ledge too.
+#[test]
+fn a_capsule_lands_on_a_one_way_ledge() {
+    let (mut ed, p) = ledge_scene(9.81, 3.0);
+    ed.world.insert(p, RigidBody { kind: BodyKind::Capsule, two_d: true, ..Default::default() });
+    let y = rest(ed, p);
+    assert!(y > 1.0 && y < 2.5, "standing on the ledge's top at y = 1; got {y:.3}");
+}
+
+/// Stand `kind` on the ledge, start a drop-through, and say where it is a
+/// second later.
+fn drop_from_ledge(kind: BodyKind) -> (f64, f64) {
+    let (mut ed, p) = ledge_scene(9.81, 3.0);
+    ed.world.insert(p, RigidBody { kind, two_d: true, ..Default::default() });
+    ed.toggle_play();
+    for _ in 0..120 {
+        ed.play_step(1.0 / 60.0, true);
+    }
+    let on = floptle_core::world_transform(&ed.world, p).translation.y;
+    ed.sim.as_mut().unwrap().set_body_drop_through(p.index(), 0.25);
+    for _ in 0..60 {
+        ed.play_step(1.0 / 60.0, true);
+    }
+    (on, floptle_core::world_transform(&ed.world, p).translation.y)
+}
+
+/// …and lets a body standing on it drop through when told to, falling on
+/// past it. It used to catch the body again as the drop timer ran out with
+/// the body half through the ledge.
+#[test]
+fn a_box_drops_through_a_one_way_ledge() {
+    let (on, y) = drop_from_ledge(BodyKind::Box);
+    assert!((on - 1.5).abs() < 0.05, "standing on the ledge first; got {on:.3}");
+    assert!(y < -1.0, "it must fall through the ledge; got {y:.3}");
+}
+
+#[test]
+fn a_capsule_drops_through_a_one_way_ledge() {
+    let (on, y) = drop_from_ledge(BodyKind::Capsule);
+    assert!(on > 1.0, "standing on the ledge first; got {on:.3}");
+    assert!(y < -1.0, "it must fall through the ledge; got {y:.3}");
+}
+
 /// A picture taken outside the frame loop — `floptle shot`, `camera.capture` —
 /// draws the tile layers. Nothing on that path built their meshes, so a
 /// photograph of a 2D level was its sprites over an empty sky.
