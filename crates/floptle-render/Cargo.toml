@@ -39,6 +39,9 @@ log = { workspace = true }
 # Game-UI text: tiny pure-Rust TTF rasterizer feeding the ui pass's glyph atlas.
 fontdue = "0.9"
 png = "0.18"
+# WOFF fonts are zlib-compressed TrueType (`woff.rs`). Pure Rust, so the web
+# build has it too.
+flate2 = "1"
 # Keys the pictures already on the GPU by their pixels; fast over megabytes.
 rustc-hash = "2"
 

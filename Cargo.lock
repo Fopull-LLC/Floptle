@@ -1955,6 +1955,7 @@ name = "floptle-render"
 version = "0.116.0-rc3"
 dependencies = [
  "bytemuck",
+ "flate2",
  "floptle-assets",
  "floptle-core",
  "floptle-field",

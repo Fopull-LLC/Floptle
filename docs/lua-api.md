@@ -1928,7 +1928,7 @@ draw.sphere(cx,cy,cz, radius, r,g,b [,a]) — three rings, i.e. a wireframe ball
 
 ### `draw.text`
 
-draw.text(x, y, s, size, r,g,b [, a] [, align] [, font]) — a string on the SCREEN, in the pixels input.mouse() reports, without building a UI tree: a damage number, a frame-time readout, the count under a selection box. The engine measures and lays out the glyphs with the same font stack ui.make uses — and measures with the SAME font it draws, so a centred run lands where you asked. align is "left" (default) | "center" | "right", and x is that edge. font is a project-relative .ttf/.otf/.ttc, or a BMFont .fnt (a bitmap font, drawn exactly at whole multiples of its size); leave it out and you get the project's UI font (Project Settings ▸ UI font), which is where to set it once rather than at forty call sites. Immediate mode: re-draw it every frame you want it.
+draw.text(x, y, s, size, r,g,b [, a] [, align] [, font]) — a string on the SCREEN, in the pixels input.mouse() reports, without building a UI tree: a damage number, a frame-time readout, the count under a selection box. The engine measures and lays out the glyphs with the same font stack ui.make uses — and measures with the SAME font it draws, so a centred run lands where you asked. align is "left" (default) | "center" | "right", and x is that edge. font is a project-relative .ttf/.otf/.ttc/.woff, or a BMFont .fnt (a bitmap font, drawn exactly at whole multiples of its size); leave it out and you get the project's UI font (Project Settings ▸ UI font), which is where to set it once rather than at forty call sites. Immediate mode: re-draw it every frame you want it.
 
 ```lua
 -- a HUD with no UI tree; align says which edge x is

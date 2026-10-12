@@ -390,6 +390,20 @@ impl Editor {
             return;
         }
         let bytes = floptle_vfs::read(&file).unwrap_or_default();
+        // WOFF2 is listed as a font so it can be picked, and says why it does
+        // not draw rather than falling back in silence.
+        if floptle_render::woff::is_woff2(&bytes) {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!(
+                    "font {path} is WOFF2, which is not read yet — convert it to .ttf or .woff \
+                     (for example with fonttools: `fonttools ttLib.woff2 decompress`). Text using it \
+                     falls back to the built-in font"
+                ),
+                None,
+            );
+        }
+        let Some(uir) = self.ui_render.as_mut() else { return };
         uir.ensure_font(path, &bytes);
     }
 

@@ -1182,6 +1182,9 @@ impl Ui {
         if self.font_ids.contains_key(path) {
             return;
         }
+        // A WOFF is the same font with its tables compressed.
+        let unwrapped = crate::woff::unwrap_woff(bytes);
+        let bytes = unwrapped.as_deref().unwrap_or(bytes);
         let id = match fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()) {
             Ok(f) => {
                 self.fonts.push(UiFont::Vector(f));

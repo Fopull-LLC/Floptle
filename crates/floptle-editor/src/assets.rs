@@ -220,7 +220,7 @@ pub(crate) fn reveal_in_explorer(path: &Path) {
 /// its sheet images beside it). Drop them anywhere in your assets.
 pub(crate) fn is_font(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
-    [".ttf", ".otf", ".ttc", ".fnt"].iter().any(|e| p.ends_with(e))
+    [".ttf", ".otf", ".ttc", ".woff", ".woff2", ".fnt"].iter().any(|e| p.ends_with(e))
 }
 
 /// Collect every texture image path in the asset tree (for the material picker).
