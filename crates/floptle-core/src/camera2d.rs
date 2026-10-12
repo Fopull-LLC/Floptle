@@ -76,6 +76,10 @@ pub struct Camera2D {
     /// reason: a rounding read back as a position is a rounding applied to an
     /// already-rounded number, every frame, forever.
     pub last_shake: DVec2,
+    /// Half the size of what the camera shows, in world units, this frame.
+    /// The limits keep the VIEW inside them, so they need to know how far it
+    /// reaches either side of the centre. Set by [`step_all_view`].
+    pub view_half: DVec2,
 }
 
 impl Default for Camera2D {
@@ -93,6 +97,7 @@ impl Default for Camera2D {
             shake_amp: 0.0,
             shake_left: 0.0,
             shake_total: 0.0,
+            view_half: DVec2::ZERO,
             last_shake: DVec2::ZERO,
         }
     }
@@ -191,9 +196,14 @@ impl Camera2D {
         }
         // 3. Limits, on the followed position — so the state itself never leaves
         // the level and there is nothing to un-clamp when the target comes back.
+        // They bound what is SHOWN: the centre stays half a view inside each
+        // edge. Clamping the centre to them instead showed half a screen of
+        // nothing past every end of the level, which is the one thing limits
+        // are for.
         if self.limits_on {
             for i in 0..2 {
-                let (lo, hi) = (self.limit_min[i] as f64, self.limit_max[i] as f64);
+                let half = self.view_half[i].max(0.0);
+                let (lo, hi) = (self.limit_min[i] as f64 + half, self.limit_max[i] as f64 - half);
                 // A limit that is not a number is ignored rather than applied.
                 // `NaN <= hi` is false, so without this the "backwards
                 // rectangle" branch below computes `(NaN + hi) * 0.5` and the
@@ -245,6 +255,12 @@ impl Camera2D {
 /// authoring session's camera is a thing you placed, and moving it because a
 /// node moved would be the editor editing your scene.
 pub fn step_all(world: &mut crate::ecs::World, dt: f32, t: f64) {
+    step_all_view(world, dt, t, None);
+}
+
+/// [`step_all`], knowing the viewport's width over height, so the limits can
+/// keep the whole view inside them. `None` clamps the centre alone.
+pub fn step_all_view(world: &mut crate::ecs::World, dt: f32, t: f64, aspect: Option<f32>) {
     // Collected first: resolving a target's world transform reads the world,
     // and the write below needs it mutably.
     //
@@ -309,7 +325,16 @@ pub fn step_all(world: &mut crate::ecs::World, dt: f32, t: f64) {
             .map(|p| p.0)
             .map(|p| crate::matter::world_transform(world, p))
             .unwrap_or(crate::transform::Transform::IDENTITY);
+        let half = match (aspect, world.get::<crate::matter::Matter>(e)) {
+            (Some(a), Some(crate::matter::Matter::Camera { ortho_height, .. })) if a.is_finite() && a > 0.0 => {
+                let hh = (*ortho_height as f64 * 0.5).max(0.0);
+                // Scaled with the camera's own scale, as the projection is.
+                DVec2::new(hh * a as f64, hh)
+            }
+            _ => DVec2::ZERO,
+        };
         let Some(c) = world.get_mut::<Camera2D>(e) else { continue };
+        c.view_half = half;
         let here = DVec2::new(cam_world.translation.x, cam_world.translation.y);
         let want = c.step(here, target.map(|p| DVec2::new(p.x, p.y)), dt, t);
         // Z is left exactly where it was: a 2D camera's depth is a decision
@@ -647,5 +672,27 @@ mod tests {
         world.insert(cam, Camera2D::default());
         step_all(&mut world, 0.016, 0.0);
         assert_eq!(world.get::<crate::transform::Transform>(cam).unwrap().translation.x, 7.0);
+    }
+
+    /// Limits keep what the camera SHOWS inside them. An 11-unit-tall view at
+    /// 16:9 is ±9.78 wide, so a camera limited to a 60×16 level and chasing a
+    /// target at its left end stops 9.78 in, not at the edge with half a
+    /// screen of nothing beyond it.
+    #[test]
+    fn limits_keep_the_view_inside_the_level() {
+        let mut c = Camera2D {
+            limits_on: true,
+            limit_min: [0.0, 0.0],
+            limit_max: [60.0, 16.0],
+            smoothing: 0.0,
+            view_half: DVec2::new(5.5 * 16.0 / 9.0, 5.5),
+            ..Default::default()
+        };
+        let out = c.step(DVec2::ZERO, Some(DVec2::new(1.0, 1.0)), 1.0 / 60.0, 0.0);
+        assert!((out.x - 5.5 * 16.0 / 9.0).abs() < 1e-6 && (out.y - 5.5).abs() < 1e-6, "{out:?}");
+        // A level narrower than the view: the camera sits in its middle.
+        c.limit_max = [8.0, 16.0];
+        let out = c.step(out, Some(DVec2::new(1.0, 1.0)), 1.0 / 60.0, 0.0);
+        assert!((out.x - 4.0).abs() < 1e-6, "{out:?}");
     }
 }

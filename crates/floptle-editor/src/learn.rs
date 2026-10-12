@@ -396,8 +396,8 @@ pub(crate) fn render_index(tutorials: &[Tutorial]) -> String {
     }
     out.push_str(
         "\n## Starter templates\n\n\
-         Three of these have a finished version you can create straight from the Hub's **New \
-         project** screen, or from a terminal:\n\n```\nfloptle --new my-game --template platformer\n```\n\n",
+         Some of these have a finished version you can create straight from the Hub's **New \
+         project** screen, or from a terminal:\n\n```\nfloptle --new my-game --template platformer2d\n```\n\n",
     );
     for t in tutorials {
         if let Some(tpl) = t.template {
@@ -517,9 +517,9 @@ impl EditorTabViewer<'_> {
         ui.add_space(6.0);
         ui.separator();
         ui.small(
-            "Prefer to read the finished code? Three of these ship as starter templates — pick \
+            "Prefer to read the finished code? Several of these ship as starter templates — pick \
              one on the Hub's New project screen, or run \
-             `floptle --new my-game --template platformer`. A template is an ordinary project: \
+             `floptle --new my-game --template platformer2d`. A template is an ordinary project: \
              every behaviour in it is a .lua file in scripts/ you can open and change.",
         );
 

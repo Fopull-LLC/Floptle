@@ -31,6 +31,8 @@ pub(crate) struct Template {
     pub(crate) tutorial: Option<&'static str>,
     /// Files written into the project, relative to its root.
     pub(crate) files: &'static [(&'static str, &'static str)],
+    /// Binary files (images) written the same way.
+    pub(crate) art: &'static [(&'static str, &'static [u8])],
 }
 
 /// The name of the do-nothing template — a plain scaffold, and the default, so
@@ -39,9 +41,24 @@ pub(crate) const EMPTY: &str = "empty";
 
 pub(crate) const TEMPLATES: &[Template] = &[
     Template {
+        name: "platformer2d",
+        title: "Pixel Platformer",
+        blurb: "2D: a pixel-art level of tiles with slopes and ledges, and a player who runs and jumps",
+        tutorial: Some("platformer2d"),
+        files: &[
+            ("scenes/first.ron", include_str!("../templates/platformer2d/first.ron")),
+            ("tilesets/ground.tileset.ron", include_str!("../templates/platformer2d/ground.tileset.ron")),
+            ("scripts/pixelPlayer.lua", lua::PIXEL_PLAYER_LUA),
+        ],
+        art: &[
+            ("textures/tiles.png", include_bytes!("../templates/platformer2d/tiles.png")),
+            ("textures/player.png", include_bytes!("../templates/platformer2d/player.png")),
+        ],
+    },
+    Template {
         name: "platformer",
         title: "Platformer",
-        blurb: "run, jump, ride a moving platform, collect coins, reach the goal",
+        blurb: "3D: run, jump, ride a moving platform, collect coins, reach the goal",
         tutorial: Some("platformer"),
         files: &[
             ("scenes/first.ron", include_str!("../templates/platformer/first.ron")),
@@ -52,11 +69,12 @@ pub(crate) const TEMPLATES: &[Template] = &[
             ("scripts/coin.lua", lua::COIN_LUA),
             ("scripts/goal.lua", lua::GOAL_LUA),
         ],
+        art: &[],
     },
     Template {
         name: "topdown",
         title: "Top-down RPG",
-        blurb: "walk a village, talk to someone, take a key, unlock a door to another scene",
+        blurb: "3D: walk a village, talk to someone, take a key, unlock a door to another scene",
         tutorial: Some("topdown"),
         files: &[
             ("scenes/first.ron", include_str!("../templates/topdown/first.ron")),
@@ -68,11 +86,12 @@ pub(crate) const TEMPLATES: &[Template] = &[
             ("scripts/itemPickup.lua", lua::ITEM_PICKUP_LUA),
             ("scripts/door.lua", lua::DOOR_LUA),
         ],
+        art: &[],
     },
     Template {
         name: "flappy",
         title: "Flappy",
-        blurb: "one button, endless obstacles, a score, and a game over you can restart",
+        blurb: "3D shapes on a flat stage: one button, endless obstacles, a score, a restart",
         tutorial: Some("flappy"),
         files: &[
             ("scenes/first.ron", include_str!("../templates/flappy/first.ron")),
@@ -81,6 +100,7 @@ pub(crate) const TEMPLATES: &[Template] = &[
             ("scripts/flappyPipe.lua", lua::FLAPPY_PIPE_LUA),
             ("scripts/flappyGame.lua", lua::FLAPPY_GAME_LUA),
         ],
+        art: &[],
     },
 ];
 
@@ -119,6 +139,15 @@ pub(crate) fn apply(t: &Template, root: &std::path::Path) -> std::io::Result<()>
             text.push('\n');
         }
         std::fs::write(&path, text)?;
+    }
+    for (rel, bytes) in t.art {
+        let path = root.join(rel);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        if !path.exists() {
+            std::fs::write(&path, bytes)?;
+        }
     }
     Ok(())
 }
@@ -367,5 +396,67 @@ mod tests {
             }
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// The 2D starter plays: the player lands on the ground the template drew,
+    /// and its script runs without an error. Scaffolding and loading say the
+    /// files are there; this says the game in them works.
+    #[test]
+    fn the_pixel_platformer_lands_its_player() {
+        let dir = scaffold("pixel-lands", "platformer2d");
+        let mut ed = crate::Editor::default();
+        ed.open_project(dir.clone());
+        ed.open_scene_file(&dir.join("scenes/first.ron").to_string_lossy());
+        let player = ed
+            .world
+            .query::<floptle_core::Name>()
+            .find(|(_, n)| n.0 == "Player")
+            .map(|(e, _)| e)
+            .expect("the template has a Player");
+        // A 2D scene opens in a 2D Scene view.
+        assert_eq!(ed.camera.lock, floptle_render::ViewLock::Front);
+        assert!(ed.camera.is_ortho());
+        ed.toggle_play();
+        for _ in 0..150 {
+            ed.play_step(1.0 / 60.0, true);
+            ed.drain_script_logs();
+        }
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        let at = floptle_core::world_transform(&ed.world, player).translation;
+        assert!((at.y - 3.5).abs() < 0.1, "the player stands on the grass, whose top is y = 3; got {:.3}", at.y);
+        // Holding right runs right: the script is driving the body.
+        ed.raw_input.keys.insert(floptle_input::Key::KeyD);
+        for _ in 0..30 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        let ran = floptle_core::world_transform(&ed.world, player).translation.x - at.x;
+        assert!(ran > 1.5, "half a second of running right at 7 m/s should cover over 1.5 units; got {ran:.2}");
+        // …and a press of Jump leaves the ground.
+        ed.raw_input.keys.remove(&floptle_input::Key::KeyD);
+        let ground = floptle_core::world_transform(&ed.world, player).translation.y;
+        ed.raw_input.keys.insert(floptle_input::Key::Space);
+        ed.raw_input.pressed.insert(floptle_input::Source::Key(floptle_input::Key::Space));
+        ed.tick_input_edges.0.insert(floptle_input::Source::Key(floptle_input::Key::Space));
+        let mut top = ground;
+        for _ in 0..30 {
+            ed.play_step(1.0 / 60.0, true);
+            ed.raw_input.pressed.clear();
+            top = top.max(floptle_core::world_transform(&ed.world, player).translation.y);
+        }
+        assert!(top - ground > 2.0, "a full jump clears two units; rose {:.2}", top - ground);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// …and a 3D scene leaves the Scene view free.
+    #[test]
+    fn a_3d_template_opens_in_a_free_view() {
+        let dir = scaffold("free-view", "platformer");
+        let mut ed = crate::Editor::default();
+        ed.open_project(dir.clone());
+        ed.open_scene_file(&dir.join("scenes/first.ron").to_string_lossy());
+        assert_eq!(ed.camera.lock, floptle_render::ViewLock::Free);
+        assert!(!ed.camera.is_ortho());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

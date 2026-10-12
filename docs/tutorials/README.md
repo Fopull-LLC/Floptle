@@ -5,6 +5,7 @@ Follow-along projects that build a small, finished game from an empty one. Each 
 | Tutorial | You'll build | Level | Time |
 |---|---|---|---|
 | [First steps — make something move](first-steps.md) | A cube you spin, tune and drive around, in about fifteen minutes. | no experience needed | ~15 min |
+| [Build a 2D pixel platformer](platformer2d.md) | A level of tiles with slopes and ledges, and a player who runs and jumps. | no experience needed | ~25 min |
 | [Build a 3D platformer](platformer.md) | Run, jump, ride a moving platform, collect coins, reach the goal. | some coding | ~45 min |
 | [Build a top-down RPG](topdown.md) | Walk a village, talk to someone, pick up a key, unlock a door to another scene. | some coding | ~50 min |
 | [Build Flappy](flappy.md) | One button, endless obstacles, a score, and a game over you can restart. | no experience needed | ~30 min |
@@ -14,12 +15,13 @@ Follow-along projects that build a small, finished game from an empty one. Each 
 
 ## Starter templates
 
-Three of these have a finished version you can create straight from the Hub's **New project** screen, or from a terminal:
+Some of these have a finished version you can create straight from the Hub's **New project** screen, or from a terminal:
 
 ```
-floptle --new my-game --template platformer
+floptle --new my-game --template platformer2d
 ```
 
+- `platformer2d` — the finished [Build a 2D pixel platformer](platformer2d.md).
 - `platformer` — the finished [Build a 3D platformer](platformer.md).
 - `topdown` — the finished [Build a top-down RPG](topdown.md).
 - `flappy` — the finished [Build Flappy](flappy.md).

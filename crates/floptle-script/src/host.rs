@@ -4041,6 +4041,13 @@ impl ScriptHost {
         *self.view_info.borrow_mut() = info;
     }
 
+    /// The game viewport's width over height, as the renderer last reported
+    /// it. `None` before anything has drawn.
+    pub fn view_aspect(&self) -> Option<f32> {
+        let v = self.view_info.borrow();
+        (v.valid && v.vp_h > 0.0 && v.vp_w > 0.0).then(|| v.vp_w / v.vp_h)
+    }
+
     /// Drain a pending `space.warp(m)` request (the editor applies + clamps it).
     pub fn take_warp_request(&self) -> Option<f64> {
         self.warp_request.borrow_mut().take()

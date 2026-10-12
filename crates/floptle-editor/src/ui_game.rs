@@ -336,6 +336,19 @@ fn layer_masks(
 }
 
 
+/// A BMFont `.fnt` and the sheet images it names, read from beside it.
+fn load_bitmap_font(file: &std::path::Path) -> Option<floptle_render::bitmap_font::BitmapFont> {
+    let text = floptle_vfs::read_to_string(file).ok()?;
+    let desc = floptle_render::bitmap_font::parse_bmfont(&text).ok()?;
+    let dir = file.parent().unwrap_or(std::path::Path::new("."));
+    let sheets = desc
+        .pages
+        .iter()
+        .map(|p| floptle_assets::load_texture(&dir.join(p)).map(|t| (t.pixels, t.width, t.height)))
+        .collect();
+    Some(floptle_render::bitmap_font::BitmapFont::new(desc, sheets))
+}
+
 /// How far a press inside a scroll view travels, in the view's design units,
 /// before it is a pan rather than a press. About a fingertip's wobble.
 const SCROLL_SLOP: f32 = 12.0;
@@ -360,6 +373,20 @@ impl Editor {
         let file = self.resolve_asset_path(path);
         let Some(uir) = self.ui_render.as_mut() else { return };
         if uir.has_font(path) {
+            return;
+        }
+        if path.to_ascii_lowercase().ends_with(".fnt") {
+            let font = load_bitmap_font(&file);
+            if font.is_none() {
+                self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    format!("font {path} could not be read as a BMFont — text using it falls back to the built-in font"),
+                    None,
+                );
+            }
+            if let Some(uir) = self.ui_render.as_mut() {
+                uir.ensure_bitmap_font(path, font);
+            }
             return;
         }
         let bytes = floptle_vfs::read(&file).unwrap_or_default();
@@ -2849,7 +2876,7 @@ fn spec_text_ui(ui: &mut egui::Ui, e: Entity, spec: &mut ElementSpec, asset_tree
             }
         })
         .response
-        .on_hover_text("any .ttf/.otf in your assets — drop font files into the project and they appear here");
+        .on_hover_text("any .ttf/.otf/.ttc, or a BMFont .fnt beside its sheet images, in your assets — drop font files into the project and they appear here");
         ui.horizontal(|ui| {
             ui.label("tracking");
             c |= ui
@@ -3879,5 +3906,40 @@ mod tests {
         let mut ed =
             Editor { playing: false, game_trap: true, ui_pointer_wanted: true, ..Default::default() };
         assert!(!ed.release_trap_for_ui());
+    }
+}
+
+#[cfg(test)]
+mod bitmap_font_tests {
+    /// A BMFont `.fnt` in the project is a font like a `.ttf`: registered by
+    /// path, measured by its own advances, and not the built-in font.
+    #[test]
+    fn a_bmfont_in_the_project_is_a_font() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let dir = std::env::temp_dir().join(format!("floptle-bmfont-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("fonts")).unwrap();
+        std::fs::write(
+            dir.join("fonts/tiny.fnt"),
+            "info face=\"Tiny\" size=8\ncommon lineHeight=10 base=8 scaleW=16 scaleH=8 pages=1\n\
+             page id=0 file=\"tiny_0.png\"\nchars count=2\n\
+             char id=65 x=0 y=0 width=4 height=6 xoffset=0 yoffset=2 xadvance=5 page=0 chnl=15\n\
+             char id=66 x=4 y=0 width=4 height=6 xoffset=1 yoffset=2 xadvance=6 page=0 chnl=15\n",
+        )
+        .unwrap();
+        let mut rgba = vec![0u8; 16 * 8 * 4];
+        for px in rgba.chunks_mut(4).take(16 * 6) {
+            px[3] = 255;
+        }
+        floptle_image::io::save_png(&dir.join("fonts/tiny_0.png"), &rgba, 16, 8).unwrap();
+        ed.project_root = dir.clone();
+        ed.ensure_ui_font("fonts/tiny.fnt");
+        let uir = ed.ui_render.as_ref().expect("a UI renderer");
+        assert_ne!(uir.font_id("fonts/tiny.fnt"), 0, "the .fnt must load as its own font");
+        let spec = floptle_ui::TextSpec { text: "ABAB".into(), font: "fonts/tiny.fnt".into(), size: 16.0, ..Default::default() };
+        let [w, h] = uir.measure_spec(&spec, None);
+        assert_eq!(w, (5.0 + 6.0) * 2.0 * 2.0, "its own advances, at twice its drawn size");
+        assert_eq!(h, 20.0, "line height 10 at twice its size");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

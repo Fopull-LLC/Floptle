@@ -1300,7 +1300,10 @@ impl Editor {
         // 2D cameras follow after all of that, for the same reason bone
         // attachments do: a camera chasing a player has to read where the
         // player ended up this frame, not where they started it.
-        floptle_core::camera2d::step_all(&mut self.world, sdt, self.play_t as f64);
+        // The view's shape, so the limits keep the whole picture inside the
+        // level. Before anything has drawn (a headless run), 16:9.
+        let aspect = self.script_host.view_aspect().unwrap_or(16.0 / 9.0);
+        floptle_core::camera2d::step_all_view(&mut self.world, sdt, self.play_t as f64, Some(aspect));
         // Particles tick last: emitter node transforms are final for the frame
         // (scripts → animation → physics → attachments → particles). Apply any
         // play/stop/restart a script queued this frame first, so it lands now.

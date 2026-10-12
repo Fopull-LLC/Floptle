@@ -84,3 +84,35 @@ fn a_rigidbody_on_a_tilemap_makes_its_tiles_solid() {
     let y = rest(ed, p);
     assert!((y - 0.5).abs() < 0.05, "the tiles under x=3 must hold the box; got {y:.3}");
 }
+
+/// A picture taken outside the frame loop — `floptle shot`, `camera.capture` —
+/// draws the tile layers. Nothing on that path built their meshes, so a
+/// photograph of a 2D level was its sprites over an empty sky.
+#[test]
+#[cfg(feature = "editor-ui")]
+fn a_shot_draws_the_tile_layers() {
+    let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+    let dir = std::env::temp_dir().join(format!("floptle-tile-shot-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(crate::new_project(&dir, "0.0.0-test", "platformer2d", true), 0);
+    ed.open_project(dir.clone());
+    ed.open_scene_file(&dir.join("scenes/first.ron").to_string_lossy());
+    let cam_e = floptle_core::active_camera(&ed.world).expect("the template has a camera");
+    let wt = floptle_core::world_transform(&ed.world, cam_e);
+    let Some(Matter::Camera { ortho_height, .. }) = ed.world.get::<Matter>(cam_e).cloned() else { panic!() };
+    let cam = floptle_render::RenderCamera::new(
+        wt.translation,
+        wt.rotation,
+        floptle_render::Projection::of_camera(1.0, true, ortho_height, 0.05, 1000.0),
+    );
+    let (w, h) = (96u32, 54u32);
+    let px = crate::shot::render_frame_pixels(&mut ed, &cam, Some(cam_e), w, h, u32::MAX, false).expect("no device");
+    // The bottom rows of the view are the level's dirt: brown, not sky blue.
+    let at = |x: u32, y: u32| {
+        let o = ((y * w + x) * 4) as usize;
+        [px[o], px[o + 1], px[o + 2]]
+    };
+    let ground = at(w / 2, h - 3);
+    assert!(ground[0] as i32 > ground[2] as i32 + 30, "the ground drew as {ground:?}: a sky-blue pixel is a missing tile layer");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1088,7 +1088,7 @@ impl<'a> SettingsCtx<'a> {
         ui.collapsing("UI font", |ui| {
             ui.label(
                 egui::RichText::new(
-                    "The .ttf/.otf every string uses when nothing names a font — draw.text, \
+                    "The .ttf/.otf/.ttc or BMFont .fnt every string uses when nothing names a font — draw.text, \
                      a ui.make label, an element whose style sets none. Project-relative \
                      (fonts/Pixel.ttf). Leave it blank for the built-in font.",
                 )

@@ -211,10 +211,12 @@ pub(crate) fn reveal_in_explorer(path: &Path) {
     }
 }
 
-/// A font the UI text can use (drop .ttf/.otf files anywhere in your assets).
+/// A font the UI text can use: an outline font (.ttf/.otf, or a .ttc
+/// collection, whose first face is used) or a BMFont bitmap font (.fnt, with
+/// its sheet images beside it). Drop them anywhere in your assets.
 pub(crate) fn is_font(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
-    p.ends_with(".ttf") || p.ends_with(".otf")
+    [".ttf", ".otf", ".ttc", ".fnt"].iter().any(|e| p.ends_with(e))
 }
 
 /// Collect every texture image path in the asset tree (for the material picker).

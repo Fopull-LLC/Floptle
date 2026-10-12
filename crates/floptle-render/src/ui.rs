@@ -404,7 +404,7 @@ pub struct Ui {
     atlas: wgpu::Texture,
     atlas_bind: wgpu::BindGroup,
     /// Font 0 is the embedded fallback; project .ttf/.otf assets append.
-    fonts: Vec<fontdue::Font>,
+    fonts: Vec<UiFont>,
     /// Asset path → index into `fonts` (None = failed to parse, use fallback).
     font_ids: HashMap<String, Option<usize>>,
     /// What an empty font name resolves to — the project's font when it names
@@ -860,7 +860,7 @@ impl Ui {
             white_bind,
             atlas,
             atlas_bind,
-            fonts: vec![font],
+            fonts: vec![UiFont::Vector(font)],
             font_ids: HashMap::new(),
             default_font: 0,
             glyphs: HashMap::new(),
@@ -1184,7 +1184,7 @@ impl Ui {
         }
         let id = match fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()) {
             Ok(f) => {
-                self.fonts.push(f);
+                self.fonts.push(UiFont::Vector(f));
                 Some(self.fonts.len() - 1)
             }
             Err(e) => {
@@ -1192,6 +1192,20 @@ impl Ui {
                 None
             }
         };
+        self.font_ids.insert(path.to_string(), id);
+    }
+
+    /// Register a bitmap font (a parsed `.fnt` and its sheets) under its
+    /// asset path. Used everywhere a `.ttf` is: UI text, `draw.text`, the
+    /// project's default font.
+    pub fn ensure_bitmap_font(&mut self, path: &str, font: Option<crate::bitmap_font::BitmapFont>) {
+        if self.font_ids.contains_key(path) {
+            return;
+        }
+        let id = font.map(|f| {
+            self.fonts.push(UiFont::Bitmap(f));
+            self.fonts.len() - 1
+        });
         self.font_ids.insert(path.to_string(), id);
     }
 
@@ -1259,7 +1273,7 @@ impl Ui {
 
     /// Say once that `fid` has no glyph for `c`, naming the text it was in.
     fn note_missing(&mut self, fid: usize, c: char, text: &str) {
-        if fid == 0 || c.is_whitespace() || c.is_control() || self.fonts[fid].lookup_glyph_index(c) != 0 {
+        if fid == 0 || c.is_whitespace() || c.is_control() || self.fonts[fid].has_glyph(c) {
             return;
         }
         if !self.missing_noted.insert((fid, c)) {
@@ -1271,7 +1285,7 @@ impl Ui {
             .find(|(_, id)| **id == Some(fid))
             .map(|(p, _)| p.as_str())
             .unwrap_or("this font");
-        let how = if self.fonts[0].lookup_glyph_index(c) != 0 {
+        let how = if self.fonts[0].has_glyph(c) {
             "drawn from the built-in font instead"
         } else {
             "and neither has the built-in font, so it draws as an empty box"
@@ -1292,10 +1306,9 @@ impl Ui {
         let font = &self.fonts[fid];
         let mut w = 0.0f32;
         for c in text.chars() {
-            w += self.fonts[self.source_font(fid, c)].metrics(c, size).advance_width;
+            w += self.fonts[self.source_font(fid, c)].advance(c, size);
         }
-        let lm = font.horizontal_line_metrics(size);
-        let h = lm.map(|l| l.ascent - l.descent).unwrap_or(size);
+        let h = font.line(size).map(|(a, d)| a - d).unwrap_or(size);
         [w, h]
     }
 
@@ -1308,7 +1321,7 @@ impl Ui {
                 uv: [0.0; 4],
                 size: [0.0, 0.0],
                 offset: [0.0, 0.0],
-                advance: metrics.advance_width,
+                advance: metrics.advance,
             });
         }
         let (w, h) = (metrics.width as u32, metrics.height as u32);
@@ -1329,7 +1342,7 @@ impl Ui {
             uv: [cx as f32 / s, cy as f32 / s, (cx + w) as f32 / s, (cy + h) as f32 / s],
             size: [metrics.width as f32, metrics.height as f32],
             offset: [metrics.xmin as f32, -(metrics.ymin as f32) - metrics.height as f32],
-            advance: metrics.advance_width,
+            advance: metrics.advance,
         })
     }
 
@@ -1338,7 +1351,7 @@ impl Ui {
     /// a bug, which is what it is. Sized from the font's own metrics so a run of
     /// them keeps the layout the text would have had.
     fn notdef_glyph(&self, fid: usize, c: char, px: u32) -> Glyph {
-        let advance = self.fonts[fid].metrics(c, px as f32).advance_width;
+        let advance = self.fonts[fid].advance(c, px as f32);
         let s = self.atlas_size as f32;
         let e = NOTDEF_PX as f32 / s;
         let h = px as f32 * 0.62;
@@ -1736,10 +1749,7 @@ impl Ui {
                 v
             };
 
-            let (ascent, descent) = self.fonts[fid]
-                .horizontal_line_metrics(px as f32)
-                .map(|l| (l.ascent, l.descent))
-                .unwrap_or((px as f32, 0.0));
+            let (ascent, descent) = self.fonts[fid].line(px as f32).unwrap_or((px as f32, 0.0));
             let natural_h = ascent - descent;
             // The same leading the layout solver measured with.
             let line_h = floptle_ui::text::line_step(natural_h, t.line_height);
@@ -1794,7 +1804,7 @@ impl Ui {
                     line0
                         .chars()
                         .take(chars)
-                        .map(|c| self.fonts[self.source_font(fid, c)].metrics(c, size).advance_width * scale + track_px)
+                        .map(|c| self.fonts[self.source_font(fid, c)].advance(c, size) * scale + track_px)
                         .sum()
                 };
                 let run_w = widths.first().copied().unwrap_or(0.0);
@@ -2178,11 +2188,61 @@ fn write_notdef(queue: &wgpu::Queue, atlas: &wgpu::Texture) {
 /// nothing. `default` is 0 — the embedded Roboto — until a project names one.
 /// [`UiRenderer::source_font`] over a plain font list, so it can be tested
 /// without a GPU.
-fn source_font_in(fonts: &[fontdue::Font], fid: usize, c: char) -> usize {
+/// A font the UI draws with: an outline font (`.ttf`/`.otf`/`.ttc`) or a
+/// bitmap one (`.fnt`). Text layout asks the same four questions of either.
+pub(crate) enum UiFont {
+    Vector(fontdue::Font),
+    Bitmap(crate::bitmap_font::BitmapFont),
+}
+
+impl UiFont {
+    fn has_glyph(&self, c: char) -> bool {
+        match self {
+            UiFont::Vector(f) => f.lookup_glyph_index(c) != 0,
+            UiFont::Bitmap(f) => f.has_glyph(c),
+        }
+    }
+
+    fn advance(&self, c: char, px: f32) -> f32 {
+        match self {
+            UiFont::Vector(f) => f.metrics(c, px).advance_width,
+            UiFont::Bitmap(f) => f.advance(c, px),
+        }
+    }
+
+    /// `(ascent, descent)` at `px`.
+    fn line(&self, px: f32) -> Option<(f32, f32)> {
+        match self {
+            UiFont::Vector(f) => f.horizontal_line_metrics(px).map(|l| (l.ascent, l.descent)),
+            UiFont::Bitmap(f) => Some(f.line(px)),
+        }
+    }
+
+    fn rasterize(&self, c: char, px: f32) -> (crate::bitmap_font::Raster, Vec<u8>) {
+        match self {
+            UiFont::Vector(f) => {
+                let (m, bitmap) = f.rasterize(c, px);
+                (
+                    crate::bitmap_font::Raster {
+                        xmin: m.xmin,
+                        ymin: m.ymin,
+                        width: m.width,
+                        height: m.height,
+                        advance: m.advance_width,
+                    },
+                    bitmap,
+                )
+            }
+            UiFont::Bitmap(f) => f.rasterize(c, px),
+        }
+    }
+}
+
+fn source_font_in(fonts: &[UiFont], fid: usize, c: char) -> usize {
     if fid == 0 || c.is_whitespace() || c.is_control() {
         return fid;
     }
-    if fonts[fid].lookup_glyph_index(c) == 0 && fonts[0].lookup_glyph_index(c) != 0 {
+    if !fonts[fid].has_glyph(c) && fonts[0].has_glyph(c) {
         0
     } else {
         fid
@@ -2203,12 +2263,14 @@ mod tests {
     /// case a game hit: its font had "-" but not "−".
     #[test]
     fn a_character_the_game_font_lacks_comes_from_the_built_in_font() {
-        let load = |b: &[u8]| fontdue::Font::from_bytes(b, fontdue::FontSettings::default()).unwrap();
+        let load = |b: &[u8]| {
+            super::UiFont::Vector(fontdue::Font::from_bytes(b, fontdue::FontSettings::default()).unwrap())
+        };
         let fonts = [
             load(include_bytes!("../fonts/Roboto-Regular.ttf")),
             load(include_bytes!("../../../packages/fofighter-kit/assets/fonts/Fofighter.ttf")),
         ];
-        assert_eq!(fonts[1].lookup_glyph_index('\u{2212}'), 0, "the fixture font must lack the minus sign");
+        assert!(!fonts[1].has_glyph('\u{2212}'), "the fixture font must lack the minus sign");
         assert_eq!(super::source_font_in(&fonts, 1, '\u{2212}'), 0, "a missing glyph falls back");
         assert_eq!(super::source_font_in(&fonts, 1, 'A'), 1, "a glyph the font has stays in it");
         assert_eq!(super::source_font_in(&fonts, 1, '\u{2192}'), 1, "the game font's own arrow, which Roboto lacks");

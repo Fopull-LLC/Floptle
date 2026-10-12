@@ -820,7 +820,32 @@ impl Editor {
             );
         }
         self.check_autosave(); // offer crash recovery if an autosave is newer
+        self.square_view_to_a_2d_camera();
         floptle_say::say_err!("  opened scene: {}", p.display()); // progress, so: stderr
+    }
+
+    /// A 2D scene opens in a 2D Scene view: locked to the front, orthographic,
+    /// centred where the game camera looks and a little wider than it.
+    ///
+    /// The lock used to be a menu item you had to find and set again in every
+    /// session, so a 2D scene opened in a perspective free-fly view of a
+    /// paper-thin level seen from an angle. Only for a game camera that is
+    /// orthographic AND faces straight down −Z: a tilted orthographic camera
+    /// is an isometric 3D game, which wants its free view left alone.
+    pub(crate) fn square_view_to_a_2d_camera(&mut self) {
+        use floptle_core::math::Vec3;
+        let Some(cam) = floptle_core::active_camera(&self.world) else { return };
+        let Some(Matter::Camera { ortho: true, ortho_height, .. }) = self.world.get::<Matter>(cam) else {
+            return;
+        };
+        let height = *ortho_height;
+        let wt = floptle_core::world_transform(&self.world, cam);
+        if (wt.rotation * Vec3::NEG_Z).z > -0.9 {
+            return;
+        }
+        self.camera.set_lock(floptle_render::ViewLock::Front);
+        self.camera.set_ortho(Some(height * 1.25));
+        self.camera.position = wt.translation;
     }
 
     /// Register the GPU meshes named by a set of paths, importing each once.
@@ -3337,6 +3362,7 @@ mod path_tests {
             ("export.rs", "a build's own manifest, written into the build"),
             ("ext/prefs.rs", "an extension's own settings"),
             ("portable.rs", "the portable writer itself"),
+            ("template_gen.rs", "the engine's own starter template, built into the editor"),
         ];
         let mut sources: Vec<(String, String)> = Vec::new();
         for dir in [concat!(env!("CARGO_MANIFEST_DIR"), "/src"), concat!(env!("CARGO_MANIFEST_DIR"), "/../floptle-scene/src")] {

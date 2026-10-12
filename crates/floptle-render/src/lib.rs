@@ -17,6 +17,7 @@
 
 // Phase 1–2 modules. `material`, `raymarch`, `post`, `light` arrive in Phases 2/4.
 // `mesh` is the CPU/GPU geometry seam (Phase 2); `raster` is the forward pass.
+pub mod bitmap_font;
 pub mod camera;
 pub mod camera_stack;
 pub mod cull;

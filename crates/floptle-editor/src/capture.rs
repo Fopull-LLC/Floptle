@@ -71,6 +71,9 @@ pub(crate) fn render_frame_texture(
     ed.sync_sky_texture();
     ed.sync_map_meshes();
     ed.sync_map_paint();
+    // …and the tile layers, whose meshes only the frame loops built: a shot or
+    // a `camera.capture` of a 2D level drew its sprites over an empty sky.
+    ed.sync_tilemaps();
     let gpu = ed.gpu.take()?;
     let aspect = w as f32 / h as f32;
     // **Retro composites at the retro resolution and upscales**, exactly as the

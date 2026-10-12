@@ -293,7 +293,7 @@ pub(crate) const NEW_CATALOG: &[NewGroup] = &[
             NewEntry {
                 label: "▩ Tilemap",
                 hover: "a grid of spritesheet cells as ONE mesh — the 2D level primitive. \
-                        Give it a Material with a sheet, then paint it in the ◫ Tiles tab \
+                        Drop a spritesheet on its ◫ Tiles tab, then paint it there \
                         or fill it from a script (node:setTilemap{…} / tm:set). \
                         Neighbouring tiles share an exact edge, so no seams open up as \
                         the camera moves",

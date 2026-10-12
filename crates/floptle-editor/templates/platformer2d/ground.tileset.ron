@@ -1,0 +1,74 @@
+TileSet(
+    name: "ground",
+    texture: "textures/tiles.png",
+    sheet_cols: 8,
+    sheet_rows: 1,
+    pages: [],
+    tiles: {
+        0: TileInfo(
+            collision: Full,
+            tags: [],
+            frames: [],
+            anim_fps: 0.0,
+        ),
+        1: TileInfo(
+            collision: Full,
+            tags: [],
+            frames: [],
+            anim_fps: 0.0,
+        ),
+        2: TileInfo(
+            collision: Poly([
+                (0.0, 0.0),
+                (1.0, 0.0),
+                (1.0, 1.0),
+                (0.0, 0.0625),
+            ]),
+            tags: [],
+            frames: [],
+            anim_fps: 0.0,
+        ),
+        3: TileInfo(
+            collision: Poly([
+                (0.0, 0.0),
+                (1.0, 0.0),
+                (1.0, 0.0625),
+                (0.0, 1.0),
+            ]),
+            tags: [],
+            frames: [],
+            anim_fps: 0.0,
+        ),
+        4: TileInfo(
+            collision: Custom(
+                x: 0.0,
+                y: 0.75,
+                w: 1.0,
+                h: 0.25,
+            ),
+            tags: [
+                "ledge",
+            ],
+            frames: [],
+            anim_fps: 0.0,
+        ),
+        5: TileInfo(
+            collision: Full,
+            tags: [],
+            frames: [],
+            anim_fps: 0.0,
+        ),
+        6: TileInfo(
+            collision: Custom(
+                x: 0.3125,
+                y: 0.0,
+                w: 0.375,
+                h: 0.375,
+            ),
+            tags: [],
+            frames: [],
+            anim_fps: 0.0,
+        ),
+    },
+    groups: [],
+)
