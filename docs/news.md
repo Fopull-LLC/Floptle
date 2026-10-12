@@ -1,5 +1,10 @@
 ## Just shipped
 
+**v0.116.0-rc5 — "Lands On Its Feet"** (beta). 2D bodies can be polygons, and
+a Rigidbody added to a sprite is traced from its art: it covers the character,
+not the empty space in its frame, and flips when the sprite does. `.woff2`
+fonts load anywhere a font goes.
+
 **v0.116.0-rc4 — "Lands On Its Feet"** (beta). A **Pixel Village** template
 where you walk up to people and talk: a dialogue box with portraits, choices
 and a pixel font, written as a game script you can change. 2D lights shade
