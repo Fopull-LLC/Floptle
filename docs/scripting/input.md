@@ -384,7 +384,7 @@ costs about a microsecond on a level of a hundred models. `perf.counts().rays`
 is how many rays scripts cast last frame and `perf.counts().rayMs` what they
 took (with `perf.enable(true)`; the time is part of `scripts`).
 
-### Shape queries — `overlapSphere`, `spherecast`, `capsulecast`
+### Shape queries — `overlapSphere`, `spherecast`, `capsulecast`, `boxcast`
 
 A ray answers *what is along this line*. A melee swing, an explosion or a
 "can I fit there" asks a different question — *what is inside this volume* — and
@@ -409,6 +409,19 @@ local blocked = capsulecast(node.pos, moveDir, 0.4, 0.9, 1.5)
 | `overlapSphere(center, radius [, opts])` | a **list** of hits, deepest overlap first (empty when nothing is inside) |
 | `spherecast(origin, dir, radius, max [, opts])` | the first hit, or `nil` |
 | `capsulecast(origin, dir, radius, halfHeight, max [, opts])` | the first hit, or `nil` |
+| `boxcast(origin, dir, halfX, halfY, max [, opts])` | the first hit, or `nil`, for a box in the XY plane — a 2D body |
+| `overlapBox(center, halfX, halfY [, opts])` | a **list** of what a box in the XY plane overlaps, deepest first |
+
+The two box queries are the 2D ones: a box held in the XY plane, the shape a
+2D body is. `boxcast` sweeps it by its edges, so it meets a step lower than its
+middle, and a box resting on the floor can sweep along the floor without
+hitting it:
+
+```lua
+-- Is there room to dash four units to the right?
+local h = boxcast(node.pos, vec3(1, 0, 0), 0.4, 0.5, 4)
+local room = h and h.distance or 4
+```
 
 Hits carry the same fields a `raycast` hit does — `x/y/z`, `nx/ny/nz`,
 `distance`, `node` and [`material`](#what-surface-did-i-hit--hmaterial) — so a

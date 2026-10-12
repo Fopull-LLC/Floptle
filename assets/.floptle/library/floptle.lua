@@ -1867,6 +1867,22 @@ function spherecast(origin, dir, radius, max, opts) end
 ---@param opts? table
 ---@return table|nil
 function capsulecast(origin, dir, radius, halfHeight, max, opts) end
+---Sweep a box held in the XY plane — a 2D body — along a direction.
+---@param origin Vec3
+---@param dir Vec3
+---@param halfX number
+---@param halfY number
+---@param max number
+---@param opts? table
+---@return table|nil
+function boxcast(origin, dir, halfX, halfY, max, opts) end
+---Everything a box in the XY plane overlaps, deepest first.
+---@param center Vec3
+---@param halfX number
+---@param halfY number
+---@param opts? table
+---@return table
+function overlapBox(center, halfX, halfY, opts) end
 ---Reports for terrain edits that have LANDED since the last call (drained).
 ---Each entry is { id, removed, added, untextured, slots = { [slot] = volume } }
 ---in world cubic units; `removed` equals `untextured` plus the slot volumes.

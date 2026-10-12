@@ -739,6 +739,110 @@ pub fn capsulecast(
     }
 }
 
+/// Points along the edges of a box in the XY plane, no more than `step` apart,
+/// pulled `inset` in from each side.
+fn box_edge_points(centre: Vec3, half: [f32; 2], inset: f32, step: f32) -> Vec<Vec3> {
+    let (hx, hy) = ((half[0] - inset).max(0.0), (half[1] - inset).max(0.0));
+    let along = |len: f32| ((2.0 * len / step).ceil() as usize).max(1);
+    let mut out = Vec::new();
+    let nx = along(hx);
+    for i in 0..=nx {
+        let x = -hx + 2.0 * hx * i as f32 / nx as f32;
+        out.push(centre + Vec3::new(x, hy, 0.0));
+        out.push(centre + Vec3::new(x, -hy, 0.0));
+    }
+    let ny = along(hy);
+    for j in 1..ny {
+        let y = -hy + 2.0 * hy * j as f32 / ny as f32;
+        out.push(centre + Vec3::new(hx, y, 0.0));
+        out.push(centre + Vec3::new(-hx, y, 0.0));
+    }
+    out
+}
+
+/// Sweep a box held in the XY plane — a 2D body's shape — along `dir`, and
+/// report the first thing it would touch.
+///
+/// Cast from points round the box's edge, a quarter unit apart at most, each
+/// a thin sphere just inside the edge. A level of one-unit tiles cannot hide a
+/// ledge between two of them, and the box's own edge is where a 2D body
+/// actually meets the world, so the answer agrees with how it would move.
+#[allow(clippy::too_many_arguments)]
+pub fn boxcast(
+    colliders: &[AnchoredCollider],
+    hulls: &[BodyHull],
+    origin: Vec3,
+    dir: Vec3,
+    half: [f32; 2],
+    max_dist: f32,
+    exclude: &[u32],
+    mask: u32,
+    skip_start: bool,
+) -> Option<ShapeHit> {
+    // Samples sit a little inside the edge and are a little smaller than
+    // that, so a box resting on a floor is not touching it with every sample
+    // before it has moved: sliding along the ground is not a hit.
+    const INSET: f32 = 0.06;
+    const RADIUS: f32 = 0.03;
+    let mut best: Option<ShapeHit> = None;
+    for p in box_edge_points(origin, half, INSET, 0.25) {
+        if let Some(h) = spherecast(colliders, hulls, p, dir, RADIUS, max_dist, exclude, mask, skip_start)
+            && best.is_none_or(|b| h.distance < b.distance)
+        {
+            best = Some(h);
+        }
+    }
+    best
+}
+
+/// Everything a box held in the XY plane overlaps, deepest first: static
+/// colliders and body hulls, each once.
+pub fn overlap_box_2d(
+    colliders: &[AnchoredCollider],
+    hulls: &[BodyHull],
+    centre: Vec3,
+    half: [f32; 2],
+    exclude: &[u32],
+    mask: u32,
+) -> Vec<ShapeHit> {
+    let mut points = box_edge_points(centre, half, 0.0, 0.25);
+    // …and the inside, so a box wholly within something still overlaps it.
+    let (nx, ny) = (((2.0 * half[0] / 0.25).ceil() as usize).max(1), ((2.0 * half[1] / 0.25).ceil() as usize).max(1));
+    for i in 1..nx {
+        for j in 1..ny {
+            let x = -half[0] + 2.0 * half[0] * i as f32 / nx as f32;
+            let y = -half[1] + 2.0 * half[1] * j as f32 / ny as f32;
+            points.push(centre + Vec3::new(x, y, 0.0));
+        }
+    }
+    let deepest = |dist: &dyn Fn(Vec3) -> f32| {
+        points.iter().map(|p| (dist(*p), *p)).fold((f32::INFINITY, centre), |a, b| if b.0 < a.0 { b } else { a })
+    };
+    let mut out = Vec::new();
+    for c in colliders {
+        if (mask >> c.layer) & 1 == 0 || c.sensor {
+            continue;
+        }
+        let (d, p) = deepest(&|q| c.distance(q));
+        if d < 0.0 {
+            let n = c.normal(p);
+            out.push(ShapeHit { eid: c.eid, point: p.into(), normal: n.into(), distance: -d });
+        }
+    }
+    for h in hulls {
+        if exclude.contains(&h.eid) || (mask >> h.layer) & 1 == 0 {
+            continue;
+        }
+        let (d, p) = deepest(&|q| h.distance(q));
+        if d < 0.0 {
+            let n = h.normal(p);
+            out.push(ShapeHit { eid: Some(h.eid), point: p.into(), normal: n.into(), distance: -d });
+        }
+    }
+    out.sort_by(|a, b| b.distance.total_cmp(&a.distance));
+    out
+}
+
 /// How far a body may move in one substep, as a fraction of its radius,
 /// before the move is swept rather than taken whole ([`PhysicsWorld::swept_move`]).
 /// Half a radius is 21 m/s for a 0.35 m capsule at 120 Hz.
@@ -3816,5 +3920,41 @@ mod swept_tests {
         let hit = spherecast(&w.colliders, &[], Vec3::new(0.0, 2.0, 0.0), Vec3::X, 0.35, 20.0, &[], !0, false);
         assert!(hit.is_some_and(|h| (h.distance - 4.65).abs() < 0.1), "the wall is still found: {hit:?}");
         assert_eq!(ASKED.load(Ordering::Relaxed), 0, "a collider nowhere near the sweep was asked");
+    }
+}
+
+#[cfg(test)]
+mod boxcast_tests {
+    use super::*;
+    use crate::shapes::BoxShape;
+
+    fn solid(center: Vec3, half: Vec3) -> AnchoredCollider {
+        AnchoredCollider::world(Box::new(BoxShape::new(center, half, floptle_core::math::Quat::IDENTITY)))
+    }
+
+    /// A box resting on a floor, swept towards a step lower than its middle:
+    /// a ray from its centre passes over the step, the box does not, and the
+    /// floor it slides along is not a hit.
+    #[test]
+    fn a_box_sweep_meets_a_low_step_and_not_the_floor_under_it() {
+        let world = [
+            solid(Vec3::new(0.0, -0.5, 0.0), Vec3::new(20.0, 0.5, 0.5)),
+            solid(Vec3::new(5.0, 0.2, 0.0), Vec3::new(0.5, 0.2, 0.5)),
+        ];
+        let from = Vec3::new(0.0, 0.5, 0.0);
+        assert!(spherecast(&world, &[], from, Vec3::X, 0.0, 10.0, &[], !0, false).is_none(), "a ray from the middle clears the step");
+        let hit = boxcast(&world, &[], from, Vec3::X, [0.5, 0.5], 10.0, &[], !0, false).expect("the box meets the step");
+        assert!((hit.distance - 4.0).abs() < 0.1, "the box's front meets the step's side 4 units on: {}", hit.distance);
+        assert!(hit.normal[0] < -0.9, "it is the step's side that is hit: {:?}", hit.normal);
+        // Straight down onto the floor from a unit up: the box's bottom lands.
+        let down = boxcast(&world, &[], Vec3::new(-3.0, 1.5, 0.0), Vec3::NEG_Y, [0.5, 0.5], 10.0, &[], !0, false).unwrap();
+        assert!((down.distance - 1.0).abs() < 0.1, "falls a unit to the floor: {}", down.distance);
+    }
+
+    #[test]
+    fn an_overlapping_box_finds_what_it_is_in() {
+        let world = [solid(Vec3::new(0.0, -0.5, 0.0), Vec3::new(20.0, 0.5, 0.5))];
+        assert_eq!(overlap_box_2d(&world, &[], Vec3::new(0.0, 0.3, 0.0), [0.5, 0.5], &[], !0).len(), 1);
+        assert!(overlap_box_2d(&world, &[], Vec3::new(0.0, 0.6, 0.0), [0.5, 0.5], &[], !0).is_empty());
     }
 }

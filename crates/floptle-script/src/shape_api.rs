@@ -381,4 +381,95 @@ pub(crate) fn install_shape_api(
             let _ = lua.globals().set("capsulecast", f);
         }
     }
+
+    // boxcast(origin, dir, halfX, halfY, max [, opts]) → first hit or nil. A
+    // 2D body's sweep: the box it is, held in the XY plane.
+    {
+        let s = shared.clone();
+        if let Ok(f) = lua.create_function(move |lua, args: mlua::MultiValue| {
+            let a: Vec<Value> = args.into_iter().collect();
+            let num = |v: Option<&Value>| -> Option<f64> {
+                match v {
+                    Some(Value::Number(n)) => Some(*n),
+                    Some(Value::Integer(i)) => Some(*i as f64),
+                    _ => None,
+                }
+            };
+            let (Some(o), Some(d), Some(hx), Some(hy), Some(max)) = (
+                a.first().and_then(crate::math_api::vec3_of),
+                a.get(1).and_then(crate::math_api::vec3_of),
+                num(a.get(2)),
+                num(a.get(3)),
+                num(a.get(4)),
+            ) else {
+                return Err(mlua::Error::RuntimeError(
+                    "boxcast(origin, dir, halfX, halfY, max [, opts]) — origin and dir are vec3s \
+                     (or a node); halfX, halfY and max are numbers"
+                        .into(),
+                ));
+            };
+            let (exclude, mask, skip) = cast_opts("boxcast", a.get(5), &s)?;
+            let sim = *s.sim_origin.borrow();
+            let p = (glam::DVec3::new(o.x, o.y, o.z) - sim).as_vec3();
+            let dir = glam::Vec3::new(d.x as f32, d.y as f32, 0.0);
+            let hit = floptle_physics::boxcast(
+                &s.colliders.borrow(),
+                &s.hulls.borrow(),
+                p,
+                dir,
+                [hx.max(0.0) as f32, hy.max(0.0) as f32],
+                max as f32,
+                &exclude,
+                mask,
+                skip,
+            );
+            match hit {
+                Some(h) => Ok(Value::Table(shape_hit_table(lua, &h, sim)?)),
+                None => Ok(Value::Nil),
+            }
+        }) {
+            let _ = lua.globals().set("boxcast", f);
+        }
+    }
+
+    // overlapBox(center, halfX, halfY [, opts]) → everything a 2D box touches,
+    // deepest first.
+    {
+        let s = shared.clone();
+        if let Ok(f) = lua.create_function(move |lua, args: mlua::MultiValue| {
+            let a: Vec<Value> = args.into_iter().collect();
+            let num = |v: Option<&Value>| -> Option<f64> {
+                match v {
+                    Some(Value::Number(n)) => Some(*n),
+                    Some(Value::Integer(i)) => Some(*i as f64),
+                    _ => None,
+                }
+            };
+            let (Some(c), Some(hx), Some(hy)) =
+                (a.first().and_then(crate::math_api::vec3_of), num(a.get(1)), num(a.get(2)))
+            else {
+                return Err(mlua::Error::RuntimeError(
+                    "overlapBox(center, halfX, halfY [, opts]) — center is a vec3 (or a node)".into(),
+                ));
+            };
+            let (exclude, mask) = query_opts("overlapBox", a.get(3), &s)?;
+            let origin = *s.sim_origin.borrow();
+            let p = (glam::DVec3::new(c.x, c.y, c.z) - origin).as_vec3();
+            let hits = floptle_physics::overlap_box_2d(
+                &s.colliders.borrow(),
+                &s.hulls.borrow(),
+                p,
+                [hx.max(0.0) as f32, hy.max(0.0) as f32],
+                &exclude,
+                mask,
+            );
+            let out = lua.create_table()?;
+            for (i, h) in hits.iter().enumerate() {
+                out.set(i + 1, shape_hit_table(lua, h, origin)?)?;
+            }
+            Ok(out)
+        }) {
+            let _ = lua.globals().set("overlapBox", f);
+        }
+    }
 }

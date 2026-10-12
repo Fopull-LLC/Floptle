@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 196
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 198
 - [node — transform & body fields](#node--transform--body-fields) — 41
 - [node — methods & handles](#node--methods--handles) — 32
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -250,6 +250,10 @@ app.version() — the engine version this build was made with, e.g. "0.81.0". Fo
 
 app.vsync() → the current frame pacing as a name: "On", "Adaptive" or "Off" — the same names project.ron uses, so a Video tab can show what is set and save it straight back.
 
+### `boxcast`
+
+boxcast(origin, dir, halfX, halfY, max [, opts]) → the first hit, or nil — sweep a box held in the XY plane, the shape a 2D body is, along a direction: "will my player fit through there", "is there a ledge a step ahead". The box is swept by its edges, so a low step a ray from its middle would pass over is still met, and a box resting on the floor can sweep along it without hitting it. The hit has the same fields as spherecast's: point, normal, distance, node. opts: ignore = {nodes}, layers = {names}, ignoreStart = true.
+
 ### `cloud`
 
 Floptle Cloud read as the GAME, with the key in project.ron: cloud.avatar for a player's picture, cloud.config for your remote config, cloud.get for any public read under /games/ or /players/. Reads only; what a player does goes through account.*.
@@ -430,6 +434,10 @@ function onTriggerEnter(node, other, hit) — fires the tick a body enters a TRI
 ### `onTriggerExit`
 
 function onTriggerExit(node, other, hit) — fires the tick a body leaves the trigger.
+
+### `overlapBox`
+
+overlapBox(center, halfX, halfY [, opts]) — everything a box in the XY plane overlaps, deepest first: the level's colliders and other bodies, each once. A hitbox, a "can I stand up here", a trigger zone made on the spot. opts: ignore = {nodes}, layers = {names}.
 
 ### `params`
 
