@@ -1,5 +1,12 @@
 ## Just shipped
 
+**v0.116.0-rc2 — "Lands On Its Feet"** (beta). A **Pixel Platformer**
+template, and a tutorial in 🎓 Learn that builds it. One-way platform tiles
+you jump up through and land on. Bitmap fonts (BMFont
+`.fnt`) work anywhere a font goes. A 2D scene opens in a 2D Scene view, a 2D
+camera's limits keep everything it shows inside the level, and screenshots of
+a 2D level show its tiles.
+
 **v0.116.0-rc1 — "Lands On Its Feet"** (beta). A 2D box dropped onto a
 tile floor lands on it, and Add RigidBody on a Sprite gives it a 2D box its
 own size. A spritesheet dropped on a tile layer comes in with collision worked
