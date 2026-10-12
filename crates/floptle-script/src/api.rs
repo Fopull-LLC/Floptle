@@ -2068,6 +2068,14 @@ pub(crate) fn apply_rich_sets(
                         "sheetRows" => {
                             m.sheet_rows = num(v).unwrap_or(m.sheet_rows as f64).max(0.0) as u32
                         }
+                        // A 9-slice border, in texture pixels, the same on all
+                        // four sides; 0 turns it off. The Inspector sets the
+                        // four sides apart.
+                        "slice" => {
+                            if let Some(n) = num(v) {
+                                m.slice = [n.max(0.0) as f32; 4];
+                            }
+                        }
                         // --- the surface maps + the two lighting models. An
                         // empty string clears a map slot, the same spelling
                         // `texture` uses.
@@ -2747,7 +2755,7 @@ pub(crate) const CAMERA_KEYS: &[&str] = &[
 /// so a key that is accepted is a key that does something.
 pub(crate) const MATERIAL_KEYS: &[&str] = &[
     "color", "emissive", "emissiveStrength", "specular", "shininess", "specularStrength", "rim",
-    "rimStrength", "unlit", "fog", "ambient", "alpha", "texture", "cell", "sheetCols", "sheetRows",
+    "rimStrength", "unlit", "fog", "ambient", "alpha", "texture", "cell", "sheetCols", "sheetRows", "slice",
     "normalMap", "normalStrength", "roughnessMap", "roughness", "metallicMap", "metallic",
     "occlusionMap", "occlusionStrength", "reflectivity", "transmission", "ior", "thickness",
     "shading", "jitter", "affineUv", "vertexLit",

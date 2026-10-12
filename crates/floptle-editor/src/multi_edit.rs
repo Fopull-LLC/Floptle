@@ -132,6 +132,7 @@ field_diff!(Material {
     sheet_cols,
     sheet_rows,
     cell,
+    slice,
     shader_tiling,
     source,
 });

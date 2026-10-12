@@ -569,6 +569,10 @@ fn default_smoothing() -> f32 {
     0.15
 }
 
+fn is_zero4(v: &[f32; 4]) -> bool {
+    v.iter().all(|x| *x == 0.0)
+}
+
 fn is_zero2(v: &(f32, f32)) -> bool {
     v.0 == 0.0 && v.1 == 0.0
 }
@@ -3242,6 +3246,10 @@ pub struct MaterialDoc {
     pub sheet_rows: u32,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub cell: u32,
+    /// A 9-slice border in texture pixels (left, top, right, bottom); all zero
+    /// is off and is not written.
+    #[serde(default, skip_serializing_if = "is_zero4")]
+    pub slice: [f32; 4],
 
     // --- The surface maps (v0.43). ------------------------------------------
     // Each skips at its neutral value, so a material that uses none of them
@@ -3513,6 +3521,7 @@ impl MaterialDoc {
             sheet_cols: self.sheet_cols,
             sheet_rows: self.sheet_rows,
             cell: self.cell,
+            slice: self.slice,
             normal_map: self.normal_map.clone(),
             normal_strength: self.normal_strength,
             roughness_map: self.roughness_map.clone(),
@@ -3559,6 +3568,7 @@ impl MaterialDoc {
             sheet_cols: m.sheet_cols,
             sheet_rows: m.sheet_rows,
             cell: m.cell,
+            slice: m.slice,
             normal_map: m.normal_map.clone(),
             normal_strength: m.normal_strength,
             roughness_map: m.roughness_map.clone(),

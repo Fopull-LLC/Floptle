@@ -409,6 +409,11 @@ pub struct Material {
     /// `getcomponent("Material").cell`) or key it on a stepped property track.
     /// Clamped into the grid, so a walk-off shows the last frame, not garbage.
     pub cell: u32,
+    /// A 9-slice border, in texture pixels: left, top, right, bottom. A Sprite
+    /// wearing it stretches with its node's scale while its corners keep their
+    /// size and its edges stretch one way only — a platform, a sign, a panel of
+    /// any size from one small picture. All zero is off.
+    pub slice: [f32; 4],
     /// Per-slot tiling for the shader's texture slots (absent = plain UVs) —
     /// honored by the stdlib `sample()` / `sampleTriplanar()` ops.
     pub shader_tiling: std::collections::BTreeMap<String, Tiling>,
@@ -457,6 +462,7 @@ impl Default for Material {
             sheet_cols: 0,
             sheet_rows: 0,
             cell: 0,
+            slice: [0.0; 4],
             source: None,
         }
     }

@@ -789,6 +789,22 @@ fn mat_base_ui(ui: &mut egui::Ui, ctx: &mut MatCtx, m: &mut Material, r: &mut Ma
             r.changed = true;
         }
         ui.end_row();
+        if m.texture.is_some() {
+            ui.label("9-slice").on_hover_text(
+                "a border, in the texture's pixels: left, top, right, bottom. A Sprite \
+                 wearing it stretches with its node's scale while the corners keep their \
+                 size and the edges stretch one way only — a platform, a sign or a panel of \
+                 any size from one small picture. All zero is off",
+            );
+            ui.horizontal_wrapped(|ui| {
+                for (i, side) in ["L ", "T ", "R ", "B "].iter().enumerate() {
+                    r.changed |= ui
+                        .add(egui::DragValue::new(&mut m.slice[i]).range(0.0..=4096.0).speed(0.25).prefix(*side))
+                        .changed();
+                }
+            });
+            ui.end_row();
+        }
         // Tiling applies to the base texture (the mesh's own or the override).
         // A sheet takes the tiling lanes over (one cell, no repeats), so the
         // controls say so rather than silently doing nothing.

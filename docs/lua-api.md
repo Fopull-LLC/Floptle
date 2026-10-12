@@ -1166,7 +1166,7 @@ node:setLighting2D{mode="2d", layers={"Terrain","Characters"}, blocks="on", inne
 
 ### `node:setMaterial`
 
-node:setMaterial{color={r,g,b}, emissive={r,g,b}, emissiveStrength=…, unlit=true, texture="…", alpha=…, …} — set (creating if absent) the node's Material. texture also takes a live render target: "rt:<name>".
+node:setMaterial{color={r,g,b}, emissive={r,g,b}, emissiveStrength=…, unlit=true, texture="…", alpha=…, …} — set (creating if absent) the node's Material. texture also takes a live render target: "rt:<name>". slice=8 gives a Sprite a 9-slice border of that many texture pixels on every side: it stretches with its node's scale while the corners keep their size (0 = off).
 
 On a MODEL this material SUPERSEDES the ones the model was imported with — every part draws with it, textures included, so a material naming no texture draws untextured. That is what a node Material is for: "this whole thing is made of THIS". To change one part instead, use node:material("<name>") — node:materials() lists what the parts are called.
 

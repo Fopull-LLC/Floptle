@@ -537,6 +537,88 @@ pub(crate) fn sprite_one_draw(
     instance_of_mat(model * local, &mp)
 }
 
+/// A Sprite's draws: its one quad, or nine when its Material is 9-sliced.
+///
+/// Sliced, the node's scale is the size the sprite stretches to rather than a
+/// scale on the picture: the corners keep their pixel size, the edges stretch
+/// along their length only, and the middle fills the rest. Each piece is an
+/// ordinary quad with its own UV window, so every pass that already draws a
+/// sprite, lit or unlit, draws a sliced one.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sprite_draws_of(
+    ppu: f32,
+    size: f32,
+    cell: u32,
+    flip_x: bool,
+    flip_y: bool,
+    pivot: [f32; 2],
+    model: floptle_core::math::Mat4,
+    node_scale: floptle_core::math::Vec3,
+    mat: Option<&Material>,
+    tex_px: Option<[f32; 2]>,
+    texel: [f32; 2],
+) -> Vec<InstanceRaw> {
+    use floptle_core::math::{Mat4, Vec3};
+    let sliced = mat.map(|m| m.slice).filter(|b| b.iter().any(|v| *v > 0.0));
+    let (Some(b), Some([tw, th])) = (sliced, tex_px) else {
+        return vec![sprite_one_draw(ppu, size, cell, flip_x, flip_y, pivot, model, mat, tex_px, texel)];
+    };
+    let (sc, sr) = mat.map(|m| m.sheet()).unwrap_or((1, 1));
+    let (sc, sr) = (sc.max(1), sr.max(1));
+    let (cw, ch) = (tw / sc as f32, th / sr as f32);
+    let cell = cell.min(sc * sr - 1);
+    let (ox, oy) = ((cell % sc) as f32 * cw, (cell / sc) as f32 * ch);
+    let (w, h) = sprite_world_size(ppu, size, mat, tex_px);
+    let (nsx, nsy) = (node_scale.x.abs().max(1e-6), node_scale.y.abs().max(1e-6));
+    // The stretched size, and each border's world size at the picture's own
+    // pixel size — shrunk together when the sprite is smaller than its borders.
+    let (big_w, big_h) = (w * nsx, h * nsy);
+    let (kx, ky) = (w / cw.max(1e-6), h / ch.max(1e-6));
+    let [l, t, r, bt] = b.map(|v| v.max(0.0));
+    let fit = |a: f32, z: f32, span: f32| if a + z > span && a + z > 0.0 { span / (a + z) } else { 1.0 };
+    let fx = fit(l * kx, r * kx, big_w);
+    let fy = fit(t * ky, bt * ky, big_h);
+    let xs_w = [0.0, l * kx * fx, big_w - r * kx * fx, big_w];
+    let ys_w = [0.0, t * ky * fy, big_h - bt * ky * fy, big_h];
+    let xs_px = [0.0, l, cw - r, cw];
+    let ys_px = [0.0, t, ch - bt, ch];
+    let base = mat.map(crate::shading::material_params).unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]));
+    let unit = 2.0 * crate::matter_catalog::PRIMITIVE_HALF;
+    // The quad's centre, with the pivot as the single sprite has it.
+    let centre = Vec3::new((0.5 - pivot[0]) * big_w, (0.5 - pivot[1]) * big_h, 0.0);
+    let (mx, my) = (if flip_x { -1.0 } else { 1.0 }, if flip_y { -1.0 } else { 1.0 });
+    let mut out = Vec::with_capacity(9);
+    for j in 0..3 {
+        for i in 0..3 {
+            let (pw, ph) = (xs_w[i + 1] - xs_w[i], ys_w[j + 1] - ys_w[j]);
+            if pw <= 1e-6 || ph <= 1e-6 || xs_px[i + 1] <= xs_px[i] || ys_px[j + 1] <= ys_px[j] {
+                continue;
+            }
+            // Measured from the quad's top-left, in world units; y runs down.
+            let cx = (xs_w[i] + xs_w[i + 1]) * 0.5 - big_w * 0.5;
+            let cy = big_h * 0.5 - (ys_w[j] + ys_w[j + 1]) * 0.5;
+            let (u0, u1) = ((ox + xs_px[i]) / tw, (ox + xs_px[i + 1]) / tw);
+            let (v0, v1) = ((oy + ys_px[j]) / th, (oy + ys_px[j + 1]) / th);
+            let mut mp = base;
+            mp.tile_mode = 1;
+            mp.tile = [u1 - u0, v1 - v0, (u0 + u1) * 0.5 - 0.5, (v0 + v1) * 0.5 - 0.5];
+            mp.tile_rotation = 0.0;
+            // In the node's own space, so its scale is divided back out: the
+            // node's matrix multiplies it in again and lands each piece at the
+            // world size worked out above.
+            let at = (centre + Vec3::new(cx * mx, cy * my, 0.0)) / Vec3::new(nsx, nsy, 1.0);
+            let local = Mat4::from_translation(at)
+                * Mat4::from_scale(Vec3::new(
+                    (mx * pw / nsx / unit).clamp(-1e6, 1e6),
+                    (my * ph / nsy / unit).clamp(-1e6, 1e6),
+                    (w.max(h) / unit).max(1e-6),
+                ));
+            out.push(instance_of_mat(model * local, &mp));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1303,4 +1385,59 @@ mod sort_tests {
         let z = zs(&world, &project);
         assert!(z[&front] > z[&back], "the front layer must win however low the other node is");
     }
+}
+
+/// A 9-sliced sprite stretched wide keeps its border at the picture's own
+/// pixel size: drawn from the dialogue frame (a 3-pixel rim round a dark
+/// middle) at 8 pixels per unit and stretched six times wider, the rim is
+/// still three pixels of the sprite thick at the left edge and in the middle
+/// of the top, not eighteen.
+#[cfg(test)]
+#[test]
+fn a_sliced_sprite_keeps_its_border_when_stretched() {
+    use floptle_core::math::{DVec3, Quat, Vec3};
+    let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+    let dir = std::env::temp_dir().join(format!("floptle-slice9-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("textures")).unwrap();
+    std::fs::write(dir.join("textures/frame.png"), include_bytes!("../templates/village2d/dialogue_frame.png")).unwrap();
+    ed.project_root = dir.clone();
+    let e = ed.world.spawn();
+    ed.world.insert(e, floptle_core::transform::Transform {
+        translation: DVec3::ZERO,
+        rotation: Quat::IDENTITY,
+        scale: Vec3::new(6.0, 2.0, 1.0),
+    });
+    ed.world.insert(e, floptle_core::Matter::Sprite { ppu: 8.0, size: 1.0, cell: 0, flip_x: false, flip_y: false, pivot: [0.5, 0.5] });
+    ed.world.insert(e, Material { texture: Some("textures/frame.png".into()), unlit: true, slice: [8.0, 8.0, 8.0, 8.0], ..Default::default() });
+    // An orthographic camera 24 units tall at 240 pixels: 10 screen pixels to
+    // a world unit, so one sprite pixel (1/8 unit) is 1.25 screen pixels.
+    let cam = floptle_render::RenderCamera::new(
+        DVec3::new(0.0, 0.0, 10.0),
+        Quat::IDENTITY,
+        floptle_render::Projection::of_camera(1.0, true, 24.0, 0.05, 1000.0),
+    );
+    let (w, h) = (240u32, 240u32);
+    let _ = ed.ensure_texture("textures/frame.png");
+    let px = crate::shot::render_frame_pixels(&mut ed, &cam, None, w, h, u32::MAX, false).expect("device");
+    if let Ok(out) = std::env::var("SLICE_OUT") {
+        floptle_image::io::save_png(std::path::Path::new(&out), &px, w, h).unwrap();
+    }
+    let at = |x: u32, y: u32| {
+        let o = ((y * w + x) * 4) as usize;
+        [px[o], px[o + 1], px[o + 2]]
+    };
+    // The sprite is 18 x 6 units: x from -9 to 9, y from -3 to 3. Its left
+    // edge is at screen x 30, its top at screen y 90.
+    let middle = at(120, 120);
+    assert!(middle[2] > middle[0] && middle[0] < 60, "the middle is the frame's dark fill: {middle:?}");
+    // Four screen pixels in from the left edge is inside a 3-sprite-pixel
+    // (3.75 screen pixel) rim only if the rim did not stretch.
+    let rim = at(32, 120);
+    assert!(rim[0] > 100, "the rim is there at the left edge: {rim:?}");
+    let past = at(30 + 6, 120);
+    assert!(past[0] < 60, "six screen pixels in is past the rim — a stretched rim would be 22 wide: {past:?}");
+    let top = at(120, 92);
+    assert!(top[0] > 100, "the top edge stretched along its length keeps its rim: {top:?}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

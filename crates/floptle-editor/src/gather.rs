@@ -1919,24 +1919,26 @@ impl Editor {
                         let texel = px
                             .map(|[w, h]| [1.0 / w.max(1.0), 1.0 / h.max(1.0)])
                             .unwrap_or([0.0, 0.0]);
-                        let mut raw = crate::sprite2d::sprite_one_draw(
+                        let raws = crate::sprite2d::sprite_draws_of(
                             *ppu, *size, *cell, *flip_x, *flip_y, *pivot,
-                            model, mat.as_ref(), px, texel,
+                            model, t.scale, mat.as_ref(), px, texel,
                         );
-                        // Same as a batch: unlit in the raster pass and
-                        // corrected by the 2D lighting pass, so the two never
-                        // light it twice.
-                        if let Some(&(rank, casts)) = lit2d.get(e) {
-                            raw.force_unlit();
-                            flat2d.push((
-                                mesh,
-                                tex,
-                                floptle_render::Light2dInstance::from_raster(&raw, rank, casts),
-                            ));
-                        }
-                        match flsl {
-                            Some(b) => flsl_draws.push((mesh, tex, b, raw)),
-                            None => instances.push((mesh, tex, raw)),
+                        for mut raw in raws {
+                            // Same as a batch: unlit in the raster pass and
+                            // corrected by the 2D lighting pass, so the two never
+                            // light it twice.
+                            if let Some(&(rank, casts)) = lit2d.get(e) {
+                                raw.force_unlit();
+                                flat2d.push((
+                                    mesh,
+                                    tex,
+                                    floptle_render::Light2dInstance::from_raster(&raw, rank, casts),
+                                ));
+                            }
+                            match flsl {
+                                Some(b) => flsl_draws.push((mesh, tex, b, raw)),
+                                None => instances.push((mesh, tex, raw)),
+                            }
                         }
                     }
                 }
@@ -2307,11 +2309,12 @@ impl Editor {
                             .and_then(|m| m.texture.as_deref())
                             .and_then(|p| self.texture_registry.get(p).copied())
                             .and_then(|id| raster.texture_size(id));
-                        let raw = crate::sprite2d::sprite_one_draw(
+                        for raw in crate::sprite2d::sprite_draws_of(
                             *ppu, *size, *cell, *flip_x, *flip_y, *pivot,
-                            model, mat, px, [0.0, 0.0],
-                        );
-                        mask_mesh.push((mesh, raw));
+                            model, t.scale, mat, px, [0.0, 0.0],
+                        ) {
+                            mask_mesh.push((mesh, raw));
+                        }
                     }
                 }
                 Matter::Mesh { asset_path } => {
