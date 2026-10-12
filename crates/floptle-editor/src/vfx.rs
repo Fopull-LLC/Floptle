@@ -592,6 +592,7 @@ impl VfxSystem {
     /// Pack this frame's billboards — every live play instance plus (when
     /// `include_preview`, i.e. outside Play) the Particles tab's preview —
     /// resolving track texture paths through the editor's registered-texture map.
+    #[allow(clippy::too_many_arguments)] // the frame's inputs and its two outputs, each used once
     pub fn collect(
         &self,
         world: &World,
