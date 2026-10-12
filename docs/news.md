@@ -1,5 +1,13 @@
 ## Just shipped
 
+**v0.116.0-rc3 — "Lands On Its Feet"** (beta). Put an `.aseprite` file in
+the project and it becomes a sprite sheet with a clip per tag, rewritten every
+time you save. Tiled and LDtk levels import with their layers, flips and
+objects. Drop down through one-way platforms with `node.dropThrough`, and find
+routes across a tile level with `tm:path`. The 2D camera looks ahead and keeps
+to rooms. `scene.load` fades between scenes. The Image tab gains per-frame
+holds, tags and a wider onion skin.
+
 **v0.116.0-rc2 — "Lands On Its Feet"** (beta). A **Pixel Platformer**
 template, and a tutorial in 🎓 Learn that builds it. One-way platform tiles
 you jump up through and land on. Bitmap fonts (BMFont
