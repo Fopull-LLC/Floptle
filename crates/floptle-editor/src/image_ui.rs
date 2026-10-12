@@ -1681,7 +1681,36 @@ impl ImageCtx<'_> {
                 d.fps = fps;
                 self.st.mark_dirty();
             }
-            ui.checkbox(&mut self.st.onion, "onion skin");
+            // This frame's hold: how many slots of 1/fps it shows for.
+            let f = self.st.frame;
+            let mut hold = self.st.doc.as_ref().map(|d| d.hold(f)).unwrap_or(1.0);
+            ui.horizontal(|ui| {
+                ui.label("hold").on_hover_text(
+                    "how long this frame shows, in frames at the rate above: 2 holds it twice as long. \
+                     Sheet exports and the clips they write keep it",
+                );
+                if ui.add(egui::DragValue::new(&mut hold).range(0.1..=100.0).speed(0.05).suffix("×")).changed() {
+                    self.st.begin_edit();
+                    if let Some(d) = self.st.doc.as_mut() {
+                        d.set_hold(f, hold);
+                    }
+                    self.st.mark_dirty();
+                }
+            });
+            ui.horizontal(|ui| {
+                let was = (self.st.onion, self.st.onion_before, self.st.onion_after);
+                ui.checkbox(&mut self.st.onion, "onion skin");
+                if self.st.onion {
+                    ui.add(egui::DragValue::new(&mut self.st.onion_before).range(0..=8).prefix("◀ "))
+                        .on_hover_text("frames before this one, in red");
+                    ui.add(egui::DragValue::new(&mut self.st.onion_after).range(0..=8).prefix("▶ "))
+                        .on_hover_text("frames after this one, in green");
+                }
+                if was != (self.st.onion, self.st.onion_before, self.st.onion_after) {
+                    self.st.invalidate_all();
+                }
+            });
+            self.image_tags_ui(ui, frames);
             ui.horizontal(|ui| {
                 ui.label("sheet cols");
                 ui.add(
@@ -1692,6 +1721,54 @@ impl ImageCtx<'_> {
                         .custom_formatter(|v, _| if v < 1.0 { "auto".into() } else { format!("{v}") }),
                 );
             });
+        }
+    }
+
+    /// The animations in this sheet: named runs of frames that a sheet export
+    /// writes as one clip each.
+    fn image_tags_ui(&mut self, ui: &mut egui::Ui, frames: usize) {
+        let tags = self.st.doc.as_ref().map(|d| d.tags.clone()).unwrap_or_default();
+        let mut next = tags.clone();
+        let mut remove = None;
+        ui.label(RichText::new("Tags").strong()).on_hover_text(
+            "named runs of frames — walk, jump, hurt. Export ▸ Sheet writes one sprite animation per tag",
+        );
+        const DIRS: [&str; 4] = ["forward", "reverse", "ping-pong", "ping-pong back"];
+        for (i, t) in next.iter_mut().enumerate() {
+            ui.horizontal_wrapped(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut t.name).desired_width(70.0));
+                let mut from = t.from + 1;
+                let mut to = t.to + 1;
+                ui.add(egui::DragValue::new(&mut from).range(1..=frames).speed(0.1));
+                ui.label("–");
+                ui.add(egui::DragValue::new(&mut to).range(1..=frames).speed(0.1));
+                t.from = from - 1;
+                t.to = (to - 1).max(t.from);
+                egui::ComboBox::from_id_salt(("img-tag-dir", i))
+                    .selected_text(DIRS[t.direction.min(3) as usize])
+                    .show_ui(ui, |ui| {
+                        for (d, label) in DIRS.iter().enumerate() {
+                            ui.selectable_value(&mut t.direction, d as u8, *label);
+                        }
+                    });
+                if ui.small_button("🗑").on_hover_text("remove this tag").clicked() {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove {
+            next.remove(i);
+        }
+        if ui.small_button("✚ tag").on_hover_text("a new tag on this frame; widen it with the two numbers").clicked() {
+            let f = self.st.frame;
+            next.push(floptle_image::AnimTag { name: format!("anim{}", next.len() + 1), from: f, to: f, direction: 0 });
+        }
+        if next != tags {
+            self.st.begin_edit();
+            if let Some(d) = self.st.doc.as_mut() {
+                d.tags = next;
+            }
+            self.st.mark_dirty();
         }
     }
 

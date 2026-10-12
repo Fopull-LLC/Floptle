@@ -552,9 +552,16 @@ impl Editor {
                         _ => FilterMode::Smooth,
                     };
                     self.save_texture_settings();
+                    let clips = self.write_sheet_clips(&doc, &dir, &stem, &out, sheet.cols, sheet.rows);
                     self.image.toast(format!(
-                        "sheet {}×{} cells — grid written to .floptle/textures.ron",
-                        sheet.cols, sheet.rows
+                        "sheet {}×{} cells and {} — grid written to .floptle/textures.ron",
+                        sheet.cols,
+                        sheet.rows,
+                        match clips.len() {
+                            0 => "no clips".to_string(),
+                            1 => format!("the clip {}", clips[0]),
+                            n => format!("{n} clips"),
+                        }
                     ));
                 }
                 ok.then_some(out)
@@ -585,6 +592,65 @@ impl Editor {
                 self.image.toast("export failed — see the Console");
             }
         }
+    }
+
+    /// Write the sprite animations a sheet export carries: one per tag, named
+    /// `<stem>_<tag>`, or one for every frame named `<stem>` when there are no
+    /// tags. Each frame keeps its hold, and a tag plays the way it says.
+    /// Rewritten on every export, like the sheet beside them.
+    pub(crate) fn write_sheet_clips(
+        &mut self,
+        doc: &floptle_image::Image,
+        dir: &Path,
+        stem: &str,
+        sheet: &Path,
+        cols: u32,
+        rows: u32,
+    ) -> Vec<String> {
+        let tex = crate::assets::asset_rel_path(&sheet.to_string_lossy(), &self.project_root);
+        let spans: Vec<(String, usize, usize, u8)> = if doc.tags.is_empty() {
+            if doc.frames < 2 {
+                return Vec::new();
+            }
+            vec![(stem.to_string(), 0, doc.frames - 1, 0)]
+        } else {
+            doc.tags
+                .iter()
+                .map(|t| (format!("{stem}_{}", sanitize(&t.name)), t.from, t.to.min(doc.frames - 1), t.direction))
+                .collect()
+        };
+        let mut written = Vec::new();
+        for (name, from, to, dir_code) in spans {
+            let direction = match dir_code {
+                1 => crate::ase_file::Direction::Reverse,
+                2 => crate::ase_file::Direction::PingPong,
+                3 => crate::ase_file::Direction::PingPongReverse,
+                _ => crate::ase_file::Direction::Forward,
+            };
+            let order = crate::ase_file::tag_frames(from, to, direction);
+            let clip = floptle_scene::SpriteAnimDoc {
+                fps: doc.fps,
+                looping: true,
+                cols,
+                rows,
+                texture: tex.clone(),
+                frames: order
+                    .iter()
+                    .map(|&f| floptle_scene::SpriteAnimFrameDoc { cell: f as u32, hold: doc.hold(f), ..Default::default() })
+                    .collect(),
+            };
+            let out = dir.join(format!("{name}{}", floptle_scene::SPRITE_ANIM_EXT));
+            match floptle_scene::save_sprite_anim(&clip, &out) {
+                Ok(()) => written.push(name),
+                Err(e) => self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("🖼 could not write {}: {e}", out.display()),
+                    None,
+                ),
+            }
+        }
+        self.anim.rescan(&self.project_root);
+        written
     }
 
     /// Write the document's palette into `.floptle/palettes/<name>.gpl` so other
@@ -748,6 +814,32 @@ mod tests {
         let ps = load_palettes(&dir);
         assert!(ps.iter().any(|p| p.name == "mine" && p.colors.len() == 2));
         assert!(ps.iter().any(|p| p.name == "PICO-8"), "built-ins survive");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod sheet_clip_tests {
+    /// A sheet export writes a clip per tag, each frame keeping its hold and
+    /// a ping-pong tag playing there and back.
+    #[test]
+    fn a_sheet_export_writes_a_clip_per_tag_with_its_holds() {
+        let dir = std::env::temp_dir().join(format!("floptle_sheet_clips_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("art")).unwrap();
+        let mut doc = floptle_image::Image::new(4, 4, floptle_image::Mode::Pixel);
+        doc.set_frames(4);
+        doc.set_hold(1, 3.0);
+        doc.tags.push(floptle_image::AnimTag { name: "walk".into(), from: 0, to: 2, direction: 2 });
+        doc.tags.push(floptle_image::AnimTag { name: "hurt".into(), from: 3, to: 3, direction: 0 });
+        let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+        let sheet = dir.join("art/hero_sheet.png");
+        let names = ed.write_sheet_clips(&doc, &dir.join("art"), "hero", &sheet, 4, 1);
+        assert_eq!(names, ["hero_walk", "hero_hurt"]);
+        let walk = floptle_scene::load_sprite_anim(&dir.join("art/hero_walk.spriteanim.ron")).unwrap();
+        assert_eq!(walk.frames.iter().map(|f| f.cell).collect::<Vec<_>>(), [0, 1, 2, 1]);
+        assert_eq!(walk.frames[1].hold, 3.0, "frame 1 keeps its hold");
+        assert_eq!(walk.texture, "art/hero_sheet.png");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

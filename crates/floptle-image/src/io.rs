@@ -29,7 +29,8 @@ const MAGIC: &[u8; 4] = b"FLIM";
 ///
 /// * v1 — the first shipped layout.
 /// * v2 — the sheet cell grid ([`V_SHEET`]).
-pub const VERSION: u16 = 2;
+/// * v3 — per-frame holds and animation tags ([`V_ANIM`]).
+pub const VERSION: u16 = 3;
 
 /// The oldest container this build reads. Versions between this and
 /// [`VERSION`] are read with the fields they had — a `.flimg` written before a
@@ -38,6 +39,9 @@ const MIN_VERSION: u16 = 1;
 
 /// The version that added the sheet cell grid ([`Image::sheet`]).
 const V_SHEET: u16 = 2;
+
+/// The version that added [`Image::holds`] and [`Image::tags`].
+const V_ANIM: u16 = 3;
 
 /// The document file extension.
 pub const DOC_EXT: &str = "flimg";
@@ -163,7 +167,13 @@ pub fn encode(img: &Image) -> Vec<u8> {
     // Write the oldest layout that can carry this document. A file that uses
     // nothing new stays readable by an older build, so adding a field costs
     // forward compatibility only for the documents that actually use it.
-    let version = if img.sheet.is_some() { V_SHEET } else { MIN_VERSION };
+    let version = if !img.holds.is_empty() || !img.tags.is_empty() {
+        V_ANIM
+    } else if img.sheet.is_some() {
+        V_SHEET
+    } else {
+        MIN_VERSION
+    };
     put_u16(&mut o, version);
     put_u32(&mut o, img.w);
     put_u32(&mut o, img.h);
@@ -232,9 +242,26 @@ pub fn encode(img: &Image) -> Vec<u8> {
     }
     // v2: the sheet cell grid, appended after the layers so a v1 file's bytes
     // are unchanged up to here and the old reader's offsets all still hold.
-    if let Some((sc, sr)) = img.sheet {
+    if version >= V_SHEET {
+        // From v3 on the grid is always written, (0, 0) for none, so the
+        // fields after it sit at a fixed place.
+        let (sc, sr) = img.sheet.unwrap_or((0, 0));
         put_u32(&mut o, sc);
         put_u32(&mut o, sr);
+    }
+    // v3: holds, then tags.
+    if version >= V_ANIM {
+        put_u32(&mut o, img.holds.len() as u32);
+        for h in &img.holds {
+            put_f32(&mut o, *h);
+        }
+        put_u32(&mut o, img.tags.len() as u32);
+        for t in &img.tags {
+            put_str(&mut o, &t.name);
+            put_u32(&mut o, t.from as u32);
+            put_u32(&mut o, t.to as u32);
+            o.push(t.direction);
+        }
     }
     o
 }
@@ -336,15 +363,37 @@ pub fn decode(bytes: &[u8]) -> Option<Image> {
     } else {
         None
     };
+    let frames = frames.max(1);
+    let (mut holds, mut tags) = (Vec::new(), Vec::new());
+    if version >= V_ANIM {
+        let n = r.u32()? as usize;
+        for _ in 0..n {
+            holds.push(r.f32()?);
+        }
+        let n = r.u32()? as usize;
+        for _ in 0..n {
+            let name = r.str()?;
+            let (from, to) = (r.u32()? as usize, r.u32()? as usize);
+            let direction = r.u8()?.min(3);
+            if from < frames && from <= to {
+                tags.push(crate::doc::AnimTag { name, from, to: to.min(frames - 1), direction });
+            }
+        }
+        if holds.len() != frames {
+            holds.clear();
+        }
+    }
 
     Some(Image {
+        holds,
+        tags,
         sheet,
         w,
         h,
         mode,
         active: active.min(layers.len() - 1),
         layers,
-        frames: frames.max(1),
+        frames,
         fps: if fps.is_finite() && fps > 0.0 { fps } else { 12.0 },
         palette,
         palette_lock: flags & 1 != 0,
@@ -537,6 +586,27 @@ mod tests {
         assert_eq!(doc_path_for(Path::new("a/b.png")), Path::new("a/b.flimg"));
     }
 
+    /// Frame holds and tags survive the file, and a document without them is
+    /// still written in the older layout an older build reads.
+    #[test]
+    fn holds_and_tags_round_trip() {
+        let mut img = Image::new(4, 4, Mode::Pixel);
+        img.set_frames(3);
+        img.set_hold(1, 3.0);
+        img.tags.push(crate::doc::AnimTag { name: "run".into(), from: 0, to: 2, direction: 2 });
+        img.sheet = Some((3, 1));
+        let back = decode(&encode(&img)).unwrap();
+        assert_eq!(back.holds, vec![1.0, 3.0, 1.0]);
+        assert_eq!(back.tags, img.tags);
+        assert_eq!(back.sheet, Some((3, 1)));
+        let mut plain = Image::new(4, 4, Mode::Pixel);
+        plain.sheet = Some((2, 2));
+        assert_eq!(u16::from_le_bytes([encode(&plain)[4], encode(&plain)[5]]), V_SHEET);
+        plain.sheet = None;
+        plain.tags.push(crate::doc::AnimTag { name: "a".into(), from: 0, to: 0, direction: 0 });
+        assert_eq!(decode(&encode(&plain)).unwrap().sheet, None, "v3 writes (0, 0) for no grid");
+    }
+
     /// The sheet cell grid is a fact about the art, so it must survive the file.
     #[test]
     fn the_sheet_cell_grid_round_trips() {
@@ -594,7 +664,7 @@ mod tests {
         let mut sheeted = sample_doc();
         sheeted.sheet = Some((4, 4));
         let bytes = encode(&sheeted);
-        assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), VERSION, "it uses the field");
+        assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), V_SHEET, "it uses the field");
     }
 
     /// And a version this build has never heard of is still refused outright,

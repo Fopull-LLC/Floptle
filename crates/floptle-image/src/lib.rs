@@ -35,7 +35,7 @@ pub mod vector;
 pub use adjust::Adjustment;
 pub use blend::Blend;
 pub use brush::{Brush, BrushMode, StrokeState};
-pub use doc::{Image, Layer, LayerKind, Mode};
+pub use doc::{AnimTag, Image, Layer, LayerKind, Mode};
 pub use effect::Effect;
 pub use palette::Palette;
 pub use select::Mask;

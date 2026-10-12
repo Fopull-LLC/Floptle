@@ -368,6 +368,9 @@ pub(crate) struct ImageEditState {
     /// starts at. Per-user, loaded once and saved when the View menu changes it.
     pub(crate) look: crate::prefs::CanvasLook,
     pub(crate) onion: bool,
+    /// How many frames before and after the current one the onion skin shows.
+    pub(crate) onion_before: usize,
+    pub(crate) onion_after: usize,
     pub(crate) frame: usize,
     pub(crate) playing: bool,
     play_clock: f32,
@@ -485,6 +488,8 @@ impl Default for ImageEditState {
             tiled_view: false,
             look: crate::prefs::load_canvas_look(),
             onion: false,
+            onion_before: 1,
+            onion_after: 0,
             frame: 0,
             playing: false,
             play_clock: 0.0,
@@ -2479,14 +2484,13 @@ impl ImageEditState {
         }
         // The onion skin is the previous frame; rebuild it only when the frame
         // or the document changed (invalidate_all drops it).
-        if self.onion && doc.frames > 1 && self.onion_tex.is_none() {
-            let prev = (self.frame + doc.frames - 1) % doc.frames;
-            if prev != self.frame {
-                let flat = composite::flatten(doc, prev);
-                let img =
-                    egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &flat);
-                self.onion_tex = Some(ctx.load_texture("flimg-onion", img, opts));
-            }
+        if self.onion
+            && doc.frames > 1
+            && self.onion_tex.is_none()
+            && let Some(ghost) = onion_ghosts(doc, self.frame, self.onion_before, self.onion_after)
+        {
+            let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &ghost);
+            self.onion_tex = Some(ctx.load_texture("flimg-onion", img, opts));
         }
         if !self.onion && self.onion_tex.is_some() {
             self.onion_tex = None;
@@ -2526,7 +2530,7 @@ impl ImageEditState {
         // Onion skin: the previous frame, ghosted, underneath. Composited once
         // per frame change (sync_texture), not once per paint.
         if let Some(o) = &self.onion_tex {
-            p.image(o.id(), img_rect, uv, Color32::from_white_alpha(90));
+            p.image(o.id(), img_rect, uv, Color32::WHITE);
         }
         if self.tiled_view {
             // Neighbours are live mirrors of the same texture: this is how you
@@ -2978,9 +2982,10 @@ impl ImageEditState {
         if !self.playing || doc.frames <= 1 {
             return;
         }
+        // Each frame shows for its hold, in slots of 1/fps.
         self.play_clock += dt * doc.fps.max(0.1);
-        while self.play_clock >= 1.0 {
-            self.play_clock -= 1.0;
+        while self.play_clock >= doc.hold(self.frame) {
+            self.play_clock -= doc.hold(self.frame);
             self.frame = (self.frame + 1) % doc.frames;
             self.pending = Some(doc.bounds());
             self.flat_cache = None;
@@ -3904,5 +3909,70 @@ mod tests {
         assert_eq!(g.get(18, 18)[3], 255, "and its far one");
         assert_eq!(g.get(2, 2)[3], 0, "and no further");
         assert_eq!(g.get(21, 21)[3], 0);
+    }
+}
+
+/// The onion skin: up to `before` frames behind the current one tinted red,
+/// and `after` frames ahead tinted green, each fainter the further it is, the
+/// nearest drawn on top. `None` when there is nothing to show.
+pub(crate) fn onion_ghosts(doc: &floptle_image::Image, frame: usize, before: usize, after: usize) -> Option<Vec<u8>> {
+    let n = doc.frames;
+    let mut ghosts: Vec<(usize, usize, [f32; 3])> = Vec::new();
+    for d in 1..=before.min(n.saturating_sub(1)) {
+        ghosts.push(((frame + n - d) % n, d, [1.0, 0.35, 0.35]));
+    }
+    for d in 1..=after.min(n.saturating_sub(1)) {
+        ghosts.push(((frame + d) % n, d, [0.35, 1.0, 0.45]));
+    }
+    ghosts.retain(|g| g.0 != frame);
+    if ghosts.is_empty() {
+        return None;
+    }
+    // The farthest first, so the nearest lands on top.
+    ghosts.sort_by_key(|g| std::cmp::Reverse(g.1));
+    let mut out = vec![0u8; doc.w as usize * doc.h as usize * 4];
+    for (f, d, tint) in ghosts {
+        let flat = composite::flatten(doc, f);
+        // A lone ghost keeps the old single-frame strength.
+        let strength = 0.45 / d as f32;
+        for (o, p) in out.as_chunks_mut::<4>().0.iter_mut().zip(flat.as_chunks::<4>().0.iter()) {
+            let sa = p[3] as f32 / 255.0 * strength;
+            if sa <= 0.0 {
+                continue;
+            }
+            let da = o[3] as f32 / 255.0;
+            let oa = sa + da * (1.0 - sa);
+            for c in 0..3 {
+                let src = p[c] as f32 * (0.5 + 0.5 * tint[c]);
+                o[c] = ((src * sa + o[c] as f32 * da * (1.0 - sa)) / oa).round().min(255.0) as u8;
+            }
+            o[3] = (oa * 255.0).round().min(255.0) as u8;
+        }
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod onion_tests {
+    /// Frames behind show red, frames ahead green, and the current frame never
+    /// ghosts over itself.
+    #[test]
+    fn the_onion_skin_shows_frames_either_side_in_their_colours() {
+        let mut doc = floptle_image::Image::new(3, 1, floptle_image::Mode::Pixel);
+        doc.set_frames(3);
+        for i in 0..doc.layers.len() {
+            doc.set_layer_animated(i, true);
+        }
+        // Frame f paints pixel f white.
+        for f in 0..3 {
+            if let Some(g) = doc.layers[0].grid_mut(f) {
+                g.set(f as i64, 0, [255, 255, 255, 255]);
+            }
+        }
+        let g = super::onion_ghosts(&doc, 1, 1, 1).expect("ghosts");
+        assert!(g[0] > g[1] && g[3] > 0, "frame 0, behind, is red-tinted: {:?}", &g[0..4]);
+        assert_eq!(g[7], 0, "the current frame is not ghosted");
+        assert!(g[9] > g[8] && g[11] > 0, "frame 2, ahead, is green-tinted: {:?}", &g[8..12]);
+        assert!(super::onion_ghosts(&doc, 1, 0, 0).is_none());
     }
 }

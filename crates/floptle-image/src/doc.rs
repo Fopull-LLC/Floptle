@@ -258,6 +258,24 @@ pub struct Image {
     /// tileset can be told the numbers rather than have them re-typed (and
     /// mistyped) in three places. `None` = an ordinary image, no cell grid.
     pub sheet: Option<(u32, u32)>,
+    /// How long each frame shows, in frame slots at `fps`: `2.0` is a frame
+    /// held twice as long. Empty means every frame is one slot; otherwise
+    /// there is one per frame, kept in step by every frame operation.
+    pub holds: Vec<f32>,
+    /// Named runs of frames — the animations in this sheet. A sheet export
+    /// writes one sprite animation per tag.
+    pub tags: Vec<AnimTag>,
+}
+
+/// A named run of frames, `from` to `to` inclusive.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnimTag {
+    pub name: String,
+    pub from: usize,
+    pub to: usize,
+    /// 0 forward, 1 reverse, 2 ping-pong, 3 ping-pong reversed — Aseprite's
+    /// numbering, so a tag means the same in both.
+    pub direction: u8,
 }
 
 impl Image {
@@ -277,6 +295,27 @@ impl Image {
             selection: None,
             tiling: false,
             sheet: None,
+            holds: Vec::new(),
+            tags: Vec::new(),
+        }
+    }
+
+    /// How many slots frame `f` shows for.
+    pub fn hold(&self, f: usize) -> f32 {
+        self.holds.get(f).copied().filter(|h| h.is_finite() && *h > 0.0).unwrap_or(1.0)
+    }
+
+    /// Set how many slots frame `f` shows for.
+    pub fn set_hold(&mut self, f: usize, hold: f32) {
+        if f >= self.frames {
+            return;
+        }
+        if self.holds.len() != self.frames {
+            self.holds = vec![1.0; self.frames];
+        }
+        self.holds[f] = if hold.is_finite() { hold.clamp(0.1, 100.0) } else { 1.0 };
+        if self.holds.iter().all(|h| *h == 1.0) {
+            self.holds.clear();
         }
     }
 
@@ -653,6 +692,13 @@ impl Image {
                 frames.truncate(n.max(1));
             }
         }
+        if !self.holds.is_empty() {
+            self.holds.resize(n, 1.0);
+        }
+        self.tags.retain(|t| t.from < n);
+        for t in &mut self.tags {
+            t.to = t.to.min(n - 1);
+        }
         self.frames = n;
     }
 
@@ -688,6 +734,20 @@ impl Image {
                 frames.insert(frame + 1, copy);
             }
         }
+        // The copy holds as long as its original, and a tag the frame is in
+        // grows to take it.
+        if frame < self.holds.len() {
+            let h = self.holds[frame];
+            self.holds.insert(frame + 1, h);
+        }
+        for t in &mut self.tags {
+            if t.from > frame {
+                t.from += 1;
+            }
+            if t.to >= frame {
+                t.to += 1;
+            }
+        }
         self.frames = (self.frames + 1).min(512);
     }
 
@@ -701,6 +761,19 @@ impl Image {
                 && frame < frames.len()
             {
                 frames.remove(frame);
+            }
+        }
+        if frame < self.holds.len() {
+            self.holds.remove(frame);
+        }
+        // A tag of just this frame goes with it; the rest close up.
+        self.tags.retain(|t| !(t.from == frame && t.to == frame));
+        for t in &mut self.tags {
+            if t.from > frame {
+                t.from -= 1;
+            }
+            if t.to >= frame && t.to > 0 {
+                t.to -= 1;
             }
         }
         self.frames -= 1;
@@ -953,5 +1026,34 @@ mod tests {
         assert_eq!(img.resident_bytes(), 0);
         img.layers[0].grid_mut(0).unwrap().set(5, 5, [1, 1, 1, 255]);
         assert_eq!(img.resident_bytes(), 128 * 128 * 4);
+    }
+}
+
+#[cfg(test)]
+mod anim_tests {
+    use super::*;
+
+    /// Holds and tags stay on the frames they belong to through duplicating
+    /// and deleting — a hold parallel to the frames that did not move with
+    /// them would land on the wrong frame.
+    #[test]
+    fn holds_and_tags_follow_their_frames() {
+        let mut img = Image::new(2, 2, Mode::Pixel);
+        img.set_frames(4);
+        img.set_hold(2, 5.0);
+        img.tags.push(AnimTag { name: "idle".into(), from: 0, to: 1, direction: 0 });
+        img.tags.push(AnimTag { name: "hit".into(), from: 2, to: 3, direction: 0 });
+        img.duplicate_frame(0);
+        assert_eq!(img.holds, vec![1.0, 1.0, 1.0, 5.0, 1.0]);
+        assert_eq!((img.tags[0].from, img.tags[0].to), (0, 2), "the tag grows to take the copy");
+        assert_eq!((img.tags[1].from, img.tags[1].to), (3, 4), "the later tag moves along");
+        img.delete_frame(1);
+        assert_eq!(img.holds, vec![1.0, 1.0, 5.0, 1.0]);
+        assert_eq!((img.tags[1].from, img.tags[1].to), (2, 3));
+        img.set_frames(3);
+        assert_eq!(img.holds.len(), 3);
+        assert_eq!((img.tags[1].from, img.tags[1].to), (2, 2), "clipped to the frames left");
+        img.set_hold(2, 1.0);
+        assert!(img.holds.is_empty(), "all ones is no holds at all");
     }
 }

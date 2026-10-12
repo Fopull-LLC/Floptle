@@ -314,11 +314,18 @@ frames are wired straight into that.
 - **✚** in the Frames panel adds a frame (and makes the layers per-frame).
 - Per-layer **per-frame** toggle: a background layer can stay static while the
   character animates.
-- **Onion skin** ghosts the previous frame under the current one.
-- Playback at the document's fps.
+- **Onion skin** ghosts the frames either side of the current one: set how many
+  before (◀, in red) and after (▶, in green). The nearest is the strongest.
+- **hold** sets how long the current frame shows, in frames at the document's
+  fps: `2×` holds it twice as long. Playback honours it.
+- **Tags** name runs of frames: `walk` is frames 1–6, `jump` is 7–9. Each plays
+  forward, reverse, ping-pong, or ping-pong back.
 - **File ▸ Export ▸ Frames → sprite sheet** packs one **uniform, row-major grid**
   and writes `cols`/`rows` into `.floptle/textures.ron` — so the sheet the packer
-  makes is exactly the sheet the runtime can address. No manual counting.
+  makes is exactly the sheet the runtime can address. No manual counting. It also
+  writes a sprite animation beside the sheet for every tag (`hero_walk`,
+  `hero_jump`), or one for all the frames when there are no tags, with every
+  hold kept. Drag one onto an animation controller and it plays.
 - **Frames → animated GIF** for sharing.
 
 ### Drawing a tileset: the cell grid
