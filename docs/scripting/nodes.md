@@ -367,6 +367,20 @@ end
 - `scene.current()` is the running scene's name; `scene.list()` enumerates
   every scene in the project (names `scene.load` accepts).
 
+**A fade between scenes** takes one option:
+
+```lua
+scene.load("level2", { fade = 0.6 })                     -- to black and back
+scene.load("level2", { fade = 1.0, color = {1, 1, 1} })  -- through white
+```
+
+`fade` is the whole transition in seconds. The screen fades to `color` over
+the first half, the scene swaps while it is covered, and the new scene fades
+in over the second half. The overlay covers the HUD too, and runs on the real
+clock, so it finishes even when the game is paused. `color` is `{r, g, b}` or
+`{r, g, b, a}`, each 0 to 1, and black when left out. A fade is for a full
+swap; asking for one with `additive = true` is refused.
+
 ### Multiplayer
 
 Only the **server** switches scenes. When the host's script calls

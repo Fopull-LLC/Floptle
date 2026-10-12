@@ -702,7 +702,8 @@ impl Editor {
         }
         // World-space layers render in the scene, not as an overlay.
         let (layers, ents) = self.ui_layer_trees(|l| !l.is_world());
-        if layers.is_empty() && self.script_rects.is_empty() && self.script_texts.is_empty() {
+        let fade = self.scene_fade_cover();
+        if layers.is_empty() && self.script_rects.is_empty() && self.script_texts.is_empty() && fade.is_none() {
             return Vec::new();
         }
         let Some(uir) = self.ui_render.as_ref() else { return Vec::new() };
@@ -783,6 +784,12 @@ impl Editor {
                 r.rect[1] -= o[1];
                 dl.texts.push(r);
             }
+            out.push((dl, 1.0));
+        }
+        // A scene fade covers everything the game draws, HUD included.
+        if let Some(c) = fade {
+            let mut dl = floptle_ui::DrawList::default();
+            dl.quads.push(floptle_ui::Quad { rect: [0.0, 0.0, viewport[0], viewport[1]], color: c, ..Default::default() });
             out.push((dl, 1.0));
         }
         // Captions, drawn by the engine so every game gets the

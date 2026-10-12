@@ -1060,3 +1060,31 @@ end
     assert!(!env.get::<bool>("reached").unwrap(), "a sealed wall cannot be crossed");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `scene.load{ fade, color }` queues a fading swap; a fade on a layer is
+/// refused, since a layer has nothing to swap.
+#[test]
+fn scene_load_takes_a_fade_and_its_colour() {
+    let dir = std::env::temp_dir().join(format!("floptle_scenefade_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "door",
+        "function start(node)\n  scene.load('next', { fade = 0.8, color = {1, 0.5, 0} })\n  ok = pcall(scene.load, 'x', { fade = 1, additive = true })\nend\n",
+    );
+    let (mut world, e) = world_with_script("door");
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let reqs = host.take_scene_requests();
+    assert_eq!(
+        reqs,
+        vec![crate::SceneRequest::Load {
+            name: "next".into(),
+            fade: Some(crate::SceneFade { seconds: 0.8, color: [1.0, 0.5, 0.0, 1.0] }),
+        }]
+    );
+    let env = host.instance_env(e.index(), "door").unwrap();
+    assert!(!env.get::<bool>("ok").unwrap(), "a fading layer must be refused");
+    let _ = std::fs::remove_dir_all(&dir);
+}

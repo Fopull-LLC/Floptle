@@ -320,6 +320,17 @@ impl Editor {
         p.record(Bucket::Scripts, (ms - mirror).max(0.0));
     }
 
+    /// How much of the screen a scene fade covers this frame, 0 to 1, and its
+    /// colour.
+    pub(crate) fn scene_fade_cover(&self) -> Option<[f32; 4]> {
+        let f = self.scene_fade.as_ref()?;
+        let half = (f.fade.seconds * 0.5).max(1e-4);
+        let a = if f.swapped { 1.0 - (f.t - half) / half } else { f.t / half };
+        let mut c = f.fade.color;
+        c[3] *= a.clamp(0.0, 1.0);
+        Some(c)
+    }
+
     pub(crate) fn play_step(&mut self, dt: f32, game_focused: bool) {
         // **`app.*` is driven from inside the step, not around it.** There are
         // two hosts that run gameplay — the windowed frame and `floptle run`'s
@@ -333,11 +344,36 @@ impl Editor {
         // Play mode: advance the (pausable) script clock and run the Lua scripts
         // attached to nodes. Scripts hot-reload as their files change.
         if self.playing {
+            // A fading transition: out to the colour, the swap while the
+            // screen is covered, and back in. Timed on the real clock, so a
+            // paused or slowed game still gets out of a menu.
+            if let Some(mut f) = self.scene_fade.take() {
+                f.t += dt.max(0.0);
+                let half = f.fade.seconds * 0.5;
+                if !f.swapped && f.t >= half {
+                    f.swapped = true;
+                    let req = f.req.clone();
+                    self.perform_scene_request(&req);
+                }
+                if f.t < f.fade.seconds {
+                    self.scene_fade = Some(f);
+                }
+            }
             // A scene transition a script queued last frame happens first —
             // at a frame boundary, never mid-frame under the scripts that
             // asked for it (offline/host = switch; joined client = refused).
             for req in std::mem::take(&mut self.pending_scene) {
                 let swap = req.is_swap();
+                if let floptle_script::SceneRequest::Load { name, fade: Some(fade) } = &req {
+                    // A second fade asked for before the swap retargets the
+                    // one running; after the swap it starts afresh.
+                    let plain = floptle_script::SceneRequest::Load { name: name.clone(), fade: None };
+                    match self.scene_fade.as_mut() {
+                        Some(f) if !f.swapped => f.req = plain,
+                        _ => self.scene_fade = Some(SceneFadeRun { req: plain, fade: *fade, t: 0.0, swapped: false }),
+                    }
+                    break;
+                }
                 self.perform_scene_request(&req);
                 // A full swap ends the queue: the requests behind it named the
                 // world that no longer exists, and the new scene's own `start`
@@ -1573,4 +1609,65 @@ pub(crate) fn moving_world_at(
         .filter(|(_, at, soi)| (p - *at).length() < *soi)
         .min_by(|a, b| a.2.total_cmp(&b.2))
         .map(|(e, ..)| *e)
+}
+
+/// A fading `scene.load` on its way through: the swap it will make, and how
+/// far along it is.
+pub(crate) struct SceneFadeRun {
+    pub(crate) req: floptle_script::SceneRequest,
+    pub(crate) fade: floptle_script::SceneFade,
+    pub(crate) t: f32,
+    pub(crate) swapped: bool,
+}
+
+#[cfg(test)]
+mod scene_fade_tests {
+    use floptle_core::transform::Transform;
+
+    fn scene_with(root: &std::path::Path, name: &str, node: &str) {
+        let mut w = floptle_core::World::default();
+        let e = w.spawn();
+        w.insert(e, Transform::IDENTITY);
+        w.insert(e, floptle_core::Name(node.into()));
+        w.insert(e, floptle_core::Matter::Empty);
+        let doc = floptle_scene::to_doc(name, &w);
+        floptle_vfs::write(root.join(format!("scenes/{name}.ron")), floptle_scene::to_ron(&doc).unwrap()).unwrap();
+    }
+
+    fn has(ed: &crate::Editor, node: &str) -> bool {
+        ed.world.query::<floptle_core::Name>().any(|(_, n)| n.0 == node)
+    }
+
+    /// `scene.load{ fade }` covers the screen first, swaps while it is covered,
+    /// and uncovers the new scene; the plain swap still happens at once.
+    #[test]
+    fn a_fading_load_swaps_while_the_screen_is_covered() {
+        let root = std::env::temp_dir().join(format!("floptle-scene-fade-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        floptle_vfs::create_dir_all(root.join("scenes")).unwrap();
+        scene_with(&root, "a", "InA");
+        scene_with(&root, "b", "InB");
+        let mut ed = crate::Editor::default();
+        ed.open_project(root.clone());
+        ed.open_scene_file(&root.join("scenes/a.ron").to_string_lossy());
+        ed.toggle_play();
+        assert!(has(&ed, "InA"));
+        let fade = floptle_script::SceneFade { seconds: 0.4, color: [0.0, 0.0, 0.0, 1.0] };
+        ed.pending_scene.push(floptle_script::SceneRequest::Load { name: "b".into(), fade: Some(fade) });
+
+        ed.play_step(0.0, true);
+        ed.play_step(0.1, true);
+        let c = ed.scene_fade_cover().expect("fading");
+        assert!((c[3] - 0.5).abs() < 0.01, "half covered a quarter of the way through: {}", c[3]);
+        assert!(has(&ed, "InA"), "the old scene stays until the screen is covered");
+
+        ed.play_step(0.11, true);
+        assert!(has(&ed, "InB") && !has(&ed, "InA"), "swapped at the halfway point");
+        let c = ed.scene_fade_cover().expect("still fading");
+        assert!(c[3] > 0.9, "and the new scene starts covered: {}", c[3]);
+
+        ed.play_step(0.25, true);
+        assert!(ed.scene_fade_cover().is_none(), "the fade is over");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

@@ -73,7 +73,7 @@ use crate::{
 };
 
 /// Every key a `scene.load` options table reads.
-pub(crate) const SCENE_LOAD_KEYS: &[&str] = &["additive", "environment", "offset", "replicate"];
+pub(crate) const SCENE_LOAD_KEYS: &[&str] = &["additive", "environment", "offset", "replicate", "fade", "color"];
 
 /// Render any Lua value as readable Console text: primitives plainly, engine
 /// handles by identity (`node "Player" (#4)`, `component "RigidBody" of …`),
@@ -1257,6 +1257,32 @@ fn install_scene(lua: &Lua, net: &crate::net_api::SharedNet, project_root: &Rc<R
                 // chain replace the base scene's for as long as it is
                 // loaded. Meaningless without `additive` (a full swap
                 // already brings its own), so it is read alongside it.
+                // `{ fade = 0.5, color = {0, 0, 0} }`: a full swap that fades the
+                // screen out, swaps while it is covered, and fades back in.
+                let mut fade = None;
+                if let Some(o) = &opts
+                    && let Some(seconds) = crate::opts::opt_num(o, "scene.load", "fade", 0.0, 30.0)?
+                {
+                    let mut color = [0.0, 0.0, 0.0, 1.0];
+                    match o.get::<Value>("color")? {
+                        Value::Nil => {}
+                        Value::Table(c) => {
+                            for (i, slot) in color.iter_mut().enumerate() {
+                                if let Some(v) = c.get::<Option<f32>>(i + 1)? {
+                                    *slot = v.clamp(0.0, 1.0);
+                                }
+                            }
+                        }
+                        _ => {
+                            return Err(mlua::Error::runtime(
+                                "scene.load: `color` is {r, g, b} or {r, g, b, a}, each 0 to 1",
+                            ))
+                        }
+                    }
+                    fade = (seconds > 0.0).then_some(crate::SceneFade { seconds: seconds as f32, color });
+                } else if opts.as_ref().is_some_and(|o| o.contains_key("color").unwrap_or(false)) {
+                    return Err(mlua::Error::runtime("scene.load: `color` is the colour of a fade; add `fade = seconds`"));
+                }
                 let (additive, environment, offset, replicate) = match &opts {
                     Some(o) => {
                         crate::opts::check_keys(o, SCENE_LOAD_KEYS, "scene.load")?;
@@ -1283,6 +1309,11 @@ fn install_scene(lua: &Lua, net: &crate::net_api::SharedNet, project_root: &Rc<R
                 // Both only mean something for a layer. Read as a full swap,
                 // `offset` would be dropped in silence and the level would
                 // arrive at the origin with everything else gone.
+                if additive && fade.is_some() {
+                    return Err(mlua::Error::runtime(
+                        "scene.load: `fade` is for a full swap; a layer arrives over the running scene",
+                    ));
+                }
                 if !additive && (offset.is_some() || replicate.is_some()) {
                     return Err(mlua::Error::runtime(
                         "scene.load: `offset` and `replicate` are for a layer; add `additive = true`",
@@ -1291,7 +1322,7 @@ fn install_scene(lua: &Lua, net: &crate::net_api::SharedNet, project_root: &Rc<R
                 let req = if additive {
                     crate::SceneRequest::Additive { name, environment, offset, replicate: replicate.unwrap_or(true) }
                 } else {
-                    crate::SceneRequest::Load { name }
+                    crate::SceneRequest::Load { name, fade }
                 };
                 let mut q = q.borrow_mut();
                 // A full swap ends the frame's queue: everything already

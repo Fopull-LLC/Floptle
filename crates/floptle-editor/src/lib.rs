@@ -3619,6 +3619,8 @@ struct Editor {
     /// performed at the top of the next frame, in order (never mid-frame under
     /// the running scripts).
     pending_scene: Vec<floptle_script::SceneRequest>,
+    /// A `scene.load{ fade = … }` in progress — see `play_step.rs`.
+    scene_fade: Option<play_step::SceneFadeRun>,
     /// The display's refresh period, seconds (0 = unknown) — dt snaps to whole
     /// multiples of it so scheduler noise never reaches the simulation clock.
     refresh_period: f32,

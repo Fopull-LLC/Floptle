@@ -894,6 +894,7 @@ impl Editor {
         self.script_lines.clear();
         self.script_rects.clear();
         self.script_texts.clear();
+        self.scene_fade = None;
         // Both directions of the Play toggle wipe action state: a key held
         // while editing must not read as a press the instant Play starts, and a
         // half-finished motion must not survive into (or out of) the session.

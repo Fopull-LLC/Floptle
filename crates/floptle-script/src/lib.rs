@@ -199,8 +199,9 @@ type UiBindings = Rc<RefCell<Vec<UiBinding>>>;
 /// behind it named the world that just stopped existing.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SceneRequest {
-    /// `scene.load(name)` — replace the world.
-    Load { name: String },
+    /// `scene.load(name)` — replace the world, with `{ fade = s }` fading
+    /// the screen to a colour and back across the swap.
+    Load { name: String, fade: Option<SceneFade> },
     /// `scene.load(name, { additive = true })` — layer on top of it.
     ///
     /// `environment` is `{ environment = true }`: the layer owns the world's
@@ -219,11 +220,20 @@ pub enum SceneRequest {
     Unload { name: String },
 }
 
+/// `scene.load(name, { fade = seconds, color = {r, g, b} })`: the whole
+/// transition takes `seconds`, half out to `color` and half back in, with the
+/// swap at the moment the screen is covered.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SceneFade {
+    pub seconds: f32,
+    pub color: [f32; 4],
+}
+
 impl SceneRequest {
     /// The scene this request names, whichever kind it is.
     pub fn name(&self) -> &str {
         match self {
-            SceneRequest::Load { name }
+            SceneRequest::Load { name, .. }
             | SceneRequest::Additive { name, .. }
             | SceneRequest::Unload { name } => name,
         }
