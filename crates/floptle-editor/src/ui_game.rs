@@ -390,15 +390,16 @@ impl Editor {
             return;
         }
         let bytes = floptle_vfs::read(&file).unwrap_or_default();
-        // WOFF2 is listed as a font so it can be picked, and says why it does
-        // not draw rather than falling back in silence.
-        if floptle_render::woff::is_woff2(&bytes) {
+        // A WOFF2 that will not unpack says why rather than falling back to
+        // the built-in font in silence: the one kind it cannot be is a font
+        // collection.
+        if floptle_render::woff2::is_woff2(&bytes) && floptle_render::woff2::unwrap_woff2(&bytes).is_none() {
             self.console.push(
                 floptle_script::LogLevel::Warn,
                 format!(
-                    "font {path} is WOFF2, which is not read yet — convert it to .ttf or .woff \
-                     (for example with fonttools: `fonttools ttLib.woff2 decompress`). Text using it \
-                     falls back to the built-in font"
+                    "font {path} is a WOFF2 that could not be read: it is damaged, or a font \
+                     collection (convert one face to .ttf or .woff2). Text using it falls back \
+                     to the built-in font"
                 ),
                 None,
             );

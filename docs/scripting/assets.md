@@ -723,9 +723,8 @@ draw.text(w - 24, 24, string.format("%.1f fps", 1 / dt), 18, 1, 1, 1, 0.7, "righ
 #### Which font it uses
 
 Leave `font` out and you get **the project's UI font** — Project Settings ▸ **UI
-font**, a project-relative `.ttf`, `.otf`, `.ttc`, `.woff` or BMFont `.fnt`.
-(`.woff2` is not read yet; the Console says so and how to convert it.) That is
-the setting to reach for: it
+font**, a project-relative `.ttf`, `.otf`, `.ttc`, `.woff`, `.woff2` or BMFont
+`.fnt`. That is the setting to reach for: it
 also covers every `ui.make` label and every element whose style names no font,
 so a pixel-art game says its font once instead of at forty call sites.
 

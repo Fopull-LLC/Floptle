@@ -44,6 +44,7 @@ pub mod ssr;
 pub mod tris;
 pub mod ui;
 pub mod woff;
+pub mod woff2;
 
 pub use camera::{FlyCamera, Input, ViewLock};
 pub use camera_stack::{StackComposite, StackLayer};

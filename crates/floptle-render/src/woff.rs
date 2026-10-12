@@ -3,8 +3,8 @@
 //! back the font it was made from, byte for byte, which the rasterizer reads
 //! like any `.ttf`.
 //!
-//! WOFF2 is a different format (Brotli, and the glyph tables rewritten) and is
-//! not read here.
+//! WOFF2 is a different format (Brotli, and the glyph tables rewritten); see
+//! [`crate::woff2`]. [`unwrap_web_font`] takes either.
 
 use std::io::Read;
 
@@ -21,9 +21,10 @@ pub fn is_woff(bytes: &[u8]) -> bool {
     bytes.starts_with(b"wOFF")
 }
 
-/// Is this a WOFF2 file, which is not read?
-pub fn is_woff2(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"wOF2")
+/// The TrueType/OpenType font inside a WOFF or WOFF2 file. `None` when the
+/// bytes are neither (an ordinary `.ttf` is read as it is) or are damaged.
+pub fn unwrap_web_font(bytes: &[u8]) -> Option<Vec<u8>> {
+    unwrap_woff(bytes).or_else(|| crate::woff2::unwrap_woff2(bytes))
 }
 
 /// The TrueType/OpenType font inside a WOFF file. `None` when it is damaged.

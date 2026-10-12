@@ -1176,14 +1176,14 @@ impl Ui {
         self.packer.skyline as f32 / self.atlas_size as f32
     }
 
-    /// Register a project font (.ttf/.otf bytes) under its asset path. Parse
+    /// Register a project font (.ttf/.otf/.woff/.woff2 bytes) under its asset path. Parse
     /// failures are remembered (and warned once) — the text falls back to font 0.
     pub fn ensure_font(&mut self, path: &str, bytes: &[u8]) {
         if self.font_ids.contains_key(path) {
             return;
         }
-        // A WOFF is the same font with its tables compressed.
-        let unwrapped = crate::woff::unwrap_woff(bytes);
+        // A WOFF or WOFF2 is the same font, compressed.
+        let unwrapped = crate::woff::unwrap_web_font(bytes);
         let bytes = unwrapped.as_deref().unwrap_or(bytes);
         let id = match fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()) {
             Ok(f) => {
