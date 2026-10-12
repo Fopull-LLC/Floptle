@@ -67,11 +67,18 @@ It **adds** to the freeze boxes below rather than replacing them, so ticking it
 can only ever lock more, and unticking it cannot silently release an axis you
 locked by hand. The axes it holds show as ticked and disabled.
 
+A 2D box collides in its own plane: its corners and edges are tested where
+it is, not half its depth in front of and behind it.
+
+**Add RigidBody on a Sprite** gives it a 2D box the size the sprite is drawn,
+so a falling crate needs no further setup.
+
 From a script: `node:getcomponent("RigidBody").two_d = 1`.
 
 > If your 2D player falls through the level, check the **tilemap** node has
-> **Collidable** on. Pressing Play warns in the console, by name, for any tilemap
-> that has solid tiles and cannot collide.
+> **Collidable** on. Making a tile solid in the ◫ Tiles tab turns it on for you,
+> and pressing Play warns in the console, by name, for any tilemap that has
+> solid tiles and cannot collide.
 
 ## 3. Gravity
 

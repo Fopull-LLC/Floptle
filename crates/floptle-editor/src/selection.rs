@@ -262,9 +262,10 @@ impl Editor {
         }
     }
 
-    /// The world point under the cursor — its ray's hit on the ground plane (y=0),
-    /// or ~6 units in front of the camera if the ray doesn't meet the ground. Used to
-    /// place a dropped asset where the cursor is.
+    /// The world point under the cursor — its ray's hit on the plane the view
+    /// faces (the ground, or z = 0 in a 2D view; see `viz::drop_axis`), or ~6
+    /// units in front of the camera if it misses. Used to place a dropped asset
+    /// where the cursor is.
     pub(crate) fn cursor_world(&self) -> DVec3 {
         let cam = self.camera.render_camera();
         let Some(gpu) = self.gpu.as_ref() else {
@@ -272,7 +273,8 @@ impl Editor {
         };
         let (w, h) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
         let inv = cam.view_proj(w / h).inverse();
-        cursor_ground(cam.world_position, cam.rotation, inv, w, h, self.cursor)
+        let axis = crate::viz::drop_axis(self.camera.lock, cam.rotation);
+        cursor_ground(cam.world_position, cam.rotation, inv, w, h, self.cursor, axis)
     }
 
     /// Move the selection up (-1) / down (+1) through the hierarchy (arrow keys).

@@ -53,6 +53,8 @@ pub(crate) enum TileCmd {
     Resize(u32, u32, i32, i32),
     /// Retile every square of the active layer.
     RetileAll,
+    /// Shrink the active layer to the squares that hold a tile.
+    FitToContent,
     /// Selection operations.
     Copy,
     Paste,
@@ -104,6 +106,8 @@ pub(crate) enum TileCmd {
     ApplyPreset(u16),
     /// Mark every tile in the palette selection solid (or not) in one go.
     BulkCollision(Vec<u32>, TileCollision),
+    /// Give each of these tiles the collision its art suggests.
+    CollisionFromArt(Vec<u32>),
     /// Save the dirty tilesets now.
     SaveTilesets,
 }
@@ -531,23 +535,37 @@ impl TileCtx<'_> {
         });
         labelled(ui, "anchor", |ui| {
             ui.add(egui::DragValue::new(&mut want.2).range(-4096..=4096).prefix("x+"))
-                .on_hover_text("where the old top-left lands — 1 to grow a column on the left");
+                .on_hover_text("columns to add on the LEFT; new width columns go on the right otherwise");
             ui.add(egui::DragValue::new(&mut want.3).range(-4096..=4096).prefix("y+"))
-                .on_hover_text("…and 1 to grow a row on the top");
+                .on_hover_text("rows to add on the TOP; new height rows go on the bottom otherwise");
         });
         ui.data_mut(|d| d.insert_temp(id, want));
         let changed = (want.0, want.1) != (cols, rows) || want.2 != 0 || want.3 != 0;
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(changed, egui::Button::new("Apply size").min_size([CHIP_W, BTN_H].into()))
-                .on_hover_text("keeps whatever overlaps; anything outside the new grid is dropped")
+                .on_hover_text(
+                    "every tile stays where it is in the world; squares outside a smaller grid \
+                     are dropped",
+                )
                 .clicked()
             {
                 self.cmds.push(TileCmd::Resize(want.0, want.1, want.2, want.3));
                 ui.data_mut(|d| d.insert_temp(id, (want.0, want.1, 0, 0)));
             }
+            if ui
+                .small_button("fit to tiles")
+                .on_hover_text("shrink to the squares that hold a tile, without moving any")
+                .clicked()
+            {
+                self.cmds.push(TileCmd::FitToContent);
+            }
             ui.small(format!("{tile} units / tile"));
         });
+        ui.checkbox(&mut self.tools.grow, "Grow as I paint").on_hover_text(
+            "painting past the edge makes the layer bigger to fit, and nothing already \
+             placed moves. Untick for a level that is a set size.",
+        );
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut self.tools.show_grid, "Grid").on_hover_text(
                 "draw the layer's tile lines in the Scene view",
@@ -1239,6 +1257,16 @@ impl TileCtx<'_> {
         });
         if mixed {
             ui.small("These tiles do not all collide the same way — pick one above to set them all.");
+        }
+        if ui
+            .small_button("fit to the art")
+            .on_hover_text(
+                "work each selected tile's collision out from its pixels: solid blocks are \
+                 full, ramps follow their top edge, small details are walk-through",
+            )
+            .clicked()
+        {
+            self.cmds.push(TileCmd::CollisionFromArt(cells.clone()));
         }
         if let TileCollision::Half(side) = coll {
             labelled(ui, "which half", |ui| {
@@ -2456,6 +2484,7 @@ impl crate::Editor {
             TileCmd::AddLayer => self.add_tile_layer(),
             TileCmd::Resize(c, r, ox, oy) => self.tile_resize(c, r, ox, oy),
             TileCmd::RetileAll => self.tile_retile_all(),
+            TileCmd::FitToContent => self.tile_fit_to_content(),
             TileCmd::Copy => self.tile_copy(),
             TileCmd::Paste => self.tile_paste(),
             TileCmd::ClearSelection => self.tile_clear_selection(),
@@ -2473,6 +2502,21 @@ impl crate::Editor {
                 }
             }
             TileCmd::SaveTilesets => self.save_tilesets(),
+            TileCmd::CollisionFromArt(cells) => {
+                let Some(path) = self.tile_tools.editing.clone() else { return };
+                let solid = self.collision_from_art(&path, &cells);
+                self.tile_note(&format!("{solid} of {} tiles collide, going by their art", cells.len()));
+                if solid > 0 {
+                    self.layers_using_collide(&path);
+                }
+            }
+            TileCmd::BulkCollision(cells, c) => {
+                let solid = c.is_solid();
+                self.apply_tileset_cmd(TileCmd::BulkCollision(cells, c));
+                if solid && let Some(path) = self.tile_tools.editing.clone() {
+                    self.layers_using_collide(&path);
+                }
+            }
             // The rest edit the tileset, not the scene, so they are not scene undo.
             // A tileset is a project asset like a material: its own file, saved on
             // change. (Tileset undo is a real gap and is written down as one — see
@@ -2702,6 +2746,18 @@ impl crate::Editor {
             .to_string();
         let path = self.new_tileset(&name, &rel, cols, rows);
         self.attach_new_tileset(e, &path);
+        // Collision from the art, so the level collides the way it looks from
+        // the first Play, and a layer that has solid tiles is a layer that
+        // collides.
+        let solid = if cols * rows > 1 { self.collision_from_art(&path, &(0..cols * rows).collect::<Vec<_>>()) } else { 0 };
+        if solid > 0 {
+            self.layers_using_collide(&path);
+            self.save_tilesets();
+            self.tile_note(&format!(
+                "{solid} tiles collide, going by their art. Pick a tile in PALETTE to change \
+                 what it collides as"
+            ));
+        }
         if cols * rows <= 1 {
             self.tile_note(&format!(
                 "made {path}, but could not tell its tile size. Set cols / rows on its SHEETS row"
@@ -2711,6 +2767,79 @@ impl crate::Editor {
                 "made {path}: {cols}×{rows} tiles. Click one in PALETTE, then paint in the Scene view"
             ));
         }
+    }
+
+    /// Set each cell's collision from its pixels. Returns how many came out
+    /// solid. A cell whose sheet cannot be read is left as it was.
+    pub(crate) fn collision_from_art(&mut self, path: &str, cells: &[u32]) -> usize {
+        let Some(set) = self.tiles.get(path).cloned() else { return 0 };
+        // Sheet 0 with no image of its own draws the layer's material.
+        let material = self
+            .tile_tools
+            .layer
+            .and_then(|e| self.world.get::<floptle_core::Material>(e))
+            .and_then(|m| Some((m.texture.clone()?, m.sheet())));
+        // Per page: its RGBA pixels, size and cut, or `None` if unreadable.
+        type Sheet = Option<(Vec<u8>, u32, u32, u32, u32)>;
+        let mut sheets: std::collections::HashMap<u32, Sheet> = std::collections::HashMap::new();
+        let mut out = Vec::new();
+        for &cell in cells {
+            let (page, index) = (cell / floptle_core::TILE_PAGE_STRIDE, cell % floptle_core::TILE_PAGE_STRIDE);
+            let sheet = sheets.entry(page).or_insert_with(|| {
+                let (tex, c, r) = match set.page(page) {
+                    Some((t, c, r)) if !t.trim().is_empty() => (t.to_string(), c, r),
+                    Some(_) if page == 0 => {
+                        let (t, (c, r)) = material.clone()?;
+                        (t, c, r)
+                    }
+                    _ => return None,
+                };
+                let abs = crate::project::resolve_asset_path(&self.project_root, &tex);
+                let (px, w, h) = floptle_image::io::load_image(&abs)?;
+                Some((px, w, h, c, r))
+            });
+            let Some((px, w, h, c, r)) = sheet.as_ref() else { continue };
+            if let Some(coll) = floptle_tiles::collision_from_art(px, *w, *h, *c, *r, index) {
+                out.push((cell, coll));
+            }
+        }
+        let Some(set) = self.tiles.get_mut(path) else { return 0 };
+        let mut solid = 0;
+        for (cell, coll) in out {
+            solid += coll.is_solid() as usize;
+            set.info_mut(cell).collision = coll;
+        }
+        set.prune();
+        self.tiles.dirty.insert(path.to_string());
+        solid
+    }
+
+    /// Tick Collidable on every layer drawing from `path` that is not already
+    /// solid. Marking a tile solid says you want to stand on it; a layer that
+    /// then collided with nothing, with a warning in the Console, was the
+    /// commonest way a first 2D level fell through its own floor.
+    pub(crate) fn layers_using_collide(&mut self, path: &str) {
+        let need: Vec<Entity> = self
+            .world
+            .query::<Matter>()
+            .filter_map(|(e, m)| match m {
+                Matter::Tilemap { tileset, .. } if tileset == path => Some(e),
+                _ => None,
+            })
+            .filter(|e| {
+                self.world.get::<floptle_core::Collidable>(*e).is_none()
+                    && self.world.get::<floptle_core::RigidBody>(*e).is_none()
+            })
+            .collect();
+        if need.is_empty() {
+            return;
+        }
+        self.begin_edit();
+        for e in &need {
+            self.world.insert(*e, floptle_core::Collidable);
+        }
+        self.scene_dirty = true;
+        self.tile_note(&format!("ticked Collidable on {} layer(s) so their solid tiles collide", need.len()));
     }
 
     fn attach_new_tileset(&mut self, e: Entity, path: &str) {
@@ -3223,5 +3352,69 @@ mod tests {
         assert!(text.contains("Drop your spritesheet here"), "{text}");
         assert!(text.contains("choose an image"), "a picker for when dragging fails:\n{text}");
         assert!(!text.contains("SHEETS above"), "SHEETS is not on screen without a tileset:\n{text}");
+    }
+
+    /// A spritesheet dropped on a layer collides like it looks, and the layer
+    /// is ticked Collidable, so the first Play stands on it. Every tile of a
+    /// fresh tileset used to be walk-through and the layer not Collidable,
+    /// and the player fell through a level that looked solid.
+    #[test]
+    fn a_dropped_spritesheet_collides_like_it_looks() {
+        let (mut ed, e, root) = project_with_image("art", 64, 32);
+        // Clear the top-right tile (4×2 cut: cell 3), so the art is not all solid.
+        let abs = root.join("textures/Tiles1.png");
+        let (mut px, w, h) = floptle_image::io::load_image(&abs).unwrap();
+        for y in 0..16u32 {
+            for x in 48..64u32 {
+                px[((y * w + x) * 4 + 3) as usize] = 0;
+            }
+        }
+        floptle_image::io::save_png(&abs, &px, w, h).unwrap();
+        ed.apply_tile_cmds(vec![TileCmd::NewTilesetFromImage("textures/Tiles1.png".into())]);
+        let path = layer_tileset_of(&ed, e);
+        let set = ed.tiles.get(&path).unwrap();
+        assert_eq!(set.collision(0), &TileCollision::Full, "an opaque tile is solid");
+        assert_eq!(set.collision(3), &TileCollision::None, "an empty tile is not");
+        assert!(ed.world.get::<floptle_core::Collidable>(e).is_some(), "and the layer collides");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Marking a tile solid makes the layers that draw it collide.
+    #[test]
+    fn marking_a_tile_solid_makes_its_layer_collide() {
+        let (mut ed, e, root) = project_with_image("solid", 64, 32);
+        ed.apply_tile_cmds(vec![TileCmd::NewTilesetForLayer]);
+        ed.world.remove::<floptle_core::Collidable>(e);
+        ed.apply_tile_cmds(vec![TileCmd::BulkCollision(vec![0], TileCollision::None)]);
+        assert!(ed.world.get::<floptle_core::Collidable>(e).is_none(), "walk-through asks for nothing");
+        ed.apply_tile_cmds(vec![TileCmd::BulkCollision(vec![0], TileCollision::Full)]);
+        assert!(ed.world.get::<floptle_core::Collidable>(e).is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A sprite dropped into a level is drawn at the level's pixel density,
+    /// and unlit. It used to be 32 px per unit whatever the art, so a 16-px
+    /// character came in half the size of the 16-px tiles it stands on.
+    #[test]
+    fn a_dropped_sprite_matches_the_tiles() {
+        let (mut ed, e, root) = project_with_image("ppu", 64, 32);
+        // Alone, a sprite comes in one unit across its image.
+        let abs = root.join("textures/Tiles1.png").to_string_lossy().into_owned();
+        assert_eq!(ed.sprite_ppu_for("textures/Tiles1.png", 1, 1), 64.0);
+        // Beside a tile layer cut into 16-px tiles one unit across, it is 16.
+        ed.apply_tile_cmds(vec![TileCmd::NewTilesetFromImage("textures/Tiles1.png".into())]);
+        let _ = e;
+        assert_eq!(ed.sprite_ppu_for("textures/Tiles1.png", 1, 1), 16.0);
+        ed.drop_asset(&abs);
+        let s = *ed.selection.first().unwrap();
+        assert!(matches!(ed.world.get::<Matter>(s), Some(Matter::Sprite { ppu, .. }) if *ppu == 16.0));
+        assert!(ed.world.get::<floptle_core::Material>(s).unwrap().unlit, "a dropped sprite is unlit");
+        // …and a body added to it is a 2D box the size it is drawn: the image
+        // is 64×32 uncut, at 16 px a unit, so 4×2 units.
+        let rb = ed.default_body_for(s);
+        assert_eq!(rb.kind, floptle_core::BodyKind::Box);
+        assert!(rb.two_d, "a sprite's body stays in its plane");
+        assert_eq!((rb.half_extents[0], rb.half_extents[1]), (2.0, 1.0));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

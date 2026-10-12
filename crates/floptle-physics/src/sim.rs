@@ -310,6 +310,7 @@ impl Sim {
         let found: Vec<(Entity, RigidBody)> = ecs
             .query::<RigidBody>()
             .filter(|(e, _)| !floptle_core::is_disabled(ecs, *e))
+            .filter(|(e, _)| !is_tilemap(ecs, *e))
             .map(|(e, rb)| (e, *rb))
             .collect();
         // Assembly pass first: a Dynamic RigidBody with `assembly` set roots a
@@ -629,6 +630,9 @@ impl Sim {
             return false;
         }
         let Some(rb) = ecs.get::<RigidBody>(e).copied() else { return false };
+        if is_tilemap(ecs, e) {
+            return false;
+        }
         // Assembly roots register via `add_compound_for`, and a part node
         // under an assembly root is a compound shape, not its own body.
         if rb.assembly && rb.mode == floptle_core::BodyMode::Dynamic {
@@ -2219,6 +2223,16 @@ impl Sim {
             }
         }
     }
+}
+
+
+/// A tilemap is never a body. Its collision is its solid tiles, which the
+/// editor adds as static colliders, and a RigidBody on one is read as "these
+/// tiles are solid". Built as a body, it became one default-sized box at the
+/// map's middle in place of every tile, so a level that looked solid was a
+/// single unit cube.
+fn is_tilemap(ecs: &World, e: Entity) -> bool {
+    matches!(ecs.get::<floptle_core::Matter>(e), Some(floptle_core::Matter::Tilemap { .. }))
 }
 
 #[cfg(test)]

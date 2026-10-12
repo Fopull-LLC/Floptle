@@ -250,6 +250,10 @@ pub(crate) struct TileTools {
     /// Whether the gesture in flight changed anything — a press that paints
     /// nothing should not leave an empty step in the undo stack.
     pub(crate) touched: bool,
+    /// Painting past the edge of the layer grows it to fit. On by default:
+    /// running out of room is not a decision anybody made. Off is a level
+    /// that is a set size, where a stroke off the edge does nothing.
+    pub(crate) grow: bool,
     /// A press is in flight.
     pub(crate) down: bool,
 }
@@ -276,6 +280,7 @@ impl Default for TileTools {
             from: None,
             last: None,
             touched: false,
+            grow: true,
             down: false,
         }
     }
@@ -546,6 +551,10 @@ impl Editor {
     /// answers about itself. Returns `None` when the ray misses the plane or lands
     /// outside the grid.
     pub(crate) fn tile_cell_under(&self, cursor: Vec2) -> Option<(i32, i32)> {
+        self.tile_cell_at(cursor, false)
+    }
+
+    fn tile_cell_at(&self, cursor: Vec2, unbounded: bool) -> Option<(i32, i32)> {
         use floptle_core::math::Vec3;
         let e = self.tile_tools.layer?;
         let Some(Matter::Tilemap { cols, rows, tile, .. }) = self.world.get::<Matter>(e) else {
@@ -579,7 +588,13 @@ impl Editor {
         // Row 0 is the top, so the row index counts down from +h.
         let fy = (h - ly) / tile;
         let (x, y) = (fx.floor() as i32, fy.floor() as i32);
-        (x >= 0 && y >= 0 && x < cols as i32 && y < rows as i32).then_some((x, y))
+        (unbounded || (x >= 0 && y >= 0 && x < cols as i32 && y < rows as i32)).then_some((x, y))
+    }
+
+    /// The square under the cursor, on the grid or off it — the cell the
+    /// layer would have there if it were bigger.
+    pub(crate) fn tile_cell_under_any(&self, cursor: Vec2) -> Option<(i32, i32)> {
+        self.tile_cell_at(cursor, true)
     }
 
     /// Run `f` over the active layer's grid, marking the scene dirty if anything
@@ -642,9 +657,20 @@ impl Editor {
             self.tile_note("pick a tile layer in the ▦ Tiles tab first");
             return false;
         }
-        let Some((x, y)) = self.tile_cell_under(cursor) else {
-            // Off the grid: not consumed, so a click into empty space can still
-            // select a different node. Swallowing it would make the tool a trap.
+        // Off the grid, a tool that places tiles still paints there when the
+        // layer grows to fit; everything else (and a set-size layer) lets the
+        // click through, so a click into empty space can still select a
+        // different node rather than the tool being a trap.
+        let places = matches!(
+            self.tile_tools.tool,
+            TileTool::Brush | TileTool::Rect | TileTool::Frame | TileTool::Line
+        );
+        let hit = match self.tile_cell_under(cursor) {
+            Some(c) => Some(c),
+            None if places && self.tile_tools.grow => self.tile_cell_under_any(cursor),
+            None => None,
+        };
+        let Some((x, y)) = hit else {
             return false;
         };
         self.tile_tools.down = true;
@@ -698,10 +724,12 @@ impl Editor {
         if self.tile_tools.last == Some((x, y)) {
             return; // same square as last frame — nothing new to do
         }
-        self.tile_tools.last = Some((x, y));
         let erase = self.tile_tools.tool == TileTool::Erase;
         let stamp = if erase { Stamp::one(floptle_core::EMPTY_TILE) } else { self.stroke_stamp() };
         let (sc, sr) = (stamp.cols.max(1) as i32, stamp.rows.max(1) as i32);
+        // Erasing never grows: there is nothing to make room for.
+        let (x, y) = if erase { (x, y) } else { self.tile_grow_to((x, y), (x + sc - 1, y + sr - 1), (x, y)) };
+        self.tile_tools.last = Some((x, y));
         let changed = self.with_grid(|g| g.stamp(x, y, &stamp, false)).unwrap_or(false);
         if changed {
             self.tile_tools.touched = true;
@@ -716,7 +744,12 @@ impl Editor {
             return;
         }
         let Some(cursor) = cursor else { return };
-        if let Some((x, y)) = self.tile_cell_under(cursor) {
+        let hit = if self.tile_tools.grow && self.tile_tools.tool != TileTool::Erase {
+            self.tile_cell_under_any(cursor)
+        } else {
+            self.tile_cell_under(cursor)
+        };
+        if let Some((x, y)) = hit {
             self.tile_paint_at(x, y);
         }
     }
@@ -735,7 +768,10 @@ impl Editor {
         let (Some(a), Some(cursor)) = (from, cursor) else { return };
         // A drag that ends off the grid commits to the last square that was on it,
         // which is what "drag past the edge to fill to the edge" means.
-        let b = self.tile_cell_under(cursor).unwrap_or(a);
+        let grows = self.tile_tools.grow
+            && matches!(self.tile_tools.tool, TileTool::Rect | TileTool::Frame | TileTool::Line);
+        let b = if grows { self.tile_cell_under_any(cursor) } else { self.tile_cell_under(cursor) }
+            .unwrap_or(a);
 
         match self.tile_tools.tool {
             TileTool::Select => {
@@ -768,6 +804,15 @@ impl Editor {
         }
 
         self.begin_edit();
+        // A rubber band dragged past the edge makes room for itself.
+        let (a, b) = if grows {
+            let lo = (a.0.min(b.0), a.1.min(b.1));
+            let hi = (a.0.max(b.0), a.1.max(b.1));
+            let shift = self.tile_grow_to(lo, hi, (0, 0));
+            ((a.0 + shift.0, a.1 + shift.1), (b.0 + shift.0, b.1 + shift.1))
+        } else {
+            (a, b)
+        };
         let stamp = self.stroke_stamp();
         let cell = stamp.data.first().copied().unwrap_or(floptle_core::EMPTY_TILE);
         // Read the tool out before the closure: `with_grid` takes `&mut self` and
@@ -887,17 +932,86 @@ impl Editor {
     pub(crate) fn tile_resize(&mut self, cols: u32, rows: u32, ox: i32, oy: i32) {
         let Some(e) = self.tile_tools.layer else { return };
         self.begin_edit();
-        let Some(Matter::Tilemap { cols: c, rows: r, data, .. }) = self.world.get_mut::<Matter>(e)
+        self.resize_in_place(e, cols, rows, ox, oy);
+        self.tile_tools.selection = None;
+    }
+
+    /// Resize a layer so that every square stays where it is in the world.
+    ///
+    /// A layer is centred on its node, so growing it by two columns moved
+    /// every square a column to the left: the level slid out from under
+    /// everything placed against it, and making room cost the layout. The
+    /// node moves by exactly the opposite, so the squares stand still and
+    /// only the new ones appear. `(ox, oy)` is where the old top-left square
+    /// lands in the new grid.
+    pub(crate) fn resize_in_place(&mut self, e: Entity, cols: u32, rows: u32, ox: i32, oy: i32) {
+        use floptle_core::math::Vec3;
+        let (cols, rows) = (cols.clamp(1, 4096), rows.clamp(1, 4096));
+        let Some(Matter::Tilemap { cols: c, rows: r, tile, data, .. }) = self.world.get_mut::<Matter>(e)
         else {
             return;
         };
-        let (nc, nr, next) =
-            TileGrid::new(*c, *r, data).resized(cols.max(1), rows.max(1), ox, oy);
+        let (oc, or, t) = (*c as f32, *r as f32, *tile);
+        let (nc, nr, next) = TileGrid::new(*c, *r, data).resized(cols, rows, ox, oy);
         *c = nc;
         *r = nr;
         *data = next;
-        self.tile_tools.selection = None;
+        // Where an old square's centre now sits in the layer's frame, minus
+        // where it was: the node moves by the opposite of that.
+        let shift = Vec3::new(
+            t * (ox as f32 - (nc as f32 - oc) * 0.5),
+            t * ((nr as f32 - or) * 0.5 - oy as f32),
+            0.0,
+        );
+        if let Some(xf) = self.world.get_mut::<floptle_core::transform::Transform>(e) {
+            let moved = xf.rotation * (xf.scale * shift);
+            xf.translation -= moved.as_dvec3();
+        }
         self.scene_dirty = true;
+    }
+
+    /// Grow the active layer so the squares `lo..=hi` are on it, if growing
+    /// is on, and return `at` in the grown grid's coordinates.
+    ///
+    /// Growth is capped at 256 squares past the old edge in one go, because a
+    /// cursor ray grazing the layer's plane lands thousands of squares away,
+    /// and a slip should not make a map the size of a continent.
+    pub(crate) fn tile_grow_to(&mut self, lo: (i32, i32), hi: (i32, i32), at: (i32, i32)) -> (i32, i32) {
+        const REACH: i32 = 256;
+        let Some(e) = self.tile_tools.layer else { return at };
+        let Some((cols, rows)) = self.tile_layer_size() else { return at };
+        let (cols, rows) = (cols as i32, rows as i32);
+        if !self.tile_tools.grow || (lo.0 >= 0 && lo.1 >= 0 && hi.0 < cols && hi.1 < rows) {
+            return at;
+        }
+        let lo = (lo.0.max(-REACH), lo.1.max(-REACH));
+        let hi = (hi.0.min(cols - 1 + REACH), hi.1.min(rows - 1 + REACH));
+        let (ox, oy) = ((-lo.0).max(0), (-lo.1).max(0));
+        let nc = (hi.0 + 1).max(cols) + ox;
+        let nr = (hi.1 + 1).max(rows) + oy;
+        self.resize_in_place(e, nc as u32, nr as u32, ox, oy);
+        let shift = |p: (i32, i32)| (p.0 + ox, p.1 + oy);
+        self.tile_tools.from = self.tile_tools.from.map(shift);
+        self.tile_tools.selection =
+            self.tile_tools.selection.map(|(a, b, c, d)| (a + ox, b + oy, c + ox, d + oy));
+        shift(at)
+    }
+
+    /// Shrink the active layer to the squares that hold a tile, keeping them
+    /// where they are.
+    pub(crate) fn tile_fit_to_content(&mut self) {
+        let Some(e) = self.tile_tools.layer else { return };
+        let bounds = match self.world.get_mut::<Matter>(e) {
+            Some(Matter::Tilemap { cols, rows, data, .. }) => TileGrid::new(*cols, *rows, data).used_bounds(),
+            _ => return,
+        };
+        let Some((x0, y0, x1, y1)) = bounds else {
+            self.tile_note("this layer is empty; there is nothing to fit to");
+            return;
+        };
+        self.begin_edit();
+        self.resize_in_place(e, (x1 - x0 + 1) as u32, (y1 - y0 + 1) as u32, -x0, -y0);
+        self.tile_tools.selection = None;
     }
 
     /// Retile the whole active layer — the "my autotile rules changed, fix the
@@ -1169,5 +1283,92 @@ impl Editor {
             }
         }
         self.tile_viz = Some(viz);
+    }
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+
+    /// An editor with one 4×3 layer, offset and scaled so a wrong sign or a
+    /// missing scale shows, and one marker tile (7) at square (1, 1).
+    fn layer_editor() -> (crate::Editor, Entity) {
+        use floptle_core::math::{DVec3, Quat, Vec3};
+        let mut ed = crate::Editor::default();
+        let e = ed.world.spawn();
+        ed.world.insert(
+            e,
+            floptle_core::transform::Transform {
+                translation: DVec3::new(10.0, -4.0, 0.0),
+                rotation: Quat::IDENTITY,
+                scale: Vec3::new(2.0, 3.0, 1.0),
+            },
+        );
+        let mut data = vec![floptle_core::EMPTY_TILE; 12];
+        data[4 + 1] = 7;
+        ed.world.insert(e, Matter::Tilemap { cols: 4, rows: 3, tile: 1.0, data, tileset: String::new() });
+        ed.tile_tools.layer = Some(e);
+        (ed, e)
+    }
+
+    /// Where tile 7 is drawn, in the world.
+    fn marker_world(ed: &crate::Editor, e: Entity) -> (f64, f64) {
+        use floptle_core::math::Vec3;
+        let Some(Matter::Tilemap { cols, rows, tile, data, .. }) = ed.world.get::<Matter>(e) else { panic!() };
+        let i = data.iter().position(|&p| p == 7).expect("the marker tile must survive");
+        let (x, y) = ((i as u32 % cols) as f32, (i as u32 / cols) as f32);
+        let local = Vec3::new((x + 0.5) * tile - *cols as f32 * tile * 0.5, *rows as f32 * tile * 0.5 - (y + 0.5) * tile, 0.0);
+        let xf = floptle_core::world_transform(&ed.world, e);
+        let w = xf.translation + (xf.rotation * (xf.scale * local)).as_dvec3();
+        (w.x, w.y)
+    }
+
+    fn close(a: (f64, f64), b: (f64, f64)) -> bool {
+        (a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4
+    }
+
+    /// Making room keeps the level where it was. The layer is centred on its
+    /// node, so growing it used to slide every tile by half the growth.
+    #[test]
+    fn resizing_a_layer_moves_no_tile() {
+        for (c, r, ox, oy) in [(9, 3, 0, 0), (4, 8, 0, 0), (7, 6, 2, 3), (2, 2, -1, -1)] {
+            let (mut ed, e) = layer_editor();
+            let before = marker_world(&ed, e);
+            ed.tile_resize(c, r, ox, oy);
+            assert!(
+                close(marker_world(&ed, e), before),
+                "resize to {c}×{r} anchored {ox},{oy} moved the tile from {before:?} to {:?}",
+                marker_world(&ed, e)
+            );
+        }
+    }
+
+    /// Painting past any edge grows the layer to take the square, and moves
+    /// nothing already placed. With growing off, the layer stays its size.
+    #[test]
+    fn painting_past_the_edge_grows_the_layer() {
+        for (at, want) in [((-2, 1), (6, 3)), ((5, -3), (6, 6)), ((1, 4), (4, 5))] {
+            let (mut ed, e) = layer_editor();
+            let before = marker_world(&ed, e);
+            let landed = ed.tile_grow_to(at, at, at);
+            assert_eq!(ed.tile_layer_size(), Some((want.0, want.1)), "painting at {at:?}");
+            let (c, r) = ed.tile_layer_size().unwrap();
+            assert!(landed.0 >= 0 && landed.1 >= 0 && landed.0 < c as i32 && landed.1 < r as i32);
+            assert!(close(marker_world(&ed, e), before), "growing toward {at:?} moved a placed tile");
+        }
+        let (mut ed, _) = layer_editor();
+        ed.tile_tools.grow = false;
+        assert_eq!(ed.tile_grow_to((-2, 1), (-2, 1), (-2, 1)), (-2, 1));
+        assert_eq!(ed.tile_layer_size(), Some((4, 3)), "a set-size layer stays its size");
+    }
+
+    /// Fit to tiles shrinks the layer to what is painted, in place.
+    #[test]
+    fn fit_to_tiles_shrinks_in_place() {
+        let (mut ed, e) = layer_editor();
+        let before = marker_world(&ed, e);
+        ed.tile_fit_to_content();
+        assert_eq!(ed.tile_layer_size(), Some((1, 1)));
+        assert!(close(marker_world(&ed, e), before));
     }
 }

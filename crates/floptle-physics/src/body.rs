@@ -280,6 +280,33 @@ impl Body {
                 a[1] = self.pos + self.up * half_height;
                 (a, 2, self.radius)
             }
+            // A body held in the XY plane (2D) is tested in that plane: its
+            // four corners, its four edge midpoints and its centre, all at its
+            // own Z. Its 3D corners sit half its depth in front of and behind
+            // the plane, and a 2D level's colliders are only as deep as one
+            // tile, so those corners landed on the colliders' faces and never
+            // counted. The box then stood on its centre point alone, half sunk
+            // into the floor, and anything thinner or faster than that went
+            // straight through it.
+            BodyShape::Box { half } if self.lock_pos[2] => {
+                for (n, &(sx, sy)) in [
+                    (-1.0f32, -1.0f32),
+                    (1.0, -1.0),
+                    (-1.0, 1.0),
+                    (1.0, 1.0),
+                    (0.0, -1.0),
+                    (0.0, 1.0),
+                    (-1.0, 0.0),
+                    (1.0, 0.0),
+                ]
+                .iter()
+                .enumerate()
+                {
+                    a[n] = self.pos + Vec3::new(sx * half.x, sy * half.y, 0.0);
+                }
+                a[8] = self.pos;
+                (a, 9, 0.0)
+            }
             BodyShape::Box { half } => {
                 let mut n = 0;
                 for &sx in &[-1.0f32, 1.0] {

@@ -629,6 +629,68 @@ impl Editor {
     /// Drop of an asset from the browser: spawn a model or a prefab instance
     /// resting on the surface under the cursor, or attach a script to the
     /// selection.
+    /// The pixels-per-unit a dropped sprite gets: the same pixel density as
+    /// what is already in the scene, so a character drawn at the tiles' scale
+    /// stands at the tiles' scale.
+    ///
+    /// In order: the scene's tile layers (their sheet's cell size over the
+    /// tile size), then any sprite already placed, then this image's own cell
+    /// so it comes in one unit across. It used to be 32 whatever the art,
+    /// which made a 16-px character half the size of the 16-px tiles it was
+    /// drawn to stand on.
+    pub(crate) fn sprite_ppu_for(&self, rel: &str, cols: u32, rows: u32) -> f32 {
+        let size_of = |tex: &str| -> Option<(u32, u32)> {
+            let abs = crate::project::resolve_asset_path(&self.project_root, tex);
+            floptle_assets::load_texture(&abs).map(|t| (t.width, t.height))
+        };
+        for (_, m) in self.world.query::<Matter>() {
+            if let Matter::Tilemap { tile, tileset, .. } = m
+                && *tile > 0.0
+                && let Some(set) = self.tiles.get(tileset)
+                && !set.texture.trim().is_empty()
+                && let Some((w, _)) = size_of(&set.texture)
+            {
+                return (w as f32 / set.sheet_cols.max(1) as f32 / tile).max(1.0);
+            }
+        }
+        for (_, m) in self.world.query::<Matter>() {
+            if let Matter::Sprite { ppu, .. } = m
+                && *ppu > 0.0
+            {
+                return *ppu;
+            }
+        }
+        match size_of(rel) {
+            Some((w, h)) => ((w / cols.max(1)).max(h / rows.max(1)) as f32).max(1.0),
+            None => 32.0,
+        }
+    }
+
+    /// The body a node gets from Add RigidBody.
+    ///
+    /// A Sprite gets a 2D box the size it is drawn: a sphere on a sprite is
+    /// never what anybody wanted, and having to pick Box, tick 2D and then
+    /// type in a size to make a falling crate was three steps of setup before
+    /// the first Play. Everything else gets the ordinary default.
+    pub(crate) fn default_body_for(&self, e: floptle_core::Entity) -> floptle_core::RigidBody {
+        let Some(Matter::Sprite { ppu, size, .. }) = self.world.get::<Matter>(e) else {
+            return floptle_core::RigidBody::default();
+        };
+        let mat = self.world.get::<floptle_core::Material>(e);
+        let tex_px = mat.and_then(|m| m.texture.as_deref()).and_then(|t| {
+            let abs = crate::project::resolve_asset_path(&self.project_root, t);
+            floptle_assets::load_texture(&abs).map(|i| [i.width as f32, i.height as f32])
+        });
+        let (w, h) = crate::sprite2d::sprite_world_size(*ppu, *size, mat, tex_px);
+        let (hx, hy) = ((w * 0.5).max(0.01), (h * 0.5).max(0.01));
+        floptle_core::RigidBody {
+            kind: floptle_core::BodyKind::Box,
+            two_d: true,
+            half_extents: [hx, hy, hx.max(hy)],
+            ..Default::default()
+        }
+    }
+
     pub(crate) fn drop_asset(&mut self, path: &str) {
         if crate::assets::is_prefab(path) {
             let at = self.cursor_world();
@@ -652,10 +714,12 @@ impl Editor {
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Sprite".into());
+            let (c, r) = crate::assets::tex_setting(&self.texture_settings, &self.project_root, &rel).sheet();
+            let ppu = self.sprite_ppu_for(&rel, c, r);
             self.add_node_at(
                 &name,
                 MatterDoc::Sprite {
-                    ppu: 32.0,
+                    ppu,
                     size: 1.0,
                     cell: 0,
                     flip_x: false,
@@ -668,14 +732,10 @@ impl Editor {
                 }),
             );
             // …wearing the texture that was dropped, which is the whole point.
+            // Unlit, like every 2D example: a sprite lit by a 3D scene's sun
+            // goes dark on the side facing away from it.
             if let Some(&e) = self.selection.first() {
-                let mut m = floptle_core::Material::default();
-                let (c, r) = crate::assets::tex_setting(
-                    &self.texture_settings,
-                    &self.project_root,
-                    &rel,
-                )
-                .sheet();
+                let mut m = floptle_core::Material { unlit: true, ..Default::default() };
                 m.texture = Some(rel);
                 m.sheet_cols = c;
                 m.sheet_rows = r;

@@ -1670,6 +1670,7 @@ impl Editor {
                         gpu.config.width as f32,
                         gpu.config.height.max(1) as f32,
                         self.cursor,
+                        crate::viz::drop_axis(self.camera.lock, cam.rotation),
                     );
                     (crate::assets::asset_rel_path(&p.path, &self.project_root), pos)
                 },

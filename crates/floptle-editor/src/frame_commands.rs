@@ -709,7 +709,8 @@ impl Editor {
         if let Some(e) = cmd.add_rigidbody.take() {
             self.record();
             for e in self.selected_group(e) {
-                self.world.insert(e, floptle_core::RigidBody::default());
+                let rb = self.default_body_for(e);
+                self.world.insert(e, rb);
             }
             self.rebuild_sim();
         }

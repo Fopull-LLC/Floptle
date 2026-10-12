@@ -169,6 +169,8 @@ mod spawn_scaling;
 #[cfg(test)]
 mod tick_overload_tests;
 #[cfg(test)]
+mod tile_physics_tests;
+#[cfg(test)]
 mod vfx_frame_tests;
 #[cfg(feature = "editor-ui")]
 mod lua_format;

@@ -306,6 +306,14 @@ impl Editor {
             .map(|(e, _)| e)
             .filter(|e| self.world.get::<floptle_core::RigidBody>(*e).is_none())
             .collect();
+        // A tilemap carrying a RigidBody is never a body (the sim skips it):
+        // the body says its tiles are solid, so they collide as if it were
+        // Collidable.
+        for (e, _) in self.world.query::<floptle_core::RigidBody>() {
+            if matches!(self.world.get::<Matter>(e), Some(Matter::Tilemap { .. })) && !ents.contains(&e) {
+                ents.push(e);
+            }
+        }
         for (e, _) in self.world.query::<floptle_core::MeshCollider>() {
             if !ents.contains(&e) && self.world.get::<floptle_core::RigidBody>(e).is_none() {
                 ents.push(e);

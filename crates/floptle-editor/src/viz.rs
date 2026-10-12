@@ -72,9 +72,29 @@ pub(crate) fn project_script_gizmos(
     }
 }
 
-/// The world point under `cursor` (physical px) — its ray's hit on the ground
-/// plane y=0, or ~6 units ahead of the camera if the ray misses. `inv_vp` is the
-/// inverse of the camera's view-projection at this `w`/`h` aspect.
+/// Which world plane a drop lands on: `0` is x = 0, `1` the ground (y = 0),
+/// `2` the 2D plane (z = 0).
+///
+/// The plane the view is square to. A view locked to the front, or a free
+/// camera looking almost straight down −Z, is somebody building a 2D game, and
+/// their sprites belong on z = 0 under the cursor. Aimed at the ground instead,
+/// that ray ran parallel to it and the drop landed six units in front of the
+/// camera, wherever that was.
+pub(crate) fn drop_axis(lock: floptle_render::ViewLock, cam_rot: Quat) -> usize {
+    use floptle_render::ViewLock;
+    match lock {
+        ViewLock::Front => 2,
+        ViewLock::Side => 0,
+        ViewLock::Top => 1,
+        ViewLock::Free if (cam_rot * Vec3::NEG_Z).z.abs() > 0.9 => 2,
+        ViewLock::Free => 1,
+    }
+}
+
+/// The world point under `cursor` (physical px): its ray's hit on the plane
+/// `axis` = 0 (see [`drop_axis`]), or ~6 units ahead of the camera if the ray
+/// misses. `inv_vp` is the inverse of the camera's view-projection at this
+/// `w`/`h` aspect.
 pub(crate) fn cursor_ground(
     cam_world: DVec3,
     cam_rot: Quat,
@@ -82,6 +102,7 @@ pub(crate) fn cursor_ground(
     w: f32,
     h: f32,
     cursor: Option<Vec2>,
+    axis: usize,
 ) -> DVec3 {
     let fallback = cam_world + (cam_rot * Vec3::NEG_Z * 6.0).as_dvec3();
     let Some(cursor) = cursor else { return fallback };
@@ -90,10 +111,23 @@ pub(crate) fn cursor_ground(
     let far = inv_vp * Vec4::new(ndc.x, ndc.y, 1.0, 1.0);
     let ro = near.truncate() / near.w; // camera-relative
     let rd = (far.truncate() / far.w - ro).normalize();
-    if rd.y.abs() > 1e-4 {
-        let t = -(cam_world.y as f32 + ro.y) / rd.y;
+    let (cam_a, ro_a, rd_a) = match axis {
+        0 => (cam_world.x as f32, ro.x, rd.x),
+        2 => (cam_world.z as f32, ro.z, rd.z),
+        _ => (cam_world.y as f32, ro.y, rd.y),
+    };
+    if rd_a.abs() > 1e-4 {
+        let t = -(cam_a + ro_a) / rd_a;
         if (0.1..1000.0).contains(&t) {
-            return cam_world + (ro + rd * t).as_dvec3();
+            let mut p = cam_world + (ro + rd * t).as_dvec3();
+            // Exactly on the plane, not a float's width off it: a sprite at
+            // z = 1e-7 sorts against one at z = 0 by an accident.
+            match axis {
+                0 => p.x = 0.0,
+                2 => p.z = 0.0,
+                _ => p.y = 0.0,
+            }
+            return p;
         }
     }
     fallback
@@ -1416,5 +1450,31 @@ mod rig_pick_tests {
         // LeftLeg → LeftLeg#toe: the head (LeftLeg) has a real parent
         // (Armature) — a genuine bone, drawn as normal, whatever's selected.
         assert!(!is_root_bone(&skeleton, 1));
+    }
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::*;
+
+    /// A drop through a 2D view lands on z = 0, under the cursor. Aimed at
+    /// the ground, that ray never met it and the drop went six units in front
+    /// of the camera.
+    #[test]
+    fn a_drop_in_a_2d_view_lands_under_the_cursor_on_z0() {
+        let cam = DVec3::new(3.0, 2.0, 10.0);
+        let rot = Quat::IDENTITY; // looking down −Z
+        // Camera-relative view-projection: rotation only, as the renderer does.
+        let proj = Mat4::orthographic_rh(-5.0, 5.0, -5.0, 5.0, 0.1, 100.0);
+        let inv = (proj * Mat4::from_quat(rot.inverse())).inverse();
+        let axis = drop_axis(floptle_render::ViewLock::Front, rot);
+        assert_eq!(axis, 2);
+        assert_eq!(drop_axis(floptle_render::ViewLock::Free, rot), 2, "a free camera square to XY is 2D too");
+        // The right-hand quarter of a 100 px viewport is 2.5 units right of centre.
+        let p = cursor_ground(cam, rot, inv, 100.0, 100.0, Some(Vec2::new(75.0, 50.0)), axis);
+        assert!((p.x - 5.5).abs() < 1e-3 && (p.y - 2.0).abs() < 1e-3 && p.z == 0.0, "{p:?}");
+        // A 3D view still lands on the ground.
+        let down = Quat::from_rotation_x(-0.6);
+        assert_eq!(drop_axis(floptle_render::ViewLock::Free, down), 1);
     }
 }

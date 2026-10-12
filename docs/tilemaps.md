@@ -89,6 +89,18 @@ out of step with the scene's.
 
 **The fill is four-connected**, so it does not leak through a diagonal wall.
 
+### Room to paint
+
+A layer grows as you paint past its edge. The brush, the rectangle, the frame
+and the line all make room for themselves, and nothing already placed moves.
+Untick **GRID ▸ Grow as I paint** for a level that is a set size.
+
+To set the size yourself, change **size** under GRID and press *Apply size*.
+Every tile stays where it is in the world: new columns go on the right and new
+rows on the bottom, or on the left and top by the number in **anchor**.
+*Fit to tiles* shrinks the layer to the squares that hold a tile, again without
+moving any.
+
 ### Multi-tile brushes
 
 Drag a rectangle in the palette and the brush becomes that whole block. Painting
@@ -178,6 +190,18 @@ also draws what it knows, over the art:
 
 ### Collision
 
+A tileset made by dropping a spritesheet on the tab already has collision,
+worked out from each tile's pixels:
+
+- a tile that is almost all art is a solid square;
+- a tile whose art sits on its bottom edge with an uneven top is a slope that
+  follows that top;
+- a tile with a little art somewhere else gets a box around it;
+- a tile that is nearly empty is walk-through.
+
+Change any of them under **TILE**, or select tiles and press *fit to the art*
+to work them out again.
+
 Five cases per tile: **none**, **full**, **half** (top / bottom / left / right),
 a hand-set **rect** in the unit tile, or a **shape** you draw yourself.
 
@@ -226,11 +250,12 @@ seams. This is the classic 2D-platformer bug and merging is the classic fix.
 Tick **Collision** in the tab to draw the merged boxes over the map. They are the
 same boxes the sim gets, so what you see is what a character walks on.
 
-The layer needs the **Collidable** switch on (Inspector ⏵ Collider), like any
-other static geometry, and it uses the node's own physics **layer**. A tilemap
-with solid tiles that is *not* Collidable warns in the console when you press
-Play, naming the node — a level you painted solid and cannot stand on looks
-exactly like a physics bug, and this is the one thing that tells you it is not.
+A layer collides when its **Collidable** switch is on (Inspector ⏵ Collider),
+and it uses the node's own physics **layer**. Making a tile solid in the tab
+turns Collidable on for every layer that draws from that tileset, so you do
+not have to. A **RigidBody** on a tilemap means the same thing: its tiles are
+solid, and the map never moves. A tilemap with solid tiles that is *not*
+Collidable still warns in the Console when you press Play, naming the node.
 
 ### Tags
 
