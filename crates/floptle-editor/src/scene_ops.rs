@@ -703,6 +703,13 @@ impl Editor {
             }
             return;
         }
+        // A Tiled or LDtk level lands with its top-left corner at the cursor.
+        #[cfg(feature = "editor-ui")]
+        if crate::level_apply::is_level_file(path) {
+            let at = self.cursor_world();
+            self.import_level_file(path, Some(at));
+            return;
+        }
         if crate::assets::is_prefab(path) {
             let at = self.cursor_world();
             self.instantiate_prefab(path, Some(at), None);

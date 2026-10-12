@@ -1272,6 +1272,9 @@ impl Editor {
         if let Some(path) = cmd.open_shader_graph.take() {
             self.open_shader_in_graph(&path);
         }
+        if let Some(path) = cmd.import_level.take() {
+            self.import_level_file(&path, None);
+        }
         if let Some(path) = cmd.import_aseprite.take() {
             self.import_aseprite_sheet(&path);
         }

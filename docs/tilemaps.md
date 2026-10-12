@@ -535,7 +535,39 @@ end
 When the goal is walled off, the path ends on the reachable square nearest it,
 and `reached` is `false`. `from` and `to` can be nodes or world positions.
 
-## 8. What is not here yet
+## 8. Levels from Tiled and LDtk
+
+Put a Tiled map (`.tmx`) or an LDtk project (`.ldtk`) in the project, then drag
+it from Assets into the Scene view, or right-click it ▸ **▦ Import level**.
+
+Each level becomes one node named after it, and under it:
+
+- **a tile layer for every tile layer**, in the same order, with each tile's
+  flip and turn kept;
+- **an empty node for every object** (Tiled) **or entity** (LDtk), at its
+  centre, tagged with its layer, its class and its LDtk tags, so a script can
+  `findTagged("spawn")`;
+- **one tileset for the whole level**, with a sheet per image, whose collision
+  is worked out from the art the way a dropped spritesheet's is. Per-tile
+  classes (Tiled) and enum tags (LDtk) become tile tags.
+
+One tile is one world unit, so a level of 8-pixel tiles is 8 pixels per unit,
+and sprites dropped beside it come out at the same pixel size.
+
+Every visible layer is **Collidable**, and the Console lists them. Untick it on
+layers that are only decoration. Hidden layers come in hidden.
+
+A sheet with a margin or spacing between its tiles is redrawn edge to edge as
+`<name>.grid.png`. An image outside the project is copied into `textures/`.
+Importing the same level again reuses its tileset, so collision and tags you
+changed are kept.
+
+Not imported: isometric and hexagonal maps, image layers, Tiled tilesets made
+of separate images, and LDtk IntGrid layers that have no tiles (their values
+are the level's logic, not its picture). Each is named in the Console when a
+level has one.
+
+## 9. What is not here yet
 
 Written down because "it does not exist" beats "it exists and does nothing":
 
@@ -544,7 +576,6 @@ Written down because "it does not exist" beats "it exists and does nothing":
   stack. Delete the file to start over.
 * **Chunked / infinite maps.** A tilemap is `cols × rows`; a very large world is
   several tilemap nodes.
-* **Importing `.tmx` / `.ldtk`.** No importer yet.
 
 ## See also
 

@@ -78,6 +78,10 @@ mod aseprite;
 mod ase_file;
 #[cfg(feature = "editor-ui")]
 mod ase_sync;
+#[cfg(feature = "editor-ui")]
+mod level_import;
+#[cfg(feature = "editor-ui")]
+mod level_apply;
 mod assets;
 // **The machine's speakers and its microphone**, both of which a dedicated
 // server has none of. Gated with `devices` rather than stubbed: a null
@@ -682,6 +686,8 @@ struct EditorCmd {
     /// Import an Aseprite sheet JSON: its tags become clips, its grid becomes
     /// the texture's slicing.
     import_aseprite: Option<String>,
+    /// Assets ▸ Import level on a `.tmx` / `.ldtk` file.
+    import_level: Option<String>,
     /// Create a new image document from the New dialog.
     image_new: Option<image_edit::NewForm>,
     /// Write the open document (`.flimg` + the flattened `.png` beside it).

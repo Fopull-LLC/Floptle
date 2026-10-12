@@ -515,6 +515,19 @@ impl<'a> EditorTabViewer<'a> {
             self.cmd.import_aseprite = Some(path.to_string());
             ui.close();
         }
+        if crate::level_apply::is_level_file(path)
+            && ui
+                .button("▦ Import level")
+                .on_hover_text(
+                    "place this level in the scene: a tile layer per layer, an empty node per \
+                     object, and a tileset whose collision comes from the art. Dragging the \
+                     file into the Scene view does the same, at the cursor",
+                )
+                .clicked()
+        {
+            self.cmd.import_level = Some(path.to_string());
+            ui.close();
+        }
         if crate::assets::is_texture(path) {
             let (cols, rows) =
                 crate::assets::tex_setting(self.texture_settings, self.project_root, path).sheet();
