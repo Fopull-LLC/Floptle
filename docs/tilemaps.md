@@ -511,6 +511,30 @@ something on the tile.
 Call `tm:autotile` after a **run** of `tm:set`, not per square: retiling per write
 would be O(area) each time, and it would fight a stroke still being laid down.
 
+### Finding a way round
+
+`tm:path(from, to)` is the route across the map for a top-down game: a list of
+square centres, and whether it reaches. Solid tiles are walls; empty squares
+and walk-through tiles are floor.
+
+```lua
+local tm = level:tilemap()
+local path, reached = tm:path(enemy, player, { avoid = { "water" }, cost = { mud = 3 } })
+if path and #path > 1 then
+  -- path[1] is the square the enemy is on; walk to the one after it.
+  enemy:moveTowards(path[2], speed * dt)
+end
+```
+
+- **`diagonal`** (default `true`) allows diagonal steps, never past a wall's
+  corner, so nothing following the path clips the wall beside it.
+- **`avoid`** lists tags to walk round as if solid.
+- **`cost`** makes tagged squares that many times dearer than plain floor, so
+  a path takes a dry detour rather than wade through mud.
+
+When the goal is walled off, the path ends on the reachable square nearest it,
+and `reached` is `false`. `from` and `to` can be nodes or world positions.
+
 ## 8. What is not here yet
 
 Written down because "it does not exist" beats "it exists and does nothing":

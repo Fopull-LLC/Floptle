@@ -1007,3 +1007,56 @@ fn sends_lowpass_and_strict_voice_options_reach_their_commands() {
     assert!(voice.contains(&crate::VoiceCmd::InputGain { db: 6.0 }), "{voice:?}");
     assert_eq!(voice.iter().filter(|c| matches!(c, crate::VoiceCmd::Attach { .. })).count(), 1, "the typo'd attach was queued anyway");
 }
+
+/// `tm:path` goes round the solid tiles, and says when it cannot get there.
+#[test]
+fn a_tilemap_path_goes_round_its_walls() {
+    let dir = std::env::temp_dir().join(format!("floptle_tilepath_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "walker",
+        "\
+function start(node)
+  node:setTilemap{ cols = 5, rows = 3, tile = 1.0, tileset = \"tilesets/w.tileset.ron\" }
+  local tm = node:tilemap()
+  tm:fill(-1)
+  -- A wall down column 2, open only on the bottom row.
+  tm:set(2, 0, 1)
+  tm:set(2, 1, 1)
+end
+
+function update(node, dt)
+  local tm = node:tilemap()
+  local path, ok = tm:path(tm:worldAt(0, 0), tm:worldAt(4, 0))
+  reached = ok
+  steps = #path
+  hitWall = false
+  lowest = 0
+  for _, p in ipairs(path) do
+    local x, y = tm:cellAt(p)
+    if tm:solid(x, y) then hitWall = true end
+    if y > lowest then lowest = y end
+  end
+  tm:set(2, 2, 1)
+end
+",
+    );
+    let (mut world, e) = world_with_script("walker");
+    world.insert(e, floptle_core::Matter::Empty);
+    let mut set = floptle_tiles::TileSet { name: "w".into(), sheet_cols: 2, sheet_rows: 1, ..Default::default() };
+    set.info_mut(1).collision = floptle_tiles::TileCollision::Full;
+    let mut host = ScriptHost::new();
+    host.set_tilesets([("tilesets/w.tileset.ron".to_string(), set)].into_iter().collect());
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let env = host.instance_env(e.index(), "walker").unwrap();
+    assert!(env.get::<bool>("reached").unwrap());
+    assert!(!env.get::<bool>("hitWall").unwrap(), "the path must never stand on a solid tile");
+    assert_eq!(env.get::<f64>("lowest").unwrap(), 2.0, "it goes down to the gap in the wall");
+    // The gap is filled now; the next pass finds no way through.
+    host.run(&mut world, &dir, 1.0 / 60.0, 2.0 / 60.0);
+    assert!(!env.get::<bool>("reached").unwrap(), "a sealed wall cannot be crossed");
+    let _ = std::fs::remove_dir_all(&dir);
+}

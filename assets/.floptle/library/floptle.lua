@@ -277,6 +277,7 @@
 ---@field solid fun(self: TilemapHandle, x: number, y: number): boolean Whether the tileset says that square collides. False with no tileset.
 ---@field tags fun(self: TilemapHandle, x: number, y: number): table The tileset's tags for that square, as a list. Empty with no tileset.
 ---@field hasTag fun(self: TilemapHandle, x: number, y: number, tag: string): boolean The common case of tags(), without allocating a table per square.
+---@field path fun(self: TilemapHandle, from: Vec3|Node, to: Vec3|Node, opts?: { diagonal?: boolean, avoid?: string[], cost?: table<string, number> }): Vec3[]|nil, boolean Square centres from one point to another round the solid tiles, and whether it reaches.
 ---@field autotile fun(self: TilemapHandle, x0: number, y0: number, x1: number, y1: number) Recompute the region's autotiled squares (and the one-square ring around it, which is where the stale edges are). Does nothing without a tileset.
 
 ---A node's Particle System, controlled from a script via `node:particles()`.

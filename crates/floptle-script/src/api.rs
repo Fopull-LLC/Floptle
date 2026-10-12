@@ -2797,6 +2797,9 @@ pub(crate) const TILE_XFORM_KEYS: &[&str] = &["rot", "flipX", "flipY"];
 /// Every key `tm:resize{...}` reads.
 pub(crate) const TILE_RESIZE_KEYS: &[&str] = &["cols", "rows", "offsetX", "offsetY"];
 
+/// Every key `tm:path(from, to, {...})` reads.
+pub(crate) const TILE_PATH_KEYS: &[&str] = &["diagonal", "avoid", "cost"];
+
 /// A tile orientation as Lua spells it: `{ rot = 90, flipX = true }`.
 ///
 /// `rot` is degrees clockwise and must be a multiple of 90 — a rotation of 45 is
@@ -3152,6 +3155,71 @@ fn new_tilemap_handle(
                 return Ok(false);
             }
             Ok(set.tags(floptle_core::tile_index(p)).contains(&tag))
+        })?,
+    )?;
+
+    // tm:path(from, to[, opts]) -> a list of square centres, and whether it
+    // reaches `to`. A* over the map's own grid: solid tiles are walls, empty
+    // squares and walk-through tiles are floor.
+    let spa = scene.clone();
+    t.raw_set(
+        "path",
+        lua.create_function(move |lua, (this, from, to, opts): (Table, Value, Value, Option<Table>)| {
+            const CALL: &str = "tm:path";
+            let e: u32 = this.raw_get("__id")?;
+            let s = spa.borrow();
+            let (Some(a), Some(b)) = (world_pos_of_value(&s, &from), world_pos_of_value(&s, &to)) else {
+                return Err(mlua::Error::runtime(
+                    "tm:path: expected two world positions (vec3s, {x=,y=,z=} or nodes)",
+                ));
+            };
+            let mut diagonal = true;
+            let mut avoid: Vec<String> = Vec::new();
+            let mut costs: Vec<(String, f32)> = Vec::new();
+            if let Some(o) = &opts {
+                crate::opts::check_keys(o, TILE_PATH_KEYS, CALL)?;
+                diagonal = crate::opts::opt_bool(o, CALL, "diagonal")?.unwrap_or(true);
+                avoid = crate::opts::opt_str_list(o, CALL, "avoid")?.unwrap_or_default();
+                if let Some(c) = o.get::<Option<Table>>("cost")? {
+                    for pair in c.pairs::<String, f64>() {
+                        let (tag, n) = pair.map_err(|_| {
+                            mlua::Error::runtime("tm:path: cost is a table of tag = number, e.g. { mud = 3 }")
+                        })?;
+                        costs.push((tag, n as f32));
+                    }
+                }
+            }
+            let Some(m) = s.tilemaps.get(&e) else { return Ok((Value::Nil, Value::Boolean(false))) };
+            let (cols, rows) = (m.cols, m.rows);
+            let (Some(fc), Some(tc)) = (cell_of_world(&s, e, a), cell_of_world(&s, e, b)) else {
+                return Ok((Value::Nil, Value::Boolean(false)));
+            };
+            let set = tileset_of(&s, e);
+            let cost = |x: u32, y: u32| -> Option<f32> {
+                let (Some(p), Some(set)) = (packed_at(&s, e, x, y), set) else { return Some(1.0) };
+                if set.is_empty_square(p) {
+                    return Some(1.0);
+                }
+                let ix = floptle_core::tile_index(p);
+                if set.collision(ix).is_solid() {
+                    return None;
+                }
+                let tags = set.tags(ix);
+                if tags.iter().any(|t| avoid.contains(t)) {
+                    return None;
+                }
+                Some(costs.iter().filter(|(t, _)| tags.contains(t)).map(|(_, c)| *c).fold(1.0, f32::max))
+            };
+            let Some((cells, reached)) = floptle_tiles::grid_path(cols, rows, &cost, fc, tc, diagonal) else {
+                return Ok((Value::Nil, Value::Boolean(false)));
+            };
+            let out = lua.create_table()?;
+            for (i, (x, y)) in cells.into_iter().enumerate() {
+                if let Some(w) = world_of_cell(&s, e, x as i64, y as i64) {
+                    out.raw_set(i + 1, crate::math_api::LuaVec3(w))?;
+                }
+            }
+            Ok((Value::Table(out), Value::Boolean(reached)))
         })?,
     )?;
 

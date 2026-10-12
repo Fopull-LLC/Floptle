@@ -41,12 +41,14 @@ pub mod autotile;
 pub mod collide;
 pub mod from_art;
 pub mod grid;
+pub mod path;
 pub mod tileset;
 
 pub use autotile::{canonical, preset_len, preset_masks, Autotiler};
 pub use from_art::collision_from_art;
 pub use collide::{collision_shapes, solid_count, TileBox, TileColliders, TilePoly};
 pub use grid::{tile_mask, tile_masks, Stamp, TileGrid};
+pub use path::grid_path;
 pub use tileset::{
     AutotileGroup, AutotileKind, AutotileRule, TileCollision, TileInfo, TilePage, TileSet, TileShape,
     TileSide,

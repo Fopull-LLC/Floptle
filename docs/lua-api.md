@@ -31,7 +31,7 @@ each group, and meant to be searched.
 - [pathfinding — nav.*](#pathfinding--nav) — 26
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 8
-- [2D — sprites, sorting & the flat camera](#2d--sprites-sorting--the-flat-camera) — 36
+- [2D — sprites, sorting & the flat camera](#2d--sprites-sorting--the-flat-camera) — 37
 - [vessels — assembly.*](#vessels--assembly) — 14
 - [the camera & the screen](#the-camera--the-screen) — 9
 - [physics controls — pause & step](#physics-controls--pause--step) — 5
@@ -2952,6 +2952,10 @@ tm:get(x, y) → cell, or nil outside the grid and on an empty square.
 ### `tm:hasTag`
 
 tm:hasTag(x, y, "ice") → the common case of tm:tags without allocating a table per square. What a per-frame ground check should call.
+
+### `tm:path`
+
+tm:path(from, to[, opts]) → a list of vec3 square centres from one world point to another, and whether it reaches. A* over the map's own grid, for a top-down game: solid tiles are walls, empty squares and walk-through tiles are floor. When the goal cannot be reached the path ends on the square nearest it, and the second value is false. opts: diagonal (default true; a diagonal step never cuts past a wall's corner), avoid = {"water"} (tags walked round as if solid), cost = { mud = 3 } (tags that cost that many times a plain step). from and to can be nodes. Returns nil when from is off the map or inside a wall.
 
 ### `tm:resize`
 
