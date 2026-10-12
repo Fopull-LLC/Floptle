@@ -386,7 +386,7 @@ impl Lighting2D {
     }
 
     /// This light's shaping, in the lane the 2D accumulation reads:
-    /// `[inner radius, exponent, casts-are-honoured, spare]`.
+    /// `[inner radius, exponent, casts-are-honoured, height above the plane]`.
     ///
     /// Clamped here rather than in the shader so that one place decides what a
     /// nonsense value means. An inner radius at or past the range would divide
@@ -398,7 +398,10 @@ impl Lighting2D {
             self.inner.clamp(0.0, r * 0.999),
             self.falloff.max(0.01),
             if self.shadows { 1.0 } else { 0.0 },
-            0.0,
+            // How far above the plane the lamp hangs, for normal-mapped
+            // relief: a third of its reach, so a bump nearby shades steeply
+            // and one at the edge of the light shades shallowly.
+            r * 0.3,
         ]
     }
 }
@@ -2640,7 +2643,7 @@ mod lighting_2d_tests {
     #[test]
     fn a_lights_falloff_clamps_where_the_shader_would_divide_by_zero() {
         let d = Lighting2D::default();
-        assert_eq!(d.falloff_lane(8.0), [0.0, 2.0, 1.0, 0.0], "the curve every light always had");
+        assert_eq!(d.falloff_lane(8.0), [0.0, 2.0, 1.0, 2.4], "the curve every light always had, hung a third of its range up");
 
         let past = Lighting2D { inner: 99.0, ..Default::default() };
         assert!(past.falloff_lane(8.0)[0] < 8.0, "an inner radius past the range flattens the light");

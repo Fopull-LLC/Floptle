@@ -95,7 +95,7 @@ pub(crate) struct LightSlots {
     pub color: [[f32; 4]; 16],
     /// 2D only: which sorting-layer ranks this light reaches.
     pub mask: [[u32; 4]; 16],
-    /// 2D only: `[inner radius, exponent, casts-are-honoured, spare]`.
+    /// 2D only: `[inner radius, exponent, casts-are-honoured, height above the plane]`.
     pub falloff: [[f32; 4]; 16],
     /// The emitter: `[kind, a, b, flags]` — 0 point, 1 sphere (a = radius),
     /// 2 rect (a/b = half width/height, flag 1 = two-sided), 3 disk (a = radius,

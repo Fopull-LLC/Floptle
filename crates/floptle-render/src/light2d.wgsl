@@ -51,6 +51,11 @@ struct Fill {
 @group(0) @binding(0) var<uniform> f: Fill;
 @group(1) @binding(0) var albedo_tex: texture_2d<f32>;
 @group(1) @binding(1) var albedo_samp: sampler;
+// The material's normal map, the second of the five surface slots the raster
+// pass binds. A material without one binds a flat (0.5, 0.5, 1) here, so this
+// pass needs no "is there a normal map" flag that could disagree with it.
+@group(1) @binding(2) var normal_tex: texture_2d<f32>;
+@group(1) @binding(3) var normal_samp: sampler;
 
 struct FillIn {
     @location(0) pos: vec3<f32>,
@@ -78,6 +83,11 @@ struct FillOut {
     @location(0) uv: vec2<f32>,
     @location(1) tint: vec4<f32>,
     @location(2) info: vec4<f32>,
+    // How the art's own x and y axes land on screen: the model's turn and
+    // mirror, then the tile's own turn. A normal map is drawn in the art's
+    // axes, so its tilt has to be turned the same way the picture was.
+    @location(3) axis_x: vec2<f32>,
+    @location(4) axis_y: vec2<f32>,
 };
 
 @vertex
@@ -103,15 +113,29 @@ fn vs_fill(in: FillIn) -> FillOut {
     // never applies to a flat 2D surface, so it samples untransformed — the
     // same thing it did before this window existed.
     let flags = u32(in.info.z + 0.5);
+    var ax = normalize(in.m0.xy + vec2<f32>(1e-12, 0.0));
+    var ay = normalize(in.m1.xy + vec2<f32>(0.0, 1e-12));
     if ((flags & 3u) == 1u) {
         let rot = f32(flags >> 2u) * 0.1 * 0.017453292519943295;
         let c = cos(rot);
         let sn = sin(rot);
         let m = mat2x2<f32>(vec2<f32>(c, sn), vec2<f32>(-sn, c));
         out.uv = m * ((in.uv - 0.5) * in.tile.xy) + 0.5 + in.tile.zw;
+        // The UV turned by `rot` means the art turned the other way on the
+        // quad, and a negative count is a mirror.
+        let inv = mat2x2<f32>(vec2<f32>(c, -sn), vec2<f32>(sn, c));
+        let flip = vec2<f32>(sign(in.tile.x + 1e-12), sign(in.tile.y + 1e-12));
+        let tx = inv * vec2<f32>(flip.x, 0.0);
+        let ty = inv * vec2<f32>(0.0, flip.y);
+        let nx = ax * tx.x + ay * tx.y;
+        let ny = ax * ty.x + ay * ty.y;
+        ax = nx;
+        ay = ny;
     } else {
         out.uv = in.uv;
     }
+    out.axis_x = ax;
+    out.axis_y = ay;
     out.tint = in.tint;
     out.info = in.info;
     return out;
@@ -134,6 +158,10 @@ fn fs_fill(in: FillOut) -> GBuffer {
     }
     var g: GBuffer;
     g.albedo = vec4<f32>(c.rgb, c.a);
+    // The normal map's tilt, in screen x/y. Texture v runs down the art while
+    // the art's y axis runs up, hence the minus.
+    let nt = textureSample(normal_tex, normal_samp, in.uv).xy * 2.0 - 1.0;
+    let n = in.axis_x * nt.x - in.axis_y * nt.y;
     // r = rank, quantized to the 64 ranks a sorting layer can have (the layer
     // step is 1/64 — see `floptle_core::SORT_LAYER_STEP`). gb = the surface
     // normal, flat until normal maps land: (0.5, 0.5) decodes to +Z. a = does
@@ -143,7 +171,7 @@ fn fs_fill(in: FillOut) -> GBuffer {
     // holes in a tilemap never reach here at all (the discard above), so "no
     // surface" and "a surface that does not cast" are the same answer and
     // neither stops a light.
-    g.surface = vec4<f32>(clamp(in.info.x, 0.0, 63.0) / 63.0, 0.5, 0.5, in.info.y);
+    g.surface = vec4<f32>(clamp(in.info.x, 0.0, 63.0) / 63.0, clamp(n * 0.5 + 0.5, vec2<f32>(0.0), vec2<f32>(1.0)), in.info.y);
     return g;
 }
 
@@ -169,7 +197,8 @@ struct Lights {
     pos: array<vec4<f32>, 16>,
     // rgb = colour × intensity.
     color: array<vec4<f32>, 16>,
-    // x = inner radius, y = exponent, z = 1 when casters stop this light.
+    // x = inner radius, y = exponent, z = 1 when casters stop this light,
+    // w = how far above the plane the light sits, for normal maps.
     falloff: array<vec4<f32>, 16>,
     // A bitmask over sorting-layer RANK: bit r of word r/32 set = this light
     // reaches rank r. All four words are used, because a uniform array's stride
@@ -319,6 +348,18 @@ fn shade(in: FullOut) -> Delta {
     let p = L.inv_view_proj * ndc;
     let world = p.xyz / p.w;
 
+    // The surface's tilt, from its normal map. Flat — every surface without a
+    // normal map — is (0, 0, 1).
+    // An 8-bit target stores the flat 0.5 as 128/255, a hair off centre, so
+    // anything within one step of flat is flat: exactly, so the relief below is
+    // exactly 1 and a surface without a normal map is untouched.
+    var nxy = surf.gb * 2.0 - 1.0;
+    let flat = dot(nxy, nxy) < 2.0e-4;
+    if (flat) {
+        nxy = vec2<f32>(0.0);
+    }
+    let normal = vec3<f32>(nxy, sqrt(max(1.0 - dot(nxy, nxy), 0.0)));
+
     var acc = L.ambient.rgb;
     let n = min(u32(L.count.x), 16u);
     let self_casts = surf.a > 0.5;
@@ -341,7 +382,16 @@ fn shade(in: FullOut) -> Delta {
         if (occluded(i, in.clip.xy, self_casts)) {
             continue;
         }
-        acc = acc + L.color[i].rgb * x;
+        // Relief: how much more or less this texel faces the light than a flat
+        // one would. A flat texel gets exactly 1, so a surface without a
+        // normal map lights precisely as it always has, and a bump is
+        // brighter on the side towards the light and darker away from it.
+        let to_light = normalize(vec3<f32>(L.pos[i].xy - world.xy, max(L.falloff[i].w, 1e-3)));
+        var relief = 1.0;
+        if (!flat) {
+            relief = clamp(dot(normal, to_light) / max(to_light.z, 0.05), 0.0, 2.0);
+        }
+        acc = acc + L.color[i].rgb * x * relief;
     }
     // Premultiplied by the surface's own alpha, because that is exactly the
     // share of this pixel the raster pass gave it. The other `1 - a` is the
