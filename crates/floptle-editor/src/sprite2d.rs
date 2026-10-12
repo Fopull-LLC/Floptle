@@ -1392,7 +1392,7 @@ mod sort_tests {
 /// middle) at 8 pixels per unit and stretched six times wider, the rim is
 /// still three pixels of the sprite thick at the left edge and in the middle
 /// of the top, not eighteen.
-#[cfg(test)]
+#[cfg(all(test, feature = "editor-ui"))]
 #[test]
 fn a_sliced_sprite_keeps_its_border_when_stretched() {
     use floptle_core::math::{DVec3, Quat, Vec3};

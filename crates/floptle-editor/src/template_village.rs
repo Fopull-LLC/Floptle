@@ -348,6 +348,7 @@ fn regenerate_village2d() {
 
 /// Open Mira's conversation in the village and photograph it to `$OUT`, to
 /// look at the dialogue box.
+#[cfg(feature = "editor-ui")]
 #[test]
 #[ignore]
 fn probe_village_dialogue_shot() {
