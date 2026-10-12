@@ -598,6 +598,7 @@ impl VfxSystem {
         cam: &RenderCamera,
         textures: &HashMap<String, TexId>,
         include_preview: bool,
+        nudge: &HashMap<Entity, floptle_core::math::DVec3>,
         out_instances: &mut Vec<ParticleInstance>,
         out_batches: &mut Vec<ParticleBatch>,
     ) {
@@ -606,9 +607,10 @@ impl VfxSystem {
         let cam_up = cam.rotation * Vec3::Y;
         // `local_xf` maps the effect's emitter space to camera-relative space (a node's
         // render matrix, a detached one-shot's world point, or the origin for a preview).
-        let mut pack = |inst: &EffectInstance, local_xf: Mat4| {
+        let mut pack = |inst: &EffectInstance, local_xf: Mat4, shift: Mat4| {
             // World-space tracks live at the instance's world anchor (camera-relative).
-            let world_xf = Mat4::from_translation((inst.anchor() - cam.world_position).as_vec3());
+            let world_xf = shift * Mat4::from_translation((inst.anchor() - cam.world_position).as_vec3());
+            let local_xf = shift * local_xf;
             let mut draws = Vec::new();
             collect_billboards(
                 inst, local_xf, world_xf, fwd, cam_right, cam_up, out_instances, &mut draws,
@@ -627,16 +629,20 @@ impl VfxSystem {
         };
         let node_xf =
             |e: Entity| floptle_core::world_transform(world, e).render_matrix(cam.world_position);
+        // An emitter on a sorting layer draws its particles at that layer's
+        // depth, the same nudge a sprite there gets, so dust kicked up behind
+        // a character stays behind it. Nothing moves the simulation.
         for (e, (_, inst)) in &self.instances {
-            pack(inst, node_xf(*e));
+            let shift = nudge.get(e).map(|v| Mat4::from_translation(v.as_vec3())).unwrap_or(Mat4::IDENTITY);
+            pack(inst, node_xf(*e), shift);
         }
         for d in &self.detached {
-            pack(&d.inst, d.emitter().render_matrix(cam.world_position));
+            pack(&d.inst, d.emitter().render_matrix(cam.world_position), Mat4::IDENTITY);
         }
         if include_preview
             && let Some(p) = &self.preview
         {
-            pack(&p.inst, p.emitter.render_matrix(cam.world_position));
+            pack(&p.inst, p.emitter.render_matrix(cam.world_position), Mat4::IDENTITY);
         }
     }
 
@@ -1209,9 +1215,42 @@ mod tests {
         );
         let world = World::new();
         let (mut instances, mut batches) = (Vec::new(), Vec::new());
-        sys.collect(&world, &cam, &registry, true, &mut instances, &mut batches);
+        sys.collect(&world, &cam, &registry, true, &HashMap::new(), &mut instances, &mut batches);
         assert!(!batches.is_empty(), "preview must produce a batch");
         assert_eq!(batches[0].texture, Some(TexId(7)), "path must resolve to the registered id");
+    }
+
+    /// An emitter on a 2D sorting layer draws its particles at that layer's
+    /// depth: the nudge a sprite on the layer gets moves every particle the
+    /// same, and an emitter with none is drawn exactly where it was.
+    #[test]
+    fn particles_take_their_emitters_sorting_depth() {
+        let doc = starter_effect_doc("T");
+        let fx = Arc::new(effect_from_doc(&doc).compile());
+        let mut inst = EffectInstance::new(fx, 1);
+        inst.simulate_to(0.5, VFX_GRAVITY);
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, floptle_core::transform::Transform::IDENTITY);
+        let mut sys = VfxSystem::default();
+        sys.instances.insert(e, ("T".into(), inst));
+        let cam = RenderCamera::new(
+            floptle_core::math::DVec3::new(0.0, 0.0, 10.0),
+            floptle_core::math::Quat::IDENTITY,
+            floptle_render::Projection::Perspective { fov_y: 1.0, near: 0.1, far: 100.0 },
+        );
+        let run = |nudge: &HashMap<Entity, floptle_core::math::DVec3>| {
+            let (mut i, mut b) = (Vec::new(), Vec::new());
+            sys.collect(&world, &cam, &HashMap::new(), false, nudge, &mut i, &mut b);
+            i
+        };
+        let plain = run(&HashMap::new());
+        assert!(!plain.is_empty(), "the effect must emit");
+        let nudged = run(&HashMap::from([(e, floptle_core::math::DVec3::new(0.0, 0.0, 0.25))]));
+        for (a, b) in plain.iter().zip(&nudged) {
+            assert!((b.pos_rot[2] - a.pos_rot[2] - 0.25).abs() < 1e-4, "{:?} vs {:?}", a.pos_rot, b.pos_rot);
+            assert_eq!((a.pos_rot[0], a.pos_rot[1]), (b.pos_rot[0], b.pos_rot[1]));
+        }
     }
 
     // Regression guard for the solar demo's ship VFX: the real Flame + Explosion

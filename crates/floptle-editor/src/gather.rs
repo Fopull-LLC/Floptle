@@ -448,11 +448,13 @@ impl Editor {
                 .is_some_and(|d| crate::dock::tab_is_front(d, EditorTab::Particles));
         let mut vfx_instances: Vec<floptle_render::ParticleInstance> = Vec::new();
         let mut vfx_batches: Vec<floptle_render::ParticleBatch> = Vec::new();
+        let nudge = crate::sprite2d::draw_offsets(&self.world, &self.project, cam.world_position);
         self.vfx.collect(
             &self.world,
             &cam,
             &self.texture_registry,
             vfx_preview_on,
+            &nudge,
             &mut vfx_instances,
             &mut vfx_batches,
         );

@@ -1092,11 +1092,13 @@ impl Editor {
         // A stacked camera leaves effects to the camera beneath, which has
         // already drawn every one of them.
         if !opts.overlay {
+            let nudge = crate::sprite2d::draw_offsets(&self.world, &self.project, cam.world_position);
             self.vfx.collect(
                 &self.world,
                 cam,
                 &self.texture_registry,
                 vfx_preview_on,
+                &nudge,
                 &mut vfx_instances,
                 &mut vfx_batches,
             );
