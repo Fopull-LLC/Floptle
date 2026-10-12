@@ -1750,6 +1750,9 @@ pub enum RichSet {
     /// Empty clears. Applied after layout, so it moves glyphs and never
     /// re-wraps the line they are in.
     GlyphOffsets(Vec<[f32; 2]>),
+    /// `node:setBodyOutline{...}` — make this node's Rigidbody a 2D polygon
+    /// of these corners. Already checked to enclose an area.
+    BodyOutline(floptle_core::outline::Outline),
     /// `node:setTilemap{...}` — build (or re-shape) a 2D grid on this node.
     MatterTilemap {
         cols: u32,

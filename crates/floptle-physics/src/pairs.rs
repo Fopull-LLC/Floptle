@@ -45,6 +45,7 @@ enum Solid {
     Sphere { c: Vec3, r: f32 },
     Capsule { a: Vec3, b: Vec3, r: f32 },
     Box { c: Vec3, rot: Quat, half: Vec3 },
+    Poly { c: Vec3, outline: floptle_core::outline::Outline, half_depth: f32 },
 }
 
 impl Solid {
@@ -59,6 +60,10 @@ impl Solid {
             Solid::Box { c, rot, half } => {
                 let q = (rot.conjugate() * (p - c)).abs() - half;
                 q.max(Vec3::ZERO).length() + q.max_element().min(0.0)
+            }
+            Solid::Poly { c, outline, half_depth } => {
+                let d = p - c;
+                crate::world::extrude(outline.distance(d.x, d.y), d.z, half_depth)
             }
         }
     }
@@ -77,7 +82,7 @@ impl Solid {
 
     fn centre(&self) -> Vec3 {
         match *self {
-            Solid::Sphere { c, .. } | Solid::Box { c, .. } => c,
+            Solid::Sphere { c, .. } | Solid::Box { c, .. } | Solid::Poly { c, .. } => c,
             Solid::Capsule { a, b, .. } => (a + b) * 0.5,
         }
     }
@@ -87,6 +92,7 @@ impl Solid {
             Solid::Sphere { c, r } => (c, r),
             Solid::Capsule { a, b, r } => ((a + b) * 0.5, (b - a).length() * 0.5 + r),
             Solid::Box { c, half, .. } => (c, half.length()),
+            Solid::Poly { c, outline, half_depth } => (c, outline.reach().hypot(half_depth)),
         }
     }
 
@@ -134,6 +140,20 @@ impl Solid {
                     }
                 }
                 (out, 27, 0.0)
+            }
+            // Corners, edge midpoints and centre, in its plane: what the
+            // static solver samples, which is enough for an outline because
+            // nothing it meets here is thinner than its depth.
+            Solid::Poly { c, outline, .. } => {
+                let pts = outline.points();
+                let n = pts.len();
+                for (i, q) in pts.iter().enumerate() {
+                    let next = pts[(i + 1) % n];
+                    out[2 * i] = c + Vec3::new(q[0], q[1], 0.0);
+                    out[2 * i + 1] = c + Vec3::new((q[0] + next[0]) * 0.5, (q[1] + next[1]) * 0.5, 0.0);
+                }
+                out[2 * n] = c;
+                (out, 2 * n + 1, 0.0)
             }
         }
     }
@@ -222,6 +242,7 @@ impl PhysicsWorld {
                         r: b.radius,
                     },
                     BodyShape::Box { half } => Solid::Box { c: b.pos, rot: Quat::IDENTITY, half },
+                    BodyShape::Polygon { outline, half_depth } => Solid::Poly { c: b.pos, outline, half_depth },
                 };
                 out.push((0, solid));
             }

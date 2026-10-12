@@ -17,7 +17,16 @@ pub enum BodyShape {
     /// Not orientation-tracked in the solver — intended for crates/platforms under level
     /// gravity, not free-tumbling rotation.
     Box { half: Vec3 },
+    /// A convex outline in the XY plane, `half_depth` thick either side of it.
+    /// Like a box it keeps its orientation: a 2D body that stands on its art
+    /// rather than tumbling. Depenetrated by its corners, its edge midpoints
+    /// and its centre, all in its own plane, the way a 2D box is.
+    Polygon { outline: floptle_core::outline::Outline, half_depth: f32 },
 }
+
+/// The most sample points a body tests: a polygon's eight corners, its eight
+/// edge midpoints and its centre.
+pub(crate) const MAX_SAMPLES: usize = 2 * floptle_core::outline::OUTLINE_MAX + 1;
 
 /// A dynamic body — a sphere or capsule integrated + depenetrated each step.
 #[derive(Clone, Copy, Debug)]
@@ -221,6 +230,7 @@ impl Body {
             BodyShape::Sphere => self.radius,
             BodyShape::Capsule { half_height } => half_height + self.radius,
             BodyShape::Box { half } => half.length(),
+            BodyShape::Polygon { outline, half_depth } => outline.reach().hypot(half_depth),
         }
     }
 
@@ -232,6 +242,18 @@ impl Body {
             shape: BodyShape::Capsule { half_height: half },
             feet: true,
             ..Self::sphere(pos, radius)
+        }
+    }
+
+    /// A polygon body from a convex outline (see [`BodyShape::Polygon`]).
+    /// `radius` is the outline's smallest half-size, for the few things that
+    /// size a body by one number (water displacement, the sweep's step).
+    pub fn polygon(pos: Vec3, outline: floptle_core::outline::Outline, half_depth: f32) -> Self {
+        let [hx, hy] = outline.half_extents();
+        let r = hx.min(hy).max(1e-3);
+        Self {
+            shape: BodyShape::Polygon { outline, half_depth: half_depth.abs().max(1e-3) },
+            ..Self::sphere(pos, r)
         }
     }
 
@@ -248,6 +270,10 @@ impl Body {
             BodyShape::Sphere => 2.0 * self.radius,
             BodyShape::Capsule { half_height } => 2.0 * (half_height + self.radius),
             BodyShape::Box { half } => 2.0 * half.y,
+            BodyShape::Polygon { outline, .. } => {
+                let ys = outline.points().iter().map(|q| q[1]);
+                ys.clone().fold(f32::MIN, f32::max) - ys.fold(f32::MAX, f32::min)
+            }
         }
     }
 
@@ -273,11 +299,12 @@ impl Body {
 
     /// The body's collision sample points, how many, and the sphere radius
     /// inflating each: 1 point (sphere), the 2 end-sphere centres (capsule), or
-    /// the 8 corners plus centre (box, as zero-radius points). The
-    /// depenetration loop pushes each point that has sunk inside a collider
-    /// back out along the collider normal.
-    pub(crate) fn sample_centers(&self) -> ([Vec3; 9], usize, f32) {
-        let mut a = [self.pos; 9];
+    /// the 8 corners plus centre (box, as zero-radius points), or a polygon's
+    /// corners, edge midpoints and centre. The depenetration loop pushes each
+    /// point that has sunk inside a collider back out along the collider
+    /// normal.
+    pub(crate) fn sample_centers(&self) -> ([Vec3; MAX_SAMPLES], usize, f32) {
+        let mut a = [self.pos; MAX_SAMPLES];
         match self.shape {
             BodyShape::Sphere => (a, 1, self.radius),
             BodyShape::Capsule { half_height } => {
@@ -324,6 +351,20 @@ impl Body {
                 }
                 a[8] = self.pos; // center, so a deeply-buried box still resolves
                 (a, 9, 0.0)
+            }
+            // In its own plane whether or not the body is locked to it: an
+            // outline has no corners in depth to sample.
+            BodyShape::Polygon { outline, .. } => {
+                let pts = outline.points();
+                let n = pts.len();
+                for (i, q) in pts.iter().enumerate() {
+                    let next = pts[(i + 1) % n];
+                    a[2 * i] = self.pos + Vec3::new(q[0], q[1], 0.0);
+                    a[2 * i + 1] =
+                        self.pos + Vec3::new((q[0] + next[0]) * 0.5, (q[1] + next[1]) * 0.5, 0.0);
+                }
+                a[2 * n] = self.pos;
+                (a, 2 * n + 1, 0.0)
             }
         }
     }

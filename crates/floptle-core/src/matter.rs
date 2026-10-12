@@ -640,6 +640,10 @@ pub enum BodyKind {
     Capsule,
     /// A box, sized by [`RigidBody::half_extents`].
     Box,
+    /// A convex outline in the XY plane, [`RigidBody::outline`], for 2D: a
+    /// sprite's own silhouette, a slope-sided crate, a round boulder. Its
+    /// depth is `half_extents[2]`.
+    Polygon,
 }
 
 /// How a [`RigidBody`] participates in the simulation — the one dropdown that
@@ -749,6 +753,9 @@ pub struct RigidBody {
     pub height: f32,
     /// Half-extents for a `Box` body (ignored for sphere/capsule).
     pub half_extents: [f32; 3],
+    /// The corners of a `Polygon` body, local to the node and before its
+    /// scale. Kept when the kind changes, so switching back finds it again.
+    pub outline: crate::outline::Outline,
     /// Bounciness 0..1 (0 = no bounce).
     pub restitution: f32,
     /// Surface friction, as a **Coulomb coefficient**: a ramp holds while
@@ -828,6 +835,7 @@ impl Default for RigidBody {
             radius: 0.5,
             height: 2.0,
             half_extents: [0.5, 0.5, 0.5],
+            outline: crate::outline::Outline::default(),
             restitution: 0.0,
             friction: 0.3,
             slope_limit: 60.0,

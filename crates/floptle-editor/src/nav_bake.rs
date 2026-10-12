@@ -340,6 +340,13 @@ fn push_body(
             let r = rb.radius * scale.x.max(scale.z);
             push_box(out, centre, Vec3::new(r, 0.5 * rb.height * scale.y + r, r), rot);
         }
+        // As the box around its outline: a 2D body's navmesh is a floor plan,
+        // and the outline has no top to walk on that the box lacks.
+        floptle_core::BodyKind::Polygon => {
+            let [hx, hy] = rb.outline.half_extents();
+            let [hx, hy] = if rb.outline.is_empty() { [rb.half_extents[0], rb.half_extents[1]] } else { [hx, hy] };
+            push_box(out, centre, Vec3::new(hx, hy, rb.half_extents[2]) * scale, rot);
+        }
     }
 }
 

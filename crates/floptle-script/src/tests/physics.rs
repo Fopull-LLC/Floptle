@@ -902,3 +902,48 @@ fn node_drop_through_queues_seconds_for_the_sim() {
     assert_eq!(host.take_body_drop_changes().get(&e.index()), Some(&0.25));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `node:setBodyOutline` makes the body a polygon of the corners given, and a
+/// list that encloses nothing raises rather than leaving a body with no shape.
+#[test]
+fn a_script_sets_a_polygon_body_outline() {
+    let dir = std::env::temp_dir().join(format!("floptle-outline-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "shape",
+        concat!(
+            "function start(node)\n",
+            "  node:setBodyOutline{ vec2(-0.4, 0), vec2(0.4, 0), vec2(0.1, 0.2), vec2(0, 1) }\n",
+            "  local ok, err = pcall(function() node:setBodyOutline{ vec2(0, 0), vec2(1, 1), vec2(2, 2) } end)\n",
+            "  log(tostring(ok) .. ' ' .. tostring(err))\n",
+            "end\n",
+        ),
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(e, floptle_core::RigidBody { kind: floptle_core::BodyKind::Box, two_d: true, ..Default::default() });
+    world.insert(
+        e,
+        Scripts(vec![floptle_core::ScriptInst {
+            kind: "shape".into(),
+            enabled: true,
+            params: vec![],
+            refs: vec![],
+            strs: Vec::new(),
+        }]),
+    );
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    let rb = world.get::<floptle_core::RigidBody>(e).unwrap();
+    assert_eq!(rb.kind, floptle_core::BodyKind::Polygon);
+    // The point inside the triangle is not a corner.
+    assert_eq!(rb.outline.points().len(), 3, "{:?}", rb.outline.points());
+    let logs: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    assert!(
+        logs.iter().any(|l| l.starts_with("false") && l.contains("enclose no area")),
+        "a line of corners raised: {logs:?}"
+    );
+}

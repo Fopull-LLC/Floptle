@@ -16,7 +16,7 @@ each group, and meant to be searched.
 
 - [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 198
 - [node — transform & body fields](#node--transform--body-fields) — 41
-- [node — methods & handles](#node--methods--handles) — 32
+- [node — methods & handles](#node--methods--handles) — 33
 - [vectors, directions & easing](#vectors-directions--easing) — 49
 - [scene lookups & raycast](#scene-lookups--raycast) — 16
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
@@ -1149,6 +1149,14 @@ node:materials() — what this model's parts are CALLED, which is what you need 
 ### `node:removeTag`
 
 node:removeTag("burning") — remove a tag (no-op when absent).
+
+### `node:setBodyOutline`
+
+node:setBodyOutline{ vec2(-0.4, 0), vec2(0.4, 0), vec2(0, 1) } — make this node's Rigidbody a 2D polygon of these corners, x and y from the node before its scale.
+
+For a body that changes shape with what the character is doing: shorter when crouched, round when rolled into a ball. The corners are kept convex and cut down to the 8 that enclose the most area, so any list of points makes a shape the solver can trust. Three corners at least, and not all in a line, or the call raises.
+
+The outline mirrors when the sprite is flipped, and scales with the node.
 
 ### `node:setCamera`
 

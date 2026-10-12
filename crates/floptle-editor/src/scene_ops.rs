@@ -679,22 +679,43 @@ impl Editor {
     /// type in a size to make a falling crate was three steps of setup before
     /// the first Play. Everything else gets the ordinary default.
     pub(crate) fn default_body_for(&self, e: floptle_core::Entity) -> floptle_core::RigidBody {
-        let Some(Matter::Sprite { ppu, size, .. }) = self.world.get::<Matter>(e) else {
+        let Some(&Matter::Sprite { ppu, size, cell, pivot, .. }) = self.world.get::<Matter>(e) else {
             return floptle_core::RigidBody::default();
         };
         let mat = self.world.get::<floptle_core::Material>(e);
-        let tex_px = mat.and_then(|m| m.texture.as_deref()).and_then(|t| {
+        let tex = mat.and_then(|m| m.texture.as_deref()).and_then(|t| {
             let abs = crate::project::resolve_asset_path(&self.project_root, t);
-            floptle_assets::load_texture(&abs).map(|i| [i.width as f32, i.height as f32])
+            floptle_assets::load_texture(&abs)
         });
-        let (w, h) = crate::sprite2d::sprite_world_size(*ppu, *size, mat, tex_px);
+        let tex_px = tex.as_ref().map(|i| [i.width as f32, i.height as f32]);
+        let (w, h) = crate::sprite2d::sprite_world_size(ppu, size, mat, tex_px);
         let (hx, hy) = ((w * 0.5).max(0.01), (h * 0.5).max(0.01));
+        // Collision comes from the art: the frame's silhouette is traced, and
+        // only a box that would already be exact (an opaque frame centred on
+        // the node) stays a box.
+        let sheet = mat.map(|m| m.sheet()).unwrap_or((1, 1));
+        let outline = tex
+            .as_ref()
+            .and_then(|i| crate::sprite2d::trace_outline(&i.pixels, [i.width, i.height], sheet, cell, (w, h), pivot))
+            .filter(|o| *o != floptle_core::outline::Outline::rect(hx, hy));
         floptle_core::RigidBody {
-            kind: floptle_core::BodyKind::Box,
+            kind: if outline.is_some() { floptle_core::BodyKind::Polygon } else { floptle_core::BodyKind::Box },
             two_d: true,
             half_extents: [hx, hy, hx.max(hy)],
+            outline: outline.unwrap_or_default(),
             ..Default::default()
         }
+    }
+
+    /// The outline a polygon body on sprite `e` would trace from its art now:
+    /// the Inspector's **trace from art**.
+    pub(crate) fn traced_outline_for(&self, e: floptle_core::Entity) -> Option<floptle_core::outline::Outline> {
+        let rb = self.default_body_for(e);
+        Some(match rb.kind {
+            floptle_core::BodyKind::Polygon => rb.outline,
+            _ => floptle_core::outline::Outline::rect(rb.half_extents[0], rb.half_extents[1]),
+        })
+        .filter(|o| !o.is_empty() && self.world.get::<Matter>(e).is_some_and(|m| matches!(m, Matter::Sprite { .. })))
     }
 
     pub(crate) fn drop_asset(&mut self, path: &str) {

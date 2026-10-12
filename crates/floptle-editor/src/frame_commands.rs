@@ -714,6 +714,17 @@ impl Editor {
             }
             self.rebuild_sim();
         }
+        if let Some(e) = cmd.trace_body_outline.take() {
+            self.record();
+            for e in self.selected_group(e) {
+                if let Some(o) = self.traced_outline_for(e)
+                    && let Some(rb) = self.world.get_mut::<floptle_core::RigidBody>(e)
+                {
+                    rb.outline = o;
+                }
+            }
+            self.rebuild_sim();
+        }
         if let Some(e) = cmd.remove_rigidbody.take() {
             self.record();
             for e in self.selected_group(e) {

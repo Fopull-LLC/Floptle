@@ -865,6 +865,15 @@ pub(crate) fn collect_shadow_proxies(world: &World, cam_world: DVec3, enabled: b
                 let h = Vec3::from(rb.half_extents) * wt.scale;
                 ([c.x, c.y, c.z, 0.0], [h.x, h.y, h.z, 2.0], [q.x, q.y, q.z, q.w], h.length())
             }
+            // The box around its outline: the occluder field has boxes,
+            // spheres and capsules, and a 2D body's shadow in a 3D sun is a
+            // rare enough sight that its corners do not show.
+            floptle_core::BodyKind::Polygon => {
+                let [hx, hy] = rb.outline.half_extents();
+                let [hx, hy] = if rb.outline.is_empty() { [rb.half_extents[0], rb.half_extents[1]] } else { [hx, hy] };
+                let h = Vec3::new(hx, hy, rb.half_extents[2]) * wt.scale;
+                ([c.x, c.y, c.z, 0.0], [h.x, h.y, h.z, 2.0], [q.x, q.y, q.z, q.w], h.length())
+            }
         };
         found.push(((c.length() - reach).max(0.0), pa, pb, rot));
     }

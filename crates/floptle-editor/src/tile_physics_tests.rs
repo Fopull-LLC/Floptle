@@ -167,6 +167,14 @@ fn a_capsule_drops_through_a_one_way_ledge() {
     assert!(y < -1.0, "it must fall through the ledge; got {y:.3}");
 }
 
+/// A polygon body drops through a one-way ledge the same way.
+#[test]
+fn a_polygon_drops_through_a_one_way_ledge() {
+    let (on, y) = drop_from_ledge(BodyKind::Polygon);
+    assert!((on - 1.5).abs() < 0.05, "standing on the ledge first; got {on:.3}");
+    assert!(y < -1.0, "it must fall through the ledge; got {y:.3}");
+}
+
 /// A picture taken outside the frame loop — `floptle shot`, `camera.capture` —
 /// draws the tile layers. Nothing on that path built their meshes, so a
 /// photograph of a 2D level was its sprites over an empty sky.
@@ -197,4 +205,83 @@ fn a_shot_draws_the_tile_layers() {
     let ground = at(w / 2, h - 3);
     assert!(ground[0] as i32 > ground[2] as i32 + 30, "the ground drew as {ground:?}: a sky-blue pixel is a missing tile layer");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The tile floor scene with the player's body swapped for a polygon of
+/// `pts`.
+fn polygon_scene(pts: &[[f32; 2]], x: f64) -> (crate::Editor, floptle_core::Entity) {
+    let (mut ed, player) = scene(1.0, x, true, false);
+    let rb = ed.world.get_mut::<RigidBody>(player).unwrap();
+    rb.kind = BodyKind::Polygon;
+    rb.outline = floptle_core::outline::Outline::convex(pts);
+    (ed, player)
+}
+
+/// A polygon body stands on its outline, not on a box round the node: this
+/// one is drawn from the node up, the way a sprite pivoted at its feet is,
+/// so it rests with its node on the floor. A box the same size rests with
+/// its centre half a unit up.
+#[test]
+fn a_polygon_body_stands_on_its_outline() {
+    let (ed, p) = polygon_scene(&[[-0.4, 0.0], [0.4, 0.0], [0.4, 1.0], [-0.4, 1.0]], 0.0);
+    let y = rest(ed, p);
+    assert!(y.abs() < 0.05, "the outline's bottom is the node's origin, so the node rests at 0; got {y:.3}");
+}
+
+/// A diamond reaching a unit below its node balances on that tip: the corner
+/// is one of the points the solver tests, so nothing sinks past it.
+#[test]
+fn a_polygon_body_rests_on_a_corner() {
+    let (ed, p) = polygon_scene(&[[0.0, -1.0], [0.5, 0.0], [0.0, 0.5], [-0.5, 0.0]], 0.0);
+    let y = rest(ed, p);
+    assert!((y - 1.0).abs() < 0.05, "the tip is 1 under the node; got {y:.3}");
+}
+
+/// A static polygon is a ramp: a box landing on it is held above the floor,
+/// and slides down it the way the slope falls.
+#[test]
+fn a_static_polygon_body_is_a_ramp() {
+    let (mut ed, player) = scene(1.0, 0.5, true, false);
+    let ramp = ed.world.spawn();
+    ed.world.insert(ramp, Transform::IDENTITY);
+    ed.world.insert(
+        ramp,
+        RigidBody {
+            kind: BodyKind::Polygon,
+            mode: floptle_core::BodyMode::Static,
+            two_d: true,
+            outline: floptle_core::outline::Outline::convex(&[[-2.0, 0.0], [2.0, 0.0], [2.0, 2.0]]),
+            ..Default::default()
+        },
+    );
+    ed.toggle_play();
+    let mut low = f64::MAX;
+    for _ in 0..60 {
+        ed.play_step(1.0 / 60.0, true);
+        let t = floptle_core::world_transform(&ed.world, player).translation;
+        // The ramp's surface under x is (x + 2) / 2, rising to the right, so
+        // the box meets it with its bottom-right corner.
+        if t.y < 2.5 {
+            low = low.min(t.y - 0.5 - ((t.x + 0.5 + 2.0) / 2.0));
+        }
+    }
+    let t = floptle_core::world_transform(&ed.world, player).translation;
+    assert!(t.x < 0.4, "it slid down the slope, to the left; x = {:.3}", t.x);
+    assert!(t.y > 1.0, "held up by the ramp, well above the floor at 0.5; y = {:.3}", t.y);
+    assert!(low > -0.1, "never sank into the ramp; deepest {low:.3}");
+}
+
+/// A flipped sprite's polygon body is the mirror image, like the picture.
+#[test]
+fn a_flipped_sprite_mirrors_its_polygon_body() {
+    let (mut ed, p) = polygon_scene(&[[0.0, -0.5], [1.0, -0.5], [1.0, 0.5], [0.0, 0.5]], 0.0);
+    let rb = *ed.world.get::<RigidBody>(p).unwrap();
+    let right = floptle_physics::polygon_outline(&ed.world, p, &rb);
+    assert!(right.points().iter().all(|q| q[0] >= 0.0));
+    if let Some(Matter::Sprite { flip_x, .. }) = ed.world.get_mut::<Matter>(p) {
+        *flip_x = true;
+    }
+    let left = floptle_physics::polygon_outline(&ed.world, p, &rb);
+    assert!(left.points().iter().all(|q| q[0] <= 0.0), "{:?}", left.points());
+    assert!(left.distance(-0.5, 0.0) < 0.0 && left.distance(0.5, 0.0) > 0.0);
 }

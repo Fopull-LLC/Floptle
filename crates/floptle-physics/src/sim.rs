@@ -504,6 +504,14 @@ impl Sim {
                         let s = wt.scale;
                         ShapeGeom::Box { half: Vec3::new(h[0] * s.x, h[1] * s.y, h[2] * s.z) }
                     }
+                    // A part of an assembly is a box around its outline: a
+                    // compound tumbles in 3D, where an outline has no depth
+                    // to turn through.
+                    BodyKind::Polygon => {
+                        let s = wt.scale;
+                        let [hx, hy] = polygon_outline(ecs, *pe, prb).half_extents();
+                        ShapeGeom::Box { half: Vec3::new(hx, hy, prb.half_extents[2] * s.z.abs()) }
+                    }
                 };
                 CompoundShape {
                     geom,
@@ -549,6 +557,10 @@ impl Sim {
                 let s = wt.scale;
                 let h = rb.half_extents;
                 Body::boxx(pos, Vec3::new(h[0] * s.x, h[1] * s.y, h[2] * s.z))
+            }
+            BodyKind::Polygon => {
+                let s = wt.scale;
+                Body::polygon(pos, polygon_outline(ecs, e, rb), rb.half_extents[2] * s.z)
             }
         };
         b.restitution = rb.restitution;
@@ -620,6 +632,17 @@ impl Sim {
                     eid,
                     sensor,
                 );
+            }
+            BodyKind::Polygon => {
+                let pts: Vec<floptle_core::math::Vec2> = polygon_outline(ecs, e, rb)
+                    .points()
+                    .iter()
+                    .map(|q| floptle_core::math::Vec2::new(q[0], q[1]))
+                    .collect();
+                let half_z = rb.half_extents[2] * wt.scale.z;
+                if let Some(shape) = PolyPrismShape::new(Vec3::ZERO, &pts, half_z, wt.rotation) {
+                    world.add_collider_tagged(wt.translation, Box::new(shape), layer, eid, sensor);
+                }
             }
         }
     }
@@ -2157,6 +2180,13 @@ impl Sim {
                         let h = rb.half_extents;
                         BodyShape::Box { half: Vec3::new(h[0] * s.x, h[1] * s.y, h[2] * s.z) }
                     }
+                    BodyKind::Polygon => {
+                        let s = world_transform(ecs, ent).scale;
+                        BodyShape::Polygon {
+                            outline: polygon_outline(ecs, ent, rb),
+                            half_depth: (rb.half_extents[2] * s.z).abs().max(1e-3),
+                        }
+                    }
                 };
             }
         }
@@ -3055,4 +3085,36 @@ mod parented_bodies {
             "the node's WORLD position is the body's: node {node:?}, body {body:?}"
         );
     }
+}
+
+/// A polygon body's outline in the sim: at the node's world scale, and
+/// mirrored with its sprite when the sprite is flipped, so the body is the
+/// shape the picture shows.
+///
+/// A flip mirrors the outline across the node's origin when the sprite's
+/// pivot is on that axis's middle (the default, and a character's feet), and
+/// across the outline's own middle otherwise, since where an off-centre
+/// picture lands when flipped depends on its frame size, which only the
+/// renderer knows. A body ticked Polygon with no outline yet is the rectangle
+/// of its half-extents, so it collides as the box it was before the switch.
+pub fn polygon_outline(ecs: &World, e: Entity, rb: &RigidBody) -> floptle_core::outline::Outline {
+    let o = if rb.outline.is_empty() {
+        floptle_core::outline::Outline::rect(rb.half_extents[0], rb.half_extents[1])
+    } else {
+        rb.outline
+    };
+    let o = match ecs.get::<floptle_core::Matter>(e) {
+        Some(&floptle_core::Matter::Sprite { flip_x, flip_y, pivot, .. }) if flip_x || flip_y => {
+            let pts = o.points();
+            let mid = |axis: usize| {
+                let lo = pts.iter().map(|q| q[axis]).fold(f32::MAX, f32::min);
+                let hi = pts.iter().map(|q| q[axis]).fold(f32::MIN, f32::max);
+                if pivot[axis] == 0.5 { 0.0 } else { (lo + hi) * 0.5 }
+            };
+            o.mirrored(flip_x.then(|| mid(0)), flip_y.then(|| mid(1)))
+        }
+        _ => o,
+    };
+    let s = world_transform(ecs, e).scale;
+    o.scaled(s.x, s.y)
 }

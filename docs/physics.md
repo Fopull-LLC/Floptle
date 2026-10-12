@@ -30,7 +30,7 @@ Inspector ▸ **◆ Rigidbody** turns a node into a dynamic body. Properties:
 
 | Property | Meaning |
 |---|---|
-| **shape** | Sphere or **Capsule** (capsules stand upright; best for characters). A capsule collides along its whole length, and stands on its **feet**: the ground straight beneath its centre line, so a character's feet meet a slope, a crease or a bump where they are drawn. |
+| **shape** | Sphere, **Capsule** (capsules stand upright; best for characters), Box, or **Polygon** (2D, below). A capsule collides along its whole length, and stands on its **feet**: the ground straight beneath its centre line, so a character's feet meet a slope, a crease or a bump where they are drawn. |
 | **radius / height** | Collision size |
 | **bounce** | Restitution (0 = no bounce) |
 | **friction** | 0 = ice, 1 = no sliding |
@@ -47,7 +47,7 @@ physics step (about 21 m/s for a 0.35 m capsule) sweeps its move: it stops where
 it first touches a wall, loses only its speed into that wall, and keeps going
 along it. So a launch, a fling or a long fall never ends up on the far side of a
 mesh wall it ran into. Slower bodies move exactly as they always have. Box
-bodies are not swept.
+and polygon bodies are not swept.
 
 ### 2D bodies
 
@@ -70,8 +70,36 @@ locked by hand. The axes it holds show as ticked and disabled.
 A 2D box collides in its own plane: its corners and edges are tested where
 it is, not half its depth in front of and behind it.
 
-**Add RigidBody on a Sprite** gives it a 2D box the size the sprite is drawn,
-so a falling crate needs no further setup.
+### Polygon bodies
+
+Pick **Polygon** as the shape and the body is an outline of up to eight corners
+in its plane: a character's own silhouette, a crate with sloped sides, a round
+boulder. It stands on its outline, so a character drawn from its feet up rests
+with its feet on the floor, and a diamond balances on its point. Like a box, it
+keeps its orientation rather than tumbling.
+
+- **trace from art** outlines the opaque pixels of the frame the sprite is
+  showing.
+- Each corner has an **x** and **y** you can type. **+ corner** splits the
+  longest edge, **−** removes a corner, and **box** resets to the rectangle of
+  the half-extents.
+- **depth** is half its thickness either side of the plane.
+
+The outline is always kept convex. A corner dragged inward past its
+neighbours drops out rather than making a dent. When the sprite flips, its
+polygon body flips with it, and it scales with the node.
+
+A **Static** polygon body is a solid wall, floor or ramp in that shape that
+never moves, and it turns with the node.
+
+From a script: `node:setBodyOutline{ vec2(-0.4, 0), vec2(0.4, 0), vec2(0, 1) }`,
+for a body that changes shape with what the character is doing.
+
+**Add RigidBody on a Sprite** gives it a body traced from its art: a polygon
+round the opaque pixels of the frame it shows, not a box round the whole frame.
+A sprite whose frame is opaque edge to edge and centred on its node gets a box
+the size it is drawn, which is already exact. Either way, a falling crate needs
+no further setup.
 
 From a script: `node:getcomponent("RigidBody").two_d = 1`.
 

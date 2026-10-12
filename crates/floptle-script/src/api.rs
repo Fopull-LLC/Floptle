@@ -1195,11 +1195,12 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("pushboxOnly".to_string(), b(rb.pushbox_only)),
                 ("radius".to_string(), rb.radius as f64),
                 ("height".to_string(), rb.height as f64),
-                // Shape kind: 0 = sphere, 1 = capsule, 2 = box.
+                // Shape kind: 0 = sphere, 1 = capsule, 2 = box, 3 = polygon.
                 ("shape".to_string(), match rb.kind {
                     floptle_core::BodyKind::Sphere => 0.0,
                     floptle_core::BodyKind::Capsule => 1.0,
                     floptle_core::BodyKind::Box => 2.0,
+                    floptle_core::BodyKind::Polygon => 3.0,
                 }),
                 ("half_x".to_string(), rb.half_extents[0] as f64),
                 ("half_y".to_string(), rb.half_extents[1] as f64),
@@ -1941,6 +1942,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                         rb.kind = match val as i64 {
                             0 => floptle_core::BodyKind::Sphere,
                             1 => floptle_core::BodyKind::Capsule,
+                            3 => floptle_core::BodyKind::Polygon,
                             _ => floptle_core::BodyKind::Box,
                         }
                     }
@@ -2162,6 +2164,12 @@ pub(crate) fn apply_rich_sets(
             }
             RichSet::MatterTerrain(id) => {
                 world.insert(e, Matter::Terrain { id, collision: Default::default() });
+            }
+            RichSet::BodyOutline(outline) => {
+                if let Some(rb) = world.get_mut::<RigidBody>(e) {
+                    rb.kind = floptle_core::BodyKind::Polygon;
+                    rb.outline = outline;
+                }
             }
             RichSet::TerrainGen(spec) => match spec {
                 Some(s) => {
@@ -6274,6 +6282,39 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                     offsets.push([p.x as f32, p.y as f32]);
                 }
                 q.borrow_mut().push((e, crate::RichSet::GlyphOffsets(offsets)));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // node:setBodyOutline{ vec2(-0.5, 0), vec2(0.5, 0), vec2(0, 1) } — the
+        // node's Rigidbody becomes a 2D polygon of these corners: a body that
+        // changes shape with what the character is doing (crouched, rolled
+        // into a ball), or an outline worked out by the game.
+        let q = q.clone();
+        methods.set(
+            "setBodyOutline",
+            lua.create_function(move |_, (this, list): (Table, Table)| {
+                const CALL: &str = "node:setBodyOutline";
+                let e: u32 = this.raw_get("__id")?;
+                let mut pts = Vec::new();
+                for (i, v) in list.sequence_values::<Value>().enumerate() {
+                    let p = crate::vec3_of(&v?).ok_or_else(|| {
+                        mlua::Error::runtime(format!(
+                            "{CALL}: corner {} is not a vec2 — corners are x, y from the node",
+                            i + 1
+                        ))
+                    })?;
+                    pts.push([p.x as f32, p.y as f32]);
+                }
+                let outline = floptle_core::outline::Outline::convex(&pts);
+                if outline.is_empty() {
+                    return Err(mlua::Error::runtime(format!(
+                        "{CALL}: {} corners enclose no area — it takes at least three, not all in a line",
+                        pts.len()
+                    )));
+                }
+                q.borrow_mut().push((e, crate::RichSet::BodyOutline(outline)));
                 Ok(())
             })?,
         )?;

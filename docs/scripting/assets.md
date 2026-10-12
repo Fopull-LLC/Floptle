@@ -408,7 +408,7 @@ every step, so a change takes effect immediately with no reset or teleport.
 | `slopeLimit` | The steepest surface this body can stand on, in degrees (60 by default). Past it there is no ground under it and no grip holds it. |
 | `restitution` | Bounciness 0..1 (0 = no bounce). |
 | `gravity` | Gravity pull on this body (assign `true`/`false`; reads back 1/0). |
-| `shape` | Body shape: 0 = sphere, 1 = capsule, 2 = box. |
+| `shape` | Body shape: 0 = sphere, 1 = capsule, 2 = box, 3 = polygon. |
 | `radius` | Sphere/capsule radius. |
 | `height` | Capsule total height. |
 | `half_x` `half_y` `half_z` | Box half-extents. |

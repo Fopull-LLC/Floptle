@@ -619,6 +619,55 @@ pub(crate) fn sprite_draws_of(
     out
 }
 
+/// The outline of one frame of a sprite, traced from its opaque pixels, in the
+/// node's space before its scale: what a polygon body on that sprite collides
+/// with.
+///
+/// The convex hull of every opaque pixel's corners, so the body covers the
+/// picture rather than its frame, and a character drawn in the corner of a
+/// roomy cell is not a box of empty air. A fully opaque frame is its own
+/// rectangle, placed by the pivot. `None` when nothing in it is opaque.
+///
+/// `cell_size` is the frame's world size and `pivot` the sprite's, exactly as
+/// it is drawn, so the outline sits on the art.
+pub(crate) fn trace_outline(
+    px: &[u8],
+    tex: [u32; 2],
+    sheet: (u32, u32),
+    cell: u32,
+    cell_size: (f32, f32),
+    pivot: [f32; 2],
+) -> Option<floptle_core::outline::Outline> {
+    let [tw, th] = tex;
+    let (sc, sr) = (sheet.0.max(1), sheet.1.max(1));
+    let (cw, ch) = (tw / sc, th / sr);
+    if cw == 0 || ch == 0 || px.len() < (tw * th * 4) as usize {
+        return None;
+    }
+    let cell = cell.min(sc * sr - 1);
+    let (ox, oy) = ((cell % sc) * cw, (cell / sc) * ch);
+    let (w, h) = cell_size;
+    // Pixel corner → node space: X right from the pivot, Y up (image rows
+    // run down).
+    let at = |x: u32, y: u32| {
+        [(x as f32 / cw as f32 - pivot[0]) * w, ((ch - y) as f32 / ch as f32 - pivot[1]) * h]
+    };
+    let mut corners = Vec::new();
+    for y in 0..ch {
+        // Only the leftmost and rightmost opaque pixel of a row can be on the
+        // hull, so a row adds four corners however wide it is.
+        let row = (oy + y) * tw;
+        let solid = |x: u32| px[((row + ox + x) * 4 + 3) as usize] >= 128;
+        let first = (0..cw).find(|&x| solid(x));
+        let last = (0..cw).rev().find(|&x| solid(x));
+        if let (Some(a), Some(b)) = (first, last) {
+            corners.extend([at(a, y), at(a, y + 1), at(b + 1, y), at(b + 1, y + 1)]);
+        }
+    }
+    let o = floptle_core::outline::Outline::convex(&corners);
+    (!o.is_empty()).then_some(o)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1440,4 +1489,65 @@ fn a_sliced_sprite_keeps_its_border_when_stretched() {
     let top = at(120, 92);
     assert!(top[0] > 100, "the top edge stretched along its length keeps its rim: {top:?}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(test)]
+mod trace_tests {
+    use super::trace_outline;
+
+    /// An `w`×`h` image, opaque wherever `solid(x, y)` (rows from the top).
+    fn image(w: u32, h: u32, solid: impl Fn(u32, u32) -> bool) -> Vec<u8> {
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                if solid(x, y) {
+                    px[((y * w + x) * 4 + 3) as usize] = 255;
+                }
+            }
+        }
+        px
+    }
+
+    /// A character in the bottom-left quarter of its frame gets a body round
+    /// the character, not round the frame.
+    #[test]
+    fn a_trace_covers_the_art_not_the_frame() {
+        let px = image(8, 8, |x, y| x < 4 && y >= 4);
+        let o = trace_outline(&px, [8, 8], (1, 1), 0, (1.0, 1.0), [0.5, 0.5]).unwrap();
+        let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+        for q in o.points() {
+            for a in 0..2 {
+                lo[a] = lo[a].min(q[a]);
+                hi[a] = hi[a].max(q[a]);
+            }
+        }
+        assert_eq!((lo, hi), ([-0.5, -0.5], [0.0, 0.0]), "{:?}", o.points());
+    }
+
+    /// The pivot moves the art, so it moves the outline with it, and the
+    /// frame that is traced is the one the sprite shows.
+    #[test]
+    fn a_trace_follows_the_pivot_and_the_cell() {
+        // Two cells side by side; only the second has anything in it.
+        let px = image(16, 8, |x, _| x >= 8);
+        assert!(trace_outline(&px, [16, 8], (2, 1), 0, (1.0, 1.0), [0.5, 0.0]).is_none());
+        let o = trace_outline(&px, [16, 8], (2, 1), 1, (1.0, 1.0), [0.5, 0.0]).unwrap();
+        assert!(o.points().iter().all(|q| q[1] >= 0.0 && q[1] <= 1.0), "feet pivot: from 0 up");
+        assert!((o.distance(0.0, 0.5) + 0.5).abs() < 1e-5, "the whole frame, half a unit from its sides");
+    }
+
+    /// A round blob traces to a round-ish outline that stays on the art.
+    #[test]
+    fn a_round_sprite_traces_round() {
+        let px = image(16, 16, |x, y| {
+            let (dx, dy) = (x as f32 + 0.5 - 8.0, y as f32 + 0.5 - 8.0);
+            dx * dx + dy * dy < 49.0
+        });
+        let o = trace_outline(&px, [16, 16], (1, 1), 0, (2.0, 2.0), [0.5, 0.5]).unwrap();
+        assert_eq!(o.points().len(), floptle_core::outline::OUTLINE_MAX);
+        // Opposite pixel rows of the disc sit seven pixels (0.875) out; the
+        // outline neither clips the art nor wraps the corners of its frame.
+        assert!(o.distance(0.0, -0.8) < 0.0 && o.distance(0.8, 0.0) < 0.0);
+        assert!(o.distance(0.9, 0.9) > 0.0, "a frame corner is outside a disc's outline");
+    }
 }

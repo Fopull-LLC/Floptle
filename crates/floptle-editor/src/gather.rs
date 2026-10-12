@@ -950,7 +950,28 @@ impl Editor {
                 Some(&(pos, h)) => (pos, h),
                 None => (wt.translation, rb.height),
             };
-            let lines = if rb.kind == floptle_core::BodyKind::Box {
+            let lines = if rb.kind == floptle_core::BodyKind::Polygon {
+                // The outline the sim collides with, flip and scale included,
+                // turned with the node when it is a static collider (a moving
+                // body keeps its orientation).
+                let o = floptle_physics::polygon_outline(&self.world, e, &rb);
+                let pts = o.points();
+                let turn = if rb.mode == floptle_core::BodyMode::Static {
+                    wt.rotation
+                } else {
+                    floptle_core::math::Quat::IDENTITY
+                };
+                let at = |q: [f32; 2]| p + (turn * Vec3::new(q[0], q[1], 0.0)).as_dvec3();
+                (0..pts.len())
+                    .filter_map(|i| {
+                        let (a, b) = (at(pts[i]), at(pts[(i + 1) % pts.len()]));
+                        Some((
+                            project(a, cam.world_position, view_proj, gw, gh)?,
+                            project(b, cam.world_position, view_proj, gw, gh)?,
+                        ))
+                    })
+                    .collect()
+            } else if rb.kind == floptle_core::BodyKind::Box {
                 let s = wt.scale;
                 let half = Vec3::new(
                     rb.half_extents[0] * s.x,

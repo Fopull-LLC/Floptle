@@ -367,7 +367,7 @@ impl ParticleSystemDoc {
 }
 
 /// Serializable physics rigidbody, mirroring [`floptle_core::RigidBody`].
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RigidBodyDoc {
     /// true = capsule (legacy field; ignored when `boxed` is set).
     #[serde(default)]
@@ -386,6 +386,14 @@ pub struct RigidBodyDoc {
     pub height: f32,
     #[serde(default = "half3_f32")]
     pub half_extents: [f32; 3],
+    /// true = a 2D polygon body, its corners in `outline`. Takes priority
+    /// over `boxed` and `capsule`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub polygon: bool,
+    /// A polygon body's corners, local to the node. Saved even while the
+    /// body is another kind, so switching back finds the outline again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outline: Vec<[f32; 2]>,
     #[serde(default)]
     pub restitution: f32,
     #[serde(default = "frict_f32")]
@@ -483,7 +491,9 @@ fn is_default_slope(v: &f32) -> bool {
 impl RigidBodyDoc {
     pub fn to_rigidbody(&self) -> RigidBody {
         RigidBody {
-            kind: if self.boxed {
+            kind: if self.polygon {
+                BodyKind::Polygon
+            } else if self.boxed {
                 BodyKind::Box
             } else if self.capsule {
                 BodyKind::Capsule
@@ -494,6 +504,7 @@ impl RigidBodyDoc {
             radius: self.radius,
             height: self.height,
             half_extents: self.half_extents,
+            outline: floptle_core::outline::Outline::convex(&self.outline),
             restitution: self.restitution,
             friction: self.friction,
             slope_limit: self.slope_limit.clamp(0.0, 90.0),
@@ -515,6 +526,8 @@ impl RigidBodyDoc {
             radius: rb.radius,
             height: rb.height,
             half_extents: rb.half_extents,
+            polygon: rb.kind == BodyKind::Polygon,
+            outline: rb.outline.points().to_vec(),
             restitution: rb.restitution,
             friction: rb.friction,
             slope_limit: rb.slope_limit,
@@ -4863,6 +4876,9 @@ mod tests {
                     rigidbody: Some(RigidBodyDoc {
                         capsule: true,
                         boxed: false,
+                        // A capsule that was a polygon once keeps its outline.
+                        polygon: false,
+                        outline: vec![[-0.5, -0.5], [0.5, -0.5], [0.0, 0.5]],
                         mode: BodyModeDoc::Kinematic, // exercise the mode round-trip
                         radius: 0.6,
                         height: 2.4,
@@ -5211,8 +5227,10 @@ mod tests {
         assert_eq!(cube.transform.translation, [1.0, 2.0, 3.0]);
         assert!(matches!(cube.matter, MatterDoc::Primitive { shape: ShapeDoc::Cube, .. }));
         // the cube's rigidbody (shape + constraints) round-trips through the World
-        let rb = cube.rigidbody.expect("cube rigidbody lost");
+        let rb = cube.rigidbody.as_ref().expect("cube rigidbody lost");
         assert!(rb.capsule && rb.radius == 0.6 && rb.height == 2.4);
+        assert!(!rb.polygon);
+        assert_eq!(rb.outline, vec![[-0.5, -0.5], [0.5, -0.5], [0.0, 0.5]]);
         assert_eq!(rb.lock_pos, [false, false, true]);
         assert_eq!(rb.lock_rot, [true, false, true]);
         assert!(rb.two_d, "the 2D switch has to survive a save and a load like every other field");

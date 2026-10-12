@@ -447,6 +447,7 @@ impl BodyHull {
                 let q = d.abs() - half;
                 q.max(Vec3::ZERO).length() + q.max_element().min(0.0)
             }
+            BodyShape::Polygon { outline, half_depth } => extrude(outline.distance(d.x, d.y), d.z, half_depth),
         }
     }
 
@@ -465,6 +466,14 @@ impl BodyHull {
             Vec3::Y
         }
     }
+}
+
+/// Signed distance to an outline extruded `half_depth` either side of its
+/// plane, from the 2D distance `d` and the depth `z`: outside is the length of
+/// the positive parts, inside the larger of the two.
+pub(crate) fn extrude(d: f32, z: f32, half_depth: f32) -> f32 {
+    let dz = z.abs() - half_depth;
+    d.max(0.0).hypot(dz.max(0.0)) + d.max(dz).min(0.0)
 }
 
 /// Sphere-trace a ray against a set of body hulls; the first surface within
@@ -1437,7 +1446,7 @@ impl PhysicsWorld {
     /// the axis and refining around the best, and only when it is strictly
     /// between the ends. Sample 0 stays the bottom sphere, the feet's; see
     /// [`Self::foot_probe`].
-    fn contact_samples(&self, bi: usize, ci: usize) -> ([Vec3; 9], usize, f32) {
+    fn contact_samples(&self, bi: usize, ci: usize) -> ([Vec3; crate::body::MAX_SAMPLES], usize, f32) {
         let b = &self.bodies[bi];
         let BodyShape::Capsule { half_height } = b.shape else { return b.sample_centers() };
         let (mut centers, n_c, radius) = b.sample_centers();
@@ -1703,7 +1712,7 @@ impl PhysicsWorld {
         let len0 = delta.length();
         if self.bodies[bi].sensor
             || radius <= 0.0
-            || matches!(self.bodies[bi].shape, BodyShape::Box { .. })
+            || matches!(self.bodies[bi].shape, BodyShape::Box { .. } | BodyShape::Polygon { .. })
             || !len0.is_finite()
             || len0 <= radius * SWEEP_FRACTION
         {
@@ -3956,5 +3965,35 @@ mod boxcast_tests {
         let world = [solid(Vec3::new(0.0, -0.5, 0.0), Vec3::new(20.0, 0.5, 0.5))];
         assert_eq!(overlap_box_2d(&world, &[], Vec3::new(0.0, 0.3, 0.0), [0.5, 0.5], &[], !0).len(), 1);
         assert!(overlap_box_2d(&world, &[], Vec3::new(0.0, 0.6, 0.0), [0.5, 0.5], &[], !0).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod polygon_hull_tests {
+    use super::*;
+
+    /// A ray meets a polygon body on its slanted face, where the box round it
+    /// would have stopped it short.
+    #[test]
+    fn a_ray_hits_a_polygon_body_on_its_outline() {
+        let outline = floptle_core::outline::Outline::convex(&[[-1.0, -1.0], [1.0, -1.0], [-1.0, 1.0]]);
+        let hull = BodyHull {
+            eid: 7,
+            pos: Vec3::ZERO,
+            radius: 0.5,
+            shape: BodyShape::Polygon { outline, half_depth: 0.5 },
+            up: Vec3::Y,
+            layer: 0,
+        };
+        // Down the diagonal from the upper right: the slanted edge is at
+        // x + y = 0, so the hit is at the origin, √2·3 along.
+        let from = Vec3::new(3.0, 3.0, 0.0);
+        let (eid, hit) = raycast_hulls(&[hull], from, -from, 10.0, &[], !0).unwrap();
+        assert_eq!(eid, 7);
+        assert!((hit.distance - 3.0 * std::f32::consts::SQRT_2).abs() < 0.03, "{}", hit.distance);
+        let n = Vec3::from(hit.normal);
+        assert!(n.dot(Vec3::new(1.0, 1.0, 0.0).normalize()) > 0.99, "{n:?}");
+        // Past its depth, nothing.
+        assert!(raycast_hulls(&[hull], Vec3::new(3.0, 3.0, 1.0), Vec3::new(-1.0, -1.0, 0.0), 10.0, &[], !0).is_none());
     }
 }

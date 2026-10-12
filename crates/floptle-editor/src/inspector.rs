@@ -6221,6 +6221,7 @@ impl EditorTabViewer<'_> {
                                 BodyKind::Sphere => "Sphere",
                                 BodyKind::Capsule => "Capsule",
                                 BodyKind::Box => "Box",
+                                BodyKind::Polygon => "Polygon",
                             })
                             .show_ui(ui, |ui| {
                                 cmd.inspector_changed |=
@@ -6229,9 +6230,21 @@ impl EditorTabViewer<'_> {
                                     ui.selectable_value(&mut rb.kind, BodyKind::Capsule, "Capsule").changed();
                                 cmd.inspector_changed |=
                                     ui.selectable_value(&mut rb.kind, BodyKind::Box, "Box").changed();
+                                let poly = ui
+                                    .selectable_value(&mut rb.kind, BodyKind::Polygon, "Polygon")
+                                    .on_hover_text("a 2D outline of up to 8 corners: a sprite's own silhouette, a slope-sided crate, a boulder")
+                                    .changed();
+                                cmd.inspector_changed |= poly;
+                                // A first switch to Polygon on a sprite takes
+                                // its outline from the art.
+                                if poly && rb.outline.is_empty() {
+                                    cmd.trace_body_outline = Some(e);
+                                }
                             });
                     });
-                    if rb.kind == BodyKind::Box {
+                    if rb.kind == BodyKind::Polygon {
+                        polygon_corners_ui(ui, rb, cmd, e);
+                    } else if rb.kind == BodyKind::Box {
                         ui.label("half-extents");
                         ui.horizontal_wrapped(|ui| {
                             for (i, ax) in ["x", "y", "z"].iter().enumerate() {
@@ -7856,6 +7869,86 @@ fn light_slot_line((live, dropped): (usize, usize)) -> (String, bool) {
     } else {
         (format!("{live} of 16 light slots used"), false)
     }
+}
+
+/// A polygon body's corners: trace them from the sprite, or type them in.
+///
+/// The outline is kept convex, so a corner dragged inward past its neighbours
+/// drops out of the hull rather than making a dent the solver cannot trust.
+fn polygon_corners_ui(
+    ui: &mut egui::Ui,
+    rb: &mut floptle_core::RigidBody,
+    cmd: &mut crate::EditorCmd,
+    e: floptle_core::Entity,
+) {
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .button("trace from art")
+            .on_hover_text("outline the opaque pixels of the frame this sprite shows")
+            .clicked()
+        {
+            cmd.trace_body_outline = Some(e);
+        }
+        if ui.button("box").on_hover_text("reset to the rectangle of the half-extents").clicked() {
+            rb.outline = floptle_core::outline::Outline::rect(rb.half_extents[0], rb.half_extents[1]);
+            cmd.inspector_changed = true;
+        }
+    });
+    let mut pts = rb.outline.points().to_vec();
+    if pts.is_empty() {
+        ui.small("no outline yet: a box of the half-extents until there is one");
+    }
+    let mut changed = false;
+    let mut cut = None;
+    let can_cut = pts.len() > 3;
+    for (i, q) in pts.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            ui.small(format!("{}", i + 1));
+            changed |= ui.add(egui::DragValue::new(&mut q[0]).speed(0.01).prefix("x ")).changed();
+            changed |= ui.add(egui::DragValue::new(&mut q[1]).speed(0.01).prefix("y ")).changed();
+            if can_cut && ui.small_button("−").on_hover_text("remove this corner").clicked() {
+                cut = Some(i);
+            }
+        });
+    }
+    if let Some(i) = cut {
+        pts.remove(i);
+        changed = true;
+    }
+    if pts.len() >= 3
+        && pts.len() < floptle_core::outline::OUTLINE_MAX
+        && ui.small_button("+ corner").on_hover_text("split the longest edge").clicked()
+    {
+        let n = pts.len();
+        let longest = (0..n)
+            .max_by(|&a, &b| {
+                let len = |i: usize| {
+                    let (p, q) = (pts[i], pts[(i + 1) % n]);
+                    (q[0] - p[0]).hypot(q[1] - p[1])
+                };
+                len(a).total_cmp(&len(b))
+            })
+            .unwrap_or(0);
+        let (p, q) = (pts[longest], pts[(longest + 1) % n]);
+        // Pushed out a little, or the hull would drop it as a straight-line
+        // point the moment it was added.
+        let (mx, my) = ((p[0] + q[0]) * 0.5, (p[1] + q[1]) * 0.5);
+        let (ex, ey) = (q[0] - p[0], q[1] - p[1]);
+        let len = ex.hypot(ey).max(1e-6);
+        let bump = 0.05 * len;
+        pts.insert(longest + 1, [mx + ey / len * bump, my - ex / len * bump]);
+        changed = true;
+    }
+    if changed {
+        rb.outline = floptle_core::outline::Outline::convex(&pts);
+        cmd.inspector_changed = true;
+    }
+    ui.horizontal(|ui| {
+        cmd.inspector_changed |= ui
+            .add(egui::DragValue::new(&mut rb.half_extents[2]).speed(0.02).range(0.02..=50.0).prefix("depth "))
+            .on_hover_text("half its thickness either side of the 2D plane")
+            .changed();
+    });
 }
 
 #[cfg(test)]

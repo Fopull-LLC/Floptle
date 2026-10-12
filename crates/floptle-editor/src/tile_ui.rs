@@ -3439,4 +3439,30 @@ mod tests {
         assert_eq!((rb.half_extents[0], rb.half_extents[1]), (2.0, 1.0));
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// A body added to a sprite with a silhouette takes its outline from the
+    /// art: a polygon round the opaque pixels, not a box round the frame.
+    #[test]
+    fn a_sprite_with_a_silhouette_gets_a_traced_body() {
+        let (mut ed, _, root) = project_with_image("trace", 16, 16);
+        // A 16×16 frame with an 8-wide figure standing in its middle.
+        let mut px = vec![0u8; 16 * 16 * 4];
+        for y in 4..16 {
+            for x in 4..12 {
+                px[(y * 16 + x) * 4..][..4].copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+        floptle_image::io::save_png(&root.join("textures/hero.png"), &px, 16, 16).unwrap();
+        ed.drop_asset(&root.join("textures/hero.png").to_string_lossy());
+        let s = *ed.selection.first().unwrap();
+        let rb = ed.default_body_for(s);
+        assert_eq!(rb.kind, floptle_core::BodyKind::Polygon);
+        let [hx, hy] = rb.outline.half_extents();
+        assert!((hx - 0.25).abs() < 1e-5 && (hy - 0.5).abs() < 1e-5, "{:?}", rb.outline.points());
+        // Its top is a quarter of the frame down: the empty air above the
+        // figure is not part of the body.
+        let top = rb.outline.points().iter().map(|q| q[1]).fold(f32::MIN, f32::max);
+        assert!((top - 0.25).abs() < 1e-5, "top {top}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
