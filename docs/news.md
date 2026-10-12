@@ -1,5 +1,12 @@
 ## Just shipped
 
+**v0.116.0-rc4 — "Lands On Its Feet"** (beta). A **Pixel Village** template
+where you walk up to people and talk: a dialogue box with portraits, choices
+and a pixel font, written as a game script you can change. 2D lights shade
+normal maps, a 2D light can be a sun, and spot lamps shine cones in 2D.
+Sprites 9-slice, `boxcast` and `overlapBox` answer for 2D bodies, particles
+keep their emitter's sorting layer, and `.woff` fonts load.
+
 **v0.116.0-rc3 — "Lands On Its Feet"** (beta). Put an `.aseprite` file in
 the project and it becomes a sprite sheet with a clip per tag, rewritten every
 time you save. Tiled and LDtk levels import with their layers, flips and
