@@ -1132,6 +1132,7 @@
                 limits_on: true,
                 limit_max: (60.0, 16.0),
                 pixel_snap: 16.0,
+                look_ahead: (2.0, 0.0),
             )),
         ),
     ],

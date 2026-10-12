@@ -51,6 +51,15 @@ pub struct Camera2D {
     /// rounding is re-applied to an already-rounded number every frame and the
     /// camera cannot creep at less than a pixel per frame at all.
     pub pixel_snap: f32,
+    /// How far ahead of the target to look, in world units per axis: the
+    /// camera leads the way the target last moved, so a player running right
+    /// sees more of what is coming than of what is behind. `[0, 0]` is off.
+    pub look_ahead: [f32; 2],
+    /// Nodes carrying this tag are rooms. The camera keeps its view inside the
+    /// room the target is in, and glides to the next one as the target crosses
+    /// into it. A room is the area of the tile layers it is, or holds. Empty is
+    /// off.
+    pub room_tag: String,
 
     // ---- live state, never saved ----
     /// Where the follow has got to. Seeded from the node's transform the first
@@ -80,6 +89,15 @@ pub struct Camera2D {
     /// The limits keep the VIEW inside them, so they need to know how far it
     /// reaches either side of the centre. Set by [`step_all_view`].
     pub view_half: DVec2,
+    /// The rooms, as world rectangles `[min x, min y, max x, max y]`, this
+    /// frame. Set by [`step_all_view`].
+    pub rooms: Vec<[f64; 4]>,
+    /// The room the camera is keeping to, once the target has entered one.
+    pub room: Option<[f64; 4]>,
+    /// Where the target was last frame, to tell which way it is going.
+    pub last_target: Option<DVec2>,
+    /// The look-ahead this frame, eased towards the way the target moves.
+    pub lead: DVec2,
 }
 
 impl Default for Camera2D {
@@ -99,6 +117,12 @@ impl Default for Camera2D {
             shake_total: 0.0,
             view_half: DVec2::ZERO,
             last_shake: DVec2::ZERO,
+            look_ahead: [0.0, 0.0],
+            room_tag: String::new(),
+            rooms: Vec::new(),
+            room: None,
+            last_target: None,
+            lead: DVec2::ZERO,
         }
     }
 }
@@ -175,7 +199,44 @@ impl Camera2D {
         if target.is_none() {
             self.pos = unshaken;
         }
-        if let Some(target) = target {
+        if let Some(raw) = target {
+            // 0. Look-ahead: lead the way the target is moving, and keep
+            // leading that way while it stands still, so stopping does not
+            // swing the view back. Eased over half a second, or the view
+            // lurches every time the player turns round.
+            let mut target = raw;
+            let dt64 = dt.max(0.0) as f64;
+            if let Some(prev) = self.last_target
+                && dt64 > 0.0
+            {
+                let v = (raw - prev) / dt64;
+                for i in 0..2 {
+                    let reach = self.look_ahead[i].max(0.0) as f64;
+                    if reach > 0.0 && v[i].abs() > 0.5 {
+                        let goal = reach * v[i].signum();
+                        let k = 1.0 - (-dt64 / 0.5).exp();
+                        self.lead[i] += (goal - self.lead[i]) * k;
+                    } else if reach <= 0.0 {
+                        self.lead[i] = 0.0;
+                    }
+                }
+            }
+            self.last_target = Some(raw);
+            target += self.lead;
+            // The room the target stands in. Leaving every room keeps the last
+            // one, so a gap between two rooms does not let the view drift free.
+            if let Some(r) = self.rooms.iter().find(|r| raw.x >= r[0] && raw.x <= r[2] && raw.y >= r[1] && raw.y <= r[3]) {
+                self.room = Some(*r);
+            }
+            if let Some(r) = self.room {
+                // Clamped before the smoothing, not after, so a change of room
+                // is a glide rather than a cut.
+                for i in 0..2 {
+                    let half = self.view_half[i].max(0.0);
+                    let (lo, hi) = (r[i] + half, r[i + 2] - half);
+                    target[i] = if lo <= hi { target[i].clamp(lo, hi) } else { (lo + hi) * 0.5 };
+                }
+            }
             // 1. Dead zone: only the part of the gap that leaves the box counts.
             let mut want = self.pos;
             for i in 0..2 {
@@ -307,6 +368,16 @@ pub fn step_all_view(world: &mut crate::ecs::World, dt: f32, t: f64, aspect: Opt
             }
         }
     }
+    // Rooms, by tag, only when some camera keeps to them.
+    let tags: Vec<String> = world
+        .query::<Camera2D>()
+        .filter(|(_, c)| !c.room_tag.is_empty())
+        .map(|(_, c)| c.room_tag.clone())
+        .collect();
+    let rooms: std::collections::HashMap<String, Vec<[f64; 4]>> = tags.into_iter().map(|t| {
+        let r = rooms_tagged(world, &t);
+        (t, r)
+    }).collect();
     for (e, follow) in jobs {
         // The camera's own place, and the frame its `translation` is written in.
         // A camera under a parent is unusual and legal; doing the arithmetic in
@@ -335,6 +406,7 @@ pub fn step_all_view(world: &mut crate::ecs::World, dt: f32, t: f64, aspect: Opt
         };
         let Some(c) = world.get_mut::<Camera2D>(e) else { continue };
         c.view_half = half;
+        c.rooms = rooms.get(&c.room_tag).cloned().unwrap_or_default();
         let here = DVec2::new(cam_world.translation.x, cam_world.translation.y);
         let want = c.step(here, target.map(|p| DVec2::new(p.x, p.y)), dt, t);
         // Z is left exactly where it was: a 2D camera's depth is a decision
@@ -350,9 +422,110 @@ pub fn step_all_view(world: &mut crate::ecs::World, dt: f32, t: f64, aspect: Opt
     }
 }
 
+/// The world rectangle of every node tagged `tag`: the tile layers it is, or
+/// holds anywhere beneath it, together.
+pub fn rooms_tagged(world: &crate::ecs::World, tag: &str) -> Vec<[f64; 4]> {
+    let mut out: std::collections::BTreeMap<u32, [f64; 4]> = std::collections::BTreeMap::new();
+    for (e, m) in world.query::<crate::matter::Matter>() {
+        let crate::matter::Matter::Tilemap { cols, rows, tile, .. } = m else { continue };
+        // The tagged node this layer belongs to: itself, or its nearest
+        // tagged ancestor.
+        let mut at = Some(e);
+        let mut room = None;
+        let mut guard = 0;
+        while let Some(n) = at {
+            if world.get::<crate::matter::Tags>(n).is_some_and(|t| t.0.iter().any(|x| x == tag)) {
+                room = Some(n);
+                break;
+            }
+            at = world.get::<crate::matter::Parent>(n).map(|p| p.0);
+            guard += 1;
+            if guard > 256 {
+                break;
+            }
+        }
+        let Some(room) = room else { continue };
+        let xf = crate::matter::world_transform(world, e);
+        let (hw, hh) = (*cols as f64 * *tile as f64 * 0.5, *rows as f64 * *tile as f64 * 0.5);
+        let mut r = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+        for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+            let local = crate::math::Vec3::new((sx * hw) as f32, (sy * hh) as f32, 0.0);
+            let p = xf.translation + (xf.rotation * (xf.scale * local)).as_dvec3();
+            r = [r[0].min(p.x), r[1].min(p.y), r[2].max(p.x), r[3].max(p.y)];
+        }
+        let e = out.entry(room.index()).or_insert(r);
+        *e = [e[0].min(r[0]), e[1].min(r[1]), e[2].max(r[2]), e[3].max(r[3])];
+    }
+    out.into_values().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Running right, the camera settles ahead of the player; stopping keeps
+    /// the lead, and running left swings it to the other side.
+    #[test]
+    fn the_camera_looks_ahead_of_where_the_target_is_going() {
+        let mut c = Camera2D { smoothing: 0.0, look_ahead: [3.0, 0.0], ..Default::default() };
+        c.step(at(0.0, 0.0), None, 0.016, 0.0);
+        let mut x = 0.0;
+        for _ in 0..240 {
+            x += 0.1;
+            c.step(at(0.0, 0.0), Some(at(x, 0.0)), 1.0 / 60.0, 0.0);
+        }
+        assert!((c.pos.x - (x + 3.0)).abs() < 0.05, "ahead by 3: {} vs {}", c.pos.x, x);
+        for _ in 0..60 {
+            c.step(at(0.0, 0.0), Some(at(x, 0.0)), 1.0 / 60.0, 0.0);
+        }
+        assert!((c.pos.x - (x + 3.0)).abs() < 0.05, "standing still keeps the lead");
+        for _ in 0..240 {
+            x -= 0.1;
+            c.step(at(0.0, 0.0), Some(at(x, 0.0)), 1.0 / 60.0, 0.0);
+        }
+        assert!((c.pos.x - (x - 3.0)).abs() < 0.05, "running left leads left");
+    }
+
+    /// A room is the area of the tile layers under the tagged node, wherever
+    /// they sit beneath it; untagged layers are not rooms.
+    #[test]
+    fn a_tagged_node_is_a_room_the_size_of_its_tile_layers() {
+        use crate::matter::{Matter, Parent, Tags};
+        use crate::transform::Transform;
+        let mut w = crate::ecs::World::default();
+        let level = w.spawn();
+        w.insert(level, Transform { translation: crate::math::DVec3::new(10.0, 0.0, 0.0), ..Transform::IDENTITY });
+        w.insert(level, Tags(vec!["room".into()]));
+        let layer = w.spawn();
+        w.insert(layer, Transform { translation: crate::math::DVec3::new(4.0, -2.0, 0.0), ..Transform::IDENTITY });
+        w.insert(layer, Matter::Tilemap { cols: 8, rows: 4, tile: 1.0, data: vec![], tileset: String::new() });
+        w.insert(layer, Parent(level));
+        let stray = w.spawn();
+        w.insert(stray, Transform::IDENTITY);
+        w.insert(stray, Matter::Tilemap { cols: 2, rows: 2, tile: 1.0, data: vec![], tileset: String::new() });
+        assert_eq!(rooms_tagged(&w, "room"), vec![[10.0, -4.0, 18.0, 0.0]]);
+        assert!(rooms_tagged(&w, "other").is_empty());
+    }
+
+    /// In a room the view stays inside it; crossing into the next room glides
+    /// the camera over rather than cutting.
+    #[test]
+    fn the_camera_keeps_to_the_room_the_target_is_in() {
+        let mut c = Camera2D { smoothing: 0.2, ..Default::default() };
+        c.view_half = DVec2::new(4.0, 2.0);
+        c.rooms = vec![[0.0, 0.0, 20.0, 10.0], [20.0, 0.0, 40.0, 10.0]];
+        c.step(at(10.0, 5.0), None, 0.016, 0.0);
+        for _ in 0..120 {
+            c.step(at(10.0, 5.0), Some(at(19.0, 5.0)), 1.0 / 60.0, 0.0);
+        }
+        assert!((c.pos.x - 16.0).abs() < 0.01, "the view's right edge stops at the room's: {}", c.pos.x);
+        c.step(at(10.0, 5.0), Some(at(21.0, 5.0)), 1.0 / 60.0, 0.0);
+        assert!(c.pos.x > 16.0 && c.pos.x < 24.0, "a glide, not a cut: {}", c.pos.x);
+        for _ in 0..240 {
+            c.step(at(10.0, 5.0), Some(at(21.0, 5.0)), 1.0 / 60.0, 0.0);
+        }
+        assert!((c.pos.x - 24.0).abs() < 0.01, "the view's left edge stops at the new room's: {}", c.pos.x);
+    }
 
     fn at(x: f64, y: f64) -> DVec2 {
         DVec2::new(x, y)

@@ -188,6 +188,8 @@ impl Editor {
         self.world.insert(root, Transform { translation: origin, rotation: Quat::IDENTITY, scale: Vec3::ONE });
         self.world.insert(root, floptle_core::Name(level.clone()));
         self.world.insert(root, Matter::Empty);
+        // Tagged, so a 2D camera whose rooms are "level" keeps to each one.
+        self.world.insert(root, floptle_core::Tags(vec!["level".into()]));
 
         let mut colliding = Vec::new();
         for (i, l) in lv.layers.iter().enumerate() {

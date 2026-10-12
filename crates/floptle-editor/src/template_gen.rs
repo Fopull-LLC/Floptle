@@ -321,6 +321,7 @@ fn regenerate_platformer2d() {
             limit_min: [0.0, 0.0],
             limit_max: [COLS as f32, ROWS as f32],
             pixel_snap: 16.0,
+            look_ahead: [2.0, 0.0],
             ..Default::default()
         },
     );

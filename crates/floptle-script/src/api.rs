@@ -2433,6 +2433,9 @@ pub(crate) fn apply_rich_sets(
                 max_x,
                 max_y,
                 pixel_snap,
+                look_ahead_x,
+                look_ahead_y,
+                room_tag,
                 off,
             } => {
                 if off {
@@ -2489,6 +2492,12 @@ pub(crate) fn apply_rich_sets(
                     // switch, so it goes through.
                     if let Some(v) = pixel_snap.filter(|v| v.is_finite() && *v >= 0.0) {
                         c.pixel_snap = v;
+                    }
+                    dz(look_ahead_x, &mut c.look_ahead[0]);
+                    dz(look_ahead_y, &mut c.look_ahead[1]);
+                    if let Some(t) = room_tag {
+                        c.room_tag = t;
+                        c.room = None;
                     }
                     world.insert(e, c);
                 }
@@ -2768,6 +2777,9 @@ pub(crate) const CAMERA_2D_KEYS: &[&str] = &[
     "maxX",
     "maxY",
     "pixelSnap",
+    "lookAheadX",
+    "lookAheadY",
+    "roomTag",
     "off",
 ];
 
@@ -5992,6 +6004,9 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                         max_x: t.get::<Option<f32>>("maxX")?,
                         max_y: t.get::<Option<f32>>("maxY")?,
                         pixel_snap: t.get::<Option<f32>>("pixelSnap")?,
+                        look_ahead_x: t.get::<Option<f32>>("lookAheadX")?,
+                        look_ahead_y: t.get::<Option<f32>>("lookAheadY")?,
+                        room_tag: t.get::<Option<String>>("roomTag")?,
                         off: t.get::<Option<bool>>("off")?.unwrap_or(false),
                     },
                 ));

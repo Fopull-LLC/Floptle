@@ -554,6 +554,12 @@ pub struct Camera2DDoc {
     /// `0` = off. See `Camera2D::pixel_snap`.
     #[serde(default, skip_serializing_if = "is_zero_f32")]
     pub pixel_snap: f32,
+    /// How far to lead the target per axis; `(0, 0)` = off.
+    #[serde(default, skip_serializing_if = "is_zero2")]
+    pub look_ahead: (f32, f32),
+    /// Nodes with this tag are rooms the camera keeps to. Empty = off.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub room_tag: String,
 }
 
 fn default_smoothing() -> f32 {
@@ -574,6 +580,8 @@ impl Default for Camera2DDoc {
             limit_min: (0.0, 0.0),
             limit_max: (0.0, 0.0),
             pixel_snap: 0.0,
+            look_ahead: (0.0, 0.0),
+            room_tag: String::new(),
         }
     }
 }
@@ -588,6 +596,8 @@ impl From<&floptle_core::camera2d::Camera2D> for Camera2DDoc {
             limit_min: (c.limit_min[0], c.limit_min[1]),
             limit_max: (c.limit_max[0], c.limit_max[1]),
             pixel_snap: c.pixel_snap,
+            look_ahead: (c.look_ahead[0], c.look_ahead[1]),
+            room_tag: c.room_tag.clone(),
         }
     }
 }
@@ -602,6 +612,8 @@ impl From<&Camera2DDoc> for floptle_core::camera2d::Camera2D {
             limit_min: [d.limit_min.0, d.limit_min.1],
             limit_max: [d.limit_max.0, d.limit_max.1],
             pixel_snap: d.pixel_snap,
+            look_ahead: [d.look_ahead.0, d.look_ahead.1],
+            room_tag: d.room_tag.clone(),
             ..Default::default()
         }
     }

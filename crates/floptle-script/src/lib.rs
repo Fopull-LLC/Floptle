@@ -1790,6 +1790,11 @@ pub enum RichSet {
         max_y: Option<f32>,
         /// Pixels per world unit to land the drawn camera on; `0` turns it off.
         pixel_snap: Option<f32>,
+        /// How far to lead the target per axis; `0` is off.
+        look_ahead_x: Option<f32>,
+        look_ahead_y: Option<f32>,
+        /// The tag that marks rooms; `""` is off.
+        room_tag: Option<String>,
         /// `off = true` removes the behaviour entirely.
         off: bool,
     },

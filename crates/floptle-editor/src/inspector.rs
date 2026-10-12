@@ -7688,6 +7688,32 @@ fn camera_2d_section(
                 }
             });
             ui.end_row();
+
+            ui.label("look ahead").on_hover_text(
+                "how far to lead the target the way it last moved, in world units. A player running right sees more of what is coming than of what is behind; standing still keeps the lead. 0 is off.",
+            );
+            ui.horizontal_wrapped(|ui| {
+                for (i, axis) in ["x ", "y "].iter().enumerate() {
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut next.look_ahead[i])
+                                .speed(0.05)
+                                .range(0.0..=100.0)
+                                .prefix(*axis),
+                        )
+                        .changed();
+                }
+            });
+            ui.end_row();
+
+            ui.label("rooms").on_hover_text(
+                "a tag. Every node carrying it is a room: the area of the tile layers it is or holds. The camera keeps its view inside the room the target is in, and glides to the next one when the target crosses over. Empty is off.",
+            );
+            if ui.add(egui::TextEdit::singleline(&mut next.room_tag).hint_text("tag, e.g. room")).changed() {
+                next.room = None;
+                changed = true;
+            }
+            ui.end_row();
         });
         changed |= crate::responsive::check(ui, &mut next.limits_on, "keep inside a rectangle")
             .on_hover_text("the camera never leaves this box, so it never shows outside the level")
