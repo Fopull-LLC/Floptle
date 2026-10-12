@@ -25,38 +25,38 @@ pub(crate) const STONE: u32 = 5;
 pub(crate) const TUFT: u32 = 6;
 pub(crate) const FLOWER: u32 = 7;
 
-const T: u32 = 16;
+pub(crate) const T: u32 = 16;
 const COLS: u32 = 60;
 const ROWS: u32 = 16;
 
-type Rgba = [u8; 4];
-const GRASS_HI: Rgba = [167, 240, 112, 255];
-const GRASS_LO: Rgba = [56, 183, 100, 255];
-const DIRT_HI: Rgba = [176, 110, 66, 255];
-const DIRT_LO: Rgba = [122, 72, 46, 255];
-const DIRT_DK: Rgba = [86, 50, 40, 255];
-const STONE_HI: Rgba = [148, 176, 194, 255];
-const STONE_LO: Rgba = [86, 108, 134, 255];
-const WOOD_HI: Rgba = [214, 152, 86, 255];
-const WOOD_LO: Rgba = [140, 86, 48, 255];
-const INK: Rgba = [41, 36, 64, 255];
-const SKIN: Rgba = [239, 125, 87, 255];
-const SKIN_HI: Rgba = [255, 205, 117, 255];
-const WHITE: Rgba = [244, 244, 244, 255];
-const PETAL: Rgba = [255, 120, 160, 255];
+pub(crate) type Rgba = [u8; 4];
+pub(crate) const GRASS_HI: Rgba = [167, 240, 112, 255];
+pub(crate) const GRASS_LO: Rgba = [56, 183, 100, 255];
+pub(crate) const DIRT_HI: Rgba = [176, 110, 66, 255];
+pub(crate) const DIRT_LO: Rgba = [122, 72, 46, 255];
+pub(crate) const DIRT_DK: Rgba = [86, 50, 40, 255];
+pub(crate) const STONE_HI: Rgba = [148, 176, 194, 255];
+pub(crate) const STONE_LO: Rgba = [86, 108, 134, 255];
+pub(crate) const WOOD_HI: Rgba = [214, 152, 86, 255];
+pub(crate) const WOOD_LO: Rgba = [140, 86, 48, 255];
+pub(crate) const INK: Rgba = [41, 36, 64, 255];
+pub(crate) const SKIN: Rgba = [239, 125, 87, 255];
+pub(crate) const SKIN_HI: Rgba = [255, 205, 117, 255];
+pub(crate) const WHITE: Rgba = [244, 244, 244, 255];
+pub(crate) const PETAL: Rgba = [255, 120, 160, 255];
 
-struct Canvas {
-    w: u32,
-    h: u32,
-    px: Vec<u8>,
+pub(crate) struct Canvas {
+    pub(crate) w: u32,
+    pub(crate) h: u32,
+    pub(crate) px: Vec<u8>,
 }
 
 impl Canvas {
-    fn new(w: u32, h: u32) -> Self {
+    pub(crate) fn new(w: u32, h: u32) -> Self {
         Self { w, h, px: vec![0; (w * h * 4) as usize] }
     }
     /// Set a pixel of cell `cell`, with `y` counted UP from the cell's bottom.
-    fn set(&mut self, cell: u32, x: u32, y_up: u32, c: Rgba) {
+    pub(crate) fn set(&mut self, cell: u32, x: u32, y_up: u32, c: Rgba) {
         let (gx, gy) = (cell * T + x, T - 1 - y_up);
         if gx < self.w && gy < self.h {
             let o = ((gy * self.w + gx) * 4) as usize;
@@ -74,7 +74,7 @@ fn dirt(x: u32, y: u32) -> Rgba {
     }
 }
 
-fn tiles_png() -> Canvas {
+pub(crate) fn tiles_png() -> Canvas {
     let mut c = Canvas::new(T * 8, T);
     for x in 0..T {
         for y in 0..T {
@@ -118,7 +118,7 @@ fn tiles_png() -> Canvas {
 }
 
 /// Six 16-px frames: two standing (a breath), four running.
-fn player_png() -> Canvas {
+pub(crate) fn player_png() -> Canvas {
     let mut c = Canvas::new(T * 6, T);
     for f in 0..6u32 {
         let bob = if f == 1 || f == 3 || f == 5 { 1 } else { 0 };
@@ -203,7 +203,7 @@ fn level() -> Vec<u32> {
     g
 }
 
-fn place(x: f64, y: f64) -> Transform {
+pub(crate) fn place(x: f64, y: f64) -> Transform {
     Transform { translation: DVec3::new(x, y, 0.0), rotation: Quat::IDENTITY, scale: Vec3::ONE }
 }
 

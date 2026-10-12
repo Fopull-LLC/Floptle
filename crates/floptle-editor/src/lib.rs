@@ -181,6 +181,8 @@ mod tile_physics_tests;
 #[cfg(test)]
 mod template_gen;
 #[cfg(test)]
+mod template_village;
+#[cfg(test)]
 mod vfx_frame_tests;
 #[cfg(feature = "editor-ui")]
 mod lua_format;

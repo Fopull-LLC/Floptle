@@ -1,0 +1,16 @@
+{
+  "start": "hello",
+  "lines": {
+    "hello": { "who": "Mira", "face": 1, "text": "Oh, hello! You're new around here.", "next": "ask" },
+    "ask": {
+      "who": "Mira", "face": 0, "text": "Have you seen the old well at the end of the path?",
+      "choices": [
+        { "text": "Not yet.", "next": "notYet" },
+        { "text": "What's so special about it?", "next": "special" }
+      ]
+    },
+    "notYet": { "who": "Mira", "face": 1, "text": "Go and look! Jump up on the planks to see over the wall.", "next": "bye" },
+    "special": { "who": "Mira", "face": 0, "text": "They say if you shout into it, it shouts back. I've never dared.", "next": "bye" },
+    "bye": { "who": "Mira", "face": 1, "text": "See you around." }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "start": "read",
+  "lines": {
+    "read": { "who": "Sign", "text": "WELCOME TO THE VILLAGE. Press E to talk to people.", "next": "more" },
+    "more": { "who": "Sign", "text": "Every word they say lives in data/<their name>.json. Change it and talk again." }
+  }
+}

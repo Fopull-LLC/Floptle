@@ -56,6 +56,30 @@ pub(crate) const TEMPLATES: &[Template] = &[
         ],
     },
     Template {
+        name: "village2d",
+        title: "Pixel Village",
+        blurb: "2D: walk up to people and talk — a dialogue box, choices and a pixel font, all in one script you can change",
+        tutorial: None,
+        files: &[
+            ("scenes/first.ron", include_str!("../templates/village2d/first.ron")),
+            ("tilesets/ground.tileset.ron", include_str!("../templates/platformer2d/ground.tileset.ron")),
+            ("scripts/pixelPlayer.lua", lua::PIXEL_PLAYER_LUA),
+            ("scripts/talk.lua", include_str!("../templates/village2d/talk.lua")),
+            ("data/Mira.json", include_str!("../templates/village2d/Mira.json")),
+            ("data/Sign.json", include_str!("../templates/village2d/Sign.json")),
+            ("fonts/pixel.fnt", include_str!("../templates/village2d/pixel.fnt")),
+        ],
+        art: &[
+            ("textures/tiles.png", include_bytes!("../templates/platformer2d/tiles.png")),
+            ("textures/player.png", include_bytes!("../templates/platformer2d/player.png")),
+            ("textures/mira.png", include_bytes!("../templates/village2d/mira.png")),
+            ("textures/sign.png", include_bytes!("../templates/village2d/sign.png")),
+            ("textures/portraits.png", include_bytes!("../templates/village2d/portraits.png")),
+            ("textures/dialogue_frame.png", include_bytes!("../templates/village2d/dialogue_frame.png")),
+            ("fonts/pixel.png", include_bytes!("../templates/village2d/pixel.png")),
+        ],
+    },
+    Template {
         name: "platformer",
         title: "Platformer",
         blurb: "3D: run, jump, ride a moving platform, collect coins, reach the goal",
@@ -445,6 +469,93 @@ mod tests {
             top = top.max(floptle_core::world_transform(&ed.world, player).translation.y);
         }
         assert!(top - ground > 2.0, "a full jump clears two units; rose {:.2}", top - ground);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every text the Dialogue layer shows right now, joined.
+    fn dialogue_text(ed: &crate::Editor) -> String {
+        let mut out = String::new();
+        for (_, spec) in ed.world.query::<floptle_ui::ElementSpec>() {
+            if let Some(t) = &spec.text {
+                out.push_str(&t.text);
+                out.push('|');
+            }
+        }
+        out
+    }
+
+    fn press_e(ed: &mut crate::Editor) {
+        use floptle_input::{Key, Source};
+        ed.raw_input.keys.insert(Key::KeyE);
+        ed.raw_input.pressed.insert(Source::Key(Key::KeyE));
+        ed.tick_input_edges.0.insert(Source::Key(Key::KeyE));
+        ed.play_step(1.0 / 60.0, true);
+        ed.raw_input.pressed.clear();
+        ed.raw_input.keys.remove(&Key::KeyE);
+        ed.play_step(1.0 / 60.0, true);
+    }
+
+    /// The village plays a conversation from its data file: E beside Mira
+    /// opens it, the words type out, a choice is made, and it ends handing the
+    /// player back their controls.
+    #[test]
+    fn the_pixel_village_holds_a_conversation() {
+        let dir = scaffold("village-talk", "village2d");
+        let mut ed = crate::Editor::default();
+        ed.open_project(dir.clone());
+        ed.open_scene_file(&dir.join("scenes/first.ron").to_string_lossy());
+        let player = ed.world.query::<floptle_core::Name>().find(|(_, n)| n.0 == "Player").map(|(e, _)| e).unwrap();
+        if let Some(t) = ed.world.get_mut::<floptle_core::transform::Transform>(player) {
+            t.translation.x = 22.8;
+        }
+        ed.toggle_play();
+        for _ in 0..60 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        assert!(dialogue_text(&ed).contains("talk to Mira"), "a hint near Mira: {}", dialogue_text(&ed));
+
+        press_e(&mut ed);
+        for _ in 0..90 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        assert!(dialogue_text(&ed).contains("You're new around here."), "the first line typed out: {}", dialogue_text(&ed));
+        // Walking is swallowed while talking.
+        let x = floptle_core::world_transform(&ed.world, player).translation.x;
+        ed.raw_input.keys.insert(floptle_input::Key::KeyD);
+        for _ in 0..20 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        ed.raw_input.keys.remove(&floptle_input::Key::KeyD);
+        let moved = floptle_core::world_transform(&ed.world, player).translation.x - x;
+        assert!(moved.abs() < 0.05, "the player must stand still while talking; moved {moved:.2}");
+
+        press_e(&mut ed);
+        for _ in 0..120 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        let shown = dialogue_text(&ed);
+        assert!(shown.contains("> Not yet.") && shown.contains("  What's so special"), "the choices, the first focused: {shown}");
+        // E picks the focused choice, which is the first.
+        press_e(&mut ed);
+        for _ in 0..120 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        assert!(dialogue_text(&ed).contains("Jump up on the planks"), "the first choice's answer: {}", dialogue_text(&ed));
+        for _ in 0..2 {
+            press_e(&mut ed);
+            for _ in 0..90 {
+                ed.play_step(1.0 / 60.0, true);
+            }
+        }
+        assert!(!dialogue_text(&ed).contains("See you around"), "the last line ends it: {}", dialogue_text(&ed));
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        let x = floptle_core::world_transform(&ed.world, player).translation.x;
+        ed.raw_input.keys.insert(floptle_input::Key::KeyD);
+        for _ in 0..20 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        assert!(floptle_core::world_transform(&ed.world, player).translation.x - x > 0.5, "free to walk again");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

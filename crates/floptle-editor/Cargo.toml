@@ -216,6 +216,9 @@ libc = "0.2"
 
 # Building template-bundle fixtures for the export tests (no network involved).
 [dev-dependencies]
+# The village2d template generator rasterizes the bundled pixel font into a
+# BMFont sheet (`template_village.rs`).
+fontdue = "0.9"
 sha2 = "0.10"
 flate2 = "1"
 tar = "0.4"
