@@ -208,7 +208,8 @@ pub(crate) fn split_point_lights(
         side.push(Candidate {
             order: e.index(),
             score: contribution(c.length(), *range, *color, *intensity),
-            pos: [c.x, c.y, c.z, range.max(0.0001)],
+            // A 2D sun has a direction and no position: a negative range says so.
+            pos: [c.x, c.y, c.z, if is_2d && lit.sun { -1.0 } else { range.max(0.0001) }],
             color: [color[0] * intensity, color[1] * intensity, color[2] * intensity, 0.0],
             mask: layer_mask(&lit, sorting_names),
             falloff: lit.falloff_lane(*range),

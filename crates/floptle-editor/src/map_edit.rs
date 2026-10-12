@@ -1037,6 +1037,7 @@ fn bare_map_node(
         light_inner: None,
         light_falloff: None,
         light_shadows: None,
+        light_sun: None,
     }
 }
 
@@ -3771,6 +3772,7 @@ mod tests {
         light_inner: None,
         light_falloff: None,
         light_shadows: None,
+        light_sun: None,
         }
     }
 

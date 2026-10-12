@@ -205,6 +205,10 @@ struct Lights {
     // is 16 bytes whatever we put in it and one word would cover only 32 of the
     // 64 ranks a sorting layer can have.
     mask: array<vec4<u32>, 16>,
+    // xy = the way the light travels, in the plane (a sun's direction, a spot
+    // lamp's aim); z/w = cos of the cone's outer/inner half-angle, z = -1 for
+    // no cone.
+    aim: array<vec4<f32>, 16>,
 };
 
 @group(0) @binding(0) var<uniform> L: Lights;
@@ -293,19 +297,10 @@ fn falloff_at(i: u32, d: f32) -> f32 {
 ///   turned towards a light is lit and only what is behind it goes dark.
 /// * **It never marches past the light.** The segment ends there, so a caster
 ///   on the far side of a lamp does not shade the near side.
-fn occluded(i: u32, origin_px: vec2<f32>, self_casts: bool) -> bool {
-    let steps = L.count.z;
+fn occluded(i: u32, origin_px: vec2<f32>, light_px: vec2<f32>, steps: f32, self_casts: bool) -> bool {
     if (steps < 1.0 || L.falloff[i].z < 0.5) {
         return false;
     }
-    // Where the light is on screen. `w <= 0` puts it behind the eye, which for
-    // a flat scene means there is no sensible segment to walk.
-    let lc = L.view_proj * vec4<f32>(L.pos[i].xyz, 1.0);
-    if (lc.w <= 0.0) {
-        return false;
-    }
-    let ndc = lc.xy / lc.w;
-    let light_px = vec2<f32>((ndc.x * 0.5 + 0.5) * L.viewport.x, (0.5 - ndc.y * 0.5) * L.viewport.y);
     let seg = light_px - origin_px;
     let n = i32(steps);
     var left_self = !self_casts;
@@ -370,23 +365,53 @@ fn shade(in: FullOut) -> Delta {
         if (!reaches(i, rank)) {
             continue;
         }
-        let d = distance(L.pos[i].xyz, world);
-        let x = falloff_at(i, d);
-        // Out of range already: no contribution, and — the part that pays for
-        // shadows — nothing to march. Only pixels actually inside a light's
-        // radius ever walk the G-buffer, so the cost follows the lit area
-        // rather than the screen.
-        if (x <= 0.0) {
-            continue;
+        var x = 1.0;
+        var to_light = vec3<f32>(0.0, 0.0, 1.0);
+        var light_px = in.clip.xy;
+        var steps = L.count.z;
+        let travel = L.aim[i].xy / max(length(L.aim[i].xy), 1e-6);
+        if (L.pos[i].w < 0.0) {
+            // A sun: everywhere at full strength, from one direction, at 45°
+            // above the plane for normal maps. Its shadows run a quarter of the
+            // screen away from it, sampled twice as finely as a lamp's.
+            to_light = normalize(vec3<f32>(-travel, 1.0));
+            light_px = in.clip.xy + vec2<f32>(-travel.x, travel.y) * length(L.viewport.xy) * 0.25;
+            steps = steps * 2.0;
+        } else {
+            let d = distance(L.pos[i].xyz, world);
+            x = falloff_at(i, d);
+            // A cone, when the lamp has one: full inside the inner angle,
+            // nothing outside the outer, a smooth edge between.
+            if (L.aim[i].z > -1.0) {
+                let v = world.xy - L.pos[i].xy;
+                let c = dot(v / max(length(v), 1e-6), travel);
+                x = x * smoothstep(L.aim[i].z, max(L.aim[i].w, L.aim[i].z + 1e-4), c);
+            }
+            // Out of range already: no contribution, and — the part that pays
+            // for shadows — nothing to march. Only pixels actually inside a
+            // light's reach ever walk the G-buffer, so the cost follows the lit
+            // area rather than the screen.
+            if (x <= 0.0) {
+                continue;
+            }
+            // Where the light is on screen. `w <= 0` puts it behind the eye,
+            // which for a flat scene means there is no segment to walk.
+            let lc = L.view_proj * vec4<f32>(L.pos[i].xyz, 1.0);
+            if (lc.w <= 0.0) {
+                steps = 0.0;
+            } else {
+                let lndc = lc.xy / lc.w;
+                light_px = vec2<f32>((lndc.x * 0.5 + 0.5) * L.viewport.x, (0.5 - lndc.y * 0.5) * L.viewport.y);
+            }
+            to_light = normalize(vec3<f32>(L.pos[i].xy - world.xy, max(L.falloff[i].w, 1e-3)));
         }
-        if (occluded(i, in.clip.xy, self_casts)) {
+        if (occluded(i, in.clip.xy, light_px, steps, self_casts)) {
             continue;
         }
         // Relief: how much more or less this texel faces the light than a flat
         // one would. A flat texel gets exactly 1, so a surface without a
         // normal map lights precisely as it always has, and a bump is
         // brighter on the side towards the light and darker away from it.
-        let to_light = normalize(vec3<f32>(L.pos[i].xy - world.xy, max(L.falloff[i].w, 1e-3)));
         var relief = 1.0;
         if (!flat) {
             relief = clamp(dot(normal, to_light) / max(to_light.z, 0.05), 0.0, 2.0);

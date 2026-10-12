@@ -248,6 +248,17 @@ pub(crate) fn light2d_uniform(
         .map(|(_, l)| l.ambient_2d)
         .unwrap_or(floptle_core::Light::default().ambient_2d);
     let ambient = [a[0], a[1], a[2], 0.0];
+    // In the plane a lamp aims, and a sun shines, the way the node's own down
+    // arrow (−Y) points: rotate it about Z to turn it. A 3D lamp's −Z would
+    // point into the screen, where a flat scene has nothing to light.
+    let mut aim = [[0.0, -1.0, -1.0, -1.0]; 16];
+    for (i, slot) in aim.iter_mut().enumerate().take(n.min(16)) {
+        let r = two_d.rot[i];
+        let q = floptle_core::math::Quat::from_xyzw(r[0], r[1], r[2], r[3]);
+        let d = q * floptle_core::math::Vec3::NEG_Y;
+        let flat = floptle_core::math::Vec2::new(d.x, d.y).try_normalize().unwrap_or(floptle_core::math::Vec2::NEG_Y);
+        *slot = [flat.x, flat.y, two_d.cone[i][0], two_d.cone[i][1]];
+    }
     floptle_render::Light2dUniform {
         count: [n as f32, 0.0, 0.0, 0.0],
         ambient,
@@ -260,6 +271,7 @@ pub(crate) fn light2d_uniform(
         color,
         falloff,
         mask,
+        aim,
         ..Default::default()
     }
 }

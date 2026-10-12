@@ -7573,6 +7573,19 @@ fn lighting_2d_row(
             next.shadows = sh;
             changed = true;
         }
+        let mut sun = cur.sun;
+        if crate::responsive::check(ui, &mut sun, "sun")
+            .on_hover_text(
+                "light everything from one direction, at full strength, the way this node's \
+                 down arrow (−Y) points — rotate it about Z to turn the sun. Blockers throw \
+                 long shadows away from it. Range and inner radius do nothing to a sun. A \
+                 lamp's spot cone aims the same way in 2D",
+            )
+            .changed()
+        {
+            next.sun = sun;
+            changed = true;
+        }
         if changed {
             cmd.set_lighting_2d = Some((e, next));
         }

@@ -489,6 +489,7 @@ mod tests {
             light_inner: None,
             light_falloff: None,
             light_shadows: None,
+            light_sun: None,
         };
         let arrow = server.spawn_subtree(&mut sw, std::slice::from_ref(&node), Some(1))[0];
         // Tick the empty-peers server a few times.

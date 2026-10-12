@@ -120,7 +120,8 @@ pub struct Light2dUniform {
     /// wrong answer for "how big is this frame" — and the march converts between
     /// UV and texel with it.
     pub viewport: [f32; 4],
-    /// xyz = camera-relative position, w = range.
+    /// xyz = camera-relative position, w = range. A negative range marks a
+    /// sun, which has no position.
     pub pos: [[f32; 4]; 16],
     /// rgb = colour × intensity.
     pub color: [[f32; 4]; 16],
@@ -138,6 +139,11 @@ pub struct Light2dUniform {
     /// (`SORT_LAYER_STEP` is 1/64), leaving every layer past the 32nd silently
     /// unlit by every light.
     pub mask: [[u32; 4]; 16],
+    /// Where each light points, in the plane: `xy` = the way its light travels
+    /// (a sun's direction, a spot lamp's aim), `z` = the cosine of the cone's
+    /// outer half-angle, `w` = of its inner one. `z = -1` is no cone, so a lamp
+    /// shines all round by arithmetic rather than by a branch.
+    pub aim: [[f32; 4]; 16],
 }
 
 impl Light2dUniform {
@@ -187,6 +193,7 @@ impl Default for Light2dUniform {
             // flat disc. `z = 0` leaves shadowing off until a gather asks.
             falloff: [[0.0, 2.0, 0.0, 0.0]; 16],
             mask: [[0; 4]; 16],
+            aim: [[0.0, -1.0, -1.0, -1.0]; 16],
         }
     }
 }
@@ -584,9 +591,9 @@ mod tests {
     fn the_light_uniform_is_std140_shaped() {
         assert_eq!(std::mem::align_of::<Light2dUniform>() % 4, 0);
         assert_eq!(std::mem::size_of::<Light2dUniform>() % 16, 0);
-        // count + ambient + viewport, two 4x4 matrices, four 16-element vec4
-        // arrays (pos, colour, falloff, mask).
-        assert_eq!(std::mem::size_of::<Light2dUniform>(), 16 * 3 + 64 * 2 + 16 * 16 * 4);
+        // count + ambient + viewport, two 4x4 matrices, five 16-element vec4
+        // arrays (pos, colour, falloff, mask, aim).
+        assert_eq!(std::mem::size_of::<Light2dUniform>(), 16 * 3 + 64 * 2 + 16 * 16 * 5);
     }
 
     /// The defaults are what a light did before any of this was authorable: a

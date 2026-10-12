@@ -257,6 +257,9 @@ pub struct NodeDoc {
     /// **Lights only.** Whether casters stop this light. `None` = yes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub light_shadows: Option<bool>,
+    /// **Lights only.** A 2D sun, lighting from one direction. `None` = no.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light_sun: Option<bool>,
 }
 
 /// Serializable replication settings, mirroring [`floptle_core::Replicated`].
@@ -3922,6 +3925,7 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
         || node.light_inner.is_some()
         || node.light_falloff.is_some()
         || node.light_shadows.is_some()
+        || node.light_sun.is_some()
     {
         let d = floptle_core::Lighting2D::default();
         world.insert(
@@ -3936,6 +3940,7 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
                 inner: node.light_inner.unwrap_or(d.inner),
                 falloff: node.light_falloff.unwrap_or(d.falloff),
                 shadows: node.light_shadows.unwrap_or(d.shadows),
+                sun: node.light_sun.unwrap_or(d.sun),
             },
         );
     }
@@ -4213,6 +4218,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
         let light_inner = lit.map(|l| l.inner).filter(|v| *v != d2.inner);
         let light_falloff = lit.map(|l| l.falloff).filter(|v| *v != d2.falloff);
         let light_shadows = lit.map(|l| l.shadows).filter(|v| *v != d2.shadows);
+        let light_sun = lit.map(|l| l.sun).filter(|v| *v != d2.sun);
         let shadow_2d = world
             .get::<floptle_core::Shadow2D>(e)
             .map(|s| s.0)
@@ -4262,6 +4268,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             light_inner,
             light_falloff,
             light_shadows,
+            light_sun,
         });
     }
     let lighting =
@@ -4961,6 +4968,7 @@ mod tests {
                     light_inner: None,
                     light_falloff: None,
                     light_shadows: None,
+                    light_sun: None,
                 },
                 NodeDoc {
                     camera_2d: None,
@@ -5009,6 +5017,7 @@ mod tests {
                     light_inner: None,
                     light_falloff: None,
                     light_shadows: None,
+                    light_sun: None,
                 },
                 NodeDoc {
                     camera_2d: None,
@@ -5054,6 +5063,7 @@ mod tests {
                     light_inner: None,
                     light_falloff: None,
                     light_shadows: None,
+                    light_sun: None,
                 },
                 NodeDoc {
                     camera_2d: None,
@@ -5099,6 +5109,7 @@ mod tests {
                     light_inner: None,
                     light_falloff: None,
                     light_shadows: None,
+                    light_sun: None,
                 },
             ],
         }

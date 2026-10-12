@@ -2756,6 +2756,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
         light_inner: None,
         light_falloff: None,
         light_shadows: None,
+        light_sun: None,
     }
 }
 
@@ -3363,6 +3364,7 @@ mod path_tests {
             ("ext/prefs.rs", "an extension's own settings"),
             ("portable.rs", "the portable writer itself"),
             ("template_gen.rs", "the engine's own starter template, built into the editor"),
+            ("template_village.rs", "the engine's own village template, built into the editor"),
         ];
         let mut sources: Vec<(String, String)> = Vec::new();
         for dir in [concat!(env!("CARGO_MANIFEST_DIR"), "/src"), concat!(env!("CARGO_MANIFEST_DIR"), "/../floptle-scene/src")] {

@@ -1862,6 +1862,8 @@ pub enum RichSet {
         inner: Option<f32>,
         falloff: Option<f32>,
         shadows: Option<bool>,
+        /// `sun = true`: light from one direction, everywhere.
+        sun: Option<bool>,
     },
     /// `node:setPointLight{ color =, intensity =, range = }`.
     ///

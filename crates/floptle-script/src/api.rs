@@ -2517,12 +2517,13 @@ pub(crate) fn apply_rich_sets(
             // Same rule: `auto` with no layer list is the
             // default, so a node put back to it stops carrying the component and
             // its scene stops mentioning 2D lighting.
-            RichSet::MatterLighting2D { mode, layers, blocks, inner, falloff, shadows } => {
+            RichSet::MatterLighting2D { mode, layers, blocks, inner, falloff, shadows, sun } => {
                 if mode.is_some()
                     || layers.is_some()
                     || inner.is_some()
                     || falloff.is_some()
                     || shadows.is_some()
+                    || sun.is_some()
                 {
                     let cur =
                         world.get::<floptle_core::Lighting2D>(e).cloned().unwrap_or_default();
@@ -2536,6 +2537,7 @@ pub(crate) fn apply_rich_sets(
                         inner: inner.unwrap_or(cur.inner).max(0.0),
                         falloff: falloff.unwrap_or(cur.falloff).max(0.01),
                         shadows: shadows.unwrap_or(cur.shadows),
+                        sun: sun.unwrap_or(cur.sun),
                     };
                     if next == floptle_core::Lighting2D::default() {
                         world.remove::<floptle_core::Lighting2D>(e);
@@ -2789,7 +2791,7 @@ pub(crate) const SPRITE_KEYS: &[&str] =
 
 /// Every key `node:setLighting2D{...}` reads.
 pub(crate) const LIGHTING_2D_KEYS: &[&str] =
-    &["mode", "layers", "blocks", "inner", "falloff", "shadows"];
+    &["mode", "layers", "blocks", "inner", "falloff", "shadows", "sun"];
 
 /// Every key `node:setPointLight{...}` reads.
 pub(crate) const POINT_LIGHT_KEYS: &[&str] = &["color", "intensity", "range"];
@@ -6123,6 +6125,7 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                         inner: t.get::<Option<f32>>("inner")?,
                         falloff: t.get::<Option<f32>>("falloff")?,
                         shadows: t.get::<Option<bool>>("shadows")?,
+                        sun: t.get::<Option<bool>>("sun")?,
                     },
                 ));
                 Ok(())

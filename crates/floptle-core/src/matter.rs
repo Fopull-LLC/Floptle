@@ -358,13 +358,19 @@ pub struct Lighting2D {
     /// — and because the per-node `blocks light` control, which
     /// is what actually decides *what* casts, has always said it would.
     pub shadows: bool,
+    /// **Lights only.** A sun: the light reaches every surface it is allowed
+    /// to, at full strength, from one direction — the way the node's local
+    /// down (−Y) points — rather than spreading from a point. Casters throw
+    /// shadows away from it, out to the edge of the screen. Its range and
+    /// inner radius are not used.
+    pub sun: bool,
 }
 
 impl Default for Lighting2D {
     fn default() -> Self {
         // Every one of these is what a light does without this component.
         // A scene that has never heard of it must be unchanged.
-        Self { mode: Lit2D::default(), layers: Vec::new(), inner: 0.0, falloff: 2.0, shadows: true }
+        Self { mode: Lit2D::default(), layers: Vec::new(), inner: 0.0, falloff: 2.0, shadows: true, sun: false }
     }
 }
 

@@ -1217,6 +1217,7 @@ mod tests {
                 light_inner: None,
                 light_falloff: None,
                 light_shadows: None,
+                light_sun: None,
             }
         }
 

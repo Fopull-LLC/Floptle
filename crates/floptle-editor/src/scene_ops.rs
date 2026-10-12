@@ -196,6 +196,7 @@ impl Editor {
         let light_inner = lit.map(|l| l.inner);
         let light_falloff = lit.map(|l| l.falloff);
         let light_shadows = lit.map(|l| l.shadows);
+        let light_sun = lit.map(|l| l.sun);
         let shadow_2d =
             self.world.get::<floptle_core::Shadow2D>(e).map(|s| s.0.name().to_string());
         Some(NodeDoc {
@@ -247,6 +248,7 @@ impl Editor {
             light_inner,
             light_falloff,
             light_shadows,
+            light_sun,
         })
     }
 
@@ -402,6 +404,7 @@ impl Editor {
             || node.light_inner.is_some()
             || node.light_falloff.is_some()
             || node.light_shadows.is_some()
+            || node.light_sun.is_some()
         {
             let d = floptle_core::Lighting2D::default();
             self.world.insert(
@@ -416,6 +419,7 @@ impl Editor {
                     inner: node.light_inner.unwrap_or(d.inner),
                     falloff: node.light_falloff.unwrap_or(d.falloff),
                     shadows: node.light_shadows.unwrap_or(d.shadows),
+                    sun: node.light_sun.unwrap_or(d.sun),
                 },
             );
         }
@@ -475,6 +479,7 @@ impl Editor {
             light_inner,
             light_falloff,
             light_shadows,
+            light_sun,
             camera_2d,
         } = doc;
 
@@ -621,6 +626,7 @@ impl Editor {
             light_inner: None,
             light_falloff: None,
             light_shadows: None,
+            light_sun: None,
         };
         let e = self.spawn_node(&node);
         self.select_single(e);
@@ -822,6 +828,7 @@ impl Editor {
                 light_inner: None,
                 light_falloff: None,
                 light_shadows: None,
+            light_sun: None,
             };
             let e = self.spawn_node(&node);
             self.select_single(e);
