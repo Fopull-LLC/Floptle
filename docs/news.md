@@ -1,5 +1,11 @@
 ## Just shipped
 
+**v0.115.0 — "Paints True"** (stable). Drop a spritesheet on a tile
+layer's **TILESET** section, or pick it from the list there, and the layer is
+ready to paint: the tileset is cut on the grid you drew it against. The Image
+tab's pixel pencil paints the pixel under the pointer, a click paints, and a
+line keeps its first and last pixel. Ctrl+S saves from any tab.
+
 **v0.114.0 — "Stays In Front"** (stable). A camera can stack other cameras
 on top of its picture, so first-person arms on their own layer never clip
 into walls. Scripts can build objects out of models at runtime with
