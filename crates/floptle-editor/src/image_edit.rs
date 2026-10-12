@@ -403,7 +403,7 @@ pub(crate) struct ImageEditState {
     pub(crate) cursor: Option<(f32, f32)>,
     /// The canvas rect as of the last frame, so keyboard zoom has something to
     /// zoom *about* (the view centre) without waiting for a mouse move.
-    last_view: Option<ERect>,
+    pub(crate) last_view: Option<ERect>,
     /// Cut/copied pixels: straight RGBA and its size.
     ///
     /// Fed by this tab's own copy/cut and by the OS clipboard's image side
@@ -1219,6 +1219,12 @@ impl ImageEditState {
             }
             return;
         }
+        // The paint tools follow the pointer itself, ahead of the gesture
+        // logic below, which waits for egui's drag threshold.
+        let setting_clone_source = self.brush.mode == BrushMode::Clone && modifiers.alt;
+        if !space && !setting_clone_source && self.paint_input(&ctx, resp, view, modifiers) {
+            return;
+        }
         // Right-drag = eyedropper preview, pick on release.
         if resp.dragged_by(egui::PointerButton::Secondary)
             || resp.clicked_by(egui::PointerButton::Secondary)
@@ -1256,6 +1262,82 @@ impl ImageEditState {
         }
         if resp.double_clicked() && self.tool == ImgTool::Reshape {
             self.toggle_node_kind(cx, cy);
+        }
+    }
+
+    /// A paint stroke, driven by the pointer's own events. True when it took
+    /// the frame's input.
+    ///
+    /// egui reports a drag only once the pointer has travelled a few screen
+    /// pixels from the press, and a press that never travels that far is a
+    /// click. A stroke started on `drag_started` therefore began wherever the
+    /// pointer had got to, never on the pixel you pressed; a click painted
+    /// nothing; and the release point was never painted either. So the
+    /// first and last pixel of a line were the ones that went missing, and
+    /// short strokes had to be gone over again. This starts the stroke at the
+    /// press origin, paints every pointer position the frame delivered (not
+    /// only the latest, so a fast curve keeps its shape at a low frame rate),
+    /// and finishes on the release point. Positions outside the canvas still
+    /// count, so a line can run off the edge and still reach it.
+    fn paint_input(
+        &mut self,
+        ctx: &egui::Context,
+        resp: &egui::Response,
+        view: ERect,
+        modifiers: egui::Modifiers,
+    ) -> bool {
+        if !self.tool.is_paint() {
+            return false;
+        }
+        let (pressed, origin, down, events) = ctx.input(|i| {
+            (i.pointer.primary_pressed(), i.pointer.press_origin(), i.pointer.primary_down(), i.events.clone())
+        });
+        let mut started_now = false;
+        if self.drag.is_none() {
+            let Some(o) = origin.filter(|_| pressed && resp.hovered()) else { return false };
+            let (x, y) = self.to_canvas(view, o);
+            self.begin_drag(x, y, modifiers.shift, modifiers.alt);
+            if !matches!(self.drag, Some(Drag::Stroke)) {
+                return true;
+            }
+            started_now = true;
+        } else if !matches!(self.drag, Some(Drag::Stroke)) {
+            return false;
+        }
+        // On the press frame, a move that arrived BEFORE the press is the
+        // approach, not part of the stroke.
+        let mut live = !started_now;
+        for ev in &events {
+            match ev {
+                egui::Event::PointerButton { button: egui::PointerButton::Primary, pressed: true, .. } => {
+                    live = true;
+                }
+                egui::Event::PointerMoved(p) if live => {
+                    let (x, y) = self.to_canvas(view, *p);
+                    self.paint_at(x, y, false);
+                }
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, .. }
+                    if live =>
+                {
+                    let (x, y) = self.to_canvas(view, *pos);
+                    self.paint_at(x, y, false);
+                    self.finish_stroke();
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        // A release the window never saw (the pointer left it, focus went
+        // elsewhere) still ends the stroke rather than leaving it armed.
+        if !down && !started_now {
+            self.finish_stroke();
+        }
+        true
+    }
+
+    fn finish_stroke(&mut self) {
+        if matches!(self.drag, Some(Drag::Stroke)) {
+            self.end_drag(0.0, 0.0, false);
         }
     }
 

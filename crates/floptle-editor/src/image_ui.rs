@@ -2353,6 +2353,83 @@ mod tests {
         assert_eq!(after, 0, "one undo must remove the whole stroke, not one dab");
     }
 
+    /// Which pixels are red, in reading order.
+    fn red_pixels(st: &ImageEditState) -> Vec<(i64, i64)> {
+        let doc = st.doc.as_ref().unwrap();
+        let g = doc.layers[0].grid(0).unwrap();
+        (0..doc.h as i64)
+            .flat_map(|y| (0..doc.w as i64).map(move |x| (x, y)))
+            .filter(|&(x, y)| g.get(x, y) == [255, 0, 0, 255])
+            .collect()
+    }
+
+    /// The canvas pixel under a screen point, through the tab's own view.
+    fn pixel_under(st: &ImageEditState, p: egui::Pos2) -> (i64, i64) {
+        let (x, y) = st.to_canvas(st.last_view.unwrap(), p);
+        (x.floor() as i64, y.floor() as i64)
+    }
+
+    /// A pencil click paints the pixel you clicked. A press that never moved
+    /// far enough to count as a drag used to paint nothing.
+    #[test]
+    fn a_pencil_click_paints_the_pixel_under_the_pointer() {
+        use egui::{Event, PointerButton, Pos2};
+        let ctx = crate::icons::test_context();
+        let mut st = doc_state();
+        st.tool = ImgTool::Pencil;
+        st.color = [255, 0, 0, 255];
+        run_events(&mut st, &ctx, vec![]);
+        // Off-centre in its pixel on purpose: near a corner is where it failed.
+        let at = Pos2::new(641.3, 401.3);
+        let press = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        run_events(&mut st, &ctx, vec![Event::PointerMoved(at), press(true)]);
+        run_events(&mut st, &ctx, vec![press(false)]);
+        assert_eq!(red_pixels(&st), vec![pixel_under(&st, at)]);
+        assert!(st.can_undo(), "a click is a stroke, and one undo step");
+    }
+
+    /// A drag paints the pixel it was pressed on and the one it was released
+    /// on. Both ends used to go missing: the stroke began only once egui had
+    /// decided it was a drag, and the release point was never painted.
+    #[test]
+    fn a_pencil_drag_paints_its_first_and_last_pixel() {
+        use egui::{Event, PointerButton, Pos2};
+        let ctx = crate::icons::test_context();
+        let mut st = doc_state();
+        st.tool = ImgTool::Pencil;
+        st.color = [255, 0, 0, 255];
+        run_events(&mut st, &ctx, vec![]);
+        let start = Pos2::new(600.7, 390.2);
+        let end = Pos2::new(700.2, 430.8);
+        run_events(
+            &mut st,
+            &ctx,
+            vec![
+                Event::PointerMoved(start),
+                Event::PointerButton { pos: start, button: PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            ],
+        );
+        // One frame carrying the whole move and the release, the way a quick
+        // flick arrives at a low frame rate.
+        run_events(
+            &mut st,
+            &ctx,
+            vec![
+                Event::PointerMoved(Pos2::new(650.0, 395.0)),
+                Event::PointerMoved(end),
+                Event::PointerButton { pos: end, button: PointerButton::Primary, pressed: false, modifiers: Default::default() },
+            ],
+        );
+        let red = red_pixels(&st);
+        let (a, b) = (pixel_under(&st, start), pixel_under(&st, end));
+        assert!(red.contains(&a), "the press pixel {a:?} must be painted; got {red:?}");
+        assert!(red.contains(&b), "the release pixel {b:?} must be painted; got {red:?}");
+        // …and the stroke is over: another frame of movement paints nothing.
+        let before = red.len();
+        run_events(&mut st, &ctx, vec![Event::PointerMoved(Pos2::new(640.0, 300.0))]);
+        assert_eq!(red_pixels(&st).len(), before, "the stroke must end on release");
+    }
+
     /// The text tool goes through egui's own font atlas — so text stamped into
     /// an image matches the text beside it, and the kernel needs no font code.
     #[test]

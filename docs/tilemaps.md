@@ -6,11 +6,15 @@ Everything for building a 2D level: the **◫ Tiles** tab, tilesets (what each t
 New here? The three-minute version:
 
 1. Add a **▩ Tilemap** node (◫ Tiles ⏵ *Add layer*, or the Hierarchy's Add menu).
-2. Give it a spritesheet in the Inspector — a texture, and `sheetCols` /
-   `sheetRows` so the engine knows how it is cut.
-3. Press **9** for the tile tool and paint in the ⌖ Scene view.
-4. For collision or autotiling, press *New tileset* in the ◫ Tiles tab and tick
-   what you want on each tile in the palette.
+2. Drag your spritesheet from Assets onto **◫ Tiles ▸ TILESET**, or pick it
+   from the *choose an image…* list there. That makes the layer's tileset, cut
+   into tiles for you: by the grid you drew it against in the 🖼 Image tab, a
+   cell size in its name (`tiles_16x16.png`), or failing those its size. Check
+   the cut on the **SHEETS** row and change cols / rows if it guessed wrong.
+3. Click a tile in **PALETTE**, press **9** for the tile tool, and paint in the
+   ⌖ Scene view.
+4. For collision or autotiling, select tiles in the palette and set them under
+   **TILE** and **AUTOTILE**.
 
 ---
 
@@ -37,6 +41,11 @@ A tilemap draws from its node's ordinary `Material`: the `texture`, and
 every other surface — same texture picker, same filtering, same custom `.flsl`
 shader if you want one — and a project does not learn a second way to say "this
 texture, chopped this way".
+
+A layer whose tileset names an image of its own draws that image instead, so a
+spritesheet dropped on the ◫ Tiles tab needs nothing set on the material. The
+material is what a layer draws when its tileset has no image, or it has no
+tileset.
 
 Cell indices are **row-major from the top-left of the sheet**, starting at 0.
 
@@ -117,7 +126,11 @@ what it is tagged, which autotile shapes it draws, whether it animates. It lives
 `<project>/tilesets/<name>.tileset.ron` and is shared by every layer cut from that
 sheet.
 
-Press *New tileset* in the ◫ Tiles tab and it is made for the layer's own sheet.
+Drop an image on **◫ Tiles ▸ TILESET** for a layer that has none, and its
+tileset is made from that image. If the project already has a tileset for that
+image, the layer uses it rather than making a copy. *+ Empty tileset* makes one
+with no image yet, to give it one on its **SHEETS** row; on a layer whose
+material already has a spritesheet, *+ New tileset* uses that.
 
 ### More than one sheet on one layer
 

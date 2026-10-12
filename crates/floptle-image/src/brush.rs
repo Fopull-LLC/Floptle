@@ -124,6 +124,7 @@ impl Brush {
     /// Cheap for the sizes a preview is worth drawing per-texel at; the caller
     /// decides where to stop (see [`Self::footprint_is_cheap`]).
     pub fn footprint(&self, x: f32, y: f32) -> (Rect, Vec<f32>) {
+        let (x, y) = self.nib_center(x, y);
         let rect = self.dab_rect(x, y);
         let mut cov = Vec::with_capacity((rect.w * rect.h) as usize);
         for row in 0..rect.h as i32 {
@@ -144,6 +145,28 @@ impl Brush {
     pub fn footprint_is_cheap(&self) -> bool {
         let r = self.radius.max(0.5) + 1.0;
         (2.0 * r) * (2.0 * r) <= 4096.0
+    }
+
+    /// Where a dab aimed at (x, y) is actually centred.
+    ///
+    /// A pixel-perfect nib sits on the pixel grid, never between texels. Left
+    /// where the pointer was, the one-pixel pencil reached a pixel only when
+    /// the pointer was within half a pixel of that pixel's CENTRE. Pressed
+    /// near a corner, it painted nothing at all, so the pixel you started or
+    /// ended a line on was the one most often missing. Snapped, the pixel
+    /// under the pointer is the pixel that paints. An odd-width nib centres on
+    /// that pixel; an even-width one has no centre pixel, so it sits on the
+    /// nearest grid corner and still covers the pixel under the pointer.
+    pub fn nib_center(&self, x: f32, y: f32) -> (f32, f32) {
+        if !self.pixel_perfect {
+            return (x, y);
+        }
+        let width = (self.radius.max(0.5) * 2.0).round() as i32;
+        if width % 2 == 1 {
+            (x.floor() + 0.5, y.floor() + 0.5)
+        } else {
+            (x.round(), y.round())
+        }
     }
 
     /// The pixel box one dab touches, centred on (x, y) in *canvas* space.
@@ -252,6 +275,7 @@ fn stamp_one(
     ctx: &DabCtx,
     state: &mut StrokeState,
 ) -> Rect {
+    let (x, y) = b.nib_center(x, y);
     let canvas_rect = b.dab_rect(x, y).intersect(Rect::size(ctx.canvas.0, ctx.canvas.1));
     if canvas_rect.is_empty() {
         return Rect::EMPTY;
@@ -736,6 +760,42 @@ mod tests {
         stroke_to(&mut g, &pencil(), 20.5, 2.5, [0, 0, 0, 255], &ctx, &mut st);
         for x in 2..=20 {
             assert_eq!(g.get(x, 2)[3], 255, "gap at x={x}");
+        }
+    }
+
+    /// The pencil paints the pixel under the pointer wherever in that pixel
+    /// the pointer is, corners included. It used to paint only within half a
+    /// pixel of the centre, and a press near a corner left nothing behind.
+    #[test]
+    fn a_pencil_paints_the_pixel_under_the_pointer_anywhere_in_it() {
+        for (x, y) in [(4.02, 4.02), (4.98, 4.02), (4.02, 4.98), (4.98, 4.98), (4.5, 4.5)] {
+            let mut g = TileGrid::new(16, 16);
+            let ctx = DabCtx::simple(16, 16);
+            let mut st = StrokeState::default();
+            st.begin(x, y, 16, 16);
+            stamp(&mut g, &pencil(), x, y, [255, 0, 0, 255], &ctx, &mut st);
+            let lit: Vec<(i64, i64)> = (0..16)
+                .flat_map(|py| (0..16).map(move |px| (px, py)))
+                .filter(|&(px, py)| g.get(px, py)[3] > 0)
+                .collect();
+            assert_eq!(lit, vec![(4, 4)], "pointer at ({x}, {y}) must paint exactly pixel (4, 4)");
+        }
+    }
+
+    /// An even-width pixel nib has no centre pixel; wherever the pointer is,
+    /// it must still cover the pixel under it, as a solid 2×2.
+    #[test]
+    fn an_even_pixel_nib_covers_the_pixel_under_the_pointer() {
+        let b = Brush { radius: 1.0, pixel_perfect: true, ..Default::default() };
+        for (x, y) in [(6.1, 6.1), (6.9, 6.9), (6.1, 6.9), (6.5, 6.5)] {
+            let mut g = TileGrid::new(16, 16);
+            let ctx = DabCtx::simple(16, 16);
+            let mut st = StrokeState::default();
+            st.begin(x, y, 16, 16);
+            stamp(&mut g, &b, x, y, [255, 0, 0, 255], &ctx, &mut st);
+            assert!(g.get(6, 6)[3] > 0, "pointer at ({x}, {y}) must cover pixel (6, 6)");
+            let n = (0..16).flat_map(|py| (0..16).map(move |px| (px, py))).filter(|&(px, py)| g.get(px, py)[3] > 0).count();
+            assert_eq!(n, 4, "a 2-px nib is a 2×2 square");
         }
     }
 

@@ -162,3 +162,70 @@ fn snapshot_input_editor() {
         floptle_say::say!("wrote {}", out.display());
     }
 }
+
+/// The ◫ Tiles panel for a 2D game's first minute: a bare layer asking for its
+/// spritesheet, and the same layer once one has been dropped on it.
+#[test]
+#[ignore]
+fn snapshot_tiles_panel() {
+    use crate::tile_edit::{TileStore, TileTools};
+    use crate::tile_ui::TileCtx;
+    let root = std::env::temp_dir().join(format!("floptle-tiles-snap-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("textures")).unwrap();
+    // A 4×2 sheet of 16-px tiles, each its own colour, so the palette is legible.
+    let (w, h) = (64u32, 32u32);
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let cell = (y / 16) * 4 + x / 16;
+            let edge = x % 16 == 0 || y % 16 == 0;
+            let o = ((y * w + x) * 4) as usize;
+            let c = if edge { [20, 20, 30] } else { [40 + cell as u8 * 25, 160 - cell as u8 * 12, 90 + cell as u8 * 18] };
+            px[o..o + 4].copy_from_slice(&[c[0], c[1], c[2], 255]);
+        }
+    }
+    floptle_image::io::save_png(&root.join("textures/Tiles1.png"), &px, w, h).unwrap();
+    for (name, tileset) in [("tiles-panel-bare", ""), ("tiles-panel-with-sheet", "tilesets/Tiles1.tileset.ron")] {
+        let mut world = floptle_core::World::default();
+        let e = world.spawn();
+        world.insert(e, floptle_core::Name("Tiles 1".into()));
+        world.insert(
+            e,
+            floptle_core::Matter::Tilemap { cols: 16, rows: 16, tile: 1.0, data: vec![], tileset: tileset.into() },
+        );
+        let mut store = TileStore::default();
+        if !tileset.is_empty() {
+            store.sets.insert(
+                tileset.into(),
+                floptle_tiles::TileSet {
+                    name: "Tiles1".into(),
+                    texture: "textures/Tiles1.png".into(),
+                    sheet_cols: 4,
+                    sheet_rows: 2,
+                    ..Default::default()
+                },
+            );
+        }
+        let mut tools = TileTools { layer: Some(e), ..Default::default() };
+        let mut cmds = Vec::new();
+        let mut hn = harness(egui::vec2(360.0, 1100.0), |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                TileCtx {
+                    store: &mut store,
+                    tools: &mut tools,
+                    world: &world,
+                    project_root: &root,
+                    cmds: &mut cmds,
+                    playing: false,
+                }
+                .ui(ui);
+            });
+        });
+        hn.run();
+        hn.run();
+        let out = out_path(name);
+        hn.render().expect("no GPU?").save(&out).unwrap();
+        floptle_say::say!("wrote {}", out.display());
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}

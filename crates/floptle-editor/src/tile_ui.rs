@@ -61,6 +61,9 @@ pub(crate) enum TileCmd {
     Reorient { turn: bool, flip_x: bool, flip_y: bool },
     /// Create a tileset for the active layer's own sheet and attach it.
     NewTilesetForLayer,
+    /// Give the active layer a tileset for this image (project-relative):
+    /// the one the project already has for it, or a new one cut to fit.
+    NewTilesetFromImage(String),
     /// Point the active layer at this tileset path (empty = none).
     AttachTileset(String),
     /// Add a sheet to the tileset being edited.
@@ -175,6 +178,54 @@ fn guess_sheet_grid(path: &str, px: Option<(u32, u32)>) -> (u32, u32) {
     (1, 1)
 }
 
+/// The cut for a sheet image, from the best source there is.
+///
+/// An image drawn in the 🖼 Image tab may carry the cell grid it was drawn
+/// against, saved in its `.flimg` beside the PNG. That is the artist's own
+/// answer and beats any guess. Without one, [`guess_sheet_grid`] works from
+/// the name and the pixel size; `px` saves decoding the image when the caller
+/// already knows it.
+pub(crate) fn sheet_cut_for(root: &std::path::Path, rel: &str, px: Option<(u32, u32)>) -> (u32, u32) {
+    let abs = crate::project::resolve_asset_path(root, rel);
+    let doc = floptle_image::io::doc_path_for(&abs);
+    if let Some((c, r)) = floptle_image::io::load_document(&doc).and_then(|d| d.sheet)
+        && c * r > 1
+    {
+        return (c, r);
+    }
+    let px = px.or_else(|| floptle_image::io::load_image(&abs).map(|(_, w, h)| (w, h)));
+    guess_sheet_grid(rel, px)
+}
+
+/// Every image in the project, project-relative and sorted, for the "pick a
+/// spritesheet" list. Skips hidden folders (`.floptle`, `.git`) and stops at
+/// a few hundred so a project with a vendored asset pack cannot stall a frame.
+fn project_images(root: &std::path::Path) -> Vec<String> {
+    fn walk(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<String>) {
+        for e in floptle_vfs::read_dir(dir).into_iter().flatten() {
+            if out.len() >= 400 {
+                return;
+            }
+            let p = e.path();
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with('.') {
+                continue;
+            }
+            if e.is_dir() {
+                walk(&p, root, out);
+            } else if crate::assets::is_texture(name)
+                && let Ok(rel) = p.strip_prefix(root)
+            {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
 /// A cell size written into a filename: `16x16`, `_32`, `-8x8`. `None` if there
 /// is no number, or if `NxM` names a non-square cell (which this cannot express).
 fn cell_size_in_name(path: &str) -> Option<u32> {
@@ -238,7 +289,7 @@ fn needs_tileset(ui: &mut egui::Ui, what: &str, cmds: &mut Vec<TileCmd>) {
         ui.colored_label(ACCENT, "⚠ needs a tileset");
         if ui
             .small_button("+ New tileset")
-            .on_hover_text("for this layer's own sheet, sized from its material")
+            .on_hover_text("for this layer's spritesheet, or an empty one; dropping an image on TILESET above makes one too")
             .clicked()
         {
             cmds.push(TileCmd::NewTilesetForLayer);
@@ -399,10 +450,9 @@ impl TileCtx<'_> {
         // The brush preview: exactly what a click will place, drawn through the
         // same `armed()` the placement uses.
         let armed = self.tools.armed();
-        if let Some(sheet) = self.sheet_handle(ui) {
+        if let Some((sheet, sc, sr)) = self.page0_sheet(ui) {
             labelled(ui, "brush", |ui| {
                 let cell_px = 22.0f32;
-                let (sc, sr) = self.sheet_size();
                 ui.vertical(|ui| {
                     for y in 0..armed.rows {
                         ui.horizontal(|ui| {
@@ -543,25 +593,7 @@ impl TileCtx<'_> {
         };
         if current.is_empty() {
             self.tools.editing = None;
-            ui.small(
-                "This layer has no tileset, so its tiles collide with nothing and cannot \
-                 autotile. One tileset per spritesheet, shared by every layer cut from it.",
-            );
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add_sized([fit(ui, CHIP_W * 2.0), BTN_H], egui::Button::new("+ New tileset"))
-                    .on_hover_text("for this layer's own sheet, sized from its material")
-                    .clicked()
-                {
-                    self.cmds.push(TileCmd::NewTilesetForLayer);
-                }
-                for path in self.store.paths() {
-                    if ui.add_sized([fit(ui, CHIP_W * 2.0), BTN_H], egui::Button::new(short(&path))).clicked()
-                    {
-                        self.cmds.push(TileCmd::AttachTileset(path.clone()));
-                    }
-                }
-            });
+            self.no_tileset_ui(ui);
             return;
         }
 
@@ -628,6 +660,76 @@ impl TileCtx<'_> {
         }
     }
 
+    /// A layer with no tileset: the first thing a 2D game needs from this
+    /// panel is the spritesheet, so this asks for exactly that.
+    ///
+    /// The image goes straight in: dropped here from Assets, dropped anywhere
+    /// on the panel, or picked from a list for when dragging is not working.
+    /// It used to be a dead end. The only button needed the layer's material
+    /// to have a spritesheet already, and the SHEETS row the palette sent you
+    /// to existed only once there was a tileset, so a PNG had nowhere to go.
+    fn no_tileset_ui(&mut self, ui: &mut egui::Ui) {
+        para(
+            ui,
+            "A tileset is your spritesheet cut into tiles. The palette paints from it, and \
+             it holds each tile's collision and autotiling. One per spritesheet, shared by \
+             every layer that uses it.",
+        );
+        let zone = egui::Frame::group(ui.style()).inner_margin(10.0).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new("⬇ Drop your spritesheet here").strong().color(ACCENT));
+                ui.small("drag a PNG in from Assets, or pick one:");
+                let mut picked = None;
+                egui::ComboBox::from_id_salt("tileset_pick_image")
+                    .selected_text("choose an image…")
+                    .width(fit(ui, 200.0))
+                    .show_ui(ui, |ui| {
+                        // Listed only while the list is open, so a closed
+                        // picker costs nothing per frame.
+                        let images = project_images(self.project_root);
+                        if images.is_empty() {
+                            ui.small("no images in this project yet. Import one in Assets.");
+                        }
+                        for rel in images {
+                            if ui.selectable_label(false, &rel).clicked() {
+                                picked = Some(rel);
+                            }
+                        }
+                    });
+                picked
+            })
+            .inner
+        });
+        let chosen = zone
+            .inner
+            .or_else(|| self.dropped_texture_on(ui, &zone.response))
+            .or_else(|| self.dropped_texture(ui));
+        if let Some(rel) = chosen {
+            self.cmds.push(TileCmd::NewTilesetFromImage(rel));
+        }
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_sized([fit(ui, CHIP_W * 2.0), BTN_H], egui::Button::new("+ Empty tileset"))
+                .on_hover_text("a tileset with no image yet; give it one on its SHEETS row")
+                .clicked()
+            {
+                self.cmds.push(TileCmd::NewTilesetForLayer);
+            }
+        });
+        let existing = self.store.paths();
+        if !existing.is_empty() {
+            ui.small("or use one this project already has:");
+            ui.horizontal_wrapped(|ui| {
+                for path in existing {
+                    if ui.add_sized([fit(ui, CHIP_W * 2.0), BTN_H], egui::Button::new(short(&path))).clicked() {
+                        self.cmds.push(TileCmd::AttachTileset(path.clone()));
+                    }
+                }
+            });
+        }
+    }
+
     /// The tileset's extra sheets.
     ///
     /// A level built out of a ground sheet, a props sheet and a decoration sheet
@@ -683,11 +785,11 @@ impl TileCtx<'_> {
                 .map(|(p, ..)| p);
             match slot {
                 Some(p) => {
-                    let (c, r) = guess_sheet_grid(&path, self.sheet_px(ui, &path));
+                    let (c, r) = sheet_cut_for(self.project_root, &path, self.sheet_px(ui, &path));
                     self.cmds.push(TileCmd::SetPage(p, path, c, r));
                 }
                 None if set.page_count() < floptle_core::TILE_MAX_PAGES => {
-                    let (c, r) = guess_sheet_grid(&path, self.sheet_px(ui, &path));
+                    let (c, r) = sheet_cut_for(self.project_root, &path, self.sheet_px(ui, &path));
                     self.cmds.push(TileCmd::AddPage);
                     self.cmds.push(TileCmd::SetPage(set.page_count(), path, c, r));
                 }
@@ -736,7 +838,7 @@ impl TileCtx<'_> {
             })
             .response;
         if let Some(dropped) = self.dropped_texture_on(ui, &resp) {
-            let (gc, gr) = guess_sheet_grid(&dropped, self.sheet_px(ui, &dropped));
+            let (gc, gr) = sheet_cut_for(self.project_root, &dropped, self.sheet_px(ui, &dropped));
             self.cmds.push(TileCmd::SetPage(p, dropped, gc, gr));
             return;
         }
@@ -829,10 +931,12 @@ impl TileCtx<'_> {
             None => None,
         };
         let Some(sheet) = handle else {
-            if page == 0 {
+            if set.is_none() {
+                ui.small("Nothing to paint from yet. Drop your spritesheet on TILESET above.");
+            } else if page == 0 {
                 ui.small(
-                    "This tileset has no sheet yet. Drop an image on SHEETS above — or give \
-                     the layer's material a spritesheet, which this falls back to.",
+                    "This tileset has no image yet. Drop one on its SHEETS row above, sheet 0, \
+                     and its tiles appear here.",
                 );
             } else {
                 ui.small("This page has no image, or it could not be read.");
@@ -1934,7 +2038,7 @@ impl TileCtx<'_> {
     fn dropped_texture_on(&self, ui: &egui::Ui, resp: &egui::Response) -> Option<String> {
         if resp
             .dnd_hover_payload::<crate::assets::AssetPayload>()
-            .is_some_and(|p| crate::assets::is_texture(&p.path))
+            .is_some_and(|p| self.sheet_image(&p.path).is_some())
         {
             ui.painter().rect_stroke(
                 resp.rect.expand(1.0),
@@ -1944,7 +2048,23 @@ impl TileCtx<'_> {
             );
         }
         let p = resp.dnd_release_payload::<crate::assets::AssetPayload>()?;
-        crate::assets::is_texture(&p.path).then(|| crate::assets::asset_rel_path(&p.path, self.project_root))
+        self.sheet_image(&p.path)
+    }
+
+    /// The image a dragged asset stands for as a sheet, project-relative.
+    ///
+    /// An image is itself. An image-editor document is the PNG it saves beside
+    /// itself, because the file you drew is the one you reach for, and refusing
+    /// it with nothing on screen reads as the drop target being broken.
+    fn sheet_image(&self, path: &str) -> Option<String> {
+        let image = if path.to_ascii_lowercase().ends_with(".flimg") {
+            floptle_image::io::png_path_for(std::path::Path::new(path)).to_string_lossy().into_owned()
+        } else if crate::assets::is_texture(path) {
+            path.to_string()
+        } else {
+            return None;
+        };
+        Some(crate::assets::asset_rel_path(&image, self.project_root))
     }
 
     /// A texture dropped anywhere on the panel — so "drag it in from my assets"
@@ -1952,7 +2072,22 @@ impl TileCtx<'_> {
     fn dropped_texture(&self, ui: &egui::Ui) -> Option<String> {
         let resp = ui.response();
         let p = resp.dnd_release_payload::<crate::assets::AssetPayload>()?;
-        crate::assets::is_texture(&p.path).then(|| crate::assets::asset_rel_path(&p.path, self.project_root))
+        self.sheet_image(&p.path)
+    }
+
+    /// Sheet 0 as the map draws it, with its cut: the tileset's own image
+    /// when it has one, else the layer's material. The same rule the palette
+    /// and the mesh builder follow; the brush preview used to read only the
+    /// material and so stayed blank for a tileset that brought its own art.
+    fn page0_sheet(&self, ui: &egui::Ui) -> Option<(egui::TextureHandle, u32, u32)> {
+        let own = self.layer_tileset();
+        if let Some(set) = self.store.get(&own)
+            && !set.texture.trim().is_empty()
+        {
+            return Some((self.texture_handle(ui, &set.texture)?, set.sheet_cols, set.sheet_rows));
+        }
+        let (sc, sr) = self.sheet_size();
+        Some((self.sheet_handle(ui)?, sc, sr))
     }
 
     /// An egui handle on the active layer's texture.
@@ -2173,9 +2308,9 @@ fn paint_tile(
             // Texture v runs down, so the art's TOP (b = 1) is the smaller v.
             if b == 1 { v0 } else { v1 },
         );
-        mesh.colored_vertex(pos, Color32::WHITE);
-        let i = mesh.vertices.len() - 1;
-        mesh.vertices[i].uv = uv;
+        // Pushed whole: `colored_vertex` is for untextured meshes and asserts
+        // so in a debug build, which panicked the first time a tile drew.
+        mesh.vertices.push(egui::epaint::Vertex { pos, uv, color: Color32::WHITE });
     }
     mesh.add_triangle(0, 1, 2);
     mesh.add_triangle(0, 2, 3);
@@ -2328,6 +2463,7 @@ impl crate::Editor {
                 self.tile_reorient_selection(turn, flip_x, flip_y)
             }
             TileCmd::NewTilesetForLayer => self.new_tileset_for_layer(),
+            TileCmd::NewTilesetFromImage(rel) => self.new_tileset_from_image(rel),
             TileCmd::AttachTileset(path) => {
                 let Some(e) = self.tile_tools.layer else { return };
                 self.begin_edit();
@@ -2525,39 +2661,67 @@ impl crate::Editor {
         self.tile_tools.selection = None;
         self.select_single(e);
         self.scene_dirty = true;
-        self.tile_note("added a tile layer — give it a spritesheet in the Inspector");
+        self.tile_note("added a tile layer. Drop your spritesheet on TILESET in the ◫ Tiles panel");
     }
 
     /// Make a tileset for the active layer's own sheet and attach it.
+    ///
+    /// A layer whose material has no spritesheet gets an empty tileset rather
+    /// than a refusal: refusing left the panel with no SHEETS row to drop an
+    /// image on, which was the only other way in.
     fn new_tileset_for_layer(&mut self) {
         let Some(e) = self.tile_tools.layer else { return };
-        let Some(mat) = self.world.get::<floptle_core::Material>(e).cloned() else { return };
-        let Some(tex) = mat.texture.clone() else {
-            self.tile_note("give this layer a spritesheet first — a tileset describes one sheet");
+        let tex = self.world.get::<floptle_core::Material>(e).and_then(|m| m.texture.clone());
+        let Some(tex) = tex.filter(|t| !t.trim().is_empty()) else {
+            let path = self.new_tileset("tileset", "", 1, 1);
+            self.attach_new_tileset(e, &path);
+            self.tile_note(&format!("made {path}. Drop your spritesheet on its SHEETS row"));
             return;
         };
-        let (cols, rows) = mat.sheet();
-        if cols * rows <= 1 {
-            self.tile_note(
-                "this material's texture is not cut into a sheet — set sheetCols / sheetRows \
-                 on it first, so the tileset knows how many tiles there are",
-            );
+        self.new_tileset_from_image(tex);
+    }
+
+    /// Give the active layer a tileset for `rel`, an image in the project.
+    ///
+    /// One tileset per spritesheet: if the project already has one for this
+    /// image, the layer gets that, collision and autotiling included, rather
+    /// than a second copy that would drift from the first.
+    fn new_tileset_from_image(&mut self, rel: String) {
+        let Some(e) = self.tile_tools.layer else { return };
+        let rel = crate::assets::asset_rel_path(&rel, &self.project_root);
+        if let Some(existing) = self.tiles.sets.iter().find(|(_, s)| s.texture == rel).map(|(p, _)| p.clone()) {
+            self.attach_new_tileset(e, &existing);
+            self.tile_note(&format!("this layer now uses {existing}, the tileset for {rel}"));
             return;
         }
-        let name = std::path::Path::new(&tex)
+        let (cols, rows) = sheet_cut_for(&self.project_root, &rel, None);
+        let name = std::path::Path::new(&rel)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("tileset")
             .to_string();
-        let path = self.new_tileset(&name, &tex, cols, rows);
+        let path = self.new_tileset(&name, &rel, cols, rows);
+        self.attach_new_tileset(e, &path);
+        if cols * rows <= 1 {
+            self.tile_note(&format!(
+                "made {path}, but could not tell its tile size. Set cols / rows on its SHEETS row"
+            ));
+        } else {
+            self.tile_note(&format!(
+                "made {path}: {cols}×{rows} tiles. Click one in PALETTE, then paint in the Scene view"
+            ));
+        }
+    }
+
+    fn attach_new_tileset(&mut self, e: Entity, path: &str) {
         self.begin_edit();
         if let Some(Matter::Tilemap { tileset, .. }) = self.world.get_mut::<Matter>(e) {
-            *tileset = path.clone();
+            *tileset = path.to_string();
             self.scene_dirty = true;
         }
-        self.tile_tools.editing = Some(path.clone());
+        self.tile_tools.editing = Some(path.to_string());
+        self.tile_tools.page = 0;
         self.save_tilesets();
-        self.tile_note(&format!("made {path} for {cols}×{rows} tiles"));
     }
 }
 
@@ -2974,5 +3138,90 @@ mod tests {
         tools.layer = Some(without);
         panel_text(&world, &mut tools, &mut store);
         assert_eq!(tools.editing, None, "a bare layer must not inherit the last one's tileset");
+    }
+
+    /// A scratch project with one image in it, and an editor pointed at it
+    /// with a tile layer armed. No GPU: tileset commands never draw.
+    fn project_with_image(tag: &str, w: u32, h: u32) -> (crate::Editor, Entity, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("floptle-tiles-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("textures")).unwrap();
+        floptle_image::io::save_png(&root.join("textures/Tiles1.png"), &vec![255u8; (w * h * 4) as usize], w, h)
+            .unwrap();
+        let mut ed = crate::Editor { project_root: root.clone(), ..Default::default() };
+        let (world, e) = layer_world("");
+        ed.world = world;
+        ed.tile_tools.layer = Some(e);
+        (ed, e, root)
+    }
+
+    fn layer_tileset_of(ed: &crate::Editor, e: Entity) -> String {
+        match ed.world.get::<Matter>(e) {
+            Some(Matter::Tilemap { tileset, .. }) => tileset.clone(),
+            _ => String::new(),
+        }
+    }
+
+    /// A layer with no tileset takes a spritesheet straight in: one image, and
+    /// the layer has a tileset cut from it, saved, ready to paint. It used to
+    /// need the layer's material set up first, and nothing on the panel said so.
+    #[test]
+    fn a_spritesheet_gives_a_bare_layer_its_tileset() {
+        let (mut ed, e, root) = project_with_image("bare", 64, 32);
+        ed.apply_tile_cmds(vec![TileCmd::NewTilesetFromImage("textures/Tiles1.png".into())]);
+        let path = layer_tileset_of(&ed, e);
+        assert!(!path.is_empty(), "the layer must have a tileset now");
+        let set = ed.tiles.get(&path).expect("and the store must have it");
+        assert_eq!(set.texture, "textures/Tiles1.png", "cut from the image that was dropped");
+        assert_eq!((set.sheet_cols, set.sheet_rows), (4, 2), "64×32 is 16-px tiles, 4×2");
+        assert!(root.join(&path).is_file(), "and it is saved, not only in memory");
+        // The same image on a second layer is the same tileset, not a copy.
+        let other = ed.world.spawn();
+        ed.world.insert(other, Matter::Tilemap { cols: 2, rows: 2, tile: 1.0, data: vec![], tileset: String::new() });
+        ed.tile_tools.layer = Some(other);
+        ed.apply_tile_cmds(vec![TileCmd::NewTilesetFromImage("textures/Tiles1.png".into())]);
+        assert_eq!(layer_tileset_of(&ed, other), path, "one tileset per spritesheet");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The image you drew in the 🖼 Image tab knows its own grid. A sheet of
+    /// 8-px tiles at 64×32 is guessed as 16-px from its size alone; the grid
+    /// saved in its .flimg says otherwise, and that wins.
+    #[test]
+    fn the_grid_an_image_was_drawn_against_is_its_cut() {
+        let (_ed, _e, root) = project_with_image("flimg", 64, 32);
+        assert_eq!(sheet_cut_for(&root, "textures/Tiles1.png", None), (4, 2), "without a document, a guess");
+        let mut doc = floptle_image::doc::Image::new(64, 32, floptle_image::doc::Mode::Pixel);
+        doc.sheet = Some((8, 4));
+        floptle_image::io::save_document(&root.join("textures/Tiles1.flimg"), &doc).unwrap();
+        assert_eq!(sheet_cut_for(&root, "textures/Tiles1.png", None), (8, 4));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// "+ Empty tileset" on a layer whose material has no image makes a
+    /// tileset anyway, so its SHEETS row exists to drop an image on. It used
+    /// to refuse, and the panel was left with no way forward.
+    #[test]
+    fn an_empty_tileset_needs_no_material() {
+        let (mut ed, e, root) = project_with_image("empty", 64, 32);
+        ed.apply_tile_cmds(vec![TileCmd::NewTilesetForLayer]);
+        let path = layer_tileset_of(&ed, e);
+        assert!(!path.is_empty(), "the layer must get a tileset even with no material");
+        assert_eq!(ed.tile_tools.editing.as_deref(), Some(path.as_str()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The bare-layer panel asks for the spritesheet, and never points at a
+    /// section that is not on screen. It used to send you to "SHEETS above",
+    /// which only exists once there is a tileset.
+    #[test]
+    fn a_bare_layer_asks_for_its_spritesheet() {
+        let (world, e) = layer_world("");
+        let mut tools = TileTools { layer: Some(e), ..Default::default() };
+        let mut store = TileStore::default();
+        let text = panel_text(&world, &mut tools, &mut store);
+        assert!(text.contains("Drop your spritesheet here"), "{text}");
+        assert!(text.contains("choose an image"), "a picker for when dragging fails:\n{text}");
+        assert!(!text.contains("SHEETS above"), "SHEETS is not on screen without a tileset:\n{text}");
     }
 }

@@ -4751,6 +4751,24 @@ impl Editor {
             {
                 return;
             }
+            // Ctrl+S saves from wherever you are. The gate below withholds
+            // every shortcut while a field has focus or the Game view does,
+            // and that took save with it: with the script editor, a search
+            // box or a number field focused, or the Game tab in front, Ctrl+S
+            // did nothing at all, so saving only worked from the Scene view.
+            // A Ctrl chord is never text, and outside Play no game is
+            // listening. The script editor still saves its own file on the
+            // same chord; this saves everything else beside it.
+            if pressed
+                && self.ctrl
+                && code == KeyCode::KeyS
+                && (typing || game_view)
+                && !self.playing
+                && !self.player_mode
+            {
+                self.save_all();
+                return;
+            }
             // Discrete commands fire on press only.
             if pressed && !typing {
                 self.key_command(event_loop, code, game_view);
