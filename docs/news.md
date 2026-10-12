@@ -1,5 +1,11 @@
 ## Just shipped
 
+**v0.116.0-rc1 — "Lands On Its Feet"** (beta). A 2D box dropped onto a
+tile floor lands on it, and Add RigidBody on a Sprite gives it a 2D box its
+own size. A spritesheet dropped on a tile layer comes in with collision worked
+out from its art. Layers grow as you paint past the edge, and resizing one no
+longer moves your level.
+
 **v0.115.0 — "Paints True"** (stable). Drop a spritesheet on a tile
 layer's **TILESET** section, or pick it from the list there, and the layer is
 ready to paint: the tileset is cut on the grid you drew it against. The Image
