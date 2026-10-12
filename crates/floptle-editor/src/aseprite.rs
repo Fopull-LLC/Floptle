@@ -12,11 +12,11 @@
 //! edited, cut down or extended afterwards and nothing remembers it was
 //! imported.
 //!
-//! **Only a uniform grid.** Aseprite can pack a sheet tightly, with per-frame
-//! rectangles that are not a grid at all, and the engine's sheets are grids. A
-//! packed sheet is refused with a sentence naming what to change in the export
-//! dialog, rather than imported as a grid it is not — which would draw every
-//! frame subtly wrong and look like a bug in the renderer.
+//! **A packed or trimmed sheet is laid out again on a grid.** Aseprite can
+//! pack frames tightly and trim their empty edges, and the engine's sheets are
+//! grids, so the import says where each frame's pixels go in a grid of cells
+//! the size of the untrimmed frame ([`Repack`]), and the caller draws that
+//! grid as a new image. Only a rotated frame is refused, naming the checkbox.
 
 use floptle_scene::{SpriteAnimDoc, SpriteAnimFrameDoc};
 
@@ -31,6 +31,80 @@ pub(crate) struct Import {
     /// `(clip name, clip)`. One per tag; one called after the file when there
     /// are no tags.
     pub(crate) clips: Vec<(String, SpriteAnimDoc)>,
+    /// Set when the sheet is not a grid: how to draw one from it.
+    pub(crate) repack: Option<Repack>,
+}
+
+/// How to redraw a packed or trimmed sheet as a grid: cell `i` of a
+/// `cols × rows` grid of `cell_w × cell_h` cells is frame `i`, whose pixels are
+/// `pieces[i]`.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Repack {
+    pub(crate) cell_w: u32,
+    pub(crate) cell_h: u32,
+    pub(crate) pieces: Vec<Piece>,
+}
+
+/// One frame's rectangle on the packed sheet, and where it sits in its cell.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub(crate) struct Piece {
+    pub(crate) x: u32,
+    pub(crate) y: u32,
+    pub(crate) w: u32,
+    pub(crate) h: u32,
+    pub(crate) dx: u32,
+    pub(crate) dy: u32,
+}
+
+/// One clip from frames in play order, as `(cell, milliseconds)`.
+///
+/// The frame rate is the shortest frame, and everything longer becomes a
+/// hold. Aseprite's timing is per frame in milliseconds and ours is a rate
+/// plus holds; this is the conversion that keeps every frame's real duration
+/// rather than averaging them into a rate that matches none.
+pub(crate) fn clip(seq: &[(u32, u32)], looping: bool, cols: u32, rows: u32) -> SpriteAnimDoc {
+    let base = seq.iter().map(|f| f.1).filter(|&m| m > 0).min().unwrap_or(100);
+    SpriteAnimDoc {
+        fps: 1000.0 / base as f32,
+        looping,
+        cols,
+        rows,
+        texture: String::new(), // filled in by the caller, which knows the path
+        frames: seq
+            .iter()
+            .map(|&(cell, ms)| SpriteAnimFrameDoc {
+                cell,
+                hold: (ms.max(1) as f32 / base as f32).max(1.0),
+                ..Default::default()
+            })
+            .collect(),
+    }
+}
+
+/// The frames a tag plays, in order, and whether the clip loops. A tag that
+/// repeats a set number of times plays that many rounds and then holds its
+/// last frame; `0` repeats forever.
+pub(crate) fn play_order(from: usize, to: usize, dir: crate::ase_file::Direction, repeat: u32) -> (Vec<usize>, bool) {
+    let once = crate::ase_file::tag_frames(from, to, dir);
+    if repeat == 0 {
+        return (once, true);
+    }
+    let mut all: Vec<usize> = Vec::with_capacity(once.len() * repeat as usize);
+    for _ in 0..repeat {
+        all.extend(&once);
+    }
+    (all, false)
+}
+
+/// A tag's direction as the JSON spells it.
+fn direction(s: &str) -> crate::ase_file::Direction {
+    use crate::ase_file::Direction::*;
+    match s {
+        "reverse" => Reverse,
+        "pingpong" => PingPong,
+        "pingpong_reverse" => PingPongReverse,
+        _ => Forward,
+    }
 }
 
 /// The frame index Aseprite put in a frame's key.
@@ -53,6 +127,12 @@ struct Frame {
     /// Milliseconds. Aseprite writes this per frame, which is the whole reason
     /// `hold` exists on our side.
     ms: u32,
+    /// Where the rectangle sits in the untrimmed frame, and that frame's size.
+    dx: u32,
+    dy: u32,
+    full_w: u32,
+    full_h: u32,
+    rotated: bool,
 }
 
 /// Read an Aseprite sheet JSON.
@@ -98,11 +178,22 @@ pub(crate) fn parse(text: &str, stem: &str) -> Result<Import, String> {
                 .map(|x| x as u32)
                 .ok_or_else(|| format!("a frame's rectangle has no `{k}`"))
         };
+        let (w, h) = (n("w")?, n("h")?);
+        let num = |o: Option<&serde_json::Value>, k: &str| {
+            o.and_then(|o| o.get(k)).and_then(|x| x.as_u64()).map(|x| x as u32)
+        };
+        let src = f.get("spriteSourceSize");
+        let full = f.get("sourceSize");
         frames.push(Frame {
             x: n("x")?,
             y: n("y")?,
-            w: n("w")?,
-            h: n("h")?,
+            w,
+            h,
+            dx: num(src, "x").unwrap_or(0),
+            dy: num(src, "y").unwrap_or(0),
+            full_w: num(full, "w").unwrap_or(w),
+            full_h: num(full, "h").unwrap_or(h),
+            rotated: f.get("rotated").and_then(|r| r.as_bool()).unwrap_or(false),
             // Aseprite always writes this; a sheet exported by something else
             // might not, and one frame rate for the lot is a fine answer.
             ms: f.get("duration").and_then(|d| d.as_u64()).unwrap_or(100) as u32,
@@ -113,20 +204,25 @@ pub(crate) fn parse(text: &str, stem: &str) -> Result<Import, String> {
     if cw == 0 || ch == 0 {
         return Err("this sheet's frames have no size".into());
     }
-    if frames.iter().any(|f| f.w != cw || f.h != ch) {
+    if frames.iter().any(|f| f.rotated) {
         return Err(
-            "this sheet's frames are not all the same size, so it is not a grid. Re-export \
-             with a constant sprite size (uncheck Trim in Aseprite's export dialog)."
+            "this sheet has rotated frames, which cannot be drawn upright again. Re-export \
+             with Allow Rotation unchecked in Aseprite's export dialog."
                 .into(),
         );
     }
-    if frames.iter().any(|f| f.x % cw != 0 || f.y % ch != 0) {
-        return Err(
-            "this sheet's frames are packed rather than laid out on a grid. Re-export with \
-             Sheet Type: By Rows or By Columns, and no padding or trimming."
-                .into(),
-        );
-    }
+    let grid = frames.iter().all(|f| {
+        f.w == cw && f.h == ch && f.x % cw == 0 && f.y % ch == 0 && f.dx == 0 && f.dy == 0
+            && f.full_w == f.w && f.full_h == f.h
+    });
+    let repack = (!grid).then(|| Repack {
+        cell_w: frames.iter().map(|f| f.full_w.max(f.dx + f.w)).max().unwrap_or(cw),
+        cell_h: frames.iter().map(|f| f.full_h.max(f.dy + f.h)).max().unwrap_or(ch),
+        pieces: frames
+            .iter()
+            .map(|f| Piece { x: f.x, y: f.y, w: f.w, h: f.h, dx: f.dx, dy: f.dy })
+            .collect(),
+    });
 
     let meta = v.get("meta");
     // **Only a plain relative name.** `Path::join` discards its base when the
@@ -151,43 +247,61 @@ pub(crate) fn parse(text: &str, stem: &str) -> Result<Import, String> {
     let size = meta.and_then(|m| m.get("size"));
     let sheet_w = size.and_then(|s| s.get("w")).and_then(|x| x.as_u64()).map(|x| x as u32);
     let sheet_h = size.and_then(|s| s.get("h")).and_then(|x| x.as_u64()).map(|x| x as u32);
-    let cols = sheet_w.map(|w| w / cw).unwrap_or_else(|| {
-        frames.iter().map(|f| f.x / cw + 1).max().unwrap_or(1)
-    });
-    let rows = sheet_h.map(|h| h / ch).unwrap_or_else(|| {
-        frames.iter().map(|f| f.y / ch + 1).max().unwrap_or(1)
-    });
-    let (cols, rows) = (cols.max(1), rows.max(1));
+    let (cols, rows) = if repack.is_some() {
+        let n = frames.len() as u32;
+        let cols = n.min(8);
+        (cols, n.div_ceil(cols))
+    } else {
+        let cols = sheet_w.map(|w| w / cw).unwrap_or_else(|| {
+            frames.iter().map(|f| f.x / cw + 1).max().unwrap_or(1)
+        });
+        let rows = sheet_h.map(|h| h / ch).unwrap_or_else(|| {
+            frames.iter().map(|f| f.y / ch + 1).max().unwrap_or(1)
+        });
+        (cols.max(1), rows.max(1))
+    };
 
-    let cell_of = |f: &Frame| (f.y / ch) * cols + (f.x / cw);
+    let cells: Vec<u32> = if repack.is_some() {
+        (0..frames.len() as u32).collect()
+    } else {
+        frames.iter().map(|f| (f.y / ch) * cols + (f.x / cw)).collect()
+    };
 
     // Tags name the animations. A sheet without any is still one clip — the
     // whole sheet, in order — because that is what a person who exported a
     // single loop has, and refusing it would mean the common simple case is the
     // one that needs a workaround.
-    let tags: Vec<(String, usize, usize)> = meta
+    type Span = (String, usize, usize, crate::ase_file::Direction, u32);
+    let tags: Vec<Span> = meta
         .and_then(|m| m.get("frameTags"))
         .and_then(|t| t.as_array())
         .map(|a| {
             a.iter()
                 .filter_map(|t| {
+                    // Aseprite writes `repeat` as a string, when it writes it.
+                    let repeat = t
+                        .get("repeat")
+                        .and_then(|r| r.as_u64().or_else(|| r.as_str()?.parse().ok()))
+                        .unwrap_or(0) as u32;
                     Some((
                         t.get("name")?.as_str()?.to_string(),
                         t.get("from")?.as_u64()? as usize,
                         t.get("to")?.as_u64()? as usize,
+                        direction(t.get("direction").and_then(|d| d.as_str()).unwrap_or("forward")),
+                        repeat,
                     ))
                 })
                 .collect()
         })
         .unwrap_or_default();
-    let spans: Vec<(String, usize, usize)> = if tags.is_empty() {
-        vec![(stem.to_string(), 0, frames.len() - 1)]
+    let spans: Vec<Span> = if tags.is_empty() {
+        vec![(stem.to_string(), 0, frames.len() - 1, crate::ase_file::Direction::Forward, 0)]
     } else {
         tags
     };
 
     let mut clips = Vec::new();
-    for (name, from, to) in spans {
+    for (name, from, to, dir, repeat) in spans {
         // **A tag naming a frame the sheet does not have is refused, not
         // trimmed.** It means the JSON and the PNG came from different exports,
         // and clamping hands back a clip that is quietly short — which reads as
@@ -204,35 +318,14 @@ pub(crate) fn parse(text: &str, stem: &str) -> Result<Import, String> {
         if to < from {
             continue;
         }
-        let span = &frames[from..=to];
-        // The frame rate is the shortest frame, and everything longer becomes a
-        // hold. Aseprite's timing is per frame in milliseconds and ours is a
-        // rate plus holds; this is the conversion that keeps every frame's real
-        // duration rather than averaging them into a rate that matches none.
-        let base = span.iter().map(|f| f.ms).filter(|&m| m > 0).min().unwrap_or(100);
-        clips.push((
-            name,
-            SpriteAnimDoc {
-                fps: 1000.0 / base as f32,
-                looping: true,
-                cols,
-                rows,
-                texture: String::new(), // filled in by the caller, which knows the path
-                frames: span
-                    .iter()
-                    .map(|f| SpriteAnimFrameDoc {
-                        cell: cell_of(f),
-                        hold: (f.ms.max(1) as f32 / base as f32).max(1.0),
-                        ..Default::default()
-                    })
-                    .collect(),
-            },
-        ));
+        let (order, looping) = play_order(from, to, dir, repeat);
+        let seq: Vec<(u32, u32)> = order.iter().map(|&i| (cells[i], frames[i].ms)).collect();
+        clips.push((name, clip(&seq, looping, cols, rows)));
     }
     if clips.is_empty() {
         return Err("this sheet's tags name no frames".into());
     }
-    Ok(Import { image, cols, rows, clips })
+    Ok(Import { image, cols, rows, clips, repack })
 }
 
 #[cfg(test)]
@@ -347,30 +440,50 @@ mod tests {
         assert_eq!(im.clips[0].1.fps, 20.0);
     }
 
-    /// A packed or trimmed sheet is refused with the fix, not imported as a grid
-    /// it is not — which would draw every frame slightly wrong and read as a
-    /// renderer bug.
+    /// A packed, trimmed sheet comes back with where each frame's pixels go in
+    /// a grid, and its clips index that grid. It used to be refused.
     #[test]
-    fn a_packed_sheet_says_what_to_change() {
-        let trimmed = r#"{
-          "frames": [
-            { "frame": { "x": 0, "y": 0, "w": 16, "h": 16 } },
-            { "frame": { "x": 16, "y": 0, "w": 12, "h": 16 } }
-          ],
-          "meta": { "image": "a.png", "size": { "w": 32, "h": 16 } }
-        }"#;
-        let e = parse(trimmed, "a").unwrap_err();
-        assert!(e.contains("same size") && e.contains("Trim"), "{e}");
-
+    fn a_packed_trimmed_sheet_is_laid_out_on_a_grid() {
         let packed = r#"{
           "frames": [
-            { "frame": { "x": 0, "y": 0, "w": 16, "h": 16 } },
-            { "frame": { "x": 17, "y": 0, "w": 16, "h": 16 } }
+            { "frame": { "x": 0, "y": 0, "w": 16, "h": 16 }, "duration": 100,
+              "spriteSourceSize": { "x": 0, "y": 0, "w": 16, "h": 16 }, "sourceSize": { "w": 16, "h": 16 } },
+            { "frame": { "x": 17, "y": 0, "w": 12, "h": 10 }, "duration": 100,
+              "spriteSourceSize": { "x": 2, "y": 6, "w": 12, "h": 10 }, "sourceSize": { "w": 16, "h": 16 } }
           ],
-          "meta": { "image": "a.png", "size": { "w": 34, "h": 16 } }
+          "meta": { "image": "a.png", "size": { "w": 34, "h": 16 },
+                    "frameTags": [ { "name": "run", "from": 0, "to": 1, "direction": "reverse" } ] }
         }"#;
-        let e = parse(packed, "a").unwrap_err();
-        assert!(e.contains("packed") && e.contains("By Rows"), "{e}");
+        let im = parse(packed, "a").unwrap();
+        let r = im.repack.expect("a packed sheet must be repacked");
+        assert_eq!((r.cell_w, r.cell_h, im.cols, im.rows), (16, 16, 2, 1));
+        assert_eq!(r.pieces[1], Piece { x: 17, y: 0, w: 12, h: 10, dx: 2, dy: 6 });
+        let run = &im.clips[0].1;
+        assert_eq!(run.frames.iter().map(|f| f.cell).collect::<Vec<_>>(), [1, 0], "reverse plays back to front");
+    }
+
+    /// A rotated frame cannot be drawn upright again, and says which checkbox.
+    #[test]
+    fn a_rotated_sheet_says_what_to_change() {
+        let rotated = r#"{ "frames": [ { "frame": { "x": 0, "y": 0, "w": 8, "h": 16 }, "rotated": true } ],
+                           "meta": { "image": "a.png" } }"#;
+        let e = parse(rotated, "a").unwrap_err();
+        assert!(e.contains("Allow Rotation"), "{e}");
+    }
+
+    /// A tag that repeats twice plays two rounds and stops; ping-pong goes
+    /// there and back without doubling its ends.
+    #[test]
+    fn tag_direction_and_repeat_shape_the_clip() {
+        let json = TAGGED.replace(
+            r#"{ "name": "walk", "from": 0, "to": 2 }"#,
+            r#"{ "name": "walk", "from": 0, "to": 2, "direction": "pingpong", "repeat": "2" }"#,
+        );
+        let im = parse(&json, "hero").unwrap();
+        let walk = &im.clips[0].1;
+        assert_eq!(walk.frames.iter().map(|f| f.cell).collect::<Vec<_>>(), [0, 1, 2, 1, 0, 1, 2, 1]);
+        assert!(!walk.looping, "a tag that repeats a set number of times does not loop");
+        assert!(im.clips[1].1.looping, "a tag with no repeat count loops");
     }
 
     /// Anything that is not an Aseprite sheet says so rather than producing an

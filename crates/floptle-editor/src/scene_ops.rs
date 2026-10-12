@@ -692,6 +692,17 @@ impl Editor {
     }
 
     pub(crate) fn drop_asset(&mut self, path: &str) {
+        // An `.aseprite` drops as the sheet it draws, made now if the poll has
+        // not got to it yet.
+        #[cfg(feature = "editor-ui")]
+        if crate::ase_sync::is_aseprite(path) {
+            let src = std::path::PathBuf::from(path);
+            let sheet = crate::ase_sync::sheet_path(&src);
+            if floptle_vfs::exists(&sheet) || self.import_aseprite_file(&src) {
+                self.drop_asset(&sheet.to_string_lossy());
+            }
+            return;
+        }
         if crate::assets::is_prefab(path) {
             let at = self.cursor_world();
             self.instantiate_prefab(path, Some(at), None);

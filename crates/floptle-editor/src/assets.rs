@@ -155,6 +155,8 @@ pub(crate) fn asset_kind(path: &str) -> AssetKind {
         k("▨", (110, 180, 250), "image")
     } else if is_texture(path) {
         k("🖼", (120, 210, 120), "texture")
+    } else if crate::ase_sync::is_aseprite(path) {
+        k("▨", (110, 180, 250), "aseprite")
     } else if is_material(path) {
         k("◑", (245, 160, 80), "material")
     } else if anim::is_sprite_anim(path) {

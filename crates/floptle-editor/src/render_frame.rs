@@ -253,6 +253,8 @@ impl Editor {
         // The half of the live loop that ISN'T the editor's own push: a texture
         // rewritten by anything (Aseprite, a build script, a git checkout)
         // re-uploads here. See image_io.rs.
+        #[cfg(feature = "editor-ui")]
+        self.poll_aseprite_files();
         self.poll_texture_hot_reload();
 
         // Nothing to drive until the window + GPU stack exist. (The borrows

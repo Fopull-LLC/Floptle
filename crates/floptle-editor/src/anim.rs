@@ -2470,7 +2470,51 @@ impl crate::Editor {
         let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| self.project_root.clone());
         // The image the JSON names, beside the JSON. Falls back to the stem,
         // which is what an export renamed after the fact looks like.
-        let png = dir.join(if im.image.is_empty() { format!("{stem}.png") } else { im.image.clone() });
+        let mut png = dir.join(if im.image.is_empty() { format!("{stem}.png") } else { im.image.clone() });
+        // A packed or trimmed sheet is drawn again as a grid beside it, and the
+        // clips use that.
+        if let Some(rp) = &im.repack {
+            let Some(src) = floptle_assets::load_texture(&png) else {
+                self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("importing {stem}: its frames are packed, and {} could not be read to lay them out again", png.display()),
+                    None,
+                );
+                self.toast = Some((format!("✖  {stem} — see the Console"), 8.0));
+                return;
+            };
+            let (gw, gh) = (im.cols * rp.cell_w, im.rows * rp.cell_h);
+            let mut px = vec![0u8; (gw * gh * 4) as usize];
+            for (i, p) in rp.pieces.iter().enumerate() {
+                let (cx, cy) = ((i as u32 % im.cols) * rp.cell_w, (i as u32 / im.cols) * rp.cell_h);
+                for y in 0..p.h {
+                    for x in 0..p.w {
+                        let (sx, sy) = (p.x + x, p.y + y);
+                        let (tx, ty) = (cx + p.dx + x, cy + p.dy + y);
+                        if sx >= src.width || sy >= src.height || tx >= gw || ty >= gh {
+                            continue;
+                        }
+                        let so = ((sy * src.width + sx) * 4) as usize;
+                        let to = ((ty * gw + tx) * 4) as usize;
+                        px[to..to + 4].copy_from_slice(&src.pixels[so..so + 4]);
+                    }
+                }
+            }
+            let grid = png.with_extension("grid.png");
+            let tex = floptle_render::TextureData { pixels: px, width: gw, height: gh };
+            match floptle_assets::encode_png(&tex).map(|b| floptle_vfs::write(&grid, b)) {
+                Some(Ok(())) => png = grid,
+                _ => {
+                    self.console.push(
+                        floptle_script::LogLevel::Error,
+                        format!("importing {stem}: could not write {}", grid.display()),
+                        None,
+                    );
+                    self.toast = Some((format!("✖  {stem} — see the Console"), 8.0));
+                    return;
+                }
+            }
+        }
         let tex_rel = crate::assets::asset_rel_path(&png.to_string_lossy(), &self.project_root);
         if !floptle_vfs::exists(&png) {
             self.console.push(

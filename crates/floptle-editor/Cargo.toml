@@ -58,6 +58,7 @@ editor-ui = [
     "dep:egui_dock",
     "dep:floptle-theme",
     "dep:skrifa",
+    "dep:flate2",
     "dep:rfd",
     "dep:tokio",
     "dep:clap",
@@ -165,6 +166,8 @@ egui = { workspace = true, optional = true }
 # to "will this icon draw?" (see `icons.rs`), and what `gui.hasGlyph` answers
 # with. Same crate epaint resolves glyphs with, so it is already in the graph.
 skrifa = { version = "0.42", optional = true }
+# Reads `.aseprite` files, whose cels are zlib-compressed (`ase_file.rs`).
+flate2 = { version = "1", optional = true }
 egui-wgpu = { workspace = true, optional = true }
 egui-winit = { workspace = true, optional = true }
 egui_dock = { workspace = true, optional = true }

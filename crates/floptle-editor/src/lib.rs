@@ -74,6 +74,10 @@ mod anim_ui;
 mod anim_curves;
 #[cfg(feature = "editor-ui")]
 mod aseprite;
+#[cfg(feature = "editor-ui")]
+mod ase_file;
+#[cfg(feature = "editor-ui")]
+mod ase_sync;
 mod assets;
 // **The machine's speakers and its microphone**, both of which a dedicated
 // server has none of. Gated with `devices` rather than stubbed: a null
@@ -3582,6 +3586,9 @@ struct Editor {
     texture_mtime: HashMap<String, SystemTime>,
     /// When the mtime poll last ran (it stats files at most twice a second).
     texture_poll_at: Option<Instant>,
+    /// When the `.aseprite` poll last ran — see `ase_sync.rs`.
+    #[cfg(feature = "editor-ui")]
+    ase_poll_at: Option<Instant>,
     /// Documents open in the 🖼 tab but not on screen — see `park_image_doc`.
     ///
     /// Each entry is a whole `ImageEditState`: its pixels, its path, its undo
