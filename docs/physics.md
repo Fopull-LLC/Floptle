@@ -95,7 +95,7 @@ never moves, and it turns with the node.
 From a script: `node:setBodyOutline{ vec2(-0.4, 0), vec2(0.4, 0), vec2(0, 1) }`,
 for a body that changes shape with what the character is doing.
 
-**Add RigidBody on a Sprite** gives it a body traced from its art: a polygon
+**Add Component ▸ Physics ▸ Rigidbody** on a Sprite gives it a body traced from its art: a polygon
 round the opaque pixels of the frame it shows, not a box round the whole frame.
 A sprite whose frame is opaque edge to edge and centred on its node gets a box
 the size it is drawn, which is already exact. Either way, a falling crate needs
