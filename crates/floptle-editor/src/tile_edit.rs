@@ -353,42 +353,52 @@ pub(crate) fn add_tilemap_colliders(
     }
     let Some(set) = store.get(tileset) else { return 0 };
     let shapes = floptle_tiles::collision_shapes(*cols, *rows, *tile, data, set);
-    let s = xf.scale;
-    let depth = (*tile * 0.5 * s.z.abs().max(1e-3)).max(1e-3);
-    for b in &shapes.boxes {
-        // Each box's centre is in the node's local frame, so it goes through the
-        // node's rotation and scale exactly like the mesh does: a rotated or
-        // scaled tilemap collides where it draws.
-        let local = Vec3::new(b.cx * s.x, b.cy * s.y, 0.0);
-        sim.add_static_box(
-            xf.translation + (xf.rotation * local).as_dvec3(),
-            Vec3::new((b.hx * s.x.abs()).max(1e-4), (b.hy * s.y.abs()).max(1e-4), depth),
-            xf.rotation,
-            layer,
-        );
-    }
-    // Hand-drawn outlines — the slopes. Each goes in as an extruded polygon, so
-    // a ramp is a ramp in the sim and not the box around it. Anchored at its own
-    // centroid-free bounding centre for the same reason the boxes are: the
-    // points are baked relative to a point the node's transform places, so the
-    // f64 residuals stay small however far out the level sits.
-    for p in &shapes.polys {
-        let mid = p.pts.iter().fold([0.0f32, 0.0], |a, q| [a[0] + q[0], a[1] + q[1]]);
-        let n = p.pts.len() as f32;
-        let (mx, my) = (mid[0] / n * s.x, mid[1] / n * s.y);
-        let pts: Vec<floptle_core::math::Vec2> = p
-            .pts
-            .iter()
-            .map(|q| floptle_core::math::Vec2::new(q[0] * s.x - mx, q[1] * s.y - my))
-            .collect();
-        let local = Vec3::new(mx, my, 0.0);
-        sim.add_static_poly(
-            xf.translation + (xf.rotation * local).as_dvec3(),
-            &pts,
-            depth,
-            xf.rotation,
-            layer,
-        );
+    for (boxes, polys, one_way) in
+        [(&shapes.boxes, &shapes.polys, false), (&shapes.one_way_boxes, &shapes.one_way_polys, true)]
+    {
+        let first = sim.static_count();
+        let s = xf.scale;
+        let depth = (*tile * 0.5 * s.z.abs().max(1e-3)).max(1e-3);
+        for b in boxes {
+            // Each box's centre is in the node's local frame, so it goes through the
+            // node's rotation and scale exactly like the mesh does: a rotated or
+            // scaled tilemap collides where it draws.
+            let local = Vec3::new(b.cx * s.x, b.cy * s.y, 0.0);
+            sim.add_static_box(
+                xf.translation + (xf.rotation * local).as_dvec3(),
+                Vec3::new((b.hx * s.x.abs()).max(1e-4), (b.hy * s.y.abs()).max(1e-4), depth),
+                xf.rotation,
+                layer,
+            );
+        }
+        // Hand-drawn outlines — the slopes. Each goes in as an extruded polygon, so
+        // a ramp is a ramp in the sim and not the box around it. Anchored at its own
+        // centroid-free bounding centre for the same reason the boxes are: the
+        // points are baked relative to a point the node's transform places, so the
+        // f64 residuals stay small however far out the level sits.
+        for p in polys {
+            let mid = p.pts.iter().fold([0.0f32, 0.0], |a, q| [a[0] + q[0], a[1] + q[1]]);
+            let n = p.pts.len() as f32;
+            let (mx, my) = (mid[0] / n * s.x, mid[1] / n * s.y);
+            let pts: Vec<floptle_core::math::Vec2> = p
+                .pts
+                .iter()
+                .map(|q| floptle_core::math::Vec2::new(q[0] * s.x - mx, q[1] * s.y - my))
+                .collect();
+            let local = Vec3::new(mx, my, 0.0);
+            sim.add_static_poly(
+                xf.translation + (xf.rotation * local).as_dvec3(),
+                &pts,
+                depth,
+                xf.rotation,
+                layer,
+            );
+        }
+        // One-way squares are solid only from the layer's own up: a character
+        // jumps up through a ledge and lands on its top.
+        if one_way {
+            sim.make_one_way(first, xf.rotation * Vec3::Y);
+        }
     }
     shapes.len()
 }
@@ -1242,7 +1252,8 @@ impl Editor {
             // The merged boxes — the same ones the sim gets, so what you see is
             // what a character walks on. Drawing per-tile outlines instead would
             // show a grid that does not exist in the physics world.
-            for b in floptle_tiles::collision_shapes(cols, rows, tile, data, set).boxes {
+            let shapes = floptle_tiles::collision_shapes(cols, rows, tile, data, set);
+            for b in shapes.boxes.into_iter().chain(shapes.one_way_boxes) {
                 let pts: Vec<Vec2> = [
                     (b.cx - b.hx, b.cy - b.hy),
                     (b.cx + b.hx, b.cy - b.hy),

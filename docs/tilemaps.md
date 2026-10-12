@@ -257,6 +257,14 @@ not have to. A **RigidBody** on a tilemap means the same thing: its tiles are
 solid, and the map never moves. A tilemap with solid tiles that is *not*
 Collidable still warns in the Console when you press Play, naming the node.
 
+### One-way platforms
+
+Tick **one-way** under **TILE** and the tile is solid only from above: a
+character jumps up through it from below and lands on its top. It works with
+any collision shape, so a thin plank ledge stays thin. Above is the layer's up,
+whichever way an individual tile is turned. One-way tiles never merge with
+solid ones, so a ledge beside a wall does not make the wall one-way.
+
 ### Tags
 
 Free strings a script reads — `"ice"`, `"water"`, `"damage"`, `"ladder"`. This is
@@ -498,8 +506,8 @@ Written down because "it does not exist" beats "it exists and does nothing":
   stack. Delete the file to start over.
 * **Chunked / infinite maps.** A tilemap is `cols × rows`; a very large world is
   several tilemap nodes.
-* **One-way platforms.** The physics layer has no one-way contact filter, so this
-  would have to be built there first.
+* **Dropping down through a one-way platform.** A character can jump up
+  through one and land on it, but there is no "press down to drop through" yet.
 * **Importing `.tmx` / `.ldtk`.** No importer yet.
 
 ## See also

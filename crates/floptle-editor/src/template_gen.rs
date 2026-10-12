@@ -232,6 +232,8 @@ fn regenerate_platformer2d() {
         }
     }
     set.info_mut(LEDGE).tags = vec!["ledge".into()];
+    // Planks are jumped up through and landed on.
+    set.info_mut(LEDGE).one_way = true;
     set.prune();
     std::fs::write(dir.join("ground.tileset.ron"), set.to_ron().unwrap()).unwrap();
 

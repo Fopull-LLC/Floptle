@@ -246,6 +246,10 @@ pub struct TileInfo {
     /// Frames per second. Zero (the default) means "do not animate", which is
     /// what a tile with no `frames` wants anyway.
     pub anim_fps: f32,
+    /// A one-way platform: solid only from above, in the tile's own art. A
+    /// character jumps up through it from below and lands on its top.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub one_way: bool,
 }
 
 impl TileInfo {
@@ -574,6 +578,11 @@ impl TileSet {
     pub fn collision(&self, cell: u32) -> &TileCollision {
         static NONE: TileCollision = TileCollision::None;
         self.tiles.get(&cell).map(|t| &t.collision).unwrap_or(&NONE)
+    }
+
+    /// Whether a tile is a one-way platform.
+    pub fn one_way(&self, cell: u32) -> bool {
+        self.tiles.get(&cell).is_some_and(|t| t.one_way)
     }
 
     pub fn tags(&self, cell: u32) -> &[String] {

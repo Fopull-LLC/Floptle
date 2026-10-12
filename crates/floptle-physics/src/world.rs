@@ -52,6 +52,11 @@ pub struct AnchoredCollider {
     /// A trigger: the solver never pushes bodies out of it (they pass
     /// through), but overlap still reports touch events (`onTriggerEnter`…).
     pub sensor: bool,
+    /// A one-way platform: solid only to a body coming down onto it from the
+    /// side this points to (its "up"). From below or the side, and while a
+    /// body is rising, it is passed through, so a character jumps up through
+    /// a ledge and lands on top of it. `None` is an ordinary solid.
+    pub one_way: Option<Vec3>,
     /// Cached `(anchor − world.origin)` as f32; queries subtract it from the probe.
     offset: Vec3,
 }
@@ -60,7 +65,7 @@ impl AnchoredCollider {
     /// A collider whose data is in absolute world coordinates (anchor = 0) — the
     /// right frame for data that's already near the world origin, and for tests.
     pub fn world(shape: Box<dyn CollisionShape>) -> Self {
-        Self { shape, anchor: DVec3::ZERO, layer: 0, eid: None, sensor: false, offset: Vec3::ZERO }
+        Self { shape, anchor: DVec3::ZERO, layer: 0, eid: None, sensor: false, one_way: None, offset: Vec3::ZERO }
     }
 
     /// The collider's bounding sphere in the SIM frame, if its shape has one.
@@ -787,7 +792,7 @@ impl PhysicsWorld {
         sensor: bool,
     ) -> usize {
         let offset = (anchor - self.origin).as_vec3();
-        self.colliders.push(AnchoredCollider { shape, anchor, layer, eid, sensor, offset });
+        self.colliders.push(AnchoredCollider { shape, anchor, layer, eid, sensor, one_way: None, offset });
         self.colliders.len() - 1
     }
 
@@ -1391,6 +1396,23 @@ impl PhysicsWorld {
     /// feet, the centre is already inside something (only the sphere push-out
     /// recovers that), nothing is within reach, or what is there is too steep
     /// to stand on.
+    /// Whether one-way collider `ci` holds body `bi` at contact sample `c`
+    /// with surface normal `n`. It holds a body landing on its top face, and
+    /// nothing else: the surface has to face its up, the body must not be
+    /// rising, and the sample must have been at or above the surface before
+    /// this step's move, so a body that has partly come up through it from
+    /// below is not suddenly shoved out of the top.
+    fn one_way_holds(&self, bi: usize, ci: usize, c: Vec3, n: Vec3, up: Vec3) -> bool {
+        let b = &self.bodies[bi];
+        if n.dot(up) < 0.7 || b.vel.dot(up) > 0.05 {
+            return false;
+        }
+        let before = c - (b.pos - b.prev_pos);
+        // A little inside counts as above: a body resting on the top sinks a
+        // hair into it each step before it is pushed back out.
+        self.colliders[ci].distance(before) > -0.05
+    }
+
     fn foot_probe(
         &self,
         bi: usize,
@@ -1403,6 +1425,7 @@ impl PhysicsWorld {
             return None;
         }
         let up = b.up;
+        let rising = b.vel.dot(up) > 0.05;
         let centre = b.pos - up * half_height;
         let reach = 2.0 * b.radius;
         let cos_walk = b.slope_limit.clamp(0.0, std::f32::consts::FRAC_PI_2).cos();
@@ -1412,7 +1435,7 @@ impl PhysicsWorld {
             for &ci in cand {
                 let ci = ci as usize;
                 let c = &self.colliders[ci];
-                if (row >> c.layer) & 1 == 0 || c.sensor {
+                if (row >> c.layer) & 1 == 0 || c.sensor || (rising && c.one_way.is_some()) {
                     continue;
                 }
                 let d = c.distance(p);
@@ -1582,7 +1605,8 @@ impl PhysicsWorld {
             cand.sort_unstable();
             cand.retain(|&ci| {
                 let c = &self.colliders[ci as usize];
-                (row >> c.layer) & 1 == 1 && !c.sensor
+                // A one-way platform only stops a body moving down onto it.
+                (row >> c.layer) & 1 == 1 && !c.sensor && c.one_way.is_none_or(|u| dir.dot(u) < 0.0)
             });
             let nearest = |p: Vec3| {
                 let mut best = (f32::INFINITY, usize::MAX);
@@ -1937,6 +1961,11 @@ impl PhysicsWorld {
                             continue;
                         }
                         let n = self.colliders[ci].normal(c);
+                        if let Some(up) = self.colliders[ci].one_way
+                            && !self.one_way_holds(bi, ci, c, n, up)
+                        {
+                            continue;
+                        }
                         // The bottom sphere's contact with walkable ground
                         // belongs to the feet (above). A wall, a cliff face,
                         // a slope past the limit — anything the body cannot

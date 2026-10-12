@@ -758,6 +758,24 @@ impl Sim {
 
     /// Register a static oriented-box collider (the "collidable" switch on a Cube node).
     /// `center` is the node's world translation (full `f64`).
+    /// How many static colliders the sim holds — the index the next one added
+    /// will have, for [`Self::make_one_way`].
+    pub fn static_count(&self) -> usize {
+        self.world.colliders.len()
+    }
+
+    /// Make every static collider added since index `from` one-way: solid
+    /// only to a body coming down onto it from the `up` side.
+    pub fn make_one_way(&mut self, from: usize, up: Vec3) {
+        let up = up.normalize_or_zero();
+        if up == Vec3::ZERO {
+            return;
+        }
+        for c in self.world.colliders.iter_mut().skip(from) {
+            c.one_way = Some(up);
+        }
+    }
+
     pub fn add_static_box(&mut self, center: DVec3, half: Vec3, rot: Quat, tag: StaticTag) {
         self.world.add_collider_tagged(
             center,

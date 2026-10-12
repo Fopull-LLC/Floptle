@@ -80,15 +80,20 @@ pub struct TileColliders {
     pub boxes: Vec<TileBox>,
     /// Hand-drawn outlines — one per square that has one, never merged.
     pub polys: Vec<TilePoly>,
+    /// The same two, for one-way platform tiles: solid only from above. Kept
+    /// apart so a ledge never merges into the wall beside it and makes the
+    /// wall one-way too.
+    pub one_way_boxes: Vec<TileBox>,
+    pub one_way_polys: Vec<TilePoly>,
 }
 
 impl TileColliders {
     pub fn len(&self) -> usize {
-        self.boxes.len() + self.polys.len()
+        self.boxes.len() + self.polys.len() + self.one_way_boxes.len() + self.one_way_polys.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.boxes.is_empty() && self.polys.is_empty()
+        self.len() == 0
     }
 }
 
@@ -104,9 +109,23 @@ pub fn collision_shapes(
     data: &[u32],
     set: &TileSet,
 ) -> TileColliders {
+    let (boxes, polys) = shapes_of(cols, rows, tile, data, set, false);
+    let (one_way_boxes, one_way_polys) = shapes_of(cols, rows, tile, data, set, true);
+    TileColliders { boxes, polys, one_way_boxes, one_way_polys }
+}
+
+/// The colliders of every square whose tile is (or is not) one-way.
+fn shapes_of(
+    cols: u32,
+    rows: u32,
+    tile: f32,
+    data: &[u32],
+    set: &TileSet,
+    one_way: bool,
+) -> (Vec<TileBox>, Vec<TilePoly>) {
     let mut polys: Vec<TilePoly> = Vec::new();
     if cols == 0 || rows == 0 || tile <= 0.0 {
-        return TileColliders::default();
+        return (Vec::new(), Vec::new());
     }
     let (w, h) = (cols as f32 * tile * 0.5, rows as f32 * tile * 0.5);
     // The local-space rect of a sub-rect `(rx, ry, rw, rh)` of the tile at
@@ -131,7 +150,7 @@ pub fn collision_shapes(
         for col in 0..cols {
             let i = (row * cols + col) as usize;
             let Some(&packed) = data.get(i) else { continue };
-            if set.is_empty_square(packed) {
+            if set.is_empty_square(packed) || set.one_way(tile_index(packed)) != one_way {
                 continue;
             }
             let coll = set.collision(tile_index(packed));
@@ -233,7 +252,7 @@ pub fn collision_shapes(
         }
     }
     out.extend(partial);
-    TileColliders { boxes: out, polys }
+    (out, polys)
 }
 
 /// How many squares are solid at all — the denominator of the "42 boxes for

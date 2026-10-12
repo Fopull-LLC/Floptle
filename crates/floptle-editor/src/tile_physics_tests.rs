@@ -85,6 +85,45 @@ fn a_rigidbody_on_a_tilemap_makes_its_tiles_solid() {
     assert!((y - 0.5).abs() < 0.05, "the tiles under x=3 must hold the box; got {y:.3}");
 }
 
+/// An 8×2 layer whose TOP row is a one-way ledge (y 0..1) with nothing under
+/// it, gravity of `g` (negative pulls up), and a 2D box at height `y`.
+fn ledge_scene(g: f32, y: f64) -> (crate::Editor, floptle_core::Entity) {
+    let (mut ed, player) = scene(1.0, 0.0, true, false);
+    let set = ed.tiles.sets.get_mut(SET).unwrap();
+    set.info_mut(0).one_way = true;
+    for (_, m) in ed.world.query_mut::<Matter>() {
+        match m {
+            Matter::Tilemap { data, .. } => {
+                let e = floptle_core::EMPTY_TILE;
+                *data = [vec![0u32; 8], vec![e; 8]].concat();
+            }
+            Matter::GravityVolume { strength, .. } => *strength = g,
+            _ => {}
+        }
+    }
+    if let Some(t) = ed.world.get_mut::<Transform>(player) {
+        t.translation.y = y;
+    }
+    (ed, player)
+}
+
+/// A one-way ledge holds a box that lands on it…
+#[test]
+fn a_box_lands_on_a_one_way_ledge() {
+    let (ed, p) = ledge_scene(9.81, 3.0);
+    let y = rest(ed, p);
+    assert!((y - 1.5).abs() < 0.05, "standing on the ledge's top at y = 1; got {y:.3}");
+}
+
+/// …and lets one rising from below pass up through it. Pulled upward, a box
+/// under an ordinary ledge stops against its underside at y = -0.5.
+#[test]
+fn a_box_rises_through_a_one_way_ledge() {
+    let (ed, p) = ledge_scene(-9.81, -2.0);
+    let y = rest(ed, p);
+    assert!(y > 3.0, "it must come out of the top and keep going; got {y:.3}");
+}
+
 /// A picture taken outside the frame loop — `floptle shot`, `camera.capture` —
 /// draws the tile layers. Nothing on that path built their meshes, so a
 /// photograph of a 2D level was its sprites over an empty sky.

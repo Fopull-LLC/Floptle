@@ -108,6 +108,8 @@ pub(crate) enum TileCmd {
     BulkCollision(Vec<u32>, TileCollision),
     /// Give each of these tiles the collision its art suggests.
     CollisionFromArt(Vec<u32>),
+    /// Make these tiles one-way platforms (solid only from above), or not.
+    SetOneWay(Vec<u32>, bool),
     /// Save the dirty tilesets now.
     SaveTilesets,
 }
@@ -1257,6 +1259,21 @@ impl TileCtx<'_> {
         });
         if mixed {
             ui.small("These tiles do not all collide the same way — pick one above to set them all.");
+        }
+        if coll.is_solid() {
+            let mut one_way = set.one_way(cell);
+            let mixed_ow = cells.iter().any(|c| set.one_way(*c) != one_way);
+            let label = if mixed_ow { "one-way (some)" } else { "one-way" };
+            if ui
+                .checkbox(&mut one_way, label)
+                .on_hover_text(
+                    "solid only from above: a character jumps up through it from below and \
+                     lands on its top. Above is the layer's up, whichever way a tile is turned.",
+                )
+                .changed()
+            {
+                self.cmds.push(TileCmd::SetOneWay(cells.clone(), one_way));
+            }
         }
         if ui
             .small_button("fit to the art")
@@ -2548,6 +2565,11 @@ impl crate::Editor {
             TileCmd::ClearRule(g, mask) => {
                 if let Some(group) = set.groups.get_mut(g as usize) {
                     group.clear_rule(mask);
+                }
+            }
+            TileCmd::SetOneWay(cells, on) => {
+                for cell in cells {
+                    set.info_mut(cell).one_way = on;
                 }
             }
             TileCmd::SetAnim(cell, frames, fps) => {

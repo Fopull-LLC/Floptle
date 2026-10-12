@@ -51,6 +51,7 @@ TileSet(
             ],
             frames: [],
             anim_fps: 0.0,
+            one_way: true,
         ),
         5: TileInfo(
             collision: Full,
