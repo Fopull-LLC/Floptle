@@ -2075,7 +2075,8 @@ fn point_light_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
     if crate::responsive::check(ui, &mut on, "aim it (spot)")
         .on_hover_text(
             "cone down the node's forward, the same axis a camera looks \
-             down — rotate the node to aim it. Off means the lamp lights \
+             down — rotate the node to aim it. A 2D light aims down its \
+             −Y arrow instead, in the plane. Off means the lamp lights \
              everything around it, which is what it has always done.",
         )
         .changed()
