@@ -463,8 +463,20 @@ impl EffectInstance {
     /// inherit the emitter's momentum (see [`crate::Track::inherit_velocity`]). Detached
     /// one-shots on a fast vessel pass its velocity here; node instances usually pass zero.
     pub fn advance_at_moving(&mut self, dt: f32, gravity: Vec3, emitter: Transform, emitter_vel: Vec3) {
+        self.advance_moving_in_level(dt, gravity, emitter, emitter_vel, None);
+    }
+
+    /// [`advance_at_moving`](Self::advance_at_moving) in a level.
+    pub fn advance_moving_in_level(
+        &mut self,
+        dt: f32,
+        gravity: Vec3,
+        emitter: Transform,
+        emitter_vel: Vec3,
+        level: Option<LevelHit<'_>>,
+    ) {
         self.pending_emit_vel = emitter_vel;
-        self.advance_at(dt, gravity, emitter);
+        self.advance_in_level(dt, gravity, emitter, level);
     }
 
     /// Advance the playhead by `dt`, firing crossed clips/bursts and aging every
@@ -472,6 +484,13 @@ impl EffectInstance {
     /// world transform — `Space::World` particles bake into world orientation at birth
     /// and re-anchor to it, so they stay put in the world as the node moves.
     pub fn advance_at(&mut self, dt: f32, gravity: Vec3, emitter: Transform) {
+        self.advance_in_level(dt, gravity, emitter, None);
+    }
+
+    /// [`advance_at`](Self::advance_at), with the level the colliding tracks
+    /// meet (see [`crate::Track::collide`]). `None` is a level with nothing in
+    /// it, which is what the editor's preview has.
+    pub fn advance_in_level(&mut self, dt: f32, gravity: Vec3, emitter: Transform, level: Option<LevelHit<'_>>) {
         if !self.playing || dt <= 0.0 {
             return;
         }
@@ -509,7 +528,7 @@ impl EffectInstance {
         self.anchored = true;
 
         // Age existing particles first; newborns then age only their partial step.
-        self.integrate(dt, gravity, &emitter);
+        self.integrate(dt, gravity, &emitter, level);
 
         // Emitter velocity for newborns this advance (Space::World inherit), consumed once.
         let emit_vel = std::mem::replace(&mut self.pending_emit_vel, Vec3::ZERO);
@@ -621,10 +640,11 @@ impl EffectInstance {
     }
 
     /// Age, gravity, drag, forces, retire. Kinematic-velocity tracks sample their LUT.
-    fn integrate(&mut self, dt: f32, gravity: Vec3, emitter: &Transform) {
+    fn integrate(&mut self, dt: f32, gravity: Vec3, emitter: &Transform, level: Option<LevelHit<'_>>) {
         // World-track turbulence samples noise at the absolute world position; the
         // anchor (as f32) shifts it back into world space from the anchor-relative store.
         let anchor = self.anchor.as_vec3();
+        let anchor_d = self.anchor;
         for (ti, ct) in self.effect.tracks.iter().enumerate() {
             let p = &mut self.tracks[ti].particles;
             let damp = (-ct.drag * dt).exp();
@@ -663,7 +683,27 @@ impl EffectInstance {
                 } else {
                     Vec3::ZERO
                 };
-                let pos = p.pos_age[i].truncate() + (vel + base) * dt;
+                let mut pos = p.pos_age[i].truncate() + (vel + base) * dt;
+                // The level, along the whole step: the first surface between
+                // where the particle was and where it is going.
+                if let (Some(c), Some(hit)) = (ct.collide, level) {
+                    let space = ParticleSpace { world: is_world, anchor: anchor_d, emitter };
+                    let from = space.to_world(p.pos_age[i].truncate());
+                    if let Some((at, n)) = hit(from, space.to_world(pos)) {
+                        if c.die {
+                            p.swap_remove(i);
+                            continue;
+                        }
+                        let n = space.dir_in(n);
+                        let into = vel.dot(n);
+                        if into < 0.0 {
+                            let along = vel - n * into;
+                            vel = along * (1.0 - c.friction) - n * (into * c.bounce);
+                        }
+                        // Just off the surface, so the next step starts outside it.
+                        pos = space.of_world(at) + n * LEVEL_SKIN;
+                    }
+                }
                 p.pos_age[i] = pos.extend(age);
                 p.vel_life[i] = vel.extend(life);
                 // Ribbon-trail history: record a point once the particle has moved
@@ -692,6 +732,54 @@ impl EffectInstance {
                 }
                 i += 1;
             }
+        }
+    }
+}
+
+/// The level, as a colliding particle asks it: a step from one world point to
+/// another, answered with the first surface it meets — the point and the
+/// surface's outward normal — or `None` when the way is clear.
+pub type LevelHit<'a> = &'a dyn Fn(DVec3, DVec3) -> Option<(DVec3, Vec3)>;
+
+/// How far off a surface a particle that hit it is put back, so its next step
+/// begins outside what it landed on.
+const LEVEL_SKIN: f32 = 0.01;
+
+/// Where a track's particles live, for turning their stored positions into the
+/// world's and back. A World track stores positions relative to the anchor; a
+/// Local one in the emitter's own frame, turned and scaled with the node.
+struct ParticleSpace<'a> {
+    world: bool,
+    anchor: DVec3,
+    emitter: &'a Transform,
+}
+
+impl ParticleSpace<'_> {
+    fn to_world(&self, p: Vec3) -> DVec3 {
+        if self.world {
+            self.anchor + p.as_dvec3()
+        } else {
+            self.emitter.translation + (self.emitter.rotation * (self.emitter.scale * p)).as_dvec3()
+        }
+    }
+
+    fn of_world(&self, w: DVec3) -> Vec3 {
+        if self.world {
+            (w - self.anchor).as_vec3()
+        } else {
+            let s = self.emitter.scale;
+            let inv = |v: f32| if v.abs() > 1e-6 { 1.0 / v } else { 0.0 };
+            (self.emitter.rotation.inverse() * (w - self.emitter.translation).as_vec3())
+                * Vec3::new(inv(s.x), inv(s.y), inv(s.z))
+        }
+    }
+
+    /// A world direction in this space, unit length.
+    fn dir_in(&self, d: Vec3) -> Vec3 {
+        if self.world {
+            d.normalize_or_zero()
+        } else {
+            (self.emitter.rotation.inverse() * d).normalize_or_zero()
         }
     }
 }
@@ -991,6 +1079,60 @@ mod tests {
             }
             .compile(),
         )
+    }
+
+    /// A floor at y = -1, as the level answers a step: where the step crosses it.
+    fn floor(from: DVec3, to: DVec3) -> Option<(DVec3, Vec3)> {
+        if from.y >= -1.0 && to.y < -1.0 {
+            let t = (from.y + 1.0) / (from.y - to.y);
+            Some((from + (to - from) * t, Vec3::Y))
+        } else {
+            None
+        }
+    }
+
+    /// The lowest a track's particles got over two seconds of falling onto the
+    /// floor, and how many are left.
+    fn fall_onto_floor(collide: Option<crate::effect::Collide>, space: Space) -> (f32, usize) {
+        let fx = one_track_effect(
+            Track {
+                clips: vec![burst_clip(0.0, 6, 5.0)],
+                velocity: ValueOrCurve::Const(Value::Vec3(Vec3::new(0.5, 0.0, 0.0))),
+                gravity: 1.0,
+                space,
+                collide,
+                ..Track::default()
+            },
+            5.0,
+            Playback::OneShot,
+        );
+        let mut inst = EffectInstance::new(fx, 3);
+        let mut lowest = f32::MAX;
+        let level: LevelHit<'_> = &floor;
+        for _ in 0..120 {
+            inst.advance_in_level(1.0 / 60.0, Vec3::new(0.0, -9.81, 0.0), Transform::IDENTITY, Some(level));
+            inst.sample_track(0, |p| lowest = lowest.min(p.pos.y));
+        }
+        (lowest, inst.alive())
+    }
+
+    /// Particles that meet the level stop at it: they land on a floor rather
+    /// than falling through, in either space; set to die there, they end.
+    /// Without the setting they fall straight through, as they always have.
+    #[test]
+    fn colliding_particles_land_on_the_level() {
+        let (through, _) = fall_onto_floor(None, Space::World);
+        assert!(through < -5.0, "with no collision they fall through: lowest {through}");
+        for space in [Space::World, Space::Local] {
+            let bounce = crate::effect::Collide { bounce: 0.0, friction: 0.0, die: false };
+            let (lowest, alive) = fall_onto_floor(Some(bounce), space);
+            assert!(lowest >= -1.0, "{space:?}: a particle went through the floor to {lowest}");
+            assert!(lowest < -0.95, "{space:?}: they never reached the floor ({lowest})");
+            assert_eq!(alive, 6, "{space:?}: landing must not end them");
+        }
+        let die = crate::effect::Collide { die: true, ..Default::default() };
+        let (_, alive) = fall_onto_floor(Some(die), Space::World);
+        assert_eq!(alive, 0, "set to die on contact, every one ends at the floor");
     }
 
     #[test]

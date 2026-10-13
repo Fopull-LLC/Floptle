@@ -32,7 +32,7 @@ pub mod vfx;
 pub use vfx::{
     load_vfx_effect, save_vfx_effect, VfxBlendDoc, VfxBurstDoc, VfxClipDoc, VfxCurveDoc,
     VfxEffectDoc, VfxEmitDoc, VfxEndDoc, VfxExtrapolateDoc, VfxFlipModeDoc, VfxFlipbookDoc,
-    VfxForceDoc, VfxGravityDoc, VfxInterpDoc, VfxKeyDoc, VfxLaneDoc, VfxLaneTargetDoc,
+    VfxCollideDoc, VfxForceDoc, VfxGravityDoc, VfxInterpDoc, VfxKeyDoc, VfxLaneDoc, VfxLaneTargetDoc,
     VfxLifetimeScaleDoc, VfxOrientDoc, VfxPlaybackDoc, VfxPropDoc, VfxRenderDoc, VfxShapeDoc,
     VfxSpaceDoc, VfxTrackDoc, VfxTrailDoc, VfxValueDoc,
     VFX_EXT,

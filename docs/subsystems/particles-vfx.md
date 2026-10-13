@@ -77,6 +77,7 @@ struct Track {
     inherit_velocity: f32,    // how much of the emitter's motion a newborn keeps
     forces: Vec<Force>,
     trail: Option<Trail>,
+    collide: Option<Collide>, // meet the level: bounce, friction, or die there
     // Beam tracks only:
     segments: u32, beam_end: Vec3,
     wave_amplitude: f32, wave_frequency: f32, scroll: f32,
@@ -100,6 +101,18 @@ squashes the same way along its local Y.
 a moving vessel used to be left behind in space. At 1 a newborn fully keeps up
 with the emitter, then drifts as drag bleeds it off. It only means anything for
 `Space::World` — a `Local` track rides the node already.
+
+`collide` makes a track's particles meet the level: tilemap walls, static
+colliders and terrain, never triggers. Each moving particle tests the whole step
+it is about to take, so a fast spark cannot pass a thin wall between frames. On
+a hit it either ends there (`die`, for rain and sparks that wink out on
+contact) or bounces: `bounce` is how much of the speed into the surface comes
+back out (0 lands dead), `friction` how much of the speed along it each hit
+takes away (1 stops it where it lands). It works the same for `World` and
+`Local` tracks. Only Play has a level to meet, so the Particles tab's preview
+passes through everything. It costs a ray per moving particle per frame, so
+turn it on for the tracks that land on something and leave glows and trails
+off. In the editor it is **collides with the level** on the track.
 
 ### Emission — clips, not a rate field
 

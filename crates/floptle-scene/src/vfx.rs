@@ -422,6 +422,37 @@ pub struct VfxTrackDoc {
     /// Force fields added to velocity each step (default: none).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub forces: Vec<VfxForceDoc>,
+    /// What its particles do when they meet the level (default: pass through).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collide: Option<VfxCollideDoc>,
+}
+
+/// A track's particles meeting the level: bounce and friction, or end there.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct VfxCollideDoc {
+    /// 0 lands dead, 1 bounces back as fast as it came in.
+    #[serde(default = "default_collide_bounce")]
+    pub bounce: f32,
+    /// How much of the speed along the surface each hit takes away.
+    #[serde(default = "default_collide_friction")]
+    pub friction: f32,
+    /// End the particle where it meets the level.
+    #[serde(default)]
+    pub die: bool,
+}
+
+impl Default for VfxCollideDoc {
+    fn default() -> Self {
+        Self { bounce: default_collide_bounce(), friction: default_collide_friction(), die: false }
+    }
+}
+
+fn default_collide_bounce() -> f32 {
+    0.3
+}
+
+fn default_collide_friction() -> f32 {
+    0.2
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -820,6 +851,7 @@ mod tests {
                     VfxForceDoc::Directional { dir: [1.0, 0.0, 0.0], strength: 2.0 },
                     VfxForceDoc::Turbulence { frequency: 0.5, strength: 1.5 },
                 ],
+                collide: Some(VfxCollideDoc { bounce: 0.6, friction: 0.1, die: false }),
             }],
         };
         let text = ron::ser::to_string_pretty(&doc, Default::default()).unwrap();

@@ -489,6 +489,7 @@ impl VfxSystem {
         dt: f32,
         grav: Option<VfxGravity<'_>>,
         frame_at: &dyn Fn(DVec3) -> Option<Entity>,
+        level: Option<floptle_vfx::LevelHit<'_>>,
     ) {
         // The gravity vector an effect feels at a world point, honoring its gravity mode.
         let grav_at = |world_pos: DVec3, mode: floptle_vfx::GravityMode| -> Vec3 {
@@ -529,7 +530,7 @@ impl VfxSystem {
                 _ => None,
             }
             .unwrap_or(emitter.rotation * Vec3::Y);
-            inst.advance_at(dt, g, emitter);
+            inst.advance_in_level(dt, g, emitter, level);
         }
         // Spawn for play-on-start systems without an instance: an asset swapped
         // mid-play, or a component attached mid-play.
@@ -569,7 +570,7 @@ impl VfxSystem {
             d.rot = emitter.rotation;
             d.scale = emitter.scale.x;
             let g = grav_at(d.pos, d.inst.gravity_mode());
-            d.inst.advance_at_moving(dt, g, emitter, d.vel);
+            d.inst.advance_moving_in_level(dt, g, emitter, d.vel, level);
             // Carry the emit point along with the inherited motion so a still-emitting
             // effect keeps pace with the vessel it was fired from. In a frame the
             // velocity is relative to it, so the point moves in the frame.
@@ -946,6 +947,7 @@ pub fn starter_effect_doc(name: &str) -> VfxEffectDoc {
         drag: 0.0,
         inherit_velocity: 0.0,
         forces: Vec::new(),
+        collide: None,
     }];
     VfxEffectDoc {
         name: name.into(),
@@ -1140,6 +1142,11 @@ pub fn effect_from_doc(doc: &VfxEffectDoc) -> ParticleEffect {
                 inherit_velocity: t.inherit_velocity,
                 forces: t.forces.iter().map(force_from_doc).collect(),
                 trail: t.trail.as_ref().map(trail_from_doc),
+                collide: t.collide.map(|c| floptle_vfx::Collide {
+                    bounce: c.bounce,
+                    friction: c.friction,
+                    die: c.die,
+                }),
                 segments: t.segments,
                 beam_end: Vec3::from_array(t.beam_end),
                 wave_amplitude: t.wave_amplitude,

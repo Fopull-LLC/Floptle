@@ -23,8 +23,8 @@ pub use draw::{
     collect_trails,
 };
 pub use effect::{
-    BillboardOrient, Blend, Clip, CompiledEffect, CompiledTrack, Emit, EmitShape, EndBehavior,
+    BillboardOrient, Blend, Clip, Collide, CompiledEffect, CompiledTrack, Emit, EmitShape, EndBehavior,
     FlipMode, Flipbook, Force, GravityMode, Lane, LaneTarget, Look, ParticleEffect, Playback,
     RenderMode, Space, Track, Trail,
 };
-pub use sim::{EffectInstance, ParticleSample, SCRUB_STEP, TRAIL_MAX_POINTS};
+pub use sim::{EffectInstance, LevelHit, ParticleSample, SCRUB_STEP, TRAIL_MAX_POINTS};

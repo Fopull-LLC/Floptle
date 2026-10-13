@@ -276,6 +276,30 @@ impl Default for Flipbook {
 /// and the draw pass connects it into camera-facing segments, UV `v` running 0→1
 /// tail→head. A trailed track's flipbook is ignored on the ribbon — the flipbook
 /// UV rect and the ribbon's per-segment `v` slice share the same instance lanes.
+/// What a particle does when it meets the level: bounce off it, or end there.
+///
+/// The level is whatever the game collides with — tilemap walls, static
+/// colliders, terrain — tested along each particle's step, so a fast spark
+/// cannot pass through a thin wall between two frames.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Collide {
+    /// How much of the speed into the surface comes back out: 0 lands dead, 1
+    /// bounces as high as it fell.
+    pub bounce: f32,
+    /// How much of the speed along the surface each hit takes away: 0 skids on,
+    /// 1 stops where it lands.
+    pub friction: f32,
+    /// End the particle at the surface instead — rain, sparks that die on
+    /// contact.
+    pub die: bool,
+}
+
+impl Default for Collide {
+    fn default() -> Self {
+        Self { bounce: 0.3, friction: 0.2, die: false }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Trail {
     /// Seconds of history the ribbon spans (older points expire off the tail).
@@ -413,6 +437,9 @@ pub struct Track {
     /// Per-particle ribbon trail (billboard tracks only; `None` = no trail, so
     /// untrailed tracks record no history and pay nothing).
     pub trail: Option<Trail>,
+    /// Particles meet the level (`None` = they pass through everything, and the
+    /// track pays nothing for it). Only in Play, where there is a level to ask.
+    pub collide: Option<Collide>,
     /// Beam tracks only: how many quads the origin→`beam_end` ribbon subdivides into.
     pub segments: u32,
     /// Beam tracks only: the ribbon's endpoint, a local offset from the effect origin
@@ -449,6 +476,7 @@ impl Default for Track {
             inherit_velocity: 0.0,
             forces: Vec::new(),
             trail: None,
+            collide: None,
             segments: 12,
             beam_end: Vec3::new(0.0, 5.0, 0.0),
             wave_amplitude: 0.0,
@@ -526,6 +554,8 @@ pub struct CompiledTrack {
     pub forces: Vec<Force>,
     /// Per-particle ribbon trail (see [`Track::trail`]; `None` = no history recorded).
     pub trail: Option<Trail>,
+    /// See [`Track::collide`].
+    pub collide: Option<Collide>,
     /// Beam subdivision + shape knobs (see the [`Track`] fields; beam tracks only).
     pub segments: u32,
     pub beam_end: Vec3,
@@ -697,6 +727,11 @@ impl Track {
             inherit_velocity: self.inherit_velocity,
             forces: self.forces.clone(),
             trail: self.trail.clone(),
+            collide: self.collide.map(|c| Collide {
+                bounce: c.bounce.clamp(0.0, 1.0),
+                friction: c.friction.clamp(0.0, 1.0),
+                die: c.die,
+            }),
             segments: self.segments.max(1),
             beam_end: self.beam_end,
             wave_amplitude: self.wave_amplitude,

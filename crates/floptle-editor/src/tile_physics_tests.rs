@@ -857,3 +857,56 @@ fn a_body_on_a_one_way_ledge_is_grounded_however_it_falls() {
     }
 }
 
+
+/// Sparks falling onto a tile floor in Play land on it when their track
+/// collides with the level, and fall straight through it when it does not.
+/// The level is the play sim's: the same merged tile colliders a body stands on.
+#[test]
+fn colliding_particles_land_on_a_tile_floor() {
+    use floptle_scene::{VfxCollideDoc, VfxPlaybackDoc, VfxPropDoc, VfxValueDoc};
+    let lowest = |collide: Option<VfxCollideDoc>| {
+        let (mut ed, player) = scene(1.0, 0.0, true, false);
+        ed.world.despawn(player);
+        let dir = std::env::temp_dir().join(format!(
+            "floptle-spark-floor-{}-{}",
+            collide.is_some(),
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut doc = crate::vfx::starter_effect_doc("Sparks");
+        doc.lifetime = 3.0;
+        doc.playback = VfxPlaybackDoc::OneShot;
+        let t = &mut doc.tracks[0];
+        t.velocity = VfxPropDoc::Const(VfxValueDoc::Vec3([0.0, 0.0, 0.0]));
+        t.gravity = 1.0;
+        t.collide = collide;
+        floptle_scene::save_vfx_effect(&doc, &dir.join("vfx/Sparks.vfx.ron")).unwrap();
+        ed.project_root = dir.clone();
+        ed.vfx.rescan(&dir);
+        // The emitter two units above the floor's top, which is y = 0.
+        let fx = ed.world.spawn();
+        ed.world.insert(fx, Transform { translation: DVec3::new(0.0, 2.0, 0.0), ..Transform::IDENTITY });
+        ed.world.insert(fx, floptle_core::ParticleSystem { asset: "vfx/Sparks".into(), play_on_start: true });
+        ed.toggle_play();
+        let mut lowest = f32::MAX;
+        let mut seen = 0;
+        for _ in 0..120 {
+            ed.play_step(1.0 / 60.0, true);
+            if let Some((_, inst)) = ed.vfx.instances.get(&fx) {
+                inst.sample_track(0, |p| {
+                    seen += 1;
+                    // Sampled relative to the emitter at y = 2 in either space:
+                    // a World track's anchor sits at the emitter.
+                    lowest = lowest.min(p.pos.y + 2.0);
+                });
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(seen > 0, "no particles were ever alive");
+        lowest
+    };
+    let through = lowest(None);
+    assert!(through < -1.0, "without collision they fall through the floor: lowest {through}");
+    let landed = lowest(Some(VfxCollideDoc { bounce: 0.0, friction: 0.5, die: false }));
+    assert!(landed >= -0.05, "a colliding spark went through the floor to {landed}");
+}

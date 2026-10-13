@@ -1399,7 +1399,22 @@ impl Editor {
         });
         let spheres = self.moving_world_spheres();
         let frame_at = |p: floptle_core::math::DVec3| moving_world_at(&spheres, p);
-        self.vfx.advance(&self.world, sdt, vfx_grav, &frame_at);
+        // The level a colliding track meets: the sim's colliders — tilemap
+        // walls, static geometry, terrain — and never its triggers.
+        let sim = self.sim.as_ref();
+        let hit = |from: floptle_core::math::DVec3, to: floptle_core::math::DVec3| {
+            let sim = sim?;
+            let d = (to - from).as_vec3();
+            let len = d.length();
+            if len <= 1e-6 {
+                return None;
+            }
+            let h = sim.raycast(from, d / len, len)?;
+            let n = floptle_core::math::Vec3::from_array(h.normal);
+            Some((floptle_core::math::DVec3::new(h.point[0] as f64, h.point[1] as f64, h.point[2] as f64), n))
+        };
+        let level: Option<floptle_vfx::LevelHit<'_>> = sim.is_some().then_some(&hit as _);
+        self.vfx.advance(&self.world, sdt, vfx_grav, &frame_at, level);
         self.profile_record(floptle_core::profile::Bucket::Particles, vfx_t.ms());
         // Audio: apply queued Lua commands, then tick voices against the
         // final node transforms (same ordering rationale as particles).

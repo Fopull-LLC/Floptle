@@ -871,6 +871,46 @@ fn particle_section(
             )
             .changed();
     });
+    // Meeting the level. A checkbox first, because off costs nothing and is
+    // what every effect did before; the knobs only mean something once it is on.
+    let mut on = track.collide.is_some();
+    if crate::responsive::check(ui, &mut on, "collides with the level")
+        .on_hover_text(
+            "particles stop at walls, floors and the ground — tilemap walls, static \
+             colliders and terrain, never triggers — instead of passing through them. \
+             In Play only: the preview here has no level. Each moving particle tests \
+             its step against the level, so keep it to the tracks that need it",
+        )
+        .changed()
+    {
+        track.collide = on.then(floptle_scene::VfxCollideDoc::default);
+        *dirty = true;
+    }
+    if let Some(c) = track.collide.as_mut() {
+        ui.horizontal(|ui| {
+            *dirty |= ui
+                .checkbox(&mut c.die, "dies on contact")
+                .on_hover_text("end the particle where it meets the level — rain, sparks")
+                .changed();
+        });
+        if !c.die {
+            ui.horizontal(|ui| {
+                ui.label("bounce");
+                *dirty |= ui
+                    .add(egui::DragValue::new(&mut c.bounce).speed(0.01).range(0.0..=1.0))
+                    .on_hover_text("0 lands dead, 1 bounces back as fast as it came in")
+                    .changed();
+                ui.label("friction");
+                *dirty |= ui
+                    .add(egui::DragValue::new(&mut c.friction).speed(0.01).range(0.0..=1.0))
+                    .on_hover_text(
+                        "how much of its speed along the surface each hit takes away: \
+                         0 skids on, 1 stops where it lands",
+                    )
+                    .changed();
+            });
+        }
+    }
 }
 
 /// Force fields on a track — the "make it feel alive" layer. Add wind / attractor /
