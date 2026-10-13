@@ -1714,9 +1714,65 @@ impl PhysicsWorld {
     /// floor it slides along never stops it and the wall ahead still does.
     /// A shorter move is exactly the plain one, so everything at ordinary
     /// speeds steps as it always has.
+    /// A fast box or outline's move, marched so it cannot jump a wall: each
+    /// stride is the distance from its nearest corner or edge point to the
+    /// nearest surface ahead, which nothing can be closer than, and it stops
+    /// on touching one, for the contacts to resolve. A surface it is already
+    /// sliding along does not count as ahead, so a crate skidding fast over a
+    /// floor is not held back by it. One-way platforms are left to the
+    /// contacts, which know which side the body came from.
+    fn march_flat(&mut self, bi: usize, delta: Vec3) {
+        let len = delta.length();
+        let dir = delta / len;
+        let row = self.matrix[self.bodies[bi].layer as usize];
+        let (centres, n_c, _) = self.bodies[bi].sample_centers();
+        let pos = self.bodies[bi].pos;
+        let reach = centres[..n_c].iter().map(|c| c.distance(pos)).fold(0.0f32, f32::max);
+        let mut cand = std::mem::take(&mut self.cand);
+        cand.clear();
+        self.collider_index.segment(pos, pos + delta, reach + 0.01, &mut cand);
+        let mut moved = 0.0f32;
+        for _ in 0..64 {
+            let left = len - moved;
+            if left <= 1e-5 {
+                break;
+            }
+            let (centres, n_c, _) = self.bodies[bi].sample_centers();
+            let mut ahead = f32::MAX;
+            for &ci in &cand {
+                let c = &self.colliders[ci as usize];
+                if (row >> c.layer) & 1 == 0 || c.sensor || c.one_way.is_some() {
+                    continue;
+                }
+                for &p in &centres[..n_c] {
+                    let d = c.distance(p);
+                    if d < 0.05 && c.normal(p).dot(dir) > -0.2 {
+                        continue;
+                    }
+                    ahead = ahead.min(d);
+                }
+            }
+            if ahead < 0.005 {
+                break;
+            }
+            let stride = ahead.min(left);
+            self.bodies[bi].pos += dir * stride;
+            moved += stride;
+        }
+        self.cand = cand;
+    }
+
     fn swept_move(&mut self, bi: usize, delta: Vec3) -> Option<SweptHit> {
         let radius = self.bodies[bi].radius;
         let len0 = delta.length();
+        if matches!(self.bodies[bi].shape, BodyShape::Box { .. } | BodyShape::Polygon { .. })
+            && !self.bodies[bi].sensor
+            && len0.is_finite()
+            && len0 > radius * SWEEP_FRACTION
+        {
+            self.march_flat(bi, delta);
+            return None;
+        }
         if self.bodies[bi].sensor
             || radius <= 0.0
             || matches!(self.bodies[bi].shape, BodyShape::Box { .. } | BodyShape::Polygon { .. })
@@ -1883,8 +1939,15 @@ impl PhysicsWorld {
         let row = self.matrix[self.bodies[bi].layer as usize];
         for _ in 0..steps {
             {
+                // Marched past a few centimetres: a substep can still be
+                // longer than the thinnest wall.
+                let mv = self.bodies[bi].vel * h;
+                if mv.length() > 0.05 {
+                    self.march_flat(bi, mv);
+                } else {
+                    self.bodies[bi].pos += mv;
+                }
                 let b = &mut self.bodies[bi];
-                b.pos += b.vel * h;
                 let spin = b.ang_vel * h;
                 b.turn(spin);
                 if b.shape_is_capsule() {
@@ -1937,11 +2000,14 @@ impl PhysicsWorld {
                 if (row >> self.colliders[ci].layer) & 1 == 0 || self.colliders[ci].sensor {
                     continue;
                 }
-                let (_, n_c, _) = self.bodies[bi].sample_centers();
-                for k in 0..n_c {
-                    // Fresh each time: every resolve moves and turns the body.
-                    let (centres, _, radius) = self.bodies[bi].sample_centers();
-                    let p = centres[k];
+                // Every point inside this collider, then one impulse per face:
+                // the points that share a normal are one contact, pushed at
+                // their middle by the deepest of them. One impulse per point,
+                // one after another, gave the first corner of a face all of
+                // the push, and a crate hitting a wall square on spun.
+                let (centres, n_c, radius) = self.bodies[bi].sample_centers();
+                let mut hits: Vec<(Vec3, Vec3, f32)> = Vec::new();
+                for &p in &centres[..n_c] {
                     let pen = radius - self.colliders[ci].distance(p);
                     #[allow(clippy::neg_cmp_op_on_partial_ord)]
                     if !(pen > 0.0) {
@@ -1956,7 +2022,15 @@ impl PhysicsWorld {
                     {
                         continue;
                     }
-                    let cp = p - n * radius;
+                    hits.push((p - n * radius, n, pen));
+                }
+                while let Some(&(_, n0, _)) = hits.first() {
+                    let (face, rest): (Vec<_>, Vec<_>) = hits.iter().partition(|h| h.1.dot(n0) > 0.95);
+                    hits = rest;
+                    let k = face.len() as f32;
+                    let cp = face.iter().fold(Vec3::ZERO, |a, h| a + h.0) / k;
+                    let n = (face.iter().fold(Vec3::ZERO, |a, h| a + h.1)).normalize_or(n0);
+                    let pen = face.iter().map(|h| h.2).fold(0.0f32, f32::max);
                     self.rigid_impulse(bi, cp, n, pen, &mut push_budget, &mut rot_budget);
                     self.note_body_contact(bi, n);
                     self.contacts.push(Contact { body: bi, collider: ci, point: cp, normal: n });

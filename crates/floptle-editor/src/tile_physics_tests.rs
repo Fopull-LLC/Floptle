@@ -455,3 +455,37 @@ fn a_tower_of_crates_stands_still() {
         assert!((t.y - (0.5 + i as f64)).abs() < 0.03, "crate {i} is where it was stacked: {t:?}");
     }
 }
+
+/// A crate fired at a thin wall stops at it. At 60 units a second it moves
+/// half a unit a step, past a wall a fifth of a unit thick, and used to come
+/// out the far side; a turning crate is held the same way.
+#[test]
+fn a_fast_crate_stops_at_a_thin_wall() {
+    for rotates in [false, true] {
+        let (mut ed, player) = scene(1.0, -3.0, true, false);
+        ed.world.remove::<RigidBody>(player);
+        let wall = ed.world.spawn();
+        ed.world.insert(wall, Transform { translation: DVec3::new(3.0, 2.0, 0.0), rotation: Quat::IDENTITY, scale: Vec3::ONE });
+        ed.world.insert(
+            wall,
+            RigidBody {
+                kind: BodyKind::Box,
+                mode: floptle_core::BodyMode::Static,
+                half_extents: [0.1, 2.0, 0.5],
+                ..Default::default()
+            },
+        );
+        let c = add_crate(&mut ed, 0.0, 1.0);
+        if let Some(rb) = ed.world.get_mut::<RigidBody>(c) {
+            rb.rotates = rotates;
+            rb.gravity = false;
+        }
+        ed.toggle_play();
+        ed.sim.as_mut().unwrap().set_body_velocity(c.index(), floptle_core::math::Vec3::new(60.0, 0.0, 0.0));
+        for _ in 0..30 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        let x = floptle_core::world_transform(&ed.world, c).translation.x;
+        assert!(x < 2.45, "rotates = {rotates}: the crate stayed on its side of the wall at 2.9; x = {x:.3}");
+    }
+}

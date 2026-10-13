@@ -46,8 +46,10 @@ position — setting position fights the solver. See [scripting.md](./scripting.
 physics step (about 21 m/s for a 0.35 m capsule) sweeps its move: it stops where
 it first touches a wall, loses only its speed into that wall, and keeps going
 along it. So a launch, a fling or a long fall never ends up on the far side of a
-mesh wall it ran into. Slower bodies move exactly as they always have. Box
-and polygon bodies are not swept.
+mesh wall it ran into. Slower bodies move exactly as they always have. A fast
+box or polygon body, turning or not, marches its move instead, never further
+in one stride than the nearest surface ahead, so a crate fired at a thin wall
+stops at it.
 
 ### 2D bodies
 
