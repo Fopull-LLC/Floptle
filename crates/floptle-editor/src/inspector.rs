@@ -7834,6 +7834,40 @@ fn lighting_2d_row(
             next.shadows = sh;
             changed = true;
         }
+        if cur.shadows {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("shadow strength");
+                let mut k = cur.shadow_strength;
+                if crate::responsive::slider(ui, egui::Slider::new(&mut k, 0.0..=1.0), "")
+                    .on_hover_text(
+                        "how much of this light a caster stops. 1 stops all of it; lower \
+                         lets some through, for a shadow that reads as something translucent \
+                         in the way or as light bouncing round the room",
+                    )
+                    .changed()
+                {
+                    next.shadow_strength = k;
+                    changed = true;
+                }
+            });
+        }
+        if !cur.sun {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("height");
+                let mut hgt = cur.height;
+                if crate::responsive::slider(ui, egui::Slider::new(&mut hgt, 0.0..=20.0).suffix(" m"), "")
+                    .on_hover_text(
+                        "how far above the plane the light hangs, for normal-mapped art: low \
+                         skims the bumps and throws long relief, high lights them from above. \
+                         0 is a third of the range",
+                    )
+                    .changed()
+                {
+                    next.height = hgt;
+                    changed = true;
+                }
+            });
+        }
         let mut sun = cur.sun;
         if crate::responsive::check(ui, &mut sun, "sun")
             .on_hover_text(

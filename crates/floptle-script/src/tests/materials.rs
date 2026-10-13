@@ -958,7 +958,7 @@ fn a_script_drives_sorting_and_2d_lighting() {
             "  node:setSorting{ layer = \"Characters\", order = 3 }\n",
             "  node:setLighting2D{ mode = \"2d\", blocks = \"on\" }\n",
             "  local torch = find(\"Torch\")\n",
-            "  torch:setLighting2D{ mode = \"2d\", layers = { \"Characters\" } }\n",
+            "  torch:setLighting2D{ mode = \"2d\", layers = { \"Characters\" }, shadowStrength = 0.6, height = 3 }\n",
             "  ok, err = pcall(function() torch:setLighting2D{ mode = \"flat-ish\" } end)\n",
             "end\n",
         ),
@@ -995,6 +995,7 @@ fn a_script_drives_sorting_and_2d_lighting() {
     );
     let torch_lit = world.get::<floptle_core::Lighting2D>(torch).expect("no Lighting2D");
     assert_eq!(torch_lit.layers, vec!["Characters".to_string()]);
+    assert_eq!((torch_lit.shadow_strength, torch_lit.height), (0.6, 3.0));
     // …and the bad spelling raised rather than defaulting. `pcall` caught it,
     // so the run itself is still clean — which is the point: the script
     // author hears about the typo, the engine does not guess.

@@ -11,12 +11,14 @@
 //! room drawn on top of it, which is a decal. Light is what you get when
 //! something *interrupts* it.
 //!
-//! Five shots, each one a claim:
+//! Six shots, each one a claim:
 //!
 //! * `shadow_off`  — the wall set not to cast. The far side is lit. This is the
 //!   reference, and it is also what every release before this one did.
 //! * `shadow_on`   — the wall casting. The far side drops to the base light and
 //!   the near side does not move.
+//! * `shadow_half` — the wall casting at half strength: the far side lands
+//!   between the two above.
 //! * `shadow_mask` — the wall on a sorting layer this light does not reach. It
 //!   must not shadow either: a light that skips a background and is *blocked* by
 //!   it would be the worst of both.
@@ -27,7 +29,7 @@
 //!
 //! The numbers say *whether* the light stopped. Only the pictures say whether it
 //! reads as a wall with a dark side, which is the thing that was actually asked
-//! for — so it writes all five.
+//! for — so it writes all six.
 //!
 //! Run: cargo run -p floptle-render --example light2d_shadow_probe -- <outdir>
 
@@ -170,6 +172,23 @@ fn main() {
         off.0,
         on.0
     );
+    // Shadow strength: half lets half through, so the far side lands between
+    // the base light and fully lit rather than on either.
+    let half = {
+        let mut l = lights;
+        l.falloff[0][2] = 0.5;
+        take("shadow_half", &mut raster, Some((true, MAP_RANK)), &l)
+    };
+    assert!(
+        half.1 > on.1 + 0.05 && half.1 < off.1 - 0.05,
+        "a half-strength shadow is at {:.3}: it must sit between the full shadow ({:.3}) and \
+         no wall ({:.3})",
+        half.1,
+        on.1,
+        off.1
+    );
+    assert!((half.0 - off.0).abs() < 0.03, "the lit side moved with the shadow strength");
+
     // The mask governs the occluder as well as the receiver.
     assert!(
         (masked.1 - off.1).abs() < 0.03,

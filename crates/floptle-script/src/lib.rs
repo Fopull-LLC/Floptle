@@ -1877,6 +1877,10 @@ pub enum RichSet {
         shadows: Option<bool>,
         /// `sun = true`: light from one direction, everywhere.
         sun: Option<bool>,
+        /// How dark its shadows are, 0 to 1.
+        shadow_strength: Option<f32>,
+        /// Its height above the plane, for normal maps (0 = a third of its range).
+        height: Option<f32>,
     },
     /// `node:setPointLight{ color =, intensity =, range = }`.
     ///

@@ -364,13 +364,31 @@ pub struct Lighting2D {
     /// shadows away from it, out to the edge of the screen. Its range and
     /// inner radius are not used.
     pub sun: bool,
+    /// **Lights only.** How dark this light's shadows are: 1 — the default —
+    /// stops it entirely, 0.5 lets half through. A shadow that keeps some of
+    /// the light reads as a translucent thing in the way, or as light bouncing
+    /// round a room.
+    pub shadow_strength: f32,
+    /// **Lights only.** How far above the plane the lamp hangs, in world units,
+    /// for normal-mapped surfaces: low skims a bump and throws long relief, high
+    /// lights it from above. `0` — the default — is a third of the range.
+    pub height: f32,
 }
 
 impl Default for Lighting2D {
     fn default() -> Self {
         // Every one of these is what a light does without this component.
         // A scene that has never heard of it must be unchanged.
-        Self { mode: Lit2D::default(), layers: Vec::new(), inner: 0.0, falloff: 2.0, shadows: true, sun: false }
+        Self {
+            mode: Lit2D::default(),
+            layers: Vec::new(),
+            inner: 0.0,
+            falloff: 2.0,
+            shadows: true,
+            sun: false,
+            shadow_strength: 1.0,
+            height: 0.0,
+        }
     }
 }
 
@@ -392,7 +410,8 @@ impl Lighting2D {
     }
 
     /// This light's shaping, in the lane the 2D accumulation reads:
-    /// `[inner radius, exponent, casts-are-honoured, height above the plane]`.
+    /// `[inner radius, exponent, shadow strength (0 = casters do not stop it),
+    /// height above the plane]`.
     ///
     /// Clamped here rather than in the shader so that one place decides what a
     /// nonsense value means. An inner radius at or past the range would divide
@@ -403,11 +422,11 @@ impl Lighting2D {
         [
             self.inner.clamp(0.0, r * 0.999),
             self.falloff.max(0.01),
-            if self.shadows { 1.0 } else { 0.0 },
+            if self.shadows { self.shadow_strength.clamp(0.0, 1.0) } else { 0.0 },
             // How far above the plane the lamp hangs, for normal-mapped
-            // relief: a third of its reach, so a bump nearby shades steeply
-            // and one at the edge of the light shades shallowly.
-            r * 0.3,
+            // relief: as set, or a third of its reach, so a bump nearby shades
+            // steeply and one at the edge of the light shades shallowly.
+            if self.height > 0.0 { self.height } else { r * 0.3 },
         ]
     }
 }
@@ -2656,6 +2675,20 @@ mod lighting_2d_tests {
     }
 
     /// Naming layers restricts it to those, and the empty name is the default
+    /// Shadow strength and height land in the lane the shader reads: a
+    /// strength is how much a caster stops (and nothing when shadows are off),
+    /// a height of 0 is the old third-of-the-range.
+    #[test]
+    fn shadow_strength_and_height_reach_the_lane() {
+        let half = Lighting2D { shadow_strength: 0.5, height: 3.0, ..Default::default() };
+        assert_eq!(half.falloff_lane(8.0)[2..], [0.5, 3.0]);
+        let off = Lighting2D { shadow_strength: 0.5, shadows: false, ..Default::default() };
+        assert_eq!(off.falloff_lane(8.0)[2], 0.0, "shadows off stops nothing, whatever the strength");
+        let over = Lighting2D { shadow_strength: 4.0, ..Default::default() };
+        assert_eq!(over.falloff_lane(8.0)[2], 1.0);
+        assert_eq!(Lighting2D::default().falloff_lane(9.0)[3], 2.7, "0 is a third of the range");
+    }
+
     /// The shaping lane, and the two values in it that a slider or a script can
     /// reach and that would break the shader if they arrived unclamped: an inner
     /// radius at or past the range divides by zero and lights the whole disc

@@ -163,7 +163,16 @@ field_diff!(RigidBody {
 // time.
 field_diff!(floptle_core::Sorting { layer, order, mode });
 field_diff!(floptle_core::Parallax { factor });
-field_diff!(floptle_core::Lighting2D { mode, layers, inner, falloff, shadows, sun });
+field_diff!(floptle_core::Lighting2D {
+    mode,
+    layers,
+    inner,
+    falloff,
+    shadows,
+    sun,
+    shadow_strength,
+    height
+});
 
 field_diff!(CelestialBody {
     mu,

@@ -198,6 +198,8 @@ impl Editor {
         let light_falloff = lit.map(|l| l.falloff);
         let light_shadows = lit.map(|l| l.shadows);
         let light_sun = lit.map(|l| l.sun);
+        let light_shadow_strength = lit.map(|l| l.shadow_strength);
+        let light_height = lit.map(|l| l.height);
         let shadow_2d =
             self.world.get::<floptle_core::Shadow2D>(e).map(|s| s.0.name().to_string());
         Some(NodeDoc {
@@ -252,6 +254,8 @@ impl Editor {
             light_falloff,
             light_shadows,
             light_sun,
+            light_shadow_strength,
+            light_height,
         })
     }
 
@@ -409,6 +413,8 @@ impl Editor {
             || node.light_falloff.is_some()
             || node.light_shadows.is_some()
             || node.light_sun.is_some()
+            || node.light_shadow_strength.is_some()
+            || node.light_height.is_some()
         {
             let d = floptle_core::Lighting2D::default();
             self.world.insert(
@@ -424,6 +430,8 @@ impl Editor {
                     falloff: node.light_falloff.unwrap_or(d.falloff),
                     shadows: node.light_shadows.unwrap_or(d.shadows),
                     sun: node.light_sun.unwrap_or(d.sun),
+                    shadow_strength: node.light_shadow_strength.unwrap_or(d.shadow_strength),
+                    height: node.light_height.unwrap_or(d.height),
                 },
             );
         }
@@ -484,6 +492,8 @@ impl Editor {
             light_falloff,
             light_shadows,
             light_sun,
+            light_shadow_strength,
+            light_height,
             camera_2d,
             joint,
         } = doc;
@@ -634,6 +644,8 @@ impl Editor {
             light_falloff: None,
             light_shadows: None,
             light_sun: None,
+            light_shadow_strength: None,
+            light_height: None,
         };
         let e = self.spawn_node(&node);
         self.select_single(e);
@@ -861,6 +873,8 @@ impl Editor {
                 light_falloff: None,
                 light_shadows: None,
             light_sun: None,
+            light_shadow_strength: None,
+            light_height: None,
             };
             let e = self.spawn_node(&node);
             self.select_single(e);

@@ -2600,13 +2600,25 @@ pub(crate) fn apply_rich_sets(
             // Same rule: `auto` with no layer list is the
             // default, so a node put back to it stops carrying the component and
             // its scene stops mentioning 2D lighting.
-            RichSet::MatterLighting2D { mode, layers, blocks, inner, falloff, shadows, sun } => {
+            RichSet::MatterLighting2D {
+                mode,
+                layers,
+                blocks,
+                inner,
+                falloff,
+                shadows,
+                sun,
+                shadow_strength,
+                height,
+            } => {
                 if mode.is_some()
                     || layers.is_some()
                     || inner.is_some()
                     || falloff.is_some()
                     || shadows.is_some()
                     || sun.is_some()
+                    || shadow_strength.is_some()
+                    || height.is_some()
                 {
                     let cur =
                         world.get::<floptle_core::Lighting2D>(e).cloned().unwrap_or_default();
@@ -2621,6 +2633,8 @@ pub(crate) fn apply_rich_sets(
                         falloff: falloff.unwrap_or(cur.falloff).max(0.01),
                         shadows: shadows.unwrap_or(cur.shadows),
                         sun: sun.unwrap_or(cur.sun),
+                        shadow_strength: shadow_strength.unwrap_or(cur.shadow_strength).clamp(0.0, 1.0),
+                        height: height.unwrap_or(cur.height).max(0.0),
                     };
                     if next == floptle_core::Lighting2D::default() {
                         world.remove::<floptle_core::Lighting2D>(e);
@@ -2879,7 +2893,7 @@ pub(crate) const SPRITE_KEYS: &[&str] =
 
 /// Every key `node:setLighting2D{...}` reads.
 pub(crate) const LIGHTING_2D_KEYS: &[&str] =
-    &["mode", "layers", "blocks", "inner", "falloff", "shadows", "sun"];
+    &["mode", "layers", "blocks", "inner", "falloff", "shadows", "sun", "shadowStrength", "height"];
 
 /// Every key `node:setPointLight{...}` reads.
 pub(crate) const POINT_LIGHT_KEYS: &[&str] = &["color", "intensity", "range"];
@@ -6254,6 +6268,8 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                         falloff: t.get::<Option<f32>>("falloff")?,
                         shadows: t.get::<Option<bool>>("shadows")?,
                         sun: t.get::<Option<bool>>("sun")?,
+                        shadow_strength: t.get::<Option<f32>>("shadowStrength")?,
+                        height: t.get::<Option<f32>>("height")?,
                     },
                 ));
                 Ok(())

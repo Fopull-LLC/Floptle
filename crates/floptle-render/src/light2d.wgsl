@@ -208,8 +208,8 @@ struct Lights {
     pos: array<vec4<f32>, 16>,
     // rgb = colour × intensity.
     color: array<vec4<f32>, 16>,
-    // x = inner radius, y = exponent, z = 1 when casters stop this light,
-    // w = how far above the plane the light sits, for normal maps.
+    // x = inner radius, y = exponent, z = how much of the light a caster stops
+    // (0 = it passes through), w = how far above the plane it sits, for normal maps.
     falloff: array<vec4<f32>, 16>,
     // A bitmask over sorting-layer RANK: bit r of word r/32 set = this light
     // reaches rank r. All four words are used, because a uniform array's stride
@@ -309,7 +309,7 @@ fn falloff_at(i: u32, d: f32) -> f32 {
 /// * **It never marches past the light.** The segment ends there, so a caster
 ///   on the far side of a lamp does not shade the near side.
 fn occluded(i: u32, origin_px: vec2<f32>, light_px: vec2<f32>, steps: f32, self_casts: bool) -> bool {
-    if (steps < 1.0 || L.falloff[i].z < 0.5) {
+    if (steps < 1.0 || L.falloff[i].z <= 0.0) {
         return false;
     }
     let seg = light_px - origin_px;
@@ -419,8 +419,13 @@ fn shade(in: FullOut) -> Delta {
             }
             to_light = normalize(vec3<f32>(L.pos[i].xy - world.xy, max(L.falloff[i].w, 1e-3)));
         }
+        // In shadow: what the light's shadow strength lets through, which is
+        // nothing at the default of 1.
         if (occluded(i, in.clip.xy, light_px, steps, self_casts)) {
-            continue;
+            x = x * (1.0 - L.falloff[i].z);
+            if (x <= 0.0) {
+                continue;
+            }
         }
         // Relief: how much more or less this texel faces the light than a flat
         // one would. A flat texel gets exactly 1, so a surface without a

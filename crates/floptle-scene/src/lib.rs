@@ -264,6 +264,13 @@ pub struct NodeDoc {
     /// **Lights only.** A 2D sun, lighting from one direction. `None` = no.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub light_sun: Option<bool>,
+    /// **Lights only.** How dark its 2D shadows are, 0 to 1. `None` = 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light_shadow_strength: Option<f32>,
+    /// **Lights only.** Its height above the plane for normal maps. `None` =
+    /// a third of its range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light_height: Option<f32>,
 }
 
 /// Serializable replication settings, mirroring [`floptle_core::Replicated`].
@@ -4055,6 +4062,8 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
         || node.light_falloff.is_some()
         || node.light_shadows.is_some()
         || node.light_sun.is_some()
+        || node.light_shadow_strength.is_some()
+        || node.light_height.is_some()
     {
         let d = floptle_core::Lighting2D::default();
         world.insert(
@@ -4070,6 +4079,8 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
                 falloff: node.light_falloff.unwrap_or(d.falloff),
                 shadows: node.light_shadows.unwrap_or(d.shadows),
                 sun: node.light_sun.unwrap_or(d.sun),
+                shadow_strength: node.light_shadow_strength.unwrap_or(d.shadow_strength),
+                height: node.light_height.unwrap_or(d.height),
             },
         );
     }
@@ -4351,6 +4362,8 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
         let light_falloff = lit.map(|l| l.falloff).filter(|v| *v != d2.falloff);
         let light_shadows = lit.map(|l| l.shadows).filter(|v| *v != d2.shadows);
         let light_sun = lit.map(|l| l.sun).filter(|v| *v != d2.sun);
+        let light_shadow_strength = lit.map(|l| l.shadow_strength).filter(|v| *v != d2.shadow_strength);
+        let light_height = lit.map(|l| l.height).filter(|v| *v != d2.height);
         let shadow_2d = world
             .get::<floptle_core::Shadow2D>(e)
             .map(|s| s.0)
@@ -4402,6 +4415,8 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             light_falloff,
             light_shadows,
             light_sun,
+            light_shadow_strength,
+            light_height,
         });
     }
     let lighting =
@@ -5108,6 +5123,8 @@ mod tests {
                     light_falloff: None,
                     light_shadows: None,
                     light_sun: None,
+                    light_shadow_strength: None,
+                    light_height: None,
                 },
                 NodeDoc {
                     camera_2d: None,
@@ -5158,6 +5175,8 @@ mod tests {
                     light_falloff: None,
                     light_shadows: None,
                     light_sun: None,
+                    light_shadow_strength: None,
+                    light_height: None,
                 },
                 NodeDoc {
                     camera_2d: None,
@@ -5205,6 +5224,8 @@ mod tests {
                     light_falloff: None,
                     light_shadows: None,
                     light_sun: None,
+                    light_shadow_strength: None,
+                    light_height: None,
                 },
                 NodeDoc {
                     camera_2d: None,
@@ -5252,6 +5273,8 @@ mod tests {
                     light_falloff: None,
                     light_shadows: None,
                     light_sun: None,
+                    light_shadow_strength: None,
+                    light_height: None,
                 },
             ],
         }
@@ -5281,6 +5304,8 @@ mod tests {
                 inner: 6.4,
                 falloff: 3.5,
                 shadows: false,
+                shadow_strength: 0.4,
+                height: 2.5,
                 ..Default::default()
             },
         );
@@ -5295,6 +5320,7 @@ mod tests {
             .find(|l| l.mode == floptle_core::Lit2D::Yes)
             .expect("the light's 2D component");
         assert_eq!((got.inner, got.falloff, got.shadows), (6.4, 3.5, false));
+        assert_eq!((got.shadow_strength, got.height), (0.4, 2.5));
 
         // …and the light nobody shaped.
         let mut plain = World::new();
@@ -5303,7 +5329,7 @@ mod tests {
         plain.insert(p, Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 10.0, shape: Default::default(), shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25 });
         plain.insert(p, floptle_core::Lighting2D { mode: floptle_core::Lit2D::Yes, ..Default::default() });
         let text = to_ron(&to_doc("plain", &plain)).unwrap();
-        for key in ["light_inner", "light_falloff", "light_shadows"] {
+        for key in ["light_inner", "light_falloff", "light_shadows", "light_shadow_strength", "light_height"] {
             assert!(!text.contains(key), "an unshaped light wrote `{key}`: {text}");
         }
     }

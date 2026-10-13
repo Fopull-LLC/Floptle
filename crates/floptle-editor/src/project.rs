@@ -2759,6 +2759,8 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
         light_falloff: None,
         light_shadows: None,
         light_sun: None,
+        light_shadow_strength: None,
+        light_height: None,
     }
 }
 

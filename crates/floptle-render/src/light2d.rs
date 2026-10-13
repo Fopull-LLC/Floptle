@@ -141,7 +141,7 @@ pub struct Light2dUniform {
     pub pos: [[f32; 4]; 16],
     /// rgb = colour × intensity.
     pub color: [[f32; 4]; 16],
-    /// Per light: `[inner radius, exponent, casts-are-honoured, spare]`.
+    /// Per light: `[inner radius, exponent, shadow strength (0 = casters do not stop it), height above the plane]`.
     ///
     /// `[0, 2, …]` is the default: a ramp that starts at the light and falls
     /// as `x²`, so a scene that never set a falloff looks as it always did.
