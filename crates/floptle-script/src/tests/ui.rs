@@ -365,6 +365,7 @@ fn ui_hook_events_reach_the_node_scripts() {
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -599,6 +600,7 @@ fn ui_make_builds_a_screen_and_its_buttons_work() {
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -681,6 +683,7 @@ fn a_made_slider_keeps_a_drag_until_the_game_says_a_new_value() {
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -753,6 +756,7 @@ fn set_shader_param_reaches_element_and_material() {
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let meshy = world.spawn();
@@ -793,7 +797,7 @@ fn script_drives_ui_text_slider_and_element_fields() {
     world.insert(driver, Transform::IDENTITY);
     world.insert(
         driver,
-        Scripts(vec![floptle_core::ScriptInst { kind: "hud".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() }]),
+        Scripts(vec![floptle_core::ScriptInst { kind: "hud".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
     );
     let label = world.spawn();
     world.insert(label, Transform::IDENTITY);
@@ -860,6 +864,7 @@ fn script_drives_ui_style_and_states() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let row = world.spawn();
@@ -914,6 +919,7 @@ fn script_reads_and_moves_ui_focus() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut el = |name: &str| {
@@ -975,6 +981,7 @@ fn ui_bind_keeps_a_label_and_a_bar_up_to_date() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let label = world.spawn();
@@ -1044,6 +1051,7 @@ fn a_binding_that_throws_is_dropped_rather_than_reported_sixty_times_a_second() 
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let label = world.spawn();
@@ -1092,6 +1100,7 @@ fn script_sets_and_reads_a_ui_element_texture() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();

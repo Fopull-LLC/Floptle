@@ -166,6 +166,7 @@ mod readout_tests {
                     params: vec![],
                     refs: Vec::new(),
                     strs: Vec::new(),
+                    pinned_bools: None,
                 }]),
             );
         }

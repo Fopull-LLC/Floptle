@@ -58,6 +58,7 @@ fn a_hookless_library_script_has_its_params_before_anybody_calls_in() {
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let bag = world.spawn();
@@ -74,6 +75,7 @@ fn a_hookless_library_script_has_its_params_before_anybody_calls_in() {
             // …wired to the HUD node, by name, as the Inspector wires one.
             refs: vec![("owner".into(), "Hud".into())],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
 
@@ -132,6 +134,7 @@ end
             params: vec![("size".into(), 42.0)],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -209,6 +212,7 @@ fn late_update_runs_after_start_and_moves_the_node() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -243,7 +247,7 @@ fn fixed_update_runs_per_tick_with_constant_dt() {
     world.insert(e, Transform::IDENTITY);
     world.insert(
         e,
-        Scripts(vec![floptle_core::ScriptInst { kind: "ticker".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() }]),
+        Scripts(vec![floptle_core::ScriptInst { kind: "ticker".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
     );
     let mut host = ScriptHost::new();
     // run_fixed before any frame pass: instance doesn't exist yet → no tick, no error.
@@ -280,7 +284,7 @@ fn predicted_node_update_rides_the_tick_clock() {
     world.insert(e, Transform::IDENTITY);
     world.insert(
         e,
-        Scripts(vec![floptle_core::ScriptInst { kind: "mover".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() }]),
+        Scripts(vec![floptle_core::ScriptInst { kind: "mover".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
     );
     let mut host = ScriptHost::new();
     host.run(&mut world, &dir, 0.016, 0.016); // start + first update
@@ -333,6 +337,7 @@ fn a_script_with_no_update_is_not_charged_for_the_frame() {
                 params: vec![],
                 refs: Vec::new(),
                 strs: Vec::new(),
+                pinned_bools: None,
             },
             floptle_core::ScriptInst {
                 kind: "marker".into(),
@@ -340,6 +345,7 @@ fn a_script_with_no_update_is_not_charged_for_the_frame() {
                 params: vec![],
                 refs: Vec::new(),
                 strs: Vec::new(),
+                pinned_bools: None,
             },
         ]),
     );
@@ -492,6 +498,7 @@ fn thousands_of_scripted_nodes_do_not_exhaust_lua() {
             params: Vec::new(),
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]));
         last = Some(e);
     }
@@ -547,6 +554,7 @@ fn an_unticked_checkbox_param_is_false_inside_a_running_script() {
                 params: vec![("ring".into(), stored)],
                 refs: Vec::new(),
                 strs: Vec::new(),
+                pinned_bools: None,
             }]),
         );
         let mut host = ScriptHost::new();
@@ -596,6 +604,7 @@ fn the_tick_pose_channel_reads_and_writes_the_body_not_the_render_transform() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -664,6 +673,7 @@ fn a_teleport_from_a_method_call_is_read_back_on_the_next_tick() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }])
     };
     // The caller first, so the body's own hook runs after the write in the
@@ -727,6 +737,7 @@ fn the_tick_pose_channel_is_absent_without_a_body() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -764,6 +775,7 @@ fn a_fixed_update_only_script_is_warned_about_a_param_it_never_reads() {
             params: vec![("speed".into(), 2.0), ("stale".into(), 3.0)],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -812,6 +824,7 @@ fn allocation_is_attributed_to_the_script_that_made_it() {
                 params: vec![],
                 refs: Vec::new(),
                 strs: Vec::new(),
+                pinned_bools: None,
             }]),
         );
     }
@@ -882,6 +895,7 @@ fn a_hook_that_does_nothing_allocates_almost_nothing() {
                     params: vec![],
                     refs: Vec::new(),
                     strs: Vec::new(),
+                    pinned_bools: None,
                 }]),
             );
         }
@@ -926,6 +940,7 @@ fn crowd(kind: &str, n: usize) -> (World, Vec<Entity>) {
                     params: vec![],
                     refs: Vec::new(),
                     strs: Vec::new(),
+                    pinned_bools: None,
                 }]),
             );
             e
@@ -995,7 +1010,7 @@ fn a_sleeper_wakes_by_call_by_timer_by_distance_and_by_touch() {
     world.insert(boss, Transform::IDENTITY);
     world.insert(
         boss,
-        Scripts(vec![floptle_core::ScriptInst { kind: "waker".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() }]),
+        Scripts(vec![floptle_core::ScriptInst { kind: "waker".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
     );
     let cam = world.spawn();
     world.insert(cam, Transform::from_translation(glam::DVec3::new(100.0, 0.0, 0.0)));

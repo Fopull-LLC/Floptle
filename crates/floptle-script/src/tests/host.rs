@@ -18,6 +18,7 @@ fn rotate_script_drives_yaw() {
         enabled: true,
         params: vec![("speed".into(), 90.0)], refs: Vec::new(),
         strs: Vec::new(),
+        pinned_bools: None,
     }]));
 
     let mut host = ScriptHost::new();
@@ -42,7 +43,7 @@ fn script_can_draw_gizmos() {
     world.insert(e, Transform::IDENTITY);
     world.insert(
         e,
-        Scripts(vec![floptle_core::ScriptInst { kind: "drawer".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() }]),
+        Scripts(vec![floptle_core::ScriptInst { kind: "drawer".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
     );
     let mut host = ScriptHost::new();
     host.run(&mut world, &dir, 0.1, 0.1);
@@ -270,7 +271,7 @@ fn script_reads_and_writes_a_component_field() {
     });
     world.insert(
         e,
-        Scripts(vec![floptle_core::ScriptInst { kind: "oscillate".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() }]),
+        Scripts(vec![floptle_core::ScriptInst { kind: "oscillate".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
     );
     let mut host = ScriptHost::new();
     host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
@@ -312,7 +313,7 @@ fn layers_and_tags_round_trip_through_the_lua_api() {
     world.insert(e, Transform::IDENTITY);
     world.insert(
         e,
-        Scripts(vec![floptle_core::ScriptInst { kind: "layerer".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() }]),
+        Scripts(vec![floptle_core::ScriptInst { kind: "layerer".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
     );
     let marked = world.spawn();
     world.insert(marked, Transform::IDENTITY);
@@ -368,6 +369,7 @@ fn spawn_and_destroy_queue_and_callback_configures_the_new_node() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     world.insert(e, floptle_core::Matter::Empty);
@@ -424,7 +426,7 @@ fn assets_api_resolves_under_project_root() {
     world.insert(e, Transform::IDENTITY);
     world.insert(
         e,
-        Scripts(vec![floptle_core::ScriptInst { kind: "probe".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() }]),
+        Scripts(vec![floptle_core::ScriptInst { kind: "probe".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
     );
     let mut host = ScriptHost::new();
     host.set_project_root(root);
@@ -464,6 +466,7 @@ fn save_api_round_trips_across_hosts() {
                 params: vec![],
                 refs: Vec::new(),
                 strs: Vec::new(),
+                pinned_bools: None,
             }]),
         );
         let mut host = ScriptHost::new();
@@ -512,6 +515,7 @@ fn a_preload_sends_sounds_to_the_audio_side_and_waits_for_both_kinds() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -573,6 +577,7 @@ fn a_preload_calls_back_once_every_model_is_in() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -840,6 +845,7 @@ fn tidy_world(dir: &Path, enabled: bool) -> (World, Entity) {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let bar = world.spawn();
@@ -952,6 +958,7 @@ fn a_reused_entity_index_gets_its_own_goodbye() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     host.run(&mut world, &dir, 0.016, 0.016);

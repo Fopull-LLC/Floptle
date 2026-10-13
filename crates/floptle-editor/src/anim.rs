@@ -3266,6 +3266,7 @@ mod tests {
                 params: Vec::new(),
                 refs: Vec::new(),
                 strs: Vec::new(),
+                pinned_bools: None,
             }]),
         );
         let mut host = floptle_script::ScriptHost::new();
@@ -3343,6 +3344,7 @@ mod tests {
                 params: Vec::new(),
                 refs: Vec::new(),
                 strs: Vec::new(),
+                pinned_bools: None,
             }]),
         );
         let mut host = floptle_script::ScriptHost::new();
@@ -3428,6 +3430,7 @@ mod tests {
                 params: Vec::new(),
                 refs: Vec::new(),
                 strs: Vec::new(),
+                pinned_bools: None,
             }]),
         );
         let mut host = floptle_script::ScriptHost::new();

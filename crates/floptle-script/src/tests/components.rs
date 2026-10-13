@@ -292,6 +292,7 @@ end
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -808,6 +809,7 @@ fn a_script_reads_and_writes_the_sprite_component() {
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();

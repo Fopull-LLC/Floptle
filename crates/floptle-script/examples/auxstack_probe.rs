@@ -90,6 +90,7 @@ fn main() {
                 params: Vec::new(),
                 refs: Vec::new(),
                 strs: Vec::new(),
+                pinned_bools: None,
             }]));
         }
         let mut host = ScriptHost::new();

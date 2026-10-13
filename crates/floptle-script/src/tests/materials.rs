@@ -78,6 +78,7 @@ fn a_script_tints_a_whole_model_without_replacing_anything() {
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
 
@@ -110,6 +111,7 @@ fn a_script_tints_a_whole_model_without_replacing_anything() {
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     write_script(&dir, "clearer", "function start(node)\n  node:setTint()\nend\n");
@@ -153,6 +155,7 @@ fn a_colour_write_keeps_the_rim_and_the_ambient() {
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -205,6 +208,7 @@ fn an_alpha_only_tint_fades_the_model_instead_of_blacking_it() {
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -256,6 +260,7 @@ fn a_tint_option_of_the_wrong_shape_is_loud() {
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -282,6 +287,7 @@ fn a_tint_option_of_the_wrong_shape_is_loud() {
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -356,6 +362,7 @@ fn a_script_dresses_one_part_of_a_model() {
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
 
@@ -684,7 +691,7 @@ fn script_reads_and_swaps_mesh_model() {
     world.insert(e, Matter::Mesh { asset_path: "assets/models/old.glb".into() });
     world.insert(
         e,
-        Scripts(vec![floptle_core::ScriptInst { kind: "swap".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() }]),
+        Scripts(vec![floptle_core::ScriptInst { kind: "swap".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
     );
     let mut host = ScriptHost::new();
     host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
@@ -766,6 +773,7 @@ fn a_part_handle_writes_its_own_shader_knobs_and_leaves_the_other_parts_alone() 
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -834,6 +842,7 @@ fn a_node_level_shader_write_fans_out_to_the_parts_that_wear_a_shader_or_says_so
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     // A model whose overrides wear no shader at all.
@@ -916,6 +925,7 @@ fn set_shader_param_reaches_the_sky() {
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -964,6 +974,7 @@ fn a_script_drives_sorting_and_2d_lighting() {
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let torch = world.spawn();
@@ -1033,6 +1044,7 @@ fn script_drives_the_post_chain() {
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -1116,6 +1128,7 @@ fn a_settings_screen_reaches_the_lens_and_the_grade() {
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -1186,6 +1199,7 @@ fn a_script_paints_with_colors_and_reads_booleans_as_booleans() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -1225,6 +1239,7 @@ fn a_non_string_texture_raises() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -1248,7 +1263,7 @@ fn script_applies_material_preset() {
     world.insert(e, Matter::Mesh { asset_path: "m.glb".into() });
     world.insert(
         e,
-        Scripts(vec![floptle_core::ScriptInst { kind: "paint".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() }]),
+        Scripts(vec![floptle_core::ScriptInst { kind: "paint".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
     );
     let mut host = ScriptHost::new();
     let mut mats = HashMap::new();
@@ -1276,7 +1291,7 @@ fn script_toggles_visibility() {
     world.insert(e, Matter::Mesh { asset_path: "m.glb".into() });
     world.insert(
         e,
-        Scripts(vec![floptle_core::ScriptInst { kind: "hide".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() }]),
+        Scripts(vec![floptle_core::ScriptInst { kind: "hide".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
     );
     let mut host = ScriptHost::new();
     host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
@@ -1318,6 +1333,7 @@ fn set_material_accepts_every_documented_colour_shape() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();

@@ -271,7 +271,7 @@ impl FieldDiff for Scripts {
 
 fn diff_inst(before: &ScriptInst, after: &ScriptInst, target: &mut ScriptInst) -> bool {
     // Exhaustive on purpose — a new kind of tunable must be handled here.
-    let ScriptInst { kind: _, enabled, params, refs, strs } = after;
+    let ScriptInst { kind: _, enabled, params, refs, strs, pinned_bools } = after;
     let mut hit = false;
     if *enabled != before.enabled {
         target.enabled = *enabled;
@@ -280,6 +280,11 @@ fn diff_inst(before: &ScriptInst, after: &ScriptInst, target: &mut ScriptInst) -
     hit |= diff_named(params, &before.params, &mut target.params);
     hit |= diff_named(refs, &before.refs, &mut target.refs);
     hit |= diff_named(strs, &before.strs, &mut target.strs);
+    // A param whose value travelled travels as the kind it was pinned as.
+    if pinned_bools != &before.pinned_bools {
+        target.pinned_bools = pinned_bools.clone();
+        hit = true;
+    }
     hit
 }
 
@@ -927,6 +932,7 @@ mod tests {
                 params: vec![("speed".into(), speed), ("range".into(), 9.0)],
                 refs: vec![],
                 strs: vec![],
+                pinned_bools: None,
             }];
             if extra {
                 list.push(ScriptInst::new("blink"));

@@ -2371,6 +2371,7 @@ mod shipped_script_tests {
                     params: vec![],
                     refs: Vec::new(),
                     strs: Vec::new(),
+                    pinned_bools: None,
                 }]),
             );
             let mut host = ScriptHost::new();

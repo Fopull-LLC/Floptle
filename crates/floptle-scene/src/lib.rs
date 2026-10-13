@@ -850,6 +850,10 @@ pub struct ScriptDoc {
     /// String params: per-instance text tunables (`name = "value"` defaults).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub strs: Vec<(String, String)>,
+    /// Which `params` were pinned as on/off switches. See
+    /// [`floptle_core::ScriptInst::pinned_bools`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_bools: Option<Vec<String>>,
 }
 
 fn yes() -> bool {
@@ -864,6 +868,7 @@ impl ScriptDoc {
             params: self.params.clone(),
             refs: self.refs.clone(),
             strs: self.strs.clone(),
+            pinned_bools: self.pinned_bools.clone(),
         }
     }
     fn from_inst(s: &ScriptInst) -> Self {
@@ -873,6 +878,7 @@ impl ScriptDoc {
             params: s.params.clone(),
             refs: s.refs.clone(),
             strs: s.strs.clone(),
+            pinned_bools: s.pinned_bools.clone(),
         }
     }
 }
@@ -4964,6 +4970,7 @@ mod tests {
                         params: vec![("speed".into(), 2.0)],
                         refs: vec![("target".into(), "blob".into())], // exercise the round-trip
                         strs: vec![("scene".into(), "arena".into())], // exercise the round-trip
+                        pinned_bools: Some(vec!["armed".into()]), // …and which pins are switches
                     }],
                     material: Some(MaterialDoc {
                         color: [0.8, 0.3, 0.2],

@@ -80,6 +80,7 @@ fn reading_from_a_script_that_failed_to_load_says_so() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]));
     }
     let mut host = ScriptHost::new();
@@ -145,6 +146,7 @@ fn a_bad_field_shape_is_a_script_error_not_an_abort() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -184,6 +186,7 @@ fn scripts_without_hooks_are_skipped_and_bad_state_is_refused() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let bad = world.spawn();
@@ -196,6 +199,7 @@ fn scripts_without_hooks_are_skipped_and_bad_state_is_refused() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();

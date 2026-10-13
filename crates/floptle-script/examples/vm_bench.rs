@@ -235,6 +235,7 @@ fn world_of(kind: &str, n: usize) -> World {
                 params: vec![],
                 refs: Vec::new(),
                 strs: Vec::new(),
+                pinned_bools: None,
             }]),
         );
     }

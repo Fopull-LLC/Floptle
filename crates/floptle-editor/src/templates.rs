@@ -384,6 +384,7 @@ mod tests {
                         params: Vec::new(),
                         refs: Vec::new(),
                         strs: Vec::new(),
+                        pinned_bools: None,
                     }]),
                 );
 

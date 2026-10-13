@@ -24,6 +24,7 @@ fn param_writes_persist_and_reach_the_stored_params() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -72,6 +73,7 @@ fn string_params_seed_override_and_write_two_way() {
             refs: Vec::new(),
             // The Inspector override: this portal goes to the arena.
             strs: vec![("scene".into(), "arena".into())],
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -117,7 +119,7 @@ fn params_seeded_from_defaults_without_overrides() {
     world.insert(e, Transform::IDENTITY);
     world.insert(
         e,
-        Scripts(vec![floptle_core::ScriptInst { kind: "spin".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() }]),
+        Scripts(vec![floptle_core::ScriptInst { kind: "spin".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
     );
     let mut host = ScriptHost::new();
     host.run(&mut world, &dir, 1.0, 1.0);
@@ -243,6 +245,7 @@ fn a_scene_param_the_script_does_not_declare_says_so_once() {
             params: vec![("reach".into(), 6.0), ("laser_range".into(), 26.0)],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]));
     }
     let mut host = ScriptHost::new();
@@ -271,4 +274,65 @@ fn a_scene_param_the_script_does_not_declare_says_so_once() {
         "reported once, not every frame"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Run one frame of `defaults = { pixelSnap = true, speed = 3, label = 5 }`
+/// with these pins, and return the warnings it logged.
+fn retype_warnings(
+    params: Vec<(String, f32)>,
+    strs: Vec<(String, String)>,
+    pinned_bools: Option<Vec<String>>,
+    tag: &str,
+) -> Vec<String> {
+    let dir = std::env::temp_dir().join(format!("floptle_retype_{tag}_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "cam",
+        "defaults = { pixelSnap = true, speed = 3, label = 5 }\nfunction update(node, dt) end\n",
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(
+        e,
+        Scripts(vec![floptle_core::ScriptInst {
+            kind: "cam".into(),
+            enabled: true,
+            params,
+            refs: Vec::new(),
+            strs,
+            pinned_bools,
+        }]),
+    );
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    host.drain_logs().into_iter().map(|l| l.msg).filter(|m| m.contains("now declares it as")).collect()
+}
+
+/// A param pinned as a number that the script turned into an on/off switch
+/// is reported, naming both kinds, and so is text turned into a number; a
+/// number still a number is not. The pinned 0 used to arrive silently as a
+/// switch that was off.
+#[test]
+fn a_pin_of_the_wrong_kind_is_reported() {
+    let warns = retype_warnings(
+        vec![("pixelSnap".into(), 0.0), ("speed".into(), 1.0)],
+        vec![("label".into(), "x".into())],
+        Some(vec![]),
+        "typed",
+    );
+    assert_eq!(warns.len(), 2, "{warns:?}");
+    assert!(warns.iter().any(|w| w.contains("pixelSnap as a number") && w.contains("as an on/off switch")), "{warns:?}");
+    assert!(warns.iter().any(|w| w.contains("label as text") && w.contains("as a number")), "{warns:?}");
+    // Pinned as a switch, a 0 is just "off".
+    assert!(retype_warnings(vec![("pixelSnap".into(), 0.0)], vec![], Some(vec!["pixelSnap".into()]), "switch").is_empty());
+}
+
+/// A scene saved before pin kinds were recorded cannot tell a pinned 0 or 1
+/// from a switch, so only a number that cannot be one is reported.
+#[test]
+fn an_older_scene_reports_only_what_it_can_tell() {
+    assert!(retype_warnings(vec![("pixelSnap".into(), 0.0)], vec![], None, "old01").is_empty());
+    assert_eq!(retype_warnings(vec![("pixelSnap".into(), 4.0)], vec![], None, "old4").len(), 1);
 }

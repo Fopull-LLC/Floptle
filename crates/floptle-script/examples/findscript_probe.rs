@@ -107,6 +107,7 @@ fn inst(kind: &str) -> ScriptInst {
         params: Vec::new(),
         refs: Vec::new(),
         strs: Vec::new(),
+        pinned_bools: None,
     }
 }
 

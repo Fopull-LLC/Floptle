@@ -98,6 +98,19 @@ pub(crate) struct ScriptMeta {
 }
 
 impl ScriptMeta {
+    /// The pinned `params` that are on/off switches by this script's
+    /// declarations, for `ScriptInst::pinned_bools`: what the scene records so
+    /// a later change of kind can be told apart from a value.
+    pub(crate) fn bool_pins(&self, params: &[(String, f32)]) -> Vec<String> {
+        params
+            .iter()
+            .filter(|(k, _)| self.params.iter().any(|p| p.name == *k && p.boolean))
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+}
+
+impl ScriptMeta {
     pub(crate) fn param(&self, name: &str) -> Option<&ParamMeta> {
         self.params.iter().find(|p| p.name == name)
     }

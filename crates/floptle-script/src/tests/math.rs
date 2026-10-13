@@ -65,6 +65,7 @@ fn vector_math_and_distance_work_end_to_end() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let target = world.spawn();

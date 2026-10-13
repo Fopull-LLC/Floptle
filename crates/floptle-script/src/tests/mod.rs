@@ -82,6 +82,7 @@ pub(super) fn world_with_script(kind: &str) -> (World, Entity) {
         enabled: true,
         params: vec![], refs: Vec::new(),
         strs: Vec::new(),
+        pinned_bools: None,
     }]));
     (world, e)
 }
@@ -101,6 +102,7 @@ pub(super) fn menu_world(script: &str, n: usize) -> (World, floptle_core::Entity
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut ids = Vec::new();

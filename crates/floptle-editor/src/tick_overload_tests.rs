@@ -36,7 +36,7 @@ fn play_for(dir: &std::path::Path, policy: floptle_scene::TickOverloadDoc, secon
     ed.world.insert(e, Matter::Empty);
     ed.world.insert(
         e,
-        Scripts(vec![ScriptInst { kind: "heavy".into(), enabled: true, params: Vec::new(), refs: Vec::new(), strs: Vec::new() }]),
+        Scripts(vec![ScriptInst { kind: "heavy".into(), enabled: true, params: Vec::new(), refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
     );
     ed.toggle_play();
     assert!(ed.playing, "did not enter play");

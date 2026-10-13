@@ -424,6 +424,11 @@ fn script_tunables_ui(
         }
         changed = true;
     }
+    // Whatever was pinned is pinned as the kind the script declares now: the
+    // record that lets a later change of kind be noticed.
+    if changed {
+        inst.pinned_bools = Some(cx.meta.bool_pins(&inst.params));
+    }
     changed
 }
 
@@ -8360,6 +8365,7 @@ mod tests {
             ],
             refs: Vec::new(),
             strs: vec![("clip".into(), "footstep".into())],
+            pinned_bools: None,
         };
 
         let ctx = crate::icons::test_context();

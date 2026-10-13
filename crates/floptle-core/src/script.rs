@@ -26,6 +26,13 @@ pub struct ScriptInst {
     /// ones — a portal's destination scene, a pickup's item id. Two-way, like
     /// `params`.
     pub strs: Vec<(String, String)>,
+    /// The `params` pinned as on/off switches (an Inspector checkbox), by
+    /// name. A pinned value is a number either way, so this is what says a
+    /// pinned 0 meant "off" rather than a count of zero, and what lets a
+    /// script that turns a number into a switch, or back, be told that the
+    /// scene's value was set as the other kind. `None` for a scene saved
+    /// before the kinds were recorded, whose 0s and 1s cannot be told apart.
+    pub pinned_bools: Option<Vec<String>>,
 }
 
 impl ScriptInst {
@@ -48,6 +55,7 @@ impl ScriptInst {
             params: Vec::new(),
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }
     }
 }

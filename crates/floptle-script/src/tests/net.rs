@@ -31,6 +31,7 @@ fn is_dedicated_is_true_only_for_a_server_with_nobody_at_it() {
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -94,7 +95,7 @@ fn net_bridge_rpc_synced_events_round_trip() {
     world.insert(e, Transform::IDENTITY);
     world.insert(
         e,
-        Scripts(vec![floptle_core::ScriptInst { kind: "netty".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() }]),
+        Scripts(vec![floptle_core::ScriptInst { kind: "netty".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
     );
     let mut host = ScriptHost::new();
     host.set_net_state(NetState {
@@ -198,7 +199,7 @@ fn a_lobby_screen_can_read_the_code_the_relay_handed_back() {
     world.insert(e, Transform::IDENTITY);
     world.insert(
         e,
-        Scripts(vec![floptle_core::ScriptInst { kind: "lobby".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() }]),
+        Scripts(vec![floptle_core::ScriptInst { kind: "lobby".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
     );
     let mut host = ScriptHost::new();
 
@@ -260,7 +261,7 @@ fn a_refused_join_reaches_the_game_with_the_relays_own_words() {
     world.insert(e, Transform::IDENTITY);
     world.insert(
         e,
-        Scripts(vec![floptle_core::ScriptInst { kind: "lobby".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() }]),
+        Scripts(vec![floptle_core::ScriptInst { kind: "lobby".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
     );
     let mut host = ScriptHost::new();
     let shown = |h: &mut ScriptHost| match &h.collect_synced()[0].2[0].1 {
@@ -332,6 +333,7 @@ fn a_driver_owned_node_still_gets_its_late_pass() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -397,6 +399,7 @@ fn a_snapshot_driven_node_still_skips_every_pass() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -449,6 +452,7 @@ fn a_driver_owned_node_keeps_its_late_pass_after_the_session_filtered_it() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -530,6 +534,7 @@ fn scheduler_fires_on_ticks_and_ignores_replays() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -597,6 +602,7 @@ fn is_mine_and_find_scripts_pick_the_local_player() {
                 enabled: true,
                 params: vec![], refs: Vec::new(),
                 strs: Vec::new(),
+                pinned_bools: None,
             }]),
         );
         e
@@ -612,6 +618,7 @@ fn is_mine_and_find_scripts_pick_the_local_player() {
             enabled: true,
             params: vec![], refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -682,6 +689,7 @@ fn net_rewind_swaps_poses_and_synced_vars_then_restores() {
             enabled: true,
             params: vec![], refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -767,6 +775,7 @@ fn snapshot_and_restore_round_trip_and_survive_re_simulation() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -844,6 +853,7 @@ fn net_random_is_identical_per_tick_and_across_a_replay() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -921,6 +931,7 @@ fn a_replay_suppresses_one_shot_side_effects_but_not_simulation_writes() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -984,6 +995,7 @@ fn a_replay_never_suppresses_an_error() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();

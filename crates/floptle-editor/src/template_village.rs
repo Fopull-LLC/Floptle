@@ -28,7 +28,7 @@ const RIM: Rgba = [214, 196, 160, 255];
 const RIM_DK: Rgba = [120, 98, 80, 255];
 
 fn script(kind: &str) -> ScriptInst {
-    ScriptInst { kind: kind.into(), enabled: true, params: Vec::new(), refs: Vec::new(), strs: Vec::new() }
+    ScriptInst { kind: kind.into(), enabled: true, params: Vec::new(), refs: Vec::new(), strs: Vec::new(), pinned_bools: None }
 }
 
 /// Mira: two 16-px frames of standing, in blue.

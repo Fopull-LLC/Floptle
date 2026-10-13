@@ -1864,6 +1864,7 @@ impl Editor {
         self.record();
         let refs: Vec<(String, String)> =
             ref_decls.into_iter().map(|(k, _)| (k, String::new())).collect();
+        let pinned_bools = Some(self.script_meta.get(&self.project_root.clone(), &kind).bool_pins(&params));
         // Attaching to a multi-selection attaches to all of it — twenty enemies
         // get their behaviour in one drag.
         let group = self.selected_group(e);
@@ -1881,6 +1882,7 @@ impl Editor {
                 params: params.clone(),
                 refs: refs.clone(),
                 strs: strs.clone(),
+                pinned_bools: pinned_bools.clone(),
             };
             if let Some(scr) = self.world.get_mut::<Scripts>(e) {
                 if skip_dupes && scr.0.iter().any(|s| s.kind == inst.kind) {
@@ -1898,6 +1900,23 @@ impl Editor {
 mod scene_request_tests {
     use crate::Editor;
     use super::{Transform, Scripts, ScriptInst};
+
+    /// Attaching a script records which of the params it pins are on/off
+    /// switches, so a later change of kind can be told from a value.
+    #[test]
+    fn attaching_a_script_records_its_switches() {
+        let root = std::env::temp_dir().join(format!("floptle-pin-kinds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        floptle_vfs::create_dir_all(root.join("scripts")).unwrap();
+        floptle_vfs::write(root.join("scripts/cam.lua"), "defaults = {\n  snap = true,\n  speed = 3,\n}\n").unwrap();
+        let mut ed = Editor { project_root: root.clone(), ..Default::default() };
+        let e = ed.world.spawn();
+        ed.world.insert(e, Transform::IDENTITY);
+        ed.attach_script_file(&root.join("scripts/cam.lua").to_string_lossy(), Some(e));
+        let inst: &ScriptInst = &ed.world.get::<Scripts>(e).expect("attached").0[0];
+        assert_eq!(inst.pinned_bools, Some(vec!["snap".to_string()]));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// `scene.load` strings resolve inside the project only: names,
     /// scenes-relative paths, and project-relative paths all work; escapes

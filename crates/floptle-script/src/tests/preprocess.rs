@@ -67,6 +67,7 @@ fn compound_assignment_runs_end_to_end() {
         enabled: true,
         params: vec![("speed".into(), 90.0)], refs: Vec::new(),
         strs: Vec::new(),
+        pinned_bools: None,
     }]));
     let mut host = ScriptHost::new();
     host.run(&mut world, &dir, 1.0, 1.0);

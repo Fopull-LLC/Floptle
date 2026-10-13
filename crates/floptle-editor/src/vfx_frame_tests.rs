@@ -77,7 +77,7 @@ fn moving_world_with(
     ed.world.insert(fx, Matter::Empty);
     ed.world.insert(
         fx,
-        Scripts(vec![ScriptInst { kind: "fx".into(), enabled: true, params: Vec::new(), refs: Vec::new(), strs: Vec::new() }]),
+        Scripts(vec![ScriptInst { kind: "fx".into(), enabled: true, params: Vec::new(), refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
     );
     setup(&mut ed, home);
     ed.toggle_play();

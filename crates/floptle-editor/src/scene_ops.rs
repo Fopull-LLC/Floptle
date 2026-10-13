@@ -104,6 +104,7 @@ impl Editor {
                         params: i.params.clone(),
                         refs: i.refs.clone(),
                         strs: i.strs.clone(),
+                        pinned_bools: i.pinned_bools.clone(),
                     })
                     .collect()
             })
@@ -301,6 +302,7 @@ impl Editor {
                     params: s.params.clone(),
                     refs: s.refs.clone(),
                     strs: s.strs.clone(),
+                    pinned_bools: None,
                 })
                 .collect();
             self.world.insert(e, Scripts(insts));

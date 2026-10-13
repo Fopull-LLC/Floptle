@@ -85,6 +85,7 @@ fn scenery(world: &mut World, n: usize) {
             params: Vec::new(),
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     for i in 0..n {

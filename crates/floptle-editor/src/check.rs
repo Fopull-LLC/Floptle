@@ -604,6 +604,62 @@ fn check_node_refs(
     }
     for s in &node.scripts {
         check_script(root, &s.kind, who, where_, r);
+        check_pinned_kinds(root, s, who, where_, r);
+    }
+}
+
+/// The same report the Console gives at Play: a param the scene pins as one
+/// kind (a number, an on/off switch, text) that the script now declares as
+/// another, so the pinned value is read as the new kind. A scene saved before
+/// pin kinds were recorded is judged only where a number cannot be a switch.
+fn check_pinned_kinds(root: &Path, s: &floptle_scene::ScriptDoc, who: &str, where_: &str, r: &mut Report) {
+    if s.kind.is_empty() || s.kind.contains("://") {
+        return;
+    }
+    let Ok(src) = std::fs::read_to_string(root.join("scripts").join(format!("{}.lua", s.kind))) else { return };
+    let meta = crate::script_meta::parse(&src);
+    let declared = |name: &str| -> Option<&'static str> {
+        let p = meta.param(name)?;
+        if p.boolean {
+            return Some("an on/off switch");
+        }
+        let d = p.default.as_deref()?.trim();
+        if d.starts_with('"') || d.starts_with('\'') || d.starts_with("[[") {
+            Some("text")
+        } else if d.parse::<f64>().is_ok() {
+            Some("a number")
+        } else {
+            None
+        }
+    };
+    let mut report = |k: &str, was: &str, now: &str| {
+        r.warn(
+            Some(where_.into()),
+            format!(
+                "{who} · {}: the scene pins {k} as {was}, but the script now declares it as {now}; \
+                 reset it in the Inspector to use the script's default",
+                s.kind
+            ),
+        );
+    };
+    for (k, v) in &s.params {
+        let Some(now) = declared(k) else { continue };
+        let was = match &s.pinned_bools {
+            Some(b) if b.contains(k) => "an on/off switch",
+            Some(_) => "a number",
+            None if now == "an on/off switch" && *v != 0.0 && *v != 1.0 => "a number",
+            None => continue,
+        };
+        if was != now {
+            report(k, was, now);
+        }
+    }
+    for (k, _) in &s.strs {
+        if let Some(now) = declared(k)
+            && now != "text"
+        {
+            report(k, "text", now);
+        }
     }
 }
 
@@ -932,6 +988,26 @@ mod tests {
     /// A node with a material, a script and nothing missing.
     fn scene(nodes: &str) -> String {
         format!("(name: \"s\", nodes: [{nodes}])")
+    }
+
+    /// **A pin of the wrong kind is reported headless, as in the Console.**
+    /// The scene pins `pixelSnap` as a number the script has since made a
+    /// switch; `speed` is still a number and says nothing.
+    #[test]
+    fn a_pin_of_the_wrong_kind_is_a_warning() {
+        let d = temp("retype");
+        std::fs::create_dir_all(d.join("scripts")).unwrap();
+        std::fs::write(d.join("scripts/cam.lua"), "defaults = {\n  pixelSnap = true,\n  speed = 3,\n}\n").unwrap();
+        let node = "(name: \"Cam\", transform: (translation: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), \
+             scale: (1.0, 1.0, 1.0)), matter: Empty, scripts: [(kind: \"cam\", params: [(\"pixelSnap\", 0.0), \
+             (\"speed\", 2.0)], pinned_bools: Some([]))])";
+        std::fs::write(d.join("scenes/first.ron"), scene(node)).unwrap();
+        let r = examine(&d);
+        let hits: Vec<_> = r.findings.iter().filter(|f| f.message.contains("now declares it as")).collect();
+        assert_eq!(hits.len(), 1, "{:?}", r.findings);
+        assert!(hits[0].message.contains("Cam · cam") && hits[0].message.contains("pixelSnap as a number"), "{}", hits[0].message);
+        assert_eq!(hits[0].level, Level::Warning);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// **A full path to a file in the project fails the check, naming the node

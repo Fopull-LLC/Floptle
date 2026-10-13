@@ -2723,6 +2723,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
             params: Vec::new(),
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }],
         material: None,
         object_materials: Default::default(),

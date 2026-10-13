@@ -108,6 +108,7 @@ fn build_world(shape: Shape2d, n: usize) -> (World, Entity) {
         params: Vec::new(),
         refs: Vec::new(),
         strs: Vec::new(),
+        pinned_bools: None,
     }]));
     match shape {
         Shape2d::Batched => {

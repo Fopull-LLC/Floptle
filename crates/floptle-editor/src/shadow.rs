@@ -356,6 +356,7 @@ end\n";
                     params: vec![("player".into(), i as f32 + 1.0)],
                     refs: Vec::new(),
                     strs: Vec::new(),
+                    pinned_bools: None,
                 }]),
             );
         }

@@ -41,6 +41,7 @@ fn terrain_busy_is_true_the_moment_a_fill_is_queued() {
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -79,7 +80,7 @@ fn script_can_raycast() {
     world.insert(e, Transform::IDENTITY);
     world.insert(
         e,
-        Scripts(vec![floptle_core::ScriptInst { kind: "caster".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() }]),
+        Scripts(vec![floptle_core::ScriptInst { kind: "caster".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
     );
     let mut host = ScriptHost::new();
     host.set_colliders(
@@ -123,6 +124,7 @@ fn a_script_can_ask_what_surface_it_is_standing_on() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -162,6 +164,7 @@ fn a_surface_with_no_per_face_material_answers_nothing() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -215,6 +218,7 @@ fn a_query_that_never_asks_what_it_hit_pays_nothing_for_the_answer() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let verts = [
@@ -288,6 +292,7 @@ fn script_reads_grounded_and_writes_velocity() {
         enabled: true,
         params: Vec::new(), refs: Vec::new(),
         strs: Vec::new(),
+        pinned_bools: None,
     }]));
     let mut host = ScriptHost::new();
     let mut bodies = HashMap::new();
@@ -370,6 +375,7 @@ fn an_agent_ordered_from_a_script_walks_the_node_there() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
 
@@ -424,6 +430,7 @@ fn an_agent_teleported_from_a_script_moves_the_node() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
 
@@ -466,6 +473,7 @@ fn shape_queries_are_callable_from_lua() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -509,7 +517,7 @@ fn script_tunes_every_rigidbody_field() {
     world.insert(e, RigidBody::default());
     world.insert(
         e,
-        Scripts(vec![floptle_core::ScriptInst { kind: "ice".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() }]),
+        Scripts(vec![floptle_core::ScriptInst { kind: "ice".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
     );
     let mut host = ScriptHost::new();
     host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
@@ -555,6 +563,7 @@ fn touch_dispatch_reaches_the_hook_with_other_and_hit() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let wall = world.spawn();
@@ -600,6 +609,7 @@ fn body_position_writes_queue_teleports() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     world.insert(e, floptle_core::Name("Pilot".into()));
@@ -660,6 +670,7 @@ fn raycast_hits_body_hulls_with_node_identity_and_self_exclusion() {
             enabled: true,
             params: vec![("targetid".into(), (e.index() + 1000) as f32)], refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -702,8 +713,8 @@ fn second_script_on_a_body_node_must_not_clobber_velocity_writes() {
     world.insert(
         e,
         Scripts(vec![
-            floptle_core::ScriptInst { kind: "mover".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() },
-            floptle_core::ScriptInst { kind: "weapon".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() },
+            floptle_core::ScriptInst { kind: "mover".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None },
+            floptle_core::ScriptInst { kind: "weapon".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new(), pinned_bools: None },
         ]),
     );
     let mut host = ScriptHost::new();
@@ -751,6 +762,7 @@ fn physics_moving_a_body_is_not_mistaken_for_a_stashed_write() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -932,6 +944,7 @@ fn a_script_sets_a_polygon_body_outline() {
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -981,6 +994,7 @@ fn a_script_joins_two_nodes() {
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut named = |name: &str| {

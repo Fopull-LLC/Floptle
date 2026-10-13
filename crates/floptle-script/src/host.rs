@@ -6065,8 +6065,8 @@ impl ScriptHost {
                     // but two per instance per pass is still not free.
                     let heap0 = self.alloc_track.get().then(|| self.lua.used_memory());
                     let called = self.tick_instance(
-                        *e, &inst.kind, &inst.params, &inst.refs, &inst.strs, &mut tr, dt, time,
-                        pass,
+                        *e, &inst.kind, &inst.params, &inst.refs, &inst.strs,
+                        inst.pinned_bools.as_deref(), &mut tr, dt, time, pass,
                     );
                     if let Some(heap0) = heap0 {
                         let grew = self.lua.used_memory().saturating_sub(heap0) as u64;
@@ -7505,11 +7505,13 @@ impl ScriptHost {
         kind: &str,
         params: &[(String, f32)],
         strs: &[(String, String)],
+        pinned_bools: Option<&[String]>,
         env: &Table,
     ) {
         if params.is_empty() && strs.is_empty() {
             return;
         }
+        self.warn_retyped_params(eid, kind, params, strs, pinned_bools, env);
         let declared = env.get::<Table>("defaults").ok();
         let known = |k: &str| {
             declared.as_ref().is_some_and(|d| {
@@ -7555,6 +7557,75 @@ impl ScriptHost {
         });
     }
 
+    /// Report a param the scene pins as one kind that the script now declares
+    /// as another (a number turned into an on/off switch, a switch into a
+    /// number, text into either) — once per `(script, param)` per session.
+    ///
+    /// The value still reaches the script, coerced to the new kind, so a
+    /// pinned `0` that meant "automatic" arrives as a switch that is off, and
+    /// nothing else says so. A scene saved before pin kinds were recorded
+    /// (`pinned_bools` of `None`) cannot tell a pinned 0 or 1 from a switch,
+    /// so only a number that is neither is reported there.
+    fn warn_retyped_params(
+        &mut self,
+        eid: u32,
+        kind: &str,
+        params: &[(String, f32)],
+        strs: &[(String, String)],
+        pinned_bools: Option<&[String]>,
+        env: &Table,
+    ) {
+        let Ok(declared) = env.get::<Table>("defaults") else { return };
+        let kind_of = |v: &Value| match v {
+            Value::Boolean(_) => Some("an on/off switch"),
+            Value::Integer(_) | Value::Number(_) => Some("a number"),
+            Value::String(_) => Some("text"),
+            _ => None,
+        };
+        let mut found: Vec<(String, &'static str, &'static str)> = Vec::new();
+        for (k, v) in params {
+            let Ok(d) = declared.get::<Value>(k.as_str()) else { continue };
+            let Some(now) = kind_of(&d) else { continue };
+            let was = match pinned_bools {
+                Some(b) if b.contains(k) => "an on/off switch",
+                Some(_) => "a number",
+                None if matches!(d, Value::Boolean(_)) && *v != 0.0 && *v != 1.0 => "a number",
+                None => continue,
+            };
+            if was != now {
+                found.push((k.clone(), was, now));
+            }
+        }
+        for (k, _) in strs {
+            let Ok(d) = declared.get::<Value>(k.as_str()) else { continue };
+            if let Some(now) = kind_of(&d)
+                && now != "text"
+            {
+                found.push((k.clone(), "text", now));
+            }
+        }
+        if found.is_empty() {
+            return;
+        }
+        let node = self.scene.borrow().names.get(&eid).cloned().unwrap_or_else(|| format!("node {eid}"));
+        let scene = self.scene_name.borrow().clone();
+        let where_ = if scene.is_empty() { format!("{node} · {kind}") } else { format!("{scene} · {node} · {kind}") };
+        for (k, was, now) in found {
+            if !self.param_warned.insert((kind.to_string(), format!("{k}#type"))) {
+                continue;
+            }
+            self.logs.borrow_mut().push(crate::ScriptLog {
+                level: crate::LogLevel::Warn,
+                msg: format!(
+                    "{where_}: the scene pins {k} as {was}, but the script now declares it as {now}, \
+                     so the pinned value is read as {now}. Reset {k} in the Inspector (↺) to use \
+                     the script's default, or set it again."
+                ),
+                source: Some((kind.to_string(), 0)),
+            });
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn tick_instance(
         &mut self,
@@ -7563,6 +7634,7 @@ impl ScriptHost {
         params: &[(String, f32)],
         refs: &[(String, String)],
         strs: &[(String, String)],
+        pinned_bools: Option<&[String]>,
         tr: &mut Transform,
         dt: f32,
         time: f32,
@@ -7626,7 +7698,7 @@ impl ScriptHost {
                     self.fail(name, format!("{name}: {err}"));
                 }
                 if let Some(env) = first_env.as_ref() {
-                    self.warn_unread_params(eid, name, params, strs, env);
+                    self.warn_unread_params(eid, name, params, strs, pinned_bools, env);
                     self.warn_shadowed_handle_keys(name, env);
                 }
                 return false;
@@ -7643,7 +7715,7 @@ impl ScriptHost {
             (first, env, inst.node.take(), rebuild, inst.writes_params)
         };
         if first {
-            self.warn_unread_params(eid, name, params, strs, &env);
+            self.warn_unread_params(eid, name, params, strs, pinned_bools, &env);
             self.warn_shadowed_handle_keys(name, &env);
         }
         let body = self.bodies.borrow().get(&eid).copied();
@@ -8531,6 +8603,7 @@ mod host_tests {
                 params: Vec::new(),
                 refs: Vec::new(),
                 strs: Vec::new(),
+                pinned_bools: None,
             }]),
         );
         world
@@ -8959,6 +9032,7 @@ mod host_tests {
                 params: Vec::new(),
                 refs: Vec::new(),
                 strs: Vec::new(),
+                pinned_bools: None,
             }]),
         );
         let mut host = ScriptHost::new();
@@ -9136,6 +9210,7 @@ mod host_tests {
                 params: Vec::new(),
                 refs: Vec::new(),
                 strs: Vec::new(),
+                pinned_bools: None,
             }]),
         );
 
@@ -9200,6 +9275,7 @@ mod host_tests {
                     params: Vec::new(),
                     refs: Vec::new(),
                     strs: Vec::new(),
+                    pinned_bools: None,
                 }]),
             );
         }
@@ -9287,6 +9363,7 @@ function update() synced.hx = synced.hx + 1 end
                     params: Vec::new(),
                     refs: Vec::new(),
                     strs: Vec::new(),
+                    pinned_bools: None,
                 }]),
             );
         }

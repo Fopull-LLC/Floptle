@@ -290,6 +290,7 @@ fn regenerate_platformer2d() {
             params: Vec::new(),
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
 

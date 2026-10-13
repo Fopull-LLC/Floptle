@@ -478,6 +478,7 @@ fn a_typo_in_a_script_names_the_typo_whichever_vm_is_running() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
 

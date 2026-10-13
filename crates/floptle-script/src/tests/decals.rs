@@ -109,6 +109,7 @@ fn run_decals(src: &str, cols: Vec<AnchoredCollider>) -> (ScriptHost, Vec<String
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();

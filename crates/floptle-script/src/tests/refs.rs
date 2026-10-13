@@ -373,6 +373,7 @@ end
             params: vec![("id".into(), i as f32)],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]));
         managers.push(e);
     }
@@ -451,6 +452,7 @@ fn node_hierarchy_traversal() {
             enabled: true,
             params: vec![], refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -505,6 +507,7 @@ fn world_position_composes_the_parent_chain() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     // Parent local +X, scaled 2 and yawed 90°, lands 6 along −Z: (10, 1, −10).
@@ -586,6 +589,7 @@ fn local_and_world_conversions_survive_a_rotated_scaled_parent() {
                 params: vec![],
                 refs: Vec::new(),
                 strs: Vec::new(),
+                pinned_bools: None,
             }]),
         );
         let mut host = ScriptHost::new();
@@ -653,6 +657,7 @@ fn look_at_faces_the_target_and_turn_towards_takes_the_short_way() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -691,6 +696,7 @@ fn look_at_under_a_rotated_parent_faces_the_world_target() {
                 params: vec![],
                 refs: Vec::new(),
                 strs: Vec::new(),
+                pinned_bools: None,
             }]),
         );
         kids.push((kind, e));
@@ -736,6 +742,7 @@ fn cross_script_reference_method_and_state() {
             enabled: true,
             params: vec![], refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let t = world.spawn();
@@ -747,6 +754,7 @@ fn cross_script_reference_method_and_state() {
             enabled: true,
             params: vec![], refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -793,6 +801,7 @@ fn noderef_param_resolves_to_a_handle_and_rebinds_by_name() {
                 ("missing".into(), String::new()),
             ],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let turret = world.spawn();
@@ -844,6 +853,7 @@ fn noderef_param_rebinds_when_the_target_appears_or_is_renamed_mid_play() {
             params: vec![],
             refs: vec![("target".into(), "Turret".into())],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -909,6 +919,7 @@ fn scriptref_and_componentref_bind_handles_directly() {
                 ("bogus".into(), "Dummy".into()), // Dummy has no PointLight → nil
             ],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let dummy = world.spawn();
@@ -923,6 +934,7 @@ fn scriptref_and_componentref_bind_handles_directly() {
             params: vec![],
             refs: vec![],
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -966,6 +978,7 @@ fn a_handle_kept_from_start_tracks_the_node() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();
@@ -1018,6 +1031,7 @@ fn a_cross_script_write_through_a_stashed_handle_lands() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let caller = world.spawn();
@@ -1031,6 +1045,7 @@ fn a_cross_script_write_through_a_stashed_handle_lands() {
             params: vec![],
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]),
     );
     let mut host = ScriptHost::new();

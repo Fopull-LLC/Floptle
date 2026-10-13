@@ -1114,6 +1114,7 @@ end\n";
                         params: vec![("player".into(), i as f32 + 1.0)],
                         refs: Vec::new(),
                         strs: Vec::new(),
+                        pinned_bools: None,
                     }]),
                 );
             }
@@ -1883,6 +1884,7 @@ end\n";
                 params: vec![],
                 refs: Vec::new(),
                 strs: Vec::new(),
+                pinned_bools: None,
             }]),
         );
         let mut sim = Sim::build(&world, &[], GravityField::uniform(Vec3::ZERO), DVec3::ZERO);

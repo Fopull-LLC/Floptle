@@ -1153,6 +1153,7 @@ end
             params: Vec::new(),
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]));
 
         let elements = |ed: &Editor| ed.world.query::<floptle_core::Made>().count();
@@ -1227,6 +1228,7 @@ end
             params: Vec::new(),
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]));
         let snap = ed.snapshot();
         ed.restore(snap.clone());
@@ -1291,6 +1293,7 @@ end
             params: Vec::new(),
             refs: Vec::new(),
             strs: Vec::new(),
+            pinned_bools: None,
         }]));
         let snap = ed.snapshot();
         // The baseline is measured through a restore, because that is what the
@@ -1355,6 +1358,7 @@ end
                 params: Vec::new(),
                 refs: Vec::new(),
                 strs: Vec::new(),
+                pinned_bools: None,
             }]),
         );
         let bar = node(&mut ed, "Bar");
