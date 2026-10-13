@@ -148,13 +148,26 @@ fn celestial_ancestor(world: &World, e: Entity) -> Option<Entity> {
 /// sorting layer. No shadows: a particle is a speck, and a march per particle
 /// per light is not worth what it shows.
 pub(crate) struct ParticleLamps<'a> {
-    pub(crate) lights: Option<&'a crate::shading::SplitLights>,
+    /// The 3D lights and the 2D ones, as the frame chose them.
+    pub(crate) lights: Option<(LampSlots<'a>, LampSlots<'a>)>,
     /// The 2D lighting rank of an emitter node, `None` when it is not on the
     /// 2D path.
     pub(crate) rank_of: &'a dyn Fn(Entity) -> Option<u32>,
     /// The rank a particle with no emitter node (a `spawnEffect` one-shot)
     /// takes in a flat scene: the default sorting layer's.
     pub(crate) default_rank: Option<u32>,
+}
+
+/// One side of the frame's lights, as the light uniform holds them: up to
+/// sixteen, camera-relative position with range in `w`, colour × intensity,
+/// and for 2D the sorting ranks reached and the falloff shape.
+#[derive(Clone, Copy)]
+pub(crate) struct LampSlots<'a> {
+    pub(crate) count: usize,
+    pub(crate) pos: &'a [[f32; 4]; 16],
+    pub(crate) color: &'a [[f32; 4]; 16],
+    pub(crate) mask: &'a [[u32; 4]; 16],
+    pub(crate) falloff: &'a [[f32; 4]; 16],
 }
 
 impl ParticleLamps<'_> {
@@ -166,11 +179,10 @@ impl ParticleLamps<'_> {
 
     /// Add each lamp's light to every lit particle in `out`, into params.yzw.
     fn light(&self, out: &mut [ParticleInstance], rank: Option<u32>) {
-        let Some(l) = self.lights else { return };
+        let Some((d3, d2)) = self.lights else { return };
         for p in out.iter_mut().filter(|p| p.light[3] > 0.0) {
             let at = Vec3::new(p.pos_rot[0], p.pos_rot[1], p.pos_rot[2]);
             let mut sum = Vec3::ZERO;
-            let d3 = &l.three_d;
             for i in 0..d3.count.min(16) {
                 let range = d3.pos[i][3].max(1e-4);
                 let d = (Vec3::new(d3.pos[i][0], d3.pos[i][1], d3.pos[i][2]) - at).length();
@@ -178,7 +190,6 @@ impl ParticleLamps<'_> {
                 sum += Vec3::new(d3.color[i][0], d3.color[i][1], d3.color[i][2]) * (x * x);
             }
             if let Some(r) = rank {
-                let d2 = &l.two_d;
                 for i in 0..d2.count.min(16) {
                     let word = (r >> 5) as usize;
                     if word >= 4 || d2.mask[i][word] & (1 << (r & 31)) == 0 {
@@ -1505,6 +1516,10 @@ mod profile_tests {
         assert_eq!(p.at(0.5), 0);
     }
 
+    fn slots(l: &crate::shading::LightSlots) -> LampSlots<'_> {
+        LampSlots { count: l.count, pos: &l.pos, color: &l.color, mask: &l.mask, falloff: &l.falloff }
+    }
+
     fn particle_at(x: f32, lit: f32) -> ParticleInstance {
         ParticleInstance {
             pos_rot: [x, 0.0, -5.0, 0.0],
@@ -1531,7 +1546,7 @@ mod profile_tests {
         split.three_d.count = 1;
         split.three_d.pos[0] = [0.0, 0.0, -5.0, 4.0];
         split.three_d.color[0] = [2.0, 1.0, 0.2, 0.0];
-        let lamps = ParticleLamps { lights: Some(&split), rank_of: &|_| None, default_rank: None };
+        let lamps = ParticleLamps { lights: Some((slots(&split.three_d), slots(&split.two_d))), rank_of: &|_| None, default_rank: None };
         let mut ps = vec![particle_at(1.0, 1.0), particle_at(10.0, 1.0), particle_at(1.0, 0.0)];
         lamps.light(&mut ps, None);
         let near = &ps[0].params;
@@ -1554,7 +1569,7 @@ mod profile_tests {
         split.two_d.color[0] = [1.0, 1.0, 1.0, 0.0];
         split.two_d.falloff[0] = [0.0, 2.0, 0.0, 0.0];
         split.two_d.mask[0] = [1 << 2, 0, 0, 0]; // rank 2 only
-        let lamps = ParticleLamps { lights: Some(&split), rank_of: &|_| None, default_rank: None };
+        let lamps = ParticleLamps { lights: Some((slots(&split.three_d), slots(&split.two_d))), rank_of: &|_| None, default_rank: None };
         let mut on = vec![particle_at(1.0, 1.0)];
         lamps.light(&mut on, Some(2));
         let mut off = vec![particle_at(1.0, 1.0)];

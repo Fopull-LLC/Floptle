@@ -1104,7 +1104,10 @@ impl Editor {
                 })
             };
             let lamps = crate::vfx::ParticleLamps {
-                lights: Some(&off_split),
+                lights: Some((
+                    crate::vfx::LampSlots { count: off_split.three_d.count, pos: &off_split.three_d.pos, color: &off_split.three_d.color, mask: &off_split.three_d.mask, falloff: &off_split.three_d.falloff },
+                    crate::vfx::LampSlots { count: off_split.two_d.count, pos: &off_split.two_d.pos, color: &off_split.two_d.color, mask: &off_split.two_d.mask, falloff: &off_split.two_d.falloff },
+                )),
                 rank_of: &rank_of,
                 default_rank: flat_camera.then(|| self.project.sorting_rank(floptle_core::DEFAULT_SORTING_LAYER)),
             };
