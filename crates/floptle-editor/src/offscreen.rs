@@ -1350,9 +1350,15 @@ impl Editor {
 /// build the renderer (CI's is OpenGL, which lacks what the raster textures
 /// need). Said on stderr, the way every other GPU test skips: that is a fact
 /// about the machine, not a failure of the thing under test.
+///
+/// Only an OpenGL adapter skips. On any other backend a refused pipeline is
+/// the renderer's own bug, and a shader that does not parse was once read as
+/// "this machine has no GPU": every test built on this passed by skipping
+/// while the frame it was guarding could not be drawn at all.
 #[cfg(test)]
 pub(crate) fn test_editor_with_gpu() -> Option<crate::Editor> {
     let gpu = floptle_render::Gpu::headless(64, 64);
+    let backend = gpu.adapter.get_info().backend;
     let failed = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let sink = failed.clone();
     gpu.device.on_uncaptured_error(std::sync::Arc::new(move |e: wgpu::Error| {
@@ -1370,6 +1376,11 @@ pub(crate) fn test_editor_with_gpu() -> Option<crate::Editor> {
     if let Ok(why) = failed.lock()
         && !why.is_empty()
     {
+        assert!(
+            backend == wgpu::Backend::Gl,
+            "the renderer failed its own validation on {backend:?}, which can build it — a bug, \
+             not this machine:\n{why}"
+        );
         floptle_say::say_err!("skipped — this machine cannot build the renderer:\n{why}");
         return None;
     }

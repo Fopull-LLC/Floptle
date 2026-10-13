@@ -273,6 +273,10 @@ fn a_lit_cloud_beside_a_lamp_takes_its_light() {
     let _ = std::fs::remove_dir_all(&dir);
     let mut doc = still_puff("Dust", VfxShapeDoc::Point);
     doc.tracks[0].lit = true;
+    // Big enough to measure: the starter puff is a dot at this distance.
+    doc.tracks[0].size = VfxPropDoc::Const(VfxValueDoc::F32(0.8));
+    // Mid grey and opaque, so a lamp has headroom above it before white.
+    doc.tracks[0].color = VfxPropDoc::Const(VfxValueDoc::Rgba([0.2, 0.2, 0.2, 1.0]));
     floptle_scene::save_vfx_effect(&doc, &dir.join("vfx/Dust.vfx.ron")).unwrap();
     ed.project_root = dir.clone();
     ed.vfx.rescan(&dir);
@@ -287,7 +291,7 @@ fn a_lit_cloud_beside_a_lamp_takes_its_light() {
     ed.world.insert(lamp, Transform { translation: near, ..Transform::IDENTITY });
     ed.world.insert(lamp, Matter::PointLight {
         color: [1.0, 0.45, 0.1],
-        intensity: 4.0,
+        intensity: 1.0,
         range: 2.0,
         shadows: Default::default(),
         shape: Default::default(),

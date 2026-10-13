@@ -95,6 +95,8 @@ struct VsOut {
     // The next flipbook frame's UV, and how far into it.
     @location(8) uv_next: vec2<f32>,
     @location(9) @interpolate(flat) extra: vec2<f32>,
+    // The lamps' light on this particle, summed on the CPU (`params.yzw`).
+    @location(10) @interpolate(flat) lamps: vec3<f32>,
 };
 
 @vertex
@@ -130,6 +132,7 @@ fn vs(in: VsIn) -> VsOut {
     out.right = normalize(in.basis_right.xyz) * ca + normalize(in.basis_up.xyz) * sa;
     out.up = normalize(in.basis_up.xyz) * ca - normalize(in.basis_right.xyz) * sa;
     out.light = in.light;
+    out.lamps = in.params.yzw;
     return out;
 }
 
@@ -189,7 +192,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (in.light.w > 0.0) {
         // The lamps reaching it (point lights, or the 2D lights that reach its
         // sorting layer) are summed per particle on the CPU into params.yzw.
-        let lit = lighting(in) + in.params.yzw;
+        let lit = lighting(in) + in.lamps;
         col = vec4<f32>(col.rgb * mix(vec3<f32>(1.0), lit, in.light.w), col.a);
     }
     // Fully transparent texels are discarded so depth-adjacent particles don't
