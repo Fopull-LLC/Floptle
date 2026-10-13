@@ -1215,8 +1215,7 @@ impl Sim {
     /// enter / stay / exit [`TouchEvent`]s. Four sources, all matrix-gated:
     /// the solver's resolved contacts (body vs solid collider), body-vs-sensor
     /// overlap (triggers — the solver never resolves those), body-vs-body
-    /// hull overlap (plain bodies do not push each other, but games still
-    /// need to know two bodies met), and the pair pass's compound contacts.
+    /// hull contact, and the pair pass's compound contacts.
     /// Costs O(contacts + bodies×sensors + bodies²) per tick — trivial at
     /// gameplay body counts.
     fn detect_touches(
@@ -1339,7 +1338,10 @@ impl Sim {
                 }
             }
         }
-        // 3. Body-vs-body overlap (detection only; no physical response).
+        // 3. Body-vs-body contact. The pair pass has already pushed solid
+        // bodies apart, so two at rest are touching, not overlapping: within
+        // a skin of it counts.
+        const BODY_SKIN: f32 = 0.02;
         for i in 0..self.world.bodies.len() {
             let Some(Some(a_eid)) = body_eid.get(i).copied() else { continue };
             let a = &self.world.bodies[i];
@@ -1362,7 +1364,7 @@ impl Sim {
                 };
                 let (centers, n_c, radius) = a.sample_centers();
                 for &c in &centers[..n_c] {
-                    if hull.distance(c) < radius {
+                    if hull.distance(c) < radius + BODY_SKIN {
                         record(
                             a_eid,
                             b_eid,

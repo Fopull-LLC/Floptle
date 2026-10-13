@@ -285,3 +285,51 @@ fn a_flipped_sprite_mirrors_its_polygon_body() {
     assert!(left.points().iter().all(|q| q[0] <= 0.0), "{:?}", left.points());
     assert!(left.distance(-0.5, 0.0) < 0.0 && left.distance(0.5, 0.0) > 0.0);
 }
+
+/// A second 2D box in the tile floor scene, at `(x, y)`.
+fn add_crate(ed: &mut crate::Editor, x: f64, y: f64) -> floptle_core::Entity {
+    let c = ed.world.spawn();
+    ed.world.insert(c, Transform { translation: DVec3::new(x, y, 0.0), rotation: Quat::IDENTITY, scale: Vec3::ONE });
+    ed.world.insert(c, Matter::Sprite { ppu: 32.0, size: 1.0, cell: 0, flip_x: false, flip_y: false, pivot: [0.5, 0.5] });
+    ed.world.insert(c, RigidBody { kind: BodyKind::Box, two_d: true, ..Default::default() });
+    c
+}
+
+/// Moving bodies collide with each other: a crate dropped on a crate stacks
+/// on it. They used to pass straight through each other and land in the
+/// same place.
+#[test]
+fn a_crate_lands_on_a_crate() {
+    let (mut ed, bottom) = scene(1.0, 0.0, true, false);
+    let top = add_crate(&mut ed, 0.1, 5.0);
+    ed.toggle_play();
+    for _ in 0..240 {
+        ed.play_step(1.0 / 60.0, true);
+    }
+    let y = |e| floptle_core::world_transform(&ed.world, e).translation.y;
+    assert!((y(bottom) - 0.5).abs() < 0.08, "the bottom crate rests on the floor; got {:.3}", y(bottom));
+    assert!((y(top) - 1.5).abs() < 0.1, "the top crate rests on the bottom one; got {:.3}", y(top));
+}
+
+/// A body moving into a crate on the floor pushes it along.
+#[test]
+fn a_moving_body_pushes_a_crate() {
+    let (mut ed, player) = scene(1.0, -2.0, true, false);
+    if let Some(t) = ed.world.get_mut::<Transform>(player) {
+        t.translation.y = 0.6;
+    }
+    let crate_ = add_crate(&mut ed, 0.0, 0.6);
+    ed.toggle_play();
+    for _ in 0..30 {
+        ed.play_step(1.0 / 60.0, true);
+    }
+    let x0 = floptle_core::world_transform(&ed.world, crate_).translation.x;
+    for _ in 0..90 {
+        ed.sim.as_mut().unwrap().set_body_velocity(player.index(), floptle_core::math::Vec3::new(3.0, 0.0, 0.0));
+        ed.play_step(1.0 / 60.0, true);
+    }
+    let px = floptle_core::world_transform(&ed.world, player).translation.x;
+    let cx = floptle_core::world_transform(&ed.world, crate_).translation.x;
+    assert!(cx > x0 + 1.0, "the crate was pushed; {x0:.2} → {cx:.2}");
+    assert!(cx - px > 0.8, "and it stayed in front of the body pushing it; body {px:.2}, crate {cx:.2}");
+}

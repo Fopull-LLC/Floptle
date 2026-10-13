@@ -1,9 +1,8 @@
-//! Contacts between moving things: a compound against another compound, or
-//! against a plain dynamic body. Run once per step, after every body and
-//! compound has taken its own step against the static world.
-//!
-//! Plain body against plain body is not resolved here; the sim still reports
-//! those as touches without pushing either one.
+//! Contacts between moving things: compounds and dynamic bodies, any pair of
+//! them. Run once per step, after every body and compound has taken its own
+//! step against the static world. Crates stack, a character pushes a crate,
+//! and two enemies shoulder each other aside; a layer matrix row that leaves
+//! the other layer out, or `ignore_pair`, lets a pair pass through.
 //!
 //! **Each side is pushed only if it resolves against the other.** A side is
 //! pushed when it can move and its layer-matrix row includes the other's layer.
@@ -386,34 +385,43 @@ impl PhysicsWorld {
     /// `compound_contacts`, one row per compound side, naming the other side
     /// as its peer.
     pub(crate) fn resolve_pairs(&mut self) {
-        if self.compounds.is_empty() {
-            return;
-        }
         let mut sides: Vec<Side> = Vec::new();
         for (ci, c) in self.compounds.iter().enumerate() {
             if c.live() && !c.shapes.is_empty() {
                 sides.push(Side::Compound(ci));
             }
         }
-        if sides.is_empty() {
-            return;
-        }
-        let n_compounds = sides.len();
         for (bi, b) in self.bodies.iter().enumerate() {
             if b.live() && !b.sensor && !b.kinematic && !b.pushbox_only {
                 sides.push(Side::Body(bi));
             }
         }
+        if sides.len() < 2 {
+            return;
+        }
         let mut scratch = Vec::new();
         let bounds: Vec<(Vec3, f32)> = sides.iter().map(|&s| self.pair_bound(s, &mut scratch)).collect();
-        // Every pair has a compound in it, so the first side runs over the
-        // compounds only: compounds x (compounds + bodies) sphere tests.
+        // Sort and sweep along X: a side is only tested against those whose
+        // span along X overlaps its own, so a level of a hundred crates and
+        // enemies costs about what its neighbourhoods do, not the square of
+        // its size.
+        let mut order: Vec<usize> = (0..sides.len()).collect();
+        order.sort_by(|&a, &b| (bounds[a].0.x - bounds[a].1).total_cmp(&(bounds[b].0.x - bounds[b].1)));
         let mut pairs: Vec<(usize, usize)> = Vec::new();
-        for i in 0..n_compounds {
-            for j in (i + 1)..sides.len() {
-                let (ci, ri) = bounds[i];
+        for (k, &i) in order.iter().enumerate() {
+            let (ci, ri) = bounds[i];
+            let right = ci.x + ri;
+            for &j in &order[k + 1..] {
                 let (cj, rj) = bounds[j];
+                if cj.x - rj > right {
+                    break;
+                }
                 if (ci - cj).length_squared() > (ri + rj) * (ri + rj) {
+                    continue;
+                }
+                // Both ends rollback-driven: neither may be moved here, and
+                // their own step already keeps them apart as the game wants.
+                if !self.pair_side_can_move(sides[i]) && !self.pair_side_can_move(sides[j]) {
                     continue;
                 }
                 if !self.ignored_pairs.is_empty()
@@ -421,9 +429,11 @@ impl PhysicsWorld {
                 {
                     continue;
                 }
-                pairs.push((i, j));
+                // Deterministic order whatever the sort did with ties.
+                pairs.push((i.min(j), i.max(j)));
             }
         }
+        pairs.sort_unstable();
         if pairs.is_empty() {
             return;
         }

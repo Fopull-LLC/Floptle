@@ -211,7 +211,8 @@ is grounded and is carried by friction. The layer matrix decides who is pushed:
 each side is pushed only if its own layer collides with the other's, so a
 one-way row makes a one-way contact. An anchored assembly is never moved, and
 neither is a rigidbody under rollback, so a fighter's trajectory never depends
-on a crate. Two plain rigidbodies still do not push each other. Layers are per
+on a crate. Two plain rigidbodies push each other the same way: crates stack
+and a character shoves a crate along. Layers are per
 assembly, not per part: a docking probe meant to slide *into* its drogue stops
 at the drogue's surface, so latch within reach of touching rather than after
 overlapping.
@@ -365,9 +366,9 @@ end
   `other:getscript("health")` all work.
 - `hit` is `{ x, y, z, nx, ny, nz }`: the world contact point and the unit
   normal out of the surface that was hit.
-- Fires for body-vs-collider, body-vs-body and assemblies. Two plain
-  rigidbodies detect each other but are not pushed apart; an assembly pushes
-  and is pushed by other assemblies and by rigidbodies (see §4.1).
+- Fires for body-vs-collider, body-vs-body and assemblies. Rigidbodies and
+  assemblies push each other apart (see §4.1); a pair whose layers do not
+  collide, or one passed to `physics.ignorePair`, passes through.
 - The events fire on **both** nodes' scripts, and the collision matrix
   (Project Settings → Layers) gates them: pairs that don't collide don't event.
 - A body resting on the floor reports `onCollisionStay` against the floor node
