@@ -1,5 +1,11 @@
 ## Just shipped
 
+**v0.116.1 — "Clear Skies"**. A world with air has a real daytime sky that
+thins into space as you climb, with no sky shader to write. Fog can follow a
+round planet, post shaders get `sceneRay` and `cameraPosition`, a bone you
+move reads back where you put it, pictures from `camera.capture` include
+scatter, and the tile brush shows the tile before you click.
+
 **v0.116.0 — "Lands On Its Feet"**. A complete 2D engine, out of beta. Pixel
 Platformer and Pixel Village templates, Aseprite files as sprite sheets,
 Tiled and LDtk levels, square, isometric and hexagonal tile maps with
