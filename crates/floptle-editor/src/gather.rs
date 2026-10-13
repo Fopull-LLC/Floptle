@@ -372,6 +372,8 @@ impl Editor {
             gpu.config.height.max(1) as f32,
             rect_half,
             map_xf.or(bone_xf),
+            map_xf.or(bone_xf).is_none()
+                && self.selection.last().is_some_and(|&e| crate::gizmo::is_flat_node(&self.world, e)),
             )
         };
 

@@ -3285,6 +3285,10 @@ struct Editor {
     /// drag (primary excluded; so is any node whose ancestor is also selected —
     /// the parent's move already carries it). The whole selection moves together.
     drag_group: Vec<(Entity, Transform)>,
+    /// A press on an already-selected node with the Select or Move tool: the
+    /// node and where the press was. Past a few pixels of travel it becomes
+    /// a free move of the node itself; released before that, it was a click.
+    body_arm: Option<(Entity, Vec2)>,
     /// A Place-tool drag in progress (see `place.rs`).
     place_drag: Option<place::PlaceDrag>,
     /// The Place tool turns what it places to follow the surface's normal.
@@ -4570,8 +4574,9 @@ impl ApplicationHandler for Editor {
             self.input_mouse_delta.1 += delta.1 as f32;
             self.tick_mouse_delta.0 += delta.0 as f32;
             self.tick_mouse_delta.1 += delta.1 as f32;
-            // Priority: RMB-look > MMB-pan > grabbed gizmo handle. (Free dragging an
-            // object now requires the Move tool's center handle — no accidental moves.)
+            // Priority: RMB-look > MMB-pan > grabbed gizmo handle > a press on a
+            // selected node becoming a move of it (only once it travels, and
+            // only for a node selected before the press: see `body_arm`).
             if self.input.looking {
                 self.camera.look(delta.0 as f32, delta.1 as f32);
                 self.rmb_moved += (delta.0.abs() + delta.1.abs()) as f32;
@@ -4579,6 +4584,8 @@ impl ApplicationHandler for Editor {
                 self.camera.pan(delta.0 as f32, delta.1 as f32);
             } else if self.grabbed.is_some() {
                 self.gizmo_drag();
+            } else if self.body_arm.is_some() {
+                self.body_drag_start();
             } else if self.vertex_drag.is_some() {
                 self.vertex_drag_update();
             } else if self.place_drag.is_some() {
@@ -5216,6 +5223,7 @@ impl Editor {
                                 bone: None,
                                 start_xf,
                                 cursor_start: self.cursor.unwrap_or(Vec2::ZERO),
+                                body: false,
                             });
                         }
                     } else if let Some(cursor) = self.cursor {
@@ -5235,23 +5243,9 @@ impl Editor {
                             bone: None,
                             start_xf,
                             cursor_start: self.cursor.unwrap_or(Vec2::ZERO),
+                            body: false,
                         });
-                        // Multi-select: snapshot every other selected node so the
-                        // drag moves them all. Nodes whose ancestor is also in the
-                        // selection are skipped (the parent's move carries them).
-                        self.drag_group = self
-                            .selection
-                            .iter()
-                            .copied()
-                            .filter(|&o| {
-                                o != e
-                                    && self.world.get::<Transform>(o).is_some()
-                                    && !self.selection.iter().any(|&a| {
-                                        a != o && self.is_descendant(o, a)
-                                    })
-                            })
-                            .map(|o| (o, floptle_core::world_transform(&self.world, o)))
-                            .collect();
+                        self.drag_group = self.drag_group_for(e);
                     }
                 } else if let (Some(h), Some((mesh, idx, start_xf))) =
                     (hovered, self.bone_gizmo_target())
@@ -5267,6 +5261,7 @@ impl Editor {
                         bone: Some(idx),
                         start_xf,
                         cursor_start: self.cursor.unwrap_or(Vec2::ZERO),
+                        body: false,
                     });
                 } else if let Some(cursor) = self.cursor {
                     // A drawn joint wins over the body behind it: the
@@ -5295,6 +5290,16 @@ impl Editor {
                         // (Ctrl matches the Hierarchy's toggle-select).
                         match self.pick(cursor) {
                             Some(e) if self.shift || self.ctrl => self.select_toggle(e),
+                            // Already selected: keep the whole selection (a
+                            // group moves together) and arm a move of it.
+                            // Only a node selected before this press, so a
+                            // click that picks something never also moves it.
+                            Some(e)
+                                if self.selection.contains(&e)
+                                    && matches!(self.tool, Tool::Select | Tool::Move) =>
+                            {
+                                self.body_arm = Some((e, cursor));
+                            }
                             Some(e) => self.select_single(e),
                             None if !self.shift && !self.ctrl => {
                                 self.clear_selection();
@@ -5308,6 +5313,13 @@ impl Editor {
                 }
             }
         } else {
+            // Released without travelling: it was a click on a selected node,
+            // which selects it alone, as any click on a node does.
+            if let Some((e, _)) = self.body_arm.take()
+                && self.drag.is_none()
+            {
+                self.select_single(e);
+            }
             self.grabbed = None;
             self.drag = None;
             self.place_drag = None;

@@ -229,3 +229,37 @@ fn snapshot_tiles_panel() {
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The Rotate gizmo on a 3D node and on a flat (2D) node, seen from the front
+/// as a 2D scene is.
+#[test]
+#[ignore]
+fn snapshot_flat_rotate_gizmo() {
+    use crate::gizmo::{Tool, build_gizmo, paint_gizmo};
+    use floptle_core::math::{DVec3, Mat4, Vec2};
+    let mut world = floptle_core::World::new();
+    let e = world.spawn();
+    world.insert(e, floptle_core::transform::Transform { translation: DVec3::new(0.0, 0.0, -10.0), ..Default::default() });
+    let vp = Mat4::perspective_rh(60f32.to_radians(), 1.0, 0.1, 1000.0);
+    let shift = |mut g: crate::gizmo::GizmoFrame, dx: f32| {
+        let d = Vec2::new(dx, 0.0);
+        g.center += d;
+        for r in &mut g.ring_pts {
+            r.iter_mut().for_each(|p| *p += d);
+        }
+        g.center_ring.iter_mut().for_each(|p| *p += d);
+        g.tips.iter_mut().flatten().for_each(|p| *p += d);
+        g
+    };
+    let g3 = shift(build_gizmo(Tool::Rotate, Some(e), &world, None, DVec3::ZERO, vp, 400.0, 400.0, None, None, false).unwrap(), -100.0);
+    let g2 = shift(build_gizmo(Tool::Rotate, Some(e), &world, None, DVec3::ZERO, vp, 400.0, 400.0, None, None, true).unwrap(), 100.0);
+    let mut h = harness(egui::vec2(400.0, 400.0), move |ui| {
+        ui.painter().rect_filled(ui.max_rect(), 0.0, egui::Color32::from_rgb(60, 66, 74));
+        paint_gizmo(ui.painter(), &g3, Tool::Rotate, None, 1.0);
+        paint_gizmo(ui.painter(), &g2, Tool::Rotate, None, 1.0);
+    });
+    let out = out_path("flat-rotate-gizmo");
+    h.run();
+    h.render().expect("no GPU?").save(&out).unwrap();
+    floptle_say::say!("wrote {}", out.display());
+}

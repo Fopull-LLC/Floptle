@@ -599,6 +599,48 @@ impl Editor {
         Some(SceneHit { e, t, pos: ro + rd * t, normal: -rd })
     }
 
+    /// Every other selected node's start transform, for a drag of `e` that
+    /// carries the whole selection. Nodes whose ancestor is also selected
+    /// are skipped: the parent's move carries them.
+    pub(crate) fn drag_group_for(&self, e: Entity) -> Vec<(Entity, Transform)> {
+        self.selection
+            .iter()
+            .copied()
+            .filter(|&o| {
+                o != e
+                    && self.world.get::<Transform>(o).is_some()
+                    && !self.selection.iter().any(|&a| a != o && self.is_descendant(o, a))
+            })
+            .map(|o| (o, floptle_core::world_transform(&self.world, o)))
+            .collect()
+    }
+
+    /// A press on a selected node has travelled: past four pixels it becomes
+    /// a free move of the node (and the rest of the selection), the same move
+    /// the Move tool's centre knob makes. Short of that it may still be a click.
+    pub(crate) fn body_drag_start(&mut self) {
+        let (Some((e, at)), Some(cursor)) = (self.body_arm, self.cursor) else { return };
+        if (cursor - at).length() < 4.0 || self.world.get::<Transform>(e).is_none() {
+            return;
+        }
+        self.body_arm = None;
+        self.begin_edit();
+        self.grabbed = Some(crate::gizmo::Handle::Center);
+        self.drag = Some(crate::gizmo::DragState {
+            handle: crate::gizmo::Handle::Center,
+            entity: e,
+            bone: None,
+            start_xf: floptle_core::world_transform(&self.world, e),
+            cursor_start: at,
+            body: true,
+        });
+        self.drag_group = self.drag_group_for(e);
+        // The primary is the node grabbed, so the move is measured from it.
+        self.selection.retain(|&o| o != e);
+        self.selection.push(e);
+        self.gizmo_drag();
+    }
+
     /// Apply a gizmo drag for the grabbed handle, as an absolute transform from the
     /// start-of-drag snapshot (no per-event accumulation ⏵ no drift).
     pub(crate) fn gizmo_drag(&mut self) {
@@ -634,7 +676,8 @@ impl Editor {
         // sideways.
         let sub_object = self.map_drag.is_some();
 
-        match self.gizmo_tool() {
+        let tool = if drag.body { Tool::Move } else { self.gizmo_tool() };
+        match tool {
             Tool::Move | Tool::MapEdit => {
                 if let Some(i) = handle.axis_index() {
                     let dir = local_axis(start.rotation, i);
@@ -1473,5 +1516,67 @@ mod pick_tests {
         // And a node `keep` refuses is looked through.
         let hit = ed.raycast_nodes(-cam, Vec3::NEG_Z, |e| e != near).expect("the room's wall");
         assert!((hit.t - 21.0).abs() < 1e-3, "{hit:?}");
+    }
+}
+
+#[cfg(all(test, feature = "editor-ui"))]
+mod body_drag_tests {
+    use floptle_core::math::{DVec3, Vec2};
+    use floptle_core::transform::Transform;
+
+    /// An editor with a selected sprite in front of the camera, and where the
+    /// sprite is on screen.
+    fn setup() -> Option<(crate::Editor, floptle_core::Entity, Vec2)> {
+        let mut ed = crate::offscreen::test_editor_with_gpu()?;
+        let cam = ed.camera.render_camera();
+        let at = cam.world_position + (cam.rotation * floptle_core::math::Vec3::NEG_Z * 10.0).as_dvec3();
+        let e = ed.world.spawn();
+        ed.world.insert(e, Transform { translation: at, ..Default::default() });
+        ed.world.insert(
+            e,
+            floptle_core::Matter::Sprite { ppu: 0.0, size: 1.0, cell: 0, flip_x: false, flip_y: false, pivot: [0.5, 0.5] },
+        );
+        ed.select_single(e);
+        let (w, h) = {
+            let g = ed.gpu.as_ref()?;
+            (g.config.width as f32, g.config.height as f32)
+        };
+        let screen = crate::viz::project(at, cam.world_position, cam.view_proj(w / h), w, h)?;
+        Some((ed, e, screen))
+    }
+
+    fn screen_of(ed: &crate::Editor, e: floptle_core::Entity) -> Vec2 {
+        let cam = ed.camera.render_camera();
+        let g = ed.gpu.as_ref().unwrap();
+        let (w, h) = (g.config.width as f32, g.config.height as f32);
+        let p = floptle_core::world_transform(&ed.world, e).translation;
+        crate::viz::project(p, cam.world_position, cam.view_proj(w / h), w, h).unwrap()
+    }
+
+    /// Pressing on a node that is already selected and dragging moves it,
+    /// under the pointer, with the Select tool out: no knob to find, however
+    /// small the node is on screen.
+    #[test]
+    fn dragging_a_selected_node_moves_it_under_the_pointer() {
+        let Some((mut ed, e, at)) = setup() else { return };
+        ed.body_arm = Some((e, at));
+        ed.cursor = Some(at + Vec2::new(12.0, -6.0));
+        ed.body_drag_start();
+        assert!(ed.drag.is_some_and(|d| d.body), "the press became a move");
+        let now = screen_of(&ed, e);
+        assert!((now - (at + Vec2::new(12.0, -6.0))).length() < 0.5, "it followed the pointer: {at} → {now}");
+    }
+
+    /// A press that never travels is a click: nothing moves.
+    #[test]
+    fn a_click_on_a_selected_node_does_not_move_it() {
+        let Some((mut ed, e, at)) = setup() else { return };
+        let before = floptle_core::world_transform(&ed.world, e).translation;
+        ed.body_arm = Some((e, at));
+        ed.cursor = Some(at + Vec2::new(2.0, 1.0));
+        ed.body_drag_start();
+        assert!(ed.drag.is_none());
+        assert_eq!(floptle_core::world_transform(&ed.world, e).translation, before);
+        let _ = DVec3::ZERO;
     }
 }

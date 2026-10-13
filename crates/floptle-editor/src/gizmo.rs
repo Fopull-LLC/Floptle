@@ -186,6 +186,19 @@ pub(crate) struct DragState {
     pub(crate) bone: Option<usize>,
     pub(crate) start_xf: Transform,
     pub(crate) cursor_start: Vec2,
+    /// Grabbed by the node itself rather than a handle: a free move in the
+    /// plane facing the camera, whichever tool is out.
+    pub(crate) body: bool,
+}
+
+/// Whether a node lives in its plane, so its gizmo moves, stretches and turns
+/// it only there: a sprite, a sprite batch, a tilemap, or a 2D body.
+pub(crate) fn is_flat_node(world: &World, e: Entity) -> bool {
+    use floptle_core::Matter;
+    matches!(
+        world.get::<Matter>(e),
+        Some(Matter::Sprite { .. } | Matter::SpriteBatch { .. } | Matter::Tilemap { .. })
+    ) || world.get::<floptle_core::RigidBody>(e).is_some_and(|rb| rb.two_d)
 }
 
 /// World basis vector for axis `i` (X=0, Y=1, Z=2).
@@ -269,6 +282,7 @@ pub(crate) fn build_gizmo(
     h: f32,
     rect_half: Option<Vec3>,
     xf_override: Option<Transform>,
+    flat: bool,
 ) -> Option<GizmoFrame> {
     if tool == Tool::Select || tool == Tool::Sculpt || tool == Tool::Paint || tool == Tool::Tiles {
         return None;
@@ -372,6 +386,11 @@ pub(crate) fn build_gizmo(
         let tip_world = t.translation + (local_axis(rot, i) * axis_len).as_dvec3();
         *tip = project(tip_world, cam_world, vp, w, h);
     }
+    // A flat node has no depth to move or stretch into: its Z handle would
+    // sit on the centre knob and take the grab meant for it.
+    if flat {
+        tips[2] = None;
+    }
 
     // Rotation rings live in the planes spanned by the object's local axes.
     let mut ring_pts: [Vec<Vec2>; 3] = [Vec::new(), Vec::new(), Vec::new()];
@@ -410,15 +429,26 @@ pub(crate) fn build_gizmo(
             *ring = pts;
             ring_front[i] = front;
         }
-        // A flat screen-space trackball ring around the center — the free-rotate handle.
-        const M: usize = 40;
-        for k in 0..=M {
-            let a = (k as f32) / (M as f32) * std::f32::consts::TAU;
-            center_ring.push(center + Vec2::new(a.cos(), a.sin()) * CENTER_RING_PX);
+        if flat {
+            // A flat node turns only in its plane. The rings that tip it out
+            // of the plane go, and so does the free trackball: seen from the
+            // front they are lines through the centre, so nearly every grab
+            // near the object tilted it edge-on to the camera.
+            for i in [0, 1] {
+                ring_pts[i].clear();
+                ring_front[i].clear();
+            }
+        } else {
+            // A flat screen-space trackball ring around the center — the free-rotate handle.
+            const M: usize = 40;
+            for k in 0..=M {
+                let a = (k as f32) / (M as f32) * std::f32::consts::TAU;
+                center_ring.push(center + Vec2::new(a.cos(), a.sin()) * CENTER_RING_PX);
+            }
         }
     }
 
-    let hovered = cursor.and_then(|c| hit_test(tool, c, center, &tips, &ring_pts, &center_ring));
+    let hovered = cursor.and_then(|c| hit_test(tool, c, center, &tips, &ring_pts, &center_ring, flat));
     Some(GizmoFrame {
         center,
         tips,
@@ -439,6 +469,7 @@ pub(crate) fn hit_test(
     tips: &[Option<Vec2>; 3],
     rings: &[Vec<Vec2>; 3],
     center_ring: &[Vec2],
+    flat: bool,
 ) -> Option<Handle> {
     let mut cands: Vec<(Handle, f32)> = Vec::new();
     let ring_dist = |ring: &[Vec2]| {
@@ -459,6 +490,14 @@ pub(crate) fn hit_test(
                 }
             }
             cands.push((Handle::Center, (cursor - center).length()));
+        }
+        // A flat node's one ring, and anywhere inside it: there is only one
+        // way to turn, so the whole disc turns it.
+        Tool::Rotate if flat => {
+            let radius = rings[2].first().map_or(0.0, |p| (*p - center).length());
+            if (cursor - center).length() <= radius + HANDLE_PX {
+                return Some(Handle::AxisZ);
+            }
         }
         Tool::Rotate => {
             for (i, ring) in rings.iter().enumerate() {
@@ -677,7 +716,7 @@ mod tests {
     #[test]
     fn a_ring_seen_edge_on_is_split_into_a_near_and_a_far_half() {
         let (world, e, cam, vp) = setup();
-        let g = build_gizmo(Tool::Rotate, Some(e), &world, None, cam, vp, 800.0, 800.0, None, None)
+        let g = build_gizmo(Tool::Rotate, Some(e), &world, None, cam, vp, 800.0, 800.0, None, None, false)
             .expect("the rotate gizmo builds");
         // Rings 0 and 1 (local Y/Z and Z/X) both contain the camera's view axis.
         for i in [0usize, 1] {
@@ -699,7 +738,7 @@ mod tests {
     #[test]
     fn a_ring_seen_face_on_is_drawn_whole() {
         let (world, e, cam, vp) = setup();
-        let g = build_gizmo(Tool::Rotate, Some(e), &world, None, cam, vp, 800.0, 800.0, None, None)
+        let g = build_gizmo(Tool::Rotate, Some(e), &world, None, cam, vp, 800.0, 800.0, None, None, false)
             .expect("builds");
         // Ring 2 spans local X/Y — face-on to a camera looking down −Z.
         assert!(
@@ -718,10 +757,38 @@ mod tests {
         let none: [Vec<Vec2>; 3] = Default::default();
         for tool in [Tool::Move, Tool::Scale, Tool::MapEdit] {
             for off in [Vec2::ZERO, Vec2::new(6.0, 1.0), Vec2::new(-3.0, -10.0), Vec2::new(0.0, -14.0)] {
-                assert!(hit_test(tool, c + off, c, &tips, &none, &[]) == Some(Handle::Center), "{off}");
+                assert!(hit_test(tool, c + off, c, &tips, &none, &[], false) == Some(Handle::Center), "{off}");
             }
             // Out along an axis, past the knob, the axis still answers.
-            assert!(hit_test(tool, c + Vec2::new(50.0, 2.0), c, &tips, &none, &[]) == Some(Handle::AxisX));
+            assert!(hit_test(tool, c + Vec2::new(50.0, 2.0), c, &tips, &none, &[], false) == Some(Handle::AxisX));
+        }
+    }
+
+    /// A flat node's gizmo turns it only in its plane: no rings that tip it
+    /// edge-on, no trackball, and anywhere inside its one ring grabs it. Its
+    /// Move and Scale have no depth handle sitting on the centre knob.
+    #[test]
+    fn a_flat_node_turns_only_in_its_plane() {
+        let (world, e, cam, vp) = setup();
+        let g = build_gizmo(Tool::Rotate, Some(e), &world, None, cam, vp, 800.0, 800.0, None, None, true)
+            .expect("builds");
+        assert!(g.ring_pts[0].is_empty() && g.ring_pts[1].is_empty(), "no tipping rings");
+        assert!(g.center_ring.is_empty(), "no trackball");
+        assert!(!g.ring_pts[2].is_empty());
+        for off in [Vec2::ZERO, Vec2::new(20.0, 5.0), Vec2::new(-40.0, 30.0)] {
+            assert!(
+                hit_test(Tool::Rotate, g.center + off, g.center, &g.tips, &g.ring_pts, &g.center_ring, true)
+                    == Some(Handle::AxisZ),
+                "{off}"
+            );
+        }
+        // The same node seen as 3D: the rings it does not have as 2D are
+        // there, and they are what a press near the centre would take.
+        let g3 = build_gizmo(Tool::Rotate, Some(e), &world, None, cam, vp, 800.0, 800.0, None, None, false).unwrap();
+        assert!(!g3.ring_pts[0].is_empty());
+        for tool in [Tool::Move, Tool::Scale] {
+            let g = build_gizmo(tool, Some(e), &world, None, cam, vp, 800.0, 800.0, None, None, true).unwrap();
+            assert!(g.tips[2].is_none() && g.tips[0].is_some() && g.tips[1].is_some());
         }
     }
 }
