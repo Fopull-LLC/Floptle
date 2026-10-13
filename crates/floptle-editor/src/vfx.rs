@@ -1523,7 +1523,30 @@ mod profile_tests {
         assert_eq!(p.at(0.5), 0);
     }
 
-    fn slots(l: &crate::shading::LightSlots) -> LampSlots<'_> {
+    /// One side of a frame's lights, as the light uniform lays them out. Its
+    /// own type rather than the renderer's, because the `vfx_shot` example
+    /// builds this file without the rest of the editor.
+    struct Lamps {
+        count: usize,
+        pos: [[f32; 4]; 16],
+        color: [[f32; 4]; 16],
+        mask: [[u32; 4]; 16],
+        falloff: [[f32; 4]; 16],
+    }
+
+    impl Default for Lamps {
+        fn default() -> Self {
+            Self { count: 0, pos: [[0.0; 4]; 16], color: [[0.0; 4]; 16], mask: [[0; 4]; 16], falloff: [[0.0; 4]; 16] }
+        }
+    }
+
+    #[derive(Default)]
+    struct Split {
+        three_d: Lamps,
+        two_d: Lamps,
+    }
+
+    fn slots(l: &Lamps) -> LampSlots<'_> {
         LampSlots { count: l.count, pos: &l.pos, color: &l.color, mask: &l.mask, falloff: &l.falloff }
     }
 
@@ -1545,11 +1568,7 @@ mod profile_tests {
     /// Lit particles used to take the ambient and the key light only.
     #[test]
     fn a_lit_particle_takes_the_lamps_near_it() {
-        let mut split = crate::shading::SplitLights {
-            three_d: Default::default(),
-            two_d: Default::default(),
-            dropped: 0,
-        };
+        let mut split = Split::default();
         split.three_d.count = 1;
         split.three_d.pos[0] = [0.0, 0.0, -5.0, 4.0];
         split.three_d.color[0] = [2.0, 1.0, 0.2, 0.0];
@@ -1566,11 +1585,7 @@ mod profile_tests {
     /// reaches.
     #[test]
     fn a_2d_light_lights_the_particles_on_its_layers() {
-        let mut split = crate::shading::SplitLights {
-            three_d: Default::default(),
-            two_d: Default::default(),
-            dropped: 0,
-        };
+        let mut split = Split::default();
         split.two_d.count = 1;
         split.two_d.pos[0] = [0.0, 0.0, -5.0, 4.0];
         split.two_d.color[0] = [1.0, 1.0, 1.0, 0.0];
