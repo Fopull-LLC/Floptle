@@ -654,8 +654,8 @@ impl Editor {
         // already updated by run; re-importing here means the new mesh renders
         // this frame).
         self.load_script_swapped_models();
-        // A static piece a script moved takes its collider with it.
-        self.follow_static_colliders();
+        // (A static piece a script moved, and a tilemap a script repainted,
+        // are followed below, once the colliders are back from the scripts.)
         // `physics.step([n])` from a script — the same frame-stepper as ⏭. Drained
         // in the frame pass, not inside the tick loop: once the tick is frozen that
         // loop doesn't run, so a request drained there could never be the thing that
@@ -722,6 +722,16 @@ impl Editor {
         // rebuilt from the scene's GravityVolume node(s) every frame (cheap scan) so
         // tweaking mode/strength/radius takes effect immediately. The active camera
         // is the floating-origin focus: drift far enough and the sim recenters on it.
+        // The colliders come back from the scripts (lent for raycasts) before
+        // anything changes them: a static piece a script moved takes its
+        // collider with it, and a tilemap a script repainted is rebuilt. Done
+        // while they were lent, both edited an empty list and the next
+        // reclaim put the old colliders back.
+        if let Some(sim) = self.sim.as_mut() {
+            sim.world.set_colliders(self.script_host.take_colliders());
+        }
+        self.follow_static_colliders();
+        self.follow_tile_colliders();
         if let Some(sim) = self.sim.as_mut() {
             sim.world.gravity = Self::build_gravity_field(&self.world, sim.world.origin);
             // Water is rebuilt every frame for the same reason gravity is:
@@ -736,7 +746,6 @@ impl Editor {
             // claim about determinism within one tick, not about being
             // built once per session.
             sim.world.water = Self::build_water_field(&self.world, sim.world.origin);
-            sim.world.set_colliders(self.script_host.take_colliders()); // reclaim before stepping
             // Live Inspector edits: re-read RigidBody tunables (shape/size, friction,
             // restitution, gravity, pos/rot locks) into the running bodies each frame —
             // no teleport.

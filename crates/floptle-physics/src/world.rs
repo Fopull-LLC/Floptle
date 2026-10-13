@@ -197,7 +197,7 @@ pub struct PhysicsWorld {
     /// drop contacts — a body falling through the floor. So `step_body` rebuilds
     /// unless `step` just did, which costs the driven path what it cost before
     /// and never risks a stale answer.
-    index_fresh: bool,
+    pub(crate) index_fresh: bool,
     /// A hash of exactly what the broadphase was last built from — every
     /// collider's `(centre, radius)`, in order. The grid is a pure function of
     /// that sequence, so an equal hash means an equal grid and the rebuild is
@@ -2400,7 +2400,16 @@ impl PhysicsWorld {
                         }
                     }
                     let (centers, n_c, radius) = self.contact_samples(bi, ci);
-                    for (si, &c) in centers[..n_c].iter().enumerate() {
+                    // Where the body was when its samples were taken: each
+                    // push moves the body and every sample with it, so a
+                    // sample is tested where it is now. Tested where it was,
+                    // a box sunk evenly into the floor pushed itself out once
+                    // per bottom sample and hopped clear of the ground, which
+                    // a script driving it down at a steady speed saw as never
+                    // being grounded.
+                    let sampled_at = self.bodies[bi].pos;
+                    for (si, &c0) in centers[..n_c].iter().enumerate() {
+                        let c = c0 + (self.bodies[bi].pos - sampled_at);
                         let pen = radius - self.colliders[ci].distance(c);
                         // `!(pen > 0.0)` also rejects NaN/Inf (a degenerate collider),
                         // so a bad distance can never push the body to a non-finite pos.
@@ -2531,6 +2540,15 @@ impl PhysicsWorld {
                 }
             }
 
+            // Resting on the ground without pressing into it — the speed a
+            // script owns is level, or this tick it had nothing left to push
+            // with — is still standing on it. Without this, a body whose
+            // gravity a script applies once a frame was grounded on every
+            // other tick.
+            if !self.bodies[bi].grounded && !self.bodies[bi].sensor {
+                self.touch_ground(bi, row);
+            }
+
             // ---- friction, part two: what the contacts just absorbed --------
             //
             // Spent once, on the surface actually underfoot, however many
@@ -2583,6 +2601,56 @@ impl PhysicsWorld {
             } else {
                 self.bodies[bi].sleep_time = 0.0;
             }
+        }
+    }
+
+    /// Ground within a skin under body `bi` that it is not pressing into:
+    /// a walkable surface (by its slope limit) a bottom sample sits on, or a
+    /// one-way top it is standing on (not rising through it, not dropping).
+    /// Counts as a contact for `grounded` and `ground_normal`, and pushes
+    /// nothing.
+    fn touch_ground(&mut self, bi: usize, row: u32) {
+        const SKIN: f32 = 0.02;
+        let g = self.gravity.accel_at(self.bodies[bi].pos, &self.colliders);
+        let Some(up) = (-g).try_normalize() else { return };
+        if self.bodies[bi].vel.dot(up) > 0.05 {
+            return; // leaving the ground, not standing on it
+        }
+        let cos_walk = self.bodies[bi].slope_limit.clamp(0.0, std::f32::consts::FRAC_PI_2).cos();
+        let (centres, n_c, radius) = self.bodies[bi].sample_centers();
+        let pos = self.bodies[bi].pos;
+        let reach = centres[..n_c].iter().map(|c| c.distance(pos)).fold(0.0f32, f32::max);
+        let mut cand = std::mem::take(&mut self.cand);
+        cand.clear();
+        self.collider_index.sphere(pos, reach + radius + SKIN, &mut cand);
+        let mut found = None;
+        'colliders: for &ci in &cand {
+            let ci = ci as usize;
+            let c = &self.colliders[ci];
+            if (row >> c.layer) & 1 == 0 || c.sensor {
+                continue;
+            }
+            for &p in &centres[..n_c] {
+                let d = c.distance(p) - radius;
+                if !(-SKIN..SKIN).contains(&d) {
+                    continue;
+                }
+                let n = c.normal(p);
+                if n.dot(up) <= cos_walk {
+                    continue;
+                }
+                if c.one_way.is_some()
+                    && (self.bodies[bi].drop_through > 0.0 || !self.clear_of_one_way(bi, ci))
+                {
+                    continue;
+                }
+                found = Some(n);
+                break 'colliders;
+            }
+        }
+        self.cand = cand;
+        if let Some(n) = found {
+            self.note_body_contact(bi, n);
         }
     }
 

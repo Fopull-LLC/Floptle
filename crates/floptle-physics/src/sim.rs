@@ -885,6 +885,15 @@ impl Sim {
         true
     }
 
+    /// Wake every sleeping body: the ground under them changed.
+    pub fn wake_all(&mut self) {
+        for bi in 0..self.world.bodies.len() {
+            if self.world.bodies[bi].asleep {
+                self.world.set_asleep(bi, false);
+            }
+        }
+    }
+
     /// Remove every static collider entity `eid` baked, and nothing else: a
     /// static piece that moved is re-baked where it is now.
     pub fn remove_statics_of(&mut self, eid: u32) {

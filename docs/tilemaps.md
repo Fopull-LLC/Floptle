@@ -479,7 +479,7 @@ end
 
 | Call | |
 |---|---|
-| `tm:set(x, y, cell [, xform])` | One square, 0-based from the **top-left**. Outside the grid is a no-op, not a wrap. |
+| `tm:set(x, y, cell [, xform])` | One square, 0-based from the **top-left**. Outside the grid is a no-op, not a wrap. It changes the picture, the queries below and the collision: while playing, a tile set solid collides from the next frame, and one cleared stops colliding. |
 | `tm:get(x, y)` | The cell, orientation stripped — `nil` outside the grid and on an empty square. |
 | `tm:at(x, y)` | `cell, rot, flipX` — the whole answer, for art that faces a direction. |
 | `tm:fill(cell [, xform])` | Every square, including the empty ones. |
@@ -514,6 +514,7 @@ something on the tile.
 | Call | |
 |---|---|
 | `tm:solid(x, y)` | Does the tileset say that square collides? `false` with no tileset. |
+| `tm:oneWay(x, y)` | Is that square a one-way platform, solid from above only? |
 | `tm:tags(x, y)` | Its tags, as a list. |
 | `tm:hasTag(x, y, "ice")` | The common case, without a table per square — what a per-frame ground check should call. |
 | `tm:tileset()` | The `.tileset.ron` path, or `nil`. |

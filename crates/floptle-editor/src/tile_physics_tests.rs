@@ -740,3 +740,120 @@ fn a_car_drives_on_its_wheels() {
     assert!(p.x > -1.5, "it drove right: {p:?}");
     assert!(p.y > 0.9, "riding on its wheels, not lying on the floor: {p:?}");
 }
+
+/// Set the floor square (the bottom row) of the scene's tilemap at column
+/// `col` to `v`, the way a script's `tm:set` does while playing.
+fn set_column(ed: &mut crate::Editor, col: usize, v: u32) {
+    for (_, m) in ed.world.query_mut::<Matter>() {
+        if let Matter::Tilemap { data, cols, .. } = m {
+            data[*cols as usize + col] = v;
+        }
+    }
+}
+
+/// Tiles changed while playing change the collision: a crate standing on
+/// the floor falls when the tiles under it are cleared, and lands on tiles
+/// put back under it. A script's `tm:set` used to change the picture and
+/// not the collider, so a floor built at runtime was walked straight through.
+#[test]
+fn tiles_changed_while_playing_collide() {
+    // Columns 0..8 cover x = -4..4; the crate at x = 0.5 stands on column 4.
+    let (mut ed, c) = scene(1.0, 0.5, true, false);
+    ed.toggle_play();
+    for _ in 0..60 {
+        ed.play_step(1.0 / 60.0, true);
+    }
+    assert!((pos(&ed, c).y - 0.5).abs() < 0.05, "standing on the floor first");
+    // A hole three tiles wide, so its corners are not left on the edges
+    // either side.
+    for col in 3..6 {
+        set_column(&mut ed, col, floptle_core::EMPTY_TILE);
+    }
+    for _ in 0..15 {
+        ed.play_step(1.0 / 60.0, true);
+    }
+    let falling = pos(&ed, c).y;
+    assert!(falling < 0.4, "the floor went from under it; y = {falling:.3}");
+    // The floor back while it is still sinking into the gap: it is pushed
+    // up and stands on it again.
+    for col in 3..6 {
+        set_column(&mut ed, col, 0);
+    }
+    for _ in 0..120 {
+        ed.play_step(1.0 / 60.0, true);
+    }
+    let y = pos(&ed, c).y;
+    assert!((y - 0.5).abs() < 0.08, "it stands on the tiles put back; y = {y:.3}");
+}
+
+/// A static block moved while playing takes its collider with it, through the
+/// real frame loop: a crate standing on it falls when it slides away. The
+/// move was followed while the colliders were lent to the scripts, so it
+/// changed nothing and the crate stood on air.
+#[test]
+fn a_static_block_moved_while_playing_takes_its_collider() {
+    let (mut ed, c) = scene(1.0, 0.0, true, false);
+    if let Some(t) = ed.world.get_mut::<Transform>(c) {
+        t.translation.y = 3.5;
+    }
+    let block = ed.world.spawn();
+    ed.world.insert(block, Transform { translation: DVec3::new(0.0, 2.0, 0.0), rotation: Quat::IDENTITY, scale: Vec3::ONE });
+    ed.world.insert(block, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [1.0; 3] });
+    ed.world.insert(block, Collidable);
+    ed.toggle_play();
+    for _ in 0..90 {
+        ed.play_step(1.0 / 60.0, true);
+    }
+    let on = pos(&ed, c).y;
+    assert!(on > 2.5, "standing on the block first; y = {on:.3}");
+    if let Some(t) = ed.world.get_mut::<Transform>(block) {
+        t.translation.x = 3.0;
+    }
+    for _ in 0..90 {
+        ed.play_step(1.0 / 60.0, true);
+    }
+    let y = pos(&ed, c).y;
+    assert!(y < 1.0, "the block slid away and it fell to the floor; y = {y:.3}");
+}
+
+/// Whether `e`'s body is grounded right now.
+fn grounded(ed: &crate::Editor, e: floptle_core::Entity) -> bool {
+    ed.sim.as_ref().unwrap().body_states().find(|r| r.entity == e).is_some_and(|r| r.grounded)
+}
+
+/// A body standing on a one-way ledge is grounded whether the engine pulls
+/// it down or a script does, as it is on solid ground: four cases. It used to
+/// be ungrounded on a one-way ledge as soon as a script owned its gravity.
+#[test]
+fn a_body_on_a_one_way_ledge_is_grounded_however_it_falls() {
+    for one_way in [false, true] {
+        for scripted in [false, true] {
+            let (mut ed, p) = ledge_scene(9.81, 1.6);
+            ed.tiles.sets.get_mut(SET).unwrap().info_mut(0).one_way = one_way;
+            if scripted {
+                ed.world.get_mut::<RigidBody>(p).unwrap().gravity = false;
+            }
+            ed.toggle_play();
+            let mut last = false;
+            for _ in 0..90 {
+                if scripted {
+                    // The controller's own gravity: a steady push down.
+                    ed.sim.as_mut().unwrap().set_body_velocity(p.index(), floptle_core::math::Vec3::new(0.0, -2.0, 0.0));
+                }
+                ed.play_step(1.0 / 60.0, true);
+                last = grounded(&ed, p);
+            }
+            let y = pos(&ed, p).y;
+            assert!((y - 1.5).abs() < 0.06, "one_way {one_way}, scripted {scripted}: standing on the ledge; y = {y:.3}");
+            assert!(last, "one_way {one_way}, scripted {scripted}: grounded");
+            if one_way {
+                // Dropping through, it is not standing on the ledge it is
+                // leaving.
+                ed.sim.as_mut().unwrap().set_body_drop_through(p.index(), 0.25);
+                ed.play_step(1.0 / 60.0, true);
+                assert!(!grounded(&ed, p), "scripted {scripted}: not grounded while dropping through");
+            }
+        }
+    }
+}
+

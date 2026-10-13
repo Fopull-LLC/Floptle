@@ -280,6 +280,7 @@
 ---@field worldAt fun(self: TilemapHandle, x: number, y: number): any|nil The world position of that square's CENTRE, or nil off the grid.
 ---@field tileset fun(self: TilemapHandle): string|nil The project-relative .tileset.ron this map is cut from, or nil.
 ---@field solid fun(self: TilemapHandle, x: number, y: number): boolean Whether the tileset says that square collides. False with no tileset.
+---@field oneWay fun(self: TilemapHandle, x: number, y: number): boolean Whether that square is a one-way platform: solid from above only. False on an empty square or with no tileset.
 ---@field tags fun(self: TilemapHandle, x: number, y: number): table The tileset's tags for that square, as a list. Empty with no tileset.
 ---@field hasTag fun(self: TilemapHandle, x: number, y: number, tag: string): boolean The common case of tags(), without allocating a table per square.
 ---@field path fun(self: TilemapHandle, from: Vec3|Node, to: Vec3|Node, opts?: { diagonal?: boolean, avoid?: string[], cost?: table<string, number> }): Vec3[]|nil, boolean Square centres from one point to another round the solid tiles, and whether it reaches.

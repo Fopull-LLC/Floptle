@@ -2773,6 +2773,10 @@ struct Editor {
     /// translation, rotation and scale it was built at. A `RefCell` because
     /// the bake runs from `&self` paths. See `follow_static_colliders`.
     static_baked: std::cell::RefCell<HashMap<u32, crate::play::BakedStatic>>,
+    /// Each colliding tilemap's cells as of its last collider build, as a
+    /// fingerprint: a script's `tm:set` changes them, and the colliders are
+    /// rebuilt to match. See `Editor::follow_tile_colliders`.
+    tile_sigs: HashMap<u32, u64>,
     /// The pieces `follow_static_colliders` is working through, and where it
     /// is in them.
     follow_keys: Vec<u32>,

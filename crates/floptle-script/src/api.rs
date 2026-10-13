@@ -3216,6 +3216,24 @@ fn new_tilemap_handle(
         })?,
     )?;
 
+    // tm:oneWay(x, y) -> whether that square is a one-way platform: solid
+    // from above only, so a character jumps up through it and lands on top.
+    let sow = scene.clone();
+    t.raw_set(
+        "oneWay",
+        lua.create_function(move |_, (this, x, y): (Table, u32, u32)| {
+            let e: u32 = this.raw_get("__id")?;
+            let s = sow.borrow();
+            let Some(p) = packed_at(&s, e, x, y) else { return Ok(false) };
+            let Some(set) = tileset_of(&s, e) else { return Ok(false) };
+            if set.is_empty_square(p) {
+                return Ok(false);
+            }
+            let cell = floptle_core::tile_index(p);
+            Ok(set.collision(cell).is_solid() && set.one_way(cell))
+        })?,
+    )?;
+
     // tm:tags(x, y) -> the tileset's tags for that square, as a list.
     let stg = scene.clone();
     t.raw_set(

@@ -498,6 +498,48 @@ impl Editor {
         self.sim = Some(sim);
     }
 
+    /// Rebuild the colliders of any tilemap whose cells changed while playing
+    /// (`tm:set`, `tm:fill`, `tm:fillRect` from a script), so a tile placed at
+    /// runtime is solid and a tile cleared is gone. Only the changed map is
+    /// rebuilt, merged into boxes like a map loaded from the scene. Bodies
+    /// asleep anywhere are woken, since one may have been resting on a tile
+    /// that went.
+    pub(crate) fn follow_tile_colliders(&mut self) {
+        if self.sim.is_none() {
+            return;
+        }
+        use std::hash::{Hash, Hasher};
+        let mut changed = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (e, m) in self.world.query::<Matter>() {
+            let Matter::Tilemap { cols, rows, tile, data, tileset } = m else { continue };
+            let collides = self.world.get::<floptle_core::Collidable>(e).is_some()
+                || self.world.get::<floptle_core::RigidBody>(e).is_some();
+            if !collides || floptle_core::is_disabled(&self.world, e) {
+                continue;
+            }
+            let mut h = std::hash::DefaultHasher::new();
+            (cols, rows, tile.to_bits(), tileset, data).hash(&mut h);
+            let sig = h.finish();
+            seen.insert(e.index());
+            match self.tile_sigs.insert(e.index(), sig) {
+                Some(old) if old != sig => changed.push(e),
+                _ => {}
+            }
+        }
+        self.tile_sigs.retain(|k, _| seen.contains(k));
+        if changed.is_empty() {
+            return;
+        }
+        let Some(mut sim) = self.sim.take() else { return };
+        for e in changed {
+            sim.remove_statics_of(e.index());
+            self.add_static_collider_for(&mut sim, e);
+        }
+        sim.wake_all();
+        self.sim = Some(sim);
+    }
+
     /// Give every node in `ents` that is static world geometry (Collidable or
     /// a mesh collider, no RigidBody, switched on) its collider.
     pub(crate) fn add_static_colliders_for(&mut self, ents: &[Entity]) {
