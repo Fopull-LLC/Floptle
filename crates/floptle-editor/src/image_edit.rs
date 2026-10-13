@@ -359,6 +359,9 @@ pub(crate) struct ImageEditState {
 
     // --- view ---
     pub(crate) zoom: f32,
+    /// Ctrl+wheel travel not yet spent on a brush-size step: a trackpad sends
+    /// many small moves where a mouse sends one notch.
+    pub(crate) size_wheel: f32,
     /// Screen offset of the canvas origin within the view rect.
     pub(crate) pan: Vec2,
     /// Set once when a document opens; the view is never re-fitted after that.
@@ -477,6 +480,7 @@ pub(crate) struct ImageEditState {
 impl Default for ImageEditState {
     fn default() -> Self {
         ImageEditState {
+            size_wheel: 0.0,
             path: None,
             doc: None,
             dirty: false,
@@ -824,6 +828,18 @@ impl ImageEditState {
     }
 
     /// Zoom about a screen point, keeping the canvas pixel under it fixed.
+    /// One brush-size step up or down: a pixel of diameter at a time while
+    /// small, a quarter of the size once large. Says the new size, since the
+    /// wheel and the bracket keys change it with nothing else on screen
+    /// moving.
+    pub(crate) fn step_brush_size(&mut self, up: bool) {
+        let r = self.brush.radius;
+        let step = (r * 0.25).max(0.5);
+        self.brush.radius = if up { (r + step).min(512.0) } else { (r - step).max(0.5) };
+        let px = (self.brush.radius * 2.0).round();
+        self.toast(format!("brush {px} px"));
+    }
+
     pub(crate) fn zoom_at(&mut self, view: ERect, at: Pos2, factor: f32) {
         let before = self.to_canvas(view, at);
         let z = self.snap_zoom(self.zoom * factor);
@@ -1174,6 +1190,10 @@ impl ImageEditState {
             )
         });
         self.cursor = ptr.filter(|p| view.contains(*p)).map(|p| self.to_canvas(view, p));
+        // A gesture keeps following the pointer off the canvas: a selection
+        // dragged past the picture's edge reaches the edge, and a release out
+        // there still ends it rather than being dropped.
+        let gesture = ptr.filter(|_| self.drag.is_some() || resp.dragged() || resp.drag_stopped());
         // The pointer says which tool is armed without anyone reading the strip.
         if hovered {
             ctx.set_cursor_icon(match self.tool {
@@ -1189,18 +1209,29 @@ impl ImageEditState {
         }
 
         // --- navigation ---
-        if hovered && scroll.abs() > 0.0
-            && let Some(p) = ptr {
-                if modifiers.ctrl {
-                    // Ctrl+wheel = brush size, the muscle memory from every
-                    // paint program.
-                    let step = if scroll > 0.0 { 1.0 } else { -1.0 };
-                    self.brush.radius = (self.brush.radius + step * (self.brush.radius * 0.25).max(0.5)).clamp(0.5, 512.0);
-                } else {
-                    let f = (scroll * 0.0035).exp();
-                    self.zoom_at(view, p, f);
+        if hovered {
+            let (wheel, pinch) = ctx.input(|i| (wheel_of(&i.events), i.zoom_delta()));
+            if wheel.size_steps != 0.0 {
+                self.size_wheel += wheel.size_steps;
+                // A whole step per mouse notch, or per 40 points of trackpad.
+                while self.size_wheel.abs() >= 1.0 {
+                    let up = self.size_wheel > 0.0;
+                    self.size_wheel -= self.size_wheel.signum();
+                    self.step_brush_size(up);
+                }
+            } else if let Some(p) = ptr {
+                // A plain wheel zooms. Only while Ctrl is up, so the tail of
+                // a smoothed scroll cannot become a resize when Ctrl goes
+                // down for something else.
+                if !modifiers.ctrl && scroll.abs() > 0.0 {
+                    self.zoom_at(view, p, (scroll * 0.0035).exp());
+                }
+                // A trackpad pinch.
+                if (pinch - 1.0).abs() > 1e-4 {
+                    self.zoom_at(view, p, pinch);
                 }
             }
+        }
         if hovered {
             let (fit, hundred) = ctx.input(|i| {
                 (
@@ -1244,7 +1275,7 @@ impl ImageEditState {
             return;
         }
 
-        let Some((cx, cy)) = self.cursor else { return };
+        let Some((cx, cy)) = self.cursor.or_else(|| gesture.map(|p| self.to_canvas(view, p))) else { return };
         let shift = modifiers.shift;
         let alt = modifiers.alt;
 
@@ -3105,11 +3136,11 @@ pub(crate) fn image_key(
             true
         }
         K::BracketLeft => {
-            st.brush.radius = (st.brush.radius - (st.brush.radius * 0.25).max(0.5)).max(0.5);
+            st.step_brush_size(false);
             true
         }
         K::BracketRight => {
-            st.brush.radius = (st.brush.radius + (st.brush.radius * 0.25).max(0.5)).min(512.0);
+            st.step_brush_size(true);
             true
         }
         K::Delete | K::Backspace => {
@@ -3313,14 +3344,44 @@ fn constrain(from: (f32, f32), to: (f32, f32), shift: bool, is_line: bool) -> (f
     }
 }
 
-/// The integer pixel rect two canvas points span.
+/// What this frame's wheel events ask of the canvas.
+struct WheelInput {
+    /// Brush-size steps from Ctrl+wheel, up positive: one per mouse notch,
+    /// or one per 40 points of trackpad scroll.
+    size_steps: f32,
+}
+
+/// Reads the wheel event by event, with the modifiers each one was sent
+/// with. egui's own scroll total cannot tell a Ctrl+wheel from a plain one:
+/// it turns the first into zoom and reports no scroll at all, and its
+/// smoothing carries a plain scroll on past the moment Ctrl goes down.
+fn wheel_of(events: &[egui::Event]) -> WheelInput {
+    let mut size_steps = 0.0;
+    for ev in events {
+        if let egui::Event::MouseWheel { unit, delta, modifiers, .. } = ev
+            && modifiers.command
+        {
+            size_steps += match unit {
+                egui::MouseWheelUnit::Point => delta.y / 40.0,
+                egui::MouseWheelUnit::Line => delta.y,
+                egui::MouseWheelUnit::Page => delta.y * 3.0,
+            };
+        }
+    }
+    WheelInput { size_steps }
+}
+
+/// The integer pixel rect two canvas points span, whichever way the drag
+/// went: the points are pixel edges, so the far edge's pixel is not included
+/// and a drag from 2 to 6 covers 2, 3, 4 and 5.
+///
+/// It used to clamp the far edge to the press, which only worked dragging
+/// right and down. A box dragged upward or leftward collapsed to the row or
+/// column it started on.
 fn rect_between(a: (f32, f32), b: (f32, f32)) -> Rect {
-    Rect::from_points(
-        a.0.floor() as i32,
-        a.1.floor() as i32,
-        (b.0.ceil() as i32 - 1).max(a.0.floor() as i32),
-        (b.1.ceil() as i32 - 1).max(a.1.floor() as i32),
-    )
+    let (x0, x1) = (a.0.min(b.0).floor() as i32, a.0.max(b.0).ceil() as i32);
+    let (y0, y1) = (a.1.min(b.1).floor() as i32, a.1.max(b.1).ceil() as i32);
+    Rect::from_points(x0, y0, (x1 - 1).max(x0), (y1 - 1).max(y0))
 }
 
 /// Paint into the active layer's mask rather than its pixels.
@@ -3811,6 +3872,57 @@ mod tests {
     fn rect_between_is_inclusive_of_the_dragged_pixels() {
         let r = rect_between((2.0, 3.0), (6.0, 9.0));
         assert_eq!(r, Rect::from_points(2, 3, 5, 8));
+    }
+
+    fn wheel(delta: f32, ctrl: bool, unit: egui::MouseWheelUnit) -> egui::Event {
+        let modifiers = if ctrl { egui::Modifiers::COMMAND } else { egui::Modifiers::NONE };
+        egui::Event::MouseWheel { unit, delta: Vec2::new(0.0, delta), phase: egui::TouchPhase::Move, modifiers }
+    }
+
+    /// Ctrl+wheel is a size step per notch, whatever egui does with it, and a
+    /// plain wheel never is: egui reports Ctrl+wheel as zoom with no scroll,
+    /// which made the binding do nothing, and its smoothed scroll ran on into
+    /// a later Ctrl press and resized the brush by accident.
+    #[test]
+    fn only_a_ctrl_wheel_resizes_the_brush() {
+        use egui::MouseWheelUnit::{Line, Point};
+        assert_eq!(wheel_of(&[wheel(1.0, true, Line)]).size_steps, 1.0);
+        assert_eq!(wheel_of(&[wheel(-2.0, true, Line)]).size_steps, -2.0);
+        assert_eq!(wheel_of(&[wheel(3.0, false, Line), wheel(40.0, false, Point)]).size_steps, 0.0);
+        assert_eq!(wheel_of(&[wheel(20.0, true, Point), wheel(20.0, true, Point)]).size_steps, 1.0);
+    }
+
+    #[test]
+    fn a_brush_size_step_is_one_pixel_while_small() {
+        let mut st = state_with_doc();
+        st.brush.radius = 0.5;
+        st.step_brush_size(true);
+        assert_eq!(st.brush.radius * 2.0, 2.0);
+        st.step_brush_size(false);
+        st.step_brush_size(false);
+        assert_eq!(st.brush.radius, 0.5, "never below one pixel");
+    }
+
+    /// The screenshot case: a marquee dragged from low on the picture up and
+    /// right past its top edge selects the whole box up to that edge.
+    #[test]
+    fn a_marquee_dragged_up_and_off_the_picture_selects_the_box() {
+        let mut st = state_with_doc();
+        st.tool = ImgTool::SelectRect;
+        st.begin_drag(4.0, 20.0, false, false);
+        st.end_drag(40.0, -5.0, false);
+        let sel = st.doc.as_ref().unwrap().selection.clone().expect("a selection");
+        assert_eq!(sel.selected_bounds(), Rect::from_points(4, 0, 31, 19));
+    }
+
+    /// A box dragged up, left, or up and left covers the same pixels as one
+    /// dragged the other way. Dragged upward, it used to be one row high.
+    #[test]
+    fn rect_between_covers_the_box_whichever_way_it_was_dragged() {
+        let want = Rect::from_points(2, 3, 5, 8);
+        for (a, b) in [((6.0, 9.0), (2.0, 3.0)), ((2.0, 9.0), (6.0, 3.0)), ((6.0, 3.0), (2.0, 9.0))] {
+            assert_eq!(rect_between(a, b), want, "{a:?} → {b:?}");
+        }
     }
 
     // ---- the short paths ------------------------------------
