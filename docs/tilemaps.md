@@ -417,6 +417,29 @@ so retiling the same map twice gives the same result — and so does opening it
 tomorrow, or on another machine. A level that reshuffled its own grass on load
 would be unusable.
 
+### Isometric and hexagonal maps
+
+A tileset's **grid**, in the Tiles tab, is the shape of its cells: **square**,
+**isometric** diamonds, **hex (pointy top)** with odd rows pushed half a cell
+right, or **hex (flat top)** with odd columns pushed half a cell down. It belongs
+to the tileset because it belongs to the art: a sheet drawn as diamonds makes
+every map painted with it lay its cells out as diamonds.
+
+Everything that knows about cells follows the shape. The map draws its tiles in
+their cells, the cursor picks the cell it is over, and collision and 2D shadows
+use each solid cell's own outline: a diamond or a hexagon, never the square it
+was drawn on in the palette. A part-tile collider drawn on that square is
+placed on the cell the same way the art is.
+
+**cell height** is a cell's height over its width: 0.5 for the usual 2:1
+isometric diamond, and a regular hexagon's for hex. Art taller than its cell,
+such as an isometric block or wall, stands on the bottom of its cell and rises
+out of the top, and the map draws front to back so a nearer block covers the one
+behind it. Leave the cell height alone for tall art; it is the floor's shape.
+
+Two things stay square: autotiling still looks at the four or eight neighbours
+of a square grid, and a turned or mirrored tile turns its art on its quad.
+
 ## 6. The orthographic camera
 
 Under perspective, a tilemap two units further back is drawn slightly smaller — so
@@ -509,6 +532,9 @@ node's transform, so it is right until the day the map moves.
 `worldAt` gives the **centre** of the square, because what you do with it is put
 something on the tile.
 
+Both follow the tileset's grid, so on an isometric or hexagonal map they answer
+in diamonds or hexagons. `tm:path` still steps between square neighbours.
+
 ### What a tile is
 
 | Call | |
@@ -574,7 +600,12 @@ A sheet with a margin or spacing between its tiles is redrawn edge to edge as
 Importing the same level again reuses its tileset, so collision and tags you
 changed are kept.
 
-Not imported: isometric and hexagonal maps, image layers, Tiled tilesets made
+A Tiled map that is isometric or hexagonal comes in with its cells' shape set
+on the tileset it makes. Its hexagons are laid out regular, staggering the odd
+rows (or columns); a map whose stagger or side length differs is laid out that
+way and the Console says so. Its objects are placed by their raw coordinates.
+
+Not imported: staggered isometric maps, image layers, Tiled tilesets made
 of separate images, and LDtk IntGrid layers that have no tiles (their values
 are the level's logic, not its picture). Each is named in the Console when a
 level has one.

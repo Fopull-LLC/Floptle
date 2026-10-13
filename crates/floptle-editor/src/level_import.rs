@@ -80,6 +80,9 @@ pub(crate) struct Level {
     pub(crate) objects: Vec<Object>,
     /// Things left out, one sentence each.
     pub(crate) warnings: Vec<String>,
+    /// The cells' shape: Tiled's isometric and hexagonal maps carry theirs
+    /// onto the tileset the import makes.
+    pub(crate) grid: floptle_tiles::GridShape,
 }
 
 // --- a small XML reader -----------------------------------------------------
@@ -429,14 +432,38 @@ pub(crate) fn read_tmx(src: &str, path: &Path) -> Result<Level, String> {
     if map.name != "map" {
         return Err("this is not a Tiled map (its root is not <map>)".into());
     }
-    if map.attr("orientation").is_some_and(|o| o != "orthogonal") {
-        return Err(format!(
-            "this map is {}; only orthogonal maps import, as the engine's tile layers are square grids",
-            map.attr("orientation").unwrap_or("?")
-        ));
+    let mut warnings = Vec::new();
+    let grid = match map.attr("orientation").unwrap_or("orthogonal") {
+        "orthogonal" => floptle_tiles::GridShape::Square,
+        "isometric" => floptle_tiles::GridShape::Isometric,
+        "hexagonal" => {
+            // The engine's hexagons are regular in their own cell, odd rows (or
+            // columns) pushed along; Tiled's even stagger and a side length
+            // other than half the cell are laid out the engine's way, and said.
+            if map.attr("staggerindex").is_some_and(|i| i == "even") {
+                warnings.push("the map staggers its even rows; they are laid out staggering the odd ones".into());
+            }
+            let pointy = map.attr("staggeraxis").unwrap_or("y") == "y";
+            let (across, side) = (if pointy { map.u("tileheight") } else { map.u("tilewidth") }, map.u("hexsidelength"));
+            if side > 0 && (side as i64 - across as i64 / 2).abs() > 1 {
+                warnings.push(format!(
+                    "its hexagons have sides of {side} pixels; they are laid out as regular hexagons, sides of {}",
+                    across / 2
+                ));
+            }
+            if pointy { floptle_tiles::GridShape::HexPointy } else { floptle_tiles::GridShape::HexFlat }
+        }
+        other => {
+            return Err(format!(
+                "this map is {other}; orthogonal, isometric and hexagonal maps import, and a staggered \
+                 isometric map does not yet"
+            ));
+        }
+    };
+    if grid != floptle_tiles::GridShape::Square && map.kids("objectgroup").next().is_some() {
+        warnings.push("objects on a map that is not orthogonal are placed by their raw coordinates".into());
     }
     let dir = path.parent().unwrap_or(Path::new("."));
-    let mut warnings = Vec::new();
     let mut sheets = Vec::new();
     let mut sets: Vec<TiledSet> = Vec::new();
     for ts in map.kids("tileset") {
@@ -569,7 +596,7 @@ pub(crate) fn read_tmx(src: &str, path: &Path) -> Result<Level, String> {
     walk(&map, (0.0, 0.0), true, &sets, (tile_w, tile_h), &mut out)?;
     let Out { layers, objects, warnings } = out;
     let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "level".into());
-    Ok(Level { name, tile_w, tile_h, origin: (0.0, 0.0), sheets, layers, objects, warnings })
+    Ok(Level { name, tile_w, tile_h, origin: (0.0, 0.0), sheets, layers, objects, warnings, grid })
 }
 
 // --- LDtk -------------------------------------------------------------------
@@ -747,6 +774,7 @@ pub(crate) fn read_ldtk(src: &str, path: &Path) -> Result<Vec<Level>, String> {
             layers,
             objects,
             warnings,
+            grid: floptle_tiles::GridShape::Square,
         });
     }
     if levels.is_empty() {
@@ -863,10 +891,20 @@ mod tests {
         assert_eq!(a.layers, b.layers);
     }
 
+    /// An isometric or hexagonal map imports with its cells' shape; a
+    /// staggered isometric one is still refused, and says so.
     #[test]
-    fn an_isometric_map_says_why_it_is_refused() {
-        let e = read_tmx(&TMX.replace("orthogonal", "isometric"), Path::new("a.tmx")).unwrap_err();
-        assert!(e.contains("isometric"), "{e}");
+    fn isometric_and_hexagonal_maps_carry_their_shape() {
+        let iso = read_tmx(&TMX.replace("orthogonal", "isometric"), Path::new("a.tmx")).unwrap();
+        assert_eq!(iso.grid, floptle_tiles::GridShape::Isometric);
+        assert_eq!(iso.layers, read_tmx(TMX, Path::new("a.tmx")).unwrap().layers, "the same cells");
+        let hex = TMX.replace("orientation=\"orthogonal\"", "orientation=\"hexagonal\" staggeraxis=\"x\" staggerindex=\"odd\"");
+        assert_eq!(read_tmx(&hex, Path::new("a.tmx")).unwrap().grid, floptle_tiles::GridShape::HexFlat);
+        let even = hex.replace("staggerindex=\"odd\"", "staggerindex=\"even\"");
+        let lv = read_tmx(&even, Path::new("a.tmx")).unwrap();
+        assert!(lv.warnings.iter().any(|w| w.contains("even rows")), "{:?}", lv.warnings);
+        let e = read_tmx(&TMX.replace("orthogonal", "staggered"), Path::new("a.tmx")).unwrap_err();
+        assert!(e.contains("staggered"), "{e}");
     }
 
     const LDTK: &str = r#"{

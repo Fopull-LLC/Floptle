@@ -73,6 +73,10 @@ impl TileGpu {
 fn collision_sig(set: Option<&floptle_tiles::TileSet>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    // The cells' shape too: turning a tileset isometric moves every cell.
+    if let Some(s) = set {
+        (s.grid as u8, s.cell_height.to_bits()).hash(&mut h);
+    }
     for (cell, info) in set.map(|s| &s.tiles).into_iter().flatten() {
         let shape = info.collision.shape();
         if matches!(shape, floptle_tiles::tileset::TileShape::None) {
@@ -239,6 +243,21 @@ impl Editor {
         if live.is_empty() {
             return;
         }
+        // Every sheet a map is cut from, loaded before its mesh is built. The
+        // cut needs the sheet's size — its half-texel inset, and how tall an
+        // isometric or hex tile stands — and a mesh built before the sheet was
+        // in was cut without it: a one-frame render (`floptle shot`) drew every
+        // isometric tile squashed to half height. Cached, so a sheet already
+        // loaded costs a lookup.
+        let sheets: Vec<String> = live
+            .iter()
+            .filter_map(|(.., tileset)| self.tiles.get(tileset))
+            .flat_map(|s| s.pages_iter().map(|(_, tex, _, _)| tex.to_string()).collect::<Vec<_>>())
+            .filter(|t| !t.trim().is_empty())
+            .collect();
+        for sheet in sheets {
+            self.ensure_texture(&sheet);
+        }
         let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
             return; // no GPU yet — try again next frame
         };
@@ -310,6 +329,18 @@ impl Editor {
             let mut spare: Vec<MeshId> =
                 old.map(|t| t.pages.into_iter().map(|p| p.mesh).collect()).unwrap_or_default();
             let mut built: Vec<TilePageGpu> = Vec::with_capacity(pages.len());
+            // Where each cell is, for a grid that is not square: listed front to
+            // back, once for every page.
+            let layout = floptle_tiles::CellLayout::of(set, cols, rows, tile);
+            let placed: Vec<(usize, [f32; 2])> = if layout.is_square() {
+                Vec::new()
+            } else {
+                layout
+                    .draw_order()
+                    .into_iter()
+                    .map(|(c, r)| ((r * cols + c) as usize, layout.center(c as i32, r as i32)))
+                    .collect()
+            };
             for (pi, (tex_path, pc, pr)) in pages.iter().enumerate() {
                 let page = pi as u32;
                 let Some(page_data) = page_squares(draw, page, pc * pr) else {
@@ -327,8 +358,21 @@ impl Editor {
                         .map(|[w, h]| [1.0 / w.max(1.0), 1.0 / h.max(1.0)])
                         .unwrap_or([0.0, 0.0])
                 };
-                let mesh_data =
-                    floptle_render::mesh::tilemap(cols, rows, tile, *pc, *pr, ptexel, &page_data);
+                let mesh_data = if layout.is_square() {
+                    floptle_render::mesh::tilemap(cols, rows, tile, *pc, *pr, ptexel, &page_data)
+                } else {
+                    // The art's own proportions set how tall a tile stands: a
+                    // flat diamond fills its cell, a block rises out of it.
+                    let quad_h = if ptexel[0] > 0.0 && ptexel[1] > 0.0 {
+                        let (px_w, px_h) = (1.0 / ptexel[0] / *pc as f32, 1.0 / ptexel[1] / *pr as f32);
+                        layout.w * px_h / px_w.max(1e-6)
+                    } else {
+                        layout.h
+                    };
+                    floptle_render::mesh::tilemap_placed(
+                        &placed, layout.w, layout.h, quad_h, *pc, *pr, ptexel, &page_data,
+                    )
+                };
                 let empty = mesh_data.indices.is_empty();
                 let (nv, ni) = (mesh_data.vertices.len() as u32, mesh_data.indices.len() as u32);
                 // Reuse a slot when the new geometry still fits, else

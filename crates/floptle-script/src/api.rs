@@ -3410,14 +3410,10 @@ fn cell_of_world(s: &crate::SceneMirror, e: u32, p: glam::DVec3) -> Option<(u32,
         return None;
     }
     let local = glam::Vec2::new(rel.x / s3.x, rel.y / s3.y);
-    let (w, h) = (m.cols as f32 * m.tile * 0.5, m.rows as f32 * m.tile * 0.5);
-    let fx = (local.x + w) / m.tile;
-    // Row 0 is the top, so the row index counts down from +h.
-    let fy = (h - local.y) / m.tile;
-    if fx < 0.0 || fy < 0.0 {
-        return None;
-    }
-    let (x, y) = (fx.floor() as i64, fy.floor() as i64);
+    // The cells' shape is the tileset's: squares, diamonds or hexagons.
+    let layout = floptle_tiles::CellLayout::of(s.tilesets.get(&m.tileset), m.cols, m.rows, m.tile);
+    let (x, y) = layout.cell_at(local.x, local.y);
+    let (x, y) = (x as i64, y as i64);
     (x >= 0 && y >= 0 && x < m.cols as i64 && y < m.rows as i64)
         .then_some((x as u32, y as u32))
 }
@@ -3428,12 +3424,9 @@ fn world_of_cell(s: &crate::SceneMirror, e: u32, x: i64, y: i64) -> Option<glam:
     if x < 0 || y < 0 || x >= m.cols as i64 || y >= m.rows as i64 {
         return None;
     }
-    let (w, h) = (m.cols as f32 * m.tile * 0.5, m.rows as f32 * m.tile * 0.5);
-    let local = glam::Vec3::new(
-        x as f32 * m.tile - w + m.tile * 0.5,
-        h - (y as f32 * m.tile + m.tile * 0.5),
-        0.0,
-    );
+    let layout = floptle_tiles::CellLayout::of(s.tilesets.get(&m.tileset), m.cols, m.rows, m.tile);
+    let [cx, cy] = layout.center(x as i32, y as i32);
+    let local = glam::Vec3::new(cx, cy, 0.0);
     let xf = world_transform_of(s, e);
     Some(xf.translation + (xf.rotation * (xf.scale * local)).as_dvec3())
 }

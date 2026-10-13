@@ -481,6 +481,23 @@ pub struct TileSet {
     /// something are present.
     pub tiles: BTreeMap<u32, TileInfo>,
     pub groups: Vec<AutotileGroup>,
+    /// The shape of the cells a map painted with this tileset lays out:
+    /// square, isometric or hexagonal. A property of the art — an isometric
+    /// sheet is drawn as diamonds — so a map takes it from its tileset.
+    #[serde(default, skip_serializing_if = "is_square")]
+    pub grid: crate::GridShape,
+    /// A cell's height over its width, for the shapes that are not square.
+    /// 0 is the shape's own: half for isometric, a regular hexagon's for hex.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub cell_height: f32,
+}
+
+fn is_square(g: &crate::GridShape) -> bool {
+    *g == crate::GridShape::Square
+}
+
+fn is_zero_f32(v: &f32) -> bool {
+    *v == 0.0
 }
 
 /// One sheet behind a tileset: an image and the uniform grid it is cut into.
@@ -502,6 +519,8 @@ impl Default for TileSet {
             pages: Vec::new(),
             tiles: BTreeMap::new(),
             groups: Vec::new(),
+            grid: crate::GridShape::Square,
+            cell_height: 0.0,
         }
     }
 }

@@ -78,6 +78,9 @@ pub(crate) enum TileCmd {
     /// would renumber nothing (the stride is fixed) but would leave every
     /// square placed from it drawing a hole with no way back.
     RemoveLastPage,
+    /// The shape of the tileset's cells, and their height over their width (0
+    /// = the shape's own).
+    SetGrid(floptle_tiles::GridShape, f32),
     /// Replace one tile's tag list.
     SetTags(u32, Vec<String>),
     /// Add a tile to one of a group's rules: `(group, neighbourhood, cell)`.
@@ -659,6 +662,43 @@ impl TileCtx<'_> {
         labelled(ui, "sheet", |ui| {
             ui.small(format!("{sc}×{sr} — {ncells} tiles, {solid} solid, {groups} groups"));
         });
+        // The cells' shape. On the tileset because it is the art's: an
+        // isometric sheet is drawn as diamonds, and every map painted with it
+        // lays its cells out that way.
+        let (grid, cell_h) = (set.grid, set.cell_height);
+        labelled(ui, "grid", |ui| {
+            egui::ComboBox::from_id_salt("tileset_grid")
+                .selected_text(grid.name())
+                .show_ui(ui, |ui| {
+                    for g in floptle_tiles::GridShape::ALL {
+                        if ui.selectable_label(g == grid, g.name()).clicked() && g != grid {
+                            self.cmds.push(TileCmd::SetGrid(g, 0.0));
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "the shape of the cells: square, isometric diamonds, or hexagons. Every \
+                     map painted with this tileset lays its cells out this way, collides with \
+                     their outlines, and picks them under the cursor by their shape",
+                );
+        });
+        if grid != floptle_tiles::GridShape::Square {
+            labelled(ui, "cell height", |ui| {
+                let mut k = if cell_h > 0.0 { cell_h } else { grid.default_cell_height() };
+                if ui
+                    .add(egui::DragValue::new(&mut k).speed(0.005).range(0.1..=4.0))
+                    .on_hover_text(
+                        "a cell's height over its width: 0.5 for the usual 2:1 isometric \
+                         diamond. Art taller than its cell (a block, a wall) stands up out of \
+                         the cell rather than changing this",
+                    )
+                    .changed()
+                {
+                    self.cmds.push(TileCmd::SetGrid(grid, k));
+                }
+            });
+        }
         // The two-cuts warning only applies to a tileset that names no sheet of
         // its own and is therefore still borrowing the layer's material. When
         // the tileset has a sheet it is the authority for both the image and the
@@ -2615,6 +2655,10 @@ impl crate::Editor {
                     page.cols = cols.max(1);
                     page.rows = rows.max(1);
                 }
+            }
+            TileCmd::SetGrid(shape, cell_height) => {
+                set.grid = shape;
+                set.cell_height = if shape == floptle_tiles::GridShape::Square { 0.0 } else { cell_height.max(0.0) };
             }
             TileCmd::RemoveLastPage => {
                 set.pages.pop();

@@ -567,13 +567,14 @@ impl Editor {
     fn tile_cell_at(&self, cursor: Vec2, unbounded: bool) -> Option<(i32, i32)> {
         use floptle_core::math::Vec3;
         let e = self.tile_tools.layer?;
-        let Some(Matter::Tilemap { cols, rows, tile, .. }) = self.world.get::<Matter>(e) else {
+        let Some(Matter::Tilemap { cols, rows, tile, tileset, .. }) = self.world.get::<Matter>(e) else {
             return None;
         };
         let (cols, rows, tile) = (*cols, *rows, *tile);
         if cols == 0 || rows == 0 || tile <= 0.0 {
             return None;
         }
+        let layout = floptle_tiles::CellLayout::of(self.tiles.get(tileset), cols, rows, tile);
         let (ro, rd) = self.map_cursor_ray(cursor)?;
         let xf = floptle_core::world_transform(&self.world, e);
         let normal = xf.rotation * Vec3::Z;
@@ -593,11 +594,8 @@ impl Editor {
             return None;
         }
         let (lx, ly) = (rel.x / xf.scale.x, rel.y / xf.scale.y);
-        let (w, h) = (cols as f32 * tile * 0.5, rows as f32 * tile * 0.5);
-        let fx = (lx + w) / tile;
-        // Row 0 is the top, so the row index counts down from +h.
-        let fy = (h - ly) / tile;
-        let (x, y) = (fx.floor() as i32, fy.floor() as i32);
+        // The layout knows the cells' shape: squares, diamonds or hexagons.
+        let (x, y) = layout.cell_at(lx, ly);
         (unbounded || (x >= 0 && y >= 0 && x < cols as i32 && y < rows as i32)).then_some((x, y))
     }
 
@@ -1193,13 +1191,14 @@ impl Editor {
             return;
         }
         let Some(e) = self.tile_tools.layer else { return };
-        let Some(Matter::Tilemap { cols, rows, tile, .. }) = self.world.get::<Matter>(e) else {
+        let Some(Matter::Tilemap { cols, rows, tile, tileset, .. }) = self.world.get::<Matter>(e) else {
             return;
         };
         let (cols, rows, tile) = (*cols, *rows, *tile);
         if cols == 0 || rows == 0 || tile <= 0.0 {
             return;
         }
+        let layout = floptle_tiles::CellLayout::of(self.tiles.get(tileset), cols, rows, tile);
         let Some(gpu) = self.gpu.as_ref() else { return };
         let (w, h) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
         let cam = self.camera.render_camera();
@@ -1210,9 +1209,21 @@ impl Editor {
             crate::viz::project(wp, cam.world_position, vp, w, h)
         };
         // Grid space → the layer's local frame. Row 0 is the top, matching the
-        // mesh and every coordinate the tools use.
-        let (hw, hh) = (cols as f32 * tile * 0.5, rows as f32 * tile * 0.5);
-        let corner = |x: f32, y: f32| Vec3::new(x * tile - hw, hh - y * tile, 0.0);
+        // mesh and every coordinate the tools use; the layout turns it into
+        // diamonds on an isometric grid.
+        let corner = |x: f32, y: f32| {
+            let [px, py] = layout.grid_point(x, y);
+            Vec3::new(px, py, 0.0)
+        };
+        let outline = |c: i32, r: i32| -> Option<Vec<Vec2>> {
+            let o = layout.outline(c, r);
+            let pts: Vec<Vec2> = o.iter().filter_map(|p| project(Vec3::new(p[0], p[1], 0.0))).collect();
+            (pts.len() == o.len()).then_some(pts)
+        };
+        let hex = matches!(
+            layout.shape,
+            floptle_tiles::GridShape::HexPointy | floptle_tiles::GridShape::HexFlat
+        );
         let ring = |x0: f32, y0: f32, x1: f32, y1: f32| -> Option<Vec<Vec2>> {
             let pts: Vec<Vec2> = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
                 .into_iter()
@@ -1226,7 +1237,25 @@ impl Editor {
             ..Default::default()
         };
 
-        if self.tile_tools.show_grid {
+        if self.tile_tools.show_grid && hex {
+            // A hexagonal grid has no straight lines to draw, so it is drawn as
+            // its cells' outlines — while they are far enough apart to read.
+            let spread = match (project(corner(0.0, 0.0)), project(corner(1.0, 0.0))) {
+                (Some(a), Some(b)) => (b - a).length(),
+                _ => 0.0,
+            };
+            if spread >= 6.0 && cols * rows <= 20_000 {
+                for r in 0..rows as i32 {
+                    for c in 0..cols as i32 {
+                        if let Some(o) = outline(c, r) {
+                            for i in 0..o.len() {
+                                viz.grid.push((o[i], o[(i + 1) % o.len()]));
+                            }
+                        }
+                    }
+                }
+            }
+        } else if self.tile_tools.show_grid {
             // A grid of 4,096 squares is 130 projected line segments; a grid of a
             // million would be 2,000, and drawing lines closer together than a
             // pixel is worse than not drawing them. So: skip whole lines once they
@@ -1268,6 +1297,14 @@ impl Editor {
             // what a character walks on. Drawing per-tile outlines instead would
             // show a grid that does not exist in the physics world.
             let shapes = floptle_tiles::collision_shapes(cols, rows, tile, data, set);
+            // Outlines too: slopes, and every collider of a diamond or hex map.
+            for p in shapes.polys.iter().chain(&shapes.one_way_polys) {
+                let pts: Vec<Vec2> =
+                    p.pts.iter().filter_map(|q| project(Vec3::new(q[0], q[1], 0.0))).collect();
+                if pts.len() == p.pts.len() {
+                    viz.collision.push(pts);
+                }
+            }
             for b in shapes.boxes.into_iter().chain(shapes.one_way_boxes) {
                 let pts: Vec<Vec2> = [
                     (b.cx - b.hx, b.cy - b.hy),
@@ -1300,12 +1337,17 @@ impl Editor {
                     ring(lo_x as f32, lo_y as f32, (hi_x + 1) as f32, (hi_y + 1) as f32);
             } else {
                 let s = self.tile_tools.armed();
-                viz.cursor = ring(
-                    cx as f32,
-                    cy as f32,
-                    (cx + s.cols.max(1) as i32) as f32,
-                    (cy + s.rows.max(1) as i32) as f32,
-                );
+                viz.cursor = if hex && s.cols.max(1) * s.rows.max(1) == 1 {
+                    // One hexagon is its outline, not a box round it.
+                    outline(cx, cy)
+                } else {
+                    ring(
+                        cx as f32,
+                        cy as f32,
+                        (cx + s.cols.max(1) as i32) as f32,
+                        (cy + s.rows.max(1) as i32) as f32,
+                    )
+                };
             }
         }
         self.tile_viz = Some(viz);

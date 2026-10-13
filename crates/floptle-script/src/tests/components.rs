@@ -1063,6 +1063,48 @@ end
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// On an isometric map `tm:worldAt` and `tm:cellAt` are the diamonds': every
+/// cell's centre comes back to that cell, and two cells in a row are half a
+/// tile apart across and a quarter down, not a tile apart.
+#[test]
+fn an_isometric_map_converts_by_its_diamonds() {
+    let dir = std::env::temp_dir().join(format!("floptle_isocell_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "iso",
+        "\
+function start(node)
+  node:setTilemap{ cols = 4, rows = 3, tile = 2.0, tileset = \"tilesets/iso.tileset.ron\" }
+end
+function update(node, dt)
+  local tm = node:tilemap()
+  roundTrip = true
+  for y = 0, 2 do
+    for x = 0, 3 do
+      local cx, cy = tm:cellAt(tm:worldAt(x, y))
+      if cx ~= x or cy ~= y then roundTrip = false end
+    end
+  end
+  local a, b = tm:worldAt(0, 0), tm:worldAt(1, 0)
+  dx, dy = b.x - a.x, b.y - a.y
+end
+",
+    );
+    let (mut world, e) = world_with_script("iso");
+    world.insert(e, floptle_core::Matter::Empty);
+    let set = floptle_tiles::TileSet { grid: floptle_tiles::GridShape::Isometric, ..Default::default() };
+    let mut host = ScriptHost::new();
+    host.set_tilesets([("tilesets/iso.tileset.ron".to_string(), set)].into_iter().collect());
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let env = host.instance_env(e.index(), "iso").unwrap();
+    assert!(env.get::<bool>("roundTrip").unwrap(), "a cell's centre must pick that cell");
+    assert_eq!((env.get::<f64>("dx").unwrap(), env.get::<f64>("dy").unwrap()), (1.0, -0.5));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `scene.load{ fade, color }` queues a fading swap; a fade on a layer is
 /// refused, since a layer has nothing to swap.
 #[test]

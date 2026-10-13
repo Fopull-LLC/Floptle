@@ -128,7 +128,11 @@ impl Editor {
         for w in &lv.warnings {
             self.console.push(floptle_script::LogLevel::Warn, format!("importing {stem}: {w}"), None);
         }
-        if lv.tile_w != lv.tile_h {
+        let square = lv.grid == floptle_tiles::GridShape::Square;
+        // A diamond or a hexagon is as tall as its cell says; only a square
+        // grid has to be square.
+        let cell_height = if square { 0.0 } else { lv.tile_h.max(1) as f32 / lv.tile_w.max(1) as f32 };
+        if square && lv.tile_w != lv.tile_h {
             self.console.push(
                 floptle_script::LogLevel::Warn,
                 format!(
@@ -153,7 +157,8 @@ impl Editor {
         // collision or tags changed since.
         let wanted = floptle_tiles::tileset_path(&level);
         let reuse = self.tiles.sets.get(&wanted).is_some_and(|set| {
-            set.page_count() as usize == page_list.len()
+            set.grid == lv.grid
+                && set.page_count() as usize == page_list.len()
                 && page_list.iter().enumerate().all(|(i, (t, c, r))| set.page(i as u32) == Some((t.as_str(), *c, *r)))
         });
         let set_path = if reuse {
@@ -162,6 +167,8 @@ impl Editor {
             let (t0, c0, r0) = page_list.first().cloned().unwrap_or_else(|| (String::new(), 1, 1));
             let p = self.new_tileset(&level, &t0, c0, r0);
             if let Some(set) = self.tiles.sets.get_mut(&p) {
+                set.grid = lv.grid;
+                set.cell_height = cell_height;
                 set.pages = page_list
                     .iter()
                     .skip(1)
@@ -204,9 +211,12 @@ impl Editor {
                 })
                 .collect();
             let e = self.world.spawn();
+            // The layer's top-left, where Tiled puts it; the node sits at the
+            // middle of its cells, wherever their shape puts that.
+            let (lo, hi) = floptle_tiles::CellLayout::new(lv.grid, l.cols, l.rows, 1.0, cell_height).bounds();
             let local = DVec3::new(
-                l.offset.0 as f64 / ppu + l.cols as f64 * 0.5,
-                -(l.offset.1 as f64 / ppu + l.rows as f64 * 0.5),
+                l.offset.0 as f64 / ppu - lo[0] as f64,
+                -(l.offset.1 as f64 / ppu + hi[1] as f64),
                 i as f64 * 0.1,
             );
             self.world.insert(e, Transform { translation: local, rotation: Quat::IDENTITY, scale: Vec3::ONE });
@@ -310,6 +320,25 @@ mod tests {
         let s = floptle_core::world_transform(&ed.world, start).translation;
         assert_eq!((s.x, s.y), (1.5, -0.5));
         assert!(ed.world.get::<floptle_core::Tags>(start).is_some_and(|t| t.0.contains(&"spawn".to_string())));
+
+        // The same map drawn isometric, 16×8 diamonds: its tileset says so,
+        // with cells half as tall as wide, and the layer's top-left bound sits
+        // where Tiled puts the map's.
+        let iso = tmx.replace("orthogonal", "isometric").replace("tileheight=\"8\">", "tileheight=\"4\">");
+        std::fs::write(dir.join("levels/two.tmx"), iso).unwrap();
+        let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+        ed.import_level_file(&dir.join("levels/two.tmx").to_string_lossy(), None);
+        let ground = find(&ed, "Ground").expect("the layer");
+        let Some(floptle_core::Matter::Tilemap { tileset, .. }) = ed.world.get::<floptle_core::Matter>(ground).cloned()
+        else {
+            panic!("not a tilemap")
+        };
+        let set = ed.tiles.sets.get(&tileset).expect("the tileset");
+        assert_eq!((set.grid, set.cell_height), (floptle_tiles::GridShape::Isometric, 0.5));
+        let layout = floptle_tiles::CellLayout::of(Some(set), 3, 2, 1.0);
+        let (lo, hi) = layout.bounds();
+        let t = floptle_core::world_transform(&ed.world, ground).translation;
+        assert!((t.x as f32 + lo[0]).abs() < 1e-5 && (t.y as f32 + hi[1]).abs() < 1e-5, "top-left at {t:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

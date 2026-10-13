@@ -127,6 +127,9 @@ fn shapes_of(
     if cols == 0 || rows == 0 || tile <= 0.0 {
         return (Vec::new(), Vec::new());
     }
+    if set.grid != crate::GridShape::Square {
+        return (Vec::new(), shaped_polys(cols, rows, tile, data, set, one_way));
+    }
     let (w, h) = (cols as f32 * tile * 0.5, rows as f32 * tile * 0.5);
     // The local-space rect of a sub-rect `(rx, ry, rw, rh)` of the tile at
     // (col, row), where the sub-rect is measured from the tile's bottom-left.
@@ -255,6 +258,48 @@ fn shapes_of(
     (out, polys)
 }
 
+/// The colliders of an isometric or hexagonal map: one outline per solid cell.
+///
+/// A diamond or a hexagon does not merge into rectangles, so every cell is its
+/// own polygon. A whole-tile collider is the cell's outline; a part-tile one,
+/// drawn on a square in the Tiles tab, is placed on the cell the way the art
+/// is (see [`crate::CellLayout::unit_to_cell`]).
+fn shaped_polys(cols: u32, rows: u32, tile: f32, data: &[u32], set: &TileSet, one_way: bool) -> Vec<TilePoly> {
+    let layout = crate::CellLayout::of(Some(set), cols, rows, tile);
+    let mut out = Vec::new();
+    for row in 0..rows {
+        for col in 0..cols {
+            let Some(&packed) = data.get((row * cols + col) as usize) else { continue };
+            if set.is_empty_square(packed) || set.one_way(tile_index(packed)) != one_way {
+                continue;
+            }
+            let coll = set.collision(tile_index(packed));
+            let (c, r) = (col as i32, row as i32);
+            let xf = tile_xform(packed);
+            let place = |u: f32, v: f32| {
+                let (pu, pv) = tile_point_drawn(u, v, xf);
+                layout.unit_to_cell(c, r, pu, pv)
+            };
+            let mut pts: Vec<[f32; 2]> = if coll.is_full() {
+                layout.outline(c, r)
+            } else {
+                match coll.shape() {
+                    TileShape::None => continue,
+                    TileShape::Rect(x, y, w, h) => {
+                        vec![place(x, y), place(x + w, y), place(x + w, y + h), place(x, y + h)]
+                    }
+                    TileShape::Poly(p) => p.iter().map(|q| place(q[0], q[1])).collect(),
+                }
+            };
+            if crate::tileset::polygon_area(&pts) < 0.0 {
+                pts.reverse();
+            }
+            out.push(TilePoly { pts });
+        }
+    }
+    out
+}
+
 /// How many squares are solid at all — the denominator of the "42 boxes for
 /// 10,000 squares" report.
 pub fn solid_count(data: &[u32], set: &TileSet) -> usize {
@@ -267,6 +312,22 @@ pub fn solid_count(data: &[u32], set: &TileSet) -> usize {
 mod tests {
     use super::*;
     use floptle_core::{tile_pack, TileXform, EMPTY_TILE};
+
+    /// An isometric map collides as diamonds where its tiles are solid, and
+    /// nothing where they are not: one outline per solid cell, each exactly
+    /// the cell's shape.
+    #[test]
+    fn an_isometric_map_collides_as_diamonds() {
+        let mut set = TileSet { sheet_cols: 2, sheet_rows: 1, grid: crate::GridShape::Isometric, ..Default::default() };
+        set.info_mut(0).collision = TileCollision::Full;
+        let data = [0, 1, EMPTY_TILE, 0];
+        let c = collision_shapes(2, 2, 2.0, &data, &set);
+        assert!(c.boxes.is_empty(), "a diamond is not a box");
+        assert_eq!(c.polys.len(), 2, "two solid cells");
+        let layout = crate::CellLayout::of(Some(&set), 2, 2, 2.0);
+        assert_eq!(c.polys[0].pts, layout.outline(0, 0));
+        assert_eq!(c.polys[1].pts, layout.outline(1, 1));
+    }
 
     use crate::tileset::{TileCollision, TileSide};
 

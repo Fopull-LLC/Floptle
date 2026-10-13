@@ -418,6 +418,59 @@ pub fn tilemap(
     oriented(vertices, indices)
 }
 
+/// A tilemap whose cells are not on a square grid — isometric or hexagonal —
+/// as one mesh.
+///
+/// `cells` lists each cell to draw as its index into `data` and its middle, in
+/// the order to draw them: front to back, so where art is taller than its cell
+/// (an isometric block) the nearer tile wins the depth test against the one
+/// behind it rather than the other way round. Every quad is `w` wide and
+/// `quad_h` high, standing on the bottom of its cell (`cell_h` high), so flat
+/// art fills the cell and taller art rises out of it.
+///
+/// Orientation and the half-texel inset are the square builder's.
+#[allow(clippy::too_many_arguments)]
+pub fn tilemap_placed(
+    cells: &[(usize, [f32; 2])],
+    w: f32,
+    cell_h: f32,
+    quad_h: f32,
+    sheet_cols: u32,
+    sheet_rows: u32,
+    texel: [f32; 2],
+    data: &[u32],
+) -> MeshData {
+    let (sc, sr) = (sheet_cols.max(1), sheet_rows.max(1));
+    let total = sc * sr;
+    let (du, dv) = (1.0 / sc as f32, 1.0 / sr as f32);
+    let (iu, iv) = (texel[0] * 0.5, texel[1] * 0.5);
+    let mut vertices = Vec::with_capacity(cells.len() * 4);
+    let mut indices = Vec::with_capacity(cells.len() * 6);
+    for &(i, [cx, cy]) in cells {
+        let Some(&packed) = data.get(i) else { continue };
+        if floptle_core::tile_is_empty(packed, total) {
+            continue;
+        }
+        let cell = floptle_core::tile_index(packed);
+        let xf = floptle_core::tile_xform(packed);
+        let (x0, x1) = (cx - w * 0.5, cx + w * 0.5);
+        let y0 = cy - cell_h * 0.5;
+        let y1 = y0 + quad_h;
+        let (gx, gy) = (cell % sc, cell / sc);
+        let (u0, u1) = (gx as f32 * du + iu, (gx + 1) as f32 * du - iu);
+        let (v0, v1) = (gy as f32 * dv + iv, (gy + 1) as f32 * dv - iv);
+        let base = vertices.len() as u32;
+        for (s, t, px, py) in [(0u8, 0u8, x0, y0), (1, 0, x1, y0), (1, 1, x1, y1), (0, 1, x0, y1)] {
+            let (a, b) = floptle_core::tile_corner(s, t, xf);
+            let u = if a == 0 { u0 } else { u1 };
+            let v = if b == 0 { v1 } else { v0 };
+            vertices.push(Vertex { pos: [px, py, 0.0], normal: [0.0, 0.0, 1.0], uv: [u, v] });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    oriented(vertices, indices)
+}
+
 /// Flat shapes in the XY plane as one mesh: `rects` as `[x0, y0, x1, y1]` and
 /// `polys` as outlines in either winding.
 ///
@@ -875,5 +928,26 @@ mod tilemap_tests {
         // A rect is two triangles over its four corners.
         let r = flat_shapes(&[[0.0, 0.0, 2.0, 1.0]], &[]);
         assert_eq!((r.vertices.len(), r.indices.len()), (4, 6));
+    }
+
+    /// A placed tile stands on the bottom of its cell: a flat one fills it,
+    /// a tall one rises out of the top, and the cells come out in the order
+    /// given, which is what lets the nearer of two overlapping tiles win.
+    #[test]
+    fn placed_tiles_stand_on_their_cells_in_the_order_given() {
+        let cells = [(1usize, [0.0, -1.0]), (0, [0.0, 1.0])];
+        let m = tilemap_placed(&cells, 2.0, 1.0, 2.0, 1, 1, [0.0, 0.0], &[0, 0]);
+        assert_eq!(m.vertices.len(), 8);
+        let ys = |q: usize| {
+            let v = &m.vertices[q * 4..q * 4 + 4];
+            let lo = v.iter().map(|v| v.pos[1]).fold(f32::MAX, f32::min);
+            let hi = v.iter().map(|v| v.pos[1]).fold(f32::MIN, f32::max);
+            (lo, hi)
+        };
+        assert_eq!(ys(0), (-1.5, 0.5), "the first listed cell first, standing on its bottom edge");
+        assert_eq!(ys(1), (0.5, 2.5));
+        // An empty square draws nothing.
+        let e = tilemap_placed(&cells, 2.0, 1.0, 1.0, 1, 1, [0.0, 0.0], &[floptle_core::EMPTY_TILE, 0]);
+        assert_eq!(e.vertices.len(), 4);
     }
 }

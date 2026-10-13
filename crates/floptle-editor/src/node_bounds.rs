@@ -76,9 +76,13 @@ pub(crate) fn local_radius(matter: &Matter, m: Measured) -> Option<f32> {
         // needs to be, and so: where the generated mesh puts its
         // origin is a detail of the mesh builder, and a cull that silently
         // depends on that would break the day somebody recentres it.
+        //
+        // The same radius holds an isometric or hexagonal layout of the same
+        // cells, which spreads them no further than twice the square half-
+        // extent; two tiles more cover art drawn taller than its cell.
         Matter::Tilemap { cols, rows, tile, .. } => {
             let (w, h) = (*cols as f32 * *tile, *rows as f32 * *tile);
-            (w.is_finite() && h.is_finite()).then(|| (w * w + h * h).sqrt())
+            (w.is_finite() && h.is_finite()).then(|| (w * w + h * h).sqrt() + 2.0 * *tile)
         }
         // Sprites live at arbitrary positions in the batch node's local space,
         // so the batch's own `size` says nothing about where they are. The
