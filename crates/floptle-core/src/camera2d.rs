@@ -85,6 +85,10 @@ pub struct Camera2D {
     /// reason: a rounding read back as a position is a rounding applied to an
     /// already-rounded number, every frame, forever.
     pub last_shake: DVec2,
+    /// Where the camera was last drawn, which is what its transform holds
+    /// until something else writes it. A transform that no longer says this
+    /// was moved by a script, and is read as it is.
+    pub last_out: Option<DVec2>,
     /// Half the size of what the camera shows, in world units, this frame.
     /// The limits keep the VIEW inside them, so they need to know how far it
     /// reaches either side of the centre. Set by [`step_all_view`].
@@ -117,6 +121,7 @@ impl Default for Camera2D {
             shake_total: 0.0,
             view_half: DVec2::ZERO,
             last_shake: DVec2::ZERO,
+            last_out: None,
             look_ahead: [0.0, 0.0],
             room_tag: String::new(),
             rooms: Vec::new(),
@@ -182,9 +187,17 @@ impl Camera2D {
     /// random number so that two machines simulating the same frame see the
     /// same camera, and so a replay looks like what happened.
     pub fn step(&mut self, here: DVec2, target: Option<DVec2>, dt: f32, t: f64) -> DVec2 {
-        // `here` carries last frame's shake, because that is what was written
-        // to the transform. Every read of it has to take that back off first.
-        let unshaken = here - self.last_shake;
+        // `here` carries last frame's shake and snap, when it is still what
+        // was written to the transform, and that has to come back off before
+        // it is read as a position. A transform a script has written since is
+        // a fresh position with nothing of ours in it: taking last frame's
+        // rounding off that moved a script-driven camera by a different
+        // fraction of a pixel every frame.
+        let unshaken = if self.last_out.is_some_and(|o| (o - here).length_squared() < 1e-18) {
+            here - self.last_shake
+        } else {
+            here
+        };
         if !self.started {
             self.pos = unshaken;
             self.started = true;
@@ -255,6 +268,9 @@ impl Camera2D {
             let k = if tau <= 1e-6 { 1.0 } else { 1.0 - (-(dt.max(0.0) as f64) / tau).exp() };
             self.pos += (want - self.pos) * k;
         }
+        // Whether a limit is holding the camera this frame, rather than the
+        // target leading it: the pixel snap below treats the two differently.
+        let before_limits = self.pos;
         // 3. Limits, on the followed position — so the state itself never leaves
         // the level and there is nothing to un-clamp when the target comes back.
         // They bound what is SHOWN: the centre stays half a view inside each
@@ -298,13 +314,26 @@ impl Camera2D {
         // grid, shake included. Snapping before the shake would put the camera
         // on a whole pixel and then move it off one again, which is the entire
         // problem.
+        //
+        // Following, the camera is snapped to a whole number of pixels from
+        // its target rather than to the world's grid: the target is drawn
+        // where it really is, and rounding the camera on its own moved it a
+        // pixel against the target on some frames and not others, so a player
+        // walking steadily wobbled on screen. Held by a limit, there is
+        // nothing to wobble against, and the world grid keeps the level still.
         if self.pixel_snap.is_finite() && self.pixel_snap > 0.0 {
             let ppu = self.pixel_snap as f64;
-            out = DVec2::new((out.x * ppu).round() / ppu, (out.y * ppu).round() / ppu);
+            let snap = |v: DVec2| DVec2::new((v.x * ppu).round() / ppu, (v.y * ppu).round() / ppu);
+            let held = (self.pos - before_limits).length_squared() > 1e-18;
+            out = match (target, held) {
+                (Some(t), false) => t + snap(out - t),
+                _ => snap(out),
+            };
         }
         // Whatever those two added is what the transform will carry, and what
         // the next frame has to take back off before it reads a position.
         self.last_shake = out - self.pos;
+        self.last_out = Some(out);
         out
     }
 }
@@ -694,22 +723,22 @@ mod tests {
     /// 2D project writes this by hand against a constant the engine already
     /// knows.
     ///
-    /// Snapping the drawn position and not `pos` is the part that matters: round
-    /// the state and the rounding is re-applied to an already-rounded number
-    /// every frame, and the camera cannot creep at less than a pixel per frame
-    /// at all.
+    /// Snapping the drawn position and not the position it was given is the
+    /// part that matters: round what the script wrote and a camera eased a
+    /// third of a pixel a frame never moves at all. (A camera following a
+    /// target snaps to whole pixels from the target instead; see
+    /// `a_followed_target_does_not_wobble_on_screen`.)
     #[test]
     fn a_snapped_camera_draws_on_whole_pixels_and_still_creeps_between_them() {
         let mut c = Camera2D { smoothing: 0.0, pixel_snap: 32.0, ..Default::default() };
-        // Seed at the origin, then ask for somewhere a third of a pixel along.
-        c.step(at(0.0, 0.0), Some(at(0.0, 0.0)), 0.016, 0.0);
         let step = 1.0 / 32.0;
-        let out = c.step(at(0.0, 0.0), Some(at(step / 3.0, 0.0)), 0.016, 0.0);
+        let out = c.step(at(0.0, 0.0), None, 0.016, 0.0);
+        assert_eq!(out.x, 0.0);
+        // A script easing it a third of a pixel at a time.
+        let out = c.step(at(step / 3.0, 0.0), None, 0.016, 0.0);
         assert_eq!(out.x, 0.0, "a third of a pixel should draw at the same pixel");
-        // The follow kept the sub-pixel place, so three of those cross one.
-        assert!((c.pos.x - step / 3.0).abs() < 1e-9, "the snap was written into the follow");
-        c.step(out, Some(at(step * 0.7, 0.0)), 0.016, 0.0);
-        let out = c.step(c.pos + c.last_shake, Some(at(step * 1.1, 0.0)), 0.016, 0.0);
+        c.step(at(step * 0.7, 0.0), None, 0.016, 0.0);
+        let out = c.step(at(step * 1.1, 0.0), None, 0.016, 0.0);
         assert!((out.x - step).abs() < 1e-9, "the camera never crossed a pixel: {}", out.x);
 
         // Off is off.
@@ -867,5 +896,70 @@ mod tests {
         c.limit_max = [8.0, 16.0];
         let out = c.step(out, Some(DVec2::new(1.0, 1.0)), 1.0 / 60.0, 0.0);
         assert!((out.x - 4.0).abs() < 1e-6, "{out:?}");
+    }
+
+    /// A script moving a snapped camera itself, a third of a pixel a frame:
+    /// what is drawn never steps backwards. Last frame's rounding used to be
+    /// taken off each fresh position, a different fraction of a pixel every
+    /// frame.
+    #[test]
+    fn a_script_driven_snapped_camera_moves_steadily() {
+        let ppu = 8.0f64;
+        let mut c = Camera2D { pixel_snap: ppu as f32, ..Default::default() };
+        let mut script = DVec2::ZERO;
+        let mut last = f64::MIN;
+        for f in 0..200 {
+            // The script keeps its own unrounded position and writes it.
+            script.x += 0.3 / ppu;
+            let out = c.step(script, None, 1.0 / 60.0, f as f64 / 60.0);
+            assert!(out.x >= last, "frame {f}: drawn at {} after {last}", out.x * ppu);
+            assert!((out.x - script.x).abs() <= 0.5 / ppu + 1e-9, "within half a pixel of where the script put it");
+            last = out.x;
+        }
+    }
+
+    /// Following a target that moves a steady 2.8 pixels a frame, the target's
+    /// place on screen never reverses: the camera keeps a whole-pixel offset
+    /// from it. Rounded on its own, the camera crossed pixel boundaries on
+    /// different frames from the target and the target wobbled a pixel.
+    #[test]
+    fn a_followed_target_does_not_wobble_on_screen() {
+        for fps in [60.0f64, 75.0, 120.0, 144.0, 165.0] {
+            let ppu = 24.0f64;
+            let mut c = Camera2D { pixel_snap: ppu as f32, smoothing: 0.15, ..Default::default() };
+            let speed = 2.8 * 60.0 / ppu; // 2.8 px a frame at 60, the same speed at every rate
+            let dt = 1.0 / fps;
+            let mut here = DVec2::ZERO;
+            let mut screen: Vec<f64> = Vec::new();
+            for f in 0..(fps as usize * 4) {
+                let target = DVec2::new(speed * f as f64 * dt, 0.0);
+                here = c.step(here, Some(target), dt as f32, f as f64 * dt);
+                // Where the target lands on screen, in pixels from the centre.
+                screen.push(((target.x - here.x) * ppu).round());
+            }
+            let moves: Vec<f64> = screen.windows(2).map(|w| w[1] - w[0]).filter(|d| *d != 0.0).collect();
+            let reversals = moves.windows(2).filter(|w| w[0].signum() != w[1].signum()).count();
+            assert_eq!(reversals, 0, "at {fps} fps the target turned back on screen {reversals} times");
+        }
+    }
+
+    /// Held still by a limit, a snapped camera sits on the world's pixel grid,
+    /// so the level does not shimmer while the player walks into a wall.
+    #[test]
+    fn a_camera_held_by_a_limit_sits_on_the_grid() {
+        let ppu = 8.0f64;
+        let mut c = Camera2D {
+            pixel_snap: ppu as f32,
+            smoothing: 0.0,
+            limits_on: true,
+            limit_min: [-10.0, -10.0],
+            limit_max: [5.03, 10.0],
+            ..Default::default()
+        };
+        let mut here = DVec2::ZERO;
+        for f in 0..30 {
+            here = c.step(here, Some(DVec2::new(20.0 + f as f64 * 0.01, 0.0)), 1.0 / 60.0, f as f64 / 60.0);
+        }
+        assert!(((here.x * ppu) - (here.x * ppu).round()).abs() < 1e-9, "on the grid: {}", here.x * ppu);
     }
 }
