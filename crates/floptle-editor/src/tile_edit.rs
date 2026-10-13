@@ -1172,6 +1172,9 @@ pub(crate) struct TileViz {
     pub(crate) collision: Vec<Vec<Vec2>>,
     /// The square (or stamp) under the cursor, as a closed ring.
     pub(crate) cursor: Option<Vec<Vec2>>,
+    /// The brush's own tiles, drawn faintly where a click will put them —
+    /// turned and flipped the way they will land.
+    pub(crate) ghost: Vec<GhostTile>,
     /// The rubber band of a drag in flight, as a closed ring.
     pub(crate) band: Option<Vec<Vec2>>,
     /// The current selection, as a closed ring.
@@ -1179,6 +1182,20 @@ pub(crate) struct TileViz {
     /// The layer's outer edge — where the map ends, which is otherwise invisible
     /// on an empty grid and is the first thing you need to see.
     pub(crate) bounds: Vec<Vec2>,
+}
+
+/// One tile of the brush, previewed where a click will place it.
+pub(crate) struct GhostTile {
+    /// The tile's quad on screen, at the corners the layer's mesh gives it, in
+    /// (s, t) order — (0, 0), (1, 0), (1, 1), (0, 1), s left→right and t
+    /// bottom→top — so the art's turn and flip land the same as on the map.
+    pub(crate) quad: [Vec2; 4],
+    /// The sheet the tile's page draws from: project-relative, and its grid.
+    pub(crate) sheet: String,
+    pub(crate) sheet_cols: u32,
+    pub(crate) sheet_rows: u32,
+    /// The tile within that page, with its orientation packed in.
+    pub(crate) packed: u32,
 }
 
 impl Editor {
@@ -1348,6 +1365,61 @@ impl Editor {
                         (cy + s.rows.max(1) as i32) as f32,
                     )
                 };
+                // The ghost: the brush's tiles themselves, for the tools whose
+                // click lays the brush down. Built from `armed()` — the stamp
+                // the placement uses — at the corners the layer's mesh gives
+                // each square, so what you see is what the click will draw.
+                if matches!(
+                    self.tile_tools.tool,
+                    TileTool::Brush | TileTool::Rect | TileTool::Frame | TileTool::Line | TileTool::Bucket
+                ) {
+                    let mat = self.world.get::<floptle_core::Material>(e).cloned().unwrap_or_default();
+                    let set = (!tileset.is_empty()).then(|| self.tiles.get(tileset)).flatten();
+                    let pages = crate::sprite2d::page_sheets(set, &mat);
+                    for y in 0..s.rows.max(1) {
+                        for x in 0..s.cols.max(1) {
+                            let Some(packed) = s.get(x, y).filter(|p| *p != floptle_core::EMPTY_TILE) else {
+                                continue;
+                            };
+                            let cell = floptle_core::tile_index(packed);
+                            let Some((sheet, sc, sr)) = pages.get(floptle_core::tile_page(cell) as usize) else {
+                                continue;
+                            };
+                            let local = floptle_core::tile_in_page(cell);
+                            if sheet.trim().is_empty() || local >= sc * sr {
+                                continue;
+                            }
+                            let (c, r) = (cx + x as i32, cy + y as i32);
+                            let quad = if layout.is_square() {
+                                let (c, r) = (c as f32, r as f32);
+                                [corner(c, r + 1.0), corner(c + 1.0, r + 1.0), corner(c + 1.0, r), corner(c, r)]
+                            } else {
+                                // `tilemap_placed`'s quad: the cell's width, standing
+                                // on the cell's bottom, as tall as the art's own
+                                // proportions make it.
+                                let [mx, my] = layout.center(c, r);
+                                let quad_h = self
+                                    .texture_registry
+                                    .get(sheet.as_str())
+                                    .and_then(|id| self.raster.as_ref()?.texture_size(*id))
+                                    .map(|[w, h]| layout.w * (h / *sr as f32) / (w / *sc as f32).max(1e-6))
+                                    .unwrap_or(layout.h);
+                                let (x0, x1) = (mx - layout.w * 0.5, mx + layout.w * 0.5);
+                                let y0 = my - layout.h * 0.5;
+                                let y1 = y0 + quad_h;
+                                [Vec3::new(x0, y0, 0.0), Vec3::new(x1, y0, 0.0), Vec3::new(x1, y1, 0.0), Vec3::new(x0, y1, 0.0)]
+                            };
+                            let [Some(a), Some(b), Some(c2), Some(d)] = quad.map(project) else { continue };
+                            viz.ghost.push(GhostTile {
+                                quad: [a, b, c2, d],
+                                sheet: sheet.clone(),
+                                sheet_cols: *sc,
+                                sheet_rows: *sr,
+                                packed: floptle_core::tile_pack(local, floptle_core::tile_xform(packed)),
+                            });
+                        }
+                    }
+                }
             }
         }
         self.tile_viz = Some(viz);
@@ -1464,5 +1536,86 @@ mod resize_tests {
         press(&mut ed, K::BracketRight);
         assert_eq!(ed.tile_tools.xform, TileXform::NONE.flipped_y());
         assert!(super::reorient_key(K::KeyA).is_none());
+    }
+}
+
+#[cfg(test)]
+mod ghost_tests {
+    use super::*;
+    use floptle_core::math::{DVec3, Vec2};
+
+    /// A 4×4 layer on a 2×2 sheet at the origin, the Scene camera ten units
+    /// back looking at it, the Tiles tool held and the pointer mid-screen.
+    fn editor() -> Option<crate::Editor> {
+        let mut ed = crate::offscreen::test_editor_with_gpu()?;
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::transform::Transform::IDENTITY);
+        ed.world.insert(
+            e,
+            Matter::Tilemap { cols: 4, rows: 4, tile: 1.0, data: vec![floptle_core::EMPTY_TILE; 16], tileset: String::new() },
+        );
+        ed.world.insert(
+            e,
+            floptle_core::Material {
+                texture: Some("sheet.png".into()),
+                sheet_cols: 2,
+                sheet_rows: 2,
+                ..Default::default()
+            },
+        );
+        ed.tile_tools.layer = Some(e);
+        ed.tool = crate::gizmo::Tool::Tiles;
+        ed.camera.position = DVec3::new(0.0, 0.0, 10.0);
+        ed.camera.yaw = 0.0;
+        ed.camera.pitch = 0.0;
+        let gpu = ed.gpu.as_ref()?;
+        ed.cursor = Some(Vec2::new(gpu.config.width as f32 * 0.5 + 1.0, gpu.config.height as f32 * 0.5 + 1.0));
+        Some(ed)
+    }
+
+    /// The brush is previewed as its own tile, turned and flipped the way the
+    /// click will place it, filling exactly the square the cursor outline
+    /// marks — its corners in the order the layer's mesh lays a tile, so the
+    /// turn lands on screen as it lands on the map.
+    #[test]
+    fn the_brush_shows_a_ghost_of_the_tile_it_will_place() {
+        let Some(mut ed) = editor() else { return };
+        ed.tile_tools.stamp = Stamp::one(3);
+        ed.tile_tools.xform = TileXform::new(1, true);
+        ed.tile_frame_viz();
+        let viz = ed.tile_viz.as_ref().expect("the overlay is built while the tool is held");
+        assert_eq!(viz.ghost.len(), 1, "one tile on the brush, one ghost");
+        let g = &viz.ghost[0];
+        assert_eq!(g.packed, floptle_core::tile_pack(3, TileXform::new(1, true)), "the ghost lost the brush's turn");
+        assert_eq!((g.sheet.as_str(), g.sheet_cols, g.sheet_rows), ("sheet.png", 2, 2));
+        let ring = viz.cursor.as_ref().expect("the cursor's square is outlined");
+        for p in &g.quad {
+            assert!(
+                ring.iter().any(|r| r.distance(*p) < 1e-3),
+                "ghost corner {p:?} is not a corner of the square the click lands on: {ring:?}"
+            );
+        }
+        // (s, t) = (0, 0) is the bottom-left on screen, (1, 1) the top-right.
+        let [bl, br, tr, tl] = g.quad;
+        assert!(bl.x < br.x && tl.x < tr.x, "s should run left to right: {:?}", g.quad);
+        assert!(bl.y > tl.y && br.y > tr.y, "t should run bottom to top (screen y grows down): {:?}", g.quad);
+    }
+
+    /// Tools that do not lay the brush down show no ghost, and mid-drag the
+    /// rubber band is the telegraph instead.
+    #[test]
+    fn only_a_placing_tool_shows_the_ghost() {
+        let Some(mut ed) = editor() else { return };
+        ed.tile_tools.stamp = Stamp::one(1);
+        for tool in [TileTool::Erase, TileTool::Pick, TileTool::Select, TileTool::Move] {
+            ed.tile_tools.tool = tool;
+            ed.tile_frame_viz();
+            assert!(ed.tile_viz.as_ref().unwrap().ghost.is_empty(), "{tool:?} showed a ghost");
+        }
+        ed.tile_tools.tool = TileTool::Rect;
+        ed.tile_tools.down = true;
+        ed.tile_tools.from = Some((0, 0));
+        ed.tile_frame_viz();
+        assert!(ed.tile_viz.as_ref().unwrap().ghost.is_empty(), "a drag in flight showed a ghost");
     }
 }

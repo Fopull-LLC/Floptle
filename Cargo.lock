@@ -2062,6 +2062,7 @@ dependencies = [
  "base64 0.22.1",
  "flate2",
  "floptle-account",
+ "floptle-anim",
  "floptle-audio",
  "floptle-core",
  "floptle-field",

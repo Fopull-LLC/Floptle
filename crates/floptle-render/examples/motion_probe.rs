@@ -314,6 +314,8 @@ impl Rig {
             proj: self.proj.to_cols_array_2d(),
             inv_proj: self.proj.inverse().to_cols_array_2d(),
             fog: [0.0; 4],
+            inv_view: glam::Mat4::IDENTITY.to_cols_array_2d(),
+            eye: [0.0; 3],
         };
         self.post.run(gpu, &s, Some(&ssao), &self.out_view);
         read_rgb(gpu, &self.out)

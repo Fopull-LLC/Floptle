@@ -2373,10 +2373,37 @@ fn paint_tile(
         ui.painter().rect_filled(rect, 0.0, c);
         return;
     }
+    // Corners of the drawn quad in (s, t): s left→right, t bottom→top. egui's y
+    // grows downward, so t = 1 is rect.top().
+    let quad = [rect.left_bottom(), rect.right_bottom(), rect.right_top(), rect.left_top()];
+    if let Some(mesh) = tile_quad_mesh(sheet.id(), sc, sr, packed, quad, Color32::WHITE) {
+        ui.painter().add(egui::Shape::mesh(mesh));
+    }
+}
+
+/// One tile of the sheet as an egui mesh over any quad, honouring its packed
+/// orientation. `quad` is the corners in (s, t) order — (0, 0), (1, 0),
+/// (1, 1), (0, 1), s left→right and t bottom→top — and `tint` multiplies the
+/// art (a ghost is the art at partial alpha).
+///
+/// The palette's tiles and the Scene view's brush ghost both draw through
+/// here, with the four UVs permuted by `tile_corner` the way the tilemap mesh
+/// permutes them: neither can show a turn the map would not draw.
+pub(crate) fn tile_quad_mesh(
+    sheet: egui::TextureId,
+    sc: u32,
+    sr: u32,
+    packed: u32,
+    quad: [egui::Pos2; 4],
+    tint: Color32,
+) -> Option<egui::Mesh> {
+    if packed == floptle_core::EMPTY_TILE {
+        return None;
+    }
     let cell = floptle_core::tile_index(packed);
     let (sc, sr) = (sc.max(1), sr.max(1));
     if cell >= sc * sr {
-        return;
+        return None;
     }
     let (cx, cy) = (cell % sc, cell / sc);
     let (u0, u1) = (cx as f32 / sc as f32, (cx + 1) as f32 / sc as f32);
@@ -2384,15 +2411,9 @@ fn paint_tile(
     let xf = floptle_core::tile_xform(packed);
     // egui's `Image` cannot express a rotated UV window, so draw the quad as a
     // mesh with the four UVs permuted the same way the tilemap mesh permutes them.
-    let mut mesh = egui::Mesh::with_texture(sheet.id());
-    // Corners of the drawn quad in (s, t): s left→right, t bottom→top. egui's y
-    // grows downward, so t = 1 is rect.top().
-    for (s, t) in [(0u8, 1u8), (1, 1), (1, 0), (0, 0)] {
+    let mut mesh = egui::Mesh::with_texture(sheet);
+    for (pos, (s, t)) in quad.into_iter().zip([(0u8, 0u8), (1, 0), (1, 1), (0, 1)]) {
         let (a, b) = floptle_core::tile_corner(s, t, xf);
-        let pos = egui::pos2(
-            if s == 0 { rect.left() } else { rect.right() },
-            if t == 1 { rect.top() } else { rect.bottom() },
-        );
         let uv = egui::pos2(
             if a == 0 { u0 } else { u1 },
             // Texture v runs down, so the art's TOP (b = 1) is the smaller v.
@@ -2400,11 +2421,11 @@ fn paint_tile(
         );
         // Pushed whole: `colored_vertex` is for untextured meshes and asserts
         // so in a debug build, which panicked the first time a tile drew.
-        mesh.vertices.push(egui::epaint::Vertex { pos, uv, color: Color32::WHITE });
+        mesh.vertices.push(egui::epaint::Vertex { pos, uv, color: tint });
     }
     mesh.add_triangle(0, 1, 2);
     mesh.add_triangle(0, 2, 3);
-    ui.painter().add(egui::Shape::mesh(mesh));
+    Some(mesh)
 }
 
 /// What the tileset knows about a tile, drawn over its art in the palette: the

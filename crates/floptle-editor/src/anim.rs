@@ -249,6 +249,9 @@ pub struct AnimInstance {
     /// This frame's script changes to the pose (`anim:setBoneRot`, `reach`,
     /// `lookAt`), applied after the animator and dropped with the frame.
     pub pose_ops: Vec<floptle_script::AnimPoseOp>,
+    /// Scratch: the rig path's final local pose, script changes included —
+    /// what a script's bone read solves its own queued writes on top of.
+    local: Vec<floptle_anim::TransformTRS>,
 }
 
 /// Everything animation the editor owns. One field on `Editor`.
@@ -298,9 +301,10 @@ pub struct AnimSystem {
     pub overrides: HashMap<Entity, AnimOverride>,
     /// Last frame: animators, and how many of them culling skipped.
     pub counts: (usize, usize),
-    /// Each rig's skeleton node names, shared with the script host's bone
-    /// reads so a frame's refill copies poses and never names.
-    bone_names: HashMap<String, Rc<Vec<String>>>,
+    /// Each rig's skeleton node names, and the skeleton itself, shared with
+    /// the script host's bone reads so a frame's refill copies poses and never
+    /// names or rigs.
+    bone_names: HashMap<String, (Rc<Vec<String>>, Rc<floptle_anim::Skeleton>)>,
     /// `anim:events` / `anim:duration` data per entity, keyed by the bound revision.
     /// The script mirror is rebuilt every frame; this half only changes when an
     /// instance rebinds, so cloning event strings 60×/s would be pure waste.
@@ -385,24 +389,30 @@ impl AnimSystem {
             let Some(Matter::Mesh { asset_path }) = world.get::<Matter>(*e) else { continue };
             let Some(rig) = mesh_registry.get(asset_path).and_then(|m| m.rig.as_ref()) else { continue };
             let nodes = &rig.skeleton.nodes;
-            let names = match self.bone_names.get(asset_path) {
+            let (names, skel) = match self.bone_names.get(asset_path) {
                 // A re-import can change the skeleton under the same path; the
                 // count and the two ends catch that without comparing every
                 // name of every character every frame.
-                Some(n)
+                Some((n, k))
                     if n.len() == nodes.len()
                         && n.first() == nodes.first().map(|b| &b.name)
                         && n.last() == nodes.last().map(|b| &b.name) =>
                 {
-                    n.clone()
+                    (n.clone(), k.clone())
                 }
                 _ => {
                     let n = Rc::new(nodes.iter().map(|n| n.name.clone()).collect::<Vec<_>>());
-                    self.bone_names.insert(asset_path.clone(), n.clone());
-                    n
+                    let k = Rc::new(rig.skeleton.clone());
+                    self.bone_names.insert(asset_path.clone(), (n.clone(), k.clone()));
+                    (n, k)
                 }
             };
             out.set(e.index(), &names, pose);
+            if let Some(inst) = self.instances.get(e)
+                && inst.local.len() == nodes.len()
+            {
+                out.set_rig(e.index(), &skel, rig.offset, &inst.local);
+            }
         }
         out.end();
     }
@@ -1193,6 +1203,7 @@ pub fn bind_entity(
                 held: 0.0,
                 stride: 0,
                 pose_ops: Vec::new(),
+                local: Vec::new(),
             })
         }
         // Controller on anything else: animate the node + its descendants.
@@ -1227,6 +1238,7 @@ pub fn bind_entity(
                 held: 0.0,
                 stride: 0,
                 pose_ops: Vec::new(),
+                local: Vec::new(),
             })
         }
         // No controller, but a rigged mesh: embedded clips, "Idle" (or the
@@ -1265,6 +1277,7 @@ pub fn bind_entity(
                 held: 0.0,
                 stride: 0,
                 pose_ops: Vec::new(),
+                local: Vec::new(),
             })
         }
         (None, None) => None,
@@ -1517,99 +1530,6 @@ fn diagnose_anim(
     }
 }
 
-/// A script's pose changes in the rig's own terms: bones by index, points in
-/// skeleton space (`to_rig` = the inverse of the node's world matrix times the
-/// rig's placement offset). A bone that is not there is said once, by name.
-fn rig_pose_ops(
-    ops: &[floptle_script::AnimPoseOp],
-    skel: &floptle_anim::Skeleton,
-    to_rig: floptle_core::math::DMat4,
-    eid: u32,
-    warn: &mut Vec<(String, String)>,
-) -> Vec<floptle_anim::PoseOp> {
-    use floptle_anim::PoseOp;
-    use floptle_script::AnimPoseOp;
-    let mut bone = |name: &str, call: &str| {
-        let found = skel.index_of(name);
-        if found.is_none() {
-            let names: Vec<&str> = skel.nodes.iter().map(|n| n.name.as_str()).collect();
-            warn.push((
-                format!("{eid}:bone:{name}"),
-                format!("anim:{call}: no bone \"{name}\" on this model{}", floptle_script::opts::near_miss_hint(name, &names)),
-            ));
-        }
-        found
-    };
-    let point = |p: [f64; 3]| to_rig.transform_point3(floptle_core::math::DVec3::from(p)).as_vec3();
-    let mut out = Vec::new();
-    // A tip without a parent and a grandparent has no limb to bend.
-    let mut limbless: Vec<&str> = Vec::new();
-    for op in ops {
-        match op {
-            AnimPoseOp::Bone { bone: name, rot, pos, add, weight } => {
-                let call = if rot.is_some() { if *add { "addBoneRot" } else { "setBoneRot" } } else if *add { "addBonePos" } else { "setBonePos" };
-                let Some(node) = bone(name, call) else { continue };
-                out.push(PoseOp::Local {
-                    node,
-                    rot: rot.map(Quat::from_array),
-                    pos: pos.map(Vec3::from_array),
-                    add: *add,
-                    weight: *weight,
-                });
-            }
-            AnimPoseOp::Reach { root, mid, tip, target, pole, weight } => {
-                let Some(t) = bone(tip, "reach") else { continue };
-                let parent = |i: usize| skel.nodes.get(i).and_then(|n| n.parent);
-                let m = match mid {
-                    Some(n) => bone(n, "reach"),
-                    None => parent(t),
-                };
-                let Some(m) = m else {
-                    if mid.is_none() {
-                        limbless.push(tip);
-                    }
-                    continue;
-                };
-                let r = match root {
-                    Some(n) => bone(n, "reach"),
-                    None => parent(m),
-                };
-                let Some(r) = r else {
-                    if root.is_none() {
-                        limbless.push(tip);
-                    }
-                    continue;
-                };
-                out.push(PoseOp::TwoBone { root: r, mid: m, tip: t, target: point(*target), pole: pole.map(point), weight: *weight });
-            }
-            AnimPoseOp::LookAt { bones, target, axis, limit_deg, weight } => {
-                let chain: Vec<usize> = bones.iter().filter_map(|b| bone(b, "lookAt")).collect();
-                if chain.len() != bones.len() {
-                    continue;
-                }
-                out.push(PoseOp::LookAt {
-                    chain,
-                    target: point(*target),
-                    // glTF's front: a character faces +Z in its own space.
-                    axis: axis.map(Vec3::from_array).unwrap_or(Vec3::Z),
-                    limit: limit_deg.to_radians(),
-                    weight: *weight,
-                });
-            }
-        }
-    }
-    for tip in limbless {
-        warn.push((
-            format!("{eid}:limb:{tip}"),
-            format!(
-                "anim:reach: \"{tip}\" has no parent and grandparent bone to bend, so there is no limb to reach with; \
-                 name the two bones with {{ root = \"UpperArm\", mid = \"Forearm\" }}"
-            ),
-        ));
-    }
-    out
-}
-
 /// Apply an instance's current pose (rig → poses map, nodes → Transforms).
 pub fn apply_instance(
     system: &mut AnimSystem,
@@ -1625,15 +1545,14 @@ pub fn apply_instance(
             let Some(rig) = mesh_registry.get(asset_path).and_then(|m| m.rig.as_ref()) else {
                 return;
             };
-            if inst.pose_ops.is_empty() {
-                rig.skeleton.world_matrices(inst.ctl.pose(), &mut inst.world);
-            } else {
+            inst.local.clear();
+            inst.local.extend_from_slice(inst.ctl.pose());
+            if !inst.pose_ops.is_empty() {
                 let to_rig = (floptle_core::world_transform(world, e).world_matrix() * rig.offset.as_dmat4()).inverse();
-                let ops = rig_pose_ops(&inst.pose_ops, &rig.skeleton, to_rig, e.index(), &mut warn);
-                let mut pose = inst.ctl.pose().to_vec();
-                floptle_anim::ik::apply(&rig.skeleton, &mut pose, &ops);
-                rig.skeleton.world_matrices(&pose, &mut inst.world);
+                let ops = floptle_script::rig_pose_ops(&inst.pose_ops, &rig.skeleton, to_rig, e.index(), &mut warn);
+                floptle_anim::ik::apply(&rig.skeleton, &mut inst.local, &ops);
             }
+            rig.skeleton.world_matrices(&inst.local, &mut inst.world);
             // Same placement offset as rest_world so pose and rest agree.
             for m in inst.world.iter_mut() {
                 *m = rig.offset * *m;

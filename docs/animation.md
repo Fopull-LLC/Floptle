@@ -327,8 +327,9 @@ end
   `anim:lookAt(bones, target, { limit = 75 })`. See
   [Bones from a script](#bones-from-a-script).
 - `anim:boneWorld(bone)` gives the bone's world position, yaw, pitch and roll
-  after all of that. It works under `floptle run` and on a dedicated server
-  too.
+  after all of that, including writes made earlier in the same `update` or
+  `lateUpdate`: set a bone, then read it, and you get where you sent it. It
+  works under `floptle run` and on a dedicated server too.
 - Reads: `anim:state([layer])`, `anim:time([layer])`, `anim:finished([layer])`,
   `anim:isPlaying([state])`, `anim:clips()`, `anim:layers()`.
 - Authored data, from the asset rather than playback (so it works in `start()`):

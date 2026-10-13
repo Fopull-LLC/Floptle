@@ -48,7 +48,7 @@ const OFFSCREEN_SRC: &str = include_str!("../src/offscreen.rs");
 /// The calls that put world geometry into a frame. Each must appear on both
 /// paths; a call that exists on only one is a kind of object some views cannot
 /// see.
-const GATHERS: [(&str, &str); 12] = [
+const GATHERS: [(&str, &str); 16] = [
     ("push_mesh_instances", "imported models, map meshes, skinned characters"),
     // Not geometry either, but the same failure with a different face: a node's
     // Tint multiplies over everything it drew. Applied on one path only, a
@@ -101,6 +101,16 @@ const GATHERS: [(&str, &str); 12] = [
     // last. Draws, lights, nodes, chunks, particles: none of it reached
     // `perf.counts()` from the one path that draws every other view.
     ("set_counts", "the render counts a game reads via perf.counts()"),
+    ("push_terrain_instances", "the meshed terrain's chunks"),
+    ("push_decal_instances", "decals on the ground"),
+    // The sixth time, and the one a game saw first: scatter was gathered by
+    // the window only, so `camera.capture` and `floptle shot` photographed
+    // bare ground with every plant, rock and lamp a field puts on it missing,
+    // and a lander resting among them looked half buried.
+    ("push_scatter", "scatter fields — the plants, rocks and props a seed grows"),
+    // The body a round world's fog is measured from, camera-relative like
+    // every other lane of its kind.
+    ("fog_body_lane", "the planet a round world's fog follows"),
 ];
 
 /// The body of `render_world_into`, from its signature to the end of its file.

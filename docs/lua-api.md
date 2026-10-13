@@ -40,7 +40,7 @@ each group, and meant to be searched.
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 19
-- [components — getcomponent](#components--getcomponent) — 104
+- [components — getcomponent](#components--getcomponent) — 106
 - [animation — node:animator](#animation--nodeanimator) — 26
 - [particles — effects from script](#particles--effects-from-script) — 11
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 32
@@ -379,7 +379,7 @@ json.encode(t) and json.decode(s) — the wire format for http.*. decode returns
 
 ### `lateUpdate`
 
-function lateUpdate(node, dt) — runs once per frame AFTER physics and the interpolated transform writeback: the CAMERA pass. Anything that follows something else (orbit cameras, name tags, listeners) belongs here so it samples this frame's FINAL poses. Following from update reads LAST frame's pose — a velocity × dt lag that turns frame-time noise into visible jitter. Animator pose ops queued here (reach, lookAt, setBoneRot, …) land on this frame's pose too.
+function lateUpdate(node, dt) — runs once per frame AFTER physics and the interpolated transform writeback: the CAMERA pass. Anything that follows something else (orbit cameras, name tags, listeners) belongs here so it samples this frame's FINAL poses. Following from update reads LAST frame's pose — a velocity × dt lag that turns frame-time noise into visible jitter. Animator pose ops queued here (reach, lookAt, setBoneRot, …) land on this frame's pose too. Every node's update has run before the first lateUpdate. Between nodes lateUpdate runs in the same order update does, which a removed node can change; when one follower must come after another (an atmosphere after the camera that sets it up), call it from that script rather than counting on scene order.
 
 ```lua
 -- follow AFTER physics, so the camera samples this frame's final pose
@@ -817,7 +817,7 @@ Screen UI from scripts: ui.on / ui.events for input, ui.bind for data, ui.make f
 
 ### `update`
 
-function update(node, dt) — runs every frame while playing.
+function update(node, dt) — runs every frame while playing. Each frame every node's update runs before any node's lateUpdate. Between nodes, the order is the order they were loaded or created, but removing a node can move another into its place, so never rely on one node's update running before another's: put the one that must run after in lateUpdate, or have one script call the other's function.
 
 ```lua
 function update(node, dt)
@@ -1174,7 +1174,7 @@ node:setCamera{fovY=1.0, active=true, target="minimap", width=256, height=256, h
 
 ### `node:setCelestial`
 
-node:setCelestial{mu=…, bodyRadius=…, soi=0, parent="Sun", a=…, e=…, i=…, m0=…, atmoColor={r,g,b}, atmoHeight=…, atmoDensity=…, clouds=…, luminosity=…, starColor={r,g,b}, occluderRadius=…} — set (creating if absent) the node's CelestialBody. camelCase fields; colors take {r,g,b}. occluderRadius = occlusion culling: the solid-core radius geometry never pierces — terrain chunks fully behind it skip their draw calls (keep it below the deepest cave/dig; 0 = off).
+node:setCelestial{mu=…, bodyRadius=…, soi=0, parent="Sun", a=…, e=…, i=…, m0=…, atmoColor={r,g,b}, atmoHeight=…, atmoDensity=…, clouds=…, luminosity=…, starColor={r,g,b}, occluderRadius=…} — set (creating if absent) the node's CelestialBody. camelCase fields; colors take {r,g,b}. occluderRadius = occlusion culling: the solid-core radius geometry never pierces — terrain chunks fully behind it skip their draw calls (keep it below the deepest cave/dig; 0 = off). The atmosphere (atmoColor, atmoHeight, atmoDensity) is the whole sky from inside it: the air's colour overhead, brighter toward the horizon, a glow around the star, thinning with height until it is space at atmoHeight with the stars showing through — no sky shader needed. From outside it is the halo around the planet's edge.
 
 ### `node:setGlyphOffsets`
 
@@ -3422,7 +3422,7 @@ Vertical field of view, radians.
 
 ### `env.ambient2d`
 
-find("Lighting"):getcomponent("Light") — the scene's Lighting node, read and written like any other component. THIS IS WHERE A 2D SCENE'S BRIGHTNESS LIVES: ambient2dR/G/B is the 2D base light, the whole light a flat scene has before a single 2D light is placed, so turning it down is how you get a dark room for a torch to carve a circle out of — and reading it back first is how you put it where it was. Also colorR/G/B + intensity + directionX/Y/Z (a day cycle), ambientR/G/B (the 3D fill, deliberately a different value), shadows/shadowSoftness/shadowStrength/shadowTintR/G/B/shadowQuantize/shadowDither/shadowDistance/contactShadows/contactLength/contactSteps/contactStrength, the screen-space reflections that make a shiny floor show the room standing on it rather than only the sky (reflections, reflectionDistance, reflectionSteps, reflectionThickness), reflectionClamp (the most one reflected bounce may carry — two mirrors facing each other re-reflect each other every frame and a polished metal loses almost nothing per pass, so without a ceiling the pair climbs into a white blob; 0 removes it), refractionLayers (how many depths of glass can be seen through at once — at 1 only the nearest pane shows what is behind it, so a fish tank has to be one box; raise it and a window can have a bottle standing behind it), and the whole fog set: fog, fogColorR/G/B, fogStart, fogEnd, fogDensity, fogHeight, fogFalloff, fogNoise, fogNoiseScale, fogVolumetric, fogDither, fogDitherStrength, and the volumetric light injection (fogLight, fogAnisotropy, fogSteps, fogShafts). Every scene has exactly one Lighting node and the loader makes it, so find("Lighting") always finds it. Writes land the same frame.
+find("Lighting"):getcomponent("Light") — the scene's Lighting node, read and written like any other component. THIS IS WHERE A 2D SCENE'S BRIGHTNESS LIVES: ambient2dR/G/B is the 2D base light, the whole light a flat scene has before a single 2D light is placed, so turning it down is how you get a dark room for a torch to carve a circle out of — and reading it back first is how you put it where it was. Also colorR/G/B + intensity + directionX/Y/Z (a day cycle), ambientR/G/B (the 3D fill, deliberately a different value), shadows/shadowSoftness/shadowStrength/shadowTintR/G/B/shadowQuantize/shadowDither/shadowDistance/contactShadows/contactLength/contactSteps/contactStrength, the screen-space reflections that make a shiny floor show the room standing on it rather than only the sky (reflections, reflectionDistance, reflectionSteps, reflectionThickness), reflectionClamp (the most one reflected bounce may carry — two mirrors facing each other re-reflect each other every frame and a polished metal loses almost nothing per pass, so without a ceiling the pair climbs into a white blob; 0 removes it), refractionLayers (how many depths of glass can be seen through at once — at 1 only the nearest pane shows what is behind it, so a fish tank has to be one box; raise it and a window can have a bottle standing behind it), and the whole fog set: fog, fogColorR/G/B, fogStart, fogEnd, fogDensity, fogHeight, fogFalloff, fogNoise, fogNoiseScale, fogVolumetric, fogDither, fogDitherStrength, fogSky, fogFollowsBody, and the volumetric light injection (fogLight, fogAnisotropy, fogSteps, fogShafts). Every scene has exactly one Lighting node and the loader makes it, so find("Lighting") always finds it. Writes land the same frame.
 
 ### `env.ambient2dB`
 
@@ -3528,6 +3528,10 @@ World distance where fog is full.
 
 Volumetric: softness of the layer's top edge, world units.
 
+### `env.fogFollowsBody`
+
+Fog on a round world (1/0). On, fogHeight is an altitude over the nearest celestial body, the volumetric layer is a shell around it, and the sky blend leans on its horizon wherever you stand. Off, heights are world y, right for a flat level.
+
 ### `env.fogHeight`
 
 Volumetric: world height (y) of the fog layer's top.
@@ -3547,6 +3551,10 @@ Volumetric: noise feature size, world units per repeat.
 ### `env.fogShafts`
 
 Volumetric (1/0): march the sun shadow at every fog step, so beams appear through windows and branches. The entire cost of lit fog lives here.
+
+### `env.fogSky`
+
+How much of the fog the sky takes at the horizon, 0..1. The sky is infinitely far away, so a thinner fog never makes it fainter on its own: fade this to fade the sky's fog, as a climb out of the air does.
 
 ### `env.fogStart`
 
@@ -3845,7 +3853,7 @@ anim:addBoneRot("Spine1", yaw, pitch, roll [, weight]) — turn one bone further
 
 ### `anim:boneWorld`
 
-anim:boneWorld("Hand") → pos, yaw, pitch, roll — where the bone is this frame, in world space, after clips, bone writes and IK. nil until the model is posed. Works under `floptle run` and on a dedicated server, which read the rig without its pictures, so a hitbox can follow a hand where nothing is drawn.
+anim:boneWorld("Hand") → pos, yaw, pitch, roll — where the bone is this frame, in world space, after clips, bone writes and IK. A write made earlier in the same pass is already in the answer, so `setBonePos` then `boneWorld` reads back the moved bone. nil until the model is posed. Works under `floptle run` and on a dedicated server, which read the rig without its pictures, so a hitbox can follow a hand where nothing is drawn.
 
 ### `anim:clips`
 

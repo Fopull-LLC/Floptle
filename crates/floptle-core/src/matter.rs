@@ -1250,6 +1250,12 @@ pub struct Light {
     /// scene that wants it. Volumetric fog ignores this — it is a real medium
     /// and reaches the sky by marching it.
     pub fog_sky: f32,
+    /// Fog on a round world. Off, fog heights are world `y` and the horizon is
+    /// the world's horizontal — right for a flat level. On, they are measured
+    /// from the nearest celestial body: `fog_height` is an altitude over its
+    /// surface, the volumetric layer is a shell around it, and the sky blend
+    /// leans on that body's horizon wherever you stand on it.
+    pub fog_follows_body: bool,
 }
 
 impl Light {
@@ -1312,6 +1318,7 @@ impl Default for Light {
             fog_steps: 16,
             fog_shafts: true,
             fog_sky: 1.0,
+            fog_follows_body: false,
         }
     }
 }

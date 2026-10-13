@@ -4912,6 +4912,13 @@ impl EditorTabViewer<'_> {
                         )
                         .changed();
                 }
+                cmd.inspector_changed |= crate::responsive::check(ui, &mut l.fog_follows_body, "follows the planet")
+                    .on_hover_text(
+                        "fog on a round world: the height is an altitude over the nearest celestial \
+                         body, the volumetric layer is a shell around it, and the sky blend follows \
+                         its horizon wherever you stand. Off, heights are world y, for a flat level.",
+                    )
+                    .changed();
                 // Dither: hide 8-bit banding on long, slow fog ramps.
                 ui.horizontal_wrapped(|ui| {
                     cmd.inspector_changed |= crate::responsive::check(ui, &mut l.fog_dither, "dither")

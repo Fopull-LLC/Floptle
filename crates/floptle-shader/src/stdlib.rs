@@ -196,6 +196,8 @@ pub static OPS: &[OpSpec] = &[
     OpSpec { name: "sceneColor", inputs: &[opt("uv", V2, f64::NAN)], output: V4, stages: POSTONLY, emit: Emit::Special, doc: "The frame so far, in real light (a bright light really is brighter than 1). Omit uv for this pixel.", category: "screen" },
     OpSpec { name: "sceneDepth", inputs: &[opt("uv", V2, f64::NAN)], output: F, stages: POSTONLY, emit: Emit::Special, doc: "How far the camera is from what it sees, in world units. Sky reads a very large number, so a silhouette is an edge.", category: "screen" },
     OpSpec { name: "sceneNormal", inputs: &[opt("uv", V2, f64::NAN)], output: V3, stages: POSTONLY, emit: Emit::Special, doc: "Which way the surface faces, in view space (+z toward the camera) — worked out from depth, so every kind of geometry has one.", category: "screen" },
+    OpSpec { name: "sceneRay", inputs: &[opt("uv", V2, f64::NAN)], output: V3, stages: POSTONLY, emit: Emit::Special, doc: "The world-space direction the camera looks through at this pixel, unit length. With cameraPosition and sceneDepth it places a pixel in the world: a sky or atmosphere pass, height fog, a world-space grid.", category: "screen" },
+    OpSpec { name: "cameraPosition", inputs: &[], output: V3, stages: POSTONLY, emit: Emit::Fn("flsl_post_camera"), doc: "Where the camera is in the world. Far from the origin this is coarse (it is 32-bit); measure heights from a nearby point, not from zero.", category: "screen" },
     OpSpec { name: "screenTexel", inputs: &[], output: V2, stages: POSTONLY, emit: Emit::Fn("flsl_post_texel"), doc: "The size of one pixel in uv. Step by this to reach a neighbour — and it follows the retro resolution, so an effect stays one pixel wide.", category: "screen" },
 ];
 
@@ -612,7 +614,7 @@ mod tests {
     /// the post stage can reach the frame.
     #[test]
     fn the_post_stage_can_read_the_screen() {
-        for name in ["sceneColor", "sceneDepth", "sceneNormal", "screenTexel"] {
+        for name in ["sceneColor", "sceneDepth", "sceneNormal", "sceneRay", "cameraPosition", "screenTexel"] {
             let o = op(name).unwrap_or_else(|| panic!("`{name}` exists"));
             assert_eq!(o.stages, POSTONLY, "`{name}` is post-only");
         }

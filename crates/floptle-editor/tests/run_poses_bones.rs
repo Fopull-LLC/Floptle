@@ -141,3 +141,73 @@ end
     assert!(off < 0.005, "reach left the tip {off} m from where it was sent: {text}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// **A bone read sees the write a script just made.** `lateUpdate` moves a
+/// bone with `setBonePos` and reads it straight back: the answer is where the
+/// bone was sent, and the same place the next frame reads once the pose the
+/// frame drew is published — not the animator's pose from before the write.
+#[test]
+fn a_bone_read_after_a_late_write_sees_the_write() {
+    let d = std::env::temp_dir().join(format!("flrunbonewrite-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("scenes")).unwrap();
+    std::fs::create_dir_all(d.join("scripts")).unwrap();
+    let sae = concat!(env!("CARGO_MANIFEST_DIR"), "/../floptle-assets/tests/fixtures/Sae.glb");
+    std::fs::copy(sae, d.join("Sae.glb")).unwrap();
+    std::fs::write(d.join("project.ron"), "(title: Some(\"w\"), entry_scene: Some(\"scenes/first.ron\"))").unwrap();
+    std::fs::write(
+        d.join("scripts/pose.lua"),
+        r#"local frames = 0
+local function fmt(p) return string.format("%.4f %.4f %.4f", p.x, p.y, p.z) end
+function update(node, dt)
+  if frames == 5 then
+    print("drawn " .. fmt(find('Sae'):animator():boneWorld('Head')))
+  end
+end
+function lateUpdate(node, dt)
+  local sae = find('Sae')
+  local a = sae:animator()
+  frames = frames + 1
+  local before = a:boneWorld('Head')
+  a:setBonePos('Head', vec3(0, 5, 0))
+  if frames == 4 then
+    print("before " .. fmt(before))
+    print("after " .. fmt(a:boneWorld('Head')))
+    print("pos " .. fmt(sae:bonePos('Head')))
+  end
+end
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        d.join("scenes/first.ron"),
+        "(name: \"s\", nodes: [\
+         (name: \"Sae\", matter: Mesh(asset_path: \"Sae.glb\"), transform: (translation: (10.0, 0.0, 0.0))),\
+         (name: \"Driver\", scripts: [(kind: \"pose\")])])",
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_floptle"))
+        .args(["run", &d.to_string_lossy(), "--seconds", "0.3", "--json"])
+        .output()
+        .expect("run floptle run");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let doc: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"));
+    assert_eq!(doc["errors"], 0, "the probe raised: {text}");
+    let read = |tag: &str| -> [f64; 3] {
+        let line = doc["log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|l| l["message"].as_str()?.strip_prefix(tag).map(str::to_string))
+            .unwrap_or_else(|| panic!("no `{tag}` line: {text}"));
+        let v: Vec<f64> = line.split_whitespace().map(|x| x.parse().unwrap()).collect();
+        [v[0], v[1], v[2]]
+    };
+    let dist = |a: [f64; 3], b: [f64; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+    let (before, after, pos, drawn) = (read("before "), read("after "), read("pos "), read("drawn "));
+    assert!(dist(before, after) > 0.5, "the read ignored the write: before {before:?}, after {after:?}");
+    assert!(dist(after, drawn) < 1e-3, "the read and the drawn pose disagree: after {after:?}, drawn {drawn:?}");
+    assert!(dist(pos, drawn) < 1e-3, "bonePos and the drawn pose disagree: {pos:?} vs {drawn:?}");
+    let _ = std::fs::remove_dir_all(&d);
+}

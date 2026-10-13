@@ -603,7 +603,7 @@ impl<'a> Writer<'a> {
                 // The screen ops. Each takes an optional uv defaulting to this
                 // pixel's, so `sceneColor()` is the whole of a colour grade and
                 // `sceneColor(uv + off)` is the whole of a warp.
-                "sceneColor" | "sceneDepth" | "sceneNormal" => {
+                "sceneColor" | "sceneDepth" | "sceneNormal" | "sceneRay" => {
                     let uv = match &call.args[0] {
                         ResolvedArg::Default(_) => "in.uv".to_string(),
                         a => self.emit_resolved(a, Some(Ty::Vec2))?,
@@ -611,6 +611,7 @@ impl<'a> Writer<'a> {
                     let f = match op.name {
                         "sceneColor" => "flsl_post_color",
                         "sceneDepth" => "flsl_post_depth",
+                        "sceneRay" => "flsl_post_ray",
                         _ => "flsl_post_normal",
                     };
                     Ok(format!("{f}({uv})"))

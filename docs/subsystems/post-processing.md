@@ -232,14 +232,21 @@ shader inkOutline {
 }
 ```
 
-Four ops, `screen` category, available **only** in `stage post`:
+Six ops, `screen` category, available **only** in `stage post`:
 
 | Op | What it gives you |
 |---|---|
 | `sceneColor(uv?)` | the frame so far, in **real light** (upstream of the tonemap, so a bright light really does read above 1) |
 | `sceneDepth(uv?)` | distance from the camera in world units; the sky reads `1e6`, so a silhouette is the largest step in the frame |
 | `sceneNormal(uv?)` | the surface normal in **view space**, reconstructed from depth — so meshes, terrain, SDF matter and tilemaps all have one, with nothing to author |
+| `sceneRay(uv?)` | the **world-space** direction the camera looks through at that pixel, unit length. Right for perspective and orthographic cameras alike |
+| `cameraPosition()` | where the camera is in the world. 32-bit, so coarse far from the origin: measure heights from a nearby point (a planet's centre), not from zero |
 | `screenTexel()` | one pixel, in uv. Follows the **retro** resolution, so an effect written in texels stays one pixel wide instead of being magnified by the upscale |
+
+`cameraPosition() + sceneRay() * sceneDepth()` is the world point a pixel
+shows, so a screen pass can paint a sky by direction, fog by height, or a grid on
+the ground. Terrain, meshes, SDF matter and tilemaps all write depth, so only
+true sky reads `1e6`.
 
 The optional `uv` is the whole point. Defaulting to this pixel makes a colour
 grade a one-liner; passing another pixel's is what makes an edge detect, a blur
@@ -265,7 +272,7 @@ Three bind groups, all built from `post::layouts` so an authored pass and a
 built-in one cannot drift: group(0) is the chain's own `{ frame, sampler, params }`
 (which is why a custom pass ping-pongs between the chain's scratch targets with
 no bind group of its own), group(1) is the depth buffer plus the inverse
-projection, group(2) is the shader's uniforms. The WGSL contract lives in
+projection, the camera's turn and its world position, group(2) is the shader's uniforms. The WGSL contract lives in
 `floptle-shader/src/post_prelude.wgsl` — and unlike `TEST_PRELUDE` it is the
 **real** module text, not a mirror, so there is nothing to keep in step.
 

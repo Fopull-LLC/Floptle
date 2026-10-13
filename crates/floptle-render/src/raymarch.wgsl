@@ -154,21 +154,10 @@ fn deep_space(dir: vec3<f32>) -> vec3<f32> {
     // Near-flat void with a whisper of vertical gradient (keeps a non-space flat
     // bg essentially its authored color, just darker toward the nadir).
     let void_col = G.bg.rgb * (0.82 + 0.18 * smoothstep(-1.0, 1.0, rd.y));
-    // Fade the celestial layers as the camera sinks into a thick DAYTIME shell so
-    // stars don't bleed through a bright sky (atmo_composite handles most of it).
-    // Airless bodies (no shell) and the night side keep their stars.
-    var fade = 1.0;
-    if (G.atmo_meta.x >= 1.0) {
-        let H = G.atmo_params[0].x;
-        let dens = G.atmo_color[0].w;
-        if (H > 0.001 && dens > 0.001) {
-            let alt = length(G.atmo_body[0].xyz) - G.atmo_body[0].w;
-            let depth = clamp(1.0 - alt / H, 0.0, 1.0); // 0 above the shell, 1 at surface
-            let zen = normalize(-G.atmo_body[0].xyz);
-            let day = smoothstep(-0.1, 0.35, dot(zen, sun_dir_at(vec3<f32>(0.0))));
-            fade = 1.0 - depth * dens * day * 0.95;
-        }
-    }
+    // No fade of its own: `atmo_composite`, which wraps this, draws the sky
+    // from inside the air over it with that air's own opacity, so the stars
+    // dim by exactly the light the air puts in front of them.
+    let fade = 1.0;
     // Only SPACE scenes (one with a real star casting light) get the star vault;
     // a non-space flat-bg scene keeps its plain `G.bg` background as before.
     let space = step(0.5, G.star_meta.x);

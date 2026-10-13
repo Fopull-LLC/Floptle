@@ -96,6 +96,24 @@ An upward ray exits the layer at a height the shader can solve for, so most sky
 pixels march a fraction of the fence. The `max distance` knob is that fence, for
 the rays that never exit.
 
+## On a round world
+
+With `fog_follows_body` on (Inspector: Lighting ▸ fog ▸ *follows the planet*; Lua
+`fogFollowsBody`), every height the fog uses is measured from the celestial body
+whose surface is nearest the camera instead of from world `y`. `fog_height` is an
+altitude over that surface, the layer is a shell around the planet (on a flat
+reading it showed as a diagonal slab across the sky wherever the planet's up was
+not world up), a sky ray leaves the layer where it crosses the shell's top
+sphere, and the depth ramp's sky blend leans on that planet's horizon wherever
+you stand on it. The body's centre is worked out on the CPU in f64 and handed
+over camera-relative, so a planet far from the origin is measured exactly.
+
+The sky the air itself makes, seen from inside an atmosphere, is the atmosphere's
+own job, not the fog's: see `CelestialBody`'s `atmo_*` fields. Fog is for haze
+near the ground. A game that fades the fog's sky blend as it climbs writes
+`fogSky` (0..1): the sky is infinitely far away, so a thinner fog alone never
+makes it fainter.
+
 ## Cost
 
 The march is `steps` samples per pixel, and with **shafts** on each sample is a

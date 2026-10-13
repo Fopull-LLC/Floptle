@@ -193,6 +193,8 @@ fn main() {
         proj: proj.to_cols_array_2d(),
         inv_proj: proj.inverse().to_cols_array_2d(),
         fog: [0.0; 4],
+        inv_view: glam::Mat4::IDENTITY.to_cols_array_2d(),
+        eye: [0.0; 3],
     };
 
     let shot = |raster: &mut Raster, name: &str, s: &PostSettings| -> Vec<u8> {

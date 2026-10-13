@@ -1162,6 +1162,12 @@ struct NodeBones {
     /// what a bone-attached node is placed by.
     model: Vec<glam::Mat4>,
     frame: u64,
+    /// What a read needs to fold in the writes a script queued since the
+    /// pose was made: the rig, its placement offset, and the local pose
+    /// `model` was composed from. Empty for a pose handed over without it.
+    skeleton: Option<Rc<floptle_anim::Skeleton>>,
+    offset: glam::Mat4,
+    local: Vec<floptle_anim::TransformTRS>,
 }
 
 impl BonePoses {
@@ -1177,6 +1183,9 @@ impl BonePoses {
             names: names.clone(),
             model: Vec::with_capacity(model.len()),
             frame,
+            skeleton: None,
+            offset: glam::Mat4::IDENTITY,
+            local: Vec::new(),
         });
         if !Rc::ptr_eq(&nb.names, names) {
             nb.names = names.clone();
@@ -1184,6 +1193,25 @@ impl BonePoses {
         nb.model.clear();
         nb.model.extend_from_slice(model);
         nb.frame = frame;
+        nb.skeleton = None;
+    }
+
+    /// The rig behind node `eid`'s pose, set after [`BonePoses::set`]: the
+    /// skeleton, its placement offset, and the local pose the model-space
+    /// matrices were composed from. With it, a bone read answers with this
+    /// frame's queued writes already applied, the way the frame will draw it.
+    pub fn set_rig(
+        &mut self,
+        eid: u32,
+        skeleton: &Rc<floptle_anim::Skeleton>,
+        offset: glam::Mat4,
+        local: &[floptle_anim::TransformTRS],
+    ) {
+        let Some(nb) = self.nodes.get_mut(&eid) else { return };
+        nb.skeleton = Some(skeleton.clone());
+        nb.offset = offset;
+        nb.local.clear();
+        nb.local.extend_from_slice(local);
     }
 
     /// Drop the nodes the refill did not reach: gone, or no longer animated.
@@ -1201,6 +1229,33 @@ impl BonePoses {
             Some(i) => Ok(nb.model.get(i).copied()),
             None => Err(nb.names.to_vec()),
         }
+    }
+
+    /// [`BonePoses::bone`] with `ops` — the pose writes queued for this node
+    /// since the pose was made — applied on top, solved against the node's
+    /// world matrix `node_world`. Without queued writes, or without a rig to
+    /// solve on, it is the published pose.
+    pub(crate) fn bone_posed(
+        &self,
+        eid: u32,
+        name: &str,
+        ops: &[AnimPoseOp],
+        node_world: glam::DMat4,
+    ) -> Result<Option<glam::Mat4>, Vec<String>> {
+        let published = self.bone(eid, name)?;
+        let Some(nb) = self.nodes.get(&eid) else { return Ok(published) };
+        let Some(skel) = nb.skeleton.as_deref() else { return Ok(published) };
+        if ops.is_empty() || nb.local.len() != skel.nodes.len() {
+            return Ok(published);
+        }
+        let Some(i) = skel.index_of(name) else { return Ok(published) };
+        let to_rig = (node_world * nb.offset.as_dmat4()).inverse();
+        let ops = rig_pose_ops(ops, skel, to_rig, eid, &mut Vec::new());
+        let mut pose = nb.local.clone();
+        floptle_anim::ik::apply(skel, &mut pose, &ops);
+        let mut model = Vec::new();
+        skel.world_matrices(&pose, &mut model);
+        Ok(model.get(i).map(|m| nb.offset * *m))
     }
 
     pub(crate) fn names(&self, eid: u32) -> Option<Rc<Vec<String>>> {
@@ -1270,6 +1325,98 @@ pub enum AnimPoseOp {
     Reach { root: Option<String>, mid: Option<String>, tip: String, target: [f64; 3], pole: Option<[f64; 3]>, weight: f32 },
     /// Turn `bones` (root-most first) so the last one faces `target`.
     LookAt { bones: Vec<String>, target: [f64; 3], axis: Option<[f32; 3]>, limit_deg: f32, weight: f32 },
+}
+
+/// A script's pose changes in the rig's own terms: bones by index, points in
+/// skeleton space (`to_rig` = the inverse of the node's world matrix times the
+/// rig's placement offset). A bone that is not there is said once, by name.
+pub fn rig_pose_ops(
+    ops: &[AnimPoseOp],
+    skel: &floptle_anim::Skeleton,
+    to_rig: floptle_core::math::DMat4,
+    eid: u32,
+    warn: &mut Vec<(String, String)>,
+) -> Vec<floptle_anim::PoseOp> {
+    use floptle_anim::PoseOp;
+    let mut bone = |name: &str, call: &str| {
+        let found = skel.index_of(name);
+        if found.is_none() {
+            let names: Vec<&str> = skel.nodes.iter().map(|n| n.name.as_str()).collect();
+            warn.push((
+                format!("{eid}:bone:{name}"),
+                format!("anim:{call}: no bone \"{name}\" on this model{}", crate::opts::near_miss_hint(name, &names)),
+            ));
+        }
+        found
+    };
+    let point = |p: [f64; 3]| to_rig.transform_point3(floptle_core::math::DVec3::from(p)).as_vec3();
+    let mut out = Vec::new();
+    // A tip without a parent and a grandparent has no limb to bend.
+    let mut limbless: Vec<&str> = Vec::new();
+    for op in ops {
+        match op {
+            AnimPoseOp::Bone { bone: name, rot, pos, add, weight } => {
+                let call = if rot.is_some() { if *add { "addBoneRot" } else { "setBoneRot" } } else if *add { "addBonePos" } else { "setBonePos" };
+                let Some(node) = bone(name, call) else { continue };
+                out.push(PoseOp::Local {
+                    node,
+                    rot: rot.map(glam::Quat::from_array),
+                    pos: pos.map(glam::Vec3::from_array),
+                    add: *add,
+                    weight: *weight,
+                });
+            }
+            AnimPoseOp::Reach { root, mid, tip, target, pole, weight } => {
+                let Some(t) = bone(tip, "reach") else { continue };
+                let parent = |i: usize| skel.nodes.get(i).and_then(|n| n.parent);
+                let m = match mid {
+                    Some(n) => bone(n, "reach"),
+                    None => parent(t),
+                };
+                let Some(m) = m else {
+                    if mid.is_none() {
+                        limbless.push(tip);
+                    }
+                    continue;
+                };
+                let r = match root {
+                    Some(n) => bone(n, "reach"),
+                    None => parent(m),
+                };
+                let Some(r) = r else {
+                    if root.is_none() {
+                        limbless.push(tip);
+                    }
+                    continue;
+                };
+                out.push(PoseOp::TwoBone { root: r, mid: m, tip: t, target: point(*target), pole: pole.map(point), weight: *weight });
+            }
+            AnimPoseOp::LookAt { bones, target, axis, limit_deg, weight } => {
+                let chain: Vec<usize> = bones.iter().filter_map(|b| bone(b, "lookAt")).collect();
+                if chain.len() != bones.len() {
+                    continue;
+                }
+                out.push(PoseOp::LookAt {
+                    chain,
+                    target: point(*target),
+                    // glTF's front: a character faces +Z in its own space.
+                    axis: axis.map(glam::Vec3::from_array).unwrap_or(glam::Vec3::Z),
+                    limit: limit_deg.to_radians(),
+                    weight: *weight,
+                });
+            }
+        }
+    }
+    for tip in limbless {
+        warn.push((
+            format!("{eid}:limb:{tip}"),
+            format!(
+                "anim:reach: \"{tip}\" has no parent and grandparent bone to bend, so there is no limb to reach with; \
+                 name the two bones with {{ root = \"UpperArm\", mid = \"Forearm\" }}"
+            ),
+        ));
+    }
+    out
 }
 
 /// `anim:setCulling`'s modes — see the controller asset's `culling`.

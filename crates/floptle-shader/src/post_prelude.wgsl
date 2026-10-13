@@ -10,8 +10,9 @@
 //   group(0) — the frame so far + the chain's own params (the SAME layout every
 //              built-in pass uses, so a custom pass can ping-pong between the
 //              chain's scratch targets with no bind group of its own).
-//   group(1) — the depth buffer the scene was rendered with, and the inverse
-//              projection that turns it back into a position.
+//   group(1) — the depth buffer the scene was rendered with, the inverse
+//              projection that turns it back into a position, and the camera's
+//              turn and position in the world.
 //   group(2) — the shader's own uniforms (declared by the chunk).
 
 @group(0) @binding(0) var tex: texture_2d<f32>;
@@ -31,6 +32,9 @@ struct PostChainParams {
 @group(1) @binding(0) var post_depth_tex: texture_2d<f32>;
 struct PostCam {
     inv_proj: mat4x4<f32>, // clip → view
+    inv_view: mat4x4<f32>, // view → world, rotation only (the world is camera-relative)
+    spare: mat4x4<f32>,
+    eye: vec4<f32>,        // xyz = the camera's world position
 };
 @group(1) @binding(1) var<uniform> pc: PostCam;
 
@@ -128,4 +132,20 @@ fn flsl_post_normal(uv: vec2<f32>) -> vec3<f32> {
     var un = normalize(n);
     if (dot(un, -c) < 0.0) { un = -un; }
     return un;
+}
+
+// The world-space direction the camera looks through at `uv`, unit length.
+// Two points on the pixel's line, not the origin and one point: an orthographic
+// camera's rays do not start at the eye, and this is right for both kinds.
+fn flsl_post_ray(uv: vec2<f32>) -> vec3<f32> {
+    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0);
+    let a = pc.inv_proj * vec4<f32>(ndc, 0.0, 1.0);
+    let b = pc.inv_proj * vec4<f32>(ndc, 0.5, 1.0);
+    let d = b.xyz / b.w - a.xyz / a.w;
+    return normalize((pc.inv_view * vec4<f32>(d, 0.0)).xyz);
+}
+
+// Where the camera is in the world.
+fn flsl_post_camera() -> vec3<f32> {
+    return pc.eye.xyz;
 }

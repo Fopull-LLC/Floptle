@@ -263,3 +263,53 @@ fn snapshot_flat_rotate_gizmo() {
     h.render().expect("no GPU?").save(&out).unwrap();
     floptle_say::say!("wrote {}", out.display());
 }
+
+/// The brush ghost: one asymmetric tile (an "L" in the top-left cell of a 2×2
+/// sheet) in all eight turns and flips, solid on the top row as the palette
+/// draws it and as the faint ghost the Scene view lays over the grid below,
+/// last over a skewed quad the way an isometric cell projects.
+#[test]
+#[ignore]
+fn snapshot_tile_ghost() {
+    let mut tex: Option<egui::TextureHandle> = None;
+    let mut h = harness(egui::vec2(560.0, 200.0), move |ui| {
+        let t = tex
+            .get_or_insert_with(|| {
+                // 16×16: cell 0 (top-left 8×8) is an orange "L" on dark blue.
+                let px: Vec<u8> = (0..256)
+                    .flat_map(|i| {
+                        let (x, y) = (i % 16, i / 16);
+                        let l = x < 8 && y < 8 && (x == 1 || y == 6);
+                        if l { [255, 150, 40, 255] } else if x < 8 && y < 8 { [30, 50, 110, 255] } else { [60, 60, 60, 255] }
+                    })
+                    .collect();
+                ui.ctx().load_texture("ghost-sheet", egui::ColorImage::from_rgba_unmultiplied([16, 16], &px), egui::TextureOptions::NEAREST)
+            })
+            .clone();
+        let p = ui.painter().clone();
+        p.rect_filled(ui.max_rect(), 0.0, egui::Color32::from_rgb(90, 110, 90));
+        let o = ui.max_rect().min;
+        for (i, (rot, flip)) in (0..4u8).flat_map(|r| [(r, false), (r, true)]).enumerate() {
+            let packed = floptle_core::tile_pack(0, floptle_core::TileXform::new(rot, flip));
+            let x = o.x + 10.0 + i as f32 * 60.0;
+            for (row, alpha) in [(0.0, 255u8), (70.0, 150)] {
+                let r = egui::Rect::from_min_size(egui::pos2(x, o.y + 10.0 + row), egui::vec2(50.0, 50.0));
+                let quad = [r.left_bottom(), r.right_bottom(), r.right_top(), r.left_top()];
+                let tint = egui::Color32::from_white_alpha(alpha);
+                if let Some(m) = crate::tile_ui::tile_quad_mesh(t.id(), 2, 2, packed, quad, tint) {
+                    p.add(egui::Shape::mesh(m));
+                }
+            }
+        }
+        // A skewed quad, as an isometric cell projects.
+        let b = egui::pos2(o.x + 500.0, o.y + 180.0);
+        let quad = [b, b + egui::vec2(40.0, -20.0), b + egui::vec2(40.0, -60.0), b + egui::vec2(0.0, -40.0)];
+        if let Some(m) = crate::tile_ui::tile_quad_mesh(t.id(), 2, 2, 0, quad, egui::Color32::from_white_alpha(150)) {
+            p.add(egui::Shape::mesh(m));
+        }
+    });
+    let out = out_path("tile-ghost");
+    h.run();
+    h.render().expect("no GPU?").save(&out).unwrap();
+    floptle_say::say!("wrote {}", out.display());
+}

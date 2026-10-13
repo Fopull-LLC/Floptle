@@ -358,7 +358,27 @@ pub struct SsaoFrame<'a> {
     /// unused]`. AO fades out with it, so a fogged-out surface is fog colour
     /// and not fog colour darkened.
     pub fog: [f32; 4],
+    /// The camera's turn (view → world, rotation only — the world is drawn
+    /// camera-relative), column-major: what `sceneRay` turns a pixel's view
+    /// direction into a world one with.
+    pub inv_view: [[f32; 4]; 4],
+    /// The camera's world position, for `cameraPosition`.
+    pub eye: [f32; 3],
 }
+
+/// The camera a `stage post` shader reads — `PostCam` in `post_prelude.wgsl`.
+/// Written into the same buffer as [`DofCam`] (one bind group layout serves
+/// both), so it is exactly that size.
+#[repr(C)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+struct PostCam {
+    inv_proj: [[f32; 4]; 4],
+    inv_view: [[f32; 4]; 4],
+    spare: [[f32; 4]; 4],
+    /// xyz = the camera's world position.
+    eye: [f32; 4],
+}
+const _: () = assert!(std::mem::size_of::<PostCam>() == std::mem::size_of::<DofCam>());
 
 #[repr(C)]
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -1428,14 +1448,14 @@ impl PostStack {
             // faces the camera: an outline finds no edges and quietly draws
             // nothing, rather than reading uninitialised memory.
             let depth_view = ssao.map(|f| f.depth).unwrap_or(&self.far_depth_view);
-            let inv_proj = ssao.map(|f| f.inv_proj).unwrap_or_else(|| {
-                glam::Mat4::IDENTITY.to_cols_array_2d()
-            });
-            gpu.queue.write_buffer(
-                &self.dof_cam_buf,
-                0,
-                bytemuck::bytes_of(&DofCam { inv_proj, ..Default::default() }),
-            );
+            let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+            let cam = PostCam {
+                inv_proj: ssao.map(|f| f.inv_proj).unwrap_or(identity),
+                inv_view: ssao.map(|f| f.inv_view).unwrap_or(identity),
+                spare: [[0.0; 4]; 4],
+                eye: ssao.map(|f| [f.eye[0], f.eye[1], f.eye[2], 0.0]).unwrap_or_default(),
+            };
+            gpu.queue.write_buffer(&self.dof_cam_buf, 0, bytemuck::bytes_of(&cam));
             let depth_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("post-flsl-depth"),
                 layout: &self.dof_layout,

@@ -148,7 +148,11 @@ pub struct RaymarchGlobals {
     pub atmo_color: [[f32; 4]; 4],
     /// Per body: xyz = CAMERA-RELATIVE center, w = surface radius.
     pub atmo_body: [[f32; 4]; 4],
-    /// Per body: x = shell height above the surface, y = cloud coverage 0..1.
+    /// Per body: x = shell height above the surface, y = cloud coverage 0..1,
+    /// z = the optical depth of the air straight overhead at the camera (0 at
+    /// and above the top of the shell) — what the sky seen from inside is
+    /// drawn from. Worked out on the CPU in f64 so it is exact far from the
+    /// origin.
     pub atmo_params: [[f32; 4]; 4],
     /// Stars mode (Lighting.stars): x = active star count. 0 = the legacy
     /// single key light in `light_dir`/`light_color` (directional or
@@ -257,6 +261,11 @@ pub struct RaymarchGlobals {
     /// always did. Appended at the end so this struct stays byte-identical to
     /// the WGSL one.
     pub terrain_scale: [[f32; 4]; 8],
+    /// The body fog is measured from (`Lighting.fog_follows_body`): xyz = its
+    /// CAMERA-RELATIVE centre, w = its surface radius. `w <= 0` is a flat world,
+    /// where fog heights are world y. Appended at the end so this struct stays
+    /// byte-identical to the WGSL one.
+    pub fog_body: [f32; 4],
 }
 
 impl Default for RaymarchGlobals {
@@ -348,6 +357,7 @@ impl Default for RaymarchGlobals {
             point_cone: [[-1.0, -1.0, 0.0, 0.0]; 16],
             fog_extra: [0.0; 4],
             terrain_scale: [[1.0; 4]; 8],
+            fog_body: [0.0; 4],
             probe_pos: [[0.0; 4]; crate::reflect::MAX_PROBES],
             probe_half: [[1.0; 4]; crate::reflect::MAX_PROBES],
         }

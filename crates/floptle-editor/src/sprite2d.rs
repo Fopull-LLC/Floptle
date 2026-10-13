@@ -271,24 +271,7 @@ impl Editor {
             let set = (!tileset.is_empty()).then(|| self.tiles.get(&tileset)).flatten();
             let step = set.map(|s| anim_step(s, now)).unwrap_or(0);
 
-            // Page 0 comes from the tileset, and the node's Material is the
-            // fallback for a layer whose tileset names no sheet of its own.
-            //
-            // The tileset is the authority because a tileset is a sheet plus
-            // what its cells mean: were it to describe a sheet it does not
-            // draw, every tilemap would need a Material carrying the same image
-            // and the same cols/rows, kept in agreement by hand, and a tileset
-            // alone would render nothing. Nothing is silently repainted: a
-            // tileset that names no texture defers to the material.
-            let (p0_tex, sc, sr) = match set {
-                Some(s) if !s.texture.trim().is_empty() => {
-                    (s.texture.clone(), s.sheet_cols.max(1), s.sheet_rows.max(1))
-                }
-                _ => {
-                    let (c, r) = mat.sheet();
-                    (mat.texture.clone().unwrap_or_default(), c, r)
-                }
-            };
+            let (p0_tex, sc, sr) = page0_sheet(set, &mat);
             // The texel size is what the half-texel inset is measured in, and it
             // has to be measured on the sheet page 0 actually draws. An unloaded
             // texture reports nothing, and the mesh is rebuilt when it arrives
@@ -301,14 +284,7 @@ impl Editor {
                 .map(|[w, h]| [1.0 / w.max(1.0), 1.0 / h.max(1.0)])
                 .unwrap_or([0.0, 0.0]);
 
-            let mut pages: Vec<(String, u32, u32)> = vec![(p0_tex, sc, sr)];
-            if let Some(s) = set {
-                for (p, tex, c, r) in s.pages_iter() {
-                    if p > 0 {
-                        pages.push((tex.to_string(), c, r));
-                    }
-                }
-            }
+            let pages = page_sheets(set, &mat);
             let sig = signature(cols, rows, tile, &data, (sc, sr), texel, step, &pages)
                 ^ collision_sig(set);
             if self.tilemaps.get(&e).is_some_and(|t| t.sig == sig) {
@@ -431,6 +407,41 @@ impl Editor {
 /// Everything not on this page becomes a hole, which is exactly right: the page
 /// draws its own squares and the pages beside it draw theirs, into the same
 /// grid, at the same coordinates.
+/// The sheet page 0 of a tile layer draws from: `(project-relative texture,
+/// sheet cols, sheet rows)`.
+///
+/// Page 0 comes from the tileset, and the node's Material is the fallback for
+/// a layer whose tileset names no sheet of its own. The tileset is the
+/// authority because a tileset is a sheet plus what its cells mean: were it to
+/// describe a sheet it does not draw, every tilemap would need a Material
+/// carrying the same image and the same cols/rows, kept in agreement by hand,
+/// and a tileset alone would render nothing. Nothing is silently repainted: a
+/// tileset that names no texture defers to the material.
+pub(crate) fn page0_sheet(set: Option<&floptle_tiles::TileSet>, mat: &Material) -> (String, u32, u32) {
+    match set {
+        Some(s) if !s.texture.trim().is_empty() => (s.texture.clone(), s.sheet_cols.max(1), s.sheet_rows.max(1)),
+        _ => {
+            let (c, r) = mat.sheet();
+            (mat.texture.clone().unwrap_or_default(), c, r)
+        }
+    }
+}
+
+/// Every page a tile layer draws from, by page number: [`page0_sheet`] first,
+/// then the tileset's further pages. The layer's draw and the brush's ghost
+/// both read it, so the ghost cannot show a tile from a different sheet.
+pub(crate) fn page_sheets(set: Option<&floptle_tiles::TileSet>, mat: &Material) -> Vec<(String, u32, u32)> {
+    let mut pages = vec![page0_sheet(set, mat)];
+    if let Some(s) = set {
+        for (p, tex, c, r) in s.pages_iter() {
+            if p > 0 {
+                pages.push((tex.to_string(), c, r));
+            }
+        }
+    }
+    pages
+}
+
 fn page_squares(data: &[u32], page: u32, page_cells: u32) -> Option<Vec<u32>> {
     let mut any = false;
     let out: Vec<u32> = data

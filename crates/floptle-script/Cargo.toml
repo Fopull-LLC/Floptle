@@ -36,6 +36,8 @@ floptle-vfs = { path = "../floptle-vfs" }
 # Types only (PlayParams + enums for the audio command queue); no OS audio stack.
 floptle-audio = { path = "../floptle-audio", default-features = false }
 floptle-core = { path = "../floptle-core" }
+# A bone read applies the writes a script queued this frame, with the same IK the driver uses.
+floptle-anim = { path = "../floptle-anim" }
 floptle-nav = { path = "../floptle-nav" }
 floptle-tiles = { path = "../floptle-tiles" } # tm:solid / tm:tags / tm:autotile read a TileSet
 # Types + resolution only; the gilrs device backend belongs to the driver.

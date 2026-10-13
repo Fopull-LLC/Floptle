@@ -1026,6 +1026,8 @@ impl Editor {
                         proj: proj.to_cols_array_2d(),
                         inv_proj: proj.inverse().to_cols_array_2d(),
                         fog: crate::shading::ao_fog(&self.world, cam.world_position),
+                        inv_view: cam.view_matrix().inverse().to_cols_array_2d(),
+                        eye: cam.world_position.as_vec3().to_array(),
                     };
                     // In retro mode the chain writes the retro colour target and
                     // the nearest-neighbour blit carries the finished picture up;

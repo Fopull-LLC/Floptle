@@ -91,7 +91,8 @@ struct Globals {
     sky_meta: vec4<f32>,
     sky_uniforms: array<vec4<f32>, 16>,
     // S8 atmospheres (meta.x = count): per body color.rgb+density.w, camera-
-    // relative center + surface radius, params = (shell height, clouds, -, -).
+    // relative center + surface radius, params = (shell height, clouds,
+    // optical depth straight up at the camera, -).
     atmo_meta: vec4<f32>,
     atmo_color: array<vec4<f32>, 4>,
     atmo_body: array<vec4<f32>, 4>,
@@ -173,6 +174,10 @@ struct Globals {
     // multiplier on the palette's base triplanar scale, 1.0 = as before.
     // Appended at the END, like everything above it.
     terrain_scale: array<vec4<f32>, 8>,
+    // The body fog is measured from: xyz = camera-relative centre, w = surface
+    // radius. w <= 0 is a flat world, where fog heights are world y.
+    // Appended at the END, like everything above it.
+    fog_body: vec4<f32>,
 };
 
 // The triplanar scale multiplier for palette slot `slot`.
@@ -597,6 +602,41 @@ fn atmo_composite(base: vec3<f32>, rd_in: vec3<f32>, tmax: f32, is_sky: bool) ->
         if (H < 0.001 || density < 0.001) {
             continue;
         }
+        // The sky from INSIDE the air: what overhead looks like standing in
+        // it. `air` is the optical depth straight up from the camera (worked
+        // out on the CPU, exactly 0 at the top of the shell), and along any
+        // other ray it is that times the air mass for the ray's elevation —
+        // so the horizon stays bright long after the zenith has gone dark on
+        // a climb, and the whole thing fades into space with no step. Space
+        // behind it (stars, the milky way) is dimmed by exactly the opacity
+        // the sky is drawn with: the stars come out as the sky thins.
+        let air = G.atmo_params[i].z;
+        if (is_sky && air > 0.0) {
+            let up = normalize(-c);
+            let mu = dot(rd, up);
+            let sdir = sun_dir_at(vec3<f32>(0.0));
+            let sun_up = dot(up, sdir);
+            let day = smoothstep(-0.3, 0.25, sun_up);
+            // 1 overhead, ~8 along the horizon; below the local horizontal
+            // the ray grazes the limb and keeps the horizon's value.
+            let mass = 1.0 / (max(mu, 0.0) + 0.12);
+            // A night sky is dark, and the stars show through it more.
+            let opacity = clamp((1.0 - exp(-air * mass)) * (0.4 + 0.6 * day), 0.0, 1.0);
+            // The air's colour: deeper overhead, whiter and brighter toward
+            // the horizon.
+            let tint = G.atmo_color[i].rgb;
+            let hz = exp(-max(mu, 0.0) * 3.5);
+            let body_col = mix(tint * 0.78, mix(tint, vec3<f32>(1.0), 0.22) * 1.12, hz);
+            // The star through the air: a wide forward-scatter glow and a
+            // tighter aureole, warmed toward the star's own colour.
+            let star = gcol / max(max(gcol.r, max(gcol.g, gcol.b)), 1e-3);
+            let cs = max(dot(rd, sdir), 0.0);
+            let sun_vis = smoothstep(-0.2, 0.08, sun_up);
+            let warm = mix(tint, mix(star, vec3<f32>(1.0, 0.86, 0.62), 0.5), 0.6);
+            let halo = warm * (pow(cs, 6.0) * 0.22 + pow(cs, 60.0) * 0.55) * sun_vis;
+            let sky = body_col * (0.05 + 0.95 * day) + halo;
+            out = mix(out, sky, opacity);
+        }
         let Ra = R + H;
         let b = dot(rd, c);
         // Perpendicular distance² from the body centre to the ray. Computed as the
@@ -709,10 +749,30 @@ fn cloud_fbm_lod(p: vec3<f32>, step: f32) -> f32 {
     return v;
 }
 
+// The height fog measures camera-relative `p` by. On a flat world it is world
+// y. On a round one (`fog_body.w > 0`) it is the altitude over the planet's
+// surface, so the layer is a shell around the planet rather than a slab that
+// cuts diagonally across its sky.
+fn fog_height_at(p: vec3<f32>) -> f32 {
+    if (G.fog_body.w > 0.0) {
+        return length(p - G.fog_body.xyz) - G.fog_body.w;
+    }
+    return p.y + G.vol_fog_b.z;
+}
+
+// Which way is up for the fog, at the camera: the planet's local vertical on a
+// round world, world +y on a flat one.
+fn fog_up() -> vec3<f32> {
+    if (G.fog_body.w > 0.0) {
+        return normalize(-G.fog_body.xyz);
+    }
+    return vec3<f32>(0.0, 1.0, 0.0);
+}
+
 // The fog's smooth part: how thick the layer is at this height. Cheap, and
 // wanted at every single step — it is what gives a fog layer an edge.
 fn vol_fog_layer(p: vec3<f32>) -> f32 {
-    let world_y = p.y + G.vol_fog_b.z; // camera-relative → world height
+    let world_y = fog_height_at(p);
     let falloff = max(G.vol_fog_a.z, 1e-3);
     // 1 inside the layer, fading to 0 across the falloff band above its top.
     let layer = clamp(1.0 - (world_y - G.vol_fog_a.y) / falloff, 0.0, 1.0);
@@ -1210,7 +1270,7 @@ fn fog_sky(color: vec3<f32>, rd: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
         // 1 at and below the horizon, easing to 0 overhead. Squared so the
         // band that actually meets the ground is tight and most of the dome is
         // left alone.
-        let up = clamp(rd.y, 0.0, 1.0);
+        let up = clamp(dot(rd, fog_up()), 0.0, 1.0);
         let horizon = (1.0 - up) * (1.0 - up);
         var f = amount * horizon;
         // The same dither the ramp uses on surfaces: a sky gradient is the
@@ -1223,7 +1283,24 @@ fn fog_sky(color: vec3<f32>, rd: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
         return mix(color, G.fog_color.rgb, clamp(f, 0.0, 1.0));
     }
     var t_max = max(G.fog_params.y, 1.0); // the "max distance" fence
-    if (rd.y > 1e-3) {
+    if (G.fog_body.w > 0.0) {
+        // A round world: the layer is a shell, and a sky ray leaves it where
+        // the ray crosses the shell's top sphere. A ray from above the shell
+        // that never meets it has no fog in it at all.
+        let top = G.fog_body.w + G.vol_fog_a.y + G.vol_fog_a.z;
+        let oc = -G.fog_body.xyz;
+        let b = dot(oc, rd);
+        let perp = oc - rd * b;
+        let disc = top * top - dot(perp, perp);
+        if (disc < 0.0) {
+            return color;
+        }
+        let far = -b + sqrt(disc);
+        if (far <= 0.0) {
+            return color;
+        }
+        t_max = min(t_max, far);
+    } else if (rd.y > 1e-3) {
         // An upward ray LEAVES the layer at a known height, so march to there
         // and no further — most sky pixels cost a fraction of the fence.
         let top = G.vol_fog_a.y + G.vol_fog_a.z;

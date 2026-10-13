@@ -34,7 +34,7 @@
 > carried as an ORDERED LIST on the PostProcess node rather than as one slot, so
 > a project stacks its own looks instead of choosing from a fixed menu. Its four
 > `screen`-category ops — `sceneColor` / `sceneDepth` / `sceneNormal` /
-> `screenTexel` — each take an OPTIONAL uv, and that optionality is the design:
+> `sceneRay` / `screenTexel` — each take an OPTIONAL uv, and that optionality is the design:
 > the default makes a colour grade a one-liner, and passing another pixel's uv
 > is what makes an edge detect, a blur or a warp expressible at all. Normals are
 > reconstructed from depth, so every kind of geometry has one with nothing to
@@ -224,7 +224,7 @@ Start small (the ADR-0007 subset), grow over time. Categories, with examples:
   options** (repeat/clamp/flip/count) so "drag on and tile" needs no shader edit;
   see [`./materials-and-textures.md`](./materials-and-textures.md).
 - **Screen** (`stage post` only) — `sceneColor`, `sceneDepth`, `sceneNormal`,
-  `screenTexel`: the finished frame, readable at any pixel rather than only this
+  `sceneRay`, `cameraPosition`, `screenTexel`: the finished frame, readable at any pixel rather than only this
   one. See [`./post-processing.md`](./post-processing.md).
 
 `stdlib::CATEGORIES` is the one list of these, and both palettes (the graph tab's

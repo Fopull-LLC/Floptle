@@ -173,6 +173,8 @@ mod settings_ui;
 mod shadow;
 mod sprite2d;
 #[cfg(test)]
+mod atmosphere_sky_tests;
+#[cfg(test)]
 mod spawn_scaling;
 #[cfg(test)]
 mod tick_overload_tests;

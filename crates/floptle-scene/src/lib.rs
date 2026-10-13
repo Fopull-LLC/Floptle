@@ -2445,6 +2445,10 @@ pub struct LightDoc {
     /// and reaches the sky on its own, so it ignores this.
     #[serde(default = "default_fog_sky")]
     pub fog_sky: f32,
+    /// Fog measured from the nearest celestial body rather than world `y`: see
+    /// `Light::fog_follows_body`. Off for every scene saved before it existed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fog_follows_body: bool,
 }
 
 fn default_shadow_softness() -> f32 {
@@ -2574,6 +2578,7 @@ impl From<&Light> for LightDoc {
             fog_steps: l.fog_steps,
             fog_shafts: l.fog_shafts,
             fog_sky: l.fog_sky,
+            fog_follows_body: l.fog_follows_body,
         }
     }
 }
@@ -2630,6 +2635,7 @@ impl LightDoc {
             fog_steps: self.fog_steps.clamp(2, 64),
             fog_shafts: self.fog_shafts,
             fog_sky: self.fog_sky.clamp(0.0, 1.0),
+            fog_follows_body: self.fog_follows_body,
         }
     }
 }

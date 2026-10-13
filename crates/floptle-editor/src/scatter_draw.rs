@@ -137,6 +137,83 @@ fn settle(
 /// scene node per piece.
 pub(crate) type Part = (MeshId, Option<TexId>, Mat4);
 
+/// Every scatter source's props for a camera at `eye`, pushed onto `out`;
+/// returns how many. Anchored sources first follow their node to where it is
+/// this frame.
+///
+/// The one place a gather draws scatter, shared by the window's gather and the
+/// offscreen one (`camera.capture`, `floptle shot`, render targets), so a
+/// picture of the world has the same plants and rocks the screen does.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_scatter(
+    script_host: &mut floptle_script::ScriptHost,
+    world: &floptle_core::World,
+    sim: Option<&floptle_physics::Sim>,
+    protos: &HashMap<String, Vec<Part>>,
+    proto_radius: &HashMap<String, f32>,
+    cache: &mut ScatterCache,
+    eye: DVec3,
+    frustum: &floptle_render::Frustum,
+    out: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
+) -> usize {
+    // Where each anchored source's node has got to this frame.
+    // A celestial body orbits at ~99 units/s, so a
+    // region pinned to the world slides out from under its own props in
+    // about two seconds. Refreshing one transform per source is the
+    // whole cost of following it: placement lives in this frame, so
+    // nothing downstream is recomputed.
+    for (id, name) in script_host.anchored_scatter() {
+        let node = world
+            .query::<floptle_core::Name>()
+            .find(|(_, n)| n.0 == name)
+            .map(|(e, _)| e);
+        let frame = node.map_or(scatter::Frame::IDENTITY, |e| {
+            let wt = floptle_core::world_transform(world, e);
+            scatter::Frame { origin: wt.translation, rot: wt.rotation.normalize() }
+        });
+        script_host.set_scatter_frame(id, frame);
+    }
+    let sources: Vec<ScatterSource> = script_host.scatter_sources().clone();
+    if sources.is_empty() {
+        if cache.len() > 0 {
+            cache.clear();
+        }
+        return 0;
+    }
+    let before = out.len();
+    let mut ground = |from: DVec3, dir: Vec3, max: f32| {
+        let sim = sim?;
+        let o = (from - sim.world.origin).as_vec3();
+        sim.world.raycast(o, dir, max).map(|h| (h.distance, Vec3::from(h.normal)))
+    };
+    // Baked before the frame's GPU borrow (see
+    // `bake_scatter_prototypes`); this only reads the answer. A
+    // prototype may be a prefab of several parts, and resolving
+    // that per prop would re-walk it twenty thousand times.
+    let mut mesh_of = |asset: &str| protos.get(asset).filter(|p| !p.is_empty()).cloned();
+    // Measured at bake time from the same import bounds the mesh path
+    // uses, so a field culls by direction as well as distance.
+    let mut radius_of = |asset: &str| proto_radius.get(asset).copied();
+    // A hard cap, logged nowhere and needing none: a source with a
+    // silly density costs a frame-rate dip, never a frame that
+    // never ends.
+    const SCATTER_BUDGET: usize = 20_000;
+    let base = MaterialParams::flat([1.0, 1.0, 1.0]);
+    build_instances(
+        cache,
+        &sources,
+        eye,
+        &mut mesh_of,
+        &mut radius_of,
+        &mut ground,
+        &base,
+        frustum,
+        SCATTER_BUDGET,
+        out,
+    );
+    out.len().saturating_sub(before)
+}
+
 /// Everything visible from `eye`, packed as instanced draws.
 ///
 /// Returns `(mesh, texture, raw)` triples in the same shape `draw_scene` takes,

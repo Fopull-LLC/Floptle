@@ -535,6 +535,8 @@ impl Editor {
         let (vol_fog_a, vol_fog_b, vol_fog_c) =
             vol_fog_uniforms(&light_node, self.fog_time, cam.world_position.y as f32);
         let terrain_scale = crate::terrain_edit::terrain_scale_lanes(&self.terrain_tex_scale);
+        // On a round world the fog's heights and horizon are the planet's.
+        let fog_body = crate::shading::fog_body_lane(&light_node, &self.world, cam.world_position);
         let make_rm = |set: &[(DVec3, f32, MaterialParams)]| -> RaymarchGlobals {
             let mut arr = [[0.0f32; 4]; 16];
             let n = set.len().min(16);
@@ -592,6 +594,7 @@ impl Editor {
                 fog_params,
                 fog_extra,
                 terrain_scale,
+                fog_body,
                 vol_fog_a,
                 vol_fog_b,
                 vol_fog_c,
@@ -639,6 +642,9 @@ impl Editor {
             || !self.terrains.is_empty()
             || sky_params[0] >= 0.5
             || self.sky_shader.is_some() // a procedural sky shader must run the raymarch (sky pass)
+            // An atmosphere is drawn by the sky pass too: without it a world's
+            // air was invisible under a plain-colour sky until it had terrain.
+            || atmo_meta[0] >= 1.0
             || !self.flsl_shape_slots.is_empty();
         let rm = {
             let mut g = make_rm(if show_blobs { &blobs } else { &[] });
@@ -1855,8 +1861,6 @@ impl Editor {
         let frustum = floptle_render::Frustum::from_view_proj(view_proj);
         // How much was skipped, reported in the window title beside the fps.
         let mut culled_nodes = 0usize;
-        // Scatter props submitted this frame.
-        let mut scatter_props = 0usize;
         for (e, matter) in &ents {
             // Hidden nodes (Visible(false), on the node or an ancestor) don't draw their
             // geometry (a script or the Inspector can toggle this); they still keep
@@ -2188,80 +2192,23 @@ impl Editor {
         // ordinary lighting, fog and shadows, including the underwater fog that
         // makes a shoreline forest go murky at the same rate as its ground.
         // Nothing here is a scene node.
-        {
-            // Where each anchored source's node has got to this frame.
-            // A celestial body orbits at ~99 units/s, so a
-            // region pinned to the world slides out from under its own props in
-            // about two seconds. Refreshing one transform per source is the
-            // whole cost of following it: placement lives in this frame, so
-            // nothing downstream is recomputed.
-            for (id, name) in self.script_host.anchored_scatter() {
-                let node = self
-                    .world
-                    .query::<floptle_core::Name>()
-                    .find(|(_, n)| n.0 == name)
-                    .map(|(e, _)| e);
-                let frame = node.map_or(floptle_core::scatter::Frame::IDENTITY, |e| {
-                    let wt = floptle_core::world_transform(&self.world, e);
-                    floptle_core::scatter::Frame {
-                        origin: wt.translation,
-                        rot: wt.rotation.normalize(),
-                    }
-                });
-                self.script_host.set_scatter_frame(id, frame);
-            }
-            let before_scatter = instances.len();
-            let sources: Vec<floptle_core::scatter::ScatterSource> =
-                self.script_host.scatter_sources().clone();
-            if !sources.is_empty() {
-                let eye = cam.world_position;
-                let sim = self.sim.as_ref();
-                let mut ground = |from: DVec3, dir: Vec3, max: f32| {
-                    let sim = sim?;
-                    let o = (from - sim.world.origin).as_vec3();
-                    sim.world
-                        .raycast(o, dir, max)
-                        .map(|h| (h.distance, Vec3::from(h.normal)))
-                };
-                // Baked before the frame's GPU borrow (see
-                // `bake_scatter_prototypes`); this only reads the answer. A
-                // prototype may be a prefab of several parts, and resolving
-                // that per prop would re-walk it twenty thousand times.
-                let protos = &self.scatter_protos;
-                let mut mesh_of =
-                    |asset: &str| protos.get(asset).filter(|p| !p.is_empty()).cloned();
-                // Measured at bake time from the same import bounds the mesh path
-                // uses, so a field culls by direction as well as distance.
-                let proto_radius = &self.scatter_proto_radius;
-                let mut radius_of = |asset: &str| proto_radius.get(asset).copied();
-                // A hard cap, logged nowhere and needing none: a source with a
-                // silly density costs a frame-rate dip, never a frame that
-                // never ends.
-                const SCATTER_BUDGET: usize = 20_000;
-                let base = MaterialParams::flat([1.0, 1.0, 1.0]);
-                let _scatter_t = floptle_core::profile::Span::new();
-                crate::scatter_draw::build_instances(
-                    &mut self.scatter_cache,
-                    &sources,
-                    eye,
-                    &mut mesh_of,
-                    &mut radius_of,
-                    &mut ground,
-                    &base,
-                    &frustum,
-                    SCATTER_BUDGET,
-                    &mut instances,
-                );
-                // Scatter. A field can ask for 117,000 props and make a scene
-                // unplayable; `props` in the counts below is that number, and
-                // this is what it cost.
-                scatter_props = instances.len().saturating_sub(before_scatter);
-                profile
-                    .borrow_mut()
-                    .record(floptle_core::profile::Bucket::Scatter, _scatter_t.ms());
-            } else if self.scatter_cache.len() > 0 {
-                self.scatter_cache.clear();
-            }
+        let scatter_t = floptle_core::profile::Span::new();
+        let scatter_props = crate::scatter_draw::push_scatter(
+            &mut self.script_host,
+            &self.world,
+            self.sim.as_ref(),
+            &self.scatter_protos,
+            &self.scatter_proto_radius,
+            &mut self.scatter_cache,
+            cam.world_position,
+            &frustum,
+            &mut instances,
+        );
+        // Scatter. A field can ask for 117,000 props and make a scene
+        // unplayable; `props` in the counts below is that number, and
+        // this is what it cost.
+        if scatter_props > 0 {
+            profile.borrow_mut().record(floptle_core::profile::Bucket::Scatter, scatter_t.ms());
         }
 
         // The gather is finished: record what it cost. `instances` is taken here

@@ -897,6 +897,23 @@ impl Editor {
             );
             crate::decals::push_decal_instances(&self.decal_batches, &self.world, raster, cam.world_position, &mut instances);
         }
+        // Scatter too, through the window gather's own function: a capture
+        // without it photographs bare ground under everything that stands on it.
+        let scatter_props = if opts.overlay {
+            0
+        } else {
+            crate::scatter_draw::push_scatter(
+                &mut self.script_host,
+                &self.world,
+                self.sim.as_ref(),
+                &self.scatter_protos,
+                &self.scatter_proto_radius,
+                &mut self.scatter_cache,
+                cam.world_position,
+                &off_frustum,
+                &mut instances,
+            )
+        };
         // …and the counts a game can read via `perf.counts()`. Every view that
         // comes through this gather — the docked or split Game view, `floptle
         // shot`, a render target — would otherwise leave the profile holding whatever the
@@ -932,10 +949,7 @@ impl Editor {
                 instances: instances.len(),
                 draws,
                 chunks,
-                // This gather does not draw scatter (unlike the Scene view's),
-                // so a scatter-heavy scene under-reports its props here. A
-                // separate, real gap.
-                props: 0,
+                props: scatter_props,
                 particles,
                 effects,
                 effects_dropped,
@@ -955,6 +969,8 @@ impl Editor {
                 || !self.terrains.is_empty()
                 || sky_params[0] >= 0.5
                 || self.sky_shader.is_some() // a procedural sky shader must run the raymarch (sky pass)
+                // …and so must an atmosphere, the same as the window gather.
+                || atmo_meta[0] >= 1.0
                 || !self.flsl_shape_slots.is_empty());
         // Reflections in an offscreen view, on exactly the terms the window gets
         // them: this view's own stored picture, allocated the first frame it is
@@ -1055,6 +1071,7 @@ impl Editor {
                 fog_params,
                 fog_extra,
                 terrain_scale: crate::terrain_edit::terrain_scale_lanes(&self.terrain_tex_scale),
+                fog_body: crate::shading::fog_body_lane(&light_node, &self.world, cam.world_position),
                 vol_fog_a,
                 vol_fog_b,
                 vol_fog_c,

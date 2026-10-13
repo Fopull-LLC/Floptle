@@ -822,6 +822,24 @@ impl EditorTabViewer<'_> {
             if let Some(ring) = &viz.band {
                 closed(&painter, ring, egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 200, 80)));
             }
+            // The brush itself, faint, where a click will lay it down — turned
+            // and flipped as it will land — under the cursor's outline.
+            for g in &viz.ghost {
+                let abs = crate::project::resolve_asset_path(self.project_root, &g.sheet);
+                let Some(sheet) = abs.to_str().and_then(|p| crate::ui_widgets::asset_thumb(ui, p, 512)) else {
+                    continue;
+                };
+                if let Some(mesh) = crate::tile_ui::tile_quad_mesh(
+                    sheet.id(),
+                    g.sheet_cols,
+                    g.sheet_rows,
+                    g.packed,
+                    g.quad.map(pt),
+                    egui::Color32::from_white_alpha(150),
+                ) {
+                    painter.add(egui::Shape::mesh(mesh));
+                }
+            }
             if let Some(ring) = &viz.cursor {
                 closed(&painter, ring, egui::Stroke::new(2.0, egui::Color32::WHITE));
             }

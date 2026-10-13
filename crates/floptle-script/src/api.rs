@@ -493,6 +493,7 @@ pub fn is_bool_field(comp: &str, field: &str) -> bool {
                     | "fogDither"
                     | "fogVolumetric"
                     | "fogShafts"
+                    | "fogFollowsBody"
             )
             | (
                 "RigidBody",
@@ -789,6 +790,8 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("fogAnisotropy".to_string(), l.fog_anisotropy as f64),
                 ("fogSteps".to_string(), l.fog_steps as f64),
                 ("fogShafts".to_string(), f64::from(l.fog_shafts)),
+                ("fogSky".to_string(), l.fog_sky as f64),
+                ("fogFollowsBody".to_string(), f64::from(l.fog_follows_body)),
             ]),
         );
     }
@@ -1126,6 +1129,22 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 // a 2D game's zoom, and the only camera number a flat game
                 // animates.
                 ("orthoHeight".to_string(), *ortho_height as f64),
+            ]),
+        );
+    }
+    // The Skybox's colour (the plain background with no texture or shader)
+    // and tint (multiplies a textured sky), so a game can dim its sky as a
+    // day ends or tint it as it leaves the air.
+    if let Some(Matter::Skybox { color, tint, .. }) = world.get::<Matter>(e) {
+        out.insert(
+            "Skybox".to_string(),
+            HashMap::from([
+                ("colorR".to_string(), color[0] as f64),
+                ("colorG".to_string(), color[1] as f64),
+                ("colorB".to_string(), color[2] as f64),
+                ("tintR".to_string(), tint[0] as f64),
+                ("tintG".to_string(), tint[1] as f64),
+                ("tintB".to_string(), tint[2] as f64),
             ]),
         );
     }
@@ -1475,6 +1494,20 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                         *target_h = h;
                     }
                     "hz" => *target_hz = (val as f32).clamp(0.0, 240.0),
+                    _ => {}
+                }
+            }
+        }
+        "Skybox" => {
+            if let Some(Matter::Skybox { color, tint, .. }) = world.get_mut::<Matter>(ent) {
+                let v = (val as f32).max(0.0);
+                match field {
+                    "colorR" => color[0] = v,
+                    "colorG" => color[1] = v,
+                    "colorB" => color[2] = v,
+                    "tintR" => tint[0] = v,
+                    "tintG" => tint[1] = v,
+                    "tintB" => tint[2] = v,
                     _ => {}
                 }
             }
@@ -1904,6 +1937,8 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "fogAnisotropy" => l.fog_anisotropy = v.clamp(-0.95, 0.95),
                     "fogSteps" => l.fog_steps = (val.max(2.0) as u32).min(64),
                     "fogShafts" => l.fog_shafts = val != 0.0,
+                    "fogSky" => l.fog_sky = v.clamp(0.0, 1.0),
+                    "fogFollowsBody" => l.fog_follows_body = val != 0.0,
                     _ => {}
                 }
             }
@@ -6980,13 +7015,14 @@ fn install_anim_pose_methods(
         )?;
     }
     {
-        let (scene, poses) = (shared.scene.clone(), shared.bone_poses.clone());
+        let (scene, poses, cmds) =
+            (shared.scene.clone(), shared.bone_poses.clone(), shared.anim_commands.clone());
         anim_methods.set(
             "boneWorld",
             lua.create_function(move |lua, (this, name): (Table, String)| {
                 let e: u32 = this.raw_get("__id")?;
                 let node = new_node_handle(lua, e)?;
-                Ok(match bone_world(&scene, &poses, &node, &name, "boneWorld")? {
+                Ok(match bone_world(&scene, &poses, &cmds, &node, &name, "boneWorld")? {
                     Some(w) => {
                         let (y, p, r) = w.rotation.to_euler(EulerRot::YXZ);
                         mlua::MultiValue::from_vec(vec![
@@ -7840,15 +7876,31 @@ fn install_node_methods(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
 /// transform composed with the bone's model-space pose — the frame a
 /// bone-attached node is placed in, so a read here and a marker node attached
 /// to the same bone agree.
+///
+/// Pose writes this node's scripts queued since the pose was made (`setBonePos`,
+/// `reach`, …) are applied before answering, so a script reads back the bone it
+/// just moved, where the frame will draw it.
 fn bone_world(
     scene: &Rc<RefCell<crate::SceneMirror>>,
     poses: &Rc<RefCell<crate::BonePoses>>,
+    cmds: &Rc<RefCell<Vec<(u32, AnimCmd)>>>,
     this: &Table,
     name: &str,
     call: &str,
 ) -> mlua::Result<Option<floptle_core::Transform>> {
     let e: u32 = this.raw_get("__id")?;
-    let model = match poses.borrow().bone(e, name) {
+    let ops: Vec<crate::AnimPoseOp> = cmds
+        .borrow()
+        .iter()
+        .filter_map(|(id, c)| match c {
+            AnimCmd::Pose(op) if *id == e => Some(op.clone()),
+            _ => None,
+        })
+        .collect();
+    let s = scene.borrow();
+    let world = world_transform_of_handle(&s, this, e);
+    let posed = poses.borrow().bone_posed(e, name, &ops, world.world_matrix());
+    let model = match posed {
         Ok(Some(m)) => m,
         Ok(None) => return Ok(None),
         Err(names) => {
@@ -7858,29 +7910,29 @@ fn bone_world(
             )));
         }
     };
-    let s = scene.borrow();
-    let world = world_transform_of_handle(&s, this, e);
     Ok(Some(world.mul_transform(&floptle_core::Transform::from_matrix(model.as_dmat4()))))
 }
 
 /// `node:bonePos(name)`, `node:boneRot(name)`, `node:bones()` — where an
 /// animated skeleton's bones are this frame, without a marker node per bone.
 fn node_bone_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Result<()> {
-    let (scene, poses) = (shared.scene.clone(), shared.bone_poses.clone());
+    let (scene, poses, cmds) =
+        (shared.scene.clone(), shared.bone_poses.clone(), shared.anim_commands.clone());
     methods.set(
         "bonePos",
         lua.create_function(move |lua, (this, name): (Table, String)| {
-            Ok(match bone_world(&scene, &poses, &this, &name, "bonePos")? {
+            Ok(match bone_world(&scene, &poses, &cmds, &this, &name, "bonePos")? {
                 Some(w) => crate::math_api::LuaVec3(w.translation).into_lua(lua)?,
                 None => Value::Nil,
             })
         })?,
     )?;
-    let (scene, poses) = (shared.scene.clone(), shared.bone_poses.clone());
+    let (scene, poses, cmds) =
+        (shared.scene.clone(), shared.bone_poses.clone(), shared.anim_commands.clone());
     methods.set(
         "boneRot",
         lua.create_function(move |_, (this, name): (Table, String)| {
-            Ok(match bone_world(&scene, &poses, &this, &name, "boneRot")? {
+            Ok(match bone_world(&scene, &poses, &cmds, &this, &name, "boneRot")? {
                 Some(w) => {
                     let (y, p, r) = w.rotation.to_euler(EulerRot::YXZ);
                     (Some(y as f64), Some(p as f64), Some(r as f64))

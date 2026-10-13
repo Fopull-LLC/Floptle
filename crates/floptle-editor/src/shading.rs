@@ -398,6 +398,7 @@ pub(crate) fn atmo_uniforms(world: &World, cam_world: DVec3) -> AtmoUniforms {
         let wp = floptle_core::world_transform(world, e).translation;
         let rel = wp - cam_world;
         let frac = (rel.length() - cb.body_radius) / cb.atmo_height;
+        let air = overhead_air(cb.atmo_density.clamp(0.0, 1.0), frac);
         let r = rel.as_vec3();
         items.push((
             frac,
@@ -408,7 +409,7 @@ pub(crate) fn atmo_uniforms(world: &World, cam_world: DVec3) -> AtmoUniforms {
                 cb.atmo_density.clamp(0.0, 1.0),
             ],
             [r.x, r.y, r.z, cb.body_radius as f32],
-            [cb.atmo_height as f32, cb.clouds.clamp(0.0, 1.0), 0.0, 0.0],
+            [cb.atmo_height as f32, cb.clouds.clamp(0.0, 1.0), air, 0.0],
         ));
     }
     items.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -423,6 +424,45 @@ pub(crate) fn atmo_uniforms(world: &World, cam_world: DVec3) -> AtmoUniforms {
         meta[0] = (i + 1) as f32;
     }
     (meta, color, body, params)
+}
+
+/// The optical depth of the air straight overhead, at the ground of a shell of
+/// `density` 1. Sets how deep the daytime sky is from inside: about 86% of the
+/// way to the air's colour overhead, and all the way along the horizon.
+const AIR_DEPTH: f32 = 2.0;
+
+/// How much air is above a camera standing `frac` of the way up its
+/// atmosphere (0 = the surface, 1 = the top of the shell), as optical depth.
+///
+/// It thins quadratically and reaches exactly 0 at the top with a flat
+/// tangent, so a climb out of the air fades the sky smoothly into space: no
+/// step at the top of the shell, and none on the way up.
+pub(crate) fn overhead_air(density: f32, frac: f64) -> f32 {
+    let t = (1.0 - frac).clamp(0.0, 1.0) as f32;
+    density * AIR_DEPTH * t * t
+}
+
+/// The body fog is measured from, for `Light::fog_follows_body`: the
+/// CAMERA-RELATIVE centre and surface radius of the celestial body whose
+/// surface is nearest the camera. Zero (a flat world, fog heights in world y)
+/// when the flag is off or there is no body.
+pub(crate) fn fog_body_lane(light: &Light, world: &World, cam_world: DVec3) -> [f32; 4] {
+    if !light.fog_follows_body {
+        return [0.0; 4];
+    }
+    world
+        .query::<floptle_core::CelestialBody>()
+        .filter(|(_, cb)| cb.body_radius > 0.0)
+        .map(|(e, cb)| {
+            let rel = floptle_core::world_transform(world, e).translation - cam_world;
+            (rel.length() - cb.body_radius, rel, cb.body_radius)
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, rel, r)| {
+            let c = rel.as_vec3();
+            [c.x, c.y, c.z, r as f32]
+        })
+        .unwrap_or([0.0; 4])
 }
 
 /// A star giving less than this share of the brightest star's light at the
