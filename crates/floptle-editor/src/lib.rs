@@ -259,6 +259,7 @@ mod scene_ops;
 mod space;
 mod script_actions;
 mod script_meta;
+mod art_scale;
 #[cfg(feature = "editor-ui")]
 mod scene_tab;
 mod selection;

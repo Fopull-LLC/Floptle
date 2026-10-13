@@ -2515,6 +2515,7 @@ pub(crate) fn apply_rich_sets(
                 look_ahead_x,
                 look_ahead_y,
                 room_tag,
+                art_pixels,
                 off,
             } => {
                 if off {
@@ -2577,6 +2578,9 @@ pub(crate) fn apply_rich_sets(
                     if let Some(t) = room_tag {
                         c.room_tag = t;
                         c.room = None;
+                    }
+                    if let Some(v) = art_pixels.filter(|v| v.is_finite() && *v >= 0.0) {
+                        c.art_pixels = v;
                     }
                     world.insert(e, c);
                 }
@@ -2865,6 +2869,7 @@ pub(crate) const CAMERA_2D_KEYS: &[&str] = &[
     "lookAheadX",
     "lookAheadY",
     "roomTag",
+    "artPixels",
     "off",
 ];
 
@@ -6131,6 +6136,7 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                         look_ahead_x: t.get::<Option<f32>>("lookAheadX")?,
                         look_ahead_y: t.get::<Option<f32>>("lookAheadY")?,
                         room_tag: t.get::<Option<String>>("roomTag")?,
+                        art_pixels: t.get::<Option<f32>>("artPixels")?,
                         off: t.get::<Option<bool>>("off")?.unwrap_or(false),
                     },
                 ));

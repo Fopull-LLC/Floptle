@@ -60,6 +60,16 @@ pub struct Camera2D {
     /// into it. A room is the area of the tile layers it is, or holds. Empty is
     /// off.
     pub room_tag: String,
+    /// Keep pixel art pixel-perfect: the art's pixels per world unit (`0` is
+    /// off). The camera's height is held at the nearest value where each art
+    /// pixel covers a whole number of screen pixels, so no pixel draws two
+    /// wide beside one drawn three, and the pixel snap is set to match.
+    pub art_pixels: f32,
+    /// The height the camera was asked for, by its author or a script, which
+    /// the pixel-perfect one is rounded from. Live state.
+    pub zoom_asked: Option<f32>,
+    /// The height last written, to tell a script's own write from ours.
+    pub zoom_written: Option<f32>,
 
     // ---- live state, never saved ----
     /// Where the follow has got to. Seeded from the node's transform the first
@@ -124,6 +134,9 @@ impl Default for Camera2D {
             last_out: None,
             look_ahead: [0.0, 0.0],
             room_tag: String::new(),
+            art_pixels: 0.0,
+            zoom_asked: None,
+            zoom_written: None,
             rooms: Vec::new(),
             room: None,
             last_target: None,
@@ -351,6 +364,53 @@ pub fn step_all(world: &mut crate::ecs::World, dt: f32, t: f64) {
 /// [`step_all`], knowing the viewport's width over height, so the limits can
 /// keep the whole view inside them. `None` clamps the centre alone.
 pub fn step_all_view(world: &mut crate::ecs::World, dt: f32, t: f64, aspect: Option<f32>) {
+    step_all_screen(world, dt, t, aspect, None);
+}
+
+/// The camera height in `art_pixels` world units per art pixel that puts a
+/// whole number of the picture's `screen_px` rows on each art pixel, nearest
+/// to `asked`; and that whole number.
+pub fn pixel_perfect_height(asked: f32, screen_px: f32, art_pixels: f32) -> (f32, f32) {
+    let per = screen_px / (asked.max(1e-3) * art_pixels.max(1e-3));
+    let k = per.round().max(1.0);
+    (screen_px / (k * art_pixels), k)
+}
+
+/// [`step_all_view`], also knowing how many pixels tall the picture is
+/// (`screen_px`: the retro height, or the window's), which pixel-perfect
+/// zoom (`Camera2D::art_pixels`) needs.
+pub fn step_all_screen(world: &mut crate::ecs::World, dt: f32, t: f64, aspect: Option<f32>, screen_px: Option<f32>) {
+    if let Some(px) = screen_px.filter(|p| *p > 0.0) {
+        let cams: Vec<crate::ecs::Entity> = world.query::<Camera2D>().map(|(e, _)| e).collect();
+        for e in cams {
+            let Some(Some(cur)) = world.get::<crate::matter::Matter>(e).map(|m| match m {
+                crate::matter::Matter::Camera { ortho: true, ortho_height, .. } => Some(*ortho_height),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let Some(c) = world.get_mut::<Camera2D>(e) else { continue };
+            // A height that is not the one written last frame was written by
+            // somebody else (a script zooming, the Inspector): it is the new ask.
+            if c.zoom_written != Some(cur) {
+                c.zoom_asked = Some(cur);
+            }
+            let write = if c.art_pixels > 0.0 {
+                let (h, k) = pixel_perfect_height(c.zoom_asked.unwrap_or(cur), px, c.art_pixels);
+                c.pixel_snap = k * c.art_pixels;
+                Some(h)
+            } else {
+                // Switched off: hand back the height that was asked for.
+                c.zoom_asked.take().filter(|a| *a != cur)
+            };
+            c.zoom_written = write.or(Some(cur));
+            if let Some(h) = write
+                && let Some(crate::matter::Matter::Camera { ortho_height, .. }) = world.get_mut::<crate::matter::Matter>(e)
+            {
+                *ortho_height = h;
+            }
+        }
+    }
     // Collected first: resolving a target's world transform reads the world,
     // and the write below needs it mutably.
     //
@@ -961,5 +1021,54 @@ mod tests {
             here = c.step(here, Some(DVec2::new(20.0 + f as f64 * 0.01, 0.0)), 1.0 / 60.0, f as f64 / 60.0);
         }
         assert!(((here.x * ppu) - (here.x * ppu).round()).abs() < 1e-9, "on the grid: {}", here.x * ppu);
+    }
+
+    /// `artPixels = 8` on a 240-row picture: a camera 11 units tall (2.73
+    /// screen pixels an art pixel) is held at 10 (exactly 3), the snap is set
+    /// to match, a script's zoom to 15 lands on 15 (exactly 2), and switching
+    /// it off hands back the height that was asked for.
+    #[test]
+    fn art_pixels_hold_the_zoom_at_a_whole_scale() {
+        use crate::ecs::World;
+        use crate::matter::Matter;
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, crate::transform::Transform::IDENTITY);
+        world.insert(e, Matter::Camera {
+            fov_y: 1.0,
+            active: true,
+            target: String::new(),
+            cull_mask: !0,
+            target_w: 0,
+            target_h: 0,
+            target_hz: 0.0,
+            ortho: true,
+            ortho_height: 11.0,
+            stack: Vec::new(),
+        });
+        world.insert(e, Camera2D { art_pixels: 8.0, ..Default::default() });
+        let height = |w: &World| match w.get::<Matter>(e) {
+            Some(Matter::Camera { ortho_height, .. }) => *ortho_height,
+            _ => unreachable!(),
+        };
+        step_all_screen(&mut world, 1.0 / 60.0, 0.0, Some(16.0 / 9.0), Some(240.0));
+        assert_eq!(height(&world), 10.0);
+        assert_eq!(world.get::<Camera2D>(e).unwrap().pixel_snap, 24.0);
+        // A script zooms out.
+        if let Some(Matter::Camera { ortho_height, .. }) = world.get_mut::<Matter>(e) {
+            *ortho_height = 15.0;
+        }
+        step_all_screen(&mut world, 1.0 / 60.0, 0.0, Some(16.0 / 9.0), Some(240.0));
+        assert_eq!(height(&world), 15.0);
+        step_all_screen(&mut world, 1.0 / 60.0, 0.0, Some(16.0 / 9.0), Some(240.0));
+        assert_eq!(height(&world), 15.0, "and stays put");
+        // Off: back to what was asked.
+        if let Some(Matter::Camera { ortho_height, .. }) = world.get_mut::<Matter>(e) {
+            *ortho_height = 11.0;
+        }
+        step_all_screen(&mut world, 1.0 / 60.0, 0.0, Some(16.0 / 9.0), Some(240.0));
+        world.get_mut::<Camera2D>(e).unwrap().art_pixels = 0.0;
+        step_all_screen(&mut world, 1.0 / 60.0, 0.0, Some(16.0 / 9.0), Some(240.0));
+        assert_eq!(height(&world), 11.0);
     }
 }

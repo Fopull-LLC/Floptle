@@ -1094,6 +1094,13 @@ impl Editor {
                 }
             }
             self.play_snapshot = Some(self.snapshot());
+            // Art drawn at a different density from the one the camera keeps
+            // pixel-perfect can never sit on its grid: said once, at Play.
+            if let Some(snap) = self.play_snapshot.as_ref() {
+                for line in crate::art_scale::art_mismatches(&self.project_root, &snap.nodes) {
+                    self.console.push(floptle_script::LogLevel::Warn, line, None);
+                }
+            }
             // **The project settings are part of what Play may change and Stop
             // must put back.** `app.setVsync` and the retro knobs write the live
             // `ProjectConfigDoc`, which is also what `save_project` writes to

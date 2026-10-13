@@ -7965,6 +7965,14 @@ fn camera_2d_section(
                 changed = true;
             }
             ui.end_row();
+
+            ui.label("art pixels").on_hover_text(
+                "pixel-perfect zoom: your art's pixels per world unit (8 for 8×8 tiles a unit across). The camera's height is held at the nearest value where each art pixel covers a whole number of screen pixels, so none draws two wide beside one drawn three, and the pixel snap is set to match. 0 is off.",
+            );
+            changed |= ui
+                .add(egui::DragValue::new(&mut next.art_pixels).speed(0.25).range(0.0..=512.0))
+                .changed();
+            ui.end_row();
         });
         changed |= crate::responsive::check(ui, &mut next.limits_on, "keep inside a rectangle")
             .on_hover_text("the camera never leaves this box, so it never shows outside the level")

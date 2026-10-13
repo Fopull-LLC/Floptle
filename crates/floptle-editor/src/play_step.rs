@@ -1365,7 +1365,14 @@ impl Editor {
         // The view's shape, so the limits keep the whole picture inside the
         // level. Before anything has drawn (a headless run), 16:9.
         let aspect = self.script_host.view_aspect().unwrap_or(16.0 / 9.0);
-        floptle_core::camera2d::step_all_view(&mut self.world, sdt, self.play_t as f64, Some(aspect));
+        // How many pixels tall the picture is, for pixel-perfect zoom: the
+        // retro height when the game renders at one, the window's otherwise.
+        let screen_px = if self.project.retro {
+            Some(self.project.retro_height as f32)
+        } else {
+            self.gpu.as_ref().map(|g| g.config.height as f32)
+        };
+        floptle_core::camera2d::step_all_screen(&mut self.world, sdt, self.play_t as f64, Some(aspect), screen_px);
         // Particles tick last: emitter node transforms are final for the frame
         // (scripts → animation → physics → attachments → particles). Apply any
         // play/stop/restart a script queued this frame first, so it lands now.

@@ -670,6 +670,9 @@ pub struct Camera2DDoc {
     /// Nodes with this tag are rooms the camera keeps to. Empty = off.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub room_tag: String,
+    /// Pixel-perfect zoom: the art's pixels per unit. `0` = off.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub art_pixels: f32,
 }
 
 fn default_smoothing() -> f32 {
@@ -696,6 +699,7 @@ impl Default for Camera2DDoc {
             pixel_snap: 0.0,
             look_ahead: (0.0, 0.0),
             room_tag: String::new(),
+            art_pixels: 0.0,
         }
     }
 }
@@ -712,6 +716,7 @@ impl From<&floptle_core::camera2d::Camera2D> for Camera2DDoc {
             pixel_snap: c.pixel_snap,
             look_ahead: (c.look_ahead[0], c.look_ahead[1]),
             room_tag: c.room_tag.clone(),
+            art_pixels: c.art_pixels,
         }
     }
 }
@@ -728,6 +733,7 @@ impl From<&Camera2DDoc> for floptle_core::camera2d::Camera2D {
             pixel_snap: d.pixel_snap,
             look_ahead: [d.look_ahead.0, d.look_ahead.1],
             room_tag: d.room_tag.clone(),
+            art_pixels: d.art_pixels,
             ..Default::default()
         }
     }

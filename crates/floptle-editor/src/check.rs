@@ -543,6 +543,9 @@ fn check_scene(root: &Path, path: &Path, where_: &str, settings: &Settings, r: &
     for node in &doc.nodes {
         check_node_refs(root, node, where_, settings, r);
     }
+    for line in crate::art_scale::art_mismatches(root, &doc.nodes) {
+        r.warn(Some(where_.into()), line);
+    }
     // A scene file with no Skybox loads with the default one, a flat mid-grey,
     // which reads as a broken render rather than as "no sky". Only a scene with
     // its own camera is meant to be looked at alone; an additive layer carries

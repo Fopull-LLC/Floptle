@@ -1816,6 +1816,8 @@ pub enum RichSet {
         look_ahead_y: Option<f32>,
         /// The tag that marks rooms; `""` is off.
         room_tag: Option<String>,
+        /// Pixel-perfect zoom: the art's pixels per unit; `0` is off.
+        art_pixels: Option<f32>,
         /// `off = true` removes the behaviour entirely.
         off: bool,
     },
