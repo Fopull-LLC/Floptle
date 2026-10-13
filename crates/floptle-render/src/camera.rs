@@ -262,7 +262,8 @@ impl FlyCamera {
         // and a Game view that disagree about what is in the scene is the whole
         // bug this constant exists to prevent.
         let proj = match self.ortho {
-            Some(height) => Projection::of_camera(0.0, true, height, 0.0, 0.0),
+            // The Scene view's own 60°, so its sky looks the same in 2D as in 3D.
+            Some(height) => Projection::of_camera(60f32.to_radians(), true, height, 0.0, 0.0),
             None => Projection::Perspective { fov_y: 60f32.to_radians(), near: 0.1, far: 2000.0 },
         };
         RenderCamera::new(self.position, self.rotation(), proj)

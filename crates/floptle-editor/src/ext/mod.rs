@@ -194,7 +194,7 @@ impl SceneView {
         // Half extents of the whole picture: tangents, or world units.
         let (half_h, near, far, ortho) = match proj {
             Projection::Perspective { fov_y, near, far } => ((fov_y * 0.5).tan(), near, far, false),
-            Projection::Orthographic { height, near, far } => (height * 0.5, near, far, true),
+            Projection::Orthographic { height, near, far, .. } => (height * 0.5, near, far, true),
         };
         let half_w = half_h * window_aspect;
         let [x0, y0, x1, y1] = view;

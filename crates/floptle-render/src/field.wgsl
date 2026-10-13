@@ -44,7 +44,7 @@ struct Globals {
     blob_specular: array<vec4<f32>, 16>, // rgb, a = strength
     blob_params: array<vec4<f32>, 16>,   // x shininess, y rim_strength, z unlit, w ambient_mul
     blob_rim: array<vec4<f32>, 16>,      // rgb, a unused
-    sky_params: vec4<f32>,               // x = mode (0 solid, 1 texture), y = size
+    sky_params: vec4<f32>,               // x = mode (0 solid, 1 texture), y = size, z = an orthographic camera's sky spread (tan half fov), 0 = perspective
     sky_tint: vec4<f32>,                 // rgb tint × sampled texel
     sky_rot0: vec4<f32>,                 // inverse skybox rotation, column 0 (xyz)
     sky_rot1: vec4<f32>,                 // column 1

@@ -79,7 +79,7 @@ fn main() {
 
     let shots = [
         // What every gameplay camera built before 0091.
-        ("was", Projection::Orthographic { height: ORTHO_HEIGHT, near: 0.05, far: 300_000.0 }),
+        ("was", Projection::Orthographic { height: ORTHO_HEIGHT, near: 0.05, far: 300_000.0, sky_fov: 1.05 }),
         ("now", Projection::of_camera(1.05, true, ORTHO_HEIGHT, 0.05, 300_000.0)),
     ];
     let mut drawn = [0usize; 2];

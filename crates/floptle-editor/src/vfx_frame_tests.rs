@@ -343,3 +343,50 @@ fn a_lit_cloud_beside_a_lamp_takes_its_light() {
     assert!(a[0] - a[2] > b[0] - b[2] + 20.0, "and warmer: near {a:?}, far {b:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A sky shader seen through an orthographic camera looks as it does through
+/// the same camera in perspective. It used to come out one flat colour: every
+/// pixel of an orthographic view looks the same way, so the shader was asked
+/// about one direction for the whole screen.
+#[test]
+#[cfg(feature = "editor-ui")]
+fn a_sky_shader_draws_the_same_through_an_orthographic_camera() {
+    use floptle_render::{Projection, RenderCamera};
+    let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+    let dir = std::env::temp_dir().join(format!("floptle-ortho-sky-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("shaders")).unwrap();
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/shaders/examples/sunsetStreaks.flsl");
+    std::fs::copy(&src, dir.join("shaders/sunsetStreaks.flsl")).unwrap();
+    ed.project_root = dir.clone();
+    let sky = ed.world.spawn();
+    ed.world.insert(sky, Transform::IDENTITY);
+    ed.world.insert(
+        sky,
+        Matter::Skybox {
+            color: [0.5; 3],
+            size: 500.0,
+            texture: None,
+            tint: [1.0; 3],
+            shader: Some("shaders/sunsetStreaks.flsl".into()),
+            shader_params: Default::default(),
+        },
+    );
+    let (w, h) = (96u32, 54u32);
+    let shoot = |ed: &mut crate::Editor, ortho: bool| {
+        let proj = Projection::of_camera(1.0, ortho, 6.0, 0.05, 300_000.0);
+        let cam = RenderCamera::new(DVec3::new(0.0, 0.0, 20.0), Default::default(), proj);
+        crate::shot::render_frame_pixels(ed, &cam, None, w, h, !0, false).expect("a frame")
+    };
+    let persp = shoot(&mut ed, false);
+    let ortho = shoot(&mut ed, true);
+    let _ = std::fs::remove_dir_all(&dir);
+    let spread = |px: &[u8]| {
+        let lum: Vec<i32> = px.chunks(4).map(|p| p[0] as i32 + p[1] as i32 + p[2] as i32).collect();
+        lum.iter().max().unwrap() - lum.iter().min().unwrap()
+    };
+    assert!(spread(&persp) > 60, "the sky shader drew nothing to compare against");
+    assert!(spread(&ortho) > 60, "the orthographic sky is one flat colour");
+    let worst = persp.iter().zip(&ortho).map(|(a, b)| (*a as i32 - *b as i32).abs()).max().unwrap();
+    assert!(worst <= 4, "the orthographic sky differs from the perspective one by up to {worst}");
+}

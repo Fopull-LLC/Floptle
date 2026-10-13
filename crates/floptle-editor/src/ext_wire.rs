@@ -1572,7 +1572,7 @@ mod scene_view_tests {
         assert!((low.fov_y_deg.unwrap() - 45.0).abs() < 1e-3);
 
         // Orthographic: world units, and no angle that looks real.
-        let ortho = Projection::Orthographic { height: 10.0, near: -5.0, far: 5.0 };
+        let ortho = Projection::Orthographic { height: 10.0, near: -5.0, far: 5.0, sky_fov: 1.0 };
         let top = SceneView::of(ortho, 2.0, [0.0, 0.0, 1.0, 0.5], [2000.0, 500.0], up, right);
         assert!(close(top.frustum, [-10.0, 10.0, 0.0, 5.0]), "{:?}", top.frustum);
         assert_eq!((top.ortho, top.fov_y_deg, top.ortho_height), (true, None, Some(5.0)));

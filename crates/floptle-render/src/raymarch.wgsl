@@ -559,6 +559,29 @@ fn camera_ray_dir(ndc: vec2<f32>, ro: vec3<f32>) -> vec3<f32> {
     return normalize(mid.xyz / mid.w - ro);
 }
 
+// The direction the sky is seen in at a screen position.
+//
+// A perspective camera's own ray. An orthographic camera's rays all point the
+// same way, so a sky shader would see one direction and paint the whole
+// background one colour; it is drawn instead as the same camera would see it
+// in perspective, its rays fanned out by its field of view (`sky_params.z` =
+// tan of half of it, 0 for perspective). The camera's right and up come from
+// the unprojection itself, so a turned or tilted orthographic camera turns its
+// sky too.
+fn sky_ray(ndc: vec2<f32>, rd: vec3<f32>) -> vec3<f32> {
+    let spread = G.sky_params.z;
+    if (spread <= 0.0) {
+        return rd;
+    }
+    let o = camera_ray_origin(vec2<f32>(0.0, 0.0));
+    let right = camera_ray_origin(vec2<f32>(1.0, 0.0)) - o;
+    let up = camera_ray_origin(vec2<f32>(0.0, 1.0)) - o;
+    let aspect = length(right) / max(length(up), 1e-6);
+    let r = right / max(length(right), 1e-6);
+    let u = up / max(length(up), 1e-6);
+    return normalize(rd + (r * ndc.x * aspect + u * ndc.y) * spread);
+}
+
 @fragment
 fn fs(in: VOut) -> FsOut {
     let ro = camera_ray_origin(in.ndc);
@@ -783,13 +806,14 @@ fn fs(in: VOut) -> FsOut {
         // Sanitize the sky: a NaN from a grazing-ray edge in the atmosphere math
         // resolves to 0 (black) in the attachment and flickers the sky. Any NaN
         // component falls back to the sky void colour, and negatives are clamped.
-        var sky = sky_color(rd);
+        let srd = sky_ray(in.ndc, rd);
+        var sky = sky_color(srd);
         sky = select(G.bg.rgb, sky, sky == sky);
         // Fog reaches the sky — the volumetric layer by marching it, the flat
         // ramp by `fog_sky`'s horizon-weighted blend (see the note there on why
         // stopping at the geometry made every dark fog colour look like no fog).
         let spix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));
-        out.color = vec4<f32>(fog_sky(max(sky, vec3<f32>(0.0)), rd, spix), 1.0);
+        out.color = vec4<f32>(fog_sky(max(sky, vec3<f32>(0.0)), srd, spix), 1.0);
         out.depth = 1.0;
     }
     return out;

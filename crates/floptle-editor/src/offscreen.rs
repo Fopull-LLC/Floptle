@@ -869,7 +869,9 @@ impl Editor {
             );
         }
 
-        let (sky_params, sky_tint, sky_rot, sky_solid) = skybox_uniforms(&self.world);
+        let (mut sky_params, sky_tint, sky_rot, sky_solid) = skybox_uniforms(&self.world);
+        // An orthographic camera's sky, through its field of view.
+        sky_params[2] = cam.projection.sky_spread();
         let clear = [sky_solid[0], sky_solid[1], sky_solid[2], 1.0];
         // SDF AO from the scene's PostProcess node shades SDF matter in offscreen
         // views too (previews + the split Game viewport).

@@ -71,7 +71,8 @@ pub struct RaymarchGlobals {
     /// rgb rim/fresnel color, a = unused.
     pub blob_rim: [[f32; 4]; 16],
     /// Skybox: x = mode (0 = solid `bg`, 1 = equirect texture), y = size (unused by the
-    /// shader; the sky is at infinity), zw unused.
+    /// shader; the sky is at infinity), z = an orthographic camera's sky spread
+    /// (`Projection::sky_spread`; 0 = perspective, the view's own rays), w unused.
     pub sky_params: [f32; 4],
     /// Sky texture tint (rgb × the sampled texel), a = unused.
     pub sky_tint: [f32; 4],

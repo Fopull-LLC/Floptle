@@ -17,7 +17,11 @@ use floptle_core::math::{DVec3, Mat4, Quat};
 #[derive(Debug, Clone, Copy)]
 pub enum Projection {
     Perspective { fov_y: f32, near: f32, far: f32 },
-    Orthographic { height: f32, near: f32, far: f32 },
+    /// `sky_fov` is the camera's field of view, kept for the sky alone: an
+    /// orthographic view's rays all point one way, so it would see one colour
+    /// of a sky shader, and draws the sky as the same camera would in
+    /// perspective instead.
+    Orthographic { height: f32, near: f32, far: f32, sky_fov: f32 },
 }
 
 /// Half the depth range an orthographic camera spans, in world units: its box
@@ -37,7 +41,7 @@ impl Projection {
             Projection::Perspective { fov_y, near, far } => {
                 Mat4::perspective_rh(fov_y, aspect, near, far)
             }
-            Projection::Orthographic { height, near, far } => {
+            Projection::Orthographic { height, near, far, .. } => {
                 let w = height * aspect;
                 Mat4::orthographic_rh(-w * 0.5, w * 0.5, -height * 0.5, height * 0.5, near, far)
             }
@@ -58,6 +62,7 @@ impl Projection {
                 height: ortho_height.max(1e-3),
                 near: -ORTHO_DEPTH,
                 far: ORTHO_DEPTH,
+                sky_fov: fov_y,
             }
         } else {
             Projection::Perspective { fov_y, near, far }
@@ -93,6 +98,20 @@ impl Projection {
         match *self {
             Projection::Perspective { .. } => None,
             Projection::Orthographic { height, .. } => Some(height),
+        }
+    }
+
+    /// `tan(fov / 2)` of the rays the sky is drawn with, when they are not the
+    /// view's own: an orthographic camera's sky is drawn through its field of
+    /// view, as it would look in perspective. 0 for a perspective camera,
+    /// whose own rays already fan out. Lane `sky_params.z` of the sky shader.
+    pub fn sky_spread(&self) -> f32 {
+        match *self {
+            Projection::Perspective { .. } => 0.0,
+            Projection::Orthographic { sky_fov, .. } => {
+                let f = if sky_fov > 0.01 && sky_fov < 3.1 { sky_fov } else { 60f32.to_radians() };
+                (f * 0.5).tan()
+            }
         }
     }
 
@@ -180,7 +199,7 @@ mod tests {
         let p = Projection::of_camera(1.05, true, 9.5, 0.05, 300_000.0);
         // The projection a camera must not build for a flat scene, so this
         // stays a regression test and not a description of the current code.
-        let was = Projection::Orthographic { height: 9.5, near: 0.05, far: 300_000.0 };
+        let was = Projection::Orthographic { height: 9.5, near: 0.05, far: 300_000.0, sky_fov: 1.0 };
         assert!(!visible(was, glam::Vec3::ZERO), "the bug: the map was clipped by its own camera");
         assert!(visible(p, glam::Vec3::ZERO), "the plane the camera sits in must be in frame");
         assert!(visible(p, glam::Vec3::new(2.0, -3.0, 0.0)), "and so must the rest of it");
@@ -213,7 +232,7 @@ mod tests {
     #[test]
     fn the_scene_view_and_a_camera_node_agree_about_depth() {
         let node = Projection::of_camera(1.05, true, 9.5, 0.05, 300_000.0);
-        let editor = Projection::Orthographic { height: 9.5, near: -ORTHO_DEPTH, far: ORTHO_DEPTH };
+        let editor = Projection::Orthographic { height: 9.5, near: -ORTHO_DEPTH, far: ORTHO_DEPTH, sky_fov: 1.0 };
         assert_eq!(node.matrix(1.6), editor.matrix(1.6));
     }
 }

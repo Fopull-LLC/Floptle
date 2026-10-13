@@ -486,7 +486,9 @@ impl Editor {
 
         // Skybox: a Skybox node drives the environment background — a solid color, or an
         // equirect texture × tint, rotated by the node so a script can spin the sky.
-        let (sky_params, sky_tint, sky_rot, sky_solid) = skybox_uniforms(&self.world);
+        let (mut sky_params, sky_tint, sky_rot, sky_solid) = skybox_uniforms(&self.world);
+        // An orthographic camera's sky, through its field of view.
+        sky_params[2] = cam.projection.sky_spread();
         let clear = [sky_solid[0], sky_solid[1], sky_solid[2], 1.0];
         // The terrain's surface Material (active terrain's, or any terrain that has one)
         // so terrain shades like the rest of the scene. Neutral default = plain matte.
