@@ -434,7 +434,7 @@ placed on the cell the same way the art is.
 **cell height** is a cell's height over its width: 0.5 for the usual 2:1
 isometric diamond, and a regular hexagon's for hex. Art taller than its cell,
 such as an isometric block or wall, stands on the bottom of its cell and rises
-out of the top, and the map draws front to back so a nearer block covers the one
+out of the top, and the map draws back to front so a nearer block covers the one
 behind it. Leave the cell height alone for tall art; it is the floor's shape.
 
 Two things stay square: autotiling still looks at the four or eight neighbours

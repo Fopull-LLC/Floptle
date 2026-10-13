@@ -422,9 +422,9 @@ pub fn tilemap(
 /// as one mesh.
 ///
 /// `cells` lists each cell to draw as its index into `data` and its middle, in
-/// the order to draw them: front to back, so where art is taller than its cell
-/// (an isometric block) the nearer tile wins the depth test against the one
-/// behind it rather than the other way round. Every quad is `w` wide and
+/// the order to draw them: back to front, so where art is taller than its cell
+/// (an isometric block) the nearer tile, drawn last, covers the one behind it.
+/// The tiles share a plane, so it is the order and not depth that decides. Every quad is `w` wide and
 /// `quad_h` high, standing on the bottom of its cell (`cell_h` high), so flat
 /// art fills the cell and taller art rises out of it.
 ///

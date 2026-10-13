@@ -386,7 +386,11 @@ impl Light2d {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: Gpu::DEPTH_FORMAT,
                 depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
+                // The colour pass's own test. Two surfaces in one plane — the tiles
+                // of an isometric map, say — resolve the same way in both
+                // passes, last drawn wins, or this pass would correct a pixel
+                // for a surface the colour pass did not draw there.
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: Default::default(),
                 bias: Default::default(),
             }),

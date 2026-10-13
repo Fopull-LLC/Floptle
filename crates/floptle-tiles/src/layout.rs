@@ -237,9 +237,15 @@ impl CellLayout {
         }
     }
 
-    /// The map's cells, front to back: the order a mesh lists them in so a
+    /// The map's cells, back to front: the order a mesh lists them in so a
     /// tile drawn taller than its cell covers the ones behind it. Front is
     /// lower on the screen.
+    ///
+    /// Back to front because the tiles share one plane, so depth cannot order
+    /// them and the last one drawn wins: under the colour pass's `LessEqual`,
+    /// under the 2D light fill (which uses the same test so the two agree on
+    /// every pixel), and under blending, where painter's order is the only
+    /// order there is.
     pub fn draw_order(&self) -> Vec<(u32, u32)> {
         let mut cells: Vec<(u32, u32)> =
             (0..self.rows).flat_map(|r| (0..self.cols).map(move |c| (c, r))).collect();
@@ -247,7 +253,7 @@ impl CellLayout {
             cells.sort_by(|a, b| {
                 let ya = self.center(a.0 as i32, a.1 as i32)[1];
                 let yb = self.center(b.0 as i32, b.1 as i32)[1];
-                ya.total_cmp(&yb)
+                yb.total_cmp(&ya)
             });
         }
         cells
@@ -351,12 +357,12 @@ mod tests {
         assert_eq!(l.unit_to_cell(1, 1, 0.0, 1.0), o[3], "top-left → top corner");
     }
 
-    /// Front to back: an isometric cell lower on the screen comes first.
+    /// Back to front: an isometric cell lower on the screen comes last.
     #[test]
-    fn isometric_cells_draw_front_to_back() {
+    fn isometric_cells_draw_back_to_front() {
         let l = CellLayout::new(GridShape::Isometric, 3, 3, 1.0, 0.0);
         let order = l.draw_order();
-        assert_eq!(order[0], (2, 2), "the bottom corner is the front");
-        assert_eq!(*order.last().unwrap(), (0, 0), "the top corner is the back");
+        assert_eq!(order[0], (0, 0), "the top corner is the back");
+        assert_eq!(*order.last().unwrap(), (2, 2), "the bottom corner is the front");
     }
 }
