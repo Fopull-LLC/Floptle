@@ -113,8 +113,19 @@ to correct.)
 
 ### Turning and mirroring
 
-`↻` `⇔` `⇕` turn the **selection** when there is one, and the **brush** when there
-is not. Same buttons, because "turn this" is one idea.
+`↺` `↻` `⇔` `⇕` turn the **selection** when there is one, and the **brush** when
+there is not. Same buttons, because "turn this" is one idea.
+
+With the tile tool out, the keys do the same while you draw:
+
+| Key | Does |
+|---|---|
+| `,` | a quarter-turn anticlockwise |
+| `.` | a quarter-turn clockwise |
+| `[` | mirror left to right |
+| `]` | mirror top to bottom |
+
+So one corner piece, drawn once, paints all four corners of a room.
 
 A square tile has exactly **eight** placements: four rotations, each optionally
 mirrored. That is why the engine stores an orientation as `(rot, flipX)` rather

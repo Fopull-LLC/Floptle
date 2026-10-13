@@ -60,7 +60,8 @@ pub(crate) enum TileCmd {
     Paste,
     ClearSelection,
     /// Turn / mirror the selection (or the brush, with no selection).
-    Reorient { turn: bool, flip_x: bool, flip_y: bool },
+    /// Quarter turns clockwise (3 = one anticlockwise), then the mirrors.
+    Reorient { turns: u8, flip_x: bool, flip_y: bool },
     /// Create a tileset for the active layer's own sheet and attach it.
     NewTilesetForLayer,
     /// Give the active layer a tileset for this image (project-relative):
@@ -420,30 +421,34 @@ impl TileCtx<'_> {
         // idea and having two sets of them is how you press the wrong one.
         let has_sel = self.tools.selection.is_some();
         labelled(ui, "orient", |ui| {
+            let what = if has_sel { "the selection" } else { "the brush" };
             if ui
-                .add_sized([fit(ui, 32.0), BTN_H], egui::Button::new("↻"))
-                .on_hover_text(if has_sel {
-                    "turn the selection a quarter-turn clockwise"
-                } else {
-                    "turn the brush a quarter-turn clockwise"
-                })
+                .add_sized([fit(ui, 32.0), BTN_H], egui::Button::new("↺"))
+                .on_hover_text(format!("turn {what} a quarter-turn anticlockwise  ( , )"))
                 .clicked()
             {
-                self.cmds.push(TileCmd::Reorient { turn: true, flip_x: false, flip_y: false });
+                self.cmds.push(TileCmd::Reorient { turns: 3, flip_x: false, flip_y: false });
+            }
+            if ui
+                .add_sized([fit(ui, 32.0), BTN_H], egui::Button::new("↻"))
+                .on_hover_text(format!("turn {what} a quarter-turn clockwise  ( . )"))
+                .clicked()
+            {
+                self.cmds.push(TileCmd::Reorient { turns: 1, flip_x: false, flip_y: false });
             }
             if ui
                 .add_sized([fit(ui, 32.0), BTN_H], egui::Button::new("⇔"))
-                .on_hover_text("mirror left-to-right")
+                .on_hover_text("mirror left-to-right  ( [ )")
                 .clicked()
             {
-                self.cmds.push(TileCmd::Reorient { turn: false, flip_x: true, flip_y: false });
+                self.cmds.push(TileCmd::Reorient { turns: 0, flip_x: true, flip_y: false });
             }
             if ui
                 .add_sized([fit(ui, 32.0), BTN_H], egui::Button::new("⇕"))
-                .on_hover_text("mirror top-to-bottom")
+                .on_hover_text("mirror top-to-bottom  ( ] )")
                 .clicked()
             {
-                self.cmds.push(TileCmd::Reorient { turn: false, flip_x: false, flip_y: true });
+                self.cmds.push(TileCmd::Reorient { turns: 0, flip_x: false, flip_y: true });
             }
             ui.label(RichText::new(self.tools.xform.label()).small().color(ACCENT));
             if self.tools.xform != TileXform::NONE
@@ -2505,8 +2510,8 @@ impl crate::Editor {
             TileCmd::Copy => self.tile_copy(),
             TileCmd::Paste => self.tile_paste(),
             TileCmd::ClearSelection => self.tile_clear_selection(),
-            TileCmd::Reorient { turn, flip_x, flip_y } => {
-                self.tile_reorient_selection(turn, flip_x, flip_y)
+            TileCmd::Reorient { turns, flip_x, flip_y } => {
+                self.tile_reorient_selection(turns, flip_x, flip_y)
             }
             TileCmd::NewTilesetForLayer => self.new_tileset_for_layer(),
             TileCmd::NewTilesetFromImage(rel) => self.new_tileset_from_image(rel),

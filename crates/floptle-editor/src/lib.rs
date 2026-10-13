@@ -5026,6 +5026,17 @@ impl Editor {
                     // both, which is what running after the match would
                     // do. The Tiles tab has its own Grid checkbox, and
                     // switching tools hands F back.
+                    // , and . turn what you are drawing a quarter-turn
+                    // anticlockwise and clockwise, [ and ] mirror it left to
+                    // right and top to bottom: one tile drawn once becomes
+                    // the eight ways it can face.
+                    if self.tool == Tool::Tiles
+                        && !self.playing
+                        && let Some((turns, fx, fy)) = crate::tile_edit::reorient_key(code)
+                    {
+                        self.tile_reorient_selection(turns, fx, fy);
+                        return;
+                    }
                     let claimed = self.tool == Tool::Tiles
                         && !self.playing
                         && letter_of(code)

@@ -893,11 +893,12 @@ impl Editor {
         }
     }
 
-    /// Re-orient the selection (or, with none, the brush).
-    pub(crate) fn tile_reorient_selection(&mut self, turn: bool, flip_x: bool, flip_y: bool) {
+    /// Re-orient the selection (or, with none, the brush): `turns` quarter
+    /// turns clockwise (3 is one anticlockwise), then the mirrors.
+    pub(crate) fn tile_reorient_selection(&mut self, turns: u8, flip_x: bool, flip_y: bool) {
         let apply = |xf: TileXform| {
             let mut xf = xf;
-            if turn {
+            for _ in 0..(turns & 3) {
                 xf = xf.rotated_cw();
             }
             if flip_x {
@@ -1063,6 +1064,20 @@ impl Editor {
             }
         }
         out
+    }
+}
+
+/// The tile keys that turn and mirror what you are drawing, as quarter turns
+/// clockwise and mirrors: `,` anticlockwise, `.` clockwise, `[` left to right,
+/// `]` top to bottom.
+pub(crate) fn reorient_key(code: winit::keyboard::KeyCode) -> Option<(u8, bool, bool)> {
+    use winit::keyboard::KeyCode as K;
+    match code {
+        K::Comma => Some((3, false, false)),
+        K::Period => Some((1, false, false)),
+        K::BracketLeft => Some((0, true, false)),
+        K::BracketRight => Some((0, false, true)),
+        _ => None,
     }
 }
 
@@ -1381,5 +1396,31 @@ mod resize_tests {
         ed.tile_fit_to_content();
         assert_eq!(ed.tile_layer_size(), Some((1, 1)));
         assert!(close(marker_world(&ed, e), before));
+    }
+
+    /// `.` then `,` is back where it started, four `.` is a full turn, and
+    /// `[` twice undoes itself: the keys turn the brush the way they say.
+    #[test]
+    fn the_reorient_keys_turn_and_mirror_the_brush() {
+        use winit::keyboard::KeyCode as K;
+        let mut ed = crate::Editor::default();
+        let press = |ed: &mut crate::Editor, k| {
+            let (t, fx, fy) = super::reorient_key(k).expect("a reorient key");
+            ed.tile_reorient_selection(t, fx, fy);
+        };
+        press(&mut ed, K::Period);
+        assert_eq!(ed.tile_tools.xform, TileXform::NONE.rotated_cw());
+        press(&mut ed, K::Comma);
+        assert_eq!(ed.tile_tools.xform, TileXform::NONE, "anticlockwise undoes clockwise");
+        press(&mut ed, K::Comma);
+        assert_eq!(ed.tile_tools.xform, TileXform::new(3, false), "a quarter-turn anticlockwise");
+        ed.tile_tools.xform = TileXform::NONE;
+        press(&mut ed, K::BracketLeft);
+        assert_eq!(ed.tile_tools.xform, TileXform::NONE.flipped_x());
+        press(&mut ed, K::BracketLeft);
+        assert_eq!(ed.tile_tools.xform, TileXform::NONE);
+        press(&mut ed, K::BracketRight);
+        assert_eq!(ed.tile_tools.xform, TileXform::NONE.flipped_y());
+        assert!(super::reorient_key(K::KeyA).is_none());
     }
 }
