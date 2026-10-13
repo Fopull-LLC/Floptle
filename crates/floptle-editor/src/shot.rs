@@ -109,7 +109,12 @@ fn feed_view(ed: &mut crate::Editor, named: Option<&str>, w: u32, h: u32) {
     });
 }
 
-fn play_for(ed: &mut crate::Editor, seconds: f32, view: (Option<&str>, u32, u32)) -> Option<f32> {
+fn play_for(
+    ed: &mut crate::Editor,
+    seconds: f32,
+    view: (Option<&str>, u32, u32),
+    pace: crate::run::Pace,
+) -> Option<f32> {
     // How long this is allowed to spend waiting on the background terrain
     // threads, in total — the same budget `shot` already gives its pre-render
     // settle, for the same reason: a world that never finishes streaming must
@@ -133,8 +138,8 @@ fn play_for(ed: &mut crate::Editor, seconds: f32, view: (Option<&str>, u32, u32)
     }
     // Rounded and never zero: `--after 0.001` asking for no simulation at all
     // would be a confusing way to spell `shot`.
-    let steps = ((seconds / crate::run::DT).round() as i64).clamp(1, u32::MAX as i64) as u32;
-    for _ in 0..steps {
+    let steps = crate::run::Span::Seconds(seconds).steps(pace.fps);
+    for step in 0..steps {
         // In the loop for the reason `run` documents at length: without it the
         // Play-start terrain hold never lifts, and a held session is a paused
         // one — no fixed tick, so no rails, no physics, and a `dt` of zero
@@ -148,8 +153,9 @@ fn play_for(ed: &mut crate::Editor, seconds: f32, view: (Option<&str>, u32, u32)
         // and every step, so a camera a script moves is what the next one
         // projects through.
         feed_view(ed, view.0, view.1, view.2);
-        ed.tick_headless_ui_clock(crate::run::DT);
-        ed.play_step(crate::run::DT, true);
+        let dt = pace.dt(step);
+        ed.tick_headless_ui_clock(dt);
+        ed.play_step(dt, true);
         // Render targets before captures, in the frame loop's order: a capture
         // of a screen wearing `rt:<name>` shows that camera's picture.
         ed.update_render_targets(ed.play_t);
@@ -198,6 +204,8 @@ pub(crate) struct Args<'a> {
     /// show a thing that flickers; a sequence with the world stepping and the
     /// camera moving between frames can, and can be scanned for it.
     pub(crate) frames: u32,
+    /// `--fps` / `--frame-jitter`: the display the frames are stepped for.
+    pub(crate) pace: crate::run::Pace,
     /// `--turn DEG`: yaw the camera by this much over the whole sequence, with
     /// a pitch nod on top — "looking around", which is when the sky flickers
     /// were reported. See `sequence_rotation`. Zero draws the scene's camera.
@@ -206,7 +214,7 @@ pub(crate) struct Args<'a> {
 
 /// Run the verb. Returns the process exit code.
 pub(crate) fn run(args: Args) -> i32 {
-    let Args { root, scene, camera, size, out, json, timing, after, seed, no_ui, frames, turn } = args;
+    let Args { root, scene, camera, size, out, json, timing, after, seed, no_ui, frames, turn, pace } = args;
     if !root.join("project.ron").is_file() {
         floptle_say::say_err!("{} is not a project directory (no project.ron)", root.display());
         return 2;
@@ -302,7 +310,7 @@ pub(crate) fn run(args: Args) -> i32 {
         if let Some(seed) = seed {
             ed.script_host.set_seed(seed);
         }
-        let Some(played) = play_for(&mut ed, seconds, (camera, w, h)) else {
+        let Some(played) = play_for(&mut ed, seconds, (camera, w, h), pace) else {
             floptle_say::say_err!("the project did not enter play mode, so there is nothing to photograph");
             return 1;
         };
@@ -438,8 +446,11 @@ pub(crate) fn run(args: Args) -> i32 {
             if after.is_some() && ed.playing {
                 ed.pump_world_streaming();
                 feed_view(&mut ed, camera, w, h);
-                ed.tick_headless_ui_clock(crate::run::DT);
-                ed.play_step(crate::run::DT, true);
+                // One display frame per picture, so at --fps 144 the sequence
+                // is 144 pictures a second of game time.
+                let dt = pace.dt(i);
+                ed.tick_headless_ui_clock(dt);
+                ed.play_step(dt, true);
                 ed.update_render_targets(ed.play_t);
                 ed.pump_captures();
                 ed.drain_script_logs();
@@ -975,7 +986,7 @@ mod tests {
         let (authored, ..) = find_camera(&ed, None).expect("the file's own camera");
 
         let played =
-            play_for(&mut ed, 0.25, (None, 160, 90)).expect("the project must enter play mode");
+            play_for(&mut ed, 0.25, (None, 160, 90), crate::run::Pace::default()).expect("the project must enter play mode");
         assert!(played > 0.0, "the span has to actually simulate — a held session steps at dt=0");
 
         // …and after playing it is, which is the whole card.
@@ -1051,7 +1062,7 @@ mod tests {
         let mut ed = crate::Editor::default();
         ed.open_project(d.clone());
         ed.open_scene_file(&d.join("scenes/first.ron").to_string_lossy());
-        play_for(&mut ed, 0.1, (None, 1920, 1080)).expect("the project must enter play mode");
+        play_for(&mut ed, 0.1, (None, 1920, 1080), crate::run::Pace::default()).expect("the project must enter play mode");
         let said: Vec<String> = ed
             .console
             .entries

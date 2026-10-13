@@ -94,6 +94,45 @@ impl AllocWindow {
 /// `run` would have reported.
 pub(crate) const DT: f32 = 1.0 / 60.0;
 
+/// How fast frames are stepped (`--fps`), and how unevenly
+/// (`--frame-jitter`): what a display at that rate would hand the game.
+///
+/// Fixed ticks keep their own rate whatever this is, so at 144 a tick lands
+/// every two or three frames and `update`, `lateUpdate` and the interpolated
+/// transforms run between them, which is where a camera that jitters only on
+/// a fast monitor jitters. The jitter is a deterministic function of `--seed`
+/// and the frame number, so an uneven run is still the same run twice.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Pace {
+    pub(crate) fps: f32,
+    /// Each frame's time varies by up to this many milliseconds either way.
+    pub(crate) jitter_ms: f32,
+    pub(crate) seed: u32,
+}
+
+impl Default for Pace {
+    fn default() -> Self {
+        Self { fps: 1.0 / DT, jitter_ms: 0.0, seed: 0 }
+    }
+}
+
+impl Pace {
+    /// The time of frame `n`, in seconds.
+    pub(crate) fn dt(&self, n: u32) -> f32 {
+        let base = 1.0 / self.fps.max(1.0);
+        if self.jitter_ms <= 0.0 {
+            return base;
+        }
+        // splitmix64 of (seed, frame): an even spread in -1..1.
+        let mut z = ((self.seed as u64) << 32 | n as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        let u = (z >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0;
+        (base + self.jitter_ms / 1000.0 * u as f32).max(base * 0.1)
+    }
+}
+
 /// How long to run for.
 pub(crate) enum Span {
     Frames(u32),
@@ -101,12 +140,13 @@ pub(crate) enum Span {
 }
 
 impl Span {
-    fn steps(&self) -> u32 {
+    /// Frames to step at `fps`.
+    pub(crate) fn steps(&self, fps: f32) -> u32 {
         match self {
             Span::Frames(n) => *n,
             // Rounded, and never zero: `--seconds 0.001` asking for no
             // simulation at all would be a confusing way to spell `check`.
-            Span::Seconds(t) => ((t / DT).round() as i64).clamp(1, u32::MAX as i64) as u32,
+            Span::Seconds(t) => ((t * fps).round() as i64).clamp(1, u32::MAX as i64) as u32,
         }
     }
 }
@@ -402,11 +442,13 @@ pub(crate) struct Options {
     /// client's, so `net.isServer()` answers false and the project's own
     /// scripts do the asserting.
     pub(crate) join: Option<String>,
+    /// `--fps` / `--frame-jitter`: the display the frames are stepped for.
+    pub(crate) pace: Pace,
 }
 
 /// Run `root` for `span`. Returns the process exit code.
 pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -> i32 {
-    let Options { json, steam, timing, alloc, seed, ghosts: want_ghosts, join } = opts;
+    let Options { json, steam, timing, alloc, seed, ghosts: want_ghosts, join, pace } = opts;
     if !root.join("project.ron").is_file() {
         floptle_say::say_err!("{} is not a project directory (no project.ron)", root.display());
         return 2;
@@ -483,7 +525,10 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
             return 1;
         }
     }
-    let asked = span.steps();
+    let asked = span.steps(pace.fps);
+    // What the loop stepped, frame by frame: with --frame-jitter no two
+    // frames are the same length.
+    let mut stepped = 0.0f32;
     // Counted, not assumed. The number asked for is an echo of the command
     // line rather than an observation, and the loop can end early, so the two
     // are not the same number. A field a caller reads to know how far the run
@@ -579,8 +624,10 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
         // none of it, which is the one failure a verb built to be believed must
         // not have. See `pump_world_streaming`.
         ed.pump_world_streaming();
-        ed.tick_headless_ui_clock(DT);
-        ed.play_step(DT, true);
+        let dt = pace.dt(step);
+        stepped += dt;
+        ed.tick_headless_ui_clock(dt);
+        ed.play_step(dt, true);
         // After the step, so a ghost sees the tick the server has just
         // finished rather than the one before it.
         if want_ghosts > 0 {
@@ -645,7 +692,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
         steps,
         asked,
         simulated,
-        Measured { clock: clock.as_ref(), allocated, by_script: &by_script, seed, ghosts: &ghosts, terrain },
+        Measured { clock: clock.as_ref(), allocated, by_script: &by_script, seed, ghosts: &ghosts, terrain, stepped, fps: pace.fps },
         json,
     )
 }
@@ -656,8 +703,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
 /// checking anything else, and it has to be readable by a test that asserts
 /// what it says. `simulated` is measured off the session clock; `steps × DT` is
 /// only what the loop was asked to step.
-fn summary_line(steps: u32, asked: u32, simulated: f32, errors: usize, warnings: usize) -> String {
-    let stepped = steps as f32 * DT;
+fn summary_line(steps: u32, asked: u32, simulated: f32, stepped: f32, errors: usize, warnings: usize) -> String {
     let mut ran = format!("ran {steps} step(s), {simulated:.2}s of simulated time");
     if steps < asked {
         // The session ended before the span did. Said out loud, because a run
@@ -849,6 +895,10 @@ struct Measured<'a> {
     /// clients at all, rather than reporting zero of them.
     ghosts: &'a [Ghost],
     terrain: TerrainHold,
+    /// Seconds the loop stepped, frame by frame.
+    stepped: f32,
+    /// The frame rate it stepped at.
+    fps: f32,
 }
 
 /// Real time the run gave background terrain threads, in total.
@@ -892,7 +942,7 @@ fn report(
     measured: Measured<'_>,
     json: bool,
 ) -> i32 {
-    let Measured { clock, allocated, by_script, seed, ghosts, terrain } = measured;
+    let Measured { clock, allocated, by_script, seed, ghosts, terrain, stepped, fps } = measured;
     use floptle_script::LogLevel;
     let all = || opened.iter().map(|e| ("open", e)).chain(console.entries.iter().map(|e| ("play", e)));
     let errors = all().filter(|(_, e)| e.level == LogLevel::Error).count();
@@ -932,7 +982,9 @@ fn report(
             // What the loop stepped. The two differ exactly when the session
             // was paused for some of the run, and a caller comparing them can
             // see that without parsing a sentence.
-            "stepped": steps as f32 * DT,
+            "stepped": stepped,
+            // The frame rate the run stepped at (`--fps`); ticks keep their own.
+            "fps": fps,
             "errors": errors,
             "warnings": warnings,
             "log": lines,
@@ -1056,7 +1108,7 @@ fn report(
             None => floptle_say::say!("{}: {phase}: {}{repeat}", level_str(e.level), e.msg),
         }
     }
-    floptle_say::say!("{}", summary_line(steps, asked, simulated, errors, warnings));
+    floptle_say::say!("{}", summary_line(steps, asked, simulated, stepped, errors, warnings));
     if let Some(line) = terrain.line() {
         floptle_say::say!("{line}");
     }
@@ -1552,9 +1604,9 @@ mod tests {
 
     #[test]
     fn seconds_and_frames_meet_at_the_tick_rate() {
-        assert_eq!(Span::Frames(90).steps(), 90);
-        assert_eq!(Span::Seconds(1.5).steps(), 90, "1.5s at 60 Hz is 90 steps");
-        assert_eq!(Span::Seconds(0.0).steps(), 1, "a span nobody can measure is still a step");
+        assert_eq!(Span::Frames(90).steps(60.0), 90);
+        assert_eq!(Span::Seconds(1.5).steps(60.0), 90, "1.5s at 60 Hz is 90 steps");
+        assert_eq!(Span::Seconds(0.0).steps(60.0), 1, "a span nobody can measure is still a step");
     }
 
     /// **The summary reports time that was simulated**.
@@ -1568,7 +1620,7 @@ mod tests {
     #[test]
     fn a_run_that_advanced_nothing_does_not_report_the_span_it_was_asked_for() {
         // 3600 steps at 60 Hz is a minute — and the clock did not move.
-        let stuck = summary_line(3600, 3600, 0.0, 0, 0);
+        let stuck = summary_line(3600, 3600, 0.0, 60.0, 0, 0);
         assert!(stuck.contains("0.00s of simulated time"), "{stuck}");
         assert!(
             !stuck.contains("60.00s of simulated time"),
@@ -1578,17 +1630,17 @@ mod tests {
         assert!(stuck.contains("60.00s"), "…naming how much was stepped without advancing: {stuck}");
 
         // A run that really did advance reads exactly as it did before.
-        let good = summary_line(3600, 3600, 60.0, 0, 0);
+        let good = summary_line(3600, 3600, 60.0, 60.0, 0, 0);
         assert_eq!(good, "ran 3600 step(s), 60.00s of simulated time — nothing raised");
 
         // Half paused, half not: both facts, one line.
-        let half = summary_line(120, 120, 1.0, 1, 2);
+        let half = summary_line(120, 120, 1.0, 2.0, 1, 2);
         assert!(half.contains("1.00s of simulated time"), "{half}");
         assert!(half.contains("PAUSED for 1.00s"), "{half}");
         assert!(half.contains("1 error(s), 2 warning(s)"), "{half}");
 
         // Ending early and pausing are different things and both get said.
-        let early = summary_line(40, 120, 0.0, 0, 0);
+        let early = summary_line(40, 120, 0.0, 40.0 * DT, 0, 0);
         assert!(early.contains("the session ended after 40 of 120"), "{early}");
         assert!(early.contains("PAUSED"), "{early}");
     }
@@ -1741,9 +1793,55 @@ mod tests {
     /// away — two runs of one project would disagree about how far they got.
     #[test]
     fn the_span_does_not_depend_on_how_fast_the_machine_is() {
-        let a = Span::Seconds(2.0).steps();
-        let b = Span::Seconds(2.0).steps();
+        let a = Span::Seconds(2.0).steps(60.0);
+        let b = Span::Seconds(2.0).steps(60.0);
         assert_eq!(a, b);
         assert_eq!(a, 120);
+    }
+
+    /// `--fps 144` steps 144 frames a simulated second, and `--frame-jitter`
+    /// varies them within its bound, the same way for the same seed.
+    #[test]
+    fn a_pace_steps_its_rate_and_jitters_reproducibly() {
+        let p = Pace { fps: 144.0, ..Default::default() };
+        assert_eq!(Span::Seconds(1.0).steps(p.fps), 144);
+        assert!((p.dt(7) - 1.0 / 144.0).abs() < 1e-7);
+        let j = Pace { fps: 144.0, jitter_ms: 2.0, seed: 9 };
+        let a: Vec<f32> = (0..50).map(|n| j.dt(n)).collect();
+        let b: Vec<f32> = (0..50).map(|n| j.dt(n)).collect();
+        assert_eq!(a, b, "the same seed is the same run");
+        assert!(a.iter().all(|d| (d - 1.0 / 144.0).abs() <= 0.002 + 1e-6), "within ±2 ms");
+        assert!(a.windows(2).any(|w| w[0] != w[1]), "and it does vary");
+        let c: Vec<f32> = (0..50).map(|n| Pace { seed: 10, ..j }.dt(n)).collect();
+        assert_ne!(a, c, "another seed is another run");
+    }
+
+    /// At 144 frames a second with ticks at 60, a body moving steadily is
+    /// drawn further along on every frame: its transform is interpolated
+    /// between ticks rather than standing still for two frames and jumping.
+    #[test]
+    fn frames_between_ticks_show_the_body_moving_on() {
+        use floptle_core::math::{DVec3, Quat, Vec3};
+        let mut ed = crate::Editor::default();
+        let e = ed.world.spawn();
+        ed.world.insert(
+            e,
+            floptle_core::transform::Transform { translation: DVec3::ZERO, rotation: Quat::IDENTITY, scale: Vec3::ONE },
+        );
+        ed.world.insert(e, floptle_core::RigidBody { gravity: false, two_d: true, ..Default::default() });
+        ed.toggle_play();
+        ed.sim.as_mut().unwrap().set_body_velocity(e.index(), Vec3::new(3.0, 0.0, 0.0));
+        let pace = Pace { fps: 144.0, ..Default::default() };
+        let mut last = f64::MIN;
+        let t0 = ed.play_t;
+        for frame in 0..Span::Seconds(1.0).steps(pace.fps) {
+            ed.play_step(pace.dt(frame), true);
+            let x = floptle_core::world_transform(&ed.world, e).translation.x;
+            if frame > 1 {
+                assert!(x > last, "frame {frame}: drawn at {x:.4}, not past {last:.4}");
+            }
+            last = x;
+        }
+        assert!((ed.play_t - t0 - 1.0).abs() < 0.02, "a second of game time: {}", ed.play_t - t0);
     }
 }

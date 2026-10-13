@@ -651,6 +651,22 @@ pub(crate) const VERBS: &[Verb] = &[
                        GAME chose",
             },
             Arg {
+                name: "--fps",
+                value: Value::Text,
+                required: false,
+                help: "step frames at this display rate (default 60) while fixed ticks keep \
+                       their own: at 144, update, lateUpdate and the interpolated transforms \
+                       run between ticks the way a fast monitor runs them, so a camera that \
+                       jitters only there jitters here. --seconds counts frames at this rate",
+            },
+            Arg {
+                name: "--frame-jitter",
+                value: Value::Text,
+                required: false,
+                help: "vary each frame's time by up to this many milliseconds either way, \
+                       deterministically under --seed: uneven pacing, reproducible",
+            },
+            Arg {
                 name: "--seed",
                 value: Value::Text,
                 required: false,
@@ -829,8 +845,10 @@ pub(crate) const VERBS: &[Verb] = &[
                  and line that raised it, and says whether each happened while opening the \
                  project or while playing.\n\n\
                  Time is FIXED, never read off the clock, so two runs of one project agree. \
-                 That does mean a bug which only appears at a particular frame rate will not \
-                 appear here.\n\n\
+                 Frames step at 60 a second unless --fps says otherwise, with ticks at their \
+                 own fixed rate either way, so a bug that only appears at a particular frame \
+                 rate is reproduced by asking for that rate (and --frame-jitter for uneven \
+                 pacing).\n\n\
                  Nothing draws and nothing is pressed: models are not registered (physics is \
                  unaffected — a mesh collider reads its triangles from the file), and every \
                  key reads as up. \"No errors\" means nothing raised, not that the game is \
@@ -865,6 +883,22 @@ pub(crate) const VERBS: &[Verb] = &[
                 value: Value::Text,
                 required: false,
                 help: "how much simulated time to run, instead of --frames",
+            },
+            Arg {
+                name: "--fps",
+                value: Value::Text,
+                required: false,
+                help: "step frames at this display rate (default 60) while fixed ticks keep \
+                       their own: at 144, update, lateUpdate and the interpolated transforms \
+                       run between ticks the way a fast monitor runs them, so a camera that \
+                       jitters only there jitters here. --seconds counts frames at this rate",
+            },
+            Arg {
+                name: "--frame-jitter",
+                value: Value::Text,
+                required: false,
+                help: "vary each frame's time by up to this many milliseconds either way, \
+                       deterministically under --seed: uneven pacing, reproducible",
             },
             Arg {
                 name: "--seed",
@@ -1624,6 +1658,13 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 );
                 return Outcome::Exit(2);
             }
+            let pace = match pace_of(a, seed) {
+                Ok(p) => p,
+                Err(e) => {
+                    floptle_say::say_err!("{e}");
+                    return Outcome::Exit(2);
+                }
+            };
             Outcome::Exit(crate::shot::run(crate::shot::Args {
                 root: &project,
                 scene: scene.as_deref(),
@@ -1637,6 +1678,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 no_ui: a.get_flag("no-ui"),
                 frames: text(a, "frames").and_then(|t| t.parse().ok()).unwrap_or(1),
                 turn: text(a, "turn").and_then(|t| t.parse().ok()).unwrap_or(0.0),
+                pace,
             }))
         }
         Some(("vfx", a)) => {
@@ -1770,6 +1812,13 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 );
                 return Outcome::Exit(2);
             }
+            let pace = match pace_of(a, seed) {
+                Ok(p) => p,
+                Err(e) => {
+                    floptle_say::say_err!("{e}");
+                    return Outcome::Exit(2);
+                }
+            };
             let ghosts = match text(a, "ghosts").as_deref().map(str::parse::<u32>) {
                 Some(Ok(0)) => {
                     floptle_say::say_err!("--ghosts 0 asks for no clients, which is what run does anyway");
@@ -1794,6 +1843,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                     seed,
                     ghosts,
                     join: text(a, "join"),
+                    pace,
                 },
             ))
         }
@@ -2014,6 +2064,31 @@ fn help_json(verb: Option<&str>) -> Outcome {
     });
     floptle_say::say!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
     Outcome::Exit(0)
+}
+
+/// `--fps` and `--frame-jitter`, checked: a rate from 1 to 1000 frames a
+/// second, and a jitter below a frame's own length.
+fn pace_of(a: &clap::ArgMatches, seed: Option<u32>) -> Result<crate::run::Pace, String> {
+    let mut pace = crate::run::Pace { seed: seed.unwrap_or(0), ..Default::default() };
+    if let Some(v) = a.try_get_one::<String>("fps").ok().flatten() {
+        match v.trim().parse::<f32>() {
+            Ok(f) if (1.0..=1000.0).contains(&f) => pace.fps = f,
+            _ => return Err(format!("--fps wants a frame rate from 1 to 1000, not {v:?}")),
+        }
+    }
+    if let Some(v) = a.try_get_one::<String>("frame-jitter").ok().flatten() {
+        match v.trim().trim_end_matches("ms").parse::<f32>() {
+            Ok(j) if j >= 0.0 && j < 1000.0 / pace.fps => pace.jitter_ms = j,
+            _ => {
+                return Err(format!(
+                    "--frame-jitter wants milliseconds below one frame ({:.1} ms at {} fps), not {v:?}",
+                    1000.0 / pace.fps,
+                    pace.fps
+                ))
+            }
+        }
+    }
+    Ok(pace)
 }
 
 #[cfg(test)]
@@ -2283,3 +2358,4 @@ mod tests {
         assert!(matches!(help_json(Some("nonsense")), Outcome::Exit(1)));
     }
 }
+
