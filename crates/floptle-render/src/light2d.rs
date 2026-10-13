@@ -34,8 +34,8 @@ pub struct Light2dInstance {
     pub tint: [f32; 4],
     /// x = sorting-layer rank, y = 1 when this surface blocks light,
     /// z = the raster pass's packed tiling flags (`InstanceRaw::rim.w`:
-    /// `mode + round(rotation_degrees * 10) * 4`). w is spare and is where a
-    /// normal-map slot goes when step 3 lands.
+    /// `mode + round(rotation_degrees * 10) * 4`), w = 1 for an occluder (see
+    /// [`Light2dInstance::occluder`]).
     pub meta: [f32; 4],
     /// The same tiling lanes the raster pass gets (`InstanceRaw::tile`):
     /// Uv mode = (count.x, count.y, offset.x, offset.y).
@@ -91,6 +91,22 @@ impl Light2dInstance {
     /// out of the G-buffer's alpha channel.
     pub fn casts(&self) -> bool {
         self.meta[1] > 0.5
+    }
+
+    /// A shape that blocks light and is not drawn: a tilemap's solid squares,
+    /// laid over the tiles after they are filled.
+    ///
+    /// It marks where light stops and nothing else — no colour, no depth, no
+    /// rank — so the tiles under it light exactly as they did, and a decor tile
+    /// beside a wall is lit without casting. The tiles themselves are filled
+    /// with `casts` off, which is what makes a tilemap cast exactly where its
+    /// tileset says it is solid rather than wherever its art is opaque.
+    pub fn occluder(model: [[f32; 4]; 4], rank: u32) -> Self {
+        Self { model, tint: [1.0; 4], meta: [rank as f32, 1.0, 0.0, 1.0], tile: [0.0; 4] }
+    }
+
+    pub fn is_occluder(&self) -> bool {
+        self.meta[3] > 0.5
     }
 }
 
@@ -198,13 +214,19 @@ impl Default for Light2dUniform {
     }
 }
 
-/// How many samples the shadow march may take along one pixel-to-light segment.
+/// The most samples the shadow march may take along one pixel-to-light segment.
 ///
-/// A ceiling, not a target: the march stops the moment it hits something, and it
-/// only runs for pixels actually inside a light's radius. It is fixed rather
-/// than authorable because it trades against nothing a game can see — too few
-/// and a thin wall leaks light, too many and it costs for no visible gain.
-pub const SHADOW_STEPS: f32 = 28.0;
+/// The march steps one pixel at a time, so a segment shorter than this is
+/// walked in full and a wall one pixel thick cannot be stepped over. A fixed
+/// count spread over whatever length the segment had was what streaked: a
+/// light 400 pixels away sampled every 14, and whether a pixel was shadowed
+/// depended on where its samples happened to land. Past this many pixels the
+/// steps spread out again, which only a light with a reach of more than half
+/// the screen ever meets.
+///
+/// A ceiling, not a cost: the march stops the moment it hits something, and it
+/// only runs for pixels inside a light's radius.
+pub const SHADOW_STEPS: f32 = 512.0;
 
 /// The G-buffer's albedo format. Linear rather than the surface's sRGB format
 /// because the value written is a *material* colour the accumulation does
@@ -234,6 +256,9 @@ struct Targets {
 /// Pipelines and per-frame targets for the 2D lighting pass.
 pub struct Light2d {
     pub(crate) fill_pipeline: wgpu::RenderPipeline,
+    /// Draws [`Light2dInstance::occluder`]s after the fill: the surface
+    /// target's alpha only, depth-tested and never depth-written.
+    pub(crate) occlude_pipeline: wgpu::RenderPipeline,
     /// The two halves of the signed correction: `dst - src` for
     /// where a light darkens, `dst + src` for where it brightens. Two pipelines
     /// and not two passes — they share every attachment and bind group, so they
@@ -370,6 +395,52 @@ impl Light2d {
             cache: None,
         });
 
+        let occlude_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("light2d-occlude"),
+            layout: Some(&fill_pl),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_fill"),
+                buffers: &[crate::mesh::Vertex::LAYOUT, Light2dInstance::LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_occlude"),
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: ALBEDO_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::empty(),
+                    }),
+                    // Alpha only: the rank and the normal under it belong to
+                    // whatever surface was filled there, and the shading reads
+                    // them.
+                    Some(wgpu::ColorTargetState {
+                        format: SURFACE_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALPHA,
+                    }),
+                ],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Gpu::DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                // Level with its own tiles, which it is drawn at the depth of —
+                // nudged a hair towards the eye so the plane it shares with
+                // them always passes — and behind anything in front of them,
+                // so a sprite standing before a wall is not marked as wall.
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState { constant: -8, slope_scale: 0.0, clamp: 0.0 },
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let light_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("light2d-accumulate"),
             bind_group_layouts: &[Some(&lights_layout), Some(&read_layout)],
@@ -471,6 +542,7 @@ impl Light2d {
 
         Self {
             fill_pipeline,
+            occlude_pipeline,
             darken_pipeline,
             brighten_pipeline,
             fill_buf,

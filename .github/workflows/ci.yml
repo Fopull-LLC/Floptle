@@ -139,6 +139,7 @@ jobs:
           run tilemap_pages_probe tilemap_pages_probe -- "$P"
           run light2d_probe       light2d_probe       -- "$P"
           run light2d_shadow_probe light2d_shadow_probe -- "$P"
+          run light2d_tile_shadow_probe light2d_tile_shadow_probe -- "$P"
           run posterize_chroma_probe posterize_chroma_probe -- "$P"
           run light2d_smooth_probe light2d_smooth_probe -- "$P"
           run light2d_normal_probe light2d_normal_probe -- "$P"

@@ -3851,6 +3851,8 @@ impl Raster {
         let mut lights = *lights;
         lights.view_proj = view_proj;
         lights.viewport = [size.0.max(1) as f32, size.1.max(1) as f32, 0.0, 0.0];
+        // An occluder casts by definition, so a frame whose only casters are a
+        // tilemap's solid squares still marches.
         lights.count[2] = if flat.iter().any(|(_, _, i)| i.casts()) {
             crate::light2d::SHADOW_STEPS
         } else {
@@ -3858,16 +3860,24 @@ impl Raster {
         };
         let lights = &lights;
         // Bucket by (mesh, texture) exactly as the colour pass does, and pack the
-        // instances contiguously so each bucket is one draw over a slice.
-        let groups = group_by_key(
-            flat.iter().map(|(id, tex, inst)| ((id.0 as usize, tex.map(|t| t.0)), *inst)),
-        );
+        // instances contiguously so each bucket is one draw over a slice. The
+        // occluders go in their own buckets, after every surface, because they
+        // mark what the fill wrote and so have to come after it.
         let mut raws: Vec<crate::light2d::Light2dInstance> = Vec::with_capacity(flat.len());
         let mut buckets: Vec<(usize, Option<u32>, u32, u32)> = Vec::new();
-        for ((mesh_idx, tex_key), members) in groups {
-            let start = raws.len() as u32;
-            raws.extend_from_slice(&members);
-            buckets.push((mesh_idx, tex_key, start, members.len() as u32));
+        let mut occluder_buckets: Vec<(usize, Option<u32>, u32, u32)> = Vec::new();
+        for occluders in [false, true] {
+            let groups = group_by_key(
+                flat.iter()
+                    .filter(|(_, _, inst)| inst.is_occluder() == occluders)
+                    .map(|(id, tex, inst)| ((id.0 as usize, tex.map(|t| t.0)), *inst)),
+            );
+            for ((mesh_idx, tex_key), members) in groups {
+                let start = raws.len() as u32;
+                raws.extend_from_slice(&members);
+                let to = if occluders { &mut occluder_buckets } else { &mut buckets };
+                to.push((mesh_idx, tex_key, start, members.len() as u32));
+            }
         }
         self.light2d.begin(gpu, size.0, size.1, view_proj, lights, &raws);
         let Some((albedo, surface, gdepth)) = self.light2d.views() else { return };
@@ -3907,21 +3917,30 @@ impl Raster {
             // G-buffer texel (0,0) and the accumulation's integer reads line up
             // whatever size the buffer happens to have grown to.
             rp.set_viewport(0.0, 0.0, size.0.max(1) as f32, size.1.max(1) as f32, 0.0, 1.0);
-            rp.set_pipeline(&self.light2d.fill_pipeline);
             rp.set_bind_group(0, &self.light2d.fill_bind, &[]);
             rp.set_vertex_buffer(1, self.light2d.instance_slice());
-            for (mesh_idx, tex_key, start, count) in buckets {
-                let mesh = &self.meshes[mesh_idx];
-                // The material texture when one overrides, else the mesh's own —
-                // the same choice, spelled the same way, as the colour pass.
-                let bind = tex_key
-                    .and_then(|t| self.textures.get(t as usize))
-                    .map(|t| &t.bind)
-                    .unwrap_or(&mesh.tex_bind);
-                rp.set_bind_group(1, bind, &[]);
-                rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
-                rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+            for (pipeline, list) in [
+                (&self.light2d.fill_pipeline, &buckets),
+                (&self.light2d.occlude_pipeline, &occluder_buckets),
+            ] {
+                if list.is_empty() {
+                    continue;
+                }
+                rp.set_pipeline(pipeline);
+                for &(mesh_idx, tex_key, start, count) in list {
+                    let mesh = &self.meshes[mesh_idx];
+                    // The material texture when one overrides, else the mesh's
+                    // own — the same choice, spelled the same way, as the
+                    // colour pass.
+                    let bind = tex_key
+                        .and_then(|t| self.textures.get(t as usize))
+                        .map(|t| &t.bind)
+                        .unwrap_or(&mesh.tex_bind);
+                    rp.set_bind_group(1, bind, &[]);
+                    rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
+                    rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                    rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+                }
             }
         }
         {

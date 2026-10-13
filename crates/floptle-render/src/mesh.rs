@@ -418,6 +418,79 @@ pub fn tilemap(
     oriented(vertices, indices)
 }
 
+/// Flat shapes in the XY plane as one mesh: `rects` as `[x0, y0, x1, y1]` and
+/// `polys` as outlines in either winding.
+///
+/// What a tilemap's solid squares look like to the 2D shadow march. The
+/// rectangles come already merged, so a wall of forty tiles is one quad with no
+/// seam inside it for a light to find.
+///
+/// An outline is cut into triangles by ear clipping rather than a fan, because a
+/// hand-drawn tile collider may be concave, and a fan of a concave outline
+/// covers squares the outline does not.
+pub fn flat_shapes(rects: &[[f32; 4]], polys: &[&[[f32; 2]]]) -> MeshData {
+    let mut vertices = Vec::with_capacity(rects.len() * 4);
+    let mut indices = Vec::with_capacity(rects.len() * 6);
+    let vert = |x: f32, y: f32| Vertex { pos: [x, y, 0.0], normal: [0.0, 0.0, 1.0], uv: [0.0, 0.0] };
+    for &[x0, y0, x1, y1] in rects {
+        let base = vertices.len() as u32;
+        vertices.extend([vert(x0, y0), vert(x1, y0), vert(x1, y1), vert(x0, y1)]);
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    for pts in polys {
+        if pts.len() < 3 {
+            continue;
+        }
+        let base = vertices.len() as u32;
+        vertices.extend(pts.iter().map(|p| vert(p[0], p[1])));
+        for [a, b, c] in ear_clip(pts) {
+            indices.extend_from_slice(&[base + a, base + b, base + c]);
+        }
+    }
+    oriented(vertices, indices)
+}
+
+/// The triangles of a simple polygon, as indices into `pts`.
+fn ear_clip(pts: &[[f32; 2]]) -> Vec<[u32; 3]> {
+    let cross = |o: [f32; 2], a: [f32; 2], b: [f32; 2]| (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    let area: f32 = (0..pts.len()).map(|i| cross([0.0, 0.0], pts[i], pts[(i + 1) % pts.len()])).sum();
+    // Counter-clockwise from here on, so "convex corner" is one sign.
+    let mut ring: Vec<u32> = (0..pts.len() as u32).collect();
+    if area < 0.0 {
+        ring.reverse();
+    }
+    let p = |i: u32| pts[i as usize];
+    let mut out = Vec::with_capacity(pts.len().saturating_sub(2));
+    let mut guard = 0;
+    while ring.len() > 3 && guard < pts.len() * pts.len() {
+        guard += 1;
+        let n = ring.len();
+        let ear = (0..n).find(|&i| {
+            let (a, b, c) = (ring[(i + n - 1) % n], ring[i], ring[(i + 1) % n]);
+            if cross(p(a), p(b), p(c)) <= 0.0 {
+                return false;
+            }
+            // No other corner inside the triangle, or cutting it would cover
+            // part of the notch.
+            ring.iter().all(|&q| {
+                q == a || q == b || q == c || {
+                    let x = p(q);
+                    cross(p(a), p(b), x) < 0.0 || cross(p(b), p(c), x) < 0.0 || cross(p(c), p(a), x) < 0.0
+                }
+            })
+        });
+        // A degenerate outline (collinear points, a self-touch) has no ear by
+        // that test; cutting the first corner keeps it from looping forever.
+        let i = ear.unwrap_or(0);
+        out.push([ring[(i + n - 1) % n], ring[i], ring[(i + 1) % n]]);
+        ring.remove(i);
+    }
+    if ring.len() == 3 {
+        out.push([ring[0], ring[1], ring[2]]);
+    }
+    out
+}
+
 // Small f32 vec helpers for the flat-shaded primitives below.
 fn vsub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
@@ -770,5 +843,37 @@ mod tilemap_tests {
         let u_min = m.vertices.iter().map(|v| v.uv[0]).fold(f32::MAX, f32::min);
         assert!(u_min > 0.5, "the inset must pull the window off the cell boundary");
         assert!(u_min < 0.52, "…but only by half a texel");
+    }
+
+    /// A concave outline is cut into triangles that cover it exactly: the same
+    /// area, and no triangle over the notch. A fan from the first corner of an
+    /// L covers the notch, which in the shadow march is a square of wall that is
+    /// not there.
+    #[test]
+    fn a_concave_outline_is_covered_exactly() {
+        // An L: the unit square's top-right quarter cut away. Area 0.75.
+        let l: &[[f32; 2]] = &[[0.0, 0.0], [1.0, 0.0], [1.0, 0.5], [0.5, 0.5], [0.5, 1.0], [0.0, 1.0]];
+        for pts in [l.to_vec(), l.iter().rev().copied().collect::<Vec<_>>()] {
+            let m = flat_shapes(&[], &[&pts]);
+            let tri_area = |t: &[u32]| {
+                let p = |i: u32| m.vertices[i as usize].pos;
+                let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
+                ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs() * 0.5
+            };
+            let total: f32 = m.indices.chunks(3).map(tri_area).sum();
+            assert!((total - 0.75).abs() < 1e-5, "covered {total}, the L is 0.75");
+            // The notch's centre is inside no triangle.
+            let inside = m.indices.chunks(3).any(|t| {
+                let p = |i: u32| m.vertices[i as usize].pos;
+                let s = |a: [f32; 3], b: [f32; 3]| (b[0] - a[0]) * (0.75 - a[1]) - (b[1] - a[1]) * (0.75 - a[0]);
+                let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
+                let (d0, d1, d2) = (s(a, b), s(b, c), s(c, a));
+                (d0 >= 0.0 && d1 >= 0.0 && d2 >= 0.0) || (d0 <= 0.0 && d1 <= 0.0 && d2 <= 0.0)
+            });
+            assert!(!inside, "a triangle covers the notch");
+        }
+        // A rect is two triangles over its four corners.
+        let r = flat_shapes(&[[0.0, 0.0, 2.0, 1.0]], &[]);
+        assert_eq!((r.vertices.len(), r.indices.len()), (4, 6));
     }
 }

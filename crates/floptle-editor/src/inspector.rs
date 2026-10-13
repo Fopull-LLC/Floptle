@@ -1414,6 +1414,10 @@ struct TypeCtx<'a> {
     project_root: &'a Path,
     cam_preview: Option<egui::TextureId>,
     light_counts: (usize, usize),
+    /// Whether this light is lit by the 2D system, where the 2D light row's
+    /// "casts stop this light" is the shadow switch and the 3D one does
+    /// nothing. Read before the Matter borrow.
+    light_2d: bool,
     sky_uniforms: &'a [floptle_shader::Uniform],
     nav: &'a crate::nav_bake::NavStatus,
     gi: crate::gi_bake::GiStatus,
@@ -2061,16 +2065,23 @@ fn point_light_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
         crate::responsive::slider(ui, egui::Slider::new(intensity, 0.0..=20.0), "intensity").changed();
     cmd.inspector_changed |=
         crate::responsive::slider(ui, egui::Slider::new(range, 0.1..=200.0), "range").changed();
-    cmd.inspector_changed |= crate::responsive::check(ui, shadows, "casts shadows")
-        .on_hover_text(
-            "stop this lamp at the walls between it and what it lights, instead \
-             of shining through them. Per lamp, because it costs a march per lit \
-             pixel and most lights in a level have nothing to be blocked by. \
-             Shadows from what is ON SCREEN: a wall casts while it is in frame \
-             and stops when you look away from it. Quality and darkness are on \
-             the Lighting node.",
-        )
-        .changed();
+    // One shadow switch per light, the one that applies. A 2D light's shadows
+    // are its 2D light row's, and a second box here that changed nothing
+    // was the switch people reached for first.
+    if ctx.light_2d {
+        ui.small("shadows: \"casts stop this light\", under 2D light above");
+    } else {
+        cmd.inspector_changed |= crate::responsive::check(ui, shadows, "casts shadows")
+            .on_hover_text(
+                "stop this lamp at the walls between it and what it lights, instead \
+                 of shining through them. Per lamp, because it costs a march per lit \
+                 pixel and most lights in a level have nothing to be blocked by. \
+                 Shadows from what is ON SCREEN: a wall casts while it is in frame \
+                 and stops when you look away from it. Quality and darkness are on \
+                 the Lighting node.",
+            )
+            .changed();
+    }
     // Aiming it. Above the emitter section because
     // it is the bigger question — "does this lamp
     // light the room or one thing in it" changes
@@ -5330,6 +5341,7 @@ impl EditorTabViewer<'_> {
                 (mat.map(|m| m.sheet()), mat.is_some_and(|m| m.texture.is_some()))
             };
             let cam_stack = CameraStackFacts::read(world, e);
+            let light_2d = light_is_2d(world, e);
             let mut ctx = TypeCtx {
                 cmd,
                 e,
@@ -5338,6 +5350,7 @@ impl EditorTabViewer<'_> {
                 project_root: self.project_root,
                 cam_preview: self.cam_preview,
                 light_counts: self.light_counts,
+                light_2d,
                 sky_uniforms: self.sky_uniforms,
                 nav: &self.nav,
                 gi: self.gi,
@@ -7635,6 +7648,16 @@ impl EditorTabViewer<'_> {
 
 }
 
+/// Whether `e` is a lamp the 2D system lights with.
+fn light_is_2d(world: &floptle_core::World, e: floptle_core::Entity) -> bool {
+    matches!(world.get::<Matter>(e), Some(Matter::PointLight { .. }))
+        && floptle_core::resolve_2d(
+            world.get::<floptle_core::Lighting2D>(e).map(|l| l.mode).unwrap_or_default(),
+            lit_2d_facts(world, e),
+        )
+        .0
+}
+
 /// What the 2D lighting inference is allowed to look at, read off the live
 /// scene. See [`floptle_core::infers_2d`] for why it is only these three.
 fn lit_2d_facts(world: &floptle_core::World, e: floptle_core::Entity) -> floptle_core::Lit2DFacts {
@@ -8197,6 +8220,7 @@ mod tests {
                 project_root: Path::new(""),
                 cam_preview: None,
                 light_counts: (0, 0),
+                light_2d: false,
                 sky_uniforms: &[],
                 nav: &nav,
                 gi: Default::default(),
@@ -8244,6 +8268,7 @@ mod tests {
                 project_root: Path::new(""),
                 cam_preview: None,
                 light_counts: (0, 0),
+                light_2d: false,
                 sky_uniforms: &[],
                 nav: &nav,
                 gi: Default::default(),
@@ -8522,6 +8547,61 @@ mod tests {
         let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0, shape: Default::default() , shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25}, false);
         let (painted, _) = run_lighting_2d(&world, e, &layers);
         assert!(painted.contains("→ 3D"), "a light in a perspective scene must read 3D:\n{painted}");
+    }
+
+    /// A 2D lamp shows one shadow switch, the one that works. The 3D "casts
+    /// shadows" box sat on every 2D light doing nothing while the switch that
+    /// did was in another row.
+    #[test]
+    fn a_2d_lamp_has_one_shadow_switch() {
+        let lamp = || Matter::PointLight {
+            color: [1.0; 3],
+            intensity: 1.0,
+            range: 5.0,
+            shape: Default::default(),
+            shadows: false,
+            spot_angle: floptle_core::OMNI_ANGLE,
+            spot_softness: 0.25,
+        };
+        let painted_for = |ortho: bool| {
+            let (mut world, e) = scene_with(lamp(), ortho);
+            let is_2d = light_is_2d(&world, e);
+            let row = run_lighting_2d(&world, e, &["Default".to_string()]).0;
+            let ctx = crate::icons::test_context();
+            let mut cmd = crate::EditorCmd::default();
+            let nav = crate::nav_bake::NavStatus::default();
+            let post = crate::shaders::PostFlslCache::default();
+            let facts = CameraStackFacts::default();
+            let mut m = world.get_mut::<Matter>(e).unwrap().clone();
+            let out = ctx.run_ui(crate::icons::test_input(), |ui| {
+                let mut tc = TypeCtx {
+                    cmd: &mut cmd,
+                    e,
+                    sprite_facts: (None, false),
+                    asset_tree: &[],
+                    project_root: Path::new(""),
+                    cam_preview: None,
+                    light_counts: (0, 0),
+                    light_2d: is_2d,
+                    sky_uniforms: &[],
+                    nav: &nav,
+                    gi: Default::default(),
+                    layer_names: &[],
+                    entity_names: &[],
+                    post_flsl_cache: &post,
+                    cam_stack: &facts,
+                };
+                point_light_type_ui(ui, &mut tc, &mut m);
+            });
+            (is_2d, format!("{row}\n{}", painted_text(&out)))
+        };
+        let (is_2d, painted) = painted_for(true);
+        assert!(is_2d);
+        assert!(!painted.contains("casts shadows"), "the 3D switch is on a 2D lamp:\n{painted}");
+        assert!(painted.contains("casts stop this light"), "the 2D switch is missing:\n{painted}");
+        let (is_2d, painted) = painted_for(false);
+        assert!(!is_2d);
+        assert!(painted.contains("casts shadows"), "a 3D lamp lost its switch:\n{painted}");
     }
 
     /// A 3D scene must not grow four controls of noise on every mesh.

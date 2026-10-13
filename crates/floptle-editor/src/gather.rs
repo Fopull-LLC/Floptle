@@ -1983,13 +1983,23 @@ impl Editor {
                         tex,
                         &mut draws,
                     );
+                    // A tilemap casts from its solid squares, laid over its
+                    // tiles as one occluder in the tiles' own frame.
+                    let lit = lit2d.get(e).map(|&(rank, casts)| {
+                        let (tiles_cast, occluder) =
+                            crate::draw_2d::tilemap_casting(&self.world, &self.tilemaps, *e, casts);
+                        (rank, tiles_cast, occluder)
+                    });
+                    if let (Some((rank, _, Some(occ))), Some(first)) = (lit, draws.first()) {
+                        flat2d.push((occ, None, floptle_render::Light2dInstance::occluder(first.2.model, rank)));
+                    }
                     for mut draw in draws {
                         // On the 2D lighting path: the raster pass draws it
                         // Unlit, and the composite corrects that by the light's
                         // difference. The G-buffer instance is
                         // taken from the very same value, so the two cannot
                         // disagree about what is being corrected.
-                        if let Some(&(rank, casts)) = lit2d.get(e) {
+                        if let Some((rank, casts, _)) = lit {
                             draw.2.force_unlit();
                             flat2d.push((
                                 draw.0,

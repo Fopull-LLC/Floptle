@@ -225,6 +225,33 @@ pub(crate) fn casts_2d(world: &floptle_core::World, e: Entity) -> bool {
     floptle_core::resolve_shadow_2d(cast, flat_matter, collidable).0
 }
 
+/// How a casting tilemap casts: `(do its tiles cast, the occluder to lay over
+/// them)`.
+///
+/// From its solid squares whenever its tileset has any — the tiles are then
+/// filled as not casting, so a decor tile or a background tile on the same
+/// layer is lit without blocking anything, and a wall's seams are not gaps.
+/// From every opaque pixel only when the node is set to cast outright and its
+/// tileset marks nothing solid, which is the one case with no squares to cast
+/// from and an author who asked for a shadow anyway.
+pub(crate) fn tilemap_casting(
+    world: &floptle_core::World,
+    tilemaps: &HashMap<Entity, crate::sprite2d::TileGpu>,
+    e: Entity,
+    casts: bool,
+) -> (bool, Option<floptle_render::MeshId>) {
+    if !casts {
+        return (false, None);
+    }
+    match tilemaps.get(&e).and_then(|t| t.occluder) {
+        Some(m) => (false, Some(m)),
+        None => {
+            let set = world.get::<floptle_core::Shadow2D>(e).map(|s| s.0).unwrap_or_default();
+            (set == floptle_core::Cast2D::Yes, None)
+        }
+    }
+}
+
 /// Takes the 2D half of a split that has already happened rather than asking for
 /// one: both gathers need this before the draw loop (to know what a light can
 /// reach) and again at the pass, and each was walking the
@@ -280,6 +307,23 @@ pub(crate) fn light2d_uniform(
 mod lit_2d_tests {
     use super::*;
     use floptle_core::{Lighting2D, Lit2D, Sorting, World};
+
+    /// A tilemap with solid squares casts from them and not from its tiles; one
+    /// with none casts nothing under `auto` and from its pixels only when set
+    /// to cast outright.
+    #[test]
+    fn a_tilemap_casts_from_its_solid_squares() {
+        let mut world = World::default();
+        let e = world.spawn();
+        let mut maps = HashMap::new();
+        assert_eq!(tilemap_casting(&world, &maps, e, false), (false, None), "not casting at all");
+        assert_eq!(tilemap_casting(&world, &maps, e, true), (false, None), "auto with nothing solid");
+        world.insert(e, floptle_core::Shadow2D(floptle_core::Cast2D::Yes));
+        assert_eq!(tilemap_casting(&world, &maps, e, true), (true, None), "set to cast, nothing solid");
+        let occ = floptle_render::MeshId(7);
+        maps.insert(e, crate::sprite2d::TileGpu::for_test(Some(occ)));
+        assert_eq!(tilemap_casting(&world, &maps, e, true), (false, Some(occ)), "the squares, never the tiles");
+    }
 
     /// **A material applies whole, or it is not the material.**
     ///

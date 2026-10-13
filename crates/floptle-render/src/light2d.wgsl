@@ -175,10 +175,21 @@ fn fs_fill(in: FillOut) -> GBuffer {
     return g;
 }
 
+/// An occluder's mark: "light stops here" in the surface target's alpha, and
+/// nothing else — the pipeline's write masks keep every other channel as the
+/// fill left it.
+@fragment
+fn fs_occlude(in: FillOut) -> GBuffer {
+    var g: GBuffer;
+    g.albedo = vec4<f32>(0.0);
+    g.surface = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    return g;
+}
+
 // ---- accumulation -----------------------------------------------------------
 
 struct Lights {
-    // x = how many lights, y = 1 when the pass should run at all, z = how many
+    // x = how many lights, y = 1 when the pass should run at all, z = the most
     // steps the shadow march may take (0 = nothing in this frame casts, so the
     // march never runs and the pass costs what it did before shadows existed).
     count: vec4<f32>,
@@ -302,10 +313,14 @@ fn occluded(i: u32, origin_px: vec2<f32>, light_px: vec2<f32>, steps: f32, self_
         return false;
     }
     let seg = light_px - origin_px;
-    let n = i32(steps);
+    // One sample per pixel of the segment, up to the budget. A fixed count
+    // spread over the whole length sampled a far light's segment every dozen
+    // pixels, so neighbouring pixels disagreed about a thin wall and the floor
+    // streaked in lines fanning out from the lamp.
+    let n = i32(min(ceil(length(seg)), steps));
     var left_self = !self_casts;
     for (var s = 1; s <= n; s = s + 1) {
-        let p = vec2<i32>(origin_px + seg * (f32(s) / f32(n + 1)));
+        let p = vec2<i32>(floor(origin_px + seg * (f32(s) / f32(n + 1))));
         let g = textureLoad(g_surface, p, 0);
         // `a` is 1 only where a surface that casts was written. Empty space —
         // the holes a tilemap is mostly made of — never blocks anything,
@@ -373,10 +388,9 @@ fn shade(in: FullOut) -> Delta {
         if (L.pos[i].w < 0.0) {
             // A sun: everywhere at full strength, from one direction, at 45°
             // above the plane for normal maps. Its shadows run a quarter of the
-            // screen away from it, sampled twice as finely as a lamp's.
+            // screen away from it, one sample a pixel like a lamp's.
             to_light = normalize(vec3<f32>(-travel, 1.0));
             light_px = in.clip.xy + vec2<f32>(-travel.x, travel.y) * length(L.viewport.xy) * 0.25;
-            steps = steps * 2.0;
         } else {
             let d = distance(L.pos[i].xyz, world);
             x = falloff_at(i, d);

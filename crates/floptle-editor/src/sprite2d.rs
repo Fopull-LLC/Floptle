@@ -53,7 +53,69 @@ pub(crate) struct TilePageGpu {
 /// tiles.
 pub(crate) struct TileGpu {
     pub(crate) pages: Vec<TilePageGpu>,
+    /// The squares its tileset calls solid, merged into rectangles exactly as
+    /// the physics merges them — what the 2D shadow march stops at. `None` when
+    /// nothing on the map is solid.
+    pub(crate) occluder: Option<MeshId>,
     sig: u64,
+}
+
+impl TileGpu {
+    #[cfg(test)]
+    pub(crate) fn for_test(occluder: Option<MeshId>) -> Self {
+        Self { pages: Vec::new(), occluder, sig: 0 }
+    }
+}
+
+/// What a tilemap's tileset says about collision, folded into one number: a
+/// square marked solid in the Tiles tab casts from that moment, not from the
+/// next time the map itself is painted.
+fn collision_sig(set: Option<&floptle_tiles::TileSet>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for (cell, info) in set.map(|s| &s.tiles).into_iter().flatten() {
+        let shape = info.collision.shape();
+        if matches!(shape, floptle_tiles::tileset::TileShape::None) {
+            continue;
+        }
+        (cell, info.one_way).hash(&mut h);
+        match shape {
+            floptle_tiles::tileset::TileShape::None => {}
+            floptle_tiles::tileset::TileShape::Rect(x, y, w, ht) => {
+                [x, y, w, ht].map(f32::to_bits).hash(&mut h)
+            }
+            floptle_tiles::tileset::TileShape::Poly(pts) => {
+                for p in pts {
+                    p.map(f32::to_bits).hash(&mut h);
+                }
+            }
+        }
+    }
+    h.finish()
+}
+
+/// The occluder geometry for a grid: every collider the physics would build,
+/// one-way ledges included — a ledge is a solid slab of art and a lamp under
+/// it is expected to light the floor and not the ceiling above it.
+pub(crate) fn occluder_mesh(
+    cols: u32,
+    rows: u32,
+    tile: f32,
+    data: &[u32],
+    set: &floptle_tiles::TileSet,
+) -> Option<floptle_render::mesh::MeshData> {
+    let c = floptle_tiles::collision_shapes(cols, rows, tile, data, set);
+    if c.is_empty() {
+        return None;
+    }
+    let rects: Vec<[f32; 4]> = c
+        .boxes
+        .iter()
+        .chain(&c.one_way_boxes)
+        .map(|b| [b.cx - b.hx, b.cy - b.hy, b.cx + b.hx, b.cy + b.hy])
+        .collect();
+    let polys: Vec<&[[f32; 2]]> = c.polys.iter().chain(&c.one_way_polys).map(|p| p.pts.as_slice()).collect();
+    Some(floptle_render::mesh::flat_shapes(&rects, &polys))
 }
 
 /// A cheap change signature for a tilemap plus the sheet it is cut from.
@@ -169,8 +231,8 @@ impl Editor {
             if let Some(t) = self.tilemaps.remove(&e)
                 && let Some(raster) = self.raster.as_mut()
             {
-                for p in t.pages {
-                    raster.free_dynamic(p.mesh);
+                for m in t.pages.into_iter().map(|p| p.mesh).chain(t.occluder) {
+                    raster.free_dynamic(m);
                 }
             }
         }
@@ -228,7 +290,8 @@ impl Editor {
                     }
                 }
             }
-            let sig = signature(cols, rows, tile, &data, (sc, sr), texel, step, &pages);
+            let sig = signature(cols, rows, tile, &data, (sc, sr), texel, step, &pages)
+                ^ collision_sig(set);
             if self.tilemaps.get(&e).is_some_and(|t| t.sig == sig) {
                 continue;
             }
@@ -242,8 +305,10 @@ impl Editor {
 
             // The slots this entity already owns, to be reused page by page and
             // whatever is left over handed back.
+            let old = self.tilemaps.remove(&e);
+            let mut spare_occluder = old.as_ref().and_then(|t| t.occluder);
             let mut spare: Vec<MeshId> =
-                self.tilemaps.remove(&e).map(|t| t.pages.into_iter().map(|p| p.mesh).collect()).unwrap_or_default();
+                old.map(|t| t.pages.into_iter().map(|p| p.mesh).collect()).unwrap_or_default();
             let mut built: Vec<TilePageGpu> = Vec::with_capacity(pages.len());
             for (pi, (tex_path, pc, pr)) in pages.iter().enumerate() {
                 let page = pi as u32;
@@ -290,10 +355,27 @@ impl Editor {
                     empty,
                 });
             }
+            // From the stored grid, not the animated one: the physics collides
+            // with the stored squares, and the light stops where the body does.
+            let occluder = set.and_then(|s| occluder_mesh(cols, rows, tile, &data, s)).map(|mesh_data| {
+                let (nv, ni) = (mesh_data.vertices.len() as u32, mesh_data.indices.len() as u32);
+                match spare_occluder.take() {
+                    Some(m) if raster.replace_dynamic(gpu, m, &mesh_data) => m,
+                    other => {
+                        if let Some(m) = other {
+                            raster.free_dynamic(m);
+                        }
+                        let fresh = raster.register_dynamic(gpu, nv.max(4), ni.max(6), false);
+                        raster.replace_dynamic(gpu, fresh, &mesh_data);
+                        fresh
+                    }
+                }
+            });
+            spare.extend(spare_occluder);
             for m in spare {
                 raster.free_dynamic(m);
             }
-            self.tilemaps.insert(e, TileGpu { pages: built, sig });
+            self.tilemaps.insert(e, TileGpu { pages: built, occluder, sig });
         }
     }
 }
@@ -831,7 +913,7 @@ mod tests {
             let mut world = World::default();
             let e = world.spawn();
             let mut tilemaps = HashMap::new();
-            tilemaps.insert(e, TileGpu { pages, sig: 0 });
+            tilemaps.insert(e, TileGpu { pages, occluder: None, sig: 0 });
             let mut out = Vec::new();
             tilemap_draws(
                 &tilemaps,
@@ -962,6 +1044,46 @@ mod tests {
         let data: Vec<u32> = (0..16).collect();
         let out = page_squares(&data, 0, 16).expect("all page 0");
         assert_eq!(out, data);
+    }
+
+    /// The occluder covers the solid squares and nothing else: a decor tile
+    /// on the same map adds no area, and a map with nothing solid has no
+    /// occluder at all. Every opaque pixel of every tile used to cast.
+    #[test]
+    fn only_solid_squares_occlude() {
+        let mut set = floptle_tiles::TileSet { name: "t".into(), sheet_cols: 2, sheet_rows: 1, ..Default::default() };
+        set.info_mut(0).collision = floptle_tiles::TileCollision::Full;
+        // A 4×2 map: a solid run of three across the top, decor (cell 1)
+        // under it and one empty square.
+        let e = floptle_core::EMPTY_TILE;
+        let data = [0, 0, 0, e, 1, 1, 1, 1];
+        let area = |m: &floptle_render::mesh::MeshData| -> f32 {
+            m.indices
+                .chunks(3)
+                .map(|t| {
+                    let p = |i: u32| m.vertices[i as usize].pos;
+                    let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
+                    ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs() * 0.5
+                })
+                .sum()
+        };
+        let m = occluder_mesh(4, 2, 0.5, &data, &set).expect("three solid squares");
+        assert!((area(&m) - 3.0 * 0.25).abs() < 1e-5, "covers {} where three squares are solid", area(&m));
+        // Merged: one rectangle, so no seam between the squares.
+        assert_eq!(m.indices.len(), 6, "the run of three must be one quad");
+        // Every corner is on the top row's band, y in [0, 0.5].
+        assert!(m.vertices.iter().all(|v| v.pos[1] >= -1e-6), "the decor row was covered");
+        assert!(occluder_mesh(4, 2, 0.5, &[1; 8], &set).is_none(), "nothing solid, nothing to cast");
+    }
+
+    /// Marking a tile solid in the Tiles tab changes the signature, so the
+    /// occluder is rebuilt then — not the next time the map is painted.
+    #[test]
+    fn a_collision_edit_changes_the_signature() {
+        let mut set = floptle_tiles::TileSet::default();
+        let before = collision_sig(Some(&set));
+        set.info_mut(3).collision = floptle_tiles::TileCollision::Full;
+        assert_ne!(before, collision_sig(Some(&set)));
     }
 }
 
