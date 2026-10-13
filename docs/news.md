@@ -1,5 +1,13 @@
 ## Just shipped
 
+**v0.116.0-rc6 — "Lands On Its Feet"** (beta). Moving bodies collide with
+each other and can turn, so crates stack, tip and roll. Joints: hinges, welds,
+ropes, springs, sliders, wheels and target pulls. Tilesets can be isometric
+or hexagonal, and Tiled maps of either import. Particles can bounce off the
+level or die on contact. 2D shadows come only from solid tiles, with no
+streaks, and 2D lights gain a shadow strength and a height. A 2D camera can
+hold a pixel-perfect zoom for your art.
+
 **v0.116.0-rc5 — "Lands On Its Feet"** (beta). 2D bodies can be polygons, and
 a Rigidbody added to a sprite is traced from its art: it covers the character,
 not the empty space in its frame, and flips when the sprite does. `.woff2`
