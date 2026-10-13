@@ -1,5 +1,11 @@
 ## Just shipped
 
+**v0.116.0 — "Lands On Its Feet"**. A complete 2D engine, out of beta. Pixel
+Platformer and Pixel Village templates, Aseprite files as sprite sheets,
+Tiled and LDtk levels, square, isometric and hexagonal tile maps with
+collision from the art, bodies that collide, turn and join, and 2D lights
+with clean shadows, suns and normal maps.
+
 **v0.116.0-rc7 — "Lands On Its Feet"** (beta). Isometric blocks stand in
 front of the cells behind them, and light correctly under 2D lights.
 
