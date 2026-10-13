@@ -1,5 +1,8 @@
 ## Just shipped
 
+**v0.116.0-rc7 — "Lands On Its Feet"** (beta). Isometric blocks stand in
+front of the cells behind them, and light correctly under 2D lights.
+
 **v0.116.0-rc6 — "Lands On Its Feet"** (beta). Moving bodies collide with
 each other and can turn, so crates stack, tip and roll. Joints: hinges, welds,
 ropes, springs, sliders, wheels and target pulls. Tilesets can be isometric
