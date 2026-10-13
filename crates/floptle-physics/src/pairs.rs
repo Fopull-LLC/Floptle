@@ -44,7 +44,7 @@ enum Solid {
     Sphere { c: Vec3, r: f32 },
     Capsule { a: Vec3, b: Vec3, r: f32 },
     Box { c: Vec3, rot: Quat, half: Vec3 },
-    Poly { c: Vec3, outline: floptle_core::outline::Outline, half_depth: f32 },
+    Poly { c: Vec3, rot: Quat, outline: floptle_core::outline::Outline, half_depth: f32 },
 }
 
 impl Solid {
@@ -60,8 +60,8 @@ impl Solid {
                 let q = (rot.conjugate() * (p - c)).abs() - half;
                 q.max(Vec3::ZERO).length() + q.max_element().min(0.0)
             }
-            Solid::Poly { c, outline, half_depth } => {
-                let d = p - c;
+            Solid::Poly { c, rot, outline, half_depth } => {
+                let d = rot.conjugate() * (p - c);
                 crate::world::extrude(outline.distance(d.x, d.y), d.z, half_depth)
             }
         }
@@ -79,6 +79,34 @@ impl Solid {
         n.try_normalize()
     }
 
+    /// The corners in the XY plane, counter-clockwise, of a box or outline
+    /// turned only about Z: what two 2D bodies meet with.
+    fn flat_corners(&self) -> Option<Vec<[f32; 2]>> {
+        let flat = |rot: Quat| (rot * Vec3::Z).z > 0.9999;
+        match *self {
+            Solid::Box { c, rot, half } if flat(rot) => Some(
+                [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+                    .iter()
+                    .map(|&(sx, sy)| {
+                        let p = c + rot * Vec3::new(sx * half.x, sy * half.y, 0.0);
+                        [p.x, p.y]
+                    })
+                    .collect(),
+            ),
+            Solid::Poly { c, rot, outline, .. } if flat(rot) => Some(
+                outline
+                    .points()
+                    .iter()
+                    .map(|q| {
+                        let p = c + rot * Vec3::new(q[0], q[1], 0.0);
+                        [p.x, p.y]
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
+
     fn centre(&self) -> Vec3 {
         match *self {
             Solid::Sphere { c, .. } | Solid::Box { c, .. } | Solid::Poly { c, .. } => c,
@@ -91,7 +119,7 @@ impl Solid {
             Solid::Sphere { c, r } => (c, r),
             Solid::Capsule { a, b, r } => ((a + b) * 0.5, (b - a).length() * 0.5 + r),
             Solid::Box { c, half, .. } => (c, half.length()),
-            Solid::Poly { c, outline, half_depth } => (c, outline.reach().hypot(half_depth)),
+            Solid::Poly { c, outline, half_depth, .. } => (c, outline.reach().hypot(half_depth)),
         }
     }
 
@@ -143,19 +171,84 @@ impl Solid {
             // Corners, edge midpoints and centre, in its plane: what the
             // static solver samples, which is enough for an outline because
             // nothing it meets here is thinner than its depth.
-            Solid::Poly { c, outline, .. } => {
+            Solid::Poly { c, rot, outline, .. } => {
                 let pts = outline.points();
                 let n = pts.len();
                 for (i, q) in pts.iter().enumerate() {
                     let next = pts[(i + 1) % n];
-                    out[2 * i] = c + Vec3::new(q[0], q[1], 0.0);
-                    out[2 * i + 1] = c + Vec3::new((q[0] + next[0]) * 0.5, (q[1] + next[1]) * 0.5, 0.0);
+                    out[2 * i] = c + rot * Vec3::new(q[0], q[1], 0.0);
+                    out[2 * i + 1] = c + rot * Vec3::new((q[0] + next[0]) * 0.5, (q[1] + next[1]) * 0.5, 0.0);
                 }
                 out[2 * n] = c;
                 (out, 2 * n + 1, 0.0)
             }
         }
     }
+}
+
+/// Where two convex outlines in the XY plane overlap: contact points, the
+/// normal from B towards A, and how deep each point is along it.
+///
+/// One normal for the pair, the axis along which they overlap least
+/// (separating axes), and every corner of either inside the other pushed out
+/// along it. Testing each corner against the nearest face instead gave a box
+/// resting square on an equal box a sideways push from any corner that had
+/// drifted a hair past the edge below, and a tower of three shook itself down
+/// within seconds.
+fn flat_contacts(a: &[[f32; 2]], b: &[[f32; 2]], z: f32) -> Vec<(Vec3, Vec3, f32)> {
+    let axes = |p: &[[f32; 2]]| -> Vec<[f32; 2]> {
+        (0..p.len())
+            .filter_map(|i| {
+                let (q, r) = (p[i], p[(i + 1) % p.len()]);
+                let (ex, ey) = (r[0] - q[0], r[1] - q[1]);
+                let len = ex.hypot(ey);
+                (len > 1e-9).then(|| [ey / len, -ex / len])
+            })
+            .collect()
+    };
+    let span = |p: &[[f32; 2]], n: [f32; 2]| {
+        p.iter().map(|q| q[0] * n[0] + q[1] * n[1]).fold((f32::MAX, f32::MIN), |(lo, hi), d| (lo.min(d), hi.max(d)))
+    };
+    let mut best: Option<([f32; 2], f32)> = None;
+    for n in axes(a).into_iter().chain(axes(b)) {
+        let (a_lo, a_hi) = span(a, n);
+        let (b_lo, b_hi) = span(b, n);
+        let overlap = (a_hi - b_lo).min(b_hi - a_lo);
+        if overlap <= 0.0 {
+            return Vec::new();
+        }
+        if best.is_none_or(|(_, o)| overlap < o) {
+            // Pointing from B towards A.
+            let ca = (a_lo + a_hi) * 0.5;
+            let cb = (b_lo + b_hi) * 0.5;
+            let n = if ca >= cb { n } else { [-n[0], -n[1]] };
+            best = Some((n, overlap));
+        }
+    }
+    let Some((n, overlap)) = best else { return Vec::new() };
+    let (_, b_top) = span(b, n);
+    let (a_bottom, _) = span(a, n);
+    let inside = |p: [f32; 2], poly: &[[f32; 2]]| {
+        (0..poly.len()).all(|i| {
+            let (q, r) = (poly[i], poly[(i + 1) % poly.len()]);
+            (r[0] - q[0]) * (p[1] - q[1]) - (r[1] - q[1]) * (p[0] - q[0]) >= -1e-4
+        })
+    };
+    let nv = Vec3::new(n[0], n[1], 0.0);
+    let mut out = Vec::new();
+    for &v in a {
+        if inside(v, b) {
+            let depth = (b_top - (v[0] * n[0] + v[1] * n[1])).clamp(0.0, overlap);
+            out.push((Vec3::new(v[0], v[1], z), nv, depth));
+        }
+    }
+    for &v in b {
+        if inside(v, a) {
+            let depth = ((v[0] * n[0] + v[1] * n[1]) - a_bottom).clamp(0.0, overlap);
+            out.push((Vec3::new(v[0], v[1], z), nv, depth));
+        }
+    }
+    out
 }
 
 /// A participant in the pass.
@@ -205,6 +298,14 @@ impl Inertial {
 }
 
 impl PhysicsWorld {
+    /// A side that lives in the XY plane: a 2D body.
+    fn pair_flat(&self, s: Side) -> bool {
+        match s {
+            Side::Body(i) => self.bodies[i].lock_pos[2],
+            Side::Compound(_) => false,
+        }
+    }
+
     fn pair_side_can_move(&self, s: Side) -> bool {
         match s {
             Side::Body(i) => !self.bodies[i].driven,
@@ -240,8 +341,10 @@ impl PhysicsWorld {
                         b: b.pos + b.up * half_height,
                         r: b.radius,
                     },
-                    BodyShape::Box { half } => Solid::Box { c: b.pos, rot: Quat::IDENTITY, half },
-                    BodyShape::Polygon { outline, half_depth } => Solid::Poly { c: b.pos, outline, half_depth },
+                    BodyShape::Box { half } => Solid::Box { c: b.pos, rot: b.orient, half },
+                    BodyShape::Polygon { outline, half_depth } => {
+                        Solid::Poly { c: b.pos, rot: b.orient, outline, half_depth }
+                    }
                 };
                 out.push((0, solid));
             }
@@ -291,10 +394,12 @@ impl PhysicsWorld {
                 let b = &self.bodies[i];
                 Inertial {
                     inv_mass: if moves { 1.0 / b.mass.max(1e-4) } else { 0.0 },
-                    inv_inertia: Mat3::ZERO,
-                    pos: b.pos,
+                    // Zero for a body that does not rotate: it is pushed,
+                    // never spun.
+                    inv_inertia: if moves { b.world_inv_inertia() } else { Mat3::ZERO },
+                    pos: b.com(),
                     vel: b.vel,
-                    ang_vel: Vec3::ZERO,
+                    ang_vel: b.ang_vel,
                     restitution: b.restitution,
                     friction: b.friction,
                 }
@@ -338,6 +443,15 @@ impl PhysicsWorld {
                 }
                 b.pos += d;
                 b.vel += dv;
+                // The push out moves a body without turning it; only the
+                // impulse spins it. Turning on the push as well made a box
+                // resting on two corners tilt a hair toward whichever was
+                // resolved first, every step, and a stack walked sideways.
+                if b.rotates {
+                    let inv_i = b.world_inv_inertia();
+                    let r = p - b.com();
+                    b.ang_vel += b.free_spin(inv_i * r.cross(impulse));
+                }
                 if (d.length_squared() > 1e-12 || dv.length_squared() > 1e-12) && b.asleep {
                     b.asleep = false;
                     b.sleep_time = 0.0;
@@ -456,6 +570,21 @@ impl PhysicsWorld {
                     for &(shape_b, solid_b) in &sb {
                         let (cb, rb) = solid_b.bound();
                         if (ca - cb).length_squared() > (ra + rb) * (ra + rb) {
+                            continue;
+                        }
+                        // Two flat boxes or outlines in the same plane meet
+                        // along one axis, found for the pair as a whole.
+                        if self.pair_flat(a) && self.pair_flat(b)
+                            && let (Some(pa), Some(pb)) = (solid_a.flat_corners(), solid_b.flat_corners())
+                        {
+                            // The overlap is one gap to close, shared by the
+                            // points: each pushing all of it threw a stacked
+                            // pair apart by several times the gap.
+                            let contacts = flat_contacts(&pa, &pb, ca.z);
+                            let share = 1.0 / contacts.len().max(1) as f32;
+                            for (cp, n, pen) in contacts {
+                                self.pair_resolve((a, shape_a, a_moves, i), (b, shape_b, b_moves, j), cp, n, pen * share, &mut budgets);
+                            }
                             continue;
                         }
                         // A's samples into B, then B's into A. `n` always

@@ -333,3 +333,125 @@ fn a_moving_body_pushes_a_crate() {
     assert!(cx > x0 + 1.0, "the crate was pushed; {x0:.2} → {cx:.2}");
     assert!(cx - px > 0.8, "and it stayed in front of the body pushing it; body {px:.2}, crate {cx:.2}");
 }
+
+/// A 2D crate that turns, at `(x, y)`, `half` across each way.
+fn turning_crate(ed: &mut crate::Editor, x: f64, y: f64, half: f32) -> floptle_core::Entity {
+    let c = add_crate(ed, x, y);
+    let rb = ed.world.get_mut::<RigidBody>(c).unwrap();
+    rb.rotates = true;
+    rb.half_extents = [half, half, 0.5];
+    c
+}
+
+fn z_angle(ed: &crate::Editor, e: floptle_core::Entity) -> f32 {
+    let r = floptle_core::world_transform(&ed.world, e).rotation;
+    let (_, _, z) = r.to_euler(floptle_core::math::EulerRot::XYZ);
+    z
+}
+
+fn play(ed: &mut crate::Editor, seconds: f32) {
+    if !ed.playing {
+        ed.toggle_play();
+    }
+    for _ in 0..(seconds * 60.0) as usize {
+        ed.play_step(1.0 / 60.0, true);
+    }
+}
+
+/// A crate that turns, set down flat on the floor, stays exactly as it was:
+/// no creep, no wobble, no turning by itself.
+#[test]
+fn a_turning_crate_rests_flat() {
+    let (mut ed, player) = scene(1.0, -3.0, true, false);
+    ed.world.remove::<RigidBody>(player);
+    let c = turning_crate(&mut ed, 0.0, 0.52, 0.5);
+    play(&mut ed, 3.0);
+    let t = floptle_core::world_transform(&ed.world, c).translation;
+    assert!((t.y - 0.5).abs() < 0.03 && t.x.abs() < 0.03, "it stayed put: {t:?}");
+    assert!(z_angle(&ed, c).abs() < 0.02, "and level: {}", z_angle(&ed, c));
+}
+
+/// A crate hanging most of the way off a ledge tips over the edge and falls,
+/// turning as it goes. One that does not turn stays balanced on the corner
+/// of the ledge, which no crate ever does.
+#[test]
+fn a_turning_crate_tips_off_a_ledge() {
+    // The ledge scene's top row is a solid floor from x = -4 to 4.
+    let (mut ed, player) = scene(1.0, -3.0, true, false);
+    ed.world.remove::<RigidBody>(player);
+    // Centre 0.3 past the right-hand end of the floor (x = 4).
+    let c = turning_crate(&mut ed, 4.3, 0.55, 0.5);
+    play(&mut ed, 2.0);
+    let t = floptle_core::world_transform(&ed.world, c).translation;
+    assert!(t.y < -1.0, "it fell off the ledge: {t:?}");
+    assert!(z_angle(&ed, c).abs() > 0.3, "turning as it went: {}", z_angle(&ed, c));
+}
+
+/// A body that does not turn keeps its rotation whatever hits it.
+#[test]
+fn a_crate_that_does_not_turn_hangs_on_the_ledge() {
+    let (mut ed, player) = scene(1.0, -3.0, true, false);
+    ed.world.remove::<RigidBody>(player);
+    let c = add_crate(&mut ed, 4.3, 0.55);
+    play(&mut ed, 2.0);
+    assert_eq!(z_angle(&ed, c), 0.0);
+}
+
+/// A ball on a slope rolls: it turns as it goes down, the way it is going.
+#[test]
+fn a_ball_rolls_down_a_ramp() {
+    let (mut ed, player) = scene(1.0, -3.0, true, false);
+    ed.world.remove::<RigidBody>(player);
+    let ramp = ed.world.spawn();
+    ed.world.insert(ramp, Transform::IDENTITY);
+    ed.world.insert(
+        ramp,
+        RigidBody {
+            kind: BodyKind::Polygon,
+            mode: floptle_core::BodyMode::Static,
+            two_d: true,
+            outline: floptle_core::outline::Outline::convex(&[[-4.0, 0.0], [4.0, 0.0], [4.0, 3.0]]),
+            ..Default::default()
+        },
+    );
+    let ball = ed.world.spawn();
+    ed.world.insert(ball, Transform { translation: DVec3::new(2.5, 3.0, 0.0), rotation: Quat::IDENTITY, scale: Vec3::ONE });
+    ed.world.insert(ball, RigidBody { kind: BodyKind::Sphere, radius: 0.4, two_d: true, rotates: true, friction: 0.8, ..Default::default() });
+    play(&mut ed, 1.0);
+    let t = floptle_core::world_transform(&ed.world, ball).translation;
+    assert!(t.x < 1.5, "it rolled down to the left: {t:?}");
+    // Rolling left is turning anticlockwise, about +Z.
+    assert!(z_angle(&ed, ball) > 0.5 || z_angle(&ed, ball) < -2.0, "and it turned: {}", z_angle(&ed, ball));
+}
+
+/// Three turning crates stacked stay stacked: no jitter shakes the tower
+/// down and nothing turns by itself.
+#[test]
+fn a_tower_of_turning_crates_stands() {
+    let (mut ed, player) = scene(1.0, -3.0, true, false);
+    ed.world.remove::<RigidBody>(player);
+    let crates: Vec<_> = (0..3).map(|i| turning_crate(&mut ed, 0.0, 0.52 + i as f64 * 1.02, 0.5)).collect();
+    play(&mut ed, 4.0);
+    for (i, &c) in crates.iter().enumerate() {
+        let t = floptle_core::world_transform(&ed.world, c).translation;
+        assert!((t.y - (0.5 + i as f64)).abs() < 0.08, "crate {i} is where it was stacked: {t:?}");
+        assert!(t.x.abs() < 0.1, "crate {i} did not slide off: {t:?}");
+        assert!(z_angle(&ed, c).abs() < 0.05, "crate {i} stayed level: {}", z_angle(&ed, c));
+    }
+}
+
+
+
+/// The same tower of crates that do not turn stands as still: every corner
+/// in contact used to push the whole overlap, so a stack bounced itself apart.
+#[test]
+fn a_tower_of_crates_stands_still() {
+    let (mut ed, player) = scene(1.0, -3.0, true, false);
+    ed.world.remove::<RigidBody>(player);
+    let crates: Vec<_> = (0..3).map(|i| add_crate(&mut ed, 0.0, 0.52 + i as f64 * 1.02)).collect();
+    play(&mut ed, 4.0);
+    for (i, &c) in crates.iter().enumerate() {
+        let t = floptle_core::world_transform(&ed.world, c).translation;
+        assert!((t.y - (0.5 + i as f64)).abs() < 0.03, "crate {i} is where it was stacked: {t:?}");
+    }
+}

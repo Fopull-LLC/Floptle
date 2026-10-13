@@ -703,6 +703,9 @@ impl Editor {
             two_d: true,
             half_extents: [hx, hy, hx.max(hy)],
             outline: outline.unwrap_or_default(),
+            // A sprite given a body is a crate, a barrel, a rock more often
+            // than a character, and those turn. A character unticks it.
+            rotates: true,
             ..Default::default()
         }
     }

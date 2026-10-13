@@ -144,6 +144,7 @@ field_diff!(RigidBody {
     height,
     half_extents,
     outline,
+    rotates,
     restitution,
     friction,
     slope_limit,

@@ -394,6 +394,10 @@ pub struct RigidBodyDoc {
     /// body is another kind, so switching back finds the outline again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outline: Vec<[f32; 2]>,
+    /// The solver turns the body. Off when absent, so a scene written before
+    /// bodies could turn keeps every body upright.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rotates: bool,
     #[serde(default)]
     pub restitution: f32,
     #[serde(default = "frict_f32")]
@@ -505,6 +509,7 @@ impl RigidBodyDoc {
             height: self.height,
             half_extents: self.half_extents,
             outline: floptle_core::outline::Outline::convex(&self.outline),
+            rotates: self.rotates,
             restitution: self.restitution,
             friction: self.friction,
             slope_limit: self.slope_limit.clamp(0.0, 90.0),
@@ -528,6 +533,7 @@ impl RigidBodyDoc {
             half_extents: rb.half_extents,
             polygon: rb.kind == BodyKind::Polygon,
             outline: rb.outline.points().to_vec(),
+            rotates: rb.rotates,
             restitution: rb.restitution,
             friction: rb.friction,
             slope_limit: rb.slope_limit,
@@ -4879,6 +4885,7 @@ mod tests {
                         // A capsule that was a polygon once keeps its outline.
                         polygon: false,
                         outline: vec![[-0.5, -0.5], [0.5, -0.5], [0.0, 0.5]],
+                        rotates: true,
                         mode: BodyModeDoc::Kinematic, // exercise the mode round-trip
                         radius: 0.6,
                         height: 2.4,
@@ -5231,6 +5238,7 @@ mod tests {
         assert!(rb.capsule && rb.radius == 0.6 && rb.height == 2.4);
         assert!(!rb.polygon);
         assert_eq!(rb.outline, vec![[-0.5, -0.5], [0.5, -0.5], [0.0, 0.5]]);
+        assert!(rb.rotates);
         assert_eq!(rb.lock_pos, [false, false, true]);
         assert_eq!(rb.lock_rot, [true, false, true]);
         assert!(rb.two_d, "the 2D switch has to survive a save and a load like every other field");

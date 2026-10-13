@@ -70,6 +70,25 @@ locked by hand. The axes it holds show as ticked and disabled.
 A 2D box collides in its own plane: its corners and edges are tested where
 it is, not half its depth in front of and behind it.
 
+### Bodies that turn
+
+Tick **rotates** and the physics turns the body. A contact away from its centre
+spins it, so a crate pushed off a ledge tips over the edge, a ball rolls down a
+slope, and a plank see-saws on a rock. The node's rotation follows. A crate
+placed tilted in the editor lands tilted.
+
+Leave it off for a character. A body that doesn't rotate keeps its orientation
+however it is hit, which is what keeps a player standing up. The **freeze rot**
+boxes and **2D** still hold the axes they name, so a 2D body only ever spins in
+its plane.
+
+A body added to a sprite starts with **rotates** on. A body added to anything
+else, or built by a script, starts with it off.
+
+Moving bodies collide with each other whether they rotate or not: crates stack,
+and a character pushes a crate along. A layer pair the collision matrix keeps
+apart, or `physics.ignorePair`, passes through.
+
 ### Polygon bodies
 
 Pick **Polygon** as the shape and the body is an outline of up to eight corners

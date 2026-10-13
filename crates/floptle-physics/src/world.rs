@@ -431,12 +431,17 @@ pub struct BodyHull {
     /// The body's collision-layer bit index, so masked raycasts filter dynamic
     /// bodies with the same bits as static geometry.
     pub layer: u8,
+    /// How the body's box or outline is turned (identity when it does not
+    /// rotate).
+    pub orient: Quat,
 }
 
 impl BodyHull {
     /// Signed distance from sim-frame `p` to the hull surface.
     pub fn distance(&self, p: Vec3) -> f32 {
         let d = p - self.pos;
+        // Box and outline are tested in the body's own axes.
+        let local = self.orient.inverse() * d;
         match self.shape {
             BodyShape::Sphere => d.length() - self.radius,
             BodyShape::Capsule { half_height } => {
@@ -444,10 +449,12 @@ impl BodyHull {
                 (d - self.up * t).length() - self.radius
             }
             BodyShape::Box { half } => {
-                let q = d.abs() - half;
+                let q = local.abs() - half;
                 q.max(Vec3::ZERO).length() + q.max_element().min(0.0)
             }
-            BodyShape::Polygon { outline, half_depth } => extrude(outline.distance(d.x, d.y), d.z, half_depth),
+            BodyShape::Polygon { outline, half_depth } => {
+                extrude(outline.distance(local.x, local.y), local.z, half_depth)
+            }
         }
     }
 
@@ -1815,6 +1822,213 @@ impl PhysicsWorld {
         hit
     }
 
+    /// One step of a body that rotates: gravity, then the move and the turn,
+    /// then every sample that has sunk into a collider pushed out with an
+    /// impulse at that point, so a contact off the centre of mass turns it.
+    /// The solver assemblies use, on a single shape, with the body's own
+    /// restitution, friction, locks, one-way platforms and sleep.
+    ///
+    /// A long move is cut into substeps no longer than half the body's
+    /// smallest size, each with its own contacts, so a fast crate or a thrown
+    /// rock meets a thin wall instead of jumping it.
+    fn step_rigid(&mut self, bi: usize, dt: f32) {
+        {
+            let b = &mut self.bodies[bi];
+            b.prev_pos = b.pos;
+            b.prev_orient = b.orient;
+            b.drop_through = (b.drop_through - dt).max(0.0);
+        }
+        let g = if self.bodies[bi].use_gravity {
+            self.gravity.accel_at(self.bodies[bi].pos, &self.colliders)
+        } else {
+            Vec3::ZERO
+        };
+        self.bodies[bi].vel += g * dt;
+        if !self.water.is_empty() {
+            let b = &self.bodies[bi];
+            let r = b.bounding_radius();
+            if let Some(a) = crate::water::buoyancy_accel(&self.water, b.com(), r, b.mass, b.vel, g, dt) {
+                self.bodies[bi].vel += a * dt;
+            }
+        }
+        // Standing on another body is only known after this step, from the
+        // pair pass, so last step's answer stands in for it when deciding
+        // whether the body has come to rest.
+        let was_grounded = self.bodies[bi].grounded;
+        {
+            let b = &mut self.bodies[bi];
+            b.ang_vel = b.free_spin(b.ang_vel);
+            b.grounded = false;
+            b.contact = None;
+            b.ground_normal = None;
+            b.wall_normal = None;
+        }
+        let size = {
+            let b = &self.bodies[bi];
+            match b.shape {
+                BodyShape::Sphere => b.radius,
+                BodyShape::Capsule { .. } => b.radius,
+                BodyShape::Box { half } => half.min_element(),
+                BodyShape::Polygon { outline, .. } => {
+                    let [hx, hy] = outline.half_extents();
+                    hx.min(hy)
+                }
+            }
+            .max(0.02)
+        };
+        let travel = self.bodies[bi].vel.length() * dt
+            + self.bodies[bi].ang_vel.length() * dt * self.bodies[bi].bounding_radius();
+        let steps = ((travel / (size * 0.5)).ceil() as usize).clamp(1, 16);
+        let h = dt / steps as f32;
+        let row = self.matrix[self.bodies[bi].layer as usize];
+        for _ in 0..steps {
+            {
+                let b = &mut self.bodies[bi];
+                b.pos += b.vel * h;
+                let spin = b.ang_vel * h;
+                b.turn(spin);
+                if b.shape_is_capsule() {
+                    b.up = b.orient * Vec3::Y;
+                }
+            }
+            self.rigid_contacts(bi, row);
+        }
+        let b = &mut self.bodies[bi];
+        for i in 0..3 {
+            if b.lock_pos[i] {
+                let home = axis(b.home, i);
+                set_axis(&mut b.pos, i, home);
+                set_axis(&mut b.vel, i, 0.0);
+            }
+        }
+        // At rest: below what anyone can see, a resting body's corner
+        // micro-impulses would otherwise creep it along forever.
+        let slow = b.vel.length() < 0.05 && b.ang_vel.length() < 0.05;
+        if (b.grounded || was_grounded) && slow {
+            b.vel = Vec3::ZERO;
+            b.ang_vel = Vec3::ZERO;
+            b.sleep_time += dt;
+            if b.sleep_time >= SLEEP_SETTLE_TIME {
+                b.asleep = true;
+                self.resting[bi] = self.find_resting_contacts(bi);
+            }
+        } else {
+            b.sleep_time = 0.0;
+        }
+    }
+
+    /// Two passes of contact against the static world and the kinematic
+    /// hulls, for a body that rotates.
+    fn rigid_contacts(&mut self, bi: usize, row: u32) {
+        let mut push_budget = 0.35f32;
+        let mut rot_budget = 0.12f32;
+        for _pass in 0..2 {
+            let cand = {
+                let (centres, n_c, radius) = self.bodies[bi].sample_centers();
+                let pos = self.bodies[bi].pos;
+                let reach = centres[..n_c].iter().map(|c| c.distance(pos)).fold(0.0f32, f32::max);
+                let mut cand = std::mem::take(&mut self.cand);
+                cand.clear();
+                self.collider_index.sphere(pos, reach + radius + 0.01, &mut cand);
+                cand
+            };
+            for &ci in &cand {
+                let ci = ci as usize;
+                if (row >> self.colliders[ci].layer) & 1 == 0 || self.colliders[ci].sensor {
+                    continue;
+                }
+                let (_, n_c, _) = self.bodies[bi].sample_centers();
+                for k in 0..n_c {
+                    // Fresh each time: every resolve moves and turns the body.
+                    let (centres, _, radius) = self.bodies[bi].sample_centers();
+                    let p = centres[k];
+                    let pen = radius - self.colliders[ci].distance(p);
+                    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+                    if !(pen > 0.0) {
+                        continue;
+                    }
+                    let n = match self.colliders[ci].normal_reliable(p) {
+                        Some(n) => n,
+                        None => self.colliders[ci].normal(p),
+                    };
+                    if let Some(up) = self.colliders[ci].one_way
+                        && !self.one_way_holds(bi, ci, p, n, up)
+                    {
+                        continue;
+                    }
+                    let cp = p - n * radius;
+                    self.rigid_impulse(bi, cp, n, pen, &mut push_budget, &mut rot_budget);
+                    self.note_body_contact(bi, n);
+                    self.contacts.push(Contact { body: bi, collider: ci, point: cp, normal: n });
+                }
+            }
+            self.cand = cand;
+            for hi in 0..self.kin_hulls.len() {
+                let hull = self.kin_hulls[hi];
+                if (row >> hull.layer) & 1 == 0 {
+                    continue;
+                }
+                let (_, n_c, _) = self.bodies[bi].sample_centers();
+                for k in 0..n_c {
+                    let (centres, _, radius) = self.bodies[bi].sample_centers();
+                    let p = centres[k];
+                    let pen = radius - hull.distance(p);
+                    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+                    if !(pen > 0.0) {
+                        continue;
+                    }
+                    let n = hull.normal(p);
+                    let cp = p - n * radius;
+                    self.rigid_impulse(bi, cp, n, pen, &mut push_budget, &mut rot_budget);
+                    self.note_body_contact(bi, n);
+                    self.kin_contacts.push((bi, hull.eid, cp, n));
+                }
+            }
+        }
+    }
+
+    /// Push body `bi` out of a surface at `cp` along `n` by `pen`, and take
+    /// the speed into the surface out of the point there: restitution along
+    /// the normal, Coulomb friction across it, both through the body's mass
+    /// and inertia so an off-centre contact turns it.
+    fn rigid_impulse(&mut self, bi: usize, cp: Vec3, n: Vec3, pen: f32, push_budget: &mut f32, rot_budget: &mut f32) {
+        let b = &mut self.bodies[bi];
+        let inv_m = 1.0 / b.mass.max(1e-4);
+        let inv_i = b.world_inv_inertia();
+        let r = cp - b.com();
+        let w = inv_m + (inv_i * r.cross(n)).cross(r).dot(n);
+        if !(w.is_finite() && w > 1e-9) {
+            return;
+        }
+        let lambda = pen / w;
+        let push = (lambda * inv_m).clamp(0.0, push_budget.max(0.0));
+        *push_budget = (*push_budget - push).max(0.0);
+        b.pos += n * push;
+        let turn = crate::pairs::spend(inv_i * r.cross(n * lambda), rot_budget);
+        b.turn(turn);
+        let r = cp - b.com();
+        let vp = b.vel + b.ang_vel.cross(r);
+        let vn = vp.dot(n);
+        if vn < 0.0 {
+            let j = -(1.0 + b.restitution) * vn / w;
+            b.vel += n * (j * inv_m);
+            b.ang_vel += b.free_spin(inv_i * r.cross(n * j));
+            let vp = b.vel + b.ang_vel.cross(r);
+            let vt = vp - n * vp.dot(n);
+            let vt_len = vt.length();
+            if vt_len > 1e-6 {
+                let t = vt / vt_len;
+                let wt = inv_m + (inv_i * r.cross(t)).cross(r).dot(t);
+                if wt.is_finite() && wt > 1e-9 {
+                    let jt = (vt_len / wt).min(b.friction.max(0.0) * j);
+                    b.vel -= t * (jt * inv_m);
+                    b.ang_vel -= b.free_spin(inv_i * r.cross(t * jt));
+                }
+            }
+        }
+    }
+
+
     pub fn step_body(&mut self, bi: usize, dt: f32) {
         let dt = dt.clamp(0.0, 0.1);
         if !self.index_fresh {
@@ -1850,8 +2064,10 @@ impl PhysicsWorld {
             // velocity without the wake-aware setters. A body that is not slow
             // is not asleep, whatever the flag says.
             self.bodies[bi].prev_pos = self.bodies[bi].pos;
+            self.bodies[bi].prev_orient = self.bodies[bi].orient;
             let has_velocity = self.bodies[bi].vel.length_squared()
-                > SLEEP_LINEAR_SPEED * SLEEP_LINEAR_SPEED;
+                > SLEEP_LINEAR_SPEED * SLEEP_LINEAR_SPEED
+                || self.bodies[bi].ang_vel.length_squared() > SLEEP_LINEAR_SPEED * SLEEP_LINEAR_SPEED;
             if !has_velocity && !self.touches_a_kinematic_hull(bi) {
                 if self.bodies[bi].driven {
                     // A rollback resimulation calls only `Sim::step_body_tick`
@@ -1907,6 +2123,10 @@ impl PhysicsWorld {
             b.prev_pos = b.pos;
             b.pos += b.vel * dt;
             b.contact = None;
+            return;
+        }
+        if self.bodies[bi].rotates {
+            self.step_rigid(bi, dt);
             return;
         }
         {
@@ -2713,6 +2933,7 @@ mod step_body_tests {
             shape: BodyShape::Sphere,
             up: Vec3::Y,
             layer: 0,
+            orient: Quat::IDENTITY,
         });
         w.step(dt);
         assert!(!w.bodies[bi].asleep, "a touching kinematic hull must wake the sleeping body");
@@ -2797,6 +3018,7 @@ mod hull_tests {
             shape: BodyShape::Capsule { half_height: 0.6 },
             up: Vec3::Y,
             layer: 0,
+            orient: Quat::IDENTITY,
         }
     }
 
@@ -2865,7 +3087,7 @@ mod shape_query_tests {
     use crate::BodyShape;
 
     fn hull(eid: u32, at: Vec3, radius: f32) -> BodyHull {
-        BodyHull { eid, pos: at, radius, shape: BodyShape::Sphere, up: Vec3::Y, layer: 0 }
+        BodyHull { eid, pos: at, radius, shape: BodyShape::Sphere, up: Vec3::Y, layer: 0, orient: Quat::IDENTITY }
     }
 
     /// The question `raycast` could not answer: what is inside this volume. A
@@ -3464,6 +3686,7 @@ mod feet {
             shape: BodyShape::Box { half: Vec3::new(2.0, 0.5, 2.0) },
             up: Vec3::Y,
             layer: 0,
+            orient: Quat::IDENTITY,
         });
         w.add_body(capsule(Vec3::new(0.0, 3.0, 0.0), true));
         settle(&mut w, 3.0);
@@ -3984,6 +4207,7 @@ mod polygon_hull_tests {
             shape: BodyShape::Polygon { outline, half_depth: 0.5 },
             up: Vec3::Y,
             layer: 0,
+            orient: Quat::IDENTITY,
         };
         // Down the diagonal from the upper right: the slanted edge is at
         // x + y = 0, so the hit is at the origin, √2·3 along.

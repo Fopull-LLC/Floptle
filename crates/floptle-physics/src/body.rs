@@ -1,7 +1,7 @@
 //! Dynamic rigid bodies: shape, integration state, material response
 //! (restitution/friction), and contact resolution against collision shapes.
 
-use floptle_core::math::Vec3;
+use floptle_core::math::{Mat3, Quat, Vec3};
 
 
 /// The collision shape of a dynamic body.
@@ -181,6 +181,21 @@ pub struct Body {
     /// it drops through the ledge it stands on. Counts down each step; a
     /// script starts it (`node.dropThrough`) when the player presses down.
     pub drop_through: f32,
+    /// The solver turns this body: contacts off its centre spin it, so a
+    /// crate tips off a ledge, a ball rolls and a plank see-saws. Off, the
+    /// body keeps its orientation however it is hit, which is what a
+    /// character wants. See [`crate::PhysicsWorld::step_body`].
+    pub rotates: bool,
+    /// How far the body has turned since it was built, applied to its shape
+    /// about its centre of mass. Identity for a body that does not rotate.
+    pub orient: Quat,
+    /// `orient` as of the start of the last step, for interpolation.
+    pub prev_orient: Quat,
+    /// Angular velocity, radians a second about each world axis.
+    pub ang_vel: Vec3,
+    /// World axes the body may not turn about: X and Y for a 2D body, so it
+    /// spins only in its plane.
+    pub lock_rot: [bool; 3],
 }
 
 impl Body {
@@ -215,7 +230,93 @@ impl Body {
             sleep_time: 0.0,
             feet: false,
             drop_through: 0.0,
+            rotates: false,
+            orient: Quat::IDENTITY,
+            prev_orient: Quat::IDENTITY,
+            ang_vel: Vec3::ZERO,
+            lock_rot: [false; 3],
         }
+    }
+
+    /// The centre of mass, relative to `pos`, before turning: the middle of
+    /// a polygon's area (its outline need not be centred on the node), the
+    /// centre of every other shape.
+    pub(crate) fn com_local(&self) -> Vec3 {
+        match self.shape {
+            BodyShape::Polygon { outline, .. } => {
+                let [x, y] = outline.centroid();
+                Vec3::new(x, y, 0.0)
+            }
+            _ => Vec3::ZERO,
+        }
+    }
+
+    pub(crate) fn shape_is_capsule(&self) -> bool {
+        matches!(self.shape, BodyShape::Capsule { .. })
+    }
+
+    /// The centre of mass, in the sim frame.
+    pub(crate) fn com(&self) -> Vec3 {
+        self.pos + self.orient * self.com_local()
+    }
+
+    /// The moments of inertia about the centre of mass along the body's own
+    /// axes: solid shapes of uniform density and `mass`.
+    pub(crate) fn inertia_local(&self) -> Vec3 {
+        let m = self.mass.max(1e-4);
+        let box_i = |h: Vec3| Vec3::new(h.y * h.y + h.z * h.z, h.x * h.x + h.z * h.z, h.x * h.x + h.y * h.y) * (m / 3.0);
+        match self.shape {
+            BodyShape::Sphere => Vec3::splat(0.4 * m * self.radius * self.radius),
+            BodyShape::Capsule { half_height } => {
+                box_i(Vec3::new(self.radius, half_height + self.radius, self.radius))
+            }
+            BodyShape::Box { half } => box_i(half),
+            BodyShape::Polygon { outline, half_depth } => {
+                // Z from the outline's own area, X and Y as the box round it.
+                let [hx, hy] = outline.half_extents();
+                let b = box_i(Vec3::new(hx, hy, half_depth));
+                Vec3::new(b.x, b.y, m * outline.polar_moment_per_area())
+            }
+        }
+    }
+
+    /// The inverse inertia in world axes, with the locked axes taken out: a
+    /// push that would turn the body about one of them turns it about the
+    /// free ones only. Zero for a body that does not rotate.
+    pub(crate) fn world_inv_inertia(&self) -> Mat3 {
+        if !self.rotates {
+            return Mat3::ZERO;
+        }
+        let i = self.inertia_local().max(Vec3::splat(1e-6));
+        let r = Mat3::from_quat(self.orient);
+        let w = r * Mat3::from_diagonal(Vec3::ONE / i) * r.transpose();
+        let mask = Mat3::from_diagonal(Vec3::new(
+            if self.lock_rot[0] { 0.0 } else { 1.0 },
+            if self.lock_rot[1] { 0.0 } else { 1.0 },
+            if self.lock_rot[2] { 0.0 } else { 1.0 },
+        ));
+        mask * w * mask
+    }
+
+    /// `v` with the locked rotation axes zeroed.
+    pub(crate) fn free_spin(&self, v: Vec3) -> Vec3 {
+        Vec3::new(
+            if self.lock_rot[0] { 0.0 } else { v.x },
+            if self.lock_rot[1] { 0.0 } else { v.y },
+            if self.lock_rot[2] { 0.0 } else { v.z },
+        )
+    }
+
+    /// Turn the body by the rotation vector `rot` about its centre of mass,
+    /// which stays where it is.
+    pub(crate) fn turn(&mut self, rot: Vec3) {
+        let rot = self.free_spin(rot);
+        if rot.length_squared() < 1e-14 {
+            return;
+        }
+        let com = self.com();
+        self.orient = (Quat::from_scaled_axis(rot) * self.orient).normalize();
+        self.pos = com - self.orient * self.com_local();
     }
 
     /// The radius of a sphere enclosing this body — what displaces water when
@@ -334,7 +435,7 @@ impl Body {
                 .iter()
                 .enumerate()
                 {
-                    a[n] = self.pos + Vec3::new(sx * half.x, sy * half.y, 0.0);
+                    a[n] = self.pos + self.orient * Vec3::new(sx * half.x, sy * half.y, 0.0);
                 }
                 a[8] = self.pos;
                 (a, 9, 0.0)
@@ -344,7 +445,7 @@ impl Body {
                 for &sx in &[-1.0f32, 1.0] {
                     for &sy in &[-1.0f32, 1.0] {
                         for &sz in &[-1.0f32, 1.0] {
-                            a[n] = self.pos + Vec3::new(sx * half.x, sy * half.y, sz * half.z);
+                            a[n] = self.pos + self.orient * Vec3::new(sx * half.x, sy * half.y, sz * half.z);
                             n += 1;
                         }
                     }
@@ -359,11 +460,11 @@ impl Body {
                 let n = pts.len();
                 for (i, q) in pts.iter().enumerate() {
                     let next = pts[(i + 1) % n];
-                    a[2 * i] = self.pos + Vec3::new(q[0], q[1], 0.0);
-                    a[2 * i + 1] =
-                        self.pos + Vec3::new((q[0] + next[0]) * 0.5, (q[1] + next[1]) * 0.5, 0.0);
+                    a[2 * i] = self.pos + self.orient * Vec3::new(q[0], q[1], 0.0);
+                    a[2 * i + 1] = self.pos
+                        + self.orient * Vec3::new((q[0] + next[0]) * 0.5, (q[1] + next[1]) * 0.5, 0.0);
                 }
-                a[2 * n] = self.pos;
+                a[2 * n] = self.com();
                 (a, 2 * n + 1, 0.0)
             }
         }

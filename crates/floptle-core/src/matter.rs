@@ -756,6 +756,11 @@ pub struct RigidBody {
     /// The corners of a `Polygon` body, local to the node and before its
     /// scale. Kept when the kind changes, so switching back finds it again.
     pub outline: crate::outline::Outline,
+    /// The solver turns this body: a crate tips off a ledge, a ball rolls, a
+    /// plank see-saws, and the node's rotation follows. Off, the body keeps
+    /// its orientation however it is hit, which is what a character wants.
+    /// The rotation locks (and 2D) still hold the axes they name.
+    pub rotates: bool,
     /// Bounciness 0..1 (0 = no bounce).
     pub restitution: f32,
     /// Surface friction, as a **Coulomb coefficient**: a ramp holds while
@@ -836,6 +841,7 @@ impl Default for RigidBody {
             height: 2.0,
             half_extents: [0.5, 0.5, 0.5],
             outline: crate::outline::Outline::default(),
+            rotates: false,
             restitution: 0.0,
             friction: 0.3,
             slope_limit: 60.0,

@@ -152,6 +152,43 @@ impl Outline {
             .fold([0.0f32, 0.0], |m, q| [m[0].max(q[0].abs()), m[1].max(q[1].abs())])
     }
 
+    /// The middle of the outline's area.
+    pub fn centroid(&self) -> [f32; 2] {
+        let p = self.points();
+        let (mut a, mut cx, mut cy) = (0.0f32, 0.0f32, 0.0f32);
+        for i in 0..p.len() {
+            let (q, r) = (p[i], p[(i + 1) % p.len()]);
+            let c = q[0] * r[1] - r[0] * q[1];
+            a += c;
+            cx += (q[0] + r[0]) * c;
+            cy += (q[1] + r[1]) * c;
+        }
+        if a.abs() < 1e-12 {
+            return [0.0, 0.0];
+        }
+        [cx / (3.0 * a), cy / (3.0 * a)]
+    }
+
+    /// The area's second moment about its centroid, divided by the area:
+    /// times a mass, the moment of inertia of a flat plate this shape about
+    /// the axis through its middle, out of the plane.
+    pub fn polar_moment_per_area(&self) -> f32 {
+        let p = self.points();
+        let [gx, gy] = self.centroid();
+        let (mut a, mut j) = (0.0f32, 0.0f32);
+        for i in 0..p.len() {
+            let (q, r) = ([p[i][0] - gx, p[i][1] - gy], [p[(i + 1) % p.len()][0] - gx, p[(i + 1) % p.len()][1] - gy]);
+            let c = q[0] * r[1] - r[0] * q[1];
+            a += c;
+            j += c * (q[0] * q[0] + q[0] * r[0] + r[0] * r[0] + q[1] * q[1] + q[1] * r[1] + r[1] * r[1]);
+        }
+        if a.abs() < 1e-12 {
+            return 0.0;
+        }
+        // The sums are twice the area and twelve times the moment.
+        (j / 12.0) / (a / 2.0)
+    }
+
     /// The farthest any corner is from the centre.
     pub fn reach(&self) -> f32 {
         self.points().iter().map(|q| q[0].hypot(q[1])).fold(0.0, f32::max)
@@ -251,6 +288,15 @@ mod tests {
             let d = o.distance(a.cos(), a.sin());
             assert!(d < 0.08, "a gap at {a}: {d}");
         }
+    }
+
+    /// A 2×1 rectangle's middle and its plate moment, (w² + h²) / 12 per unit
+    /// mass, wherever the rectangle sits.
+    #[test]
+    fn a_rectangle_knows_its_middle_and_its_moment() {
+        let o = Outline::convex(&[[1.0, 0.0], [3.0, 0.0], [3.0, 1.0], [1.0, 1.0]]);
+        assert_eq!(o.centroid(), [2.0, 0.5]);
+        assert!((o.polar_moment_per_area() - 5.0 / 12.0).abs() < 1e-5, "{}", o.polar_moment_per_area());
     }
 
     #[test]

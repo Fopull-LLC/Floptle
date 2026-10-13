@@ -126,5 +126,6 @@ pub(super) fn hull(eid: u32, x: f32) -> floptle_physics::BodyHull {
         shape: floptle_physics::BodyShape::Capsule { half_height: 0.6 },
         up: glam::Vec3::Y,
         layer: 0,
+        orient: glam::Quat::IDENTITY,
     }
 }

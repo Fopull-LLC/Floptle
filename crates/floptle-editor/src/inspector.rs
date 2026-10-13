@@ -6335,6 +6335,15 @@ impl EditorTabViewer<'_> {
                                  freezes below rather than replacing them.",
                             )
                             .changed();
+                        cmd.inspector_changed |= crate::responsive::check(ui, &mut rb.rotates, "rotates")
+                            .on_hover_text(
+                                "The physics turns it: a crate tips off a ledge, a \
+                                 ball rolls, a plank see-saws, and the node's \
+                                 rotation follows. Untick it for a character, which \
+                                 should stay upright however it is hit. The freeze \
+                                 rot boxes below still hold the axes they name.",
+                            )
+                            .changed();
                         let two_d = rb.two_d;
                         ui.horizontal_wrapped(|ui| {
                             ui.label("freeze pos");

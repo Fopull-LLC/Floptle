@@ -576,6 +576,14 @@ impl Sim {
         // moving pickups, projectiles that pass through, sweeping zones.
         b.sensor = ecs.get::<floptle_core::Trigger>(e).is_some();
         b.pushbox_only = rb.pushbox_only;
+        b.lock_rot = rb.locks_rot();
+        b.rotates = turns(rb);
+        if b.rotates {
+            // A turning body carries the node's whole rotation, so a crate
+            // placed tilted collides tilted.
+            b.orient = wt.rotation;
+            b.prev_orient = wt.rotation;
+        }
         let rot0 = ecs.get::<Transform>(e).map(|t| t.rotation).unwrap_or(Quat::IDENTITY);
         (b, rot0)
     }
@@ -1361,6 +1369,7 @@ impl Sim {
                     shape: b.shape,
                     up: b.up,
                     layer: b.layer,
+                    orient: b.orient,
                 };
                 let (centers, n_c, radius) = a.sample_centers();
                 for &c in &centers[..n_c] {
@@ -1485,7 +1494,7 @@ impl Sim {
             }
             let from = self.tick_prev.get(link.body).copied().unwrap_or(b.prev_pos);
             let p = from.lerp(b.pos, alpha);
-            self.write_one_transform(ecs, link, p);
+            self.write_one_transform(ecs, link, p, alpha);
         }
         self.writeback_compounds(ecs, alpha, true);
     }
@@ -1866,6 +1875,7 @@ impl Sim {
                     shape: b.shape,
                     up: b.up,
                     layer: b.layer,
+                    orient: b.orient,
                 }
             })
             .collect()
@@ -2156,6 +2166,18 @@ impl Sim {
                     b.prev_pos = b.pos;
                     b.pos = p;
                 }
+                b.lock_rot = rb.locks_rot();
+                let rotates = turns(rb);
+                if rotates != b.rotates || (rotates && kinematic) {
+                    // Switched on (or carried by its node while kinematic):
+                    // take the node's rotation. Switched off: upright again,
+                    // as a body that does not turn always is.
+                    let r = if rotates { world_transform(ecs, ent).rotation } else { Quat::IDENTITY };
+                    b.orient = r;
+                    b.prev_orient = r;
+                    b.ang_vel = Vec3::ZERO;
+                }
+                b.rotates = rotates;
                 for a in 0..3 {
                     if rb.locks_pos()[a] && !b.lock_pos[a] {
                         crate::body::set_axis(&mut b.home, a, crate::body::axis(b.pos, a));
@@ -2210,6 +2232,7 @@ impl Sim {
                     shape: b.shape,
                     up: b.up,
                     layer: b.layer,
+                    orient: b.orient,
                 })
             })
             .collect();
@@ -2249,16 +2272,31 @@ impl Sim {
                 continue;
             }
             let p = b.prev_pos.lerp(b.pos, alpha);
-            self.write_one_transform(ecs, link, p);
+            self.write_one_transform(ecs, link, p, alpha);
         }
         self.writeback_compounds(ecs, alpha, false);
     }
 
     /// Write one body's (interpolated) sim-frame position to its entity's transform,
     /// honoring the rotation-axis locks.
-    fn write_one_transform(&self, ecs: &mut World, link: &BodyLink, p: Vec3) {
+    fn write_one_transform(&self, ecs: &mut World, link: &BodyLink, p: Vec3, alpha: f32) {
         let world_pos = self.world.origin + DVec3::new(p.x as f64, p.y as f64, p.z as f64);
         let local = local_translation_for(ecs, link.entity, world_pos);
+        let b = &self.world.bodies[link.body];
+        if b.rotates {
+            // The solver's turn is the node's world rotation, written in its
+            // parent's frame.
+            let world = b.prev_orient.slerp(b.orient, alpha).normalize();
+            let parent = ecs
+                .get::<floptle_core::Parent>(link.entity)
+                .map(|p| world_transform(ecs, p.0).rotation)
+                .unwrap_or(Quat::IDENTITY);
+            if let Some(t) = ecs.get_mut::<Transform>(link.entity) {
+                t.translation = local;
+                t.rotation = (parent.inverse() * world).normalize();
+            }
+            return;
+        }
         if let Some(t) = ecs.get_mut::<Transform>(link.entity) {
             t.translation = local;
             // Align-to-gravity: tilt the node so local +Y tracks the body's up
@@ -3119,4 +3157,11 @@ pub fn polygon_outline(ecs: &World, e: Entity, rb: &RigidBody) -> floptle_core::
     };
     let s = world_transform(ecs, e).scale;
     o.scaled(s.x, s.y)
+}
+
+/// Whether a body is turned by the solver: asked for, and simulated. A
+/// kinematic body's rotation is its node's, and a pushbox-only body is not
+/// negotiated with at all.
+fn turns(rb: &RigidBody) -> bool {
+    rb.rotates && rb.mode != floptle_core::BodyMode::Static && !rb.pushbox_only
 }
