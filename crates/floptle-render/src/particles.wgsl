@@ -69,7 +69,8 @@ struct VsIn {
     @location(4) basis_right: vec4<f32>,
     // Instance: the quad's in-plane +Y axis (xyz); its length carries stretch.
     @location(5) basis_up: vec4<f32>,
-    // Instance: x = soft-edge distance in world units (0 = hard).
+    // Instance: x = soft-edge distance in world units (0 = hard); yzw = the
+    // light the scene's lamps cast on a lit particle, summed on the CPU.
     @location(6) params: vec4<f32>,
     // Instance: xyz = the effect's up (the ground's, for a night-side test),
     // w = how lit the particle is (0 = unlit, as authored; 1 = fully lit).
@@ -186,7 +187,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let texel = texel_of(in);
     var col = texel * in.color;
     if (in.light.w > 0.0) {
-        col = vec4<f32>(col.rgb * mix(vec3<f32>(1.0), lighting(in), in.light.w), col.a);
+        // The lamps reaching it (point lights, or the 2D lights that reach its
+        // sorting layer) are summed per particle on the CPU into params.yzw.
+        let lit = lighting(in) + in.params.yzw;
+        col = vec4<f32>(col.rgb * mix(vec3<f32>(1.0), lit, in.light.w), col.a);
     }
     // Fully transparent texels are discarded so depth-adjacent particles don't
     // fog each other's edges with invisible quads.

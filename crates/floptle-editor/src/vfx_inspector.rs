@@ -455,7 +455,9 @@ fn look_section(
                 "full scene lighting per particle"
             } else {
                 "the sun or star and the ambient light each puff, rounded like a ball, and dark on \
-                 the night side of a planet. For smoke and dust; leave glow and fire unlit"
+                 the night side of a planet; and the point lights reaching it, or in a flat scene the \
+                 2D lights reaching its layer, with no shadows. For smoke and dust; leave glow and \
+                 fire unlit"
             })
             .changed();
         ui.add_enabled_ui(is_mesh, |ui| {

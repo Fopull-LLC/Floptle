@@ -138,6 +138,74 @@ fn celestial_ancestor(world: &World, e: Entity) -> Option<Entity> {
     None
 }
 
+/// The scene's lamps, for lighting particles: the same sixteen the sprites
+/// and meshes beside them are lit by this frame.
+///
+/// A lit particle took the ambient and the key light only, so dust in a
+/// lamp-lit scene glowed the same in a dark corner as beside a torch. Each
+/// lit particle now sums the point lights reaching it (their colour, range
+/// and falloff), and in a flat scene the 2D lights that reach its emitter's
+/// sorting layer. No shadows: a particle is a speck, and a march per particle
+/// per light is not worth what it shows.
+pub(crate) struct ParticleLamps<'a> {
+    pub(crate) lights: Option<&'a crate::shading::SplitLights>,
+    /// The 2D lighting rank of an emitter node, `None` when it is not on the
+    /// 2D path.
+    pub(crate) rank_of: &'a dyn Fn(Entity) -> Option<u32>,
+    /// The rank a particle with no emitter node (a `spawnEffect` one-shot)
+    /// takes in a flat scene: the default sorting layer's.
+    pub(crate) default_rank: Option<u32>,
+}
+
+impl ParticleLamps<'_> {
+    /// No lamps: lit particles keep the ambient and key light alone.
+    #[cfg(test)]
+    pub(crate) fn none() -> ParticleLamps<'static> {
+        ParticleLamps { lights: None, rank_of: &|_| None, default_rank: None }
+    }
+
+    /// Add each lamp's light to every lit particle in `out`, into params.yzw.
+    fn light(&self, out: &mut [ParticleInstance], rank: Option<u32>) {
+        let Some(l) = self.lights else { return };
+        for p in out.iter_mut().filter(|p| p.light[3] > 0.0) {
+            let at = Vec3::new(p.pos_rot[0], p.pos_rot[1], p.pos_rot[2]);
+            let mut sum = Vec3::ZERO;
+            let d3 = &l.three_d;
+            for i in 0..d3.count.min(16) {
+                let range = d3.pos[i][3].max(1e-4);
+                let d = (Vec3::new(d3.pos[i][0], d3.pos[i][1], d3.pos[i][2]) - at).length();
+                let x = (1.0 - d / range).clamp(0.0, 1.0);
+                sum += Vec3::new(d3.color[i][0], d3.color[i][1], d3.color[i][2]) * (x * x);
+            }
+            if let Some(r) = rank {
+                let d2 = &l.two_d;
+                for i in 0..d2.count.min(16) {
+                    let word = (r >> 5) as usize;
+                    if word >= 4 || d2.mask[i][word] & (1 << (r & 31)) == 0 {
+                        continue;
+                    }
+                    let c = Vec3::new(d2.color[i][0], d2.color[i][1], d2.color[i][2]);
+                    if d2.pos[i][3] < 0.0 {
+                        sum += c; // a sun: everything it reaches, at full strength
+                        continue;
+                    }
+                    // The 2D ramp: full out to the inner radius, to zero at the range.
+                    let range = d2.pos[i][3].max(1e-4);
+                    let inner = d2.falloff[i][0].clamp(0.0, range * 0.999);
+                    let d = Vec3::new(d2.pos[i][0] - at.x, d2.pos[i][1] - at.y, 0.0).length();
+                    let x = ((range - d) / (range - inner)).clamp(0.0, 1.0);
+                    let e = d2.falloff[i][1].max(0.01);
+                    sum += c * if e == 2.0 { x * x } else { x.powf(e) };
+                }
+            }
+            p.params[1] += sum.x;
+            p.params[2] += sum.y;
+            p.params[3] += sum.z;
+        }
+    }
+}
+
+
 /// Everything particles the editor owns. One field on `Editor`.
 ///
 /// `Default` is written out rather than derived: `max_detached` deriving to 0
@@ -600,6 +668,7 @@ impl VfxSystem {
         textures: &HashMap<String, TexId>,
         include_preview: bool,
         nudge: &HashMap<Entity, floptle_core::math::DVec3>,
+        lamps: &ParticleLamps,
         out_instances: &mut Vec<ParticleInstance>,
         out_batches: &mut Vec<ParticleBatch>,
     ) {
@@ -608,11 +677,12 @@ impl VfxSystem {
         let cam_up = cam.rotation * Vec3::Y;
         // `local_xf` maps the effect's emitter space to camera-relative space (a node's
         // render matrix, a detached one-shot's world point, or the origin for a preview).
-        let mut pack = |inst: &EffectInstance, local_xf: Mat4, shift: Mat4| {
+        let mut pack = |inst: &EffectInstance, local_xf: Mat4, shift: Mat4, rank: Option<u32>| {
             // World-space tracks live at the instance's world anchor (camera-relative).
             let world_xf = shift * Mat4::from_translation((inst.anchor() - cam.world_position).as_vec3());
             let local_xf = shift * local_xf;
             let mut draws = Vec::new();
+            let first = out_instances.len();
             collect_billboards(
                 inst, local_xf, world_xf, fwd, cam_right, cam_up, out_instances, &mut draws,
             );
@@ -620,6 +690,7 @@ impl VfxSystem {
             // pass draws ribbons as ordinary oriented quads, no extra pipeline.
             collect_trails(inst, local_xf, world_xf, cam_right, out_instances, &mut draws);
             collect_beams(inst, local_xf, world_xf, cam_right, out_instances, &mut draws);
+            lamps.light(&mut out_instances[first..], rank.or(lamps.default_rank));
             for d in draws {
                 out_batches.push(ParticleBatch {
                     texture: d.texture.as_deref().and_then(|p| textures.get(p).copied()),
@@ -635,15 +706,15 @@ impl VfxSystem {
         // a character stays behind it. Nothing moves the simulation.
         for (e, (_, inst)) in &self.instances {
             let shift = nudge.get(e).map(|v| Mat4::from_translation(v.as_vec3())).unwrap_or(Mat4::IDENTITY);
-            pack(inst, node_xf(*e), shift);
+            pack(inst, node_xf(*e), shift, (lamps.rank_of)(*e));
         }
         for d in &self.detached {
-            pack(&d.inst, d.emitter().render_matrix(cam.world_position), Mat4::IDENTITY);
+            pack(&d.inst, d.emitter().render_matrix(cam.world_position), Mat4::IDENTITY, None);
         }
         if include_preview
             && let Some(p) = &self.preview
         {
-            pack(&p.inst, p.emitter.render_matrix(cam.world_position), Mat4::IDENTITY);
+            pack(&p.inst, p.emitter.render_matrix(cam.world_position), Mat4::IDENTITY, None);
         }
     }
 
@@ -1216,7 +1287,7 @@ mod tests {
         );
         let world = World::new();
         let (mut instances, mut batches) = (Vec::new(), Vec::new());
-        sys.collect(&world, &cam, &registry, true, &HashMap::new(), &mut instances, &mut batches);
+        sys.collect(&world, &cam, &registry, true, &HashMap::new(), &ParticleLamps::none(), &mut instances, &mut batches);
         assert!(!batches.is_empty(), "preview must produce a batch");
         assert_eq!(batches[0].texture, Some(TexId(7)), "path must resolve to the registered id");
     }
@@ -1242,7 +1313,7 @@ mod tests {
         );
         let run = |nudge: &HashMap<Entity, floptle_core::math::DVec3>| {
             let (mut i, mut b) = (Vec::new(), Vec::new());
-            sys.collect(&world, &cam, &HashMap::new(), false, nudge, &mut i, &mut b);
+            sys.collect(&world, &cam, &HashMap::new(), false, nudge, &ParticleLamps::none(), &mut i, &mut b);
             i
         };
         let plain = run(&HashMap::new());
@@ -1432,5 +1503,63 @@ mod profile_tests {
         assert_eq!(p.peak, 0);
         assert!(!p.over_capacity());
         assert_eq!(p.at(0.5), 0);
+    }
+
+    fn particle_at(x: f32, lit: f32) -> ParticleInstance {
+        ParticleInstance {
+            pos_rot: [x, 0.0, -5.0, 0.0],
+            size: [1.0; 4],
+            color: [1.0; 4],
+            basis_right: [1.0, 0.0, 0.0, 0.0],
+            basis_up: [0.0, 1.0, 0.0, 0.0],
+            params: [0.0; 4],
+            light: [0.0, 0.0, 0.0, lit],
+            extra: [0.0; 4],
+        }
+    }
+
+    /// A lit particle beside a warm point light takes its colour and gets
+    /// brighter; one out of its range, and one that is not lit, get nothing.
+    /// Lit particles used to take the ambient and the key light only.
+    #[test]
+    fn a_lit_particle_takes_the_lamps_near_it() {
+        let mut split = crate::shading::SplitLights {
+            three_d: Default::default(),
+            two_d: Default::default(),
+            dropped: 0,
+        };
+        split.three_d.count = 1;
+        split.three_d.pos[0] = [0.0, 0.0, -5.0, 4.0];
+        split.three_d.color[0] = [2.0, 1.0, 0.2, 0.0];
+        let lamps = ParticleLamps { lights: Some(&split), rank_of: &|_| None, default_rank: None };
+        let mut ps = vec![particle_at(1.0, 1.0), particle_at(10.0, 1.0), particle_at(1.0, 0.0)];
+        lamps.light(&mut ps, None);
+        let near = &ps[0].params;
+        assert!(near[1] > 0.5 && near[1] > near[2] && near[2] > near[3], "warm and bright: {near:?}");
+        assert_eq!(ps[1].params[1..], [0.0; 3], "out of range");
+        assert_eq!(ps[2].params[1..], [0.0; 3], "an unlit particle keeps its look");
+    }
+
+    /// In a flat scene a 2D light lights only the particles on the layers it
+    /// reaches.
+    #[test]
+    fn a_2d_light_lights_the_particles_on_its_layers() {
+        let mut split = crate::shading::SplitLights {
+            three_d: Default::default(),
+            two_d: Default::default(),
+            dropped: 0,
+        };
+        split.two_d.count = 1;
+        split.two_d.pos[0] = [0.0, 0.0, -5.0, 4.0];
+        split.two_d.color[0] = [1.0, 1.0, 1.0, 0.0];
+        split.two_d.falloff[0] = [0.0, 2.0, 0.0, 0.0];
+        split.two_d.mask[0] = [1 << 2, 0, 0, 0]; // rank 2 only
+        let lamps = ParticleLamps { lights: Some(&split), rank_of: &|_| None, default_rank: None };
+        let mut on = vec![particle_at(1.0, 1.0)];
+        lamps.light(&mut on, Some(2));
+        let mut off = vec![particle_at(1.0, 1.0)];
+        lamps.light(&mut off, Some(1));
+        assert!(on[0].params[1] > 0.4, "{:?}", on[0].params);
+        assert_eq!(off[0].params[1], 0.0, "a layer the light does not reach");
     }
 }

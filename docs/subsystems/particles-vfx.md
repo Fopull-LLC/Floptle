@@ -241,8 +241,12 @@ plays smoothly instead of stepping.
 sun, point lights, field shadow, AO. A billboard takes the sun (or the brightest
 star) and the ambient on a rounded normal, so a puff reads as a ball and not a
 card, and over a planet's night side, where the ground faces away from the
-light, it takes only the ambient. Use it for smoke and dust, and leave glow
-and fire unlit. `cast_shadows` lets a mesh track's live cloud cast into the
+light, it takes only the ambient. On top of that, each lit billboard takes the
+point lights reaching it, with their colour, range and falloff, and in a flat
+scene the 2D lights that reach its emitter's sorting layer (a `spawnEffect`
+one-shot counts as the Default layer). It takes no shadows from them: dust by a
+torch is lit by the torch even with a wall between. Use it for smoke and dust,
+and leave glow and fire unlit. `cast_shadows` lets a mesh track's live cloud cast into the
 field shadow march.
 `soft` is the distance, in world units, over which a billboard fades out in
 front of whatever it intersects — the *soft edges* field in the Inspector — so

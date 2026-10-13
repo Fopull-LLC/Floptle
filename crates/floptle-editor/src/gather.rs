@@ -451,12 +451,28 @@ impl Editor {
         let mut vfx_instances: Vec<floptle_render::ParticleInstance> = Vec::new();
         let mut vfx_batches: Vec<floptle_render::ParticleBatch> = Vec::new();
         let nudge = crate::sprite2d::draw_offsets(&self.world, &self.project, cam.world_position);
+        // The lamps lit particles answer to: the same lights as the scene, and
+        // in a flat scene the 2D ones reaching each emitter's sorting layer.
+        let rank_of = |e: Entity| {
+            flat_camera.then(|| {
+                self.world
+                    .get::<floptle_core::Sorting>(e)
+                    .map(|sg| self.project.sorting_rank(&sg.layer))
+                    .unwrap_or(0)
+            })
+        };
+        let lamps = crate::vfx::ParticleLamps {
+            lights: Some(&lights_split),
+            rank_of: &rank_of,
+            default_rank: flat_camera.then(|| self.project.sorting_rank(floptle_core::DEFAULT_SORTING_LAYER)),
+        };
         self.vfx.collect(
             &self.world,
             &cam,
             &self.texture_registry,
             vfx_preview_on,
             &nudge,
+            &lamps,
             &mut vfx_instances,
             &mut vfx_batches,
         );

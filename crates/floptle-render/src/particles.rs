@@ -120,7 +120,9 @@ pub struct ParticleInstance {
     pub basis_up: [f32; 4],
     /// x = soft-edge distance in world units: the particle fades out over that
     /// much depth in front of whatever it intersects, so a sprite crossing a
-    /// floor has no hard line. 0 = a hard edge. yzw unused.
+    /// floor has no hard line. 0 = a hard edge. yzw = the light the scene's
+    /// lamps cast on a lit particle (point lights, or the 2D lights reaching
+    /// its sorting layer), added to its ambient and key light; zero when unlit.
     pub params: [f32; 4],
     /// xyz = the effect's up, so a lit particle over a planet's night side is
     /// in its shadow (zero = no ground to ask); w = how lit it is, 0 for a

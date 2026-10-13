@@ -258,3 +258,84 @@ fn a_decal_laid_on_a_moving_planet_rides_it() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **A lit cloud beside a lamp takes the lamp's light.** Two identical lit
+/// puffs in a dim scene, one inside a warm point light's range and one out of
+/// it, drawn through the real particle pass: the near one comes out brighter
+/// and warmer. Lit particles used to take the ambient and the key light only,
+/// so both came out the same.
+#[test]
+#[cfg(feature = "editor-ui")]
+fn a_lit_cloud_beside_a_lamp_takes_its_light() {
+    use floptle_core::math::Quat;
+    let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+    let dir = std::env::temp_dir().join(format!("floptle-lit-dust-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut doc = still_puff("Dust", VfxShapeDoc::Point);
+    doc.tracks[0].lit = true;
+    floptle_scene::save_vfx_effect(&doc, &dir.join("vfx/Dust.vfx.ron")).unwrap();
+    ed.project_root = dir.clone();
+    ed.vfx.rescan(&dir);
+    // A dim key light, so a lamp has something to add to.
+    let sun = ed.world.spawn();
+    ed.world.insert(sun, Transform::IDENTITY);
+    ed.world.insert(sun, floptle_core::Light { intensity: 0.1, ..Default::default() });
+    let cam = ed.camera.render_camera();
+    let ahead = |x: f32| cam.world_position + (cam.rotation * Vec3::new(x, 0.0, -6.0)).as_dvec3();
+    let (near, far) = (ahead(-1.5), ahead(1.5));
+    let lamp = ed.world.spawn();
+    ed.world.insert(lamp, Transform { translation: near, ..Transform::IDENTITY });
+    ed.world.insert(lamp, Matter::PointLight {
+        color: [1.0, 0.45, 0.1],
+        intensity: 4.0,
+        range: 2.0,
+        shadows: Default::default(),
+        shape: Default::default(),
+        spot_angle: floptle_core::OMNI_ANGLE,
+        spot_softness: 0.25,
+    });
+    ed.toggle_play();
+    for at in [near, far] {
+        ed.vfx.spawn_detached_with(
+            "vfx/Dust",
+            crate::vfx::DetachedSpawn {
+                emitter: Transform { translation: at, rotation: Quat::IDENTITY, ..Transform::IDENTITY },
+                vel: Vec3::ZERO,
+                frame: None,
+                intensity: None,
+                tint: None,
+                up: None,
+            },
+        );
+    }
+    for _ in 0..3 {
+        ed.play_step(1.0 / 60.0, true);
+    }
+    let (w, h) = (160u32, 120u32);
+    let cam = ed.camera.render_camera();
+    let px = crate::shot::render_frame_pixels(&mut ed, &cam, None, w, h, !0, false).expect("a frame");
+    let vp = cam.view_proj(w as f32 / h as f32);
+    let sample = |p: DVec3| {
+        let s = crate::viz::project(p, cam.world_position, vp, w as f32, h as f32).expect("on screen");
+        let (x, y) = (s.x.round() as i64, s.y.round() as i64);
+        let mut sum = [0.0f64; 3];
+        let mut n = 0.0;
+        for dy in -2..=2 {
+            for dx in -2..=2 {
+                let (sx, sy) = ((x + dx).clamp(0, w as i64 - 1) as u32, (y + dy).clamp(0, h as i64 - 1) as u32);
+                let i = ((sy * w + sx) * 4) as usize;
+                for c in 0..3 {
+                    sum[c] += px[i + c] as f64;
+                }
+                n += 1.0;
+            }
+        }
+        sum.map(|v| v / n)
+    };
+    let (a, b) = (sample(near), sample(far));
+    let _ = std::fs::write(dir.join("probe.txt"), format!("near {a:?} far {b:?}"));
+    let lum = |c: [f64; 3]| c[0] + c[1] + c[2];
+    assert!(lum(a) > lum(b) + 30.0, "the cloud by the lamp is brighter: near {a:?}, far {b:?}");
+    assert!(a[0] - a[2] > b[0] - b[2] + 20.0, "and warmer: near {a:?}, far {b:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
