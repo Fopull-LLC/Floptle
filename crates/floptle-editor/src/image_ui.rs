@@ -1266,15 +1266,18 @@ impl ImageCtx<'_> {
                 for (i, n) in names.iter().enumerate() {
                     if ui.button(n).clicked() {
                         let p = self.st.palettes[i].clone();
+                        self.st.push_undo();
                         if let Some(d) = self.st.doc.as_mut() {
                             d.palette = Some(p);
                         }
-                        self.st.mark_dirty();
                         ui.close();
                     }
                 }
                 ui.separator();
+                // Every palette change is an edit like any other: it can be
+                // undone, and it marks the image unsaved.
                 if ui.button("From this image").clicked() {
+                    self.st.push_undo();
                     let f = self.st.frame;
                     if let Some(d) = self.st.doc.as_mut() {
                         let flat = floptle_image::composite::flatten(d, f);
@@ -1292,6 +1295,7 @@ impl ImageCtx<'_> {
                 }
                 ui.separator();
                 if ui.add_enabled(has_pal, egui::Button::new("Clear")).clicked() {
+                    self.st.push_undo();
                     if let Some(d) = self.st.doc.as_mut() {
                         d.palette = None;
                         d.palette_lock = false;
@@ -2137,13 +2141,23 @@ fn adjustment_params_ui(ui: &mut egui::Ui, a: &mut Adjustment, palettes: &[Palet
                     changed |= ui.selectable_value(channel, c, n).clicked();
                 }
             });
-            // A compact editable curve: drag the interior keys.
+            // A compact editable curve: drag the interior keys, or take one
+            // out (a curve keeps its two ends).
+            let can_cut = points.len() > 2;
+            let mut cut = None;
             for (i, p) in points.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("{i}")).small().weak());
                     changed |= ui.add(egui::DragValue::new(&mut p.0).speed(0.01).range(0.0..=1.0)).changed();
                     changed |= ui.add(egui::DragValue::new(&mut p.1).speed(0.01).range(0.0..=1.0)).changed();
+                    if can_cut && ui.small_button("✖").on_hover_text("remove this key").clicked() {
+                        cut = Some(i);
+                    }
                 });
+            }
+            if let Some(i) = cut {
+                points.remove(i);
+                changed = true;
             }
             if ui.small_button("✚ key").clicked() {
                 points.push((0.5, 0.5));
@@ -2197,11 +2211,20 @@ fn adjustment_params_ui(ui: &mut egui::Ui, a: &mut Adjustment, palettes: &[Palet
             changed |= ui.add(egui::Slider::new(amount, 0.0..=1.0).text("amount")).changed();
         }
         Adjustment::GradientMap { stops } => {
+            let can_cut = stops.len() > 2;
+            let mut cut = None;
             for (i, s) in stops.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
                     changed |= ui.add(egui::DragValue::new(&mut s.0).speed(0.01).range(0.0..=1.0)).changed();
                     changed |= color_button(ui, &mut s.1, &format!("gm-{i}"));
+                    if can_cut && ui.small_button("✖").on_hover_text("remove this stop").clicked() {
+                        cut = Some(i);
+                    }
                 });
+            }
+            if let Some(i) = cut {
+                stops.remove(i);
+                changed = true;
             }
             if ui.small_button("✚ stop").clicked() {
                 stops.push((0.5, [128, 128, 128, 255]));

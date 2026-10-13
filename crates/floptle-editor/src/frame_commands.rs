@@ -729,7 +729,7 @@ impl Editor {
             self.record();
             for e in self.selected_group(e) {
                 if self.world.get::<Matter>(e).is_some_and(|m| {
-                    !matches!(m, Matter::Skybox { .. } | Matter::PostProcess { .. })
+                    !matches!(m, Matter::Skybox { .. } | Matter::PostProcess { .. } | Matter::Terrain { .. })
                 }) {
                     self.world.insert(e, Matter::Empty);
                 }
@@ -873,6 +873,13 @@ impl Editor {
                     // Clear both the new marker and any legacy mesh-collider marker.
                     self.world.remove::<floptle_core::Collidable>(e);
                     self.world.remove::<floptle_core::MeshCollider>(e);
+                    // The trigger box was part of the collider and goes with
+                    // it, unless a Rigidbody still uses it. Left behind, it
+                    // was invisible and came back as a sensor the next time
+                    // the node got a collider.
+                    if self.world.get::<floptle_core::RigidBody>(e).is_none() {
+                        self.world.remove::<floptle_core::Trigger>(e);
+                    }
                 }
             }
             self.rebuild_sim();
@@ -1752,6 +1759,28 @@ mod type_removal_tests {
         ed.apply_frame_commands(cmd, false);
         assert!(matches!(ed.world.get::<Matter>(e), Some(Matter::Empty)));
         assert!(ed.world.get::<floptle_core::Tags>(e).is_some(), "its other components stay");
+    }
+
+    /// Removing a collider takes its trigger with it, so adding a collider
+    /// later starts solid; a trigger a Rigidbody uses stays.
+    #[test]
+    fn removing_a_collider_takes_its_trigger() {
+        let mut ed = crate::Editor::default();
+        let lone = ed.world.spawn();
+        let body = ed.world.spawn();
+        for e in [lone, body] {
+            ed.world.insert(e, floptle_core::transform::Transform::IDENTITY);
+            ed.world.insert(e, floptle_core::Collidable);
+            ed.world.insert(e, floptle_core::Trigger);
+        }
+        ed.world.insert(body, floptle_core::RigidBody::default());
+        for e in [lone, body] {
+            ed.select_single(e);
+            let cmd = crate::EditorCmd { set_collidable: Some((e, false)), ..Default::default() };
+            ed.apply_frame_commands(cmd, false);
+        }
+        assert!(ed.world.get::<floptle_core::Trigger>(lone).is_none());
+        assert!(ed.world.get::<floptle_core::Trigger>(body).is_some());
     }
 
     /// The sky is every scene's own; its type is not removable.

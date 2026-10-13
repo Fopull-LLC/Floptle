@@ -2539,10 +2539,8 @@ impl crate::Editor {
                     self.layers_using_collide(&path);
                 }
             }
-            // The rest edit the tileset, not the scene, so they are not scene undo.
-            // A tileset is a project asset like a material: its own file, saved on
-            // change. (Tileset undo is a real gap and is written down as one — see
-            // docs/tilemaps.md.)
+            // The rest edit the tileset: its own file, saved on change, with
+            // each edit a step on the same undo history as the tiles.
             other => self.apply_tileset_cmd(other),
         }
     }
@@ -2554,6 +2552,19 @@ impl crate::Editor {
         if self.tiles.load_failed.contains(&path) {
             return;
         }
+        // Every tileset edit that changes something is a step on the undo
+        // history, beside the tiles.
+        let prev = self.tiles.sets.get(&path).cloned();
+        self.edit_tileset(cmd, &path);
+        if let Some(prev) = prev
+            && self.tiles.sets.get(&path).is_some_and(|now| *now != prev)
+        {
+            self.push_history(crate::Snapshot::Tileset(path, Box::new(prev)));
+        }
+    }
+
+    fn edit_tileset(&mut self, cmd: TileCmd, path: &str) {
+        let path = path.to_string();
         let Some(set) = self.tiles.get_mut(&path) else { return };
         match cmd {
             TileCmd::SetTags(cell, tags) => set.info_mut(cell).tags = tags,
@@ -3416,6 +3427,30 @@ mod tests {
         assert!(ed.world.get::<floptle_core::Collidable>(e).is_none(), "walk-through asks for nothing");
         ed.apply_tile_cmds(vec![TileCmd::BulkCollision(vec![0], TileCollision::Full)]);
         assert!(ed.world.get::<floptle_core::Collidable>(e).is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Removing an autotile group, with all its rules, is undone by Ctrl+Z
+    /// like the tiles painted with it, and redone by Ctrl+Y. It used to be
+    /// saved straight to the file, and Ctrl+Z undid some other edit instead.
+    #[test]
+    fn a_tileset_edit_undoes_and_redoes() {
+        let (mut ed, _e, root) = project_with_image("tsundo", 64, 32);
+        ed.apply_tile_cmds(vec![TileCmd::NewTilesetForLayer]);
+        let path = ed.tile_tools.editing.clone().expect("editing the new tileset");
+        ed.apply_tile_cmds(vec![TileCmd::AddGroup(floptle_tiles::AutotileKind::default())]);
+        let groups = |ed: &crate::Editor| ed.tiles.sets[&path].groups.len();
+        assert_eq!(groups(&ed), 1);
+        ed.apply_tile_cmds(vec![TileCmd::RemoveGroup(0)]);
+        assert_eq!(groups(&ed), 0);
+        ed.undo();
+        assert_eq!(groups(&ed), 1, "undo brings the group back");
+        assert!(ed.tiles.dirty.contains(&path), "and saves the tileset");
+        ed.redo();
+        assert_eq!(groups(&ed), 0, "redo takes it away again");
+        ed.undo();
+        ed.undo();
+        assert_eq!(groups(&ed), 0, "a second undo takes back adding it");
         let _ = std::fs::remove_dir_all(&root);
     }
 

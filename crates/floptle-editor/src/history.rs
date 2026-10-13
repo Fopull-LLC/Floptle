@@ -26,6 +26,8 @@ impl Editor {
         // "undo a move, click another node to check something, Ctrl+Y" loses
         // the move — a click must never make an edit unrecoverable.)
         let selection_only = matches!(snap, Snapshot::Selection(_));
+        // A tileset is its own file, saved on change; the scene is untouched.
+        let scene_edit = !selection_only && !matches!(snap, Snapshot::Tileset(..));
         if !selection_only {
             self.history.redo.clear();
         }
@@ -40,8 +42,10 @@ impl Editor {
         {
             self.history.undo.remove(0);
         }
-        if !selection_only {
+        if scene_edit {
             self.scene_dirty = true; // any undo-able edit (scene or terrain) is unsaved
+        }
+        if !selection_only {
             // Whatever the selection did this frame belongs to this step's
             // snapshot — don't also mint a Selection step for it.
             self.suppress_sel_step = true;
@@ -320,6 +324,11 @@ impl Editor {
                     self.history.redo.push(redo);
                 }
             }
+            Some(Snapshot::Tileset(path, prev)) => {
+                if let Some(cur) = self.swap_tileset(&path, *prev) {
+                    self.history.redo.push(Snapshot::Tileset(path, Box::new(cur)));
+                }
+            }
             Some(Snapshot::MapMesh(id, prev, paint)) => {
                 let inverse = self.swap_map_step(id, &prev, paint);
                 self.history.redo.push(inverse);
@@ -362,12 +371,29 @@ impl Editor {
                     self.history.undo.push(undo);
                 }
             }
+            Some(Snapshot::Tileset(path, next)) => {
+                if let Some(cur) = self.swap_tileset(&path, *next) {
+                    self.history.undo.push(Snapshot::Tileset(path, Box::new(cur)));
+                }
+            }
             Some(Snapshot::MapMesh(id, next, paint)) => {
                 let inverse = self.swap_map_step(id, &next, paint);
                 self.history.undo.push(inverse);
             }
             None => {}
         }
+    }
+
+    /// Put a tileset back as it was in a history step, returning the one it
+    /// replaced (for the opposite stack). It is saved like any other tileset
+    /// edit, and the physics rebuilt, since its collision may have changed.
+    fn swap_tileset(&mut self, path: &str, set: floptle_tiles::TileSet) -> Option<floptle_tiles::TileSet> {
+        let cur = self.tiles.sets.insert(path.to_string(), set)?;
+        self.tiles.dirty.insert(path.to_string());
+        // The armed autotile group is an index into the list that changed.
+        self.tile_tools.group = None;
+        self.rebuild_sim();
+        Some(cur)
     }
 
     /// Swap a texture-paint stroke's nodes between their snapshot state and the current

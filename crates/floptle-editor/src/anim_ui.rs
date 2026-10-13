@@ -51,6 +51,9 @@ pub struct AnimUiState {
     pub focus_prompt: bool,
     /// Layer index awaiting delete confirmation in the graph window.
     pub confirm_delete_layer: Option<usize>,
+    /// A state waiting on "Delete it?" — asked first, like a layer, because
+    /// it takes every transition to and from it and the asset has no undo.
+    pub confirm_delete_state: Option<String>,
 
     // ---- Animating tab ----
     /// The bound node (must carry a controller or a rigged mesh).
@@ -212,6 +215,7 @@ impl Default for AnimUiState {
             new_ctl_dir: None,
             focus_prompt: false,
             confirm_delete_layer: None,
+            confirm_delete_state: None,
             target: None,
             sel_anim: None,
             clip_doc: None,
@@ -822,6 +826,35 @@ impl EditorTabViewer<'_> {
                 ui.small("no default state (right-click a node)");
             }
         });
+        if let Some(nm) = st.confirm_delete_state.clone() {
+            let layer = &mut doc.layers[li];
+            if !layer.states.iter().any(|s| s.name == nm) {
+                st.confirm_delete_state = None;
+            } else {
+                let links = layer.transitions.iter().filter(|t| t.from == nm || t.to == nm).count();
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        Color32::from_rgb(230, 160, 80),
+                        format!(
+                            "Delete state \"{nm}\" and its {links} transition(s)? This edits the asset file and can't be undone."
+                        ),
+                    );
+                    if ui.button("🗑 Delete").clicked() {
+                        layer.states.retain(|s| s.name != nm);
+                        layer.transitions.retain(|t| t.from != nm && t.to != nm);
+                        if layer.default_state.as_ref() == Some(&nm) {
+                            layer.default_state = None;
+                        }
+                        st.sel_state = None;
+                        st.graph_dirty = true;
+                        st.confirm_delete_state = None;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        st.confirm_delete_state = None;
+                    }
+                });
+            }
+        }
 
         // ---- canvas (left) + selection panel (right) ----
         let panel_w = 210.0;
@@ -1043,14 +1076,7 @@ impl EditorTabViewer<'_> {
                     ui.close();
                 }
                 if ui.button("🗑 Delete state").clicked() {
-                    let nm = name.clone();
-                    layer.states.retain(|s| s.name != nm);
-                    layer.transitions.retain(|t| t.from != nm && t.to != nm);
-                    if layer.default_state.as_ref() == Some(&nm) {
-                        layer.default_state = None;
-                    }
-                    st.sel_state = None;
-                    st.graph_dirty = true;
+                    st.confirm_delete_state = Some(name.clone());
                     ui.close();
                 }
             });

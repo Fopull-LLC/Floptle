@@ -106,6 +106,12 @@ pub(crate) struct VfxUiState {
     /// own, so a change is legible against a stable axis. Refit every frame,
     /// a point you drag upward springs back toward the middle.
     pub lane_settled: std::collections::HashMap<(usize, LaneRef), (f32, f32)>,
+    /// The effect as it was at the last settled moment (pointer up, nothing
+    /// changing): what an edit since then is undone back to.
+    baseline: Option<VfxEffectDoc>,
+    /// Earlier versions of the effect, one per finished gesture, newest last.
+    undo: Vec<VfxEffectDoc>,
+    redo: Vec<VfxEffectDoc>,
 }
 
 impl Default for VfxUiState {
@@ -140,6 +146,9 @@ impl Default for VfxUiState {
             lane_drag: None,
             lane_vrange: None,
             lane_settled: std::collections::HashMap::new(),
+            baseline: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
         }
     }
 }
@@ -164,8 +173,65 @@ impl VfxUiState {
             self.lane_drag = None;
             self.lane_vrange = None;
             self.lane_settled.clear();
+            self.baseline = None;
+            self.undo.clear();
+            self.redo.clear();
             self.bump();
         }
+    }
+
+    /// Take an undo step if the effect changed since it last settled. Called
+    /// with the pointer up, so a drag is one step, however many frames it
+    /// edited.
+    pub(crate) fn settle(&mut self) {
+        let Some(doc) = &self.doc else { return };
+        match &self.baseline {
+            Some(b) if b != doc => {
+                self.undo.push(b.clone());
+                if self.undo.len() > 64 {
+                    self.undo.remove(0);
+                }
+                self.redo.clear();
+                self.baseline = Some(doc.clone());
+            }
+            Some(_) => {}
+            None => self.baseline = Some(doc.clone()),
+        }
+    }
+
+    /// Ctrl+Z in the Particles tab: the effect as it was before the last
+    /// gesture. True when there was one to go back to.
+    pub(crate) fn undo(&mut self) -> bool {
+        self.settle();
+        let Some(prev) = self.undo.pop() else { return false };
+        if let Some(cur) = self.doc.replace(prev.clone()) {
+            self.redo.push(cur);
+        }
+        self.baseline = Some(prev);
+        self.after_history();
+        true
+    }
+
+    /// Ctrl+Y: forward again.
+    pub(crate) fn redo(&mut self) -> bool {
+        let Some(next) = self.redo.pop() else { return false };
+        if let Some(cur) = self.doc.replace(next.clone()) {
+            self.undo.push(cur);
+        }
+        self.baseline = Some(next);
+        self.after_history();
+        true
+    }
+
+    /// Selections can point past what the restored effect has.
+    fn after_history(&mut self) {
+        self.sel_track = None;
+        self.sel = None;
+        self.drag = None;
+        self.sel_key = None;
+        self.auto_sel = None;
+        self.lane_drag = None;
+        self.mark_dirty();
     }
 
     fn bump(&mut self) {
@@ -619,6 +685,10 @@ fn track_block_h(track: &VfxTrackDoc, expanded: bool, row_scale: f32) -> f32 {
 
 impl EditorTabViewer<'_> {
     pub(crate) fn particles_ui(&mut self, ui: &mut egui::Ui) {
+        // With the pointer up, a finished edit becomes an undo step.
+        if !self.pointer_down {
+            self.vfx_ui.settle();
+        }
         // Coalesced save: commit the working copy once the pointer is up.
         if self.vfx_ui.dirty && !self.pointer_down {
             if let (Some(k), Some(d)) = (self.vfx_ui.open_key.clone(), self.vfx_ui.doc.clone()) {
@@ -2091,6 +2161,33 @@ fn apply_deferred(edit: DeferredEdit, st: &mut VfxUiState, doc: &mut VfxEffectDo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Deleting a track is undone by Ctrl+Z and redone by Ctrl+Y, and a drag
+    /// across many frames is one step: the editor had no undo at all, so a
+    /// deleted track lost its whole emitter.
+    #[test]
+    fn a_deleted_track_comes_back_with_undo() {
+        let mut st = VfxUiState { doc: Some(starter_effect_doc("x")), ..Default::default() };
+        let tracks = |st: &VfxUiState| st.doc.as_ref().unwrap().tracks.len();
+        let n = tracks(&st);
+        st.settle();
+        // A drag: three frames of edits with the pointer down, then up.
+        for _ in 0..3 {
+            st.doc.as_mut().unwrap().lifetime += 0.1;
+            st.mark_dirty();
+        }
+        st.settle();
+        st.doc.as_mut().unwrap().tracks.remove(0);
+        st.mark_dirty();
+        st.settle();
+        assert!(st.undo());
+        assert_eq!(tracks(&st), n, "the track is back");
+        assert!(st.undo());
+        assert!((st.doc.as_ref().unwrap().lifetime - starter_effect_doc("x").lifetime).abs() < 1e-6, "the whole drag in one step");
+        assert!(!st.undo(), "nothing before the effect opened");
+        assert!(st.redo() && st.redo());
+        assert_eq!(tracks(&st), n - 1);
+    }
 
     #[test]
     fn visible_lanes_include_life_curves_and_automation() {

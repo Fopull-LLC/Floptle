@@ -3854,6 +3854,11 @@ enum Snapshot {
     /// and an undo that brought the shape back but not the shading was the
     /// one place in the editor where Ctrl+Z did not fully undo.
     MapMesh(u32, floptle_map::MapMesh, Option<Box<crate::map_paint::MapPaintStash>>),
+    /// A tileset as it was before an edit in the Tiles tab: `(path, set)`.
+    /// On the same history as the tiles painted with it, so Ctrl+Z steps back
+    /// through both in the order they happened. Undo swaps the set back and
+    /// saves it.
+    Tileset(String, Box<floptle_tiles::TileSet>),
 }
 
 /// Undo/redo stack of whole-scene + terrain snapshots (simple + robust here).
@@ -4955,6 +4960,13 @@ impl Editor {
                             if matches!(self.focused_tab, Some(EditorTab::Animation)) => {}
                         KeyCode::KeyZ if in_image => self.image.undo(),
                         KeyCode::KeyY if in_image => self.image.redo(),
+                        // The ✨ Particles editor keeps its effect's history.
+                        KeyCode::KeyZ if matches!(self.focused_tab, Some(EditorTab::Particles)) => {
+                            self.vfx_ui.undo();
+                        }
+                        KeyCode::KeyY if matches!(self.focused_tab, Some(EditorTab::Particles)) => {
+                            self.vfx_ui.redo();
+                        }
                         // Ctrl+A and Ctrl+D both mean "stop
                         // clipping me": with no selection the
                         // whole canvas is editable.

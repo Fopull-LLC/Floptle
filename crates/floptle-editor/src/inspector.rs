@@ -5292,8 +5292,13 @@ impl EditorTabViewer<'_> {
             // node with its children and other components. Not an Empty
             // (nothing to take off) or the scene's own sky and post chain,
             // which every scene has exactly one of.
+            // Nor a terrain, whose shape lives in a field outside the node:
+            // it is deleted as a node, never turned into another type.
             let removable = world.get::<Matter>(e).is_some_and(|m| {
-                !matches!(m, Matter::Empty | Matter::Skybox { .. } | Matter::PostProcess { .. })
+                !matches!(
+                    m,
+                    Matter::Empty | Matter::Skybox { .. } | Matter::PostProcess { .. } | Matter::Terrain { .. }
+                )
             });
             let (copy, paste, remove) = component_header(
                 ui,
@@ -6458,7 +6463,9 @@ impl EditorTabViewer<'_> {
         // ===== Celestial Body (on-rails orbit; only when the node has one) =====
         if world.get::<floptle_core::CelestialBody>(e).is_some() {
             ui.separator();
-            let (_, _, remove) = component_header(ui, "☉ Celestial Body", false, true);
+            // No copy here: there is no clipboard slot for it, and a menu
+            // item that does nothing is worse than none.
+            let remove = component_header_no_copy(ui, "☉ Celestial Body", true);
             if remove {
                 cmd.remove_celestial = Some(e);
             }

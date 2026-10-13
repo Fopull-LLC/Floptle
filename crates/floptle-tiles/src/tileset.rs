@@ -350,7 +350,7 @@ pub struct AutotileRule {
 }
 
 /// A named set of tiles that pick themselves by what is next to them.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AutotileGroup {
     pub name: String,
@@ -448,7 +448,7 @@ impl AutotileGroup {
 }
 
 /// Per-tile data for one spritesheet.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TileSet {
     /// Display name. The file name is the identity; this is what a panel shows.

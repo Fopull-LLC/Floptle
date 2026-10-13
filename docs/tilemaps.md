@@ -582,9 +582,6 @@ level has one.
 
 Written down because "it does not exist" beats "it exists and does nothing":
 
-* **Tileset undo.** The scene's tiles undo with Ctrl-Z; edits to the *tileset*
-  (collision, tags, groups) are saved to their own file and are not on the undo
-  stack. Delete the file to start over.
 * **Chunked / infinite maps.** A tilemap is `cols × rows`; a very large world is
   several tilemap nodes.
 
