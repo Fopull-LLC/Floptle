@@ -232,6 +232,10 @@ pub struct NodeDoc {
     /// every camera that has not opted in. See [`floptle_core::camera2d::Camera2D`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera_2d: Option<Camera2DDoc>,
+    /// A joint holding this node's body to another node or to the world. See
+    /// [`floptle_core::joint::Joint`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub joint: Option<JointDoc>,
     /// Whether this node is on the 2D lighting path: `"auto"`, `"2d"` or
     /// `"3d"`. `None` = `auto`, which is every node that has not opted in, so
     /// this writes nothing to a scene that does not use 2D lighting.
@@ -545,6 +549,90 @@ impl RigidBodyDoc {
             mass: rb.mass,
             assembly: rb.assembly,
             pushbox_only: rb.pushbox_only,
+        }
+    }
+}
+
+/// Serializable [`floptle_core::joint::Joint`]: what a scene saves of a joint.
+/// Each setting is written only when it differs from a new joint's, so a
+/// scene says what was chosen and nothing else. Whether it has broken, and
+/// a script's target, are play state and not saved.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct JointDoc {
+    pub kind: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub other: String,
+    #[serde(skip_serializing_if = "is_zero3")]
+    pub anchor: [f32; 3],
+    #[serde(skip_serializing_if = "is_zero3")]
+    pub other_anchor: [f32; 3],
+    pub axis: [f32; 3],
+    pub length: f32,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub limit: bool,
+    pub min: f32,
+    pub max: f32,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub motor: bool,
+    pub motor_speed: f32,
+    pub max_force: f32,
+    pub stiffness: f32,
+    pub damping: f32,
+    pub break_force: f32,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub collide_connected: bool,
+}
+
+impl Default for JointDoc {
+    fn default() -> Self {
+        Self::from(&floptle_core::joint::Joint::default())
+    }
+}
+
+impl From<&floptle_core::joint::Joint> for JointDoc {
+    fn from(j: &floptle_core::joint::Joint) -> Self {
+        Self {
+            kind: j.kind.name().to_string(),
+            other: j.other.clone(),
+            anchor: j.anchor,
+            other_anchor: j.other_anchor,
+            axis: j.axis,
+            length: j.length,
+            limit: j.limit,
+            min: j.min,
+            max: j.max,
+            motor: j.motor,
+            motor_speed: j.motor_speed,
+            max_force: j.max_force,
+            stiffness: j.stiffness,
+            damping: j.damping,
+            break_force: j.break_force,
+            collide_connected: j.collide_connected,
+        }
+    }
+}
+
+impl From<&JointDoc> for floptle_core::joint::Joint {
+    fn from(d: &JointDoc) -> Self {
+        Self {
+            kind: floptle_core::joint::JointKind::parse(&d.kind).unwrap_or_default(),
+            other: d.other.clone(),
+            anchor: d.anchor,
+            other_anchor: d.other_anchor,
+            axis: d.axis,
+            length: d.length,
+            limit: d.limit,
+            min: d.min,
+            max: d.max,
+            motor: d.motor,
+            motor_speed: d.motor_speed,
+            max_force: d.max_force,
+            stiffness: d.stiffness,
+            damping: d.damping,
+            break_force: d.break_force,
+            collide_connected: d.collide_connected,
+            ..Default::default()
         }
     }
 }
@@ -3987,6 +4075,9 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
     if let Some(c) = node.camera_2d.as_ref() {
         world.insert(e, floptle_core::camera2d::Camera2D::from(c));
     }
+    if let Some(j) = node.joint.as_ref() {
+        world.insert(e, floptle_core::joint::Joint::from(j));
+    }
     let sort_mode = node.sort_mode.as_deref().map(floptle_core::SortMode::parse).unwrap_or_default();
     if node.sorting.is_some() || sort_mode != floptle_core::SortMode::default() {
         let (layer, order) = node.sorting.clone().unwrap_or_default();
@@ -4261,6 +4352,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             sort_mode,
             parallax,
             camera_2d: world.get::<floptle_core::camera2d::Camera2D>(e).map(Camera2DDoc::from),
+            joint: world.get::<floptle_core::joint::Joint>(e).map(JointDoc::from),
             matter: MatterDoc::from(matter),
             scripts,
             material,
@@ -4854,6 +4946,7 @@ mod tests {
             nodes: vec![
                 NodeDoc {
                     camera_2d: None,
+                    joint: None,
                     sort_mode: None,
                     parallax: None,
                     id: None,
@@ -5005,6 +5098,7 @@ mod tests {
                 },
                 NodeDoc {
                     camera_2d: None,
+                    joint: None,
                     sort_mode: None,
                     parallax: None,
                     id: None,
@@ -5054,6 +5148,7 @@ mod tests {
                 },
                 NodeDoc {
                     camera_2d: None,
+                    joint: None,
                     sort_mode: None,
                     parallax: None,
                     id: None,
@@ -5100,6 +5195,7 @@ mod tests {
                 },
                 NodeDoc {
                     camera_2d: None,
+                    joint: None,
                     sort_mode: None,
                     parallax: None,
                     id: None,

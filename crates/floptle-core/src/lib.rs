@@ -23,6 +23,7 @@ pub mod camera2d;
 pub mod ecs;
 pub mod event;
 pub mod frames;
+pub mod joint;
 pub mod scatter;
 pub mod layers;
 pub mod material;

@@ -15,8 +15,8 @@ each group, and meant to be searched.
 ## Contents
 
 - [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 198
-- [node — transform & body fields](#node--transform--body-fields) — 41
-- [node — methods & handles](#node--methods--handles) — 33
+- [node — transform & body fields](#node--transform--body-fields) — 42
+- [node — methods & handles](#node--methods--handles) — 36
 - [vectors, directions & easing](#vectors-directions--easing) — 49
 - [scene lookups & raycast](#scene-lookups--raycast) — 16
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
@@ -1001,6 +1001,10 @@ Every script on this node as an array of handles, in the order they were attache
 
 The node's whole scale as a vec3 (read/write). `node.scale` stays the uniform-scale shortcut, and also accepts a vec3 when you want all three axes at once.
 
+### `node.spin`
+
+How fast a turning body spins about Z, in degrees a second, anticlockwise positive. Write it to set the spin: a wheel kicked into motion, a thrown axe. A body that does not turn (its Rigidbody's rotates is off) ignores it.
+
 ### `node.tags`
 
 The node's tags as an array of strings (a fresh table each read). Assign a whole array to replace the list; use node:addTag / node:removeTag for single edits and node:hasTag to test.
@@ -1146,6 +1150,10 @@ node:material() / node:material("Clothing") — a material you can read AND assi
 
 node:materials() — what this model's parts are CALLED, which is what you need before you can address one: a list of { object =, material =, textured =, overridden = }. `object` names one sub-object exactly (import renames repeats, so a model with two Torso nodes has a "Torso#2" — which is why guessing does not work); `material` is the glTF material name and reaches every part wearing it, usually the grouping you mean. Empty on a node that is not an imported model.
 
+### `node:removeJoint`
+
+node:removeJoint() — take this node's joint off. It lets go at once.
+
 ### `node:removeTag`
 
 node:removeTag("burning") — remove a tag (no-op when absent).
@@ -1175,6 +1183,20 @@ node:setGlyphOffsets{ vec2(0,0), vec2(0,-3), … } — displace individual chara
 The half spans cannot do. Glyph positions are computed inside the renderer and never surface, so a game could not move one letter at any price — no wobble, no shake, no per-glyph reveal. Applied AFTER layout: a displaced glyph never re-wraps its line and never moves its neighbours, so an effect cannot reflow the sentence it is decorating.
 
 Deliberately offsets rather than named effects: which characters move, by how much and on what phase is the game's to decide, and the engine only agrees to move a glyph it has already positioned. A shadow and an outline follow the glyph they belong to.
+
+### `node:setJoint`
+
+node:setJoint{ kind = "rope", to = hook, length = 4 } — hold this node's body to another node, or (with no `to`) to where it is now. Replaces any joint the node had.
+
+Kinds: "hinge" (a pin it turns about), "fixed" (a weld), "distance" (a rod), "rope" (no further apart than its length), "spring", "slider" (along the other's axis), "wheel" (a wheel on the other, on a suspension), "target" (pulled toward a point; see node:setJointTarget).
+
+Options: to (a node or a node's name), anchor and otherAnchor (vec2 or vec3, in each node's own space), axis, length, min and max (a hinge's degrees or a slider's units; setting either turns the limit on), motorSpeed (degrees or units a second; setting it turns the motor on), maxForce, stiffness (cycles a second), damping, breakForce, collide.
+
+The joint goes on the part that moves and names what it hangs from: a wheel names the car, a link names the link above. For a grappling hook, set a rope to the hook's node when it lands and removeJoint when the player lets go.
+
+### `node:setJointTarget`
+
+node:setJointTarget(point) — where this node's target joint pulls it, in world space (a vec2 or vec3); nil lets go. Picking something up and carrying it: set a target joint once, then point it at the mouse each frame. The joint's stiffness and maxForce say how firmly.
 
 ### `node:setLighting2D`
 

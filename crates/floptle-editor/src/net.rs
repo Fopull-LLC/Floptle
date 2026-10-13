@@ -2298,6 +2298,7 @@ impl Editor {
         // Apply writes, step physics one tick, publish transforms.
         hs.sim.world.gravity = Self::build_gravity_field(&hs.world, hs.sim.world.origin);
         hs.sim.sync_dynamic_params(&hs.world);
+        hs.sim.sync_joints(&mut hs.world);
         for (eid, v) in hs.host.take_body_changes() {
             hs.sim.set_body_velocity(eid, floptle_core::math::Vec3::new(v[0], v[1], v[2]));
         }
@@ -2598,9 +2599,16 @@ impl Editor {
             };
             // Rewind to the server's word…
             if let Some(sim) = self.sim.as_mut() {
+                // The wire carries no turn: a predicted body keeps its own.
+                let (orient, ang_vel) = sim
+                    .body_snapshot(eid)
+                    .map(|s| (s.orient, s.ang_vel))
+                    .unwrap_or((floptle_core::math::Quat::IDENTITY, floptle_core::math::Vec3::ZERO));
                 sim.restore_body(
                     eid,
                     &BodySnapshot {
+                        orient,
+                        ang_vel,
                         pos: floptle_core::math::DVec3::from_array(state.pos),
                         vel: floptle_core::math::Vec3::from_array(state.vel),
                         grounded: state.grounded,

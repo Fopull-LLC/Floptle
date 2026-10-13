@@ -234,6 +234,9 @@ pub struct PhysicsWorld {
     /// Body/assembly pairs that pass through each other, by owner; see
     /// [`Self::ignore_pair`].
     pub ignored_pairs: Vec<IgnoredPair>,
+    /// Hinges, welds, ropes, springs, sliders and wheels between bodies,
+    /// solved after every body has moved. See [`crate::joints`].
+    pub joints: Vec<crate::joints::JointRt>,
 }
 
 /// Two owners (a body's node or an assembly's root, by entity index) the pair
@@ -256,6 +259,7 @@ impl Default for PhysicsWorld {
             origin: DVec3::ZERO,
             matrix: [!0u32; 32],
             ignored_pairs: Vec::new(),
+            joints: Vec::new(),
             kin_hulls: Vec::new(),
             kin_contacts: Vec::new(),
             compounds: Vec::new(),
@@ -944,6 +948,12 @@ impl PhysicsWorld {
         for h in &mut self.kin_hulls {
             h.pos += delta;
         }
+        for j in &mut self.joints {
+            j.world += delta;
+            if let Some(t) = &mut j.target {
+                *t += delta;
+            }
+        }
         for (_, _, p, _) in &mut self.kin_contacts {
             *p += delta;
         }
@@ -1098,6 +1108,9 @@ impl PhysicsWorld {
         for ci in 0..self.compounds.len() {
             self.step_compound(ci, dt);
         }
+        // Joints after the bodies have moved and before they are pushed apart,
+        // so a hinged arm is held to its shoulder and still kept out of a wall.
+        self.solve_joints(dt);
         // Compounds against each other and against bodies, once everything
         // has made its own move. Never moves a driven body; see `pairs.rs`.
         self.resolve_pairs();

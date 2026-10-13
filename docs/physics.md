@@ -91,6 +91,69 @@ Moving bodies collide with each other whether they rotate or not: crates stack,
 and a character pushes a crate along. A layer pair the collision matrix keeps
 apart, or `physics.ignorePair`, passes through.
 
+### Joints
+
+**Add Component ▸ Physics ▸ Joint** holds a node's body to another node, or to
+the place it starts. Put the joint on the part that moves, and name what it
+hangs from in **to**: a door names its frame, each wheel names the car, each
+link of a chain names the link above. Leave **to** empty and it is held where
+it is when play starts: a sign's hook, a pendulum's pivot.
+
+| Kind | What it holds |
+|---|---|
+| **hinge** | A pin. The two turn about the anchor freely, or between **min** and **max** degrees with **limit** on. A **motor** turns it. |
+| **fixed** | A weld: the two move as one. |
+| **distance** | A rod: the anchors stay **length** apart. |
+| **rope** | No further apart than **length**, and slack when closer. |
+| **spring** | Pulled toward **length**, by **stiffness** and **damping**. |
+| **slider** | Slides along the other's **axis** without turning, between **min** and **max** with **limit** on. A **motor** drives it along. |
+| **wheel** | A wheel on the other: free to turn, held at its mount along **axis** by a suspension. A **motor** drives it round. |
+| **target** | Pulled toward a point a script sets, for picking things up and carrying them. |
+
+- **anchor** is where on this node, in its own space. **other anchor** is where
+  on the other. Leave it at zero and the joint takes the point under this
+  anchor when play starts, so a hinge or weld joins the two exactly where you
+  placed them.
+- **stiffness** is in cycles a second: 1 is soft, 5 firm, 20 nearly rigid.
+  **damping** 0 bounces for ever and 1 settles without overshooting. A heavy
+  body on a spring feels the same as a light one on the same spring.
+- **motor** speed is degrees a second for a hinge or wheel (anticlockwise is
+  positive) and units a second for a slider. **max force** caps it; 0 is no
+  cap.
+- **breaks at** lets go for good past that force. In play the Inspector shows
+  the force the joint is carrying, and **broken** once it has.
+- Two joined bodies don't collide with each other unless **collides with the
+  other** is on, so a hinged arm can sit inside the shoulder it hangs from.
+- The bodies need **rotates** on to swing. A body that doesn't turn is held
+  in place by a hinge but never turns about it.
+
+A car is a body with two wheel nodes, each with a **wheel** joint naming the
+body, an **axis** of `0, 1, 0` for suspension that works up and down, and a
+motor. A chain is a row of small bodies, each hinged to the one before.
+
+From a script:
+
+```lua
+-- A grappling hook: a rope to wherever it caught.
+player:setJoint{ kind = "rope", to = hookNode, length = 5 }
+-- …and letting go.
+player:removeJoint()
+
+-- Carry a crate under the mouse (in a 2D scene, the ray from the mouse
+-- starts at the world point under it).
+crate:setJoint{ kind = "target", stiffness = 6, maxForce = 400 }
+local mx, my = input.mouse()
+local ox, oy = camera.screenToRay(mx, my)
+crate:setJointTarget(vec2(ox, oy))
+
+-- Tune it while it runs.
+local j = door:getcomponent("Joint")
+j.motorSpeed = -90
+if j.broken == 1 then print("the door came off") end
+```
+
+`node.spin` reads and sets how fast a turning body spins, in degrees a second.
+
 ### Polygon bodies
 
 Pick **Polygon** as the shape and the body is an outline of up to eight corners

@@ -997,6 +997,53 @@ impl Editor {
                 self.body_gizmos.push(lines);
             }
         }
+        // Joints: a diamond at the anchor, and a line to what it holds to (the
+        // other node's anchor, or where it is pinned in the world).
+        if filter.physics {
+            let joints: Vec<(Entity, floptle_core::joint::Joint)> = self
+                .world
+                .query::<floptle_core::joint::Joint>()
+                .map(|(e, j)| (e, j.clone()))
+                .collect();
+            for (e, j) in joints {
+                let wt = floptle_core::world_transform(&self.world, e);
+                let at = wt.translation + (wt.rotation * Vec3::from(j.anchor)).as_dvec3();
+                let other = self
+                    .world
+                    .query::<floptle_core::Name>()
+                    .find(|(o, n)| *o != e && !j.other.is_empty() && n.0 == j.other)
+                    .map(|(o, _)| o);
+                let far = match other {
+                    Some(o) => {
+                        let ot = floptle_core::world_transform(&self.world, o);
+                        ot.translation + (ot.rotation * Vec3::from(j.other_anchor)).as_dvec3()
+                    }
+                    None => at,
+                };
+                let mut lines = Vec::new();
+                let pr = |p: DVec3| project(p, cam.world_position, view_proj, gw, gh);
+                if let Some(c) = pr(at) {
+                    let r = 5.0;
+                    let pts = [
+                        c + floptle_core::math::Vec2::new(r, 0.0),
+                        c + floptle_core::math::Vec2::new(0.0, r),
+                        c + floptle_core::math::Vec2::new(-r, 0.0),
+                        c + floptle_core::math::Vec2::new(0.0, -r),
+                    ];
+                    for i in 0..4 {
+                        lines.push((pts[i], pts[(i + 1) % 4]));
+                    }
+                    if let Some(f) = pr(far)
+                        && (f - c).length() > 1.0
+                    {
+                        lines.push((c, f));
+                    }
+                }
+                if !lines.is_empty() {
+                    self.body_gizmos.push(lines);
+                }
+            }
+        }
         // Collision telegraph: a small cross at each contact resolved this step.
         // (Contacts are sim-frame — origin-relative — so convert to world here.)
         if let Some(sim) = self.sim.as_ref().filter(|_| filter.physics) {

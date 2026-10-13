@@ -489,3 +489,254 @@ fn a_fast_crate_stops_at_a_thin_wall() {
         assert!(x < 2.45, "rotates = {rotates}: the crate stayed on its side of the wall at 2.9; x = {x:.3}");
     }
 }
+
+// ---- joints --------------------------------------------------------------
+
+use floptle_core::joint::{Joint, JointKind};
+
+/// The floor scene with no player, for joint tests.
+fn joint_scene() -> crate::Editor {
+    let (mut ed, player) = scene(1.0, -3.0, true, false);
+    ed.world.despawn(player);
+    ed
+}
+
+/// A turning 2D box named `name` at `(x, y)`, `half` across.
+fn link(ed: &mut crate::Editor, name: &str, x: f64, y: f64, half: f32) -> floptle_core::Entity {
+    let e = turning_crate(ed, x, y, half);
+    ed.world.insert(e, Name(name.into()));
+    e
+}
+
+fn pos(ed: &crate::Editor, e: floptle_core::Entity) -> DVec3 {
+    floptle_core::world_transform(&ed.world, e).translation
+}
+
+/// A pendulum: a box hinged to the world a unit to its side swings down and
+/// through, its centre always a unit from the pivot.
+#[test]
+fn a_hinged_box_swings_as_a_pendulum() {
+    let mut ed = joint_scene();
+    let bob = link(&mut ed, "Bob", 1.0, 5.0, 0.2);
+    ed.world.insert(bob, Joint { kind: JointKind::Hinge, anchor: [-1.0, 0.0, 0.0], ..Default::default() });
+    ed.toggle_play();
+    let (mut min_x, mut max_dev) = (f64::MAX, 0.0f64);
+    for _ in 0..90 {
+        ed.play_step(1.0 / 60.0, true);
+        let p = pos(&ed, bob);
+        min_x = min_x.min(p.x);
+        // Pivot at (0, 5); the bob's centre is a unit from it, however it has turned.
+        max_dev = max_dev.max((((p.x - 0.0).powi(2) + (p.y - 5.0).powi(2)).sqrt() - 1.0).abs());
+    }
+    assert!(min_x < -0.5, "it swung through to the other side; least x {min_x:.3}");
+    assert!(max_dev < 0.03, "the pivot held: the bob strayed {max_dev:.3} from its circle");
+}
+
+/// A rope holds a body at its length and goes slack when the body is closer.
+#[test]
+fn a_rope_holds_at_its_length() {
+    let mut ed = joint_scene();
+    let w = link(&mut ed, "Weight", 0.0, 6.0, 0.2);
+    ed.world.insert(w, Joint { kind: JointKind::Rope, length: 2.0, ..Default::default() });
+    // The rope's top is where the weight starts: (0, 6). Lift it a unit first.
+    ed.toggle_play();
+    for _ in 0..120 {
+        ed.play_step(1.0 / 60.0, true);
+    }
+    let y = pos(&ed, w).y;
+    assert!((y - 4.0).abs() < 0.05, "hanging at the rope's length below its top; y = {y:.3}");
+}
+
+/// A chain of links, each hinged to the one above, hangs as one piece.
+#[test]
+fn a_chain_hangs_together() {
+    let mut ed = joint_scene();
+    let mut prev = String::new();
+    let mut links = Vec::new();
+    for i in 0..5 {
+        let name = format!("Link{i}");
+        let e = link(&mut ed, &name, 0.6 * (i + 1) as f64, 6.0, 0.15);
+        ed.world.insert(e, Joint { kind: JointKind::Hinge, other: prev.clone(), anchor: [-0.3, 0.0, 0.0], other_anchor: [0.3, 0.0, 0.0], ..Default::default() });
+        links.push(e);
+        prev = name;
+    }
+    ed.toggle_play();
+    let mut lowest = f64::MAX;
+    for _ in 0..180 {
+        ed.play_step(1.0 / 60.0, true);
+        lowest = lowest.min(pos(&ed, *links.last().unwrap()).y);
+    }
+    for w in links.windows(2) {
+        let d = (pos(&ed, w[1]) - pos(&ed, w[0])).length();
+        assert!(d < 0.66, "neighbouring links stay joined; {d:.3} apart");
+    }
+    // The first link is pinned to the world at (0.3, 6), and the free end,
+    // laid out three units to the side, swings down under it.
+    let first = pos(&ed, links[0]);
+    assert!(first.distance(DVec3::new(0.3, 6.0, 0.0)) < 0.35, "the first link stays at its pin: {first:?}");
+    assert!(lowest < 4.0, "and the chain swings down from it; the free end got no lower than {lowest:.2}");
+}
+
+/// A spring stretches under a weight, settles, and holds it above where it
+/// would fall.
+#[test]
+fn a_spring_settles_under_a_weight() {
+    let mut ed = joint_scene();
+    let w = link(&mut ed, "Weight", 0.0, 6.0, 0.2);
+    ed.world.insert(w, Joint { kind: JointKind::Spring, length: 0.0, stiffness: 2.0, damping: 0.7, ..Default::default() });
+    ed.toggle_play();
+    for _ in 0..360 {
+        ed.play_step(1.0 / 60.0, true);
+    }
+    let y1 = pos(&ed, w).y;
+    for _ in 0..30 {
+        ed.play_step(1.0 / 60.0, true);
+    }
+    let y2 = pos(&ed, w).y;
+    assert!(y1 < 6.0 && y1 > 2.0, "stretched down some, held well above the floor; y = {y1:.3}");
+    assert!((y1 - y2).abs() < 0.01, "and settled: {y1:.3} then {y2:.3}");
+}
+
+/// Two welded boxes fall as one: the gap and the angle between them hold.
+#[test]
+fn welded_boxes_move_as_one() {
+    let mut ed = joint_scene();
+    let a = link(&mut ed, "A", 0.0, 4.0, 0.3);
+    let b = link(&mut ed, "B", 0.9, 4.6, 0.3);
+    ed.world.insert(b, Joint { kind: JointKind::Fixed, other: "A".into(), ..Default::default() });
+    let _ = a;
+    ed.toggle_play();
+    for _ in 0..180 {
+        ed.play_step(1.0 / 60.0, true);
+    }
+    let d = pos(&ed, b) - pos(&ed, a);
+    let rel = z_angle(&ed, b) - z_angle(&ed, a);
+    assert!((d.length() - (0.9f64.hypot(0.6))).abs() < 0.03, "the gap held: {d:?}");
+    assert!(rel.abs() < 0.03, "and so did the angle: {rel}");
+    assert!(pos(&ed, a).y < 2.0, "they fell together");
+}
+
+/// A slider along X keeps a body on its rail: it does not fall, and a push
+/// along the rail carries it.
+#[test]
+fn a_slider_keeps_its_body_on_the_rail() {
+    let mut ed = joint_scene();
+    let s = link(&mut ed, "Car", 0.0, 4.0, 0.2);
+    ed.world.insert(s, Joint { kind: JointKind::Slider, axis: [1.0, 0.0, 0.0], ..Default::default() });
+    ed.toggle_play();
+    ed.sim.as_mut().unwrap().set_body_velocity(s.index(), floptle_core::math::Vec3::new(2.0, 0.0, 0.0));
+    for _ in 0..60 {
+        ed.play_step(1.0 / 60.0, true);
+    }
+    let p = pos(&ed, s);
+    assert!((p.y - 4.0).abs() < 0.03, "on the rail; y = {:.3}", p.y);
+    assert!(p.x > 1.0, "carried along it; x = {:.3}", p.x);
+}
+
+/// A motor turns a hinge at its speed.
+#[test]
+fn a_hinge_motor_turns_the_body() {
+    let mut ed = joint_scene();
+    let wheel = link(&mut ed, "Wheel", 0.0, 4.0, 0.4);
+    if let Some(rb) = ed.world.get_mut::<RigidBody>(wheel) {
+        rb.gravity = false;
+    }
+    ed.world.insert(wheel, Joint { kind: JointKind::Hinge, motor: true, motor_speed: 90.0, max_force: 1000.0, ..Default::default() });
+    ed.toggle_play();
+    for _ in 0..30 {
+        ed.play_step(1.0 / 60.0, true);
+    }
+    // Half a second at 90° a second is 45°, give or take the spin-up.
+    let a = z_angle(&ed, wheel).to_degrees();
+    assert!(a > 30.0 && a < 50.0, "turned about 45°: {a:.1}");
+    assert!(pos(&ed, wheel).distance(DVec3::new(0.0, 4.0, 0.0)) < 0.01, "about its pin");
+}
+
+/// A joint asked to carry more than its break force breaks, says so, and
+/// lets go.
+#[test]
+fn an_overloaded_joint_breaks() {
+    let mut ed = joint_scene();
+    let w = link(&mut ed, "Weight", 0.0, 5.0, 0.3);
+    if let Some(rb) = ed.world.get_mut::<RigidBody>(w) {
+        rb.mass = 10.0;
+    }
+    ed.world.insert(w, Joint { kind: JointKind::Hinge, anchor: [0.0, 0.3, 0.0], break_force: 20.0, ..Default::default() });
+    ed.toggle_play();
+    for _ in 0..120 {
+        ed.play_step(1.0 / 60.0, true);
+    }
+    assert!(ed.world.get::<Joint>(w).unwrap().broken, "the joint reports it broke");
+    assert!(pos(&ed, w).y < 1.0, "and the weight fell to the floor; y = {:.3}", pos(&ed, w).y);
+}
+
+
+/// A hinge with limits swings no further than them.
+#[test]
+fn a_hinge_stops_at_its_limits() {
+    let mut ed = joint_scene();
+    let bob = link(&mut ed, "Bob", 1.0, 5.0, 0.2);
+    ed.world.insert(bob, Joint { kind: JointKind::Hinge, anchor: [-1.0, 0.0, 0.0], limit: true, min: -20.0, max: 20.0, ..Default::default() });
+    ed.toggle_play();
+    let mut widest = 0.0f32;
+    for _ in 0..120 {
+        ed.play_step(1.0 / 60.0, true);
+        widest = widest.max(z_angle(&ed, bob).abs().to_degrees());
+    }
+    assert!(widest > 15.0 && widest < 23.0, "it swung to its limit and stopped there: {widest:.1}°");
+}
+
+/// A target joint pulls its body to the point a script set, against gravity.
+#[test]
+fn a_target_joint_pulls_to_its_point() {
+    let mut ed = joint_scene();
+    let held = link(&mut ed, "Held", 0.0, 3.0, 0.2);
+    ed.world.insert(held, Joint { kind: JointKind::Target, stiffness: 5.0, damping: 1.0, target: Some([2.0, 4.0, 0.0]), ..Default::default() });
+    ed.toggle_play();
+    for _ in 0..180 {
+        ed.play_step(1.0 / 60.0, true);
+    }
+    let p = pos(&ed, held);
+    assert!(p.distance(DVec3::new(2.0, 4.0, 0.0)) < 0.15, "it was carried to the target: {p:?}");
+}
+
+/// A body on two driven wheels drives along the floor, riding on their
+/// suspension rather than dragging on the ground. Each wheel carries its own
+/// joint, naming the body.
+#[test]
+fn a_car_drives_on_its_wheels() {
+    let mut ed = joint_scene();
+    // At the left end of the eight-unit floor, so a second's drive stays on it.
+    let body = link(&mut ed, "Body", -3.0, 1.6, 0.5);
+    if let Some(rb) = ed.world.get_mut::<RigidBody>(body) {
+        rb.half_extents = [1.0, 0.25, 0.5];
+    }
+    for (i, x) in [-3.7f64, -2.3].into_iter().enumerate() {
+        let w = ed.world.spawn();
+        ed.world.insert(w, Transform { translation: DVec3::new(x, 0.95, 0.0), rotation: Quat::IDENTITY, scale: Vec3::ONE });
+        ed.world.insert(w, Name(format!("Wheel{i}")));
+        ed.world.insert(w, RigidBody { kind: BodyKind::Sphere, radius: 0.35, two_d: true, rotates: true, friction: 1.2, ..Default::default() });
+        // Suspension along the body's Y; driven clockwise to roll right.
+        ed.world.insert(
+            w,
+            Joint {
+                kind: JointKind::Wheel,
+                other: "Body".into(),
+                axis: [0.0, 1.0, 0.0],
+                stiffness: 4.0,
+                damping: 0.7,
+                motor: true,
+                motor_speed: -720.0,
+                max_force: 50.0,
+                ..Default::default()
+            },
+        );
+    }
+    ed.toggle_play();
+    for _ in 0..60 {
+        ed.play_step(1.0 / 60.0, true);
+    }
+    let p = pos(&ed, body);
+    assert!(p.x > -1.5, "it drove right: {p:?}");
+    assert!(p.y > 0.9, "riding on its wheels, not lying on the floor: {p:?}");
+}

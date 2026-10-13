@@ -60,6 +60,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field roll number Roll about Z, in radians.
 ---@field grounded boolean Physics (rigidbody nodes): resting on a surface this frame.
 ---@field dropThrough number|boolean Physics: fall through one-way platforms for this many seconds (true = 0.25). Write-only.
+---@field spin number Physics: how fast a turning body spins about Z, degrees a second, anticlockwise positive. Write to set it.
 ---@field asleep boolean Physics: the solver is skipping this body. Set true to put it to sleep now, false to wake it.
 ---@field vx number Physics: body velocity X (read/write — set it to drive the body).
 ---@field vy number Physics: body velocity Y (read/write).
@@ -103,6 +104,9 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field setTextSpans fun(self: Node, spans: table) Colour stretches of this UI element's text instead of the whole string: `n:setTextSpans{ {len=10}, {len=3, color={1,0.3,0.3}} }`. `len` is CHARACTERS of the authored string, spans run end to end from the start, and a span with no `color` is how you spell a gap. Spans style but never lay out — a two-colour run wraps exactly where the same string in one colour does — which is why a span cannot change size or font. `{}` clears.
 ---@field setGlyphOffsets fun(self: Node, offsets: table) Displace individual characters at draw time, in design units, one vec2 per character of the authored string: `n:setGlyphOffsets{ vec2(0,0), vec2(0,-3) }`. Shorter is fine (the rest stay still) and `{}` clears. Applied AFTER layout, so a moved glyph never re-wraps its line or shifts its neighbours — wobble, shake and per-glyph reveal are yours to write.
 ---@field setBodyOutline fun(self: Node, corners: table) Make this node's Rigidbody a 2D polygon of these corners, x and y from the node: `n:setBodyOutline{ vec2(-0.4, 0), vec2(0.4, 0), vec2(0, 1) }`. Kept convex, at most 8 corners; at least three, not all in a line.
+---@field setJoint fun(self: Node, opts: table) Hold this node's body to another node, or to where it is: `n:setJoint{ kind = \"rope\", to = hook, length = 4 }`. Kinds: hinge, fixed, distance, rope, spring, slider, wheel, target. Replaces any joint the node had.
+---@field removeJoint fun(self: Node) Take this node's joint off: it lets go.
+---@field setJointTarget fun(self: Node, point: any) Where this node's target joint pulls, in world space; nil lets go.
 ---@field setCamera fun(self: Node, t: table) Construction API: aim a camera and point it at a RENDER TARGET. Fields: fovY (RADIANS, 0.05–3), active (bool — true clears every other camera's authority), target (a bare name; the picture is the texture \"rt:<name>\", usable on any material or UI image), width/height (the target's pixels, 8–4096), hz (redraws per second, 0 = every frame), cullMask (layer bitmask), stack (a list of camera names drawn over this one's picture, bottom first — first-person arms on their own layer that never clip into walls; replaces the list, {} clears it). A node that is not a camera becomes one. Minimaps, mirrors, security monitors, scopes, split-screen.
 ---@field sound fun(self: Node): AudioSourceHandle The sound handle for this node's Audio Source: play / stop / pause / swap clips and read playback state.
 ---@field parent Node|nil The parent node handle, or nil at the root.

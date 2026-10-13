@@ -2688,6 +2688,7 @@ impl ScriptHost {
             body_height_changes: Rc::new(RefCell::new(HashMap::new())),
             body_sleep_changes: Rc::new(RefCell::new(HashMap::new())),
             body_drop_changes: Rc::new(RefCell::new(HashMap::new())),
+            body_spin_changes: Rc::new(RefCell::new(HashMap::new())),
             body_pos_changes: Rc::new(RefCell::new(HashMap::new())),
             sprite_draws: Rc::new(RefCell::new(HashMap::new())),
             shader_param_sets: Rc::new(RefCell::new(Vec::new())),
@@ -3047,6 +3048,7 @@ impl ScriptHost {
             body_height_changes: shared.body_height_changes.clone(),
             body_sleep_changes: shared.body_sleep_changes.clone(),
             body_drop_changes: shared.body_drop_changes.clone(),
+            body_spin_changes: shared.body_spin_changes.clone(),
             body_pos_changes: shared.body_pos_changes.clone(),
             sprite_draws: shared.sprite_draws.clone(),
             sprites_written: None,
@@ -5534,6 +5536,11 @@ impl ScriptHost {
     }
 
     /// Drain the `node.dropThrough = …` writes (entity index → seconds).
+    /// Drain the `node.spin = …` writes (entity index → degrees a second).
+    pub fn take_body_spin_changes(&self) -> HashMap<u32, f32> {
+        std::mem::take(&mut *self.body_spin_changes.borrow_mut())
+    }
+
     pub fn take_body_drop_changes(&self) -> HashMap<u32, f32> {
         std::mem::take(&mut *self.body_drop_changes.borrow_mut())
     }

@@ -1211,6 +1211,7 @@ mod tests {
                 sort_mode: None,
                 parallax: None,
                 camera_2d: None,
+                joint: None,
                 lit_2d: None,
                 light_layers: Vec::new(),
                 shadow_2d: None,

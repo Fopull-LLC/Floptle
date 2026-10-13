@@ -894,6 +894,17 @@ impl Editor {
                 }
             }
         }
+        if let Some((e, on)) = cmd.set_joint.take() {
+            self.record();
+            for e in self.selected_group(e) {
+                if on {
+                    self.world.insert(e, floptle_core::joint::Joint::default());
+                } else {
+                    self.world.remove::<floptle_core::joint::Joint>(e);
+                }
+            }
+            self.rebuild_sim();
+        }
         if cmd.rebuild_physics {
             self.rebuild_sim();
         }

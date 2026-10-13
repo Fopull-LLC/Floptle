@@ -2692,6 +2692,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
     let rot = Quat::from_mat3(&Mat3::from_cols(right, up, -fwd));
     floptle_scene::NodeDoc {
         camera_2d: None,
+        joint: None,
         sort_mode: None,
         parallax: None,
         id: None,

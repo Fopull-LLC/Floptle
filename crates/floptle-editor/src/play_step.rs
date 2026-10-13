@@ -425,6 +425,7 @@ impl Editor {
                         ground_normal: None,
                         wall_normal: None,
                         asleep: false,
+                        spin: 0.0,
                     },
                 );
             }
@@ -740,6 +741,7 @@ impl Editor {
             // restitution, gravity, pos/rot locks) into the running bodies each frame —
             // no teleport.
             sim.sync_dynamic_params(&self.world);
+            sim.sync_joints(&mut self.world);
             // `update`'s velocity/height writes apply before the first tick, so
             // frame-pass controllers (the pre-fixedUpdate style) behave as before.
             for (eid, v) in self.script_host.take_body_changes() {
@@ -750,6 +752,9 @@ impl Editor {
             }
             for (eid, on) in self.script_host.take_body_sleep_changes() {
                 sim.set_body_asleep(eid, on);
+            }
+            for (eid, s) in self.script_host.take_body_spin_changes() {
+                sim.set_body_spin(eid, s.to_radians());
             }
             for (eid, t) in self.script_host.take_body_drop_changes() {
                 sim.set_body_drop_through(eid, t);
@@ -891,6 +896,7 @@ impl Editor {
                                 ground_normal: None,
                                 wall_normal: None,
                                 asleep: false,
+                                spin: 0.0,
                             },
                         );
                     }
@@ -955,6 +961,7 @@ impl Editor {
                     sim.world.set_colliders(self.script_host.take_colliders()); // reclaim
                     // Apply the tick's writes, then step physics exactly one tick.
                     sim.sync_dynamic_params(&self.world);
+                    sim.sync_joints(&mut self.world);
                     for (eid, v) in self.script_host.take_body_changes() {
                         sim.set_body_velocity(eid, Vec3::new(v[0], v[1], v[2]));
                     }
@@ -963,6 +970,9 @@ impl Editor {
                     }
                     for (eid, on) in self.script_host.take_body_sleep_changes() {
                         sim.set_body_asleep(eid, on);
+                    }
+                    for (eid, s) in self.script_host.take_body_spin_changes() {
+                        sim.set_body_spin(eid, s.to_radians());
                     }
                     for (eid, t) in self.script_host.take_body_drop_changes() {
                         sim.set_body_drop_through(eid, t);
@@ -1189,6 +1199,7 @@ impl Editor {
                         ground_normal: None,
                         wall_normal: None,
                         asleep: false,
+                        spin: 0.0,
                     },
                 );
             }

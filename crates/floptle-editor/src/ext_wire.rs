@@ -999,6 +999,7 @@ fn known_doc_fields() -> &'static [&'static str] {
             light_shadows,
             light_sun,
             camera_2d,
+            joint,
         } = d;
         let _ = (
             name, transform, matter, scripts, material, object_materials, tint, tint_rim,
@@ -1007,7 +1008,7 @@ fn known_doc_fields() -> &'static [&'static str] {
             nav_exclude, visible, cast_shadow, anim_controller, particles, id, parent_id, parent,
             attachment, net, ui_layer, ui, audio, layer, tags, sorting, sort_mode, parallax, lit_2d,
             light_layers,
-            shadow_2d, light_inner, light_falloff, light_shadows, light_sun, camera_2d,
+            shadow_2d, light_inner, light_falloff, light_shadows, light_sun, camera_2d, joint,
         );
     }
     &[
@@ -1058,6 +1059,7 @@ fn known_doc_fields() -> &'static [&'static str] {
         "light_shadows",
         "light_sun",
         "camera_2d",
+        "joint",
         // `id`, `parent_id`, `parent` and `attachment` are the scene file's
         // linkage between nodes. A package addresses a node by the id `scene.*`
         // gave it and re-parents with `scene.setParent`; letting one write these

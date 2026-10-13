@@ -1212,6 +1212,33 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("lock_rot_y".to_string(), b(rb.lock_rot[1])),
                 ("lock_rot_z".to_string(), b(rb.lock_rot[2])),
                 ("two_d".to_string(), b(rb.two_d)),
+                // The physics turns it (1/0): a crate tips, a ball rolls.
+                ("rotates".to_string(), b(rb.rotates)),
+            ]),
+        );
+    }
+    if let Some(j) = world.get::<floptle_core::joint::Joint>(e) {
+        let b = |v: bool| if v { 1.0 } else { 0.0 };
+        out.insert(
+            "Joint".to_string(),
+            HashMap::from([
+                ("motor".to_string(), b(j.motor)),
+                // Degrees a second for a hinge or wheel, units a second for a
+                // slider; anticlockwise positive.
+                ("motorSpeed".to_string(), j.motor_speed as f64),
+                ("maxForce".to_string(), j.max_force as f64),
+                ("stiffness".to_string(), j.stiffness as f64),
+                ("damping".to_string(), j.damping as f64),
+                // Below zero: the length the anchors had when play started.
+                ("length".to_string(), j.length as f64),
+                ("limit".to_string(), b(j.limit)),
+                ("min".to_string(), j.min as f64),
+                ("max".to_string(), j.max as f64),
+                ("breakForce".to_string(), j.break_force as f64),
+                // 1 once it has broken; write 0 to mend it.
+                ("broken".to_string(), b(j.broken)),
+                // The largest force it carried last step, read-only.
+                ("force".to_string(), j.force as f64),
             ]),
         );
     }
@@ -1956,6 +1983,25 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "lock_rot_y" => rb.lock_rot[1] = val != 0.0,
                     "lock_rot_z" => rb.lock_rot[2] = val != 0.0,
                     "two_d" => rb.two_d = val != 0.0,
+                    "rotates" => rb.rotates = val != 0.0,
+                    _ => {}
+                }
+            }
+        }
+        "Joint" => {
+            if let Some(j) = world.get_mut::<floptle_core::joint::Joint>(ent) {
+                match field {
+                    "motor" => j.motor = val != 0.0,
+                    "motorSpeed" => j.motor_speed = val as f32,
+                    "maxForce" => j.max_force = (val as f32).max(0.0),
+                    "stiffness" => j.stiffness = (val as f32).max(0.0),
+                    "damping" => j.damping = (val as f32).max(0.0),
+                    "length" => j.length = val as f32,
+                    "limit" => j.limit = val != 0.0,
+                    "min" => j.min = val as f32,
+                    "max" => j.max = val as f32,
+                    "breakForce" => j.break_force = (val as f32).max(0.0),
+                    "broken" => j.broken = val != 0.0,
                     _ => {}
                 }
             }
@@ -2164,6 +2210,23 @@ pub(crate) fn apply_rich_sets(
             }
             RichSet::MatterTerrain(id) => {
                 world.insert(e, Matter::Terrain { id, collision: Default::default() });
+            }
+            RichSet::Joint(None) => {
+                world.remove::<floptle_core::joint::Joint>(e);
+            }
+            RichSet::Joint(Some((mut j, other))) => {
+                // Handed a node: joined to that node by its index, and by name
+                // too when it has one, so the Inspector shows what it holds.
+                if let Some(o) = other.and_then(|id| ents.get(&id).copied()) {
+                    j.other_id = Some(o.index());
+                    j.other = world.get::<floptle_core::Name>(o).map(|n| n.0.clone()).unwrap_or_default();
+                }
+                world.insert(e, j);
+            }
+            RichSet::JointTarget(t) => {
+                if let Some(j) = world.get_mut::<floptle_core::joint::Joint>(e) {
+                    j.target = t;
+                }
             }
             RichSet::BodyOutline(outline) => {
                 if let Some(rb) = world.get_mut::<RigidBody>(e) {
@@ -2778,6 +2841,10 @@ pub(crate) const CELESTIAL_KEYS: &[&str] = &[
 
 /// Every key `node:setTilemap{...}` reads.
 pub(crate) const TILEMAP_KEYS: &[&str] = &["cols", "rows", "tile", "data", "tileset"];
+pub(crate) const JOINT_KEYS: &[&str] = &[
+    "kind", "to", "anchor", "otherAnchor", "axis", "length", "limit", "min", "max", "motor", "motorSpeed",
+    "maxForce", "stiffness", "damping", "breakForce", "collide",
+];
 
 /// Every key `node:setSorting{...}` reads.
 pub(crate) const SORTING_KEYS: &[&str] = &["layer", "order", "mode"];
@@ -4078,6 +4145,14 @@ let node_mt = lua.create_table()?;
             "asleep" => {
                 return Ok(Value::Boolean(bodies.borrow().get(&e).is_some_and(|b| b.asleep)));
             }
+            // Degrees a second about Z, anticlockwise positive: how fast a
+            // turning body spins.
+            "spin" => {
+                return Ok(match bodies.borrow().get(&e) {
+                    Some(b) => Value::Number(b.spin as f64),
+                    None => Value::Nil,
+                });
+            }
             "height" => {
                 return Ok(match bodies.borrow().get(&e) {
                     Some(b) => Value::Number(b.height as f64),
@@ -4117,6 +4192,7 @@ let node_mt = lua.create_table()?;
     let body_height = shared.body_height_changes.clone();
     let body_sleep = shared.body_sleep_changes.clone();
     let body_drop = shared.body_drop_changes.clone();
+    let body_spin = shared.body_spin_changes.clone();
     let body_pos = shared.body_pos_changes.clone();
     let model_changes = shared.model_changes.clone();
     let material_changes = shared.material_changes.clone();
@@ -4367,6 +4443,18 @@ let node_mt = lua.create_table()?;
                     },
                 };
                 body_drop.borrow_mut().insert(e, secs);
+                return Ok(());
+            }
+            // `node.spin = 360` — a turning body spins at that many degrees a
+            // second about Z. Read back at once.
+            "spin" => {
+                let Some(n) = as_num(&val) else {
+                    return Err(mlua::Error::RuntimeError("node.spin takes degrees a second".into()));
+                };
+                body_spin.borrow_mut().insert(e, n as f32);
+                if let Some(b) = bodies.borrow_mut().get_mut(&e) {
+                    b.spin = n as f32;
+                }
                 return Ok(());
             }
             _ => {}
@@ -6282,6 +6370,97 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                     offsets.push([p.x as f32, p.y as f32]);
                 }
                 q.borrow_mut().push((e, crate::RichSet::GlyphOffsets(offsets)));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // node:setJoint{ kind = "rope", to = hook, length = 4 } — hold this
+        // node's body to another node, or to where it is, at runtime: a
+        // grappling hook, a rope swing, a door knocked off its hinges and
+        // put back. Replaces any joint the node had.
+        let q = q.clone();
+        methods.set(
+            "setJoint",
+            lua.create_function(move |_, (this, t): (Table, Table)| {
+                const CALL: &str = "node:setJoint";
+                let e: u32 = this.raw_get("__id")?;
+                crate::opts::check_keys(&t, JOINT_KEYS, CALL)?;
+                let mut j = floptle_core::joint::Joint::default();
+                if let Some(k) = t.get::<Option<String>>("kind")? {
+                    j.kind = floptle_core::joint::JointKind::parse(&k).ok_or_else(|| {
+                        let all: Vec<&str> = floptle_core::joint::JointKind::ALL.iter().map(|k| k.name()).collect();
+                        mlua::Error::runtime(format!("{CALL}: kind \"{k}\" is not one of {}", all.join(", ")))
+                    })?;
+                }
+                let mut other = None;
+                match t.get::<Value>("to")? {
+                    Value::Nil => {}
+                    Value::String(s) => j.other = s.to_str()?.to_string(),
+                    Value::Table(n) => other = Some(n.raw_get::<u32>("__id")?),
+                    _ => return Err(mlua::Error::runtime(format!("{CALL}: to is a node or a node's name"))),
+                }
+                let vec = |key: &str| -> mlua::Result<Option<[f32; 3]>> {
+                    match t.get::<Value>(key)? {
+                        Value::Nil => Ok(None),
+                        v => crate::vec3_of(&v)
+                            .map(|p| Some([p.x as f32, p.y as f32, p.z as f32]))
+                            .ok_or_else(|| mlua::Error::runtime(format!("{CALL}: {key} is a vec2 or vec3"))),
+                    }
+                };
+                if let Some(v) = vec("anchor")? {
+                    j.anchor = v;
+                }
+                if let Some(v) = vec("otherAnchor")? {
+                    j.other_anchor = v;
+                }
+                if let Some(v) = vec("axis")? {
+                    j.axis = v;
+                }
+                let num = |key: &str| t.get::<Option<f32>>(key);
+                if let Some(v) = num("length")? { j.length = v; }
+                if let Some(v) = num("min")? { j.min = v; j.limit = true; }
+                if let Some(v) = num("max")? { j.max = v; j.limit = true; }
+                if let Some(v) = t.get::<Option<bool>>("limit")? { j.limit = v; }
+                if let Some(v) = num("motorSpeed")? { j.motor_speed = v; j.motor = true; }
+                if let Some(v) = t.get::<Option<bool>>("motor")? { j.motor = v; }
+                if let Some(v) = num("maxForce")? { j.max_force = v.max(0.0); }
+                if let Some(v) = num("stiffness")? { j.stiffness = v.max(0.0); }
+                if let Some(v) = num("damping")? { j.damping = v.max(0.0); }
+                if let Some(v) = num("breakForce")? { j.break_force = v.max(0.0); }
+                if let Some(v) = t.get::<Option<bool>>("collide")? { j.collide_connected = v; }
+                q.borrow_mut().push((e, crate::RichSet::Joint(Some((j, other)))));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // node:removeJoint() — let go.
+        let q = q.clone();
+        methods.set(
+            "removeJoint",
+            lua.create_function(move |_, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                q.borrow_mut().push((e, crate::RichSet::Joint(None)));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // node:setJointTarget(point) — where this node's target joint pulls,
+        // in world space; nil lets go.
+        let q = q.clone();
+        methods.set(
+            "setJointTarget",
+            lua.create_function(move |_, (this, p): (Table, Value)| {
+                let e: u32 = this.raw_get("__id")?;
+                let target = match p {
+                    Value::Nil => None,
+                    v => Some(crate::vec3_of(&v).map(|p| [p.x, p.y, p.z]).ok_or_else(|| {
+                        mlua::Error::runtime("node:setJointTarget: the point is a vec2 or vec3, or nil to let go")
+                    })?),
+                };
+                q.borrow_mut().push((e, crate::RichSet::JointTarget(target)));
                 Ok(())
             })?,
         )?;

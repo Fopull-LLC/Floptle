@@ -185,6 +185,10 @@ pub struct BodySnapshot {
     /// What is left of a one-way drop-through (`Body::drop_through`), so a
     /// replay falls through the same ledge on the same tick.
     pub drop_through: f32,
+    /// How a turning body is turned, and how fast: a replay of a crate that
+    /// tipped must tip the same way.
+    pub orient: Quat,
+    pub ang_vel: Vec3,
 }
 
 /// What one dynamic body reports to the game each frame — see
@@ -207,6 +211,8 @@ pub struct BodyReport {
     pub wall_normal: Option<Vec3>,
     /// The solver is skipping this body until something wakes it.
     pub asleep: bool,
+    /// Angular velocity, radians a second about each world axis.
+    pub ang_vel: Vec3,
 }
 
 /// One row of [`Sim::compound_impacts`]: `(root entity index, part = shape_id,
@@ -341,7 +347,7 @@ impl Sim {
                 height_set: None,
             });
         }
-        Self {
+        let mut sim = Self {
             world,
             map,
             cmap,
@@ -356,6 +362,169 @@ impl Sim {
             events: Vec::new(),
             tick_cc: Vec::new(),
             parked: Vec::new(),
+        };
+        sim.build_joints(ecs);
+        sim
+    }
+
+    /// Make the simulation's joints from every node with a `Joint` and a
+    /// body. Called once the bodies exist, and again when a body is added at
+    /// runtime; a joint that has already broken stays broken.
+    pub fn build_joints(&mut self, ecs: &World) {
+        use floptle_core::joint::JointKind;
+        let broken: Vec<u32> = self.world.joints.iter().filter(|j| j.broken).map(|j| j.owner).collect();
+        let joined: Vec<(u32, u32)> = self
+            .world
+            .joints
+            .iter()
+            .filter_map(|j| j.b.map(|b| (self.world.bodies[j.a].owner, self.world.bodies[b].owner)))
+            .collect();
+        for (oa, ob) in joined {
+            self.world.ignore_pair(oa, ob, Some(0.0));
+        }
+        self.world.joints.clear();
+        let body_of = |e: Entity| self.map.iter().find(|l| l.entity == e).map(|l| l.body);
+        let origin = self.world.origin;
+        let mut out = Vec::new();
+        for (e, jc) in ecs.query::<floptle_core::joint::Joint>() {
+            let Some(a) = body_of(e) else { continue };
+            // The other end: a body named `other`, or a node without one (held
+            // where it stands), or nothing at all (the world).
+            let other = match jc.other_id {
+                Some(id) => ecs.query::<Transform>().find(|(o, _)| o.index() == id && *o != e).map(|(o, _)| o),
+                None => (!jc.other.is_empty())
+                    .then(|| {
+                        ecs.query::<floptle_core::Name>()
+                            .find(|(o, n)| n.0 == jc.other && *o != e)
+                            .map(|(o, _)| o)
+                    })
+                    .flatten(),
+            };
+            let b = other.and_then(body_of);
+            let ba = &self.world.bodies[a];
+            let anchor_a = Vec3::from(jc.anchor);
+            let pa = ba.pos + ba.orient * anchor_a;
+            let mut anchor_b = Vec3::from(jc.other_anchor);
+            // Left at zero, a pin, weld, slider or wheel joins the bodies where
+            // they stand: the other end is the point of the other body under
+            // this anchor when play starts. Otherwise a weld between two
+            // crates set side by side pulled them into one place.
+            if anchor_b == Vec3::ZERO
+                && let Some(bi) = b
+                && matches!(jc.kind, JointKind::Hinge | JointKind::Fixed | JointKind::Slider | JointKind::Wheel)
+            {
+                let bb = &self.world.bodies[bi];
+                anchor_b = bb.orient.inverse() * (pa - bb.pos);
+            }
+            let world = match (b, other) {
+                (Some(_), _) => Vec3::ZERO,
+                (None, Some(o)) => {
+                    let t = world_transform(ecs, o);
+                    (t.translation - origin).as_vec3() + t.rotation * anchor_b
+                }
+                (None, None) => pa,
+            };
+            let pb = match b {
+                Some(bi) => self.world.bodies[bi].pos + self.world.bodies[bi].orient * anchor_b,
+                None => world,
+            };
+            let qa = ba.orient;
+            let qb = b.map_or(Quat::IDENTITY, |bi| self.world.bodies[bi].orient);
+            let angular = matches!(jc.kind, JointKind::Hinge | JointKind::Wheel);
+            let to_rad = |v: f32| if angular { v.to_radians() } else { v };
+            let length = if jc.length < 0.0 { (pb - pa).length() } else { jc.length };
+            let hinge_limits = jc.kind == JointKind::Hinge;
+            out.push(crate::joints::JointRt {
+                owner: e.index(),
+                kind: jc.kind,
+                a,
+                b,
+                anchor_a,
+                anchor_b,
+                world,
+                axis: Vec3::from(jc.axis).normalize_or(Vec3::Z),
+                rel0: qa.inverse() * qb,
+                length,
+                limit: jc.limit,
+                min: if hinge_limits { jc.min.to_radians() } else { jc.min },
+                max: if hinge_limits { jc.max.to_radians() } else { jc.max },
+                motor: jc.motor,
+                motor_speed: to_rad(jc.motor_speed),
+                max_force: jc.max_force,
+                stiffness: jc.stiffness,
+                damping: jc.damping,
+                break_force: jc.break_force,
+                broken: jc.broken || broken.contains(&e.index()),
+                reported: jc.broken,
+                target: jc.target.map(|t| (DVec3::from(t) - origin).as_vec3()),
+                force: 0.0,
+                built_from: crate::joints::JointShape::of(jc),
+            });
+            // A joined pair does not collide unless asked to: a hinged arm
+            // sits inside the shoulder it hangs from.
+            if let Some(bi) = b
+                && !jc.collide_connected
+            {
+                let ob = self.world.bodies[bi].owner;
+                self.world.ignore_pair(e.index(), ob, None);
+            }
+        }
+        self.world.joints = out;
+    }
+
+    /// Keep each joint's settings in step with its component (an Inspector
+    /// edit, a script turning a motor on or moving a target), and hand back
+    /// what the physics learned: whether it broke, and the force it carried.
+    pub fn sync_joints(&mut self, ecs: &mut World) {
+        use floptle_core::joint::JointKind;
+        // A joint added, removed or reshaped since the last build (a script's
+        // `setJoint`, an Inspector edit while playing) rebuilds them all,
+        // keeping whatever has broken broken.
+        let wanted: Vec<(u32, crate::joints::JointShape)> = ecs
+            .query::<floptle_core::joint::Joint>()
+            .filter(|(e, _)| self.map.iter().any(|l| l.entity == *e))
+            .map(|(e, j)| (e.index(), crate::joints::JointShape::of(j)))
+            .collect();
+        let built: Vec<(u32, crate::joints::JointShape)> =
+            self.world.joints.iter().map(|j| (j.owner, j.built_from.clone())).collect();
+        if wanted != built {
+            self.build_joints(ecs);
+        }
+        let origin = self.world.origin;
+        for j in &mut self.world.joints {
+            let Some(e) = self.map.iter().find(|l| l.entity.index() == j.owner).map(|l| l.entity) else { continue };
+            let Some(jc) = ecs.get_mut::<floptle_core::joint::Joint>(e) else { continue };
+            let angular = matches!(j.kind, JointKind::Hinge | JointKind::Wheel);
+            j.motor = jc.motor;
+            j.motor_speed = if angular { jc.motor_speed.to_radians() } else { jc.motor_speed };
+            j.max_force = jc.max_force;
+            j.stiffness = jc.stiffness;
+            j.damping = jc.damping;
+            j.break_force = jc.break_force;
+            j.limit = jc.limit;
+            if j.kind == JointKind::Hinge {
+                j.min = jc.min.to_radians();
+                j.max = jc.max.to_radians();
+            } else {
+                j.min = jc.min;
+                j.max = jc.max;
+            }
+            if jc.length >= 0.0 {
+                j.length = jc.length;
+            }
+            j.target = jc.target.map(|t| (DVec3::from(t) - origin).as_vec3());
+            // A break is reported once; a script that then clears `broken`
+            // mends the joint.
+            if j.broken {
+                if j.reported && !jc.broken {
+                    j.broken = false;
+                    j.reported = false;
+                } else {
+                    jc.broken = true;
+                    j.reported = true;
+                }
+            }
+            jc.force = j.force;
         }
     }
 
@@ -1789,6 +1958,8 @@ impl Sim {
                 asleep: b.asleep,
                 sleep_time: b.sleep_time,
                 drop_through: b.drop_through,
+                orient: b.orient,
+                ang_vel: b.ang_vel,
             }
         })
     }
@@ -1808,6 +1979,9 @@ impl Sim {
                 b.asleep = s.asleep;
                 b.sleep_time = s.sleep_time;
                 b.drop_through = s.drop_through;
+                b.orient = s.orient;
+                b.prev_orient = s.orient;
+                b.ang_vel = s.ang_vel;
                 if let Some(tp) = self.tick_prev.get_mut(l.body) {
                     *tp = p;
                 }
@@ -1842,6 +2016,7 @@ impl Sim {
                 ground_normal: b.ground_normal,
                 wall_normal: b.wall_normal,
                 asleep: b.asleep,
+                ang_vel: b.ang_vel,
             }
         })
     }
@@ -2085,6 +2260,17 @@ impl Sim {
         let Some(bi) = self.map.iter().find(|l| l.entity.index() == eid).map(|l| l.body) else { return };
         self.world.bodies[bi].drop_through = seconds.max(0.0);
         if seconds > 0.0 {
+            self.world.set_asleep(bi, false);
+        }
+    }
+
+    /// Set a turning body's spin about Z, radians a second (`node.spin`). A
+    /// body that does not turn, or whose Z turn is frozen, ignores it.
+    pub fn set_body_spin(&mut self, eid: u32, spin: f32) {
+        let Some(bi) = self.map.iter().find(|l| l.entity.index() == eid).map(|l| l.body) else { return };
+        let b = &mut self.world.bodies[bi];
+        if b.rotates && !b.lock_rot[2] {
+            b.ang_vel.z = spin;
             self.world.set_asleep(bi, false);
         }
     }
@@ -2679,6 +2865,8 @@ mod runtime_body_tests {
             asleep: false,
             sleep_time: 0.0,
             drop_through: 0.0,
+            orient: Quat::IDENTITY,
+            ang_vel: Vec3::ZERO,
         };
         sim.restore_body(e.index(), &server);
         for _ in 0..6 {

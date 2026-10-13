@@ -404,6 +404,7 @@ mod tests {
                         ground_normal: Some([0.0, 1.0, 0.0]),
                         wall_normal: None,
                         asleep: false,
+                        spin: 0.0,
                     },
                 );
                 host.set_bodies(bodies);

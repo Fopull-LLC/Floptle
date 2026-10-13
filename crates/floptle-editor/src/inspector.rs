@@ -6777,6 +6777,177 @@ impl EditorTabViewer<'_> {
         }
     }
 
+    /// The node's joint: what it holds to, where, and how.
+    fn node_joint_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
+        use floptle_core::joint::{Joint, JointKind};
+        let cmd = &mut *self.cmd;
+        let playing = self.playing;
+        let names = self.entity_names;
+        let has_body = self.world.get::<floptle_core::RigidBody>(e).is_some();
+        let Some(j) = self.world.get_mut::<Joint>(e) else { return };
+        let before = (j.kind, j.other.clone(), j.anchor, j.other_anchor, j.axis, j.collide_connected);
+        ui.separator();
+        if component_header_no_copy(ui, "⛓ Joint", true) {
+            cmd.set_joint = Some((e, false));
+            return;
+        }
+        let mut changed = false;
+        ui.indent("joint_props", |ui| {
+            if !has_body {
+                ui.colored_label(
+                    egui::Color32::from_rgb(230, 160, 80),
+                    "needs a Rigidbody on this node to move it",
+                );
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.label("kind");
+                egui::ComboBox::from_id_salt("joint-kind")
+                    .selected_text(j.kind.name())
+                    .show_ui(ui, |ui| {
+                        for k in JointKind::ALL {
+                            changed |= ui.selectable_value(&mut j.kind, k, k.name()).changed();
+                        }
+                    });
+            });
+            ui.small(match j.kind {
+                JointKind::Hinge => "a pin: turns about the anchor",
+                JointKind::Fixed => "a weld: moves as one with the other",
+                JointKind::Distance => "a rod: the anchors stay a set length apart",
+                JointKind::Rope => "a rope: no further apart than its length, slack when closer",
+                JointKind::Spring => "a spring: pulled toward its length",
+                JointKind::Slider => "slides along the other's axis without turning",
+                JointKind::Wheel => "a wheel on the other, on a suspension spring",
+                JointKind::Target => "pulled toward a point a script sets",
+            });
+            if j.kind != JointKind::Target {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("to");
+                    let shown = if j.other.is_empty() { "(where it starts)" } else { j.other.as_str() };
+                    egui::ComboBox::from_id_salt("joint-other")
+                        .selected_text(shown)
+                        .show_ui(ui, |ui| {
+                            changed |= ui
+                                .selectable_label(j.other.is_empty(), "(where it starts)")
+                                .on_hover_text("held to the world, at the anchor's place when play starts")
+                                .clicked()
+                                && {
+                                    j.other.clear();
+                                    true
+                                };
+                            for (o, n) in names {
+                                if *o != e && ui.selectable_label(j.other == *n, n).clicked() {
+                                    j.other = n.clone();
+                                    changed = true;
+                                }
+                            }
+                        });
+                });
+            }
+            let v3 = |ui: &mut egui::Ui, label: &str, v: &mut [f32; 3], hover: &str| {
+                let mut c = false;
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(label).on_hover_text(hover);
+                    for (i, ax) in ["x", "y", "z"].iter().enumerate() {
+                        c |= ui.add(egui::DragValue::new(&mut v[i]).speed(0.01).prefix(format!("{ax} "))).changed();
+                    }
+                });
+                c
+            };
+            changed |= v3(ui, "anchor", &mut j.anchor, "where on this node, in its own space");
+            if !j.other.is_empty() && j.kind != JointKind::Target {
+                changed |= v3(
+                    ui,
+                    "other anchor",
+                    &mut j.other_anchor,
+                    "where on the other node, in its space. All zero: wherever this anchor is when play starts",
+                );
+            }
+            if matches!(j.kind, JointKind::Slider | JointKind::Wheel | JointKind::Hinge) {
+                changed |= v3(
+                    ui,
+                    "axis",
+                    &mut j.axis,
+                    "the slider's rail, the wheel's suspension, or a 3D hinge's axle, in the other node's space",
+                );
+            }
+            if matches!(j.kind, JointKind::Distance | JointKind::Rope | JointKind::Spring) {
+                let mut auto = j.length < 0.0;
+                ui.horizontal_wrapped(|ui| {
+                    if ui.checkbox(&mut auto, "length as placed").changed() {
+                        j.length = if auto { -1.0 } else { 1.0 };
+                        changed = true;
+                    }
+                    if !auto {
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut j.length).speed(0.01).range(0.0..=1000.0).prefix("length "))
+                            .changed();
+                    }
+                });
+            }
+            if matches!(j.kind, JointKind::Hinge | JointKind::Slider) {
+                ui.horizontal_wrapped(|ui| {
+                    changed |= ui.checkbox(&mut j.limit, "limit").changed();
+                    if j.limit {
+                        let unit = if j.kind == JointKind::Hinge { "°" } else { "" };
+                        changed |= ui.add(egui::DragValue::new(&mut j.min).speed(0.5).prefix("min ").suffix(unit)).changed();
+                        changed |= ui.add(egui::DragValue::new(&mut j.max).speed(0.5).prefix("max ").suffix(unit)).changed();
+                    }
+                });
+            }
+            if matches!(j.kind, JointKind::Hinge | JointKind::Slider | JointKind::Wheel) {
+                ui.horizontal_wrapped(|ui| {
+                    changed |= ui.checkbox(&mut j.motor, "motor").changed();
+                    if j.motor {
+                        let unit = if j.kind == JointKind::Slider { "/s" } else { "°/s" };
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut j.motor_speed).speed(1.0).prefix("speed ").suffix(unit))
+                            .on_hover_text("anticlockwise is positive")
+                            .changed();
+                    }
+                });
+            }
+            if j.motor || j.kind == JointKind::Target {
+                changed |= ui
+                    .add(egui::DragValue::new(&mut j.max_force).speed(1.0).range(0.0..=1e7).prefix("max force "))
+                    .on_hover_text("the most the motor or the pull may use; 0 is no limit")
+                    .changed();
+            }
+            if matches!(j.kind, JointKind::Spring | JointKind::Wheel | JointKind::Target) {
+                changed |= crate::responsive::slider(ui, egui::Slider::new(&mut j.stiffness, 0.1..=30.0).logarithmic(true), "stiffness")
+                    .on_hover_text("cycles a second: 1 is soft, 5 firm, 20 nearly rigid")
+                    .changed();
+                changed |= crate::responsive::slider(ui, egui::Slider::new(&mut j.damping, 0.0..=2.0), "damping")
+                    .on_hover_text("0 bounces for ever, 1 settles without overshooting")
+                    .changed();
+            }
+            changed |= ui
+                .add(egui::DragValue::new(&mut j.break_force).speed(1.0).range(0.0..=1e9).prefix("breaks at "))
+                .on_hover_text("the force that breaks the joint; 0 never breaks")
+                .changed();
+            if j.kind != JointKind::Target && !j.other.is_empty() {
+                changed |= ui
+                    .checkbox(&mut j.collide_connected, "collides with the other")
+                    .on_hover_text("off: a hinged arm can sit inside the shoulder it hangs from")
+                    .changed();
+            }
+            if playing {
+                if j.broken {
+                    ui.colored_label(egui::Color32::from_rgb(230, 120, 90), "broken");
+                } else {
+                    ui.small(format!("carrying {:.0} N", j.force));
+                }
+            }
+        });
+        if changed {
+            cmd.inspector_changed = true;
+            // What it holds to and where is built into the simulation; the
+            // rest (motor, spring, limits, breaking) reaches the running
+            // joint every step without rebuilding anything.
+            let after = (j.kind, j.other.clone(), j.anchor, j.other_anchor, j.axis, j.collide_connected);
+            cmd.rebuild_physics |= after != before;
+        }
+    }
+
     /// The node's scripts and their parameters.
     fn node_scripts_ui(&mut self, ui: &mut egui::Ui, e: floptle_core::Entity) {
         let cmd = &mut *self.cmd;
@@ -7243,6 +7414,7 @@ impl EditorTabViewer<'_> {
             // One catalog of (category, label, action) — built from current state.
             enum Add {
                 Rb,
+                Joint,
                 Celestial,
                 Coll,
                 NavExclude,
@@ -7260,6 +7432,9 @@ impl EditorTabViewer<'_> {
             let mut items: Vec<(&str, String, Add)> = Vec::new();
             if !has_rb {
                 items.push(("Physics", "♦  Rigidbody".into(), Add::Rb));
+            }
+            if world.get::<floptle_core::joint::Joint>(e).is_none() {
+                items.push(("Physics", "⛓  Joint".into(), Add::Joint));
             }
             if world.get::<floptle_core::CelestialBody>(e).is_none() {
                 items.push(("Physics", "☉  Celestial Body (orbit rails)".into(), Add::Celestial));
@@ -7399,6 +7574,7 @@ impl EditorTabViewer<'_> {
                                 Add::Net => cmd.add_networked = Some(e),
                                 Add::Coll => cmd.set_collidable = Some((e, true)),
                                 Add::NavExclude => cmd.set_nav_exclude = Some((e, true)),
+                                Add::Joint => cmd.set_joint = Some((e, true)),
                                 Add::Mat => cmd.add_material = Some(e),
                                 Add::Preset(n) => cmd.apply_preset = Some((e, n.clone())),
                                 Add::Script(n) => cmd.attach_named = Some((n.clone(), e)),
@@ -7445,6 +7621,7 @@ impl EditorTabViewer<'_> {
         self.node_networked_ui(ui, e);
         self.node_collider_ui(ui, e);
         self.node_navmesh_exclude_ui(ui, e);
+        self.node_joint_ui(ui, e);
         self.node_scripts_ui(ui, e);
         self.node_objects_and_rig_ui(ui, e);
         self.node_bone_attachment_ui(ui, e);

@@ -947,3 +947,63 @@ fn a_script_sets_a_polygon_body_outline() {
         "a line of corners raised: {logs:?}"
     );
 }
+
+/// `node:setJoint{...}` gives the node a joint to the node handed over (by
+/// index, and by name when it has one); `setJointTarget` aims a target joint;
+/// `removeJoint` lets go; a misspelled kind raises with the kinds it takes.
+#[test]
+fn a_script_joins_two_nodes() {
+    let dir = std::env::temp_dir().join(format!("floptle-joint-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "join",
+        concat!(
+            "function start(node)\n",
+            "  local hook = find('Hook')\n",
+            "  node:setJoint{ kind = 'rope', to = hook, length = 3, anchor = vec2(0, 0.5), breakForce = 50 }\n",
+            "  find('Grabbed'):setJoint{ kind = 'target', stiffness = 6 }\n",
+            "  find('Grabbed'):setJointTarget(vec3(1, 2, 0))\n",
+            "  find('Loose'):removeJoint()\n",
+            "  local ok, err = pcall(function() node:setJoint{ kind = 'rubberband' } end)\n",
+            "  log(tostring(err))\n",
+            "end\n",
+        ),
+    );
+    let mut world = World::default();
+    let me = world.spawn();
+    world.insert(me, Transform::IDENTITY);
+    world.insert(
+        me,
+        Scripts(vec![floptle_core::ScriptInst {
+            kind: "join".into(),
+            enabled: true,
+            params: vec![],
+            refs: vec![],
+            strs: Vec::new(),
+        }]),
+    );
+    let mut named = |name: &str| {
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, floptle_core::Name(name.into()));
+        e
+    };
+    let hook = named("Hook");
+    let grabbed = named("Grabbed");
+    let loose = named("Loose");
+    world.insert(loose, floptle_core::joint::Joint::default());
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    let j = world.get::<floptle_core::joint::Joint>(me).expect("a joint");
+    assert_eq!(j.kind, floptle_core::joint::JointKind::Rope);
+    assert_eq!((j.other_id, j.other.as_str()), (Some(hook.index()), "Hook"));
+    assert_eq!((j.length, j.anchor, j.break_force), (3.0, [0.0, 0.5, 0.0], 50.0));
+    let g = world.get::<floptle_core::joint::Joint>(grabbed).expect("a target joint");
+    assert_eq!(g.kind, floptle_core::joint::JointKind::Target);
+    assert_eq!(g.target, Some([1.0, 2.0, 0.0]));
+    assert!(world.get::<floptle_core::joint::Joint>(loose).is_none(), "removed");
+    let logs: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    assert!(logs.iter().any(|l| l.contains("rubberband") && l.contains("hinge")), "the kinds are named: {logs:?}");
+}

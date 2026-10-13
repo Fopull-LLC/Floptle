@@ -995,6 +995,7 @@ fn bare_map_node(
 ) -> floptle_scene::NodeDoc {
     floptle_scene::NodeDoc {
         camera_2d: None,
+        joint: None,
         sort_mode: None,
         parallax: None,
         id: None,
@@ -3730,6 +3731,7 @@ mod tests {
     fn blank_node() -> floptle_scene::NodeDoc {
         floptle_scene::NodeDoc {
             camera_2d: None,
+            joint: None,
             sort_mode: None,
             parallax: None,
             id: None,

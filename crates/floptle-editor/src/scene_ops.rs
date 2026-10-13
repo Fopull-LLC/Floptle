@@ -208,6 +208,8 @@ impl Editor {
                 .world
                 .get::<floptle_core::camera2d::Camera2D>(e)
                 .map(floptle_scene::Camera2DDoc::from),
+            // …and its joint, so a duplicated wheel is still a wheel.
+            joint: self.world.get::<floptle_core::joint::Joint>(e).map(floptle_scene::JointDoc::from),
             terrain_gen,
             name,
             transform,
@@ -481,6 +483,7 @@ impl Editor {
             light_shadows,
             light_sun,
             camera_2d,
+            joint,
         } = doc;
 
         // `name`, `transform` and `matter` are always written by `insert_doc`,
@@ -503,6 +506,7 @@ impl Editor {
         self.world.remove::<floptle_core::Layer>(e);
         self.world.remove::<floptle_core::Tags>(e);
         self.world.remove::<floptle_core::camera2d::Camera2D>(e);
+        self.world.remove::<floptle_core::joint::Joint>(e);
         self.world.remove::<floptle_core::Sorting>(e);
         self.world.remove::<floptle_core::Parallax>(e);
         self.world.remove::<floptle_core::Lighting2D>(e);
@@ -586,6 +590,7 @@ impl Editor {
             id: None,
             parent_id: None,
             camera_2d: None,
+            joint: None,
             terrain_gen: None,
             name: name.into(),
             transform,
@@ -809,6 +814,7 @@ impl Editor {
                 id: None,
                 parent_id: None,
                 camera_2d: None,
+                joint: None,
                 terrain_gen: None,
                 name,
                 transform: TransformDoc {

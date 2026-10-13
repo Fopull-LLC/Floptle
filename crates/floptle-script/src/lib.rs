@@ -689,6 +689,8 @@ pub struct ScriptHost {
     body_sleep_changes: Rc<RefCell<HashMap<u32, bool>>>,
     /// `node.dropThrough = …` writes this frame (entity index → seconds).
     body_drop_changes: Rc<RefCell<HashMap<u32, f32>>>,
+    /// `node.spin = …` writes this frame (entity index → degrees a second).
+    body_spin_changes: Rc<RefCell<HashMap<u32, f32>>>,
     /// Cross-node position writes on body entities → the driver teleports the
     /// body (see `Shared::body_pos_changes`).
     body_pos_changes: Rc<RefCell<HashMap<u32, [f64; 3]>>>,
@@ -1753,6 +1755,12 @@ pub enum RichSet {
     /// `node:setBodyOutline{...}` — make this node's Rigidbody a 2D polygon
     /// of these corners. Already checked to enclose an area.
     BodyOutline(floptle_core::outline::Outline),
+    /// `node:setJoint{...}` — this node's joint, whole; the other end by
+    /// entity index when a node was handed over. `None`: `removeJoint`.
+    Joint(Option<(floptle_core::joint::Joint, Option<u32>)>),
+    /// `node:setJointTarget(point)` — where a target joint pulls, world
+    /// space; `None` lets go.
+    JointTarget(Option<[f64; 3]>),
     /// `node:setTilemap{...}` — build (or re-shape) a 2D grid on this node.
     MatterTilemap {
         cols: u32,
@@ -2071,6 +2079,8 @@ struct Shared {
     body_height_changes: Rc<RefCell<HashMap<u32, f32>>>,
     body_sleep_changes: Rc<RefCell<HashMap<u32, bool>>>,
     body_drop_changes: Rc<RefCell<HashMap<u32, f32>>>,
+    /// `node.spin = …` writes this frame (entity index → degrees a second).
+    body_spin_changes: Rc<RefCell<HashMap<u32, f32>>>,
     /// Cross-node position writes onto entities that have a physics body —
     /// the driver teleports the body there (otherwise the physics writeback
     /// stomps the transform next frame and the write silently vanishes).
@@ -2243,6 +2253,9 @@ pub struct BodyState {
     /// The solver is skipping this body until something wakes it —
     /// `node.asleep`.
     pub asleep: bool,
+    /// How fast a turning body spins about Z, degrees a second
+    /// (`node.spin`); anticlockwise positive.
+    pub spin: f32,
 }
 
 impl Default for BodyState {
@@ -2256,6 +2269,7 @@ impl Default for BodyState {
             ground_normal: None,
             wall_normal: None,
             asleep: false,
+            spin: 0.0,
         }
     }
 }
@@ -2375,6 +2389,7 @@ mod shipped_script_tests {
                     ground_normal: Some([0.0, 1.0, 0.0]),
                     wall_normal: None,
                     asleep: false,
+                    spin: 0.0,
                 },
             );
             host.set_bodies(bodies);

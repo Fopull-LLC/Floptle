@@ -521,6 +521,8 @@ struct EditorCmd {
     set_collidable: Option<(Entity, bool)>,
     /// Add / remove the navmesh-exclude marker on a node.
     set_nav_exclude: Option<(Entity, bool)>,
+    /// Give a node a Joint (true) or take it off (false).
+    set_joint: Option<(Entity, bool)>,
     /// Toggle the Trigger flag on a Collidable (sensor: events, no blocking).
     set_trigger: Option<(Entity, bool)>,
     /// A structural physics edit happened (e.g. the Rigidbody mode dropdown) —

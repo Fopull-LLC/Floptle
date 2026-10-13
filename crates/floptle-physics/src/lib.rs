@@ -28,6 +28,7 @@ mod body;
 mod character;
 mod compound;
 mod gravity;
+pub mod joints;
 mod pairs;
 mod shapes;
 mod sim;

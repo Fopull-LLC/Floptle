@@ -1,0 +1,509 @@
+//! Joints between bodies, solved once per step after every body has moved.
+//!
+//! Hard links (a pin, a rod, a rope at full stretch, a weld, a slider's rail)
+//! are positional: each pass moves the two ends back together through both
+//! bodies' mass and inertia, and the same correction goes into their speed,
+//! so a chain hangs still rather than ringing. Soft ones (a spring, a wheel's
+//! suspension, a target pull, a motor) act on speed, in a form that stays
+//! stable at any stiffness the step can show.
+
+use floptle_core::joint::JointKind;
+use floptle_core::math::{Quat, Vec3};
+
+use crate::world::PhysicsWorld;
+
+/// One joint in the simulation. Anchors are in their body's own frame (the
+/// body's `pos`, before its turn); a joint to the world keeps its far end in
+/// `world`, sim frame.
+#[derive(Clone, Debug)]
+pub struct JointRt {
+    /// The node the joint is on (entity index).
+    pub owner: u32,
+    pub kind: JointKind,
+    pub a: usize,
+    pub b: Option<usize>,
+    pub anchor_a: Vec3,
+    pub anchor_b: Vec3,
+    /// The far end when there is no other body.
+    pub world: Vec3,
+    /// Axis in B's own frame (the world's, with no B).
+    pub axis: Vec3,
+    /// B's orientation relative to A's when play started, for welds,
+    /// sliders and hinge limits.
+    pub rel0: Quat,
+    pub length: f32,
+    pub limit: bool,
+    /// Radians (hinge) or units (slider).
+    pub min: f32,
+    pub max: f32,
+    pub motor: bool,
+    /// Radians a second (hinge, wheel) or units a second (slider).
+    pub motor_speed: f32,
+    pub max_force: f32,
+    pub stiffness: f32,
+    pub damping: f32,
+    pub break_force: f32,
+    pub broken: bool,
+    /// The break has been written back to the node's component.
+    pub reported: bool,
+    /// Sim-frame point a target joint pulls toward.
+    pub target: Option<Vec3>,
+    /// The largest force the joint carried last step, for breaking and for
+    /// scripts to read.
+    pub force: f32,
+    /// What the joint was built from: its kind, the other node's name, the
+    /// anchors, the axis and whether the pair collides. A component that no
+    /// longer matches is rebuilt.
+    pub built_from: JointShape,
+}
+
+/// The parts of a joint the simulation is built from, as opposed to the
+/// settings it reads every step.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JointShape {
+    pub kind: JointKind,
+    pub other: String,
+    pub other_id: Option<u32>,
+    pub anchor: [f32; 3],
+    pub other_anchor: [f32; 3],
+    pub axis: [f32; 3],
+    pub collide_connected: bool,
+}
+
+impl JointShape {
+    pub fn of(j: &floptle_core::joint::Joint) -> Self {
+        Self {
+            kind: j.kind,
+            other: j.other.clone(),
+            other_id: j.other_id,
+            anchor: j.anchor,
+            other_anchor: j.other_anchor,
+            axis: j.axis,
+            collide_connected: j.collide_connected,
+        }
+    }
+}
+
+/// One end of a joint, as the solver sees it this pass.
+#[derive(Clone, Copy)]
+struct End {
+    /// World anchor point.
+    p: Vec3,
+    /// From the centre of mass to the anchor.
+    r: Vec3,
+    inv_m: f32,
+    inv_i: floptle_core::math::Mat3,
+}
+
+impl End {
+    /// Inverse mass at the anchor along `n`.
+    fn w(&self, n: Vec3) -> f32 {
+        let rn = self.r.cross(n);
+        self.inv_m + rn.dot(self.inv_i * rn)
+    }
+    fn w_ang(&self, n: Vec3) -> f32 {
+        n.dot(self.inv_i * n)
+    }
+}
+
+const ITERATIONS: usize = 8;
+
+impl PhysicsWorld {
+    fn joint_end(&self, bi: Option<usize>, local: Vec3, world: Vec3) -> End {
+        match bi {
+            Some(i) => {
+                let b = &self.bodies[i];
+                let p = b.pos + b.orient * local;
+                let moves = b.live() && !b.kinematic && !b.driven && !b.pushbox_only;
+                End {
+                    p,
+                    r: p - b.com(),
+                    inv_m: if moves { 1.0 / b.mass.max(1e-4) } else { 0.0 },
+                    inv_i: if moves { b.world_inv_inertia() } else { floptle_core::math::Mat3::ZERO },
+                }
+            }
+            None => End { p: world, r: Vec3::ZERO, inv_m: 0.0, inv_i: floptle_core::math::Mat3::ZERO },
+        }
+    }
+
+    fn orient_of(&self, bi: Option<usize>) -> Quat {
+        bi.map_or(Quat::IDENTITY, |i| self.bodies[i].orient)
+    }
+
+    /// Move body `bi` by `lin` at the point offset `r` from its centre of mass
+    /// (a positional impulse), turning it as that implies, and give it the
+    /// matching speed over `dt`.
+    fn joint_shift(&mut self, bi: Option<usize>, r: Vec3, lin: Vec3, dt: f32) {
+        let Some(i) = bi else { return };
+        let b = &mut self.bodies[i];
+        if !b.live() || b.kinematic || b.driven || b.pushbox_only {
+            return;
+        }
+        let inv_m = 1.0 / b.mass.max(1e-4);
+        let inv_i = b.world_inv_inertia();
+        let d = lin * inv_m;
+        let mut lock = d;
+        for axis in 0..3 {
+            if b.lock_pos[axis] {
+                crate::body::set_axis(&mut lock, axis, 0.0);
+            }
+        }
+        b.pos += lock;
+        b.vel += lock / dt;
+        let rot = b.free_spin(inv_i * r.cross(lin));
+        b.turn(rot);
+        b.ang_vel += rot / dt;
+        if lock.length_squared() > 1e-12 || rot.length_squared() > 1e-12 {
+            b.asleep = false;
+            b.sleep_time = 0.0;
+        }
+    }
+
+    /// Turn body `bi` by the angular positional impulse `ang`.
+    fn joint_turn(&mut self, bi: Option<usize>, ang: Vec3, dt: f32) {
+        let Some(i) = bi else { return };
+        let b = &mut self.bodies[i];
+        if !b.live() || b.kinematic || b.driven || b.pushbox_only || !b.rotates {
+            return;
+        }
+        let rot = b.free_spin(b.world_inv_inertia() * ang);
+        b.turn(rot);
+        b.ang_vel += rot / dt;
+        if rot.length_squared() > 1e-12 {
+            b.asleep = false;
+            b.sleep_time = 0.0;
+        }
+    }
+
+    /// Change body `bi`'s speed by the impulse `j` at offset `r`.
+    fn joint_impulse(&mut self, bi: Option<usize>, r: Vec3, j: Vec3) {
+        let Some(i) = bi else { return };
+        let b = &mut self.bodies[i];
+        if !b.live() || b.kinematic || b.driven || b.pushbox_only {
+            return;
+        }
+        let inv_m = 1.0 / b.mass.max(1e-4);
+        let mut dv = j * inv_m;
+        for axis in 0..3 {
+            if b.lock_pos[axis] {
+                crate::body::set_axis(&mut dv, axis, 0.0);
+            }
+        }
+        b.vel += dv;
+        let dw = b.free_spin(b.world_inv_inertia() * r.cross(j));
+        b.ang_vel += dw;
+        if dv.length_squared() > 1e-10 || dw.length_squared() > 1e-10 {
+            b.asleep = false;
+            b.sleep_time = 0.0;
+        }
+    }
+
+    /// Speed of an end's anchor point.
+    fn point_vel(&self, bi: Option<usize>, r: Vec3) -> Vec3 {
+        bi.map_or(Vec3::ZERO, |i| self.bodies[i].vel + self.bodies[i].ang_vel.cross(r))
+    }
+
+    fn ang_vel_of(&self, bi: Option<usize>) -> Vec3 {
+        bi.map_or(Vec3::ZERO, |i| self.bodies[i].ang_vel)
+    }
+
+    /// Bring two anchor points together along `c` (B minus A) as far as
+    /// `amount` of it, returning the positional impulse spent.
+    fn close_gap(&mut self, j: usize, dir: Vec3, gap: f32, dt: f32) -> f32 {
+        let (a, b) = (self.joints[j].a, self.joints[j].b);
+        let ea = self.joint_end(Some(a), self.joints[j].anchor_a, Vec3::ZERO);
+        let eb = self.joint_end(b, self.joints[j].anchor_b, self.joints[j].world);
+        let w = ea.w(dir) + eb.w(dir);
+        if !w.is_finite() || w <= 1e-9 {
+            return 0.0;
+        }
+        let lambda = gap / w;
+        self.joint_shift(Some(a), ea.r, dir * lambda, dt);
+        self.joint_shift(b, eb.r, -dir * lambda, dt);
+        lambda
+    }
+
+    /// Turn B by the rotation vector `err` (and A the other way), shared by
+    /// their inertia, returning the angular impulse spent.
+    fn close_turn(&mut self, j: usize, err: Vec3, dt: f32) -> f32 {
+        let len = err.length();
+        if len < 1e-7 {
+            return 0.0;
+        }
+        let n = err / len;
+        let (a, b) = (self.joints[j].a, self.joints[j].b);
+        let ea = self.joint_end(Some(a), self.joints[j].anchor_a, Vec3::ZERO);
+        let eb = self.joint_end(b, self.joints[j].anchor_b, self.joints[j].world);
+        let w = ea.w_ang(n) + eb.w_ang(n);
+        if !w.is_finite() || w <= 1e-9 {
+            return 0.0;
+        }
+        let lambda = len / w;
+        self.joint_turn(Some(a), -n * lambda, dt);
+        self.joint_turn(b, n * lambda, dt);
+        lambda
+    }
+
+    /// The rotation vector that takes B's orientation to where the joint
+    /// wants it relative to A's: zero when they are as they started.
+    fn weld_error(&self, j: usize) -> Vec3 {
+        let jt = &self.joints[j];
+        let qa = self.orient_of(Some(jt.a));
+        let qb = self.orient_of(jt.b);
+        let want = qa * jt.rel0;
+        let mut d = want * qb.inverse();
+        if d.w < 0.0 {
+            d = -d;
+        }
+        Vec3::new(d.x, d.y, d.z) * 2.0
+    }
+
+    /// How far B has turned relative to A about the joint's axis since play
+    /// started, in radians.
+    fn hinge_angle(&self, j: usize) -> f32 {
+        let jt = &self.joints[j];
+        let qa = self.orient_of(Some(jt.a));
+        let qb = self.orient_of(jt.b);
+        let rel = (qa * jt.rel0).inverse() * qb;
+        let ax = jt.axis.normalize_or(Vec3::Z);
+        let s = Vec3::new(rel.x, rel.y, rel.z).dot(ax);
+        // The turn of A against B is what the limit holds, so it is negated.
+        -2.0 * s.atan2(rel.w)
+    }
+
+    /// Solve every live joint: the hard links positionally over a few passes,
+    /// then the springs and motors on speed. A joint that carried more than
+    /// its `break_force` breaks.
+    pub(crate) fn solve_joints(&mut self, dt: f32) {
+        if self.joints.is_empty() || dt <= 0.0 {
+            return;
+        }
+        for j in 0..self.joints.len() {
+            self.joints[j].force = 0.0;
+        }
+        for _ in 0..ITERATIONS {
+            for j in 0..self.joints.len() {
+                if self.joints[j].broken {
+                    continue;
+                }
+                let spent = self.solve_hard(j, dt);
+                let jt = &mut self.joints[j];
+                jt.force = jt.force.max(spent / (dt * dt));
+            }
+        }
+        for j in 0..self.joints.len() {
+            if self.joints[j].broken {
+                continue;
+            }
+            let spent = self.solve_soft(j, dt);
+            let jt = &mut self.joints[j];
+            jt.force = jt.force.max(spent / dt);
+            if jt.break_force > 0.0 && jt.force > jt.break_force {
+                jt.broken = true;
+            }
+        }
+    }
+
+    fn ends(&self, j: usize) -> (End, End) {
+        let jt = &self.joints[j];
+        (
+            self.joint_end(Some(jt.a), jt.anchor_a, Vec3::ZERO),
+            self.joint_end(jt.b, jt.anchor_b, jt.world),
+        )
+    }
+
+    /// The positional part of a joint, one pass. Returns the impulse spent.
+    fn solve_hard(&mut self, j: usize, dt: f32) -> f32 {
+        let kind = self.joints[j].kind;
+        let (ea, eb) = self.ends(j);
+        let c = eb.p - ea.p;
+        let axis_w = self.orient_of(self.joints[j].b) * self.joints[j].axis.normalize_or(Vec3::Z);
+        let mut spent = 0.0;
+        match kind {
+            JointKind::Hinge | JointKind::Fixed => {
+                if let Some(n) = c.try_normalize() {
+                    spent += self.close_gap(j, n, c.length(), dt);
+                }
+                if kind == JointKind::Fixed {
+                    let e = self.weld_error(j);
+                    spent += self.close_turn(j, e, dt);
+                } else {
+                    // A 3D hinge keeps the two axles in line; a 2D body only
+                    // turns about Z, so its axle is in line already.
+                    let qa = self.orient_of(Some(self.joints[j].a));
+                    let axis_a = qa * (self.joints[j].rel0 * self.joints[j].axis.normalize_or(Vec3::Z));
+                    let e = axis_a.cross(axis_w);
+                    spent += self.close_turn(j, -e, dt);
+                    if self.joints[j].limit {
+                        let th = self.hinge_angle(j);
+                        let (lo, hi) = (self.joints[j].min, self.joints[j].max);
+                        let over = if th < lo { th - lo } else if th > hi { th - hi } else { 0.0 };
+                        if over != 0.0 {
+                            spent += self.close_turn(j, axis_w * over, dt);
+                        }
+                    }
+                }
+            }
+            JointKind::Distance | JointKind::Rope => {
+                let d = c.length();
+                if let Some(n) = c.try_normalize() {
+                    let gap = d - self.joints[j].length;
+                    if kind == JointKind::Distance || gap > 0.0 {
+                        spent += self.close_gap(j, n, gap, dt);
+                    }
+                }
+            }
+            JointKind::Slider | JointKind::Wheel => {
+                // Off the rail: the part of the gap across the axis.
+                let across = c - axis_w * axis_w.dot(c);
+                if let Some(n) = across.try_normalize() {
+                    spent += self.close_gap(j, n, across.length(), dt);
+                }
+                if kind == JointKind::Slider {
+                    let e = self.weld_error(j);
+                    spent += self.close_turn(j, e, dt);
+                    if self.joints[j].limit {
+                        // Travel of this node along the rail from the other's
+                        // anchor; past a limit it is moved back along it.
+                        let s = -axis_w.dot(c);
+                        let (lo, hi) = (self.joints[j].min, self.joints[j].max);
+                        let over = if s < lo { s - lo } else if s > hi { s - hi } else { 0.0 };
+                        if over != 0.0 {
+                            spent += self.close_gap(j, -axis_w, over, dt);
+                        }
+                    }
+                }
+            }
+            JointKind::Spring | JointKind::Target => {}
+        }
+        spent
+    }
+
+    /// A soft constraint's impulse along `n` for a gap `c` and the speed
+    /// apart `vn`: a spring of `freq` cycles a second, critically damped at
+    /// `zeta` = 1. The form from Box2D's soft step, stable at any frequency.
+    fn soft_impulse(w: f32, c: f32, vn: f32, freq: f32, zeta: f32, dt: f32) -> f32 {
+        if !w.is_finite() || w <= 1e-9 || freq <= 0.0 {
+            return 0.0;
+        }
+        let omega = std::f32::consts::TAU * freq;
+        let a1 = 2.0 * zeta + dt * omega;
+        let a2 = dt * omega * a1;
+        let bias_rate = omega / a1;
+        let mass_scale = a2 / (1.0 + a2);
+        -(1.0 / w) * mass_scale * (vn + bias_rate * c)
+    }
+
+    /// The speed part of a joint, once a step. Returns the impulse spent.
+    fn solve_soft(&mut self, j: usize, dt: f32) -> f32 {
+        let jt = self.joints[j].clone();
+        let (ea, eb) = self.ends(j);
+        let axis_w = self.orient_of(jt.b) * jt.axis.normalize_or(Vec3::Z);
+        let mut spent = 0.0;
+        match jt.kind {
+            JointKind::Spring => {
+                let c = eb.p - ea.p;
+                if let Some(n) = c.try_normalize() {
+                    let gap = c.length() - jt.length;
+                    // Apart speed of B from A along the line between them.
+                    let vn = (self.point_vel(jt.b, eb.r) - self.point_vel(Some(jt.a), ea.r)).dot(n);
+                    let w = ea.w(n) + eb.w(n);
+                    let l = Self::soft_impulse(w, gap, vn, jt.stiffness, jt.damping, dt);
+                    self.joint_impulse(Some(jt.a), ea.r, -n * l);
+                    self.joint_impulse(jt.b, eb.r, n * l);
+                    spent += l.abs();
+                }
+            }
+            JointKind::Wheel => {
+                // Suspension: this node (the wheel) held at the other's mount
+                // along the axis by a spring.
+                let c = ea.p - eb.p;
+                let s = axis_w.dot(c);
+                let vn = (self.point_vel(Some(jt.a), ea.r) - self.point_vel(jt.b, eb.r)).dot(axis_w);
+                let w = ea.w(axis_w) + eb.w(axis_w);
+                let l = Self::soft_impulse(w, s, vn, jt.stiffness, jt.damping, dt);
+                self.joint_impulse(Some(jt.a), ea.r, axis_w * l);
+                self.joint_impulse(jt.b, eb.r, -axis_w * l);
+                spent += l.abs();
+                if jt.motor {
+                    // The wheel turns about its axle, Z of what it hangs from,
+                    // at the motor's speed relative to it.
+                    let axle = self.orient_of(jt.b) * Vec3::Z;
+                    let rel = (self.ang_vel_of(Some(jt.a)) - self.ang_vel_of(jt.b)).dot(axle);
+                    let w = ea.w_ang(axle) + eb.w_ang(axle);
+                    spent += self.motor_turn(&jt, axle, rel, w, dt, true);
+                }
+            }
+            JointKind::Hinge if jt.motor => {
+                // This node turns relative to the other at the motor's speed.
+                let rel = (self.ang_vel_of(Some(jt.a)) - self.ang_vel_of(jt.b)).dot(axis_w);
+                let w = ea.w_ang(axis_w) + eb.w_ang(axis_w);
+                spent += self.motor_turn(&jt, axis_w, rel, w, dt, true);
+            }
+            JointKind::Slider if jt.motor => {
+                // This node slides along the rail at the motor's speed.
+                let rel = (self.point_vel(Some(jt.a), ea.r) - self.point_vel(jt.b, eb.r)).dot(axis_w);
+                let w = ea.w(axis_w) + eb.w(axis_w);
+                if w > 1e-9 {
+                    let mut l = (jt.motor_speed - rel) / w;
+                    if jt.max_force > 0.0 {
+                        let cap = jt.max_force * dt;
+                        l = l.clamp(-cap, cap);
+                    }
+                    self.joint_impulse(Some(jt.a), ea.r, axis_w * l);
+                    self.joint_impulse(jt.b, eb.r, -axis_w * l);
+                    spent += l.abs();
+                }
+            }
+            JointKind::Target => {
+                if let Some(t) = jt.target {
+                    let c = ea.p - t;
+                    let v = self.point_vel(Some(jt.a), ea.r);
+                    let mut total = Vec3::ZERO;
+                    for n in [Vec3::X, Vec3::Y, Vec3::Z] {
+                        let w = ea.w(n);
+                        total += n * Self::soft_impulse(w, c.dot(n), v.dot(n), jt.stiffness, jt.damping, dt);
+                    }
+                    if jt.max_force > 0.0 {
+                        let cap = jt.max_force * dt;
+                        if total.length() > cap {
+                            total = total.normalize() * cap;
+                        }
+                    }
+                    self.joint_impulse(Some(jt.a), ea.r, total);
+                    spent += total.length();
+                }
+            }
+            _ => {}
+        }
+        spent
+    }
+
+    /// Drive the relative spin about `axle` toward the motor's speed, within
+    /// its force. `on_a` drives this node; otherwise the other end.
+    fn motor_turn(&mut self, jt: &JointRt, axle: Vec3, rel: f32, w: f32, dt: f32, on_a: bool) -> f32 {
+        if !w.is_finite() || w <= 1e-9 {
+            return 0.0;
+        }
+        let mut l = (jt.motor_speed - rel) / w;
+        if jt.max_force > 0.0 {
+            let cap = jt.max_force * dt;
+            l = l.clamp(-cap, cap);
+        }
+        let (fwd, back) = if on_a { (Some(jt.a), jt.b) } else { (jt.b, Some(jt.a)) };
+        for (bi, sign) in [(fwd, 1.0f32), (back, -1.0)] {
+            if let Some(i) = bi {
+                let b = &mut self.bodies[i];
+                if b.live() && !b.kinematic && !b.driven && b.rotates {
+                    let dw = b.free_spin(b.world_inv_inertia() * axle * (l * sign));
+                    b.ang_vel += dw;
+                    if dw.length_squared() > 1e-10 {
+                        b.asleep = false;
+                        b.sleep_time = 0.0;
+                    }
+                }
+            }
+        }
+        l.abs()
+    }
+}
