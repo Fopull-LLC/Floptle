@@ -5288,12 +5288,22 @@ impl EditorTabViewer<'_> {
                 Some(m) => (matter_icon(m), matter_kind_label(m), matches!(m, Matter::Terrain { .. })),
                 None => ("◎", "Type", false),
             };
-            let (copy, paste, _) = component_header(
+            // A type you added can be taken off again, leaving an Empty
+            // node with its children and other components. Not an Empty
+            // (nothing to take off) or the scene's own sky and post chain,
+            // which every scene has exactly one of.
+            let removable = world.get::<Matter>(e).is_some_and(|m| {
+                !matches!(m, Matter::Empty | Matter::Skybox { .. } | Matter::PostProcess { .. })
+            });
+            let (copy, paste, remove) = component_header(
                 ui,
                 &format!("{icon} {label}"),
                 !is_terrain && matches!(clip, Some(ComponentClip::Matter(_))),
-                false,
+                removable,
             );
+            if remove {
+                cmd.clear_type = Some(e);
+            }
             if copy && !is_terrain
                 && let Some(m) = world.get::<Matter>(e) {
                     cmd.copy_component = Some(ComponentClip::Matter(m.clone()));

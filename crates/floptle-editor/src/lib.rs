@@ -442,6 +442,8 @@ struct EditorCmd {
     /// Add / remove a physics RigidBody on this entity.
     add_rigidbody: Option<Entity>,
     remove_rigidbody: Option<Entity>,
+    /// Take the node's type off, leaving it an Empty.
+    clear_type: Option<Entity>,
     /// Trace a polygon body's outline from its sprite's art.
     trace_body_outline: Option<Entity>,
     add_celestial: Option<Entity>,

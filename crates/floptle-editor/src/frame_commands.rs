@@ -725,6 +725,17 @@ impl Editor {
             }
             self.rebuild_sim();
         }
+        if let Some(e) = cmd.clear_type.take() {
+            self.record();
+            for e in self.selected_group(e) {
+                if self.world.get::<Matter>(e).is_some_and(|m| {
+                    !matches!(m, Matter::Skybox { .. } | Matter::PostProcess { .. })
+                }) {
+                    self.world.insert(e, Matter::Empty);
+                }
+            }
+            self.rebuild_sim();
+        }
         if let Some(e) = cmd.remove_rigidbody.take() {
             self.record();
             for e in self.selected_group(e) {
@@ -1719,5 +1730,47 @@ impl Editor {
                     self.import_model(&path);
                 }
             }
+    }
+}
+
+#[cfg(all(test, feature = "editor-ui"))]
+mod type_removal_tests {
+    use floptle_core::Matter;
+
+    /// A Sprite added to a node can be taken off again: the node becomes an
+    /// Empty, keeping its other components. The type's header used to offer
+    /// no remove at all.
+    #[test]
+    fn removing_a_sprite_leaves_an_empty_node() {
+        let mut ed = crate::Editor::default();
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::transform::Transform::IDENTITY);
+        ed.world.insert(e, Matter::Sprite { ppu: 16.0, size: 1.0, cell: 0, flip_x: false, flip_y: false, pivot: [0.5, 0.5] });
+        ed.world.insert(e, floptle_core::Tags(vec!["crate".into()]));
+        ed.select_single(e);
+        let cmd = crate::EditorCmd { clear_type: Some(e), ..Default::default() };
+        ed.apply_frame_commands(cmd, false);
+        assert!(matches!(ed.world.get::<Matter>(e), Some(Matter::Empty)));
+        assert!(ed.world.get::<floptle_core::Tags>(e).is_some(), "its other components stay");
+    }
+
+    /// The sky is every scene's own; its type is not removable.
+    #[test]
+    fn the_sky_keeps_its_type() {
+        let mut ed = crate::Editor::default();
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::transform::Transform::IDENTITY);
+        ed.world.insert(e, Matter::Skybox {
+            color: [0.5; 3],
+            size: 100.0,
+            texture: None,
+            tint: [1.0; 3],
+            shader: None,
+            shader_params: Default::default(),
+        });
+        ed.select_single(e);
+        let cmd = crate::EditorCmd { clear_type: Some(e), ..Default::default() };
+        ed.apply_frame_commands(cmd, false);
+        assert!(matches!(ed.world.get::<Matter>(e), Some(Matter::Skybox { .. })));
     }
 }
