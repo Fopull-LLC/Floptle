@@ -927,7 +927,7 @@ The floor the body is standing on, as a vec3 normal — nil when airborne, so it
 
 ### `node.grounded`
 
-True while the rigidbody rests on a surface (read-only). Gate jumps on it.
+True while the rigidbody rests on a surface it can stand on (read-only). Gate jumps on it. A one-way platform counts once the body is standing on its top: not while it rises up through it, and not while node.dropThrough is letting it fall through. The same whether the engine applies the body's gravity or a script does.
 
 ### `node.height`
 
