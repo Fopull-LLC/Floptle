@@ -33,6 +33,7 @@ use std::collections::HashMap;
 
 use floptle_core::math::Vec3;
 
+use crate::chunk_data::ChunkData;
 use crate::terrain::{Brush, BrushProfile};
 
 /// Exact signed distance to an axis-aligned box: negative inside, positive outside,
@@ -48,8 +49,8 @@ fn box_sdf(p: Vec3, center: Vec3, half: Vec3) -> f32 {
 /// brush-dirty granularity and a sub-millisecond remesh unit. 16³ doubles per-chunk
 /// overhead; 64³ makes remesh and LOD rings too coarse.
 pub const CHUNK: i32 = 32;
-const CHUNK_U: usize = CHUNK as usize;
-const CHUNK_VOXELS: usize = CHUNK_U * CHUNK_U * CHUNK_U;
+pub(crate) const CHUNK_U: usize = CHUNK as usize;
+pub(crate) const CHUNK_VOXELS: usize = CHUNK_U * CHUNK_U * CHUNK_U;
 
 /// Narrow-band half-width, in voxels. Distances are stored clamped to ±(band × voxel).
 /// 4 gives the mesher and gradient stencils plenty of room either side of the surface.
@@ -68,17 +69,6 @@ enum Chunk {
     Data(Box<ChunkData>),
 }
 
-#[derive(Clone)]
-struct ChunkData {
-    dist: Vec<f32>,        // CHUNK_VOXELS, x-fastest
-    color: Vec<[u8; 4]>,   // parallel to dist
-}
-
-impl std::fmt::Debug for ChunkData {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ChunkData({} voxels)", self.dist.len())
-    }
-}
 
 /// Chunk coordinate → the chunk containing global voxel `i`.
 #[inline]
@@ -177,7 +167,13 @@ impl ChunkField {
 
     /// Resident bytes of voxel data — what the 192 MB dense field is measured against.
     pub fn memory_bytes(&self) -> usize {
-        self.data_chunks() * CHUNK_VOXELS * (4 + 4)
+        self.chunks
+            .values()
+            .map(|c| match c {
+                Chunk::Data(d) => d.heap_bytes(),
+                Chunk::Uniform(_) => 0,
+            })
+            .sum()
     }
 
     /// Every stored chunk coordinate — data and uniform sentinels. The undo-snapshot
@@ -257,14 +253,14 @@ impl ChunkField {
         match self.chunks.get(&chunk_of(i)) {
             None => self.band(),
             Some(Chunk::Uniform(v)) => *v,
-            Some(Chunk::Data(d)) => d.dist[local_of(i)],
+            Some(Chunk::Data(d)) => d.dist(local_of(i)),
         }
     }
 
     #[inline]
     fn color_at(&self, i: [i32; 3]) -> [u8; 4] {
         match self.chunks.get(&chunk_of(i)) {
-            Some(Chunk::Data(d)) => d.color[local_of(i)],
+            Some(Chunk::Data(d)) => d.color(local_of(i)),
             _ => self.base_color,
         }
     }
@@ -329,10 +325,7 @@ impl ChunkField {
         let base = self.base_color;
         let entry = self.chunks.entry(c).or_insert(Chunk::Uniform(band));
         if let Chunk::Uniform(v) = *entry {
-            *entry = Chunk::Data(Box::new(ChunkData {
-                dist: vec![v; CHUNK_VOXELS],
-                color: vec![base; CHUNK_VOXELS],
-            }));
+            *entry = Chunk::Data(Box::new(ChunkData::new(v, base)));
         }
         match entry {
             Chunk::Data(d) => d,
@@ -345,9 +338,9 @@ impl ChunkField {
         let band = BAND_VOXELS * self.voxel;
         let li = local_of(i);
         let data = self.data_mut(chunk_of(i));
-        data.dist[li] = d.clamp(-band, band);
+        data.set_dist(li, d.clamp(-band, band));
         if let Some(c) = color {
-            data.color[li] = c;
+            data.set_color(li, c);
         }
     }
 
@@ -362,8 +355,17 @@ impl ChunkField {
     /// grazed and a ring of their neighbours, six times, at seven hash lookups a
     /// voxel, which was most of a second per building pad.
     ///
+    /// Only voxels `may_write` accepts are changed; the rest are read but kept. A
+    /// brush that must not reach past its own extent says so here, because the
+    /// projection otherwise carries an edit on, sweep by sweep, into rock the
+    /// brush itself left alone.
+    ///
     /// Returns the chunks it changed, which can spill one voxel past the write.
-    fn renormalize_from(&mut self, mut active: Vec<[i32; 3]>) -> Vec<[i32; 3]> {
+    fn renormalize_from(
+        &mut self,
+        mut active: Vec<[i32; 3]>,
+        may_write: impl Fn([i32; 3]) -> bool,
+    ) -> Vec<[i32; 3]> {
         const NEIGHBOURS: [(i32, i32, i32); 6] =
             [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)];
         let h = self.voxel;
@@ -387,6 +389,9 @@ impl ChunkField {
             {
                 let mut read = VoxelReader::new(self);
                 for &i in &active {
+                    if !may_write(i) {
+                        continue;
+                    }
                     let cur = read.at(i);
                     if cur.abs() >= band {
                         continue; // saturated plateau: zero gradient by design
@@ -418,7 +423,7 @@ impl ChunkField {
                 let li = local_of(i);
                 let c = chunk_of(i);
                 let data = self.data_mut(c);
-                data.dist[li] = v.clamp(-band, band);
+                data.set_dist(li, v.clamp(-band, band));
                 changed.push(c);
                 active.push(i);
             }
@@ -468,22 +473,37 @@ impl ChunkField {
         // Clamping each voxel into the interval its neighbours allow is the standard
         // alternating projection; a few sweeps converge, and a dab only perturbs the
         // field a voxel or two from where it wrote.
+        //
+        // Each chunk's sweep reads only its own voxels and the one-voxel apron
+        // around them, gathered into a flat block so the stencil is array
+        // indexing rather than seven hash lookups a voxel, and the chunks are
+        // independent within a sweep, so they share out across threads.
+        const DIM: usize = CHUNK_U + 2;
         for _ in 0..6 {
-            let mut writes: Vec<([i32; 3], f32)> = Vec::new();
-            for c in &region {
-                for lz in 0..CHUNK {
-                    for ly in 0..CHUNK {
-                        for lx in 0..CHUNK {
-                            let i = [c[0] * CHUNK + lx, c[1] * CHUNK + ly, c[2] * CHUNK + lz];
-                            let cur = self.voxel_at(i);
+            let sweep = par_map(region.len(), |k| {
+                let c = region[k];
+                let lo = [c[0] * CHUNK - 1, c[1] * CHUNK - 1, c[2] * CHUNK - 1];
+                let (mut dist, mut color) = (Vec::new(), Vec::new());
+                self.gather(lo, DIM, &mut dist, &mut color);
+                let at = |x: usize, y: usize, z: usize| dist[(z * DIM + y) * DIM + x];
+                let mut writes: Vec<(usize, f32)> = Vec::new();
+                for lz in 0..CHUNK_U {
+                    for ly in 0..CHUNK_U {
+                        for lx in 0..CHUNK_U {
+                            let (x, y, z) = (lx + 1, ly + 1, lz + 1);
+                            let cur = at(x, y, z);
                             if cur.abs() >= band {
                                 continue; // saturated plateau: zero gradient by design
                             }
                             let (mut lo, mut hi) = (f32::NEG_INFINITY, f32::INFINITY);
-                            for (dx, dy, dz) in
-                                [(-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)]
-                            {
-                                let n = self.voxel_at([i[0] + dx, i[1] + dy, i[2] + dz]);
+                            for n in [
+                                at(x - 1, y, z),
+                                at(x + 1, y, z),
+                                at(x, y - 1, z),
+                                at(x, y + 1, z),
+                                at(x, y, z - 1),
+                                at(x, y, z + 1),
+                            ] {
                                 // A saturated neighbour is a bound we don't trust — it
                                 // says "at least band away", not "exactly band away".
                                 if n.abs() >= band {
@@ -504,21 +524,26 @@ impl ChunkField {
                                 cur.clamp(lo, hi)
                             };
                             if (next - cur).abs() > 1e-6 {
-                                writes.push((i, next));
+                                writes.push(((lz * CHUNK_U + ly) * CHUNK_U + lx, next));
                             }
                         }
                     }
                 }
-            }
-            if writes.is_empty() {
+                writes
+            });
+            if sweep.iter().all(Vec::is_empty) {
                 break; // already 1-Lipschitz — the common case after a gentle dab
             }
             // Jacobi, not Gauss-Seidel: updating in place would make the result depend
             // on iteration order (and bias the surface along +x).
-            for (i, v) in writes {
-                let li = local_of(i);
-                let data = self.data_mut(chunk_of(i));
-                data.dist[li] = v.clamp(-band, band);
+            for (c, writes) in region.iter().zip(sweep) {
+                if writes.is_empty() {
+                    continue;
+                }
+                let data = self.data_mut(*c);
+                for (li, v) in writes {
+                    data.set_dist(li, v.clamp(-band, band));
+                }
             }
         }
     }
@@ -526,15 +551,20 @@ impl ChunkField {
     /// Collapse chunks whose voxels are all one value back to a sentinel — this is what
     /// keeps a large map's memory proportional to its surface rather than its volume.
     fn compact(&mut self, coords: &[[i32; 3]]) {
+        let band = BAND_VOXELS * self.voxel;
         for c in coords {
-            let uniform = match self.chunks.get(c) {
+            let uniform = match self.chunks.get_mut(c) {
                 Some(Chunk::Data(d)) => {
-                    let first = d.dist[0];
                     // Only collapse fully-saturated chunks: an interior value would lose
                     // real information, a band-saturated one carries none.
-                    let band = BAND_VOXELS * self.voxel;
-                    (first.abs() >= band - 1e-6 && d.dist.iter().all(|v| *v == first))
-                        .then_some(first)
+                    match d.uniform_dist() {
+                        Some(v) if v.abs() >= band - 1e-6 => Some(v),
+                        _ => {
+                            // What stays data is packed down to what it says.
+                            d.shrink();
+                            None
+                        }
+                    }
                 }
                 _ => None,
             };
@@ -592,6 +622,161 @@ fn occupancy(d: f32, voxel: f32) -> f32 {
     (0.5 - d / voxel).clamp(0.0, 1.0)
 }
 
+/// What a generator can say about a block of voxels without evaluating them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockClass {
+    /// Every voxel is at least a band out in open air.
+    Air,
+    /// Every voxel is at least a band deep in solid.
+    Solid,
+    /// Neither is certain: evaluate each voxel.
+    Mixed,
+}
+
+/// A shape [`ChunkField::generate`] can build a field from.
+///
+/// `classify` must never be wrong in the direction of certainty: `Air` or
+/// `Solid` for a block where any voxel is nearer the surface than the band
+/// writes a wall the shape does not have. `Mixed` is always a safe answer.
+pub trait VoxelSource: Sync {
+    /// Working memory one thread keeps across the voxels it samples.
+    type Scratch: Default;
+    /// What is in the world-space box `[lo, hi]`, given the band half-width.
+    fn classify(&self, lo: Vec3, hi: Vec3, band: f32) -> BlockClass;
+    /// The distance at `p`, with its colour, or `None` when it is a band or
+    /// more out in open air (where no colour is needed).
+    fn sample(&self, p: Vec3, band: f32, scratch: &mut Self::Scratch) -> Option<(f32, [u8; 4])>;
+    /// The colour at `p`, which `classify` placed in deep solid.
+    fn solid_color(&self, p: Vec3, scratch: &mut Self::Scratch) -> [u8; 4];
+}
+
+/// Voxels per edge of the blocks [`ChunkField::generate`] classifies.
+const BLOCK: i32 = 4;
+
+/// One chunk of [`ChunkField::generate`]: `None` when it is all open air.
+fn gen_chunk<S: VoxelSource>(
+    c: [i32; 3],
+    ilo: [i32; 3],
+    ihi: [i32; 3],
+    voxel: f32,
+    band: f32,
+    base: [u8; 4],
+    src: &S,
+) -> Option<Chunk> {
+    let mut data: Option<Box<ChunkData>> = None;
+    let fresh = || {
+        Box::new(ChunkData::new(band, base))
+    };
+    let at = |i: [i32; 3]| Vec3::new(i[0] as f32, i[1] as f32, i[2] as f32) * voxel;
+    // The whole chunk first: most of a planet's cube is sky or buried rock.
+    let b = [c[0] * CHUNK, c[1] * CHUNK, c[2] * CHUNK];
+    let s = [b[0].max(ilo[0]), b[1].max(ilo[1]), b[2].max(ilo[2])];
+    let e = [(b[0] + CHUNK - 1).min(ihi[0]), (b[1] + CHUNK - 1).min(ihi[1]), (b[2] + CHUNK - 1).min(ihi[2])];
+    match src.classify(at(s), at(e), band) {
+        BlockClass::Air => return None,
+        // Deep solid is the sentinel `compact` would make of it anyway. (A
+        // chunk cut by the edge of the fill keeps unwritten air in it.)
+        BlockClass::Solid if s == b && e == [b[0] + CHUNK - 1, b[1] + CHUNK - 1, b[2] + CHUNK - 1] => {
+            return Some(Chunk::Uniform(-band));
+        }
+        _ => {}
+    }
+    let (mut solid, mut wrote) = (0usize, 0usize);
+    let mut scratch = S::Scratch::default();
+    let blocks = CHUNK / BLOCK;
+    for bz in 0..blocks {
+        for by in 0..blocks {
+            for bx in 0..blocks {
+                let b = [c[0] * CHUNK + bx * BLOCK, c[1] * CHUNK + by * BLOCK, c[2] * CHUNK + bz * BLOCK];
+                let s = [b[0].max(ilo[0]), b[1].max(ilo[1]), b[2].max(ilo[2])];
+                let e = [
+                    (b[0] + BLOCK - 1).min(ihi[0]),
+                    (b[1] + BLOCK - 1).min(ihi[1]),
+                    (b[2] + BLOCK - 1).min(ihi[2]),
+                ];
+                if s[0] > e[0] || s[1] > e[1] || s[2] > e[2] {
+                    continue;
+                }
+                let class = src.classify(at(s), at(e), band);
+                if class == BlockClass::Air {
+                    continue;
+                }
+                let d = data.get_or_insert_with(fresh);
+                for z in s[2]..=e[2] {
+                    for y in s[1]..=e[1] {
+                        for x in s[0]..=e[0] {
+                            let li = local_of([x, y, z]);
+                            let p = at([x, y, z]);
+                            if class == BlockClass::Solid {
+                                d.set_dist(li, -band);
+                                d.set_color(li, src.solid_color(p, &mut scratch));
+                                solid += 1;
+                                wrote += 1;
+                            } else if let Some((v, col)) = src.sample(p, band, &mut scratch) {
+                                let v = v.clamp(-band, band);
+                                d.set_dist(li, v);
+                                d.set_color(li, col);
+                                solid += usize::from(v == -band);
+                                wrote += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Wholly deep solid is the sentinel `compact` would make of it anyway.
+    if solid == CHUNK_VOXELS {
+        return Some(Chunk::Uniform(-band));
+    }
+    // A block that might have held ground but did not leaves no chunk, as an
+    // unwritten one never existed.
+    data.filter(|_| wrote > 0).map(Chunk::Data)
+}
+
+/// How many threads a bulk field job shares out across: every core but one,
+/// so the frame keeps a core while a planet generates behind it.
+#[cfg(not(target_arch = "wasm32"))]
+fn workers() -> usize {
+    std::thread::available_parallelism().map(|n| n.get().saturating_sub(1)).unwrap_or(1).max(1)
+}
+
+/// `(0..n).map(f)`, shared out across [`workers`]; results in index order.
+#[cfg(not(target_arch = "wasm32"))]
+fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    let threads = workers().min(n);
+    if threads <= 1 {
+        return (0..n).map(f).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut out: Vec<Option<T>> = (0..n).map(|_| None).collect();
+    std::thread::scope(|s| {
+        let job = || {
+            let mut got = Vec::new();
+            loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if i >= n {
+                    break got;
+                }
+                got.push((i, f(i)));
+            }
+        };
+        let handles: Vec<_> = (0..threads).map(|_| s.spawn(job)).collect();
+        for h in handles {
+            for (i, v) in h.join().expect("a field worker panicked") {
+                out[i] = Some(v);
+            }
+        }
+    });
+    out.into_iter().map(|v| v.expect("every index ran")).collect()
+}
+
+/// The web has no threads to share out across: in order, on this one.
+#[cfg(target_arch = "wasm32")]
+fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    (0..n).map(f).collect()
+}
+
 /// Reads voxels with the last chunk it looked up kept to hand: neighbouring
 /// voxels are nearly always in the same chunk, so most reads skip the hash.
 struct VoxelReader<'a> {
@@ -618,7 +803,7 @@ impl<'a> VoxelReader<'a> {
         match chunk {
             None => self.field.band(),
             Some(Chunk::Uniform(v)) => *v,
-            Some(Chunk::Data(d)) => d.dist[local_of(i)],
+            Some(Chunk::Data(d)) => d.dist(local_of(i)),
         }
     }
 }
@@ -827,7 +1012,7 @@ impl ChunkField {
             touched.push(chunk_of(i));
             seeds.push(i);
         }
-        touched.extend(self.renormalize_from(seeds));
+        touched.extend(self.renormalize_from(seeds, |_| true));
         touched.sort_unstable();
         touched.dedup();
         self.compact(&touched);
@@ -912,7 +1097,14 @@ impl ChunkField {
             touched.push(chunk_of(i));
             seeds.push(i);
         }
-        touched.extend(self.renormalize_from(seeds));
+        // The projection keeps to the band and falloff the pad wrote within, plus
+        // half a voxel. Left free it walked the edit down into a cave under the
+        // pad, a voxel a sweep, and filled its roof with rock.
+        let (voxel, limit) = (self.voxel, band + FLATTEN_FALLOFF_VOXELS * self.voxel + 0.5 * self.voxel);
+        touched.extend(self.renormalize_from(seeds, |i| {
+            let p = Vec3::new(i[0] as f32, i[1] as f32, i[2] as f32) * voxel;
+            (p - center).dot(n).abs() <= limit
+        }));
         touched.sort_unstable();
         touched.dedup();
         self.compact(&touched);
@@ -1077,6 +1269,50 @@ impl ChunkField {
         self.compact(&touched);
     }
 
+    /// Generate a fresh field over `[min, max]` from `src`, chunk by chunk on
+    /// every core but one.
+    ///
+    /// The result is the field [`Self::fill_with_rgba`] would write into an empty
+    /// field from the same distances and colours, voxel for voxel. What is
+    /// different is what it costs: [`VoxelSource::classify`] answers for whole
+    /// blocks of voxels first, and a block it can place wholly in open air or
+    /// wholly in deep solid is never evaluated voxel by voxel. A planet's fill
+    /// then costs the shell its surface and caves live in, not the cube around
+    /// it, and that shell is shared out across threads.
+    pub fn generate(voxel: f32, min: Vec3, max: Vec3, src: &impl VoxelSource) -> Self {
+        let mut field = Self::new(voxel.clamp(0.25, 16.0));
+        let (voxel, band) = (field.voxel, field.band());
+        let lo = (min - Vec3::splat(band + voxel)) / voxel;
+        let hi = (max + Vec3::splat(band + voxel)) / voxel;
+        let ilo = [lo.x.floor() as i32, lo.y.floor() as i32, lo.z.floor() as i32];
+        let ihi = [hi.x.ceil() as i32, hi.y.ceil() as i32, hi.z.ceil() as i32];
+        let (c0, c1) = (chunk_of(ilo), chunk_of(ihi));
+        let mut coords = Vec::new();
+        for cz in c0[2]..=c1[2] {
+            for cy in c0[1]..=c1[1] {
+                for cx in c0[0]..=c1[0] {
+                    coords.push([cx, cy, cz]);
+                }
+            }
+        }
+        let base = field.base_color;
+        let chunks = par_map(coords.len(), |k| gen_chunk(coords[k], ilo, ihi, voxel, band, base, src));
+        let mut touched = Vec::new();
+        for (c, chunk) in coords.into_iter().zip(chunks) {
+            if let Some(chunk) = chunk {
+                if matches!(chunk, Chunk::Data(_)) {
+                    touched.push(c);
+                }
+                field.chunks.insert(c, chunk);
+            }
+        }
+        // As `fill_with_rgba`: project back onto 1-Lipschitz, then collapse what
+        // came out uniform.
+        field.renormalize(&touched);
+        field.compact(&touched);
+        field
+    }
+
     /// Collapse fully-saturated chunks to sentinels. Called automatically by the brushes;
     /// exposed for bulk writers that use [`Self::write_voxel`] directly.
     pub fn compact_all(&mut self) {
@@ -1135,8 +1371,7 @@ impl ChunkField {
                                     let n = (ex - sx + 1) as usize;
                                     let sa = si + (sx - bx) as usize;
                                     let da = di + (sx - lo[0]) as usize;
-                                    dist[da..da + n].copy_from_slice(&d.dist[sa..sa + n]);
-                                    color[da..da + n].copy_from_slice(&d.color[sa..sa + n]);
+                                    d.copy_row(sa, n, &mut dist[da..da + n], &mut color[da..da + n]);
                                 }
                             }
                         }
@@ -1350,11 +1585,7 @@ impl ChunkField {
         self.base_color = [rgb[0], rgb[1], rgb[2], self.base_color[3]];
         for c in self.chunks.values_mut() {
             if let Chunk::Data(d) = c {
-                for v in &mut d.color {
-                    v[0] = rgb[0];
-                    v[1] = rgb[1];
-                    v[2] = rgb[2];
-                }
+                d.map_colors(|v| [rgb[0], rgb[1], rgb[2], v[3]]);
             }
         }
     }
@@ -1366,9 +1597,7 @@ impl ChunkField {
         self.base_color[3] = slot;
         for c in self.chunks.values_mut() {
             if let Chunk::Data(d) = c {
-                for v in &mut d.color {
-                    v[3] = slot;
-                }
+                d.map_colors(|v| [v[0], v[1], v[2], slot]);
             }
         }
     }
@@ -1578,7 +1807,7 @@ impl ChunkField {
                     // Distance: i8 in band units, RLE (u16 run, i8 value).
                     let q = |v: f32| ((v / band) * 127.0).round().clamp(-127.0, 127.0) as i8;
                     let mut runs: Vec<(u16, i8)> = Vec::new();
-                    for v in &d.dist {
+                    for v in &(0..CHUNK_VOXELS).map(|li| d.dist(li)).collect::<Vec<_>>() {
                         let qv = q(*v);
                         match runs.last_mut() {
                             Some((n, lv)) if *lv == qv && *n < u16::MAX => *n += 1,
@@ -1592,7 +1821,7 @@ impl ChunkField {
                     }
                     // Colour: RLE (u16 run, RGBA8).
                     let mut cruns: Vec<(u16, [u8; 4])> = Vec::new();
-                    for v in &d.color {
+                    for v in &(0..CHUNK_VOXELS).map(|li| d.color(li)).collect::<Vec<_>>() {
                         match cruns.last_mut() {
                             Some((n, lv)) if lv == v && *n < u16::MAX => *n += 1,
                             _ => cruns.push((1, *v)),
@@ -1678,7 +1907,7 @@ impl ChunkField {
                     if color.len() != CHUNK_VOXELS {
                         return None;
                     }
-                    f.chunks.insert(c, Chunk::Data(Box::new(ChunkData { dist, color })));
+                    f.chunks.insert(c, Chunk::Data(Box::new(ChunkData::from_flat(&dist, &color))));
                 }
                 _ => return None,
             }
@@ -1858,7 +2087,7 @@ impl ChunkUndo {
         self.entries
             .iter()
             .map(|(_, ch)| match ch {
-                Some(Chunk::Data(_)) => CHUNK_VOXELS * 8,
+                Some(Chunk::Data(d)) => d.heap_bytes(),
                 _ => 16,
             })
             .sum()
@@ -2037,16 +2266,23 @@ mod tests {
     /// voxel of its box toward the plane however far below it was, so a cave
     /// under a pad filled solid down to the box's bottom face and was cut there
     /// by a flat wall: a cliff in the field, which a planet shows as an
-    /// axis-aligned plug. Five pads at radius 15 over a cave 15 m down now touch
-    /// nothing more than the band plus two voxels from the plane, and leave no
-    /// cliff across a sign change.
+    /// axis-aligned plug. Five pads at radius 15 over a cave 9 to 15 m down now
+    /// touch nothing more than the band plus two voxels from the plane, and leave
+    /// no cliff across a sign change.
     #[test]
     fn a_flatten_over_a_cave_changes_nothing_far_from_its_plane() {
+        // Roofs just past the brush's reach, where the projection that follows a
+        // write used to carry it on down and fill the cave's top, and one 15 m down,
+        // which the old brush's box (radius + 5 voxels deep) cut through its middle.
+        for roof in [9.0f32, 10.5, 12.0, 15.0] {
+            flatten_over_a_cave(roof);
+        }
+    }
+
+    fn flatten_over_a_cave(roof: f32) {
         let voxel = 1.5;
         let mut f = ChunkField::new(voxel);
-        // A cave whose roof is 15 m under the pad, which the old brush's box
-        // (radius + 5 voxels deep) cut through its middle.
-        let cave = Vec3::new(0.0, -25.0, 0.0);
+        let cave = Vec3::new(0.0, -(roof + 10.0), 0.0);
         f.fill_with(
             Vec3::new(-40.0, -45.0, -40.0),
             Vec3::new(40.0, 6.0, 40.0),
@@ -2079,7 +2315,7 @@ mod tests {
                 far_changed += 1;
             }
         }
-        assert_eq!(far_changed, 0, "{far_changed} voxels further than the band + 2 voxels from the plane changed");
+        assert_eq!(far_changed, 0, "roof {roof} m: {far_changed} voxels further than the band + 2 voxels from the plane changed");
         let mut cliffs = 0;
         for &([x, y, z], d) in &after {
             for n in [[x + 1, y, z], [x, y + 1, z], [x, y, z + 1]] {
@@ -2089,7 +2325,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(cliffs, 0, "the pads left {cliffs} field cliffs across the surface");
+        assert_eq!(cliffs, 0, "roof {roof} m: the pads left {cliffs} field cliffs across the surface");
         // And the pad itself is level.
         for x in [-6.0f32, 0.0, 6.0] {
             let d = f.d(Vec3::new(x, plane.y, 4.0));

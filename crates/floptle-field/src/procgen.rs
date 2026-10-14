@@ -16,7 +16,7 @@
 //! glowing pockets, thin glowing seams and polar ice.
 
 use floptle_core::math::Vec3;
-use floptle_core::noise::{Noise, Rng};
+use floptle_core::noise::{FbmCache, Noise, Rng};
 
 use crate::ChunkField;
 
@@ -150,6 +150,22 @@ fn smax(a: f32, b: f32, k: f32) -> f32 {
     -smin(-a, -b, k)
 }
 
+/// One [`FbmCache`] for each noise a planet's voxel reads: consecutive voxels
+/// of a block mostly share lattice cells, so each call site keeps its own.
+#[derive(Default)]
+pub(crate) struct Caches {
+    bump: FbmCache,
+    a: FbmCache,
+    b: FbmCache,
+    c1: FbmCache,
+    c2: FbmCache,
+    detail: FbmCache,
+    vary: FbmCache,
+    patch: FbmCache,
+    pocket: FbmCache,
+    seam: FbmCache,
+}
+
 /// A planet's shape before it is voxelized: the ground, the craters and the
 /// caves, as a signed distance (negative is rock).
 pub(crate) struct PlanetShape {
@@ -165,11 +181,21 @@ pub(crate) struct PlanetShape {
 
 impl PlanetShape {
     /// The ground alone: negative under it.
+    #[cfg(test)]
     pub(crate) fn body(&self, p: Vec3) -> f32 {
+        self.body_with(p, self.bump(p, &mut FbmCache::default()))
+    }
+
+    /// How far the ground is raised above `radius` in `p`'s direction.
+    fn bump(&self, p: Vec3, cache: &mut FbmCache) -> f32 {
         let r = p.length();
         let dir = if r > 1e-3 { p / r } else { Vec3::X };
-        let bump = self.noise.fbm(dir * self.bump_freq, 5) * self.relief;
-        let mut body = r - (self.radius + bump);
+        self.noise.fbm_cached(dir * self.bump_freq, 5, cache) * self.relief
+    }
+
+    /// [`Self::body`] with the bump already known.
+    fn body_with(&self, p: Vec3, bump: f32) -> f32 {
+        let mut body = p.length() - (self.radius + bump);
         for (c, cr) in &self.craters {
             body = body.max(-((p - *c).length() - cr));
         }
@@ -187,126 +213,409 @@ impl PlanetShape {
     /// scale keeps a wall from being a plane over tens of metres. The crust
     /// gate is a smooth maximum, never below the hard one: no cave comes within
     /// three voxels of the surface.
+    #[cfg(test)]
     pub(crate) fn d(&self, p: Vec3) -> f32 {
-        let body = self.body(p);
-        if self.cave_depth <= 0.0 {
+        self.d_with(p, self.body(p), &mut Caches::default())
+    }
+
+    /// [`Self::d`] with the ground already known.
+    fn d_with(&self, p: Vec3, body: f32, k: &mut Caches) -> f32 {
+        // Within a voxel and a half of the surface, or above it, the crust gate
+        // alone keeps every cave out (`gated ≥ 3·voxel + body ≥ −body`), so
+        // the answer is the ground's and the cave noise need not be asked.
+        if self.cave_depth <= 0.0 || body >= -1.5 * self.voxel + 0.01 {
             return body;
         }
         let noise = &self.noise;
         let r = p.length();
-        let a = noise.fbm(p * 0.018, 3);
-        let b = noise.fbm(p * 0.018 + Vec3::splat(51.7), 3);
+        let a = noise.fbm_cached(p * 0.018, 3, &mut k.a);
+        let b = noise.fbm_cached(p * 0.018 + Vec3::splat(51.7), 3, &mut k.b);
         let w = 0.1 + (-body * 0.0006).clamp(0.0, 0.07);
         let tunnel = (a.hypot(b) - w) * 34.0;
-        let c1 = noise.fbm(p * 0.008 + Vec3::splat(113.0), 2);
-        let c2 = noise.fbm(p * 0.008 + Vec3::splat(7.9), 2);
+        let c1 = noise.fbm_cached(p * 0.008 + Vec3::splat(113.0), 2, &mut k.c1);
+        let c2 = noise.fbm_cached(p * 0.008 + Vec3::splat(7.9), 2, &mut k.c2);
         let chamber = (c1.hypot(c2) - 0.14) * 70.0;
         let ceiling = body + self.cave_depth * 0.42;
-        let detail = noise.fbm(p * 0.07 + Vec3::splat(3.3), 3) * 1.2;
+        let detail = noise.fbm_cached(p * 0.07 + Vec3::splat(3.3), 3, &mut k.detail) * 1.2;
         let cave = smin(tunnel, smax(chamber, ceiling, 6.0), 4.0) + detail;
-        let gated = smax(smax(cave, self.voxel * 3.0 + body, 2.0), -(body + self.cave_depth), 4.0)
+        // The crust and floor joins narrow with a shallow cave zone. At their
+        // full widths the two met in the middle of a moon's few metres of cave
+        // and flattened every cave in it; a zone 20 m deep or more keeps them.
+        let k = (self.cave_depth / 20.0).min(1.0);
+        let gated = smax(smax(cave, self.voxel * 3.0 + body, 2.0 * k), -(body + self.cave_depth), 4.0 * k)
             .max((self.core_r + self.voxel * 6.0) - r);
         body.max(-gated)
     }
 }
 
 /// Fill one planet into a fresh sparse field. Deterministic in `spec`.
+///
+/// Only the shell the ground and the caves live in is evaluated voxel by
+/// voxel, shared out across cores; see [`ChunkField::generate`] and
+/// [`Planet::classify`]. The field is the one a voxel-by-voxel fill of the
+/// whole cube writes, voxel for voxel.
 pub fn generate_planet(spec: &PlanetFill) -> ChunkField {
-    let noise = Noise::new(spec.seed);
-    let mut rng = Rng::new(spec.seed.wrapping_add(31));
-    let mut field = ChunkField::new(spec.voxel.clamp(0.25, 16.0));
+    let planet = Planet::new(spec);
     let ext = spec.radius + spec.relief + 2.0;
-    let (radius, relief, cave_depth, core_r, bump_freq) =
-        (spec.radius, spec.relief, spec.cave_depth, spec.core_r, spec.bump_freq);
-    let spec = spec.clone();
+    ChunkField::generate(spec.voxel, Vec3::splat(-ext), Vec3::splat(ext), &planet)
+}
 
-    // Impact craters: spherical dents subtracted in the fill SDF.
-    let craters: Vec<(Vec3, f32)> = (0..spec.craters)
-        .map(|_| {
-            let d = Vec3::new(
-                rng.range(-1.0, 1.0) as f32,
-                rng.range(-1.0, 1.0) as f32,
-                rng.range(-1.0, 1.0) as f32,
-            )
-            .normalize_or_zero();
-            let d = if d == Vec3::ZERO { Vec3::X } else { d };
-            let r = rng.range(spec.crater_min as f64, spec.crater_max as f64) as f32 * radius;
-            (d * (radius + relief * 0.3), r)
-        })
-        .collect();
-    let craters2 = craters.clone();
-    let voxel = field.voxel();
-    let shape = PlanetShape { noise, radius, relief, cave_depth, core_r, bump_freq, voxel, craters };
+/// A planet ready to voxelize: its shape and its paint.
+pub(crate) struct Planet {
+    shape: PlanetShape,
+    spec: PlanetFill,
+}
 
-    field.fill_with_rgba(
-        Vec3::splat(-ext),
-        Vec3::splat(ext),
-        move |p| shape.d(p),
-        move |p| {
-            let r = p.length();
-            let dir = if r > 1e-3 { p / r } else { Vec3::X };
-            let bump = noise.fbm(dir * bump_freq, 5) * relief;
-            let alt = (r - radius) / relief.max(1.0);
-            let depth = (radius + bump) - r;
-            let vary = noise.fbm(p * 0.05 + Vec3::splat(83.0), 2);
-            let patch = noise.fbm(dir * 9.0 + Vec3::splat(37.0), 3);
+impl Planet {
+    pub(crate) fn new(spec: &PlanetFill) -> Self {
+        let mut rng = Rng::new(spec.seed.wrapping_add(31));
+        let (radius, relief) = (spec.radius, spec.relief);
+        // Impact craters: spherical dents subtracted in the fill SDF.
+        let craters: Vec<(Vec3, f32)> = (0..spec.craters)
+            .map(|_| {
+                let d = Vec3::new(
+                    rng.range(-1.0, 1.0) as f32,
+                    rng.range(-1.0, 1.0) as f32,
+                    rng.range(-1.0, 1.0) as f32,
+                )
+                .normalize_or_zero();
+                let d = if d == Vec3::ZERO { Vec3::X } else { d };
+                let r = rng.range(spec.crater_min as f64, spec.crater_max as f64) as f32 * radius;
+                (d * (radius + relief * 0.3), r)
+            })
+            .collect();
+        let shape = PlanetShape {
+            noise: Noise::new(spec.seed),
+            radius,
+            relief,
+            cave_depth: spec.cave_depth,
+            core_r: spec.core_r,
+            bump_freq: spec.bump_freq,
+            voxel: spec.voxel.clamp(0.25, 16.0),
+            craters,
+        };
+        Planet { shape, spec: spec.clone() }
+    }
 
-            // Molten core zone (usually a glow slot): a deep dig reads hot
-            // before the core itself appears.
-            if spec.core_paint.slot != 0 && cave_depth > 0.0 && r < core_r + core_r.min(10.0) {
-                return rgba(tint(spec.core_paint.color, vary), spec.core_paint.slot);
+    /// The colour a voxel at `p` is painted, the ground there raised `bump`.
+    fn paint(&self, p: Vec3, bump: f32, k: &mut Caches) -> [u8; 4] {
+        let (spec, noise) = (&self.spec, &self.shape.noise);
+        let (radius, relief, cave_depth, core_r) =
+            (self.shape.radius, self.shape.relief, self.shape.cave_depth, self.shape.core_r);
+        let r = p.length();
+        let dir = if r > 1e-3 { p / r } else { Vec3::X };
+        let alt = (r - radius) / relief.max(1.0);
+        let depth = (radius + bump) - r;
+        let vary = noise.fbm_cached(p * 0.05 + Vec3::splat(83.0), 2, &mut k.vary);
+        let patch = noise.fbm_cached(dir * 9.0 + Vec3::splat(37.0), 3, &mut k.patch);
+
+        // Molten core zone (usually a glow slot): a deep dig reads hot
+        // before the core itself appears.
+        if spec.core_paint.slot != 0 && cave_depth > 0.0 && r < core_r + core_r.min(10.0) {
+            return rgba(tint(spec.core_paint.color, vary), spec.core_paint.slot);
+        }
+        // Sparse glowing pockets — the reason to dig.
+        if let Some(pk) = &spec.pockets {
+            let pocket = noise.fbm_cached(p * 0.05 + Vec3::splat(17.3), 3, &mut k.pocket);
+            if depth > pk.min_depth && pocket > pk.threshold {
+                return rgba(tint(pk.paint.color, vary), pk.paint.slot);
             }
-            // Sparse glowing pockets — the reason to dig.
-            if let Some(pk) = &spec.pockets {
-                let pocket = noise.fbm(p * 0.05 + Vec3::splat(17.3), 3);
-                if depth > pk.min_depth && pocket > pk.threshold {
-                    return rgba(tint(pk.paint.color, vary), pk.paint.slot);
-                }
+        }
+        // Vein seams: a thin band of the seam field — filaments through
+        // the rock, not glowing walls.
+        if let Some(sm) = &spec.seam
+            && depth > sm.min_depth
+            && (noise.fbm_cached(p * 0.035 + Vec3::splat(5.9), 3, &mut k.seam) - sm.center).abs() < sm.width
+        {
+            return rgba(tint(sm.paint.color, vary), sm.paint.slot);
+        }
+        // Depth layers: deep cave walls → strata → subsoil.
+        if depth > cave_depth * 0.5 {
+            return rgba(tint(spec.deep.color, vary), spec.deep.slot);
+        }
+        if depth > spec.strata_depth {
+            return rgba(tint(spec.strata.color, vary), spec.strata.slot);
+        }
+        if depth > spec.subsoil_depth {
+            return rgba(tint(spec.subsoil.color, vary), spec.subsoil.slot);
+        }
+        // Crater floors wear dust.
+        for (c, cr) in &self.shape.craters {
+            if (p - *c).length() < cr + 1.6 {
+                return rgba(tint(spec.crater_dust.color, vary), spec.crater_dust.slot);
             }
-            // Vein seams: a thin band of the seam field — filaments through
-            // the rock, not glowing walls.
-            if let Some(sm) = &spec.seam
-                && depth > sm.min_depth
-                && (noise.fbm(p * 0.035 + Vec3::splat(5.9), 3) - sm.center).abs() < sm.width
-            {
-                return rgba(tint(sm.paint.color, vary), sm.paint.slot);
-            }
-            // Depth layers: deep cave walls → strata → subsoil.
-            if depth > cave_depth * 0.5 {
-                return rgba(tint(spec.deep.color, vary), spec.deep.slot);
-            }
-            if depth > spec.strata_depth {
-                return rgba(tint(spec.strata.color, vary), spec.strata.slot);
-            }
-            if depth > spec.subsoil_depth {
-                return rgba(tint(spec.subsoil.color, vary), spec.subsoil.slot);
-            }
-            // Crater floors wear dust.
-            for (c, cr) in &craters2 {
-                if (p - *c).length() < cr + 1.6 {
-                    return rgba(tint(spec.crater_dust.color, vary), spec.crater_dust.slot);
-                }
-            }
-            // Polar caps + frost patches.
-            if let Some((lat, ice)) = &spec.ice_caps
-                && (dir.y.abs() > *lat || patch < -0.42)
-            {
-                return rgba(tint(ice.color, vary), ice.slot);
-            }
-            // Surface biomes.
-            if patch + alt * spec.patch_bias > spec.patch_thr {
-                rgba(tint(spec.surface_a.color, vary), spec.surface_a.slot)
+        }
+        // Polar caps + frost patches.
+        if let Some((lat, ice)) = &spec.ice_caps
+            && (dir.y.abs() > *lat || patch < -0.42)
+        {
+            return rgba(tint(ice.color, vary), ice.slot);
+        }
+        // Surface biomes.
+        if patch + alt * spec.patch_bias > spec.patch_thr {
+            rgba(tint(spec.surface_a.color, vary), spec.surface_a.slot)
+        } else {
+            rgba(tint(spec.surface_b.color, vary), spec.surface_b.slot)
+        }
+    }
+
+    /// Bounds on the ground's raise, [`PlanetShape::bump`], over a box.
+    ///
+    /// The directions a box covers lie in the box of each `p / |p|` component's
+    /// extremes, which `fbm_bounds` can bound the relief noise over.
+    fn bump_bounds(&self, lo: Vec3, hi: Vec3, r_min: f32, r_max: f32) -> (f32, f32) {
+        let s = &self.shape;
+        if r_min <= 1e-3 {
+            return (-s.relief, s.relief);
+        }
+        let axis = |l: f32, h: f32| {
+            let (a, b) = if l >= 0.0 {
+                (l / r_max, h / r_min)
+            } else if h <= 0.0 {
+                (l / r_min, h / r_max)
             } else {
-                rgba(tint(spec.surface_b.color, vary), spec.surface_b.slot)
-            }
-        },
-    );
-    field
+                (l / r_min, h / r_min)
+            };
+            (a.max(-1.0), b.min(1.0))
+        };
+        let (x, y, z) = (axis(lo.x, hi.x), axis(lo.y, hi.y), axis(lo.z, hi.z));
+        let dl = Vec3::new(x.0, y.0, z.0) * s.bump_freq;
+        let dh = Vec3::new(x.1, y.1, z.1) * s.bump_freq;
+        let (bl, bh) = s.noise.fbm_bounds(dl.min(dh), dl.max(dh), 5);
+        let (a, b) = (bl.max(-1.0) * s.relief, bh.min(1.0) * s.relief);
+        (a.min(b), a.max(b))
+    }
+
+    /// A lower bound on the cave field, the `cave` term of [`PlanetShape::d`],
+    /// over a box whose ground (`body`) is at least `body_lo` everywhere.
+    fn cave_lower_bound(&self, lo: Vec3, hi: Vec3, body_lo: f32) -> f32 {
+        let s = &self.shape;
+        let n = &s.noise;
+        let span = |f: f32, off: f32, oct: u32| {
+            n.fbm_bounds(lo * f + Vec3::splat(off), hi * f + Vec3::splat(off), oct)
+        };
+        // The nearest an interval comes to zero.
+        let near0 = |(l, h): (f32, f32)| if l > 0.0 { l } else if h < 0.0 { -h } else { 0.0 };
+        let (a, b) = (span(0.018, 0.0, 3), span(0.018, 51.7, 3));
+        // Galleries widen with depth, so the widest `w` in the box is at its
+        // deepest, `body_lo`.
+        let w = 0.1 + (-body_lo * 0.0006).clamp(0.0, 0.07);
+        let tunnel = (near0(a).hypot(near0(b)) - w) * 34.0;
+        let (c1, c2) = (span(0.008, 113.0, 2), span(0.008, 7.9, 2));
+        let chamber = (near0(c1).hypot(near0(c2)) - 0.14) * 70.0;
+        // The ceiling only raises the cave (smax ≥ max), smin(a, b, k) ≥
+        // min(a, b) − k/4, and the wall detail is at least −1.2.
+        tunnel.min(chamber) - 1.0 - 1.2
+    }
+}
+
+impl crate::VoxelSource for Planet {
+    /// Open air: the box is above the highest ground its directions can have
+    /// (craters only lower ground). Deep solid: below the lowest ground less
+    /// the cave zone, or inside the cave zone where neither the tunnels nor
+    /// the chambers can reach. Anything else is evaluated.
+    fn classify(&self, lo: Vec3, hi: Vec3, band: f32) -> crate::BlockClass {
+        use crate::BlockClass;
+        let s = &self.shape;
+        let margin = s.voxel;
+        let near = Vec3::ZERO.clamp(lo, hi);
+        let far = lo.abs().max(hi.abs());
+        let (r_min, r_max) = (near.length(), far.length());
+        if r_min - (s.radius + s.relief.abs()) >= band + margin {
+            return BlockClass::Air;
+        }
+        let (bump_lo, bump_hi) = self.bump_bounds(lo, hi, r_min, r_max);
+        if r_min - (s.radius + bump_hi) >= band + margin {
+            return BlockClass::Air;
+        }
+        // The highest the ground can be in the box: the plain body, or a
+        // crater's dent, which raises it (a crater is air).
+        let mut body_hi = r_max - (s.radius + bump_lo);
+        for (c, cr) in &s.craters {
+            let q = c.clamp(lo, hi);
+            body_hi = body_hi.max(cr - (*c - q).length());
+        }
+        if s.cave_depth <= 0.0 {
+            return if body_hi <= -(band + margin) { BlockClass::Solid } else { BlockClass::Mixed };
+        }
+        // Below the cave zone: the depth gate alone keeps it solid.
+        if body_hi <= -(s.cave_depth + band + margin) {
+            return BlockClass::Solid;
+        }
+        // In the cave zone, under the crust: solid if no cave reaches the box.
+        let body_lo = r_min - (s.radius + bump_hi);
+        if body_hi <= -(band + margin) && self.cave_lower_bound(lo, hi, body_lo) >= band + margin {
+            return BlockClass::Solid;
+        }
+        BlockClass::Mixed
+    }
+
+    type Scratch = Caches;
+
+    fn sample(&self, p: Vec3, band: f32, k: &mut Caches) -> Option<(f32, [u8; 4])> {
+        let bump = self.shape.bump(p, &mut k.bump);
+        let body = self.shape.body_with(p, bump);
+        if body >= band {
+            return None; // caves only ever open air: `d ≥ body`
+        }
+        let d = self.shape.d_with(p, body, k);
+        (d < band).then(|| (d, self.paint(p, bump, k)))
+    }
+
+    fn solid_color(&self, p: Vec3, k: &mut Caches) -> [u8; 4] {
+        let bump = self.shape.bump(p, &mut k.bump);
+        self.paint(p, bump, k)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fill the generator replaced: every voxel of the cube, one thread.
+    fn fill_every_voxel(spec: &PlanetFill) -> ChunkField {
+        let planet = Planet::new(spec);
+        let mut field = ChunkField::new(spec.voxel.clamp(0.25, 16.0));
+        let ext = spec.radius + spec.relief + 2.0;
+        field.fill_with_rgba(
+            Vec3::splat(-ext),
+            Vec3::splat(ext),
+            |p| planet.shape.d(p),
+            |p| planet.paint(p, planet.shape.bump(p, &mut FbmCache::default()), &mut Caches::default()),
+        );
+        field
+    }
+
+    /// **A small moon keeps caves you can stand in.** The joins that round a
+    /// cave into the crust gate above it and the depth gate below are a few
+    /// metres wide; on a moon whose cave zone is under ten metres deep they met
+    /// in the middle, and the roomiest point of any cave was 1.46 m from a wall.
+    /// Sampled straight down 2,000 directions, some cave keeps 2 m of room.
+    #[test]
+    fn a_small_moon_keeps_caves_tall_enough_to_stand_in() {
+        let radius = 38.7;
+        let spec = PlanetFill {
+            seed: 5150,
+            radius,
+            voxel: 1.5,
+            relief: radius * 0.065,
+            cave_depth: 9.7,
+            core_r: 5.0,
+            ..PlanetFill::default()
+        };
+        let planet = Planet::new(&spec);
+        let mut room = 0.0f32;
+        let mut r = Rng::new(3);
+        for _ in 0..2000 {
+            let d = Vec3::new(r.range(-1.0, 1.0) as f32, r.range(-1.0, 1.0) as f32, r.range(-1.0, 1.0) as f32)
+                .normalize_or_zero();
+            if d == Vec3::ZERO {
+                continue;
+            }
+            let top = radius + spec.relief;
+            let mut t = 0.0f32;
+            while t < spec.relief * 2.0 + spec.cave_depth + 3.0 {
+                let p = d * (top - t);
+                // Below the ground only: a cave, not the sky.
+                if planet.shape.body(p) < 0.0 {
+                    room = room.max(planet.shape.d(p));
+                }
+                t += 0.05;
+            }
+        }
+        assert!(room >= 2.0, "the roomiest cave on the moon is {room:.2} m from a wall");
+    }
+
+    /// [`Planet`], counting the voxels it is asked to evaluate.
+    struct Counting(Planet, std::sync::atomic::AtomicUsize);
+
+    impl crate::VoxelSource for Counting {
+        type Scratch = Caches;
+        fn classify(&self, lo: Vec3, hi: Vec3, band: f32) -> crate::BlockClass {
+            self.0.classify(lo, hi, band)
+        }
+        fn sample(&self, p: Vec3, band: f32, k: &mut Caches) -> Option<(f32, [u8; 4])> {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.0.sample(p, band, k)
+        }
+        fn solid_color(&self, p: Vec3, k: &mut Caches) -> [u8; 4] {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.0.solid_color(p, k)
+        }
+    }
+
+    /// **A planet costs its surface, not its volume.** With the same ground
+    /// and caves, doubling the radius quadruples the shell they live in and
+    /// multiplies the cube around it by eight; the voxels evaluated have to
+    /// follow the shell. And what is kept follows what the chunks say: a
+    /// stored chunk costs well under the 256 KB a flat one did.
+    #[test]
+    fn a_planet_costs_its_shell_not_its_cube() {
+        let run = |radius: f32| {
+            let spec = PlanetFill { seed: 77, radius, voxel: 1.0, relief: 5.0, cave_depth: 12.0, core_r: 4.0, craters: 3, ..PlanetFill::default() };
+            let src = Counting(Planet::new(&spec), Default::default());
+            let ext = spec.radius + spec.relief + 2.0;
+            let field = ChunkField::generate(spec.voxel, Vec3::splat(-ext), Vec3::splat(ext), &src);
+            let cube = (2.0 * (ext + field.band() + 1.0)).powi(3) as usize;
+            (src.1.into_inner(), cube, field)
+        };
+        let (small, small_cube, _) = run(60.0);
+        let (big, big_cube, field) = run(120.0);
+        let growth = big as f32 / small as f32;
+        // A shell of fixed thickness grows a little faster than r² at these
+        // sizes (its volume here grows ×4.3), and the cube grows ×8.
+        assert!(growth < 5.5, "doubling the radius multiplied the evaluated voxels by {growth:.2}; the shell grows by ~4.3, the cube by 8");
+        assert!(big * 2 < big_cube, "{big} of the cube's {big_cube} voxels evaluated");
+        assert!(small < small_cube, "{small} of {small_cube}");
+        let per_chunk = field.memory_bytes() / field.data_chunks().max(1);
+        // About 62 KB here; unfolded solid blocks alone put it near 96 KB.
+        assert!(per_chunk < 80 * 1024, "{per_chunk} bytes a stored chunk; a flat one was 262144");
+    }
+
+    /// **Skipping blocks changes no voxel.** The generator evaluates only the
+    /// blocks it cannot prove are open air or deep solid, on many threads; the
+    /// field it builds must be the one the whole-cube fill builds, distance and
+    /// colour, chunk for chunk — a block wrongly called solid is a wall in a
+    /// cave, and one wrongly called air is a hole in the ground.
+    #[test]
+    fn generating_matches_filling_every_voxel() {
+        let worlds = [
+            // Caves, craters, pockets, seams and ice.
+            PlanetFill {
+                seed: 4242,
+                radius: 70.0,
+                voxel: 1.0,
+                relief: 6.0,
+                cave_depth: 26.0,
+                core_r: 6.0,
+                craters: 5,
+                pockets: Some(GlowPockets { paint: LayerPaint { slot: 7, color: [1.0, 0.4, 0.2] }, threshold: 0.3, min_depth: 4.0 }),
+                seam: Some(SeamSpec { paint: LayerPaint { slot: 6, color: [0.9, 0.9, 0.3] }, min_depth: 8.0, center: 0.3, width: 0.05 }),
+                ice_caps: Some((0.8, LayerPaint { slot: 9, color: [0.9, 0.95, 1.0] })),
+                ..PlanetFill::default()
+            },
+            // A solid body with tall relief and no caves.
+            PlanetFill { seed: 9, radius: 48.0, voxel: 1.5, relief: 9.0, cave_depth: 0.0, craters: 0, ..PlanetFill::default() },
+        ];
+        for spec in &worlds {
+            let (want, got) = (fill_every_voxel(spec), generate_planet(spec));
+            let mut cw = want.all_chunk_coords();
+            let mut cg = got.all_chunk_coords();
+            cw.sort_unstable();
+            cg.sort_unstable();
+            assert_eq!(cw, cg, "the same chunks are stored");
+            assert_eq!(want.data_chunks(), got.data_chunks());
+            let (mut dw, mut colw, mut dg, mut colg) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            for c in cw {
+                let lo = [c[0] * crate::CHUNK, c[1] * crate::CHUNK, c[2] * crate::CHUNK];
+                want.gather(lo, crate::CHUNK as usize, &mut dw, &mut colw);
+                got.gather(lo, crate::CHUNK as usize, &mut dg, &mut colg);
+                for i in 0..dw.len() {
+                    assert!(dw[i] == dg[i] && colw[i] == colg[i], "chunk {c:?} voxel {i}: {} {:?} vs {} {:?}", dw[i], colw[i], dg[i], colg[i]);
+                }
+            }
+        }
+    }
 
     /// The card's Bryolru-like world: radius 200, relief 13, caves to 0.35 r.
     fn bryolru() -> PlanetShape {

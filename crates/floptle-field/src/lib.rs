@@ -23,6 +23,7 @@
 //! - `scalar`   : general scalar/vector spatial fields sampled on the brickmap —
 //!   density `ρ(p)`, gravity potential `Φ(p)`, acceleration `g(p)`.
 
+mod chunk_data;
 pub mod chunks;
 pub mod mesh2sdf;
 pub mod mesher;
@@ -30,7 +31,7 @@ pub mod procgen;
 pub mod terrain;
 
 pub use mesh2sdf::{bake, bake_occluder, BakedSdf, TexRef};
-pub use chunks::{ChunkField, ChunkUndo, FieldSaver, SculptYield, BAND_VOXELS, CHUNK};
+pub use chunks::{BlockClass, ChunkField, ChunkUndo, FieldSaver, SculptYield, VoxelSource, BAND_VOXELS, CHUNK};
 pub use mesher::{mesh_chunk, mesh_field, mesh_scratch, scratch_for_chunk, ChunkMesh, MeshScratch};
 pub use terrain::{Brush, BrushProfile, Falloff, Terrain};
 
