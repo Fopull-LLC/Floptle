@@ -1364,16 +1364,17 @@ impl ChunkField {
                             }
                         }
                         Some(Chunk::Data(d)) => {
-                            for z in sz..=ez {
-                                for y in sy..=ey {
-                                    let si = ((z - bz) as usize * CHUNK_U + (y - by) as usize) * CHUNK_U;
-                                    let di = ((z - lo[2]) as usize * dim + (y - lo[1]) as usize) * dim;
-                                    let n = (ex - sx + 1) as usize;
-                                    let sa = si + (sx - bx) as usize;
-                                    let da = di + (sx - lo[0]) as usize;
-                                    d.copy_row(sa, n, &mut dist[da..da + n], &mut color[da..da + n]);
-                                }
-                            }
+                            let at = ((sz - lo[2]) as usize * dim + (sy - lo[1]) as usize) * dim + (sx - lo[0]) as usize;
+                            d.copy_box(
+                                [(sx - bx) as usize, (sy - by) as usize, (sz - bz) as usize],
+                                [(ex - bx) as usize, (ey - by) as usize, (ez - bz) as usize],
+                                dim,
+                                at,
+                                dist,
+                                color,
+                                band,
+                                self.base_color,
+                            );
                         }
                     }
                 }

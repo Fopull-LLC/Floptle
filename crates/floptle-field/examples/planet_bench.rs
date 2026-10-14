@@ -35,4 +35,20 @@ fn main() {
         field.data_chunks(),
         field.memory_bytes() as f64 / 1e6,
     );
+    if std::env::var("MESH").is_ok() {
+        for stride in [1, 2, 4, 8] {
+            let coords = field.chunk_coords();
+            let t = Instant::now();
+            for c in &coords {
+                std::hint::black_box(floptle_field::mesh_chunk(&field, *c, stride, true));
+            }
+            let mesh = t.elapsed().as_secs_f64() * 1e3 / coords.len() as f64;
+            let t = Instant::now();
+            for c in &coords {
+                std::hint::black_box(floptle_field::scratch_for_chunk(&field, *c, stride));
+            }
+            let gather = t.elapsed().as_secs_f64() * 1e3 / coords.len() as f64;
+            println!("stride {stride}: {mesh:.3} ms a chunk, {gather:.3} of it gathering");
+        }
+    }
 }

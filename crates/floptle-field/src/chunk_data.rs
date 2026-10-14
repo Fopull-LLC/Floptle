@@ -1,4 +1,4 @@
-//! The voxels of one stored chunk, kept in 4³ blocks.
+//! The voxels of one stored chunk, kept in 8³ blocks.
 //!
 //! A chunk the surface passes through is mostly two plateaus, open air above
 //! and saturated solid below, with the band between them; and its colours are
@@ -14,7 +14,7 @@
 use crate::chunks::{CHUNK_U, CHUNK_VOXELS};
 
 /// Voxels per block edge, and per block.
-const B: usize = 4;
+const B: usize = 8;
 const BV: usize = B * B * B;
 /// Blocks per chunk edge, and per chunk.
 const BE: usize = CHUNK_U / B;
@@ -176,38 +176,76 @@ impl ChunkData {
         self.colors = Colors::Raw { fill, pages };
     }
 
-    /// Copy `n` voxels along x from `li` (all in one row of the chunk).
-    pub(crate) fn copy_row(&self, li: usize, n: usize, dist: &mut [f32], color: &mut [[u8; 4]]) {
-        let mut k = 0;
-        while k < n {
-            let (b, i) = split(li + k);
-            // The run left in this block's row.
-            let run = (B - i % B).min(n - k);
-            match self.dist_slot[b] {
-                FILL => dist[k..k + run].fill(self.dist_fill[b]),
-                s => dist[k..k + run].copy_from_slice(&self.dist_pages[s as usize][i..i + run]),
-            }
-            let slot = self.color_slot[b];
-            match &self.colors {
-                Colors::Palette { palette, fill, pages } => {
-                    if slot == FILL {
-                        color[k..k + run].fill(palette[fill[b] as usize]);
-                    } else {
-                        let page = &pages[slot as usize];
-                        for j in 0..run {
-                            color[k + j] = palette[page[i + j] as usize];
+    /// Copy the box of voxels `s ..= e` (chunk-local, per axis) into flat buffers
+    /// `dim` wide, where `s` lands at `at`. A block holding `skip_dist` or
+    /// `skip_color` throughout is not written: the buffers already hold those.
+    ///
+    /// Block by block, so each block's pages are found once, not once a voxel;
+    /// the mesher gathers boxes of a million voxels at coarse strides, and most
+    /// blocks in them are one value.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn copy_box(
+        &self,
+        s: [usize; 3],
+        e: [usize; 3],
+        dim: usize,
+        at: usize,
+        dist: &mut [f32],
+        color: &mut [[u8; 4]],
+        skip_dist: f32,
+        skip_color: [u8; 4],
+    ) {
+        for bz in s[2] / B..=e[2] / B {
+            for by in s[1] / B..=e[1] / B {
+                for bx in s[0] / B..=e[0] / B {
+                    let b = (bz * BE + by) * BE + bx;
+                    let lo = [s[0].max(bx * B), s[1].max(by * B), s[2].max(bz * B)];
+                    let hi = [e[0].min(bx * B + B - 1), e[1].min(by * B + B - 1), e[2].min(bz * B + B - 1)];
+                    let n = hi[0] - lo[0] + 1;
+                    let dslot = self.dist_slot[b];
+                    let dfill = self.dist_fill[b];
+                    let cslot = self.color_slot[b];
+                    let cfill = match &self.colors {
+                        Colors::Palette { palette, fill, .. } => palette[fill[b] as usize],
+                        Colors::Raw { fill, .. } => fill[b],
+                    };
+                    let skip_d = dslot == FILL && dfill.to_bits() == skip_dist.to_bits();
+                    let skip_c = cslot == FILL && cfill == skip_color;
+                    if skip_d && skip_c {
+                        continue;
+                    }
+                    for z in lo[2]..=hi[2] {
+                        for y in lo[1]..=hi[1] {
+                            let d0 = at + ((z - s[2]) * dim + (y - s[1])) * dim + (lo[0] - s[0]);
+                            let i0 = ((z % B) * B + y % B) * B + lo[0] % B;
+                            if !skip_d {
+                                if dslot == FILL {
+                                    dist[d0..d0 + n].fill(dfill);
+                                } else {
+                                    dist[d0..d0 + n].copy_from_slice(&self.dist_pages[dslot as usize][i0..i0 + n]);
+                                }
+                            }
+                            if !skip_c {
+                                if cslot == FILL {
+                                    color[d0..d0 + n].fill(cfill);
+                                } else {
+                                    match &self.colors {
+                                        Colors::Palette { palette, pages, .. } => {
+                                            let page = &pages[cslot as usize];
+                                            for k in 0..n {
+                                                color[d0 + k] = palette[page[i0 + k] as usize];
+                                            }
+                                        }
+                                        Colors::Raw { pages, .. } => {
+                                            color[d0..d0 + n].copy_from_slice(&pages[cslot as usize][i0..i0 + n]);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
-                Colors::Raw { fill, pages } => {
-                    if slot == FILL {
-                        color[k..k + run].fill(fill[b]);
-                    } else {
-                        color[k..k + run].copy_from_slice(&pages[slot as usize][i..i + run]);
-                    }
-                }
             }
-            k += run;
         }
     }
 
@@ -337,7 +375,7 @@ mod tests {
     use super::*;
 
     /// Whatever is written reads back exactly, in any order, through every
-    /// way the chunk is read — one voxel, a row, the uniform check — and
+    /// way the chunk is read — one voxel, a box, the uniform check — and
     /// still does after the chunk is packed down; including a chunk with more
     /// colours than a palette holds.
     #[test]
@@ -371,11 +409,20 @@ mod tests {
                     assert_eq!(d.dist(li).to_bits(), flat_d[li].to_bits(), "dist {li}");
                     assert_eq!(d.color(li), flat_c[li], "color {li}");
                 }
-                let (mut rd, mut rc) = (vec![0.0; 13], vec![[0; 4]; 13]);
-                for row_start in [0, 5 * CHUNK_U + 3, 77 * CHUNK_U + 19] {
-                    d.copy_row(row_start, 13, &mut rd, &mut rc);
-                    assert_eq!(&rd[..], &flat_d[row_start..row_start + 13]);
-                    assert_eq!(&rc[..], &flat_c[row_start..row_start + 13]);
+                // A box straddling blocks, into buffers that skip nothing.
+                let (s0, e0) = ([3usize, 5, 7], [19usize, 26, 30]);
+                let dim = 40;
+                let (mut bd, mut bc) = (vec![f32::NAN; dim * dim * dim], vec![[7u8; 4]; dim * dim * dim]);
+                d.copy_box(s0, e0, dim, 0, &mut bd, &mut bc, f32::NAN, [7, 7, 7, 7]);
+                for z in s0[2]..=e0[2] {
+                    for y in s0[1]..=e0[1] {
+                        for x in s0[0]..=e0[0] {
+                            let li = (z * CHUNK_U + y) * CHUNK_U + x;
+                            let di = ((z - s0[2]) * dim + (y - s0[1])) * dim + (x - s0[0]);
+                            assert_eq!(bd[di].to_bits(), flat_d[li].to_bits(), "box dist {x} {y} {z}");
+                            assert_eq!(bc[di], flat_c[li], "box color {x} {y} {z}");
+                        }
+                    }
                 }
                 assert_eq!(d.uniform_dist(), None);
             }
