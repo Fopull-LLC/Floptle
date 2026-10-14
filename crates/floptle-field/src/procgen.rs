@@ -112,6 +112,11 @@ pub struct PlanetFill {
     pub biomes: Vec<Biome>,
     /// The size of the moisture pattern biomes read (higher is finer).
     pub moisture_scale: f32,
+    /// Leave the buried cave zone ungenerated until something comes near it.
+    /// From outside a planet is its surface, and its caves are most of its
+    /// chunks: a deferred planet fills its surface shell and keeps the rest as
+    /// stand-in rock, made when a dig, a body or the camera reaches it.
+    pub defer_caves: bool,
 }
 
 /// Mountain ranges: `height` at the crests, ranges `coverage` (0..1) of the
@@ -278,6 +283,7 @@ impl Default for PlanetFill {
             rivers: None,
             biomes: Vec::new(),
             moisture_scale: 1.5,
+            defer_caves: false,
         }
     }
 }
@@ -443,7 +449,21 @@ impl PlanetShape {
 pub fn generate_planet(spec: &PlanetFill) -> ChunkField {
     let planet = Planet::new(spec);
     let ext = planet.extent();
+    if spec.defer_caves && spec.cave_depth > 0.0 {
+        return ChunkField::generate_deferring(spec.voxel, Vec3::splat(-ext), Vec3::splat(ext), std::sync::Arc::new(planet));
+    }
     ChunkField::generate(spec.voxel, Vec3::splat(-ext), Vec3::splat(ext), &planet)
+}
+
+/// What makes a deferred planet's pending chunks, for a field loaded from a
+/// file: it knows which chunks are pending but not how to make them. The
+/// spec has to be the one the planet was generated from.
+pub fn pending_source_for(spec: &PlanetFill) -> Option<std::sync::Arc<dyn crate::PendingSource>> {
+    (spec.defer_caves && spec.cave_depth > 0.0).then(|| {
+        let planet = Planet::new(spec);
+        let ext = planet.extent();
+        ChunkField::generate_source(spec.voxel, Vec3::splat(-ext), Vec3::splat(ext), std::sync::Arc::new(planet))
+    })
 }
 
 /// A planet ready to voxelize: its shape and its paint.
@@ -705,6 +725,34 @@ impl crate::VoxelSource for Planet {
         let bump = self.shape.bump(p, &mut k.bump);
         self.paint(p, bump, k)
     }
+
+    /// A chunk wholly below the crust gate holds no outer surface, so all
+    /// that is in it is caves and the rock between them: nothing anyone sees
+    /// from outside. Only those the classifier cannot already settle.
+    fn defer(&self, lo: Vec3, hi: Vec3, band: f32) -> bool {
+        let s = &self.shape;
+        if s.cave_depth <= 0.0 {
+            return false;
+        }
+        let far = lo.abs().max(hi.abs());
+        let corners: [Vec3; 8] = std::array::from_fn(|k| {
+            Vec3::new(
+                if k & 1 == 0 { lo.x } else { hi.x },
+                if k & 2 == 0 { lo.y } else { hi.y },
+                if k & 4 == 0 { lo.z } else { hi.z },
+            )
+        });
+        let near = Vec3::ZERO.clamp(lo, hi);
+        let bump_lo = match &s.ground {
+            Some(relief) => relief.height_bounds(&corners).0,
+            None => self.bump_bounds(lo, hi, near.length(), far.length()).0,
+        };
+        let mut body_hi = far.length() - (s.radius + bump_lo) + s.overhang_reach();
+        for (c, cr) in &s.craters {
+            body_hi = body_hi.max(cr - (*c - c.clamp(lo, hi)).length());
+        }
+        body_hi <= -(3.0 * s.voxel + band + s.voxel) && self.classify(lo, hi, band) == crate::BlockClass::Mixed
+    }
 }
 
 #[cfg(test)]
@@ -809,6 +857,72 @@ mod tests {
         let per_chunk = field.memory_bytes() / field.data_chunks().max(1);
         // About 62 KB here; unfolded solid blocks alone put it near 96 KB.
         assert!(per_chunk < 80 * 1024, "{per_chunk} bytes a stored chunk; a flat one was 262144");
+    }
+
+    /// **A planet whose caves wait is the same planet once they are made.**
+    /// Deferring leaves the buried cave zone as stand-in rock: from outside the
+    /// planet reads as it does when filled whole, and realizing every pending
+    /// chunk gives the same caves, to within the evening-out at chunk faces.
+    /// A dig into it makes what it reaches before reading it, and a save
+    /// keeps the chunks that are still to make.
+    #[test]
+    fn a_deferred_planet_is_the_whole_planet_once_its_caves_are_made() {
+        let spec = PlanetFill { seed: 13, radius: 150.0, voxel: 1.0, relief: 5.0, cave_depth: 70.0, core_r: 8.0, ..PlanetFill::default() };
+        let whole = generate_planet(&spec);
+        let mut deferred = generate_planet(&PlanetFill { defer_caves: true, ..spec.clone() });
+        let pending = deferred.pending_count();
+        assert!(pending > 20, "only {pending} chunks deferred");
+        assert!(deferred.data_chunks() * 10 < whole.data_chunks() * 8, "{} data chunks deferred against {} whole", deferred.data_chunks(), whole.data_chunks());
+        // From outside, the same ground.
+        let mut r = Rng::new(6);
+        for _ in 0..500 {
+            let d = Vec3::new(r.range(-1.0, 1.0) as f32, r.range(-1.0, 1.0) as f32, r.range(-1.0, 1.0) as f32).normalize_or_zero();
+            let (a, b) = (whole.raycast(d * 200.0, -d, 100.0), deferred.raycast(d * 200.0, -d, 100.0));
+            assert_eq!(a.is_some(), b.is_some());
+            if let (Some(a), Some(b)) = (a, b) {
+                assert!((a - b).length() < 1e-3, "the surface moved: {a:?} against {b:?}");
+            }
+        }
+        // A save keeps what is still to make, and the spec makes it.
+        let mut back = ChunkField::from_bytes(&deferred.to_bytes()).expect("the save loads");
+        assert_eq!(back.pending_count(), pending);
+        back.set_pending_source(pending_source_for(&PlanetFill { defer_caves: true, ..spec.clone() }).unwrap());
+        // A dig inside the cave zone makes the chunks it reaches first.
+        let deep = Vec3::new(0.0, spec.radius - 18.0, 0.0);
+        let c = deep.to_array().map(|v| (v / spec.voxel).floor() as i32).map(|i| i.div_euclid(crate::CHUNK));
+        let before = back.pending_count();
+        back.sculpt(crate::Brush::Lower, deep, 2.0, 1.0, crate::BrushProfile::default());
+        assert!(back.pending_count() < before, "the dig left its chunk {c:?} ungenerated");
+        // Every chunk made, in two orders and through a dig: the same caves,
+        // to the bit, whatever was made first; and close to the planet filled
+        // whole, which evened all its chunks out together.
+        let all: Vec<[i32; 3]> = deferred.all_chunk_coords();
+        let mut other = generate_planet(&PlanetFill { defer_caves: true, ..spec.clone() });
+        for c in all.iter().rev() {
+            other.realize(&[*c]);
+        }
+        deferred.realize(&all);
+        assert_eq!(deferred.pending_count(), 0);
+        let (mut differ, mut sign, mut band) = (0usize, 0usize, 0usize);
+        let (mut dw, mut cw, mut dd, mut cd, mut d2, mut c2) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut coords = whole.all_chunk_coords();
+        coords.extend(deferred.all_chunk_coords());
+        coords.sort_unstable();
+        coords.dedup();
+        for ch in coords {
+            let lo = [ch[0] * crate::CHUNK, ch[1] * crate::CHUNK, ch[2] * crate::CHUNK];
+            whole.gather(lo, crate::CHUNK as usize, &mut dw, &mut cw);
+            deferred.gather(lo, crate::CHUNK as usize, &mut dd, &mut cd);
+            other.gather(lo, crate::CHUNK as usize, &mut d2, &mut c2);
+            assert!(dd == d2 && cd == c2, "chunk {ch:?} came out differently made in another order");
+            for i in 0..dw.len() {
+                band += usize::from(dw[i].abs() < whole.band());
+                differ += usize::from((dw[i] - dd[i]).abs() > 0.05 * spec.voxel);
+                sign += usize::from((dw[i] < 0.0) != (dd[i] < 0.0));
+            }
+        }
+        assert!(sign * 1000 < band, "{sign} of {band} band voxels changed side against the planet filled whole");
+        assert!(differ * 50 < band, "{differ} of {band} band voxels differ by more than a twentieth of a voxel");
     }
 
     /// **Mountains taller than the base relief are generated whole.** The fill

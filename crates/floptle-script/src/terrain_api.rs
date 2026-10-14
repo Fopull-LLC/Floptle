@@ -669,7 +669,7 @@ pub(crate) const PLANET_KEYS: &[&str] = &[
     "craterMin", "craterMax", "patchBias", "patchThr", "subsoilDepth", "strataDepth",
     "corePaint", "craterDust", "surfaceA", "surfaceB", "subsoil", "strata", "deep", "pockets",
     "seam", "iceCaps", "mountains", "warp", "plateau", "terrace", "overhangs", "ravines", "rivers",
-    "biomes", "moistureScale",
+    "biomes", "moistureScale", "deferCaves",
 ];
 
 /// The relief layers' inner keys.
@@ -899,6 +899,9 @@ fn relief_layers_from_table(t: &Table, fill: &mut floptle_field::procgen::Planet
     }
     if let Some(v) = t.raw_get::<Option<f64>>("moistureScale").ok().flatten() {
         fill.moisture_scale = v as f32;
+    }
+    if let Some(v) = t.raw_get::<Option<bool>>("deferCaves").ok().flatten() {
+        fill.defer_caves = v;
     }
     Ok(())
 }

@@ -123,3 +123,11 @@ terrain.generatePlanet(1, {
 ## What it costs
 
 A planet with any of these layers works its ground height out once per direction, on a grid about a voxel across, before it fills a voxel. Each voxel then reads the grid instead of evaluating the layers, so they cost little: a 400 m world with mountains, warp, terraces, overhangs, ravines and rivers generates in about a fifth longer than the same world without them, most of that because mountains give it more surface to fill. Rivers are traced on a coarser copy of the same ground, which is why `terrain.planetRivers` answers quickly.
+
+### Leaving the caves for later
+
+From outside, a planet is its surface. Its caves are sealed under at least three voxels of crust, so nothing sees them until a dig breaks in. `deferCaves = true` takes advantage of that: the generator fills the surface and keeps every chunk that lies wholly in the buried cave zone as plain rock, then makes the real chunk the moment a dig, or any edit, reaches it.
+
+On a 400 m world with an 80 m cave zone that leaves about a quarter of the chunks for later, and the planet fills and keeps about a quarter less. A chunk comes out the same whichever order chunks are made in, so two players' games agree on its caves. It is evened out on its own rather than with its neighbours, so where it meets a chunk the first fill made, its walls can sit a hair (well under a voxel) from where filling the whole planet at once would put them.
+
+A saved field remembers which chunks are still to make; the body's generation spec makes them when it is loaded again.

@@ -42,13 +42,16 @@ fn main() {
     } else {
         spec
     };
+    // DEFER=1: leave the buried cave zone for later.
+    let spec = PlanetFill { defer_caves: std::env::var("DEFER").is_ok(), ..spec };
     let t = Instant::now();
     let field = generate_planet(&spec);
     let secs = t.elapsed().as_secs_f64();
     println!(
-        "r {radius} m, voxel {voxel} m, caves {:.0} m: {secs:.2} s, {} data chunks, {:.0} MB",
+        "r {radius} m, voxel {voxel} m, caves {:.0} m: {secs:.2} s, {} data chunks, {} pending, {:.0} MB",
         spec.cave_depth,
         field.data_chunks(),
+        field.pending_count(),
         field.memory_bytes() as f64 / 1e6,
     );
     if std::env::var("MESH").is_ok() {

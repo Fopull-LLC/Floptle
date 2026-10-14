@@ -1833,7 +1833,8 @@ function terrain.paintTexture(x, y, z, radius, slot) end
 ---overhangs {depth,scale,strength}, ravines {count,depth,width,length,meander},
 ---rivers {count,depth,width,seaLevel,meander}; biomes, a list of
 ---{slot,color,latitude,altitude,slope,moisture,nearRiver} rules (ranges are
----{min,max}; the first match paints the surface); moistureScale.
+---{min,max}; the first match paints the surface); moistureScale;
+---deferCaves (leave the buried cave zone ungenerated until a dig reaches it).
 ---@param id number The terrain id (a node with that Terrain id shows the result).
 ---@param opts? table
 function terrain.generatePlanet(id, opts) end

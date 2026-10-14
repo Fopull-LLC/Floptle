@@ -270,11 +270,25 @@ const CHECKPOINT_FORCE_SECS: f64 = 20.0;
 /// the shadow-proxy derivation; runs on background threads (and blockingly
 /// for file sources at the emergency radius). None = every candidate failed.
 fn load_terrain_from(sources: Vec<TerrainSource>) -> Option<EditorTerrain> {
+    // A saved field of a planet whose caves wait knows which chunks are still
+    // to make but not how: the body's genspec, when it has one, does.
+    let spec: Option<floptle_field::procgen::PlanetFill> = sources.iter().find_map(|s| match s {
+        TerrainSource::Generate(spec) => ron::from_str(spec).ok(),
+        TerrainSource::File(_) => None,
+    });
     for src in sources {
         let field = match src {
             TerrainSource::File(path) => floptle_vfs::read(&path)
                 .ok()
-                .and_then(|b| floptle_field::ChunkField::from_bytes(&b)),
+                .and_then(|b| floptle_field::ChunkField::from_bytes(&b))
+                .map(|mut f| {
+                    if f.pending_count() > 0
+                        && let Some(source) = spec.as_ref().and_then(floptle_field::procgen::pending_source_for)
+                    {
+                        f.set_pending_source(source);
+                    }
+                    f
+                }),
             TerrainSource::Generate(spec) => ron::from_str(&spec)
                 .ok()
                 .map(|fill: floptle_field::procgen::PlanetFill| {

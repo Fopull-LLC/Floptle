@@ -97,6 +97,60 @@ pub struct ChunkField {
     base_color: [u8; 4],
     /// The box of voxels written since [`Self::take_changed`] last asked.
     changed: Option<([i32; 3], [i32; 3])>,
+    /// Chunks stored as deep solid that are really not generated yet: what
+    /// they hold is buried rock and caves nothing can see until something
+    /// comes near, and [`Self::realize`] makes them from `source`.
+    pending: std::collections::HashSet<[i32; 3]>,
+    source: Option<Source>,
+}
+
+/// What makes a field's pending chunks: see [`ChunkField::generate_deferring`].
+pub trait PendingSource: Send + Sync {
+    /// The chunk at `c`, as the generator that deferred it would have made it.
+    fn generate(&self, c: [i32; 3]) -> Generated;
+}
+
+/// A chunk a [`PendingSource`] made, ready for [`ChunkField::adopt_generated`].
+pub struct Generated(Option<Chunk>);
+
+/// A field's pending source, shareable with a worker thread.
+#[derive(Clone)]
+struct Source(std::sync::Arc<dyn PendingSource>);
+
+impl std::fmt::Debug for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PendingSource")
+    }
+}
+
+/// A [`VoxelSource`] that makes chunks on demand, with the frame of the fill
+/// that deferred them.
+struct Deferred<S> {
+    src: std::sync::Arc<S>,
+    ilo: [i32; 3],
+    ihi: [i32; 3],
+    voxel: f32,
+    band: f32,
+    base: [u8; 4],
+}
+
+impl<S: VoxelSource + Send + Sync + 'static> PendingSource for Deferred<S> {
+    /// The chunk, evened out on its own, as if nothing were around it: so what
+    /// comes back depends on where it is and nothing else, and a chunk made
+    /// before its neighbours is the same as one made after them. Two players
+    /// whose games made a planet's caves in different orders have the same
+    /// caves.
+    fn generate(&self, c: [i32; 3]) -> Generated {
+        let Some(chunk) = gen_chunk(c, self.ilo, self.ihi, self.voxel, self.band, self.base, &*self.src) else {
+            return Generated(None);
+        };
+        let mut alone = ChunkField::new(self.voxel);
+        alone.base_color = self.base;
+        alone.chunks.insert(c, chunk);
+        alone.renormalize(&[c]);
+        alone.compact(&[c]);
+        Generated(alone.chunks.remove(&c))
+    }
 }
 
 impl Default for ChunkField {
@@ -115,6 +169,7 @@ pub struct FieldSaver {
     written: u32,
     count_pos: usize,
     buf: Vec<u8>,
+    pending: Vec<[i32; 3]>,
 }
 
 impl FieldSaver {
@@ -132,6 +187,18 @@ impl FieldSaver {
     pub fn finish(mut self) -> Vec<u8> {
         self.buf[self.count_pos..self.count_pos + 4]
             .copy_from_slice(&self.written.to_le_bytes());
+        // Which of the solid chunks are not generated yet, after the chunks: a
+        // reader that does not know the section stops before it and reads them
+        // as the rock they stand in for.
+        if !self.pending.is_empty() {
+            self.buf.extend_from_slice(b"PEND");
+            self.buf.extend_from_slice(&(self.pending.len() as u32).to_le_bytes());
+            for c in &self.pending {
+                for k in c {
+                    self.buf.extend_from_slice(&k.to_le_bytes());
+                }
+            }
+        }
         self.buf
     }
 }
@@ -141,7 +208,14 @@ impl ChunkField {
     /// one density knob (the dense grid's "detail" was a cell *count* that silently
     /// meant nothing as terrain grew; this is a real density).
     pub fn new(voxel: f32) -> Self {
-        Self { chunks: HashMap::new(), voxel: voxel.max(1e-3), base_color: [128, 128, 128, 255], changed: None }
+        Self {
+            chunks: HashMap::new(),
+            voxel: voxel.max(1e-3),
+            base_color: [128, 128, 128, 255],
+            changed: None,
+            pending: std::collections::HashSet::new(),
+            source: None,
+        }
     }
 
     pub fn voxel(&self) -> f32 {
@@ -323,6 +397,11 @@ impl ChunkField {
 
     /// Make a chunk writable, materializing a `Uniform` sentinel into real voxels.
     fn data_mut(&mut self, c: [i32; 3]) -> &mut ChunkData {
+        // A write into a chunk not generated yet generates it first, or the
+        // write would land on stand-in rock and the chunk be made over it later.
+        if self.pending.contains(&c) {
+            self.realize_now(&[c]);
+        }
         let band = BAND_VOXELS * self.voxel;
         let base = self.base_color;
         let entry = self.chunks.entry(c).or_insert(Chunk::Uniform(band));
@@ -641,7 +720,15 @@ impl ChunkField {
     /// two agree *byte-for-byte* by construction, instead of trusting a re-run of
     /// the same op to converge (any drift there is a player standing on air).
     pub fn copy_chunks_from(&mut self, src: &ChunkField, coords: &[[i32; 3]]) {
+        if self.source.is_none() {
+            self.source = src.source.clone();
+        }
         for c in coords {
+            if src.pending.contains(c) {
+                self.pending.insert(*c);
+            } else {
+                self.pending.remove(c);
+            }
             match src.chunks.get(c) {
                 Some(chunk) => {
                     self.chunks.insert(*c, chunk.clone());
@@ -709,6 +796,13 @@ pub trait VoxelSource: Sync {
     fn sample(&self, p: Vec3, band: f32, scratch: &mut Self::Scratch) -> Option<(f32, [u8; 4])>;
     /// The colour at `p`, which `classify` placed in deep solid.
     fn solid_color(&self, p: Vec3, scratch: &mut Self::Scratch) -> [u8; 4];
+    /// May the chunk in the box `[lo, hi]` be left for later: is it something
+    /// nothing can see from outside until it comes near? Read only by
+    /// [`ChunkField::generate_deferring`]. No, by default.
+    fn defer(&self, lo: Vec3, hi: Vec3, band: f32) -> bool {
+        let _ = (lo, hi, band);
+        false
+    }
 }
 
 /// Voxels per edge of the blocks [`ChunkField::generate`] classifies.
@@ -933,6 +1027,7 @@ impl ChunkField {
         let r_eff = radius * s;
         let k = (1.0 - profile.hardness.clamp(0.0, 1.0)) * radius * 0.5;
         let (lo, hi) = self.voxel_range(center, radius);
+        self.realize_voxels(lo, hi);
         let mut touched = Vec::new();
         let mut yielded = SculptYield::default();
         let vox_vol = f64::from(self.voxel).powi(3);
@@ -996,6 +1091,7 @@ impl ChunkField {
         let rgb = [color[0] * 255.0, color[1] * 255.0, color[2] * 255.0];
         let s = strength.clamp(0.0, 1.0);
         let (lo, hi) = self.voxel_range(center, radius);
+        self.realize_voxels(lo, hi);
         let band = self.band();
         let mut touched = Vec::new();
         for iz in lo[2]..=hi[2] {
@@ -1036,6 +1132,7 @@ impl ChunkField {
     fn smooth(&mut self, center: Vec3, radius: f32, strength: f32, profile: BrushProfile) -> Vec<[i32; 3]> {
         let s = strength.clamp(0.0, 1.0);
         let (lo, hi) = self.voxel_range(center, radius);
+        self.realize_voxels(lo, hi);
         // Read the pre-dab field for every sample: averaging against partially-updated
         // neighbours would let iteration order bias the result.
         let mut writes = Vec::new();
@@ -1108,6 +1205,7 @@ impl ChunkField {
         let s = strength.clamp(0.0, 1.0);
         let band = self.band();
         let (lo, hi) = self.voxel_range(center, radius);
+        self.realize_voxels(lo, hi);
         // Read everything first, then write: the reads share one chunk cache, and
         // a voxel whose value would not change is never written at all. Deep rock
         // under the pad and open sky above it are already as far from the plane as
@@ -1303,6 +1401,10 @@ impl ChunkField {
         let band = self.band();
         let lo = (min - Vec3::splat(band + self.voxel)) / self.voxel;
         let hi = (max + Vec3::splat(band + self.voxel)) / self.voxel;
+        self.realize_voxels(
+            [lo.x.floor() as i32, lo.y.floor() as i32, lo.z.floor() as i32],
+            [hi.x.ceil() as i32, hi.y.ceil() as i32, hi.z.ceil() as i32],
+        );
         let mut touched = Vec::new();
         for iz in lo.z.floor() as i32..=hi.z.ceil() as i32 {
             for iy in lo.y.floor() as i32..=hi.y.ceil() as i32 {
@@ -1341,6 +1443,54 @@ impl ChunkField {
     /// then costs the shell its surface and caves live in, not the cube around
     /// it, and that shell is shared out across threads.
     pub fn generate(voxel: f32, min: Vec3, max: Vec3, src: &impl VoxelSource) -> Self {
+        Self::generate_with(voxel, min, max, src, false).0
+    }
+
+    /// [`Self::generate`], leaving for later every chunk `src` says nothing can
+    /// see until it comes near ([`VoxelSource::defer`]): it is stored as the
+    /// solid rock it is buried in, costs nothing, and is made the same as it
+    /// would have been when [`Self::realize`] or [`Self::adopt_generated`] asks,
+    /// or when anything writes into it. A planet's caves are most of its
+    /// chunks, and a player sees the few they reach.
+    pub fn generate_deferring<S: VoxelSource + Send + Sync + 'static>(
+        voxel: f32,
+        min: Vec3,
+        max: Vec3,
+        src: std::sync::Arc<S>,
+    ) -> Self {
+        let (mut field, frame) = Self::generate_with(voxel, min, max, &*src, true);
+        let (ilo, ihi) = frame;
+        let (voxel, band, base) = (field.voxel, field.band(), field.base_color);
+        if !field.pending.is_empty() {
+            field.source = Some(Source(std::sync::Arc::new(Deferred { src, ilo, ihi, voxel, band, base })));
+        }
+        field
+    }
+
+    /// The source [`Self::generate_deferring`] would give a field filled over
+    /// `[min, max]` from `src`, for one whose pending chunks came from a file.
+    pub fn generate_source<S: VoxelSource + Send + Sync + 'static>(
+        voxel: f32,
+        min: Vec3,
+        max: Vec3,
+        src: std::sync::Arc<S>,
+    ) -> std::sync::Arc<dyn PendingSource> {
+        let field = Self::new(voxel.clamp(0.25, 16.0));
+        let (voxel, band, base) = (field.voxel, field.band(), field.base_color);
+        let lo = (min - Vec3::splat(band + voxel)) / voxel;
+        let hi = (max + Vec3::splat(band + voxel)) / voxel;
+        let ilo = [lo.x.floor() as i32, lo.y.floor() as i32, lo.z.floor() as i32];
+        let ihi = [hi.x.ceil() as i32, hi.y.ceil() as i32, hi.z.ceil() as i32];
+        std::sync::Arc::new(Deferred { src, ilo, ihi, voxel, band, base })
+    }
+
+    fn generate_with(
+        voxel: f32,
+        min: Vec3,
+        max: Vec3,
+        src: &impl VoxelSource,
+        defer: bool,
+    ) -> (Self, ([i32; 3], [i32; 3])) {
         let mut field = Self::new(voxel.clamp(0.25, 16.0));
         let (voxel, band) = (field.voxel, field.band());
         let lo = (min - Vec3::splat(band + voxel)) / voxel;
@@ -1357,9 +1507,22 @@ impl ChunkField {
             }
         }
         let base = field.base_color;
-        let chunks = par_map(coords.len(), |k| gen_chunk(coords[k], ilo, ihi, voxel, band, base, src));
+        let at = |i: [i32; 3]| Vec3::new(i[0] as f32, i[1] as f32, i[2] as f32) * voxel;
+        let chunks = par_map(coords.len(), |k| {
+            let c = coords[k];
+            let (s, e) = ([c[0] * CHUNK, c[1] * CHUNK, c[2] * CHUNK], [c[0] * CHUNK + CHUNK - 1, c[1] * CHUNK + CHUNK - 1, c[2] * CHUNK + CHUNK - 1]);
+            if defer && src.defer(at(s), at(e), band) {
+                return Err(());
+            }
+            Ok(gen_chunk(c, ilo, ihi, voxel, band, base, src))
+        });
         let mut touched = Vec::new();
         for (c, chunk) in coords.into_iter().zip(chunks) {
+            let Ok(chunk) = chunk else {
+                field.chunks.insert(c, Chunk::Uniform(-band));
+                field.pending.insert(c);
+                continue;
+            };
             if let Some(chunk) = chunk {
                 if matches!(chunk, Chunk::Data(_)) {
                     touched.push(c);
@@ -1371,7 +1534,121 @@ impl ChunkField {
         // came out uniform.
         field.renormalize(&touched);
         field.compact(&touched);
-        field
+        (field, (ilo, ihi))
+    }
+
+    /// How many chunks are not generated yet.
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// The chunks not generated yet within the world box `lo..hi`.
+    pub fn pending_in_box(&self, lo: Vec3, hi: Vec3) -> Vec<[i32; 3]> {
+        if self.pending.is_empty() {
+            return Vec::new();
+        }
+        self.chunks_in_world_box(lo, hi).into_iter().filter(|c| self.pending.contains(c)).collect()
+    }
+
+    /// What makes this field's pending chunks, for running it off this thread:
+    /// hand its answers to [`Self::adopt_generated`].
+    pub fn pending_source(&self) -> Option<std::sync::Arc<dyn PendingSource>> {
+        self.source.as_ref().map(|s| s.0.clone())
+    }
+
+    /// Give this field the source of its pending chunks: one loaded from a file
+    /// knows which chunks are pending but not how to make them.
+    pub fn set_pending_source(&mut self, source: std::sync::Arc<dyn PendingSource>) {
+        self.source = Some(Source(source));
+    }
+
+    /// Generate these pending chunks now, on this thread's workers. Returns the
+    /// chunks that changed, for a remesh and a collider copy.
+    pub fn realize(&mut self, coords: &[[i32; 3]]) -> Vec<[i32; 3]> {
+        let want: Vec<[i32; 3]> = coords.iter().copied().filter(|c| self.pending.contains(c)).collect();
+        let Some(src) = self.pending_source() else { return Vec::new() };
+        let made = par_map(want.len(), |k| src.generate(want[k]));
+        self.adopt_generated(want.into_iter().zip(made).collect())
+    }
+
+    /// Take chunks a [`PendingSource`] made, wherever it ran. One that is no
+    /// longer pending (an edit made it in the meantime) is dropped, since the
+    /// edit is newer. Returns the chunks that changed.
+    pub fn adopt_generated(&mut self, made: Vec<([i32; 3], Generated)>) -> Vec<[i32; 3]> {
+        let mut touched = Vec::new();
+        for (c, g) in made {
+            if !self.pending.remove(&c) {
+                continue;
+            }
+            match g.0 {
+                Some(chunk) => {
+                    self.chunks.insert(c, chunk);
+                }
+                None => {
+                    self.chunks.remove(&c);
+                }
+            }
+            self.note_changed([c[0] * CHUNK, c[1] * CHUNK, c[2] * CHUNK]);
+            self.note_changed([c[0] * CHUNK + CHUNK - 1, c[1] * CHUNK + CHUNK - 1, c[2] * CHUNK + CHUNK - 1]);
+            touched.push(c);
+        }
+        // A neighbour's mesh reads a layer into a made chunk, so it changes too.
+        let mut region = touched.clone();
+        for c in &touched {
+            for d in 0..27 {
+                region.push([c[0] + d % 3 - 1, c[1] + d / 3 % 3 - 1, c[2] + d / 9 - 1]);
+            }
+        }
+        region.sort_unstable();
+        region.dedup();
+        region.retain(|c| self.chunks.contains_key(c));
+        region
+    }
+
+    /// Generate, on this thread, the pending chunks a write over voxels
+    /// `lo..=hi` reads or writes, with the voxels its projection can reach.
+    fn realize_voxels(&mut self, lo: [i32; 3], hi: [i32; 3]) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let m = 8;
+        let (c0, c1) = (chunk_of([lo[0] - m, lo[1] - m, lo[2] - m]), chunk_of([hi[0] + m, hi[1] + m, hi[2] + m]));
+        let mut want = Vec::new();
+        for z in c0[2]..=c1[2] {
+            for y in c0[1]..=c1[1] {
+                for x in c0[0]..=c1[0] {
+                    if self.pending.contains(&[x, y, z]) {
+                        want.push([x, y, z]);
+                    }
+                }
+            }
+        }
+        if !want.is_empty() {
+            self.realize(&want);
+        }
+    }
+
+    /// [`Self::realize`] from inside a write, with no projection: the write in
+    /// progress runs its own.
+    fn realize_now(&mut self, coords: &[[i32; 3]]) {
+        let Some(src) = self.pending_source() else {
+            for c in coords {
+                self.pending.remove(c);
+            }
+            return;
+        };
+        for &c in coords {
+            if self.pending.remove(&c) {
+                match src.generate(c).0 {
+                    Some(chunk) => {
+                        self.chunks.insert(c, chunk);
+                    }
+                    None => {
+                        self.chunks.remove(&c);
+                    }
+                }
+            }
+        }
     }
 
     /// Collapse fully-saturated chunks to sentinels. Called automatically by the brushes;
@@ -1668,6 +1945,7 @@ impl ChunkField {
     /// the brush ball. Mirrors the dense [`crate::Terrain::paint_texture`].
     pub fn paint_texture(&mut self, center: Vec3, radius: f32, slot: u8) -> Vec<[i32; 3]> {
         let (lo, hi) = self.voxel_range(center, radius);
+        self.realize_voxels(lo, hi);
         let band = self.band();
         let mut touched = Vec::new();
         for iz in lo[2]..=hi[2] {
@@ -1842,7 +2120,9 @@ impl ChunkField {
         coords.sort_unstable(); // deterministic output (byte-identical saves)
         let count_pos = buf.len();
         buf.extend_from_slice(&0u32.to_le_bytes()); // patched by finish()
-        FieldSaver { coords, at: 0, written: 0, count_pos, buf }
+        let mut pending: Vec<[i32; 3]> = self.pending.iter().copied().collect();
+        pending.sort_unstable();
+        FieldSaver { coords, at: 0, written: 0, count_pos, buf, pending }
     }
 
     /// Encode up to `max_chunks` more chunks into `s`. Returns `true` once the
@@ -1975,6 +2255,20 @@ impl ChunkField {
                     f.chunks.insert(c, Chunk::Data(Box::new(ChunkData::from_flat(&dist, &color))));
                 }
                 _ => return None,
+            }
+        }
+        if data.get(at..at + 4) == Some(b"PEND".as_slice()) {
+            at += 4;
+            let n = u32_at(take(&mut at, 4)?) as usize;
+            if n > 4_000_000 {
+                return None;
+            }
+            for _ in 0..n {
+                let mut c = [0i32; 3];
+                for k in &mut c {
+                    *k = i32::from_le_bytes(take(&mut at, 4)?.try_into().ok()?);
+                }
+                f.pending.insert(c);
             }
         }
         Some(f)
