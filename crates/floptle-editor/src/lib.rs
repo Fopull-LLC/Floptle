@@ -2559,6 +2559,14 @@ struct Editor {
     /// Monotonic job stamp for worker remeshes: never repeats across scenes, so a
     /// stale result from a previous world can never land on a reused entity id.
     terrain_epoch: u64,
+    /// The worker that builds terrain collision meshes after an edit, apart from
+    /// the drawing one so a dig never waits behind a planet streaming in.
+    collision_worker: Option<crate::terrain_edit::TerrainWorker>,
+    /// Collision meshes in flight: (terrain, chunk) → (job stamp, the frame it
+    /// is due). See `pump_collision_meshes`.
+    collision_pending: HashMap<(Entity, [i32; 3]), (u64, u64)>,
+    /// Frames `pump_collision_meshes` has seen.
+    collision_frame: u64,
     /// Frame counter staggering the per-terrain full-chunk coverage scan (a big
     /// planet has tens of thousands of chunks — each terrain scans every 4th
     /// frame, offset by its entity index).

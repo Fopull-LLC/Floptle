@@ -2256,6 +2256,14 @@ impl Sim {
             })
     }
 
+    /// The terrain collider on node `eid`, for an edit that will hand it new
+    /// collision meshes itself ([`ChunkTerrain::adopt_mesh`]): nothing cached
+    /// is forgotten, so until those land the old triangles stand.
+    pub fn terrain_collider_mut(&mut self, eid: u32) -> Option<&mut ChunkTerrain> {
+        self.world.level_edits += 1;
+        self.world.colliders.iter_mut().find(|c| c.eid == Some(eid)).and_then(|c| c.shape.chunk_terrain_mut())
+    }
+
     /// Put the body on node `eid` to sleep now, or wake it.
     ///
     /// Asleep, the solver skips it — no gravity, no contacts against the

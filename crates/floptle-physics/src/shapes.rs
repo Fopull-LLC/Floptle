@@ -464,14 +464,98 @@ impl CollisionShape for SdfTerrain {
 /// a handful of chunks.
 #[derive(Default)]
 struct Surface {
-    /// Which chunks have been meshed, so an empty one is not re-meshed every
-    /// query. A chunk of pure air or pure rock extracts nothing and belongs in
-    /// here exactly as much as one that extracted a thousand triangles.
-    meshed: std::collections::HashSet<[i32; 3]>,
-    /// Triangles in field-local space, bucketed by `cell`. One grid across every
-    /// meshed chunk rather than one per chunk: a query near a chunk boundary
-    /// then reads one bucket set instead of merging several.
-    grid: std::collections::HashMap<(i32, i32, i32), Vec<SurfaceTri>>,
+    /// Every meshed chunk's triangles, an empty one included: a chunk of pure
+    /// air or pure rock extracts nothing and belongs in here exactly as much as
+    /// one that extracted a thousand triangles, so it is not re-meshed every
+    /// query.
+    chunks: std::collections::HashMap<[i32; 3], CollisionChunk>,
+}
+
+impl Surface {
+    /// Every triangle bucketed in `cell`, from whichever chunks reach it.
+    ///
+    /// A chunk's triangles reach a voxel past its own edges (its mesh takes a
+    /// layer from each neighbour), so a cell within two voxels of a chunk face
+    /// asks the chunk across it too; any other asks one.
+    fn each_in(&self, cell: (i32, i32, i32), mut f: impl FnMut(&SurfaceTri)) {
+        let span = |k: i32| ((k - 2).div_euclid(floptle_field::CHUNK), (k + 2).div_euclid(floptle_field::CHUNK));
+        let ((x0, x1), (y0, y1), (z0, z1)) = (span(cell.0), span(cell.1), span(cell.2));
+        for z in z0..=z1 {
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    if let Some(ch) = self.chunks.get(&[x, y, z]) {
+                        ch.cell(cell).iter().for_each(&mut f);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One chunk's collision triangles, bucketed for closest-point queries: one
+/// list sorted by bucket, each bucket a run of it. Two allocations a chunk,
+/// whatever its size, so building one off the main thread and handing it over
+/// costs the main thread nothing to speak of; a bucket each was thousands of
+/// small allocations, a few milliseconds a chunk, every time a dig re-meshed.
+#[derive(Clone, Default)]
+pub struct CollisionChunk {
+    runs: std::collections::HashMap<(i32, i32, i32), (u32, u32)>,
+    tris: Vec<SurfaceTri>,
+}
+
+impl CollisionChunk {
+    /// Bucket a chunk's triangles from its mesh `m` (a skirt, if it has one,
+    /// left out), in buckets `cell` across: the voxel of the field it was
+    /// meshed from.
+    pub fn from_mesh(m: &floptle_field::ChunkMesh, cell: f32) -> Self {
+        let origin = Vec3::from(m.origin);
+        let surface = m.indices.len() - m.skirt_tris * 3;
+        let mut placed: Vec<((i32, i32, i32), SurfaceTri)> = Vec::new();
+        for t in m.indices[..surface].as_chunks::<3>().0 {
+            let at = |i: u32| origin + Vec3::from(m.positions[i as usize]);
+            let tri = [at(t[0]), at(t[1]), at(t[2])];
+            if (tri[1] - tri[0]).cross(tri[2] - tri[0]).length_squared() <= 1e-12 {
+                continue; // zero-area: no closest point worth having
+            }
+            // The mesher's normals are unit gradients; a degenerate one
+            // (deep in uniform solid, which never meshes) falls back to
+            // the face so the side test always has something to compare
+            // against rather than a zero.
+            let face = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize();
+            let nrm = |i: u32| Vec3::from(m.normals[i as usize]).try_normalize().unwrap_or(face);
+            let entry = SurfaceTri { p: tri, n: [nrm(t[0]), nrm(t[1]), nrm(t[2])] };
+            let lo = cell_coord(tri[0].min(tri[1]).min(tri[2]), cell);
+            let hi = cell_coord(tri[0].max(tri[1]).max(tri[2]), cell);
+            for cz in lo.2..=hi.2 {
+                for cy in lo.1..=hi.1 {
+                    for cx in lo.0..=hi.0 {
+                        placed.push(((cx, cy, cz), entry));
+                    }
+                }
+            }
+        }
+        placed.sort_by_key(|(k, _)| *k);
+        let mut runs = std::collections::HashMap::new();
+        let mut tris = Vec::with_capacity(placed.len());
+        let mut i = 0;
+        while i < placed.len() {
+            let k = placed[i].0;
+            let start = tris.len() as u32;
+            while i < placed.len() && placed[i].0 == k {
+                tris.push(placed[i].1);
+                i += 1;
+            }
+            runs.insert(k, (start, tris.len() as u32 - start));
+        }
+        Self { runs, tris }
+    }
+
+    fn cell(&self, k: (i32, i32, i32)) -> &[SurfaceTri] {
+        match self.runs.get(&k) {
+            Some(&(start, n)) => &self.tris[start as usize..(start + n) as usize],
+            None => &[],
+        }
+    }
 }
 
 /// One drawn triangle: its corners and the field-gradient normal at each.
@@ -485,8 +569,6 @@ struct Surface {
 struct SurfaceTri {
     p: [Vec3; 3],
     n: [Vec3; 3],
-    /// The chunk it was meshed from, so an edit can forget just its chunks.
-    chunk: [i32; 3],
 }
 
 /// The terrain collider: collides against the triangles the mesher extracts,
@@ -593,8 +675,7 @@ impl ChunkTerrain {
     /// next query after an edit, which is precisely when the collision has to be
     /// right.
     pub fn invalidate_surface(&mut self) {
-        self.surface.get_mut().meshed.clear();
-        self.surface.get_mut().grid.clear();
+        self.surface.get_mut().chunks.clear();
     }
 
     /// **Forget the meshed chunks an edit of `written` could have changed**:
@@ -602,68 +683,67 @@ impl ChunkTerrain {
     /// layer into its neighbours. A dig re-meshes the few chunks it reached on
     /// the next query near them, not every chunk any body was standing in.
     pub fn invalidate_chunks(&mut self, written: &[[i32; 3]]) {
-        let mut gone: std::collections::HashSet<[i32; 3]> = std::collections::HashSet::new();
+        let mut ring: Vec<[i32; 3]> = Vec::new();
         for c in written {
             for dz in -1..=1 {
                 for dy in -1..=1 {
                     for dx in -1..=1 {
-                        gone.insert([c[0] + dx, c[1] + dy, c[2] + dz]);
+                        ring.push([c[0] + dx, c[1] + dy, c[2] + dz]);
                     }
                 }
             }
         }
+        self.invalidate_meshes(&ring);
+    }
+
+    /// **Forget exactly these chunks' meshed triangles**, for a caller that
+    /// knows which meshes an edit reached (`ChunkField::chunks_reading` over
+    /// the box it changed). Costs the cells those chunks filled, not the cache:
+    /// a sweep of every cached triangle per dig was most of a mining laser's
+    /// frame on a planet a player had walked across.
+    /// **Take chunk `c`'s collision mesh as already built**, in place of the one
+    /// cached. Meshed off the main thread at full detail from this collider's
+    /// own field, so the main thread pays for bucketing the triangles, not for
+    /// extracting them; until it arrives, the old triangles stand, as the old
+    /// mesh stays drawn until its replacement lands.
+    /// Is chunk `c`'s collision mesh cached?
+    pub fn is_meshed(&self, c: [i32; 3]) -> bool {
+        self.surface.borrow().chunks.contains_key(&c)
+    }
+
+    pub fn adopt_mesh(&mut self, c: [i32; 3], m: &floptle_field::ChunkMesh) {
+        let built = CollisionChunk::from_mesh(m, self.bucket());
+        self.adopt(c, built);
+    }
+
+    /// [`Self::adopt_mesh`] with the bucketing done too, where the mesh was
+    /// built ([`CollisionChunk::from_mesh`] with this field's voxel).
+    pub fn adopt(&mut self, c: [i32; 3], built: CollisionChunk) {
+        self.surface.get_mut().chunks.insert(c, built);
+    }
+
+    pub fn invalidate_meshes(&mut self, stale: &[[i32; 3]]) {
         let s = self.surface.get_mut();
-        let before = s.meshed.len();
-        s.meshed.retain(|c| !gone.contains(c));
-        if s.meshed.len() == before {
-            return;
+        for c in stale {
+            s.chunks.remove(c);
         }
-        s.grid.retain(|_, tris| {
-            tris.retain(|t| !gone.contains(&t.chunk));
-            !tris.is_empty()
-        });
     }
 
     /// Make sure every chunk within `cell()` of `local` has been meshed.
     fn ensure_meshed(&self, local: Vec3, s: &mut Surface) {
         let r = Vec3::splat(self.reach());
         for c in self.field.chunks_in_world_box(local - r, local + r) {
-            if s.meshed.insert(c) {
-                self.mesh_into(c, s);
-            }
+            self.mesh_into(c, s);
         }
     }
 
-    /// Mesh chunk `c` into the surface's buckets.
+    /// Mesh chunk `c` into the surface, unless it is there already.
     fn mesh_into(&self, c: [i32; 3], s: &mut Surface) {
-        let m = drawn_chunk(&self.field, c);
-        let origin = Vec3::from(m.origin);
-        let cell = self.bucket();
-        for t in m.indices.as_chunks::<3>().0 {
-            let at = |i: u32| origin + Vec3::from(m.positions[i as usize]);
-            let tri = [at(t[0]), at(t[1]), at(t[2])];
-            if (tri[1] - tri[0]).cross(tri[2] - tri[0]).length_squared() <= 1e-12 {
-                continue; // zero-area: no closest point worth having
-            }
-            // The mesher's normals are unit gradients; a degenerate one
-            // (deep in uniform solid, which never meshes) falls back to
-            // the face so the side test always has something to compare
-            // against rather than a zero.
-            let face = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize();
-            let nrm = |i: u32| {
-                Vec3::from(m.normals[i as usize]).try_normalize().unwrap_or(face)
-            };
-            let entry = SurfaceTri { p: tri, n: [nrm(t[0]), nrm(t[1]), nrm(t[2])], chunk: c };
-            let lo = cell_coord(tri[0].min(tri[1]).min(tri[2]), cell);
-            let hi = cell_coord(tri[0].max(tri[1]).max(tri[2]), cell);
-            for cz in lo.2..=hi.2 {
-                for cy in lo.1..=hi.1 {
-                    for cx in lo.0..=hi.0 {
-                        s.grid.entry((cx, cy, cz)).or_default().push(entry);
-                    }
-                }
-            }
+        if s.chunks.contains_key(&c) {
+            return;
         }
+        let m = drawn_chunk(&self.field, c);
+        s.chunks.insert(c, CollisionChunk::from_mesh(&m, self.bucket()));
     }
 
     /// The closest point on the drawn surface to `local`, and the surface's
@@ -709,15 +789,14 @@ impl ChunkTerrain {
                         if !on_shell {
                             continue;
                         }
-                        let Some(bucket) = s.grid.get(&(cx, cy, cz)) else { continue };
-                        for tri in bucket {
+                        s.each_in((cx, cy, cz), |tri| {
                             let q = closest_point_on_triangle(local, tri.p[0], tri.p[1], tri.p[2]);
                             let d2 = (q - local).length_squared();
                             if d2 < best {
                                 best = d2;
                                 hit = Some((q, normal_at(tri, q)));
                             }
-                        }
+                        });
                     }
                 }
             }
@@ -838,29 +917,26 @@ impl CollisionShape for ChunkTerrain {
         let mut s = self.surface.borrow_mut();
         let cell = self.bucket();
         for ch in self.field.chunks_in_world_box(llo, lhi) {
-            if s.meshed.insert(ch) {
-                self.mesh_into(ch, &mut s);
-            }
+            self.mesh_into(ch, &mut s);
         }
         let (a, b) = (cell_coord(llo, cell), cell_coord(lhi, cell));
         let mut seen: std::collections::HashSet<[u32; 9]> = std::collections::HashSet::new();
         for cz in a.2..=b.2 {
             for cy in a.1..=b.1 {
                 for cx in a.0..=b.0 {
-                    let Some(bucket) = s.grid.get(&(cx, cy, cz)) else { continue };
-                    for tri in bucket {
+                    s.each_in((cx, cy, cz), |tri| {
                         if !tri_box_overlap(&tri.p, llo, lhi) {
-                            continue;
+                            return;
                         }
                         let key: [u32; 9] = std::array::from_fn(|i| tri.p[i / 3][i % 3].to_bits());
                         if !seen.insert(key) {
-                            continue;
+                            return;
                         }
                         out.push(FaceTri {
                             p: tri.p.map(|p| self.rot * (p * scale)),
                             n: tri.n.map(|n| self.rot * n),
                         });
-                    }
+                    });
                 }
             }
         }
@@ -2354,7 +2430,7 @@ mod drawn_surface_tests {
         let (pa, pb) = (crown(&t, a), crown(&t, b));
         let before = t.distance(pa);
         t.distance(pb);
-        let far: Vec<[i32; 3]> = t.surface.borrow().meshed.iter().copied().filter(|c| c[0] >= 3).collect();
+        let far: Vec<[i32; 3]> = t.surface.borrow().chunks.keys().copied().filter(|c| c[0] >= 3).collect();
         assert!(!far.is_empty(), "the far hill was never meshed");
         let mut written = Vec::new();
         for _ in 0..40 {
@@ -2364,10 +2440,82 @@ mod drawn_surface_tests {
         written.dedup();
         t.invalidate_chunks(&written);
         let s = t.surface.borrow();
-        assert!(far.iter().all(|c| s.meshed.contains(c)), "the dig forgot the far hill's chunks too");
-        assert!(written.iter().all(|c| !s.meshed.contains(c)), "a chunk the dig wrote is still cached");
+        assert!(far.iter().all(|c| s.chunks.contains_key(c)), "the dig forgot the far hill's chunks too");
+        assert!(written.iter().all(|c| !s.chunks.contains_key(c)), "a chunk the dig wrote is still cached");
         drop(s);
         let fresh = t.distance(pa);
         assert!(fresh > before + 0.1, "the dug ground still reads as it was: {before} -> {fresh}");
+    }
+
+    /// **A dig re-meshes no collision chunk on the main thread.** Fifty bites of
+    /// a mining laser into a generated planet, each where the player stands. The
+    /// collider copies the voxels the bite wrote and keeps its old triangles,
+    /// which a query reads without meshing anything; the chunks whose meshes the
+    /// bite reached are meshed elsewhere and adopted, and then the query sees
+    /// the hole. Forgetting every touched chunk and its neighbours made the next
+    /// query re-mesh a few dozen of them on the main thread, tens of milliseconds
+    /// a bite. What is left on it is the copy, the gathers and the bucketing.
+    #[test]
+    fn a_dig_re_meshes_no_collision_chunk_on_the_main_thread() {
+        use floptle_field::{Brush, BrushProfile};
+        let radius = 150.0;
+        let mut field = floptle_field::procgen::generate_planet(&floptle_field::procgen::PlanetFill {
+            seed: 11,
+            radius,
+            voxel: 1.5,
+            relief: radius * 0.065,
+            cave_depth: radius * 0.35,
+            core_r: 10.5,
+            ..Default::default()
+        });
+        let _ = field.take_changed();
+        let mut t = ChunkTerrain::new(field.clone());
+        let (mut stale_n, mut main_ms, mut moved) = (Vec::new(), Vec::new(), 0);
+        for k in 0..50 {
+            let a = k as f32 * 0.071;
+            let dir = Vec3::new(a.cos(), 0.35, a.sin()).normalize();
+            let Some(ground) = field.raycast(dir * radius * 1.5, -dir, radius) else { continue };
+            let feet = ground + dir * 0.9;
+            let before = t.distance(feet);
+            let meshed_before = t.surface.borrow().chunks.len();
+            let touched = field.sculpt(Brush::Lower, ground, 2.4, 0.85, BrushProfile::default());
+            let start = std::time::Instant::now();
+            let (lo, hi) = field.take_changed().expect("the bite wrote voxels");
+            let mut copy = field.chunks_holding(lo, hi);
+            copy.extend_from_slice(&touched);
+            t.field.copy_chunks_from(&field, &copy);
+            let stale: Vec<[i32; 3]> = field.chunks_reading(lo, hi, 1).into_iter().filter(|c| t.is_meshed(*c)).collect();
+            let scratches: Vec<_> = stale.iter().map(|c| floptle_field::scratch_for_chunk(&field, *c, 1)).collect();
+            let mut main = start.elapsed();
+            // Until the new meshes land the old triangles answer, and nothing meshes.
+            assert_eq!(t.distance(feet), before, "the old triangles must answer until the new ones land");
+            assert_eq!(t.surface.borrow().chunks.len(), meshed_before, "a query meshed a chunk on the main thread");
+            // The worker's half: meshing and bucketing.
+            let built: Vec<_> = scratches
+                .iter()
+                .map(|sc| CollisionChunk::from_mesh(&floptle_field::mesh_scratch(sc, false), field.voxel()))
+                .collect();
+            let adopt = std::time::Instant::now();
+            for (c, b) in stale.iter().zip(built) {
+                t.adopt(*c, b);
+            }
+            main += adopt.elapsed();
+            if t.distance(feet) > before + 0.05 {
+                moved += 1;
+            }
+            stale_n.push(stale.len());
+            main_ms.push(main.as_secs_f64() * 1e3);
+        }
+        assert!(stale_n.len() >= 40, "only {} bites found the ground", stale_n.len());
+        assert!(moved * 10 >= stale_n.len() * 9, "only {moved} of {} bites showed in the collider once its meshes landed", stale_n.len());
+        main_ms.sort_by(f64::total_cmp);
+        stale_n.sort_unstable();
+        println!(
+            "{} bites: {} collision chunks re-meshed off the main thread (median); main thread p50 {:.2} ms, p90 {:.2} ms",
+            stale_n.len(),
+            stale_n[stale_n.len() / 2],
+            main_ms[main_ms.len() / 2],
+            main_ms[main_ms.len() * 9 / 10]
+        );
     }
 }

@@ -95,6 +95,8 @@ pub struct ChunkField {
     voxel: f32,
     /// Default colour for voxels in chunks that have never been painted.
     base_color: [u8; 4],
+    /// The box of voxels written since [`Self::take_changed`] last asked.
+    changed: Option<([i32; 3], [i32; 3])>,
 }
 
 impl Default for ChunkField {
@@ -139,7 +141,7 @@ impl ChunkField {
     /// one density knob (the dense grid's "detail" was a cell *count* that silently
     /// meant nothing as terrain grew; this is a real density).
     pub fn new(voxel: f32) -> Self {
-        Self { chunks: HashMap::new(), voxel: voxel.max(1e-3), base_color: [128, 128, 128, 255] }
+        Self { chunks: HashMap::new(), voxel: voxel.max(1e-3), base_color: [128, 128, 128, 255], changed: None }
     }
 
     pub fn voxel(&self) -> f32 {
@@ -333,8 +335,62 @@ impl ChunkField {
         }
     }
 
+    /// Widen the changed box to take in voxel `i`.
+    #[inline]
+    fn note_changed(&mut self, i: [i32; 3]) {
+        self.changed = Some(match self.changed {
+            None => (i, i),
+            Some((lo, hi)) => (
+                [lo[0].min(i[0]), lo[1].min(i[1]), lo[2].min(i[2])],
+                [hi[0].max(i[0]), hi[1].max(i[1]), hi[2].max(i[2])],
+            ),
+        });
+    }
+
+    /// The box, in voxel indices, of every voxel written since the last call,
+    /// and start a new one. `None` when nothing was.
+    ///
+    /// Finer than the chunks an edit reports: a dig touches a chunk or two but
+    /// writes a few voxels in them, and whatever keeps meshes of the field (a
+    /// collider's triangles) needs only re-mesh the chunks whose meshes read
+    /// this box, rather than every neighbour of every chunk touched.
+    pub fn take_changed(&mut self) -> Option<([i32; 3], [i32; 3])> {
+        self.changed.take()
+    }
+
+    /// Every chunk whose unskirted mesh at `stride` can change with a voxel of
+    /// the box `lo..=hi` (see [`crate::mesh_depends`]).
+    pub fn chunks_reading(&self, lo: [i32; 3], hi: [i32; 3], stride: i32) -> Vec<[i32; 3]> {
+        let m = crate::mesh_depends(stride);
+        let (c0, c1) = (chunk_of([lo[0] - m, lo[1] - m, lo[2] - m]), chunk_of([hi[0] + m, hi[1] + m, hi[2] + m]));
+        let mut out = Vec::new();
+        for z in c0[2]..=c1[2] {
+            for y in c0[1]..=c1[1] {
+                for x in c0[0]..=c1[0] {
+                    out.push([x, y, z]);
+                }
+            }
+        }
+        out
+    }
+
+    /// Every chunk holding a voxel of the box `lo..=hi`.
+    pub fn chunks_holding(&self, lo: [i32; 3], hi: [i32; 3]) -> Vec<[i32; 3]> {
+        let (c0, c1) = (chunk_of(lo), chunk_of(hi));
+        let mut out = Vec::new();
+        for z in c0[2]..=c1[2] {
+            for y in c0[1]..=c1[1] {
+                for x in c0[0]..=c1[0] {
+                    out.push([x, y, z]);
+                }
+            }
+        }
+        out
+    }
+
     #[inline]
     fn set_voxel(&mut self, i: [i32; 3], d: f32, color: Option<[u8; 4]>) {
+        self.note_changed(i);
         let band = BAND_VOXELS * self.voxel;
         let li = local_of(i);
         let data = self.data_mut(chunk_of(i));
@@ -422,6 +478,7 @@ impl ChunkField {
             for (i, v) in writes {
                 let li = local_of(i);
                 let c = chunk_of(i);
+                self.note_changed(i);
                 let data = self.data_mut(c);
                 data.set_dist(li, v.clamp(-band, band));
                 changed.push(c);
@@ -539,6 +596,10 @@ impl ChunkField {
             for (c, writes) in region.iter().zip(sweep) {
                 if writes.is_empty() {
                     continue;
+                }
+                for &(li, _) in &writes {
+                    let (x, y, z) = (li % CHUNK_U, (li / CHUNK_U) % CHUNK_U, li / (CHUNK_U * CHUNK_U));
+                    self.note_changed([c[0] * CHUNK + x as i32, c[1] * CHUNK + y as i32, c[2] * CHUNK + z as i32]);
                 }
                 let data = self.data_mut(*c);
                 for (li, v) in writes {
@@ -1722,6 +1783,9 @@ impl ChunkField {
                 .collect(),
         };
         for (c, ch) in &undo.entries {
+            // Whole chunks change hands, so the whole chunk changed.
+            self.note_changed([c[0] * CHUNK, c[1] * CHUNK, c[2] * CHUNK]);
+            self.note_changed([c[0] * CHUNK + CHUNK - 1, c[1] * CHUNK + CHUNK - 1, c[2] * CHUNK + CHUNK - 1]);
             match ch {
                 Some(ch) => {
                     self.chunks.insert(*c, ch.clone());

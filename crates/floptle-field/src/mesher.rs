@@ -108,7 +108,7 @@ impl MeshScratch {
         // layer from outside the gathered box, where `at` reports open air — coarse chunks
         // grew vertices tens of units off the surface (caught by
         // `lod_strides_shed_triangles_and_still_hold_the_surface`).
-        let margin = stride + reach(stride) + stride / 2 + 3;
+        let margin = mesh_reads(stride);
         let lo = [
             chunk[0] * CHUNK - margin,
             chunk[1] * CHUNK - margin,
@@ -211,6 +211,25 @@ impl MeshScratch {
 /// coarser neighbour's surface under this one.
 fn reach(stride: i32) -> i32 {
     stride.max(4)
+}
+
+/// How far past its own chunk, in voxels, the scratch a chunk's mesh at `stride`
+/// is built from reaches: every voxel the mesher may read.
+pub fn mesh_reads(stride: i32) -> i32 {
+    let stride = stride.max(1);
+    stride + reach(stride) + stride / 2 + 3
+}
+
+/// How far past its own chunk, in voxels, a change to the field can alter a
+/// chunk's unskirted mesh at `stride`. A collider that keeps meshes needs only
+/// re-mesh the chunks within this of an edit.
+///
+/// Tighter than [`mesh_reads`] at full detail, where no vertex settles: corners
+/// reach one voxel past the chunk and a normal reads a voxel either side of its
+/// vertex, through the trilinear cell around that, so four voxels hold every
+/// value the mesh is built from.
+pub fn mesh_depends(stride: i32) -> i32 {
+    if stride <= 1 { 4 } else { mesh_reads(stride) }
 }
 
 /// Each face of a cell as its four corners in order around the face, and the cell edge
@@ -1918,6 +1937,47 @@ mod tests {
         }
         assert!(windows.is_empty(), "{} placements see through the rock: {windows:#?}", windows.len());
         assert!(rays > 300, "only {rays} rays started inside a passage");
+    }
+
+    /// **A chunk outside what an edit reached meshes exactly as it did.** The
+    /// collider re-meshes only the chunks `chunks_reading` names after a dig; one
+    /// it leaves out that the dig did change is ground a body stands on that is
+    /// not there. Digs at random spots of a cavernous planet, near chunk faces
+    /// and corners as much as anywhere, and every other chunk meshes the same.
+    #[test]
+    fn an_edit_changes_no_mesh_outside_the_chunks_reading_it() {
+        let radius = 60.0;
+        let mut f = crate::procgen::generate_planet(&crate::procgen::PlanetFill {
+            seed: 3,
+            radius,
+            voxel: 1.0,
+            relief: 4.0,
+            cave_depth: 18.0,
+            core_r: 4.0,
+            ..Default::default()
+        });
+        let _ = f.take_changed();
+        let mut r = floptle_core::noise::Rng::new(9);
+        for _ in 0..12 {
+            let dir = Vec3::new(r.range(-1.0, 1.0) as f32, r.range(-1.0, 1.0) as f32, r.range(-1.0, 1.0) as f32)
+                .normalize_or_zero();
+            let Some(ground) = f.raycast(dir * radius * 1.5, -dir, radius) else { continue };
+            let before: Vec<([i32; 3], ChunkMesh)> =
+                f.chunk_coords().into_iter().map(|c| (c, mesh_chunk(&f, c, 1, false))).collect();
+            f.sculpt(Brush::Lower, ground, 2.0 + r.next_f64() as f32 * 2.0, 1.0, BrushProfile::default());
+            let (lo, hi) = f.take_changed().expect("the dig wrote");
+            let reading: std::collections::HashSet<[i32; 3]> = f.chunks_reading(lo, hi, 1).into_iter().collect();
+            for (c, m) in before {
+                if reading.contains(&c) {
+                    continue;
+                }
+                let now = mesh_chunk(&f, c, 1, false);
+                assert!(
+                    now.positions == m.positions && now.indices == m.indices && now.normals == m.normals,
+                    "chunk {c:?} changed under a dig at {ground:?} that reached only {lo:?}..{hi:?}"
+                );
+            }
+        }
     }
 
     /// **Coarse ground does not fold on a cavernous planet.** Settling a coarse

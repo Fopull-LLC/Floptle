@@ -255,7 +255,10 @@ impl Editor {
         // ---- the game ----
         // `true`: a build's window is the game, so input is never somebody
         // else's. In the editor this is "does the Game view have focus".
-        self.timed_script_pass(|ed| ed.play_step(dt, true));
+        // Untimed as a whole: each script pass inside times itself, and physics
+        // and terrain record their own buckets. Timed again out here, all of
+        // it counted a second time as `scripts`.
+        self.play_step(dt, true);
         self.finish_input_frame();
         self.load_script_swapped_models();
 
@@ -1486,6 +1489,45 @@ mod tests {
             let poses = ed.raster.as_ref().unwrap().skin_pose_count();
             assert_eq!(poses, 0, "frame {frame}: the build's frame must start a fresh pose table");
         }
+    }
+
+    /// **A build's frame counts a script's time once.** The whole game step
+    /// was timed as `scripts` on top of the script passes inside it, which time
+    /// themselves: a script's own work was counted twice, and physics and
+    /// terrain inside the step a second time under `scripts`. A frame's buckets
+    /// then added up to more than the frame, and a dig read as a hitch twice
+    /// its size. A script that burns 8 ms in `update` costs `scripts` about 8 ms.
+    #[test]
+    fn a_builds_frame_counts_a_scripts_time_once() {
+        use floptle_core::{Matter, Name, ScriptInst, Scripts, Transform};
+        let dir = std::env::temp_dir().join(format!("floptle-once-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(
+            dir.join("scripts/burn.lua"),
+            "function update(node, dt)\n  local t = os.clock()\n  while os.clock() - t < 0.008 do end\nend\n",
+        )
+        .unwrap();
+        let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+        let e = ed.world.spawn();
+        ed.world.insert(e, Transform::IDENTITY);
+        ed.world.insert(e, Name("Burn".into()));
+        ed.world.insert(e, Matter::Empty);
+        ed.world.insert(
+            e,
+            Scripts(vec![ScriptInst { kind: "burn".into(), enabled: true, params: Vec::new(), refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
+        );
+        ed.toggle_play();
+        assert!(ed.playing, "did not enter play");
+        ed.script_host.profile().borrow_mut().enable(true);
+        for _ in 0..40 {
+            let _ = ed.player_frame(false);
+            ed.end_profile_frame();
+        }
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        let ms = ed.script_host.profile().borrow().bucket(floptle_core::profile::Bucket::Scripts).map_or(0.0, |c| c.ms);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(ms > 7.0, "the script's 8 ms went missing: scripts {ms:.2} ms");
+        assert!(ms < 12.0, "the script's 8 ms was counted more than once: scripts {ms:.2} ms");
     }
 
     /// **What the GPU refused reaches a build's console.**

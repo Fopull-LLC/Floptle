@@ -776,9 +776,11 @@ impl Editor {
         // `update`, splits from UI handlers): forces arm the coming ticks,
         // splits happen now.
         self.drain_assembly_cmds();
+        // Collision meshes rebuilt since an earlier edit land before any tick.
+        self.pump_collision_meshes();
         // Terrain edits queued by the frame pass (`terrain.sculpt/dig/...`):
         // applied to the authority field + the sim's collider copy before any
-        // tick steps, so physics never disagrees with the surface.
+        // tick steps.
         self.drain_script_terrain_ops();
     }
 

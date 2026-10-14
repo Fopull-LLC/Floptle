@@ -51,4 +51,43 @@ fn main() {
             println!("stride {stride}: {mesh:.3} ms a chunk, {gather:.3} of it gathering");
         }
     }
+    if std::env::var("DIG").is_ok() {
+        use floptle_field::{Brush, BrushProfile};
+        let mut field = field;
+        let mut mirror = field.clone();
+        let mut shadow = field.to_dense(96).expect("a planet has bounds");
+        let (mut sculpt, mut copy, mut dense, mut gather, mut n) = (0.0, 0.0, 0.0, 0.0, 0);
+        let mut chunks = 0usize;
+        for k in 0..50 {
+            let a = k as f32 * 0.37;
+            let dir = floptle_core::math::Vec3::new(a.cos(), 0.3, a.sin()).normalize();
+            let Some(hit) = field.raycast(dir * (radius * 1.5), -dir, radius) else { continue };
+            let t = Instant::now();
+            let (touched, _) = field.sculpt_measured(Brush::Lower, hit, 2.4, 0.85, BrushProfile::default());
+            sculpt += t.elapsed().as_secs_f64();
+            let mut region = Vec::new();
+            for c in &touched {
+                for dz in -1..=1 { for dy in -1..=1 { for dx in -1..=1 { region.push([c[0] + dx, c[1] + dy, c[2] + dz]); } } }
+            }
+            region.sort_unstable();
+            region.dedup();
+            let t = Instant::now();
+            mirror.copy_chunks_from(&field, &region);
+            copy += t.elapsed().as_secs_f64();
+            let pad = field.band() + field.voxel();
+            let t = Instant::now();
+            field.refresh_dense_region(&mut shadow, hit - floptle_core::math::Vec3::splat(2.4 + pad), hit + floptle_core::math::Vec3::splat(2.4 + pad));
+            dense += t.elapsed().as_secs_f64();
+            let t = Instant::now();
+            for c in &touched {
+                std::hint::black_box(floptle_field::scratch_for_chunk(&field, *c, 1));
+            }
+            gather += t.elapsed().as_secs_f64();
+            chunks += touched.len();
+            n += 1;
+        }
+        let ms = |v: f64| v * 1e3 / n as f64;
+        println!("{n} digs, {:.1} chunks each: sculpt {:.3} ms, collider copy {:.3} ms ({} chunks), shadow {:.3} ms, remesh gathers {:.3} ms",
+            chunks as f64 / n as f64, ms(sculpt), ms(copy), 27, ms(dense), ms(gather));
+    }
 }

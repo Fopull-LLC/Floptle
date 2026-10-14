@@ -383,6 +383,10 @@ pub(crate) struct RemeshJob {
     pub lod: u8,
     pub epoch: u64,
     pub scratch: floptle_field::MeshScratch,
+    /// A collision mesh, bucketed this many units across, rather than a drawn
+    /// one: no skirt (as collision it would be an invisible wall round every
+    /// chunk), and the bucketing done here too.
+    pub collision: Option<f32>,
 }
 
 pub(crate) struct RemeshDone {
@@ -391,6 +395,8 @@ pub(crate) struct RemeshDone {
     pub lod: u8,
     pub epoch: u64,
     pub mesh: floptle_field::ChunkMesh,
+    /// The bucketed collision triangles, for a collision job.
+    pub collision: Option<floptle_physics::CollisionChunk>,
 }
 
 /// The background remesh worker (P4): one thread, jobs in / meshes out over
@@ -406,6 +412,8 @@ pub(crate) struct TerrainWorker {
     /// Jobs sent and not yet drained — the main thread caps this so a big LOD
     /// migration streams in nearest-first instead of flooding the queue.
     pub in_flight: usize,
+    /// Results [`Self::wait`] took off the channel, for the next `try_recv`.
+    early: Vec<RemeshDone>,
 }
 
 /// At most this many queued-but-unfinished jobs. Each job's scratch is ~1 MB at full
@@ -448,6 +456,10 @@ pub(crate) fn chunk_priority(
     if on_body { metres } else { metres.saturating_add(OFF_BODY_PENALTY) }
 }
 
+/// Frames after an edit that its collision meshes are due: they land then
+/// whether or not the worker finished sooner (see `pump_collision_meshes`).
+const COLLISION_MESH_FRAMES: u64 = 2;
+
 /// Added to every chunk of a body the camera is not on.
 ///
 /// Metres alone gets one case wrong: standing between two worlds, a chunk under
@@ -471,19 +483,20 @@ impl TerrainWorker {
                     }
                 }
             });
-            Self { tx: jtx, rx: drx, in_flight: 0 }
+            Self { tx: jtx, rx: drx, in_flight: 0, early: Vec::new() }
         }
         #[cfg(target_arch = "wasm32")]
         {
-            Self { tx: jtx, rx: drx, in_flight: 0, inline: (jrx, dtx) }
+            Self { tx: jtx, rx: drx, in_flight: 0, early: Vec::new(), inline: (jrx, dtx) }
         }
     }
 
     /// One job: mesh the scratch and hand the result back. `false` when the
     /// receiving side is gone.
     fn run(job: RemeshJob, done: &std::sync::mpsc::Sender<RemeshDone>) -> bool {
-        let mesh = floptle_field::mesh_scratch(&job.scratch, true);
-        done.send(RemeshDone { entity: job.entity, coord: job.coord, lod: job.lod, epoch: job.epoch, mesh })
+        let mesh = floptle_field::mesh_scratch(&job.scratch, job.collision.is_none());
+        let collision = job.collision.map(|cell| floptle_physics::CollisionChunk::from_mesh(&mesh, cell));
+        done.send(RemeshDone { entity: job.entity, coord: job.coord, lod: job.lod, epoch: job.epoch, mesh, collision })
             .is_ok()
     }
 
@@ -507,7 +520,20 @@ impl TerrainWorker {
         self.pump();
     }
 
+    /// Block until the next result is in the channel (not taking it), or a
+    /// short while passes. On the web the jobs ran when they were sent.
+    pub(crate) fn wait(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(d) = self.rx.recv_timeout(std::time::Duration::from_millis(50)) {
+            self.early.push(d);
+        }
+    }
+
     pub(crate) fn try_recv(&mut self) -> Option<RemeshDone> {
+        if let Some(d) = self.early.pop() {
+            self.in_flight = self.in_flight.saturating_sub(1);
+            return Some(d);
+        }
         match self.rx.try_recv() {
             Ok(d) => {
                 self.in_flight = self.in_flight.saturating_sub(1);
@@ -834,6 +860,7 @@ impl Editor {
                         coord,
                         1 << lod,
                     ),
+                    collision: None,
                 });
             }
         }
@@ -1609,21 +1636,62 @@ impl Editor {
         if touched.is_empty() || self.sim.is_none() {
             return;
         }
-        let mut region: Vec<[i32; 3]> = Vec::new();
-        for c in touched {
-            for dz in -1..=1 {
-                for dy in -1..=1 {
-                    for dx in -1..=1 {
-                        region.push([c[0] + dx, c[1] + dy, c[2] + dz]);
+        let Some(t) = self.terrains.get_mut(&e) else { return };
+        // What the edit wrote, to the voxel. The collider copy takes the chunks
+        // holding it and forgets the meshes that read it: a dig writes a few
+        // voxels of one chunk, and copying that chunk's whole neighbourhood and
+        // re-meshing every collision chunk next to it was most of a bite's frame.
+        let (copy, stale) = match t.field.take_changed() {
+            Some((lo, hi)) => {
+                let mut copy = t.field.chunks_holding(lo, hi);
+                copy.extend_from_slice(touched);
+                copy.sort_unstable();
+                copy.dedup();
+                (copy, t.field.chunks_reading(lo, hi, 1))
+            }
+            // No record of the write: every chunk touched and its neighbours.
+            None => {
+                let mut region: Vec<[i32; 3]> = Vec::new();
+                for c in touched {
+                    for dz in -1..=1 {
+                        for dy in -1..=1 {
+                            for dx in -1..=1 {
+                                region.push([c[0] + dx, c[1] + dy, c[2] + dz]);
+                            }
+                        }
                     }
                 }
+                region.sort_unstable();
+                region.dedup();
+                (region.clone(), region)
             }
-        }
-        region.sort_unstable();
-        region.dedup();
-        let Some(t) = self.terrains.get(&e) else { return };
-        match self.sim.as_mut().and_then(|s| s.terrain_chunks_mut(e.index(), &region)) {
-            Some(f) => f.copy_chunks_from(&t.field, &region),
+        };
+        let t = &self.terrains[&e];
+        match self.sim.as_mut().and_then(|s| s.terrain_collider_mut(e.index())) {
+            Some(collider) => {
+                collider.field.copy_chunks_from(&t.field, &copy);
+                // The stale collision meshes are rebuilt off this thread and the
+                // old triangles stand until they land, a frame or two later,
+                // as the old drawn mesh does. A chunk never meshed for
+                // collision needs nothing: it meshes from the new field when
+                // something first stands in it.
+                let worker = self.collision_worker.get_or_insert_with(TerrainWorker::spawn);
+                for c in stale {
+                    if !collider.is_meshed(c) {
+                        continue;
+                    }
+                    self.terrain_epoch += 1;
+                    self.collision_pending.insert((e, c), (self.terrain_epoch, self.collision_frame + COLLISION_MESH_FRAMES));
+                    worker.send(RemeshJob {
+                        entity: e,
+                        coord: c,
+                        lod: 0,
+                        epoch: self.terrain_epoch,
+                        scratch: floptle_field::scratch_for_chunk(&t.field, c, 1),
+                        collision: Some(t.field.voxel()),
+                    });
+                }
+            }
             None => {
                 if !self.terrain_mirror_warned {
                     self.terrain_mirror_warned = true;
@@ -1640,6 +1708,45 @@ impl Editor {
                 }
             }
         }
+    }
+
+    /// Hand the terrain colliders the collision meshes the worker has built,
+    /// once a frame, before any tick steps.
+    ///
+    /// A mesh lands as soon as it is ready, and one that is due lands this frame
+    /// even if the frame has to wait for it, so a run of `floptle run` lands
+    /// every mesh on the same frame as the last: physics after a dig plays out
+    /// the same twice. Due [`COLLISION_MESH_FRAMES`] after the edit, which the
+    /// worker beats by far.
+    pub(crate) fn pump_collision_meshes(&mut self) {
+        self.collision_frame += 1;
+        let Some(w) = self.collision_worker.as_mut() else { return };
+        if self.collision_pending.is_empty() {
+            return;
+        }
+        let frame = self.collision_frame;
+        let t0 = floptle_core::profile::Span::new();
+        let deadline = floptle_core::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            while let Some(done) = w.try_recv() {
+                let key = (done.entity, done.coord);
+                if self.collision_pending.get(&key).map(|p| p.0) != Some(done.epoch) {
+                    continue; // a later edit of the chunk superseded it
+                }
+                self.collision_pending.remove(&key);
+                if let (Some(collider), Some(built)) =
+                    (self.sim.as_mut().and_then(|s| s.terrain_collider_mut(done.entity.index())), done.collision)
+                {
+                    collider.adopt(done.coord, built);
+                }
+            }
+            let due = self.collision_pending.values().any(|p| p.1 <= frame);
+            if !due || floptle_core::time::Instant::now() >= deadline {
+                break;
+            }
+            w.wait();
+        }
+        self.profile_record(floptle_core::profile::Bucket::Terrain, t0.ms());
     }
 
     /// Queue the render/shadow refresh for a terrain write at `local` (node-local):
@@ -3613,6 +3720,45 @@ mod residency_tests {
         }
         assert!(!ed.terrain_render[&e].pending.contains_key(&c), "the worker's mesh never landed");
         assert!(mesh_of(&ed, c).is_some(), "the chunk is drawn after the remesh");
+    }
+
+    /// **In Play a dig's collision meshes are built off the main thread and land
+    /// on a fixed frame.** The collider keeps its old triangles until then, as
+    /// the drawn chunk keeps its old mesh, and from that frame on it stands on
+    /// the dug ground. A mining laser re-meshed every collision chunk near each
+    /// bite on the main thread, most of its frame.
+    #[test]
+    fn in_play_a_digs_collision_lands_from_the_worker_on_its_frame() {
+        use floptle_field::{Brush, BrushProfile};
+        use floptle_physics::CollisionShape;
+        let mut ed = crate::Editor::default();
+        let mut field = floptle_field::ChunkField::new(0.5);
+        field.fill_slab(Vec3::new(-12.0, -6.0, -12.0), Vec3::new(12.0, 0.0, 12.0), 0.0, [0.5, 0.5, 0.5]);
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        ed.terrains.insert(e, EditorTerrain::new(field));
+        ed.toggle_play();
+        assert!(ed.playing && ed.sim.is_some(), "did not enter play with a sim");
+        let probe = Vec3::new(1.0, 0.6, 1.0);
+        let collider_distance = |ed: &mut crate::Editor| {
+            ed.sim.as_mut().unwrap().terrain_collider_mut(e.index()).expect("the terrain's collider").distance(probe)
+        };
+        let before = collider_distance(&mut ed);
+        assert!((before - 0.6).abs() < 0.2, "the slab's top is not where it was laid: {before}");
+
+        // The dig, through the path a script's `terrain.dig` takes.
+        let touched = {
+            let t = ed.terrains.get_mut(&e).unwrap();
+            t.field.sculpt(Brush::Lower, Vec3::new(1.0, 0.0, 1.0), 2.0, 1.0, BrushProfile { hardness: 1.0, ..Default::default() })
+        };
+        ed.mirror_terrain_chunks_to_sim(e, &touched);
+        assert_eq!(collider_distance(&mut ed), before, "the old triangles must stand until the new ones land");
+        for _ in 0..COLLISION_MESH_FRAMES {
+            ed.pump_collision_meshes();
+        }
+        assert!(ed.collision_pending.is_empty(), "the collision meshes never landed");
+        let after = collider_distance(&mut ed);
+        assert!(after > before + 0.5, "the collider does not see the hole: {before} -> {after}");
     }
 
     /// The full genspec streaming pipeline, headless: a PlanetFill serialized
