@@ -24,6 +24,42 @@ pub(crate) struct SceneHit {
     pub(crate) normal: Vec3,
 }
 
+/// Where a flat 2D node (a sprite or a painted tile) is drawn in the stack, for
+/// telling apart two that a click strikes at the same distance.
+///
+/// In a flat front view that is the ordinary case, not a corner: a character
+/// and the ground it stands on are a sorting step apart, 1/4096 of a unit for
+/// one `order`. An orthographic ray starts thousands of units behind the eye,
+/// where an `f32` distance cannot resolve that step, so the distance alone
+/// picked whichever node the world happened to list first.
+#[derive(Clone, Copy, Debug)]
+struct Flat2d {
+    /// The node's drawn position towards the viewer, in `f64`, sorting and
+    /// parallax offsets included. Larger is in front.
+    depth: f64,
+    /// The node's drawn area. Two nodes drawn at exactly the same depth go to
+    /// the smaller: a prop placed on a map is what a click on it means.
+    area: f32,
+}
+
+/// Does `hit` take the click from `best`?
+///
+/// The nearer hit wins. Between two flat 2D nodes whose distances agree to
+/// within what the ray can resolve, the one drawn in front wins, then the
+/// smaller one.
+fn beats(hit: &SceneHit, flat: Option<Flat2d>, best: &SceneHit, best_flat: Option<Flat2d>) -> bool {
+    if let (Some(a), Some(b)) = (flat, best_flat) {
+        let tol = 1e-5 * hit.t.abs().max(best.t.abs()) + 1e-4;
+        if (hit.t - best.t).abs() <= tol {
+            if a.depth != b.depth {
+                return a.depth > b.depth;
+            }
+            return a.area < b.area;
+        }
+    }
+    hit.t < best.t
+}
+
 /// A local-space surface normal carried out through a node's inverse matrix
 /// (the inverse transpose), so non-uniform scale keeps it perpendicular.
 pub(crate) fn local_normal_to_world(m_inv: &Mat4, n: Vec3) -> Vec3 {
@@ -421,12 +457,19 @@ impl Editor {
         // Nodes whose triangles decide the hit: a bounds test admits them, then
         // the exact cast below settles it.
         let mut exact: Vec<(Entity, Mat4)> = Vec::new();
-        let mut best: Option<SceneHit> = None;
-        let offer = |best: &mut Option<SceneHit>, hit: SceneHit| {
-            if best.as_ref().is_none_or(|b| hit.t < b.t) {
-                *best = Some(hit);
+        let mut best: Option<(SceneHit, Option<Flat2d>)> = None;
+        // A map with nothing painted on it yet, under the cursor. Empty squares
+        // are see-through, so this only wins when nothing at all was hit: a new
+        // layer can still be clicked before it has any tiles.
+        let mut blank_map: Option<SceneHit> = None;
+        let offer = |best: &mut Option<(SceneHit, Option<Flat2d>)>, hit: SceneHit, flat2d: Option<Flat2d>| {
+            if best.as_ref().is_none_or(|(b, bf)| beats(&hit, flat2d, b, *bf)) {
+                *best = Some((hit, flat2d));
             }
         };
+        // Which way is towards the viewer, for ranking flat 2D nodes by the
+        // depth they are drawn at (see `Flat2d`).
+        let back = (self.camera.rotation() * Vec3::Z).as_dvec3();
         let flat = |e: Entity, t: f32| SceneHit { e, t, pos: ro + rd * t, normal: -rd };
         for (e, m) in self.world.query::<Matter>() {
             if !keep(e) {
@@ -458,14 +501,14 @@ impl Editor {
                 Matter::Blob { scale } => {
                     let center = (t.translation - cam.world_position).as_vec3();
                     if let Some(th) = ray_sphere(ro, rd, center, 0.85 * scale * t.scale.x) {
-                        offer(&mut best, flat(e, th));
+                        offer(&mut best, flat(e, th), None);
                     }
                 }
                 Matter::FieldShape { radius } => {
                     // Pick by the authored bounding sphere (the shape lives inside it).
                     let center = (t.translation - cam.world_position).as_vec3();
                     if let Some(th) = ray_sphere(ro, rd, center, (radius * t.scale.x).max(0.1)) {
-                        offer(&mut best, flat(e, th));
+                        offer(&mut best, flat(e, th), None);
                     }
                 }
                 Matter::Mesh { asset_path } => {
@@ -485,21 +528,41 @@ impl Editor {
                         .and_then(|mesh| floptle_map::raycast(mesh, ro_l, rd_l, f32::MAX))
                     {
                         let normal = local_normal_to_world(&m_inv, h.normal);
-                        offer(&mut best, SceneHit { e, t: h.t, pos: ro + rd * h.t, normal });
+                        offer(&mut best, SceneHit { e, t: h.t, pos: ro + rd * h.t, normal }, None);
                     }
                 }
-                // A flat grid in the node's XY plane: pick it as a thin box, so
-                // clicking the floor of a 2D room selects the map rather than
-                // requiring the Hierarchy.
-                Matter::Tilemap { cols, rows, tile, .. } => {
-                    let half = Vec3::new(
-                        (*cols as f32 * tile * 0.5).max(0.01),
-                        (*rows as f32 * tile * 0.5).max(0.01),
-                        tile * 0.1,
-                    );
-                    if let Some(th) = ray_box(ro_l, rd_l, half) {
-                        let normal = local_normal_to_world(&m_inv, Vec3::Z);
-                        offer(&mut best, SceneHit { e, t: th, pos: ro + rd * th, normal });
+                // A grid in the node's XY plane, picked where it is painted.
+                //
+                // It used to be a box over the whole grid standing a tenth of a
+                // tile proud of its plane, and in a flat front view that box was
+                // in front of everything sorted onto the same plane: every click
+                // on a character standing on the ground selected the ground, and
+                // nothing behind the layer could be clicked even through holes.
+                // A click is a hit only on a square that draws a tile; the empty
+                // ones let the click through, as they let the eye through.
+                Matter::Tilemap { cols, rows, tile, data, tileset } => {
+                    let (cols, rows, tile) = (*cols, *rows, *tile);
+                    if cols == 0 || rows == 0 || tile <= 0.0 || rd_l.z.abs() < 1e-9 {
+                        continue;
+                    }
+                    let th = -ro_l.z / rd_l.z;
+                    if th <= 0.0 {
+                        continue;
+                    }
+                    let p = ro_l + rd_l * th;
+                    let layout = floptle_tiles::CellLayout::of(self.tiles.get(tileset), cols, rows, tile);
+                    let (c, r) = layout.cell_at(p.x, p.y);
+                    if c < 0 || r < 0 || c >= cols as i32 || r >= rows as i32 {
+                        continue;
+                    }
+                    let normal = local_normal_to_world(&m_inv, Vec3::Z);
+                    let hit = SceneHit { e, t: th, pos: ro + rd * th, normal };
+                    let painted = |i: usize| data.get(i).is_some_and(|&q| q != floptle_core::EMPTY_TILE);
+                    if painted((r as u32 * cols + c as u32) as usize) {
+                        let area = cols as f32 * rows as f32 * tile * tile * (t.scale.x * t.scale.y).abs();
+                        offer(&mut best, hit, Some(Flat2d { depth: t.translation.dot(back), area }));
+                    } else if !data.iter().any(|&q| q != floptle_core::EMPTY_TILE) {
+                        blank_map = blank_map.filter(|b| b.t <= hit.t).or(Some(hit));
                     }
                 }
                 // Its sprites are this frame's, and picking one would select the
@@ -507,7 +570,7 @@ impl Editor {
                 Matter::SpriteBatch { size } => {
                     let center = (t.translation - cam.world_position).as_vec3();
                     if let Some(th) = ray_sphere(ro, rd, center, (size * t.scale.max_element()).max(0.1)) {
-                        offer(&mut best, flat(e, th));
+                        offer(&mut best, flat(e, th), None);
                     }
                 }
                 // One sprite is a quad, and clicking it should feel like
@@ -536,8 +599,22 @@ impl Editor {
                             0.0,
                         );
                     let center = (t.translation - cam.world_position).as_vec3() + off;
-                    if let Some(th) = ray_sphere(ro, rd, center, (w.max(h) * 0.5).max(0.05)) {
-                        offer(&mut best, flat(e, th));
+                    // The quad itself, in its own plane: the corners of a square
+                    // sprite are as clickable as its middle, and a click is
+                    // ranked at the depth the sprite is drawn at, not a sphere's
+                    // bulge in front of it.
+                    let normal = t.rotation * Vec3::Z;
+                    let denom = rd.dot(normal);
+                    if denom.abs() < 1e-6 {
+                        continue;
+                    }
+                    let th = (center - ro).dot(normal) / denom;
+                    let rel = t.rotation.inverse() * (ro + rd * th - center);
+                    let (hw, hh) = ((w * 0.5).max(0.025), (h * 0.5).max(0.025));
+                    if th > 0.0 && rel.x.abs() <= hw && rel.y.abs() <= hh {
+                        let n = if denom < 0.0 { normal } else { -normal };
+                        let hit = SceneHit { e, t: th, pos: ro + rd * th, normal: n };
+                        offer(&mut best, hit, Some(Flat2d { depth: t.translation.dot(back), area: w * h }));
                     }
                 }
                 // no mesh — select via the hierarchy.
@@ -558,10 +635,10 @@ impl Editor {
         }
         for (e, model) in exact {
             if let Some(hit) = self.raycast_node_triangles(e, &model, ro, rd) {
-                offer(&mut best, hit);
+                offer(&mut best, hit, None);
             }
         }
-        best
+        best.map(|(h, _)| h).or(blank_map)
     }
 
     /// The camera-relative ray against one node's own triangles (model or
@@ -1516,6 +1593,69 @@ mod pick_tests {
         // And a node `keep` refuses is looked through.
         let hit = ed.raycast_nodes(-cam, Vec3::NEG_Z, |e| e != near).expect("the room's wall");
         assert!((hit.t - 21.0).abs() < 1e-3, "{hit:?}");
+    }
+
+    fn sprite() -> Matter {
+        Matter::Sprite { ppu: 0.0, size: 1.0, cell: 0, flip_x: false, flip_y: false, pivot: [0.5, 0.5] }
+    }
+
+    /// **A flat 2D scene seen face-on picks what is drawn under the cursor.**
+    /// In the locked Front view every click on a character standing on a tile
+    /// layer selected the layer: the layer was a box a tenth of a tile in front
+    /// of its own plane, sprites were spheres inscribed in their quads, and the
+    /// ortho ray starts so far back that a sorting step is below what its
+    /// distance can tell apart.
+    #[test]
+    fn a_face_on_2d_click_selects_what_is_drawn_on_top() {
+        use floptle_core::{EMPTY_TILE, Sorting};
+        let mut ed = Editor::default();
+        ed.camera.set_lock(floptle_render::ViewLock::Front);
+        ed.camera.set_ortho(Some(12.0));
+        // A 4 × 2 ground layer centred on the origin, painted on its left half.
+        let mut data = vec![EMPTY_TILE; 8];
+        for i in [0, 1, 4, 5] {
+            data[i] = 3;
+        }
+        let ground =
+            put(&mut ed, Matter::Tilemap { cols: 4, rows: 2, tile: 1.0, data, tileset: String::new() }, [0.0; 3], 1.0);
+        let hero = put(&mut ed, sprite(), [-1.0, 0.0, 0.0], 1.0);
+        let behind = put(&mut ed, sprite(), [1.5, 0.5, -2.0], 1.0);
+
+        // The ray the viewport casts in ortho: parallel, from the near plane
+        // `ORTHO_DEPTH` behind the eye.
+        let cam = ed.camera.render_camera().world_position;
+        let click = |ed: &mut Editor, x: f64, y: f64| {
+            let ro = (DVec3::new(x, y, cam.z + floptle_render::ORTHO_DEPTH as f64) - cam).as_vec3();
+            ed.raycast_nodes(ro, Vec3::NEG_Z, |_| true).map(|h| h.e)
+        };
+
+        // The character, at its middle and near its corner (a sphere missed the
+        // corner, and the layer's slab took the rest).
+        assert_eq!(click(&mut ed, -1.0, 0.0), Some(hero));
+        assert_eq!(click(&mut ed, -1.45, 0.45), Some(hero));
+        // Painted ground beside it.
+        assert_eq!(click(&mut ed, -1.8, -0.5), Some(ground));
+        // An empty square lets the click through to what is drawn behind it.
+        assert_eq!(click(&mut ed, 1.5, 0.5), Some(behind));
+        // Empty space past both.
+        assert_eq!(click(&mut ed, 1.5, -0.5), None);
+
+        // Sorted behind the ground, the character is covered by it: the ground
+        // is what is drawn there, so the ground is what a click selects.
+        ed.world.insert(hero, Sorting { layer: String::new(), order: -1, mode: floptle_core::SortMode::Order });
+        assert_eq!(click(&mut ed, -1.0, 0.0), Some(ground));
+        // In front by one order step, it is the character again.
+        ed.world.insert(hero, Sorting { layer: String::new(), order: 1, mode: floptle_core::SortMode::Order });
+        assert_eq!(click(&mut ed, -1.0, 0.0), Some(hero));
+
+        // A layer with nothing painted on it yet can still be clicked.
+        let blank = put(
+            &mut ed,
+            Matter::Tilemap { cols: 2, rows: 2, tile: 1.0, data: vec![EMPTY_TILE; 4], tileset: String::new() },
+            [10.0, 0.0, 0.0],
+            1.0,
+        );
+        assert_eq!(click(&mut ed, 10.5, 0.5), Some(blank));
     }
 }
 
