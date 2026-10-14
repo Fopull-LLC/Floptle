@@ -47,6 +47,7 @@
       "blurb": "The tools that come with the engine, rather than around it.",
       "pages": [
         "map-tools.md",
+        "planet-generator.md",
         "2d.md",
         "tilemaps.md",
         "image-editor.md",

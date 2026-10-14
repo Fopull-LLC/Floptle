@@ -496,6 +496,33 @@ pub(crate) fn install_terrain_api(
         }
     }
 
+    // terrain.planetRivers(opts) → the rivers and ravines `generatePlanet`
+    // with the same opts carves, without generating: { {river=, depth=,
+    // points={x1,y1,z1, ...}, widths={...}}, ... }. Points are planet-local,
+    // on the sphere of the planet's radius; the ground there is the carved bed.
+    if let Ok(f) = lua.create_function(|lua, opts: Option<Table>| {
+        let fill = planet_fill_from_table(opts.as_ref())?;
+        let out = lua.create_table()?;
+        for (i, c) in floptle_field::relief::channels_of(&fill).iter().enumerate() {
+            let ch = lua.create_table()?;
+            ch.set("river", c.river)?;
+            ch.set("depth", c.depth)?;
+            let pts = lua.create_table_with_capacity(c.points.len() * 3, 0)?;
+            for (k, p) in c.points.iter().enumerate() {
+                let p = *p * fill.radius;
+                pts.raw_set(k * 3 + 1, p.x)?;
+                pts.raw_set(k * 3 + 2, p.y)?;
+                pts.raw_set(k * 3 + 3, p.z)?;
+            }
+            ch.set("points", pts)?;
+            ch.set("widths", lua.create_sequence_from(c.widths.iter().copied())?)?;
+            out.raw_set(i + 1, ch)?;
+        }
+        Ok(out)
+    }) {
+        let _ = t.set("planetRivers", f);
+    }
+
     // terrain.yields() → the reports for edits that have landed since the last
     // call, drained. An op is queued and applied after the script pass, so the
     // report for a dab arrives on the following frame; the id `dig` returned
@@ -641,8 +668,19 @@ pub(crate) const PLANET_KEYS: &[&str] = &[
     "seed", "radius", "voxel", "relief", "bumpFreq", "caveDepth", "coreR", "craters",
     "craterMin", "craterMax", "patchBias", "patchThr", "subsoilDepth", "strataDepth",
     "corePaint", "craterDust", "surfaceA", "surfaceB", "subsoil", "strata", "deep", "pockets",
-    "seam", "iceCaps",
+    "seam", "iceCaps", "mountains", "warp", "plateau", "terrace", "overhangs", "ravines", "rivers",
+    "biomes", "moistureScale",
 ];
+
+/// The relief layers' inner keys.
+const MOUNTAIN_KEYS: &[&str] = &["height", "scale", "sharpness", "coverage", "octaves"];
+const WARP_KEYS: &[&str] = &["strength", "scale"];
+const PLATEAU_KEYS: &[&str] = &["height", "smooth"];
+const TERRACE_KEYS: &[&str] = &["step", "sharpness"];
+const OVERHANG_KEYS: &[&str] = &["depth", "scale", "strength"];
+const RAVINE_KEYS: &[&str] = &["count", "depth", "width", "length", "meander"];
+const RIVER_KEYS: &[&str] = &["count", "depth", "width", "seaLevel", "meander"];
+const BIOME_KEYS: &[&str] = &["slot", "color", "latitude", "altitude", "slope", "moisture", "nearRiver"];
 
 /// The inner keys of a paint layer, and of the three special sub-tables.
 const PAINT_KEYS: &[&str] = &["slot", "color"];
@@ -766,8 +804,102 @@ pub(crate) fn planet_fill_from_table(
                         },
                     ));
                 }
+                relief_layers_from_table(t, &mut fill, CALL)?;
         }
     }
     Ok(fill)
+}
+
+/// The relief layers of a planet's opts: `mountains`, `warp`, `plateau`,
+/// `terrace`, `overhangs`, `ravines`, `rivers` (each a table whose keys all
+/// default), `biomes` (a list of rules) and `moistureScale`.
+fn relief_layers_from_table(t: &Table, fill: &mut floptle_field::procgen::PlanetFill, call: &str) -> mlua::Result<()> {
+    use crate::opts::check_keys;
+    use floptle_field::procgen as pg;
+    let sub = |k: &str, keys: &[&str]| -> mlua::Result<Option<Table>> {
+        let v = t.raw_get::<Option<Table>>(k).ok().flatten();
+        if let Some(v) = &v {
+            check_keys(v, keys, &format!("{call} {k}"))?;
+        }
+        Ok(v)
+    };
+    let num = |v: &Table, k: &str, d: f32| v.raw_get::<Option<f64>>(k).ok().flatten().map_or(d, |x| x as f32);
+    let range = |v: &Table, k: &str| -> Option<[f32; 2]> {
+        let r: Table = v.raw_get::<Option<Table>>(k).ok().flatten()?;
+        Some([r.raw_get::<Option<f64>>(1).ok().flatten()? as f32, r.raw_get::<Option<f64>>(2).ok().flatten()? as f32])
+    };
+    if let Some(v) = sub("mountains", MOUNTAIN_KEYS)? {
+        let d = pg::Mountains::default();
+        fill.mountains = Some(pg::Mountains {
+            height: num(&v, "height", d.height),
+            scale: num(&v, "scale", d.scale),
+            sharpness: num(&v, "sharpness", d.sharpness),
+            coverage: num(&v, "coverage", d.coverage),
+            octaves: num(&v, "octaves", d.octaves as f32).max(1.0) as u32,
+        });
+    }
+    if let Some(v) = sub("warp", WARP_KEYS)? {
+        fill.warp = Some(pg::Warp { strength: num(&v, "strength", 0.15), scale: num(&v, "scale", 2.0) });
+    }
+    if let Some(v) = sub("plateau", PLATEAU_KEYS)? {
+        let d = pg::Plateau::default();
+        fill.plateau = Some(pg::Plateau { height: num(&v, "height", d.height), smooth: num(&v, "smooth", d.smooth) });
+    }
+    if let Some(v) = sub("terrace", TERRACE_KEYS)? {
+        let d = pg::Terrace::default();
+        fill.terrace = Some(pg::Terrace { step: num(&v, "step", d.step), sharpness: num(&v, "sharpness", d.sharpness) });
+    }
+    if let Some(v) = sub("overhangs", OVERHANG_KEYS)? {
+        let d = pg::Overhangs::default();
+        fill.overhangs = Some(pg::Overhangs {
+            depth: num(&v, "depth", d.depth),
+            scale: num(&v, "scale", d.scale),
+            strength: num(&v, "strength", d.strength),
+        });
+    }
+    if let Some(v) = sub("ravines", RAVINE_KEYS)? {
+        let d = pg::Ravines::default();
+        fill.ravines = Some(pg::Ravines {
+            count: num(&v, "count", d.count as f32).max(0.0) as u32,
+            depth: num(&v, "depth", d.depth),
+            width: num(&v, "width", d.width),
+            length: num(&v, "length", d.length),
+            meander: num(&v, "meander", d.meander),
+        });
+    }
+    if let Some(v) = sub("rivers", RIVER_KEYS)? {
+        let d = pg::Rivers::default();
+        fill.rivers = Some(pg::Rivers {
+            count: num(&v, "count", d.count as f32).max(0.0) as u32,
+            depth: num(&v, "depth", d.depth),
+            width: num(&v, "width", d.width),
+            sea_level: num(&v, "seaLevel", d.sea_level),
+            meander: num(&v, "meander", d.meander),
+        });
+    }
+    if let Some(list) = t.raw_get::<Option<Table>>("biomes").ok().flatten() {
+        for (i, rule) in list.sequence_values::<Table>().enumerate() {
+            let rule = rule.map_err(|_| mlua::Error::runtime(format!("{call} biomes[{}] is not a table", i + 1)))?;
+            check_keys(&rule, BIOME_KEYS, &format!("{call} biomes[{}]", i + 1))?;
+            let color = rule.raw_get::<Option<Table>>("color").ok().flatten().map(|c| {
+                [1, 2, 3].map(|k| c.raw_get::<Option<f64>>(k).ok().flatten().unwrap_or(1.0) as f32)
+            });
+            fill.biomes.push(pg::Biome {
+                paint: pg::LayerPaint {
+                    slot: rule.raw_get::<Option<u32>>("slot").ok().flatten().unwrap_or(1) as u8,
+                    color: color.unwrap_or([1.0; 3]),
+                },
+                latitude: range(&rule, "latitude"),
+                altitude: range(&rule, "altitude"),
+                slope: range(&rule, "slope"),
+                moisture: range(&rule, "moisture"),
+                near_river: rule.raw_get::<Option<f64>>("nearRiver").ok().flatten().map(|x| x as f32),
+            });
+        }
+    }
+    if let Some(v) = t.raw_get::<Option<f64>>("moistureScale").ok().flatten() {
+        fill.moisture_scale = v as f32;
+    }
+    Ok(())
 }
 

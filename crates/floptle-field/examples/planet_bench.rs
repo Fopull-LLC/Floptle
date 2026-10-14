@@ -26,6 +26,22 @@ fn main() {
         craters: 6,
         ..PlanetFill::default()
     };
+    // LAYERS=1: the alpine-and-canyon mix of relief layers on the same world.
+    let spec = if std::env::var("LAYERS").is_ok() {
+        use floptle_field::procgen::*;
+        PlanetFill {
+            mountains: Some(Mountains { height: radius * 0.2, ..Mountains::default() }),
+            warp: Some(Warp { strength: 0.15, scale: 2.5 }),
+            terrace: Some(Terrace { step: 5.0, sharpness: 0.8 }),
+            overhangs: Some(Overhangs::default()),
+            ravines: Some(Ravines::default()),
+            rivers: Some(Rivers::default()),
+            biomes: vec![Biome { paint: LayerPaint { slot: 12, color: [1.0; 3] }, slope: Some([35.0, 90.0]), ..Biome::default() }],
+            ..spec
+        }
+    } else {
+        spec
+    };
     let t = Instant::now();
     let field = generate_planet(&spec);
     let secs = t.elapsed().as_secs_f64();

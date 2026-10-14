@@ -130,6 +130,30 @@ impl Noise {
         sum / norm.max(1e-6)
     }
 
+    /// Ridged noise in `[0, 1]`: each octave folded about zero and turned
+    /// upside down, `(1 - |n|)^sharpness`, so its zero lines become crests.
+    /// Mountain ranges, where `fbm` makes rolling hills; the octaves turn and
+    /// scale as `fbm`'s do. Higher `sharpness` makes thinner, steeper ridges.
+    pub fn ridged(&self, p: Vec3, octaves: u32, sharpness: f32) -> f32 {
+        let rot = |v: Vec3| {
+            Vec3::new(
+                0.36 * v.x - 0.80 * v.y + 0.48 * v.z,
+                0.80 * v.x + 0.52 * v.y + 0.30 * v.z,
+                -0.48 * v.x + 0.30 * v.y + 0.82 * v.z,
+            )
+        };
+        let (mut amp, mut sum, mut norm) = (1.0f32, 0.0f32, 0.0f32);
+        let mut q = p;
+        for i in 0..octaves.clamp(1, 10) {
+            let n = self.value(q + Vec3::splat(i as f32 * 19.19)).abs().min(1.0);
+            sum += (1.0 - n).powf(sharpness) * amp;
+            norm += amp;
+            amp *= 0.5;
+            q = rot(q) * 2.03;
+        }
+        sum / norm.max(1e-6)
+    }
+
     /// [`Self::fbm`], reusing lattice values `cache` already holds.
     ///
     /// The same number, bit for bit: only the hashing is skipped, never the

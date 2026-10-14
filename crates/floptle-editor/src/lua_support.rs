@@ -1827,10 +1827,22 @@ function terrain.paintTexture(x, y, z, radius, slot) end
 ---craterMin, craterMax, craterDust, surfaceA, surfaceB, patchBias, patchThr,
 ---subsoil, subsoilDepth, strata, strataDepth, deep,
 ---pockets {slot,color,threshold,minDepth}, seam {slot,color,minDepth,center,width},
----iceCaps {lat,slot,color}, seed.
+---iceCaps {lat,slot,color}, seed. Relief layers, each a table of optional
+---keys: mountains {height,scale,sharpness,coverage,octaves}, warp
+---{strength,scale}, plateau {height,smooth}, terrace {step,sharpness},
+---overhangs {depth,scale,strength}, ravines {count,depth,width,length,meander},
+---rivers {count,depth,width,seaLevel,meander}; biomes, a list of
+---{slot,color,latitude,altitude,slope,moisture,nearRiver} rules (ranges are
+---{min,max}; the first match paints the surface); moistureScale.
 ---@param id number The terrain id (a node with that Terrain id shows the result).
 ---@param opts? table
 function terrain.generatePlanet(id, opts) end
+---The rivers and ravines `terrain.generatePlanet` carves with these opts,
+---without generating: { {river=, depth=, points={x1,y1,z1, ...}, widths={...}}, ... }.
+---Points are planet-local, on the sphere of the planet's radius.
+---@param opts table The same opts table `terrain.generatePlanet` takes.
+---@return table[]
+function terrain.planetRivers(opts) end
 ---Set (or read, with no argument) the game's SAVE-SLOT directory for
 ---player-edited terrain, relative to the project root (e.g.
 ---\"saves/slot1/terrain\"). While set, streaming loads a body's field from here

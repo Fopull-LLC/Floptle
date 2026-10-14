@@ -22,7 +22,7 @@ use crate::ChunkField;
 
 /// One material layer: a terrain palette slot (1-based) + an RGB tint
 /// (`albedo = texture × tint`).
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct LayerPaint {
     pub slot: u8,
     pub color: [f32; 3],
@@ -92,6 +92,154 @@ pub struct PlanetFill {
     pub seam: Option<SeamSpec>,
     /// Polar caps + frost patches: `|dir.y| > lat` (or patch noise < -0.42).
     pub ice_caps: Option<(f32, LayerPaint)>,
+    /// Mountain ranges: ridged peaks where a slow mask is high.
+    pub mountains: Option<Mountains>,
+    /// Bends the relief before it is read, into folded and wind-carved forms.
+    pub warp: Option<Warp>,
+    /// Flattens every peak above a height into a table top.
+    pub plateau: Option<Plateau>,
+    /// Steps the ground into terraces and mesas.
+    pub terrace: Option<Terrace>,
+    /// Real overhangs, arches and undercut cliffs: 3D noise in a shell round
+    /// the surface.
+    pub overhangs: Option<Overhangs>,
+    /// Steep-walled ravines and canyons, cut along meandering lines.
+    pub ravines: Option<Ravines>,
+    /// Rivers from the highlands down to the sea, each in a valley it carves.
+    pub rivers: Option<Rivers>,
+    /// Surface materials by latitude, altitude, slope, moisture and nearness
+    /// to a river: the first rule that matches paints the ground.
+    pub biomes: Vec<Biome>,
+    /// The size of the moisture pattern biomes read (higher is finer).
+    pub moisture_scale: f32,
+}
+
+/// Mountain ranges: `height` at the crests, ranges `coverage` (0..1) of the
+/// world, ridges `scale` across the sphere, crests sharper as `sharpness` rises.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Mountains {
+    pub height: f32,
+    pub scale: f32,
+    pub sharpness: f32,
+    pub coverage: f32,
+    pub octaves: u32,
+}
+
+impl Default for Mountains {
+    fn default() -> Self {
+        Mountains { height: 40.0, scale: 3.0, sharpness: 2.0, coverage: 0.4, octaves: 5 }
+    }
+}
+
+/// Domain warp: the relief is read at a point pushed up to `strength` (a
+/// fraction of the radius) by noise `scale` across the sphere.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Warp {
+    pub strength: f32,
+    pub scale: f32,
+}
+
+/// Peaks above `height` are rounded off into flat tops over `smooth` metres.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Plateau {
+    pub height: f32,
+    pub smooth: f32,
+}
+
+impl Default for Plateau {
+    fn default() -> Self {
+        Plateau { height: 20.0, smooth: 3.0 }
+    }
+}
+
+/// Terraces `step` metres tall; `sharpness` 0 is a gentle slope between them,
+/// 1 a sheer rise.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Terrace {
+    pub step: f32,
+    pub sharpness: f32,
+}
+
+impl Default for Terrace {
+    fn default() -> Self {
+        Terrace { step: 6.0, sharpness: 0.6 }
+    }
+}
+
+/// Overhangs: the ground within `depth` metres of the surface is pushed in and
+/// out by up to `strength` metres of 3D noise `scale` per metre, so a cliff can
+/// lean out over its own foot.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Overhangs {
+    pub depth: f32,
+    pub scale: f32,
+    pub strength: f32,
+}
+
+impl Default for Overhangs {
+    fn default() -> Self {
+        Overhangs { depth: 12.0, scale: 0.05, strength: 4.0 }
+    }
+}
+
+/// `count` ravines `length` metres long, `width` across, `depth` deep, wandering
+/// by `meander`.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Ravines {
+    pub count: u32,
+    pub depth: f32,
+    pub width: f32,
+    pub length: f32,
+    pub meander: f32,
+}
+
+impl Default for Ravines {
+    fn default() -> Self {
+        Ravines { count: 4, depth: 20.0, width: 14.0, length: 400.0, meander: 1.0 }
+    }
+}
+
+/// `count` rivers from the highest ground down to `sea_level` (metres above
+/// the radius), carving a bed `width` across and `depth` deep in a valley four
+/// times as wide.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Rivers {
+    pub count: u32,
+    pub depth: f32,
+    pub width: f32,
+    pub sea_level: f32,
+    pub meander: f32,
+}
+
+impl Default for Rivers {
+    fn default() -> Self {
+        Rivers { count: 6, depth: 4.0, width: 8.0, sea_level: 0.0, meander: 0.6 }
+    }
+}
+
+/// One surface rule: ground matching every range given is painted `paint`.
+/// Ranges are `[min, max]`; one left out does not constrain.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Biome {
+    pub paint: LayerPaint,
+    /// Degrees from the equator, north or south.
+    pub latitude: Option<[f32; 2]>,
+    /// Metres above the radius.
+    pub altitude: Option<[f32; 2]>,
+    /// Degrees from level.
+    pub slope: Option<[f32; 2]>,
+    /// The moisture pattern, -1 (dry) to 1 (wet).
+    pub moisture: Option<[f32; 2]>,
+    /// Within this many metres of a river.
+    pub near_river: Option<f32>,
 }
 
 impl Default for PlanetFill {
@@ -121,6 +269,15 @@ impl Default for PlanetFill {
             pockets: None,
             seam: None,
             ice_caps: None,
+            mountains: None,
+            warp: None,
+            plateau: None,
+            terrace: None,
+            overhangs: None,
+            ravines: None,
+            rivers: None,
+            biomes: Vec::new(),
+            moisture_scale: 1.5,
         }
     }
 }
@@ -177,6 +334,9 @@ pub(crate) struct PlanetShape {
     bump_freq: f32,
     voxel: f32,
     craters: Vec<(Vec3, f32)>,
+    /// The precomputed ground, for a world with relief layers.
+    ground: Option<std::sync::Arc<crate::relief::Relief>>,
+    overhangs: Option<Overhangs>,
 }
 
 impl PlanetShape {
@@ -190,16 +350,42 @@ impl PlanetShape {
     fn bump(&self, p: Vec3, cache: &mut FbmCache) -> f32 {
         let r = p.length();
         let dir = if r > 1e-3 { p / r } else { Vec3::X };
-        self.noise.fbm_cached(dir * self.bump_freq, 5, cache) * self.relief
+        match &self.ground {
+            Some(relief) => relief.height(dir),
+            None => self.noise.fbm_cached(dir * self.bump_freq, 5, cache) * self.relief,
+        }
     }
 
     /// [`Self::body`] with the bump already known.
     fn body_with(&self, p: Vec3, bump: f32) -> f32 {
         let mut body = p.length() - (self.radius + bump);
+        if let Some(o) = &self.overhangs
+            && o.strength != 0.0
+        {
+            // Strongest at the surface, gone `depth` either side of it.
+            let shell = 1.0 - (body.abs() / o.depth.max(0.1)).min(1.0);
+            if shell > 0.0 {
+                let s = shell * shell * (3.0 - 2.0 * shell);
+                body += o.strength * s * self.noise.fbm(p * o.scale + Vec3::splat(431.0), 3);
+            }
+        }
         for (c, cr) in &self.craters {
             body = body.max(-((p - *c).length() - cr));
         }
         body
+    }
+
+    /// The lowest and highest the ground stands above the radius anywhere.
+    fn height_range(&self) -> (f32, f32) {
+        match &self.ground {
+            Some(r) => r.range(),
+            None => (-self.relief.abs(), self.relief.abs()),
+        }
+    }
+
+    /// How far the overhang layer can move the ground either way.
+    fn overhang_reach(&self) -> f32 {
+        self.overhangs.map_or(0.0, |o| o.strength.abs())
     }
 
     /// The whole shape, caves included.
@@ -256,7 +442,7 @@ impl PlanetShape {
 /// whole cube writes, voxel for voxel.
 pub fn generate_planet(spec: &PlanetFill) -> ChunkField {
     let planet = Planet::new(spec);
-    let ext = spec.radius + spec.relief + 2.0;
+    let ext = planet.extent();
     ChunkField::generate(spec.voxel, Vec3::splat(-ext), Vec3::splat(ext), &planet)
 }
 
@@ -293,8 +479,18 @@ impl Planet {
             bump_freq: spec.bump_freq,
             voxel: spec.voxel.clamp(0.25, 16.0),
             craters,
+            ground: crate::relief::Relief::wanted(spec).then(|| std::sync::Arc::new(crate::relief::Relief::new(spec))),
+            overhangs: spec.overhangs,
         };
         Planet { shape, spec: spec.clone() }
+    }
+
+    /// How far from the centre the ground can reach: the radius, the highest
+    /// the relief layers raise it, and what overhangs can push out, with a
+    /// little to spare. The cube a fill walks.
+    pub(crate) fn extent(&self) -> f32 {
+        let s = &self.shape;
+        s.radius + s.height_range().1.max(s.relief.abs()) + s.overhang_reach() + 2.0
     }
 
     /// The colour a voxel at `p` is painted, the ground there raised `bump`.
@@ -338,6 +534,35 @@ impl Planet {
         }
         if depth > spec.subsoil_depth {
             return rgba(tint(spec.subsoil.color, vary), spec.subsoil.slot);
+        }
+        // Biome rules, for the ground that is not a deeper layer.
+        if !spec.biomes.is_empty()
+            && let Some(relief) = &self.shape.ground
+        {
+            let lat = dir.y.abs().clamp(0.0, 1.0).asin().to_degrees();
+            let within = |range: Option<[f32; 2]>, v: f32| range.is_none_or(|[lo, hi]| v >= lo && v <= hi);
+            let mut slope = None;
+            let mut moisture = None;
+            for b in &spec.biomes {
+                if !within(b.latitude, lat) || !within(b.altitude, bump) {
+                    continue;
+                }
+                if b.slope.is_some() && !within(b.slope, *slope.get_or_insert_with(|| relief.slope_degrees(dir, radius))) {
+                    continue;
+                }
+                if b.moisture.is_some()
+                    && !within(
+                        b.moisture,
+                        *moisture.get_or_insert_with(|| noise.fbm(dir * spec.moisture_scale + Vec3::splat(913.0), 3)),
+                    )
+                {
+                    continue;
+                }
+                if b.near_river.is_some_and(|m| relief.river_distance(dir) > m) {
+                    continue;
+                }
+                return rgba(tint(b.paint.color, vary), b.paint.slot);
+            }
         }
         // Crater floors wear dust.
         for (c, cr) in &self.shape.craters {
@@ -421,16 +646,30 @@ impl crate::VoxelSource for Planet {
         let near = Vec3::ZERO.clamp(lo, hi);
         let far = lo.abs().max(hi.abs());
         let (r_min, r_max) = (near.length(), far.length());
-        if r_min - (s.radius + s.relief.abs()) >= band + margin {
+        // Overhangs move the ground either way by up to their strength.
+        let lean = s.overhang_reach();
+        if r_min - (s.radius + s.height_range().1) - lean >= band + margin {
             return BlockClass::Air;
         }
-        let (bump_lo, bump_hi) = self.bump_bounds(lo, hi, r_min, r_max);
-        if r_min - (s.radius + bump_hi) >= band + margin {
+        let (bump_lo, bump_hi) = match &s.ground {
+            Some(relief) => {
+                let corners: [Vec3; 8] = std::array::from_fn(|k| {
+                    Vec3::new(
+                        if k & 1 == 0 { lo.x } else { hi.x },
+                        if k & 2 == 0 { lo.y } else { hi.y },
+                        if k & 4 == 0 { lo.z } else { hi.z },
+                    )
+                });
+                relief.height_bounds(&corners)
+            }
+            None => self.bump_bounds(lo, hi, r_min, r_max),
+        };
+        if r_min - (s.radius + bump_hi) - lean >= band + margin {
             return BlockClass::Air;
         }
         // The highest the ground can be in the box: the plain body, or a
         // crater's dent, which raises it (a crater is air).
-        let mut body_hi = r_max - (s.radius + bump_lo);
+        let mut body_hi = r_max - (s.radius + bump_lo) + lean;
         for (c, cr) in &s.craters {
             let q = c.clamp(lo, hi);
             body_hi = body_hi.max(cr - (*c - q).length());
@@ -443,7 +682,7 @@ impl crate::VoxelSource for Planet {
             return BlockClass::Solid;
         }
         // In the cave zone, under the crust: solid if no cave reaches the box.
-        let body_lo = r_min - (s.radius + bump_hi);
+        let body_lo = r_min - (s.radius + bump_hi) - lean;
         if body_hi <= -(band + margin) && self.cave_lower_bound(lo, hi, body_lo) >= band + margin {
             return BlockClass::Solid;
         }
@@ -476,7 +715,7 @@ mod tests {
     fn fill_every_voxel(spec: &PlanetFill) -> ChunkField {
         let planet = Planet::new(spec);
         let mut field = ChunkField::new(spec.voxel.clamp(0.25, 16.0));
-        let ext = spec.radius + spec.relief + 2.0;
+        let ext = planet.extent();
         field.fill_with_rgba(
             Vec3::splat(-ext),
             Vec3::splat(ext),
@@ -572,6 +811,63 @@ mod tests {
         assert!(per_chunk < 80 * 1024, "{per_chunk} bytes a stored chunk; a flat one was 262144");
     }
 
+    /// **Mountains taller than the base relief are generated whole.** The fill
+    /// walked a cube sized by the base relief alone, so a range taller than it
+    /// came out sliced flat at the cube's face.
+    #[test]
+    fn mountains_taller_than_the_relief_are_not_cut_off() {
+        let spec = PlanetFill {
+            seed: 8,
+            radius: 60.0,
+            voxel: 1.0,
+            relief: 3.0,
+            cave_depth: 0.0,
+            mountains: Some(Mountains { height: 20.0, scale: 2.0, sharpness: 1.5, coverage: 0.7, octaves: 3 }),
+            ..PlanetFill::default()
+        };
+        let f = generate_planet(&spec);
+        let planet = Planet::new(&spec);
+        let (_, top) = planet.shape.height_range();
+        assert!(top > spec.relief + 8.0, "the fixture's mountains are not tall: {top}");
+        let mut highest = 0.0f32;
+        let mut r = Rng::new(2);
+        for _ in 0..4000 {
+            let d = Vec3::new(r.range(-1.0, 1.0) as f32, r.range(-1.0, 1.0) as f32, r.range(-1.0, 1.0) as f32).normalize_or_zero();
+            if let Some(hit) = f.raycast(d * (spec.radius + 60.0), -d, 120.0) {
+                highest = highest.max(hit.length() - spec.radius);
+            }
+        }
+        assert!(highest > spec.relief + 4.0, "the ground tops out at {highest:.1} m: the peaks were cut off");
+        assert!(highest <= top + 1.0, "ground at {highest:.1} m, above the grid's highest {top:.1}");
+    }
+
+    /// **Relief layers cost a planet little more to fill.** The ground with
+    /// mountains, warp, terraces, overhangs, ravines and rivers is read from a
+    /// precomputed grid whose bounds keep the classifier skipping what it
+    /// skips, so the voxels evaluated grow with the extra surface the layers
+    /// make and no more: at most 30% over the same world without them.
+    #[test]
+    fn relief_layers_add_at_most_a_third_to_the_voxels_evaluated() {
+        let plain = PlanetFill { seed: 21, radius: 90.0, voxel: 1.0, relief: 6.0, cave_depth: 16.0, core_r: 5.0, ..PlanetFill::default() };
+        let layered = PlanetFill {
+            mountains: Some(Mountains { height: 8.0, scale: 3.0, sharpness: 2.0, coverage: 0.4, octaves: 4 }),
+            warp: Some(Warp { strength: 0.15, scale: 2.5 }),
+            terrace: Some(Terrace { step: 3.0, sharpness: 0.8 }),
+            overhangs: Some(Overhangs { depth: 6.0, scale: 0.1, strength: 2.0 }),
+            ravines: Some(Ravines { count: 3, depth: 8.0, width: 6.0, length: 150.0, meander: 1.0 }),
+            rivers: Some(Rivers { count: 4, depth: 2.0, width: 4.0, sea_level: -2.0, meander: 0.5 }),
+            ..plain.clone()
+        };
+        let count = |spec: &PlanetFill| {
+            let src = Counting(Planet::new(spec), Default::default());
+            let ext = src.0.extent();
+            ChunkField::generate(spec.voxel, Vec3::splat(-ext), Vec3::splat(ext), &src);
+            src.1.into_inner()
+        };
+        let (a, b) = (count(&plain), count(&layered));
+        assert!((b as f64) < 1.3 * a as f64, "the layers took the voxels evaluated from {a} to {b}");
+    }
+
     /// **Skipping blocks changes no voxel.** The generator evaluates only the
     /// blocks it cannot prove are open air or deep solid, on many threads; the
     /// field it builds must be the one the whole-cube fill builds, distance and
@@ -596,6 +892,30 @@ mod tests {
             },
             // A solid body with tall relief and no caves.
             PlanetFill { seed: 9, radius: 48.0, voxel: 1.5, relief: 9.0, cave_depth: 0.0, craters: 0, ..PlanetFill::default() },
+            // Every relief layer at once: mountains on warped ground, plateaus,
+            // terraces, overhangs, ravines, rivers, and biome rules.
+            PlanetFill {
+                seed: 77,
+                radius: 64.0,
+                voxel: 1.0,
+                relief: 4.0,
+                cave_depth: 14.0,
+                core_r: 4.0,
+                craters: 2,
+                mountains: Some(Mountains { height: 14.0, scale: 2.5, sharpness: 2.0, coverage: 0.6, octaves: 4 }),
+                warp: Some(Warp { strength: 0.15, scale: 2.0 }),
+                plateau: Some(Plateau { height: 10.0, smooth: 2.0 }),
+                terrace: Some(Terrace { step: 3.0, sharpness: 0.7 }),
+                overhangs: Some(Overhangs { depth: 6.0, scale: 0.12, strength: 2.5 }),
+                ravines: Some(Ravines { count: 2, depth: 8.0, width: 6.0, length: 120.0, meander: 1.0 }),
+                rivers: Some(Rivers { count: 3, depth: 2.0, width: 4.0, sea_level: -1.0, meander: 0.5 }),
+                biomes: vec![
+                    Biome { paint: LayerPaint { slot: 12, color: [1.0, 1.0, 1.0] }, altitude: Some([12.0, 100.0]), ..Biome::default() },
+                    Biome { paint: LayerPaint { slot: 13, color: [0.5, 0.5, 0.5] }, slope: Some([35.0, 90.0]), ..Biome::default() },
+                    Biome { paint: LayerPaint { slot: 14, color: [0.3, 0.6, 0.3] }, near_river: Some(6.0), ..Biome::default() },
+                ],
+                ..PlanetFill::default()
+            },
         ];
         for spec in &worlds {
             let (want, got) = (fill_every_voxel(spec), generate_planet(spec));
@@ -629,6 +949,8 @@ mod tests {
             bump_freq: 4.5,
             voxel: 1.5,
             craters: Vec::new(),
+            ground: None,
+            overhangs: None,
         }
     }
 

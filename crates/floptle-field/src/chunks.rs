@@ -804,7 +804,7 @@ fn workers() -> usize {
 
 /// `(0..n).map(f)`, shared out across [`workers`]; results in index order.
 #[cfg(not(target_arch = "wasm32"))]
-fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+pub(crate) fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
     let threads = workers().min(n);
     if threads <= 1 {
         return (0..n).map(f).collect();
@@ -834,7 +834,7 @@ fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
 
 /// The web has no threads to share out across: in order, on this one.
 #[cfg(target_arch = "wasm32")]
-fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+pub(crate) fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
     (0..n).map(f).collect()
 }
 
