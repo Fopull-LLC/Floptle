@@ -21,6 +21,30 @@ use crate::opts::check_keys;
 /// A scatter source a script declared, plus the ids it has removed.
 pub type Sources = Rc<RefCell<Vec<floptle_core::scatter::ScatterSource>>>;
 
+/// The script instance that created each source, by source id.
+///
+/// A source outlives the call that made it, so without an owner nothing can
+/// tell which ones a hot reload or a destroyed node leaves behind. A script
+/// that creates its field in `start` and is reloaded ten times while it is
+/// tuned draws eleven copies of the field.
+pub type Owners = Rc<RefCell<std::collections::HashMap<u32, (u32, String)>>>;
+
+/// Drop the sources `key` created with an id up to `upto` — every one, with
+/// `u32::MAX`. Ids only grow, so the sources a rebuilt script just created are
+/// the ones above the id counter as it stood before the rebuild.
+pub(crate) fn drop_owned(sources: &Sources, owners: &Owners, key: &(u32, String), upto: u32) {
+    let mut own = owners.borrow_mut();
+    let gone: Vec<u32> =
+        own.iter().filter(|(id, k)| **id <= upto && *k == key).map(|(id, _)| *id).collect();
+    if gone.is_empty() {
+        return;
+    }
+    for id in &gone {
+        own.remove(id);
+    }
+    sources.borrow_mut().retain(|s| !gone.contains(&s.id));
+}
+
 /// Read `key` from an options table as a number, falling back to `d`.
 fn num(t: &Table, key: &str, d: f64) -> f64 {
     t.get::<Option<f64>>(key).ok().flatten().unwrap_or(d)
@@ -65,6 +89,8 @@ const LOUD_CHUNKS: u64 = 400;
 pub(crate) fn install_scatter_api(
     lua: &Lua,
     sources: Sources,
+    owners: Owners,
+    current: Rc<RefCell<Option<(u32, String)>>>,
     next_id: Rc<std::cell::Cell<u32>>,
     logs: Rc<RefCell<Vec<crate::ScriptLog>>>,
 ) {
@@ -75,6 +101,8 @@ pub(crate) fn install_scatter_api(
     // shortest useful call is `scatter.create{ asset = "tree.glb" }`.
     {
         let s = sources.clone();
+        let own = owners.clone();
+        let cur = current.clone();
         let ids = next_id.clone();
         let lg = logs.clone();
         if let Ok(f) = lua.create_function(move |_, opts: Table| {
@@ -231,6 +259,9 @@ pub(crate) fn install_scatter_api(
                 });
             }
             s.borrow_mut().push(src);
+            if let Some(key) = cur.borrow().clone() {
+                own.borrow_mut().insert(id, key);
+            }
             Ok(id)
         }) {
             let _ = t.set("create", f);
@@ -265,7 +296,9 @@ pub(crate) fn install_scatter_api(
     // scatter.destroy(id) — the whole source goes.
     {
         let s = sources.clone();
+        let own = owners.clone();
         if let Ok(f) = lua.create_function(move |_, id: u32| {
+            own.borrow_mut().remove(&id);
             let mut v = s.borrow_mut();
             let before = v.len();
             v.retain(|src| src.id != id);
@@ -422,6 +455,8 @@ mod tests {
         install_scatter_api(
             &lua,
             sources.clone(),
+            Owners::default(),
+            Rc::default(),
             Rc::new(std::cell::Cell::new(0)),
             logs.clone(),
         );

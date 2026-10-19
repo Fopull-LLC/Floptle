@@ -2633,9 +2633,12 @@ impl ScriptHost {
         // game keeps deciding what grows where; the engine draws them.
         let scatter_sources: crate::scatter_api::Sources = Rc::new(RefCell::new(Vec::new()));
         let scatter_next_id: Rc<std::cell::Cell<u32>> = Rc::new(std::cell::Cell::new(0));
+        let scatter_owners = crate::scatter_api::Owners::default();
         crate::scatter_api::install_scatter_api(
             &lua,
             scatter_sources.clone(),
+            scatter_owners.clone(),
+            net.current.clone(),
             scatter_next_id.clone(),
             logs.clone(),
         );
@@ -3120,6 +3123,8 @@ impl ScriptHost {
             water_volumes,
             water_freeze,
             scatter_sources,
+            scatter_owners,
+            scatter_next_id,
             scene_name,
             ui_focus,
             ui_focus_request,
@@ -3507,6 +3512,13 @@ impl ScriptHost {
     /// the world that is about to stop existing.
     pub fn clear_scatter(&mut self) {
         self.scatter_sources.borrow_mut().clear();
+        self.scatter_owners.borrow_mut().clear();
+    }
+
+    /// Drop the scatter sources a script instance created with an id up to
+    /// `upto` — a destroyed node's, or the old generation's on a hot reload.
+    fn drop_scatter_of(&self, key: &(u32, String), upto: u32) {
+        crate::scatter_api::drop_owned(&self.scatter_sources, &self.scatter_owners, key, upto);
     }
 
     /// Publish the scene's bodies of water, before scripts run — what
@@ -5815,6 +5827,7 @@ impl ScriptHost {
             self.envs.borrow_mut().remove(&k);
             self.drop_net_instance(&k);
             self.drop_ui_listeners_of(&k);
+            self.drop_scatter_of(&k, u32::MAX);
             self.sleepers.borrow_mut().forget(k.0, &k.1);
         }
     }
@@ -7290,6 +7303,7 @@ impl ScriptHost {
             // own registrations from the previous generation's.
             *self.net.current.borrow_mut() = Some((e.index(), name.to_string()));
             let registered_from = self.net.handlers.borrow().len();
+            let scatter_upto = self.scatter_next_id.get();
             let built = build_env(&self.lua, &src, name);
             *self.net.current.borrow_mut() = None;
             match built {
@@ -7313,6 +7327,7 @@ impl ScriptHost {
                     // file-scope `net.on` the instant it was written.
                     self.drop_net_instance_before(&key, registered_from);
                     self.drop_ui_listeners_of(&key);
+                    self.drop_scatter_of(&key, scatter_upto);
                     self.setup_synced(&env, &key);
                     let hooks = Hooks::of(&env);
                     let writes_params = source_writes_params(&src);

@@ -966,3 +966,62 @@ fn a_reused_entity_index_gets_its_own_goodbye() {
     host.call_on_destroy_nodes(&mut world, &[e2.index()]);
     assert_eq!(byes(&mut host), vec!["bye Pulley2".to_string()]);
 }
+
+/// **A script's scatter field goes with the script.** A source outlives the
+/// call that made it, and nothing knew whose it was: a script that made its
+/// field in `start` and was hot-reloaded while it was tuned drew one more copy
+/// of the field per save, and a destroyed node left its field standing.
+#[test]
+fn a_reloaded_or_destroyed_script_takes_its_scatter_field_with_it() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_scatter_owner_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let body = |n: u32| {
+        format!("-- version {n}\nfunction start()\n  scatter.create{{ asset = \"rock.glb\", perChunk = 2 }}\nend\n")
+    };
+    write_script(&dir, "field", &body(0));
+    // A second script's field must survive the first one's reload.
+    write_script(&dir, "other", "scatter.create{ asset = \"tree.glb\" }\n");
+
+    let mut world = World::default();
+    let spawn = |world: &mut World, kind: &str| {
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Scripts(vec![floptle_core::ScriptInst {
+            kind: kind.into(),
+            enabled: true,
+            params: Vec::new(),
+            refs: Vec::new(),
+            strs: Vec::new(),
+            pinned_bools: None,
+        }]));
+        e
+    };
+    let e = spawn(&mut world, "field");
+    spawn(&mut world, "other");
+    let mut host = ScriptHost::new();
+    host.set_playing(true);
+    let assets = |host: &ScriptHost| {
+        let mut v: Vec<String> = host.scatter_sources().iter().map(|s| s.bands[0].asset.clone()).collect();
+        v.sort();
+        v
+    };
+    host.run(&mut world, &dir, 0.016, 0.016);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    assert_eq!(assets(&host), ["rock.glb", "tree.glb"]);
+
+    for n in 1..=2 {
+        write_script(&dir, "field", &body(n));
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(10 * n as u64);
+        std::fs::File::options().write(true).open(dir.join("field.lua")).unwrap().set_modified(later).unwrap();
+        host.run(&mut world, &dir, 0.016, 0.016);
+        host.run(&mut world, &dir, 0.016, 0.016);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        assert_eq!(assets(&host), ["rock.glb", "tree.glb"], "after reload {n}");
+    }
+
+    world.despawn(e);
+    host.run(&mut world, &dir, 0.016, 0.016);
+    assert_eq!(assets(&host), ["tree.glb"], "a destroyed node's field is still standing");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -935,6 +935,11 @@ pub struct ScriptHost {
     /// Scatter sources scripts declared — resolved into
     /// drawable instances by the driver, never into scene nodes.
     scatter_sources: scatter_api::Sources,
+    /// Which script instance created each source, so a hot reload or a
+    /// destroyed node takes its sources with it.
+    scatter_owners: scatter_api::Owners,
+    /// The last source id handed out — where a rebuild's own sources start.
+    scatter_next_id: Rc<std::cell::Cell<u32>>,
     /// The running scene's name, fed by the driver — what `scene.current()` reads.
     scene_name: Rc<RefCell<String>>,
     /// The focused UI element, fed by the engine each frame: what
