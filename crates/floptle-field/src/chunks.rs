@@ -2364,17 +2364,44 @@ impl ChunkField {
             2.0 * baked.half_extent[1] / baked.dims[1].max(1) as f32,
             2.0 * baked.half_extent[2] / baked.dims[2].max(1) as f32,
         );
+        // A cell and a half: every cell whose colour can blend into a pixel on
+        // the surface.
+        let near = 1.5 * vs.max_element();
         for iz in mn[2]..=mx[2] {
             for iy in mn[1]..=mx[1] {
                 for ix in mn[0]..=mx[0] {
                     let p = lo
                         + Vec3::new(ix as f32 + 0.5, iy as f32 + 0.5, iz as f32 + 0.5) * vs;
                     let i = ((iz * h + iy) * w + ix) as usize;
-                    baked.distance[i] = self.d(p);
-                    baked.color[i] = self.color(p);
+                    let d = self.d(p);
+                    baked.distance[i] = d;
+                    baked.color[i] = self.surface_color(p, d, near);
                 }
             }
         }
+    }
+
+    /// The colour a proxy cell at `p` (field distance `d`) carries: within
+    /// `near` of the surface, the colour of the ground there — the voxel the
+    /// surface lies in, where the cell's gradient points; deeper, its own.
+    ///
+    /// A cell is several voxels across, and the terrain's texture is blended
+    /// from the cells around each pixel, so a cell whose centre fell a voxel or
+    /// two under the ground carried the subsoil, and the subsoil showed through
+    /// undug ground in blobs the shape of the cells. Taken from the surface, a
+    /// cell reads what the ground is made of where it is, and a dug face, which
+    /// is surface too, reads what the dig laid bare.
+    fn surface_color(&self, p: Vec3, d: f32, near: f32) -> [u8; 4] {
+        if d.abs() > near {
+            return self.color(p);
+        }
+        let n = self.grad(p).normalize_or_zero();
+        if n == Vec3::ZERO {
+            return self.color(p);
+        }
+        // A quarter voxel inside: half a voxel lands on the boundary to the next
+        // voxel down, and rounding takes the one under the surface layer.
+        self.color(p - n * (d + 0.25 * self.voxel))
     }
 
     /// Worst |∇d| over the near-surface band, and the fraction of samples violating the
@@ -2690,6 +2717,69 @@ mod tests {
             let d = f.d(Vec3::new(x, plane.y, 4.0));
             assert!(d.abs() < 0.6 * voxel, "the pad is not on its plane at x = {x}: d {d}");
         }
+    }
+
+    /// The share of the terrain texture at `p` that slot `slot` gets, blended
+    /// from the proxy's cells exactly as the shader blends them: the eight cell
+    /// centres around the point, trilinear weights, voxel centres at `i + 0.5`.
+    fn splat_share(b: &crate::mesh2sdf::BakedSdf, p: Vec3, slot: u8) -> f32 {
+        let dims = Vec3::new(b.dims[0] as f32, b.dims[1] as f32, b.dims[2] as f32);
+        let lo = Vec3::from(b.center) - Vec3::from(b.half_extent);
+        let frac = ((p - lo) / (2.0 * Vec3::from(b.half_extent))).clamp(Vec3::ZERO, Vec3::ONE);
+        let c = (frac * dims - 0.5).clamp(Vec3::ZERO, dims - 1.0);
+        let (i0, fw) = (c.floor(), c - c.floor());
+        let (mut share, mut total) = (0.0, 0.0);
+        for k in 0..8 {
+            let o = Vec3::new((k & 1) as f32, ((k >> 1) & 1) as f32, ((k >> 2) & 1) as f32);
+            let wv = Vec3::ONE - fw + (fw * 2.0 - Vec3::ONE) * o;
+            let w = wv.x * wv.y * wv.z;
+            let q = (i0 + o).min(dims - 1.0);
+            let i = ((q.z as u32 * b.dims[1] + q.y as u32) * b.dims[0] + q.x as u32) as usize;
+            total += w;
+            if b.color[i][3] == slot {
+                share += w;
+            }
+        }
+        share / total.max(1e-6)
+    }
+
+    /// **The ground's texture is the ground's, not what lies under it.** The
+    /// terrain texture blends slots from the proxy's cells, several voxels
+    /// across, and a cell whose centre sat under the ground carried the
+    /// subsoil: a subsoil one voxel down showed through undug ground in
+    /// blobs. Undug, the subsoil gets none of the texture; dug down to, it is
+    /// most of it.
+    #[test]
+    fn undug_ground_shows_none_of_the_subsoil_under_it() {
+        let mut f = ChunkField::new(1.0);
+        f.fill_with_rgba(
+            Vec3::new(-30.0, -20.0, -30.0),
+            Vec3::new(30.0, 0.0, 30.0),
+            |p| p.y,
+            |p| if -p.y < 1.0 { [200, 180, 140, 1] } else { [120, 100, 80, 2] },
+        );
+        let mut proxy = f.to_dense(24).expect("the slab has bounds");
+        let cell = 2.0 * proxy.half_extent[0] / proxy.dims[0] as f32;
+        assert!(cell > 2.0, "the fixture's proxy cells are {cell} voxels, finer than the bleed needs");
+        let mut worst = 0.0f32;
+        for x in -20..=20 {
+            for z in -20..=20 {
+                let ro = Vec3::new(x as f32 + 0.3, 5.0, z as f32 + 0.7);
+                let hit = f.raycast(ro, Vec3::NEG_Y, 20.0).expect("the slab is under every ray");
+                worst = worst.max(splat_share(&proxy, hit, 2));
+            }
+        }
+        assert!(worst < 1e-3, "the subsoil gets {:.0}% of the texture on undug ground", worst * 100.0);
+        // A pit dug through the top layer shows the subsoil at its floor.
+        let hard = BrushProfile { hardness: 1.0, ..Default::default() };
+        for _ in 0..6 {
+            f.sculpt(Brush::Lower, Vec3::new(0.0, 0.0, 0.0), 6.0, 1.0, hard);
+        }
+        f.refresh_dense_region(&mut proxy, Vec3::splat(-12.0), Vec3::splat(12.0));
+        let floor = f.raycast(Vec3::new(0.3, 5.0, 0.4), Vec3::NEG_Y, 30.0).expect("the pit has a floor");
+        assert!(floor.y < -2.0, "the fixture's pit is only {:.1} deep", -floor.y);
+        let dug = splat_share(&proxy, floor, 2);
+        assert!(dug > 0.5, "the pit's floor shows only {:.0}% subsoil", dug * 100.0);
     }
 
     /// Per-write-path |∇d| report.    /// Per-write-path |∇d| report. This is the diagnostic that found the real culprit:
