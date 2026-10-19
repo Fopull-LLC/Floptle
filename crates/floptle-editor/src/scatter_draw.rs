@@ -195,18 +195,29 @@ pub(crate) fn push_scatter(
     // about two seconds. Refreshing one transform per source is the
     // whole cost of following it: placement lives in this frame, so
     // nothing downstream is recomputed.
-    for (id, name) in script_host.anchored_scatter() {
-        let node = world
-            .query::<floptle_core::Name>()
-            .find(|(_, n)| n.0 == name)
-            .map(|(e, _)| e);
+    // One pass over the scene's names for every anchor at once: a scan per
+    // anchored source was a walk of every named node in the scene, per source,
+    // every frame.
+    let anchored = script_host.anchored_scatter();
+    let mut nodes: HashMap<&str, floptle_core::Entity> = HashMap::new();
+    if !anchored.is_empty() {
+        for (e, n) in world.query::<floptle_core::Name>() {
+            if anchored.iter().any(|(_, a)| *a == n.0) {
+                nodes.entry(n.0.as_str()).or_insert(e);
+            }
+        }
+    }
+    for (id, name) in &anchored {
+        let node = nodes.get(name.as_str()).copied();
         let frame = node.map_or(scatter::Frame::IDENTITY, |e| {
             let wt = floptle_core::world_transform(world, e);
             scatter::Frame { origin: wt.translation, rot: wt.rotation.normalize() }
         });
-        script_host.set_scatter_frame(id, frame);
+        script_host.set_scatter_frame(*id, frame);
     }
-    let sources: Vec<ScatterSource> = script_host.scatter_sources().clone();
+    // Borrowed, not cloned: a source carries its density grid and every id it
+    // has lost, and copying all of them was a per-source cost every frame.
+    let sources = script_host.scatter_sources();
     if sources.is_empty() {
         if cache.len() > 0 {
             cache.clear();
@@ -224,7 +235,7 @@ pub(crate) fn push_scatter(
     // here: a prototype may be a prefab of several parts, and resolving
     // that per prop would re-walk it twenty thousand times.
     let mut looks: HashMap<&str, Vec<Part>> = HashMap::new();
-    for src in &sources {
+    for src in sources.iter() {
         for band in &src.bands {
             if !looks.contains_key(band.asset.as_str())
                 && let Some((name, baked)) = protos.get_key_value(&band.asset)
@@ -322,27 +333,37 @@ pub(crate) fn build_instances(
         // Nearest first, so the draw budget below cuts the horizon rather than
         // your feet, and so streaming spends its first frames on what you can
         // actually see.
+        // Each band's parts, looked up once per source rather than once per
+        // prop drawn: a field of thousands of props has a handful of bands.
+        let band_parts: Vec<Option<Vec<Part>>> = src.bands.iter().map(|b| mesh_of(&b.asset)).collect();
         for &key in &sweep.keys {
-            let ck = (src.id, key);
-            let known = resolved.get(&ck);
-            // Something has been cut since this chunk was resolved: redo it now,
-            // budget or no budget. That is one chunk, it is the player's own
-            // doing, and a prop that survives the swing that felled it is a bug.
-            let cut = known.is_some_and(|c| c.removed_len != src.removed.len());
-            if cut {
-                let rolled = scatter::chunk_instances(src, key);
-                settled += rolled.len();
-                let instances = rolled.into_iter().filter_map(|i| settle(src, i, ground)).collect();
-                resolved.insert(ck, ResolvedChunk { instances, pending: Vec::new(), removed_len: src.removed.len() });
-            } else if known.is_none() {
+            // One lookup a chunk a frame. A field whose sources are sparse is
+            // mostly chunks, and three lookups each made eight overlapping
+            // sources cost two and a half times what one source did per prop.
+            let chunk = match resolved.entry((src.id, key)) {
+                std::collections::hash_map::Entry::Occupied(e) => {
+                    let chunk = e.into_mut();
+                    // Something has been cut since this chunk was resolved:
+                    // redo it now, budget or no budget. That is one chunk, it
+                    // is the player's own doing, and a prop that survives the
+                    // swing that felled it is a bug.
+                    if chunk.removed_len != src.removed.len() {
+                        let rolled = scatter::chunk_instances(src, key);
+                        settled += rolled.len();
+                        let instances = rolled.into_iter().filter_map(|i| settle(src, i, ground)).collect();
+                        *chunk = ResolvedChunk { instances, pending: Vec::new(), removed_len: src.removed.len() };
+                    }
+                    chunk
+                }
                 // Arriving is the other case, and it is thousands of props at
                 // once: they wait their turn, a prop at a time, below.
-                let pending = scatter::chunk_instances(src, key);
-                resolved.insert(ck, ResolvedChunk { instances: Vec::new(), pending, removed_len: src.removed.len() });
-            }
-            if let Some(chunk) = resolved.get_mut(&ck)
-                && !chunk.pending.is_empty()
-            {
+                std::collections::hash_map::Entry::Vacant(e) => e.insert(ResolvedChunk {
+                    instances: Vec::new(),
+                    pending: scatter::chunk_instances(src, key),
+                    removed_len: src.removed.len(),
+                }),
+            };
+            if !chunk.pending.is_empty() {
                 // Within the frame's budget, by count and by time, but always
                 // one, so a field that is never cheap still arrives.
                 let span = floptle_core::profile::Span::new();
@@ -357,7 +378,6 @@ pub(crate) fn build_instances(
                 }
                 settle_ms += span.ms();
             }
-            let Some(chunk) = resolved.get(&ck) else { continue };
             for inst in &chunk.instances {
                 if out.len() >= budget {
                     return;
@@ -387,8 +407,7 @@ pub(crate) fn build_instances(
                 // switching is what a pop is; two half-opaque props for a few
                 // metres of walking is what nobody notices.
                 let mut push = |b: usize, alpha: f32| {
-                    let Some(asset) = src.bands.get(b) else { return };
-                    let Some(parts) = mesh_of(&asset.asset) else { return };
+                    let Some(Some(parts)) = band_parts.get(b) else { return };
                     // The per-instance roll rides the albedo, so a game can
                     // give one species a spread of shades without a material
                     // per plant. Neutral at param 0.5.
@@ -398,7 +417,7 @@ pub(crate) fn build_instances(
                     // with its own mesh, texture, look and place within the
                     // prop. They are still one instanced draw each — the prefab
                     // is resolved to this list once, not instantiated per prop.
-                    for (mesh, tex, local, look) in &parts {
+                    for (mesh, tex, local, look) in parts {
                         let mut mp = *look;
                         mp.alpha *= alpha;
                         // The source's tint multiplies the model's own colour,
@@ -850,6 +869,55 @@ mod tests {
         // The parts of one prop are a metre apart, not on top of each other.
         let ys: Vec<f32> = two.iter().take(2).map(|(_, _, r)| r.model[3][1]).collect();
         assert!((ys[0] - ys[1]).abs() > 0.5, "the offset part moved: {ys:?}");
+    }
+
+    /// **A prop costs the same however many sources it shares the ground
+    /// with.** A game measured about 1 µs a resident prop with one source and
+    /// 4.3 µs with eight overlapping ones, the same props split eight ways.
+    /// Asserted as a ratio, not a duration, so a slow machine cannot fail it.
+    #[test]
+    fn a_prop_costs_the_same_however_many_sources_overlap() {
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]);
+        let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
+        let field = |n: u32| -> Vec<ScatterSource> {
+            (0..n)
+                .map(|i| ScatterSource {
+                    id: i + 1,
+                    seed: 11 + i as u64,
+                    // Two props a chunk between them, the shape a game's
+                    // flora took: sparse fields are where chunk overhead shows.
+                    per_chunk: 16 / n,
+                    bands: vec![Band { asset: format!("p{i}"), distance: 60.0 }],
+                    ..src()
+                })
+                .collect()
+        };
+        let mut per_prop = |sources: &[ScatterSource], ground: &mut dyn FnMut(DVec3, Vec3, f32) -> Option<(f32, Vec3)>| {
+            let mut cache = ScatterCache::default();
+            let mut out = Vec::new();
+            let mut g = |a: DVec3, b: Vec3, c: f32| ground(a, b, c);
+            // Settled first: this is the cost of standing in a field, not of
+            // arriving at one.
+            for _ in 0..400 {
+                out.clear();
+                build_instances(&mut cache, sources, DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut g,
+                    &floptle_render::Frustum::everything(), 100_000, &mut out);
+            }
+            let t = std::time::Instant::now();
+            let frames = 300;
+            for _ in 0..frames {
+                out.clear();
+                build_instances(&mut cache, sources, DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut g,
+                    &floptle_render::Frustum::everything(), 100_000, &mut out);
+            }
+            let us = t.elapsed().as_secs_f64() * 1e6 / frames as f64;
+            (us / out.len().max(1) as f64, out.len())
+        };
+        let (one, n1) = per_prop(&field(1), &mut ground);
+        let (eight, n8) = per_prop(&field(8), &mut ground);
+        eprintln!("one source: {one:.3} µs a prop ({n1}); eight: {eight:.3} µs a prop ({n8})");
+        assert!(n1 > 400 && n8 > 400, "the fields are too small to measure: {n1}, {n8}");
+        assert!(eight < one * 2.0, "eight overlapping sources cost {eight:.3} µs a prop against one source's {one:.3}");
     }
 
     /// A prop with no ground under it is dropped, not left floating at the
