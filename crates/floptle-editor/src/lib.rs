@@ -257,6 +257,7 @@ mod rollback;
 mod rollback_session;
 mod rig_overrides;
 mod scatter_draw;
+mod weather;
 mod scene_ops;
 mod space;
 mod script_actions;

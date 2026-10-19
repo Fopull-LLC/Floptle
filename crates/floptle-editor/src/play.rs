@@ -1393,6 +1393,8 @@ impl Editor {
         // about to be replaced.
         self.script_host.clear_scatter();
         self.scatter_cache.clear();
+        // …and so does a wind: the bodies it blew on are going too.
+        self.script_host.clear_weather();
         self.script_gizmos.clear();
         self.audio_stop_play();
         // …swap the world…

@@ -554,6 +554,7 @@ impl Editor {
     /// asked for — mouse lock, scene loads, captions, frame steps, animation,
     /// velocity writes, assembly and terrain commands.
     fn run_frame_scripts(&mut self, sdt: f32, dir: &std::path::Path) {
+        self.refresh_wind_frames();
         self.timed_script_pass(|s| s.script_host.run(&mut s.world, dir, sdt, s.play_t));
         // UI hook events (clicked / hoverStart / …) fire against the run's
         // fresh scene mirror, with their own write flush.
