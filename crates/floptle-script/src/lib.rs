@@ -358,6 +358,7 @@ pub mod ui_make;
 pub mod vm;
 mod view_api;
 pub mod water_api;
+mod weather_api;
 
 pub(crate) use api::install_handle_api;
 /// Live ECS field appliers, reused by the animation system's property tracks.
@@ -938,6 +939,8 @@ pub struct ScriptHost {
     /// Which script instance created each source, so a hot reload or a
     /// destroyed node takes its sources with it.
     scatter_owners: scatter_api::Owners,
+    /// The winds scripts declared (`weather.*`) and the clock they blow by.
+    weather: weather_api::WeatherShared,
     /// The last source id handed out — where a rebuild's own sources start.
     scatter_next_id: Rc<std::cell::Cell<u32>>,
     /// The running scene's name, fed by the driver — what `scene.current()` reads.

@@ -3276,6 +3276,7 @@ const API_CATEGORIES: &[&str] = &[
     "terrain — runtime sculpt & queries",
     "pathfinding — nav.*",
     "water — depth, buoyancy & ice",
+    "weather — wind",
     "scatter — instanced props",
     "2D — sprites, sorting & the flat camera",
     "vessels — assembly.*",
@@ -3415,6 +3416,8 @@ fn api_category(label: &str) -> &'static str {
         "drawing — draw.*"
     } else if label == "water" || label.starts_with("water.") {
         "water — depth, buoyancy & ice"
+    } else if label == "weather" || label.starts_with("weather.") {
+        "weather — wind"
     } else if label == "scatter" || label.starts_with("scatter.") {
         "scatter — instanced props"
     } else if label == "assembly" || label.starts_with("assembly.") {
@@ -4797,6 +4800,11 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "terrain.slotAt", insert: "terrain.slotAt(", doc: "terrain.slotAt(x, y, z) — the texture-palette slot at a world point, or nil where the field is untextured. The material half of the question terrain.query answers the distance half of: survey before you cut, and let a footstep know what it is standing on." },
     ApiEntry { label: "terrain.yields", insert: "terrain.yields()", doc: "terrain.yields() — drains what recent digs actually removed: { id, removed, added, untextured, slots }, with slots mapping palette slot to volume. This is how mining pays out by MATERIAL — you get ore because you cut rock that was painted as ore." },
     ApiEntry { label: "ui", insert: "ui", doc: "Screen UI from scripts: ui.on / ui.events for input, ui.bind for data, ui.make for whole trees. See the game-UI section for the full set." },
+    ApiEntry { label: "weather", insert: "weather", doc: "Wind: one field that particles and props are moved by, declared by your game and read back with weather.windAt. A wind blows in the frame of the body it rides, so a planet's prevailing wind turns with the planet; one with a radius is a local cell (a storm, a valley's down-draught) that adds to the winds under it and fades to nothing at its edge. It is a pure function of place and time, so every machine agrees on it and it costs nothing until something asks." },
+    ApiEntry { label: "weather.addWind", insert: "weather.addWind{", doc: "weather.addWind{ velocity = vec3(4, 0, 0), gust = 0.4, gustPeriod = 6, turbulence = 0.2, scale = 40 } — declare a wind, get its id. `velocity` is metres a second. `gust` swings the speed by that fraction (0.4 blows between 0.6 and 1.4 times it), roughly every `gustPeriod` seconds, and a gust travels downwind at the wind's speed, so it is seen crossing a field rather than everything moving at once. `turbulence` adds eddies `scale` metres across, as a fraction of the speed, drifting with the wind. `parent = \"Kail\"` blows in that node's frame (then `velocity` and `center` are in it too). `center` + `radius` makes a local cell. An option this doesn't list is an error." },
+    ApiEntry { label: "weather.setWind", insert: "weather.setWind(", doc: "weather.setWind(id, { ... }) — change the options it names and keep the rest: a storm building is `weather.setWind(storm, { gust = 0.8 })` each few seconds. `radius = 0` makes a cell blow everywhere again. Returns false when there is no such wind." },
+    ApiEntry { label: "weather.removeWind", insert: "weather.removeWind(", doc: "weather.removeWind(id) — the wind stops. Returns true if there was one. Every wind is dropped when the scene changes." },
+    ApiEntry { label: "weather.windAt", insert: "weather.windAt(", doc: "weather.windAt(point) → vec3, the wind at that point in world space: every wind there added up, at this frame's time. The same number the engine moves particles and props by, so a flag your script waves agrees with the smoke beside it." },
     ApiEntry { label: "water", insert: "water", doc: "Water volumes: how deep a point is (water.depthAt), what is in the water (water.at), freezing and thawing (water.setFrozen). The engine already does buoyancy and drag — these are the questions a GAME still has to answer: swimming, drowning, flooding, a gauge going red." },
     ApiEntry { label: "water.at", insert: "water.at(", doc: "water.at(point) — nil in air, else { depth, density, frozen, node, up }. `up` is the way OUT of the water (radial on a sea, the pool's own +Y) — what a swim controller pushes along, and NOT the same as -gravity in a tilted tank. Innermost volume wins, so a tank inside an ocean answers as the tank." },
     ApiEntry { label: "water.depthAt", insert: "water.depthAt(", doc: "water.depthAt(x, y, z) — or a vec3, or a node. Metres BELOW the surface at that point; 0 in air. The one number everything else is derived from, and it is the same rule the solver uses, so a swim state can never disagree with the physics that floats you. A frozen volume reads 0 everywhere." },

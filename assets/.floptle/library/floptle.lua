@@ -1659,6 +1659,32 @@ function scatter.removed(id) end
 ---@return boolean
 function scatter.destroy(id) end
 
+---Wind: one field that particles and props are moved by. Declared by the game,
+---read back with `weather.windAt`. A wind blows in the frame of the body it
+---rides; one with a `radius` is a local cell that adds to the winds under it.
+---@class Weather
+weather = {}
+---Declare a wind; returns its id. `velocity` in metres a second; `gust` swings
+---the speed by that fraction every `gustPeriod` seconds, travelling downwind;
+---`turbulence` adds eddies `scale` metres across. `parent` names the node it
+---blows in the frame of; `center` + `radius` makes a local cell.
+---@param opts { velocity?: Vec3, gust?: number, gustPeriod?: number, turbulence?: number, scale?: number, parent?: string, center?: Vec3, radius?: number, seed?: number }
+---@return integer
+function weather.addWind(opts) end
+---Change the options it names and keep the rest. False when there is no such wind.
+---@param id integer
+---@param opts { velocity?: Vec3, gust?: number, gustPeriod?: number, turbulence?: number, scale?: number, parent?: string, center?: Vec3, radius?: number, seed?: number }
+---@return boolean
+function weather.setWind(id, opts) end
+---The wind stops. True if there was one.
+---@param id integer
+---@return boolean
+function weather.removeWind(id) end
+---The wind at a point, in world space: every wind there added up.
+---@param point Vec3
+---@return Vec3
+function weather.windAt(point) end
+
 ---The scene's bodies of water. The engine floats things and drags them; what
 ---being WET means — swimming, drowning, a flooded engine, a gauge going red —
 ---is the game's, and all of it comes from one number: the depth.

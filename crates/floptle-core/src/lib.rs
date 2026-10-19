@@ -25,6 +25,7 @@ pub mod event;
 pub mod frames;
 pub mod joint;
 pub mod scatter;
+pub mod weather;
 pub mod layers;
 pub mod material;
 pub mod math;

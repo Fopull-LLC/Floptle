@@ -2643,6 +2643,10 @@ impl ScriptHost {
             logs.clone(),
         );
 
+        // `weather.*` — the wind every system is moved by.
+        let weather = crate::weather_api::WeatherShared::default();
+        crate::weather_api::install_weather_api(&lua, weather.clone());
+
         let gizmos = install_gizmos(&lua);
         let preloads: Rc<RefCell<crate::preload_api::Preloads>> = Rc::default();
         let paths = install_assets(&lua, &logs, preloads.clone());
@@ -3125,6 +3129,7 @@ impl ScriptHost {
             scatter_sources,
             scatter_owners,
             scatter_next_id,
+            weather,
             scene_name,
             ui_focus,
             ui_focus_request,
@@ -3513,6 +3518,34 @@ impl ScriptHost {
     pub fn clear_scatter(&mut self) {
         self.scatter_sources.borrow_mut().clear();
         self.scatter_owners.borrow_mut().clear();
+    }
+
+    /// Every wind scripts have declared — what particles and props read.
+    pub fn wind_field(&self) -> std::cell::Ref<'_, floptle_core::weather::WindField> {
+        self.weather.field.borrow()
+    }
+
+    /// The game time the winds blow by, in seconds.
+    pub fn weather_time(&self) -> f64 {
+        self.weather.time.get()
+    }
+
+    /// Every wind that rides a node, as `(id, node name)`.
+    pub fn anchored_winds(&self) -> Vec<(u32, String)> {
+        self.weather.field.borrow().winds.iter().filter_map(|w| w.anchor.clone().map(|a| (w.id, a))).collect()
+    }
+
+    /// Tell a wind where its anchor node has got to — once a frame, as
+    /// [`Self::set_scatter_frame`] does for scatter.
+    pub fn set_wind_frame(&self, id: u32, frame: floptle_core::scatter::Frame) {
+        if let Some(w) = self.weather.field.borrow_mut().winds.iter_mut().find(|w| w.id == id) {
+            w.frame = frame;
+        }
+    }
+
+    /// Drop every wind — a scene switch, like [`Self::clear_scatter`].
+    pub fn clear_weather(&mut self) {
+        self.weather.field.borrow_mut().winds.clear();
     }
 
     /// Drop the scatter sources a script instance created with an id up to
@@ -5730,6 +5763,7 @@ impl ScriptHost {
     /// `dt` is the frame delta and `time` is seconds since play started.
     pub fn run(&mut self, world: &mut World, scripts_dir: &Path, dt: f32, time: f32) {
         let _budget = self.budget.arm();
+        self.weather.time.set(time as f64);
         self.errors.clear();
         // Gizmos are immediate mode — a fresh frame starts empty even if the last
         // frame's batch was never drained. Sprite-batch draws are the same

@@ -30,6 +30,7 @@ each group, and meant to be searched.
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 17
 - [pathfinding — nav.*](#pathfinding--nav) — 26
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 6
+- [weather — wind](#weather--wind) — 5
 - [scatter — instanced props](#scatter--instanced-props) — 8
 - [2D — sprites, sorting & the flat camera](#2d--sprites-sorting--the-flat-camera) — 38
 - [vessels — assembly.*](#vessels--assembly) — 14
@@ -2846,6 +2847,28 @@ water.setFrozen(node, true) — freeze a water volume. Freezing is a STATE, not 
 ### `water.volumes`
 
 water.volumes() — every body of water in the scene, as node handles. What a climate or weather system iterates when it wants to know where the seas are.
+
+## weather — wind
+
+### `weather`
+
+Wind: one field that particles and props are moved by, declared by your game and read back with weather.windAt. A wind blows in the frame of the body it rides, so a planet's prevailing wind turns with the planet; one with a radius is a local cell (a storm, a valley's down-draught) that adds to the winds under it and fades to nothing at its edge. It is a pure function of place and time, so every machine agrees on it and it costs nothing until something asks.
+
+### `weather.addWind`
+
+weather.addWind{ velocity = vec3(4, 0, 0), gust = 0.4, gustPeriod = 6, turbulence = 0.2, scale = 40 } — declare a wind, get its id. `velocity` is metres a second. `gust` swings the speed by that fraction (0.4 blows between 0.6 and 1.4 times it), roughly every `gustPeriod` seconds, and a gust travels downwind at the wind's speed, so it is seen crossing a field rather than everything moving at once. `turbulence` adds eddies `scale` metres across, as a fraction of the speed, drifting with the wind. `parent = "Kail"` blows in that node's frame (then `velocity` and `center` are in it too). `center` + `radius` makes a local cell. An option this doesn't list is an error.
+
+### `weather.removeWind`
+
+weather.removeWind(id) — the wind stops. Returns true if there was one. Every wind is dropped when the scene changes.
+
+### `weather.setWind`
+
+weather.setWind(id, { ... }) — change the options it names and keep the rest: a storm building is `weather.setWind(storm, { gust = 0.8 })` each few seconds. `radius = 0` makes a cell blow everywhere again. Returns false when there is no such wind.
+
+### `weather.windAt`
+
+weather.windAt(point) → vec3, the wind at that point in world space: every wind there added up, at this frame's time. The same number the engine moves particles and props by, so a flag your script waves agrees with the smoke beside it.
 
 ## scatter — instanced props
 
