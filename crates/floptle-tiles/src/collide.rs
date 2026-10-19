@@ -73,6 +73,60 @@ pub struct TilePoly {
     pub pts: Vec<[f32; 2]>,
 }
 
+/// One square's collider as the engine collides it, in the square's own unit
+/// tile — 0 to 1 from its bottom-left corner, y up — with the square's turn and
+/// flip already applied. What [`collision_shapes`] places into the map, square
+/// by square, before it merges whole squares into boxes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SquareShape {
+    /// An axis-aligned rect: the whole square, a half, or a drawn box.
+    Rect { x: f32, y: f32, w: f32, h: f32 },
+    /// A drawn outline, anticlockwise.
+    Poly(Vec<[f32; 2]>),
+}
+
+/// The collider of the square holding `packed`, or `None` for one that does
+/// not collide (empty, or a tile with no collision). One function, so the
+/// colliders and anything that reads a level square by square cannot disagree
+/// about a turned plank or a mirrored slope.
+pub fn square_shape(set: &TileSet, packed: u32) -> Option<SquareShape> {
+    if set.is_empty_square(packed) {
+        return None;
+    }
+    let xf = tile_xform(packed);
+    match set.collision(tile_index(packed)).shape() {
+        TileShape::None => None,
+        TileShape::Rect(rx, ry, rw, rh) => {
+            // The orientation maps the unit square onto itself, so the rect's
+            // two opposite corners are enough — and because the eight
+            // orientations are symmetries, the result is exactly axis-aligned
+            // rather than a bounding box of one.
+            let (ax, ay) = tile_point_drawn(rx, ry, xf);
+            let (bx, by) = tile_point_drawn(rx + rw, ry + rh, xf);
+            let (x, y) = (ax.min(bx), ay.min(by));
+            Some(SquareShape::Rect { x, y, w: ax.max(bx) - x, h: ay.max(by) - y })
+        }
+        TileShape::Poly(pts) => {
+            // Every point through the same map the rect corners use, so a
+            // flipped slope faces the other way rather than staying put — which
+            // is how one drawn ramp serves all four diagonals.
+            let mut out: Vec<[f32; 2]> = pts
+                .iter()
+                .map(|p| {
+                    let (x, y) = tile_point_drawn(p[0], p[1], xf);
+                    [x, y]
+                })
+                .collect();
+            // A mirror reverses winding; a consistent order keeps the debug
+            // overlay and any area test from disagreeing about inside.
+            if crate::tileset::polygon_area(&out) < 0.0 {
+                out.reverse();
+            }
+            Some(SquareShape::Poly(out))
+        }
+    }
+}
+
 /// Everything a tilemap collides as.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TileColliders {
@@ -161,42 +215,13 @@ fn shapes_of(
                 full[i] = true;
                 continue;
             }
-            let xf = tile_xform(packed);
-            match coll.shape() {
-                TileShape::None => {}
-                TileShape::Rect(rx, ry, rw, rh) => {
-                    // A partial collider turns with its square. The orientation
-                    // maps the unit square onto itself, so the rect's two
-                    // opposite corners are enough — and because the eight
-                    // orientations are symmetries, the result is exactly
-                    // axis-aligned rather than a bounding box of one.
-                    let (ax, ay) = tile_point_drawn(rx, ry, xf);
-                    let (bx, by) = tile_point_drawn(rx + rw, ry + rh, xf);
-                    let (lo_x, hi_x) = (ax.min(bx), ax.max(bx));
-                    let (lo_y, hi_y) = (ay.min(by), ay.max(by));
-                    partial.push(place(col, row, lo_x, lo_y, hi_x - lo_x, hi_y - lo_y));
-                }
-                TileShape::Poly(pts) => {
-                    // Every point through the same orientation map the rect
-                    // corners use, so a flipped slope faces the other way rather
-                    // than staying put — which is how one drawn ramp serves all
-                    // four diagonals.
+            match square_shape(set, packed) {
+                None => {}
+                Some(SquareShape::Rect { x, y, w: rw, h: rh }) => partial.push(place(col, row, x, y, rw, rh)),
+                Some(SquareShape::Poly(pts)) => {
                     let x0 = col as f32 * tile - w;
                     let y0 = h - (row + 1) as f32 * tile;
-                    let mut out: Vec<[f32; 2]> = pts
-                        .iter()
-                        .map(|p| {
-                            let (px, py) = tile_point_drawn(p[0], p[1], xf);
-                            [x0 + px * tile, y0 + py * tile]
-                        })
-                        .collect();
-                    // A mirror reverses winding. The distance field does not
-                    // care, but a consistent order keeps the debug overlay and
-                    // any future area test from disagreeing about inside.
-                    if crate::tileset::polygon_area(&out) < 0.0 {
-                        out.reverse();
-                    }
-                    polys.push(TilePoly { pts: out });
+                    polys.push(TilePoly { pts: pts.iter().map(|p| [x0 + p[0] * tile, y0 + p[1] * tile]).collect() });
                 }
             }
         }

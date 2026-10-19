@@ -622,6 +622,8 @@ end
 | `tm:get(x, y)` | the cell index at that square, or `nil` (outside the grid, or empty) |
 | `tm:at(x, y)` | `cell, rotDeg, flipX` — the full answer, orientation included |
 | `tm:solid(x, y)` | whether the tileset says that square collides — **the one that matters**; the rest is decoration without it |
+| `tm:oneWay(x, y)` | whether that square is a one-way platform: solid from above only, so a character jumps up through it. The same answer the game's own `tm:oneWay` gives |
+| `tm:shape(x, y)` | the square's collider as the engine collides it, or `nil` for one that does not collide: `{ kind = "rect", x, y, w, h }` or `{ kind = "poly", points = { x1, y1, x2, y2, ... } }`, in the square's own unit tile (0 to 1 from its bottom-left corner, y up), with its turn and flip already applied. A plank, a half step and a ramp read as what they are |
 | `tm:tags(x, y)` | the tileset's tags for that square, as a list |
 | `tm:hasTag(x, y, tag)` | the common case of the above without a table per call |
 | `tm:cellAt(worldPoint)` | `x, y`, or `nil` off the map — through the node's own transform, so a moved, turned or scaled tilemap needs no arithmetic at your end |

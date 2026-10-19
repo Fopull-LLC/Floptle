@@ -226,6 +226,65 @@ fn new_tilemap_handle(lua: &Lua, id: u32, shared: Rc<Shared>) -> mlua::Result<Ta
             })?,
         )?;
     }
+    // tm:oneWay(x, y) -> whether that square is a one-way platform: solid from
+    // above only. The same answer the game's own `tm:oneWay` gives.
+    {
+        let shared = shared.clone();
+        t.set(
+            "oneWay",
+            lua.create_function(move |_, (this, x, y): (Table, u32, u32)| {
+                let id: u32 = this.raw_get("__id")?;
+                let s = shared.scene.borrow();
+                let Some(grid) = s.tilemap(id) else { return Ok(false) };
+                let Some(p) = tile_packed_at(&s, id, x, y) else { return Ok(false) };
+                let Some(set) = s.tileset_of(grid) else { return Ok(false) };
+                if set.is_empty_square(p) {
+                    return Ok(false);
+                }
+                let cell = floptle_core::tile_index(p);
+                Ok(set.collision(cell).is_solid() && set.one_way(cell))
+            })?,
+        )?;
+    }
+    // tm:shape(x, y) -> the square's collider as the engine collides it, or nil:
+    // { kind = "rect", x, y, w, h } or { kind = "poly", points = { x1, y1, ... } },
+    // in the square's own unit tile (0..1 from its bottom-left, y up) with its
+    // turn and flip already applied. A plank, a step and a ramp read as what
+    // they are, not as a full square.
+    {
+        let shared = shared.clone();
+        t.set(
+            "shape",
+            lua.create_function(move |lua, (this, x, y): (Table, u32, u32)| {
+                let id: u32 = this.raw_get("__id")?;
+                let s = shared.scene.borrow();
+                let Some(grid) = s.tilemap(id) else { return Ok(Value::Nil) };
+                let Some(p) = tile_packed_at(&s, id, x, y) else { return Ok(Value::Nil) };
+                let Some(set) = s.tileset_of(grid) else { return Ok(Value::Nil) };
+                let out = lua.create_table()?;
+                match floptle_tiles::square_shape(set, p) {
+                    None => return Ok(Value::Nil),
+                    Some(floptle_tiles::SquareShape::Rect { x, y, w, h }) => {
+                        out.set("kind", "rect")?;
+                        out.set("x", x)?;
+                        out.set("y", y)?;
+                        out.set("w", w)?;
+                        out.set("h", h)?;
+                    }
+                    Some(floptle_tiles::SquareShape::Poly(pts)) => {
+                        out.set("kind", "poly")?;
+                        let flat = lua.create_table_with_capacity(pts.len() * 2, 0)?;
+                        for (i, q) in pts.iter().enumerate() {
+                            flat.raw_set(i * 2 + 1, q[0])?;
+                            flat.raw_set(i * 2 + 2, q[1])?;
+                        }
+                        out.set("points", flat)?;
+                    }
+                }
+                Ok(Value::Table(out))
+            })?,
+        )?;
+    }
     // tm:tags(x, y) -> the tileset's tags for that square, as a list.
     {
         let shared = shared.clone();

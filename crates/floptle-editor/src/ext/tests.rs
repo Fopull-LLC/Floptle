@@ -1875,6 +1875,80 @@ fn a_package_reads_a_tilemaps_grid_and_solidity() {
     let _ = std::fs::remove_dir_all(&proj);
 }
 
+/// **A package reads each square as the engine collides it.** `tm:solid` said
+/// yes or no, so a one-way plank, a half-height step and a drawn ramp all read
+/// as full squares, and a route-finder made of them treated a plank as a
+/// ceiling and a ramp as a staircase. `tm:oneWay` and `tm:shape` answer with
+/// the square's turn and flip already applied: a bottom half turned a quarter
+/// collides across the left half, and a mirrored ramp rises the other way.
+#[test]
+fn a_package_reads_each_squares_collider_as_the_engine_collides_it() {
+    use floptle_core::{tile_pack, TileXform};
+    let proj = temp("tilemap-shape");
+    install(
+        &proj,
+        "com.t.tms",
+        "",
+        r#"
+        local tm = tilemap.of(scene.find("Level"))
+        local function show(x)
+            local s = tm:shape(x, 0)
+            if not s then return "nil" end
+            if s.kind == "rect" then return string.format("rect %.2f,%.2f %.2fx%.2f", s.x, s.y, s.w, s.h) end
+            local out = {}
+            for i = 1, #s.points do out[#out + 1] = string.format("%.0f", s.points[i]) end
+            return "poly " .. table.concat(out, ",")
+        end
+        ed.log(string.format("full=%s oneWay0=%s | plank=%s oneWay1=%s | ramp=%s | empty=%s",
+            show(0), tostring(tm:oneWay(0, 0)), show(1), tostring(tm:oneWay(1, 0)), show(2), show(3)))
+        "#,
+    );
+    let mut world = floptle_core::World::default();
+    let level = world.spawn();
+    world.insert(level, floptle_core::Name("Level".into()));
+    world.insert(level, floptle_core::transform::Transform::IDENTITY);
+    let data = vec![
+        tile_pack(3, TileXform::default()),
+        tile_pack(1, TileXform { rot: 1, flip_x: false }),
+        tile_pack(2, TileXform { rot: 0, flip_x: true }),
+        floptle_core::EMPTY_TILE,
+    ];
+    world.insert(level, floptle_core::Matter::Tilemap { cols: 4, rows: 1, tile: 1.0, data: data.clone(), tileset: "t.tileset.ron".into() });
+    let mut mirror = SceneMirror::build(&world, &|_, _| None, &|_, _| None);
+    let mut tileset = floptle_tiles::TileSet { sheet_cols: 4, sheet_rows: 1, ..Default::default() };
+    tileset.tiles.insert(3, floptle_tiles::TileInfo { collision: floptle_tiles::TileCollision::Full, ..Default::default() });
+    tileset.tiles.insert(
+        1,
+        floptle_tiles::TileInfo {
+            collision: floptle_tiles::TileCollision::Half(floptle_tiles::TileSide::Bottom),
+            one_way: true,
+            ..Default::default()
+        },
+    );
+    tileset.tiles.insert(
+        2,
+        floptle_tiles::TileInfo {
+            collision: floptle_tiles::TileCollision::Poly(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]),
+            ..Default::default()
+        },
+    );
+    mirror.tilemaps.insert(
+        level.index(),
+        std::rc::Rc::new(scene_mirror::TilemapGrid { cols: 4, rows: 1, tile: 1.0, data, tileset: "t.tileset.ron".into() }),
+    );
+    mirror.tilesets.insert("t.tileset.ron".into(), tileset);
+    let mut host = ExtHost::new();
+    host.begin_frame(Snapshot { project_root: proj.clone(), ..Snapshot::default() }, mirror);
+    host.reload(&proj, &engine(), |_| true);
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert_eq!(
+        log.first().map(String::as_str),
+        Some("full=rect 0.00,0.00 1.00x1.00 oneWay0=false | plank=rect 0.00,0.00 0.50x1.00 oneWay1=true | ramp=poly 0,1,0,0,1,0 | empty=nil"),
+        "{log:?}"
+    );
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
 fn host_with_a_navmesh(proj: &Path) -> ExtHost {
     let mut host = ExtHost::new();
     host.begin_frame(
