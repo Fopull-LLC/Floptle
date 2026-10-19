@@ -210,6 +210,7 @@ fn field(far: f32) -> ScatterSource {
         removed: Default::default(),
         anchor: None,
         frame: Default::default(),
+        look: Default::default(),
     }
 }
 
