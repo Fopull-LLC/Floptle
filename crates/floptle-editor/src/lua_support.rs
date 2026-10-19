@@ -1730,6 +1730,13 @@ function weather.removeWind(id) end
 ---@param point Vec3
 ---@return Vec3
 function weather.windAt(point) end
+---A lightning bolt's strands to draw, the main channel from `from` to `to`
+---first; forks name it as `parent`. The same seed is the same bolt everywhere.
+---@param from Vec3
+---@param to Vec3
+---@param opts? { seed?: number, branches?: number, jag?: number }
+---@return { points: number[], width: number, parent?: integer }[]
+function weather.bolt(from, to, opts) end
 
 ---The scene's bodies of water. The engine floats things and drags them; what
 ---being WET means — swimming, drowning, a flooded engine, a gauge going red —

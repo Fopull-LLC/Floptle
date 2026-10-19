@@ -30,7 +30,7 @@ each group, and meant to be searched.
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 18
 - [pathfinding — nav.*](#pathfinding--nav) — 26
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 6
-- [weather — wind](#weather--wind) — 5
+- [weather — wind](#weather--wind) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 8
 - [2D — sprites, sorting & the flat camera](#2d--sprites-sorting--the-flat-camera) — 38
 - [vessels — assembly.*](#vessels--assembly) — 14
@@ -2861,6 +2861,10 @@ Wind: one field that particles and props are moved by, declared by your game and
 ### `weather.addWind`
 
 weather.addWind{ velocity = vec3(4, 0, 0), gust = 0.4, gustPeriod = 6, turbulence = 0.2, scale = 40 } — declare a wind, get its id. `velocity` is metres a second. `gust` swings the speed by that fraction (0.4 blows between 0.6 and 1.4 times it), roughly every `gustPeriod` seconds, and a gust travels downwind at the wind's speed, so it is seen crossing a field rather than everything moving at once. `turbulence` adds eddies `scale` metres across, as a fraction of the speed, drifting with the wind. `parent = "Kail"` blows in that node's frame (then `velocity` and `center` are in it too). `center` + `radius` makes a local cell. An option this doesn't list is an error.
+
+### `weather.bolt`
+
+weather.bolt(from, to [, { seed = 1, branches = 3, jag = 0.15 }]) → the strands of a lightning bolt to draw: { {points={x1,y1,z1, x2,y2,z2, ...}, width=, parent=}, ... }. The main channel runs from `from` to `to` and comes first; each fork leaves from a point on it and names it as `parent`, with a `width` under 1 to draw it thinner. `jag` is how far the channel wanders sideways for its length (0 is straight). The same seed is the same bolt on every machine, so a strike a host announces looks the same to every player. Draw it with draw.line or as beams, for the frames the flash lasts.
 
 ### `weather.removeWind`
 

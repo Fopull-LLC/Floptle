@@ -135,6 +135,69 @@ impl WindField {
     }
 }
 
+/// One strand of a lightning bolt: a jagged line, and how thick to draw it
+/// relative to the main channel (1).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Strand {
+    pub points: Vec<DVec3>,
+    pub width: f32,
+    /// The strand it forks from (an index into the bolt), or `None` for the
+    /// main channel. A fork starts on one of its parent's points.
+    pub parent: Option<usize>,
+}
+
+/// A lightning bolt from `from` to `to`, as strands to draw: the main channel
+/// first, then `branches` forks off it, each jagged by `jag` (0 is a straight
+/// line; 0.15 is a storm's). The same seed gives the same bolt, so every
+/// machine sees the one strike.
+///
+/// Midpoint displacement: each segment is split at a point pushed sideways by
+/// up to `jag` times its length, until segments are about a fiftieth of the
+/// whole. A fork leaves the channel at a random point, heads off within about
+/// 40 degrees of it, and is a fifth to a half as long as the rest of the way.
+pub fn bolt(from: DVec3, to: DVec3, seed: u32, branches: u32, jag: f32) -> Vec<Strand> {
+    let mut rng = crate::noise::Rng::new(seed.max(1));
+    let jag = jag.max(0.0) as f64;
+    let mut strands = vec![Strand { points: jagged(from, to, jag, &mut rng), width: 1.0, parent: None }];
+    for _ in 0..branches {
+        let main = &strands[0].points;
+        if main.len() < 3 {
+            break;
+        }
+        let i = 1 + (rng.next_f64() * (main.len() - 2) as f64) as usize;
+        let start = main[i];
+        let rest = (to - start).length();
+        let ahead = (to - start).normalize_or_zero();
+        // A direction off the channel's own heading, no further than ~40°.
+        let side = ahead.any_orthonormal_vector();
+        let side = glam::DQuat::from_axis_angle(ahead, rng.range(0.0, std::f64::consts::TAU)) * side;
+        let dir = (ahead + side * rng.range(0.35, 0.85)).normalize_or_zero();
+        let end = start + dir * rest * rng.range(0.2, 0.5);
+        strands.push(Strand { points: jagged(start, end, jag, &mut rng), width: rng.range(0.3, 0.6) as f32, parent: Some(0) });
+    }
+    strands
+}
+
+fn jagged(from: DVec3, to: DVec3, jag: f64, rng: &mut crate::noise::Rng) -> Vec<DVec3> {
+    let mut pts = vec![from, to];
+    let along = (to - from).normalize_or_zero();
+    for _ in 0..6 {
+        let mut next = Vec::with_capacity(pts.len() * 2);
+        for w in pts.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let len = (b - a).length();
+            // Sideways only, so the bolt still gets where it is going.
+            let side = DVec3::new(rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0));
+            let side = (side - along * side.dot(along)).normalize_or_zero();
+            next.push(a);
+            next.push((a + b) * 0.5 + side * len * jag * rng.range(0.0, 1.0));
+        }
+        next.push(*pts.last().unwrap_or(&to));
+        pts = next;
+    }
+    pts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,6 +280,32 @@ mod tests {
         assert!((mean - Vec3::new(4.0, 0.0, 0.0)).length() < 0.4, "{mean}");
         let spread = (0..200).map(|k| w.velocity_at(DVec3::ZERO, k as f64 * 0.7)).fold(0.0f32, |m, v| m.max((v - w.base).length()));
         assert!(spread > 1.0, "neither gusts nor eddies moved it: {spread}");
+    }
+
+    /// A bolt runs from where it was asked to where it was asked, jagged but
+    /// never straying further sideways than its jag allows, forks off its own
+    /// channel, and is the same bolt for the same seed.
+    #[test]
+    fn a_bolt_strikes_where_it_was_aimed() {
+        let (from, to) = (DVec3::new(0.0, 500.0, 0.0), DVec3::new(40.0, 0.0, 10.0));
+        let b = bolt(from, to, 7, 3, 0.15);
+        assert_eq!(b.len(), 4, "a channel and three forks");
+        let main = &b[0].points;
+        assert_eq!((main[0], *main.last().unwrap()), (from, to));
+        let axis = (to - from).normalize();
+        let len = (to - from).length();
+        let stray = main.iter().map(|p| ((*p - from) - axis * (*p - from).dot(axis)).length()).fold(0.0, f64::max);
+        assert!(stray > 1.0, "a storm's bolt is not a straight line: {stray}");
+        assert!(stray < len * 0.15, "it strayed {stray} m from a {len} m channel");
+        for f in &b[1..] {
+            assert_eq!(f.parent, Some(0));
+            assert!(main.contains(&f.points[0]), "a fork must leave from the channel");
+            assert!(f.width < 1.0);
+        }
+        assert_eq!(bolt(from, to, 7, 3, 0.15), b, "the same seed must give the same bolt");
+        assert_ne!(bolt(from, to, 8, 3, 0.15), b);
+        let straight = bolt(from, to, 7, 0, 0.0);
+        assert!(straight[0].points.iter().all(|p| ((*p - from) - axis * (*p - from).dot(axis)).length() < 1e-9));
     }
 
     /// Far from the origin the wind keeps its detail, rather than an f32 noise

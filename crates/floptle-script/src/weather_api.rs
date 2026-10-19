@@ -138,6 +138,45 @@ pub(crate) fn install_weather_api(lua: &Lua, shared: WeatherShared) {
         }
     }
 
+    // weather.bolt(from, to [, { seed, branches, jag }]) → the strands of a
+    // lightning bolt to draw: { {points={x1,y1,z1, ...}, width=, parent=}, ... },
+    // the main channel first. The same seed is the same bolt everywhere.
+    if let Ok(f) = lua.create_function(|lua, (from, to, opts): (Value, Value, Option<Table>)| {
+        let (Some(from), Some(to)) = (crate::math_api::vec3_of(&from), crate::math_api::vec3_of(&to)) else {
+            return Err(mlua::Error::RuntimeError("weather.bolt(from, to [, opts]): from and to are vec3s".into()));
+        };
+        if let Some(o) = &opts {
+            check_keys(o, &["seed", "branches", "jag"], "weather.bolt")?;
+        }
+        let get = |k: &str| opts.as_ref().and_then(|o| num(o, k));
+        let strands = floptle_core::weather::bolt(
+            from,
+            to,
+            get("seed").unwrap_or(1.0) as u32,
+            get("branches").unwrap_or(3.0).clamp(0.0, 64.0) as u32,
+            get("jag").unwrap_or(0.15) as f32,
+        );
+        let out = lua.create_table()?;
+        for (i, s) in strands.iter().enumerate() {
+            let row = lua.create_table()?;
+            let pts = lua.create_table_with_capacity(s.points.len() * 3, 0)?;
+            for (k, p) in s.points.iter().enumerate() {
+                pts.raw_set(k * 3 + 1, p.x)?;
+                pts.raw_set(k * 3 + 2, p.y)?;
+                pts.raw_set(k * 3 + 3, p.z)?;
+            }
+            row.set("points", pts)?;
+            row.set("width", s.width)?;
+            if let Some(p) = s.parent {
+                row.set("parent", p + 1)?;
+            }
+            out.raw_set(i + 1, row)?;
+        }
+        Ok(out)
+    }) {
+        let _ = t.set("bolt", f);
+    }
+
     let _ = lua.globals().set("weather", t);
 }
 
@@ -194,6 +233,23 @@ mod tests {
             .unwrap();
         assert!(gone);
         assert!(shared.field.borrow().winds.is_empty());
+    }
+
+    /// A bolt reaches Lua as strands to draw: the channel from `from` to `to`
+    /// first, its forks naming it as their parent.
+    #[test]
+    fn a_bolt_reaches_lua_as_strands_to_draw() {
+        let (lua, _) = host();
+        let (n, ends, parent): (i64, bool, i64) = lua
+            .load(
+                r#"local b = weather.bolt(vec3(0, 100, 0), vec3(5, 0, 2), { seed = 3, branches = 2 })
+                   local p = b[1].points
+                   local ends = p[1] == 0 and p[2] == 100 and p[#p - 2] == 5 and p[#p - 1] == 0 and p[#p] == 2
+                   return #b, ends, b[2].parent"#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!((n, ends, parent), (3, true, 1));
     }
 
     /// An option the wind does not read is an error, not a default forever.
