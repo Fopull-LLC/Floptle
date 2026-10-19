@@ -2260,7 +2260,6 @@ impl Sim {
     /// collision meshes itself ([`ChunkTerrain::adopt_mesh`]): nothing cached
     /// is forgotten, so until those land the old triangles stand.
     pub fn terrain_collider_mut(&mut self, eid: u32) -> Option<&mut ChunkTerrain> {
-        self.world.level_edits += 1;
         self.world.colliders.iter_mut().find(|c| c.eid == Some(eid)).and_then(|c| c.shape.chunk_terrain_mut())
     }
 
