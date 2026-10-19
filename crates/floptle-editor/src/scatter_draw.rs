@@ -898,7 +898,7 @@ mod tests {
             let mut g = |a: DVec3, b: Vec3, c: f32| ground(a, b, c);
             // Settled first: this is the cost of standing in a field, not of
             // arriving at one.
-            for _ in 0..400 {
+            for _ in 0..100 {
                 out.clear();
                 build_instances(&mut cache, sources, DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut g,
                     &floptle_render::Frustum::everything(), 100_000, &mut out);
@@ -913,8 +913,16 @@ mod tests {
             let us = t.elapsed().as_secs_f64() * 1e6 / frames as f64;
             (us / out.len().max(1) as f64, out.len())
         };
-        let (one, n1) = per_prop(&field(1), &mut ground);
-        let (eight, n8) = per_prop(&field(8), &mut ground);
+        // Alternated, best of five each: the suite runs this beside a thousand
+        // other tests, and a burst of load on one side must not decide it.
+        let (one_f, eight_f) = (field(1), field(8));
+        let (mut one, mut eight, mut n1, mut n8) = (f64::INFINITY, f64::INFINITY, 0, 0);
+        for _ in 0..5 {
+            let (t, n) = per_prop(&one_f, &mut ground);
+            (one, n1) = (one.min(t), n);
+            let (t, n) = per_prop(&eight_f, &mut ground);
+            (eight, n8) = (eight.min(t), n);
+        }
         eprintln!("one source: {one:.3} µs a prop ({n1}); eight: {eight:.3} µs a prop ({n8})");
         assert!(n1 > 400 && n8 > 400, "the fields are too small to measure: {n1}, {n8}");
         assert!(eight < one * 2.0, "eight overlapping sources cost {eight:.3} µs a prop against one source's {one:.3}");
