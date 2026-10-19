@@ -152,9 +152,14 @@ const BODY_RING_FRACTION: [f64; 3] = [0.15, 0.40, 1.0];
 
 /// The ground within this many metres of the camera is always full detail:
 /// what a player walks on, digs and shoots at is drawn as the collider has it.
-const NEAR_METRES: f64 = 48.0;
+const NEAR_METRES: f64 = 64.0;
 /// …and nothing within this many metres is coarser than stride 2.
 const MID_METRES: f64 = 120.0;
+
+/// Ring distances are measured in quarter chunks: in whole chunks, rounding up
+/// made a 64 m ring reach 96 m on a 48 m chunk, and doubled what was meshed at
+/// full detail.
+const RING_STEPS: i32 = 4;
 
 /// The LOD rings to use for a terrain, given the body radius it belongs to
 /// (`None` for ordinary, non-celestial terrain).
@@ -165,25 +170,23 @@ const MID_METRES: f64 = 120.0;
 /// ones around it, however small it is.
 fn rings_for_body(body_radius: Option<f64>, chunk_units: f64) -> [i32; 3] {
     let chunk = chunk_units.max(1e-3);
+    let steps = |metres: f64| (metres / chunk * RING_STEPS as f64).ceil() as i32;
     // What a player can touch is drawn as it collides, however small the body:
     // full detail within `NEAR_METRES`, nothing coarser than stride 2 within
     // `MID_METRES`.
-    let near = (NEAR_METRES / chunk).ceil() as i32;
-    let mid = (MID_METRES / chunk).ceil() as i32;
-    let Some(r) = body_radius.filter(|r| *r > 0.0) else {
-        return [LOD_RINGS[0].max(near), LOD_RINGS[1].max(mid), LOD_RINGS[2].max(mid + 1)];
-    };
-    let mut out = LOD_RINGS;
-    for (i, frac) in BODY_RING_FRACTION.iter().enumerate() {
-        let by_body = ((r * frac) / chunk).ceil() as i32;
-        out[i] = out[i].min(by_body).max(i as i32 + 1);
+    let (near, mid) = (steps(NEAR_METRES), steps(MID_METRES));
+    let mut out = LOD_RINGS.map(|r| r * RING_STEPS);
+    if let Some(r) = body_radius.filter(|r| *r > 0.0) {
+        for (i, frac) in BODY_RING_FRACTION.iter().enumerate() {
+            out[i] = out[i].min(steps(r * frac)).max((i as i32 + 1) * RING_STEPS);
+        }
     }
     out[0] = out[0].max(near);
     out[1] = out[1].max(mid);
-    // Rings must stay strictly ordered or `lod_for`'s hysteresis compares
-    // against a boundary that is behind it.
-    out[1] = out[1].max(out[0] + 1);
-    out[2] = out[2].max(out[1] + 1);
+    // Rings must stay strictly ordered, a chunk apart, or `lod_for`'s
+    // hysteresis compares against a boundary that is behind it.
+    out[1] = out[1].max(out[0] + RING_STEPS);
+    out[2] = out[2].max(out[1] + RING_STEPS);
     out
 }
 
@@ -389,7 +392,7 @@ fn lod_for(dist: i32, cur: u8, rings: [i32; 3]) -> u8 {
         cur
     } else if raw > cur {
         // Coarsen only once clearly past the boundary above the current ring.
-        if dist > rings[(cur as usize).min(2)] + 1 {
+        if dist > rings[(cur as usize).min(2)] + RING_STEPS {
             raw
         } else {
             cur
@@ -734,7 +737,7 @@ impl Editor {
             let dist_of = |c: [i32; 3]| {
                 let lo = Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32);
                 let gap = (lo - cl).max(cl - (lo + Vec3::ONE)).max(Vec3::ZERO);
-                gap.length().ceil() as i32
+                (gap.length() * RING_STEPS as f32).ceil() as i32
             };
             // Queue position, in metres, so chunks from different terrains can
             // be compared at all.
@@ -3357,7 +3360,7 @@ mod occluder_tests {
 #[cfg(test)]
 mod tests {
     use super::terrain_voxel_size;
-    use super::{CHUNK_FADE_SECS, chunk_fade, chunk_priority, lod_for, raw_lod, rings_for_body, LOD_RINGS};
+    use super::{CHUNK_FADE_SECS, chunk_fade, chunk_priority, lod_for, raw_lod, rings_for_body, LOD_RINGS, RING_STEPS};
     use floptle_core::math::{DVec3, Quat};
     use floptle_field::BakedSdf;
 
@@ -3570,10 +3573,10 @@ mod tests {
         // Fresh chunks take the raw ring.
         assert_eq!(raw_lod(b, r), 0);
         assert_eq!(raw_lod(b + 1, r), 1);
-        // A lod0 chunk exactly at the boundary +1 stays lod0…
-        assert_eq!(lod_for(b + 1, 0, r), 0);
+        // A lod0 chunk up to a chunk past the boundary stays lod0…
+        assert_eq!(lod_for(b + RING_STEPS, 0, r), 0);
         // …and coarsens once clearly past it.
-        assert_eq!(lod_for(b + 2, 0, r), 1);
+        assert_eq!(lod_for(b + RING_STEPS + 1, 0, r), 1);
         // A lod1 chunk back inside the finer ring refines at once.
         assert_eq!(lod_for(b, 1, r), 0);
         assert_eq!(lod_for(b - 1, 1, r), 0);
@@ -3581,7 +3584,7 @@ mod tests {
         assert_eq!(lod_for(2, 0, r), 0);
         assert_eq!(lod_for(100, 3, r), 3);
         // Far chunks are lod3 regardless of history.
-        assert_eq!(lod_for(LOD_RINGS[2] + 2, 0, r), 3);
+        assert_eq!(lod_for(LOD_RINGS[2] + RING_STEPS + 1, 0, r), 3);
     }
 
     /// Surface chunks of a sphere of `radius`, and how many of them the rings
@@ -3610,7 +3613,13 @@ mod tests {
                         continue;
                     }
                     surface += 1;
-                    let d = (x - cam[0]).abs().max((y - cam[1]).abs()).max((z - cam[2]).abs());
+                    // How far the camera, on the surface over the pole, is from
+                    // the chunk's nearest face, in the rings' quarter chunks.
+                    let eye = [0.0, radius / chunk, 0.0];
+                    let gap = |c: i32, e: f64| ((c as f64 - e).max(e - (c + 1) as f64)).max(0.0);
+                    let g = (gap(x, eye[0]).powi(2) + gap(y, eye[1]).powi(2) + gap(z, eye[2]).powi(2)).sqrt();
+                    let d = (g * RING_STEPS as f64).ceil() as i32;
+                    let _ = cam;
                     if raw_lod(d, rings) == 0 {
                         full += 1;
                     }
@@ -3627,7 +3636,7 @@ mod tests {
         // Solar's planets are 100–230 units; one chunk is 32 voxels × 1.5.
         let (radius, chunk) = (180.0, 48.0);
         let tight = rings_for_body(Some(radius), chunk);
-        let (surface, before) = lod0_chunks(radius, chunk, LOD_RINGS);
+        let (surface, before) = lod0_chunks(radius, chunk, LOD_RINGS.map(|r| r * RING_STEPS));
         let (_, after) = lod0_chunks(radius, chunk, tight);
 
         assert!(
@@ -3635,9 +3644,11 @@ mod tests {
             "more than HALF the body's {surface} surface chunks used to be queued at full \
              detail from one standing position ({before})"
         );
+        // What is left at full detail is the ground within 64 m of the player,
+        // which has to be: about a tenth of a world this small.
         assert!(
-            after * 8 < before,
-            "standing on a {radius}-unit world: {before} full-detail chunks became {after}"
+            after * 4 < before && after * 5 < surface,
+            "standing on a {radius}-unit world: {before} full-detail chunks became {after} of {surface}"
         );
         println!(
             "radius {radius}: {surface} surface chunks, full detail {before} -> {after} \
@@ -3652,17 +3663,18 @@ mod tests {
     /// untouched — this can only ever tighten.
     #[test]
     fn a_big_world_keeps_the_rings_it_had() {
-        assert_eq!(rings_for_body(Some(100_000.0), 48.0), LOD_RINGS);
-        assert_eq!(rings_for_body(None, 48.0), LOD_RINGS, "ordinary terrain has no body");
+        let quarters = LOD_RINGS.map(|r| r * RING_STEPS);
+        assert_eq!(rings_for_body(Some(100_000.0), 48.0), quarters);
+        assert_eq!(rings_for_body(None, 48.0), quarters, "ordinary terrain has no body");
         // A tiny moon still gets a full-detail ring under your feet and two
-        // coarser ones around it, rather than collapsing to nothing; the second
-        // reaches 120 m, which nothing within is drawn coarser than stride 2.
+        // coarser ones around it, rather than collapsing to nothing; the first
+        // reaches 64 m and the second 120 m, as everywhere.
         let tiny = rings_for_body(Some(20.0), 48.0);
-        assert_eq!(tiny, [1, 3, 4], "ordered, and never empty: {tiny:?}");
+        assert_eq!(tiny, [6, 10, 14], "ordered, and never empty: {tiny:?}");
     }
 
     /// **What a player can touch is drawn at full detail.** On a body of any
-    /// size, ground within 48 m of the camera is stride 1 and nothing within
+    /// size, ground within 64 m of the camera is stride 1 and nothing within
     /// 120 m is coarser than stride 2, whatever stride a chunk was drawn at
     /// before. The rings were a fraction of the body's radius, which on a
     /// 300 m world rounded to one chunk, and a coarse chunk refined only once
@@ -3674,13 +3686,13 @@ mod tests {
             for chunk in [24.0, 48.0, 96.0] {
                 let rings = rings_for_body(Some(radius), chunk);
                 for m in 0..200 {
-                    // The camera-to-chunk distance in chunks, rounded up.
-                    let dist = (m as f64 / chunk).ceil() as i32;
+                    // The camera-to-chunk distance in the rings' quarter chunks.
+                    let dist = (m as f64 / chunk * RING_STEPS as f64).ceil() as i32;
                     for cur in 0..=3u8 {
                         let lod = lod_for(dist, cur, rings);
-                        if m as f64 <= 48.0 {
+                        if m as f64 <= super::NEAR_METRES {
                             assert_eq!(lod, 0, "r {radius}, chunk {chunk}: ground {m} m away drawn at lod {lod} (was {cur})");
-                        } else if m as f64 <= 120.0 {
+                        } else if m as f64 <= super::MID_METRES {
                             assert!(lod <= 1, "r {radius}, chunk {chunk}: ground {m} m away drawn at lod {lod} (was {cur})");
                         }
                     }
