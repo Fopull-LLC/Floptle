@@ -680,6 +680,7 @@ impl Editor {
         let wait_t = floptle_core::time::Instant::now();
         let acquired = gpu.acquire();
         let wait_ms = wait_t.elapsed().as_secs_f32() * 1000.0;
+        self.script_host.profile().borrow_mut().record(floptle_core::profile::Bucket::GpuWait, wait_ms);
         self.present_wait_ms = if self.present_wait_ms > 0.0 {
             self.present_wait_ms * 0.9 + wait_ms * 0.1
         } else {
@@ -1201,7 +1202,9 @@ impl Editor {
                     egui.renderer.free_texture(id);
                 }
                 dump_presented_frame(gpu, &frame.surface.texture, self.frame_no);
+                let present_t = floptle_core::profile::Span::new();
                 frame.present();
+                self.script_host.profile().borrow_mut().record(floptle_core::profile::Bucket::Present, present_t.ms());
             }
             None => {
                 let size = window.inner_size();

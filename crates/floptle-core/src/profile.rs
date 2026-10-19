@@ -54,17 +54,28 @@ pub enum Bucket {
     /// Everything from the gather to submit: instances, the raymarch, the raster
     /// passes, post.
     Render,
+    /// Textures, shaders and materials the frame needs on the GPU for the first
+    /// time: decoding and uploading an image, compiling a shader.
+    Assets,
+    /// Waiting on the GPU: for a swapchain image to come free, which is the GPU
+    /// still drawing an earlier frame (or, with vsync on, the display not yet
+    /// wanting one), and for any readback the frame blocks on.
+    GpuWait,
+    /// Handing the finished image to the compositor.
+    Present,
     /// The rest of the frame: the time between two frames that no other bucket
-    /// measured. Waiting on the GPU or the display, and work nothing times yet.
-    /// Without it a slow frame whose buckets added up to little was not a
-    /// hitch at all, and a frame that was mostly unmeasured named nothing.
+    /// measured — engine work nothing times yet, and the OS not running the
+    /// game at all. Without it a slow frame whose buckets added up to little
+    /// was not a hitch at all, and a frame that was mostly unmeasured named
+    /// nothing. Named `untimed`; scripts written when it was `other` still get
+    /// it by that name.
     Other,
 }
 
 impl Bucket {
     /// Every bucket, in the order a readout should list them — roughly the order
     /// of a frame.
-    pub const ALL: [Bucket; 12] = [
+    pub const ALL: [Bucket; 15] = [
         Bucket::Scripts,
         Bucket::Mirror,
         Bucket::Physics,
@@ -76,13 +87,16 @@ impl Bucket {
         Bucket::Models,
         Bucket::Ui,
         Bucket::Render,
+        Bucket::Assets,
+        Bucket::GpuWait,
+        Bucket::Present,
         Bucket::Other,
     ];
 
     /// The name a script passes to `perf.ms(...)`, and the label a readout shows.
     ///
-    /// camelCase-free because every one is a single lowercase word: these are
-    /// what a game author calls them, not what the crates are called.
+    /// What a game author calls them, not what the crates are called, and
+    /// camelCase where a name is two words.
     pub fn name(self) -> &'static str {
         match self {
             Bucket::Scripts => "scripts",
@@ -96,7 +110,10 @@ impl Bucket {
             Bucket::Models => "models",
             Bucket::Ui => "ui",
             Bucket::Render => "render",
-            Bucket::Other => "other",
+            Bucket::Assets => "assets",
+            Bucket::GpuWait => "gpuWait",
+            Bucket::Present => "present",
+            Bucket::Other => "untimed",
         }
     }
 
@@ -104,6 +121,9 @@ impl Bucket {
     /// caller turns that into an error naming the whole set, rather than
     /// answering zero for a typo.
     pub fn from_name(name: &str) -> Option<Bucket> {
+        if name == "other" {
+            return Some(Bucket::Other);
+        }
         Bucket::ALL.into_iter().find(|b| b.name() == name)
     }
 }
@@ -665,11 +685,15 @@ mod tests {
     /// spent the time on top, and a read empties it.
     /// **A slow frame is a hitch even when the buckets do not see why.** A
     /// frame of 60 ms whose buckets add up to 10 is kept, and the 50 ms nothing
-    /// measured is named as `other` rather than left out, so a hitch always
+    /// measured is named as `untimed` rather than left out, so a hitch always
     /// says where its time went, even when the answer is "not in the engine's
-    /// buckets".
+    /// buckets". A script that asks for it by its old name, `other`, still gets
+    /// it.
     #[test]
-    fn a_slow_frame_the_buckets_miss_is_a_hitch_named_other() {
+    fn a_slow_frame_the_buckets_miss_is_a_hitch_named_untimed() {
+        assert_eq!(Bucket::Other.name(), "untimed");
+        assert_eq!(Bucket::from_name("other"), Some(Bucket::Other));
+        assert_eq!(Bucket::from_name("gpuWait"), Some(Bucket::GpuWait));
         let mut p = FrameProfile::default();
         p.enable(true);
         p.end_frame();

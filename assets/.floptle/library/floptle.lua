@@ -1628,7 +1628,7 @@ scatter = {}
 ---per instance and never while chunks build — placement has to stay a pure
 ---function of the seed, or walking away and back would regrow a different
 ---world. Density 0 generates no instance at all.
----@param opts { asset?: string, lod?: { asset: string, distance: number }[], seed?: number, center?: Vec3, radius?: number, halfX?: number, halfZ?: number, perChunk?: number, chunk?: number, align?: string, scaleMin?: number, scaleMax?: number, range?: number, fade?: number, density?: fun(x: number, y: number, z: number): number | number[], densityRows?: number }
+---@param opts { tint?: number[], emissive?: number[], emissiveStrength?: number, asset?: string, lod?: { asset: string, distance: number }[], seed?: number, center?: Vec3, radius?: number, halfX?: number, halfZ?: number, perChunk?: number, chunk?: number, align?: string, scaleMin?: number, scaleMax?: number, range?: number, fade?: number, density?: fun(x: number, y: number, z: number): number | number[], densityRows?: number }
 ---@return integer
 function scatter.create(opts) end
 ---Instances within `radius` of a point, nearest first. What a harvest verb aims
@@ -1636,7 +1636,7 @@ function scatter.create(opts) end
 ---@param id integer
 ---@param point Vec3
 ---@param radius? number
----@return { id: integer, distance: number, pos: Vec3, scale: number, param: number }[]
+---@return { id: number, distance: number, pos: Vec3, scale: number, param: number, up: Vec3, yaw: number }[]
 function scatter.near(id, point, radius) end
 ---Remove one instance, permanently. By ID, so it survives the chunk streaming
 ---out and back in.
@@ -1781,10 +1781,23 @@ function terrain.paintTexture(x, y, z, radius, slot) end
 ---craterMin, craterMax, craterDust, surfaceA, surfaceB, patchBias, patchThr,
 ---subsoil, subsoilDepth, strata, strataDepth, deep,
 ---pockets {slot,color,threshold,minDepth}, seam {slot,color,minDepth,center,width},
----iceCaps {lat,slot,color}, seed.
+---iceCaps {lat,slot,color}, seed. Relief layers, each a table of optional
+---keys: mountains {height,scale,sharpness,coverage,octaves}, warp
+---{strength,scale}, plateau {height,smooth}, terrace {step,sharpness},
+---overhangs {depth,scale,strength}, ravines {count,depth,width,length,meander},
+---rivers {count,depth,width,seaLevel,meander}; biomes, a list of
+---{slot,color,latitude,altitude,slope,moisture,nearRiver} rules (ranges are
+---{min,max}; the first match paints the surface); moistureScale;
+---deferCaves (leave the buried cave zone ungenerated until a dig reaches it).
 ---@param id number The terrain id (a node with that Terrain id shows the result).
 ---@param opts? table
 function terrain.generatePlanet(id, opts) end
+---The rivers and ravines `terrain.generatePlanet` carves with these opts,
+---without generating: { {river=, depth=, points={x1,y1,z1, ...}, widths={...}}, ... }.
+---Points are planet-local, on the sphere of the planet's radius.
+---@param opts table The same opts table `terrain.generatePlanet` takes.
+---@return table[]
+function terrain.planetRivers(opts) end
 ---Set (or read, with no argument) the game's SAVE-SLOT directory for
 ---player-edited terrain, relative to the project root (e.g.
 ---"saves/slot1/terrain"). While set, streaming loads a body's field from here

@@ -320,6 +320,14 @@ impl Editor {
         p.record(Bucket::Scripts, (ms - mirror).max(0.0));
     }
 
+    /// Run `f` with a wall clock around it, into `bucket`.
+    pub(crate) fn timed_into<R>(&mut self, bucket: floptle_core::profile::Bucket, f: impl FnOnce(&mut Self) -> R) -> R {
+        let span = floptle_core::profile::Span::new();
+        let out = f(self);
+        self.profile_record(bucket, span.ms());
+        out
+    }
+
     /// How much of the screen a scene fade covers this frame, 0 to 1, and its
     /// colour.
     pub(crate) fn scene_fade_cover(&self) -> Option<[f32; 4]> {

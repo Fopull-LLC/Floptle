@@ -861,6 +861,43 @@ fn normal_at(tri: &SurfaceTri, q: Vec3) -> Vec3 {
 }
 
 impl CollisionShape for ChunkTerrain {
+    /// The field first, then the drawn surface where the field says it is.
+    ///
+    /// The march every other shape gets steps at most a metre at a time and
+    /// asks this collider its distance at every step, which near the ground
+    /// means a closest-triangle search; a ray that misses walked its whole
+    /// length that way, so a 124 m miss cost ten times a hit. The field's own
+    /// trace strides through open air a band at a time and is cheap; a miss
+    /// there is a miss. Where it does find the ground, the drawn surface is
+    /// within about half a voxel of it, so the exact march starts a few voxels
+    /// short and goes only that far. A ray that starts in rock, or whose march
+    /// finds nothing near the field's hit, is handed to the general march.
+    fn ray_cast(&self, o: Vec3, rd: Vec3, tmax: f32) -> RayAnswer {
+        let scale = self.scale.max(1e-6);
+        let local = self.to_local(o);
+        if self.field.d(local) < 0.0 {
+            return RayAnswer::March;
+        }
+        let ld = (self.rot.inverse() * rd).normalize_or_zero();
+        let Some(hit) = self.field.raycast(local, ld, tmax / scale) else {
+            return RayAnswer::Miss;
+        };
+        let voxel = self.field.voxel() * scale;
+        let field_t = (hit - local).length() * scale;
+        let (mut t, end) = ((field_t - 3.0 * voxel).max(0.0), (field_t + 3.0 * voxel).min(tmax));
+        for _ in 0..512 {
+            if t > end {
+                break;
+            }
+            let p = o + rd * t;
+            let d = self.distance(p);
+            if d < 0.02 {
+                return RayAnswer::Hit(t, self.ray_normal(p, rd));
+            }
+            t += d.clamp(0.02, 1.0);
+        }
+        RayAnswer::March
+    }
     fn distance(&self, p: Vec3) -> f32 {
         let local = self.to_local(p);
         let scale = self.scale.max(1e-6);
@@ -2517,5 +2554,76 @@ mod drawn_surface_tests {
             main_ms[main_ms.len() / 2],
             main_ms[main_ms.len() * 9 / 10]
         );
+    }
+
+    /// A terrain collider that leaves every ray to the general march, as all
+    /// terrain did: the reference the field-first ray is checked against.
+    struct MarchOnly(ChunkTerrain);
+
+    impl CollisionShape for MarchOnly {
+        fn distance(&self, p: Vec3) -> f32 {
+            self.0.distance(p)
+        }
+        fn normal(&self, p: Vec3) -> Vec3 {
+            self.0.normal(p)
+        }
+        fn ray_normal(&self, p: Vec3, rd: Vec3) -> Vec3 {
+            self.0.ray_normal(p, rd)
+        }
+    }
+
+    /// **A ray that misses a planet costs about what one that hits it does, and
+    /// both find what the march found.** 124 m rays, a thousand straight down
+    /// at the ground and a thousand skimming past above it. The march stepped
+    /// a metre at a time with a closest-triangle search at every step, so a
+    /// miss walked its whole length that way: ten times a hit.
+    #[test]
+    fn a_ray_past_a_planet_costs_about_what_a_ray_into_it_does() {
+        let radius = 150.0;
+        let field = floptle_field::procgen::generate_planet(&floptle_field::procgen::PlanetFill {
+            seed: 11,
+            radius,
+            voxel: 1.5,
+            relief: radius * 0.065,
+            cave_depth: radius * 0.35,
+            core_r: 10.5,
+            ..Default::default()
+        });
+        let fast = vec![crate::AnchoredCollider::world(Box::new(ChunkTerrain::new(field.clone())))];
+        let slow = vec![crate::AnchoredCollider::world(Box::new(MarchOnly(ChunkTerrain::new(field))))];
+        let mut r = floptle_core::noise::Rng::new(5);
+        let (mut down, mut past) = (Vec::new(), Vec::new());
+        for _ in 0..1000 {
+            let d = Vec3::new(r.range(-1.0, 1.0) as f32, r.range(-1.0, 1.0) as f32, r.range(-1.0, 1.0) as f32).normalize_or_zero();
+            if d == Vec3::ZERO {
+                continue;
+            }
+            let side = d.cross(if d.y.abs() < 0.9 { Vec3::Y } else { Vec3::X }).normalize();
+            down.push((d * (radius + 30.0), -d));
+            past.push((d * (radius + 25.0) - side * 62.0, side));
+        }
+        let cast = |cols: &[crate::AnchoredCollider], rays: &[(Vec3, Vec3)]| {
+            let t = std::time::Instant::now();
+            let hits: Vec<Option<f32>> = rays.iter().map(|(o, d)| crate::raycast_colliders(cols, *o, *d, 124.0, !0).map(|h| h.distance)).collect();
+            (hits, t.elapsed().as_secs_f64())
+        };
+        // Warm both caches, so the timing is the ray and not first meshing.
+        cast(&fast, &down);
+        cast(&slow, &down);
+        let (hit_fast, hit_s) = cast(&fast, &down);
+        let (miss_fast, miss_s) = cast(&fast, &past);
+        let (hit_slow, _) = cast(&slow, &down);
+        let (miss_slow, _) = cast(&slow, &past);
+        for (i, (a, b)) in hit_fast.iter().zip(&hit_slow).enumerate() {
+            match (a, b) {
+                (Some(a), Some(b)) => assert!((a - b).abs() < 0.05, "ray {i} down: {a} against the march's {b}"),
+                _ => assert_eq!(a.is_some(), b.is_some(), "ray {i} down: {a:?} against the march's {b:?}"),
+            }
+        }
+        assert_eq!(miss_fast, miss_slow, "the rays past the planet answer what the march answered");
+        assert!(hit_fast.iter().filter(|h| h.is_some()).count() > 950, "the rays down did not find the ground");
+        assert!(miss_fast.iter().filter(|h| h.is_none()).count() > 950, "the rays past it were not misses");
+        println!("1000 rays of 124 m: down {:.3} ms each, past {:.3} ms each", hit_s, miss_s);
+        assert!(miss_s < 2.0 * hit_s, "a miss costs {:.1}x a hit", miss_s / hit_s);
     }
 }

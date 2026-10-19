@@ -1,5 +1,6 @@
 //! Offscreen renders of the game view: the player window, the Game panel and shots all draw the world into a texture through here.
 
+use floptle_core::profile::Bucket;
 use floptle_core::Entity;
 use floptle_core::Light;
 use floptle_core::Material;
@@ -228,7 +229,6 @@ impl Editor {
         // Capture the dirty flag before `sync_terrain_gpu` consumes it, exactly
         // as the editor frame does — a structural change is a full re-mesh.
         let terrain_full_rebuild = self.terrain_gpu_dirty;
-        self.sync_terrain_gpu();
         // LOD rings centre on what the player actually sees. There is no editor
         // fly-camera to fall back to here, so a scene with no active camera
         // streams around the origin rather than around nothing.
@@ -237,18 +237,21 @@ impl Editor {
                 .map(|e| floptle_core::world_transform(&self.world, e).translation)
                 .unwrap_or(self.camera.position),
         );
-        self.drain_terrain_generates();
-        self.update_terrain_residency(lod_cam);
-        self.publish_terrain_busy();
-        self.step_terrain_checkpoint();
-        {
-            let _t = floptle_core::profile::Span::new();
-            self.sync_terrain_meshes(terrain_full_rebuild, lod_cam);
-            self.profile_record(floptle_core::profile::Bucket::Terrain, _t.ms());
-        }
-        self.sync_sky_texture();
-        self.sync_sky_shader();
-        self.sync_tex_paint_mirrors();
+        // Every part of the frame is in some bucket, so a hitch names where it
+        // went rather than leaving it to `untimed`.
+        self.timed_into(Bucket::Terrain, |ed| {
+            ed.sync_terrain_gpu();
+            ed.drain_terrain_generates();
+            ed.update_terrain_residency(lod_cam);
+            ed.publish_terrain_busy();
+            ed.step_terrain_checkpoint();
+            ed.sync_terrain_meshes(terrain_full_rebuild, lod_cam);
+        });
+        self.timed_into(Bucket::Assets, |ed| {
+            ed.sync_sky_texture();
+            ed.sync_sky_shader();
+            ed.sync_tex_paint_mirrors();
+        });
         // Gamepads: polled once a frame, absent hardware is fine.
         self.pump_input_devices();
 
@@ -260,26 +263,33 @@ impl Editor {
         // it counted a second time as `scripts`.
         self.play_step(dt, true);
         self.finish_input_frame();
+        // Times itself, as `models`.
         self.load_script_swapped_models();
 
         // ---- what the frame needs on the GPU ----
-        self.ensure_vfx_assets();
-        self.ensure_scene_textures();
-        self.ensure_flsl_materials();
-        self.ensure_ui_shaders();
-        self.ensure_post_shaders();
+        self.timed_into(Bucket::Assets, |ed| {
+            ed.ensure_vfx_assets();
+            ed.ensure_scene_textures();
+            ed.ensure_flsl_materials();
+            ed.ensure_ui_shaders();
+            ed.ensure_post_shaders();
+        });
         self.report_gpu_errors();
-        self.refresh_gi();
-        self.step_reflection_probes();
-        self.sync_field_shapes();
-        self.update_render_targets(elapsed);
-        self.pump_captures();
+        self.timed_into(Bucket::Render, |ed| {
+            ed.refresh_gi();
+            ed.step_reflection_probes();
+            ed.sync_field_shapes();
+            ed.update_render_targets(elapsed);
+            ed.pump_captures();
+        });
 
         // ---- draw ----
         self.apply_project_vsync();
         // The swapchain image is acquired first and the device borrow dropped,
         // because the draw below needs the whole editor mutably.
-        let Some(frame) = self.gpu.as_mut().and_then(|g| g.acquire()) else {
+        // Waiting for a swapchain image is waiting on the GPU (or, with vsync,
+        // on the display): `gpuWait`, not time the engine spent.
+        let Some(frame) = self.timed_into(Bucket::GpuWait, |ed| ed.gpu.as_mut().and_then(|g| g.acquire())) else {
             // A surface that was outdated or lost reconfigures itself and the
             // frame is skipped — the same answer the editor gives.
             self.drain_script_logs();
@@ -312,10 +322,10 @@ impl Editor {
         // **Photographed before it is presented**, and out of the swapchain
         // image itself — so what lands in the PNG is the frame the player saw,
         // not a second render that resembles it.
-        let shot = capture
-            .then(|| self.gpu.as_ref().and_then(|g| read_back_frame(g, &frame.surface.texture)))
-            .flatten();
-        frame.present();
+        let shot = self.timed_into(Bucket::GpuWait, |ed| {
+            capture.then(|| ed.gpu.as_ref().and_then(|g| read_back_frame(g, &frame.surface.texture))).flatten()
+        });
+        self.timed_into(Bucket::Present, |_| frame.present());
 
         // Anything the game's scripts printed reaches stderr (the Console
         // mirrors there in player mode), so a shipped build can still be

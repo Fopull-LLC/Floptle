@@ -27,7 +27,7 @@ each group, and meant to be searched.
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 71
 - [networking — net.*, synced](#networking--net-synced) — 41
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
-- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 16
+- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 17
 - [pathfinding — nav.*](#pathfinding--nav) — 26
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 8
@@ -2669,7 +2669,7 @@ terrain.flush() — checkpoint every EDITED resident terrain field to the save s
 
 ### `terrain.generatePlanet`
 
-terrain.generatePlanet(id [, opts]) — REPLACE terrain id's whole field with a generated planet (sphere ± noise relief, caves + chambers, molten core, craters, layered materials). Background-generated (seconds; Console shows progress). opts (all optional): radius, voxel, relief, bumpFreq, caveDepth, coreR, corePaint, craters, craterMin/Max, craterDust, surfaceA/B {slot,color}, patchBias/Thr, subsoil(+Depth), strata(+Depth), deep, pockets {slot,color,threshold,minDepth}, seam {slot,color,minDepth,center,width}, iceCaps {lat,slot,color}, seed.
+terrain.generatePlanet(id [, opts]) — REPLACE terrain id's whole field with a generated planet (sphere ± noise relief, caves + chambers, molten core, craters, layered materials). Background-generated (seconds; Console shows progress). opts (all optional): radius, voxel, relief, bumpFreq, caveDepth, coreR, corePaint, craters, craterMin/Max, craterDust, surfaceA/B {slot,color}, patchBias/Thr, subsoil(+Depth), strata(+Depth), deep, pockets {slot,color,threshold,minDepth}, seam {slot,color,minDepth,center,width}, iceCaps {lat,slot,color}, seed. Relief layers (each a table whose keys all default; see docs/planet-generator.md): mountains {height,scale,sharpness,coverage,octaves}, warp {strength,scale}, plateau {height,smooth}, terrace {step,sharpness}, overhangs {depth,scale,strength}, ravines {count,depth,width,length,meander}, rivers {count,depth,width,seaLevel,meander}, biomes = { {slot,color,latitude={min,max},altitude={min,max},slope={min,max},moisture={min,max},nearRiver}, ... } (first match paints the surface), moistureScale. deferCaves = true leaves the buried cave zone ungenerated until a dig reaches it: a quarter less to fill and keep, the same caves when they are made (to a hair at chunk faces).
 
 ### `terrain.height`
 
@@ -2686,6 +2686,10 @@ terrain.paint(x,y,z, radius, r,g,b [, strength]) — recolor the terrain surface
 ### `terrain.paintTexture`
 
 terrain.paintTexture(x,y,z, radius, slot) — paint a terrain-palette texture slot (1-based, the Terrain tab's palette; 0 clears to flat color).
+
+### `terrain.planetRivers`
+
+terrain.planetRivers(opts) → the rivers and ravines terrain.generatePlanet carves with the same opts, without generating anything: { {river=true|false, depth=, points={x1,y1,z1, x2,y2,z2, ...}, widths={...}}, ... }, river ones source first. Points are planet-local, on the sphere of the planet's radius (the carved bed is below the ground there); widths are per point in world units. For laying water, bridges or missions along them.
 
 ### `terrain.query`
 
@@ -3161,7 +3165,7 @@ perf.accountedMs() — the buckets added up. Called 'accounted' and not 'total' 
 
 ### `perf.buckets`
 
-perf.buckets() → the bucket names, in frame order: scripts, mirror, physics, terrain, scatter, particles, audio, animation, models, ui, render, other. Iterate this rather than keeping your own list, which could go stale. `scripts` is the WHOLE of every script pass — setup, reference params, write flush and hooks; `mirror` is the ECS-to-Lua sync each pass runs first, nested inside a pass and subtracted out of `scripts` so nothing is counted twice. `other` is the rest of the frame, the time between two frames that no other bucket measured: waiting on the GPU or the display, and work nothing times yet.
+perf.buckets() → the bucket names, in frame order: scripts, mirror, physics, terrain, scatter, particles, audio, animation, models, ui, render, assets, gpuWait, present, untimed. Iterate this rather than keeping your own list, which could go stale. `scripts` is the WHOLE of every script pass — setup, reference params, write flush and hooks; `mirror` is the ECS-to-Lua sync each pass runs first, nested inside a pass and subtracted out of `scripts` so nothing is counted twice. `assets` is textures, shaders and materials used for the first time. `gpuWait` is waiting for a swapchain image (the GPU still drawing an earlier frame, or with vsync on the display not yet wanting one) and for readbacks; `present` is handing the image to the compositor. `untimed` is the rest of the frame, the time between two frames that no other bucket measured: work nothing times yet, or the game not being run at all. It was called `other`, and perf.ms("other") still answers it.
 
 ### `perf.counts`
 
@@ -3185,11 +3189,11 @@ perf.gpuMs(pass) → one pass's GPU milliseconds last frame ("opaque + lighting"
 
 ### `perf.hitches`
 
-perf.hitches() → every frame since the last call that took 50 ms or more, oldest first: { {frame=, ms=, top="terrain", buckets={terrain=157.4, scripts=30.1, ...}}, ... }. perf.worstMs looks back sixty frames, so a probe that reads every few seconds loses the spike it is hunting; this keeps each one (up to 64) until it is read, with the bucket that spent the time on top. Time no bucket measured is named `other`, so a hitch the engine's buckets cannot explain still says so. Needs perf.enable(true).
+perf.hitches() → every frame since the last call that took 50 ms or more, oldest first: { {frame=, ms=, top="terrain", buckets={terrain=157.4, scripts=30.1, ...}}, ... }. perf.worstMs looks back sixty frames, so a probe that reads every few seconds loses the spike it is hunting; this keeps each one (up to 64) until it is read, with the bucket that spent the time on top. Time no bucket measured is named `untimed`, and waiting on the GPU or the display `gpuWait` and `present`, so a hitch the engine's buckets cannot explain still says so. Needs perf.enable(true).
 
 ### `perf.mirrorCause`
 
-perf.mirrorCause() → why the scripts' copy of the scene was last rebuilt from scratch — the node and what changed on it, e.g. "the tags changed on 'Crate 4' (node 812) (a Tags write)" — or nil if it never has. Changing a component's value (a camera's fovY, a light's intensity, visible) re-reads only that node; spawning, destroying, renaming, reparenting, retagging or attaching a script rebuilds the whole copy. If perf.counts().mirrorRebuilds is nonzero every frame, this names what is doing it. Readable while collection is off.
+perf.mirrorCause() → why the scripts' copy of the scene was last rebuilt from scratch — "first sync", the scene replaced, or a node id handed to a new node — or nil if it never has. Changing a component's value (a camera's fovY, a light's intensity, visible) re-reads only that node; spawning, destroying, renaming, reparenting, retagging or attaching a script patches that node and the lists naming it, never the whole copy. If perf.counts().mirrorRebuilds is nonzero every frame, this names what is doing it. Readable while collection is off.
 
 ### `perf.ms`
 
