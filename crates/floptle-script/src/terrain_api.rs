@@ -523,6 +523,33 @@ pub(crate) fn install_terrain_api(
         let _ = t.set("planetRivers", f);
     }
 
+    // terrain.planetLakes(opts [, { cell, minDepth, seaLevel }]) → the lakes
+    // the planet's basins hold, without generating it: { {level=, center=,
+    // reach=, area=, depth=}, ... }, largest first. `center` is planet-local,
+    // on the lake's surface.
+    if let Ok(f) = lua.create_function(|lua, (opts, query): (Option<Table>, Option<Table>)| {
+        let fill = planet_fill_from_table(opts.as_ref())?;
+        if let Some(q) = &query {
+            crate::opts::check_keys(q, &["cell", "minDepth", "seaLevel"], "terrain.planetLakes")?;
+        }
+        let get = |k: &str| query.as_ref().and_then(|q| q.get::<Option<f32>>(k).ok().flatten());
+        let sea = get("seaLevel").unwrap_or(fill.rivers.as_ref().map_or(f32::NEG_INFINITY, |r| r.sea_level));
+        let lakes = floptle_field::procgen::lakes_of(&fill, get("cell").unwrap_or(3.0), get("minDepth").unwrap_or(0.5), sea);
+        let out = lua.create_table()?;
+        for (i, l) in lakes.iter().enumerate() {
+            let row = lua.create_table()?;
+            row.set("level", l.level)?;
+            row.set("center", crate::math_api::LuaVec3((l.centre * (fill.radius + l.level)).as_dvec3()))?;
+            row.set("reach", l.reach)?;
+            row.set("area", l.area)?;
+            row.set("depth", l.depth)?;
+            out.raw_set(i + 1, row)?;
+        }
+        Ok(out)
+    }) {
+        let _ = t.set("planetLakes", f);
+    }
+
     // terrain.yields() → the reports for edits that have landed since the last
     // call, drained. An op is queued and applied after the script pass, so the
     // report for a dab arrives on the following frame; the id `dig` returned

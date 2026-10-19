@@ -31,6 +31,19 @@ end
 
 The points lie on the sphere of the planet's radius; the carved bed is below the ground there.
 
+## Lakes
+
+`terrain.planetLakes(opts)` answers where water would settle on the same planet, again without generating it. Every basin is filled to the height it spills at, and each connected stretch of water is one lake:
+
+```lua
+for _, lake in ipairs(terrain.planetLakes(opts, { minDepth = 1 })) do
+  print(string.format("a lake at %.1f m, %.0f m across, %.1f m deep", lake.level, lake.reach * 2, lake.depth))
+  -- lake.center is planet-local, on the lake's surface: where to put its water.
+end
+```
+
+Ground below the rivers' `seaLevel` is sea, not a lake; pass `seaLevel` to set it yourself. With no sea at all, the planet's lowest point is where it drains, and it holds no lake. Lakes are found on a grid of cells about `cell` metres across (3 by default), and only water deeper than `minDepth` (0.5 m by default) counts.
+
 ## Surface materials by climate
 
 `biomes` is a list of rules. For every patch of surface, the first rule whose ranges all match paints it with that rule's `slot` and `color`. A range left out does not constrain. Ground that no rule matches falls back to `surfaceA` and `surfaceB`, as before. Deeper layers (`subsoil`, `strata`, `deep`, pockets and seams) are unchanged.

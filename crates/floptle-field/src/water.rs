@@ -140,6 +140,13 @@ fn to_face(d: Vec3) -> (usize, f32, f32) {
     }
 }
 
+/// The direction through cube face `f` at `(u, v)`, both in [-1, 1]: where a
+/// [`WaterGrid::sphere`] cell is. Cell `c` of an `n`-cell face grid is face
+/// `c / n²`, at column `c % n` and row `(c % n²) / n`.
+pub fn face_dir(f: usize, u: f32, v: f32) -> Vec3 {
+    from_face(f, u, v)
+}
+
 fn from_face(f: usize, u: f32, v: f32) -> Vec3 {
     match f {
         0 => Vec3::new(1.0, v, -u),

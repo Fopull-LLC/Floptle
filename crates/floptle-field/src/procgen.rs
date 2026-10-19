@@ -455,6 +455,69 @@ pub fn generate_planet(spec: &PlanetFill) -> ChunkField {
     ChunkField::generate(spec.voxel, Vec3::splat(-ext), Vec3::splat(ext), &planet)
 }
 
+/// One lake on a generated planet: a body of still water standing in a basin.
+#[derive(Clone, Debug)]
+pub struct Lake {
+    /// Its surface, in metres above the planet's radius.
+    pub level: f32,
+    /// The direction from the planet's centre to its middle (area-weighted).
+    pub centre: Vec3,
+    /// The great-circle distance from the middle to its farthest shore, metres.
+    pub reach: f32,
+    /// Its surface area, square metres.
+    pub area: f32,
+    /// Its deepest point, metres below the surface.
+    pub depth: f32,
+}
+
+/// The lakes a planet's basins hold, without generating it: every basin
+/// filled to the height it spills at (see [`crate::water::lake_levels`]), on
+/// a grid of cells about `cell` metres across, and each connected stretch of
+/// water deeper than `min_depth` above `sea_level` reported as one lake.
+/// Ground below `sea_level` is sea, and not a lake. Largest first.
+pub fn lakes_of(spec: &PlanetFill, cell: f32, min_depth: f32, sea_level: f32) -> Vec<Lake> {
+    let planet = Planet::new(spec);
+    let radius = spec.radius;
+    let n = ((std::f32::consts::FRAC_PI_2 * radius) / cell.max(0.5)).ceil().clamp(4.0, 2048.0) as usize;
+    let grid = crate::water::WaterGrid::sphere(n, radius, |d| planet.ground_height(d));
+    let level = crate::water::lake_levels(&grid, sea_level);
+    let wet = |c: usize| level[c] - grid.ground[c] > min_depth && level[c] > sea_level;
+    let dir_of = |c: usize| {
+        let (f, r) = (c / (n * n), c % (n * n));
+        let u = -1.0 + ((r % n) as f32 + 0.5) * 2.0 / n as f32;
+        let v = -1.0 + ((r / n) as f32 + 0.5) * 2.0 / n as f32;
+        crate::water::face_dir(f, u, v)
+    };
+    let mut seen = vec![false; grid.len()];
+    let mut lakes = Vec::new();
+    for start in 0..grid.len() {
+        if seen[start] || !wet(start) {
+            continue;
+        }
+        // One lake: the wet cells joined to this one at the same level.
+        let mut stack = vec![start];
+        seen[start] = true;
+        let mut cells = Vec::new();
+        while let Some(c) = stack.pop() {
+            cells.push(c);
+            for &o in &grid.nbr[c] {
+                let o = o as usize;
+                if o != crate::water::WALL as usize && !seen[o] && wet(o) && (level[o] - level[c]).abs() < 1e-3 {
+                    seen[o] = true;
+                    stack.push(o);
+                }
+            }
+        }
+        let area: f32 = cells.iter().map(|&c| grid.area[c]).sum();
+        let centre = cells.iter().map(|&c| dir_of(c) * grid.area[c]).sum::<Vec3>().normalize_or_zero();
+        let reach = cells.iter().map(|&c| dir_of(c).angle_between(centre)).fold(0.0f32, f32::max) * radius;
+        let depth = cells.iter().map(|&c| level[c] - grid.ground[c]).fold(0.0f32, f32::max);
+        lakes.push(Lake { level: level[start], centre, reach, area, depth });
+    }
+    lakes.sort_by(|a, b| b.area.total_cmp(&a.area));
+    lakes
+}
+
 /// What makes a deferred planet's pending chunks, for a field loaded from a
 /// file: it knows which chunks are pending but not how to make them. The
 /// spec has to be the one the planet was generated from.
@@ -503,6 +566,27 @@ impl Planet {
             overhangs: spec.overhangs,
         };
         Planet { shape, spec: spec.clone() }
+    }
+
+    /// The ground's height above the radius in direction `d` (a unit
+    /// vector): the relief, and a crater's floor where one has been carved.
+    /// Overhangs and caves are not part of it.
+    pub(crate) fn ground_height(&self, d: Vec3) -> f32 {
+        let s = &self.shape;
+        let mut t = s.radius + s.bump(d * s.radius, &mut FbmCache::default());
+        // A crater is a ball taken out of the ground: where the surface falls
+        // inside one, the ground is the ball's floor along this direction.
+        for (c, cr) in &s.craters {
+            let b = d.dot(*c);
+            let disc = b * b - c.length_squared() + cr * cr;
+            if disc > 0.0 {
+                let (near, far) = (b - disc.sqrt(), b + disc.sqrt());
+                if t > near && t <= far {
+                    t = near.max(0.0);
+                }
+            }
+        }
+        t - s.radius
     }
 
     /// How far from the centre the ground can reach: the radius, the highest
@@ -757,6 +841,52 @@ impl crate::VoxelSource for Planet {
 
 #[cfg(test)]
 mod tests {
+    /// **A lake's ground is the ground the planet is generated with.** The
+    /// height `lakes_of` reads in a direction is where a ray from outside the
+    /// generated field meets its surface, craters included, to within a voxel.
+    #[test]
+    fn the_ground_a_lake_reads_is_the_generated_ground() {
+        let spec = PlanetFill { seed: 3, radius: 120.0, voxel: 1.5, relief: 8.0, cave_depth: 0.0, craters: 6, crater_min: 0.35, crater_max: 0.45, ..PlanetFill::default() };
+        let planet = Planet::new(&spec);
+        let field = generate_planet(&spec);
+        let mut rng = Rng::new(17);
+        let mut in_crater = 0;
+        for _ in 0..200 {
+            let d = Vec3::new(rng.range(-1.0, 1.0) as f32, rng.range(-1.0, 1.0) as f32, rng.range(-1.0, 1.0) as f32).normalize_or_zero();
+            if d == Vec3::ZERO {
+                continue;
+            }
+            let Some(hit) = field.raycast(d * 200.0, -d, 200.0) else { continue };
+            let h = planet.ground_height(d);
+            let base = planet.shape.bump(d * spec.radius, &mut FbmCache::default());
+            in_crater += usize::from(h < base - 1.0);
+            assert!((hit.length() - (spec.radius + h)).abs() < 1.5, "{d}: ground at {} but the field's surface at {}", spec.radius + h, hit.length());
+        }
+        assert!(in_crater > 5, "no ray went into a crater: {in_crater}");
+    }
+
+    /// **A crater holds a lake.** Of two craters on a smooth planet with no
+    /// sea, the deeper is where the planet drains to; the other comes back as
+    /// a lake in it, standing between its floor and the ground round it.
+    #[test]
+    fn a_crater_comes_back_as_a_lake() {
+        let spec = PlanetFill { seed: 8, radius: 150.0, voxel: 1.5, relief: 1.0, cave_depth: 0.0, craters: 2, crater_min: 0.15, crater_max: 0.3, ..PlanetFill::default() };
+        let planet = Planet::new(&spec);
+        let floor = |c: Vec3| planet.ground_height(c.normalize());
+        let (a, b) = (planet.shape.craters[0].0, planet.shape.craters[1].0);
+        let c = if floor(a) > floor(b) { a } else { b };
+        let c = c.normalize();
+        let lakes = lakes_of(&spec, 3.0, 0.5, -1000.0);
+        let lake = lakes
+            .iter()
+            .min_by(|a, b| a.centre.angle_between(c).total_cmp(&b.centre.angle_between(c)))
+            .expect("the planet holds no lake");
+        assert!(lake.centre.angle_between(c.normalize()) < 0.1, "no lake is in the crater: {lakes:?}");
+        let floor = floor(c);
+        assert!(lake.level > floor + 1.0 && lake.level < 1.5, "level {} over a floor at {floor}", lake.level);
+        assert!(lake.depth > 1.0 && lake.area > 100.0, "{lake:?}");
+    }
+
     use super::*;
 
     /// The fill the generator replaced: every voxel of the cube, one thread.

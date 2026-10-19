@@ -1824,6 +1824,14 @@ function terrain.generatePlanet(id, opts) end
 ---@param opts table The same opts table `terrain.generatePlanet` takes.
 ---@return table[]
 function terrain.planetRivers(opts) end
+---The lakes the planet's basins hold, without generating: every basin filled to
+---the height it spills at. { {level=, center=, reach=, area=, depth=}, ... },
+---largest first; `center` is planet-local, on the lake's surface. Ground below
+---`seaLevel` is sea, not a lake.
+---@param opts table The same opts table `terrain.generatePlanet` takes.
+---@param query? { cell?: number, minDepth?: number, seaLevel?: number }
+---@return { level: number, center: Vec3, reach: number, area: number, depth: number }[]
+function terrain.planetLakes(opts, query) end
 ---Set (or read, with no argument) the game's SAVE-SLOT directory for
 ---player-edited terrain, relative to the project root (e.g.
 ---"saves/slot1/terrain"). While set, streaming loads a body's field from here

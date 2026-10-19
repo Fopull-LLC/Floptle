@@ -1025,3 +1025,45 @@ fn a_reloaded_or_destroyed_script_takes_its_scatter_field_with_it() {
     assert_eq!(assets(&host), ["tree.glb"], "a destroyed node's field is still standing");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `terrain.planetLakes` answers the lakes the planet's basins hold, without
+/// generating it: two craters on a smooth world with no sea give a lake in the
+/// shallower one, on the surface of the planet. A misspelt option is refused.
+#[test]
+fn planet_lakes_reports_the_lakes_a_planet_holds() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_planet_lakes_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "lakes",
+        "local opts = { seed = 8, radius = 150, voxel = 1.5, relief = 1, caveDepth = 0, craters = 2, craterMin = 0.15, craterMax = 0.3 }\n\
+         local lakes = terrain.planetLakes(opts, { cell = 3, minDepth = 0.5 })\n\
+         local big = lakes[1]\n\
+         log(string.format(\"%d %.1f %.1f %.1f\", #lakes, big.center:length() - 150 - big.level, big.depth, big.area))\n\
+         local ok, err = pcall(terrain.planetLakes, opts, { mindepth = 1 })\n\
+         log(tostring(ok) .. \" \" .. tostring(err))\n",
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(e, Scripts(vec![floptle_core::ScriptInst {
+        kind: "lakes".into(),
+        enabled: true,
+        params: Vec::new(),
+        refs: Vec::new(),
+        strs: Vec::new(),
+        pinned_bools: None,
+    }]));
+    let mut host = ScriptHost::new();
+    host.set_playing(true);
+    host.run(&mut world, &dir, 0.016, 0.016);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    let first: Vec<f64> = said[0].split(' ').map(|v| v.parse().unwrap()).collect();
+    assert!(first[0] >= 1.0, "no lakes: {said:?}");
+    assert!(first[1].abs() < 0.1, "the centre is not on the lake's surface: {said:?}");
+    assert!(first[2] > 1.0 && first[3] > 100.0, "{said:?}");
+    assert!(said[1].starts_with("false") && said[1].contains("mindepth"), "{said:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

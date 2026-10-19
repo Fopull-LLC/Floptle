@@ -27,7 +27,7 @@ each group, and meant to be searched.
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 71
 - [networking — net.*, synced](#networking--net-synced) — 41
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
-- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 17
+- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 18
 - [pathfinding — nav.*](#pathfinding--nav) — 26
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 6
 - [weather — wind](#weather--wind) — 5
@@ -2687,6 +2687,10 @@ terrain.paint(x,y,z, radius, r,g,b [, strength]) — recolor the terrain surface
 ### `terrain.paintTexture`
 
 terrain.paintTexture(x,y,z, radius, slot) — paint a terrain-palette texture slot (1-based, the Terrain tab's palette; 0 clears to flat color).
+
+### `terrain.planetLakes`
+
+terrain.planetLakes(opts [, { cell = 3, minDepth = 0.5, seaLevel = ... }]) → the lakes the planet's basins hold, without generating anything: { {level=, center=, reach=, area=, depth=}, ... }, largest first. Every basin is filled to the height it spills at. `level` is metres above the radius, `center` a planet-local point on the lake's surface, `reach` how far its farthest shore is from the centre and `depth` its deepest point, all in metres. Ground below `seaLevel` (default: the rivers' seaLevel, or none) is sea and not a lake; with no sea, the planet's lowest point is where it drains, and holds none. Found on a grid of cells `cell` metres across; only water deeper than `minDepth` counts. For placing water at the level it would settle at.
 
 ### `terrain.planetRivers`
 
