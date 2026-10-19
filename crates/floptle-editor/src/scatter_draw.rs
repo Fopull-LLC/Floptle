@@ -25,6 +25,10 @@ use floptle_render::{instance_of_mat, InstanceRaw, MaterialParams, MeshId, TexId
 /// One chunk's instances, already dropped onto the surface.
 pub(crate) struct ResolvedChunk {
     pub instances: Vec<Instance>,
+    /// Props rolled for the chunk and not dropped onto the ground yet: settling
+    /// is shared out across frames a prop at a time, so a chunk with hundreds
+    /// of props fills in over a few frames instead of stopping one.
+    pub pending: Vec<Instance>,
     /// The removal-set size the chunk was resolved at. A cut prop has to
     /// disappear this frame, not when the chunk next streams — so a change
     /// here invalidates the cache.
@@ -47,7 +51,7 @@ const SETTLE_BUDGET: usize = 512;
 /// …and the time the same frame may spend doing it. A prop costs a ray down
 /// to the ground, and a ray over a terrain field is a march, so 512 of them
 /// were most of a second on a planet: the count alone does not bound the frame.
-const SETTLE_MS: f32 = 3.0;
+const SETTLE_MS: f32 = 1.0;
 
 /// Which chunks one source is resident in, and where the eye was standing when
 /// that was worked out.
@@ -241,7 +245,9 @@ pub(crate) fn build_instances(
     // it all is fully resident afterwards and stops asking, so the next source
     // gets the next frame's — it converges rather than starving anyone.
     let mut settled = 0usize;
-    let started = floptle_core::profile::Span::new();
+    // Time spent settling, and only that: the draw work around it is the
+    // frame's anyway, and counting it spent the budget before a prop settled.
+    let mut settle_ms = 0.0f32;
     for src in sources {
         let range = src.range();
         if range <= 0.0 || src.bands.is_empty() {
@@ -286,17 +292,33 @@ pub(crate) fn build_instances(
             // budget or no budget. That is one chunk, it is the player's own
             // doing, and a prop that survives the swing that felled it is a bug.
             let cut = known.is_some_and(|c| c.removed_len != src.removed.len());
-            if known.is_none() || cut {
-                // Arriving is the other case, and it is thousands of props at
-                // once. Let them come over the next few frames instead.
-                if known.is_none() && (settled >= SETTLE_BUDGET || (settled > 0 && started.ms() > SETTLE_MS)) {
-                    continue;
-                }
+            if cut {
                 let rolled = scatter::chunk_instances(src, key);
                 settled += rolled.len();
-                let instances =
-                    rolled.into_iter().filter_map(|i| settle(src, i, ground)).collect();
-                resolved.insert(ck, ResolvedChunk { instances, removed_len: src.removed.len() });
+                let instances = rolled.into_iter().filter_map(|i| settle(src, i, ground)).collect();
+                resolved.insert(ck, ResolvedChunk { instances, pending: Vec::new(), removed_len: src.removed.len() });
+            } else if known.is_none() {
+                // Arriving is the other case, and it is thousands of props at
+                // once: they wait their turn, a prop at a time, below.
+                let pending = scatter::chunk_instances(src, key);
+                resolved.insert(ck, ResolvedChunk { instances: Vec::new(), pending, removed_len: src.removed.len() });
+            }
+            if let Some(chunk) = resolved.get_mut(&ck)
+                && !chunk.pending.is_empty()
+            {
+                // Within the frame's budget, by count and by time, but always
+                // one, so a field that is never cheap still arrives.
+                let span = floptle_core::profile::Span::new();
+                while !chunk.pending.is_empty()
+                    && (settled == 0 || (settled < SETTLE_BUDGET && settle_ms + span.ms() <= SETTLE_MS))
+                {
+                    let inst = chunk.pending.pop().expect("not empty");
+                    settled += 1;
+                    if let Some(on) = settle(src, inst, ground) {
+                        chunk.instances.push(on);
+                    }
+                }
+                settle_ms += span.ms();
             }
             let Some(chunk) = resolved.get(&ck) else { continue };
             for inst in &chunk.instances {
@@ -824,14 +846,12 @@ mod tests {
             );
             worst = worst.max(casts);
             frames += 1;
-            if casts == 0 || frames > 400 {
+            if casts == 0 || frames > 5000 {
                 break;
             }
         }
-        assert!(
-            worst <= SETTLE_BUDGET + s.per_chunk as usize,
-            "one frame settled {worst} props — the cap is {SETTLE_BUDGET}"
-        );
+        // Never a chunk's worth over the cap: props settle one at a time.
+        assert!(worst <= SETTLE_BUDGET, "one frame settled {worst} props — the cap is {SETTLE_BUDGET}");
         // …and standing still, a warmed field costs no ground work at all.
         let mut casts = 0usize;
         let mut ground = |_: DVec3, _: Vec3, _: f32| {
