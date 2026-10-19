@@ -28,6 +28,7 @@ pub mod chunks;
 pub mod mesh2sdf;
 pub mod mesher;
 pub mod procgen;
+pub mod water;
 pub mod relief;
 pub mod terrain;
 
