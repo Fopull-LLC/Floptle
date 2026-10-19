@@ -290,7 +290,7 @@ saved to a project material's file.
 
 ### The maps
 
-Four slots beside the base colour, each `None` by default and each with a
+Five slots beside the base colour, each `None` by default and each with a
 **neutral** 1×1 default bound when it is: a flat `(0.5, 0.5, 1)` normal and
 white for the rest. A material that names no map therefore shades exactly as it
 did before they existed, and there is no "is a map bound" flag anywhere that
@@ -302,10 +302,21 @@ could disagree with what is actually bound.
 | `roughness_map` | **G** | × `roughness` |
 | `metallic_map` | **B** | × `metallic` |
 | `ao_map` | **R** | baked occlusion; × `occlusion_strength` |
+| `emissive_map` | RGB (a colour, sampled as sRGB) | where and in what colour the surface glows; × `emissive` × `emissive_strength` |
 
 The channels are not arbitrary: R/G/B is glTF's packed
 occlusion-roughness-metallic layout, so **one image drops into all three
 slots** and does the right thing.
+
+**A glTF part draws its file's maps.** Import keeps each material's
+metallic-roughness, normal, occlusion and emissive textures and their factors
+(`PartMaps`), and a part that has any draws them through the same function a
+hand-set material with those maps does (`shading::material_draw_with`), so the
+two cannot drift. A part with a metallic-roughness map shades `Physical`; one
+with only a normal, occlusion or emissive map keeps `Classic`, because glTF's
+default factors (metallic 1, roughness 1) would otherwise turn every untextured
+export into black metal. A part whose file names only a base colour draws as it
+always has, and an `object_materials` override still replaces the whole look.
 
 Occlusion multiplies **ambient and indirect only, never the key light**.
 Occlusion darkens light arriving from everywhere, not light arriving from one

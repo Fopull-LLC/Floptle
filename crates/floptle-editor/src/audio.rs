@@ -84,6 +84,54 @@ pub struct AudioSystem {
     preview_waiting: Option<String>,
     /// The play session's live mixer (project mixer + Lua tweaks); reverts on Stop.
     pub runtime_mixer: Option<MixerDesc>,
+    /// What scripts changed on the mixer this play session, by track.
+    ///
+    /// Laid back over the project mixer every time a scene loads, so a
+    /// Settings screen sets a bus's volume once and it holds: each `scene.load`
+    /// used to rebuild the mixer from the project's and drop it. Cleared only
+    /// when Play stops.
+    session_edits: std::collections::BTreeMap<String, TrackEdits>,
+    /// Tracks a sound was sent to that the mixer does not have, said once.
+    missing_tracks: std::collections::HashSet<String>,
+    /// What to say in the Console, drained by [`Self::take_warnings`].
+    warnings: Vec<String>,
+}
+
+/// One track's script changes, each `None` until a script sets it.
+#[derive(Clone, Debug, Default)]
+struct TrackEdits {
+    gain_db: Option<f32>,
+    pan: Option<f32>,
+    muted: Option<bool>,
+    soloed: Option<bool>,
+    lowpass: Option<f32>,
+    /// Effect slot → bypassed.
+    bypass: std::collections::BTreeMap<usize, bool>,
+}
+
+impl TrackEdits {
+    fn apply(&self, t: &mut floptle_audio::TrackDesc) {
+        if let Some(v) = self.gain_db {
+            t.gain_db = v;
+        }
+        if let Some(v) = self.pan {
+            t.pan = v;
+        }
+        if let Some(v) = self.muted {
+            t.muted = v;
+        }
+        if let Some(v) = self.soloed {
+            t.soloed = v;
+        }
+        if let Some(v) = self.lowpass {
+            t.lowpass = v;
+        }
+        for (&slot, &on) in &self.bypass {
+            if let Some(fx) = t.effects.get_mut(slot) {
+                fx.bypass = on;
+            }
+        }
+    }
 }
 
 impl AudioSystem {
@@ -200,6 +248,7 @@ impl AudioSystem {
 
     fn source_start(&mut self, world: &World, e: Entity, clip: ClipRef, w: Waiting) {
         let Some(src) = world.get::<AudioSource>(e).cloned() else { return };
+        self.note_track(&src.params.track);
         let pos = Self::world_pos(world, e);
         let Some(eng) = self.engine() else { return };
         let id = eng.play(clip, Some(pos), src.params.clone());
@@ -312,11 +361,53 @@ impl AudioSystem {
         }
     }
 
+    /// The play session's mixer: `mixer` with this session's script changes
+    /// laid over it.
+    pub fn set_runtime_mixer(&mut self, mixer: &MixerDesc) {
+        let mut m = mixer.clone();
+        for (name, edits) in &self.session_edits {
+            let t = if name == floptle_audio::MASTER { Some(&mut m.master) } else { m.track_mut(name) };
+            if let Some(t) = t {
+                edits.apply(t);
+            }
+        }
+        self.apply_mixer(&m);
+        self.runtime_mixer = Some(m);
+    }
+
+    /// Forget this session's script changes to the mixer — Play stopped.
+    pub fn end_session(&mut self) {
+        self.session_edits.clear();
+        self.missing_tracks.clear();
+    }
+
+    /// What the Console should hear about audio this frame.
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.warnings)
+    }
+
+    /// A sound is going to `track`: say so, once, when the mixer has no such
+    /// track — it plays through Master instead, and nothing else would tell.
+    fn note_track(&mut self, track: &str) {
+        let Some(m) = self.runtime_mixer.as_ref() else { return };
+        if track.is_empty() || track == floptle_audio::MASTER || m.track(track).is_some() {
+            return;
+        }
+        if self.missing_tracks.insert(track.to_string()) {
+            let have: Vec<&str> = m.tracks.iter().map(|t| t.name.as_str()).collect();
+            self.warnings.push(format!(
+                "audio: a sound was sent to the track \"{track}\", which the mixer does not have, so it plays \
+                 through Master. The tracks are: Master{}{}",
+                if have.is_empty() { "" } else { ", " },
+                have.join(", ")
+            ));
+        }
+    }
+
     /// Play-mode start: apply the project mixer and fire play-on-start sources.
     pub fn start_play(&mut self, world: &World, root: &Path, mixer: &MixerDesc) {
         self.stop_preview();
-        self.runtime_mixer = Some(mixer.clone());
-        self.apply_mixer(mixer);
+        self.set_runtime_mixer(mixer);
         let starters: Vec<Entity> = world
             .query::<AudioSource>()
             .filter(|(_, s)| s.play_on_start && !s.clip.is_empty())
@@ -471,6 +562,7 @@ impl AudioSystem {
         for cmd in cmds {
             match cmd {
                 AudioCmd::Play { handle, clip, at, params } => {
+                    self.note_track(&params.track);
                     // Checked before the clip: a host with no output (a
                     // dedicated server) has no reason to decode a thing.
                     if self.engine().is_none() {
@@ -552,6 +644,7 @@ impl AudioSystem {
                     }
                 }
                 AudioCmd::SetTrack { handle, track } => {
+                    self.note_track(&track);
                     if let Some(s) = self.sounds.get_mut(&handle) {
                         s.params.track = track;
                         let (v, p) = (s.live(), s.params.clone());
@@ -636,28 +729,35 @@ impl AudioSystem {
                     }
                 }
                 AudioCmd::TrackVolume { track, db } => {
-                    if let Some(t) = self.runtime_track(&track) {
-                        t.gain_db = (db as f32).clamp(-80.0, 24.0);
-                        mixer_dirty = true;
-                    }
+                    let v = (db as f32).clamp(-80.0, 24.0);
+                    mixer_dirty |= self.edit_track(&track, |t| t.gain_db = v, |e| e.gain_db = Some(v));
                 }
                 AudioCmd::TrackPan { track, pan } => {
-                    if let Some(t) = self.runtime_track(&track) {
-                        t.pan = (pan as f32).clamp(-1.0, 1.0);
-                        mixer_dirty = true;
-                    }
+                    let v = (pan as f32).clamp(-1.0, 1.0);
+                    mixer_dirty |= self.edit_track(&track, |t| t.pan = v, |e| e.pan = Some(v));
                 }
                 AudioCmd::TrackMuted { track, muted } => {
-                    if let Some(t) = self.runtime_track(&track) {
-                        t.muted = muted;
-                        mixer_dirty = true;
-                    }
+                    mixer_dirty |= self.edit_track(&track, |t| t.muted = muted, |e| e.muted = Some(muted));
                 }
                 AudioCmd::TrackSoloed { track, soloed } => {
-                    if let Some(t) = self.runtime_track(&track) {
-                        t.soloed = soloed;
-                        mixer_dirty = true;
-                    }
+                    mixer_dirty |= self.edit_track(&track, |t| t.soloed = soloed, |e| e.soloed = Some(soloed));
+                }
+                AudioCmd::TrackLowpass { track, hz } => {
+                    let v = hz.max(0.0) as f32;
+                    mixer_dirty |= self.edit_track(&track, |t| t.lowpass = v, |e| e.lowpass = Some(v));
+                }
+                AudioCmd::TrackBypass { track, slot, on } => {
+                    mixer_dirty |= self.edit_track(
+                        &track,
+                        |t| {
+                            if let Some(fx) = t.effects.get_mut(slot) {
+                                fx.bypass = on;
+                            }
+                        },
+                        |e| {
+                            e.bypass.insert(slot, on);
+                        },
+                    );
                 }
             }
         }
@@ -669,6 +769,20 @@ impl AudioSystem {
     /// Resolve an entity index from a script command to a live AudioSource node.
     fn source_entity(world: &World, idx: u32) -> Option<Entity> {
         world.entity_with::<AudioSource>(idx)
+    }
+
+    /// Change a track on the session's mixer and remember the change for the
+    /// next scene. False when there is no such track.
+    fn edit_track(
+        &mut self,
+        name: &str,
+        now: impl FnOnce(&mut floptle_audio::TrackDesc),
+        keep: impl FnOnce(&mut TrackEdits),
+    ) -> bool {
+        let Some(t) = self.runtime_track(name) else { return false };
+        now(t);
+        keep(self.session_edits.entry(name.to_string()).or_default());
+        true
     }
 
     /// The play session's live copy of a mixer track ("Master" = the master).
@@ -683,6 +797,21 @@ impl AudioSystem {
     /// Build the playback mirror scripts read (`sound:isPlaying()` etc.).
     pub fn script_info(&mut self) -> AudioInfo {
         let mut info = AudioInfo::default();
+        if let Some(m) = &self.runtime_mixer {
+            info.mixer = true;
+            let row = |t: &floptle_audio::TrackDesc, master: bool| floptle_script::TrackInfo {
+                name: t.name.clone(),
+                gain_db: t.gain_db,
+                pan: t.pan,
+                muted: t.muted,
+                soloed: t.soloed,
+                output: (!master).then(|| t.output.clone().unwrap_or_else(|| floptle_audio::MASTER.to_string())),
+                lowpass: t.lowpass,
+                effects: t.effects.len(),
+            };
+            info.tracks.push(floptle_script::TrackInfo { name: floptle_audio::MASTER.to_string(), ..row(&m.master, true) });
+            info.tracks.extend(m.tracks.iter().map(|t| row(t, false)));
+        }
         let mut sounds: Vec<(u32, VoiceId)> = Vec::new();
         for (h, s) in &self.sounds {
             match &s.voice {
@@ -794,6 +923,64 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         panic!("the sound never started");
+    }
+
+    /// **A bus volume a script sets holds across `scene.load`**, and Play's
+    /// stop forgets it. The first scene's script turns Music down and loads
+    /// the second; the second reads the mixer back through `audio.tracks()`
+    /// and finds Music where the first left it, not at the project's -6 dB.
+    /// `audio.track` answers nil for a track the mixer does not have, and a
+    /// sound sent to one is said once in the Console.
+    #[test]
+    fn a_script_volume_holds_across_a_scene_load() {
+        let d = std::env::temp_dir().join(format!("floptle-bus-volume-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for sub in ["scenes", "scripts"] {
+            std::fs::create_dir_all(d.join(sub)).unwrap();
+        }
+        std::fs::write(
+            d.join("project.ron"),
+            "(title: Some(\"t\"), entry_scene: Some(\"scenes/first.ron\"), \
+             mixer: (master: (name: \"Master\"), tracks: [(name: \"Music\", gain_db: -6.0), (name: \"SFX\")]))",
+        )
+        .unwrap();
+        let scene = |script: &str| format!("(name: \"s\", nodes: [(name: \"N\", scripts: [(kind: \"{script}\")])])");
+        std::fs::write(d.join("scenes/first.ron"), scene("settings")).unwrap();
+        std::fs::write(d.join("scenes/second.ron"), scene("reader")).unwrap();
+        std::fs::write(
+            d.join("scripts/settings.lua"),
+            "function start(node)\n  audio.track('Music'):setVolume(-20)\n  audio.track('SFX'):setLowpass(800)\n  \
+             scene.load('second')\nend\n",
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("scripts/reader.lua"),
+            "function update(node, dt)\n  for _, t in ipairs(audio.tracks()) do\n    \
+             if t.name == 'Music' then node.x = t.gainDb end\n    if t.name == 'SFX' then node.y = t.lowpass end\n  end\n  \
+             node.z = audio.track('Nope') == nil and 1 or 0\n  audio.play('a.wav', { track = 'Nope' })\nend\n",
+        )
+        .unwrap();
+        let mut ed = crate::Editor::default();
+        ed.audio.engine = Some(AudioEngine::silent());
+        ed.open_project(d.clone());
+        ed.toggle_play();
+        for _ in 0..6 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        let music = |ed: &crate::Editor| ed.audio.runtime_mixer.as_ref().and_then(|m| m.track("Music")).map(|t| t.gain_db);
+        assert_eq!(music(&ed), Some(-20.0), "the session's mixer after the load");
+        let n = ed.world.query::<floptle_core::Name>().find(|(_, n)| n.0 == "N").map(|(e, _)| e).expect("the second scene's node");
+        let read = ed.world.get::<floptle_core::Transform>(n).unwrap().translation;
+        assert_eq!((read.x, read.y), (-20.0, 800.0), "what audio.tracks() reads in the second scene");
+        assert_eq!(read.z, 1.0, "audio.track answers nil for a track the mixer does not have");
+        let said = ed.console.entries.iter().filter(|e| e.msg.contains("\"Nope\", which the mixer does not have")).count();
+        assert_eq!(said, 1, "a sound sent to a missing track is said once");
+        // Stopping Play forgets it: the next session starts at the project's.
+        ed.toggle_play();
+        ed.toggle_play();
+        assert_eq!(music(&ed), Some(-6.0), "a new session starts from the project mixer");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// A playlist polls `isPlaying()` to know when a track has ended. A track

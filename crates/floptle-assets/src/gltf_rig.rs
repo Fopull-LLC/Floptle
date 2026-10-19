@@ -55,6 +55,8 @@ pub struct RiggedPart {
     pub material: String,
     pub base_color: [f32; 3],
     pub texture: Option<usize>,
+    /// The material's other maps and factors (see [`crate::gltf_import::PartMaps`]).
+    pub maps: crate::gltf_import::PartMaps,
     /// Index into `RiggedModel::skeleton` — the node whose animated world
     /// matrix places this part.
     pub node: usize,
@@ -235,6 +237,7 @@ pub(crate) fn build_rigged(
                     texture: pbr
                         .base_color_texture()
                         .map(|info| info.texture().source().index()),
+                    maps: crate::gltf_import::part_maps(&mat),
                     node: skel_idx,
                     skin: skin_info.as_ref().map(|(jn, ibm)| SkinStream {
                         joints: Vec::new(),

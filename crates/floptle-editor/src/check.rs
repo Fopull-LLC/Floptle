@@ -224,7 +224,10 @@ pub(crate) fn examine(root: &Path) -> Report {
         if name.ends_with(".vfx.ron") {
             r.effects += 1;
             match floptle_scene::load_vfx_effect(path) {
-                Ok(doc) => check_effect(root, &doc, &where_, &mut r),
+                Ok(doc) => {
+                    check_effect(root, &doc, &where_, &mut r);
+                    check_effect_fields(path, &where_, &mut r);
+                }
                 Err(e) => r.error(Some(where_), format!("{e}")),
             }
         } else if name.ends_with(".prefab.ron") {
@@ -464,6 +467,21 @@ fn in_dir(root: &Path, path: &Path, dir: &str) -> bool {
 /// effect; a track whose billboard texture, instanced mesh or trail texture is
 /// missing still parses, still emits, and draws as untextured quads — which
 /// reads on screen as "the effect is wrong" rather than "a file is gone".
+/// **A field an effect names that no effect has.** The file still loads — a
+/// field from a newer editor must not stop one opening — so `collde:` for
+/// `collide:` turns collision off without a word, where a wrong type at least
+/// fails the parse.
+fn check_effect_fields(path: &Path, where_: &str, r: &mut Report) {
+    let Ok(text) = floptle_scene::portable::read(path) else { return };
+    for field in floptle_scene::strict::unknown_fields::<floptle_scene::VfxEffectDoc>(&text) {
+        let name = field.rsplit('.').next().unwrap_or(&field).to_string();
+        r.warn(
+            Some(where_.to_string()),
+            format!("`{field}` is not a field an effect has, so it does nothing — is `{name}` misspelt?"),
+        );
+    }
+}
+
 fn check_effect(root: &Path, doc: &floptle_scene::VfxEffectDoc, where_: &str, r: &mut Report) {
     for t in &doc.tracks {
         let who = if t.name.is_empty() { "an unnamed track" } else { &t.name };
@@ -815,6 +833,7 @@ fn check_texture(
         ("roughness map", m.roughness_map.as_deref()),
         ("metallic map", m.metallic_map.as_deref()),
         ("ambient occlusion map", m.ao_map.as_deref()),
+        ("emissive map", m.emissive_map.as_deref()),
     ];
     for (what, path) in named {
         let Some(path) = path.filter(|t| !t.is_empty()) else { continue };
@@ -992,6 +1011,33 @@ mod tests {
     /// A node with a material, a script and nothing missing.
     fn scene(nodes: &str) -> String {
         format!("(name: \"s\", nodes: [{nodes}])")
+    }
+
+    /// **A misspelt effect field is a warning, naming the track.** `collde`
+    /// and `bonce` both load and do nothing; a clean effect says nothing.
+    #[test]
+    fn a_misspelt_effect_field_is_a_warning() {
+        let d = temp("vfxfield");
+        let mut doc = crate::vfx::starter_effect_doc("Sparks");
+        doc.tracks[0].collide = Some(floptle_scene::VfxCollideDoc::default());
+        floptle_scene::save_vfx_effect(&doc, &d.join("vfx/Sparks.vfx.ron")).unwrap();
+        let unknown = |r: &Report| -> Vec<String> {
+            r.findings.iter().filter(|f| f.message.contains("is not a field")).map(|f| f.message.clone()).collect()
+        };
+        assert!(unknown(&examine(&d)).is_empty(), "a clean effect: {:?}", examine(&d).findings);
+        let text = std::fs::read_to_string(d.join("vfx/Sparks.vfx.ron")).unwrap();
+        for (file, from, to) in [("Sparks", "collide:", "collde:"), ("Dust", "bounce:", "bonce:")] {
+            let typo = text.replacen(from, to, 1);
+            assert_ne!(typo, text);
+            std::fs::write(d.join(format!("vfx/{file}.vfx.ron")), typo).unwrap();
+        }
+        let r = examine(&d);
+        let mut hits = unknown(&r);
+        hits.sort();
+        assert_eq!(hits.len(), 2, "{:?}", r.findings);
+        assert!(hits[0].contains("`tracks[0].collde`") && hits[0].contains("is `collde` misspelt"), "{}", hits[0]);
+        assert!(hits[1].contains("`tracks[0].collide.bonce`"), "{}", hits[1]);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// **A pin of the wrong kind is reported headless, as in the Console.**

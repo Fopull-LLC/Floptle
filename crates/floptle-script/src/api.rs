@@ -631,7 +631,7 @@ pub(crate) const MATERIAL_NUM_FIELDS: &[&str] = &[
 /// …and every string-valued one: the texture and the surface maps, plus the
 /// shading model's name.
 pub(crate) const MATERIAL_STR_FIELDS: &[&str] =
-    &["texture", "normalMap", "roughnessMap", "metallicMap", "occlusionMap", "shading", "shader"];
+    &["texture", "normalMap", "roughnessMap", "metallicMap", "occlusionMap", "emissiveMap", "shading", "shader"];
 
 /// The Material a component name addresses: the node's own for `Material`, or
 /// one sub-object's override for `Material:<key>` — created on demand, because
@@ -1195,6 +1195,43 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
             ]),
         );
     }
+    // A celestial body's numbers, so a weather script can read the clouds it
+    // is about to change and a HUD can read a world's air without a mirror of
+    // its own. Colours read as R/G/B lanes, the way `Light`'s do.
+    if let Some(c) = world.get::<floptle_core::CelestialBody>(e) {
+        out.insert(
+            "CelestialBody".to_string(),
+            HashMap::from([
+                ("mu".to_string(), c.mu),
+                ("bodyRadius".to_string(), c.body_radius),
+                ("soi".to_string(), c.soi),
+                ("a".to_string(), c.a),
+                ("e".to_string(), c.e),
+                ("i".to_string(), c.i),
+                ("lan".to_string(), c.lan),
+                ("argPe".to_string(), c.arg_pe),
+                ("m0".to_string(), c.m0),
+                ("atmoColorR".to_string(), c.atmo_color[0] as f64),
+                ("atmoColorG".to_string(), c.atmo_color[1] as f64),
+                ("atmoColorB".to_string(), c.atmo_color[2] as f64),
+                ("atmoHeight".to_string(), c.atmo_height),
+                ("atmoDensity".to_string(), c.atmo_density as f64),
+                ("clouds".to_string(), c.clouds as f64),
+                ("cloudColorR".to_string(), c.cloud_color[0] as f64),
+                ("cloudColorG".to_string(), c.cloud_color[1] as f64),
+                ("cloudColorB".to_string(), c.cloud_color[2] as f64),
+                ("cloudDarkness".to_string(), c.cloud_darkness as f64),
+                ("cloudHeight".to_string(), c.cloud_height as f64),
+                ("aureoleSize".to_string(), c.aureole_size as f64),
+                ("aureole".to_string(), c.aureole as f64),
+                ("luminosity".to_string(), c.luminosity as f64),
+                ("starColorR".to_string(), c.star_color[0] as f64),
+                ("starColorG".to_string(), c.star_color[1] as f64),
+                ("starColorB".to_string(), c.star_color[2] as f64),
+                ("occluderRadius".to_string(), c.occluder_radius),
+            ]),
+        );
+    }
     // The Skybox's colour (the plain background with no texture or shader)
     // and tint (multiplies a textured sky), so a game can dim its sky as a
     // day ends or tint it as it leaves the air.
@@ -1541,6 +1578,43 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "value" => s.value = val as f32,
                     "min" => s.min = val as f32,
                     "max" => s.max = val as f32,
+                    _ => {}
+                }
+            }
+        }
+        // Every number `mirror_components` reads back, written the same way
+        // `setCelestial` writes it.
+        "CelestialBody" => {
+            if let Some(c) = world.get_mut::<floptle_core::CelestialBody>(ent) {
+                let v = val as f32;
+                match field {
+                    "mu" => c.mu = val,
+                    "bodyRadius" => c.body_radius = val,
+                    "soi" => c.soi = val,
+                    "a" => c.a = val,
+                    "e" => c.e = val,
+                    "i" => c.i = val,
+                    "lan" => c.lan = val,
+                    "argPe" => c.arg_pe = val,
+                    "m0" => c.m0 = val,
+                    "atmoColorR" => c.atmo_color[0] = v.max(0.0),
+                    "atmoColorG" => c.atmo_color[1] = v.max(0.0),
+                    "atmoColorB" => c.atmo_color[2] = v.max(0.0),
+                    "atmoHeight" => c.atmo_height = val.max(0.0),
+                    "atmoDensity" => c.atmo_density = v.max(0.0),
+                    "clouds" => c.clouds = v.clamp(0.0, 1.0),
+                    "cloudColorR" => c.cloud_color[0] = v.max(0.0),
+                    "cloudColorG" => c.cloud_color[1] = v.max(0.0),
+                    "cloudColorB" => c.cloud_color[2] = v.max(0.0),
+                    "cloudDarkness" => c.cloud_darkness = v.clamp(0.0, 1.0),
+                    "cloudHeight" => c.cloud_height = v.clamp(0.01, 1.0),
+                    "aureoleSize" => c.aureole_size = v.max(0.0),
+                    "aureole" => c.aureole = v.max(0.0),
+                    "luminosity" => c.luminosity = v.max(0.0),
+                    "starColorR" => c.star_color[0] = v.max(0.0),
+                    "starColorG" => c.star_color[1] = v.max(0.0),
+                    "starColorB" => c.star_color[2] = v.max(0.0),
+                    "occluderRadius" => c.occluder_radius = val.max(0.0),
                     _ => {}
                 }
             }
@@ -2185,6 +2259,18 @@ pub(crate) fn apply_rich_sets(
                             c.luminosity = num(v).map(|n| n as f32).unwrap_or(c.luminosity)
                         }
                         "starColor" => c.star_color = v3(v).unwrap_or(c.star_color),
+                        "cloudColor" => c.cloud_color = v3(v).unwrap_or(c.cloud_color),
+                        "cloudDarkness" => {
+                            c.cloud_darkness =
+                                num(v).map(|n| (n as f32).clamp(0.0, 1.0)).unwrap_or(c.cloud_darkness)
+                        }
+                        "cloudHeight" => {
+                            c.cloud_height = num(v).map(|n| (n as f32).clamp(0.01, 1.0)).unwrap_or(c.cloud_height)
+                        }
+                        "aureoleSize" => {
+                            c.aureole_size = num(v).map(|n| (n as f32).max(0.0)).unwrap_or(c.aureole_size)
+                        }
+                        "aureole" => c.aureole = num(v).map(|n| (n as f32).max(0.0)).unwrap_or(c.aureole),
                         "occluderRadius" => {
                             c.occluder_radius = num(v).unwrap_or(c.occluder_radius)
                         }
@@ -2282,6 +2368,11 @@ pub(crate) fn apply_rich_sets(
                         "occlusionStrength" => {
                             m.occlusion_strength =
                                 num(v).map(|n| n as f32).unwrap_or(m.occlusion_strength)
+                        }
+                        "emissiveMap" => {
+                            if let CompVal::Str(t) = v {
+                                m.emissive_map = (!t.is_empty()).then(|| t.clone());
+                            }
                         }
                         "reflectivity" => {
                             m.reflectivity = num(v).map(|n| n as f32).unwrap_or(m.reflectivity)
@@ -2968,7 +3059,7 @@ pub(crate) const MATERIAL_KEYS: &[&str] = &[
     "color", "emissive", "emissiveStrength", "specular", "shininess", "specularStrength", "rim",
     "rimStrength", "unlit", "fog", "ambient", "alpha", "texture", "cell", "sheetCols", "sheetRows", "slice",
     "normalMap", "normalStrength", "roughnessMap", "roughness", "metallicMap", "metallic",
-    "occlusionMap", "occlusionStrength", "reflectivity", "transmission", "ior", "thickness",
+    "occlusionMap", "occlusionStrength", "emissiveMap", "reflectivity", "transmission", "ior", "thickness",
     "shading", "jitter", "affineUv", "vertexLit",
     "ditherAlpha", "retroExempt",
 ];
@@ -2976,7 +3067,8 @@ pub(crate) const MATERIAL_KEYS: &[&str] = &[
 /// Every key `node:setCelestial{...}` reads.
 pub(crate) const CELESTIAL_KEYS: &[&str] = &[
     "mu", "bodyRadius", "soi", "parent", "a", "e", "i", "lan", "argPe", "m0", "atmoColor",
-    "atmoHeight", "atmoDensity", "clouds", "luminosity", "starColor", "occluderRadius",
+    "atmoHeight", "atmoDensity", "clouds", "luminosity", "starColor", "occluderRadius", "cloudColor",
+    "cloudDarkness", "cloudHeight", "aureoleSize", "aureole",
 ];
 
 /// Every key `node:setTilemap{...}` reads.
@@ -3670,6 +3762,7 @@ pub fn apply_component_field_str(world: &mut World, ent: Entity, comp: &str, fie
                     "roughnessMap" => m.roughness_map = path,
                     "metallicMap" => m.metallic_map = path,
                     "occlusionMap" => m.ao_map = path,
+                    "emissiveMap" => m.emissive_map = path,
                     "shader" => m.shader = path,
                     "shading" => {
                         if let Some(sh) = floptle_core::Shading::parse(val) {
@@ -3731,6 +3824,7 @@ pub fn mirror_component_strings(
             ("roughnessMap".to_string(), p(&m.roughness_map)),
             ("metallicMap".to_string(), p(&m.metallic_map)),
             ("occlusionMap".to_string(), p(&m.ao_map)),
+            ("emissiveMap".to_string(), p(&m.emissive_map)),
             ("shading".to_string(), m.shading.as_str().to_string()),
             ("shader".to_string(), p(&m.shader)),
         ])

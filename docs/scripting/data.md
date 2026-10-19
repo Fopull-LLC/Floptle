@@ -369,6 +369,9 @@ window, not the game's — and says so once in the Console, the same way
 Vsync and the retro settings live in `project.ron`, which is the file that ships
 to everybody who plays. So changing one changes it **for this run**, and Stop
 puts the project back exactly as it was — the same rule `audio.track(…)` follows.
+(A mixer change holds across `scene.load` for the rest of the session, so a
+Settings screen sets each bus once; it is Stop, not a new scene, that puts the
+saved mixer back.)
 
 Which means **persisting it is your game's job**, through `save.*`. That is not
 an omission: a player's preference belongs in the player's save, not in a file

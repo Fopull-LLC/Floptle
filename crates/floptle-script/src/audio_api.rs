@@ -92,6 +92,22 @@ fn parse_params(opts: Option<&Table>) -> mlua::Result<PlayParams> {
     Ok(p)
 }
 
+/// One mixer track as `audio.tracks()` and `track:info()` give it.
+fn track_table(lua: &Lua, t: &crate::TrackInfo) -> mlua::Result<Table> {
+    let o = lua.create_table()?;
+    o.raw_set("name", t.name.as_str())?;
+    o.raw_set("gainDb", t.gain_db)?;
+    o.raw_set("pan", t.pan)?;
+    o.raw_set("muted", t.muted)?;
+    o.raw_set("soloed", t.soloed)?;
+    if let Some(out) = &t.output {
+        o.raw_set("output", out.as_str())?;
+    }
+    o.raw_set("lowpass", t.lowpass)?;
+    o.raw_set("effects", t.effects)?;
+    Ok(o)
+}
+
 fn as_f64(v: &Value) -> Option<f64> {
     match v {
         Value::Number(n) => Some(*n),
@@ -263,6 +279,50 @@ pub(crate) fn install_audio_api(lua: &Lua, b: &AudioBridges) -> mlua::Result<()>
             })?,
         )?;
     }
+    {
+        let cmds = b.commands.clone();
+        tmethods.set(
+            "setLowpass",
+            lua.create_function(move |_, (this, hz): (Table, f64)| {
+                let track: String = this.raw_get("__track")?;
+                cmds.borrow_mut().push(AudioCmd::TrackLowpass { track, hz: hz.max(0.0) });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // Slots count from 1, the way the Mixer tab lists the chain.
+        let cmds = b.commands.clone();
+        tmethods.set(
+            "setBypass",
+            lua.create_function(move |_, (this, slot, on): (Table, i64, bool)| {
+                let track: String = this.raw_get("__track")?;
+                if slot < 1 {
+                    return Err(mlua::Error::runtime(format!(
+                        "track:setBypass: effect slots count from 1, got {slot}"
+                    )));
+                }
+                cmds.borrow_mut().push(AudioCmd::TrackBypass { track, slot: slot as usize - 1, on });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // track:info() — the same table audio.tracks() lists, or nil when the
+        // track has gone.
+        let inf = b.info.clone();
+        tmethods.set(
+            "info",
+            lua.create_function(move |lua, this: Table| {
+                let track: String = this.raw_get("__track")?;
+                let inf = inf.borrow();
+                match inf.tracks.iter().find(|t| t.name == track) {
+                    Some(t) => Ok(Value::Table(track_table(lua, t)?)),
+                    None => Ok(Value::Nil),
+                }
+            })?,
+        )?;
+    }
     let track_mt = lua.create_table()?;
     track_mt.set("__index", tmethods)?;
     lua.set_named_registry_value("floptle_audio_track_mt", track_mt)?;
@@ -345,16 +405,43 @@ pub(crate) fn install_audio_api(lua: &Lua, b: &AudioBridges) -> mlua::Result<()>
         )?;
     }
     {
-        // audio.track("Music") → mixer-track handle ("Master" = the master).
+        // audio.track("Music") → mixer-track handle ("Master" = the master),
+        // or nil when the project's mixer has no such track. A handle to a
+        // track that is not there took every setVolume without a word, and
+        // a sound sent to it played through Master.
+        let inf = b.info.clone();
         audio.set(
             "track",
             lua.create_function(move |lua, name: String| {
+                {
+                    let inf = inf.borrow();
+                    if inf.mixer && !inf.tracks.iter().any(|t| t.name == name) {
+                        return Ok(Value::Nil);
+                    }
+                }
                 let t = lua.create_table()?;
                 t.raw_set("__track", name)?;
                 if let Ok(mt) = lua.named_registry_value::<Table>("floptle_audio_track_mt") {
                     t.set_metatable(Some(mt));
                 }
-                Ok(t)
+                Ok(Value::Table(t))
+            })?,
+        )?;
+    }
+    {
+        // audio.tracks() → { {name=, gainDb=, pan=, muted=, soloed=, output=,
+        // lowpass=, effects=}, ... }, Master first: the mixer as this play
+        // session has it, script changes included.
+        let inf = b.info.clone();
+        audio.set(
+            "tracks",
+            lua.create_function(move |lua, ()| {
+                let inf = inf.borrow();
+                let out = lua.create_table()?;
+                for (i, t) in inf.tracks.iter().enumerate() {
+                    out.raw_set(i + 1, track_table(lua, t)?)?;
+                }
+                Ok(out)
             })?,
         )?;
     }

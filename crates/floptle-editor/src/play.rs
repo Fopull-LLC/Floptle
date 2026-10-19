@@ -63,6 +63,14 @@ impl Editor {
     fn audio_stop_play(&mut self) {}
 
     #[cfg(feature = "devices")]
+    fn audio_end_session(&mut self) {
+        self.audio.end_session();
+    }
+
+    #[cfg(not(feature = "devices"))]
+    fn audio_end_session(&mut self) {}
+
+    #[cfg(feature = "devices")]
     fn audio_forget(&mut self, gone: &std::collections::HashSet<Entity>) {
         self.audio.forget_entities(gone);
     }
@@ -974,6 +982,7 @@ impl Editor {
             );
             // Silence the play session's sounds and revert Lua mixer tweaks.
             self.audio_stop_play();
+            self.audio_end_session();
             self.sim = None; // drop the physics sim; restore reverts moved transforms
             // Multiplayer sessions live inside a play session — never across Stop.
             self.net_stop("play stopped");

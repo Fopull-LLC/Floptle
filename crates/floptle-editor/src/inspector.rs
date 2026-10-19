@@ -1107,6 +1107,17 @@ fn mat_maps_ui(ui: &mut egui::Ui, ctx: &mut MatCtx, m: &mut Material, r: &mut Ma
                             .changed();
                         ui.end_row();
                     }
+                    r.changed |= map_row(
+                        ui,
+                        "mat_emissive",
+                        "emissive",
+                        "Where the surface glows, and in what colour: multiplies the emissive \
+                         colour and strength above. A console's screen or a hull's lit windows \
+                         glow on the same material as the metal around them. Unset, the \
+                         emissive colour covers the whole surface, as it always has.",
+                        &mut m.emissive_map,
+                    );
+                    ui.end_row();
                 });
             });
     });
@@ -6543,6 +6554,31 @@ impl EditorTabViewer<'_> {
                         ui.label("clouds");
                         ch |= crate::responsive::slider(ui, egui::Slider::new(&mut cb.clouds, 0.0..=1.0), "")
                             .on_hover_text("cloud coverage in the atmosphere (0 = clear)")
+                            .changed();
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("cloud colour");
+                        ch |= ui
+                            .color_edit_button_rgb(&mut cb.cloud_color)
+                            .on_hover_text("the deck's colour in full daylight (white = as it has always been)")
+                            .changed();
+                        ui.label("darkness");
+                        ch |= crate::responsive::slider(ui, egui::Slider::new(&mut cb.cloud_darkness, 0.0..=1.0), "")
+                            .on_hover_text("0 = a fair-weather deck, 1 = a storm with almost no light through it")
+                            .changed();
+                        ui.label("height");
+                        ch |= crate::responsive::slider(ui, egui::Slider::new(&mut cb.cloud_height, 0.01..=1.0), "")
+                            .on_hover_text("how high the deck sits, as a share of the atmosphere's height")
+                            .changed();
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("aureole");
+                        ch |= crate::responsive::slider(ui, egui::Slider::new(&mut cb.aureole, 0.0..=4.0), "")
+                            .on_hover_text("how bright the glow around the star is in this sky (1 = natural)")
+                            .changed();
+                        ui.label("spread");
+                        ch |= crate::responsive::slider(ui, egui::Slider::new(&mut cb.aureole_size, 0.1..=4.0), "")
+                            .on_hover_text("how far the glow around the star reaches (1 = natural)")
                             .changed();
                     });
                     ui.small("star (Lighting `stars mode` uses these as the lights):");

@@ -178,6 +178,11 @@ struct Globals {
     // radius. w <= 0 is a flat world, where fog heights are world y.
     // Appended at the END, like everything above it.
     fog_body: vec4<f32>,
+    // Each atmosphere's cloud deck (rgb = daylight colour, w = darkness) and
+    // its star's aureole (x = spread, y = strength), in `atmo_*` order.
+    // Appended at the END, like everything above it.
+    atmo_cloud: array<vec4<f32>, 4>,
+    atmo_sun: array<vec4<f32>, 4>,
 };
 
 // The triplanar scale multiplier for palette slot `slot`.
@@ -611,6 +616,9 @@ fn atmo_composite(base: vec3<f32>, rd_in: vec3<f32>, tmax: f32, is_sky: bool) ->
         // behind it (stars, the milky way) is dimmed by exactly the opacity
         // the sky is drawn with: the stars come out as the sky thins.
         let air = G.atmo_params[i].z;
+        // What the air in front of the star leaves of its direct light: 1
+        // outside the air, and below it by air mass (more of the blue).
+        var t_disc = vec3<f32>(1.0);
         if (is_sky && air > 0.0) {
             let up = normalize(-c);
             let mu = dot(rd, up);
@@ -633,7 +641,17 @@ fn atmo_composite(base: vec3<f32>, rd_in: vec3<f32>, tmax: f32, is_sky: bool) ->
             let cs = max(dot(rd, sdir), 0.0);
             let sun_vis = smoothstep(-0.2, 0.08, sun_up);
             let warm = mix(tint, mix(star, vec3<f32>(1.0, 0.86, 0.62), 0.5), 0.6);
-            let halo = warm * (pow(cs, 6.0) * 0.22 + pow(cs, 60.0) * 0.55) * sun_vis;
+            // The aureole's spread and strength are the world's to set
+            // (`atmo_sun`: 1, 1 is the glow as it always was).
+            let spread = max(G.atmo_sun[i].x, 0.05);
+            // **The star's light is not the sky's.** It loses only what the air
+            // mass in front of the star takes, more of the blue than the red, so
+            // a low sun sets orange instead of fading into the haze. The light
+            // scattered forward around it has crossed the same air, so the
+            // aureole reddens with it; the disc itself takes this below.
+            let sun_mass = 1.0 / (max(dot(sdir, up), 0.0) + 0.12);
+            t_disc = exp(-vec3<f32>(0.03, 0.05, 0.09) * air * sun_mass);
+            let halo = t_disc * warm * (pow(cs, 6.0 / spread) * 0.22 + pow(cs, 60.0 / spread) * 0.55 * G.atmo_sun[i].y) * sun_vis;
             let sky = body_col * (0.05 + 0.95 * day) + halo;
             out = mix(out, sky, opacity);
         }
@@ -678,10 +696,12 @@ fn atmo_composite(base: vec3<f32>, rd_in: vec3<f32>, tmax: f32, is_sky: bool) ->
         let scatter = max(daylight, 0.12);
         let scol = G.atmo_color[i].rgb * scatter;
         out = mix(out, scol, a);
-        // Cloud deck: a drifting noise shell at ~1/3 of the atmosphere height.
+        // Cloud deck: a drifting noise shell at the world's own height (a
+        // third of the way up the air unless it says otherwise).
         let cov = G.atmo_params[i].y;
         if (cov > 0.01) {
-            let rc = R + H * 0.35;
+            // 0 is a globals block that never set it: the deck where it was.
+            let rc = R + H * select(G.atmo_params[i].w, 0.35, G.atmo_params[i].w <= 0.0);
             if (d2 < rc * rc) {
                 let hc = sqrt(rc * rc - d2);
                 var tc = b - hc;
@@ -694,7 +714,12 @@ fn atmo_composite(base: vec3<f32>, rd_in: vec3<f32>, tmax: f32, is_sky: bool) ->
                     let nse = cloud_fbm(cp * 14.0 + vec3<f32>(drift, 0.0, drift * 0.7));
                     let edge = 1.0 - cov * 0.9;
                     let cl = smoothstep(edge, edge + 0.22, nse);
-                    let ccol = mix(scol, vec3<f32>(daylight * 0.95), 0.75);
+                    // The world's cloud colour and darkness over the deck as it
+                    // always was (white, 0): a storm deck is dark from below
+                    // in daylight, and still a little lit by the air.
+                    let deck = G.atmo_cloud[i];
+                    let lit = mix(scol, vec3<f32>(daylight * 0.95) * deck.rgb, 0.75);
+                    let ccol = lit * (1.0 - 0.85 * clamp(deck.w, 0.0, 1.0));
                     // Cloud opacity rides its own gentle curve — never the
                     // saturated atmosphere alpha (that whited out the disc).
                     out = mix(out, ccol, cl * 0.85 * clamp(density + 0.25, 0.0, 1.0) * smoothstep(0.02, 0.2, a));
@@ -703,7 +728,9 @@ fn atmo_composite(base: vec3<f32>, rd_in: vec3<f32>, tmax: f32, is_sky: bool) ->
         }
         if (is_sky) {
             let sd = max(dot(rd, sun_dir_at(vec3<f32>(0.0))), 0.0);
-            out += gcol * (pow(sd, 180.0) * 1.4 + pow(sd, 10.0) * 0.12) * a * daylight;
+            // The star's disc through the air: dimmed and reddened by the air
+            // mass in front of it, the same as the glint above.
+            out += gcol * (pow(sd, 180.0) * 1.4 + pow(sd, 10.0) * 0.12) * a * daylight * t_disc;
         }
     }
     // Never emit a NaN: a single bad component resolves to 0 (black) in the
@@ -1273,6 +1300,12 @@ fn fog_sky(color: vec3<f32>, rd: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
         let up = clamp(dot(rd, fog_up()), 0.0, 1.0);
         let horizon = (1.0 - up) * (1.0 - up);
         var f = amount * horizon;
+        // Inside a round world's air the sky takes the ramp over the length of
+        // the ray inside the air, as a surface does: long along the horizon,
+        // short overhead, none at all from above the air looking out.
+        if (G.fog_body.w > 0.0 && G.fog_extra.y > 0.0) {
+            f = amount * fog_ramp(fog_path(rd, 1e9));
+        }
         // The same dither the ramp uses on surfaces: a sky gradient is the
         // slowest one in the frame and bands the hardest in 8 bits.
         let amp = G.fog_color.w;
@@ -1337,12 +1370,44 @@ fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
         let f = clamp((1.0 - m.transmittance) * k, 0.0, 1.0);
         return color2 * (1.0 - f) + m.scattered * k;
     }
-    let denom = max(G.fog_params.y - G.fog_params.x, 1e-4);
-    var f = clamp((length(pos) - G.fog_params.x) / denom, 0.0, 1.0);
+    let dist = length(pos);
+    var f = fog_ramp(fog_path(pos / max(dist, 1e-4), dist));
     if (amp > 0.0) {
         f = clamp(f + (dith - 0.5) * amp * 0.06, 0.0, 1.0);
     }
     return mix(color2, G.fog_color.rgb, f);
+}
+
+// The flat ramp at a distance `d` of fogged path: 0 before `fog_start`, 1 at
+// `fog_end`.
+fn fog_ramp(d: f32) -> f32 {
+    let denom = max(G.fog_params.y - G.fog_params.x, 1e-4);
+    return clamp((d - G.fog_params.x) / denom, 0.0, 1.0);
+}
+
+// How much of the ray from the camera along unit `rd`, out to `t_max`, the flat
+// fog fills. On a round world whose body has air (`fog_extra.y` = the radius of
+// the air's top, `fog_body` its camera-relative centre) that is only the stretch
+// inside the air, so a sun, a moon or a planet out in space is fogged by the
+// air in front of it and not by every metre to it; everywhere else, all of it.
+fn fog_path(rd: vec3<f32>, t_max: f32) -> f32 {
+    let top = G.fog_extra.y;
+    if (G.fog_body.w <= 0.0 || top <= 0.0) {
+        return t_max;
+    }
+    let c = G.fog_body.xyz;
+    let b = dot(rd, c);
+    // The rejection form, for the reason `atmo_composite` gives: |c|² − b² loses
+    // everything to cancellation far from the body.
+    let perp = c - rd * b;
+    let disc = top * top - dot(perp, perp);
+    if (disc <= 0.0) {
+        return 0.0;
+    }
+    let h = sqrt(disc);
+    let t0 = max(b - h, 0.0);
+    let t1 = min(b + h, t_max);
+    return max(t1 - t0, 0.0);
 }
 
 // The UNCLAMPED voxel edge of the coarsest in-field volume containing `p` —

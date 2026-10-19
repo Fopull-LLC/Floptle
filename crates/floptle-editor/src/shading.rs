@@ -38,15 +38,27 @@ pub(crate) fn material_draw(
 ) -> (Option<floptle_render::TexId>, MaterialParams) {
     let look = |p: Option<&String>| p.and_then(|p| registry.get(p.as_str()).copied());
     let base = look(m.texture.as_ref()).or(fallback);
+    let maps = m.has_maps().then(|| m.maps().map(look));
+    material_draw_with(raster, gpu, m, base, maps)
+}
+
+/// [`material_draw`] with the images already resolved: `maps` in
+/// [`Material::maps`] order, or `None` for a material that names none. What an
+/// imported model part draws with, so a file's maps and the same maps set by
+/// hand go through one function.
+pub(crate) fn material_draw_with(
+    raster: &mut floptle_render::Raster,
+    gpu: &floptle_render::Gpu,
+    m: &Material,
+    base: Option<floptle_render::TexId>,
+    maps: Option<[Option<floptle_render::TexId>; 5]>,
+) -> (Option<floptle_render::TexId>, MaterialParams) {
     let mut params = material_params(m);
     params.ext_index =
         raster.push_surface_extras(floptle_render::SurfaceExtras::from_material(m));
     // A material with no maps gets its base texture back unchanged — no set is
     // built, nothing is cached, and the draw is byte-for-byte what it was.
-    if !m.has_maps() {
-        return (base, params);
-    }
-    let maps = m.maps().map(look);
+    let Some(maps) = maps else { return (base, params) };
     (Some(raster.material_set(gpu, base, maps)), params)
 }
 
@@ -389,30 +401,7 @@ pub(crate) fn sun_vec(world: &World, l: &Light, cam_world: DVec3) -> [f32; 4] {
 /// aerial haze and cloud decks from outside too.
 pub(crate) type AtmoUniforms = ([f32; 4], [[f32; 4]; 4], [[f32; 4]; 4], [[f32; 4]; 4]);
 pub(crate) fn atmo_uniforms(world: &World, cam_world: DVec3) -> AtmoUniforms {
-    type AtmoItem = (f64, [f32; 4], [f32; 4], [f32; 4]);
-    let mut items: Vec<AtmoItem> = Vec::new();
-    for (e, cb) in world.query::<floptle_core::CelestialBody>() {
-        if cb.atmo_height <= 0.0 || cb.atmo_density <= 0.0 {
-            continue;
-        }
-        let wp = floptle_core::world_transform(world, e).translation;
-        let rel = wp - cam_world;
-        let frac = (rel.length() - cb.body_radius) / cb.atmo_height;
-        let air = overhead_air(cb.atmo_density.clamp(0.0, 1.0), frac);
-        let r = rel.as_vec3();
-        items.push((
-            frac,
-            [
-                cb.atmo_color[0],
-                cb.atmo_color[1],
-                cb.atmo_color[2],
-                cb.atmo_density.clamp(0.0, 1.0),
-            ],
-            [r.x, r.y, r.z, cb.body_radius as f32],
-            [cb.atmo_height as f32, cb.clouds.clamp(0.0, 1.0), air, 0.0],
-        ));
-    }
-    items.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let items = atmo_items(world, cam_world);
     let mut meta = [0.0f32; 4];
     let mut color = [[0.0f32; 4]; 4];
     let mut body = [[0.0f32, 0.0, 0.0, 1.0]; 4];
@@ -424,6 +413,85 @@ pub(crate) fn atmo_uniforms(world: &World, cam_world: DVec3) -> AtmoUniforms {
         meta[0] = (i + 1) as f32;
     }
     (meta, color, body, params)
+}
+
+/// One atmosphere's lanes: `(immersion, color, body, params, cloud, sun)`.
+type AtmoItem = (f64, [f32; 4], [f32; 4], [f32; 4], [f32; 4], [f32; 4]);
+
+/// Every atmosphere in the world as its uniform lanes, deepest immersion
+/// first — the one order [`atmo_uniforms`] and [`atmo_style`] both index by.
+fn atmo_items(world: &World, cam_world: DVec3) -> Vec<AtmoItem> {
+    let mut items: Vec<AtmoItem> = Vec::new();
+    for (e, cb) in world.query::<floptle_core::CelestialBody>() {
+        if cb.atmo_height <= 0.0 || cb.atmo_density <= 0.0 {
+            continue;
+        }
+        let wp = floptle_core::world_transform(world, e).translation;
+        let rel = wp - cam_world;
+        let frac = (rel.length() - cb.body_radius) / cb.atmo_height;
+        let air = overhead_air(cb.atmo_density.clamp(0.0, 1.0), frac);
+        let r = rel.as_vec3();
+        let cc = cb.cloud_color;
+        items.push((
+            frac,
+            [
+                cb.atmo_color[0],
+                cb.atmo_color[1],
+                cb.atmo_color[2],
+                cb.atmo_density.clamp(0.0, 1.0),
+            ],
+            [r.x, r.y, r.z, cb.body_radius as f32],
+            [cb.atmo_height as f32, cb.clouds.clamp(0.0, 1.0), air, cb.cloud_height.clamp(0.01, 1.0)],
+            [cc[0].max(0.0), cc[1].max(0.0), cc[2].max(0.0), cb.cloud_darkness.clamp(0.0, 1.0)],
+            [cb.aureole_size.max(0.0), cb.aureole.max(0.0), 0.0, 0.0],
+        ));
+    }
+    items.sort_by(|a, b| a.0.total_cmp(&b.0));
+    items
+}
+
+/// The lanes [`atmo_uniforms`] has no room for, in its order: each
+/// atmosphere's cloud deck (`rgb` = daylight colour, `w` = darkness) and its
+/// star's aureole (`x` = spread, `y` = strength).
+pub(crate) fn atmo_style(world: &World, cam_world: DVec3) -> ([[f32; 4]; 4], [[f32; 4]; 4]) {
+    let mut cloud = [[1.0, 1.0, 1.0, 0.0]; 4];
+    let mut sun = [[1.0, 1.0, 0.0, 0.0]; 4];
+    for (i, it) in atmo_items(world, cam_world).iter().take(4).enumerate() {
+        cloud[i] = it.4;
+        sun[i] = it.5;
+    }
+    (cloud, sun)
+}
+
+/// The air's lanes a globals block gets on top of `atmo_uniforms`: each
+/// atmosphere's cloud deck and aureole, and the flat fog's shell (`fog_extra.y`).
+/// One function for both gathers, so the window and every offscreen view see
+/// the same sky.
+pub(crate) fn stamp_air_style(g: &mut floptle_render::RaymarchGlobals, light: &Light, world: &World, cam_world: DVec3) {
+    let (cloud, sun) = atmo_style(world, cam_world);
+    g.atmo_cloud = cloud;
+    g.atmo_sun = sun;
+    g.fog_extra[1] = fog_shell_top(light, world, cam_world);
+}
+
+/// The radius of the shell the flat fog stays inside on a round world: the
+/// atmosphere's top of the body the fog follows (`fog_body_lane`'s pick), or 0
+/// when there is no such body or it has no air — the ramp then runs the whole
+/// distance, as it always did.
+pub(crate) fn fog_shell_top(light: &Light, world: &World, cam_world: DVec3) -> f32 {
+    if !light.fog_follows_body {
+        return 0.0;
+    }
+    world
+        .query::<floptle_core::CelestialBody>()
+        .filter(|(_, cb)| cb.body_radius > 0.0)
+        .map(|(e, cb)| {
+            let rel = floptle_core::world_transform(world, e).translation - cam_world;
+            (rel.length() - cb.body_radius, cb)
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, cb)| if cb.atmo_height > 0.0 { (cb.body_radius + cb.atmo_height) as f32 } else { 0.0 })
+        .unwrap_or(0.0)
 }
 
 /// The optical depth of the air straight overhead, at the ground of a shell of

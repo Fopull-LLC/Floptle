@@ -95,6 +95,9 @@ pub static OPS: &[OpSpec] = &[
     OpSpec { name: "ceil", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("ceil"), doc: "Round up.", category: "math" },
     OpSpec { name: "round", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("round"), doc: "Round to nearest.", category: "math" },
     OpSpec { name: "fract", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("fract"), doc: "Fractional part (x - floor(x)).", category: "math" },
+    OpSpec { name: "dpdx", inputs: &[req("x", G)], output: G, stages: FRAG, emit: Emit::Fn("dpdx"), doc: "How much x changes to the next pixel across the screen — with dpdy, what builds a tangent frame from worldPos and uv, or antialiases a procedural edge.", category: "math" },
+    OpSpec { name: "dpdy", inputs: &[req("x", G)], output: G, stages: FRAG, emit: Emit::Fn("dpdy"), doc: "How much x changes to the next pixel down the screen (see dpdx).", category: "math" },
+    OpSpec { name: "fwidth", inputs: &[req("x", G)], output: G, stages: FRAG, emit: Emit::Fn("fwidth"), doc: "|dpdx(x)| + |dpdy(x)|: how much x changes per pixel. smoothstep(0, fwidth(d), d) is a one-pixel antialiased edge.", category: "math" },
     OpSpec { name: "sqrt", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("sqrt"), doc: "Square root.", category: "math" },
     OpSpec { name: "sin", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("sin"), doc: "Sine (radians).", category: "math" },
     OpSpec { name: "cos", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("cos"), doc: "Cosine (radians).", category: "math" },
@@ -180,6 +183,7 @@ pub static OPS: &[OpSpec] = &[
     OpSpec { name: "twist", inputs: &[req("p", V3), req("amount", F)], output: V3, stages: BOTH, emit: Emit::Fn("flsl_op_twist"), doc: "Twist space around the Y axis (radians per unit height).", category: "sdf" },
 
     // ---- engine hooks (the concat-seam dividend) ----------------------------
+    OpSpec { name: "litPbr", inputs: &[req("albedo", V3), opt("normal", V3, f64::NAN)], output: V3, stages: FRAG, emit: Emit::Special, doc: "The engine's Physical (metal-rough) lighting on your albedo, exactly as a built-in Physical material draws: the node Material's normal map on top of your normal (or the mesh's), its roughness / metallic / occlusion maps × their values, GGX sun and point lights, the sky reflection, AO and rim. A damage or scorch shader keeps the surface's normal-mapped PBR look underneath.", category: "engine" },
     OpSpec { name: "litSurface", inputs: &[req("albedo", V3), opt("normal", V3, f64::NAN)], output: V3, stages: FRAG, emit: Emit::Special, doc: "The engine's full lighting on your albedo: sun + shadows + AO + point lights + specular/rim from the node's Material. Give a normal (same space as `normal`) to light a bent one — waves, bumps, detail; omit it for the mesh's own.", category: "engine" },
     OpSpec { name: "sunShadow", inputs: &[req("p", V3), req("n", V3)], output: V3, stages: FRAG, emit: Emit::Special, doc: "The scene's marched sun-shadow factor at a point (1 = fully lit).", category: "engine" },
     OpSpec { name: "sdfAo", inputs: &[req("p", V3), req("n", V3)], output: F, stages: FRAG, emit: Emit::Fn("flsl_ao"), doc: "True SDF ambient occlusion at a point (1 = open sky).", category: "engine" },

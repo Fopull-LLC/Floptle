@@ -404,11 +404,11 @@ impl Particles {
         );
         let white_view = white.create_view(&wgpu::TextureViewDescriptor::default());
         let white_samp = device.create_sampler(&wgpu::SamplerDescriptor::default());
-        // A billboard only ever reads the colour slot; the other four take the
+        // A billboard only ever reads the colour slot; the other five take the
         // same white so the group matches the shared layout.
         let w = (&white_view, &white_samp);
         let default_bind =
-            crate::raster::make_surface_bind(device, &tex_layout, "particles-white", [w, w, w, w, w]);
+            crate::raster::make_surface_bind(device, &tex_layout, "particles-white", [w, w, w, w, w, w]);
 
         let quad_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("particles-quad"),

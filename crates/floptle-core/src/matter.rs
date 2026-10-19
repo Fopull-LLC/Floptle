@@ -721,6 +721,20 @@ pub struct CelestialBody {
     pub atmo_density: f32,
     /// Cloud coverage inside the atmosphere, 0..1 (0 = clear skies).
     pub clouds: f32,
+    /// The cloud deck's colour in full daylight. White is the deck as it has
+    /// always been drawn — mostly the day's light, a little of the air's.
+    pub cloud_color: [f32; 3],
+    /// How dark the deck is, 0..1: 0 is a fair-weather deck, 1 a storm with
+    /// almost no light coming through it.
+    pub cloud_darkness: f32,
+    /// How high the deck sits, as a share of the atmosphere's height (0.35 =
+    /// a third of the way up, the deck's height before this was a setting).
+    pub cloud_height: f32,
+    /// How far the star's aureole — the bright glow around it in the sky —
+    /// spreads, as a multiple of its natural size. 1 = as before.
+    pub aureole_size: f32,
+    /// How bright the aureole is, as a multiple of its natural strength.
+    pub aureole: f32,
     /// Star: this body emits light (Lighting `stars` mode). Irradiance at
     /// distance d = `luminosity × 1e6 / d²` — ~36 lights a body 6000 units
     /// out at full strength. 0 = not a star.
@@ -752,6 +766,11 @@ impl Default for CelestialBody {
             atmo_height: 0.0,
             atmo_density: 1.0,
             clouds: 0.0,
+            cloud_color: [1.0, 1.0, 1.0],
+            cloud_darkness: 0.0,
+            cloud_height: 0.35,
+            aureole_size: 1.0,
+            aureole: 1.0,
             luminosity: 0.0,
             star_color: [1.0, 0.97, 0.9],
             occluder_radius: 0.0,

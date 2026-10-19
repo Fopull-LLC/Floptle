@@ -471,7 +471,7 @@ impl Editor {
                     .get(sm.slot as usize)
                     .cloned()
                     .unwrap_or_else(|| format!("Slot {}", sm.slot));
-                part_meta.push(PartMeta { material: name, base_color: [0.75, 0.75, 0.75], textured: false });
+                part_meta.push(PartMeta { material: name, base_color: [0.75, 0.75, 0.75], textured: false, imported: None });
             }
             for (mid, _) in old {
                 raster.free_dynamic(mid);

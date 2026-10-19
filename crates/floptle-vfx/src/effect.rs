@@ -355,6 +355,11 @@ pub struct Look {
     pub flipbook: Option<Flipbook>,
     /// Full scene lighting per particle: sun + point lights + field shadow + AO.
     pub lit: bool,
+    /// A lit billboard's light from behind, 0..1: the key light shining
+    /// through it toward the camera, strongest where the particle is thinnest
+    /// (its alpha lowest), so smoke against a low sun glows at its edges and
+    /// keeps a dark core. 0 = lit from the front only.
+    pub translucency: f32,
     /// Billboards fade out over this many world units in front of whatever they
     /// intersect, so a sprite crossing a floor or a wall shows no hard line.
     /// 0 = a hard edge.
@@ -377,6 +382,7 @@ impl Default for Look {
             speed_stretch: 0.0,
             flipbook: None,
             lit: false,
+            translucency: 0.0,
             soft: DEFAULT_SOFT,
             cast_shadows: false,
             distortion: DEFAULT_DISTORTION,

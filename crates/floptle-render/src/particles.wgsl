@@ -76,7 +76,8 @@ struct VsIn {
     // w = how lit the particle is (0 = unlit, as authored; 1 = fully lit).
     @location(7) light: vec4<f32>,
     // Instance: xy = the next flipbook frame's UV min, z = how far into it
-    // (0 = this frame only), w = distortion strength (Distortion blend).
+    // (0 = this frame only), w = distortion strength under the Distortion
+    // blend, and the translucency (light from behind, 0..1) under every other.
     @location(8) extra: vec4<f32>,
 };
 
@@ -153,17 +154,41 @@ fn lighting(in: VsOut) -> vec3<f32> {
     let toward_cam = normalize(cross(in.right, in.up)) * sign(dot(cross(in.right, in.up), -in.view_pos));
     let bulge = sqrt(max(1.0 - dot(c, c), 0.0));
     let n = normalize(in.right * c.x + in.up * c.y + toward_cam * (bulge + 0.35));
+    let l = key_dir(in);
+    let wrap = clamp(dot(n, l) * 0.6 + 0.4, 0.0, 1.0);
+    return g.ambient.rgb + g.light_color.rgb * wrap * day_of(in, l);
+}
+
+// The way to the key light from this particle.
+fn key_dir(in: VsOut) -> vec3<f32> {
     var l = g.light_dir.xyz;
     if (g.light_dir.w > 0.5) {
         l = g.light_dir.xyz - in.view_pos;
     }
-    l = normalize(l);
-    let wrap = clamp(dot(n, l) * 0.6 + 0.4, 0.0, 1.0);
-    var day = 1.0;
+    return normalize(l);
+}
+
+// 1 on the day side of the particle's ground, 0 on its night side.
+fn day_of(in: VsOut, l: vec3<f32>) -> f32 {
     if (dot(in.light.xyz, in.light.xyz) > 0.25) {
-        day = smoothstep(-0.12, 0.2, dot(normalize(in.light.xyz), l));
+        return smoothstep(-0.12, 0.2, dot(normalize(in.light.xyz), l));
     }
-    return g.ambient.rgb + g.light_color.rgb * wrap * day;
+    return 1.0;
+}
+
+// The key light coming through the particle from behind it: as much as the
+// light lines up behind the particle from the eye, times the track's
+// translucency, times how thin the particle is there (1 − alpha). Thin edges
+// against a low sun glow; a thick core stays dark; lit from the front, nothing.
+fn transmitted(in: VsOut, alpha: f32) -> vec3<f32> {
+    let k = in.extra.y;
+    if (k <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let l = key_dir(in);
+    let behind = clamp(dot(l, normalize(in.view_pos)), 0.0, 1.0);
+    let thin = clamp(1.0 - alpha, 0.0, 1.0);
+    return g.light_color.rgb * (k * behind * behind * thin * day_of(in, l));
 }
 
 // A depth-buffer value as a distance in front of the camera.
@@ -192,7 +217,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (in.light.w > 0.0) {
         // The lamps reaching it (point lights, or the 2D lights that reach its
         // sorting layer) are summed per particle on the CPU into params.yzw.
-        let lit = lighting(in) + in.lamps;
+        let lit = lighting(in) + in.lamps + transmitted(in, col.a);
         col = vec4<f32>(col.rgb * mix(vec3<f32>(1.0), lit, in.light.w), col.a);
     }
     // Fully transparent texels are discarded so depth-adjacent particles don't

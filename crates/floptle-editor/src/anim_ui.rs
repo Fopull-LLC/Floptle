@@ -2270,6 +2270,7 @@ const ANIMATABLE_PROPS: &[(&str, &[PropField])] = &[
             ("metallic", PropKind::Float, "Surface"),
             ("occlusionMap", PropKind::Text, "Surface"),
             ("occlusionStrength", PropKind::Float, "Surface"),
+            ("emissiveMap", PropKind::Text, "Surface"),
             ("reflectivity", PropKind::Float, "Surface"),
             ("transmission", PropKind::Float, "Surface"),
             ("ior", PropKind::Float, "Surface"),

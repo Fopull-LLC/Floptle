@@ -50,7 +50,7 @@
 ---@field getComponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|LightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|MaterialHandle|nil Live component handle (RigidBody / PointLight / Light / Camera / ParticleSystem / AudioSource / UiElement / UiSlider / UiLayer / Material), nil if the node lacks it.
 ---@field particles fun(self: Node): ParticleSystemHandle The particle handle for this node's Particle System: play / stop / restart the effect and read its live state.
 ---@field setShaderParam fun(self: Node, name: string, x: number, y?: number, z?: number, w?: number) Drive a `.flsl` uniform on this node every tick (a GPU uniform write, never a recompile): the node's Material shader, or its UI element's `stage ui` shader (instruments like the navball). Unset lanes are 0.
----@field setCelestial fun(self: Node, t: table) Construction API: set (and create if absent) the node's CelestialBody. Fields (camelCase): mu, bodyRadius, soi, parent (name string), a, e, i, lan, argPe, m0, atmoColor {r,g,b}, atmoHeight, atmoDensity, clouds, luminosity, starColor, occluderRadius (occlusion culling: radius of the solid core geometry never pierces — chunks fully behind it skip their draws; keep it BELOW the deepest cave/dig; 0 = off).
+---@field setCelestial fun(self: Node, t: table) Construction API: set (and create if absent) the node's CelestialBody. Fields (camelCase): mu, bodyRadius, soi, parent (name string), a, e, i, lan, argPe, m0, atmoColor {r,g,b}, atmoHeight, atmoDensity, clouds, cloudColor {r,g,b}, cloudDarkness (0..1, 1 = storm), cloudHeight (share of atmoHeight), aureole, aureoleSize (the star's glow: strength, spread; 1 = natural), luminosity, starColor, occluderRadius (occlusion culling: radius of the solid core geometry never pierces — chunks fully behind it skip their draws; keep it BELOW the deepest cave/dig; 0 = off).
 ---@field setShaderTexture fun(self: Node, slot: string, ref: string) Point one of this node's `.flsl` shader texture SLOTS somewhere else, at runtime. `slot` is the name the shader declares (`texture ramp` gives "ramp"); `ref` is a project-relative image path, an `rt:<name>` render target (what another camera sees, live), or "" to clear the slot. A shader can declare up to 8 slots.
 ---@field setMaterial fun(self: Node, t: table) Construction API — SETUP-TIME, not per-frame: set (and create if absent) the node's Material. It inserts the component and queues a deferred write, so call it on transitions and use `setShaderParam` for values that change every tick. Fields: color/emissive/specular/rim (a colour takes {r,g,b}, {x,y,z}, {1,0.5,0.2} or vec3), emissiveStrength, shininess, specularStrength, rimStrength, unlit (bool), ambient, alpha, texture (path or "rt:<name>"), sheetCols/sheetRows/cell (spritesheet grid + which cell draws — `cell` is also a live mirror field, see MaterialHandle).
 ---@field setTerrain fun(self: Node, id: number) Construction API: make this node a Terrain volume with the given id (generate its field with `terrain.generatePlanet`).
@@ -372,12 +372,27 @@
 ---@field position fun(self: SoundHandle): number Playhead in seconds.
 
 ---A mixer track handle from `audio.track(name)` — live control of the
----project mixer (reverts to the saved mixer when Play stops).
+---project mixer. Changes hold for the whole play session, across
+---`scene.load`, and revert to the saved mixer when Play stops.
 ---@class AudioTrackHandle
 ---@field setVolume fun(self: AudioTrackHandle, db: number) Fader gain in dB (0 = unity, −60 = silent).
 ---@field setPan fun(self: AudioTrackHandle, pan: number) Stereo pan −1..1.
 ---@field setMuted fun(self: AudioTrackHandle, muted: boolean) Mute / unmute the track.
 ---@field setSoloed fun(self: AudioTrackHandle, soloed: boolean) Solo the track (mutes everything else).
+---@field setLowpass fun(self: AudioTrackHandle, hz: number) Muffle the whole bus above that many Hz (underwater); 0 = off.
+---@field setBypass fun(self: AudioTrackHandle, slot: integer, on: boolean) Bypass effect `slot` (from 1, as the Mixer tab lists the chain).
+---@field info fun(self: AudioTrackHandle): AudioTrackInfo? The track as it stands, or nil.
+
+---One mixer track as `audio.tracks()` lists it.
+---@class AudioTrackInfo
+---@field name string
+---@field gainDb number Fader gain in dB, script changes included.
+---@field pan number
+---@field muted boolean
+---@field soloed boolean
+---@field output string? The track it feeds ("Master" for a top-level track; nil for Master itself).
+---@field lowpass number The bus low-pass in Hz, 0 when off.
+---@field effects integer How many effects its chain holds.
 
 ---Options for `audio.play`. All fields optional.
 ---@class AudioPlayOpts
@@ -399,7 +414,8 @@
 ---@class audio
 ---@field play fun(clip: string, a?: Node|number, b?: number|AudioPlayOpts, c?: number, opts?: AudioPlayOpts): SoundHandle Play a clip: `audio.play("audio/ding.ogg")` (flat) · `audio.play("audio/hit.ogg", x, y, z, opts)` (at a point) · `audio.play("audio/engine.ogg", carNode, {loop=true})` (follows the node).
 ---@field stopAll fun() Stop every playing sound (sources and one-shots).
----@field track fun(name: string): AudioTrackHandle A mixer track handle ("Master" or a track name from the Mixer tab).
+---@field track fun(name: string): AudioTrackHandle? A mixer track handle ("Master" or a track name from the Mixer tab); nil when the mixer has no such track.
+---@field tracks fun(): AudioTrackInfo[] Every mixer track, Master first, as this play session has it.
 audio = {}
 
 ---This instance's tunables, seeded from the script's `defaults` table.
@@ -1267,6 +1283,8 @@ function camera.screenRect() end
 function camera.pixelsPerUnit(distance) end
 ---Project a world point to the game view: `sx, sy, depth, onscreen`. `onscreen`
 ---is false for points behind the camera or outside the frustum — skip those.
+---Uses the camera node as it stands when called (this frame's motion so far),
+---so a label placed in `lateUpdate` sits on its object this frame.
 ---@param x number
 ---@param y number
 ---@param z number
@@ -1419,6 +1437,7 @@ function findTagged(tag) end
 ---@field roughnessMap string
 ---@field metallicMap string
 ---@field occlusionMap string
+---@field emissiveMap string Where it glows and in what colour (× emissive). `""` clears it.
 ---@field shader string The `.flsl` surface shader it draws with, project-relative. `""` when it has none, or to clear it.
 ---@field color Color The tint, multiplied into the texture.
 ---@field emissive Color Light this surface gives off (scaled by emissiveStrength).

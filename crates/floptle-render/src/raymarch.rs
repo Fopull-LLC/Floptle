@@ -266,6 +266,13 @@ pub struct RaymarchGlobals {
     /// where fog heights are world y. Appended at the end so this struct stays
     /// byte-identical to the WGSL one.
     pub fog_body: [f32; 4],
+    /// Each atmosphere's cloud deck, in `atmo_*` order: rgb = its daylight
+    /// colour (white = as before), w = darkness 0..1. Appended at the end so
+    /// this struct stays byte-identical to the WGSL one.
+    pub atmo_cloud: [[f32; 4]; 4],
+    /// Each atmosphere's star aureole: x = spread, y = strength, multiples of
+    /// natural (1, 1 = as before). Appended at the end, like everything above.
+    pub atmo_sun: [[f32; 4]; 4],
 }
 
 impl Default for RaymarchGlobals {
@@ -358,6 +365,8 @@ impl Default for RaymarchGlobals {
             fog_extra: [0.0; 4],
             terrain_scale: [[1.0; 4]; 8],
             fog_body: [0.0; 4],
+            atmo_cloud: [[1.0, 1.0, 1.0, 0.0]; 4],
+            atmo_sun: [[1.0, 1.0, 0.0, 0.0]; 4],
             probe_pos: [[0.0; 4]; crate::reflect::MAX_PROBES],
             probe_half: [[1.0; 4]; crate::reflect::MAX_PROBES],
         }

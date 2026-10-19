@@ -188,6 +188,8 @@ mod template_gen;
 mod template_village;
 #[cfg(test)]
 mod vfx_frame_tests;
+#[cfg(all(test, feature = "editor-ui"))]
+mod imported_maps_tests;
 #[cfg(feature = "editor-ui")]
 mod lua_format;
 #[cfg(feature = "editor-ui")]
@@ -3945,6 +3947,21 @@ pub(crate) struct PartMeta {
     pub(crate) material: String,
     pub(crate) base_color: [f32; 3],
     pub(crate) textured: bool,
+    /// The part's imported surface when its file names more than a base
+    /// colour — maps, a glow. `None` draws the part as base colour × its
+    /// texture, as every model drew before imports kept their maps.
+    pub(crate) imported: Option<ImportedLook>,
+}
+
+/// A part's surface as its model file describes it: the material those maps
+/// and factors make, and the images bound for it. Drawn through the same
+/// function a hand-set material is, so the two cannot disagree.
+#[derive(Clone)]
+pub(crate) struct ImportedLook {
+    pub(crate) material: floptle_core::Material,
+    pub(crate) base: Option<floptle_render::TexId>,
+    /// Normal, roughness, metallic, occlusion, emissive — `Material::maps` order.
+    pub(crate) maps: [Option<floptle_render::TexId>; 5],
 }
 
 impl MeshAsset {

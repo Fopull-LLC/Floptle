@@ -68,7 +68,9 @@ sound ends — self-cleaning one-shots), **Loop**.
 
 - **`AudioSystem`** (`floptle-editor/src/audio.rs`) — the glue field on
   `Editor`: clip cache, play-mode voice per `AudioSource`, script one-shots,
-  the runtime mixer overlay (Lua tweaks revert on Stop). Ticked in the play
+  the runtime mixer overlay (Lua tweaks hold across `scene.load` — kept as
+  `session_edits` and laid back over the project mixer at every scene start —
+  and revert on Stop). Ticked in the play
   loop after physics/attachments so emitters ride final transforms.
 - **Clip cache** (`floptle-editor/src/audio_clips.rs`) — a clip is decoded on
   a worker the first time anything asks for it (inline in a browser, like
@@ -93,7 +95,9 @@ sound ends — self-cleaning one-shots), **Loop**.
 
 Command-queue + info-mirror, like anim/vfx — scripts never touch the engine:
 `audio.play(...) → SoundHandle`, `node:sound()` for components,
-`audio.track(name)` for live mixer control, tunables via
+`audio.track(name)` for live mixer control (nil for a track the mixer does
+not have; `setLowpass` is a bus low-pass after the effect chain, the
+`TrackDesc::lowpass` field), `audio.tracks()` to read the mixer, tunables via
 `getcomponent("AudioSource")`. See scripting.md §11.
 
 ## Real-time rules (keep these)

@@ -87,18 +87,24 @@ struct SendTap {
 /// Two one-pole low-passes in series (12 dB an octave), per ear, with a
 /// coefficient that glides so a cutoff change never clicks. A coefficient of
 /// 1 passes the sound through untouched.
-struct LowPass {
+pub(crate) struct LowPass {
     cur: f32,
     tgt: f32,
     z: [f32; 4],
 }
 
 impl LowPass {
-    fn off() -> Self {
+    pub(crate) fn off() -> Self {
         Self { cur: 1.0, tgt: 1.0, z: [0.0; 4] }
     }
 
-    fn set(&mut self, hz: f32, sample_rate: f32) {
+    /// Jump to the target cutoff instead of gliding to it.
+    pub(crate) fn snap(&mut self) {
+        self.cur = self.tgt;
+    }
+
+    /// The cutoff in Hz; 0 (or anything past the band) passes the sound through.
+    pub(crate) fn set(&mut self, hz: f32, sample_rate: f32) {
         self.tgt = if hz > 0.0 && hz < sample_rate * 0.45 {
             1.0 - (-std::f32::consts::TAU * hz / sample_rate).exp()
         } else {
@@ -106,7 +112,7 @@ impl LowPass {
         };
     }
 
-    fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+    pub(crate) fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
         if self.cur >= 0.9999 && self.tgt >= 0.9999 {
             // Passing through: keep the state on the signal so engaging later
             // starts from where the sound is, not from silence.
@@ -658,6 +664,40 @@ mod tests {
         let (low, low_cut) = (run(100.0, 0.0), run(100.0, 500.0));
         assert!(high_cut < high * 0.05, "5 kHz through 500 Hz kept {high_cut} of {high}");
         assert!(low_cut > low * 0.9, "100 Hz through 500 Hz kept only {low_cut} of {low}");
+    }
+
+    /// **A bus low-pass muffles everything on that bus, and nothing else.**
+    /// A 4 kHz tone on SFX through SFX's 500 Hz cutoff — set on a running
+    /// mixer, as a script does — is a fraction of itself; the same tone on
+    /// Music is untouched.
+    #[test]
+    fn a_bus_lowpass_cuts_a_high_tone_on_that_bus_only() {
+        let tone = || {
+            let n = 48_000 / 5;
+            Arc::new(Clip {
+                sample_rate: 48_000,
+                channels: 1,
+                samples: (0..n).map(|i| (std::f32::consts::TAU * 4000.0 * i as f32 / 48_000.0).sin() * 0.5).collect(),
+            })
+        };
+        let run = |bus_lowpass: f32, track: &str| {
+            let mut core = AudioCore::new(48_000.0, 128);
+            let mixer = |lowpass: f32| crate::MixerDesc {
+                master: crate::TrackDesc::new(crate::MASTER),
+                tracks: vec![crate::TrackDesc { lowpass, ..crate::TrackDesc::new("SFX") }, crate::TrackDesc::new("Music")],
+            };
+            core.mixer.apply(&mixer(0.0));
+            core.mixer.apply(&mixer(bus_lowpass));
+            core.play(1, tone(), None, PlayParams { track: track.into(), ..Default::default() });
+            let (mut l, mut r) = (vec![0.0f32; 4800], vec![0.0f32; 4800]);
+            core.render(&mut l, &mut r);
+            peak(&l[2400..])
+        };
+        let (open, cut) = (run(0.0, "SFX"), run(500.0, "SFX"));
+        assert!(open > 0.1, "the fixture: the tone reaches the output ({open})");
+        assert!(cut < open * 0.05, "4 kHz through SFX's 500 Hz low-pass kept {cut} of {open}");
+        let other = run(500.0, "Music");
+        assert!((other - open).abs() < open * 0.02, "SFX's low-pass changed Music: {other} vs {open}");
     }
 
     #[test]

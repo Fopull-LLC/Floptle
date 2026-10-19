@@ -176,8 +176,8 @@ impl Editor {
         // The active camera's layer cull mask applies to the fullscreen game
         // view only — the editor Scene view always shows everything.
         let mut game_cull_mask = u32::MAX;
+        let active = if game_view { floptle_core::active_camera(&self.world) } else { None };
         let cam = {
-            let active = if game_view { floptle_core::active_camera(&self.world) } else { None };
             match active {
                 Some(e) => {
                     let (fov_y, ortho, oh) = match self.world.get::<Matter>(e) {
@@ -214,6 +214,8 @@ impl Editor {
                 fov_y: cam.projection.fov_y(),
                 ortho_height: cam.projection.ortho_height().unwrap_or(0.0),
                 valid: true,
+                camera: active.map(|e| e.index()),
+                proj: cam.proj_matrix(aspect).to_cols_array(),
             });
         }
 
@@ -648,6 +650,7 @@ impl Editor {
             || !self.flsl_shape_slots.is_empty();
         let rm = {
             let mut g = make_rm(if show_blobs { &blobs } else { &[] });
+            crate::shading::stamp_air_style(&mut g, &light_node, &self.world, cam.world_position);
             Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.mesh_occluders, &self.occluder_regions, self.project.shadow_volumes, &self.world, &mut g, cam.world_position);
             crate::shaders::apply_field_shapes(&self.world, &self.flsl_shape_slots, &self.sdf_cache, &mut g, cam.world_position, None);
             // Baked GI. The renderer owns the probe texture; these four lanes

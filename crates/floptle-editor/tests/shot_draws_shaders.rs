@@ -171,3 +171,69 @@ fn a_surface_shader_lights_its_own_normal_toward_the_key_light() {
     assert!(toward > away + 150, "lit toward the light {toward}, away from it {away}: the shader's normal was not lit");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// **A surface shader keeps a Physical material's normal map.** `litPbr` is the
+/// built-in Physical lighting on the shader's albedo, with the Material's own
+/// normal and ORM maps: so the same wall, its normal map on, draws its ridges
+/// under the shader as it does with no shader at all, and differs plainly from
+/// the wall with the map taken off. `litSurface` was Blinn-Phong over the mesh
+/// normal, which is why a damage shader on a normal-mapped hull flattened it.
+#[test]
+fn a_pbr_surface_shader_shows_the_materials_normal_map() {
+    let d = temp("pbrnormal");
+    for sub in ["scenes", "shaders", "textures"] {
+        std::fs::create_dir_all(d.join(sub)).unwrap();
+    }
+    std::fs::write(d.join("project.ron"), "(title: Some(\"p\"), entry_scene: Some(\"scenes/pbr.ron\"))").unwrap();
+    std::fs::write(
+        d.join("shaders/pbr.flsl"),
+        "shader pbr {\n  stage fragment\n  output color = vec4(litPbr(vec3(0.8)), 1)\n}\n",
+    )
+    .unwrap();
+    // Ridges: the normal leans hard one way, then the other, eight times across.
+    let mut n = image::RgbaImage::new(64, 64);
+    for (x, _, p) in n.enumerate_pixels_mut() {
+        *p = if (x / 4) % 2 == 0 { image::Rgba([30, 128, 200, 255]) } else { image::Rgba([225, 128, 200, 255]) };
+    }
+    n.save(d.join("textures/ridges.png")).unwrap();
+    let shoot = |tag: &str, material: &str| -> Option<image::RgbaImage> {
+        let scene = format!(
+            "(name: \"pbr\", lighting: (direction: (0.8, 0.3, 0.6), ambient: (0.1, 0.1, 0.1)), nodes: [\
+             (name: \"Camera\", transform: (translation: (0.0, 0.0, 0.0)), matter: Camera(fov_y: 1.0, active: true)),\
+             (name: \"Wall\", transform: (translation: (0.0, 0.0, -6.0), scale: (8.0, 8.0, 1.0)), \
+              matter: Primitive(shape: Cube, color: (1.0, 1.0, 1.0)), material: Some(({material})))])"
+        );
+        std::fs::write(d.join("scenes/pbr.ron"), scene).unwrap();
+        let out = d.join(format!("{tag}.png"));
+        let r = Command::new(bin())
+            .args(["shot", &d.to_string_lossy(), "--scene", "pbr", "--size", "160x90", "--no-ui", "--out", &out.to_string_lossy()])
+            .output()
+            .expect("run shot");
+        if !r.status.success() {
+            let why = String::from_utf8_lossy(&r.stderr);
+            assert!(cannot_render(&why), "shot failed for a reason that is not the adapter:\n{why}");
+            return None;
+        }
+        Some(image::open(&out).expect("a PNG was written").to_rgba8())
+    };
+    let surface = "color: (0.8, 0.8, 0.8), shading: Physical, metallic: 0.0, roughness: 0.5";
+    let Some(mapped) = shoot("mapped", &format!("{surface}, normal_map: Some(\"textures/ridges.png\"), shader: Some(\"shaders/pbr.flsl\")")) else { return };
+    let Some(flat) = shoot("flat", &format!("{surface}, shader: Some(\"shaders/pbr.flsl\")")) else { return };
+    let Some(builtin) = shoot("builtin", &format!("{surface}, normal_map: Some(\"textures/ridges.png\")")) else { return };
+    let diff = |a: &image::RgbaImage, b: &image::RgbaImage| {
+        // The middle of the wall, away from its edges.
+        let mut sum = 0u64;
+        for y in 25..65 {
+            for x in 40..120 {
+                let (p, q) = (a.get_pixel(x, y), b.get_pixel(x, y));
+                sum += (0..3).map(|c| (p[c] as i32 - q[c] as i32).unsigned_abs() as u64).sum::<u64>();
+            }
+        }
+        sum as f64 / (40.0 * 80.0 * 3.0)
+    };
+    let ridges = diff(&mapped, &flat);
+    let same = diff(&mapped, &builtin);
+    let _ = std::fs::remove_dir_all(&d);
+    assert!(ridges > 8.0, "the shader drew the wall the same with and without its normal map ({ridges:.2} apart)");
+    assert!(same < 2.0, "litPbr differs from the built-in Physical look by {same:.2} a channel");
+}

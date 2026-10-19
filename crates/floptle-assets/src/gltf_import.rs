@@ -6,9 +6,12 @@
 //! optional base-color texture (decoded to RGBA8). The whole model is recentered
 //! to the origin so it frames/places predictably regardless of native scale.
 //!
-//! Deferred (per `docs/subsystems/asset-pipeline.md`): the metallic/roughness/
-//! normal/emissive maps, per-material samplers and alpha blending, skins, and
-//! animations. This returns what the lit textured pass consumes today.
+//! Each part also carries its material's other maps — metallic-roughness,
+//! normal, occlusion and emissive — with their factors ([`PartMaps`]), which the
+//! editor turns into the same surface a hand-set material with those maps
+//! draws. Deferred (per `docs/subsystems/asset-pipeline.md`): per-material
+//! samplers, alpha blending and a second UV set; skins and animations come
+//! through `gltf_rig`.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -46,6 +49,57 @@ pub struct ImportedPart {
     pub base_color: [f32; 3],
     /// Index into [`ImportedModel::textures`], if the material has a base-color map.
     pub texture: Option<usize>,
+    /// The material's other maps and factors.
+    pub maps: PartMaps,
+}
+
+/// A glTF material's maps beyond base colour, as indices into the model's
+/// decoded images, and the factors that scale them. glTF's packing is the
+/// engine's: roughness in green and metallic in blue of one image, occlusion
+/// in red.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PartMaps {
+    pub metallic_roughness: Option<usize>,
+    pub metallic: f32,
+    pub roughness: f32,
+    pub normal: Option<usize>,
+    pub normal_scale: f32,
+    pub occlusion: Option<usize>,
+    pub occlusion_strength: f32,
+    pub emissive: Option<usize>,
+    pub emissive_factor: [f32; 3],
+}
+
+impl PartMaps {
+    /// Does the material ask for anything a plain base colour does not
+    /// draw — a map, or a glow?
+    pub fn any(&self) -> bool {
+        self.metallic_roughness.is_some()
+            || self.normal.is_some()
+            || self.occlusion.is_some()
+            || self.emissive.is_some()
+            || self.emissive_factor.iter().any(|&c| c > 0.0)
+    }
+}
+
+/// The maps of `m`. A map on a second UV set is left out: every mesh here
+/// carries one.
+pub(crate) fn part_maps(m: &gltf::Material) -> PartMaps {
+    let pbr = m.pbr_metallic_roughness();
+    let first_uv = |set: u32, idx: usize| (set == 0).then_some(idx);
+    PartMaps {
+        metallic_roughness: pbr
+            .metallic_roughness_texture()
+            .and_then(|t| first_uv(t.tex_coord(), t.texture().source().index())),
+        metallic: pbr.metallic_factor(),
+        roughness: pbr.roughness_factor(),
+        normal: m.normal_texture().and_then(|t| first_uv(t.tex_coord(), t.texture().source().index())),
+        normal_scale: m.normal_texture().map_or(1.0, |t| t.scale()),
+        occlusion: m.occlusion_texture().and_then(|t| first_uv(t.tex_coord(), t.texture().source().index())),
+        occlusion_strength: m.occlusion_texture().map_or(1.0, |t| t.strength()),
+        emissive: m.emissive_texture().and_then(|t| first_uv(t.tex_coord(), t.texture().source().index())),
+        emissive_factor: m.emissive_factor(),
+    }
 }
 
 /// What can go wrong importing a model.
@@ -295,6 +349,7 @@ impl Parts {
             material: name,
             base_color: [bcf[0], bcf[1], bcf[2]],
             texture,
+            maps: part_maps(material),
         });
         let idx = self.list.len() - 1;
         self.by_key.insert(key, idx);

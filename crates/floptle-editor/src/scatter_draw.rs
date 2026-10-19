@@ -741,7 +741,7 @@ mod tests {
         look.emissive_strength = 3.0;
         let asset = crate::MeshAsset {
             parts: vec![MeshId(4)],
-            part_meta: vec![crate::PartMeta { material: "Leaf".into(), base_color: [0.2, 0.4, 0.8], textured: false }],
+            part_meta: vec![crate::PartMeta { material: "Leaf".into(), base_color: [0.2, 0.4, 0.8], textured: false, imported: None }],
             tex_filter: None,
             size: 1.0,
             rig: None,

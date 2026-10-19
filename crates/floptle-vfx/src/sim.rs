@@ -143,7 +143,7 @@ pub const TRAIL_MAX_POINTS: usize = 32;
 /// Live particles of one track — structure-of-arrays, capacity-allocated once,
 /// retired by swap-remove so the arrays stay dense. Field packing is std430-ready:
 /// `pos_age` = position.xyz + age, `vel_life` = velocity.xyz + total lifetime,
-/// `frame` = birth-orientation quaternion, `misc` = [birth_size, speed_mul, spare, spare].
+/// `frame` = birth-orientation quaternion, `misc` = [birth_size, speed_mul, at rest on the level, spare].
 pub struct TrackParticles {
     pub pos_age: Vec<Vec4>,
     pub vel_life: Vec<Vec4>,
@@ -383,6 +383,21 @@ impl EffectInstance {
             ts.emit_counter = 0;
             ts.dropped = 0;
         }
+    }
+
+    /// Wake every particle resting on the level, so each asks it again next
+    /// step — call it when the level changed shape under them.
+    pub fn wake_resting(&mut self) {
+        for ts in &mut self.tracks {
+            for m in &mut ts.particles.misc {
+                m.z = 0.0;
+            }
+        }
+    }
+
+    /// How many particles are resting on the level, asking it nothing.
+    pub fn resting(&self) -> usize {
+        self.tracks.iter().map(|ts| ts.particles.misc.iter().filter(|m| m.z > 0.0).count()).sum()
     }
 
     /// Total live particles across all tracks.
@@ -655,12 +670,25 @@ impl EffectInstance {
             // scaled by the node, and a particle that never moves within the emitter
             // still lays its ribbon along the node's path.
             let emitter_path = !is_world && ct.trail_in_world();
+            // Only a World track's particle can come to rest: a Local one rides
+            // its emitter past the level, and a force or a velocity curve moves
+            // it on its own.
+            let may_rest = is_world && ct.forces.is_empty() && !ct.velocity_is_curve;
             let mut i = 0;
             while i < p.count {
                 let age = p.pos_age[i].w + dt;
                 let life = p.vel_life[i].w;
                 if age >= life {
                     p.swap_remove(i);
+                    continue;
+                }
+                // At rest on the level: it stays exactly where it landed and
+                // asks the level nothing until `wake_resting` says the level
+                // changed. Debris that has landed was otherwise a ray per
+                // particle per frame, every one of them a hit.
+                if may_rest && ct.collide.is_some() && p.misc[i].z > 0.0 {
+                    p.pos_age[i].w = age;
+                    i += 1;
                     continue;
                 }
                 let mut vel = p.vel_life[i].truncate();
@@ -702,6 +730,10 @@ impl EffectInstance {
                         }
                         // Just off the surface, so the next step starts outside it.
                         pos = space.of_world(at) + n * LEVEL_SKIN;
+                        if may_rest && settles(vel, g, n, c.friction) {
+                            vel = Vec3::ZERO;
+                            p.misc[i].z = 1.0;
+                        }
                     }
                 }
                 p.pos_age[i] = pos.extend(age);
@@ -744,6 +776,37 @@ pub type LevelHit<'a> = &'a dyn Fn(DVec3, DVec3) -> Option<(DVec3, Vec3)>;
 /// How far off a surface a particle that hit it is put back, so its next step
 /// begins outside what it landed on.
 const LEVEL_SKIN: f32 = 0.01;
+
+/// Below this speed along a surface (m/s) a particle that hits it can come to
+/// rest.
+const REST_SPEED: f32 = 0.02;
+
+/// Does a particle that just met a surface with outward normal `n` — moving at
+/// `vel` after the hit, and gaining `g` from gravity this step — stay there?
+///
+/// Only if gravity holds it on the surface, it bounced back no faster than one
+/// step of gravity takes away (so it would only fall straight back), and it is
+/// barely moving along the surface. And only if friction can hold it: each hit
+/// keeps `1 − friction` of the speed along the surface, so gravity's pull along
+/// a slope settles at `(1 − friction) · g_along / friction` a step. Under
+/// `REST_SPEED` the particle stays; above it, it slides.
+fn settles(vel: Vec3, g: Vec3, n: Vec3, friction: f32) -> bool {
+    let g_in = g.dot(n);
+    if g_in >= 0.0 {
+        return false;
+    }
+    let up = vel.dot(n);
+    let along = (vel - n * up).length();
+    let g_along = (g - n * g_in).length();
+    let creep = if g_along < 1e-6 {
+        0.0
+    } else if friction <= 0.0 {
+        f32::INFINITY
+    } else {
+        (1.0 - friction.min(1.0)) * g_along / friction
+    };
+    up <= -g_in && along < REST_SPEED && creep < REST_SPEED
+}
 
 /// Where a track's particles live, for turning their stored positions into the
 /// world's and back. A World track stores positions relative to the anchor; a
@@ -1133,6 +1196,62 @@ mod tests {
         let die = crate::effect::Collide { die: true, ..Default::default() };
         let (_, alive) = fall_onto_floor(Some(die), Space::World);
         assert_eq!(alive, 0, "set to die on contact, every one ends at the floor");
+    }
+
+    /// **Debris that has landed asks the level nothing.** Two hundred
+    /// particles dropped onto a floor come to rest, and from then on not one
+    /// ray is cast for them, until the level changes and wakes them — when
+    /// they ask again and settle back where they were.
+    #[test]
+    fn landed_particles_stop_casting_until_woken() {
+        let fx = one_track_effect(
+            Track {
+                clips: vec![burst_clip(0.0, 200, 10.0)],
+                velocity: ValueOrCurve::Const(Value::Vec3(Vec3::new(0.3, 0.0, 0.0))),
+                gravity: 1.0,
+                space: Space::World,
+                collide: Some(crate::effect::Collide { bounce: 0.0, friction: 1.0, die: false }),
+                ..Track::default()
+            },
+            10.0,
+            Playback::OneShot,
+        );
+        let mut inst = EffectInstance::new(fx, 5);
+        let rays = std::cell::Cell::new(0usize);
+        let counted = |from: DVec3, to: DVec3| {
+            rays.set(rays.get() + 1);
+            floor(from, to)
+        };
+        let level: LevelHit<'_> = &counted;
+        let step = |inst: &mut EffectInstance| {
+            inst.advance_in_level(1.0 / 60.0, Vec3::new(0.0, -9.81, 0.0), Transform::IDENTITY, Some(level));
+        };
+        for _ in 0..90 {
+            step(&mut inst);
+        }
+        assert_eq!(inst.alive(), 200);
+        assert_eq!(inst.resting(), 200, "every landed particle should be at rest");
+        let mut before = Vec::new();
+        inst.sample_track(0, |p| before.push(p.pos));
+        rays.set(0);
+        let t = floptle_core::time::Instant::now();
+        for _ in 0..60 {
+            step(&mut inst);
+        }
+        let per_frame = t.elapsed().as_secs_f64() * 1000.0 / 60.0;
+        assert_eq!(rays.get(), 0, "resting particles cast {} rays in a second", rays.get());
+        eprintln!("200 resting particles: {per_frame:.4} ms a frame");
+        inst.wake_resting();
+        step(&mut inst);
+        assert_eq!(rays.get(), 200, "woken, each particle asks the level once");
+        for _ in 0..10 {
+            step(&mut inst);
+        }
+        let mut after = Vec::new();
+        inst.sample_track(0, |p| after.push(p.pos));
+        let moved = before.iter().zip(&after).map(|(a, b)| a.distance(*b)).fold(0.0f32, f32::max);
+        assert!(moved < 0.012, "a woken particle settled {moved} m from where it rested");
+        assert_eq!(inst.resting(), 200);
     }
 
     #[test]

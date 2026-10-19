@@ -56,7 +56,9 @@ pub fn collect_billboards(
         let flip = ct.look.flipbook;
         let soft = ct.look.soft.max(0.0);
         let lit = if ct.look.lit { 1.0 } else { 0.0 };
-        let distortion = ct.look.distortion;
+        // The spare lane is the distortion strength for the Distortion blend,
+        // which has its own fragment stage, and the translucency for the rest.
+        let spare = if ct.look.blend == Blend::Distortion { ct.look.distortion } else { ct.look.translucency };
         let start = instances.len();
         inst.sample_track(ti, |s| {
             let world = xf.transform_point3(s.pos);
@@ -85,7 +87,7 @@ pub fn collect_billboards(
                 basis_up: [up.x, up.y, up.z, uv[3]],
                 params: [soft, 0.0, 0.0, 0.0],
                 light: [effect_up.x, effect_up.y, effect_up.z, lit],
-                extra: [next[0], next[1], t, distortion],
+                extra: [next[0], next[1], t, spare],
             });
         });
         if instances.len() == start {

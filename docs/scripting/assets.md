@@ -222,7 +222,7 @@ wearing it, which is usually the group you mean: one `Clothing` covers a torso
 and both arms).
 
 A handle is the material, whole: `texture`, `normalMap`, `roughnessMap`,
-`metallicMap`, `occlusionMap` by path (`""` clears one), `color` / `emissive` /
+`metallicMap`, `occlusionMap`, `emissiveMap` by path (`""` clears one), `color` / `emissive` /
 `specular` / `rim` as colours, and `alpha`, `roughness`, `metallic`,
 `emissiveStrength`, `unlit`, `fog`, `cell` as values. Reads answer with what you
 last wrote:

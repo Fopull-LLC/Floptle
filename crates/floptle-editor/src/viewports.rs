@@ -608,6 +608,8 @@ impl Editor {
                 fov_y: cam.projection.fov_y(),
                 ortho_height: cam.projection.ortho_height().unwrap_or(0.0),
                 valid: true,
+                camera: active.map(|e| e.index()),
+                proj: cam.proj_matrix(aspect).to_cols_array(),
             });
         }
         // Script `gizmo.*` shapes for the docked game tab, projected through the

@@ -438,6 +438,12 @@ fn map_d(p: vec3<f32>) -> f32 { return p.y + 0.55; }
 fn flsl_surface_gap(p: vec3<f32>) -> f32 { return max(p.y + 0.55, 0.0); }
 fn base_texel(in: VsOut) -> vec4<f32> { return textureSample(tex, samp, in.uv); }
 fn facing_normal(n: vec3<f32>, front: bool) -> vec3<f32> { return select(-n, n, front); }
+// A thumbnail has no Material maps or sky to reflect: `litPbr` previews as the
+// plain key light on its albedo.
+fn surface_pbr(in: VsOut, front: bool, albedo: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let n = facing_normal(normalize(normal), front);
+    return albedo * (g.ambient.rgb + key_light(in.view_pos, n, normalize(-in.view_pos), 32.0, vec2<u32>(0u)).diffuse);
+}
 "#;
 
 /// A synthetic frame for post-shader previews: a lit ball on a flat wall, with

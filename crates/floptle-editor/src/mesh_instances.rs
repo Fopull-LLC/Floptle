@@ -320,7 +320,21 @@ pub(crate) fn push_mesh_instances(
             // superseding. An untextured material means untextured, so it says
             // so with white.
             PartLook::Node(m) => (Some(tex.unwrap_or_else(|| raster.white_texture(gpu))), *m, None),
-            PartLook::Imported(base) => (tex, MaterialParams::flat(base), None),
+            // A part whose file names maps or a glow draws them, through the
+            // same function an override with those maps would.
+            PartLook::Imported(base) => match asset.part_meta.get(part).and_then(|pm| pm.imported.as_ref()) {
+                Some(look) => {
+                    let (t, p) = crate::shading::material_draw_with(
+                        raster,
+                        gpu,
+                        &look.material,
+                        look.base,
+                        Some(look.maps),
+                    );
+                    (t, p, None)
+                }
+                None => (tex, MaterialParams::flat(base), None),
+            },
         }
     };
     // Vertex paint is per-part: import splits a model per-material into parts with

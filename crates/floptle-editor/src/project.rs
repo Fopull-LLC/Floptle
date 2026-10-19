@@ -592,6 +592,7 @@ impl Editor {
                     .iter()
                     .map(|p| raster.register_sampled(gpu, &p.mesh, p.texture.map(|i| &model.textures[i]), sampling))
                     .collect();
+                let mut images = std::collections::HashMap::new();
                 let part_meta = model
                     .parts
                     .iter()
@@ -599,6 +600,14 @@ impl Editor {
                         material: p.material.clone(),
                         base_color: p.base_color,
                         textured: p.texture.is_some(),
+                        imported: imported_look(
+                            gpu,
+                            raster,
+                            &model.textures,
+                            (p.texture, p.base_color, &p.maps),
+                            overrides.texture_filter,
+                            &mut images,
+                        ),
                     })
                     .collect();
                 let mut rig = anim::rig_from_model(&model, &overrides);
@@ -637,6 +646,7 @@ impl Editor {
                     .iter()
                     .map(|p| raster.register_sampled(gpu, &p.mesh, p.texture.map(|i| &model.textures[i]), sampling))
                     .collect();
+                let mut images = std::collections::HashMap::new();
                 let part_meta = model
                     .parts
                     .iter()
@@ -644,6 +654,14 @@ impl Editor {
                         material: p.material.clone(),
                         base_color: p.base_color,
                         textured: p.texture.is_some(),
+                        imported: imported_look(
+                            gpu,
+                            raster,
+                            &model.textures,
+                            (p.texture, p.base_color, &p.maps),
+                            overrides.texture_filter,
+                            &mut images,
+                        ),
                     })
                     .collect();
                 self.mesh_registry.insert(
@@ -2924,6 +2942,53 @@ pub(crate) fn scenes_shadowed_by_a_root_copy(root: &Path) -> Vec<String> {
     }
     out.sort();
     out
+}
+
+/// A model part's surface from its file — `(base image, base colour, maps)` —
+/// as a material and the images it binds, or `None` when the file names only
+/// a base colour (the part then draws as it always has).
+///
+/// glTF materials are metal-rough, so a part with a metallic-roughness map
+/// shades physically; one with only a normal, occlusion or emissive map keeps
+/// the classic model, because glTF's default factors (metallic 1, roughness 1)
+/// would turn every untextured export into black metal. Each image is uploaded
+/// once per model however many parts and slots use it (`images`).
+pub(crate) fn imported_look(
+    gpu: &floptle_render::Gpu,
+    raster: &mut floptle_render::Raster,
+    textures: &[floptle_render::TextureData],
+    part: (Option<usize>, [f32; 3], &floptle_assets::gltf_import::PartMaps),
+    filter: Option<crate::assets::FilterMode>,
+    images: &mut std::collections::HashMap<usize, floptle_render::TexId>,
+) -> Option<crate::ImportedLook> {
+    let (base_image, base_color, maps) = part;
+    if !maps.any() {
+        return None;
+    }
+    let sampling = crate::assets::TexSetting { filter: filter.unwrap_or_default(), ..Default::default() }.to_sampling();
+    let mut tex = |i: Option<usize>| -> Option<floptle_render::TexId> {
+        let i = i?;
+        let data = textures.get(i)?;
+        Some(*images.entry(i).or_insert_with(|| raster.register_texture(gpu, data, sampling)))
+    };
+    let mut m = floptle_core::Material::tinted(base_color);
+    if maps.metallic_roughness.is_some() {
+        m.shading = floptle_core::Shading::Physical;
+        m.metallic = maps.metallic;
+        m.roughness = maps.roughness;
+    }
+    m.normal_strength = maps.normal_scale;
+    m.occlusion_strength = maps.occlusion_strength;
+    m.emissive = maps.emissive_factor;
+    m.emissive_strength = if maps.emissive_factor.iter().any(|&c| c > 0.0) { 1.0 } else { 0.0 };
+    let base = tex(base_image);
+    let mr = tex(maps.metallic_roughness);
+    let look = crate::ImportedLook {
+        base,
+        maps: [tex(maps.normal), mr, mr, tex(maps.occlusion), tex(maps.emissive)],
+        material: m,
+    };
+    Some(look)
 }
 
 // These exercise the authoring half — the dock, the Inspector, the

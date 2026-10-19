@@ -48,7 +48,7 @@ const OFFSCREEN_SRC: &str = include_str!("../src/offscreen.rs");
 /// The calls that put world geometry into a frame. Each must appear on both
 /// paths; a call that exists on only one is a kind of object some views cannot
 /// see.
-const GATHERS: [(&str, &str); 16] = [
+const GATHERS: [(&str, &str); 18] = [
     ("push_mesh_instances", "imported models, map meshes, skinned characters"),
     // Not geometry either, but the same failure with a different face: a node's
     // Tint multiplies over everything it drew. Applied on one path only, a
@@ -111,6 +111,13 @@ const GATHERS: [(&str, &str); 16] = [
     // The body a round world's fog is measured from, camera-relative like
     // every other lane of its kind.
     ("fog_body_lane", "the planet a round world's fog follows"),
+    // Each world's cloud deck and star aureole, and the air the flat fog
+    // stays inside.
+    ("stamp_air_style", "a world's clouds, aureole and the fog's shell"),
+    // A node Material's surface maps and extras (Physical shading, retro
+    // flags): the offscreen gather took the base texture alone, so every
+    // shot and capture drew a normal-mapped Physical surface flat.
+    ("material_draw", "a node Material's surface maps and shading model"),
 ];
 
 /// The body of `render_world_into`, from its signature to the end of its file.

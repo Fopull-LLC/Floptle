@@ -331,6 +331,13 @@ pub struct Material {
     pub ao_map: Option<String>,
     /// How much of the AO map to apply (`0` = ignore it, `1` = as authored).
     pub occlusion_strength: f32,
+    /// An emissive map (project-relative path): where the surface glows, and in
+    /// what colour. Multiplies [`emissive`](Self::emissive) ×
+    /// [`emissive_strength`](Self::emissive_strength), so a lit console screen
+    /// or a row of windows glows only where the picture says, on the same
+    /// material as the hull around it. Unset binds white: the plain emissive
+    /// colour everywhere, as before there was a map.
+    pub emissive_map: Option<String>,
     /// How much of the environment this surface reflects — the sky, and
     /// whatever else the renderer captures into the environment map.
     ///
@@ -448,6 +455,7 @@ impl Default for Material {
             metallic: 0.0,
             ao_map: None,
             occlusion_strength: 1.0,
+            emissive_map: None,
             reflectivity: 1.0,
             transmission: 0.0,
             ior: 1.5,
@@ -474,15 +482,16 @@ impl Material {
         Self { color, ..Self::default() }
     }
 
-    /// The four surface maps in the order the renderer binds them:
-    /// normal, roughness, metallic, occlusion. A `None` binds that slot's
-    /// neutral default, so this is safe to call on any material.
-    pub fn maps(&self) -> [Option<&String>; 4] {
+    /// The five surface maps in the order the renderer binds them:
+    /// normal, roughness, metallic, occlusion, emissive. A `None` binds that
+    /// slot's neutral default, so this is safe to call on any material.
+    pub fn maps(&self) -> [Option<&String>; 5] {
         [
             self.normal_map.as_ref(),
             self.roughness_map.as_ref(),
             self.metallic_map.as_ref(),
             self.ao_map.as_ref(),
+            self.emissive_map.as_ref(),
         ]
     }
 

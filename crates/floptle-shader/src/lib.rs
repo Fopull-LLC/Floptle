@@ -417,6 +417,20 @@ shader duo {
             .unwrap_or_else(|e| panic!("naga rejects: {} (chunk line {:?})\n{}", e.message, e.chunk_line, compiled.chunk));
     }
 
+    /// `litPbr` and the screen derivatives transpile to valid WGSL, the
+    /// scorch example the shader docs give included.
+    #[test]
+    fn lit_pbr_and_the_derivatives_compile() {
+        let src = "shader scorch {\n  stage fragment\n  let scorch = smoothstep(0.4, 0.6, noise(worldPos * 2))\n  \
+                   let edge = smoothstep(0, fwidth(uv.x), uv.x - 0.5) + dpdx(uv.y) + dpdy(uv.x)\n  \
+                   let lit = litPbr(baseTexture().rgb * mix(1, 0.2, scorch)) + litPbr(vec3(edge), normal)\n  \
+                   output color = vec4(lit, 1)\n}\n";
+        let compiled = compile_fragment(src).expect("compiles");
+        assert!(compiled.chunk.contains("surface_pbr(in, front,"), "{}", compiled.chunk);
+        transpile::validate(transpile::TEST_PRELUDE, &compiled.chunk)
+            .unwrap_or_else(|e| panic!("naga rejects: {} (chunk line {:?})\n{}", e.message, e.chunk_line, compiled.chunk));
+    }
+
     #[test]
     fn the_new_shader_template_compiles() {
         let compiled = compile_fragment(NEW_SHADER_TEMPLATE).expect("template compiles");

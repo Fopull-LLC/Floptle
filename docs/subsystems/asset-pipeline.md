@@ -27,8 +27,9 @@ with the `gltf` crate, which gives direct buffer access for fast upload.
   [`./materials-and-textures.md`](./materials-and-textures.md)). Split per-primitive
   (per-material). *Tangents and UV sets beyond 0 are not imported yet.*
 - **PBR materials** — base color, metallic/roughness, normal, emissive,
-  occlusion. These **seed** Floptle materials ([`./materials-and-textures.md`](./materials-and-textures.md))
-  which we then enrich; glTF PBR maps onto a built-in `lit_textured`-style shader.
+  occlusion, textures and factors (UV set 0). A part draws them as the same
+  maps set by hand on a material would ([`./materials-and-textures.md`](./materials-and-textures.md),
+  "The maps").
 - **Skins** — joints + inverse-bind matrices, for skeletal animation.
 - **Animations** — TRS keyframe channels → clips consumed by `floptle-anim`
   ([`./animation.md`](./animation.md)).

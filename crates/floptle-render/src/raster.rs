@@ -404,18 +404,19 @@ fn make_globals_bind(
     })
 }
 
-/// The five surface maps a draw binds, in group(1) order: base colour, normal,
-/// roughness, metallic, occlusion. Each slot is a texture + its own sampler, so
+/// The six surface maps a draw binds, in group(1) order: base colour, normal,
+/// roughness, metallic, occlusion, emissive. Each slot is a texture + its own sampler, so
 /// a normal map can be crisp while the albedo is filtered.
 ///
 /// Every slot has a NEUTRAL default rather than a shader branch: white for the
 /// three scalar maps (× a scalar that is 1, or 0 for metallic) and a flat
-/// `(0.5, 0.5, 1)` for the normal. A material that names no map therefore shades
+/// `(0.5, 0.5, 1)` for the normal; white for the emissive map too, which
+/// multiplies the material's emissive colour. A material that names no map therefore shades
 /// bit-for-bit as it did before v0.43, and there is no "is a map bound" flag
 /// anywhere that could disagree with what is actually bound.
-const SURFACE_SLOTS: usize = 5;
+const SURFACE_SLOTS: usize = 6;
 
-/// Build a group(1) bind group from five (view, sampler) pairs.
+/// Build a group(1) bind group from six (view, sampler) pairs.
 pub(crate) fn make_surface_bind(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -436,7 +437,7 @@ pub(crate) fn make_surface_bind(
     device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some(label), layout, entries: &entries })
 }
 
-/// The group(1) layout: five texture + sampler pairs (see [`SURFACE_SLOTS`]).
+/// The group(1) layout: six texture + sampler pairs (see [`SURFACE_SLOTS`]).
 pub(crate) fn surface_bind_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     let mut entries = Vec::with_capacity(SURFACE_SLOTS * 2);
     for i in 0..SURFACE_SLOTS as u32 {
@@ -2129,18 +2130,21 @@ impl Raster {
         let white = linear_view_of(&self.default_tex);
         let n = (&self.flat_normal_view, &self.neutral_samp);
         let w = (&white, &self.neutral_samp);
-        make_surface_bind(&gpu.device, &self.tex_layout, label, [(view, samp), n, w, w, w])
+        let srgb_white = self.default_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let e = (&srgb_white, &self.neutral_samp);
+        make_surface_bind(&gpu.device, &self.tex_layout, label, [(view, samp), n, w, w, w, e])
     }
 
-    /// The [`TexId`] whose group(1) binds all five maps at once: `base` in the
-    /// colour slot and `maps` = `[normal, roughness, metallic, occlusion]`, each
+    /// The [`TexId`] whose group(1) binds all six maps at once: `base` in the
+    /// colour slot and `maps` = `[normal, roughness, metallic, occlusion,
+    /// emissive]`, each
     /// `None` taking its neutral default.
     ///
     /// The result is a perfectly ordinary `TexId`, so the whole draw path —
     /// bucketing, instancing, the custom-shader path, the particle pass — needs
     /// no idea that surface maps exist. Sets are cached by the ids they bind, so
     /// asking every frame (which the editor does) costs a hash lookup.
-    pub fn material_set(&mut self, gpu: &Gpu, base: Option<TexId>, maps: [Option<TexId>; 4]) -> TexId {
+    pub fn material_set(&mut self, gpu: &Gpu, base: Option<TexId>, maps: [Option<TexId>; 5]) -> TexId {
         let key = {
             let mut k = [u32::MAX; SURFACE_SLOTS];
             k[0] = base.map_or(u32::MAX, |t| t.0);
@@ -2190,6 +2194,8 @@ impl Raster {
                 slot(key[2], false, true),
                 slot(key[3], false, true),
                 slot(key[4], false, true),
+                // The emissive map is a colour, stored as a picture is.
+                slot(key[5], false, false),
             ],
         );
         // The set's own `view` / `_texture` mirror its BASE, so `texture_view`

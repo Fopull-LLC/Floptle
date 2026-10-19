@@ -172,3 +172,46 @@ fn heat_haze_bends_the_scene_behind_it() {
     assert!(still[0] > 200 && still[1] < 50, "unbent, the haze shows the red behind it: {still:?}");
     assert!(bent[1] > 200 && bent[0] < 50, "bent, it shows the green from further right: {bent:?}");
 }
+
+/// **Smoke against a low sun glows where it is thin.** The same lit quad with
+/// the key light straight behind it, at a thin alpha and an opaque one: with
+/// translucency 0.6 the thin one reads clearly brighter than with none, and
+/// the opaque core does not change. Lit from the front, translucency changes
+/// nothing at all.
+#[test]
+fn backlit_smoke_glows_at_its_thin_edge_and_keeps_a_dark_core() {
+    let Some((gpu, mut particles, raster)) = device() else { return };
+    let proj = Mat4::perspective_rh(1.0, 1.0, 0.1, 100.0);
+    let mut shot = |toward_light: [f32; 3], alpha: f32, translucency: f32| {
+        let (tex, view) = target(&gpu, "backlit");
+        clear(&gpu, &view);
+        // No ground under it: the day term stays out of the way.
+        let mut q = quad(1.0, [0.0; 3]);
+        q.color = [1.0, 1.0, 1.0, alpha];
+        q.extra = [0.0, 0.0, 0.0, translucency];
+        let mut gl = globals(proj);
+        gl.light_dir = [toward_light[0], toward_light[1], toward_light[2], 0.0];
+        particles.draw(
+            &gpu,
+            &view,
+            gpu.depth_view(),
+            gl,
+            &[q],
+            &[ParticleBatch { texture: None, blend: ParticleBlend::Alpha, range: 0..1 }],
+            &raster,
+            None,
+        );
+        let px = floptle_render::probe::readback(&gpu, &tex);
+        px[(SIZE / 2 * SIZE + SIZE / 2) as usize][0] as i32
+    };
+    // The camera looks down -Z at the quad; the light is beyond it, or behind the eye.
+    let (behind, front) = ([0.0, 0.0, -1.0], [0.0, 0.0, 1.0]);
+    let (thin_off, thin_on) = (shot(behind, 0.35, 0.0), shot(behind, 0.35, 0.6));
+    assert!(thin_on > thin_off + 15, "backlit, the thin edge did not glow: {thin_off} → {thin_on}");
+    let (core_off, core_on) = (shot(behind, 1.0, 0.0), shot(behind, 1.0, 0.6));
+    assert!((core_on - core_off).abs() <= 1, "an opaque core must stay dark: {core_off} → {core_on}");
+    for alpha in [0.35, 1.0] {
+        let (off, on) = (shot(front, alpha, 0.0), shot(front, alpha, 0.6));
+        assert_eq!(off, on, "front-lit at alpha {alpha}, translucency changed the picture");
+    }
+}

@@ -44,8 +44,8 @@ fn main() {
     let flat: Vec<u8> = (0..n * n).flat_map(|_| [128u8, 128, 255, 255]).collect();
     let bump_tex = raster.register_texture(&gpu, &TextureData { pixels: bump, width: n, height: n }, TexSampling::default());
     let flat_tex = raster.register_texture(&gpu, &TextureData { pixels: flat, width: n, height: n }, TexSampling::default());
-    let bumpy = raster.material_set(&gpu, Some(tex), [Some(bump_tex), None, None, None]);
-    let flat_set = raster.material_set(&gpu, Some(tex), [Some(flat_tex), None, None, None]);
+    let bumpy = raster.material_set(&gpu, Some(tex), [Some(bump_tex), None, None, None, None]);
+    let flat_set = raster.material_set(&gpu, Some(tex), [Some(flat_tex), None, None, None, None]);
 
     let data: Vec<u32> = (0..COLS * ROWS).map(|_| 0).collect();
     let md = mesh::tilemap(COLS, ROWS, 1.0, 1, 1, [0.0, 0.0], &data);

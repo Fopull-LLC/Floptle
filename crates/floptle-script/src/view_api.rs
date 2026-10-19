@@ -13,6 +13,8 @@ use std::rc::Rc;
 use glam::{DVec3, Mat4, Vec4};
 use mlua::Lua;
 
+use crate::SceneMirror;
+
 /// The active game camera + viewport for this frame (fed by the editor).
 #[derive(Clone, Debug)]
 pub struct ViewInfo {
@@ -41,6 +43,19 @@ pub struct ViewInfo {
     pub ortho_height: f32,
     /// False until the editor has fed a real camera (screen queries no-op).
     pub valid: bool,
+    /// The camera node this view is of, when it is one: the projections below
+    /// then take its transform from the scene as it stands when the script
+    /// asks, not as it stood when the renderer last drew.
+    ///
+    /// The renderer feeds this view, so without it a script projected with the
+    /// previous frame's camera. On a world that moves between frames — a
+    /// planet on rails, and the camera following it — every planet-fixed point
+    /// came out off by that frame's motion, and a label pinned to one shook by
+    /// however many ticks the frame happened to run.
+    pub camera: Option<u32>,
+    /// The projection alone (`cam.proj_matrix(aspect)`), column-major — what
+    /// `view_proj` is built from once the camera's live rotation is known.
+    pub proj: [f32; 16],
 }
 
 impl Default for ViewInfo {
@@ -55,11 +70,29 @@ impl Default for ViewInfo {
             fov_y: 60f32.to_radians(),
             ortho_height: 0.0,
             valid: false,
+            camera: None,
+            proj: [0.0; 16],
         }
     }
 }
 
-pub(crate) fn install_camera_api(lua: &Lua, view: Rc<RefCell<ViewInfo>>) {
+/// The view-projection and camera position to project with right now: the
+/// camera node's transform in the script mirror — which carries every write
+/// made so far this pass — when the view names a camera the mirror holds, and
+/// the view as last drawn otherwise (the editor's own camera, or no camera).
+fn live_view(v: &ViewInfo, scene: &RefCell<SceneMirror>) -> (Mat4, DVec3) {
+    if let Some(e) = v.camera
+        && let Ok(s) = scene.try_borrow()
+        && s.transforms.contains_key(&e)
+    {
+        let wt = crate::api::world_transform_of(&s, e);
+        let vp = Mat4::from_cols_array(&v.proj) * Mat4::from_quat(wt.rotation.conjugate());
+        return (vp, wt.translation);
+    }
+    (Mat4::from_cols_array(&v.view_proj), DVec3::from(v.cam_world))
+}
+
+pub(crate) fn install_camera_api(lua: &Lua, view: Rc<RefCell<ViewInfo>>, scene: Rc<RefCell<SceneMirror>>) {
     let Ok(t) = lua.create_table() else { return };
 
     // camera.exists() — true once the editor is feeding a live game camera.
@@ -89,6 +122,7 @@ pub(crate) fn install_camera_api(lua: &Lua, view: Rc<RefCell<ViewInfo>>) {
     // know: it is the projection, which the renderer already has.
     {
         let v = view.clone();
+        let sc = scene.clone();
         if let Ok(f) = lua.create_function(move |_, distance: Option<f32>| {
             let v = v.borrow();
             if !v.valid {
@@ -108,10 +142,7 @@ pub(crate) fn install_camera_api(lua: &Lua, view: Rc<RefCell<ViewInfo>>) {
                 // flat game is built around the origin plane, and asking for the
                 // number at "where my game is" should not require restating
                 // where that is.
-                let d = distance.unwrap_or_else(|| {
-                    let c = DVec3::from(v.cam_world);
-                    c.length() as f32
-                });
+                let d = distance.unwrap_or_else(|| live_view(&v, &sc).1.length() as f32);
                 let half = (v.fov_y * 0.5).tan().max(1e-6);
                 2.0 * d.abs().max(1e-6) * half
             };
@@ -144,13 +175,15 @@ pub(crate) fn install_camera_api(lua: &Lua, view: Rc<RefCell<ViewInfo>>) {
     // Lua should skip those when finding the nearest orbit point to the cursor.
     {
         let v = view.clone();
+        let sc = scene.clone();
         if let Ok(f) = lua.create_function(move |_, (x, y, z): (f64, f64, f64)| {
             let v = v.borrow();
             if !v.valid {
                 return Ok((0.0f32, 0.0f32, 0.0f32, false));
             }
-            let rel = (DVec3::new(x, y, z) - DVec3::from(v.cam_world)).as_vec3();
-            let clip = Mat4::from_cols_array(&v.view_proj) * rel.extend(1.0);
+            let (view_proj, cam_world) = live_view(&v, &sc);
+            let rel = (DVec3::new(x, y, z) - cam_world).as_vec3();
+            let clip = view_proj * rel.extend(1.0);
             if clip.w <= 1e-4 {
                 return Ok((0.0f32, 0.0f32, 0.0f32, false)); // behind the camera
             }
@@ -168,20 +201,22 @@ pub(crate) fn install_camera_api(lua: &Lua, view: Rc<RefCell<ViewInfo>>) {
     // the cursor (origin on the near plane, unit direction into the scene).
     {
         let v = view.clone();
+        let sc = scene;
         if let Ok(f) = lua.create_function(move |_, (sx, sy): (f32, f32)| {
             let v = v.borrow();
             if !v.valid || v.vp_w <= 0.0 || v.vp_h <= 0.0 {
                 return Ok((0.0f64, 0.0, 0.0, 0.0, 0.0, 1.0));
             }
+            let (view_proj, cam_world) = live_view(&v, &sc);
             let nx = ((sx - v.vp_x) / v.vp_w) * 2.0 - 1.0;
             let ny = 1.0 - ((sy - v.vp_y) / v.vp_h) * 2.0;
-            let inv = Mat4::from_cols_array(&v.view_proj).inverse();
+            let inv = view_proj.inverse();
             let near = inv * Vec4::new(nx, ny, 0.0, 1.0); // wgpu near plane z=0
             let far = inv * Vec4::new(nx, ny, 1.0, 1.0);
             let np = near.truncate() / near.w; // camera-relative
             let fp = far.truncate() / far.w;
             let dir = (fp - np).normalize_or_zero();
-            let o = DVec3::from(v.cam_world) + np.as_dvec3();
+            let o = cam_world + np.as_dvec3();
             Ok((o.x, o.y, o.z, dir.x as f64, dir.y as f64, dir.z as f64))
         }) {
             let _ = t.set("screenToRay", f);
@@ -213,6 +248,8 @@ mod tests {
             fov_y: 1.0,
             ortho_height: 0.0,
             valid: true,
+            camera: None,
+            proj: proj.to_cols_array(),
         }
     }
 
@@ -282,6 +319,8 @@ mod tests {
             fov_y: 2.0 * (height * 0.5).atan(),
             ortho_height: height,
             valid: true,
+            camera: None,
+            proj: proj.to_cols_array(),
         };
 
         let near = lua_with(info(9.33));
@@ -310,7 +349,7 @@ mod tests {
 
     fn lua_with(view: ViewInfo) -> Lua {
         let lua = Lua::new();
-        install_camera_api(&lua, Rc::new(RefCell::new(view)));
+        install_camera_api(&lua, Rc::new(RefCell::new(view)), Rc::default());
         lua
     }
 

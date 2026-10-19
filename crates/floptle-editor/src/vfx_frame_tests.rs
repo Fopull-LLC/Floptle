@@ -390,3 +390,153 @@ fn a_sky_shader_draws_the_same_through_an_orthographic_camera() {
     let worst = persp.iter().zip(&ortho).map(|(a, b)| (*a as i32 - *b as i32).abs()).max().unwrap();
     assert!(worst <= 4, "the orthographic sky differs from the perspective one by up to {worst}");
 }
+
+/// A World-space burst that drops onto the level under gravity and collides
+/// with it, spread over a ring so the particles land apart.
+fn falling_debris(friction: f32) -> floptle_scene::VfxEffectDoc {
+    let mut doc = still_puff("Debris", VfxShapeDoc::Ring { radius: 1.5 });
+    let t = &mut doc.tracks[0];
+    t.gravity = 1.0;
+    t.collide = Some(floptle_scene::VfxCollideDoc { bounce: 0.0, friction, die: false });
+    doc
+}
+
+/// Play a scene with `floor` (a static box) under a `falling_debris` burst
+/// fired at `at`, with the camera — and so the sim's origin — beside it, and
+/// hand back each frame's particle positions in metres from `at`, and how
+/// many rest on the level at the end.
+fn drop_debris(
+    tag: &str,
+    at: DVec3,
+    floor: (DVec3, floptle_core::math::Quat),
+    friction: f32,
+    frames: usize,
+) -> (Vec<Vec<Vec3>>, usize) {
+    use floptle_core::{BodyKind, BodyMode, RigidBody};
+    let dir = std::env::temp_dir().join(format!("floptle-debris-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    floptle_scene::save_vfx_effect(&falling_debris(friction), &dir.join("vfx/Debris.vfx.ron")).unwrap();
+    let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+    ed.vfx.rescan(&dir);
+    let slab = ed.world.spawn();
+    ed.world.insert(slab, Transform { translation: floor.0, rotation: floor.1, ..Transform::IDENTITY });
+    let body = RigidBody { kind: BodyKind::Box, mode: BodyMode::Static, half_extents: [20.0, 1.0, 20.0], ..Default::default() };
+    ed.world.insert(slab, body);
+    let cam = ed.world.spawn();
+    ed.world.insert(cam, Transform { translation: at + DVec3::new(0.0, 3.0, 12.0), ..Transform::IDENTITY });
+    ed.world.insert(
+        cam,
+        Matter::Camera {
+            fov_y: 1.0,
+            active: true,
+            target: String::new(),
+            cull_mask: u32::MAX,
+            target_w: 0,
+            target_h: 0,
+            target_hz: 0.0,
+            ortho: false,
+            ortho_height: 10.0,
+            stack: Vec::new(),
+        },
+    );
+    let fx = ed.world.spawn();
+    ed.world.insert(fx, Transform { translation: at, ..Transform::IDENTITY });
+    ed.world.insert(fx, floptle_core::ParticleSystem { asset: "vfx/Debris".into(), play_on_start: true });
+    ed.toggle_play();
+    let mut out = Vec::new();
+    for _ in 0..frames {
+        ed.play_step(1.0 / 60.0, true);
+        let mut now = Vec::new();
+        if let Some((_, inst)) = ed.vfx.instances.get(&fx) {
+            let anchor = inst.anchor();
+            inst.sample_track(0, |p| now.push(((anchor - at).as_vec3()) + p.pos));
+        }
+        out.push(now);
+    }
+    let resting = ed.vfx.instances.get(&fx).map_or(0, |(_, inst)| inst.resting());
+    let _ = std::fs::remove_dir_all(&dir);
+    (out, resting)
+}
+
+/// **Landed debris lies still megametres from the origin, as it does at it.**
+/// A bounce 0, friction 1 drop onto a flat floor. The hit point used to come
+/// back as f32 world coordinates, which 4.9 Mm out snap to a half-metre grid:
+/// every hit moved the particle onto the grid and it fell back, hopping about
+/// a tenth of a metre a frame. At rest it now does not move at all, and sits
+/// within a skin of the floor.
+#[test]
+fn landed_debris_lies_still_far_from_the_origin() {
+    // The floor's top sits off the f32 grid out there (0.5 m), as ground does.
+    for y in [0.3f64, 4.9e6 + 0.3] {
+        let at = DVec3::new(0.0, y + 2.0, 0.0);
+        let floor = (DVec3::new(0.0, y - 1.0, 0.0), Default::default());
+        let (frames, resting) = drop_debris(&format!("far{y}"), at, floor, 1.0, 150);
+        let (a, b) = (&frames[120], &frames[149]);
+        assert_eq!(a.len(), 8, "y = {y}: the burst is not all there");
+        assert_eq!(resting, 8, "y = {y}: landed debris should be at rest, asking the level nothing");
+        let mut worst = 0.0f32;
+        for w in frames[120..].windows(2) {
+            for (p, q) in w[0].iter().zip(&w[1]) {
+                worst = worst.max(p.distance(*q));
+            }
+        }
+        assert!(worst < 1e-5, "y = {y}: landed particles moved {worst} m between frames");
+        for p in b {
+            // Two metres up from the emitter is the floor's top.
+            let above = p.y + 2.0;
+            assert!((0.0..=0.015).contains(&above), "y = {y}: a particle rests {above} m off the floor");
+        }
+    }
+}
+
+/// **A landed particle with little friction slides down a slope**, held
+/// within a skin of it. Each hit put it back where it touched down, and a
+/// particle a centimetre off a surface counted as touching it at the start of
+/// every step, so it could not slide at all and hovered.
+#[test]
+fn a_landed_particle_slides_down_a_slope() {
+    use floptle_core::math::Quat;
+    let tilt = Quat::from_rotation_z(20f32.to_radians());
+    let at = DVec3::new(0.0, 3.0, 0.0);
+    let (frames, _) = drop_debris("slope", at, (DVec3::ZERO, tilt), 0.1, 120);
+    let n = tilt * Vec3::Y;
+    // The slab's top face passes through the centre plus its normal.
+    let off = |p: Vec3| (p + at.as_vec3() - n).dot(n);
+    let (a, b) = (&frames[60], &frames[119]);
+    assert_eq!(a.len(), 8, "the burst is not all there");
+    for (p, q) in a.iter().zip(b) {
+        assert!(off(*p) < 0.1, "it never reached the slope: {} m off", off(*p));
+        assert!(p.distance(*q) > 0.2, "a particle at friction 0.1 on a 20° slope moved {} m in a second", p.distance(*q));
+    }
+    for f in &frames[60..] {
+        for p in f {
+            let d = off(*p);
+            assert!((-0.002..=0.015).contains(&d), "a sliding particle rides {d} m off the slope");
+        }
+    }
+}
+
+/// **`perf.counts().particles` answers on a frame nobody drew.** The count
+/// was filled in only by the draw gather, so `floptle run` — which draws no
+/// frame at all — and the undrawn frames of a `shot --after` read 0 while the
+/// particles were live.
+#[test]
+fn particle_counts_are_filled_in_without_a_draw() {
+    let dir = std::env::temp_dir().join(format!("floptle-undrawn-counts-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    floptle_scene::save_vfx_effect(&still_puff("Puff", VfxShapeDoc::Point), &dir.join("vfx/Puff.vfx.ron")).unwrap();
+    let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+    ed.vfx.rescan(&dir);
+    let fx = ed.world.spawn();
+    ed.world.insert(fx, Transform::IDENTITY);
+    ed.world.insert(fx, floptle_core::ParticleSystem { asset: "vfx/Puff".into(), play_on_start: true });
+    ed.script_host.profile().borrow_mut().enable(true);
+    ed.toggle_play();
+    for _ in 0..5 {
+        ed.play_step(1.0 / 60.0, true);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(ed.vfx.live_particles(), 8, "the fixture: the puff is live");
+    let counted = ed.script_host.profile().borrow().counts().particles;
+    assert_eq!(counted, 8, "perf.counts().particles on an undrawn frame");
+}

@@ -2137,8 +2137,8 @@ fn make_atlas(device: &wgpu::Device, size: u32) -> wgpu::Texture {
 
 /// A group(1) ELEMENT bind for one texture, in the raster surface shape.
 ///
-/// The UI has one picture per element, and the surface layout has five slots —
-/// so the same view and sampler fill all five. The four extra slots are never
+/// The UI has one picture per element, and the surface layout has six slots —
+/// so the same view and sampler fill all six. The five extra slots are never
 /// read (ui.wgsl declares bindings 0 and 1 only); they exist so that this bind
 /// and a raster material's bind are the same shape, which is what lets a
 /// project texture be drawn by the UI without re-registering it.
@@ -2151,7 +2151,7 @@ fn make_elem_bind(
 ) -> wgpu::BindGroup {
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
     let slot = (&view, sampler);
-    crate::raster::make_surface_bind(device, layout, label, [slot, slot, slot, slot, slot])
+    crate::raster::make_surface_bind(device, layout, label, [slot, slot, slot, slot, slot, slot])
 }
 
 /// Draw the ▯ box into the atlas's reserved top-left corner: a hollow square

@@ -361,6 +361,10 @@ pub struct VfxTrackDoc {
     /// Full scene lighting per particle (default off — classic crisp VFX).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lit: bool,
+    /// A lit billboard's light from behind, 0..1: how much of the key light
+    /// shines through its thin edges toward the camera (default 0).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub translucency: f32,
     /// Billboards fade out over this many world units in front of whatever they
     /// intersect (0 = a hard edge).
     #[serde(default = "default_soft", skip_serializing_if = "is_default_soft")]
@@ -767,6 +771,7 @@ mod tests {
                 wave_frequency: 2.0,
                 scroll: 0.0,
                 lit: false,
+                translucency: 0.0,
                 soft: DEFAULT_SOFT,
                 cast_shadows: false,
                 distortion: 0.015,

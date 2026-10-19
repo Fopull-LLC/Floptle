@@ -86,7 +86,7 @@ fn find_camera(
 /// so every HUD that sizes itself from the screen fell back to a guess and a
 /// shot could not say whether a layout survives 1440p. `input.mouse()` shares
 /// the space by construction: the rect's origin is 0, 0.
-fn feed_view(ed: &mut crate::Editor, named: Option<&str>, w: u32, h: u32) {
+pub(crate) fn feed_view(ed: &mut crate::Editor, named: Option<&str>, w: u32, h: u32) {
     let Some((e, fov_y, _, ortho, ortho_height)) = find_camera(ed, named) else { return };
     let wt = floptle_core::world_transform(&ed.world, e);
     let cam = RenderCamera::new(
@@ -106,7 +106,28 @@ fn feed_view(ed: &mut crate::Editor, named: Option<&str>, w: u32, h: u32) {
         fov_y: cam.projection.fov_y(),
         ortho_height: cam.projection.ortho_height().unwrap_or(0.0),
         valid: true,
+        camera: Some(e.index()),
+        proj: cam.proj_matrix(aspect).to_cols_array(),
     });
+}
+
+/// Bring the terrain's chunk meshes up to date, as the frame loop does before
+/// it draws anything: the field changes, the LOD rings follow the camera, and
+/// finished meshes reach the GPU.
+///
+/// A headless play has no frame loop, so without this every `camera.capture`
+/// and render target drawn during `--after` showed the chunks as they were
+/// when Play began — coarse rings near the camera, or none — and a planet's
+/// sea showed through where the window drew ground. The final picture never
+/// showed it, because it settles the meshes on its own before drawing.
+fn pump_terrain_meshes(ed: &mut crate::Editor) {
+    let full = ed.terrain_gpu_dirty;
+    ed.sync_terrain_gpu();
+    let at = floptle_core::active_camera(&ed.world)
+        .map(|e| floptle_core::world_transform(&ed.world, e).translation)
+        .unwrap_or(ed.camera.position);
+    let at = ed.lod_center(at);
+    ed.sync_terrain_meshes(full, at);
 }
 
 fn play_for(
@@ -157,6 +178,7 @@ fn play_for(
         let dt = pace.dt(step);
         ed.tick_headless_ui_clock(dt);
         ed.play_step(dt, true);
+        pump_terrain_meshes(ed);
         // Render targets before captures, in the frame loop's order: a capture
         // of a screen wearing `rt:<name>` shows that camera's picture.
         ed.update_render_targets(ed.play_t);
@@ -452,6 +474,7 @@ pub(crate) fn run(args: Args) -> i32 {
                 let dt = pace.dt(i);
                 ed.tick_headless_ui_clock(dt);
                 ed.play_step(dt, true);
+                pump_terrain_meshes(&mut ed);
                 ed.update_render_targets(ed.play_t);
                 ed.pump_captures();
                 ed.drain_script_logs();

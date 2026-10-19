@@ -1594,6 +1594,10 @@ pub enum AudioCmd {
     TrackPan { track: String, pan: f64 },
     TrackMuted { track: String, muted: bool },
     TrackSoloed { track: String, soloed: bool },
+    /// `track:setLowpass(hz)` — the whole bus's low-pass; 0 is off.
+    TrackLowpass { track: String, hz: f64 },
+    /// `track:setBypass(slot, on)` — `slot` counts the chain from 0 here.
+    TrackBypass { track: String, slot: usize, on: bool },
 }
 
 /// Live playback state of one sound / source, mirrored for script reads.
@@ -1614,6 +1618,28 @@ pub struct AudioPlayState {
 pub struct AudioInfo {
     pub sounds: HashMap<u32, AudioPlayState>,
     pub sources: HashMap<u32, AudioPlayState>,
+    /// The play session's mixer as it stands, Master first — `audio.tracks()`.
+    pub tracks: Vec<TrackInfo>,
+    /// Whether `tracks` is the real mixer. False where nothing feeds one (a
+    /// build with no audio device), and then `audio.track` hands out a handle
+    /// for any name rather than claiming the track is missing.
+    pub mixer: bool,
+}
+
+/// One mixer track as a script reads it.
+#[derive(Clone, Debug, Default)]
+pub struct TrackInfo {
+    pub name: String,
+    pub gain_db: f32,
+    pub pan: f32,
+    pub muted: bool,
+    pub soloed: bool,
+    /// The track it feeds; `None` for Master itself.
+    pub output: Option<String>,
+    /// The bus low-pass in Hz, 0 when off.
+    pub lowpass: f32,
+    /// How many effects its chain holds.
+    pub effects: usize,
 }
 
 /// A mirror of the scene graph the Lua node/script handles read and write, synced from

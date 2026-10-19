@@ -1132,3 +1132,39 @@ fn scene_load_takes_a_fade_and_its_colour() {
     assert!(!env.get::<bool>("ok").unwrap(), "a fading layer must be refused");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **A celestial body reads back, and its sky is a script's to set.** A
+/// weather script reads the clouds it is about to change through
+/// `getcomponent`, writes a storm deck there, and sets the aureole through
+/// `setCelestial`; both reach the component.
+#[test]
+fn a_script_reads_and_styles_a_celestial_bodys_sky() {
+    use floptle_core::CelestialBody;
+    let dir = std::env::temp_dir().join("floptle_script_test_celestial_sky");
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "weather",
+        concat!(
+            "function update(node, dt)\n",
+            "  local c = node:getcomponent('CelestialBody')\n",
+            "  node.x = c.clouds + c.cloudHeight\n",
+            "  c.cloudDarkness = 0.8\n",
+            "  c.cloudColorR = 0.4\n",
+            "  node:setCelestial{ aureole = 2.5, aureoleSize = 0.5, cloudColor = {0.4, 0.45, 0.5}, cloudHeight = 0.6 }\n",
+            "end\n",
+        ),
+    );
+    let (mut world, e) = world_with_script("weather");
+    world.insert(e, CelestialBody { clouds: 0.3, ..Default::default() });
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 0.1, 0.1);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let c = world.get::<CelestialBody>(e).unwrap();
+    let read = world.get::<floptle_core::Transform>(e).unwrap().translation.x;
+    assert!((read - 0.65).abs() < 1e-4, "clouds + cloudHeight read back as {read}");
+    assert!((c.cloud_darkness - 0.8).abs() < 1e-6, "cloudDarkness {}", c.cloud_darkness);
+    assert!((c.aureole - 2.5).abs() < 1e-6 && (c.aureole_size - 0.5).abs() < 1e-6);
+    assert_eq!(c.cloud_color, [0.4, 0.45, 0.5]);
+    assert!((c.cloud_height - 0.6).abs() < 1e-6);
+}

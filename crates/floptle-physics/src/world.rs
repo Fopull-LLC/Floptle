@@ -208,6 +208,10 @@ pub struct PhysicsWorld {
     /// that sequence, so an equal hash means an equal grid and the rebuild is
     /// skipped. See `reindex_colliders`.
     indexed_hash: u64,
+    /// Bumped by every hand-out of a collider's shape for an in-place edit (a
+    /// terrain dig). What [`Self::level_revision`] folds in for the changes a
+    /// collider's bounds cannot show.
+    pub level_edits: u64,
     /// Compound rigid bodies (multi-shape 6-DOF assemblies — see `compound.rs`),
     /// stepped alongside `bodies` with the same collider set and layer matrix.
     pub compounds: Vec<Compound>,
@@ -274,6 +278,7 @@ impl Default for PhysicsWorld {
             cand_feet: Vec::new(),
             index_fresh: false,
             indexed_hash: 0,
+            level_edits: 0,
             resting: Vec::new(),
             resting_check_elapsed: 0.0,
             last_revalidated_collider_count: usize::MAX,
@@ -418,6 +423,118 @@ pub fn raycast_colliders(
             return Some(RayHit { point: p.into(), normal: n.into(), distance: t, eid: c.eid });
         }
         t += dmin.clamp(0.02, 1.0); // cap so an unsigned mesh distance can't overshoot
+    }
+    best
+}
+
+/// How far outside a collider's box [`PhysicsWorld::raycast_surface`] still
+/// asks it.
+const SURFACE_SLACK: f32 = 0.05;
+
+/// The march behind [`PhysicsWorld::raycast_surface`], over the candidate
+/// colliders `cand` only.
+///
+/// A marched surface counts as hit inside `EPS`, and the crossing is bisected
+/// back to where the distance first fell under it. Steps near a surface are
+/// never shorter than `MIN_STEP`, so a grazing ray cannot spend the budget
+/// creeping along it; the bisection is what takes back a step that went in.
+fn surface_hit(colliders: &[AnchoredCollider], cand: &[u32], origin: Vec3, rd: Vec3, max_dist: f32) -> Option<RayHit> {
+    const EPS: f32 = 0.002;
+    const MIN_STEP: f32 = 0.004;
+    let mut best: Option<RayHit> = None;
+    let mut marched: Vec<usize> = Vec::new();
+    let (mut m_lo, mut m_hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    for &ci in cand {
+        let i = ci as usize;
+        let Some(c) = colliders.get(i) else { continue };
+        if c.sensor {
+            continue;
+        }
+        let span = match c.aabb().map(Ok).or_else(|| c.bounds().map(Err)) {
+            Some(Ok((lo, hi))) => crate::ray_box_span(
+                origin,
+                rd,
+                lo - Vec3::splat(SURFACE_SLACK),
+                hi + Vec3::splat(SURFACE_SLACK),
+                max_dist,
+            ),
+            Some(Err((centre, r))) => {
+                let r = r + SURFACE_SLACK;
+                let tc = (centre - origin).dot(rd);
+                let d2 = (origin + rd * tc - centre).length_squared();
+                (d2 <= r * r)
+                    .then(|| {
+                        let h = (r * r - d2).sqrt();
+                        ((tc - h).max(0.0), (tc + h).min(max_dist))
+                    })
+                    .filter(|(a, b)| a <= b)
+            }
+            None => Some((0.0, max_dist)),
+        };
+        let Some((t0, t1)) = span else { continue };
+        match c.ray_cast(origin, rd, max_dist) {
+            crate::RayAnswer::March => {
+                marched.push(i);
+                m_lo = m_lo.min(t0);
+                m_hi = m_hi.max(t1);
+            }
+            crate::RayAnswer::Miss => {}
+            crate::RayAnswer::Hit(t, n) => {
+                if best.as_ref().is_none_or(|b| t < b.distance) {
+                    best = Some(RayHit { point: (origin + rd * t).into(), normal: n.into(), distance: t, eid: c.eid });
+                }
+            }
+        }
+    }
+    if marched.is_empty() {
+        return best;
+    }
+    let nearest = |t: f32| {
+        let p = origin + rd * t;
+        let mut dmin = f32::MAX;
+        let mut hit = 0usize;
+        for &i in &marched {
+            let d = colliders[i].distance(p);
+            if d < dmin {
+                dmin = d;
+                hit = i;
+            }
+        }
+        (dmin, hit)
+    };
+    let stop = best.as_ref().map_or(max_dist, |b| b.distance).min(m_hi);
+    let mut t = m_lo;
+    let mut prev = t;
+    for _ in 0..512 {
+        if t > stop {
+            break;
+        }
+        let (dmin, hit) = nearest(t);
+        if !dmin.is_finite() {
+            prev = t;
+            t += 1.0;
+            continue;
+        }
+        if dmin < EPS {
+            let (mut out, mut inn, mut c) = (prev, t, hit);
+            if inn > out {
+                for _ in 0..10 {
+                    let mid = 0.5 * (out + inn);
+                    let (d, h) = nearest(mid);
+                    if d < EPS {
+                        inn = mid;
+                        c = h;
+                    } else {
+                        out = mid;
+                    }
+                }
+            }
+            let p = origin + rd * inn;
+            let col = &colliders[c];
+            return Some(RayHit { point: p.into(), normal: col.ray_normal(p, rd).into(), distance: inn, eid: col.eid });
+        }
+        prev = t;
+        t += if dmin < 0.02 { dmin.max(MIN_STEP) } else { dmin.min(1.0) };
     }
     best
 }
@@ -986,6 +1103,55 @@ impl PhysicsWorld {
     /// None. See [`raycast_colliders`].
     pub fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<RayHit> {
         raycast_colliders(&self.colliders, origin, dir, max_dist, !0)
+    }
+
+    /// Bring the collider broadphase up to date for queries made between
+    /// steps. Cheap when nothing changed: the grid is rebuilt only when the
+    /// hash of what it is built from moved.
+    pub fn index_colliders(&mut self) {
+        self.reindex_colliders();
+    }
+
+    /// [`Self::raycast`] for a point that comes to rest on what it hits (a
+    /// particle): only the colliders the broadphase puts near the segment are
+    /// asked, and a marched surface is found to within a couple of millimetres
+    /// instead of [`raycast_colliders`]' two centimetres — so a point held a
+    /// centimetre off a floor does not count as touching it at the start of
+    /// every step. Triggers never block it. Call [`Self::index_colliders`]
+    /// first, after any change to the collider set.
+    pub fn raycast_surface(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<RayHit> {
+        let rd = dir.try_normalize()?;
+        let mut cand = Vec::new();
+        if self.indexed_hash == 0 {
+            // Never indexed: an empty grid would offer nothing at all.
+            cand.extend(0..self.colliders.len() as u32);
+        } else {
+            self.collider_index.segment(origin, origin + rd * max_dist, SURFACE_SLACK, &mut cand);
+            cand.sort_unstable();
+            cand.dedup();
+        }
+        surface_hit(&self.colliders, &cand, origin, rd, max_dist)
+    }
+
+    /// A number that changes when the level changes shape: a collider added,
+    /// removed or resized, or edited in place. Not when the level only moves —
+    /// a world on rails re-anchors its colliders every tick, and what rests on
+    /// it is carried with it.
+    pub fn level_revision(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::hash::DefaultHasher::new();
+        self.level_edits.hash(&mut h);
+        self.colliders.len().hash(&mut h);
+        for c in &self.colliders {
+            c.eid.hash(&mut h);
+            if let Some((centre, r)) = c.shape.bounds() {
+                centre.x.to_bits().hash(&mut h);
+                centre.y.to_bits().hash(&mut h);
+                centre.z.to_bits().hash(&mut h);
+                r.to_bits().hash(&mut h);
+            }
+        }
+        h.finish()
     }
 
     pub fn add_body(&mut self, body: Body) -> usize {

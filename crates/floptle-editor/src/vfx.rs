@@ -261,6 +261,9 @@ pub struct VfxSystem {
     node_frames: HashMap<Entity, (Entity, floptle_core::transform::Transform)>,
     /// Each node's `setTint`, given to every instance it plays.
     node_tints: HashMap<Entity, [f32; 4]>,
+    /// The level's shape as particles resting on it last saw it — see
+    /// [`Self::note_level`].
+    level_revision: Option<u64>,
 }
 
 impl Default for VfxSystem {
@@ -275,6 +278,7 @@ impl Default for VfxSystem {
             preview: None,
             node_frames: HashMap::new(),
             node_tints: HashMap::new(),
+            level_revision: None,
         }
     }
 }
@@ -285,6 +289,23 @@ pub(crate) fn effect_stem(key: &str) -> &str {
 }
 
 impl VfxSystem {
+    /// Tell the particles what shape the level is in this frame
+    /// (`PhysicsWorld::level_revision`). When it changed, every particle
+    /// resting on it wakes and asks it again: the ground under a pile of
+    /// debris may have been dug out or streamed away.
+    pub fn note_level(&mut self, revision: Option<u64>) {
+        if revision == self.level_revision {
+            return;
+        }
+        self.level_revision = revision;
+        for (_, inst) in self.instances.values_mut() {
+            inst.wake_resting();
+        }
+        for d in &mut self.detached {
+            d.inst.wake_resting();
+        }
+    }
+
     /// Re-scan `assets/` for particle effects (compiling curves to LUTs).
     pub fn rescan(&mut self, project_root: &Path) {
         self.effects.clear();
@@ -905,6 +926,7 @@ pub fn starter_effect_doc(name: &str) -> VfxEffectDoc {
         wave_frequency: 2.0,
         scroll: 0.0,
         lit: false,
+        translucency: 0.0,
         soft: floptle_scene::vfx::DEFAULT_SOFT,
         cast_shadows: false,
         distortion: 0.015,
@@ -1097,6 +1119,7 @@ pub fn effect_from_doc(doc: &VfxEffectDoc) -> ParticleEffect {
                     speed_stretch: t.speed_stretch,
                     flipbook: t.flipbook.as_ref().map(flipbook_from_doc),
                     lit: t.lit,
+                    translucency: t.translucency.clamp(0.0, 1.0),
                     soft: t.soft,
                     cast_shadows: t.cast_shadows,
                     distortion: t.distortion,

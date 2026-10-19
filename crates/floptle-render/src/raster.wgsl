@@ -133,9 +133,9 @@ fn sun_map_vis(p: vec3<f32>, n: vec3<f32>) -> f32 {
 // Entry 0 is the reserved NEUTRAL: an instance that sets none of this reads it
 // and shades exactly as it did before these lanes existed.
 @group(0) @binding(10) var<storage, read> mat_ext: array<vec4<f32>>;
-// This surface's five maps. Slots 1..4 have NEUTRAL 1×1 defaults bound whenever
-// the material names no map — a flat (0.5, 0.5, 1) normal and white for the
-// three scalar maps — so there is exactly one code path and no "is a map bound"
+// This surface's six maps. Slots 1..5 have NEUTRAL 1×1 defaults bound whenever
+// the material names no map — a flat (0.5, 0.5, 1) normal, white for the three
+// scalar maps and white for the emissive map (× the emissive colour) — so there is exactly one code path and no "is a map bound"
 // flag that could disagree with what is actually bound.
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
@@ -147,6 +147,8 @@ fn sun_map_vis(p: vec3<f32>, n: vec3<f32>) -> f32 {
 @group(1) @binding(7) var metal_samp: sampler;
 @group(1) @binding(8) var ao_tex: texture_2d<f32>;
 @group(1) @binding(9) var ao_samp: sampler;
+@group(1) @binding(10) var emit_tex: texture_2d<f32>;
+@group(1) @binding(11) var emit_samp: sampler;
 
 // vec4s per entry. Mirrored as `EXT_LANES` in raster.rs; the two are the same
 // number and the store is misread by exactly one material if they disagree.
@@ -1452,6 +1454,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let rough_s = textureSample(rough_tex, rough_samp, muv).g;
     let metal_s = textureSample(metal_tex, metal_samp, muv).b;
     let ao_s = textureSample(ao_tex, ao_samp, muv).r;
+    let emit_s = textureSample(emit_tex, emit_samp, muv).rgb;
     let v = normalize(-in.view_pos);
     let texel = base_texel(in);
     // MESHED TERRAIN (tsplat flag): the vertex color's alpha is a palette SLOT, not opacity,
@@ -1474,7 +1477,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
         tsplat_val = terrain_splat(in, tp_dpx, tp_dpy);
     }
     let albedo = select(texel.rgb * in.color.rgb * in.vcolor.rgb, tsplat_val.rgb * in.color.rgb, terrain);
-    let emissive = in.emissive.rgb * in.emissive.a;
+    let emissive = in.emissive.rgb * in.emissive.a * emit_s;
     // Opacity: the material's alpha (in.color.a) times the texture's own alpha,
     // times painted alpha. Terrain is forced opaque (its vcolor.a is a slot).
     // Terrain is opaque: its dissolve is the discard below, not a blend, so its
@@ -1636,6 +1639,44 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     }
 
     return vec4<f32>(surface_fog(ext, lit * occ + emissive + glow, in.view_pos, pix), out_a);
+}
+
+// `fs`'s Physical shading over a custom shader's own albedo and normal — what
+// FLSL's `litPbr` calls. The Material's normal map tilts `normal`, its
+// roughness / metallic / occlusion maps scale its scalars, and the light is
+// the same GGX key and point lights, sky reflection, SDF AO and rim. Kept to
+// the same recipe as the Physical branch in `fs` above; change the two
+// together. Glass (transmission) is left out: a custom surface draws in the
+// pass it asks for, not the refraction pass.
+fn surface_pbr(in: VsOut, front: bool, albedo: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let ext = ext_at(u32(in.imeta.y));
+    let muv = map_uv(in);
+    let geo_n = facing_normal(normalize(normal), front);
+    let n = mapped_normal(in, geo_n, muv, ext.nstr);
+    let rough = clamp(ext.rough * textureSample(rough_tex, rough_samp, muv).g, 0.045, 1.0);
+    let metal = clamp(ext.metal * textureSample(metal_tex, metal_samp, muv).b, 0.0, 1.0);
+    let ao_s = textureSample(ao_tex, ao_samp, muv).r;
+    let v = normalize(-in.view_pos);
+    let pix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));
+    var occ = 1.0;
+    if (G.ao_params.x > 0.5) {
+        occ = sdf_ao(in.view_pos, n);
+    }
+    let ambient =
+        gi_ambient(in.view_pos, n, g.ambient.rgb) * in.params.w * mix(1.0, ao_s, clamp(ext.ostr, 0.0, 1.0));
+    let f0 = mix(vec3<f32>(0.04), albedo, metal);
+    let diffuse_albedo = albedo * (1.0 - metal);
+    let kl = key_light_ggx(in.view_pos, n, v, f0, rough, pix);
+    var lit = diffuse_albedo * (ambient + kl.diffuse) + kl.spec;
+    let pl = point_ggx(in.view_pos, n, v, f0, rough, pix);
+    lit += diffuse_albedo * pl.diffuse + pl.spec;
+    let refl = ext.reflect * gi_only_gate();
+    if (refl > 0.0) {
+        lit += env_specular(in.view_pos, n, v, f0, rough, pix) * refl;
+    }
+    let rim_f = pow(1.0 - max(dot(n, v), 0.0), 2.0) * in.params.y;
+    lit += in.rim.rgb * rim_f;
+    return lit * occ;
 }
 
 // Silhouette mask: solid 1.0 wherever the mesh covers a pixel. Rendered into a

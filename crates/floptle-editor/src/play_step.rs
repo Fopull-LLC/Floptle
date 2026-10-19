@@ -1401,6 +1401,13 @@ impl Editor {
         for (key, spawn) in std::mem::take(&mut self.pending_effects) {
             self.vfx.spawn_detached_with(&key, spawn);
         }
+        // Particles ask the level through the broadphase, so the index is
+        // brought up to date first; and a level that changed shape wakes what
+        // rests on it.
+        if let Some(sim) = self.sim.as_mut() {
+            sim.world.index_colliders();
+        }
+        self.vfx.note_level(self.sim.as_ref().map(|s| s.world.level_revision()));
         // Hand particles the live gravity field so `GravityMode::Field` effects fall
         // toward planets (same field the rigidbodies use), not world −Y.
         let vfx_grav = self.sim.as_ref().map(|s| crate::vfx::VfxGravity {
@@ -1415,17 +1422,23 @@ impl Editor {
         let sim = self.sim.as_ref();
         let hit = |from: floptle_core::math::DVec3, to: floptle_core::math::DVec3| {
             let sim = sim?;
-            let d = (to - from).as_vec3();
+            let d = to - from;
             let len = d.length();
             if len <= 1e-6 {
                 return None;
             }
-            let h = sim.raycast(from, d / len, len)?;
+            let dir = d / len;
+            let h = sim.raycast_surface(from, dir.as_vec3(), len as f32)?;
             let n = floptle_core::math::Vec3::from_array(h.normal);
-            Some((floptle_core::math::DVec3::new(h.point[0] as f64, h.point[1] as f64, h.point[2] as f64), n))
+            // The point is rebuilt in f64 from the distance. Made in f32 world
+            // coordinates, as it was, it snapped to a half-metre grid
+            // megametres out and a landed particle hopped on it.
+            Some((from + dir * h.distance as f64, n))
         };
         let level: Option<floptle_vfx::LevelHit<'_>> = sim.is_some().then_some(&hit as _);
         self.vfx.advance(&self.world, sdt, vfx_grav, &frame_at, level);
+        let live = (self.vfx.live_particles(), self.vfx.detached.len());
+        self.script_host.profile().borrow_mut().set_particle_counts(live.0, live.1);
         self.profile_record(floptle_core::profile::Bucket::Particles, vfx_t.ms());
         // Audio: apply queued Lua commands, then tick voices against the
         // final node transforms (same ordering rationale as particles).
@@ -1452,6 +1465,10 @@ impl Editor {
             }
             #[cfg(feature = "devices")]
             self.audio.apply_script_commands(&self.world, &root, audio_cmds);
+            #[cfg(feature = "devices")]
+            for w in self.audio.take_warnings() {
+                self.console.push(floptle_script::LogLevel::Warn, w, None);
+            }
             #[cfg(not(feature = "devices"))]
             let _ = (&root, audio_cmds);
         }

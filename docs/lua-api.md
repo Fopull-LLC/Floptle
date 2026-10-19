@@ -41,10 +41,10 @@ each group, and meant to be searched.
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 19
-- [components — getcomponent](#components--getcomponent) — 110
+- [components — getcomponent](#components--getcomponent) — 111
 - [animation — node:animator](#animation--nodeanimator) — 29
 - [particles — effects from script](#particles--effects-from-script) — 11
-- [audio — sounds & the mixer](#audio--sounds--the-mixer) — 32
+- [audio — sounds & the mixer](#audio--sounds--the-mixer) — 36
 - [assets](#assets) — 18
 - [debug gizmos](#debug-gizmos) — 5
 - [lua stdlib](#lua-stdlib) — 43
@@ -1162,7 +1162,7 @@ node:hasTag("enemy") — whether the node carries that exact tag. The classic hi
 
 ### `node:material`
 
-node:material() / node:material("Clothing") — a material you can read AND assign, in code. With no name it is this node's OWN Material, which on a model covers every part of it. With a name — an object like "Torso#2" or a material like "Clothing", both from node:materials() — it is that part of the model alone, and the override is created the first time you write to it. Fields: texture (and normalMap/roughnessMap/metallicMap/occlusionMap) by path, color/emissive/specular/rim as colours, plus alpha, roughness, metallic, emissiveStrength, unlit, fog, cell. This is how a clothing system works: node:material("Clothing").texture = "art/shirt.png". A part's override starts as the engine's default material, not as the part's imported look — state what you want it to be.
+node:material() / node:material("Clothing") — a material you can read AND assign, in code. With no name it is this node's OWN Material, which on a model covers every part of it. With a name — an object like "Torso#2" or a material like "Clothing", both from node:materials() — it is that part of the model alone, and the override is created the first time you write to it. Fields: texture (and normalMap/roughnessMap/metallicMap/occlusionMap/emissiveMap) by path, color/emissive/specular/rim as colours, plus alpha, roughness, metallic, emissiveStrength, unlit, fog, cell. This is how a clothing system works: node:material("Clothing").texture = "art/shirt.png". A part's override starts as the engine's default material, not as the part's imported look — state what you want it to be.
 
 `m.source` is read-only: the project material file this one follows ("materials/Checkerboard.ron"), or nil for a material of its own. Key gameplay rules on it rather than on the texture, which survives the file being re-textured. From a raycast: `hit.node:material(hit.material).source` (or `hit.node:material().source` when hit.material is nil).
 
@@ -1194,7 +1194,7 @@ node:setCamera{fovY=1.0, active=true, target="minimap", width=256, height=256, h
 
 ### `node:setCelestial`
 
-node:setCelestial{mu=…, bodyRadius=…, soi=0, parent="Sun", a=…, e=…, i=…, m0=…, atmoColor={r,g,b}, atmoHeight=…, atmoDensity=…, clouds=…, luminosity=…, starColor={r,g,b}, occluderRadius=…} — set (creating if absent) the node's CelestialBody. camelCase fields; colors take {r,g,b}. occluderRadius = occlusion culling: the solid-core radius geometry never pierces — terrain chunks fully behind it skip their draw calls (keep it below the deepest cave/dig; 0 = off). The atmosphere (atmoColor, atmoHeight, atmoDensity) is the whole sky from inside it: the air's colour overhead, brighter toward the horizon, a glow around the star, thinning with height until it is space at atmoHeight with the stars showing through — no sky shader needed. From outside it is the halo around the planet's edge.
+node:setCelestial{mu=…, bodyRadius=…, soi=0, parent="Sun", a=…, e=…, i=…, m0=…, atmoColor={r,g,b}, atmoHeight=…, atmoDensity=…, clouds=…, cloudColor={r,g,b}, cloudDarkness=…, cloudHeight=…, aureole=…, aureoleSize=…, luminosity=…, starColor={r,g,b}, occluderRadius=…} — set (creating if absent) the node's CelestialBody. The cloud deck's look: cloudColor its daylight colour (white = as before), cloudDarkness 0..1 (1 = a storm with almost no light through it), cloudHeight its height as a share of atmoHeight (0.35 = as before). aureole / aureoleSize = the glow around the star in this sky: strength and spread, 1 = natural. Every field reads back through node:getcomponent("CelestialBody"), colours as R/G/B lanes (cloudColorR, atmoColorG, starColorB…), and writes there too. camelCase fields; colors take {r,g,b}. occluderRadius = occlusion culling: the solid-core radius geometry never pierces — terrain chunks fully behind it skip their draw calls (keep it below the deepest cave/dig; 0 = off). The atmosphere (atmoColor, atmoHeight, atmoDensity) is the whole sky from inside it: the air's colour overhead, brighter toward the horizon, a glow around the star, thinning with height until it is space at atmoHeight with the stars showing through — no sky shader needed. From outside it is the halo around the planet's edge.
 
 ### `node:setGlyphOffsets`
 
@@ -1228,7 +1228,7 @@ node:setMaterial{color={r,g,b}, emissive={r,g,b}, emissiveStrength=…, unlit=tr
 
 On a MODEL this material SUPERSEDES the ones the model was imported with — every part draws with it, textures included, so a material naming no texture draws untextured. That is what a node Material is for: "this whole thing is made of THIS". To change one part instead, use node:material("<name>") — node:materials() lists what the parts are called.
 
-Surface maps: normalMap / roughnessMap / metallicMap / occlusionMap (paths, "" clears) with normalStrength / roughness / metallic / occlusionStrength. shading="physical" switches from the hand-set Blinn-Phong highlight to metal-rough; roughness and metallic only mean anything there, while a normal or occlusion map works under either.
+Surface maps: normalMap / roughnessMap / metallicMap / occlusionMap / emissiveMap (paths, "" clears; emissiveMap multiplies emissive) with normalStrength / roughness / metallic / occlusionStrength. shading="physical" switches from the hand-set Blinn-Phong highlight to metal-rough; roughness and metallic only mean anything there, while a normal or occlusion map works under either.
 
 Under physical shading a surface also REFLECTS the sky. A mirror is metallic=1 with roughness=0; raise the roughness and the same reflection blurs. reflectivity scales it (1 = the real amount and the default, 0 = none, above 1 = a deliberate cheat).
 
@@ -3221,11 +3221,11 @@ camera.screenSize() → w, h — the game viewport size in pixels. camera.exists
 
 ### `camera.screenToRay`
 
-camera.screenToRay(sx,sy) → ox,oy,oz, dx,dy,dz — a world ray from a screen pixel (inverse of worldToScreen).
+camera.screenToRay(sx,sy) → ox,oy,oz, dx,dy,dz — a world ray from a screen pixel (inverse of worldToScreen; the same camera, read at the moment of the call).
 
 ### `camera.worldToScreen`
 
-camera.worldToScreen(x,y,z) → sx, sy, depth, onscreen — project a world point into the game view (pixels in input.mouse()'s space). onscreen=false behind the camera / off-frustum. Sample a drawn line into points, project each, keep the nearest to the cursor = click-on-line picking (the map's maneuver nodes).
+camera.worldToScreen(x,y,z) → sx, sy, depth, onscreen — project a world point into the game view (pixels in input.mouse()'s space). onscreen=false behind the camera / off-frustum. Sample a drawn line into points, project each, keep the nearest to the cursor = click-on-line picking (the map's maneuver nodes). Projects with the camera node where it stands at the moment of the call — this frame's rails ticks, physics and any lateUpdate that moved it so far included — so a label placed in lateUpdate sits on its object as this frame draws it. Two exceptions: a move the calling script makes to its OWN node in the same hook counts once the hook returns, and a Camera2D follow lands after lateUpdate.
 
 ## physics controls — pause & step
 
@@ -3780,6 +3780,10 @@ mat.color — the tint, MULTIPLIED into the texture: white leaves the picture al
 
 mat.emissive — light this surface gives off, scaled by emissiveStrength. A colour; the channels are also mat.emissiveR/G/B.
 
+### `mat.emissiveMap`
+
+mat.emissiveMap — where the surface glows and in what colour, multiplying emissive × emissiveStrength: a console's screen or a hull's windows glow on the same material as the metal around them. "" clears it (the emissive colour everywhere).
+
 ### `mat.emissiveStrength`
 
 mat.emissiveStrength — how much light emissive gives off. 0 turns it off however bright the colour is.
@@ -4141,7 +4145,11 @@ audio.stopAll() — stop every playing sound (sources and one-shots), with a cli
 
 ### `audio.track`
 
-audio.track(name) — a live mixer-track handle ("Master" or a track from the Mixer tab): :setVolume(db), :setPan(-1..1), :setMuted(bool), :setSoloed(bool). Changes affect the running session only and revert on Stop. e.g. audio.track("Music"):setVolume(-12) to duck music.
+audio.track(name) — a live mixer-track handle ("Master" or a track from the Mixer tab), or nil when the mixer has no such track: :setVolume(db), :setPan(-1..1), :setMuted(bool), :setSoloed(bool), :setLowpass(hz), :setBypass(slot, on), :info(). Changes hold for the whole play session — across scene.load, so a Settings screen sets them once — and revert on Stop. e.g. audio.track("Music"):setVolume(-12) to duck music. A sound sent to a track the mixer does not have plays through Master, and the Console says so once.
+
+### `audio.tracks`
+
+audio.tracks() → { {name, gainDb, pan, muted, soloed, output, lowpass, effects}, ... } — every mixer track, Master first, as this play session has it (script changes included). output is the track it feeds, "Master" for a top-level track and nil for Master itself.
 
 ### `sound:isLoading`
 
@@ -4234,6 +4242,18 @@ Swap the clip (project-relative path like \"audio/steps.ogg\"); restarts playbac
 ### `source:stop`
 
 Fade the sound out (a few ms — no click).
+
+### `track:info`
+
+The track as audio.tracks() lists it — {name, gainDb, pan, muted, soloed, output, lowpass, effects} — or nil.
+
+### `track:setBypass`
+
+track:setBypass(slot, on) — bypass the effect in that slot of the track's chain, counting from 1 as the Mixer tab lists it.
+
+### `track:setLowpass`
+
+track:setLowpass(hz) — muffle the whole bus above that many Hz, every sound on it at once (underwater, behind a wall); glides, never clicks. 0 = off.
 
 ### `track:setMuted`
 

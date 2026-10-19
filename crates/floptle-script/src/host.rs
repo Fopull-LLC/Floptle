@@ -3039,7 +3039,7 @@ impl ScriptHost {
         // The `camera.*` world→screen API (map click-on-line picking).
         let view_info: Rc<RefCell<crate::view_api::ViewInfo>> =
             Rc::new(RefCell::new(crate::view_api::ViewInfo::default()));
-        crate::view_api::install_camera_api(&lua, view_info.clone());
+        crate::view_api::install_camera_api(&lua, view_info.clone(), shared.scene.clone());
         if let Err(e) = crate::data_api::install(&lua) {
             floptle_say::say_err!("[lua] failed to install the data API: {e}");
         }

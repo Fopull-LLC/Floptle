@@ -304,6 +304,25 @@ let n = normalize(normal + vec3(dx, 0, dz))
 output color = vec4(litSurface(albedo.rgb, n), 1)
 ```
 
+`litSurface` is the classic (Blinn-Phong) model and ignores the Material's
+surface maps. `litPbr(albedo)` / `litPbr(albedo, n)` is the built-in Physical
+path instead, exactly as a Physical material with no shader draws: the
+Material's normal map tilts `n` (or the mesh normal), its roughness, metallic
+and occlusion maps scale its `roughness`, `metallic` and `occlusion_strength`,
+and the light is the same GGX sun and point lights, sky reflection, AO and rim.
+So a damage or scorch shader can darken a normal-mapped hull and keep its
+panels:
+
+```
+let scorch = smoothstep(0.4, 0.6, noise(worldPos * 2))
+output color = vec4(litPbr(baseTexture().rgb * mix(1, 0.2, scorch)), 1)
+```
+
+Glass (`transmission`) is left out of `litPbr`. `dpdx(x)`, `dpdy(x)` and
+`fwidth(x)` are the screen-space derivatives, fragment stage only: with
+`worldPos` and `uv` they build a tangent frame of your own, and
+`smoothstep(0, fwidth(d), d)` antialiases a procedural edge to one pixel.
+
 For light the engine does not do for you, such as a glint or a subsurface glow,
 `lightDir` is the unit vector toward the key light (the sun, or in a scene lit
 by stars the dominant one) and `lightColor` is its colour times its intensity.

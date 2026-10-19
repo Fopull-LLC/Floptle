@@ -925,6 +925,97 @@ mod tests {
         assert!(moved > 5.0, "the fixture needs frames that run several ticks, the planet moved at most {moved} m");
     }
 
+    /// **A label projected in `lateUpdate` sits on a planet-fixed point as
+    /// this frame draws it.** The view `camera.worldToScreen` reads is fed by
+    /// the renderer, so it used to be last frame's camera: with the planet on
+    /// rails at 87 m/s and the camera riding it, a point fixed to the planet
+    /// was projected off by the planet's motion since the last draw — 0, 1 or
+    /// 2 ticks' worth — and shook by tens of pixels. The renderer's feed is
+    /// emulated after every step, the way the window does it.
+    #[test]
+    fn a_planet_fixed_point_projected_in_late_update_holds_still_on_screen() {
+        use floptle_core::{Matter, Name, Parent};
+        let dir = std::env::temp_dir().join(format!("floptle-label-jitter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(
+            dir.join("scripts/label.lua"),
+            "function lateUpdate(node, dt)\n  local p = find('Home'):toWorld(vec3(3, 2, 0))\n  \
+             local sx, sy, _, on = camera.worldToScreen(p.x, p.y, p.z)\n  \
+             if on then node.x = sx; node.y = sy end\nend\n",
+        )
+        .unwrap();
+        let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+        let celestial = |ed: &mut crate::Editor, name: &str, at: DVec3, body: CelestialBody| {
+            let e = ed.world.spawn();
+            ed.world.insert(e, Name(name.into()));
+            ed.world.insert(e, Transform { translation: at, ..Transform::IDENTITY });
+            ed.world.insert(e, body);
+            e
+        };
+        // 87 m/s: sqrt(mu / a).
+        celestial(&mut ed, "Sun", DVec3::ZERO, CelestialBody { mu: 3.78e7, ..Default::default() });
+        let home = CelestialBody { parent: "Sun".into(), a: 5000.0, mu: 1.0e4, soi: 500.0, ..Default::default() };
+        let home = celestial(&mut ed, "Home", DVec3::new(5000.0, 0.0, 0.0), home);
+        // The camera rides the planet, 25 m back from the point it looks at.
+        let cam = ed.world.spawn();
+        ed.world.insert(cam, Name("Cam".into()));
+        ed.world.insert(cam, Transform { translation: DVec3::new(0.0, 0.0, 25.0), ..Transform::IDENTITY });
+        ed.world.insert(cam, Parent(home));
+        ed.world.insert(
+            cam,
+            Matter::Camera {
+                fov_y: 1.0,
+                active: true,
+                target: String::new(),
+                cull_mask: u32::MAX,
+                target_w: 0,
+                target_h: 0,
+                target_hz: 0.0,
+                ortho: false,
+                ortho_height: 10.0,
+                stack: Vec::new(),
+            },
+        );
+        let label = ed.world.spawn();
+        ed.world.insert(label, Name("Label".into()));
+        ed.world.insert(label, Transform::IDENTITY);
+        ed.world.insert(
+            label,
+            floptle_core::Scripts(vec![floptle_core::ScriptInst {
+                kind: "label".into(),
+                enabled: true,
+                params: Vec::new(),
+                refs: Vec::new(),
+                strs: Vec::new(),
+                pinned_bools: None,
+            }]),
+        );
+        ed.toggle_play();
+        let world = |ed: &crate::Editor, e| floptle_core::world_transform(&ed.world, e).translation;
+        for _ in 0..5 {
+            ed.play_step(1.0 / 60.0, true);
+            crate::shot::feed_view(&mut ed, None, 800, 600);
+        }
+        let screen = |ed: &crate::Editor| world(ed, label);
+        let mut last = screen(&ed);
+        let (mut moved, mut worst) = (0.0f64, 0.0f64);
+        for dt in [0.005f32, 0.016, 0.03, 0.008, 0.02, 0.0167, 0.004, 0.033, 0.011].repeat(6) {
+            let before = world(&ed, home);
+            ed.play_step(dt, true);
+            crate::shot::feed_view(&mut ed, None, 800, 600);
+            assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+            moved = moved.max((world(&ed, home) - before).length());
+            let now = screen(&ed);
+            worst = worst.max((now - last).length());
+            last = now;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(last.x > 400.0 && last.y < 300.0, "the label never landed on the point: {last}");
+        assert!(moved > 2.0, "the fixture needs frames that run several ticks, the planet moved at most {moved} m");
+        assert!(worst < 0.5, "the label moved {worst} px between frames on a still point");
+    }
+
     /// **At Play start the crew rides its planet onto the rails.** A planet is
     /// authored wherever the author put it, and its first tick snaps it to its
     /// orbit; the crew standing on it goes with it rather than being left in

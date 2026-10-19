@@ -43,6 +43,16 @@ pub struct TrackDesc {
     /// Name of the track this one outputs into; `None` = Master.
     #[serde(default)]
     pub output: Option<String>,
+    /// A low-pass over the whole bus, in Hz, ahead of the fader — what
+    /// muffles every sound on it at once (underwater, behind a wall). 0 is
+    /// off. Set from a script (`track:setLowpass`); the Mixer tab's chain is
+    /// the place for a bus's authored EQ.
+    #[serde(default, skip_serializing_if = "is_off")]
+    pub lowpass: f32,
+}
+
+fn is_off(hz: &f32) -> bool {
+    *hz <= 0.0
 }
 
 impl TrackDesc {
@@ -55,6 +65,7 @@ impl TrackDesc {
             soloed: false,
             effects: Vec::new(),
             output: None,
+            lowpass: 0.0,
         }
     }
 }
@@ -116,6 +127,8 @@ struct TrackDsp {
     tgt_r: f32,
     buf_l: Vec<f32>,
     buf_r: Vec<f32>,
+    /// The bus low-pass ([`TrackDesc::lowpass`]), after the effect chain.
+    lowpass: crate::voice::LowPass,
     /// Post-fader peak of the last processed block (for UI meters).
     meter: f32,
 }
@@ -132,6 +145,7 @@ impl TrackDsp {
             tgt_r: 1.0,
             buf_l: vec![0.0; block],
             buf_r: vec![0.0; block],
+            lowpass: crate::voice::LowPass::off(),
             meter: 0.0,
         }
     }
@@ -264,11 +278,13 @@ impl MixerDsp {
             let (pl, pr) = pan_gains(td.pan);
             t.tgt_l = g * pl;
             t.tgt_r = g * pr;
+            t.lowpass.set(td.lowpass, self.sample_rate);
             if is_new[i] {
                 // Brand-new track: snap to target instead of gliding in from
                 // unity — a track born muted must be born silent.
                 t.cur_l = t.tgt_l;
                 t.cur_r = t.tgt_r;
+                t.lowpass.snap();
             }
         }
 
@@ -322,6 +338,7 @@ impl MixerDsp {
                     dsp.process(&mut l_buf[..n], &mut r_buf[..n]);
                 }
             }
+            t.lowpass.process(&mut l_buf[..n], &mut r_buf[..n]);
             let mut peak = 0.0f32;
             let (mut cl, mut cr) = (t.cur_l, t.cur_r);
             let (tl, tr) = (t.tgt_l, t.tgt_r);

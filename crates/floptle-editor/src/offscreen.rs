@@ -626,11 +626,20 @@ impl Editor {
                 let mp = mat.as_ref().map(material_params).unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]));
                 crate::paint_tex::push_painted_node(&self.world, &self.paint_tex, *ent, model, &mp, &mut instances);
             }
-            let tex = mat
-                .as_ref()
-                .and_then(|m| m.texture.as_deref())
-                .and_then(|p| self.texture_registry.get(p).copied())
-                .filter(|id| Some(*id) != skip_tex);
+            // The node's texture and surface extras, resolved as the window's
+            // gather resolves them: a material with surface maps comes back as
+            // one combined texture, and its extras (Physical shading, the
+            // retro flags, reflectivity) as an index stamped below. This view
+            // took the base texture alone, so every docked Game view, shot and
+            // capture drew a normal-mapped Physical material flat and Classic.
+            let (tex, node_ext) = match (mat.as_ref(), self.gpu.as_ref(), self.raster.as_mut()) {
+                (Some(m), Some(gpu), Some(raster)) => {
+                    let (t, p) = crate::shading::material_draw(raster, gpu, m, &self.texture_registry, None);
+                    (t, p.ext_index)
+                }
+                _ => (None, 0),
+            };
+            let tex = tex.filter(|id| Some(*id) != skip_tex);
             let flsl = self.flsl_binds.get(ent).map(|b| b.binding);
             // Where this node's draws begin, for the tint stamp after the match.
             let tint_from = (instances.len(), flsl_draws.len(), skin_draws.len(), flat2d.len());
@@ -880,6 +889,25 @@ impl Editor {
                 &mut skin_draws,
                 &mut flat2d,
             );
+            // …and the extras stamp, the window's rule: only where a part's
+            // own override has not already set one.
+            if node_ext != 0 {
+                use floptle_render::{ext_index_of, set_ext_index};
+                let fill = |raw: &mut floptle_render::InstanceRaw| {
+                    if ext_index_of(raw) == 0 {
+                        set_ext_index(raw, node_ext);
+                    }
+                };
+                for (_, _, raw) in &mut instances[tint_from.0..] {
+                    fill(raw);
+                }
+                for (_, _, _, raw) in &mut flsl_draws[tint_from.1..] {
+                    fill(raw);
+                }
+                for d in &mut skin_draws[tint_from.2..] {
+                    fill(&mut d.instance);
+                }
+            }
         }
 
         let (mut sky_params, sky_tint, sky_rot, sky_solid) = skybox_uniforms(&self.world);
@@ -1109,6 +1137,7 @@ impl Editor {
                 g.sky_meta = [1.0, 0.0, 0.0, 0.0];
                 g.sky_uniforms = sky_uniform_vals;
             }
+            crate::shading::stamp_air_style(&mut g, &light_node, &self.world, cam.world_position);
             Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.mesh_occluders, &self.occluder_regions, self.project.shadow_volumes, &self.world, &mut g, cam.world_position);
             crate::shaders::apply_field_shapes(&self.world, &self.flsl_shape_slots, &self.sdf_cache, &mut g, cam.world_position, None);
             if let Some(rmarch) = self.raymarch.as_ref() {

@@ -626,6 +626,16 @@ impl<'a> Writer<'a> {
                         _ => Ok(format!("flsl_lit(in, front, {albedo})")),
                     }
                 }
+                // The built-in Physical path on the shader's albedo, with the
+                // Material's own normal and ORM maps (raster.wgsl `surface_pbr`).
+                "litPbr" => {
+                    let albedo = self.emit_resolved(&call.args[0], Some(Ty::Vec3))?;
+                    let n = match call.args.get(1) {
+                        Some(n @ ResolvedArg::Expr(_)) => self.emit_resolved(n, Some(Ty::Vec3))?,
+                        _ => "in.normal".to_string(),
+                    };
+                    Ok(format!("surface_pbr(in, front, {albedo}, {n})"))
+                }
                 "sunShadow" => {
                     let p = self.emit_resolved(&call.args[0], Some(Ty::Vec3))?;
                     let n = self.emit_resolved(&call.args[1], Some(Ty::Vec3))?;
@@ -1274,6 +1284,10 @@ fn map_d(p: vec3<f32>) -> f32 { return 1e9; }
 fn flsl_surface_gap(p: vec3<f32>) -> f32 { return 1e9; }
 fn base_texel(in: VsOut) -> vec4<f32> { return textureSample(tex, samp, in.uv); }
 fn facing_normal(n: vec3<f32>, front: bool) -> vec3<f32> { return select(-n, n, front); }
+fn surface_pbr(in: VsOut, front: bool, albedo: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let n = facing_normal(normalize(normal), front);
+    return albedo * (g.ambient.rgb + key_light(in.view_pos, n, normalize(-in.view_pos), 32.0, vec2<u32>(0u)).diffuse);
+}
 "#;
 
 /// A minimal stand-in for the UI pass module (floptle-render/ui.wgsl),

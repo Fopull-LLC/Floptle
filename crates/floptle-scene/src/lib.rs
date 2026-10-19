@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod anim;
 pub mod portable;
+pub mod strict;
 pub use anim::{
     key_mode_at, load_anim_clip, load_anim_controller, move_key_mode, same_key_time, save_anim_clip,
     save_anim_controller, set_key_mode, AnimChannelDoc, AnimInterpDoc, AnimKeyModeDoc,
@@ -778,6 +779,19 @@ pub struct CelestialBodyDoc {
     pub atmo_density: f32,
     #[serde(default)]
     pub clouds: f32,
+    /// The cloud deck's look: daylight colour, darkness (0..1), height as a
+    /// share of the atmosphere. Each skips at the deck it has always been.
+    #[serde(default = "white3", skip_serializing_if = "is_white3")]
+    pub cloud_color: [f32; 3],
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cloud_darkness: f32,
+    #[serde(default = "default_cloud_height", skip_serializing_if = "is_default_cloud_height")]
+    pub cloud_height: f32,
+    /// The star's aureole in this sky: spread and strength, multiples of natural.
+    #[serde(default = "one_f32", skip_serializing_if = "is_one_f32")]
+    pub aureole_size: f32,
+    #[serde(default = "one_f32", skip_serializing_if = "is_one_f32")]
+    pub aureole: f32,
     /// Star: irradiance at distance d = luminosity × 1e6 / d². 0 = not a star.
     #[serde(default)]
     pub luminosity: f32,
@@ -786,6 +800,14 @@ pub struct CelestialBodyDoc {
     /// Occlusion culling: solid-core radius geometry never pierces (0 = off).
     #[serde(default)]
     pub occluder_radius: f64,
+}
+
+fn default_cloud_height() -> f32 {
+    0.35
+}
+
+fn is_default_cloud_height(v: &f32) -> bool {
+    *v == 0.35
 }
 
 fn default_star_color() -> [f32; 3] {
@@ -820,6 +842,11 @@ impl CelestialBodyDoc {
             atmo_height: self.atmo_height,
             atmo_density: self.atmo_density,
             clouds: self.clouds,
+            cloud_color: self.cloud_color,
+            cloud_darkness: self.cloud_darkness.clamp(0.0, 1.0),
+            cloud_height: self.cloud_height.clamp(0.0, 1.0),
+            aureole_size: self.aureole_size.max(0.0),
+            aureole: self.aureole.max(0.0),
             luminosity: self.luminosity,
             star_color: self.star_color,
             occluder_radius: self.occluder_radius,
@@ -841,6 +868,11 @@ impl CelestialBodyDoc {
             atmo_height: b.atmo_height,
             atmo_density: b.atmo_density,
             clouds: b.clouds,
+            cloud_color: b.cloud_color,
+            cloud_darkness: b.cloud_darkness,
+            cloud_height: b.cloud_height,
+            aureole_size: b.aureole_size,
+            aureole: b.aureole,
             luminosity: b.luminosity,
             star_color: b.star_color,
             occluder_radius: b.occluder_radius,
@@ -3403,6 +3435,8 @@ pub struct MaterialDoc {
     pub ao_map: Option<String>,
     #[serde(default = "one_f32", skip_serializing_if = "is_one_f32")]
     pub occlusion_strength: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emissive_map: Option<String>,
     /// How much of the environment (the sky) this surface reflects. `1` is the
     /// physically honest amount and the default, so a file written before
     /// reflections existed loads as a surface that reflects its sky properly.
@@ -3662,6 +3696,7 @@ impl MaterialDoc {
             metallic: self.metallic,
             ao_map: self.ao_map.clone(),
             occlusion_strength: self.occlusion_strength,
+            emissive_map: self.emissive_map.clone(),
             reflectivity: self.reflectivity,
             transmission: self.transmission.clamp(0.0, 1.0),
             // Fenced: an ior below 1 inverts the bend into something no material
@@ -3709,6 +3744,7 @@ impl MaterialDoc {
             metallic: m.metallic,
             ao_map: m.ao_map.clone(),
             occlusion_strength: m.occlusion_strength,
+            emissive_map: m.emissive_map.clone(),
             reflectivity: m.reflectivity,
             transmission: m.transmission,
             ior: m.ior,
@@ -5120,6 +5156,11 @@ mod tests {
                         atmo_height: 42.0,
                         atmo_density: 0.7,
                         clouds: 0.35,
+                        cloud_color: [0.5, 0.5, 0.55], // …and the cloud look's
+                        cloud_darkness: 0.6,
+                        cloud_height: 0.5,
+                        aureole_size: 1.5,
+                        aureole: 0.5,
                         luminosity: 12.0, // exercise the star round-trip
                         star_color: [1.0, 0.9, 0.8],
                         occluder_radius: 48.0, // exercise the occluder round-trip

@@ -154,7 +154,7 @@ fn normal_map_tilts_the_light(gpu: &Gpu, dir: &str) {
         &TextureData { pixels: vec![255, 255, 255, 255], width: 1, height: 1 },
         TexSampling::default(),
     );
-    let mapped = raster.material_set(gpu, Some(white), [Some(nmap), None, None, None]);
+    let mapped = raster.material_set(gpu, Some(white), [Some(nmap), None, None, None, None]);
 
     // A CUBE, not a plane. The plane primitive's triangles wind away from a
     // camera on +Z, so `facing_normal` flips its shading normal to point away

@@ -1320,6 +1320,15 @@ impl Sim {
         })
     }
 
+    /// [`PhysicsWorld::raycast_surface`] from a world-space origin. The hit
+    /// comes back with its point in the sim frame's f32, so a caller far from
+    /// the world origin rebuilds it in f64 as `origin + dir * distance` — the
+    /// f32 world coordinate is only good to half a metre megametres out.
+    pub fn raycast_surface(&self, origin: DVec3, dir: Vec3, max_dist: f32) -> Option<RayHit> {
+        let o = (origin - self.world.origin).as_vec3();
+        self.world.raycast_surface(o, dir, max_dist)
+    }
+
     /// Cast a ray against the colliders on `mask`'s layers only. World-space
     /// origin, as [`Self::raycast`].
     ///
@@ -2490,6 +2499,7 @@ impl Sim {
     /// added to avoid the mirror image of. Done here rather than at each call
     /// site because this is the only way the field is handed out.
     pub fn terrain_field_mut(&mut self, eid: u32) -> Option<&mut floptle_field::ChunkField> {
+        self.world.level_edits += 1;
         self.world
             .colliders
             .iter_mut()
@@ -2505,6 +2515,7 @@ impl Sim {
     /// changes: the collider forgets only the triangles those chunks could
     /// have given it, rather than every chunk it had meshed.
     pub fn terrain_chunks_mut(&mut self, eid: u32, written: &[[i32; 3]]) -> Option<&mut floptle_field::ChunkField> {
+        self.world.level_edits += 1;
         self.world
             .colliders
             .iter_mut()
@@ -2520,6 +2531,7 @@ impl Sim {
     /// collision meshes itself ([`ChunkTerrain::adopt_mesh`]): nothing cached
     /// is forgotten, so until those land the old triangles stand.
     pub fn terrain_collider_mut(&mut self, eid: u32) -> Option<&mut ChunkTerrain> {
+        self.world.level_edits += 1;
         self.world.colliders.iter_mut().find(|c| c.eid == Some(eid)).and_then(|c| c.shape.chunk_terrain_mut())
     }
 

@@ -484,6 +484,18 @@ impl FrameProfile {
             .join(" · ")
     }
 
+    /// Publish the live particle and one-shot effect counts from the
+    /// simulation step, which runs whether or not the frame is drawn. The draw
+    /// gather publishes them again with everything else; without this a frame
+    /// nobody drew — every frame of `floptle run`, most of a `shot --after` —
+    /// read zero particles while thousands were live.
+    pub fn set_particle_counts(&mut self, particles: usize, effects: usize) {
+        if self.on {
+            self.counts.particles = particles;
+            self.counts.effects = effects;
+        }
+    }
+
     /// Publish this frame's counts.
     pub fn set_counts(&mut self, counts: Counts) {
         if self.on {

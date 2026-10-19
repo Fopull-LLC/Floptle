@@ -225,3 +225,132 @@ fn volumetric_fog_is_a_shell_around_the_planet() {
     let flat = centre_from(&mut ed, eye, Quat::IDENTITY);
     assert!(flat[1] > 0.5, "measured in world y the layer is far below, so the block should be clear: {flat:?}");
 }
+
+/// The colour `n` pixels right of centre in a `rot`-turned view from `eye`,
+/// 0..1, with a narrow lens (so a far disc covers the middle).
+fn pixel_from(ed: &mut crate::Editor, eye: DVec3, rot: Quat, n: u32) -> [f32; 3] {
+    let cam = RenderCamera::new(eye, rot, Projection::Perspective { fov_y: 0.5, near: 0.05, far: 300_000.0 });
+    let (w, h) = (64u32, 36u32);
+    let tex = crate::capture::render_frame_texture(ed, &cam, None, w, h, u32::MAX, false, false)
+        .expect("a GPU editor renders");
+    let px = crate::offscreen::read_back_frame(ed.gpu.as_ref().unwrap(), &tex).expect("the frame reads back");
+    let i = (((h / 2) * w + w / 2 + n) * 4) as usize;
+    [px[i] as f32 / 255.0, px[i + 1] as f32 / 255.0, px[i + 2] as f32 / 255.0]
+}
+
+/// The view from the top of the planet turned up by `deg` toward −Z.
+fn raised(deg: f32) -> Quat {
+    Quat::from_rotation_x(deg.to_radians())
+}
+
+/// **Flat fog on a round world stays in the air.** A bright disc out in space
+/// at 30° elevation — a moon, a star — seen through Low (flat) fog that
+/// follows the planet keeps its own colour: the ramp runs over the stretch of
+/// ray inside the air, not over every metre out to the disc, which used to
+/// paint it the fog's magenta.
+#[test]
+fn flat_fog_on_a_round_world_leaves_a_disc_in_space_its_colour() {
+    let eye = CENTRE + DVec3::new(0.0, RADIUS + 1.0, 0.0);
+    let shoot = |fog: bool| -> Option<[f32; 3]> {
+        let mut ed = crate::offscreen::test_editor_with_gpu()?;
+        world(&mut ed);
+        let l = floptle_core::Light {
+            fog,
+            fog_color: [1.0, 0.0, 1.0],
+            // Low fog: it starts past the 78 m of air a 30° ray crosses.
+            fog_start: 100.0,
+            fog_end: 300.0,
+            fog_follows_body: true,
+            ..Default::default()
+        };
+        let lighting = ed.world.spawn();
+        ed.world.insert(lighting, l);
+        let (s, c) = 30f64.to_radians().sin_cos();
+        let disc = ed.world.spawn();
+        ed.world.insert(
+            disc,
+            Transform {
+                translation: eye + DVec3::new(0.0, s, -c) * 20_000.0,
+                scale: floptle_core::math::Vec3::splat(900.0),
+                ..Transform::IDENTITY
+            },
+        );
+        ed.world.insert(disc, Matter::Primitive { shape: floptle_core::Shape::Sphere, color: [1.0, 0.9, 0.5] });
+        ed.world.insert(disc, floptle_core::Material { unlit: true, color: [1.0, 0.9, 0.5], ..Default::default() });
+        Some(pixel_from(&mut ed, eye, raised(30.0), 0))
+    };
+    let Some(clear) = shoot(false) else { return };
+    let Some(fogged) = shoot(true) else { return };
+    assert!(clear[0] > 0.6 && clear[1] > 0.5, "the fixture: the disc is in the middle of the view: {clear:?}");
+    let off = (0..3).map(|c| (clear[c] - fogged[c]).abs()).fold(0.0f32, f32::max);
+    assert!(off < 0.08, "flat fog moved the disc in space from {clear:?} to {fogged:?}");
+}
+
+/// **The sun low in thick air is the sun, dimmed and orange — not the haze.**
+/// The star 5° over the horizon from the ground of a dense atmosphere, against
+/// the same star with no air: its disc keeps at least 40% of its brightness
+/// over the sky around it, and comes out warmer than it is. The space behind
+/// the air was drawn at the sky's own transparency, about a tenth near the
+/// horizon, and the disc went with it.
+#[test]
+fn the_sun_low_in_thick_air_keeps_its_disc_and_warms() {
+    let eye = CENTRE + DVec3::new(0.0, RADIUS + 1.0, 0.0);
+    // `air` 0 is a whisper of air too thin to see, which is what keeps the sky
+    // pass running: the same disc with nothing in front of it.
+    let shoot = |air: f64| -> Option<([f32; 3], [f32; 3])> {
+        let mut ed = crate::offscreen::test_editor_with_gpu()?;
+        let w = &mut ed.world;
+        let sky = w.spawn();
+        w.insert(sky, Transform::IDENTITY);
+        w.insert(
+            sky,
+            Matter::Skybox {
+                color: [0.02, 0.02, 0.03],
+                size: 500.0,
+                texture: None,
+                tint: [1.0; 3],
+                shader: None,
+                shader_params: Default::default(),
+            },
+        );
+        let planet = w.spawn();
+        w.insert(planet, Transform { translation: CENTRE, ..Transform::IDENTITY });
+        w.insert(
+            planet,
+            CelestialBody {
+                body_radius: RADIUS,
+                atmo_color: [0.2, 0.28, 0.45], // a dim sky, so the disc over it stays under white
+                atmo_height: if air > 0.0 { air } else { 1.0 },
+                atmo_density: if air > 0.0 { 1.0 } else { 0.002 },
+                ..Default::default()
+            },
+        );
+        // Far past the far plane, so what is seen is the sky's own disc. A
+        // dim grey star, so its disc stays under white and its colour shows.
+        let (s, c) = 5f64.to_radians().sin_cos();
+        let star = w.spawn();
+        w.insert(star, Transform { translation: eye + DVec3::new(0.0, s, -c) * 5.0e6, ..Transform::IDENTITY });
+        w.insert(star, CelestialBody { body_radius: 1000.0, luminosity: 2.0e7, star_color: [0.2, 0.2, 0.2], ..Default::default() });
+        let lighting = w.spawn();
+        w.insert(lighting, floptle_core::Light { stars: true, ..Default::default() });
+        let rot = raised(5.0);
+        // The disc, and the sky a lens-width to the side of it.
+        Some((pixel_from(&mut ed, eye, rot, 0), pixel_from(&mut ed, eye, rot, 28)))
+    };
+    let Some((space_disc, space_sky)) = shoot(0.0) else { return };
+    let Some((air_disc, air_sky)) = shoot(HEIGHT) else { return };
+    let luma = |c: [f32; 3]| (c[0] + c[1] + c[2]) / 3.0;
+    let in_space = luma(space_disc) - luma(space_sky);
+    let in_air = luma(air_disc) - luma(air_sky);
+    assert!(in_space > 0.2, "the fixture: the disc shows in space ({space_disc:?} over {space_sky:?})");
+    assert!(
+        in_air >= 0.4 * in_space,
+        "low in thick air the disc stands {in_air:.3} over its sky, against {in_space:.3} in space"
+    );
+    // The light the disc adds over its sky has more red in it than blue —
+    // measured where nothing clips, or a white block would read as warm
+    // against a blue sky.
+    assert!(air_disc.iter().all(|&c| c < 0.99), "the fixture: the disc clips, so its colour cannot show: {air_disc:?}");
+    let warm = |c: [f32; 3], s: [f32; 3]| (c[0] - s[0]) - (c[2] - s[2]);
+    assert!(warm(air_disc, air_sky) > 0.05, "the low sun is not warmer than white: {air_disc:?} over {air_sky:?}");
+}

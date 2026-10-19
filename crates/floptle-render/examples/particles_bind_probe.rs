@@ -23,7 +23,7 @@ fn main() {
     );
     // A combined surface set is still an ordinary texture the particle pass can
     // bind — that is the whole point of returning a `TexId`.
-    let set = raster.material_set(&gpu, Some(tex), [Some(tex), None, None, None]);
+    let set = raster.material_set(&gpu, Some(tex), [Some(tex), None, None, None, None]);
     let color = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("particles-bind"),
         size: wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 1 },

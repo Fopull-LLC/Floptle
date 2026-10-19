@@ -467,6 +467,21 @@ fn look_section(
                 .changed();
         });
     });
+    if !is_mesh {
+        ui.add_enabled_ui(track.lit, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("translucency");
+                *dirty |= ui
+                    .add(egui::Slider::new(&mut track.translucency, 0.0..=1.0).max_decimals(2))
+                    .on_hover_text(
+                        "light from behind: with the sun or star beyond the smoke, this much of it \
+                         shines through toward you, most where the particle is thinnest, so the edges \
+                         glow and a thick core stays dark. No change when it is lit from the front",
+                    )
+                    .changed();
+            });
+        });
+    }
     egui::ComboBox::from_id_salt("vfx_space")
         .selected_text(match track.space {
             VfxSpaceDoc::Local => "space: local (follows node)",

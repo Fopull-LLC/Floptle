@@ -110,9 +110,19 @@ contact) or bounces: `bounce` is how much of the speed into the surface comes
 back out (0 lands dead), `friction` how much of the speed along it each hit
 takes away (1 stops it where it lands). It works the same for `World` and
 `Local` tracks. Only Play has a level to meet, so the Particles tab's preview
-passes through everything. It costs a ray per moving particle per frame, so
-turn it on for the tracks that land on something and leave glows and trails
-off. In the editor it is **collides with the level** on the track.
+passes through everything. It costs a ray per moving particle per frame, asked
+only of the colliders near that step, so turn it on for the tracks that land on
+something and leave glows and trails off. In the editor it is **collides with
+the level** on the track.
+
+A `World` track's particle that lands and stays — gravity holds it on the
+surface, it has stopped bouncing, and its friction is enough to hold it on the
+slope — comes to rest: it stays exactly where it landed and asks the level
+nothing more until the level changes shape (a collider added, removed or
+resized, or terrain dug), when every resting particle asks again. A track with
+force fields or a velocity curve never rests, and neither does a `Local` one,
+which rides its emitter. The hit point is worked out in double precision from
+the step, so debris lies as still megametres from the origin as at it.
 
 ### Emission — clips, not a rate field
 
@@ -259,7 +269,12 @@ point lights reaching it, with their colour, range and falloff, and in a flat
 scene the 2D lights that reach its emitter's sorting layer (a `spawnEffect`
 one-shot counts as the Default layer). It takes no shadows from them: dust by a
 torch is lit by the torch even with a wall between. Use it for smoke and dust,
-and leave glow and fire unlit. `cast_shadows` lets a mesh track's live cloud cast into the
+and leave glow and fire unlit. `translucency` (0..1, a lit billboard's
+**translucency** slider) is light from behind: with the key light beyond the
+particle, that share of it comes through toward the camera, scaled by how thin
+the particle is there (one minus its alpha), so smoke against a low sun glows at
+its edges and keeps a dark core. Lit from the front it changes nothing.
+`cast_shadows` lets a mesh track's live cloud cast into the
 field shadow march.
 `soft` is the distance, in world units, over which a billboard fades out in
 front of whatever it intersects — the *soft edges* field in the Inspector — so
