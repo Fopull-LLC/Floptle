@@ -3030,3 +3030,38 @@ fn a_headless_game_verb_runs_no_package_editor_tools() {
     assert_eq!(load(true), 0, "a game verb must not");
     let _ = std::fs::remove_dir_all(&proj);
 }
+
+/// **A read is answered on a frame that queued nothing else.** The editor
+/// served `scene.docs`, `mesh.read` and file pickers at the end of applying a
+/// frame's commands, after returning early when there were none: a read asked
+/// from a button that did nothing else waited for some unrelated command, and
+/// a real package sat on "Reading the scene…" for 959 s.
+#[test]
+fn a_read_alone_is_answered_on_the_next_frame() {
+    let proj = temp("read-alone");
+    install(
+        &proj,
+        "com.t.alone",
+        "",
+        r#"
+        local asked = false
+        ed.onUpdate(function()
+            if asked then return end
+            asked = true
+            scene.docs({ 99 }, function(docs, missing)
+                ed.log("served, missing " .. table.concat(missing, ","))
+            end)
+        end)
+        "#,
+    );
+    let mut ed = crate::Editor { project_root: proj.clone(), ..Default::default() };
+    ed.load_packages();
+    ed.refresh_ext_frame();
+    ed.ext.fire(HookKind::Update);
+    assert!(ed.ext.take_cmds().is_empty(), "the fixture must queue nothing but the read");
+    ed.apply_ext_commands();
+    ed.drain_ext_log();
+    let s = ed.console.entries.iter().map(|e| e.msg.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(s.contains("served, missing 99"), "the read was not answered:\n{s}");
+    let _ = std::fs::remove_dir_all(&proj);
+}

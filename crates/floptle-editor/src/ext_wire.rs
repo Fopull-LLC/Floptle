@@ -395,7 +395,10 @@ impl Editor {
         let cmds = self.ext.take_cmds();
         // Collected rather than applied in the loop — see below.
         let mut copies: Vec<String> = Vec::new();
+        // Reads and pickers are answered every frame, commands or none: a read
+        // asked from a button that does nothing else has nothing else queued.
         if cmds.is_empty() {
+            self.serve_ext_reads();
             return;
         }
         let mut recorded = false;
@@ -568,6 +571,12 @@ impl Editor {
                 );
             }
         }
+        self.serve_ext_reads();
+    }
+
+    /// What a package asked to read (`scene.docs`, `mesh.read`) and the file
+    /// pickers it opened, answered; and what it logged, shown.
+    fn serve_ext_reads(&mut self) {
         self.drain_ext_log();
         self.serve_mesh_reads();
         self.serve_doc_reads();
