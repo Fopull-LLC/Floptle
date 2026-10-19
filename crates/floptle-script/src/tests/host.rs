@@ -877,8 +877,15 @@ fn streaming_nodes_into_a_big_scene_patches_the_mirror() {
         }
         (crate::host::FULL_SYNCS.with(|c| c.get()), refreshed, best)
     }
-    let (rebuilds, refreshed, streaming_ms) = stream(2000, 30);
-    let (_, _, still_ms) = stream(2000, 0);
+    // Alternated, best of three each: the suite runs this beside hundreds of
+    // other tests, and load landing on one side must not decide the ratio.
+    let (mut rebuilds, mut refreshed) = (0, 0);
+    let (mut streaming_ms, mut still_ms) = (f64::MAX, f64::MAX);
+    for _ in 0..3 {
+        let (r, n, ms) = stream(2000, 30);
+        (rebuilds, refreshed, streaming_ms) = (rebuilds.max(r), refreshed.max(n), streaming_ms.min(ms));
+        still_ms = still_ms.min(stream(2000, 0).2);
+    }
     floptle_say::say_err!("mirror per frame in 2,000 nodes: streaming 30 {streaming_ms:.4} ms, streaming none {still_ms:.4} ms");
     assert_eq!(rebuilds, 0, "streaming nodes in rebuilt the mirror");
     assert!(refreshed <= 31, "a frame read {refreshed} nodes for 30 new and one retagged");
