@@ -1773,6 +1773,36 @@ impl ChunkField {
         None
     }
 
+    /// How far along a ray it first comes within `margin` of the surface, or
+    /// `None` when it never does within `max_t`. `Some(0.0)` when it starts
+    /// that close.
+    ///
+    /// What a collider asks before an exact test against geometry drawn from
+    /// this field: a mesh built from it sits within about half a voxel of the
+    /// surface, so a ray that never comes within a voxel of the surface cannot
+    /// touch the mesh either, and one that does is worth testing from there.
+    /// The plain [`raycast`](Self::raycast) answers the surface itself, and a ray
+    /// grazing a bump passed over the field's surface while clipping the mesh.
+    pub fn raycast_within(&self, ro: Vec3, rd: Vec3, max_t: f32, margin: f32) -> Option<f32> {
+        let rd = rd.normalize_or_zero();
+        if rd == Vec3::ZERO {
+            return None;
+        }
+        let mut t = 0.0f32;
+        for _ in 0..2048 {
+            if t > max_t {
+                return None;
+            }
+            let d = self.d(ro + rd * t) - margin;
+            if d < 0.0 {
+                return Some(t);
+            }
+            // Half steps, for the same reason `raycast` takes them.
+            t += (d * 0.5).max(self.voxel * 0.25);
+        }
+        None
+    }
+
     // ---- migration ----------------------------------------------------------
 
     /// Import a dense [`crate::mesh2sdf::BakedSdf`] (a legacy `.tfield`) into the sparse
