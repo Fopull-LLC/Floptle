@@ -324,7 +324,10 @@ pub fn chunk_instances(src: &ScatterSource, key: ChunkKey) -> Vec<Instance> {
     let mut out = Vec::with_capacity(src.per_chunk as usize);
     let ck = mix((key.0 as u64) << 32 ^ (key.1 as u64 & 0xFFFF_FFFF));
     for i in 0..src.per_chunk {
-        let id = hash3(src.seed, ck, i as u64);
+        // Kept within 53 bits, so it is an exact Lua number: a full 64-bit
+        // hash came back from a script rounded, and `scatter.remove` matched
+        // nothing.
+        let id = hash3(src.seed, ck, i as u64) & ((1u64 << 53) - 1);
         if src.removed.contains(&id) {
             continue;
         }
@@ -352,7 +355,7 @@ pub fn chunk_instances(src: &ScatterSource, key: ChunkKey) -> Vec<Instance> {
                 // each point is normalised onto the sphere. Even coverage with
                 // no pole pile-up, and it is the same mapping the terrain
                 // streamer uses so chunks line up with the ground they sit on.
-                let face = key.0.rem_euclid(6) as usize;
+                let face = (key.0 & 7) as usize;
                 let gu = (key.0 >> 3) as f64;
                 let gv = key.1 as f64;
                 let (u, v) = (
@@ -450,7 +453,7 @@ pub fn chunk_center(src: &ScatterSource, key: ChunkKey) -> DVec3 {
             center.z + (key.1 as f64 + 0.5) * src.chunk,
         ),
         Region::Sphere { center, radius } => {
-            let face = key.0.rem_euclid(6) as usize;
+            let face = (key.0 & 7) as usize;
             let (gu, gv) = ((key.0 >> 3) as f64, key.1 as f64);
             let u = ((gu + 0.5) * src.chunk / radius).clamp(-1.0, 1.0);
             let v = ((gv + 0.5) * src.chunk / radius).clamp(-1.0, 1.0);
@@ -1014,6 +1017,27 @@ mod tests {
                 let radial = (i.pos - center).normalize().as_vec3();
                 assert!(i.up.dot(radial) > 0.999, "up is not the surface normal");
             }
+        }
+    }
+
+    /// **A sphere source puts a chunk where its key says.** Keys pack the cube
+    /// face in their low three bits and were read back modulo six, so two
+    /// columns in three were generated on the wrong face: props stood
+    /// thousands of metres from the player standing among them. The chunk the
+    /// eye is in is centred near the eye, on every face.
+    #[test]
+    fn a_sphere_chunk_is_on_the_face_its_key_names() {
+        let center = DVec3::new(1000.0, 0.0, 0.0);
+        let s = ScatterSource { region: Region::Sphere { center, radius: 600.0 }, chunk: 40.0, ..ground(32) };
+        let mut r = crate::noise::Rng::new(3);
+        for _ in 0..400 {
+            let d = DVec3::new(r.range(-1.0, 1.0), r.range(-1.0, 1.0), r.range(-1.0, 1.0)).normalize_or_zero();
+            if d == DVec3::ZERO {
+                continue;
+            }
+            let eye = center + d * 600.0;
+            let at = chunk_center(&s, eye_chunk(&s, eye));
+            assert!((at - eye).length() < 80.0, "the chunk under {eye:?} is centred {:.0} m away", (at - eye).length());
         }
     }
 

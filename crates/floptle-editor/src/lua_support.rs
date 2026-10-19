@@ -1682,7 +1682,7 @@ function scatter.create(opts) end
 ---@param id integer
 ---@param point Vec3
 ---@param radius? number
----@return { id: integer, distance: number, pos: Vec3, scale: number, param: number }[]
+---@return { id: number, distance: number, pos: Vec3, scale: number, param: number, up: Vec3, yaw: number }[]
 function scatter.near(id, point, radius) end
 ---Remove one instance, permanently. By ID, so it survives the chunk streaming
 ---out and back in.

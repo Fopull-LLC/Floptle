@@ -267,7 +267,7 @@ pub(crate) fn install_scatter_api(
     // position is a float that came from a chain of arithmetic.
     {
         let s = sources.clone();
-        if let Ok(f) = lua.create_function(move |_, (id, inst): (u32, mlua::Integer)| {
+        if let Ok(f) = lua.create_function(move |_, (id, inst): (u32, f64)| {
             let mut v = s.borrow_mut();
             let Some(src) = v.iter_mut().find(|s| s.id == id) else { return Ok(false) };
             Ok(src.removed.insert(inst as u64))
@@ -281,7 +281,7 @@ pub(crate) fn install_scatter_api(
     // having to remember what it cut.
     {
         let s = sources.clone();
-        if let Ok(f) = lua.create_function(move |_, (id, inst): (u32, Option<mlua::Integer>)| {
+        if let Ok(f) = lua.create_function(move |_, (id, inst): (u32, Option<f64>)| {
             let mut v = s.borrow_mut();
             let Some(src) = v.iter_mut().find(|s| s.id == id) else { return Ok(0u32) };
             match inst {
@@ -311,7 +311,7 @@ pub(crate) fn install_scatter_api(
                 let mut ids: Vec<u64> = src.removed.iter().copied().collect();
                 ids.sort_unstable();
                 for (i, v) in ids.iter().enumerate() {
-                    out.set(i + 1, *v as mlua::Integer)?;
+                    out.set(i + 1, *v as f64)?;
                 }
             }
             Ok(out)
@@ -367,11 +367,17 @@ pub(crate) fn install_scatter_api(
             found.sort_by(|a, b| a.0.total_cmp(&b.0));
             for (n, (d, i)) in found.iter().enumerate() {
                 let row = lua.create_table()?;
-                row.set("id", i.id as mlua::Integer)?;
+                // A plain number: ids are 53 bits, which a Lua number holds
+                // exactly, and a Lua integer here is 32.
+                row.set("id", i.id as f64)?;
                 row.set("distance", *d)?;
                 row.set("pos", crate::math_api::LuaVec3(i.pos))?;
                 row.set("scale", i.scale as f64)?;
                 row.set("param", i.param as f64)?;
+                // How it stands: its up (the ground's normal, when it aligns to
+                // the surface) and its spin about that up, in radians.
+                row.set("up", crate::math_api::LuaVec3(i.up.as_dvec3()))?;
+                row.set("yaw", i.yaw as f64)?;
                 out.set(n + 1, row)?;
             }
             Ok(out)
@@ -477,6 +483,38 @@ mod tests {
         // not a place to blow up.
         let none: Table = lua.load("return scatter.cost(9999)").eval().unwrap();
         assert!(none.get::<Option<i64>>("chunks").unwrap().is_none());
+    }
+
+    /// **An instance id survives Lua.** Ids were 64-bit hashes, and a Lua
+    /// number is a double: the id `near` handed out came back to `remove`
+    /// rounded, matched nothing, and a harvest left the plant standing. Now an
+    /// id from `near` removes that instance, it is gone from the next `near`,
+    /// and `removed` lists it exactly.
+    #[test]
+    fn an_instance_id_from_near_removes_that_instance() {
+        let (lua, _, _) = host_with_logs();
+        let out: (bool, bool, bool, bool) = lua
+            .load(
+                r#"local id = scatter.create{ asset = "rock.glb", halfX = 40, halfZ = 40, range = 80, chunk = 20, perChunk = 30 }
+                   local here = scatter.near(id, { x = 0, y = 0, z = 0 }, 30)
+                   local victim = here[1].id
+                   local removed = scatter.remove(id, victim)
+                   local still = false
+                   for _, i in ipairs(scatter.near(id, { x = 0, y = 0, z = 0 }, 30)) do
+                       if i.id == victim then still = true end
+                   end
+                   local listed = false
+                   for _, r in ipairs(scatter.removed(id)) do
+                       if r == victim then listed = true end
+                   end
+                   return removed, not still, listed, here[1].up ~= nil and here[1].yaw ~= nil"#,
+            )
+            .eval()
+            .unwrap();
+        assert!(out.0, "remove did not take the id near handed out");
+        assert!(out.1, "the removed instance is still in near");
+        assert!(out.2, "removed does not list the id exactly");
+        assert!(out.3, "near does not say how an instance stands");
     }
 
     /// The test that would have caught `collide`: every option the Lua surface
