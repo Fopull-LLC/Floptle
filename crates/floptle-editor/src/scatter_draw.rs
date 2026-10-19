@@ -358,7 +358,10 @@ pub(crate) fn build_instances(
                     // give one species a spread of shades without a material
                     // per plant. Neutral at param 0.5.
                     let tintf = 0.85 + 0.3 * inst.param;
-                    mp.color = [mp.color[0] * tintf, mp.color[1] * tintf, mp.color[2] * tintf];
+                    let t = src.look.tint;
+                    mp.color = [mp.color[0] * t[0] * tintf, mp.color[1] * t[1] * tintf, mp.color[2] * t[2] * tintf];
+                    mp.emissive = src.look.emissive;
+                    mp.emissive_strength = src.look.emissive_strength;
                     // A prototype may be several parts (a prefab's nodes), each
                     // with its own mesh, texture and place within the prop. They
                     // are still one instanced draw each — the prefab is resolved
@@ -615,6 +618,34 @@ mod tests {
             removed: Default::default(),
             anchor: None,
             frame: Default::default(),
+            look: Default::default(),
+        }
+    }
+
+    /// **A source's tint and glow reach every prop it draws.** Scatter drew
+    /// every prop flat white, so a game baked each palette into a texture of
+    /// its own — two thousand model variants for one forest.
+    #[test]
+    fn a_sources_tint_and_glow_reach_its_props() {
+        let s = ScatterSource {
+            look: scatter::ScatterLook { tint: [1.0, 0.0, 0.0], emissive: [0.0, 1.0, 0.0], emissive_strength: 2.0 },
+            ..src()
+        };
+        let mut cache = ScatterCache::default();
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY)]);
+        let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
+        let mut out = Vec::new();
+        for _ in 0..50 {
+            out.clear();
+            build_instances(
+                &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground,
+                &MaterialParams::flat([1.0; 3]), &floptle_render::Frustum::everything(), 20_000, &mut out,
+            );
+        }
+        assert!(!out.is_empty(), "nothing drew");
+        for (_, _, raw) in &out {
+            assert!(raw.color[0] > 0.5 && raw.color[1] == 0.0 && raw.color[2] == 0.0, "untinted: {:?}", raw.color);
+            assert_eq!(&raw.emissive, &[0.0, 1.0, 0.0, 2.0], "no glow");
         }
     }
 

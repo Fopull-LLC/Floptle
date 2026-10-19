@@ -38,9 +38,19 @@ fn dvec3(t: &Table, key: &str) -> Option<glam::DVec3> {
 /// through, and the only reason that could happen is that an unknown key was
 /// silently dropped. A typo'd `perchunk` had exactly the same
 /// failure: the default, forever, with nothing to see.
+/// A colour option: `{ r, g, b }` or `{ 1, 0.5, 0 }`, 0 to 1.
+fn color_opt(opts: &mlua::Table, key: &str) -> Option<[f32; 3]> {
+    let t: mlua::Table = opts.get::<Option<mlua::Table>>(key).ok().flatten()?;
+    let at = |name: &str, i: usize| -> f32 {
+        t.get::<Option<f64>>(name).ok().flatten().or_else(|| t.get::<Option<f64>>(i).ok().flatten()).unwrap_or(1.0) as f32
+    };
+    Some([at("r", 1), at("g", 2), at("b", 3)])
+}
+
 pub(crate) const CREATE_KEYS: &[&str] = &[
     "asset", "lod", "range", "seed", "center", "radius", "halfX", "halfZ", "align", "perChunk",
-    "chunk", "scaleMin", "scaleMax", "fade", "density", "densityRows", "parent",
+    "chunk", "scaleMin", "scaleMax", "fade", "density", "densityRows", "parent", "tint", "emissive",
+    "emissiveStrength",
 ];
 
 /// Chunks resident at once, above which a source is reported rather than left
@@ -195,6 +205,11 @@ pub(crate) fn install_scatter_api(
                     .flatten()
                     .filter(|s| !s.is_empty()),
                 frame: Default::default(),
+                look: floptle_core::scatter::ScatterLook {
+                    tint: color_opt(&opts, "tint").unwrap_or([1.0; 3]),
+                    emissive: color_opt(&opts, "emissive").unwrap_or([1.0; 3]),
+                    emissive_strength: num(&opts, "emissiveStrength", 0.0) as f32,
+                },
             };
             // Say what this costs, here, while the two numbers that decided it
             // are still on screen. The alternative is what

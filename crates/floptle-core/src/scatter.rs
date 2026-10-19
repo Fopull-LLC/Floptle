@@ -210,6 +210,24 @@ pub struct ScatterSource {
     /// cached answer, and every placement decision is made in the frame it
     /// describes rather than in the world.
     pub frame: Frame,
+    /// How its props are coloured.
+    pub look: ScatterLook,
+}
+
+/// The colour a source's props are drawn with, on top of their own textures.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScatterLook {
+    /// Multiplies the albedo: one model, a field of reds or of blues.
+    pub tint: [f32; 3],
+    /// Light the props give off, as a colour, and how strongly.
+    pub emissive: [f32; 3],
+    pub emissive_strength: f32,
+}
+
+impl Default for ScatterLook {
+    fn default() -> Self {
+        ScatterLook { tint: [1.0; 3], emissive: [0.0; 3], emissive_strength: 0.0 }
+    }
 }
 
 impl ScatterSource {
@@ -634,6 +652,7 @@ mod tests {
             removed: HashSet::new(),
             anchor: None,
             frame: Default::default(),
+            look: Default::default(),
         }
     }
 

@@ -1674,7 +1674,7 @@ scatter = {}
 ---per instance and never while chunks build — placement has to stay a pure
 ---function of the seed, or walking away and back would regrow a different
 ---world. Density 0 generates no instance at all.
----@param opts { asset?: string, lod?: { asset: string, distance: number }[], seed?: number, center?: Vec3, radius?: number, halfX?: number, halfZ?: number, perChunk?: number, chunk?: number, align?: string, scaleMin?: number, scaleMax?: number, range?: number, fade?: number, density?: fun(x: number, y: number, z: number): number | number[], densityRows?: number }
+---@param opts { tint?: number[], emissive?: number[], emissiveStrength?: number, asset?: string, lod?: { asset: string, distance: number }[], seed?: number, center?: Vec3, radius?: number, halfX?: number, halfZ?: number, perChunk?: number, chunk?: number, align?: string, scaleMin?: number, scaleMax?: number, range?: number, fade?: number, density?: fun(x: number, y: number, z: number): number | number[], densityRows?: number }
 ---@return integer
 function scatter.create(opts) end
 ---Instances within `radius` of a point, nearest first. What a harvest verb aims
