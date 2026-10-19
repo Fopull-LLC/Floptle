@@ -150,6 +150,12 @@ const LOD_RINGS: [i32; 3] = [4, 10, 24];
 /// hundred.
 const BODY_RING_FRACTION: [f64; 3] = [0.15, 0.40, 1.0];
 
+/// The ground within this many metres of the camera is always full detail:
+/// what a player walks on, digs and shoots at is drawn as the collider has it.
+const NEAR_METRES: f64 = 48.0;
+/// …and nothing within this many metres is coarser than stride 2.
+const MID_METRES: f64 = 120.0;
+
 /// The LOD rings to use for a terrain, given the body radius it belongs to
 /// (`None` for ordinary, non-celestial terrain).
 ///
@@ -158,13 +164,22 @@ const BODY_RING_FRACTION: [f64; 3] = [0.15, 0.40, 1.0];
 /// stand on always gets a ring of full detail under your feet and two coarser
 /// ones around it, however small it is.
 fn rings_for_body(body_radius: Option<f64>, chunk_units: f64) -> [i32; 3] {
-    let Some(r) = body_radius.filter(|r| *r > 0.0) else { return LOD_RINGS };
     let chunk = chunk_units.max(1e-3);
+    // What a player can touch is drawn as it collides, however small the body:
+    // full detail within `NEAR_METRES`, nothing coarser than stride 2 within
+    // `MID_METRES`.
+    let near = (NEAR_METRES / chunk).ceil() as i32;
+    let mid = (MID_METRES / chunk).ceil() as i32;
+    let Some(r) = body_radius.filter(|r| *r > 0.0) else {
+        return [LOD_RINGS[0].max(near), LOD_RINGS[1].max(mid), LOD_RINGS[2].max(mid + 1)];
+    };
     let mut out = LOD_RINGS;
     for (i, frac) in BODY_RING_FRACTION.iter().enumerate() {
         let by_body = ((r * frac) / chunk).ceil() as i32;
         out[i] = out[i].min(by_body).max(i as i32 + 1);
     }
+    out[0] = out[0].max(near);
+    out[1] = out[1].max(mid);
     // Rings must stay strictly ordered or `lod_for`'s hysteresis compares
     // against a boundary that is behind it.
     out[1] = out[1].max(out[0] + 1);
@@ -380,12 +395,10 @@ fn lod_for(dist: i32, cur: u8, rings: [i32; 3]) -> u8 {
             cur
         }
     } else {
-        // Refine only once clearly inside the finer ring.
-        if dist < rings[raw as usize] {
-            raw
-        } else {
-            cur
-        }
+        // Refine as soon as it is inside the finer ring. Only coarsening waits:
+        // a ring of one chunk refined only at distance zero, so the chunk ahead
+        // of a walking player stayed coarse until they were standing in it.
+        raw
     }
 }
 
@@ -713,15 +726,15 @@ impl Editor {
             // Camera into the field's local frame (rotation + uniform scale), so
             // LOD rings follow the terrain wherever its node puts it.
             let cl = (rot.inverse() * (cam_world - anchor).as_vec3()) / (chunk_units * ts);
-            let cam_chunk =
-                [cl.x.floor() as i32, cl.y.floor() as i32, cl.z.floor() as i32];
             // LOD ring selection, in this terrain's chunk units — which is the
             // right unit for a ring, and the wrong one for a queue position.
+            // How far the camera is from the nearest point of the chunk, rounded
+            // up: zero inside it. The chunk ahead is as near as its near face,
+            // not as near as its index.
             let dist_of = |c: [i32; 3]| {
-                (c[0] - cam_chunk[0])
-                    .abs()
-                    .max((c[1] - cam_chunk[1]).abs())
-                    .max((c[2] - cam_chunk[2]).abs())
+                let lo = Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32);
+                let gap = (lo - cl).max(cl - (lo + Vec3::ONE)).max(Vec3::ZERO);
+                gap.length().ceil() as i32
             };
             // Queue position, in metres, so chunks from different terrains can
             // be compared at all.
@@ -782,7 +795,13 @@ impl Editor {
                     render.empty.remove(&coord);
                     let dist = dist_of(coord);
                     let cur = render.slots.get(&coord).map(|&(_, l)| l);
-                    let lod = cur.unwrap_or_else(|| raw_lod(dist, rings));
+                    // A dug chunk the player is near is remeshed at full detail
+                    // whatever it was drawn at: a coarse remesh of a pit draws a
+                    // mound over it, or nothing.
+                    let lod = match cur {
+                        Some(c) if raw_lod(dist, rings) > 0 => c,
+                        _ => raw_lod(dist, rings),
+                    };
                     if lod == 0 && sync_near {
                         render.pending.remove(&coord); // a sync mesh supersedes any job
                         // Skirted like every drawn chunk: a full-detail chunk next to a
@@ -3540,8 +3559,10 @@ mod tests {
         assert!(ed.now().is_none(), "no window, no clock — and so nothing to fade against");
     }
 
-    /// The LOD rings hold their chunk at the boundary (±1 hysteresis) so a camera
-    /// drifting across a ring edge can't flip a chunk's stride every frame.
+    /// A chunk coarsens only a chunk past its ring (hysteresis), so a camera
+    /// drifting across a ring edge can't flip it every frame; it refines as
+    /// soon as it is inside the finer ring, because waiting there kept the
+    /// ground ahead of a walking player coarse until they stood in it.
     #[test]
     fn lod_rings_have_hysteresis() {
         let r = LOD_RINGS;
@@ -3553,9 +3574,8 @@ mod tests {
         assert_eq!(lod_for(b + 1, 0, r), 0);
         // …and coarsens once clearly past it.
         assert_eq!(lod_for(b + 2, 0, r), 1);
-        // A lod1 chunk at the boundary stays lod1…
-        assert_eq!(lod_for(b, 1, r), 1);
-        // …and refines once clearly inside.
+        // A lod1 chunk back inside the finer ring refines at once.
+        assert_eq!(lod_for(b, 1, r), 0);
         assert_eq!(lod_for(b - 1, 1, r), 0);
         // No-change fast path.
         assert_eq!(lod_for(2, 0, r), 0);
@@ -3635,9 +3655,38 @@ mod tests {
         assert_eq!(rings_for_body(Some(100_000.0), 48.0), LOD_RINGS);
         assert_eq!(rings_for_body(None, 48.0), LOD_RINGS, "ordinary terrain has no body");
         // A tiny moon still gets a full-detail ring under your feet and two
-        // coarser ones around it, rather than collapsing to nothing.
+        // coarser ones around it, rather than collapsing to nothing; the second
+        // reaches 120 m, which nothing within is drawn coarser than stride 2.
         let tiny = rings_for_body(Some(20.0), 48.0);
-        assert_eq!(tiny, [1, 2, 3], "ordered, and never empty: {tiny:?}");
+        assert_eq!(tiny, [1, 3, 4], "ordered, and never empty: {tiny:?}");
+    }
+
+    /// **What a player can touch is drawn at full detail.** On a body of any
+    /// size, ground within 48 m of the camera is stride 1 and nothing within
+    /// 120 m is coarser than stride 2, whatever stride a chunk was drawn at
+    /// before. The rings were a fraction of the body's radius, which on a
+    /// 300 m world rounded to one chunk, and a coarse chunk refined only once
+    /// the camera was inside it: mountains that were not there until you walked
+    /// into them, and pits that were never drawn.
+    #[test]
+    fn ground_near_the_camera_is_drawn_at_full_detail() {
+        for radius in [40.0, 120.0, 300.0, 1500.0] {
+            for chunk in [24.0, 48.0, 96.0] {
+                let rings = rings_for_body(Some(radius), chunk);
+                for m in 0..200 {
+                    // The camera-to-chunk distance in chunks, rounded up.
+                    let dist = (m as f64 / chunk).ceil() as i32;
+                    for cur in 0..=3u8 {
+                        let lod = lod_for(dist, cur, rings);
+                        if m as f64 <= 48.0 {
+                            assert_eq!(lod, 0, "r {radius}, chunk {chunk}: ground {m} m away drawn at lod {lod} (was {cur})");
+                        } else if m as f64 <= 120.0 {
+                            assert!(lod <= 1, "r {radius}, chunk {chunk}: ground {m} m away drawn at lod {lod} (was {cur})");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// A dense field with the given world size and voxel dims — only the fields

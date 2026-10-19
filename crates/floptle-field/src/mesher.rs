@@ -520,8 +520,8 @@ impl MeshScratch {
     /// onto the real surface keeps the coarse mesh where the ground is. Both chunks
     /// sharing a vertex settle it from the same values, so seams still agree.
     ///
-    /// Only inward, and only onto ground that faces the way the coarse surface does,
-    /// judged at the coarse cell's scale or at one voxel's. A vertex that lands on the far wall of a cave
+    /// Only inward, and only onto ground that faces within 60° of the way the
+    /// coarse surface does, judged at the coarse cell's scale or at one voxel's. A vertex that lands on the far wall of a cave
     /// or the side of a boulder while its neighbours land on the ground folds the
     /// triangles between them; staying put leaves it a little proud of the ground
     /// instead, which nobody sees at the distance a coarse chunk is drawn.
@@ -567,7 +567,7 @@ impl MeshScratch {
             // the ground itself; either agreeing is ground the coarse surface can
             // stand on.
             let h = (self.stride / 2).max(1) as f32 * self.voxel;
-            let agrees = |n: Vec3| n.dot(dir) >= 0.9;
+            let agrees = |n: Vec3| n.dot(dir) >= 0.5;
             return if agrees(facing(h)) || agrees(facing(self.voxel)) { q } else { p };
         }
         p
@@ -1977,6 +1977,42 @@ mod tests {
                     "chunk {c:?} changed under a dig at {ground:?} that reached only {lo:?}..{hi:?}"
                 );
             }
+        }
+    }
+
+    /// **Coarse ground stays near the real ground on a rough moon.** Each coarse
+    /// vertex settled back onto the ground only where the ground faced within
+    /// about 25° of the coarse cell, so on steep, curved ground most stayed
+    /// where the solid-keeping filter pushed them: faces rising metres over the
+    /// hills, which shrank into small hills as you walked up. Settling now
+    /// takes ground within 60°, and the fold check undoes any it should not.
+    /// Measured down 1,500 directions on a cratered moon with 15 m of relief;
+    /// a stride-8 cell is 12 m across, wider than the moon's smaller bumps, so
+    /// it is held at its 95th percentile.
+    #[test]
+    fn coarse_ground_stays_near_the_ground_on_a_rough_moon() {
+        let f = crate::procgen::generate_planet(&crate::procgen::PlanetFill {
+            seed: 248913517,
+            radius: 99.345,
+            voxel: 1.5,
+            relief: 14.52,
+            bump_freq: 4.241,
+            cave_depth: 24.14,
+            craters: 4,
+            ..Default::default()
+        });
+        for (stride, pct, limit) in [(2, 0.99, 1.0f32), (4, 0.99, 2.5), (8, 0.95, 3.0)] {
+            let hulls: Vec<Hull> = f.chunk_coords().into_iter().map(|c| hull(&mesh_chunk(&f, c, stride, false))).collect();
+            let mut above = Vec::new();
+            for d in directions(1500) {
+                let ro = d * 160.0;
+                let Some(truth) = f.raycast(ro, -d, 160.0) else { continue };
+                let Some(t) = first_hit(&hulls, ro, -d, 320.0) else { continue };
+                above.push((truth - ro).length() - t);
+            }
+            above.sort_by(f32::total_cmp);
+            let at = above[((above.len() - 1) as f64 * pct) as usize];
+            assert!(at <= limit, "stride {stride}: the {:.0}th percentile of coarse ground stands {at:.2} m over the real ground (limit {limit})", pct * 100.0);
         }
     }
 
