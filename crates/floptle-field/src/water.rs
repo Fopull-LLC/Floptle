@@ -223,26 +223,81 @@ pub fn lake_levels(grid: &WaterGrid, sea_level: f32) -> Vec<f32> {
     level
 }
 
+/// A surface difference below this is level, metres.
+const LEVEL: f32 = 1e-4;
+/// A flow below this is still, cubic metres a second.
+const STILL: f32 = 1e-4;
+/// Steps a cell must be still for before it sleeps.
+const SLEEP_STEPS: u8 = 30;
+
 /// Water moving over a [`WaterGrid`].
+///
+/// Only cells that are **awake** are stepped. A cell wakes when something
+/// asks it to ([`Self::wake`]), when water reaches it, or when a sleeping
+/// cell's surface stands above an awake neighbour's; it sleeps again once it
+/// has been still for a while. A settled sea costs nothing a step, and a
+/// breach costs only the water it sets moving.
 #[derive(Clone, Debug)]
 pub struct ShallowWater {
     /// Water depth in each cell, metres.
     pub depth: Vec<f32>,
-    /// Outflow to each neighbour, cubic metres a second.
+    /// Outflow to each neighbour, cubic metres a second. Zero while asleep.
     flux: Vec<[f32; 4]>,
     /// Gravity, metres a second squared.
     pub gravity: f32,
     /// How much of last step's flow carries into this one, 0 to 1. Below 1 a
     /// slosh dies away rather than ringing forever.
     pub damping: f32,
+    awake: Vec<bool>,
+    /// Steps each awake cell has been still for.
+    calm: Vec<u8>,
+    /// The awake cells.
+    list: Vec<u32>,
+    /// Per-cell volume change in a step, and the cells it touched.
+    dv: Vec<f64>,
+    touched: Vec<u32>,
 }
 
 impl ShallowWater {
     /// Water standing at `surface` (a level per cell, as [`lake_levels`]
-    /// returns), still.
+    /// returns), still, and asleep.
     pub fn at_rest(grid: &WaterGrid, surface: &[f32]) -> Self {
+        let n = grid.len();
         let depth = grid.ground.iter().zip(surface).map(|(g, s)| (s - g).max(0.0)).collect();
-        Self { depth, flux: vec![[0.0; 4]; grid.len()], gravity: 9.81, damping: 0.995 }
+        Self {
+            depth,
+            flux: vec![[0.0; 4]; n],
+            gravity: 9.81,
+            damping: 0.995,
+            awake: vec![false; n],
+            calm: vec![0; n],
+            list: Vec::new(),
+            dv: vec![0.0; n],
+            touched: Vec::new(),
+        }
+    }
+
+    /// Wake cell `c`: something changed there (a dig, a spring, a splash).
+    pub fn wake(&mut self, c: usize) {
+        if let Some(a) = self.awake.get_mut(c) {
+            self.calm[c] = 0;
+            if !*a {
+                *a = true;
+                self.list.push(c as u32);
+            }
+        }
+    }
+
+    /// Wake every cell.
+    pub fn wake_all(&mut self) {
+        for c in 0..self.depth.len() {
+            self.wake(c);
+        }
+    }
+
+    /// How many cells are awake: what a step costs.
+    pub fn awake_count(&self) -> usize {
+        self.list.len()
     }
 
     /// The volume of water on the grid, cubic metres.
@@ -255,32 +310,46 @@ impl ShallowWater {
         self.depth.iter().zip(&grid.ground).map(|(d, g)| d + g).collect()
     }
 
-    /// The largest step that stays stable on this grid: a wave must not cross
-    /// more than a cell a step.
+    /// A step that stays stable on this grid at its current deepest water.
+    ///
+    /// Four neighbours pouring into one cell overshoot it, and the overshoot
+    /// grows, once `dt` reaches `l / (2·√(g·h))`. This is half that. Water
+    /// that gets deeper than it was (a hole filling) needs it asked again.
     pub fn stable_dt(&self, grid: &WaterGrid) -> f32 {
         let deepest = self.depth.iter().copied().fold(0.0f32, f32::max).max(0.01);
         let shortest = grid.dist.iter().flatten().copied().fold(f32::INFINITY, f32::min);
-        0.5 * shortest / (self.gravity * deepest).sqrt()
+        0.25 * shortest / (self.gravity * deepest).sqrt()
     }
 
-    /// Advance `dt` seconds.
+    /// Advance the awake cells `dt` seconds.
     ///
     /// Each pipe's flow is driven by the difference in the two surfaces, then
     /// every cell's outflow is scaled down to what it holds, so no cell goes
     /// below empty. A transfer leaves one cell and arrives in the other, so
     /// the total volume is what it was.
     pub fn step(&mut self, grid: &WaterGrid, dt: f32) {
-        let n = grid.len();
-        let surface: Vec<f32> = (0..n).map(|c| self.depth[c] + grid.ground[c]).collect();
-        for c in 0..n {
+        let surf = |w: &Self, c: usize| w.depth[c] + grid.ground[c];
+        // A sleeping cell standing above an awake one joins in, or water
+        // would pile up against it as against a wall.
+        for i in 0..self.list.len() {
+            let c = self.list[i] as usize;
+            for &o in &grid.nbr[c] {
+                if o != WALL && !self.awake[o as usize] && self.depth[o as usize] > 0.0 && surf(self, o as usize) > surf(self, c) + LEVEL {
+                    self.wake(o as usize);
+                }
+            }
+        }
+        for &c in &self.list {
+            let c = c as usize;
             let mut out = 0.0f32;
             for k in 0..4 {
                 let o = grid.nbr[c][k];
                 let f = if o == WALL {
                     0.0
                 } else {
-                    let dh = surface[c] - surface[o as usize];
-                    let cross = grid.width[c][k] * self.depth[c].max(self.depth[o as usize]).min(1e3);
+                    let o = o as usize;
+                    let dh = (self.depth[c] + grid.ground[c]) - (self.depth[o] + grid.ground[o]);
+                    let cross = grid.width[c][k] * self.depth[c].max(self.depth[o]).min(1e3);
                     (self.flux[c][k] * self.damping + dt * self.gravity * cross * dh / grid.dist[c][k]).max(0.0)
                 };
                 self.flux[c][k] = f;
@@ -296,20 +365,55 @@ impl ShallowWater {
         }
         // Moved as transfers: what leaves `c` towards `o` is exactly what `o`
         // receives from `c`.
-        let mut dv = vec![0.0f64; n];
-        for c in 0..n {
+        for i in 0..self.list.len() {
+            let c = self.list[i] as usize;
             for k in 0..4 {
                 let o = grid.nbr[c][k];
-                if o == WALL {
+                let v = (self.flux[c][k] * dt) as f64;
+                if o == WALL || v == 0.0 {
                     continue;
                 }
-                let v = (self.flux[c][k] * dt) as f64;
-                dv[c] -= v;
-                dv[o as usize] += v;
+                for x in [c, o as usize] {
+                    if self.dv[x] == 0.0 {
+                        self.touched.push(x as u32);
+                    }
+                }
+                self.dv[c] -= v;
+                self.dv[o as usize] += v;
             }
         }
-        for ((d, v), a) in self.depth.iter_mut().zip(&dv).zip(&grid.area) {
-            *d = ((*d as f64 + v / *a as f64).max(0.0)) as f32;
+        for i in 0..self.touched.len() {
+            let c = self.touched[i] as usize;
+            let v = std::mem::take(&mut self.dv[c]);
+            self.depth[c] = ((self.depth[c] as f64 + v / grid.area[c] as f64).max(0.0)) as f32;
+            // Water arriving wakes a cell, but not rounding noise: a sea whose
+            // level differs in the last bit would otherwise wake whole.
+            if v > (STILL * dt) as f64 {
+                self.wake(c);
+            }
+        }
+        self.touched.clear();
+        // Still cells sleep: no flow out, and level with every neighbour that
+        // has water to give or take.
+        let mut i = 0;
+        while i < self.list.len() {
+            let c = self.list[i] as usize;
+            let still = self.flux[c].iter().all(|f| *f < STILL)
+                && grid.nbr[c].iter().all(|&o| {
+                    o == WALL || {
+                        let (sc, so) = (surf(self, c), surf(self, o as usize));
+                        let higher_dry = if sc > so { self.depth[c] == 0.0 } else { self.depth[o as usize] == 0.0 };
+                        higher_dry || (sc - so).abs() < LEVEL
+                    }
+                });
+            self.calm[c] = if still { self.calm[c].saturating_add(1) } else { 0 };
+            if self.calm[c] >= SLEEP_STEPS {
+                self.awake[c] = false;
+                self.flux[c] = [0.0; 4];
+                self.list.swap_remove(i);
+            } else {
+                i += 1;
+            }
         }
     }
 }
@@ -359,10 +463,13 @@ mod tests {
         let mut w = ShallowWater::at_rest(&g, &level);
         let v0 = w.volume(&g);
         assert!(v0 > 100.0, "the basin holds {v0} m³");
+        // Every cell woken, so this asks the step and not the sleep.
+        w.wake_all();
         let dt = w.stable_dt(&g);
         for _ in 0..2000 {
             w.step(&g, dt);
         }
+        assert_eq!(w.awake_count(), 0, "a settled lake should fall asleep");
         let worst = w.surface(&g).iter().zip(&level).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
         assert!(worst < 1e-3, "the lake moved {worst} m");
         assert!((w.volume(&g) - v0).abs() / v0 < 1e-6);
@@ -382,6 +489,12 @@ mod tests {
             }
         }
         let mut w = ShallowWater::at_rest(&breached, &level);
+        // Only the breach is woken: the rest of the lake has to join in.
+        for y in 18..23 {
+            for x in 30..35 {
+                w.wake(y * 40 + x);
+            }
+        }
         let v0 = w.volume(&breached);
         let centre = 20 * 40 + 20;
         let d0 = w.depth[centre];
@@ -393,6 +506,30 @@ mod tests {
         assert!((v - v0).abs() / v0 < 0.01, "volume went from {v0} to {v}");
         assert!(w.depth[centre] < d0 - 0.2, "the lake did not drain: {} of {d0}", w.depth[centre]);
         assert!(w.depth[20 * 40 + 36] > 0.0, "nothing came through the breach");
+    }
+
+    /// **A hole dug in a lake floor fills from the lake.** Only the dug cell
+    /// is woken, and it is lower than everything round it, so the lake that
+    /// flows into it has to wake itself: water standing above a moving cell
+    /// joins in. The hole fills, the lake drops a little, and nothing is lost.
+    #[test]
+    fn a_hole_dug_in_a_lake_floor_fills_from_the_lake() {
+        let mut g = bowl(1.5);
+        let level = lake_levels(&g, -100.0);
+        let mut w = ShallowWater::at_rest(&g, &level);
+        let v0 = w.volume(&g);
+        let hole = 20 * 40 + 15;
+        g.ground[hole] -= 3.0;
+        w.wake(hole);
+        // Asked after the dig: the hole's water is deeper than the lake's.
+        let dt = w.stable_dt(&g);
+        for _ in 0..1500 {
+            w.step(&g, dt);
+        }
+        let s = w.surface(&g);
+        assert!((s[hole] - s[20 * 40 + 20]).abs() < 0.01, "the hole stands at {} and the lake at {}", s[hole], s[20 * 40 + 20]);
+        assert!(s[20 * 40 + 20] < 3.5, "the lake gave nothing to the hole");
+        assert!((w.volume(&g) - v0).abs() / v0 < 1e-5);
     }
 
     /// The cube map's neighbours are mutual and round the planet: every cell's
@@ -440,6 +577,7 @@ mod tests {
             assert!((level[c] - 2.0).abs() < 1e-5, "the crater stands at {} not its rim", level[c]);
         }
         let mut w = ShallowWater::at_rest(&g, &level);
+        w.wake_all();
         let v0 = w.volume(&g);
         assert!(v0 > 0.0, "the crater holds nothing");
         let dt = w.stable_dt(&g);
