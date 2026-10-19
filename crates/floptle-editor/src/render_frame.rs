@@ -215,26 +215,26 @@ impl Editor {
         // frame — or it adopts the freshly created body as cold and streams a
         // Stale same-id file into it (the authored scene's old planet loaded
         // under a rolled galaxy's spawn world — the player fell straight through it).
-        self.drain_terrain_generates();
-        self.update_terrain_residency(lod_cam);
-        self.publish_terrain_busy();
-        // Background checkpoints (terrain.flush): a few chunks of encoding per
-        // frame + threaded writes — autosaves must never stutter the game.
-        self.step_terrain_checkpoint();
-        {
-            // Terrain: residency, field generation and meshing. "I can see
-            // through unloaded terrain" is the meshing queue, and this number
-            // shows it.
-            let _t = floptle_core::profile::Span::new();
-            self.sync_terrain_meshes(terrain_full_rebuild, lod_cam);
-            self.profile_record(floptle_core::profile::Bucket::Terrain, _t.ms());
-        }
-        self.sync_sky_texture();
-        self.sync_sky_shader();
-        // Texture-painted nodes keep their vertex paint via atlas-ordered mirror blocks;
-        // rebuild them when vertex paint changed this frame (no-op otherwise). after
-        // `vertex_paint_frame_update` above, so a dab shows the same frame it lands.
-        self.sync_tex_paint_mirrors();
+        // Terrain: residency, field generation and meshing. "I can see through
+        // unloaded terrain" is the meshing queue, and this number shows it.
+        self.timed_into(floptle_core::profile::Bucket::Terrain, |ed| {
+            ed.drain_terrain_generates();
+            ed.update_terrain_residency(lod_cam);
+            ed.publish_terrain_busy();
+            // Background checkpoints (terrain.flush): a few chunks of encoding
+            // per frame + threaded writes — autosaves must never stutter the game.
+            ed.step_terrain_checkpoint();
+            ed.sync_terrain_meshes(terrain_full_rebuild, lod_cam);
+        });
+        self.timed_into(floptle_core::profile::Bucket::Assets, |ed| {
+            ed.sync_sky_texture();
+            ed.sync_sky_shader();
+            // Texture-painted nodes keep their vertex paint via atlas-ordered
+            // mirror blocks; rebuild them when vertex paint changed this frame
+            // (no-op otherwise). after `vertex_paint_frame_update` above, so a
+            // dab shows the same frame it lands.
+            ed.sync_tex_paint_mirrors();
+        });
         // Keep the Inspector's script param list in sync with each script's `defaults`
         // (cheap: cached by file mtime, selected node only) so editing a script surfaces
         // new tunables and drops removed ones live.
@@ -308,18 +308,21 @@ impl Editor {
         // before the gather that resolves them (full &mut self here — no borrow
         // race, no frame lag on the open effect).
         self.frame_no = self.frame_no.wrapping_add(1);
-        self.ensure_vfx_assets();
-        // Every texture this scene's materials name, before any gather looks one
-        // up — see `ensure_scene_textures` for what an unregistered one looks
-        // like (it looks like the material was never applied).
-        self.ensure_scene_textures();
-        // Compile/hot-reload `.flsl` shader materials + refresh their group(3)
-        // bindings — the gathers below (main, Game viewport, camera preview)
-        // all read `flsl_binds`, so this must run before any of them. Field
-        // Shapes follow: their sdf shaders splice into both passes on change.
-        self.ensure_flsl_materials();
-        self.ensure_ui_shaders();
-        self.ensure_post_shaders();
+        self.timed_into(floptle_core::profile::Bucket::Assets, |ed| {
+            ed.ensure_vfx_assets();
+            // Every texture this scene's materials name, before any gather looks
+            // one up — see `ensure_scene_textures` for what an unregistered one
+            // looks like (it looks like the material was never applied).
+            ed.ensure_scene_textures();
+            // Compile/hot-reload `.flsl` shader materials + refresh their
+            // group(3) bindings — the gathers below (main, Game viewport, camera
+            // preview) all read `flsl_binds`, so this must run before any of
+            // them. Field Shapes follow: their sdf shaders splice into both
+            // passes on change.
+            ed.ensure_flsl_materials();
+            ed.ensure_ui_shaders();
+            ed.ensure_post_shaders();
+        });
         // Anything the GPU rejected since the last frame. It does not take
         // the process down (see `Gpu::new`), so this is the only place it
         // becomes visible — and it has to, or a pass that silently stops
