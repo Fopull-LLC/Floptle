@@ -2197,6 +2197,7 @@ impl Editor {
             &mut self.script_host,
             &self.world,
             self.sim.as_ref(),
+            raster,
             &self.scatter_protos,
             &self.scatter_proto_radius,
             &mut self.scatter_cache,

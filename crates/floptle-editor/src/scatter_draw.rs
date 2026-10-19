@@ -132,14 +132,42 @@ fn settle(
     Some(inst)
 }
 
-/// One drawable piece of a scatter prototype: a mesh, its texture, and where it
-/// sits within the prop.
+/// One drawable piece of a scatter prototype, ready to draw: a mesh, its
+/// texture, where it sits within the prop, and its surface as its model file
+/// describes it.
 ///
 /// A `.glb` is one part at identity. A prefab is however many Mesh nodes it
 /// holds, each at its authored place — which is what lets a plant be a trunk
 /// and three fronds and still cost one instanced draw per piece rather than a
 /// scene node per piece.
-pub(crate) type Part = (MeshId, Option<TexId>, Mat4);
+pub(crate) type Part = (MeshId, Option<TexId>, Mat4, MaterialParams);
+
+/// A prototype part as baked: everything about its look that the model file
+/// fixed, kept as facts and turned into a material once per prototype per
+/// frame (see [`resolve_parts`]).
+#[derive(Clone)]
+pub(crate) struct BakedPart {
+    pub mesh: MeshId,
+    pub local: Mat4,
+    /// The part's imported base-colour factor.
+    pub base: [f32; 3],
+}
+
+/// A baked prototype's parts with their materials, for this frame — the same
+/// look an ordinary Mesh node with no Material of its own draws: the imported
+/// base colour, and the model's own vertex colours.
+pub(crate) fn resolve_parts(raster: &floptle_render::Raster, baked: &[BakedPart]) -> Vec<Part> {
+    baked
+        .iter()
+        .map(|b| {
+            let mut mp = MaterialParams::flat(b.base);
+            // Imported COLOR_0 is a plain multiply (white is identity), as on
+            // a Mesh node.
+            mp.paint_base = raster.mesh_paint_base(b.mesh);
+            (b.mesh, None, b.local, mp)
+        })
+        .collect()
+}
 
 /// Every scatter source's props for a camera at `eye`, pushed onto `out`;
 /// returns how many. Anchored sources first follow their node to where it is
@@ -153,7 +181,8 @@ pub(crate) fn push_scatter(
     script_host: &mut floptle_script::ScriptHost,
     world: &floptle_core::World,
     sim: Option<&floptle_physics::Sim>,
-    protos: &HashMap<String, Vec<Part>>,
+    raster: &floptle_render::Raster,
+    protos: &HashMap<String, Vec<BakedPart>>,
     proto_radius: &HashMap<String, f32>,
     cache: &mut ScatterCache,
     eye: DVec3,
@@ -191,10 +220,21 @@ pub(crate) fn push_scatter(
         sim.world.raycast(o, dir, max).map(|h| (h.distance, Vec3::from(h.normal)))
     };
     // Baked before the frame's GPU borrow (see
-    // `bake_scatter_prototypes`); this only reads the answer. A
-    // prototype may be a prefab of several parts, and resolving
+    // `bake_scatter_prototypes`), and given its materials once a frame
+    // here: a prototype may be a prefab of several parts, and resolving
     // that per prop would re-walk it twenty thousand times.
-    let mut mesh_of = |asset: &str| protos.get(asset).filter(|p| !p.is_empty()).cloned();
+    let mut looks: HashMap<&str, Vec<Part>> = HashMap::new();
+    for src in &sources {
+        for band in &src.bands {
+            if !looks.contains_key(band.asset.as_str())
+                && let Some((name, baked)) = protos.get_key_value(&band.asset)
+                && !baked.is_empty()
+            {
+                looks.insert(name.as_str(), resolve_parts(raster, baked));
+            }
+        }
+    }
+    let mut mesh_of = |asset: &str| looks.get(asset).cloned();
     // Measured at bake time from the same import bounds the mesh path
     // uses, so a field culls by direction as well as distance.
     let mut radius_of = |asset: &str| proto_radius.get(asset).copied();
@@ -202,7 +242,6 @@ pub(crate) fn push_scatter(
     // silly density costs a frame-rate dip, never a frame that
     // never ends.
     const SCATTER_BUDGET: usize = 20_000;
-    let base = MaterialParams::flat([1.0, 1.0, 1.0]);
     build_instances(
         cache,
         &sources,
@@ -210,7 +249,6 @@ pub(crate) fn push_scatter(
         &mut mesh_of,
         &mut radius_of,
         &mut ground,
-        &base,
         frustum,
         SCATTER_BUDGET,
         out,
@@ -232,7 +270,6 @@ pub(crate) fn build_instances(
     mesh_of: &mut impl FnMut(&str) -> Option<Vec<Part>>,
     radius_of: &mut impl FnMut(&str) -> Option<f32>,
     ground: &mut impl FnMut(DVec3, Vec3, f32) -> Option<(f32, Vec3)>,
-    material: &MaterialParams,
     frustum: &floptle_render::Frustum,
     budget: usize,
     out: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
@@ -352,22 +389,28 @@ pub(crate) fn build_instances(
                 let mut push = |b: usize, alpha: f32| {
                     let Some(asset) = src.bands.get(b) else { return };
                     let Some(parts) = mesh_of(&asset.asset) else { return };
-                    let mut mp = *material;
-                    mp.alpha = alpha;
                     // The per-instance roll rides the albedo, so a game can
                     // give one species a spread of shades without a material
                     // per plant. Neutral at param 0.5.
                     let tintf = 0.85 + 0.3 * inst.param;
                     let t = src.look.tint;
-                    mp.color = [mp.color[0] * t[0] * tintf, mp.color[1] * t[1] * tintf, mp.color[2] * t[2] * tintf];
-                    mp.emissive = src.look.emissive;
-                    mp.emissive_strength = src.look.emissive_strength;
                     // A prototype may be several parts (a prefab's nodes), each
-                    // with its own mesh, texture and place within the prop. They
-                    // are still one instanced draw each — the prefab is resolved
-                    // to this list once, not instantiated per prop.
-                    for &(mesh, tex, local) in &parts {
-                        out.push((mesh, tex, instance_of_mat(model * local, &mp)));
+                    // with its own mesh, texture, look and place within the
+                    // prop. They are still one instanced draw each — the prefab
+                    // is resolved to this list once, not instantiated per prop.
+                    for (mesh, tex, local, look) in &parts {
+                        let mut mp = *look;
+                        mp.alpha *= alpha;
+                        // The source's tint multiplies the model's own colour,
+                        // so a texture's palette is shaded rather than replaced.
+                        mp.color = [mp.color[0] * t[0] * tintf, mp.color[1] * t[1] * tintf, mp.color[2] * t[2] * tintf];
+                        // A source's glow supersedes the model's; a source with
+                        // none leaves the model's own glow alone.
+                        if src.look.emissive_strength > 0.0 {
+                            mp.emissive = src.look.emissive;
+                            mp.emissive_strength = src.look.emissive_strength;
+                        }
+                        out.push((*mesh, *tex, instance_of_mat(model * *local, &mp)));
                     }
                 };
                 // At the very ends of a fade window one half rounds to nothing.
@@ -420,7 +463,7 @@ impl crate::Editor {
         }
     }
 
-    pub(crate) fn scatter_prototype(&mut self, asset: &str) -> Option<Vec<Part>> {
+    pub(crate) fn scatter_prototype(&mut self, asset: &str) -> Option<Vec<BakedPart>> {
         // A "nothing baked" answer taken without a GPU is not about the asset,
         // so it stops being the answer the moment there is one to bake on.
         if self.gpu.is_some() && !self.scatter_protos_gpuless.is_empty() {
@@ -490,7 +533,7 @@ impl crate::Editor {
         floptle_vfs::exists(crate::project::resolve_asset_path(&self.project_root, asset))
     }
 
-    fn bake_scatter_prototype(&mut self, asset: &str) -> Vec<Part> {
+    fn bake_scatter_prototype(&mut self, asset: &str) -> Vec<BakedPart> {
         // A prefab first, since a project may legitimately hold both names.
         if let Some(path) = self.resolve_prefab_request(asset)
             && let Ok(docs) = crate::prefab::load_prefab_docs(&path)
@@ -506,14 +549,13 @@ impl crate::Editor {
                     continue;
                 }
                 let Some(a) = self.mesh_registry.get(asset_path) else { continue };
-                let parts: Vec<MeshId> = a.parts.clone();
                 let local = prefab_local(&docs, i);
                 let (scale, _, offset) = local.to_scale_rotation_translation();
                 radius = radius.max(
                     offset.length()
                         + floptle_render::cull::radius_from_longest_edge(a.size, scale),
                 );
-                out.extend(parts.into_iter().map(|m| (m, None, local)));
+                out.extend(baked_parts(a, local));
             }
             if radius.is_finite() && radius > 0.0 {
                 self.scatter_proto_radius.insert(asset.to_string(), radius);
@@ -525,12 +567,28 @@ impl crate::Editor {
         }
         let Some(a) = self.mesh_registry.get(asset) else { return Vec::new() };
         let radius = floptle_render::cull::radius_from_longest_edge(a.size, Vec3::ONE);
-        let parts: Vec<Part> = a.parts.iter().map(|&m| (m, None, Mat4::IDENTITY)).collect();
+        let parts = baked_parts(a, Mat4::IDENTITY);
         if radius.is_finite() && radius > 0.0 {
             self.scatter_proto_radius.insert(asset.to_string(), radius);
         }
         parts
     }
+}
+
+/// A model's parts as a prototype bakes them, each with its imported look.
+fn baked_parts(a: &crate::MeshAsset, local: Mat4) -> Vec<BakedPart> {
+    a.parts
+        .iter()
+        .enumerate()
+        .map(|(i, &mesh)| {
+            let meta = a.part_meta.get(i);
+            BakedPart {
+                mesh,
+                local,
+                base: meta.map_or([1.0; 3], |m| m.base_color),
+            }
+        })
+        .collect()
 }
 
 /// A prefab node's transform relative to the prefab's root — its own, composed
@@ -632,20 +690,60 @@ mod tests {
             ..src()
         };
         let mut cache = ScatterCache::default();
-        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY)]);
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]);
         let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
         let mut out = Vec::new();
         for _ in 0..50 {
             out.clear();
             build_instances(
                 &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground,
-                &MaterialParams::flat([1.0; 3]), &floptle_render::Frustum::everything(), 20_000, &mut out,
+                &floptle_render::Frustum::everything(), 20_000, &mut out,
             );
         }
         assert!(!out.is_empty(), "nothing drew");
         for (_, _, raw) in &out {
             assert!(raw.color[0] > 0.5 && raw.color[1] == 0.0 && raw.color[2] == 0.0, "untinted: {:?}", raw.color);
             assert_eq!(&raw.emissive, &[0.0, 1.0, 0.0, 2.0], "no glow");
+        }
+    }
+
+    /// **A model's own colour is what a prop is tinted from.** Scatter drew
+    /// every part from flat white, so a glTF's base-colour factor and its glow
+    /// were thrown away, and a game baked each colour into a texture instead.
+    #[test]
+    fn a_props_own_colour_and_glow_survive_its_sources_tint() {
+        let mut look = MaterialParams::flat([0.2, 0.4, 0.8]);
+        look.emissive = [1.0, 0.5, 0.0];
+        look.emissive_strength = 3.0;
+        let asset = crate::MeshAsset {
+            parts: vec![MeshId(4)],
+            part_meta: vec![crate::PartMeta { material: "Leaf".into(), base_color: [0.2, 0.4, 0.8], textured: false }],
+            tex_filter: None,
+            size: 1.0,
+            rig: None,
+        };
+        let baked = baked_parts(&asset, Mat4::IDENTITY);
+        assert_eq!(baked[0].base, [0.2, 0.4, 0.8], "the bake dropped the part's base colour");
+        let s = ScatterSource { look: scatter::ScatterLook { tint: [1.0, 0.5, 1.0], ..Default::default() }, ..src() };
+        let mut cache = ScatterCache::default();
+        let mut mesh = |_: &str| Some(vec![(MeshId(4), None, Mat4::IDENTITY, look)]);
+        let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
+        let mut out = Vec::new();
+        for _ in 0..50 {
+            out.clear();
+            build_instances(
+                &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground,
+                &floptle_render::Frustum::everything(), 20_000, &mut out,
+            );
+        }
+        assert!(!out.is_empty(), "nothing drew");
+        for (_, _, raw) in &out {
+            // Up to the per-prop shade roll, which scales all three alike.
+            let k = raw.color[0] / 0.2;
+            assert!((0.8..=1.2).contains(&k), "the part's colour was replaced: {:?}", raw.color);
+            assert!((raw.color[1] - 0.4 * 0.5 * k).abs() < 1e-4, "{:?}", raw.color);
+            assert!((raw.color[2] - 0.8 * k).abs() < 1e-4, "{:?}", raw.color);
+            assert_eq!(&raw.emissive, &[1.0, 0.5, 0.0, 3.0], "the model's glow was dropped");
         }
     }
 
@@ -662,11 +760,10 @@ mod tests {
     fn a_scatter_field_submits_only_the_half_it_can_see() {
         let s = src();
         let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
-        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY)]);
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]);
         // A measured prototype radius is what makes the cull possible at all;
         // without one the source is submitted whole, as it was before.
         let mut radius = |_: &str| Some(1.0f32);
-        let mat = MaterialParams::flat([1.0; 3]);
         let mut count = |frustum: &floptle_render::Frustum,
                          radius: &mut dyn FnMut(&str) -> Option<f32>| {
             let mut out = Vec::new();
@@ -677,7 +774,6 @@ mod tests {
                 &mut mesh,
                 &mut { radius },
                 &mut ground,
-                &mat,
                 frustum,
                 100_000,
                 &mut out,
@@ -719,17 +815,16 @@ mod tests {
         // Two parts: one at the origin, one a metre up.
         let up = Mat4::from_translation(Vec3::new(0.0, 1.0, 0.0));
         let mut mesh = |_: &str| {
-            Some(vec![(MeshId(0), None, Mat4::IDENTITY), (MeshId(1), None, up)])
+            Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3])), (MeshId(1), None, up, MaterialParams::flat([1.0; 3]))])
         };
         let mut one = Vec::new();
         build_instances(
             &mut ScatterCache::default(),
             std::slice::from_ref(&s),
             DVec3::ZERO,
-            &mut |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY)]),
+            &mut |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]),
             &mut |_: &str| None,
             &mut ground,
-            &MaterialParams::flat([1.0; 3]),
             &floptle_render::Frustum::everything(),
             10_000,
             &mut one,
@@ -742,7 +837,6 @@ mod tests {
             &mut mesh,
             &mut |_: &str| None,
             &mut ground,
-            &MaterialParams::flat([1.0; 3]),
             &floptle_render::Frustum::everything(),
             10_000,
             &mut two,
@@ -789,12 +883,11 @@ mod tests {
     fn cutting_a_prop_invalidates_the_cache_immediately() {
         let mut cache = ScatterCache::default();
         let mut s = src();
-        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY)]);
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]);
         let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
-        let mat = MaterialParams::flat([1.0, 1.0, 1.0]);
         let mut out = Vec::new();
         build_instances(
-            &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground, &mat,
+            &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground,
             &floptle_render::Frustum::everything(),
             10_000, &mut out,
         );
@@ -806,7 +899,7 @@ mod tests {
         s.removed.insert(victim);
         out.clear();
         build_instances(
-            &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground, &mat,
+            &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground,
             &floptle_render::Frustum::everything(),
             10_000, &mut out,
         );
@@ -821,12 +914,11 @@ mod tests {
         let mut s = src();
         s.per_chunk = 512;
         s.bands = vec![Band { asset: "a".into(), distance: 400.0 }];
-        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY)]);
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]);
         let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
-        let mat = MaterialParams::flat([1.0, 1.0, 1.0]);
         let mut out = Vec::new();
         build_instances(
-            &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground, &mat,
+            &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground,
             &floptle_render::Frustum::everything(),
             64, &mut out,
         );
@@ -853,8 +945,7 @@ mod tests {
     fn arriving_ground_is_settled_over_several_frames_not_all_at_once() {
         let s = big_field();
         let mut cache = ScatterCache::default();
-        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY)]);
-        let mat = MaterialParams::flat([1.0; 3]);
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]);
         let eye = DVec3::ZERO;
 
         // Left alone this configuration is ninety thousand props, every one of
@@ -871,7 +962,7 @@ mod tests {
             };
             let mut out = Vec::new();
             build_instances(
-                &mut cache, std::slice::from_ref(&s), eye, &mut mesh, &mut |_: &str| None, &mut ground, &mat,
+                &mut cache, std::slice::from_ref(&s), eye, &mut mesh, &mut |_: &str| None, &mut ground,
             &floptle_render::Frustum::everything(),
                 20_000, &mut out,
             );
@@ -891,7 +982,7 @@ mod tests {
         };
         let mut out = Vec::new();
         build_instances(
-            &mut cache, std::slice::from_ref(&s), eye, &mut mesh, &mut |_: &str| None, &mut ground, &mat,
+            &mut cache, std::slice::from_ref(&s), eye, &mut mesh, &mut |_: &str| None, &mut ground,
             &floptle_render::Frustum::everything(), 20_000,
             &mut out,
         );
@@ -907,23 +998,22 @@ mod tests {
     fn a_full_budget_drops_the_far_props_and_keeps_the_near_ones() {
         let s = big_field();
         let mut cache = ScatterCache::default();
-        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY)]);
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]);
         let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
-        let mat = MaterialParams::flat([1.0; 3]);
         let eye = DVec3::ZERO;
 
         // Warm, so the settle budget isn't what's limiting this.
         for _ in 0..40 {
             let mut out = Vec::new();
             build_instances(
-                &mut cache, std::slice::from_ref(&s), eye, &mut mesh, &mut |_: &str| None, &mut ground, &mat,
+                &mut cache, std::slice::from_ref(&s), eye, &mut mesh, &mut |_: &str| None, &mut ground,
             &floptle_render::Frustum::everything(),
                 20_000, &mut out,
             );
         }
         let mut out = Vec::new();
         build_instances(
-            &mut cache, std::slice::from_ref(&s), eye, &mut mesh, &mut |_: &str| None, &mut ground, &mat,
+            &mut cache, std::slice::from_ref(&s), eye, &mut mesh, &mut |_: &str| None, &mut ground,
             &floptle_render::Frustum::everything(), 300,
             &mut out,
         );
@@ -956,8 +1046,7 @@ mod tests {
         let mut s = src();
         s.anchor = Some("Umunquo".into());
         let mut cache = ScatterCache::default();
-        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY)]);
-        let mat = MaterialParams::flat([1.0; 3]);
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]);
 
         // Frame one: at the origin.
         let casts = std::cell::Cell::new(0usize);
@@ -972,7 +1061,7 @@ mod tests {
             before.clear();
             build_instances(
                 &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh,
-                &mut |_: &str| None, &mut ground, &mat,
+                &mut |_: &str| None, &mut ground,
                 &floptle_render::Frustum::everything(), 20_000, &mut before,
             );
         }
@@ -989,7 +1078,7 @@ mod tests {
         casts.set(0);
         let mut after = Vec::new();
         build_instances(
-            &mut cache, std::slice::from_ref(&s), moved, &mut mesh, &mut |_: &str| None, &mut ground, &mat,
+            &mut cache, std::slice::from_ref(&s), moved, &mut mesh, &mut |_: &str| None, &mut ground,
             &floptle_render::Frustum::everything(), 20_000,
             &mut after,
         );
@@ -1037,12 +1126,11 @@ mod tests {
         let s = src();
         assert!(s.anchor.is_none() && s.frame.is_identity());
         let mut cache = ScatterCache::default();
-        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY)]);
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]);
         let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
-        let mat = MaterialParams::flat([1.0; 3]);
         let mut out = Vec::new();
         build_instances(
-            &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground, &mat,
+            &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground,
             &floptle_render::Frustum::everything(),
             20_000, &mut out,
         );
@@ -1062,18 +1150,17 @@ mod tests {
         s.fade = 10.0;
         let mut asked: Vec<String> = Vec::new();
         let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
-        let mat = MaterialParams::flat([1.0, 1.0, 1.0]);
         let mut out = Vec::new();
         {
             let mut mesh = |a: &str| {
                 asked.push(a.to_string());
-                Some(vec![(MeshId(0), None, Mat4::IDENTITY)])
+                Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))])
             };
             // Stand ~35 m away: inside the first band's 10 m fade window.
             build_instances(
                 &mut cache, std::slice::from_ref(&s), DVec3::new(0.0, 0.0, 0.0), &mut mesh,
                 &mut |_: &str| None,
-                &mut ground, &mat, &floptle_render::Frustum::everything(), 10_000, &mut out,
+                &mut ground, &floptle_render::Frustum::everything(), 10_000, &mut out,
             );
         }
         let both = asked.iter().any(|a| a == "near") && asked.iter().any(|a| a == "far");

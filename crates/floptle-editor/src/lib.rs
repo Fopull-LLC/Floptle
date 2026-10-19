@@ -2249,7 +2249,7 @@ struct Editor {
     /// baked once (see `scatter_prototype`). An empty entry is a remembered
     /// Failure, so a prototype that cannot be drawn is reported once rather
     /// than every frame it is looked at.
-    scatter_protos: HashMap<String, Vec<crate::scatter_draw::Part>>,
+    scatter_protos: HashMap<String, Vec<crate::scatter_draw::BakedPart>>,
     /// Prototypes that baked to nothing only because there was no GPU to
     /// register meshes on (`floptle run`, `check`). Cached so a long headless
     /// run asks once instead of per step, and thrown away the moment a GPU
