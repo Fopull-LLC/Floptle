@@ -3170,6 +3170,23 @@ impl Raster {
     /// returning its handle. The mesh's own texture uses the default (crisp) sampling.
     /// `data.colors`, if present, becomes the mesh's shared vertex-paint block.
     pub fn register(&mut self, gpu: &Gpu, data: &MeshData, texture: Option<&TextureData>) -> MeshId {
+        self.register_sampled(gpu, data, texture, TexSampling::default())
+    }
+
+    /// [`Self::register`], with the mesh's own texture sampled as `sampling`.
+    ///
+    /// The filter has to be known here rather than set afterwards, because a
+    /// trilinear filter needs a mip chain and the chain is built from the
+    /// pixels at upload: [`Self::set_mesh_sampling`] can only rebind what was
+    /// uploaded, and asked for mipmaps on a single-level texture it sampled the
+    /// one level there was, so far textures shimmered exactly as before.
+    pub fn register_sampled(
+        &mut self,
+        gpu: &Gpu,
+        data: &MeshData,
+        texture: Option<&TextureData>,
+        sampling: TexSampling,
+    ) -> MeshId {
         let id = MeshId(self.meshes.len() as u32);
         let gpu_mesh = GpuMesh::upload(gpu, data);
         // A short/long color stream would silently misalign paint against geometry —
@@ -3187,12 +3204,15 @@ impl Raster {
             None => 0,
         };
 
-        let owned = texture.map(|t| self.mesh_texture(gpu, t));
+        let mips = matches!(sampling.filter, TexFilter::SmoothMipmaps);
+        let owned = texture.map(|t| self.mesh_texture(gpu, t, mips));
         let view = owned
             .as_ref()
             .unwrap_or(&self.default_tex)
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let sampler = self.sampler_for(gpu, TexSampling::default());
+        // A mesh with no texture of its own keeps the shared default's crisp
+        // sampling, as `set_mesh_sampling` always left it.
+        let sampler = self.sampler_for(gpu, if owned.is_some() { sampling } else { TexSampling::default() });
         let tex_bind = self.plain_surface_bind(gpu, "raster-mesh-tex", &view, &sampler);
 
         self.meshes.push(RegisteredMesh {
@@ -3206,14 +3226,21 @@ impl Raster {
     }
 
     /// The GPU copy of a model's picture: the one already there when another
-    /// mesh brought the same pixels, otherwise a new one.
-    fn mesh_texture(&mut self, gpu: &Gpu, t: &TextureData) -> wgpu::Texture {
+    /// mesh brought the same pixels, otherwise a new one. With and without a
+    /// mip chain are two copies: the same pixels sampled two ways.
+    fn mesh_texture(&mut self, gpu: &Gpu, t: &TextureData, mips: bool) -> wgpu::Texture {
         use std::hash::Hasher;
         let mut h = rustc_hash::FxHasher::default();
         h.write_u32(t.width);
         h.write_u32(t.height);
+        h.write_u8(mips as u8);
         h.write(&t.pixels);
-        self.mesh_textures.entry(h.finish()).or_insert_with(|| upload_texture(gpu, t)).clone()
+        self.mesh_textures.entry(h.finish()).or_insert_with(|| upload_texture_mips(gpu, t, mips)).clone()
+    }
+
+    /// How many mip levels mesh `id`'s own texture has; `None` without one.
+    pub fn mesh_texture_mips(&self, id: MeshId) -> Option<u32> {
+        self.meshes.get(id.0 as usize)?._texture.as_ref().map(|t| t.mip_level_count())
     }
 
     /// How many distinct model pictures are on the GPU.
@@ -3223,7 +3250,14 @@ impl Raster {
 
     /// The bytes those pictures hold on the GPU.
     pub fn mesh_texture_bytes(&self) -> u64 {
-        self.mesh_textures.values().map(|t| u64::from(t.width()) * u64::from(t.height()) * 4).sum()
+        self.mesh_textures
+            .values()
+            .map(|t| {
+                (0..t.mip_level_count())
+                    .map(|l| u64::from((t.width() >> l).max(1)) * u64::from((t.height() >> l).max(1)) * 4)
+                    .sum::<u64>()
+            })
+            .sum()
     }
 
     /// Re-derive a registered mesh's texture bind group with different sampling —

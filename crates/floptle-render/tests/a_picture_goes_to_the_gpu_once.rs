@@ -40,3 +40,32 @@ fn meshes_that_bring_the_same_pixels_share_one_texture() {
     raster.register(&gpu, &quad(), None);
     assert_eq!(raster.mesh_texture_count(), 4, "a picture that differs in a pixel or in shape is its own");
 }
+
+/// **A model whose textures ask for mipmaps gets a mip chain.** The filter was
+/// applied after registration, by rebinding a sampler, and a sampler cannot add
+/// levels a texture does not have: "smooth + mipmaps" sampled the single level
+/// there was, and a far model's texture shimmered exactly as a crisp one did.
+#[test]
+fn a_mesh_texture_sampled_with_mipmaps_has_a_mip_chain() {
+    use floptle_render::{TexFilter, TexSampling};
+    let gpu = Gpu::headless(8, 8);
+    if !gpu.adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::VIEW_FORMATS) {
+        eprintln!("skipped — this device cannot build the raster pass");
+        return;
+    }
+    let mut raster = Raster::new(&gpu);
+    let skin = picture(3);
+    let crisp = raster.register(&gpu, &quad(), Some(&skin));
+    let smooth = raster.register_sampled(
+        &gpu,
+        &quad(),
+        Some(&skin),
+        TexSampling { filter: TexFilter::SmoothMipmaps, ..Default::default() },
+    );
+    assert_eq!(raster.mesh_texture_mips(crisp), Some(1));
+    assert_eq!(raster.mesh_texture_mips(smooth), Some(7), "64×64 has seven levels down to 1×1");
+    // The same pixels twice, one copy each way.
+    assert_eq!(raster.mesh_texture_count(), 2);
+    let untextured = raster.register_sampled(&gpu, &quad(), None, TexSampling { filter: TexFilter::SmoothMipmaps, ..Default::default() });
+    assert_eq!(raster.mesh_texture_mips(untextured), None);
+}

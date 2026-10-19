@@ -572,6 +572,11 @@ impl Editor {
             return false;
         };
         let overrides = crate::rig_overrides::RigOverrides::load(file);
+        // The embedded textures' filter, applied as the parts register: "smooth
+        // + mipmaps" needs its mip chain built from the pixels at upload.
+        let sampling =
+            crate::assets::TexSetting { filter: overrides.texture_filter.unwrap_or_default(), ..Default::default() }
+                .to_sampling();
         match decoded {
             // Rigged: any glTF with animations keeps its node tree + clips
             // (parts stay node-local and get posed each frame).
@@ -579,7 +584,7 @@ impl Editor {
                 let parts: Vec<MeshId> = model
                     .parts
                     .iter()
-                    .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
+                    .map(|p| raster.register_sampled(gpu, &p.mesh, p.texture.map(|i| &model.textures[i]), sampling))
                     .collect();
                 let part_meta = model
                     .parts
@@ -590,12 +595,6 @@ impl Editor {
                         textured: p.texture.is_some(),
                     })
                     .collect();
-                if let Some(f) = overrides.texture_filter {
-                    let s = crate::assets::TexSetting { filter: f, ..Default::default() };
-                    for &mid in &parts {
-                        raster.set_mesh_sampling(gpu, mid, s.to_sampling());
-                    }
-                }
                 let mut rig = anim::rig_from_model(&model, &overrides);
                 // Bind pose + per-vertex weights to the GPU once, here: from now on
                 // this model's characters are deformed in the vertex shader.
@@ -630,7 +629,7 @@ impl Editor {
                 let parts: Vec<MeshId> = model
                     .parts
                     .iter()
-                    .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
+                    .map(|p| raster.register_sampled(gpu, &p.mesh, p.texture.map(|i| &model.textures[i]), sampling))
                     .collect();
                 let part_meta = model
                     .parts
@@ -641,12 +640,6 @@ impl Editor {
                         textured: p.texture.is_some(),
                     })
                     .collect();
-                if let Some(f) = overrides.texture_filter {
-                    let s = crate::assets::TexSetting { filter: f, ..Default::default() };
-                    for &mid in &parts {
-                        raster.set_mesh_sampling(gpu, mid, s.to_sampling());
-                    }
-                }
                 self.mesh_registry.insert(
                     path.to_string(),
                     MeshAsset {
