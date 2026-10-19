@@ -23,6 +23,7 @@ linked here, it isn't finished — a test enforces that.
 | Keep first-person arms out of walls | [camera-stacks.md](camera-stacks.md) |
 | Make your game playable by more people | [accessibility.md](accessibility.md) |
 | Sculpt terrain / build a planet | [subsystems/deformable-matter.md](subsystems/deformable-matter.md) |
+| Generate a planet: mountains, rivers, lakes, biomes | [planet-generator.md](planet-generator.md) |
 | Draw a texture | [image-editor.md](image-editor.md) |
 | Build a menu or a HUD | [ui-tab.md](ui-tab.md) → [ui-styles.md](ui-styles.md) → [ui-make.md](ui-make.md) |
 | Animate a character | [animation.md](animation.md) |
