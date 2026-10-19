@@ -12,16 +12,25 @@ use floptle_core::math::{Quat, Vec3};
 
 use crate::world::PhysicsWorld;
 
+/// What one end of a joint holds: a body, or an assembly's compound (the
+/// whole rigid craft, so a hinge between two assemblies articulates a vessel
+/// built from sub-assemblies), by index into the world's lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Link {
+    Body(usize),
+    Compound(usize),
+}
+
 /// One joint in the simulation. Anchors are in their body's own frame (the
-/// body's `pos`, before its turn); a joint to the world keeps its far end in
-/// `world`, sim frame.
+/// body's `pos`, before its turn; a compound's centre of mass and turn); a
+/// joint to the world keeps its far end in `world`, sim frame.
 #[derive(Clone, Debug)]
 pub struct JointRt {
     /// The node the joint is on (entity index).
     pub owner: u32,
     pub kind: JointKind,
-    pub a: usize,
-    pub b: Option<usize>,
+    pub a: Link,
+    pub b: Option<Link>,
     pub anchor_a: Vec3,
     pub anchor_b: Vec3,
     /// The far end when there is no other body.
@@ -51,6 +60,32 @@ pub struct JointRt {
     /// The largest force the joint carried last step, for breaking and for
     /// scripts to read.
     pub force: f32,
+    /// Where the joint is, after the last step: a hinge's or a wheel's turn
+    /// (radians), a slider's travel along its rail, a distance joint's
+    /// length. And how fast that is changing, a second.
+    pub position: f32,
+    pub speed: f32,
+    /// Drive the motor to `goal` (a hinge's turn in radians, a slider's
+    /// travel) instead of at a speed: a servo or a piston. `motor_speed` is
+    /// how fast it may go getting there.
+    pub servo: bool,
+    pub goal: f32,
+    /// The servo's error, summed over time: what holds it at its goal against
+    /// a steady load (an arm's own weight), which the error alone cannot.
+    pub servo_sum: f32,
+    /// Made by a script (`assembly.grip`) rather than from a node's `Joint`:
+    /// a rebuild of the component joints keeps it.
+    pub scripted: bool,
+    /// The far end rides this collider (by index) when there is no other
+    /// body: `world` is then relative to the collider's anchor, so a grip on
+    /// the ground of an orbiting planet moves with the planet.
+    pub on_collider: Option<usize>,
+    /// The node that collider belongs to, so the grip finds it again when
+    /// the collider list is rebuilt (a chunk streaming in reorders it).
+    pub collider_eid: Option<u32>,
+    /// A braked wheel's parking spot: the collider it rests on and where on
+    /// it, relative to its anchor. See `PhysicsWorld::tyre_grip`.
+    pub park: Option<(usize, Vec3)>,
     /// What the joint was built from: its kind, the other node's name, the
     /// anchors, the axis and whether the pair collides. A component that no
     /// longer matches is rebuilt.
@@ -106,12 +141,15 @@ impl End {
     }
 }
 
-const ITERATIONS: usize = 8;
+/// Passes over the hard links each step. Sixteen, not eight: a heavy load at
+/// the end of a chain of light links (a robotic arm holding cargo) rested
+/// past its limits and shivered there at eight, and settles still at this.
+const ITERATIONS: usize = 16;
 
 impl PhysicsWorld {
-    fn joint_end(&self, bi: Option<usize>, local: Vec3, world: Vec3) -> End {
+    fn joint_end(&self, bi: Option<Link>, local: Vec3, world: Vec3) -> End {
         match bi {
-            Some(i) => {
+            Some(Link::Body(i)) => {
                 let b = &self.bodies[i];
                 let p = b.pos + b.orient * local;
                 let moves = b.live() && !b.kinematic && !b.driven && !b.pushbox_only;
@@ -122,19 +160,71 @@ impl PhysicsWorld {
                     inv_i: if moves { b.world_inv_inertia() } else { floptle_core::math::Mat3::ZERO },
                 }
             }
+            Some(Link::Compound(i)) => {
+                let c = &self.compounds[i];
+                let p = c.pos + c.orient * local;
+                let moves = c.live() && !c.anchored;
+                End {
+                    p,
+                    r: p - c.pos,
+                    inv_m: if moves { 1.0 / c.mass.max(1e-4) } else { 0.0 },
+                    inv_i: if moves { c.world_inv_inertia() } else { floptle_core::math::Mat3::ZERO },
+                }
+            }
             None => End { p: world, r: Vec3::ZERO, inv_m: 0.0, inv_i: floptle_core::math::Mat3::ZERO },
         }
     }
 
-    fn orient_of(&self, bi: Option<usize>) -> Quat {
-        bi.map_or(Quat::IDENTITY, |i| self.bodies[i].orient)
+    /// The far end of joint `j` when it has no other body: its fixed world
+    /// point, or a point riding the collider it was gripped to.
+    fn world_end(&self, j: usize) -> Vec3 {
+        let jt = &self.joints[j];
+        match jt.on_collider.and_then(|ci| self.colliders.get(ci)) {
+            Some(col) => col.offset() + jt.world,
+            None => jt.world,
+        }
+    }
+
+    fn orient_of(&self, bi: Option<Link>) -> Quat {
+        match bi {
+            Some(Link::Body(i)) => self.bodies[i].orient,
+            Some(Link::Compound(i)) => self.compounds[i].orient,
+            None => Quat::IDENTITY,
+        }
+    }
+
+    /// Whether a compound end takes the solver's corrections.
+    fn compound_moves(&self, i: usize) -> bool {
+        let c = &self.compounds[i];
+        c.live() && !c.anchored
     }
 
     /// Move body `bi` by `lin` at the point offset `r` from its centre of mass
     /// (a positional impulse), turning it as that implies, and give it the
     /// matching speed over `dt`.
-    fn joint_shift(&mut self, bi: Option<usize>, r: Vec3, lin: Vec3, dt: f32) {
-        let Some(i) = bi else { return };
+    fn joint_shift(&mut self, bi: Option<Link>, r: Vec3, lin: Vec3, dt: f32) {
+        let i = match bi {
+            Some(Link::Body(i)) => i,
+            Some(Link::Compound(i)) => {
+                if !self.compound_moves(i) {
+                    return;
+                }
+                let c = &mut self.compounds[i];
+                let d = lin / c.mass.max(1e-4);
+                let rot = c.world_inv_inertia() * r.cross(lin);
+                c.pos += d;
+                c.vel += d / dt;
+                if rot.length_squared() > 1e-14 {
+                    c.orient = (Quat::from_scaled_axis(rot) * c.orient).normalize();
+                }
+                c.ang_vel += rot / dt;
+                if d.length_squared() > 1e-12 || rot.length_squared() > 1e-12 {
+                    c.wake();
+                }
+                return;
+            }
+            None => return,
+        };
         let b = &mut self.bodies[i];
         if !b.live() || b.kinematic || b.driven || b.pushbox_only {
             return;
@@ -160,8 +250,26 @@ impl PhysicsWorld {
     }
 
     /// Turn body `bi` by the angular positional impulse `ang`.
-    fn joint_turn(&mut self, bi: Option<usize>, ang: Vec3, dt: f32) {
-        let Some(i) = bi else { return };
+    fn joint_turn(&mut self, bi: Option<Link>, ang: Vec3, dt: f32) {
+        let i = match bi {
+            Some(Link::Body(i)) => i,
+            Some(Link::Compound(i)) => {
+                if !self.compound_moves(i) {
+                    return;
+                }
+                let c = &mut self.compounds[i];
+                let rot = c.world_inv_inertia() * ang;
+                if rot.length_squared() > 1e-14 {
+                    c.orient = (Quat::from_scaled_axis(rot) * c.orient).normalize();
+                }
+                c.ang_vel += rot / dt;
+                if rot.length_squared() > 1e-12 {
+                    c.wake();
+                }
+                return;
+            }
+            None => return,
+        };
         let b = &mut self.bodies[i];
         if !b.live() || b.kinematic || b.driven || b.pushbox_only || !b.rotates {
             return;
@@ -176,8 +284,25 @@ impl PhysicsWorld {
     }
 
     /// Change body `bi`'s speed by the impulse `j` at offset `r`.
-    fn joint_impulse(&mut self, bi: Option<usize>, r: Vec3, j: Vec3) {
-        let Some(i) = bi else { return };
+    fn joint_impulse(&mut self, bi: Option<Link>, r: Vec3, j: Vec3) {
+        let i = match bi {
+            Some(Link::Body(i)) => i,
+            Some(Link::Compound(i)) => {
+                if !self.compound_moves(i) {
+                    return;
+                }
+                let c = &mut self.compounds[i];
+                let dv = j / c.mass.max(1e-4);
+                let dw = c.world_inv_inertia() * r.cross(j);
+                c.vel += dv;
+                c.ang_vel += dw;
+                if dv.length_squared() > 1e-10 || dw.length_squared() > 1e-10 {
+                    c.wake();
+                }
+                return;
+            }
+            None => return,
+        };
         let b = &mut self.bodies[i];
         if !b.live() || b.kinematic || b.driven || b.pushbox_only {
             return;
@@ -199,12 +324,20 @@ impl PhysicsWorld {
     }
 
     /// Speed of an end's anchor point.
-    fn point_vel(&self, bi: Option<usize>, r: Vec3) -> Vec3 {
-        bi.map_or(Vec3::ZERO, |i| self.bodies[i].vel + self.bodies[i].ang_vel.cross(r))
+    fn point_vel(&self, bi: Option<Link>, r: Vec3) -> Vec3 {
+        match bi {
+            Some(Link::Body(i)) => self.bodies[i].vel + self.bodies[i].ang_vel.cross(r),
+            Some(Link::Compound(i)) => self.compounds[i].vel + self.compounds[i].ang_vel.cross(r),
+            None => Vec3::ZERO,
+        }
     }
 
-    fn ang_vel_of(&self, bi: Option<usize>) -> Vec3 {
-        bi.map_or(Vec3::ZERO, |i| self.bodies[i].ang_vel)
+    fn ang_vel_of(&self, bi: Option<Link>) -> Vec3 {
+        match bi {
+            Some(Link::Body(i)) => self.bodies[i].ang_vel,
+            Some(Link::Compound(i)) => self.compounds[i].ang_vel,
+            None => Vec3::ZERO,
+        }
     }
 
     /// Bring two anchor points together along `c` (B minus A) as far as
@@ -212,7 +345,7 @@ impl PhysicsWorld {
     fn close_gap(&mut self, j: usize, dir: Vec3, gap: f32, dt: f32) -> f32 {
         let (a, b) = (self.joints[j].a, self.joints[j].b);
         let ea = self.joint_end(Some(a), self.joints[j].anchor_a, Vec3::ZERO);
-        let eb = self.joint_end(b, self.joints[j].anchor_b, self.joints[j].world);
+        let eb = self.joint_end(b, self.joints[j].anchor_b, self.world_end(j));
         let w = ea.w(dir) + eb.w(dir);
         if !w.is_finite() || w <= 1e-9 {
             return 0.0;
@@ -233,7 +366,7 @@ impl PhysicsWorld {
         let n = err / len;
         let (a, b) = (self.joints[j].a, self.joints[j].b);
         let ea = self.joint_end(Some(a), self.joints[j].anchor_a, Vec3::ZERO);
-        let eb = self.joint_end(b, self.joints[j].anchor_b, self.joints[j].world);
+        let eb = self.joint_end(b, self.joints[j].anchor_b, self.world_end(j));
         let w = ea.w_ang(n) + eb.w_ang(n);
         if !w.is_finite() || w <= 1e-9 {
             return 0.0;
@@ -296,19 +429,72 @@ impl PhysicsWorld {
                 continue;
             }
             let spent = self.solve_soft(j, dt);
+            let (position, speed) = self.joint_position(j);
             let jt = &mut self.joints[j];
             jt.force = jt.force.max(spent / dt);
+            jt.position = position;
+            jt.speed = speed;
             if jt.break_force > 0.0 && jt.force > jt.break_force {
                 jt.broken = true;
             }
         }
     }
 
+    /// Where joint `j` is and how fast that is changing: a hinge's or a
+    /// wheel's turn (radians), a slider's travel, a distance joint's length.
+    fn joint_position(&self, j: usize) -> (f32, f32) {
+        let jt = &self.joints[j];
+        let (ea, eb) = self.ends(j);
+        let axis_w = self.orient_of(jt.b) * jt.axis.normalize_or(Vec3::Z);
+        let rel_v = self.point_vel(Some(jt.a), ea.r) - self.point_vel(jt.b, eb.r);
+        match jt.kind {
+            JointKind::Hinge => {
+                let w = (self.ang_vel_of(Some(jt.a)) - self.ang_vel_of(jt.b)).dot(axis_w);
+                (self.hinge_angle(j), w)
+            }
+            // A wheel's travel on its suspension, and its spin about the axle.
+            JointKind::Wheel => {
+                let axle = self.orient_of(jt.b) * Vec3::Z;
+                let w = (self.ang_vel_of(Some(jt.a)) - self.ang_vel_of(jt.b)).dot(axle);
+                (axis_w.dot(ea.p - eb.p), w)
+            }
+            JointKind::Slider => (-axis_w.dot(eb.p - ea.p), rel_v.dot(axis_w)),
+            JointKind::Distance | JointKind::Rope | JointKind::Spring => {
+                let c = eb.p - ea.p;
+                (c.length(), -c.normalize_or_zero().dot(rel_v))
+            }
+            _ => (0.0, 0.0),
+        }
+    }
+
+    /// The speed a motor drives at: its own, or for a servo the speed that
+    /// closes on its goal, no faster than its own.
+    fn motor_command(&mut self, j: usize, dt: f32) -> f32 {
+        if !self.joints[j].servo {
+            self.joints[j].servo_sum = 0.0;
+            return self.joints[j].motor_speed;
+        }
+        // How quickly the remaining error is closed (a tenth of a second's
+        // worth each second, so it arrives without overshooting), and how
+        // quickly a standing error is worked off.
+        const GAIN: f32 = 10.0;
+        const SUM_GAIN: f32 = 25.0;
+        let pos = self.joint_position(j).0;
+        let jt = &mut self.joints[j];
+        let cap = jt.motor_speed.abs();
+        let err = jt.goal - pos;
+        // The sum never asks for more than the motor's speed on its own, so
+        // a servo held off its goal does not wind up and fling past it.
+        let limit = if SUM_GAIN > 0.0 { cap / SUM_GAIN } else { 0.0 };
+        jt.servo_sum = (jt.servo_sum + err * dt).clamp(-limit, limit);
+        (err * GAIN + jt.servo_sum * SUM_GAIN).clamp(-cap, cap)
+    }
+
     fn ends(&self, j: usize) -> (End, End) {
         let jt = &self.joints[j];
         (
             self.joint_end(Some(jt.a), jt.anchor_a, Vec3::ZERO),
-            self.joint_end(jt.b, jt.anchor_b, jt.world),
+            self.joint_end(jt.b, jt.anchor_b, self.world_end(j)),
         )
     }
 
@@ -396,7 +582,9 @@ impl PhysicsWorld {
 
     /// The speed part of a joint, once a step. Returns the impulse spent.
     fn solve_soft(&mut self, j: usize, dt: f32) -> f32 {
-        let jt = self.joints[j].clone();
+        let speed = self.motor_command(j, dt);
+        let mut jt = self.joints[j].clone();
+        jt.motor_speed = speed;
         let (ea, eb) = self.ends(j);
         let axis_w = self.orient_of(jt.b) * jt.axis.normalize_or(Vec3::Z);
         let mut spent = 0.0;
@@ -425,14 +613,30 @@ impl PhysicsWorld {
                 self.joint_impulse(Some(jt.a), ea.r, axis_w * l);
                 self.joint_impulse(jt.b, eb.r, -axis_w * l);
                 spent += l.abs();
+                // A wheel turns about its axle, Z of what it hangs from, and
+                // about nothing else relative to it: a wheel left free to spin
+                // about the upright creeps sideways down any slope it is
+                // parked on.
+                let axle = self.orient_of(jt.b) * Vec3::Z;
+                let rel = self.ang_vel_of(Some(jt.a)) - self.ang_vel_of(jt.b);
+                let off_axle = rel - axle * rel.dot(axle);
+                let n = off_axle.normalize_or_zero();
+                let w = ea.w_ang(n) + eb.w_ang(n);
+                if n != Vec3::ZERO && w.is_finite() && w > 1e-9 {
+                    let l = -rel.dot(n) / w;
+                    self.spin_impulse(Some(jt.a), n * l);
+                    self.spin_impulse(jt.b, -n * l);
+                    spent += l.abs();
+                }
                 if jt.motor {
-                    // The wheel turns about its axle, Z of what it hangs from,
-                    // at the motor's speed relative to it.
-                    let axle = self.orient_of(jt.b) * Vec3::Z;
+                    // At the motor's speed relative to what it hangs from.
                     let rel = (self.ang_vel_of(Some(jt.a)) - self.ang_vel_of(jt.b)).dot(axle);
                     let w = ea.w_ang(axle) + eb.w_ang(axle);
                     spent += self.motor_turn(&jt, axle, rel, w, dt, true);
                 }
+                // After the drive, which turns the wheel and so moves the
+                // patch: the grip has the last word on whether it slides.
+                spent += self.tyre_grip(j, &jt, l, dt);
             }
             JointKind::Hinge if jt.motor => {
                 // This node turns relative to the other at the motor's speed.
@@ -491,11 +695,115 @@ impl PhysicsWorld {
             l = l.clamp(-cap, cap);
         }
         let (fwd, back) = if on_a { (Some(jt.a), jt.b) } else { (jt.b, Some(jt.a)) };
-        for (bi, sign) in [(fwd, 1.0f32), (back, -1.0)] {
-            if let Some(i) = bi {
+        self.spin_impulse(fwd, axle * l);
+        self.spin_impulse(back, -axle * l);
+        l.abs()
+    }
+
+    /// Tyre friction for a wheel joint's wheel (a body on the ground): the
+    /// contact patch's sliding, along and across the tread, is stopped by an
+    /// impulse no larger than friction times what the wheel carries this
+    /// step, its own weight and the suspension's push `load`. Solved here,
+    /// after the joints, because the load arrives through the joint: the
+    /// contact pass alone sees only the wheel's own weight, and a rover parked
+    /// on a slope slid on wheels that held a third of it up.
+    fn tyre_grip(&mut self, j: usize, jt: &JointRt, load: f32, dt: f32) -> f32 {
+        let Link::Body(i) = jt.a else { return 0.0 };
+        // Held only while braked and on the ground: a parked wheel.
+        let braked = jt.motor && jt.motor_speed == 0.0;
+        let grounded = self.bodies[i].grounded;
+        if !(braked && grounded) {
+            self.joints[j].park = None;
+        }
+        let (n, r, mu, mass) = {
+            let b = &self.bodies[i];
+            let Some(n) = b.ground_normal.filter(|_| b.grounded && b.live()) else { return 0.0 };
+            (n, -n * b.radius, b.friction.max(0.0), b.mass.max(1e-4))
+        };
+        let g = self.gravity.accel_at(self.bodies[i].pos, &self.colliders);
+        // What presses the patch into the ground: the wheel's weight and the
+        // suspension's share of the craft, both as impulses this step.
+        let press = (mass * (-g).dot(n)).max(0.0) * dt + load.abs();
+        let budget = mu * press;
+        if budget <= 0.0 {
+            return 0.0;
+        }
+        let b = &self.bodies[i];
+        let v = b.vel + b.ang_vel.cross(r);
+        // The aim is a patch at rest once the next step's gravity has been
+        // added, before it moves: the slope's pull is taken off now, or a
+        // parked rover creeps one step's worth of it every step.
+        let g_t = g - n * g.dot(n);
+        let slide = v - n * v.dot(n) + g_t * dt;
+        let len = slide.length();
+        if len < 1e-6 {
+            return 0.0;
+        }
+        let t = slide / len;
+        // The wheel cannot slide along the ground without dragging what it
+        // hangs from, which the joint holds to it across the suspension: the
+        // grip stops the two together, each taking its share.
+        let wheel = End { r, ..self.joint_end(Some(jt.a), Vec3::ZERO, Vec3::ZERO) };
+        let patch = self.bodies[i].pos + r;
+        let mount = self.joint_end(jt.b, jt.anchor_b, Vec3::ZERO);
+        let mount = End { r: patch - (mount.p - mount.r), ..mount };
+        let (wa, wb) = (wheel.w(t), mount.w(t));
+        if !wa.is_finite() || wa <= 1e-9 {
+            return 0.0;
+        }
+        let (ma, mb) = (1.0 / wa, if wb.is_finite() && wb > 1e-9 { 1.0 / wb } else { 0.0 });
+        let need = len * (ma + mb);
+        let imp = need.min(budget);
+        let share_a = ma / (ma + mb);
+        self.joint_impulse(Some(jt.a), r, -t * (imp * share_a));
+        self.joint_impulse(jt.b, mount.r, -t * (imp * (1.0 - share_a)));
+        // Braked and not slipping: the wheel stays where it stopped on the
+        // ground it stopped on. Cancelling its speed each step still lets a
+        // parked rover creep by what the joints' position fixes leave over;
+        // holding the spot does not, and the spot rides the collider.
+        if braked && need <= budget {
+            self.park_wheel(j, i, n);
+        } else {
+            self.joints[j].park = None;
+        }
+        imp
+    }
+
+    /// Hold joint `j`'s wheel (body `i`) on the spot it parked on, along the
+    /// ground (normal `n`): taken the first step it is parked, against the
+    /// collider it is resting on, then each step it is moved back there.
+    fn park_wheel(&mut self, j: usize, i: usize, n: Vec3) {
+        let pos = self.bodies[i].pos;
+        match self.joints[j].park {
+            Some((ci, rel)) if ci < self.colliders.len() => {
+                let err = self.colliders[ci].offset() + rel - pos;
+                let along = err - n * err.dot(n);
+                self.bodies[i].pos += along;
+            }
+            _ => {
+                let Some(ci) = self.contacts.iter().find(|c| c.body == i).map(|c| c.collider) else { return };
+                self.joints[j].park = Some((ci, pos - self.colliders[ci].offset()));
+            }
+        }
+    }
+
+    /// Change an end's spin by the angular impulse `ang`.
+    fn spin_impulse(&mut self, bi: Option<Link>, ang: Vec3) {
+        match bi {
+            Some(Link::Compound(i)) => {
+                if self.compound_moves(i) {
+                    let c = &mut self.compounds[i];
+                    let dw = c.world_inv_inertia() * ang;
+                    c.ang_vel += dw;
+                    if dw.length_squared() > 1e-10 {
+                        c.wake();
+                    }
+                }
+            }
+            Some(Link::Body(i)) => {
                 let b = &mut self.bodies[i];
                 if b.live() && !b.kinematic && !b.driven && b.rotates {
-                    let dw = b.free_spin(b.world_inv_inertia() * axle * (l * sign));
+                    let dw = b.free_spin(b.world_inv_inertia() * ang);
                     b.ang_vel += dw;
                     if dw.length_squared() > 1e-10 {
                         b.asleep = false;
@@ -503,7 +811,7 @@ impl PhysicsWorld {
                     }
                 }
             }
+            None => {}
         }
-        l.abs()
     }
 }

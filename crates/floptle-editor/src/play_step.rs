@@ -419,7 +419,7 @@ impl Editor {
             for r in sim.body_states() {
                 states.insert(r.entity.index(), crate::play::body_state(&r));
             }
-            for (eid, vel, up, grounded, pos) in sim.compound_states() {
+            for (eid, vel, up, grounded, pos, asleep) in sim.compound_states() {
                 states.insert(
                     eid,
                     floptle_script::BodyState {
@@ -432,7 +432,7 @@ impl Editor {
                         // impulses; "the floor under it" isn't one normal.
                         ground_normal: None,
                         wall_normal: None,
-                        asleep: false,
+                        asleep,
                         spin: 0.0,
                     },
                 );
@@ -904,7 +904,7 @@ impl Editor {
                     for r in sim.body_states() {
                         states.insert(r.entity.index(), crate::play::body_state(&r));
                     }
-                    for (eid, vel, up, grounded, pos) in sim.compound_states() {
+                    for (eid, vel, up, grounded, pos, asleep) in sim.compound_states() {
                         states.insert(
                             eid,
                             floptle_script::BodyState {
@@ -915,7 +915,7 @@ impl Editor {
                                 pos: [pos.x, pos.y, pos.z],
                                 ground_normal: None,
                                 wall_normal: None,
-                                asleep: false,
+                                asleep,
                                 spin: 0.0,
                             },
                         );
@@ -1205,7 +1205,7 @@ impl Editor {
             // Compound roots read like bodies too (node.vx / up_x /
             // grounded on a vessel) — before the collider hand-off, since
             // their gravity-up needs the collider set.
-            for (eid, vel, up, grounded, pos) in sim.compound_states() {
+            for (eid, vel, up, grounded, pos, asleep) in sim.compound_states() {
                 states.insert(
                     eid,
                     floptle_script::BodyState {
@@ -1218,7 +1218,7 @@ impl Editor {
                         // impulses; "the floor under it" isn't one normal.
                         ground_normal: None,
                         wall_normal: None,
-                        asleep: false,
+                        asleep,
                         spin: 0.0,
                     },
                 );

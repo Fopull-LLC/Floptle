@@ -25,6 +25,13 @@ pub(crate) fn load_prefab_docs(path: &Path) -> Result<Vec<NodeDoc>, String> {
         .map_err(|e| format!("{}: not a prefab ({e})", path.display()))
 }
 
+/// A tensor as the rows `assembly.info().inertia` hands scripts.
+fn inertia_rows(m: floptle_core::math::Mat3) -> [[f64; 3]; 3] {
+    let row = |r: floptle_core::math::Vec3| [r.x as f64, r.y as f64, r.z as f64];
+    let t = m.transpose();
+    [row(t.x_axis), row(t.y_axis), row(t.z_axis)]
+}
+
 impl Editor {
     /// Open a prefab for editing **on its own**: its nodes
     /// become the whole world, and saving writes back to this same file.
@@ -521,6 +528,11 @@ impl Editor {
         let mut map = std::collections::HashMap::new();
         for (eid, c) in sim.assemblies() {
             let o = c.origin();
+            // A compound in distant-craft LOD is held by an anchor the game
+            // never set: report the craft, not the stand-in.
+            let (anchored, grounded, vel) = self
+                .lod_state(eid)
+                .unwrap_or((c.anchored, c.grounded, [c.vel.x, c.vel.y, c.vel.z]));
             map.insert(
                 eid,
                 floptle_script::AssemblyInfo {
@@ -535,10 +547,12 @@ impl Editor {
                         origin.y + o.y as f64,
                         origin.z + o.z as f64,
                     ],
-                    vel: [c.vel.x, c.vel.y, c.vel.z],
+                    vel,
                     ang_vel: [c.ang_vel.x, c.ang_vel.y, c.ang_vel.z],
-                    grounded: c.grounded,
-                    anchored: c.anchored,
+                    inertia: inertia_rows(c.world_inertia()),
+                    grounded,
+                    anchored,
+                    gripped: sim.gripped(eid),
                     parts: c.shapes.iter().map(|s| s.id as u32).collect(),
                 },
             );
@@ -571,6 +585,17 @@ impl Editor {
         }
         use floptle_core::math::{DVec3, Vec3};
         for cmd in cmds {
+            // A push, a teleport or an anchor change on a craft in distant
+            // LOD acts on the craft: it wakes into full physics first, where
+            // the LOD's own anchor would have zeroed it.
+            if let floptle_script::AssemblyCmd::Hold { root, .. }
+            | floptle_script::AssemblyCmd::Impulse { root, .. }
+            | floptle_script::AssemblyCmd::Teleport { root, .. }
+            | floptle_script::AssemblyCmd::Anchor { root, .. }
+            | floptle_script::AssemblyCmd::Grip { root, .. } = &cmd
+            {
+                self.wake_compound_from_lod(*root);
+            }
             match cmd {
                 floptle_script::AssemblyCmd::Hold { root, force, at, torque } => {
                     if let Some(sim) = self.sim.as_mut() {
@@ -591,22 +616,22 @@ impl Editor {
                         );
                     }
                 }
-                floptle_script::AssemblyCmd::Rebuild { root } => {
-                    if let Some(sim) = self.sim.as_mut() {
-                        // A rebuild must not silently release launch clamps:
-                        // the fresh compound inherits the old one's anchor.
-                        let was_anchored =
-                            sim.compound_of(root).map(|c| c.anchored).unwrap_or(false);
-                        sim.remove_compound(root);
-                        let ent = self
-                            .world
-                            .entity_with::<floptle_core::RigidBody>(root);
-                        if let Some(e) = ent {
-                            sim.add_compound_for(e, &self.world);
+                floptle_script::AssemblyCmd::Rebuild { root, cb } => {
+                    let built = self.sim.as_mut().is_some_and(|sim| {
+                        // The fresh compound inherits the old one's anchor (a
+                        // rebuild must not release launch clamps) and its
+                        // motion (a moving vessel must not stop dead).
+                        sim.rebuild_compound(root, &self.world)
+                    });
+                    match cb {
+                        Some(cb) if built => {
+                            // Re-fed first, as for a split: the callback is there
+                            // to read the new compound (its mass, to size a push).
+                            self.feed_assembly_info();
+                            self.script_host.call_resync_callback(&mut self.world, cb, root);
                         }
-                        if was_anchored {
-                            sim.set_compound_anchored(root, true);
-                        }
+                        Some(cb) => self.script_host.drop_registry_value(cb),
+                        None => {}
                     }
                 }
                 floptle_script::AssemblyCmd::Anchor { root, on } => {
@@ -650,6 +675,26 @@ impl Editor {
                 }
                 floptle_script::AssemblyCmd::Merge { root, other } => {
                     self.perform_assembly_merge(root, other);
+                }
+                floptle_script::AssemblyCmd::Grip { root, at, target, break_force } => {
+                    let held = self.sim.as_mut().is_some_and(|sim| {
+                        sim.grip(root, DVec3::new(at[0], at[1], at[2]), target, break_force)
+                    });
+                    if !held {
+                        self.console.push(
+                            floptle_script::LogLevel::Warn,
+                            format!(
+                                "assembly.grip: node {root} is not an assembly with a body, or the target is \
+                                 part of it — nothing was gripped"
+                            ),
+                            None,
+                        );
+                    }
+                }
+                floptle_script::AssemblyCmd::Release { root } => {
+                    if let Some(sim) = self.sim.as_mut() {
+                        sim.release_grips(root);
+                    }
                 }
             }
         }

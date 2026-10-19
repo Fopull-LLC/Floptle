@@ -173,6 +173,10 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field half_x number Box half-extent X.
 ---@field half_y number Box half-extent Y.
 ---@field half_z number Box half-extent Z.
+---@field mass number Mass (live). On an assembly part, its share of the vessel: mass, centre of mass and inertia follow next tick.
+---@field worldHalfX number Read-only: half_x times the node's world scale, the box the physics builds.
+---@field worldHalfY number Read-only: half_y times the node's world scale.
+---@field worldHalfZ number Read-only: half_z times the node's world scale.
 ---@field lock_x number Freeze world X translation (1/0).
 ---@field lock_y number Freeze world Y translation (1/0).
 ---@field lock_z number Freeze world Z translation (1/0).

@@ -167,6 +167,20 @@ pub struct Compound {
     /// The assembly's root node, by entity index; `u32::MAX` when it belongs
     /// to none. [`crate::PhysicsWorld::ignore_pair`] names compounds by it.
     pub owner: u32,
+    /// At rest and skipped by the solver until something wakes it: a held
+    /// force or torque, an impulse, a velocity write, a moving body's push, or
+    /// its ground changing under it. Falls asleep like a [`crate::Body`]:
+    /// grounded and still for [`crate::SLEEP_SETTLE_TIME`].
+    pub asleep: bool,
+    /// Seconds it has been grounded and still, toward falling asleep.
+    pub(crate) sleep_time: f32,
+    /// What it was resting on when it fell asleep, re-reported every asleep
+    /// step so touches and `assembly.impacts` see it touching what it was.
+    pub(crate) resting: Vec<CompoundContact>,
+    /// Each shape sample's penetration when it fell asleep (the deepest over
+    /// the colliders, in sample order). A re-check that finds a sample
+    /// clearly deeper or clearly clear of where it was wakes the compound.
+    pub(crate) rest_pens: Vec<f32>,
     /// Force accumulator (sim frame, applied at the CoM), cleared each step.
     pub(crate) force: Vec3,
     /// Torque accumulator (sim frame), cleared each step.
@@ -222,6 +236,10 @@ impl Compound {
             grounded: false,
             owner: u32::MAX,
             off: false,
+            asleep: false,
+            sleep_time: 0.0,
+            resting: Vec::new(),
+            rest_pens: Vec::new(),
             force: Vec3::ZERO,
             torque: Vec3::ZERO,
         }
@@ -244,6 +262,10 @@ impl Compound {
     /// `local_origin` (= −CoM).
     pub fn resync_shape_geometry(&mut self, updates: &[(u64, Vec3, Quat)]) {
         let lo = self.local_origin;
+        // A leg that moved may no longer be what the craft stands on.
+        if !updates.is_empty() {
+            self.wake();
+        }
         for (id, off_origin, rot) in updates {
             if let Some(s) = self.shapes.iter_mut().find(|s| s.id == *id) {
                 s.offset = *off_origin + lo;
@@ -263,14 +285,87 @@ impl Compound {
         r * self.inv_inertia_local * r.transpose()
     }
 
+    /// Inertia tensor about the centre of mass in the SIM frame (mass × length²)
+    /// for the current orientation: the tensor the solver turns a torque
+    /// with, so a script sizing its own torques reads the same numbers.
+    pub fn world_inertia(&self) -> Mat3 {
+        let r = Mat3::from_quat(self.orient);
+        r * self.inv_inertia_local.inverse() * r.transpose()
+    }
+
+    /// Give the shapes named in `masses` — `(shape id, mass)` — new masses and
+    /// re-derive the total mass, centre of mass and inertia, without moving
+    /// anything: the assembly origin and every shape keep their place in the
+    /// world. A tank burning off, cargo loaded. Changing mass exerts no
+    /// impulse, so the new centre of mass takes the velocity that body-fixed
+    /// point already had (`v + ω×r`) and the spin is kept. Returns whether
+    /// any mass changed; an unchanged list costs a comparison per entry.
+    pub fn set_shape_masses(&mut self, masses: &[(u64, f32)]) -> bool {
+        let mut changed = false;
+        for &(id, m) in masses {
+            if let Some(s) = self.shapes.iter_mut().find(|s| s.id == id)
+                && s.mass != m
+            {
+                s.mass = m;
+                changed = true;
+            }
+        }
+        if !changed {
+            return false;
+        }
+        let mut mass = 0.0f32;
+        let mut com = Vec3::ZERO;
+        for s in &self.shapes {
+            let m = s.mass.max(1e-4);
+            mass += m;
+            com += s.offset * m;
+        }
+        com /= mass;
+        for s in &mut self.shapes {
+            s.offset -= com;
+        }
+        self.local_origin -= com;
+        let shift = self.orient * com;
+        self.vel += self.ang_vel.cross(shift);
+        self.pos += shift;
+        self.prev_pos += shift;
+        self.mass = mass;
+        self.inv_inertia_local = compose_inertia(&self.shapes).inverse();
+        // A centre of mass that moved can tip a craft that was standing.
+        self.wake();
+        true
+    }
+
     /// Velocity of the body-fixed point currently at sim-frame `p`.
     pub fn point_velocity(&self, p: Vec3) -> Vec3 {
         self.vel + self.ang_vel.cross(p - self.pos)
     }
 
+    /// The thinnest any shape is, measured from its centre: a sphere's or a
+    /// capsule's radius, a box's smallest half-extent. A move longer than half
+    /// of it in one step is swept (see `PhysicsWorld::step_compound`).
+    pub fn thinnest(&self) -> f32 {
+        self.shapes
+            .iter()
+            .map(|s| match s.geom {
+                ShapeGeom::Sphere { radius } | ShapeGeom::Capsule { radius, .. } => radius,
+                ShapeGeom::Box { half } => half.min_element(),
+            })
+            .fold(f32::INFINITY, f32::min)
+    }
+
+    /// Wake it: the next step simulates it in full.
+    pub fn wake(&mut self) {
+        self.asleep = false;
+        self.sleep_time = 0.0;
+    }
+
     /// Accumulate a force (sim frame) acting through the CoM for the next step.
     pub fn apply_force(&mut self, f: Vec3) {
         self.force += f;
+        if f != Vec3::ZERO {
+            self.wake();
+        }
     }
 
     /// Accumulate a force (sim frame) acting at sim-frame point `at` — the
@@ -278,17 +373,26 @@ impl Compound {
     pub fn apply_force_at(&mut self, f: Vec3, at: Vec3) {
         self.force += f;
         self.torque += (at - self.pos).cross(f);
+        if f != Vec3::ZERO {
+            self.wake();
+        }
     }
 
     /// Accumulate a pure torque (sim frame) for the next step.
     pub fn apply_torque(&mut self, t: Vec3) {
         self.torque += t;
+        if t != Vec3::ZERO {
+            self.wake();
+        }
     }
 
     /// Instantaneous impulse (sim frame) at sim-frame point `at`.
     pub fn apply_impulse_at(&mut self, imp: Vec3, at: Vec3) {
         self.vel += imp / self.mass;
         self.ang_vel += self.world_inv_inertia() * (at - self.pos).cross(imp);
+        if imp != Vec3::ZERO {
+            self.wake();
+        }
     }
 
     /// Detach every shape whose id is in `ids` into a new compound, leaving

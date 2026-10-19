@@ -33,7 +33,7 @@ each group, and meant to be searched.
 - [weather — wind](#weather--wind) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 8
 - [2D — sprites, sorting & the flat camera](#2d--sprites-sorting--the-flat-camera) — 38
-- [vessels — assembly.*](#vessels--assembly) — 14
+- [vessels — assembly.*](#vessels--assembly) — 16
 - [the camera & the screen](#the-camera--the-screen) — 9
 - [physics controls — pause & step](#physics-controls--pause--step) — 5
 - [frame cost — perf.*](#frame-cost--perf) — 16
@@ -41,7 +41,7 @@ each group, and meant to be searched.
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 19
-- [components — getcomponent](#components--getcomponent) — 106
+- [components — getcomponent](#components--getcomponent) — 110
 - [animation — node:animator](#animation--nodeanimator) — 26
 - [particles — effects from script](#particles--effects-from-script) — 11
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 32
@@ -898,7 +898,7 @@ voice.transmitting() — is the microphone open right now?
 
 ### `node.asleep`
 
-True while the physics solver is skipping this rigidbody. Set it true to put the body to sleep now: it stops where it is and costs nothing until something wakes it (a node.vel write, a moving platform, or its ground going away — a body slept in mid-air wakes and falls at the next check). Set false to wake it. Better than switching it kinematic, which changes how it behaves rather than whether it is simulated. For far-away NPCs, pair it with script.sleep.
+True while the physics solver is skipping this rigidbody. Set it true to put the body to sleep now: it stops where it is and costs nothing until something wakes it (a node.vel write, a moving platform, or its ground going away — a body slept in mid-air wakes and falls at the next check). Set false to wake it. Better than switching it kinematic, which changes how it behaves rather than whether it is simulated. For far-away NPCs, pair it with script.sleep. On an assembly root it is the whole craft's: a parked vessel falls asleep on its own once it has been still on the ground for half a second, and a held force, an impulse, a teleport, a push from something moving or its ground changing wakes it.
 
 ### `node.castShadow`
 
@@ -1191,9 +1191,9 @@ node:setJoint{ kind = "rope", to = hook, length = 4 } — hold this node's body 
 
 Kinds: "hinge" (a pin it turns about), "fixed" (a weld), "distance" (a rod), "rope" (no further apart than its length), "spring", "slider" (along the other's axis), "wheel" (a wheel on the other, on a suspension), "target" (pulled toward a point; see node:setJointTarget).
 
-Options: to (a node or a node's name), anchor and otherAnchor (vec2 or vec3, in each node's own space), axis, length, min and max (a hinge's degrees or a slider's units; setting either turns the limit on), motorSpeed (degrees or units a second; setting it turns the motor on), maxForce, stiffness (cycles a second), damping, breakForce, collide.
+Options: to (a node or a node's name), anchor and otherAnchor (vec2 or vec3, in each node's own space), axis, length, min and max (a hinge's degrees or a slider's units; setting either turns the limit on), motorSpeed (degrees or units a second; setting it turns the motor on), goal (a servo's or a piston's target, degrees or units; setting it turns the motor on and makes it a servo), maxForce, stiffness (cycles a second), damping, breakForce, collide.
 
-The joint goes on the part that moves and names what it hangs from: a wheel names the car, a link names the link above. For a grappling hook, set a rope to the hook's node when it lands and removeJoint when the player lets go.
+The joint goes on the part that moves and names what it hangs from: a wheel names the car, a link names the link above. Either end may be an assembly (its root or any of its parts stands for the whole craft), so a vessel built from sub-assemblies articulates: a hinge, a piston, a rotor (a hinge with a motor), a robotic arm. A wheel hung from an assembly chassis grips the ground by its suspension load, and a braked wheel (motor on, motorSpeed 0) holds the spot it stopped on. For a grappling hook, set a rope to the hook's node when it lands and removeJoint when the player lets go.
 
 ### `node:setJointTarget`
 
@@ -3080,6 +3080,10 @@ assembly.force(node, force) — a HELD force through the centre of mass, re-appl
 
 assembly.forceAt(node, force, at) — a held world-space force at a world point. Off the centre of mass it produces torque as well as acceleration, which is how an off-axis thruster makes a craft tumble — and how RCS steers it.
 
+### `assembly.grip`
+
+assembly.grip(node, at [, target] [, breakForce]) — weld the vessel at world point at to target (a node with a body, any node of an assembly, or a terrain node) or, with no target, to the ground nearest the point: a landing claw, a harpoon, a grab. The pair keeps the pose it has now, the grip rides its ground when that moves (a planet on its rails), and it lets go past breakForce (0: never). assembly.info(node).gripped says whether it still holds. Applied after the script pass.
+
 ### `assembly.impacts`
 
 assembly.impacts(node) — the LAST tick's per-part contact loads: { part, impulse, speed, speedAbs, x, y, z }. What a damage model reads: how hard each part was hit and where.
@@ -3090,7 +3094,7 @@ assembly.impulseAt(node, impulse, at) — a one-shot kick at a world point, appl
 
 ### `assembly.info`
 
-assembly.info(node) — { mass, com, origin, vel, angVel, grounded, anchored, parts }. com is the world-space centre of mass as a vec3 — the number a flight controller, a CoM gizmo and a landing check all need.
+assembly.info(node) — { mass, com, origin, vel, angVel, inertia, grounded, anchored, gripped, parts }. com is the world-space centre of mass as a vec3 — the number a flight controller, a CoM gizmo and a landing check all need. inertia is the tensor the solver turns torques with, about the centre of mass in world axes, as three rows: inertia[1].x .. inertia[3].z. A torque of I × (wanted change in angVel) / dt stops a spin in one tick without overshooting.
 
 ### `assembly.keepLive`
 
@@ -3102,7 +3106,11 @@ assembly.merge(node, other) — latch another assembly onto this one: docking, g
 
 ### `assembly.rebuild`
 
-assembly.rebuild(node) — re-gather the compound from the root's CURRENT children. Call it after you have added or removed part nodes yourself, so the physics body matches the scene again.
+assembly.rebuild(node [, fn]) — re-gather the compound from the root's CURRENT children. Call it after you have added or removed part nodes yourself, so the physics body matches the scene again. A moving vessel keeps its velocity and spin through it, and an anchored one stays anchored. The rebuild lands after the script pass, so assembly.info read straight after it still describes the old compound; fn(node) is called once the new one exists and assembly.info describes it — read its mass there to size a push: assembly.rebuild(ship, function(s) local i = assembly.info(s); assembly.impulseAt(s, vel * i.mass, i.com) end).
+
+### `assembly.release`
+
+assembly.release(node) — let go of every grip the vessel holds (assembly.grip).
 
 ### `assembly.setAnchored`
 
@@ -3856,6 +3864,10 @@ Freeze world Y translation (1/0).
 
 Freeze world Z translation (1/0).
 
+### `rb.mass`
+
+Mass (read and write, live). On an assembly part it is that part's share of the vessel: the compound's mass, centre of mass and inertia follow on the next tick, with no rebuild and no kick — a tank burning off or a hold filling is one write a tick.
+
 ### `rb.radius`
 
 Sphere/capsule radius.
@@ -3875,6 +3887,18 @@ Steepest standable surface, in degrees (default 60). Past it nothing grounds the
 ### `rb.two_d`
 
 2D (1/0): keep the body in the XY plane — it keeps its depth, never drifts out of the layer, and still spins the one way a flat object spins. Collides with the same world a 3D body does.
+
+### `rb.worldHalfX`
+
+Read-only: the box's half-extent X as the physics builds it, half_x times the node's world scale. half_* are the authored, unscaled numbers; radius and height are used as written, unscaled.
+
+### `rb.worldHalfY`
+
+Read-only: the box's half-extent Y as the physics builds it (half_y times the world scale).
+
+### `rb.worldHalfZ`
+
+Read-only: the box's half-extent Z as the physics builds it (half_z times the world scale).
 
 ## animation — node:animator
 

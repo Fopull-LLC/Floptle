@@ -25,8 +25,10 @@ use crate::Editor;
 #[derive(Clone, Copy)]
 pub(crate) enum CompoundLod {
     /// Anchored in place; `was_anchored` remembers a gameplay anchor (launch
-    /// clamps) so waking doesn't silently release it.
-    Frozen { was_anchored: bool },
+    /// clamps) so waking doesn't silently release it, and `was_grounded`
+    /// whether it was standing on something when it froze — what
+    /// `assembly.info` keeps reporting while it is frozen.
+    Frozen { was_anchored: bool, was_grounded: bool },
     /// On rails around dominant celestial `dom` with cached elements.
     Coast { dom: u32, k: Kepler },
 }
@@ -35,8 +37,69 @@ pub(crate) enum CompoundLod {
 const LOD_FAR: f64 = 700.0;
 /// …and inside this one it wakes back to live physics (hysteresis).
 const LOD_NEAR: f64 = 500.0;
+/// Seconds a far craft a script pushed stays out of LOD after the push: long
+/// enough to span the gap between ticks of thrust, short enough that a craft
+/// left alone goes back to its rails.
+const PUSH_GRACE: f64 = 1.0;
+
+/// Bring a compound out of its LOD into full physics: off the LOD's anchor
+/// unless a gameplay anchor held it before, and a coasting one at the
+/// velocity its rails give it now (the anchor zeroed the real one).
+fn wake_lod(sim: &mut floptle_physics::Sim, eid: u32, lod: CompoundLod, cb: &[(Entity, CelestialBody)], t: f64) {
+    match lod {
+        CompoundLod::Coast { dom, k } => {
+            sim.set_compound_anchored(eid, false);
+            if let Some(i) = cb.iter().position(|(e, _)| e.index() == dom) {
+                let (_r, v) = k.pos_vel(cb[i].1.mu, t);
+                sim.set_compound_velocity(eid, v.as_vec3());
+            }
+        }
+        CompoundLod::Frozen { was_anchored, .. } => {
+            if !was_anchored {
+                sim.set_compound_anchored(eid, false);
+            }
+        }
+    }
+}
 
 impl Editor {
+    /// Wake a compound out of distant-craft LOD before a script acts on it:
+    /// an impulse or a held force on the LOD's anchored stand-in would be
+    /// zeroed by the anchor. The next rails tick puts it back on its LOD if it
+    /// is still far — a coasting craft on the conic its new velocity gives.
+    pub(crate) fn wake_compound_from_lod(&mut self, eid: u32) {
+        // However it is filed now, it stays live a moment after the push.
+        self.lod_woken.insert(eid, PUSH_GRACE);
+        let Some(lod) = self.compound_lod.remove(&eid) else { return };
+        let cb: Vec<(Entity, CelestialBody)> =
+            self.world.query::<CelestialBody>().map(|(e, b)| (e, b.clone())).collect();
+        let t = self.space_time;
+        if let Some(sim) = self.sim.as_mut() {
+            wake_lod(sim, eid, lod, &cb, t);
+        }
+    }
+
+    /// What `assembly.info` reports for a compound in LOD, rather than the
+    /// anchored stand-in the sim holds: `(anchored, grounded, velocity)`. A
+    /// coasting craft is free and moving at its rails velocity; a frozen one
+    /// is as it was when it froze, at rest. `None` when it is not in LOD.
+    pub(crate) fn lod_state(&self, eid: u32) -> Option<(bool, bool, [f32; 3])> {
+        match *self.compound_lod.get(&eid)? {
+            CompoundLod::Coast { dom, k } => {
+                let mu = self
+                    .world
+                    .entity_with::<CelestialBody>(dom)
+                    .and_then(|e| self.world.get::<CelestialBody>(e))
+                    .map(|b| b.mu)?;
+                let v = k.pos_vel(mu, self.space_time).1.as_vec3();
+                Some((false, false, [v.x, v.y, v.z]))
+            }
+            CompoundLod::Frozen { was_anchored, was_grounded } => {
+                Some((was_anchored, was_grounded, [0.0; 3]))
+            }
+        }
+    }
+
     /// Republish `space.*` without advancing the clock when the set of
     /// celestial bodies has changed since the last rails tick. A no-op before
     /// the first tick (Play start snaps every body on that tick) and when
@@ -580,18 +643,8 @@ impl Editor {
                     // anchor, so resuming from rest would drop it out of orbit), a
                     // landed one at rest (respecting a prior clamp).
                     if self.lod_keep_live.contains(&eid) {
-                        match self.compound_lod.remove(&eid) {
-                            Some(CompoundLod::Coast { dom, k }) => {
-                                sim.set_compound_anchored(eid, false);
-                                if let Some(i) = cb.iter().position(|(e, _)| e.index() == dom) {
-                                    let (_r, v) = k.pos_vel(cb[i].1.mu, t);
-                                    sim.set_compound_velocity(eid, v.as_vec3());
-                                }
-                            }
-                            Some(CompoundLod::Frozen { was_anchored }) if !was_anchored => {
-                                sim.set_compound_anchored(eid, false);
-                            }
-                            Some(CompoundLod::Frozen { .. }) | None => {}
+                        if let Some(lod) = self.compound_lod.remove(&eid) {
+                            wake_lod(sim, eid, lod, &cb, t);
                         }
                         continue;
                     }
@@ -599,12 +652,13 @@ impl Editor {
                     match self.compound_lod.get(&eid).copied() {
                         None => {
                             let Some(c) = sim.compound_of(eid) else { continue };
-                            if d <= LOD_FAR {
+                            if d <= LOD_FAR || self.lod_woken.contains_key(&eid) {
                                 continue;
                             }
                             let slow = c.grounded || c.anchored || c.vel.length() < 0.5;
                             let vel = c.vel.as_dvec3();
                             let was_anchored = c.anchored;
+                            let was_grounded = c.grounded;
                             if !slow
                                 && let Some(i) = dom_of(com)
                                 && cb[i].1.mu > 0.0
@@ -623,7 +677,7 @@ impl Editor {
                             } else {
                                 sim.set_compound_anchored(eid, true);
                                 self.compound_lod
-                                    .insert(eid, CompoundLod::Frozen { was_anchored });
+                                    .insert(eid, CompoundLod::Frozen { was_anchored, was_grounded });
                             }
                         }
                         Some(CompoundLod::Coast { dom, k }) => {
@@ -654,7 +708,7 @@ impl Editor {
                                 sim.set_compound_anchored(eid, false);
                             }
                         }
-                        Some(CompoundLod::Frozen { was_anchored }) => {
+                        Some(CompoundLod::Frozen { was_anchored, .. }) => {
                             if d < LOD_NEAR {
                                 self.compound_lod.remove(&eid);
                                 if !was_anchored {
@@ -664,6 +718,10 @@ impl Editor {
                         }
                     }
                 }
+                for left in self.lod_woken.values_mut() {
+                    *left -= tick_dt;
+                }
+                self.lod_woken.retain(|_, left| *left > 0.0);
                 // Despawned compounds leave stale LOD entries — sweep them.
                 self.compound_lod
                     .retain(|eid, _| sim.compound_of(*eid).is_some());

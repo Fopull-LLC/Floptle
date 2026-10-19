@@ -177,6 +177,8 @@ mod atmosphere_sky_tests;
 #[cfg(test)]
 mod spawn_scaling;
 #[cfg(test)]
+mod assembly_script_tests;
+#[cfg(test)]
 mod tick_overload_tests;
 #[cfg(test)]
 mod tile_physics_tests;
@@ -3060,6 +3062,11 @@ struct Editor {
     /// in full physics however far the camera roams — the piloted vessel sets
     /// this while the map view is open so it remains controllable (see space.rs).
     lod_keep_live: std::collections::HashSet<u32>,
+    /// Compounds a script has pushed lately (root eid → seconds of grace
+    /// left): far from the camera they stay live until a second after the
+    /// last push, rather than being re-filed as frozen between one tick's
+    /// thrust and the next.
+    lod_woken: std::collections::HashMap<u32, f64>,
     /// Warp-coasting rails for live compounds (root eid → dominant celestial
     /// eid + captured conic): while warp > 1 an in-flight vessel is driven
     /// analytically, exactly like single bodies' `space_coast` (see space.rs).

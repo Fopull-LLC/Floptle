@@ -36,9 +36,14 @@ pub struct AssemblyInfo {
     pub origin: [f64; 3],
     pub vel: [f32; 3],
     pub ang_vel: [f32; 3],
+    /// Inertia tensor about the centre of mass, world axes, as rows (mass ×
+    /// length²): the tensor the solver turns torques with.
+    pub inertia: [[f64; 3]; 3],
     pub grounded: bool,
     /// Pinned in place by `assembly.setAnchored` (launch clamps, latches).
     pub anchored: bool,
+    /// Holding on with `assembly.grip` (and the grip has not broken).
+    pub gripped: bool,
     /// Part entity indices (the compound's shape ids).
     pub parts: Vec<u32>,
 }
@@ -84,7 +89,9 @@ pub enum AssemblyCmd {
     Merge { root: u32, other: u32 },
     /// Re-gather the compound from the root's current descendants — call
     /// after script-assembling a vessel (spawning parts under the root).
-    Rebuild { root: u32 },
+    /// `cb` (if any) is called with the root's node once the new compound
+    /// exists and `assembly.info` describes it.
+    Rebuild { root: u32, cb: Option<RegistryKey> },
     /// Pin the compound where it stands / release it (launch clamps).
     Anchor { root: u32, on: bool },
     /// Exempt the compound from distant-craft LOD / release it: a kept-live
@@ -98,6 +105,11 @@ pub enum AssemblyCmd {
     /// Teleport the assembly origin to a world position, velocity untouched
     /// (re-pinning a clamped vessel to a pad that rides an orbiting planet).
     Teleport { root: u32, pos: [f64; 3] },
+    /// Weld the assembly at world point `at` to `target` (a node), or to the
+    /// ground there; it lets go past `break_force` (0: never).
+    Grip { root: u32, at: [f64; 3], target: Option<u32>, break_force: f32 },
+    /// Let go of every grip the assembly holds.
+    Release { root: u32 },
 }
 
 /// A `vec3(...)`-ish argument: the `vec3()` value itself, in either backing, or
@@ -256,14 +268,22 @@ pub(crate) fn install_assembly_api(
         })?;
         t.set("merge", f)?;
     }
-    // assembly.rebuild(node) — re-gather the compound from the root's current
-    // part children. Call once after spawning parts under an assembly root
-    // (script-assembled vessels: blueprint spawners, procgen structures).
+    // assembly.rebuild(node [, fn]) — re-gather the compound from the root's
+    // current part children. Call once after spawning parts under an assembly
+    // root (script-assembled vessels: blueprint spawners, procgen structures).
+    // The rebuild happens after this script pass, so `assembly.info` read in
+    // the same breath still describes the old compound (or none); fn(node) is
+    // called once the new one exists and `assembly.info` describes it — the
+    // place to read its mass and give it its velocity.
     {
         let q = cmds.clone();
-        let f = lua.create_function(move |_, node: Value| {
+        let f = lua.create_function(move |lua, (node, cb): (Value, Option<mlua::Function>)| {
             let root = node_eid(&node, "assembly.rebuild(node)")?;
-            q.borrow_mut().push(AssemblyCmd::Rebuild { root });
+            let cb = match cb {
+                Some(f) => Some(lua.create_registry_value(f)?),
+                None => None,
+            };
+            q.borrow_mut().push(AssemblyCmd::Rebuild { root, cb });
             Ok(())
         })?;
         t.set("rebuild", f)?;
@@ -322,7 +342,42 @@ pub(crate) fn install_assembly_api(
         })?;
         t.set("teleport", f)?;
     }
+    // assembly.grip(node, at [, target] [, breakForce]) — weld the vessel at
+    // world point `at` to `target` (a node with a body, any node of an
+    // assembly, or a terrain node) or, with none, to the ground nearest the
+    // point: a landing claw, a harpoon, a grab. It holds the pose it has now,
+    // rides the ground when the ground moves (a planet on its rails), and
+    // lets go past breakForce (0: never). assembly.release(node) lets go.
+    {
+        let q = cmds.clone();
+        let f = lua.create_function(
+            move |_, (node, at, target, break_force): (Value, Value, Value, Option<f32>)| {
+                let root = node_eid(&node, "assembly.grip(node, at [, target] [, breakForce])")?;
+                let at = v3(&at, "assembly.grip: at")?;
+                let (target, break_force) = match target {
+                    Value::Nil => (None, break_force),
+                    Value::Number(n) => (None, Some(n as f32)),
+                    Value::Integer(n) => (None, Some(n as f32)),
+                    other => (Some(node_eid(&other, "assembly.grip: target")?), break_force),
+                };
+                let break_force = break_force.unwrap_or(0.0).max(0.0);
+                q.borrow_mut().push(AssemblyCmd::Grip { root, at, target, break_force });
+                Ok(())
+            },
+        )?;
+        t.set("grip", f)?;
+    }
+    {
+        let q = cmds.clone();
+        let f = lua.create_function(move |_, node: Value| {
+            let root = node_eid(&node, "assembly.release(node)")?;
+            q.borrow_mut().push(AssemblyCmd::Release { root });
+            Ok(())
+        })?;
+        t.set("release", f)?;
+    }
     // assembly.info(node) — mass, com (world vec3), vel, angVel (vec3 tables),
+    // inertia (three rows, each an {x,y,z} table, world axes about the CoM),
     // grounded, anchored, and parts (the part nodes' entity ids). nil for
     // non-assemblies.
     {
@@ -343,8 +398,14 @@ pub(crate) fn install_assembly_api(
                 "angVel",
                 vec3_table(lua, [i.ang_vel[0] as f64, i.ang_vel[1] as f64, i.ang_vel[2] as f64])?,
             )?;
+            let inertia = lua.create_table()?;
+            for (k, row) in i.inertia.iter().enumerate() {
+                inertia.set(k + 1, vec3_table(lua, *row)?)?;
+            }
+            out.set("inertia", inertia)?;
             out.set("grounded", i.grounded)?;
             out.set("anchored", i.anchored)?;
+            out.set("gripped", i.gripped)?;
             let parts = lua.create_table()?;
             for (k, p) in i.parts.iter().enumerate() {
                 parts.set(k + 1, *p)?;

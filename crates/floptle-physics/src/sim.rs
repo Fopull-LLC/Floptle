@@ -91,6 +91,9 @@ pub struct Sim {
     /// Static colliders of switched-off nodes, out of the solver and every
     /// query until their node comes back (see [`Self::sync_parked_colliders`]).
     parked: Vec<crate::AnchoredCollider>,
+    /// A compound was added or removed since the joints were built, so the
+    /// indices they hold may name another: [`Self::sync_joints`] rebuilds.
+    joints_stale: bool,
 }
 
 /// The last known contact between a touching pair (world coordinates, so a
@@ -220,6 +223,11 @@ pub struct BodyReport {
 /// The two speeds let a damage model judge severity by the honest total (energy)
 /// while keeping the normal component for square-on landing feel.
 pub type CompoundImpact = (u32, u32, f32, f32, f32, DVec3);
+
+/// One assembly root's script-visible body state, from [`Sim::compound_states`]:
+/// `(root entity index, linear velocity, gravity-up, grounded, world centre of
+/// mass, asleep)`.
+pub type CompoundState = (u32, Vec3, Vec3, bool, DVec3, bool);
 
 /// The local translation that puts `e` at `world_pos`.
 ///
@@ -362,6 +370,7 @@ impl Sim {
             events: Vec::new(),
             tick_cc: Vec::new(),
             parked: Vec::new(),
+            joints_stale: false,
         };
         sim.build_joints(ecs);
         sim
@@ -371,23 +380,27 @@ impl Sim {
     /// body. Called once the bodies exist, and again when a body is added at
     /// runtime; a joint that has already broken stays broken.
     pub fn build_joints(&mut self, ecs: &World) {
+        use crate::joints::Link;
         use floptle_core::joint::JointKind;
         let broken: Vec<u32> = self.world.joints.iter().filter(|j| j.broken).map(|j| j.owner).collect();
         let joined: Vec<(u32, u32)> = self
             .world
             .joints
             .iter()
-            .filter_map(|j| j.b.map(|b| (self.world.bodies[j.a].owner, self.world.bodies[b].owner)))
+            .filter(|j| !j.scripted)
+            .filter_map(|j| j.b.map(|b| (self.link_owner(j.a), self.link_owner(b))))
             .collect();
         for (oa, ob) in joined {
             self.world.ignore_pair(oa, ob, Some(0.0));
         }
-        self.world.joints.clear();
-        let body_of = |e: Entity| self.map.iter().find(|l| l.entity == e).map(|l| l.body);
+        // Grips a script made are not the components' to rebuild.
+        let scripted: Vec<crate::joints::JointRt> =
+            self.world.joints.drain(..).filter(|j| j.scripted).collect();
+        self.joints_stale = false;
         let origin = self.world.origin;
         let mut out = Vec::new();
         for (e, jc) in ecs.query::<floptle_core::joint::Joint>() {
-            let Some(a) = body_of(e) else { continue };
+            let Some(a) = self.link_of(e) else { continue };
             // The other end: a body named `other`, or a node without one (held
             // where it stands), or nothing at all (the world).
             let other = match jc.other_id {
@@ -400,21 +413,30 @@ impl Sim {
                     })
                     .flatten(),
             };
-            let b = other.and_then(body_of);
-            let ba = &self.world.bodies[a];
-            let anchor_a = Vec3::from(jc.anchor);
-            let pa = ba.pos + ba.orient * anchor_a;
+            let b = other.and_then(|o| self.link_of(o));
+            // Two parts of one assembly are one rigid body already.
+            if b == Some(a) {
+                continue;
+            }
+            let (pos_a, qa) = self.link_pose(a);
+            // An anchor is in its node's space; a compound end keeps it in the
+            // compound's own frame, which is not the part node's.
+            let anchor_a = self.anchor_in(a, ecs, e, Vec3::from(jc.anchor));
+            let pa = pos_a + qa * anchor_a;
             let mut anchor_b = Vec3::from(jc.other_anchor);
             // Left at zero, a pin, weld, slider or wheel joins the bodies where
             // they stand: the other end is the point of the other body under
             // this anchor when play starts. Otherwise a weld between two
             // crates set side by side pulled them into one place.
-            if anchor_b == Vec3::ZERO
-                && let Some(bi) = b
-                && matches!(jc.kind, JointKind::Hinge | JointKind::Fixed | JointKind::Slider | JointKind::Wheel)
-            {
-                let bb = &self.world.bodies[bi];
-                anchor_b = bb.orient.inverse() * (pa - bb.pos);
+            if let Some(bl) = b {
+                let (pos_b, qb) = self.link_pose(bl);
+                if anchor_b == Vec3::ZERO
+                    && matches!(jc.kind, JointKind::Hinge | JointKind::Fixed | JointKind::Slider | JointKind::Wheel)
+                {
+                    anchor_b = qb.inverse() * (pa - pos_b);
+                } else if let Some(o) = other {
+                    anchor_b = self.anchor_in(bl, ecs, o, anchor_b);
+                }
             }
             let world = match (b, other) {
                 (Some(_), _) => Vec3::ZERO,
@@ -425,11 +447,19 @@ impl Sim {
                 (None, None) => pa,
             };
             let pb = match b {
-                Some(bi) => self.world.bodies[bi].pos + self.world.bodies[bi].orient * anchor_b,
+                Some(bl) => {
+                    let (p, q) = self.link_pose(bl);
+                    p + q * anchor_b
+                }
                 None => world,
             };
-            let qa = ba.orient;
-            let qb = b.map_or(Quat::IDENTITY, |bi| self.world.bodies[bi].orient);
+            let qb = b.map_or(Quat::IDENTITY, |bl| self.link_pose(bl).1);
+            // The axis is in the other node's space; a compound end needs it
+            // in the compound's frame.
+            let mut axis = Vec3::from(jc.axis).normalize_or(Vec3::Z);
+            if let (Some(Link::Compound(_)), Some(o)) = (b, other) {
+                axis = (qb.inverse() * (world_transform(ecs, o).rotation * axis)).normalize_or(Vec3::Z);
+            }
             let angular = matches!(jc.kind, JointKind::Hinge | JointKind::Wheel);
             let to_rad = |v: f32| if angular { v.to_radians() } else { v };
             let length = if jc.length < 0.0 { (pb - pa).length() } else { jc.length };
@@ -442,7 +472,7 @@ impl Sim {
                 anchor_a,
                 anchor_b,
                 world,
-                axis: Vec3::from(jc.axis).normalize_or(Vec3::Z),
+                axis,
                 rel0: qa.inverse() * qb,
                 length,
                 limit: jc.limit,
@@ -458,18 +488,208 @@ impl Sim {
                 reported: jc.broken,
                 target: jc.target.map(|t| (DVec3::from(t) - origin).as_vec3()),
                 force: 0.0,
+                position: 0.0,
+                speed: 0.0,
+                servo: jc.servo,
+                goal: if hinge_limits { jc.goal.to_radians() } else { jc.goal },
+                scripted: false,
+                on_collider: None,
+                collider_eid: None,
+                park: None,
+                servo_sum: 0.0,
                 built_from: crate::joints::JointShape::of(jc),
             });
             // A joined pair does not collide unless asked to: a hinged arm
             // sits inside the shoulder it hangs from.
-            if let Some(bi) = b
+            if let Some(bl) = b
                 && !jc.collide_connected
             {
-                let ob = self.world.bodies[bi].owner;
-                self.world.ignore_pair(e.index(), ob, None);
+                let (oa, ob) = (self.link_owner(a), self.link_owner(bl));
+                self.world.ignore_pair(oa, ob, None);
             }
         }
+        out.extend(scripted);
         self.world.joints = out;
+    }
+
+    /// Weld the assembly rooted at `root_eid` to what is at world point `at`
+    /// (`assembly.grip`): to `target` (a node with a body, any node of an
+    /// assembly, or a node with static colliders such as a terrain) or, with
+    /// none, to whatever static collider is nearest the point, else to the
+    /// world there. The pair keeps the pose it has now, and a grip on a
+    /// collider rides it when it moves (a planet on its rails). It lets go
+    /// past `break_force` (0: never). Returns false when there is no such
+    /// assembly, or the target is the assembly itself.
+    pub fn grip(&mut self, root_eid: u32, at: DVec3, target: Option<u32>, break_force: f32) -> bool {
+        use crate::joints::Link;
+        let Some(ci) = self.cmap.iter().find(|l| l.entity.index() == root_eid).map(|l| l.compound) else {
+            return false;
+        };
+        let a = Link::Compound(ci);
+        let p = (at - self.world.origin).as_vec3();
+        let (pos_a, qa) = self.link_pose(a);
+        let anchor_a = qa.inverse() * (p - pos_a);
+        let other = target.and_then(|eid| {
+            if let Some(l) = self.map.iter().find(|l| l.entity.index() == eid) {
+                return Some(Link::Body(l.body));
+            }
+            if let Some(l) = self.cmap.iter().find(|l| l.entity.index() == eid) {
+                return Some(Link::Compound(l.compound));
+            }
+            self.world.compounds.iter().position(|c| c.shapes.iter().any(|s| s.id == eid as u64)).map(Link::Compound)
+        });
+        if other == Some(a) {
+            return false;
+        }
+        // No body to hold: the static collider of the target node, or the
+        // nearest one to the point.
+        let collider = if other.is_some() {
+            None
+        } else {
+            let cols = &self.world.colliders;
+            let near = |i: &usize| cols[*i].distance(p).abs();
+            match target {
+                Some(eid) => (0..cols.len()).filter(|&i| cols[i].eid == Some(eid)).min_by(|x, y| near(x).total_cmp(&near(y))),
+                None => (0..cols.len()).filter(|&i| !cols[i].sensor && near(&i) < 1.0).min_by(|x, y| near(x).total_cmp(&near(y))),
+            }
+        };
+        let (anchor_b, world, qb) = match other {
+            Some(bl) => {
+                let (pos_b, qb) = self.link_pose(bl);
+                (qb.inverse() * (p - pos_b), Vec3::ZERO, qb)
+            }
+            None => match collider {
+                Some(i) => (Vec3::ZERO, p - self.world.colliders[i].offset(), Quat::IDENTITY),
+                None => (Vec3::ZERO, p, Quat::IDENTITY),
+            },
+        };
+        self.world.joints.push(crate::joints::JointRt {
+            owner: root_eid,
+            kind: floptle_core::joint::JointKind::Fixed,
+            a,
+            b: other,
+            anchor_a,
+            anchor_b,
+            world,
+            axis: Vec3::Z,
+            rel0: qa.inverse() * qb,
+            length: 0.0,
+            limit: false,
+            min: 0.0,
+            max: 0.0,
+            motor: false,
+            motor_speed: 0.0,
+            max_force: 0.0,
+            stiffness: 0.0,
+            damping: 0.0,
+            break_force,
+            broken: false,
+            reported: false,
+            target: None,
+            force: 0.0,
+            position: 0.0,
+            speed: 0.0,
+            servo: false,
+            goal: 0.0,
+            scripted: true,
+            on_collider: collider,
+            collider_eid: collider.and_then(|i| self.world.colliders[i].eid),
+            park: None,
+            servo_sum: 0.0,
+            built_from: crate::joints::JointShape::of(&floptle_core::joint::Joint::default()),
+        });
+        if let Some(bl) = other {
+            let ob = self.link_owner(bl);
+            self.world.ignore_pair(root_eid, ob, None);
+        }
+        true
+    }
+
+    /// Let go of every grip the assembly rooted at `root_eid` holds.
+    pub fn release_grips(&mut self, root_eid: u32) {
+        let mut freed = Vec::new();
+        self.world.joints.retain(|j| {
+            let keep = !(j.scripted && j.owner == root_eid);
+            if !keep && let Some(b) = j.b {
+                freed.push(b);
+            }
+            keep
+        });
+        for b in freed {
+            let ob = self.link_owner(b);
+            self.world.ignore_pair(root_eid, ob, Some(0.0));
+        }
+    }
+
+    /// Whether the assembly rooted at `root_eid` holds an unbroken grip.
+    pub fn gripped(&self, root_eid: u32) -> bool {
+        self.world.joints.iter().any(|j| j.scripted && j.owner == root_eid && !j.broken)
+    }
+
+    /// Point every grip on a collider back at it after the collider list
+    /// changed (by the node it belongs to), so a streamed chunk does not
+    /// leave a grip holding some other collider.
+    fn refind_grip_colliders(&mut self) {
+        for j in &mut self.world.joints {
+            let (Some(i), Some(eid)) = (j.on_collider, j.collider_eid) else { continue };
+            if self.world.colliders.get(i).is_some_and(|c| c.eid == Some(eid)) {
+                continue;
+            }
+            j.on_collider = self.world.colliders.iter().position(|c| c.eid == Some(eid));
+            // What it held has gone: it lets go.
+            if j.on_collider.is_none() {
+                j.broken = true;
+            }
+        }
+    }
+
+    /// What a joint on node `e` holds: its body, or the compound of the
+    /// assembly it is the root or a part of.
+    fn link_of(&self, e: Entity) -> Option<crate::joints::Link> {
+        use crate::joints::Link;
+        if let Some(l) = self.map.iter().find(|l| l.entity == e) {
+            return Some(Link::Body(l.body));
+        }
+        if let Some(l) = self.cmap.iter().find(|l| l.entity == e) {
+            return Some(Link::Compound(l.compound));
+        }
+        let id = e.index() as u64;
+        self.world
+            .compounds
+            .iter()
+            .position(|c| c.shapes.iter().any(|s| s.id == id))
+            .map(Link::Compound)
+    }
+
+    /// A link's position and turn, sim frame: what its anchors hang from.
+    fn link_pose(&self, l: crate::joints::Link) -> (Vec3, Quat) {
+        match l {
+            crate::joints::Link::Body(i) => (self.world.bodies[i].pos, self.world.bodies[i].orient),
+            crate::joints::Link::Compound(i) => (self.world.compounds[i].pos, self.world.compounds[i].orient),
+        }
+    }
+
+    /// The node a link belongs to, for the pair filter.
+    fn link_owner(&self, l: crate::joints::Link) -> u32 {
+        match l {
+            crate::joints::Link::Body(i) => self.world.bodies[i].owner,
+            crate::joints::Link::Compound(i) => self.world.compounds[i].owner,
+        }
+    }
+
+    /// An anchor given in node `e`'s own space, in link `l`'s frame. A body's
+    /// frame is its node's; a compound's is its centre of mass and turn, so
+    /// the point goes through the node's world pose (its scale included).
+    fn anchor_in(&self, l: crate::joints::Link, ecs: &World, e: Entity, local: Vec3) -> Vec3 {
+        match l {
+            crate::joints::Link::Body(_) => local,
+            crate::joints::Link::Compound(i) => {
+                let c = &self.world.compounds[i];
+                let wt = world_transform(ecs, e);
+                let p = (wt.translation - self.world.origin).as_vec3() + wt.rotation * (local * wt.scale);
+                c.orient.inverse() * (p - c.pos)
+            }
+        }
     }
 
     /// Keep each joint's settings in step with its component (an Inspector
@@ -477,22 +697,31 @@ impl Sim {
     /// what the physics learned: whether it broke, and the force it carried.
     pub fn sync_joints(&mut self, ecs: &mut World) {
         use floptle_core::joint::JointKind;
+        self.refind_grip_colliders();
         // A joint added, removed or reshaped since the last build (a script's
         // `setJoint`, an Inspector edit while playing) rebuilds them all,
         // keeping whatever has broken broken.
         let wanted: Vec<(u32, crate::joints::JointShape)> = ecs
             .query::<floptle_core::joint::Joint>()
-            .filter(|(e, _)| self.map.iter().any(|l| l.entity == *e))
+            .filter(|(e, _)| self.link_of(*e).is_some())
             .map(|(e, j)| (e.index(), crate::joints::JointShape::of(j)))
             .collect();
-        let built: Vec<(u32, crate::joints::JointShape)> =
-            self.world.joints.iter().map(|j| (j.owner, j.built_from.clone())).collect();
-        if wanted != built {
+        let built: Vec<(u32, crate::joints::JointShape)> = self
+            .world
+            .joints
+            .iter()
+            .filter(|j| !j.scripted)
+            .map(|j| (j.owner, j.built_from.clone()))
+            .collect();
+        if wanted != built || self.joints_stale {
             self.build_joints(ecs);
         }
         let origin = self.world.origin;
         for j in &mut self.world.joints {
-            let Some(e) = self.map.iter().find(|l| l.entity.index() == j.owner).map(|l| l.entity) else { continue };
+            if j.scripted {
+                continue;
+            }
+            let Some(e) = ecs.entity_with::<floptle_core::joint::Joint>(j.owner) else { continue };
             let Some(jc) = ecs.get_mut::<floptle_core::joint::Joint>(e) else { continue };
             let angular = matches!(j.kind, JointKind::Hinge | JointKind::Wheel);
             j.motor = jc.motor;
@@ -502,6 +731,8 @@ impl Sim {
             j.damping = jc.damping;
             j.break_force = jc.break_force;
             j.limit = jc.limit;
+            j.servo = jc.servo;
+            j.goal = if j.kind == JointKind::Hinge { jc.goal.to_radians() } else { jc.goal };
             if j.kind == JointKind::Hinge {
                 j.min = jc.min.to_radians();
                 j.max = jc.max.to_radians();
@@ -525,6 +756,10 @@ impl Sim {
                 }
             }
             jc.force = j.force;
+            let angular = matches!(j.kind, JointKind::Hinge | JointKind::Wheel);
+            let shown = |v: f32| if angular { v.to_degrees() } else { v };
+            jc.position = shown(j.position);
+            jc.speed = shown(j.speed);
         }
     }
 
@@ -1258,6 +1493,9 @@ impl Sim {
     /// Overwrite a compound's linear velocity (SOI-seam frame handoffs).
     pub fn set_compound_velocity(&mut self, eid: u32, vel: Vec3) {
         if let Some(c) = self.compound_of_mut(eid) {
+            if c.vel != vel {
+                c.wake();
+            }
             c.vel = vel;
         }
     }
@@ -1279,6 +1517,9 @@ impl Sim {
     /// silently de-spin a tumbling stage).
     pub fn set_compound_angular_velocity(&mut self, eid: u32, ang: Vec3) {
         if let Some(c) = self.compound_of_mut(eid) {
+            if c.ang_vel != ang {
+                c.wake();
+            }
             c.ang_vel = ang;
         }
     }
@@ -1305,12 +1546,11 @@ impl Sim {
         self.held.clear();
     }
 
-    /// Every compound root's script-visible body state: (entity index, linear
-    /// velocity, local gravity-up, grounded). Merged into the same node-state
+    /// Every compound root's script-visible body state ([`CompoundState`]). Merged into the same node-state
     /// mirror as single bodies, so `node.vx` / `node.up_x` / `node.grounded`
     /// read identically on a vessel root — cameras and controllers built for
     /// bodies work on assemblies unchanged.
-    pub fn compound_states(&self) -> Vec<(u32, Vec3, Vec3, bool, DVec3)> {
+    pub fn compound_states(&self) -> Vec<CompoundState> {
         self.cmap
             .iter()
             .map(|l| {
@@ -1322,7 +1562,7 @@ impl Sim {
                 // answers with the compound's real pose rather than a
                 // convincing zero.
                 let pos = c.pos.as_dvec3() + self.world.origin;
-                (l.entity.index(), c.vel, up, c.grounded || c.anchored, pos)
+                (l.entity.index(), c.vel, up, c.grounded || c.anchored, pos, c.asleep)
             })
             .collect()
     }
@@ -1383,6 +1623,10 @@ impl Sim {
             return;
         };
         self.shift_compound(eid, target - cur);
+        // Set down somewhere else, it rests on whatever is there, if anything.
+        if let Some(c) = self.compound_of_mut(eid) {
+            c.wake();
+        }
     }
 
     /// Shift every baked static collider owned by entity `eid` by a world
@@ -1834,6 +2078,8 @@ impl Sim {
         c.owner = root.index();
         let idx = self.world.add_compound(c);
         self.cmap.push(CompoundLink { entity: root, compound: idx });
+        // A joint waiting on this assembly can be built now.
+        self.joints_stale = true;
         if self.tick_prev_c.len() == idx {
             let c = &self.world.compounds[idx];
             self.tick_prev_c.push((c.pos, c.orient));
@@ -1907,6 +2153,20 @@ impl Sim {
                 l.compound = ci;
             }
         }
+        // Joints follow the swap; one on the compound that went is dropped
+        // (a component joint comes back at the rebuild the stale flag asks
+        // for, if its ends still exist).
+        use crate::joints::Link;
+        let gone = |l: &Link| *l == Link::Compound(ci);
+        self.world.joints.retain(|j| !gone(&j.a) && !j.b.as_ref().is_some_and(gone));
+        for j in &mut self.world.joints {
+            for l in std::iter::once(&mut j.a).chain(j.b.as_mut()) {
+                if *l == Link::Compound(last) {
+                    *l = Link::Compound(ci);
+                }
+            }
+        }
+        self.joints_stale = true;
         self.world.compound_contacts.clear();
         self.tick_prev_c.clear();
     }
@@ -2291,9 +2551,21 @@ impl Sim {
         }
     }
 
+    /// `node.asleep = …` on a body, or on an assembly root for its compound.
     pub fn set_body_asleep(&mut self, eid: u32, asleep: bool) {
-        let Some(bi) = self.map.iter().find(|l| l.entity.index() == eid).map(|l| l.body) else { return };
-        self.world.set_asleep(bi, asleep);
+        if let Some(bi) = self.map.iter().find(|l| l.entity.index() == eid).map(|l| l.body) {
+            self.world.set_asleep(bi, asleep);
+            return;
+        }
+        let Some(ci) = self.cmap.iter().find(|l| l.entity.index() == eid).map(|l| l.compound) else {
+            return;
+        };
+        if asleep {
+            self.world.reindex_colliders();
+            self.world.put_compound_to_sleep(ci);
+        } else {
+            self.world.compounds[ci].wake();
+        }
     }
 
     pub fn set_body_velocity(&mut self, eid: u32, vel: Vec3) {
@@ -2389,6 +2661,7 @@ impl Sim {
                 b.friction = rb.friction;
                 b.slope_limit = rb.slope_limit.clamp(0.0, 90.0).to_radians();
                 b.use_gravity = rb.gravity;
+                b.mass = rb.mass.max(1e-4);
                 b.lock_pos = rb.locks_pos();
                 b.radius = rb.radius.max(0.01);
                 b.shape = match rb.kind {
@@ -2416,6 +2689,7 @@ impl Sim {
                 };
             }
         }
+        self.sync_compound_masses(ecs);
         // Refresh the kinematic hulls dynamic bodies collide against (poses
         // were just synced above). Cheap: kinematic bodies are few. A sensor
         // (trigger) kinematic never pushes anything, so it stays out.
@@ -2438,6 +2712,105 @@ impl Sim {
                 })
             })
             .collect();
+    }
+
+    /// Re-read each assembly part's RigidBody `mass` into its compound: a
+    /// changed part re-derives the compound's mass, centre of mass and inertia
+    /// in place ([`Compound::set_shape_masses`]), so a tank that burns off or a
+    /// hold that fills weighs what the game says, every tick, with no rebuild.
+    /// The render anchor moves with the centre of mass so the change never
+    /// shows as a jump. Unchanged masses cost one lookup per part.
+    fn sync_compound_masses(&mut self, ecs: &World) {
+        let mut masses: Vec<(u64, f32)> = Vec::new();
+        for li in 0..self.cmap.len() {
+            let ci = self.cmap[li].compound;
+            masses.clear();
+            for s in &self.world.compounds[ci].shapes {
+                let Some(rb) = ecs
+                    .entity_with::<RigidBody>(s.id as u32)
+                    .and_then(|e| ecs.get::<RigidBody>(e))
+                else {
+                    continue;
+                };
+                // The same floor `compound_from` bakes with.
+                let m = rb.mass.max(1e-3);
+                if m != s.mass {
+                    masses.push((s.id, m));
+                }
+            }
+            if masses.is_empty() {
+                continue;
+            }
+            let c = &mut self.world.compounds[ci];
+            let before = c.pos;
+            if c.set_shape_masses(&masses) {
+                let d = c.pos - before;
+                if let Some(p) = self.tick_prev_c.get_mut(ci) {
+                    p.0 += d;
+                }
+            }
+        }
+    }
+
+    /// Re-gather the compound rooted at `root_eid` from its current part nodes
+    /// (`assembly.rebuild`), carrying its motion over: the new centre of mass
+    /// takes the velocity that point of the old body had and the spin is kept,
+    /// so a moving vessel that gains or loses parts flies on instead of
+    /// stopping dead. The anchor and the switched-off flag carry over too.
+    /// Returns whether a compound exists afterwards.
+    pub fn rebuild_compound(&mut self, root_eid: u32, ecs: &World) -> bool {
+        let old = self.compound_of(root_eid).map(|c| (c.pos, c.vel, c.ang_vel, c.anchored, c.off));
+        // Its grips, with their anchors as world points, to put back on the
+        // new compound (removing it drops them).
+        let ci = self.cmap.iter().find(|l| l.entity.index() == root_eid).map(|l| l.compound);
+        // Each with its anchor as a world point, the turn it holds the other
+        // end at, and the other end's owner (its slot may move).
+        let grips: Vec<(crate::joints::JointRt, Vec3, Quat, Option<u32>)> = match ci {
+            Some(ci) => {
+                let c = &self.world.compounds[ci];
+                self.world
+                    .joints
+                    .iter()
+                    .filter(|j| j.scripted && j.a == crate::joints::Link::Compound(ci))
+                    .map(|j| (j.clone(), c.pos + c.orient * j.anchor_a, c.orient * j.rel0, j.b.map(|b| self.link_owner(b))))
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+        self.remove_compound(root_eid);
+        let Some(root) = ecs.entity_with::<RigidBody>(root_eid) else { return false };
+        if !self.add_compound_for(root, ecs) {
+            return false;
+        }
+        if let Some((pos, vel, ang_vel, anchored, off)) = old
+            && let Some(c) = self.compound_of_mut(root_eid)
+        {
+            c.vel = vel + ang_vel.cross(c.pos - pos);
+            c.ang_vel = ang_vel;
+            c.anchored = anchored;
+            c.off = off;
+            if anchored {
+                c.vel = Vec3::ZERO;
+                c.ang_vel = Vec3::ZERO;
+            }
+        }
+        if let Some(ni) = self.cmap.iter().find(|l| l.entity.index() == root_eid).map(|l| l.compound) {
+            let c = &self.world.compounds[ni];
+            let (pos, orient) = (c.pos, c.orient);
+            for (mut j, p, held, other) in grips {
+                if let (Some(crate::joints::Link::Compound(_)), Some(o)) = (j.b, other) {
+                    match self.cmap.iter().find(|l| l.entity.index() == o) {
+                        Some(l) => j.b = Some(crate::joints::Link::Compound(l.compound)),
+                        None => continue,
+                    }
+                }
+                j.a = crate::joints::Link::Compound(ni);
+                j.anchor_a = orient.inverse() * (p - pos);
+                j.rel0 = orient.inverse() * held;
+                self.world.joints.push(j);
+            }
+        }
+        true
     }
 
     /// Set a capsule body's total standing height (for crouch). The feet stay planted —

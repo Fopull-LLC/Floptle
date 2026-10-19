@@ -116,11 +116,12 @@ fn play_for(
     pace: crate::run::Pace,
 ) -> Option<f32> {
     // How long this is allowed to spend waiting on the background terrain
-    // threads, in total — the same budget `shot` already gives its pre-render
-    // settle, for the same reason: a world that never finishes streaming must
-    // end in a picture and a warning rather than in a hang.
-    const STREAM_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
-    let deadline = floptle_core::time::Instant::now() + STREAM_BUDGET;
+    // threads, in total: `run`'s budget, so the two hold for the same world.
+    // A smaller one ran out on a game that loads a scene mid-play and streams
+    // its terrain afresh, and the picture was the loading screen `run` never
+    // stops on. A world that never finishes streaming still ends in a picture
+    // and a warning rather than in a hang.
+    let deadline = floptle_core::time::Instant::now() + crate::run::TERRAIN_BUDGET;
 
     // **Press Play on a cold world, exactly as `run` does.** Loading the
     // ground around the view first looked like a kindness, but it made a

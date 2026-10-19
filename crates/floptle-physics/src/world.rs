@@ -92,6 +92,11 @@ impl AnchoredCollider {
         gap.length_squared() <= slack * slack
     }
 
+    /// The anchor in the sim frame: where the collider's own origin is now.
+    pub fn offset(&self) -> Vec3 {
+        self.offset
+    }
+
     /// Signed distance from sim-frame point `p` to the surface.
     pub fn distance(&self, p: Vec3) -> f32 {
         self.shape.distance(p - self.offset)
@@ -949,7 +954,10 @@ impl PhysicsWorld {
             h.pos += delta;
         }
         for j in &mut self.joints {
-            j.world += delta;
+            // A grip on a collider is relative to it, and the collider moved.
+            if j.on_collider.is_none() {
+                j.world += delta;
+            }
             if let Some(t) = &mut j.target {
                 *t += delta;
             }
@@ -1053,6 +1061,7 @@ impl PhysicsWorld {
         if replaced {
             self.last_revalidated_collider_count = self.colliders.len();
             self.revalidate_sleeping_bodies();
+            self.revalidate_sleeping_compounds();
         }
     }
 
@@ -1124,6 +1133,7 @@ impl PhysicsWorld {
         if self.resting_check_elapsed >= SLEEP_REVALIDATE_INTERVAL {
             self.resting_check_elapsed = 0.0;
             self.revalidate_sleeping_bodies();
+            self.revalidate_sleeping_compounds();
         }
         self.index_fresh = false;
     }
@@ -1281,6 +1291,35 @@ impl PhysicsWorld {
             c.grounded = true;
             return;
         }
+        if self.compounds[ci].asleep {
+            // Sleeping: no gravity, no integration and none of the per-sample
+            // collider work, which is the whole cost of a parked craft. A held
+            // force, an impulse or a velocity write wakes it; so does a
+            // velocity left on it some other way (a public field), as for a
+            // body: one that is moving is not asleep, whatever the flag says.
+            let c = &mut self.compounds[ci];
+            let moving = c.vel.length_squared() > SLEEP_LINEAR_SPEED * SLEEP_LINEAR_SPEED
+                || c.ang_vel.length_squared() > SLEEP_LINEAR_SPEED * SLEEP_LINEAR_SPEED;
+            let pushed = c.force != Vec3::ZERO || c.torque != Vec3::ZERO;
+            if !moving && !pushed {
+                c.prev_pos = c.pos;
+                c.prev_orient = c.orient;
+                c.vel = Vec3::ZERO;
+                c.ang_vel = Vec3::ZERO;
+                // Still touching what it rests on, for touches and impacts.
+                let n = self.colliders.len();
+                for k in 0..self.compounds[ci].resting.len() {
+                    let mut cc = self.compounds[ci].resting[k];
+                    if matches!(cc.peer, crate::compound::ContactPeer::Collider(i) if i >= n) {
+                        continue;
+                    }
+                    cc.compound = ci;
+                    self.compound_contacts.push(cc);
+                }
+                return;
+            }
+            c.wake();
+        }
         {
             let c = &mut self.compounds[ci];
             c.prev_pos = c.pos;
@@ -1305,12 +1344,19 @@ impl PhysicsWorld {
         if !self.water.is_empty() {
             self.apply_water_to_compound(ci, dt);
         }
+        // A move longer than half the thinnest part is swept against the
+        // static world and stops at first touch, as a body's is: a fast
+        // craft otherwise arrives a metre or more inside the ground, past
+        // where the field has a usable normal, and is thrown back out.
+        // Spin counts: a corner of a tumbling craft travels as surely as its
+        // centre does.
+        let f = self.sweep_compound(ci, dt);
         {
             let c = &mut self.compounds[ci];
 
-            c.pos += c.vel * dt;
+            c.pos += c.vel * (dt * f);
             if c.ang_vel.length_squared() > 1e-12 {
-                c.orient = (Quat::from_scaled_axis(c.ang_vel * dt) * c.orient).normalize();
+                c.orient = (Quat::from_scaled_axis(c.ang_vel * (dt * f)) * c.orient).normalize();
             }
             c.grounded = false;
         }
@@ -1452,6 +1498,216 @@ impl PhysicsWorld {
         if c.grounded && c.vel.length() < 0.05 && c.ang_vel.length() < 0.05 {
             c.vel = Vec3::ZERO;
             c.ang_vel = Vec3::ZERO;
+            // At rest, consecutively, for as long as a body waits: asleep.
+            c.sleep_time += dt;
+            if c.sleep_time >= SLEEP_SETTLE_TIME {
+                self.put_compound_to_sleep(ci);
+            }
+        } else {
+            c.sleep_time = 0.0;
+        }
+    }
+
+    /// How much of this step's move compound `ci` can make before one of its
+    /// shape samples first touches the static world, as a fraction of the
+    /// step: 1 when nothing is in the way or the move is short, else the
+    /// fraction that leaves the first sample to touch a hair inside the
+    /// surface, so the contact pass resolves the hit (restitution and
+    /// friction) this same step.
+    ///
+    /// Each sample moves where the step's translation and rotation carry it,
+    /// and sphere-traces along that line against the colliders whose box the
+    /// swept samples can reach. A sample already touching something only
+    /// counts as hitting when it goes deeper than it started, so a craft
+    /// sliding fast along the ground it rests on is not stopped by it. Only a
+    /// move longer than [`SWEEP_FRACTION`] of the thinnest part is swept.
+    fn sweep_compound(&self, ci: usize, dt: f32) -> f32 {
+        // How far inside the first touch is left: enough for the contact
+        // pass to see it.
+        const SKIN: f32 = 0.005;
+        // How much deeper a sample that starts in contact may go before it
+        // counts as hitting.
+        const MARGIN: f32 = 0.01;
+        let c = &self.compounds[ci];
+        let end_orient = if c.ang_vel.length_squared() > 1e-12 {
+            (Quat::from_scaled_axis(c.ang_vel * dt) * c.orient).normalize()
+        } else {
+            c.orient
+        };
+        let end_pos = c.pos + c.vel * dt;
+        let to_end = end_orient * c.orient.inverse();
+        // (start, move, radius) per sample.
+        let mut samples: Vec<(Vec3, Vec3, f32)> = Vec::new();
+        let mut longest = 0.0f32;
+        for si in 0..c.shapes.len() {
+            let (centers, n, radius) = c.shape_samples(si);
+            for &p in &centers[..n] {
+                let d = end_pos + to_end * (p - c.pos) - p;
+                longest = longest.max(d.length());
+                samples.push((p, d, radius));
+            }
+        }
+        if longest.is_nan() || longest <= SWEEP_FRACTION * c.thinnest() {
+            return 1.0;
+        }
+        let row = self.matrix[c.layer as usize];
+        let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+        let mut reach = 0.0f32;
+        for &(p, d, r) in &samples {
+            lo = lo.min(p).min(p + d);
+            hi = hi.max(p).max(p + d);
+            reach = reach.max(r);
+        }
+        let cands: Vec<usize> = (0..self.colliders.len())
+            .filter(|&i| {
+                let col = &self.colliders[i];
+                (row >> col.layer) & 1 == 1 && !col.sensor && col.may_reach(lo, hi, reach + SKIN)
+            })
+            .collect();
+        if cands.is_empty() {
+            return 1.0;
+        }
+        let dist = |p: Vec3| {
+            cands.iter().map(|&i| self.colliders[i].distance(p)).fold(f32::INFINITY, f32::min)
+        };
+        // The fraction of the step every sample can make, found along each
+        // sample's own line.
+        let mut stop = 1.0f32;
+        for &(p, d, r) in &samples {
+            let len = d.length();
+            if len.is_nan() || len <= 1e-6 {
+                continue;
+            }
+            let s0 = dist(p);
+            if !s0.is_finite() {
+                continue;
+            }
+            let thr = (r - SKIN).min(s0 - MARGIN);
+            // March in fractions of the step: each step as long as the
+            // distance field allows, with a floor so a sample gliding just
+            // above a surface still crosses the move in a bounded number of
+            // steps.
+            let floor = 1.0 / 32.0;
+            let (mut clear, mut t) = (0.0f32, 0.0f32);
+            let mut hit = None;
+            for _ in 0..40 {
+                let s = dist(p + d * t);
+                if s <= thr {
+                    hit = Some(t);
+                    break;
+                }
+                if t >= stop {
+                    break;
+                }
+                clear = t;
+                t = (t + ((s - thr) / len).max(floor)).min(stop);
+            }
+            let Some(mut inside) = hit else { continue };
+            if inside <= 0.0 {
+                return 0.0;
+            }
+            // Narrow down where it crosses.
+            for _ in 0..10 {
+                let mid = 0.5 * (clear + inside);
+                if dist(p + d * mid) <= thr {
+                    inside = mid;
+                } else {
+                    clear = mid;
+                }
+            }
+            stop = stop.min(inside);
+        }
+        stop
+    }
+
+    /// Put compound `ci` to sleep where it stands, caching what it rests on
+    /// and how deep each sample sits (see [`Self::compound_rest_probe`]).
+    pub fn put_compound_to_sleep(&mut self, ci: usize) {
+        let Some(c) = self.compounds.get(ci) else { return };
+        if !c.live() {
+            return;
+        }
+        let (pens, resting) = self.compound_rest_probe(ci);
+        let c = &mut self.compounds[ci];
+        c.asleep = true;
+        c.sleep_time = 0.0;
+        c.vel = Vec3::ZERO;
+        c.ang_vel = Vec3::ZERO;
+        c.rest_pens = pens;
+        c.resting = resting;
+    }
+
+    /// How deep each of compound `ci`'s shape samples sits in the static
+    /// world (the deepest over the colliders it collides with; negative is
+    /// clear by that much), in sample order, and the contacts within a hair
+    /// of the surface, as the step would report them at rest. One pass of
+    /// the step's collider work — what falling asleep and each re-check cost.
+    fn compound_rest_probe(&self, ci: usize) -> (Vec<f32>, Vec<CompoundContact>) {
+        let c = &self.compounds[ci];
+        let row = self.matrix[c.layer as usize];
+        let mut pens = Vec::new();
+        let mut resting = Vec::new();
+        for si in 0..c.shapes.len() {
+            let (centers, n_samples, radius) = c.shape_samples(si);
+            for &p in &centers[..n_samples] {
+                let mut deepest = f32::NEG_INFINITY;
+                for coli in 0..self.colliders.len() {
+                    if (row >> self.colliders[coli].layer) & 1 == 0 || self.colliders[coli].sensor {
+                        continue;
+                    }
+                    let pen = radius - self.colliders[coli].distance(p);
+                    if !pen.is_finite() {
+                        continue;
+                    }
+                    deepest = deepest.max(pen);
+                    // The same hair of slack a resting body's cache allows:
+                    // the step just resolved it to the surface.
+                    if pen > -0.01 {
+                        let n = self.colliders[coli].normal(p);
+                        resting.push(CompoundContact {
+                            compound: ci,
+                            shape: si,
+                            shape_id: c.shapes[si].id,
+                            peer: crate::compound::ContactPeer::Collider(coli),
+                            point: p - n * radius,
+                            normal: n,
+                            impulse: 0.0,
+                            speed: 0.0,
+                            speed_abs: 0.0,
+                        });
+                    }
+                }
+                pens.push(deepest);
+            }
+        }
+        (pens, resting)
+    }
+
+    /// Re-check every sleeping compound against the static world as it is
+    /// now, waking any whose ground changed: a sample that was resting is
+    /// now clear of it (a dig, a chunk unloading) or one is pressed deeper
+    /// (a sculpt pushing up). Errs toward waking, like the bodies' re-check.
+    fn revalidate_sleeping_compounds(&mut self) {
+        // The same slack falling asleep allows, both ways.
+        const MOVED: f32 = 0.01;
+        for ci in 0..self.compounds.len() {
+            if !self.compounds[ci].asleep || !self.compounds[ci].live() {
+                continue;
+            }
+            let (pens, resting) = self.compound_rest_probe(ci);
+            let c = &mut self.compounds[ci];
+            let changed = pens.len() != c.rest_pens.len()
+                || resting.is_empty()
+                || pens.iter().zip(&c.rest_pens).any(|(&now, &was)| {
+                    // A sample that was touching and has come clear, or one
+                    // pressed deeper than it slept.
+                    (was > -MOVED && now < was - MOVED) || now > was + MOVED
+                });
+            if changed {
+                c.wake();
+            } else {
+                c.resting = resting;
+            }
         }
     }
 

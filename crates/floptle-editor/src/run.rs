@@ -901,8 +901,11 @@ struct Measured<'a> {
     fps: f32,
 }
 
-/// Real time the run gave background terrain threads, in total.
-const TERRAIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+/// Real time the run gives background terrain threads, in total. `shot
+/// --after` gives the same, or a game that streams new terrain after a scene
+/// load mid-play holds for it under `run` and photographs its loading screen
+/// under `shot`.
+pub(crate) const TERRAIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// How the run waited on background terrain generation and streaming.
 #[derive(Clone, Copy, Default)]

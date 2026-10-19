@@ -130,6 +130,17 @@ pub struct Joint {
     /// handing over the node itself. Used ahead of `other`, so it works for a
     /// node with no name or one of several with the same name. Not saved.
     pub other_id: Option<u32>,
+    /// Drive the motor to `goal` rather than at `motor_speed`: a servo
+    /// (hinge, degrees) or a piston (slider, units), going no faster than
+    /// `motor_speed` and pushing no harder than `max_force`. Not saved.
+    pub servo: bool,
+    pub goal: f32,
+    /// Where the joint is, set by the physics each step: a hinge's or a
+    /// wheel's turn in degrees since play started, a slider's travel, a
+    /// distance joint's length. And how fast it is changing, a second. Not
+    /// saved.
+    pub position: f32,
+    pub speed: f32,
 }
 
 impl Default for Joint {
@@ -155,6 +166,10 @@ impl Default for Joint {
             force: 0.0,
             target: None,
             other_id: None,
+            servo: false,
+            goal: 0.0,
+            position: 0.0,
+            speed: 0.0,
         }
     }
 }

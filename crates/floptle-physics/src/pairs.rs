@@ -462,6 +462,16 @@ impl PhysicsWorld {
                 let inv_m = 1.0 / c.mass.max(1e-4);
                 let inv_i = c.world_inv_inertia();
                 let r = p - c.pos;
+                if c.asleep {
+                    // A sleeping craft holds still under what merely rests on
+                    // it (a crate on its deck presses a little every step);
+                    // a blow that would really move it wakes it.
+                    let dv = impulse * inv_m + (inv_i * r.cross(impulse)).cross(r);
+                    if dv.length_squared() < crate::SLEEP_LINEAR_SPEED * crate::SLEEP_LINEAR_SPEED {
+                        return;
+                    }
+                    c.wake();
+                }
                 let d = spend(shift * inv_m, &mut budget.0);
                 c.pos += d;
                 let rot = spend(inv_i * r.cross(shift), &mut budget.1);

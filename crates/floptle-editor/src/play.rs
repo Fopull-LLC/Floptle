@@ -1142,6 +1142,7 @@ impl Editor {
             self.space_rails_prev.clear(); // the first tick snaps authored → rails
             self.compound_lod.clear(); // distant-craft LOD restarts with them
             self.lod_keep_live.clear(); // keep-live exemptions don't persist runs
+            self.lod_woken.clear();
             self.compound_coast.clear();
             self.script_lines.clear(); // no stale map lines across runs
             self.script_rects.clear();

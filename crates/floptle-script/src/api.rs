@@ -1192,10 +1192,17 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
     }
     if let Some(rb) = world.get::<RigidBody>(e) {
         let b = |v: bool| if v { 1.0 } else { 0.0 };
+        // The box the physics builds is the half-extents times the node's
+        // world scale; `half_*` stay the authored numbers.
+        let scale = floptle_core::world_transform(world, e).scale.abs();
         out.insert(
             "RigidBody".to_string(),
             HashMap::from([
                 ("friction".to_string(), rb.friction as f64),
+                // Read and write. On an assembly part it is that part's share
+                // of the compound, which re-derives its mass, centre of mass
+                // and inertia the next tick.
+                ("mass".to_string(), rb.mass as f64),
                 // Degrees. The steepest surface this body can stand on: past it
                 // there is no ground under it and no grip holds it.
                 ("slopeLimit".to_string(), rb.slope_limit as f64),
@@ -1224,6 +1231,10 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("half_x".to_string(), rb.half_extents[0] as f64),
                 ("half_y".to_string(), rb.half_extents[1] as f64),
                 ("half_z".to_string(), rb.half_extents[2] as f64),
+                // Read-only: what the solver collides with.
+                ("worldHalfX".to_string(), (rb.half_extents[0] * scale.x) as f64),
+                ("worldHalfY".to_string(), (rb.half_extents[1] * scale.y) as f64),
+                ("worldHalfZ".to_string(), (rb.half_extents[2] * scale.z) as f64),
                 ("lock_x".to_string(), b(rb.lock_pos[0])),
                 ("lock_y".to_string(), b(rb.lock_pos[1])),
                 ("lock_z".to_string(), b(rb.lock_pos[2])),
@@ -1258,6 +1269,14 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("broken".to_string(), b(j.broken)),
                 // The largest force it carried last step, read-only.
                 ("force".to_string(), j.force as f64),
+                // A servo or piston: the motor drives to `goal` (degrees for
+                // a hinge, units for a slider) instead of at a speed.
+                ("servo".to_string(), b(j.servo)),
+                ("goal".to_string(), j.goal as f64),
+                // Read-only, from the last step: the turn (degrees) or the
+                // travel, and how fast it is changing a second.
+                ("position".to_string(), j.position as f64),
+                ("speed".to_string(), j.speed as f64),
             ]),
         );
     }
@@ -1982,6 +2001,9 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
             if let Some(rb) = world.get_mut::<RigidBody>(ent) {
                 match field {
                     "friction" => rb.friction = val as f32,
+                    // Never zero or below: an inverse mass of infinity is a
+                    // body that any touch flings out of the world.
+                    "mass" => rb.mass = (val as f32).max(1e-3),
                     "slopeLimit" => rb.slope_limit = (val as f32).clamp(0.0, 90.0),
                     "restitution" => rb.restitution = val as f32,
                     "gravity" => rb.gravity = val != 0.0,
@@ -2037,6 +2059,8 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "max" => j.max = val as f32,
                     "breakForce" => j.break_force = (val as f32).max(0.0),
                     "broken" => j.broken = val != 0.0,
+                    "servo" => j.servo = val != 0.0,
+                    "goal" => j.goal = val as f32,
                     _ => {}
                 }
             }
@@ -2896,7 +2920,7 @@ pub(crate) const CELESTIAL_KEYS: &[&str] = &[
 pub(crate) const TILEMAP_KEYS: &[&str] = &["cols", "rows", "tile", "data", "tileset"];
 pub(crate) const JOINT_KEYS: &[&str] = &[
     "kind", "to", "anchor", "otherAnchor", "axis", "length", "limit", "min", "max", "motor", "motorSpeed",
-    "maxForce", "stiffness", "damping", "breakForce", "collide",
+    "maxForce", "stiffness", "damping", "breakForce", "collide", "goal",
 ];
 
 /// Every key `node:setSorting{...}` reads.
@@ -6497,6 +6521,8 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                 if let Some(v) = num("damping")? { j.damping = v.max(0.0); }
                 if let Some(v) = num("breakForce")? { j.break_force = v.max(0.0); }
                 if let Some(v) = t.get::<Option<bool>>("collide")? { j.collide_connected = v; }
+                // A goal makes the motor a servo: it drives there and holds.
+                if let Some(v) = num("goal")? { j.goal = v; j.servo = true; j.motor = true; }
                 q.borrow_mut().push((e, crate::RichSet::Joint(Some((j, other)))));
                 Ok(())
             })?,
