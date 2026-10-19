@@ -24,7 +24,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use mlua::{Function, Lua, Table, Value};
+use mlua::{Function, IntoLuaMulti, Lua, Table, Value};
 
 use crate::http_api::{self, HttpState};
 use crate::{LogLevel, ScriptLog};
@@ -35,7 +35,16 @@ pub struct TextureRequest {
     pub id: u64,
     pub name: String,
     pub bytes: Vec<u8>,
+    /// `Some([w, h])`: the bytes are raw RGBA8 pixels (`assets.textureFromPixels`),
+    /// uploaded as they are, and nobody waits on an answer. `None`: an encoded
+    /// picture, decoded on a worker.
+    pub pixels: Option<[u32; 2]>,
 }
+
+/// The widest or tallest picture `assets.textureFromPixels` takes. The same
+/// side the GPU guarantees everywhere, so a texture made on one machine is
+/// made on all of them.
+pub const MAX_PIXEL_SIDE: u32 = 4096;
 
 enum ByUrl {
     Loading(u64),
@@ -87,7 +96,7 @@ impl TextureLoads {
     }
 
     fn request(&mut self, id: u64, bytes: Vec<u8>) {
-        self.requests.push(TextureRequest { id, name: format!("img:{id}"), bytes });
+        self.requests.push(TextureRequest { id, name: format!("img:{id}"), bytes, pixels: None });
     }
 
     pub(crate) fn take_requests(&mut self) -> Vec<TextureRequest> {
@@ -173,6 +182,66 @@ pub(crate) fn install(
                 s.request(id, bytes.as_bytes().to_vec());
             }
             Ok(())
+        })?,
+    )?;
+
+    // assets.textureFromPixels(w, h, pixels) -> name — a texture from RGBA
+    // bytes a script made (a bark or leaf pattern, a minimap), answered at
+    // once: there is nothing to decode, so nothing to wait for. Drawable from
+    // the next frame.
+    let st = state.clone();
+    assets.set(
+        "textureFromPixels",
+        lua.create_function(move |lua, (w, h, pixels): (f64, f64, Value)| {
+            const CALL: &str = "assets.textureFromPixels";
+            let side = |v: f64, what: &str| -> mlua::Result<u32> {
+                if v.fract() != 0.0 || v < 1.0 || v > MAX_PIXEL_SIDE as f64 {
+                    return Err(mlua::Error::runtime(format!(
+                        "{CALL}: the {what} is {v}; it is a whole number of pixels from 1 to {MAX_PIXEL_SIDE}"
+                    )));
+                }
+                Ok(v as u32)
+            };
+            let (w, h) = (side(w, "width")?, side(h, "height")?);
+            let want = w as usize * h as usize * 4;
+            let bytes: Vec<u8> = match &pixels {
+                Value::String(s) => s.as_bytes().to_vec(),
+                Value::Table(t) => {
+                    let mut out = Vec::with_capacity(t.raw_len());
+                    for i in 1..=t.raw_len() {
+                        let v: f64 = t.raw_get(i)?;
+                        if !(0.0..=255.0).contains(&v) {
+                            return Err(mlua::Error::runtime(format!(
+                                "{CALL}: pixels[{i}] is {v}; a channel is 0 to 255"
+                            )));
+                        }
+                        out.push(v.round() as u8);
+                    }
+                    out
+                }
+                other => {
+                    return Err(mlua::Error::runtime(format!(
+                        "{CALL} takes the pixels as a string of bytes or a list of numbers, not a {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            if bytes.len() != want {
+                return Err(mlua::Error::runtime(format!(
+                    "{CALL}: {w}x{h} takes {want} bytes (r, g, b, a per pixel), and {} were given",
+                    bytes.len()
+                )));
+            }
+            let mut s = st.borrow_mut();
+            if !s.can_draw {
+                return (Value::Nil, NO_GPU).into_lua_multi(lua);
+            }
+            let id = s.next;
+            s.next += 1;
+            let name = format!("img:{id}");
+            s.live.insert(name.clone());
+            s.requests.push(TextureRequest { id, name: name.clone(), bytes, pixels: Some([w, h]) });
+            name.into_lua_multi(lua)
         })?,
     )?;
 
@@ -422,6 +491,35 @@ mod tests {
             }
         });
         (url, accepted)
+    }
+
+    /// **Pixels a script made become a texture name at once.** Bytes or a
+    /// number list, r, g, b, a per pixel; the driver is handed them raw, with
+    /// the size, and a later frame's answer pass does not let them go. A
+    /// wrong count, a channel past 255 or a size past the limit raises; a host
+    /// that draws nothing answers nil and why.
+    #[test]
+    fn pixels_become_a_texture_name_at_once_and_are_checked() {
+        let h = harness();
+        let a: String = h.lua.load("return assets.textureFromPixels(2, 1, string.char(255,0,0,255, 0,0,255,128))").eval().unwrap();
+        let b: String = h.lua.load("return assets.textureFromPixels(1, 1, {10, 20, 30, 40})").eval().unwrap();
+        assert!(a.starts_with("img:") && b.starts_with("img:") && a != b, "{a} {b}");
+        let reqs = h.book.borrow_mut().take_requests();
+        assert_eq!(reqs.len(), 2);
+        assert_eq!((reqs[0].name.as_str(), reqs[0].pixels, &reqs[0].bytes[4..]), (a.as_str(), Some([2, 1]), &[0u8, 0, 255, 128][..]));
+        assert_eq!((reqs[1].pixels, reqs[1].bytes.as_slice()), (Some([1, 1]), &[10u8, 20, 30, 40][..]));
+        h.frame();
+        assert!(h.lua.load(format!("return assets.release('{a}')")).eval::<bool>().unwrap(), "the name was not live");
+
+        let err = |src: &str| h.lua.load(src).exec().unwrap_err().to_string();
+        assert!(err("assets.textureFromPixels(2, 2, string.rep('x', 15))").contains("takes 16 bytes"));
+        assert!(err("assets.textureFromPixels(1, 1, {0, 0, 0, 300})").contains("0 to 255"));
+        assert!(err("assets.textureFromPixels(5000, 1, '')").contains("1 to 4096"));
+        assert!(err("assets.textureFromPixels(1.5, 1, '')").contains("whole number"));
+
+        h.book.borrow_mut().set_can_draw(false);
+        let (t, why): (Option<String>, Option<String>) = h.lua.load("return assets.textureFromPixels(1, 1, '\\0\\0\\0\\0')").eval().unwrap();
+        assert!(t.is_none() && why.is_some_and(|w| w.contains("draws nothing")));
     }
 
     /// `http.get` hands a binary reply over whole. It used to read the reply

@@ -38,7 +38,17 @@ impl Editor {
         for name in self.script_host.take_texture_releases() {
             self.release_runtime_texture(&name);
         }
+        self.pump_runtime_meshes();
         for req in self.script_host.take_texture_requests() {
+            // Raw pixels: nothing to decode, and nobody waiting on an answer.
+            if let Some([width, height]) = req.pixels {
+                if let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) {
+                    let data = TextureData { pixels: req.bytes, width, height };
+                    let tex = raster.register_texture(gpu, &data, Default::default());
+                    self.texture_registry.insert(req.name, tex);
+                }
+                continue;
+            }
             let Some(gpu) = self.gpu.as_ref().filter(|_| can_draw) else {
                 self.script_host.answer_texture(req.id, Err("this host draws nothing, so it makes no textures".into()));
                 continue;
@@ -87,8 +97,52 @@ impl Editor {
         }
     }
 
+    /// Upload what `mesh.build` made since the last call, under its `mesh:`
+    /// name, and let go of what `mesh.free` gave back. A host that draws
+    /// nothing registers nothing: the name still exists for the script, and
+    /// nothing draws it.
+    pub(crate) fn pump_runtime_meshes(&mut self) {
+        for name in self.script_host.take_mesh_releases() {
+            self.release_runtime_mesh(&name);
+        }
+        let requests = self.script_host.take_mesh_requests();
+        let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else { return };
+        for req in requests {
+            let vertices: Vec<floptle_render::Vertex> = req
+                .positions
+                .iter()
+                .zip(&req.normals)
+                .zip(&req.uvs)
+                .map(|((p, n), uv)| floptle_render::Vertex { pos: *p, normal: *n, uv: *uv })
+                .collect();
+            let size = req.positions.iter().fold(0.0f32, |m, p| m.max(p[0].abs()).max(p[1].abs()).max(p[2].abs())) * 2.0;
+            let data = floptle_render::MeshData { vertices, indices: req.indices, colors: req.colors };
+            let id = raster.register(gpu, &data, None);
+            self.mesh_registry.insert(
+                req.name,
+                crate::MeshAsset { parts: vec![id], part_meta: Vec::new(), tex_filter: None, size: size.max(1e-3), rig: None },
+            );
+        }
+    }
+
+    fn release_runtime_mesh(&mut self, name: &str) {
+        // A scatter baked from it holds its part ids: drop that too.
+        self.scatter_protos.remove(name);
+        let Some(asset) = self.mesh_registry.remove(name) else { return };
+        if let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) {
+            for id in asset.parts {
+                raster.release_mesh(gpu, id);
+            }
+        }
+    }
+
     /// Stop: every runtime picture goes with the session that asked for it.
     pub(crate) fn release_runtime_textures(&mut self) {
+        let built: Vec<String> =
+            self.mesh_registry.keys().filter(|k| floptle_script::mesh_api::is_built_mesh(k)).cloned().collect();
+        for n in built {
+            self.release_runtime_mesh(&n);
+        }
         self.texture_jobs.clear();
         let names: Vec<String> =
             self.texture_registry.keys().filter(|k| k.starts_with("img:")).cloned().collect();
@@ -175,6 +229,59 @@ mod tests {
         ed.release_runtime_textures();
         assert!(img_keys(&ed).is_empty(), "Stop kept a runtime texture");
         assert_eq!(ed.ensure_texture(&name), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A mesh and a texture a script made from numbers are registered under
+    /// the names it was handed.** `mesh.build` lands in the model registry
+    /// a Mesh node and scatter read; `assets.textureFromPixels` in the
+    /// texture registry, at its own size. `mesh.free` and Stop let go.
+    #[test]
+    fn a_built_mesh_and_a_pixel_texture_are_registered_and_released() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let dir = std::env::temp_dir().join(format!("floptle-runtime-mesh-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("maker.lua"),
+            "function start(node)\n\
+             \x20 a = mesh.build{ positions = {0,0,0, 1,0,0, 0,1,0, 1,1,0}, indices = {1,2,3, 2,4,3} }\n\
+             \x20 b = mesh.build{ positions = {0,0,0, 1,0,0, 0,0,1}, indices = {1,3,2} }\n\
+             \x20 tex = assets.textureFromPixels(2, 1, string.char(255,0,0,255, 0,255,0,255))\n\
+             \x20 node.model = a\n\
+             end\n\
+             local f = 0\n\
+             function update(node, dt)\n\
+             \x20 f = f + 1\n\
+             \x20 if f == 2 and mesh.free(b) then b = nil end\n\
+             end\n",
+        )
+        .unwrap();
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Scripts(vec![ScriptInst::new("maker")]));
+        ed.script_host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        ed.pump_runtime_textures();
+        let env = ed.script_host.instance_env(e.index(), "maker").unwrap();
+        let (a, tex): (String, String) = (env.get("a").unwrap(), env.get("tex").unwrap());
+        assert!(ed.mesh_registry.contains_key(&a), "the built mesh is not a model");
+        let t = ed.ensure_texture(&tex).expect("the pixel texture is not in the registry");
+        assert_eq!(ed.raster.as_ref().unwrap().texture_size(t), Some([2.0, 1.0]));
+        assert_eq!(
+            world.get::<floptle_core::Matter>(e),
+            Some(&floptle_core::Matter::Mesh { asset_path: a.clone() }),
+            "node.model did not take the built name"
+        );
+        // Freed in the next pass: gone from the registry once the driver looks.
+        let built = ed.mesh_registry.keys().filter(|k| k.starts_with("mesh:")).count();
+        assert_eq!(built, 2);
+        ed.script_host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        ed.pump_runtime_textures();
+        assert_eq!(ed.mesh_registry.keys().filter(|k| k.starts_with("mesh:")).count(), 1, "mesh.free kept the mesh");
+        ed.release_runtime_textures();
+        assert!(!ed.mesh_registry.contains_key(&a), "Stop kept a built mesh");
+        assert_eq!(ed.ensure_texture(&tex), None, "Stop kept a pixel texture");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

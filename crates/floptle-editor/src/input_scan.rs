@@ -170,6 +170,34 @@ fn scan_dir(dir: &Path) -> Vec<Usage> {
 
 /// Drop a trailing `--` comment, respecting quotes so a `--` inside a string
 /// literal doesn't truncate the line.
+/// Every quoted string in the project's Lua, comments left out: the names a
+/// script can `find`, so a panel authored hidden and shown from code can be
+/// told apart from one nothing will ever show. The same plain text scan as the
+/// action list, with the same blind spot for a name built at runtime.
+pub(crate) fn string_literals(dir: &Path) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for path in lua_files(dir) {
+        let Ok(text) = floptle_vfs::read_to_string(&path) else { continue };
+        for line in text.lines() {
+            let code = strip_comment(line);
+            let mut rest = code;
+            while let Some(open) = rest.find(['"', '\'']) {
+                let q = rest.as_bytes()[open];
+                let body = &rest[open + 1..];
+                let b = body.as_bytes();
+                let mut i = 0;
+                while i < b.len() && b[i] != q {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                let end = i.min(body.len());
+                out.insert(body[..end].to_string());
+                rest = body.get(end + 1..).unwrap_or("");
+            }
+        }
+    }
+    out
+}
+
 fn strip_comment(line: &str) -> &str {
     let b = line.as_bytes();
     let (mut quote, mut i) = (None::<u8>, 0usize);

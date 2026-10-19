@@ -247,10 +247,12 @@ pub struct AnimInstance {
     /// Frames since its last pose, for the reduced rate.
     stride: u32,
     /// This frame's script changes to the pose (`anim:setBoneRot`, `reach`,
-    /// `lookAt`), applied after the animator and dropped with the frame.
+    /// `lookAt`), applied after the animator and dropped with the frame —
+    /// or, with the pose held, kept until a frame writes new ones.
     pub pose_ops: Vec<floptle_script::AnimPoseOp>,
-    /// Scratch: the rig path's final local pose, script changes included —
-    /// what a script's bone read solves its own queued writes on top of.
+    /// `pose_ops` were written this frame, rather than held from an earlier one.
+    pose_fresh: bool,
+    /// Scratch: the rig path's final local pose, script changes included.
     local: Vec<floptle_anim::TransformTRS>,
 }
 
@@ -317,11 +319,14 @@ pub struct AnimOverride {
     /// `anim:setEnabled(false)`: no advance and no pose until switched back on.
     pub enabled: bool,
     pub culling: Option<floptle_scene::AnimCullingDoc>,
+    /// `anim:holdPose(true)`: a frame that writes nothing to the pose keeps
+    /// the writes of the last one that did.
+    pub hold_pose: bool,
 }
 
 impl Default for AnimOverride {
     fn default() -> Self {
-        Self { enabled: true, culling: None }
+        Self { enabled: true, culling: None, hold_pose: false }
     }
 }
 
@@ -408,10 +413,15 @@ impl AnimSystem {
                 }
             };
             out.set(e.index(), &names, pose);
+            // The animator's pose, before any script write, and the writes of
+            // this frame on top of it: a bone read folds the writes queued
+            // since into the same pose the frame will draw from. Last frame's
+            // drawn pose would count a bone written every frame twice.
             if let Some(inst) = self.instances.get(e)
-                && inst.local.len() == nodes.len()
+                && inst.ctl.pose().len() == nodes.len()
             {
-                out.set_rig(e.index(), &skel, rig.offset, &inst.local);
+                let applied = if inst.pose_fresh { inst.pose_ops.as_slice() } else { &[] };
+                out.set_rig(e.index(), &skel, rig.offset, inst.ctl.pose(), applied);
             }
         }
         out.end();
@@ -1203,6 +1213,7 @@ pub fn bind_entity(
                 held: 0.0,
                 stride: 0,
                 pose_ops: Vec::new(),
+                pose_fresh: false,
                 local: Vec::new(),
             })
         }
@@ -1238,6 +1249,7 @@ pub fn bind_entity(
                 held: 0.0,
                 stride: 0,
                 pose_ops: Vec::new(),
+                pose_fresh: false,
                 local: Vec::new(),
             })
         }
@@ -1277,6 +1289,7 @@ pub fn bind_entity(
                 held: 0.0,
                 stride: 0,
                 pose_ops: Vec::new(),
+                pose_fresh: false,
                 local: Vec::new(),
             })
         }
@@ -1960,9 +1973,12 @@ pub fn apply_commands(
     world: &World,
     cmds: Vec<(u32, floptle_script::AnimCmd)>,
 ) {
-    // A pose change lasts the frame it was asked for.
-    for inst in system.instances.values_mut() {
-        inst.pose_ops.clear();
+    // A pose change lasts the frame it was asked for, unless it is held.
+    for (e, inst) in system.instances.iter_mut() {
+        if !system.overrides.get(e).is_some_and(|o| o.hold_pose) {
+            inst.pose_ops.clear();
+        }
+        inst.pose_fresh = false;
     }
     apply_commands_keeping_pose_ops(system, world, cmds);
 }
@@ -2039,6 +2055,19 @@ fn apply_commands_keeping_pose_ops(
                 }
                 continue;
             }
+            AnimCmd::HoldPose(on) => {
+                if let Some(e) = world.entity_at(eid) {
+                    system.overrides.entry(e).or_default().hold_pose = on;
+                    // Let go this frame: a held pose nothing rewrote goes now.
+                    if let Some(inst) = system.instances.get_mut(&e)
+                        && !on
+                        && !inst.pose_fresh
+                    {
+                        inst.pose_ops.clear();
+                    }
+                }
+                continue;
+            }
             _ => {}
         }
         let Some(&e) = by_index.get(&eid) else {
@@ -2105,8 +2134,15 @@ fn apply_commands_keeping_pose_ops(
                 )),
             },
             AnimCmd::SetParam { name, value } => inst.ctl.set_param(&name, value),
-            AnimCmd::Pose(op) => inst.pose_ops.push(op),
-            AnimCmd::SetEnabled(_) | AnimCmd::SetCulling(_) => {}
+            AnimCmd::Pose(op) => {
+                // The first write of a frame replaces a held pose.
+                if !inst.pose_fresh {
+                    inst.pose_ops.clear();
+                    inst.pose_fresh = true;
+                }
+                inst.pose_ops.push(op)
+            }
+            AnimCmd::SetEnabled(_) | AnimCmd::SetCulling(_) | AnimCmd::HoldPose(_) => {}
         }
     }
     for (key, msg) in warn {
@@ -3703,5 +3739,242 @@ mod tests {
         assert!(!has_ext("", ANIM_CLIP_EXT));
         // A multi-byte tail must not split a character.
         assert!(!has_ext("\u{e9}\u{e9}", ".ron"));
+    }
+
+    /// A straight chain of `n` bones a metre apart up +Y, named `B0`…, with no
+    /// clips: the animator's pose is the rest pose.
+    fn chain_rig(n: usize) -> crate::MeshAsset {
+        use floptle_anim::{SkelNode, Skeleton, TransformTRS};
+        let nodes = (0..n)
+            .map(|i| SkelNode {
+                name: format!("B{i}"),
+                parent: i.checked_sub(1),
+                rest: TransformTRS { t: if i == 0 { Vec3::ZERO } else { Vec3::Y }, r: Quat::IDENTITY, s: Vec3::ONE },
+                pivot: Vec3::ZERO,
+            })
+            .collect();
+        let rig = RigAsset {
+            skeleton: Skeleton::new(nodes),
+            clips: Vec::new(),
+            part_nodes: Vec::new(),
+            rest_world: vec![Mat4::IDENTITY; n],
+            offset: Mat4::IDENTITY,
+            skins: Vec::new(),
+            skin_bases: Vec::new(),
+            node_is_object: vec![false; n],
+        };
+        crate::MeshAsset { parts: Vec::new(), part_meta: Vec::new(), tex_filter: None, size: 2.0, rig: Some(rig) }
+    }
+
+    fn scripted(world: &mut World, kind: &str) -> Entity {
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            floptle_core::Scripts(vec![floptle_core::ScriptInst {
+                kind: kind.into(),
+                enabled: true,
+                params: Vec::new(),
+                refs: Vec::new(),
+                strs: Vec::new(),
+                pinned_bools: None,
+            }]),
+        );
+        e
+    }
+
+    fn rigged(world: &mut World, name: &str, at: f64) -> Entity {
+        let e = world.spawn();
+        world.insert(e, Name(name.to_string()));
+        world.insert(e, Transform::from_translation(floptle_core::math::DVec3::new(at, 0.0, 0.0)));
+        world.insert(e, Matter::Mesh { asset_path: "models/chain.glb".to_string() });
+        e
+    }
+
+    /// One frame the way play runs it: the frame pass, the animation step
+    /// with the commands it queued, and the poses handed back to the scripts.
+    fn frame(host: &mut floptle_script::ScriptHost, system: &mut AnimSystem, world: &mut World, reg: &HashMap<String, crate::MeshAsset>, dir: &std::path::Path, i: u32) {
+        host.run(world, dir, 1.0 / 60.0, i as f32 / 60.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        advance_animators(system, world, reg, 1.0 / 60.0, host.take_anim_commands(), CullBy::Nothing);
+        system.publish_bones(world, reg, &mut host.bone_poses());
+    }
+
+    /// **A bone written every frame reads back once, not twice.** `update`
+    /// shifts an unkeyed bone by a fixed offset each frame and reads it
+    /// straight back. The read used to stack the queued write on last frame's
+    /// drawn pose, which already held last frame's write: rest + 2 × offset.
+    #[test]
+    fn a_bone_written_every_frame_reads_back_its_write_once() {
+        let mut reg: HashMap<String, crate::MeshAsset> = HashMap::new();
+        reg.insert("models/chain.glb".to_string(), chain_rig(3));
+        let mut world = World::new();
+        rigged(&mut world, "Chain", 10.0);
+        let dir = std::env::temp_dir().join(format!("floptle_bone_once_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("shift.lua"),
+            "function update(node, dt)\n  local a = find('Chain'):animator()\n  \
+             a:addBonePos('B1', vec3(0, -0.1, 0))\n  a:addBonePos('B2', vec3(0.25, 0, 0))\n  \
+             local p = a:boneWorld('B2')\n  if p then node.x, node.y = p.x, p.y end\nend\n\
+             function lateUpdate(node, dt)\n  local a = find('Chain'):animator()\n  \
+             a:addBonePos('B2', vec3(0, 0, 0.5))\n  local p = a:boneWorld('B2')\n  \
+             if p then node.x, node.y, node.z = p.x, p.y, p.z end\nend\n",
+        )
+        .unwrap();
+        let reader = scripted(&mut world, "shift");
+        let mut host = floptle_script::ScriptHost::new();
+        let mut system = AnimSystem::default();
+        // Frame 0 has no pose to read yet: the rig is first posed by its step.
+        frame(&mut host, &mut system, &mut world, &reg, &dir, 0);
+        for i in 1..5 {
+            frame(&mut host, &mut system, &mut world, &reg, &dir, i);
+            // Rest: B2 at y = 2 under the node at x = 10.
+            let got = world.get::<Transform>(reader).unwrap().translation;
+            assert!(
+                (got.y - 1.9).abs() < 1e-5 && (got.x - 10.25).abs() < 1e-5,
+                "frame {i}: B2 read at ({}, {}), not rest + one offset (10.25, 1.9)",
+                got.x,
+                got.y
+            );
+            // lateUpdate adds its own write on top of the frame's: the read
+            // there holds `update`'s writes once and its own once.
+            host.run_late(&mut world, 1.0 / 60.0, i as f32 / 60.0);
+            assert!(host.errors().is_empty(), "{:?}", host.errors());
+            apply_late_commands(&mut system, &mut world, &reg, host.take_anim_commands());
+            system.publish_bones(&world, &reg, &mut host.bone_poses());
+            let got = world.get::<Transform>(reader).unwrap().translation;
+            let want = floptle_core::math::DVec3::new(10.25, 1.9, 0.5);
+            assert!(got.distance(want) < 1e-5, "frame {i}: the late read is {got}, not {want}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A hundred bones in one call pose the rig the same as two hundred
+    /// calls, for a fraction of the cost.** Two copies of one rig, one posed
+    /// by `setBones` with numbers from `boneIndex`, one by `setBonePos` and
+    /// `setBoneRot` per bone by name, end on the same matrices. The cost is
+    /// compared as a ratio, which a slow machine does not change; the
+    /// absolute figure is printed.
+    #[test]
+    fn set_bones_poses_a_hundred_bones_like_the_calls_it_replaces() {
+        const N: usize = 100;
+        let mut reg: HashMap<String, crate::MeshAsset> = HashMap::new();
+        reg.insert("models/chain.glb".to_string(), chain_rig(N));
+        let mut world = World::new();
+        let batch = rigged(&mut world, "Batch", 0.0);
+        let single = rigged(&mut world, "Single", 5.0);
+        let dir = std::env::temp_dir().join(format!("floptle_set_bones_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("pose.lua"),
+            format!(
+                "local N = {N}\n\
+                 local ids, pos, rot\n\
+                 local timing\n\
+                 local function value(i) return 0.01 * i, 1 + 0.002 * i, -0.003 * i, 0.02 * i, -0.01 * i, 0.005 * i end\n\
+                 function update(node, dt)\n\
+                 \x20 local b, s = find('Batch'):animator(), find('Single'):animator()\n\
+                 \x20 if not ids then\n\
+                 \x20   if not b:boneIndex('B0') then return end\n\
+                 \x20   ids, pos, rot = {{}}, {{}}, {{}}\n\
+                 \x20   for i = 0, N - 1 do\n\
+                 \x20     ids[#ids + 1] = b:boneIndex('B' .. i)\n\
+                 \x20     local x, y, z, yw, p, r = value(i)\n\
+                 \x20     pos[#pos + 1], pos[#pos + 2], pos[#pos + 3] = x, y, z\n\
+                 \x20     rot[#rot + 1], rot[#rot + 2], rot[#rot + 3] = yw, p, r\n\
+                 \x20   end\n\
+                 \x20 end\n\
+                 \x20 b:setBones(ids, pos, rot)\n\
+                 \x20 for i = 0, N - 1 do\n\
+                 \x20   local x, y, z, yw, p, r = value(i)\n\
+                 \x20   s:setBonePos('B' .. i, vec3(x, y, z))\n\
+                 \x20   s:setBoneRot('B' .. i, yw, p, r)\n\
+                 \x20 end\n\
+                 \x20 if not timing then\n\
+                 \x20   -- Best of five short runs each, interleaved: a busy machine\n\
+                 \x20   -- slows a run, never speeds one up.\n\
+                 \x20   local reps, best_b, best_c = 40, math.huge, math.huge\n\
+                 \x20   for _ = 1, 5 do\n\
+                 \x20     local t0 = os.clock()\n\
+                 \x20     for _ = 1, reps do b:setBones(ids, pos, rot) end\n\
+                 \x20     local t1 = os.clock()\n\
+                 \x20     for _ = 1, reps do\n\
+                 \x20       for i = 0, N - 1 do\n\
+                 \x20         s:setBonePos('B' .. i, vec3(0.01 * i, 1, 0))\n\
+                 \x20         s:setBoneRot('B' .. i, 0.02 * i, 0, 0)\n\
+                 \x20       end\n\
+                 \x20     end\n\
+                 \x20     local t2 = os.clock()\n\
+                 \x20     best_b, best_c = math.min(best_b, t1 - t0), math.min(best_c, t2 - t1)\n\
+                 \x20   end\n\
+                 \x20   timing = {{ batch = best_b / reps * 1000, calls = best_c / reps * 1000 }}\n\
+                 \x20 end\n\
+                 \x20 node.x, node.y = timing.batch, timing.calls\n\
+                 end\n"
+            ),
+        )
+        .unwrap();
+        let driver = scripted(&mut world, "pose");
+        let mut host = floptle_script::ScriptHost::new();
+        let mut system = AnimSystem::default();
+        // Frame 0 poses the rigs at rest, so frame 1 can number the bones;
+        // frame 2 times the calls (their writes are dropped by frame 3).
+        for i in 0..4 {
+            frame(&mut host, &mut system, &mut world, &reg, &dir, i);
+        }
+        let (a, b) = (system.poses.get(&batch).expect("posed"), system.poses.get(&single).expect("posed"));
+        let moved = a.iter().zip(chain_rig(N).rig.unwrap().skeleton.nodes.iter()).any(|(m, _)| m.w_axis.x.abs() > 1e-3);
+        assert!(moved, "setBones moved nothing");
+        for (i, (m, n)) in a.iter().zip(b).enumerate() {
+            let d = (*m - *n).to_cols_array().iter().fold(0f32, |acc, v| acc.max(v.abs()));
+            assert!(d < 1e-4, "bone {i}: setBones and the per-bone calls disagree by {d}");
+        }
+        let t = world.get::<Transform>(driver).unwrap().translation;
+        let (batch_ms, calls_ms) = (t.x, t.y);
+        assert!(calls_ms > 0.0, "the timing never ran");
+        println!("100 bones: setBones {batch_ms:.4} ms, 200 calls {calls_ms:.4} ms");
+        assert!(batch_ms * 4.0 < calls_ms, "setBones {batch_ms} ms is not a fraction of the {calls_ms} ms the calls cost");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A held pose stays without being rewritten.** One frame writes a
+    /// bone and holds; the frames after write nothing and the bone stays put.
+    /// A later write replaces the held pose, and releasing the hold lets the
+    /// rig fall back to the animator's pose that same frame.
+    #[test]
+    fn a_held_pose_stays_until_it_is_changed_or_released() {
+        let mut reg: HashMap<String, crate::MeshAsset> = HashMap::new();
+        reg.insert("models/chain.glb".to_string(), chain_rig(3));
+        let mut world = World::new();
+        let chain = rigged(&mut world, "Chain", 0.0);
+        let dir = std::env::temp_dir().join(format!("floptle_hold_pose_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("hold.lua"),
+            "local f = 0\nfunction update(node, dt)\n  f = f + 1\n  local a = find('Chain'):animator()\n  \
+             if f == 2 then a:holdPose(true); a:setBonePos('B1', vec3(0.5, 1, 0)) end\n  \
+             if f == 5 then a:setBonePos('B2', vec3(0, 1, 0.5)) end\n  \
+             if f == 7 then a:holdPose(false) end\nend\n",
+        )
+        .unwrap();
+        scripted(&mut world, "hold");
+        let mut host = floptle_script::ScriptHost::new();
+        let mut system = AnimSystem::default();
+        let at = |system: &AnimSystem, i: usize| system.poses.get(&chain).expect("posed")[i].w_axis.truncate();
+        for f in 1..=8u32 {
+            frame(&mut host, &mut system, &mut world, &reg, &dir, f);
+            let (b1, b2) = (at(&system, 1), at(&system, 2));
+            match f {
+                1 => assert!(b1.distance(Vec3::Y) < 1e-5, "frame {f}: rest, B1 at {b1}"),
+                2..=4 => assert!(b1.distance(Vec3::new(0.5, 1.0, 0.0)) < 1e-5, "frame {f}: the held write, B1 at {b1}"),
+                5 | 6 => {
+                    assert!(b1.distance(Vec3::Y) < 1e-5, "frame {f}: the new write replaced the held one, B1 at {b1}");
+                    assert!(b2.distance(Vec3::new(0.0, 2.0, 0.5)) < 1e-5, "frame {f}: B2 at {b2}");
+                }
+                _ => assert!(b2.distance(Vec3::new(0.0, 2.0, 0.0)) < 1e-5, "frame {f}: released, B2 at {b2}"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

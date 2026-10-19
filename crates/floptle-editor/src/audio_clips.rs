@@ -200,7 +200,7 @@ impl ClipCache {
 
 /// A clip reference to a file: the project-relative path as written, else
 /// with each audio extension appended (so Lua can say `"audio/hit"`).
-fn resolve_clip_path(root: &Path, key: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_clip_path(root: &Path, key: &str) -> Option<PathBuf> {
     // resolve_asset_path handles every ref spelling (project-relative,
     // legacy `assets/…`-prefixed, CWD-relative, absolute) — probe the key
     // as written, then with each audio extension appended.

@@ -2070,6 +2070,10 @@ struct Editor {
     game_packages_only: bool,
     /// `app.setFullscreen` under the editor has explained itself once.
     fullscreen_explained: bool,
+    /// The monitors and their modes `app.monitors` / `app.displayModes`
+    /// answer, with how many more frames they are kept before being asked
+    /// again: listing video modes is a round trip to the display server.
+    display_cache: Option<crate::app_settings::DisplayCache>,
     /// How hard a render-scale upscale sharpens (`app.setRenderSharpness`);
     /// `None` until a game sets it, which reads as the default.
     render_sharpness: Option<f32>,

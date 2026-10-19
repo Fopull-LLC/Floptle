@@ -493,6 +493,11 @@ impl crate::Editor {
         if let Some(cached) = self.scatter_protos.get(asset) {
             return (!cached.is_empty()).then(|| cached.clone());
         }
+        // A mesh a script built this pass is uploaded after it: not there yet
+        // is not "nothing to draw", and is neither cached nor said.
+        if floptle_script::mesh_api::is_built_mesh(asset) && !self.mesh_registry.contains_key(asset) {
+            return None;
+        }
         let parts = self.bake_scatter_prototype(asset);
         if parts.is_empty() {
             // **"Nothing to draw" has to be a fact about the asset.**

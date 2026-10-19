@@ -182,6 +182,69 @@ fn parent_rotation_inverse(s: &crate::SceneMirror, e: u32) -> glam::DQuat {
     parent_world_of(s, e).rotation.as_dquat().inverse()
 }
 
+/// A node's local rotation as the script currently sees it: the own-node
+/// handle's live raw angles, else the mirror. See [`live_local_of`].
+fn local_rotation_of_handle(s: &crate::SceneMirror, this: &Table, e: u32) -> Quat {
+    match (this.raw_get::<f64>("yaw"), this.raw_get::<f64>("pitch"), this.raw_get::<f64>("roll")) {
+        (Ok(y), Ok(p), Ok(r)) => Quat::from_euler(EulerRot::YXZ, y as f32, p as f32, r as f32),
+        _ => s.transforms.get(&e).map_or(Quat::IDENTITY, |t| t.rotation),
+    }
+}
+
+/// A whole rotation written to a node in one step.
+enum RotationWrite {
+    /// Yaw, pitch, roll, composed as given whatever their range.
+    Angles(f64, f64, f64),
+    Quat(Quat),
+}
+
+/// Write a node's whole local rotation at once: the own-node handle's raw
+/// yaw/pitch/roll, composed after the hook (a quaternion goes there as its
+/// angles, so reads in the same hook agree), or the mirror for any other
+/// handle.
+fn write_rotation(this: &Table, s: &mut crate::SceneMirror, e: u32, w: RotationWrite) -> mlua::Result<()> {
+    if this.raw_get::<f64>("yaw").is_ok() {
+        let (y, p, r) = match w {
+            RotationWrite::Angles(y, p, r) => (y, p, r),
+            RotationWrite::Quat(q) => {
+                let (y, p, r) = q.to_euler(EulerRot::YXZ);
+                (y as f64, p as f64, r as f64)
+            }
+        };
+        this.raw_set("yaw", y)?;
+        this.raw_set("pitch", p)?;
+        this.raw_set("roll", r)?;
+        return Ok(());
+    }
+    if let Some(tr) = s.transforms.get_mut(&e) {
+        tr.rotation = match w {
+            RotationWrite::Angles(y, p, r) => Quat::from_euler(EulerRot::YXZ, y as f32, p as f32, r as f32),
+            RotationWrite::Quat(q) => q,
+        };
+        s.dirty.insert(e);
+    }
+    Ok(())
+}
+
+/// The rotation whose +Y is `up` (parent space, any length). With a
+/// `forward`, −Z is that direction made perpendicular to `up`; without one,
+/// or when it lies along `up`, `current` is tipped the shortest way so the
+/// heading it had is kept.
+pub(crate) fn up_rotation(up: glam::DVec3, forward: Option<glam::DVec3>, current: glam::DQuat) -> glam::DQuat {
+    use glam::{DMat3, DQuat, DVec3};
+    let y = up.normalize();
+    if let Some(f) = forward {
+        let back = -(f - y * f.dot(y));
+        if back.length_squared() > 1e-18 {
+            let z = back.normalize();
+            let x = y.cross(z);
+            return DQuat::from_mat3(&DMat3::from_cols(x, y, z)).normalize();
+        }
+    }
+    let now = (current * DVec3::Y).normalize();
+    (DQuat::from_rotation_arc(now, y) * current).normalize()
+}
+
 /// The world position of whatever a Lua value refers to: a node handle (through
 /// its parent chain, live local included) or any plain `{x=,y=,z=}` / vec3,
 /// which is already a world point.
@@ -3862,6 +3925,7 @@ let node_mt = lua.create_table()?;
     let cast_shadow_r = shared.cast_shadow_changes.clone();
     let persistent_changes = shared.persistent_changes.clone();
     let tag_changes = shared.tag_changes.clone();
+    let name_changes = shared.name_changes.clone();
     let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
         let e: u32 = this.raw_get("__id")?;
         // `node.pos` — the position as a vec3 value. The script's OWN node
@@ -3971,7 +4035,8 @@ let node_mt = lua.create_table()?;
         match key.as_str() {
             "id" => return Ok(Value::Integer(e as mlua::Integer)),
             "name" => {
-                let n = scene.borrow().names.get(&e).cloned();
+                // Read-your-writes: a rename lands in the scene after the pass.
+                let n = name_changes.borrow().get(&e).cloned().or_else(|| scene.borrow().names.get(&e).cloned());
                 return Ok(match n {
                     Some(n) => Value::String(lua.create_string(&n)?),
                     None => Value::Nil,
@@ -4291,6 +4356,7 @@ let node_mt = lua.create_table()?;
     let persistent_changes = shared.persistent_changes.clone();
     let layer_changes = shared.layer_changes.clone();
     let tag_changes = shared.tag_changes.clone();
+    let name_changes = shared.name_changes.clone();
     let layer_table = shared.layer_table.clone();
     let ui_text_changes = shared.ui_text_changes.clone();
     let ui_style_changes = shared.ui_style_changes.clone();
@@ -4621,6 +4687,16 @@ let node_mt = lua.create_table()?;
                 }
                 drop(lt);
                 layer_changes.borrow_mut().insert(e, name);
+                return Ok(());
+            }
+            // `node.name = "Vessel 2"` — rename. Raises on a non-string: this
+            // assignment used to be dropped without a word, and a fleet restore
+            // set names for months that never landed.
+            "name" => {
+                let Value::String(s) = &val else {
+                    return Err(mlua::Error::RuntimeError("node.name takes a string".into()));
+                };
+                name_changes.borrow_mut().insert(e, s.to_string_lossy().to_string());
                 return Ok(());
             }
             // `node.tags = {"enemy", "boss"}` — replace the whole list
@@ -6936,14 +7012,32 @@ fn install_anim_pose_methods(
         let q = glam::Quat::from_euler(EulerRot::YXZ, y as f32, p as f32, r as f32);
         [q.x, q.y, q.z, q.w]
     };
+    // A bone is its name, or its number from `anim:boneIndex` — the number
+    // skips the name copy and the lookup, which is most of a write's cost.
+    let bone_op = |bone: Value, rot: Option<[f32; 4]>, pos: Option<[f32; 3]>, add: bool, weight: f32, call: &str| -> mlua::Result<AnimPoseOp> {
+        Ok(match bone {
+            Value::String(n) => AnimPoseOp::Bone { bone: n.to_str()?.to_string(), rot, pos, add, weight },
+            Value::Integer(i) if i >= 1 => {
+                AnimPoseOp::Bones { bones: vec![(i - 1) as u32], rot: rot.map(|r| vec![r]), pos: pos.map(|p| vec![p]), add, weight }
+            }
+            Value::Number(n) if n >= 1.0 && n.fract() == 0.0 => AnimPoseOp::Bones {
+                bones: vec![(n as u32) - 1],
+                rot: rot.map(|r| vec![r]),
+                pos: pos.map(|p| vec![p]),
+                add,
+                weight,
+            },
+            _ => return Err(mlua::Error::runtime(format!("anim:{call}: the bone is a name or a number from anim:boneIndex"))),
+        })
+    };
     for (name, add) in [("setBoneRot", false), ("addBoneRot", true)] {
         let cmds = shared.anim_commands.clone();
         anim_methods.set(
             name,
-            lua.create_function(move |_, (this, bone, y, p, r, w): (Table, String, f64, f64, f64, Option<f64>)| {
+            lua.create_function(move |_, (this, bone, y, p, r, w): (Table, Value, f64, f64, f64, Option<f64>)| {
                 let e: u32 = this.raw_get("__id")?;
                 let weight = anim_weight(w, name)?;
-                queue(&cmds, e, AnimCmd::Pose(AnimPoseOp::Bone { bone, rot: Some(euler(y, p, r)), pos: None, add, weight }));
+                queue(&cmds, e, AnimCmd::Pose(bone_op(bone, Some(euler(y, p, r)), None, add, weight, name)?));
                 Ok(())
             })?,
         )?;
@@ -6952,13 +7046,99 @@ fn install_anim_pose_methods(
         let cmds = shared.anim_commands.clone();
         anim_methods.set(
             name,
-            lua.create_function(move |_, (this, bone, v, w): (Table, String, Value, Option<f64>)| {
+            lua.create_function(move |_, (this, bone, v, w): (Table, Value, Value, Option<f64>)| {
                 let e: u32 = this.raw_get("__id")?;
                 let p = crate::math_api::vec3_of(&v)
                     .ok_or_else(|| mlua::Error::runtime(format!("anim:{name}: the position is a vec3")))?;
                 let weight = anim_weight(w, name)?;
                 let pos = Some([p.x as f32, p.y as f32, p.z as f32]);
-                queue(&cmds, e, AnimCmd::Pose(AnimPoseOp::Bone { bone, rot: None, pos, add, weight }));
+                queue(&cmds, e, AnimCmd::Pose(bone_op(bone, None, pos, add, weight, name)?));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // anim:boneIndex(name) — the bone's number on this model, the same as
+        // its place in node:bones(). Nil until the model has posed once.
+        let poses = shared.bone_poses.clone();
+        anim_methods.set(
+            "boneIndex",
+            lua.create_function(move |_, (this, name): (Table, String)| {
+                let e: u32 = this.raw_get("__id")?;
+                let Some(names) = poses.borrow().names(e) else { return Ok(None) };
+                match names.iter().position(|n| *n == name) {
+                    Some(i) => Ok(Some(i as i64 + 1)),
+                    None => Err(mlua::Error::runtime(format!(
+                        "anim:boneIndex: no bone \"{name}\" on this model{}",
+                        crate::opts::near_miss_hint(&name, &names.iter().map(String::as_str).collect::<Vec<_>>())
+                    ))),
+                }
+            })?,
+        )?;
+    }
+    {
+        // anim:setBones(bones, positions, rotations [, weight]) — many bones
+        // in one call: `bones` lists numbers from boneIndex, `positions` is
+        // flat x,y,z per bone and `rotations` flat yaw,pitch,roll per bone,
+        // either nil to leave that channel alone.
+        let cmds = shared.anim_commands.clone();
+        anim_methods.set(
+            "setBones",
+            lua.create_function(
+                move |_, (this, bones, pos, rot, w): (Table, Table, Option<Table>, Option<Table>, Option<f64>)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    let weight = anim_weight(w, "setBones")?;
+                    let n = bones.raw_len();
+                    let mut ids = Vec::with_capacity(n);
+                    for i in 1..=n {
+                        let b: f64 = bones.raw_get(i)?;
+                        if !(b >= 1.0 && b.fract() == 0.0) {
+                            return Err(mlua::Error::runtime(format!(
+                                "anim:setBones: bones[{i}] is {b}, not a number from anim:boneIndex"
+                            )));
+                        }
+                        ids.push(b as u32 - 1);
+                    }
+                    let flat = |t: &Table, per: usize, what: &str| -> mlua::Result<Vec<f64>> {
+                        if t.raw_len() != n * per {
+                            return Err(mlua::Error::runtime(format!(
+                                "anim:setBones: {what} holds {} numbers; {n} bones take {}",
+                                t.raw_len(),
+                                n * per
+                            )));
+                        }
+                        (1..=n * per).map(|i| t.raw_get::<f64>(i)).collect()
+                    };
+                    let pos = match &pos {
+                        Some(t) => Some(
+                            flat(t, 3, "positions")?
+                                .as_chunks::<3>()
+                                .0
+                                .iter()
+                                .map(|c| [c[0] as f32, c[1] as f32, c[2] as f32])
+                                .collect(),
+                        ),
+                        None => None,
+                    };
+                    let rot = match &rot {
+                        Some(t) => Some(flat(t, 3, "rotations")?.as_chunks::<3>().0.iter().map(|c| euler(c[0], c[1], c[2])).collect()),
+                        None => None,
+                    };
+                    queue(&cmds, e, AnimCmd::Pose(AnimPoseOp::Bones { bones: ids, rot, pos, add: false, weight }));
+                    Ok(())
+                },
+            )?,
+        )?;
+    }
+    {
+        // anim:holdPose(on) — keep the last pose a script wrote while a frame
+        // writes none, instead of falling back to the animator's pose.
+        let cmds = shared.anim_commands.clone();
+        anim_methods.set(
+            "holdPose",
+            lua.create_function(move |_, (this, on): (Table, bool)| {
+                let e: u32 = this.raw_get("__id")?;
+                queue(&cmds, e, AnimCmd::HoldPose(on));
                 Ok(())
             })?,
         )?;
@@ -7671,6 +7851,51 @@ fn node_motion_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
                 this.set("roll", roll)?;
             }
             Ok(())
+        })?,
+    )?;
+}
+{
+    // node:setAngles(yaw, pitch, roll) — all three at once, composed exactly
+    // as given. A node stores a rotation, not three numbers, so writing the
+    // fields one by one re-reads the other two in canonical form (pitch
+    // within ±90°) between writes, and a valid triple outside that range
+    // lands as a different rotation.
+    let scene = shared.scene.clone();
+    methods.set(
+        "setAngles",
+        lua.create_function(move |_, (this, yaw, pitch, roll): (Table, f64, f64, f64)| {
+            let e: u32 = this.raw_get("__id")?;
+            write_rotation(&this, &mut scene.borrow_mut(), e, RotationWrite::Angles(yaw, pitch, roll))
+        })?,
+    )?;
+}
+{
+    // node:setUp(up [, forward]) — turn the node so its +Y lies along a
+    // world direction: standing something on a surface normal anywhere on a
+    // planet, the lower half included, with no Euler angles in sight. With a
+    // `forward` its −Z faces that way as nearly as the up allows; without
+    // one it tips the shortest way from where it points now, so its heading
+    // is kept.
+    let scene = shared.scene.clone();
+    methods.set(
+        "setUp",
+        lua.create_function(move |_, (this, up, forward): (Table, Value, Option<Value>)| {
+            let e: u32 = this.raw_get("__id")?;
+            let vec = |v: &Value, what: &str| {
+                crate::math_api::vec3_of(v)
+                    .filter(|v| v.length_squared() > 1e-24 && v.is_finite())
+                    .ok_or_else(|| mlua::Error::RuntimeError(format!("node:setUp's {what} is a non-zero vec3")))
+            };
+            let up = vec(&up, "up")?;
+            let forward = match &forward {
+                Some(Value::Nil) | None => None,
+                Some(f) => Some(vec(f, "forward")?),
+            };
+            let mut s = scene.borrow_mut();
+            let to_parent = parent_rotation_inverse(&s, e);
+            let current = local_rotation_of_handle(&s, &this, e).as_dquat();
+            let q = up_rotation(to_parent * up, forward.map(|f| to_parent * f), current);
+            write_rotation(&this, &mut s, e, RotationWrite::Quat(q.as_quat()))
         })?,
     )?;
 }

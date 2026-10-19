@@ -1723,6 +1723,12 @@ fn install_ui(lua: &Lua, net: &crate::net_api::SharedNet) -> UiCells {
             );
         }
         let _ = lua.globals().set("ui", t);
+        // `ui.engineSettings`: the Controls and Accessibility pages, written in
+        // Lua over ui.make, input.* and access.* — nothing a game could not
+        // write itself, so it is written once here instead of in every game.
+        if let Err(e) = lua.load(include_str!("settings_ui.lua")).set_name("=ui.engineSettings").exec() {
+            floptle_say::say_err!("[lua] failed to install ui.engineSettings: {e}");
+        }
     }
 
     UiCells {
@@ -2710,6 +2716,7 @@ impl ScriptHost {
             persistent_changes: Rc::new(RefCell::new(HashMap::new())),
             layer_changes: Rc::new(RefCell::new(HashMap::new())),
             tag_changes: Rc::new(RefCell::new(HashMap::new())),
+            name_changes: Rc::new(RefCell::new(HashMap::new())),
             layer_table: layer_table.clone(),
             ui_text_changes: Rc::new(RefCell::new(HashMap::new())),
             ui_style_changes: Rc::new(RefCell::new(HashMap::new())),
@@ -2810,6 +2817,10 @@ impl ScriptHost {
             crate::texture_api::install(&lua, textures.clone(), http.clone(), logs.clone(), http_in_fixed.clone())
         {
             floptle_say::say_err!("[lua] failed to install the runtime texture API: {e}");
+        }
+        let meshes: Rc<RefCell<crate::mesh_api::MeshBook>> = Rc::default();
+        if let Err(e) = crate::mesh_api::install(&lua, meshes.clone()) {
+            floptle_say::say_err!("[lua] failed to install the runtime mesh API: {e}");
         }
         let cloud: crate::cloud_api::CloudState = Rc::default();
         let fetcher = crate::texture_api::Fetcher {
@@ -3090,6 +3101,7 @@ impl ScriptHost {
             persistent_changes: shared.persistent_changes.clone(),
             layer_changes: shared.layer_changes.clone(),
             tag_changes: shared.tag_changes.clone(),
+            name_changes: shared.name_changes.clone(),
             layer_table,
             ui_text_changes: shared.ui_text_changes.clone(),
             ui_style_changes: shared.ui_style_changes.clone(),
@@ -3186,6 +3198,7 @@ impl ScriptHost {
             account,
             preloads,
             textures,
+            meshes,
             captures,
             cloud,
             http_in_fixed,
@@ -4365,6 +4378,7 @@ impl ScriptHost {
         if !playing {
             self.preloads.borrow_mut().cancel_all();
             self.textures.borrow_mut().reset();
+            self.meshes.borrow_mut().reset();
             self.captures.borrow_mut().cancel_all();
         }
         // Stop drops every leaderboard callback still waiting, for the same
@@ -5666,6 +5680,17 @@ impl ScriptHost {
         self.textures.borrow_mut().take_releases()
     }
 
+    /// Meshes scripts built since the last call (`mesh.build`), for the driver
+    /// to upload and register under each request's `name`.
+    pub fn take_mesh_requests(&self) -> Vec<crate::MeshRequest> {
+        self.meshes.borrow_mut().take_requests()
+    }
+
+    /// Meshes `mesh.free` gave back since the last call.
+    pub fn take_mesh_releases(&self) -> Vec<String> {
+        self.meshes.borrow_mut().take_releases()
+    }
+
     /// The Floptle Cloud game this project is connected to — its slug and
     /// game key from `project.ron` — for `cloud.*`, or `None` when it is not
     /// connected. Set by the driver before Play.
@@ -5773,6 +5798,7 @@ impl ScriptHost {
         self.gizmos.borrow_mut().clear();
         self.sprite_draws.borrow_mut().clear();
         self.sprites_written = None;
+        self.bone_poses.borrow_mut().frame_pass_starts();
         for inst in self.instances.values_mut() {
             inst.seen = false;
         }
@@ -6342,6 +6368,13 @@ impl ScriptHost {
                     }
                 }
             }
+            // Renames. The mirror patches its name lists on the next sync, so
+            // `find` answers with the new name from the next pass on.
+            for (eid, name) in self.name_changes.borrow().iter() {
+                if let Some(&ent) = scene.ents.get(eid) {
+                    world.insert(ent, floptle_core::Name(name.clone()));
+                }
+            }
             // `node.text = ...`: write the UI element's label (creating the text
             // spec if the element doesn't have one yet).
             for (eid, txt) in self.ui_text_changes.borrow().iter() {
@@ -6559,6 +6592,7 @@ impl ScriptHost {
         self.persistent_changes.borrow_mut().clear();
         self.layer_changes.borrow_mut().clear();
         self.tag_changes.borrow_mut().clear();
+        self.name_changes.borrow_mut().clear();
         self.ui_text_changes.borrow_mut().clear();
         self.ui_style_changes.borrow_mut().clear();
         self.component_changes.borrow_mut().clear();
@@ -6678,12 +6712,12 @@ impl ScriptHost {
         //
         // The world's change log says which entities were touched and in what
         // type. Transforms are never logged (every one is copied below), so an
-        // empty log is the transforms-only case. A touched entity whose name,
-        // tags, parent and scripts still match the mirror only needs its value
-        // fields re-read, which costs that entity and nothing else. Anything
-        // the log cannot express that way — a spawn, a despawn, a rename, a
-        // reparent, a log that overflowed — rebuilds the whole mirror, and says
-        // why.
+        // empty log is the transforms-only case. A touched entity only needs
+        // its own fields re-read, and a spawn, despawn, rename, retag or
+        // reparent patches the lists that name it, which costs that entity and
+        // nothing else. What the log cannot express that way — a log that
+        // overflowed, a whole column rewritten, an id handed to a new entity —
+        // rebuilds the whole mirror, and says why.
         //
         // Rebuilding on every value write used to be the only path: a single
         // `cam.fovY = …` a frame cost O(scene) three times over, and the cost
@@ -6803,9 +6837,15 @@ impl ScriptHost {
                     if lifetime.binary_search(&ch.index).is_ok() {
                         continue;
                     }
-                    let has = world.entity_with::<Transform>(ch.index).is_some();
-                    if has != s.ents.contains_key(&ch.index) {
-                        return Some(format!("a Transform was attached or removed ({})", Self::label(s, world, ch.index)));
+                    // Attached: the node joins the mirror the way a spawn does.
+                    // Removed: it leaves the way a despawn does.
+                    match (world.entity_with::<Transform>(ch.index), s.ents.contains_key(&ch.index)) {
+                        (Some(e), false) if !born.contains(&e) => born.push(e),
+                        (None, true) => {
+                            Self::forget_node(s, ch.index);
+                            gone = true;
+                        }
+                        _ => {}
                     }
                 }
                 floptle_core::ChangeKind::Component(_) => touched.push(ch.index),
@@ -6847,11 +6887,11 @@ impl ScriptHost {
             // Not in the mirror (no Transform) and not joining it: nothing to do.
             let Some(&mirrored) = s.ents.get(&id) else { continue };
             let Some(e) = world.entity_at(id).filter(|&e| e == mirrored) else {
-                return Some(format!("node {id} was replaced"));
+                return Some(format!("{} was replaced by a new node", Self::label(s, world, id)));
             };
-            if let Some(what) = Self::structure_moved(s, world, e) {
-                let at = changes.iter().rev().find(|c| c.index == id).map_or("?", |c| c.what);
-                return Some(format!("{what} changed on {} (a {at} write)", Self::label(s, world, id)));
+            if Self::structure_moved(s, world, e).is_some() {
+                Self::restructure(s, world, e);
+                s.structure_rev += 1;
             }
             Self::forget_values(s, id);
             Self::mirror_values(s, world, e, None);
@@ -6977,6 +7017,99 @@ impl ScriptHost {
             return Some("the attached scripts");
         }
         None
+    }
+
+    /// Bring a mirrored node's name, tags, parent and script kinds up to date,
+    /// and patch the scene-order lists that name it (`by_name`, `by_tag`,
+    /// `children`, `by_kind`) in place. Proportional to the node and the
+    /// lists it is in, never to the scene: a game retagging one plant as it
+    /// streams in used to rebuild the scripts' copy of every node for it.
+    fn restructure(s: &mut crate::SceneMirror, world: &World, e: Entity) {
+        let id = e.index();
+        // A node's place in scene order is its Transform row, which is the
+        // order every one of these lists is kept in.
+        let rank = |ents: &HashMap<u32, Entity>, x: u32| {
+            ents.get(&x).and_then(|&e| world.row_of::<Transform>(e)).unwrap_or(usize::MAX)
+        };
+        let insert = |list: &mut Vec<u32>, ents: &HashMap<u32, Entity>| {
+            let r = rank(ents, id);
+            let at = list.partition_point(|&x| rank(ents, x) < r);
+            list.insert(at, id);
+        };
+        let remove = |map: &mut HashMap<String, Vec<u32>>, key: &str| {
+            if let Some(v) = map.get_mut(key) {
+                v.retain(|&x| x != id);
+                if v.is_empty() {
+                    map.remove(key);
+                }
+            }
+        };
+
+        let name = world.get::<floptle_core::Name>(e).map(|n| n.0.clone());
+        if s.names.get(&id) != name.as_ref() {
+            if let Some(old) = s.names.remove(&id)
+                && s.by_name.get(&old) == Some(&id)
+            {
+                // First in scene order wins, so the next holder of the name
+                // takes it over.
+                s.by_name.remove(&old);
+                if let Some(&next) = s.order.iter().find(|&&x| s.names.get(&x) == Some(&old)) {
+                    s.by_name.insert(old, next);
+                }
+            }
+            if let Some(new) = name {
+                let r = rank(&s.ents, id);
+                match s.by_name.get(&new) {
+                    Some(&held) if rank(&s.ents, held) < r => {}
+                    _ => {
+                        s.by_name.insert(new.clone(), id);
+                    }
+                }
+                s.names.insert(id, new);
+            }
+        }
+
+        let tags = world.get::<floptle_core::Tags>(e).map(|t| t.0.clone());
+        if s.tags.get(&id) != tags.as_ref() {
+            for t in s.tags.remove(&id).unwrap_or_default() {
+                remove(&mut s.by_tag, &t);
+            }
+            if let Some(tags) = tags {
+                for t in &tags {
+                    insert(s.by_tag.entry(t.clone()).or_default(), &s.ents);
+                }
+                s.tags.insert(id, tags);
+            }
+        }
+
+        let parent = world.get::<floptle_core::Parent>(e).map(|p| p.0.index());
+        if s.parent.get(&id).copied() != parent {
+            if let Some(old) = s.parent.remove(&id)
+                && let Some(v) = s.children.get_mut(&old)
+            {
+                v.retain(|&x| x != id);
+                if v.is_empty() {
+                    s.children.remove(&old);
+                }
+            }
+            if let Some(p) = parent {
+                s.parent.insert(id, p);
+                insert(s.children.entry(p).or_default(), &s.ents);
+            }
+        }
+
+        let kinds: Option<Vec<String>> = world.get::<Scripts>(e).map(|sc| sc.0.iter().map(|i| i.kind.clone()).collect());
+        if s.scripts.get(&id) != kinds.as_ref() {
+            for k in s.scripts.remove(&id).unwrap_or_default() {
+                remove(&mut s.by_kind, &k);
+            }
+            if let Some(kinds) = kinds {
+                for k in &kinds {
+                    insert(s.by_kind.entry(k.clone()).or_default(), &s.ents);
+                }
+                s.scripts.insert(id, kinds);
+            }
+        }
     }
 
     /// Drop every value field [`Self::mirror_values`] writes for `id`, so it can

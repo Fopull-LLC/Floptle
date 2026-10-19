@@ -192,22 +192,34 @@ fn a_same_value_visible_write_every_frame_does_not_rebuild_the_mirror() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// **A structural change still rebuilds, and says what it was.** The refresh
-/// path must not swallow a rename: `find` has to see the new name.
+/// **A retag or a rename patches the mirror, and scripts see it.** The patch
+/// must not swallow the change: `findTagged` and `find` answer with it the
+/// next pass, with no rebuild.
 #[test]
-fn a_rebuild_names_the_node_and_the_change_that_caused_it() {
+fn a_retag_or_rename_patches_the_mirror_and_scripts_see_it() {
     let dir = std::env::temp_dir().join(format!("floptle_mirror_cause_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
-    write_script(&dir, "idle", "function update(node, dt) end\n");
-    let (mut world, _e, cam) = level_with_camera("idle", 3);
+    write_script(
+        &dir,
+        "seer",
+        "function update(node, dt)\n  node.x = #findTagged('main')\n  node.y = find('Lens') and 1 or 0\nend\n",
+    );
+    let (mut world, e, cam) = level_with_camera("seer", 3);
     let mut host = ScriptHost::new();
     host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
     crate::host::FULL_SYNCS.with(|c| c.set(0));
     world.insert(cam, floptle_core::Tags(vec!["main".into()]));
+    world.insert(cam, floptle_core::Name("Lens".into()));
     host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
-    assert_eq!(crate::host::FULL_SYNCS.with(|c| c.get()), 1, "a tag change must rebuild");
-    let cause = host.profile().borrow().mirror_cause().unwrap_or_default().to_string();
-    assert!(cause.contains("tags") && cause.contains("'Cam'"), "cause: {cause}");
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    assert_eq!(
+        crate::host::FULL_SYNCS.with(|c| c.get()),
+        0,
+        "a retag rebuilt the mirror ({:?})",
+        host.profile().borrow().mirror_cause()
+    );
+    let t = world.get::<Transform>(e).unwrap().translation;
+    assert_eq!((t.x, t.y), (1.0, 1.0), "the scripts did not see the new tag and name");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -684,11 +696,12 @@ fn a_conic_is_a_closed_ellipse_or_an_arc_cut_at_its_reach() {
     }
 }
 
-/// **A spawn or a despawn is not a rebuild, and says the same thing one
-/// would.** After each round of random spawns and despawns the scripts' copy
-/// of the scene is exactly what a fresh full rebuild makes of the same world
-/// (the scene order, first-name-wins, the per-kind and per-tag lists, children)
-/// and the incremental host never rebuilt.
+/// **A spawn, a despawn, a rename, a retag or a reparent is not a rebuild,
+/// and says the same thing one would.** After each round of random spawns,
+/// despawns and structural edits the scripts' copy of the scene is exactly
+/// what a fresh full rebuild makes of the same world (the scene order,
+/// first-name-wins, the per-kind and per-tag lists, children) and the
+/// incremental host never rebuilt.
 #[test]
 fn spawning_and_destroying_nodes_keeps_the_mirror_exact_without_a_rebuild() {
     fn node(world: &mut World, i: u32, parent: Option<Entity>) -> Entity {
@@ -767,18 +780,113 @@ fn spawning_and_destroying_nodes_keeps_the_mirror_exact_without_a_rebuild() {
             live.push(node(&mut world, next, p));
             next += 1;
         }
+        // The root is the first "Crate" in scene order. Renaming it away
+        // hands the name to the next one; renaming it back takes it back.
+        if round % 10 == 5 {
+            let name = if round % 20 == 5 { "Root" } else { "Crate" };
+            world.insert(root, floptle_core::Name(name.into()));
+        }
+        // Structural edits on nodes the mirror already holds. Parents only
+        // ever point at the root, so no edit can make a cycle.
+        for _ in 0..rnd(6) {
+            let e = live[1 + rnd(live.len() as u32 - 1) as usize];
+            match rnd(5) {
+                // Any node may be renamed, the root too: it holds the first
+                // "Crate", and a rename has to hand that name to the next one.
+                0 => {
+                    let e = live[rnd(live.len() as u32) as usize];
+                    world.insert(e, floptle_core::Name(if rnd(2) == 0 { "Crate".into() } else { format!("r{next}") }))
+                }
+                1 => world.insert(e, floptle_core::Tags(vec![format!("t{}", rnd(7)), "enemy".into()])),
+                2 => {
+                    world.remove::<floptle_core::Tags>(e);
+                }
+                3 => {
+                    if rnd(2) == 0 {
+                        world.insert(e, floptle_core::Parent(root));
+                    } else {
+                        world.remove::<floptle_core::Parent>(e);
+                    }
+                }
+                _ => world.insert(e, Scripts(vec![floptle_core::ScriptInst::new(if rnd(2) == 0 { "ai" } else { "door" })])),
+            }
+            next += 1;
+        }
         let before = crate::host::FULL_SYNCS.with(|c| c.get());
         host.sync_scene_for_test(&world);
         assert_eq!(
             crate::host::FULL_SYNCS.with(|c| c.get()),
             before,
-            "round {round}: a spawn/despawn rebuilt the mirror ({:?})",
+            "round {round}: a spawn, despawn or structural edit rebuilt the mirror ({:?})",
             host.profile().borrow().mirror_cause()
         );
         let fresh = ScriptHost::new();
         fresh.sync_scene_for_test(&world);
         assert_eq!(snapshot(&host), snapshot(&fresh), "round {round}: the incremental mirror drifted from a rebuild");
     }
+}
+
+/// **Streaming nodes in costs the nodes, not the scene.** Thirty plants a
+/// frame join a 2,000-node level under a "Flora" parent whose tags are
+/// rewritten each time, the way a game streams flora as the player walks.
+/// That used to rebuild the scripts' whole copy of the scene for every batch.
+/// Now nothing rebuilds, only the new and touched nodes are read, and a frame
+/// that streams costs little more than one that does not (every pass copies
+/// each node's transform either way). Best of twenty frames, so a busy
+/// machine slows a reading and never speeds one up.
+#[test]
+fn streaming_nodes_into_a_big_scene_patches_the_mirror() {
+    fn stream(base: usize, per_frame: u32) -> (u64, u32, f64) {
+        let mut world = World::default();
+        for i in 0..base {
+            let e = world.spawn();
+            world.insert(e, Transform::from_translation(glam::DVec3::new(i as f64, 0.0, 0.0)));
+            world.insert(e, floptle_core::Name(format!("Rock {i}")));
+            if i % 10 == 0 {
+                world.insert(e, floptle_core::Tags(vec!["rock".into()]));
+            }
+        }
+        let flora = world.spawn();
+        world.insert(flora, Transform::IDENTITY);
+        world.insert(flora, floptle_core::Name("Flora".into()));
+        let host = ScriptHost::new();
+        host.profile().borrow_mut().enable(true);
+        host.sync_scene_for_test(&world);
+        crate::host::FULL_SYNCS.with(|c| c.set(0));
+        let (mut best, mut refreshed) = (f64::MAX, 0);
+        for f in 0..20u32 {
+            for k in 0..per_frame {
+                let e = world.spawn();
+                world.insert(e, Transform::IDENTITY);
+                world.insert(e, floptle_core::Name(format!("Plant {f}.{k}")));
+                world.insert(e, floptle_core::Tags(vec!["plant".into()]));
+                world.insert(e, floptle_core::Parent(flora));
+            }
+            if per_frame > 0 {
+                world.insert(flora, floptle_core::Tags(vec![format!("wave{f}")]));
+            }
+            // Three passes a frame, as play runs them; only the first sees
+            // the batch.
+            let t = std::time::Instant::now();
+            for _ in 0..3 {
+                host.sync_scene_for_test(&world);
+            }
+            best = best.min(t.elapsed().as_secs_f64() * 1000.0);
+            host.profile().borrow_mut().end_frame();
+            refreshed = refreshed.max(host.profile().borrow().mirror_work().refreshed);
+        }
+        (crate::host::FULL_SYNCS.with(|c| c.get()), refreshed, best)
+    }
+    let (rebuilds, refreshed, streaming_ms) = stream(2000, 30);
+    let (_, _, still_ms) = stream(2000, 0);
+    floptle_say::say_err!("mirror per frame in 2,000 nodes: streaming 30 {streaming_ms:.4} ms, streaming none {still_ms:.4} ms");
+    assert_eq!(rebuilds, 0, "streaming nodes in rebuilt the mirror");
+    assert!(refreshed <= 31, "a frame read {refreshed} nodes for 30 new and one retagged");
+    assert!(
+        streaming_ms < still_ms * 2.0,
+        "streaming 30 nodes a frame cost {:.1}x a frame with none",
+        streaming_ms / still_ms
+    );
 }
 
 /// **A component a `createNode` callback adds is readable afterwards.** The

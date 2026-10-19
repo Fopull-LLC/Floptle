@@ -298,6 +298,8 @@ pub mod paths;
 pub mod data_api;
 mod cloud_api;
 pub mod decal_api;
+pub mod mesh_api;
+pub use mesh_api::MeshRequest;
 pub use texture_api::TextureRequest;
 pub use capture_api::{CaptureCamera, CaptureFormat, CaptureRequest, MAX_CAPTURE_SIDE, NO_RENDERER};
 pub use account_api::keep_account_signed_out;
@@ -794,6 +796,9 @@ pub struct ScriptHost {
     /// Tag edits: entity index → the node's full new tag list, applied as a
     /// `Tags` component after `run` (empty removes it).
     tag_changes: Rc<RefCell<HashMap<u32, Vec<String>>>>,
+    /// `node.name = ...`: entity index → the new name, applied as a `Name`
+    /// component after `run`.
+    name_changes: Rc<RefCell<HashMap<u32, String>>>,
     /// The project's resolved layer table, set by the driver at Play start
     /// ([`Self::set_layers`]) — validates layer writes, resolves raycast masks.
     layer_table: Rc<RefCell<floptle_core::Layers>>,
@@ -1007,6 +1012,8 @@ pub struct ScriptHost {
     http: Rc<RefCell<http_api::HttpState>>,
     /// `assets.textureFromUrl` / `textureFromBytes`: the book of runtime textures.
     textures: Rc<RefCell<texture_api::TextureLoads>>,
+    /// `mesh.build` / `mesh.free`: meshes waiting for the driver.
+    meshes: Rc<RefCell<mesh_api::MeshBook>>,
     /// `camera.capture` / `captureTexture`: pictures waiting for the driver.
     captures: Rc<RefCell<capture_api::Captures>>,
     /// `cloud.*`: the game this project is connected to, set by the driver.
@@ -1171,11 +1178,13 @@ struct NodeBones {
     model: Vec<glam::Mat4>,
     frame: u64,
     /// What a read needs to fold in the writes a script queued since the
-    /// pose was made: the rig, its placement offset, and the local pose
-    /// `model` was composed from. Empty for a pose handed over without it.
+    /// pose was made: the rig, its placement offset, the animator's local
+    /// pose before any script write, and the writes `model` already holds on
+    /// top of it. Empty for a pose handed over without it.
     skeleton: Option<Rc<floptle_anim::Skeleton>>,
     offset: glam::Mat4,
     local: Vec<floptle_anim::TransformTRS>,
+    applied: Vec<AnimPoseOp>,
 }
 
 impl BonePoses {
@@ -1194,6 +1203,7 @@ impl BonePoses {
             skeleton: None,
             offset: glam::Mat4::IDENTITY,
             local: Vec::new(),
+            applied: Vec::new(),
         });
         if !Rc::ptr_eq(&nb.names, names) {
             nb.names = names.clone();
@@ -1205,21 +1215,36 @@ impl BonePoses {
     }
 
     /// The rig behind node `eid`'s pose, set after [`BonePoses::set`]: the
-    /// skeleton, its placement offset, and the local pose the model-space
-    /// matrices were composed from. With it, a bone read answers with this
-    /// frame's queued writes already applied, the way the frame will draw it.
+    /// skeleton, its placement offset, the animator's local pose before any
+    /// script write (`local`), and the writes the model-space matrices hold on
+    /// top of it (`applied`). With it, a bone read answers with this frame's
+    /// queued writes applied to the pose they will land on, the way the frame
+    /// will draw it.
     pub fn set_rig(
         &mut self,
         eid: u32,
         skeleton: &Rc<floptle_anim::Skeleton>,
         offset: glam::Mat4,
         local: &[floptle_anim::TransformTRS],
+        applied: &[AnimPoseOp],
     ) {
         let Some(nb) = self.nodes.get_mut(&eid) else { return };
         nb.skeleton = Some(skeleton.clone());
         nb.offset = offset;
         nb.local.clear();
         nb.local.extend_from_slice(local);
+        nb.applied.clear();
+        nb.applied.extend_from_slice(applied);
+    }
+
+    /// A new frame's script pass begins: the writes the published pose holds
+    /// were last frame's, and writes queued from now on replace them rather
+    /// than add to them. Without this a bone written every frame read its own
+    /// write twice.
+    pub fn frame_pass_starts(&mut self) {
+        for nb in self.nodes.values_mut() {
+            nb.applied.clear();
+        }
     }
 
     /// Drop the nodes the refill did not reach: gone, or no longer animated.
@@ -1240,9 +1265,10 @@ impl BonePoses {
     }
 
     /// [`BonePoses::bone`] with `ops` — the pose writes queued for this node
-    /// since the pose was made — applied on top, solved against the node's
-    /// world matrix `node_world`. Without queued writes, or without a rig to
-    /// solve on, it is the published pose.
+    /// since the pose was made — applied the way the frame will apply them:
+    /// onto the animator's pose plus whatever writes of this frame it already
+    /// holds, solved against the node's world matrix `node_world`. Without
+    /// queued writes, or without a rig to solve on, it is the published pose.
     pub(crate) fn bone_posed(
         &self,
         eid: u32,
@@ -1258,6 +1284,13 @@ impl BonePoses {
         }
         let Some(i) = skel.index_of(name) else { return Ok(published) };
         let to_rig = (node_world * nb.offset.as_dmat4()).inverse();
+        let all: Vec<AnimPoseOp>;
+        let ops = if nb.applied.is_empty() {
+            ops
+        } else {
+            all = nb.applied.iter().chain(ops).cloned().collect();
+            &all
+        };
         let ops = rig_pose_ops(ops, skel, to_rig, eid, &mut Vec::new());
         let mut pose = nb.local.clone();
         floptle_anim::ik::apply(skel, &mut pose, &ops);
@@ -1317,8 +1350,12 @@ pub enum AnimCmd {
     /// `anim:setParam(name, v)`: a value blend states read.
     SetParam { name: String, value: f32 },
     /// A change to this frame's pose, applied after the animator has posed
-    /// the rig (`anim:setBoneRot`, `reach`, `lookAt`, …). Lasts one frame.
+    /// the rig (`anim:setBoneRot`, `reach`, `lookAt`, …). Lasts one frame,
+    /// unless the pose is held.
     Pose(AnimPoseOp),
+    /// `anim:holdPose(on)`: keep the last frame's pose writes while a frame
+    /// sends none, so a still, non-rest pose costs nothing to keep.
+    HoldPose(bool),
 }
 
 /// What a script asks of a rig's pose after the animator made it. Positions
@@ -1328,6 +1365,10 @@ pub enum AnimPoseOp {
     /// Set (`add: false`) or turn by (`add: true`) a bone's local rotation
     /// and/or translation, blended in by `weight`.
     Bone { bone: String, rot: Option<[f32; 4]>, pos: Option<[f32; 3]>, add: bool, weight: f32 },
+    /// [`AnimPoseOp::Bone`] for many bones at once, by skeleton index
+    /// (`anim:boneIndex`, 0-based here): `rot` and `pos`, when present, are
+    /// index-parallel to `bones`.
+    Bones { bones: Vec<u32>, rot: Option<Vec<[f32; 4]>>, pos: Option<Vec<[f32; 3]>>, add: bool, weight: f32 },
     /// Two-bone IK: turn `root` and `mid` so `tip` reaches `target`, bending
     /// toward `pole`.
     Reach { root: Option<String>, mid: Option<String>, tip: String, target: [f64; 3], pole: Option<[f64; 3]>, weight: f32 },
@@ -1361,6 +1402,7 @@ pub fn rig_pose_ops(
     let mut out = Vec::new();
     // A tip without a parent and a grandparent has no limb to bend.
     let mut limbless: Vec<&str> = Vec::new();
+    let mut unnumbered: Vec<(String, String)> = Vec::new();
     for op in ops {
         match op {
             AnimPoseOp::Bone { bone: name, rot, pos, add, weight } => {
@@ -1373,6 +1415,30 @@ pub fn rig_pose_ops(
                     add: *add,
                     weight: *weight,
                 });
+            }
+            AnimPoseOp::Bones { bones, rot, pos, add, weight } => {
+                for (k, &i) in bones.iter().enumerate() {
+                    let node = i as usize;
+                    if node >= skel.nodes.len() {
+                        unnumbered.push((
+                            format!("{eid}:bone#{i}"),
+                            format!(
+                                "anim: no bone number {} on this model, which has {} — a bone index is the model's own, \
+                                 from anim:boneIndex on this node",
+                                i + 1,
+                                skel.nodes.len()
+                            ),
+                        ));
+                        continue;
+                    }
+                    out.push(PoseOp::Local {
+                        node,
+                        rot: rot.as_ref().and_then(|r| r.get(k)).map(|r| glam::Quat::from_array(*r)),
+                        pos: pos.as_ref().and_then(|p| p.get(k)).map(|p| glam::Vec3::from_array(*p)),
+                        add: *add,
+                        weight: *weight,
+                    });
+                }
             }
             AnimPoseOp::Reach { root, mid, tip, target, pole, weight } => {
                 let Some(t) = bone(tip, "reach") else { continue };
@@ -1415,6 +1481,7 @@ pub fn rig_pose_ops(
             }
         }
     }
+    warn.extend(unnumbered);
     for tip in limbless {
         warn.push((
             format!("{eid}:limb:{tip}"),
@@ -2290,6 +2357,8 @@ struct Shared {
     /// Tag edits (`node:addTag/removeTag`, `node.tags = {...}`): entity index →
     /// the node's full new tag list, applied as a `Tags` component.
     tag_changes: Rc<RefCell<HashMap<u32, Vec<String>>>>,
+    /// Renames (`node.name = ...`), applied as a `Name` component.
+    name_changes: Rc<RefCell<HashMap<u32, String>>>,
     /// The project's resolved layer table (names + collision matrix), lent by
     /// the driver at Play start — validates `node.layer` writes and resolves
     /// `raycast`'s named-layer filters to masks.

@@ -274,6 +274,11 @@ impl Editor {
         if self.mesh_registry.contains_key(path) {
             return true;
         }
+        // A mesh a script built names no file: it is registered when the
+        // driver uploads it, and is never looked for on disk.
+        if floptle_script::mesh_api::is_built_mesh(path) {
+            return false;
+        }
         // The registry stays keyed by the ref as written; only the fs read resolves.
         let file = resolve_asset_path(&self.project_root, path);
         // A missing file (e.g. a model deleted while still referenced by a VFX effect or
@@ -307,6 +312,7 @@ impl Editor {
     /// fight for the time it took to decode twenty of them.
     pub(crate) fn request_model(&mut self, path: &str) {
         if self.mesh_registry.contains_key(path)
+            || floptle_script::mesh_api::is_built_mesh(path)
             || self.model_jobs.contains_key(path)
             || self.model_failed.contains(path)
             || self.model_queued(path)
@@ -1552,7 +1558,8 @@ impl Editor {
         for line in floptle_scene::validate_parents(&doc.nodes) {
             self.console.push(floptle_script::LogLevel::Error, format!("🔗 {line}"), None);
         }
-        for line in floptle_scene::validate_ui_visibility(&doc.nodes) {
+        let named = crate::input_scan::string_literals(&self.scripts_dir());
+        for line in floptle_scene::validate_ui_visibility(&doc.nodes, |n| named.contains(n)) {
             self.console.push(floptle_script::LogLevel::Warn, format!("👁 {line}"), None);
         }
     }
@@ -2473,9 +2480,9 @@ pub(crate) fn seed_example_shaders(project_root: &Path) {
 /// See [`Editor::resolve_asset_path`]; free so it is unit-testable without an
 /// Editor.
 ///
-/// Resolution order: absolute as-is; as-written relative to the CWD (the
-/// repo-root workflow, where refs spell `assets/…`); joined onto the project
-/// root (the canonical, portable form: `textures/…`); then the legacy-prefix
+/// Resolution order: absolute as-is; joined onto the project root (the
+/// canonical, portable form: `textures/…`); as-written relative to the CWD
+/// (the repo-root workflow, where refs spell `assets/…`); then the legacy-prefix
 /// rescue, where a ref whose first component is the project folder's name
 /// (`assets/textures/x.png` inside a project rooted at `…/assets`) gets that
 /// component stripped and re-joined. The rescue is what keeps such refs
@@ -2569,15 +2576,22 @@ fn resolve_asset_path_anywhere(project_root: &Path, path: &str) -> PathBuf {
         return p;
     }
     let p = PathBuf::from(path);
-    if floptle_vfs::exists(&p) {
-        return p;
-    }
     if looks_absolute(path) {
+        if floptle_vfs::exists(&p) {
+            return p;
+        }
         return rescue_stranded_root(project_root, path).unwrap_or(p);
     }
+    // The project before the CWD. A process started in some other project
+    // (the real game a scratch copy links its folders from, a sibling with
+    // the same layout) holds the same relative path there too, and taking
+    // that one loads another project's file, or refuses it as outside.
     let joined = project_root.join(&p);
     if floptle_vfs::exists(&joined) {
         return joined;
+    }
+    if floptle_vfs::exists(&p) {
+        return p;
     }
     if let (Some(first), Some(root_name)) = (p.components().next(), project_root.file_name())
         && first.as_os_str() == root_name
@@ -3059,6 +3073,41 @@ mod path_tests {
         assert!(!is_inside_project(&link, &real.join("models/escape.glb")), "an escaping link was let in");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// **A linked asset folder resolves in the project, whatever the CWD
+    /// holds.** A scratch project links `audio/` to the real game's; run from
+    /// inside the real game, the CWD has the same relative path, and taking
+    /// it first resolved every sound outside the scratch project and refused
+    /// it. The CWD here is this crate's folder, which has a `src/lib.rs` of
+    /// its own: the fixture's linked `src/` is the same shape.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_asset_folder_resolves_in_the_project_whatever_the_cwd_holds() {
+        let dir = std::env::temp_dir().join(format!("floptle-linkdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let elsewhere = dir.join("real");
+        floptle_vfs::create_dir_all(elsewhere.join("audio")).unwrap();
+        floptle_vfs::write(elsewhere.join("audio/hit.ogg"), b"ogg").unwrap();
+        floptle_vfs::write(elsewhere.join("audio/lib.rs"), b"ogg").unwrap();
+        let root = dir.join("scratch");
+        floptle_vfs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("audio"), root.join("audio")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("audio"), root.join("src")).unwrap();
+        let linked_root = dir.join("linked-scratch");
+        std::os::unix::fs::symlink(&root, &linked_root).unwrap();
+        assert!(floptle_vfs::exists("src/lib.rs"), "the CWD is meant to hold its own src/lib.rs");
+        reset_refused_refs();
+
+        for r in [&root, &linked_root] {
+            assert_eq!(resolve_asset_path(r, "audio/hit.ogg"), r.join("audio/hit.ogg"));
+            #[cfg(feature = "devices")]
+            assert_eq!(crate::audio_clips::resolve_clip_path(r, "audio/hit"), Some(r.join("audio/hit.ogg")));
+            assert_eq!(resolve_asset_path(r, "src/lib.rs"), r.join("src/lib.rs"), "the CWD's copy won");
+        }
+        assert!(take_refused_refs().is_empty(), "a linked folder was refused");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 
     /// **A reference that resolves outside the project is missing, and the
     /// Console says so once.** `node.model = "/etc/hostname"` names a file

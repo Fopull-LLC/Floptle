@@ -1137,3 +1137,88 @@ fn string_field_applier_swaps_ui_image() {
     crate::apply_component_field(&mut world, e, "UiElement", "opacity", 0.5);
     assert_eq!(world.get::<floptle_ui::ElementSpec>(e).unwrap().opacity, 0.5);
 }
+
+/// **A game opens the engine's Controls and Accessibility pages in its own
+/// container.** Controls lists every action with its binding; a click arms
+/// the rebind and the row says so; the key the player presses is committed by
+/// the page's `update` and shown. Accessibility toggles a real setting and
+/// says it back. Built through `ui.make`, so the look stays the game's.
+#[test]
+fn engine_settings_pages_rebind_an_action_and_toggle_captions() {
+    use floptle_input::{Action, Binding, InputMap, Key, RawInput, Source};
+    let dir = std::env::temp_dir().join(format!("floptle_engine_settings_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "settings",
+        "heard = ''\n\
+         function start(node)\n\
+         \x20 local page = node.name == 'Controls' and 'controls' or 'accessibility'\n\
+         \x20 panel = ui.engineSettings(node, page, { onChanged = function(k, v) heard = heard .. k .. ' ' end })\n\
+         end\n\
+         function update(node, dt) panel:update() end\n",
+    );
+    let mut world = World::default();
+    let mut container = |name: &str| {
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, floptle_core::Name(name.into()));
+        world.insert(e, floptle_ui::ElementSpec::default());
+        world.insert(e, Scripts(vec![floptle_core::ScriptInst::new("settings")]));
+        e
+    };
+    let controls = container("Controls");
+    let access_page = container("Access");
+    let host = &mut ScriptHost::new();
+    host.set_input_map(InputMap {
+        actions: vec![Action { name: "Jump".into(), bindings: vec![Binding::new(Source::Key(Key::Space))] }],
+        ..Default::default()
+    });
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    host.apply_ui_makes(&mut world);
+
+    // The made node with this key whose parent is the made node with that one.
+    let under = |world: &World, row_key: &str, key: &str| -> floptle_core::Entity {
+        let row = world.query::<floptle_core::Made>().find(|(_, m)| m.key == row_key).expect(row_key).0;
+        world
+            .query::<floptle_core::Made>()
+            .find(|(e, m)| m.key == key && world.get::<floptle_core::Parent>(*e).is_some_and(|p| p.0 == row))
+            .expect(key)
+            .0
+    };
+    let label = |world: &World, row_key: &str| -> String {
+        let button = under(world, row_key, "value");
+        let text = world
+            .query::<floptle_core::Made>()
+            .find(|(e, m)| m.key == "text" && world.get::<floptle_core::Parent>(*e).is_some_and(|p| p.0 == button))
+            .expect("text")
+            .0;
+        world.get::<floptle_ui::ElementSpec>(text).unwrap().text.as_ref().unwrap().text.clone()
+    };
+    assert!(label(&world, "Jump").contains("Space"), "the row shows the binding: {}", label(&world, "Jump"));
+    assert_eq!(label(&world, "captions"), "off");
+
+    // Rebind: click, the row waits, a key arrives, the page commits it.
+    let button = under(&world, "Jump", "value").index();
+    host.run_ui_hooks(&mut world, &[(button, "clicked")]);
+    host.apply_ui_makes(&mut world);
+    assert_eq!(label(&world, "Jump"), "press a key...");
+    let raw = RawInput { keys: [Key::KeyU].into_iter().collect(), ..Default::default() };
+    host.input_system().borrow_mut().poll_rebind(&raw).expect("captured");
+    host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+    host.apply_ui_makes(&mut world);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    assert!(label(&world, "Jump").contains('U'), "the new binding is shown: {}", label(&world, "Jump"));
+
+    // Accessibility: a click turns captions on, for real, and says so.
+    let button = under(&world, "captions", "value").index();
+    host.run_ui_hooks(&mut world, &[(button, "clicked")]);
+    host.apply_ui_makes(&mut world);
+    assert!(host.access().captions, "the click did not reach access.setCaptions");
+    assert_eq!(label(&world, "captions"), "on");
+    let heard: String = host.instance_env(access_page.index(), "settings").unwrap().get("heard").unwrap();
+    let rebound: String = host.instance_env(controls.index(), "settings").unwrap().get("heard").unwrap();
+    assert_eq!((heard.as_str(), rebound.as_str()), ("captions ", "binding "), "onChanged names what changed");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1231,10 +1231,11 @@ mod alloc_window_tests {
 mod tests {
     use super::*;
 
-    /// **A rebuild every frame is said, once.** A game that retags a
-    /// node each frame rebuilds the scripts' copy of the whole scene each
-    /// frame; after half a second the Console names the cause, and says it
-    /// once. A game that only moves things is never told anything.
+    /// **A rebuild every frame is said, once — and a retag is not one.** A
+    /// game that retags a node each frame patches the scripts' copy of the
+    /// scene and is told nothing, the same as one that only moves things.
+    /// What still rebuilds from scratch every frame (here, fed straight to
+    /// the profiler) is named after half a second, once.
     #[test]
     fn rebuilding_the_mirror_every_frame_is_said_once_with_its_cause() {
         let d = std::env::temp_dir().join(format!("flrun-churn-{}-{:?}", std::process::id(), std::thread::current().id()));
@@ -1248,7 +1249,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(d.join("scripts/mover.lua"), "function update(node, dt)\n  node.x = node.x + dt\nend\n").unwrap();
-        let said = |kind: &str| {
+        let said = |kind: &str, rebuild_each_frame: bool| {
             std::fs::write(
                 d.join("scenes/first.ron"),
                 format!("(name: \"s\", nodes: [(name: \"A\", scripts: [(kind: \"{kind}\")]), (name: \"B\")])"),
@@ -1263,15 +1264,19 @@ mod tests {
                 ed.pump_world_streaming();
                 ed.play_step(DT, true);
                 ed.drain_script_logs();
+                if rebuild_each_frame {
+                    ed.script_host.profile().borrow_mut().record_mirror(Some("the scene was replaced".into()), 0);
+                }
                 ed.end_profile_frame();
             }
             ed.console.entries.iter().filter(|e| e.msg.contains("rebuilt from scratch")).map(|e| e.msg.clone()).collect::<Vec<_>>()
         };
-        let churn = said("churn");
+        assert!(said("churn", false).is_empty(), "a retag every frame is not a rebuild");
+        assert!(said("mover", false).is_empty(), "moving a node is not a rebuild");
+        let churn = said("mover", true);
         assert_eq!(churn.len(), 1, "said once per Play: {churn:?}");
-        assert!(churn[0].contains("the tags changed"), "and names the cause: {churn:?}");
+        assert!(churn[0].contains("the scene was replaced"), "and names the cause: {churn:?}");
         assert!(!churn[0].contains("  "), "no hole where a line continuation was lost: {churn:?}");
-        assert!(said("mover").is_empty(), "moving a node is not a rebuild");
         let _ = std::fs::remove_dir_all(&d);
     }
 

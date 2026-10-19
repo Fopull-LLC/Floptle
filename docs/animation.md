@@ -326,10 +326,18 @@ end
   `anim:reach(tip, target, { pole = p })`, and
   `anim:lookAt(bones, target, { limit = 75 })`. See
   [Bones from a script](#bones-from-a-script).
+- Many bones at once: `anim:boneIndex(name)` gives a bone's number (its place
+  in `node:bones()`), every bone write takes that number instead of the name,
+  and `anim:setBones(bones, positions, rotations [, w])` sets a whole list in
+  one call. `anim:holdPose(true)` keeps the last pose a script wrote while a
+  frame writes nothing.
 - `anim:boneWorld(bone)` gives the bone's world position, yaw, pitch and roll
   after all of that, including writes made earlier in the same `update` or
-  `lateUpdate`: set a bone, then read it, and you get where you sent it. It
-  works under `floptle run` and on a dedicated server too.
+  `lateUpdate`: set a bone, then read it, and you get where you sent it. The
+  writes are counted once: they land on the animator's pose, not on last
+  frame's drawn pose, which already held last frame's writes. Read before any
+  write, it gives the pose last drawn. It works under `floptle run` and on a
+  dedicated server too.
 - Reads: `anim:state([layer])`, `anim:time([layer])`, `anim:finished([layer])`,
   `anim:isPlaying([state])`, `anim:clips()`, `anim:layers()`.
 - Authored data, from the asset rather than playback (so it works in `start()`):
@@ -355,7 +363,11 @@ The clips pose the rig first, then a script can change it for the frame:
 2. `reach` and `lookAt` run in the order they were called.
 
 All of them last one frame. Call them every frame you want them held, and stop
-calling to hand the bone back to the clips. Angles are radians in the
+calling to hand the bone back to the clips. Or hold them:
+`anim:holdPose(true)` keeps the writes of the last frame that made any, so a
+still pose (a canopy lying on the ground) costs nothing to keep. The first
+write of a later frame replaces the whole held pose, and `anim:holdPose(false)`
+hands the rig back to the clips that same frame. Angles are radians in the
 `node.yaw/pitch/roll` convention, and positions are in the bone's parent space.
 Targets and poles for `reach` and `lookAt` are world points. Every call takes a
 weight from 0 to 1 that blends from the animated pose. All of it needs a rigged
@@ -367,6 +379,32 @@ thigh. Name them with `root` and `mid` when the rig has a twist bone between.
 `pole` is a point the middle joint bends toward, such as a point in front of
 the knee or behind the elbow. A target out of reach straightens the limb
 toward it.
+
+**A hundred bones a frame.** A procedural rig (a cloth canopy, a rope, a
+tentacle) is cheaper posed in one call than one call per bone: the name copy,
+the lookup and the crossing into the engine are most of each write's cost.
+Number the bones once, the first frame the model has posed (`boneIndex` is
+nil until then, so not in `start`), and send flat lists: x, y, z per bone in
+`positions` and yaw, pitch, roll per bone in `rotations`. Either list may be
+nil to leave that channel alone.
+
+```lua
+local ids, pos, rot
+function lateUpdate(node, dt)
+  local anim = node:animator()
+  if not ids then
+    if not anim:boneIndex("Rib1") then return end -- not posed yet
+    ids = {}
+    for i = 1, 100 do ids[i] = anim:boneIndex("Rib" .. i) end
+    pos, rot = {}, {}
+  end
+  for i = 1, #ids do
+    pos[3 * i - 2], pos[3 * i - 1], pos[3 * i] = 0, 0.1 * i, math.sin(i + os.clock())
+    rot[3 * i - 2], rot[3 * i - 1], rot[3 * i] = 0, 0.05 * i, 0
+  end
+  anim:setBones(ids, pos, rot)
+end
+```
 
 **Planting feet on uneven ground.** Cast a ray down from where each foot
 stands, drop the hips by the deeper foot's gap, then reach each foot to its hit:
@@ -397,7 +435,7 @@ end
 ```
 
 Take the targets from a fixed stance like this, not from `anim:boneWorld(foot)`.
-`boneWorld` answers last frame's pose *after* the reach, so a foot placed from
+`boneWorld` read before the reach answers last frame's pose *after* its reach, so a foot placed from
 it is placed from where the reach last put it, and on a slope each frame's
 target lands a little lower than the one before: the feet creep downhill and
 the legs stretch out from under the hips. Keep the hips' drop under the length

@@ -24,7 +24,51 @@
 //! playtest would be written into `project.ron` the next time anybody touched
 //! Project Settings, and shipped.
 
-use floptle_script::app_api::{AppInfo, AppRequests, Vsync};
+use std::rc::Rc;
+
+use floptle_script::app_api::{AppInfo, AppRequests, DisplayMode, DisplayModeRequest, MonitorInfo, Vsync};
+
+/// What the displays were when last asked, and for how many frames more that
+/// answer stands. Two seconds: a monitor plugged in shows up in a settings
+/// page that is open, and the frames between pay nothing.
+pub(crate) struct DisplayCache {
+    frames_left: u32,
+    monitors: Rc<Vec<MonitorInfo>>,
+    modes: Rc<Vec<DisplayMode>>,
+}
+
+/// The window's monitors as `app.monitors()` lists them, and every mode of
+/// each. A mode a monitor lists once per colour depth is listed once.
+fn gather_displays(window: &winit::window::Window) -> (Vec<MonitorInfo>, Vec<DisplayMode>) {
+    let current = window.current_monitor();
+    let mut monitors = Vec::new();
+    let mut modes = Vec::new();
+    for (i, m) in window.available_monitors().enumerate() {
+        let (size, pos) = (m.size(), m.position());
+        monitors.push(MonitorInfo {
+            name: m.name().unwrap_or_default(),
+            width: size.width,
+            height: size.height,
+            refresh: m.refresh_rate_millihertz().map(|r| r as f32 / 1000.0),
+            x: pos.x,
+            y: pos.y,
+            current: current.as_ref() == Some(&m),
+        });
+        let mut own: Vec<DisplayMode> = m
+            .video_modes()
+            .map(|v| DisplayMode {
+                width: v.size().width,
+                height: v.size().height,
+                refresh: v.refresh_rate_millihertz() as f32 / 1000.0,
+                monitor: i + 1,
+            })
+            .collect();
+        own.sort_by(|a, b| (b.width, b.height).cmp(&(a.width, a.height)).then(b.refresh.total_cmp(&a.refresh)));
+        own.dedup();
+        modes.extend(own);
+    }
+    (monitors, modes)
+}
 
 /// The API's vsync mode as the file format's.
 pub(crate) fn to_doc(v: Vsync) -> floptle_scene::VsyncDoc {
@@ -79,7 +123,11 @@ impl crate::Editor {
             refresh_hz: (self.refresh_period > 0.0).then(|| 1.0 / self.refresh_period),
             dynamic_resolution: self.dyn_res.is_some(),
             touch: self.touch_device,
+            monitors: Rc::default(),
+            display_modes: Rc::default(),
         };
+        let (monitors, display_modes) = self.displays();
+        let info = AppInfo { monitors, display_modes, ..info };
         self.script_host.set_app_info(info);
     }
 
@@ -114,6 +162,9 @@ impl crate::Editor {
         }
         if let Some(on) = req.fullscreen {
             self.app_set_fullscreen(on);
+        }
+        if let Some(d) = req.display_mode {
+            self.app_set_display_mode(d);
         }
         if let Some(fps) = req.frame_cap {
             self.frame_cap = fps.max(0.0);
@@ -157,6 +208,95 @@ impl crate::Editor {
         if let Some(window) = self.window.as_ref() {
             crate::set_fullscreen(window, on);
         }
+    }
+
+    /// The monitors and their modes, from the cache while it stands. None
+    /// without a window.
+    fn displays(&mut self) -> (Rc<Vec<MonitorInfo>>, Rc<Vec<DisplayMode>>) {
+        let Some(window) = self.window.as_ref() else { return (Rc::default(), Rc::default()) };
+        match &mut self.display_cache {
+            Some(c) if c.frames_left > 0 => {
+                c.frames_left -= 1;
+                (c.monitors.clone(), c.modes.clone())
+            }
+            _ => {
+                let (m, d) = gather_displays(window);
+                let c = DisplayCache { frames_left: 120, monitors: Rc::new(m), modes: Rc::new(d) };
+                let out = (c.monitors.clone(), c.modes.clone());
+                self.display_cache = Some(c);
+                out
+            }
+        }
+    }
+
+    /// `app.setDisplayMode{...}`: a resolution, refresh rate and monitor.
+    ///
+    /// Full screen switches the monitor to that mode (exclusive), which is
+    /// what a resolution setting means there; a browser has no such thing and
+    /// covers the screen instead. A window is resized to that many pixels and
+    /// centred on the monitor. Like `app.setFullscreen`, only a game's own
+    /// window does this; under the editor it says so once and leaves the
+    /// editor's window alone.
+    pub(crate) fn app_set_display_mode(&mut self, d: DisplayModeRequest) {
+        if !self.player_mode {
+            if !self.fullscreen_explained {
+                self.fullscreen_explained = true;
+                self.console.push(
+                    floptle_script::LogLevel::Debug,
+                    format!(
+                        "app.setDisplayMode{{ width = {}, height = {} }} — in an exported build this \
+                         sets the game's window or screen mode; in the editor the window is the \
+                         editor's, so it is left alone.",
+                        d.width, d.height
+                    ),
+                    None,
+                );
+            }
+            return;
+        }
+        let Some(window) = self.window.as_ref() else { return };
+        let target = d
+            .monitor
+            .and_then(|i| window.available_monitors().nth(i.saturating_sub(1)))
+            .or_else(|| window.current_monitor());
+        let full = d.fullscreen.unwrap_or(window.fullscreen().is_some());
+        if full {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(m) = &target {
+                let handles: Vec<winit::monitor::VideoModeHandle> = m.video_modes().collect();
+                let listed: Vec<DisplayMode> = handles
+                    .iter()
+                    .map(|v| DisplayMode {
+                        width: v.size().width,
+                        height: v.size().height,
+                        refresh: v.refresh_rate_millihertz() as f32 / 1000.0,
+                        monitor: 1,
+                    })
+                    .collect();
+                if let Some(want) = floptle_script::app_api::pick_mode(&listed, 1, d.width, d.height, d.refresh)
+                    && let Some(i) = listed.iter().position(|m| *m == want)
+                {
+                    window.set_fullscreen(Some(winit::window::Fullscreen::Exclusive(handles[i].clone())));
+                    self.display_cache = None;
+                    return;
+                }
+            }
+            // No such mode (or a browser): cover the screen at its own size.
+            #[cfg(target_arch = "wasm32")]
+            crate::set_fullscreen(window, true);
+            #[cfg(not(target_arch = "wasm32"))]
+            window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(target)));
+        } else {
+            window.set_fullscreen(None);
+            let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(d.width, d.height));
+            if let Some(m) = target {
+                let (pos, size) = (m.position(), m.size());
+                let x = pos.x + (size.width as i32 - d.width as i32).max(0) / 2;
+                let y = pos.y + (size.height as i32 - d.height as i32).max(0) / 2;
+                window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+            }
+        }
+        self.display_cache = None;
     }
 
     /// End the game — see the module docs for why this is three different things.

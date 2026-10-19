@@ -433,8 +433,38 @@ end
 A field a `PostProcess` does not have reads as `nil`, so a game can check for
 one before it offers the toggle.
 
-**Not here yet:** window resolution and monitor choice. Those are one
-question — windowing — and it deserves answering properly rather than by adding
-a resolution setter that only half works. `app.setRetroHeight` is the one that
-already existed as a live render setting, and in a pixel-art game it is the
-"resolution" a player means.
+**Display — resolution and monitor.** `app.monitors()` lists the screens,
+`app.displayModes([monitor])` the full-screen modes each one offers, and
+`app.setDisplayMode{ width =, height = [, refresh =, monitor =, fullscreen = ] }`
+applies a pick. Full screen switches the monitor to that mode, so it has to be
+one the list offers (anything else raises, naming the sizes it does offer); a
+window may be any size and is centred on the monitor. In a pixel-art game
+`app.setRetroHeight` is still the "resolution" a player means.
+
+```lua
+-- a Resolution dropdown and a Monitor dropdown
+local monitors = app.monitors()
+local modes = app.displayModes(chosenMonitor)
+app.setDisplayMode{ width = 1920, height = 1080, refresh = 144, monitor = chosenMonitor, fullscreen = true }
+save.set("display", { w = 1920, h = 1080, hz = 144, monitor = chosenMonitor })
+```
+
+**Controls and Accessibility, ready-made.** `ui.engineSettings(container,
+"controls")` and `ui.engineSettings(container, "accessibility")` build the
+engine's own pages into a container of yours with `ui.make`, in the styles you
+name. Call the returned page's `:update()` every frame while it is open, and
+save what its `onChanged` reports:
+
+```lua
+function start(node)
+  page = ui.engineSettings(find("Settings Body"), "controls", {
+    styles = { row = "settingsRow", label = "settingsLabel", button = "chip" },
+    onChanged = function(key, value) save.set("settings." .. key, value) end,
+  })
+end
+function update(node, dt) page:update() end
+```
+
+Rebinding reaches **actions only**: a script that reads `input.key("space")`
+gets nothing from a rebind. See [moving key reads to
+actions](input.md#moving-key-reads-to-actions-so-rebinding-reaches-them).

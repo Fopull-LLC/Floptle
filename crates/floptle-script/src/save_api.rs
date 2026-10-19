@@ -1,9 +1,9 @@
 //! The Lua `save.*` API — persistent game data (roadmap A2).
 //!
 //! A per-slot key→value store that survives Play sessions, editor restarts, and
-//! ships with exported builds. Values ride the same guardrailed [`NetValue`]
-//! marshalling as `synced` vars (numbers, strings, bools, tables ≤ depth 4,
-//! ≤ 1 KB each — no functions/userdata), stored as human-readable RON at
+//! ships with exported builds. Values ride the same [`NetValue`] marshalling as
+//! `synced` vars (numbers, strings, bools, tables — no functions/userdata), but
+//! nest up to [`SAVE_MAX_DEPTH`] rather than the wire's 4, stored as RON at
 //! `<project>/save/<slot>.ron`.
 //!
 //! Loading is lazy (first touch reads the file); writes mark the store dirty and
@@ -22,8 +22,8 @@ use std::rc::Rc;
 use floptle_net::NetValue;
 use mlua::{Lua, Value};
 
-/// How many keys one slot may hold, and how many bytes between them. A value
-/// is already capped at 1 KB; without these the count was unbounded, and the
+/// How many keys one slot may hold, and how many bytes between them. Without
+/// these the count was unbounded, and the
 /// flush serialises the whole store every few seconds — a slot that only grew
 /// was a stall that only grew with it.
 pub const MAX_SAVE_KEYS: usize = 10_000;
@@ -96,6 +96,11 @@ fn valid_slot(name: &str) -> bool {
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// How deep a saved table may nest. Bounded at all because a cyclic table
+/// would otherwise recurse until the stack goes, and kept well inside what the
+/// slot file's own reader accepts, so nothing written can fail to load.
+pub(crate) const SAVE_MAX_DEPTH: usize = 16;
+
 fn ensure_loaded(state: &mut SaveState, root: &std::path::Path) {
     if state.loaded {
         return;
@@ -132,13 +137,16 @@ pub(crate) fn install_save_api(
 ) {
     let Ok(t) = lua.create_table() else { return };
 
-    // save.set(key, value) — value takes the synced-var guardrails (depth ≤ 4,
-    // ≤ 1 KB, no functions/userdata); a violation is a loud script error.
+    // save.set(key, value) — plain data only (no functions/userdata), nested
+    // up to SAVE_MAX_DEPTH and within the slot's byte cap; a violation is a
+    // loud script error. Not the wire's depth-4 rule: a save stays on this
+    // machine, and a craft with parts with modules with state is four deep
+    // before it says anything.
     {
         let state = state.clone();
         let paths = paths.clone();
         if let Ok(f) = lua.create_function(move |_, (key, value): (String, Value)| {
-            let nv = crate::net_api::lua_to_netvalue(&value, 0)
+            let nv = crate::net_api::lua_to_netvalue_max(&value, 0, SAVE_MAX_DEPTH)
                 .map_err(|e| mlua::Error::RuntimeError(format!("save.set(\"{key}\"): {e}")))?;
             let mut s = state.borrow_mut();
             ensure_loaded(&mut s, &paths.runtime_base());
@@ -272,6 +280,34 @@ mod tests {
         let logs = Rc::new(RefCell::new(Vec::new()));
         install_save_api(&lua, state.clone(), crate::paths::Paths::at(root.to_path_buf()), logs);
         (lua, state)
+    }
+
+    /// **A save keeps nested data, and reads it back from disk.** The wire's
+    /// depth-4 rule used to apply here, so a craft with parts with modules with
+    /// state was refused. The deepest table allowed must also survive the
+    /// write and a fresh read of the file, or a save would load as empty; one
+    /// level deeper (or a cycle) is still refused, loudly.
+    #[test]
+    fn a_deeply_nested_table_saves_and_loads_back_from_disk() {
+        let root = std::env::temp_dir().join(format!("floptle-savedeep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (lua, state) = lua_with_save(&root);
+        let nest = |depth: usize| format!("local t = 'leaf' for i = 1, {depth} do t = {{ t, n = i }} end return t");
+        lua.load(format!("save.set('ten', (function() {} end)())", nest(10))).exec().unwrap();
+        lua.load(format!("save.set('deepest', (function() {} end)())", nest(SAVE_MAX_DEPTH))).exec().unwrap();
+        let e = lua.load(format!("save.set('too', (function() {} end)())", nest(SAVE_MAX_DEPTH + 1))).exec().unwrap_err().to_string();
+        assert!(e.contains("save.set(\"too\")") && e.contains("nests deeper"), "{e}");
+        let e = lua.load("local c = {} c.self = c save.set('cycle', c)").exec().unwrap_err().to_string();
+        assert!(e.contains("cyclic"), "{e}");
+        flush(&mut state.borrow_mut(), &root).unwrap();
+
+        let (lua, _state) = lua_with_save(&root);
+        let read = "local t, d = save.get(KEY), 0 while type(t) == 'table' do d = d + 1 t = t[1] end return d, t";
+        let (d, leaf): (usize, String) = lua.load(read.replace("KEY", "'ten'")).eval().unwrap();
+        assert_eq!((d, leaf.as_str()), (10, "leaf"), "the 10-deep table did not come back");
+        let (d, _): (usize, String) = lua.load(read.replace("KEY", "'deepest'")).eval().unwrap();
+        assert_eq!(d, SAVE_MAX_DEPTH, "the deepest table allowed did not survive the file");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// **A slot has a ceiling on keys and on bytes**, and both are the same

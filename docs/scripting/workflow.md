@@ -250,17 +250,20 @@ before each pass. Changing a component's **value** (a camera's `fovY`, a light's
 intensity, `node.visible`, a post-process setting) re-reads only that node, so
 tweening one every frame is cheap. Spawning and destroying a node add or remove
 that node alone, so a decal, a casing or a one-shot effect costs about one
-node's worth. Changing the scene's **shape** in place rebuilds the whole copy,
-and that costs time in proportion to the whole scene: renaming, reparenting,
-retagging and attaching a script count as shape changes. When one happens on
-every frame for half a second, the Console says so and names the cause.
+node's worth. Renaming, reparenting, retagging and attaching a script patch
+that node and the lists that name it (`find`, `findTagged`, children), so
+streaming plants in under a tagged parent costs the plants, not the level.
+What still rebuilds the whole copy, in time proportional to the whole scene,
+is the scene being replaced or a node id handed to a new node in one step.
+When a rebuild happens on every frame for half a second, the Console says so
+and names the cause.
 
 If `mirror` is high, check two numbers:
 
 ```lua
 local c = perf.counts()
 print(c.mirrorRebuilds, c.mirrorRefreshed)   -- last frame
-print(perf.mirrorCause())   -- "the tags changed on 'Crate 4' (node 812) …"
+print(perf.mirrorCause())   -- "first sync", or what forced the last rebuild
 ```
 
 `perf.counts().rays` and `rayMs` are last frame's script raycasts and the time
@@ -268,9 +271,8 @@ they took, inside `scripts`. A frame that spends milliseconds there is casting
 more rays than it needs, or casting them one at a time where `raycastMany`
 would do.
 
-`mirrorRebuilds` above zero on every frame means something changes the shape of
-the scene every frame, and `perf.mirrorCause()` names the node and what changed.
-Usually that's a tag toggled per frame, which a field in the script can replace.
+`mirrorRebuilds` above zero on every frame means something replaces the scene,
+or a node's id, every frame, and `perf.mirrorCause()` names what.
 
 ### Many NPCs: put the far ones to sleep
 

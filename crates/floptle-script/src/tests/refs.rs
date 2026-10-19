@@ -312,11 +312,11 @@ end
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// **Anything that is not a transform forces a full rebuild** — here a
-/// rename, the kind of change the refresh path cannot see and must never
-/// be allowed to hide.
+/// **A rename patches the mirror, and `find` sees it** — the kind of change
+/// the refresh path must never be allowed to hide, made without rebuilding
+/// the scripts' copy of the whole scene.
 #[test]
-fn a_rename_forces_a_full_rebuild_and_find_sees_it() {
+fn a_rename_patches_the_mirror_and_find_sees_it() {
     let dir = std::env::temp_dir().join(format!("floptle_mirror_rename_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     write_script(&dir, "seeker", "function update(node, dt) node.y = find('Renamed') and 1 or 0 end\n");
@@ -331,8 +331,48 @@ fn a_rename_forces_a_full_rebuild_and_find_sees_it() {
 
     world.get_mut::<floptle_core::Name>(other).unwrap().0 = "Renamed".into();
     host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
-    assert_eq!(crate::host::FULL_SYNCS.with(|c| c.get()), 1, "a rename must rebuild the mirror once");
+    assert_eq!(crate::host::FULL_SYNCS.with(|c| c.get()), 0, "a rename rebuilt the mirror");
     assert_eq!(world.get::<Transform>(e).unwrap().translation.y, 1.0, "find() did not see the new name");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **`node.name` is writable, and `find` answers to the new name.** The
+/// assignment used to be dropped without a word. The handle reads its own
+/// write back at once; the scene, and `find`, have it from the next pass. A
+/// non-string raises rather than vanishing.
+#[test]
+fn a_node_renamed_from_lua_is_found_by_its_new_name() {
+    let dir = std::env::temp_dir().join(format!("floptle_rename_lua_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "namer",
+        "local frame = 0\n\
+         function update(node, dt)\n\
+         \x20 frame = frame + 1\n\
+         \x20 if frame == 1 then\n\
+         \x20   local v = find('Vessel')\n\
+         \x20   v.name = 'Kestrel'\n\
+         \x20   node.name = 'Mission Control'\n\
+         \x20   if v.name ~= 'Kestrel' then error('the handle did not read its own write: ' .. tostring(v.name)) end\n\
+         \x20   local ok = pcall(function() v.name = 7 end)\n\
+         \x20   if ok then error('a number was accepted as a name') end\n\
+         \x20 else\n\
+         \x20   node.x = (find('Kestrel') and 1 or 0) + (find('Vessel') and 10 or 0) + (find('Mission Control') and 100 or 0)\n\
+         \x20 end\n\
+         end\n",
+    );
+    let (mut world, e) = world_with_script("namer");
+    let vessel = world.spawn();
+    world.insert(vessel, Transform::IDENTITY);
+    world.insert(vessel, floptle_core::Name("Vessel".into()));
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    assert_eq!(world.get::<floptle_core::Name>(vessel).map(|n| n.0.as_str()), Some("Kestrel"), "the rename never reached the scene");
+    host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 101.0, "find saw the old names (1 = Kestrel, 10 = Vessel, 100 = own rename)");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -712,6 +752,122 @@ fn look_at_under_a_rotated_parent_faces_the_world_target() {
             "{kind}: the child faces {fwd:?} in the world, not the target along +X"
         );
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A node stood on any normal points its +Y along it, the lower hemisphere
+/// included.** The usual surface solve, `pitch = atan2(uz, uy)`, is past 90°
+/// whenever `uy < 0`, and writing it one field at a time re-read the other
+/// two in canonical form between writes: a launch pad on a planet's lower
+/// half came out tilted. `setUp` takes the normal; `setAngles` takes a triple
+/// as given. Both are checked on another node's handle (the mirror) and on
+/// the script's own node (raw angles composed after the hook), under a
+/// rotated parent so the world-to-parent turn is exercised too.
+#[test]
+fn set_up_and_set_angles_land_exactly_whatever_the_hemisphere() {
+    use floptle_core::math::{EulerRot, Quat, Vec3};
+    let dir = std::env::temp_dir().join(format!("floptle_set_up_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let parent_rot = Quat::from_rotation_y(0.7) * Quat::from_rotation_x(-0.4);
+    // A deterministic spread of unit normals, a fair share with uy < 0, plus
+    // the poles and the equator where Euler angles are least well behaved.
+    let mut normals: Vec<[f64; 3]> = vec![[0.0, 1.0, 0.0], [0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]];
+    let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut rnd = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+    };
+    while normals.len() < 1000 {
+        let v = [rnd(), rnd(), rnd()];
+        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        if l > 0.1 && l <= 1.0 {
+            normals.push([v[0] / l, v[1] / l, v[2] / l]);
+        }
+    }
+    assert!(normals.iter().filter(|n| n[1] < 0.0).count() > 400);
+    let list: String = normals.iter().map(|n| format!("{{{},{},{}}},", n[0], n[1], n[2])).collect();
+
+    // Another node's handle: every normal, read back through the mirror.
+    write_script(
+        &dir,
+        "stand",
+        &format!(
+            "local N = {{{list}}}\n\
+             function start(node)\n\
+             \x20 local t = find('Pad')\n\
+             \x20 for i, n in ipairs(N) do\n\
+             \x20   t:setUp(vec3(n[1], n[2], n[3]))\n\
+             \x20   local u = t:worldUp()\n\
+             \x20   local d = math.max(math.abs(u.x - n[1]), math.abs(u.y - n[2]), math.abs(u.z - n[3]))\n\
+             \x20   if d > 1e-5 then error('normal ' .. i .. ' off by ' .. d) end\n\
+             \x20 end\n\
+             \x20 -- With a forward: up exact, and -Z as near the forward as it can be.\n\
+             \x20 t:setUp(vec3(0, -1, 0), vec3(1, 0, 0))\n\
+             \x20 local f = t:worldForward()\n\
+             \x20 if f.x < 0.99999 then error('forward ' .. f.x) end\n\
+             \x20 t:setAngles(0.3, math.rad(120), math.rad(10))\n\
+             end\n",
+        ),
+    );
+    let script = |kind: &str| {
+        Scripts(vec![floptle_core::ScriptInst {
+            kind: kind.into(),
+            enabled: true,
+            params: vec![],
+            refs: Vec::new(),
+            strs: Vec::new(),
+            pinned_bools: None,
+        }])
+    };
+    let mut world = World::default();
+    let parent = world.spawn();
+    world.insert(parent, Transform { rotation: parent_rot, ..Transform::IDENTITY });
+    let pad = world.spawn();
+    world.insert(pad, Transform::IDENTITY);
+    world.insert(pad, floptle_core::Name("Pad".into()));
+    world.insert(pad, floptle_core::Parent(parent));
+    let driver = world.spawn();
+    world.insert(driver, Transform::IDENTITY);
+    world.insert(driver, script("stand"));
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 0.016, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    // The non-canonical triple is the rotation the three matrices compose to.
+    let want = Quat::from_euler(EulerRot::YXZ, 0.3, 120f32.to_radians(), 10f32.to_radians());
+    let got = world.get::<Transform>(pad).unwrap().rotation;
+    assert!(got.angle_between(want) < 1e-5, "setAngles on a handle: {got:?} is not {want:?}");
+
+    // The script's own node: a handful of normals, one run each, checked on
+    // the world transform after the read-back.
+    for (i, n) in normals.iter().enumerate().filter(|(i, _)| i % 97 == 0 || *i < 4) {
+        write_script(&dir, "self_up", &format!("function start(node)\n  node:setUp(vec3({}, {}, {}))\nend\n", n[0], n[1], n[2]));
+        let mut world = World::default();
+        let parent = world.spawn();
+        world.insert(parent, Transform { rotation: parent_rot, ..Transform::IDENTITY });
+        let e = world.spawn();
+        world.insert(e, Transform { rotation: Quat::from_rotation_z(0.2), ..Transform::IDENTITY });
+        world.insert(e, floptle_core::Parent(parent));
+        world.insert(e, script("self_up"));
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.016, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let up = floptle_core::world_transform(&world, e).rotation * Vec3::Y;
+        let want = Vec3::new(n[0] as f32, n[1] as f32, n[2] as f32);
+        assert!((up - want).abs().max_element() < 1e-5, "own node, normal {i}: up {up:?} is not {want:?}");
+    }
+
+    write_script(&dir, "self_angles", "function start(node)\n  node:setAngles(0.3, math.rad(120), math.rad(10))\nend\n");
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(e, script("self_angles"));
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 0.016, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    let got = world.get::<Transform>(e).unwrap().rotation;
+    assert!(got.angle_between(want) < 1e-5, "setAngles on its own node: {got:?} is not {want:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

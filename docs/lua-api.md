@@ -14,17 +14,17 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 198
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 201
 - [node — transform & body fields](#node--transform--body-fields) — 42
 - [node — methods & handles](#node--methods--handles) — 36
-- [vectors, directions & easing](#vectors-directions--easing) — 49
+- [vectors, directions & easing](#vectors-directions--easing) — 51
 - [scene lookups & raycast](#scene-lookups--raycast) — 16
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
 - [input — keyboard & mouse](#input--keyboard--mouse) — 45
 - [drawing — draw.*](#drawing--draw) — 18
 - [the web — http.*, json.*](#the-web--http-json) — 15
 - [the player's account — account.*](#the-players-account--account) — 13
-- [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 71
+- [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 72
 - [networking — net.*, synced](#networking--net-synced) — 41
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 18
@@ -42,10 +42,10 @@ each group, and meant to be searched.
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 19
 - [components — getcomponent](#components--getcomponent) — 110
-- [animation — node:animator](#animation--nodeanimator) — 26
+- [animation — node:animator](#animation--nodeanimator) — 29
 - [particles — effects from script](#particles--effects-from-script) — 11
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 32
-- [assets](#assets) — 14
+- [assets](#assets) — 18
 - [debug gizmos](#debug-gizmos) — 5
 - [lua stdlib](#lua-stdlib) — 43
 
@@ -151,6 +151,10 @@ The settings a game offers the person playing it, and the one thing every main m
 
 app.dataPath() — the folder a player's own files are in, as a full path: where `user://` points, for a screen that says "your levels are in …". In an exported build that is the per-user data folder (%APPDATA%\<studio>\<data_id>\user on Windows, ~/Library/Application Support/<data_id>/user on macOS, ~/.local/share/<data_id>/user on Linux); in the editor, floptle run and shot it is the project's save/user. nil in a browser, where the files live in the page's storage and there is no folder to show.
 
+### `app.displayModes`
+
+app.displayModes([monitor]) → { {width=, height=, refresh=, monitor=}, … } — the full-screen modes the monitors offer (one monitor's when you pass its index), largest first, each once. What a Resolution dropdown lists. Empty where there is no window; a browser lists none it can switch to.
+
 ### `app.dynamicResolution`
 
 app.dynamicResolution() → whether the engine is choosing the render scale itself (app.setDynamicResolution).
@@ -170,6 +174,10 @@ app.isTouch() — true when the player's main pointer is a finger: a phone or ta
 ### `app.isWeb`
 
 app.isWeb() — true in a browser build. The same answer as app.platform() == "web", for the common question.
+
+### `app.monitors`
+
+app.monitors() → { {index=, name=, width=, height=, refresh=, x=, y=, current=}, … } — the displays the game's window could be on, in the system's order; current is the one it is on now. Sizes are physical pixels. An empty list where there is no window (floptle run, a dedicated server). Kept up to date every couple of seconds, so a monitor plugged in while a settings page is open shows up.
 
 ### `app.platform`
 
@@ -202,6 +210,17 @@ app.retroHeight() → the internal height the game composites at, in pixels. In 
 ### `app.retroIntegerScale`
 
 app.retroIntegerScale() → whether the retro composite is upscaled by a WHOLE number and letterboxed rather than stretched to fill.
+
+### `app.setDisplayMode`
+
+app.setDisplayMode{ width =, height = [, refresh =, monitor =, fullscreen = ] } — set the resolution, refresh rate and monitor. fullscreen = true switches that monitor to that mode (exclusive full screen), so it must be one app.displayModes lists — otherwise it RAISES naming the sizes the monitor has; refresh left out takes the highest at that size. fullscreen = false makes a window that many pixels, centred on the monitor; any size. Left out, the game stays as full-screen or windowed as it is. monitor is an index from app.monitors() (default: the one the window is on). A browser covers the screen instead of switching modes. Only a game's own window: in the editor it says so once in the Console and leaves the editor alone. For this session; persist the player's choice with save.set.
+
+```lua
+-- a Resolution dropdown: list what the screen offers, apply a pick
+local modes = app.displayModes()
+local m = modes[1]
+app.setDisplayMode{ width = m.width, height = m.height, refresh = m.refresh, fullscreen = true }
+```
 
 ### `app.setDynamicResolution`
 
@@ -952,7 +971,7 @@ A Mesh node's model path — read it, or ASSIGN it to swap the model live (e.g. 
 
 ### `node.name`
 
-The node's name (string).
+The node's name (string). Writable: node.name = "Kestrel" renames it — the handle reads the new name back at once, the scene has it after the pass, and find("Kestrel") answers from the next pass. A non-string raises.
 
 ### `node.parent`
 
@@ -960,7 +979,7 @@ The parent node handle, or nil. A handle has the same fields (x/y/z, …) so you
 
 ### `node.pitch`
 
-Pitch about X, in radians.
+Pitch about X, in radians. Reads back canonical (within ±pi/2); see node.yaw for why one-field writes can change a rotation, and node:setAngles / node:setUp for the whole-rotation setters.
 
 ### `node.pos`
 
@@ -976,7 +995,7 @@ The node's +X axis as a vec3, from its OWN rotation, in its PARENT's space (like
 
 ### `node.roll`
 
-Roll about Z, in radians.
+Roll about Z, in radians. See node.yaw: node:setAngles sets all three at once, node:setUp stands the node on a normal.
 
 ### `node.scale`
 
@@ -1080,7 +1099,7 @@ World Y position (number).
 
 ### `node.yaw`
 
-Heading about Y, in radians.
+Heading about Y, in radians. A node stores a rotation, not three numbers: writing one angle of another node re-reads the other two in canonical form (pitch within ±pi/2), so a triple with pitch past 90° written field by field lands as a DIFFERENT rotation. To set all three use node:setAngles; to stand a node on a surface normal use node:setUp; lookRotation gives canonical angles.
 
 ### `node.z`
 
@@ -1094,7 +1113,7 @@ node:addTag("burning") — add a tag at runtime (duplicates are ignored). findTa
 
 ### `node:animator`
 
-node:animator() — the animation handle for this node's Animation Controller (or a rigged model's embedded clips). Setters: :play/:restart/:crossfade/:stop/:setSpeed/:setLayerWeight/:seek/:setParam/:setEnabled/:setCulling. Bones, per frame: :setBoneRot/:addBoneRot/:setBonePos/:addBonePos/:reach/:lookAt. Getters: :state/:time/:finished/:isPlaying/:clips/:layers/:boneWorld.
+node:animator() — the animation handle for this node's Animation Controller (or a rigged model's embedded clips). Setters: :play/:restart/:crossfade/:stop/:setSpeed/:setLayerWeight/:seek/:setParam/:setEnabled/:setCulling. Bones, per frame: :setBoneRot/:addBoneRot/:setBonePos/:addBonePos/:reach/:lookAt, many at once with :boneIndex/:setBones, kept with :holdPose. Getters: :state/:time/:finished/:isPlaying/:clips/:layers/:boneWorld.
 
 ```lua
 local anim = node:animator()
@@ -1389,6 +1408,25 @@ node:lookAt(aimPoint, node.up)   -- roll set too, for a planet camera
 ### `node:moveTowards`
 
 node:moveTowards(target, maxDelta) — the method spelling of moveTowards(node, …). World-space and placed through the parent inverse, so a node under a container arrives where you actually pointed.
+
+### `node:setAngles`
+
+node:setAngles(yaw, pitch, roll) — set all three angles in one write, composed exactly as given (yaw about Y, then pitch about X, then roll about Z), canonical or not. Writing node.yaw / node.pitch / node.roll one at a time re-reads the other two in canonical form between writes, so pitch 120° and roll 10° written that way is a different rotation; this is not.
+
+```lua
+-- all three angles in one write, composed exactly as given
+node:setAngles(yaw, math.rad(120), roll)
+```
+
+### `node:setUp`
+
+node:setUp(up [, forward]) — turn the node so its +Y lies along a WORLD direction (a surface normal, the way out from a planet's centre), whatever the hemisphere and whatever its parent's rotation. With a forward, its -Z faces that way as nearly as the up allows; without one it tips the shortest way from where it points now, so its heading is kept. No Euler angles involved, so a normal with y < 0 stands it as surely as one with y > 0.
+
+```lua
+-- stand on a surface: +Y along the normal, anywhere on a planet
+node:setUp(hit.normal)
+node:setUp(hit.normal, toCamera)   -- and face that way as nearly as it can
+```
 
 ### `node:setWorldPos`
 
@@ -2356,6 +2394,21 @@ ui.dragging() — the element being dragged, as a node, or nil. Live for the who
 ### `ui.dropTarget`
 
 ui.dropTarget() — the drop target the drag is currently over, as a node, or nil.
+
+### `ui.engineSettings`
+
+ui.engineSettings(container, "controls" | "accessibility" [, { styles = { page=, row=, label=, value=, button= }, onChanged = function(key, value) end, filter = "keyboard" }]) → panel — build the engine's own settings page into a container of yours, with ui.make. controls: one row per input.ron action with its bindings; clicking a row arms press-to-bind (filter narrows it to "keyboard", "pad" or "axis"). accessibility: text size, colour filter, reduce motion and captions, each a button that steps through its values. Nothing is painted: every element takes the style you name for its slot, so the page wears your theme. Call panel:update() from your update while the page is open — a pressed key arrives between frames, and update commits it; panel:refresh() redraws after you change a setting yourself. onChanged(key, value) fires after each change ("textScale", "colorFilter", "reducedMotion", "captions", or "binding" with the action) so you can save.set it: the settings are the player's, and the engine does not save them for you. Rebinding reaches only actions: a script reading raw input.key gets nothing from it.
+
+```lua
+-- the engine's Controls page, in your panel, in your styles
+function start(node)
+  panel = ui.engineSettings(find("Settings Body"), "controls", {
+    styles = { row = "settingsRow", button = "chip" },
+    onChanged = function(key, value) save.set("settings." .. key, value) end,
+  })
+end
+function update(node, dt) panel:update() end
+```
 
 ### `ui.event`
 
@@ -3332,7 +3385,7 @@ save.get("gold" [, default]) — the stored value, else the default, else nil. s
 
 ### `save.set`
 
-save.set("gold", 42) — store persistent game data: survives Play sessions, editor restarts, and ships with exported builds. Values follow the synced-var guardrails (numbers/strings/bools/tables, depth <= 4, <= 1 KB), and a slot holds at most 10 000 keys / 4 MB in all. Flushed on Stop + every few seconds during Play.
+save.set("gold", 42) — store persistent game data: survives Play sessions, editor restarts, and ships with exported builds. Values are plain data (numbers/strings/bools/tables, no functions or userdata), tables nested up to 16 deep (a cycle or a 17th level raises); a slot holds at most 10 000 keys / 4 MB in all. Not the wire's depth-4 rule: a save stays on this machine. Flushed on Stop + every few seconds during Play.
 
 ```lua
 save.set("hp", hp)                 -- survives scene loads and quits
@@ -3910,9 +3963,13 @@ anim:addBonePos("Hips", vec3(0, -0.12, 0) [, weight]) — move one bone by this 
 
 anim:addBoneRot("Spine1", yaw, pitch, roll [, weight]) — turn one bone further by this much, on top of what the clips put there, for this frame only. The way to aim a chest over a run cycle without taking the run's motion off it.
 
+### `anim:boneIndex`
+
+anim:boneIndex("Rib12") → number — the bone's number on this model, its place in node:bones(). Every bone write (setBoneRot/addBoneRot/setBonePos/addBonePos) takes the number instead of the name, and anim:setBones takes a list of them: no name copied and looked up per call. nil until the model has posed once (so not in start); a bone the model lacks raises.
+
 ### `anim:boneWorld`
 
-anim:boneWorld("Hand") → pos, yaw, pitch, roll — where the bone is this frame, in world space, after clips, bone writes and IK. A write made earlier in the same pass is already in the answer, so `setBonePos` then `boneWorld` reads back the moved bone. nil until the model is posed. Works under `floptle run` and on a dedicated server, which read the rig without its pictures, so a hitbox can follow a hand where nothing is drawn.
+anim:boneWorld("Hand") → pos, yaw, pitch, roll — where the bone is this frame, in world space, after clips, bone writes and IK. A write made earlier in the same pass is already in the answer, counted once, so `setBonePos` then `boneWorld` reads back the moved bone (written every frame, it is not read twice). Read before any write, it is the pose last drawn. nil until the model is posed. Works under `floptle run` and on a dedicated server, which read the rig without its pictures, so a hitbox can follow a hand where nothing is drawn.
 
 ### `anim:clips`
 
@@ -3937,6 +3994,10 @@ anim:events("Punch") — the clip's authored events as { {t = seconds, func = "o
 ### `anim:finished`
 
 anim:finished([layer]) — true when a non-looped state reached its end this frame (or stays true while holding the last frame).
+
+### `anim:holdPose`
+
+anim:holdPose(true) — keep the writes of the last frame that made any while later frames write nothing, instead of falling back to the clips: a still, non-rest pose costs nothing to keep. The first write of a later frame replaces the whole held pose; anim:holdPose(false) hands the rig back to the clips that same frame.
 
 ### `anim:isPlaying`
 
@@ -3973,6 +4034,10 @@ anim:setBonePos("Hips", vec3(0, 0.9, 0) [, weight]) — replace one bone's local
 ### `anim:setBoneRot`
 
 anim:setBoneRot("Neck", yaw, pitch, roll [, weight]) — replace one bone's local rotation (radians, the node.yaw/pitch/roll convention) after the clips have posed the rig, for this frame only: call it every frame you want it held. weight 0..1 blends from the animated pose. On a rigged model; a bone the model doesn't have warns once.
+
+### `anim:setBones`
+
+anim:setBones(bones, positions, rotations [, weight]) — set many bones in one call, for this frame only: bones is a list of numbers from anim:boneIndex, positions flat x, y, z per bone (parent space), rotations flat yaw, pitch, roll per bone (radians); either list may be nil to leave that channel alone. The same pose as one setBonePos + setBoneRot per bone, for a fraction of the cost — a hundred-bone cloth or rope in one crossing.
 
 ### `anim:setCulling`
 
@@ -4228,6 +4293,10 @@ assets.remove("user://levels/mine.json") -> ok, err — delete one of the PLAYER
 
 assets.textureFromBytes(bytes, function(tex, err) end) — assets.textureFromUrl for bytes you already have, such as a blob's res.body. Same formats, limits and names; at most 8 MB of bytes.
 
+### `assets.textureFromPixels`
+
+assets.textureFromPixels(w, h, pixels) → tex — a texture from pixels a script made: bark, leaves, a minimap, a noise pattern. `pixels` is r, g, b, a per pixel, row by row from the top, as a string of w*h*4 bytes (string.char, or a buffer read out) or a flat list of numbers 0–255. Answers a name like "img:5" at once, usable anywhere a texture path is (a material's texture, draw.quad, a UI image); it draws from the next frame. w and h are whole numbers from 1 to 4096, and the count must match exactly — anything else raises. Kept until assets.release(tex) or Stop. A host that draws nothing (floptle run, a dedicated server) answers nil, why.
+
 ### `assets.textureFromUrl`
 
 assets.textureFromUrl(url [, opts], function(tex, err) end) — download a picture (a profile picture, a shared image) and make it a texture. `tex` is a name like "img:3" that goes anywhere a texture path does: draw.quad, a UI image's texture, a material's texture; a UI image with radius = half its size draws round. PNG, JPEG and WebP only, told apart by the bytes' own signature, at most 4096 pixels a side; anything else answers nil, why. The download is exactly http.get (same opts, Play only, public addresses, the same rate limits), and a URL already loaded this session answers from memory. The callback runs on a later frame. Kept until assets.release(tex) or Stop. A host that draws nothing (a dedicated server) answers with an error and downloads nothing. Refuses: what http.get refuses, at the call.
@@ -4243,6 +4312,18 @@ assets.writeJson("charts/neon.json", value [, { pretty = true }]) -> ok, err —
 ### `assets.writeText`
 
 assets.writeText("charts/neon.txt", text) -> ok, err — write a file under Assets/, creating the folders on the way and replacing what was there. A path starting `user://` is the PLAYER's instead (settings, progress, levels they made, replays): in an exported build it lives in a per-user data folder that survives installing a new version, apart from the game's files; in the editor and floptle run it is the project's save/user. An exported build that writes a plain path writes into its own install folder, which a new build will not see and an installed game may not be allowed to write — it still works, and the Console says so once. A path outside the project is refused (false and why). Editor or exported build alike; in a browser the write lands in the page's own storage and survives a reload. Refuses: the path leaves the project (absolute, or containing `..`); the path is an existing FOLDER; the folder could not be created; the write itself failed (permissions, a full disk).
+
+### `mesh`
+
+Meshes a script builds while the game runs: mesh.build and mesh.free. A built mesh is a name like "mesh:3" that goes wherever a model path does — node.model, scatter.create{ asset = }.
+
+### `mesh.build`
+
+mesh.build{ positions =, indices = [, normals =, uvs =, colors = ] } → name — build a mesh from numbers: a procedural plant, a fairing fitted to a part, a rope. positions is x, y, z per vertex (local space); indices is three per triangle, numbering vertices from 1, wound counter-clockwise seen from the front; normals x, y, z per vertex (left out, they are worked out from the faces, smooth); uvs u, v per vertex (0, 0 at the texture's top-left); colors r, g, b, a per vertex, 0–1, multiplied into the material. Answers a name at once: node.model = name draws it from the next frame, with the node's own material (node:setMaterial{ texture = assets.textureFromPixels(...) }). At most 1 048 576 vertices and 3 145 728 indices. A missing or uneven list, an index out of range, or a non-finite number raises, naming the list. Kept until mesh.free(name) or Stop. One material per mesh: a part in two materials is two meshes. A host that draws nothing still answers a name, and nothing draws it. A Mesh collider does not read a built mesh.
+
+### `mesh.free`
+
+mesh.free(name) → true if it was a mesh mesh.build made — give it back. Nodes still wearing it draw nothing; the name is never handed out again.
 
 ## debug gizmos
 

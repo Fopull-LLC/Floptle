@@ -102,6 +102,70 @@ pub struct AppInfo {
     /// Whether the player's main pointer is a finger: a phone or tablet in a
     /// browser, or any screen that has been touched.
     pub touch: bool,
+    /// The displays the window could be on, in the order the system lists
+    /// them. Empty where there is no window (`floptle run`). Shared, because
+    /// it changes when a monitor is plugged in, not every frame.
+    pub monitors: Rc<Vec<MonitorInfo>>,
+    /// Every full-screen mode of every monitor, `monitor` naming which.
+    pub display_modes: Rc<Vec<DisplayMode>>,
+}
+
+/// One display, as `app.monitors()` lists it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MonitorInfo {
+    /// What the system calls it, or "" where it says nothing.
+    pub name: String,
+    /// Its current size in physical pixels.
+    pub width: u32,
+    pub height: u32,
+    /// Its current refresh rate in Hz, where it says.
+    pub refresh: Option<f32>,
+    /// Its top-left corner on the desktop, in physical pixels.
+    pub x: i32,
+    pub y: i32,
+    /// The window is on this one.
+    pub current: bool,
+}
+
+/// One full-screen video mode a monitor offers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DisplayMode {
+    pub width: u32,
+    pub height: u32,
+    /// Hz.
+    pub refresh: f32,
+    /// 1-based, into `monitors`.
+    pub monitor: usize,
+}
+
+/// What `app.setDisplayMode{...}` asked for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DisplayModeRequest {
+    pub width: u32,
+    pub height: u32,
+    /// Hz; `None` takes the highest the monitor offers at that size.
+    pub refresh: Option<f32>,
+    /// 1-based; `None` is the monitor the window is on.
+    pub monitor: Option<usize>,
+    /// Exclusive full screen at this mode, or a window this size; `None`
+    /// keeps whichever the game is in now.
+    pub fullscreen: Option<bool>,
+}
+
+/// Every key `app.setDisplayMode{...}` reads.
+pub const DISPLAY_MODE_KEYS: &[&str] = &["width", "height", "refresh", "monitor", "fullscreen"];
+
+/// The mode in `modes` a request means: that monitor and size, at the refresh
+/// asked for (nearest within half a hertz) or else the highest offered.
+pub fn pick_mode(modes: &[DisplayMode], monitor: usize, width: u32, height: u32, refresh: Option<f32>) -> Option<DisplayMode> {
+    let at_size = modes.iter().filter(|m| m.monitor == monitor && m.width == width && m.height == height);
+    match refresh {
+        Some(hz) => at_size
+            .filter(|m| (m.refresh - hz).abs() <= 0.5)
+            .min_by(|a, b| (a.refresh - hz).abs().total_cmp(&(b.refresh - hz).abs()))
+            .copied(),
+        None => at_size.max_by(|a, b| a.refresh.total_cmp(&b.refresh)).copied(),
+    }
 }
 
 /// What a script asked the driver to change or do this frame.
@@ -128,6 +192,8 @@ pub struct AppRequests {
     pub frame_cap: Option<f32>,
     /// Turn dynamic resolution on with these settings, or off (`Some(None)`).
     pub dynamic_resolution: Option<Option<DynResSpec>>,
+    /// A resolution, refresh rate and monitor, from `app.setDisplayMode`.
+    pub display_mode: Option<DisplayModeRequest>,
 }
 
 impl AppRequests {
@@ -144,6 +210,7 @@ impl AppRequests {
             && self.fullscreen.is_none()
             && self.frame_cap.is_none()
             && self.dynamic_resolution.is_none()
+            && self.display_mode.is_none()
     }
 }
 
@@ -536,6 +603,113 @@ pub fn install(lua: &Lua, info: &SharedAppInfo, req: &SharedAppRequests) -> mlua
         )?;
     }
 
+    // --- displays -----------------------------------------------------------
+    // app.monitors() / app.displayModes([monitor]) / app.setDisplayMode{...} —
+    // what a Display page offers: which screen, and at what resolution.
+    {
+        let i = info.clone();
+        t.set(
+            "monitors",
+            lua.create_function(move |lua, ()| {
+                let list = lua.create_table()?;
+                for (n, m) in i.borrow().monitors.iter().enumerate() {
+                    let row = lua.create_table()?;
+                    row.set("index", n + 1)?;
+                    row.set("name", m.name.as_str())?;
+                    row.set("width", m.width)?;
+                    row.set("height", m.height)?;
+                    row.set("refresh", m.refresh.map(f64::from))?;
+                    row.set("x", m.x)?;
+                    row.set("y", m.y)?;
+                    row.set("current", m.current)?;
+                    list.raw_set(n + 1, row)?;
+                }
+                Ok(list)
+            })?,
+        )?;
+    }
+    {
+        let i = info.clone();
+        t.set(
+            "displayModes",
+            lua.create_function(move |lua, monitor: Option<usize>| {
+                let list = lua.create_table()?;
+                let info = i.borrow();
+                let mut n = 0;
+                for m in info.display_modes.iter().filter(|m| monitor.is_none_or(|w| w == m.monitor)) {
+                    let row = lua.create_table()?;
+                    row.set("width", m.width)?;
+                    row.set("height", m.height)?;
+                    row.set("refresh", f64::from(m.refresh))?;
+                    row.set("monitor", m.monitor)?;
+                    n += 1;
+                    list.raw_set(n, row)?;
+                }
+                Ok(list)
+            })?,
+        )?;
+    }
+    {
+        let r = req.clone();
+        let i = info.clone();
+        t.set(
+            "setDisplayMode",
+            lua.create_function(move |_, o: mlua::Table| {
+                use crate::opts::{check_keys, opt_num};
+                const CALL: &str = "app.setDisplayMode";
+                check_keys(&o, DISPLAY_MODE_KEYS, CALL)?;
+                let size = |key: &str| -> mlua::Result<u32> {
+                    opt_num(&o, CALL, key, 1.0, 65535.0)?.map(|v| v.round() as u32).ok_or_else(|| {
+                        mlua::Error::RuntimeError(format!("{CALL} needs a {key}, in pixels"))
+                    })
+                };
+                let (width, height) = (size("width")?, size("height")?);
+                let refresh = opt_num(&o, CALL, "refresh", 1.0, 1000.0)?.map(|v| v as f32);
+                let fullscreen: Option<bool> = o.get("fullscreen")?;
+                let info = i.borrow();
+                let monitor = match opt_num(&o, CALL, "monitor", 1.0, 1e6)? {
+                    Some(m) => {
+                        let m = m as usize;
+                        if !info.monitors.is_empty() && m > info.monitors.len() {
+                            return Err(mlua::Error::RuntimeError(format!(
+                                "{CALL}: there is no monitor {m}; app.monitors() lists {}",
+                                info.monitors.len()
+                            )));
+                        }
+                        Some(m)
+                    }
+                    None => None,
+                };
+                // Full screen switches the monitor's own mode, so it has to be
+                // one the monitor offers. Checked here, where the error can say
+                // which line asked; a window may be any size.
+                let full = fullscreen.unwrap_or(info.fullscreen);
+                let on = monitor.or_else(|| info.monitors.iter().position(|m| m.current).map(|p| p + 1)).unwrap_or(1);
+                if full && !info.display_modes.is_empty() && pick_mode(&info.display_modes, on, width, height, refresh).is_none() {
+                    let mut sizes: Vec<String> = info
+                        .display_modes
+                        .iter()
+                        .filter(|m| m.monitor == on)
+                        .map(|m| format!("{}x{}", m.width, m.height))
+                        .collect();
+                    sizes.dedup();
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "{CALL}: monitor {on} has no full-screen mode {width}x{height}{} — it offers {} \
+                         (app.displayModes({on}) lists them with their refresh rates)",
+                        refresh.map_or(String::new(), |hz| format!(" at {hz} Hz")),
+                        sizes.join(", ")
+                    )));
+                }
+                drop(info);
+                r.borrow_mut().display_mode = Some(DisplayModeRequest { width, height, refresh, monitor, fullscreen });
+                if let Some(f) = fullscreen {
+                    i.borrow_mut().fullscreen = f;
+                }
+                Ok(())
+            })?,
+        )?;
+    }
+
     lua.globals().set("app", t)?;
     Ok(())
 }
@@ -605,6 +779,62 @@ mod tests {
         let back: bool = lua.load("app.setFullscreen(false) return app.fullscreen()").eval().unwrap();
         assert!(!back);
         assert_eq!(req.borrow().fullscreen, Some(false));
+    }
+
+    /// **A Display page can list the screens and their modes, and pick one.**
+    /// Two monitors, the window on the second; full screen must name a mode
+    /// that monitor offers (the error says which it does), a window may be
+    /// any size, and a refresh left out takes the highest at that size.
+    #[test]
+    fn display_modes_list_by_monitor_and_a_full_screen_mode_must_be_offered() {
+        let lua = Lua::new();
+        let mode = |monitor, width, height, refresh| DisplayMode { width, height, refresh, monitor };
+        let info: SharedAppInfo = Rc::new(RefCell::new(AppInfo {
+            monitors: Rc::new(vec![
+                MonitorInfo { name: "Left".into(), width: 1920, height: 1080, refresh: Some(60.0), ..Default::default() },
+                MonitorInfo { name: "Right".into(), width: 2560, height: 1440, refresh: Some(144.0), x: 1920, current: true, ..Default::default() },
+            ]),
+            display_modes: Rc::new(vec![
+                mode(1, 1920, 1080, 60.0),
+                mode(1, 1280, 720, 60.0),
+                mode(2, 2560, 1440, 144.0),
+                mode(2, 2560, 1440, 60.0),
+                mode(2, 1920, 1080, 120.0),
+            ]),
+            ..Default::default()
+        }));
+        let req: SharedAppRequests = Rc::new(RefCell::new(AppRequests::default()));
+        install(&lua, &info, &req).unwrap();
+
+        let (n, name, current): (usize, String, bool) =
+            lua.load("local m = app.monitors() return #m, m[2].name, m[2].current").eval().unwrap();
+        assert_eq!((n, name.as_str(), current), (2, "Right", true));
+        let (all, second): (usize, usize) = lua.load("return #app.displayModes(), #app.displayModes(2)").eval().unwrap();
+        assert_eq!((all, second), (5, 3));
+        assert!(req.borrow().is_empty(), "listing is not asking");
+
+        // Full screen at a size the window's monitor offers: queued as asked.
+        lua.load("app.setDisplayMode{ width = 2560, height = 1440, fullscreen = true }").exec().unwrap();
+        assert_eq!(
+            req.borrow().display_mode,
+            Some(DisplayModeRequest { width: 2560, height: 1440, refresh: None, monitor: None, fullscreen: Some(true) })
+        );
+        assert!(lua.load("return app.fullscreen()").eval::<bool>().unwrap(), "the getter answers the click at once");
+        assert_eq!(pick_mode(&info.borrow().display_modes, 2, 2560, 1440, None).map(|m| m.refresh), Some(144.0));
+        assert_eq!(pick_mode(&info.borrow().display_modes, 2, 2560, 1440, Some(59.94)).map(|m| m.refresh), Some(60.0));
+
+        // A size that monitor does not offer, full screen: refused, naming what it does.
+        let err = lua.load("app.setDisplayMode{ width = 1280, height = 720, fullscreen = true }").exec().unwrap_err().to_string();
+        assert!(err.contains("1280x720") && err.contains("2560x1440"), "{err}");
+        // …but monitor 1 has it.
+        lua.load("app.setDisplayMode{ width = 1280, height = 720, monitor = 1, fullscreen = true }").exec().unwrap();
+        // A window may be any size; a monitor that is not there is refused.
+        lua.load("app.setDisplayMode{ width = 1000, height = 700, fullscreen = false }").exec().unwrap();
+        assert!(!lua.load("return app.fullscreen()").eval::<bool>().unwrap());
+        let err = lua.load("app.setDisplayMode{ width = 800, height = 600, monitor = 3 }").exec().unwrap_err().to_string();
+        assert!(err.contains("no monitor 3"), "{err}");
+        let err = lua.load("app.setDisplayMode{ height = 600 }").exec().unwrap_err().to_string();
+        assert!(err.contains("width"), "{err}");
     }
 
     fn spec() -> DynResSpec {

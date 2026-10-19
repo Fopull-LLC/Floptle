@@ -91,9 +91,9 @@ impl Editor {
                 format!(
                     "the scripts' copy of the scene has been rebuilt from scratch on each of the last \
                      {streak} frames, which costs time in proportion to the whole scene (the `mirror` \
-                     bucket in perf). The last cause: {}. Something structural is changing every \
-                     frame: a rename, a retag, a reparent or a script attached. Pool the node or keep \
-                     its name and tags fixed.",
+                     bucket in perf). The last cause: {}. A rename, retag, reparent, spawn or despawn \
+                     only patches it, so something is replacing the scene, or writing more than the \
+                     change log holds, every frame.",
                     cause.as_deref().unwrap_or("unknown")
                 ),
                 None,

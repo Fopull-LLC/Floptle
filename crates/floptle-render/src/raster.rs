@@ -3152,6 +3152,19 @@ impl Raster {
         }
     }
 
+    /// Let go of an upload-once mesh's vertex and index buffers. The id stays
+    /// taken and draws nothing, so a stale handle is harmless; only the GPU
+    /// memory comes back. Its vertex-paint block, if it had one, is not
+    /// reclaimed. A dynamic slot goes back to its free-list instead.
+    pub fn release_mesh(&mut self, gpu: &Gpu, id: MeshId) {
+        if self.meshes.get(id.0 as usize).is_some_and(|m| m.dynamic.is_some()) {
+            return self.free_dynamic(id);
+        }
+        let Some(m) = self.meshes.get_mut(id.0 as usize) else { return };
+        m.gpu_mesh = GpuMesh::with_capacity(gpu, 1, 1);
+        m.gpu_mesh.index_count = 0;
+    }
+
     /// The terrain-color base a dynamic slot owns (0 = none) — goes in
     /// [`MaterialParams::terrain_paint_base`] for that chunk's instance.
     pub fn dyn_paint_base(&self, id: MeshId) -> u32 {

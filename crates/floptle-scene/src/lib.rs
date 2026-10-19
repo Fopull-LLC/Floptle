@@ -3924,15 +3924,38 @@ pub fn validate_parents(nodes: &[NodeDoc]) -> Vec<String> {
     out
 }
 
-/// UI elements whose parent chain can never be visible, one line each.
+/// UI elements whose parent chain can never be visible, one line per hidden
+/// parent.
 ///
 /// An invisible parent hides its whole subtree, so this is the difference
 /// between "obviously broken" and "you cannot see any of this and nothing will
 /// tell you why" — which is how a match HUD went missing for two play sessions
 /// and was reported as three separate bugs.
-pub fn validate_ui_visibility(nodes: &[NodeDoc]) -> Vec<String> {
+///
+/// A panel a game shows from a script is authored hidden on purpose: a pause
+/// menu, an inventory, a dialog. `shown_by_script` answers whether a node name
+/// is one a script can reach, and a hidden parent that is, or that sits under
+/// one that is, or that carries a script of its own, is left alone. Only the
+/// nearest hidden parent is judged: it is the one that has to be shown.
+pub fn validate_ui_visibility(nodes: &[NodeDoc], shown_by_script: impl Fn(&str) -> bool) -> Vec<String> {
     let by_id = node_id_positions(nodes);
-    let mut out = Vec::new();
+    let reachable = |p: usize| {
+        if !nodes[p].scripts.is_empty() {
+            return true;
+        }
+        let mut at = Some(p);
+        for _ in 0..=nodes.len() {
+            let Some(i) = at else { break };
+            if shown_by_script(&nodes[i].name) {
+                return true;
+            }
+            at = resolve_parent(&nodes[i], &by_id);
+        }
+        false
+    };
+    // Hidden parent → the elements under it, in scene order, so the report is
+    // one line per thing to fix rather than one per child.
+    let mut hidden: Vec<(usize, Vec<usize>)> = Vec::new();
     for (i, n) in nodes.iter().enumerate() {
         if n.ui.is_none() {
             continue;
@@ -3943,17 +3966,35 @@ pub fn validate_ui_visibility(nodes: &[NodeDoc]) -> Vec<String> {
             let Some(parent) = nodes.get(p) else { break };
             let hidden_spec = parent.ui.as_ref().is_some_and(|u| !u.visible);
             if !parent.visible || hidden_spec {
-                out.push(format!(
-                    "UI element \"{}\" sits under \"{}\", which is not visible — nothing in \
-                     this subtree will ever be drawn",
-                    n.name, parent.name
-                ));
+                match hidden.iter_mut().find(|(h, _)| *h == p) {
+                    Some((_, kids)) => kids.push(i),
+                    None => hidden.push((p, vec![i])),
+                }
                 break;
             }
             at = p;
         }
     }
-    out
+    hidden
+        .into_iter()
+        .filter(|(p, _)| !reachable(*p))
+        .map(|(p, kids)| {
+            let parent = &nodes[p].name;
+            match kids.as_slice() {
+                [one] => format!(
+                    "UI element \"{}\" sits under \"{parent}\", which is not visible and is not \
+                     named in any script — nothing in this subtree will ever be drawn",
+                    nodes[*one].name
+                ),
+                _ => format!(
+                    "{} UI elements (\"{}\", …) sit under \"{parent}\", which is not visible and is \
+                     not named in any script — nothing in this subtree will ever be drawn",
+                    kids.len(),
+                    nodes[kids[0]].name
+                ),
+            }
+        })
+        .collect()
 }
 
 /// Spawn one node's components into the world (no parent/attachment linking —
@@ -4950,7 +4991,7 @@ mod tests {
         let mut label = plain("Score", 2, Some(1));
         label.ui = Some(floptle_ui::ElementSpec::default());
         let nodes = vec![panel, label];
-        let out = validate_ui_visibility(&nodes);
+        let out = validate_ui_visibility(&nodes, |_| false);
         assert!(
             out.iter().any(|l| l.contains("Score") && l.contains("Hidden Panel")),
             "names both the element and what is hiding it: {out:?}"
@@ -4961,7 +5002,42 @@ mod tests {
         ok_parent.ui = Some(floptle_ui::ElementSpec::default());
         let mut kid = plain("Score", 2, Some(1));
         kid.ui = Some(floptle_ui::ElementSpec::default());
-        assert!(validate_ui_visibility(&[ok_parent, kid]).is_empty());
+        assert!(validate_ui_visibility(&[ok_parent, kid], |_| false).is_empty());
+    }
+
+    /// A panel a script shows is hidden on purpose. A pause menu with a dozen
+    /// children used to print a dozen warnings on every open, and a real one
+    /// was lost among them. Named in a script (or under something that is, or
+    /// carrying a script itself): silent. Named nowhere: one line for the
+    /// panel, however many children it hides.
+    #[test]
+    fn a_hidden_panel_a_script_shows_is_not_reported_and_one_nobody_names_is_reported_once() {
+        let scene = || {
+            let mut root = plain("Menus", 1, None);
+            root.ui = Some(floptle_ui::ElementSpec::default());
+            let mut pause = plain("Pause Panel", 2, Some(1));
+            pause.visible = false;
+            pause.ui = Some(floptle_ui::ElementSpec::default());
+            let mut nodes = vec![root, pause];
+            for (i, name) in ["Resume", "Options", "Quit"].iter().enumerate() {
+                let mut b = plain(name, 10 + i as u32, Some(2));
+                b.ui = Some(floptle_ui::ElementSpec::default());
+                nodes.push(b);
+            }
+            nodes
+        };
+        let nodes = scene();
+        let out = validate_ui_visibility(&nodes, |_| false);
+        assert_eq!(out.len(), 1, "one line per hidden parent: {out:?}");
+        assert!(out[0].contains("3 UI elements") && out[0].contains("Pause Panel"), "{out:?}");
+
+        assert!(validate_ui_visibility(&nodes, |n| n == "Pause Panel").is_empty(), "a script finds it");
+        assert!(validate_ui_visibility(&nodes, |n| n == "Menus").is_empty(), "a script finds its ancestor");
+        assert_eq!(validate_ui_visibility(&nodes, |n| n == "Resume").len(), 1, "a child's name does not show the panel");
+
+        let mut scripted = scene();
+        scripted[1].scripts.push(ron::from_str::<ScriptDoc>("(kind: \"pause\")").unwrap());
+        assert!(validate_ui_visibility(&scripted, |_| false).is_empty(), "a script on the panel itself");
     }
 
     fn demo() -> SceneDoc {

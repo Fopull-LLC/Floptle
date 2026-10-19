@@ -9,8 +9,8 @@
 ---@field scale_x number Scale along X.
 ---@field scale_y number Scale along Y.
 ---@field scale_z number Scale along Z.
----@field yaw number Heading about Y, in radians.
----@field pitch number Pitch about X, in radians.
+---@field yaw number Heading about Y, in radians. One-field writes re-read the other two angles in canonical form; node:setAngles sets all three, node:setUp stands the node on a normal.
+---@field pitch number Pitch about X, in radians (reads back within ±pi/2).
 ---@field roll number Roll about Z, in radians.
 ---@field grounded boolean Physics (rigidbody nodes): resting on a surface this frame.
 ---@field dropThrough number|boolean Physics: fall through one-way platforms for this many seconds (true = 0.25). Write-only.
@@ -38,6 +38,7 @@
 ---@field tickZ number Physics: the body's world Z at the start of this tick (read/write).
 ---@field tickPos Vec3 Physics: the body's tick pose as a vec3 (read/write). Build hurtboxes from THIS, and move a fighter with `node.tickPos = node.tickPos + vec3(d, 0, 0)` — `node.x = node.x + d` inside fixedUpdate teleports the body onto its VISUAL position, so the model slides and the hitbox doesn't.
 ---@field layer string Collision/query layer, by project-defined NAME ("Default" when unset). Assigning a name the project doesn't define is an ERROR — add layers in Project Settings.
+---@field name string The node's name. Assign a string to rename it; the handle reads the new name at once and find() answers to it from the next pass.
 ---@field tags string[] The node's tags (a fresh array each read). Assign a whole array to replace; use addTag/removeTag for single edits.
 ---@field hasTag fun(self: Node, tag: string): boolean Whether the node carries this exact tag.
 ---@field destroy fun(self: Node) Remove this node and its whole subtree (queued; applied after the pass). Same as `destroy(node)`.
@@ -79,7 +80,7 @@
 ---@field script fun(self: Node, name: string): table|nil Short alias of getscript.
 ---@field scripts table[] Every script on this node as handles, in attach order — possibly empty, never nil. The plural of getScript, for when you do not yet know the name: `for _, s in ipairs(n.scripts) do print(s.kind) end` tells you what a node actually carries, which is the question a getScript that answered nil leaves you with.
 ---@field component fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|LightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|MaterialHandle|nil Short alias of getcomponent.
----@field animator fun(self: Node): table The animation handle for this node's Animation Controller (or a rigged model's embedded clips): :play / :restart / :crossfade / :stop / :setSpeed / :setLayerWeight / :seek / :setParam, per-frame bone writes :setBoneRot / :addBoneRot / :setBonePos / :addBonePos / :reach / :lookAt, and :state / :time / :finished / :isPlaying / :boneWorld.
+---@field animator fun(self: Node): table The animation handle for this node's Animation Controller (or a rigged model's embedded clips): :play / :restart / :crossfade / :stop / :setSpeed / :setLayerWeight / :seek / :setParam, per-frame bone writes :setBoneRot / :addBoneRot / :setBonePos / :addBonePos / :reach / :lookAt (a bone by name or by its :boneIndex number), many at once with :setBones, kept with :holdPose, and :state / :time / :finished / :isPlaying / :boneWorld.
 ---@field toWorld fun(self: Node, v: Vec3): Vec3 A point in this node's own frame converted to world space — position, rotation AND scale, composed up the whole parent chain. "Where is the muzzle?" is gun:toWorld(vec3(0, 0, -1.2)).
 ---@field toLocal fun(self: Node, v: Vec3): Vec3 The inverse of toWorld: a world point expressed in this node's frame.
 ---@field setWorldPos fun(self: Node, v: Vec3) Put this node at a WORLD point, whatever it is parented to, without deriving the parent inverse by hand.
@@ -90,6 +91,8 @@
 ---@field distanceFlat fun(self: Node, other: Node|Vec3, up?: Vec3): number Distance ignoring the up axis (default +Y): the "have I arrived?" test for anything walking on ground it does not control the height of. Pass an up for a planet.
 ---@field setParent fun(self: Node, parent: Node|nil, opts?: table) Move under another node (nil = top level). Keeps the world pose unless { keepWorld = false }, which keeps the local numbers.
 ---@field lookAt fun(self: Node, target: Node|Vec3, up?: Vec3) Point this node at another node or a world point. Sets yaw + pitch and leaves roll alone; pass an up and it sets roll too.
+---@field setUp fun(self: Node, up: Vec3, forward?: Vec3) Turn so +Y lies along a world direction (a surface normal), any hemisphere; with a forward, -Z faces it as nearly as the up allows.
+---@field setAngles fun(self: Node, yaw: number, pitch: number, roll: number) Set all three angles at once, composed exactly as given, canonical or not.
 ---@field turnTowards fun(self: Node, target: Node|Vec3, maxRadians: number) Turn toward something by at most that much, the SHORT way round. Pass rate * dt for a frame-rate-independent turn.
 ---@field moveTowards fun(self: Node, target: Node|Vec3, maxDelta: number) The method spelling of moveTowards(node, ...). World-space and placed through the parent inverse, so a node under a container arrives where you pointed.
 ---@field setTint fun(self: Node, color?: Color|table, alpha?: number) A colour MULTIPLIED over everything this node draws — its own textures and each part's own colour are kept. The easy "same model, but red": a hit flash, a team colour, a ghosted preview. The table form `node:setTint{ color =, alpha =, rim =, rimStrength =, ambient = }` adds the two knobs a multiply cannot do — an ADDITIVE rim and an ambient lift — and fields you leave out keep their value. `node:setTint()` with nothing clears it. Different from a Material, which REPLACES the model's own materials.
@@ -722,6 +725,16 @@ function ui.unbind(node, property) end
 ---@param container Node
 ---@param tree table
 function ui.make(container, tree) end
+
+---The engine's Controls or Accessibility page, built into `container` with
+---ui.make and styled by the slots you name (`page`, `row`, `label`, `value`,
+---`button`). Call `panel:update()` every frame while it is open so a rebind is
+---committed; `onChanged(key, value)` fires after each change so you can save it.
+---@param container Node
+---@param page string controls or accessibility
+---@param opts? { styles?: table, onChanged?: fun(key: string, value: any), filter?: string }
+---@return table panel
+function ui.engineSettings(container, page, opts) end
 
 ---A colour: `color(r, g, b [, a])`, `color(gray [, a])`, or `color(other, a)`
 ---to copy with a new alpha. Channels are 0..1 and alpha defaults to 1, so
@@ -2028,9 +2041,25 @@ function math.fbm(x, y, z, octaves, seed) end
 ---@return Rng
 function rng(seed) end
 
+---Meshes a script builds at runtime. A built mesh is a name like `mesh:3`,
+---usable anywhere a model path is (node.model, scatter.create{ asset = }).
+---@class MeshApi
+mesh = {}
+---Build a mesh from flat number lists: positions (x, y, z per vertex),
+---indices (three per triangle, vertices numbered from 1), and optionally
+---normals, uvs (u, v) and colors (r, g, b, a, 0..1). Answers its name at once;
+---it draws from the next frame. Kept until mesh.free or Stop.
+---@param spec { positions: number[], indices: integer[], normals?: number[], uvs?: number[], colors?: number[] }
+---@return string name
+function mesh.build(spec) end
+---Give a built mesh back. True if it was one.
+---@param name string
+---@return boolean
+function mesh.free(name) end
+
 ---Persistent game data: a per-slot key→value store that survives Play
----sessions, editor restarts, and ships with exported builds. Values take the
----synced-var guardrails (numbers/strings/bools/tables ≤ depth 4, ≤ 1 KB).
+---sessions, editor restarts, and ships with exported builds. Values are plain
+---data (numbers/strings/bools/tables nested up to 16 deep), within the slot cap.
 ---Flushes on Stop + every few seconds during Play; `save.flush()` forces it.
 ---Multiplayer: LOCAL storage — for server-authoritative progress call save.*
 ---on the server and hand results to clients via synced/RPC.

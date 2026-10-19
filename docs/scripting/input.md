@@ -142,6 +142,38 @@ it brings a caret, selection, the clipboard and key repeat with it
 ([ui-navigation.md](../ui-navigation.md)). `input.typed()` is empty while a field
 has focus, because the field consumed them.
 
+### Moving key reads to actions, so rebinding reaches them
+
+`input.key("space")` asks about one key, and a player's rebind cannot change
+which key that is. Rebinding — `input.startRebind`, and the Controls page
+`ui.engineSettings` builds — rewrites **actions**, so a control a player can
+rebind has to be read as one. The move is mechanical, one control at a time:
+
+1. Name the control. Project Settings ⏵ Input lists every name your scripts
+   already pass to `input.action`, so writing the call first is enough to make
+   the row appear; give it the key it used to read (and a pad button, while
+   you are there). The map lives in `input.ron`.
+2. Replace the read, edge for edge:
+
+| Raw key read | Action read |
+|---|---|
+| `input.key("space")` | `input.action("Jump")` |
+| `input.pressed("space")` | `input.justPressed("Jump")` |
+| `input.released("space")` | `input.justReleased("Jump")` |
+| `input.axis("a", "d")` | `input.axis1("MoveX")`, an axis bound to the pair |
+
+```lua
+-- before: fixed to the space bar
+if input.pressed("space") and node.grounded then jump() end
+-- after: whatever the player bound, keyboard or pad
+if input.justPressed("Jump") and node.grounded then jump() end
+```
+
+Keep raw reads for what is not a control: a debug key, typed text
+(`input.typed()`), a key the game shows by name in a tutorial line it builds
+from `input.bindingsOf`. Project Settings ⏵ Input lists the raw key reads left
+in your scripts beside the actions, which is the worklist.
+
 ### Touch: phones, tablets and touchscreens
 
 A phone has no mouse and no keyboard: a game played on one reads fingers.

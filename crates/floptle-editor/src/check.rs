@@ -537,7 +537,8 @@ fn check_scene(root: &Path, path: &Path, where_: &str, settings: &Settings, r: &
     for line in floptle_scene::validate_parents(&doc.nodes) {
         r.error(Some(where_.into()), line);
     }
-    for line in floptle_scene::validate_ui_visibility(&doc.nodes) {
+    let named = crate::input_scan::string_literals(&root.join("scripts"));
+    for line in floptle_scene::validate_ui_visibility(&doc.nodes, |n| named.contains(n)) {
         r.warn(Some(where_.into()), line);
     }
     for node in &doc.nodes {
@@ -1107,6 +1108,41 @@ mod tests {
     /// The happy path — and, more to the point, that the checker actually
     /// looked at something. A pass that examined nothing reads identically to
     /// a pass that examined everything, which is the one way this verb lies.
+    /// **A hidden panel a script finds is not a finding.** A pause menu is
+    /// authored hidden and shown from code; one named in no script is the
+    /// real thing, and it is one line however many children it hides.
+    #[test]
+    fn a_hidden_panel_a_script_finds_is_quiet_and_one_nobody_names_warns_once() {
+        let d = temp("hidden-panel");
+        let ui = |name: &str, id: u32, parent: Option<u32>, visible: bool| {
+            format!(
+                "(name: \"{name}\", transform: (translation: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), \
+                 scale: (1.0, 1.0, 1.0)), matter: Empty, scripts: [], id: Some({id}), parent_id: {}, \
+                 visible: {visible}, ui: Some(()))",
+                parent.map_or("None".to_string(), |p| format!("Some({p})"))
+            )
+        };
+        let nodes = [
+            ui("Pause Panel", 1, None, false),
+            ui("Resume", 2, Some(1), true),
+            ui("Quit", 3, Some(1), true),
+        ]
+        .join(", ");
+        std::fs::write(d.join("scenes/first.ron"), scene(&nodes)).unwrap();
+        let hidden = |r: &Report| -> Vec<String> {
+            r.findings.iter().filter(|f| f.message.contains("not visible")).map(|f| f.message.clone()).collect()
+        };
+
+        std::fs::write(d.join("scripts/menu.lua"), "-- \"Pause Panel\" in a comment shows nothing\n").unwrap();
+        let said = hidden(&examine(&d));
+        assert_eq!(said.len(), 1, "one line for the panel: {said:?}");
+        assert!(said[0].contains("2 UI elements") && said[0].contains("Pause Panel"), "{said:?}");
+
+        std::fs::write(d.join("scripts/menu.lua"), "local p = find(\"Pause Panel\")\np.visible = true\n").unwrap();
+        assert!(hidden(&examine(&d)).is_empty(), "a panel a script finds was reported");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn a_sound_project_passes_and_says_what_it_read() {
         let d = temp("clean");
