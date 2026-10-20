@@ -21,6 +21,9 @@ const REPO_URL: &str = "https://github.com/Fopull-LLC/Floptle";
 const RELEASES_URL: &str = "https://github.com/Fopull-LLC/Floptle-releases/releases";
 const DOCS_URL: &str = "https://github.com/Fopull-LLC/Floptle/tree/main/docs";
 const ISSUES_URL: &str = "https://github.com/Fopull-LLC/Floptle/issues";
+/// What Floptle is for, as fopull.com/floptle puts it, word for word.
+const MULTIPLAYER_LINE: &str = "Online multiplayer for indie games, without running servers or port forwarding.";
+const MULTIPLAYER_GUIDE_URL: &str = "https://fopull.com/floptle/docs/multiplayer";
 
 /// UI glyphs — every one is verified present in egui's bundled fonts (Ubuntu / NotoEmoji /
 /// emoji-icon-font), so none render as a missing-glyph box. Anything added here must be
@@ -1721,6 +1724,9 @@ impl HubApp {
                 ui.label(egui::RichText::new(ico::PROJECTS).size(28.0).weak());
                 ui.label("No projects yet.");
                 ui.small("Create one above, or add an existing project folder.");
+                ui.add_space(10.0);
+                ui.label(MULTIPLAYER_LINE);
+                ui.hyperlink_to("How: the multiplayer guide", MULTIPLAYER_GUIDE_URL);
             });
             return;
         }
@@ -2484,6 +2490,9 @@ impl HubApp {
         ui.separator();
         ui.add_space(6.0);
         ui.vertical_centered(|ui| {
+            ui.label(MULTIPLAYER_LINE);
+            ui.hyperlink_to("The multiplayer guide", MULTIPLAYER_GUIDE_URL);
+            ui.add_space(4.0);
             ui.small("Floptle is open source. Contributions, bug reports, and ideas are welcome.");
             ui.small("Built with Rust, wgpu, and egui.");
             ui.add_space(4.0);

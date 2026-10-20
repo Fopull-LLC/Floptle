@@ -3,15 +3,40 @@
 
 # Floptle
 
-**A lightweight, hyperoptimized game engine for surreal, otherworldly visuals.**
+**Online multiplayer for indie games, without running servers or port forwarding.**
 
-*Make games that look like they're from another dimension — without anyone else's restrictions.*
+*A lightweight Rust game engine for surreal, otherworldly visuals, with diggable worlds,
+a command line an AI can drive, and multiplayer that is one line.*
 
 — a [Fopull LLC](https://github.com/Fopull-LLC) project · free & open source (MIT OR Apache-2.0) —
 
 </div>
 
 ---
+
+## Multiplayer in one line
+
+Install the [Floptle Hub](#get-started-players--game-makers), make a project, and host:
+
+```lua
+net.host{ relay = "cloud" }      -- the Console shows a six-character lobby code
+```
+
+Read the code to a friend. On their machine:
+
+```lua
+net.join("cloud://UABCDE")       -- the code you were given
+```
+
+That is the whole address. Nobody port-forwards and nobody runs a server: the lobby is relayed
+through Floptle Cloud, which has a free plan ([pricing](https://fopull.com/cloud/pricing)). The
+editor's networking panel does the same with two buttons. Replication, prediction and rollback
+are picked per node in the Inspector; [the multiplayer guide](https://fopull.com/floptle/docs/multiplayer)
+goes from a single-player scene to two machines playing together.
+
+**Made with Floptle:** [Forgery](https://fopull.com/games/forgery) ·
+[freeflier](https://fopull.com/games/freeflier) ·
+[Solar](https://github.com/Fopull-LLC/Solar)
 
 > **Status: early but very real.** The editor, SDF/raymarch + mesh renderer,
 > chunked diggable terrain with galaxy-scale streaming, custom physics,
