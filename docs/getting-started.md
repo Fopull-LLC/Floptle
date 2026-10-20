@@ -93,6 +93,12 @@ floating object that still collides and can be script-driven.
 3. Play — the character collides with the model's triangles, not just the terrain.
    Toggle **View ▸ Mesh collider wireframes** to see them.
 
+A model's textures are filtered the way its file says: one exported with nearest
+filtering keeps crisp pixels, one exported with linear filtering draws smooth, with
+mipmaps. Blender writes linear unless an image's interpolation is set to **Closest**.
+A file that names no filter draws crisp. To choose for the whole model, select the
+`.glb` in the Assets panel and set **embedded texture filter** in the Inspector.
+
 ## 6. Script some interaction
 
 Scripts are Lua files in `scripts/`, attached to nodes, hot-reloaded on save. A node's

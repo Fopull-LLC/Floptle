@@ -20,12 +20,14 @@
 
 use std::path::{Path, PathBuf};
 
-/// One extracted image: the material it belongs to, and where it landed
-/// (project-relative, which is how a material references a texture).
+/// One extracted image: the material it belongs to, where it landed
+/// (project-relative, which is how a material references a texture), and the
+/// filter the model draws it with, so the file can be drawn the same way.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Extracted {
     pub material: String,
     pub path: String,
+    pub filter: crate::assets::FilterMode,
 }
 
 /// A file name that cannot escape its folder or collide with a path separator —
@@ -94,6 +96,7 @@ pub(crate) fn extract_model_textures(
     project_root: &Path,
 ) -> Result<Vec<Extracted>, String> {
     let model = floptle_assets::import(model_abs).map_err(|e| e.to_string())?;
+    let chosen = crate::rig_overrides::RigOverrides::load(model_abs).texture_filter;
     let dir_rel = extract_dir(model_rel);
     let dir_abs = project_root.join(&dir_rel);
     let mut out: Vec<Extracted> = Vec::new();
@@ -116,7 +119,8 @@ pub(crate) fn extract_model_textures(
         let rel = format!("{dir_rel}/{name}.png");
         floptle_assets::save_texture_png(tex, &dir_abs.join(format!("{name}.png")))
             .map_err(|e| format!("writing {rel}: {e}"))?;
-        out.push(Extracted { material: part.material.clone(), path: rel });
+        let filter = crate::project::embedded_sampling(chosen, &model.texture_filters, Some(idx)).filter;
+        out.push(Extracted { material: part.material.clone(), path: rel, filter: filter.into() });
     }
     if out.is_empty() {
         return Err("this model carries no textures — its materials are flat colours".into());

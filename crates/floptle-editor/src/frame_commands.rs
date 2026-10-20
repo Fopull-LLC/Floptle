@@ -622,6 +622,7 @@ impl Editor {
             let abs = self.resolve_asset_path(&path);
             match crate::model_textures::extract_model_textures(&abs, &path, &self.project_root) {
                 Ok(written) => {
+                    self.adopt_extracted_filters(&written);
                     self.console.push(
                         floptle_script::LogLevel::Debug,
                         format!(
@@ -674,6 +675,7 @@ impl Editor {
                         &self.project_root,
                     ) {
                         Ok(written) => {
+                            self.adopt_extracted_filters(&written);
                             self.asset_tree = build_assets(&self.project_root);
                             written
                                 .iter()

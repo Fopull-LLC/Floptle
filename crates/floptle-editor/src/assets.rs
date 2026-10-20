@@ -659,6 +659,16 @@ pub(crate) enum FilterMode {
     SmoothMipmaps,
 }
 
+impl From<floptle_render::TexFilter> for FilterMode {
+    fn from(f: floptle_render::TexFilter) -> Self {
+        match f {
+            floptle_render::TexFilter::Pixelated => FilterMode::Pixelated,
+            floptle_render::TexFilter::Smooth => FilterMode::Smooth,
+            floptle_render::TexFilter::SmoothMipmaps => FilterMode::SmoothMipmaps,
+        }
+    }
+}
+
 /// How a texture wraps outside [0,1] — serde mirror of [`floptle_render::TexWrap`].
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub(crate) enum WrapMode {

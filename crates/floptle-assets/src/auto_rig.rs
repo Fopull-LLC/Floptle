@@ -30,7 +30,7 @@ pub fn add_flow_rig(
     object: &str,
     bone_count: usize,
 ) -> Result<RigReport, ImportError> {
-    let (objs, textures) = crate::gltf_mirror::gather_objects(model_path)?;
+    let (objs, textures, filters) = crate::gltf_mirror::gather_objects(model_path)?;
     let n = bone_count.max(2);
 
     // Locate the target object's baked geometry + its Y range and horizontal centroid.
@@ -122,7 +122,7 @@ pub fn add_flow_rig(
             .collect(),
     };
 
-    let bytes = write_glb(&nodes, &[skin], &textures);
+    let bytes = write_glb(&nodes, &[skin], &textures, &filters);
     let output = model_path.with_extension("rigged.glb");
     floptle_vfs::write(&output, bytes).map_err(|e| ImportError::Gltf(gltf::Error::Io(e)))?;
     Ok(RigReport { output, object: object.to_string(), bones: n })

@@ -3318,7 +3318,7 @@ mod occluder_tests {
             base_color: [1.0; 4],
             ..Default::default()
         };
-        std::fs::write(root.join("models/mound.glb"), write_glb(&[WriteNode::mesh_node("m", mesh)], &[], &[])).unwrap();
+        std::fs::write(root.join("models/mound.glb"), write_glb(&[WriteNode::mesh_node("m", mesh)], &[], &[], &[])).unwrap();
 
         let mut ed = crate::Editor { project_root: root.clone(), ..Default::default() };
         let e = ed.world.spawn();

@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use floptle_core::time::SystemTime;
 
 use floptle_core::math::{Mat3, Mat4, Vec3};
-use floptle_render::{MeshData, TextureData, Vertex};
+use floptle_render::{MeshData, TexFilter, TextureData, Vertex};
 
 /// A model imported from glTF: per-material parts (recentered to the origin), the
 /// decoded base-color textures they reference, and overall bounds.
@@ -31,6 +31,9 @@ pub struct ImportedModel {
     pub parts: Vec<ImportedPart>,
     /// Decoded base-color textures, indexed by `ImportedPart::texture`.
     pub textures: Vec<TextureData>,
+    /// How the file says each of `textures` is filtered, in the same order:
+    /// `None` where it does not say. See [`image_filters`].
+    pub texture_filters: Vec<Option<TexFilter>>,
     pub size: f32,
     /// Axis-aligned bounds after recentering (symmetric about the origin, so
     /// `min == -max`). `min[1]` is the floor offset for ground placement.
@@ -299,6 +302,7 @@ pub(crate) fn build_static(
 ) -> Result<ImportedModel, ImportError> {
     // Decode every image to RGBA8 once; parts reference them by index.
     let textures: Vec<TextureData> = images.iter().map(to_rgba8).collect();
+    let texture_filters = image_filters(doc, textures.len());
 
     let mut parts = Parts::default();
     if let Some(scene) = doc.default_scene().or_else(|| doc.scenes().next()) {
@@ -319,7 +323,7 @@ pub(crate) fn build_static(
 
     let (size, min, max) = recenter_and_measure(&mut parts);
     let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("model").to_string();
-    Ok(ImportedModel { name, parts, textures, size, min, max })
+    Ok(ImportedModel { name, parts, textures, texture_filters, size, min, max })
 }
 
 /// Per-material accumulator: maps a material key (its index, or -1 for the default
@@ -466,6 +470,54 @@ pub(crate) fn compute_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f
     acc.iter().map(|v| v.normalize_or_zero().to_array()).collect()
 }
 
+/// How a glTF sampler filters, as the engine's [`TexFilter`]: point
+/// magnification is crisp pixels, linear is smooth, and smooth gets a mip
+/// chain unless the sampler asks for a minification without one. `None` when
+/// the sampler names neither filter, which glTF leaves to the engine.
+pub fn sampler_filter(
+    mag: Option<gltf::texture::MagFilter>,
+    min: Option<gltf::texture::MinFilter>,
+) -> Option<TexFilter> {
+    use gltf::texture::{MagFilter, MinFilter};
+    match (mag, min) {
+        (Some(MagFilter::Nearest), _) => Some(TexFilter::Pixelated),
+        (Some(MagFilter::Linear), Some(MinFilter::Nearest | MinFilter::Linear)) => Some(TexFilter::Smooth),
+        (Some(MagFilter::Linear), _) => Some(TexFilter::SmoothMipmaps),
+        (None, Some(MinFilter::Nearest | MinFilter::NearestMipmapNearest)) => Some(TexFilter::Pixelated),
+        (None, Some(MinFilter::Linear)) => Some(TexFilter::Smooth),
+        (None, Some(_)) => Some(TexFilter::SmoothMipmaps),
+        (None, None) => None,
+    }
+}
+
+/// What the engine's own `.glb` writer signs its files with. Files signed
+/// [`OLD_GENERATOR`] came from a writer that gave every texture the same
+/// smooth, mipmapped sampler whatever its source said, so their samplers say
+/// nothing about the texture.
+pub const GENERATOR: &str = "Floptle glb_write 2";
+const OLD_GENERATOR: &str = "Floptle glb_write";
+
+/// Each image's filter as the file states it, one per image: the sampler of
+/// the first texture that shows that image. A texture's sampler belongs to the
+/// texture, not the image, so two textures could show one image two ways; the
+/// engine uploads an image once, and the first one wins.
+pub(crate) fn image_filters(doc: &gltf::Document, images: usize) -> Vec<Option<TexFilter>> {
+    let mut out = vec![None; images];
+    if doc.as_json().asset.generator.as_deref() == Some(OLD_GENERATOR) {
+        return out;
+    }
+    let mut seen = vec![false; images];
+    for t in doc.textures() {
+        let i = t.source().index();
+        if i < images && !seen[i] {
+            seen[i] = true;
+            let s = t.sampler();
+            out[i] = sampler_filter(s.mag_filter(), s.min_filter());
+        }
+    }
+    out
+}
+
 /// Convert a decoded glTF image to tightly-packed RGBA8.
 pub(crate) fn to_rgba8(img: &gltf::image::Data) -> TextureData {
     use gltf::image::Format::*;
@@ -518,6 +570,72 @@ mod tests {
             assert!((v[0]).abs() < 1e-6 && (v[1]).abs() < 1e-6);
             assert!((v[2] - 1.0).abs() < 1e-6, "expected +Z normal, got {v:?}");
         }
+    }
+
+    /// What each sampler a modelling tool writes means here. A pixel-art export
+    /// says nearest; Blender's default says linear with mipmaps; a sampler
+    /// that names nothing leaves it to the engine.
+    #[test]
+    fn a_sampler_says_point_or_smooth() {
+        use gltf::texture::{MagFilter as Mag, MinFilter as Min};
+        assert_eq!(sampler_filter(Some(Mag::Nearest), Some(Min::Nearest)), Some(TexFilter::Pixelated));
+        assert_eq!(sampler_filter(Some(Mag::Nearest), Some(Min::LinearMipmapLinear)), Some(TexFilter::Pixelated));
+        assert_eq!(sampler_filter(Some(Mag::Linear), Some(Min::LinearMipmapLinear)), Some(TexFilter::SmoothMipmaps));
+        assert_eq!(sampler_filter(Some(Mag::Linear), None), Some(TexFilter::SmoothMipmaps));
+        assert_eq!(sampler_filter(Some(Mag::Linear), Some(Min::Linear)), Some(TexFilter::Smooth));
+        assert_eq!(sampler_filter(None, Some(Min::NearestMipmapNearest)), Some(TexFilter::Pixelated));
+        assert_eq!(sampler_filter(None, Some(Min::Linear)), Some(TexFilter::Smooth));
+        assert_eq!(sampler_filter(None, None), None);
+    }
+
+    /// **Each texture keeps the filter its file states**, through the
+    /// engine's own writer and back, so a mirrored or rigged bake of a model
+    /// draws the way its source did. One that states none comes back as none.
+    #[test]
+    fn each_texture_keeps_the_filter_its_file_states() {
+        use crate::glb_write::{write_glb, WriteMesh, WriteNode};
+        let tex = TextureData { pixels: vec![255; 16], width: 2, height: 2 };
+        let tri = |t: usize| WriteMesh {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            uvs: Some(vec![[0.0, 0.0]; 3]),
+            colors: None,
+            joints: None,
+            weights: None,
+            indices: vec![0, 1, 2],
+            base_color: [1.0; 4],
+            texture: Some(t),
+        };
+        let filters = [Some(TexFilter::Pixelated), Some(TexFilter::SmoothMipmaps), None, Some(TexFilter::Smooth)];
+        let nodes: Vec<WriteNode> = (0..filters.len()).map(|i| WriteNode::mesh_node(format!("n{i}"), tri(i))).collect();
+        let bytes = write_glb(&nodes, &[], &vec![tex; filters.len()], &filters);
+        let dir = std::env::temp_dir().join(format!("floptle-filters-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("filters.glb");
+        std::fs::write(&path, bytes).unwrap();
+        let model = import(&path).unwrap();
+        let rigged = crate::import_rigged(&path).unwrap().expect("four mesh objects keep their tree");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(model.texture_filters, filters);
+        assert_eq!(rigged.texture_filters, filters);
+    }
+
+    /// **A file from the engine's old writer says nothing about its textures.**
+    /// That writer gave every texture one smooth, mipmapped sampler whatever
+    /// the source was, so believing it would turn every model converted from
+    /// FBX smooth. The same sampler from any other tool is believed.
+    #[test]
+    fn the_old_writers_one_sampler_is_not_believed() {
+        let doc = |generator: &str| {
+            let json = format!(
+                "{{\"asset\":{{\"version\":\"2.0\",\"generator\":\"{generator}\"}},\"images\":[{{\"uri\":\"a.png\"}}],\
+                 \"samplers\":[{{\"magFilter\":9729,\"minFilter\":9987}}],\"textures\":[{{\"source\":0,\"sampler\":0}}]}}"
+            );
+            gltf::Gltf::from_slice(json.as_bytes()).unwrap().document
+        };
+        assert_eq!(image_filters(&doc("Floptle glb_write"), 1), [None]);
+        assert_eq!(image_filters(&doc("Khronos glTF Blender I/O"), 1), [Some(TexFilter::SmoothMipmaps)]);
+        assert_eq!(image_filters(&doc(GENERATOR), 1), [Some(TexFilter::SmoothMipmaps)]);
     }
 
     /// **A Draco-compressed model is refused by name, not imported as nothing.**

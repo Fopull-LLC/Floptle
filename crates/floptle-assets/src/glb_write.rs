@@ -10,7 +10,7 @@
 //! PBR base-color (factor + optional embedded texture), and skins with
 //! inverse-bind matrices. That's the exact surface our importer round-trips.
 
-use floptle_render::TextureData;
+use floptle_render::{TexFilter, TextureData};
 use serde_json::{json, Value};
 
 /// One triangle mesh attached to a [`WriteNode`]. Streams are parallel and in the
@@ -132,22 +132,53 @@ fn f32_bytes<const N: usize>(rows: &[[f32; N]]) -> Vec<u8> {
     b
 }
 
-/// Serialize a node tree into a `.glb` byte vector. `textures` are embedded as PNG.
-pub fn write_glb(nodes: &[WriteNode], skins: &[WriteSkin], textures: &[TextureData]) -> Vec<u8> {
+/// The glTF sampler that says `filter`, wrapping as the engine's textures do.
+/// With no filter it names none, which glTF leaves to whoever reads the file:
+/// a bake must not claim a filtering its source never stated.
+fn sampler_json(filter: Option<TexFilter>) -> Value {
+    // GL enums: NEAREST 9728, LINEAR 9729, LINEAR_MIPMAP_LINEAR 9987, REPEAT 10497.
+    let mut s = json!({ "wrapS": 10497, "wrapT": 10497 });
+    let (mag, min) = match filter {
+        None => return s,
+        Some(TexFilter::Pixelated) => (9728, 9728),
+        Some(TexFilter::Smooth) => (9729, 9729),
+        Some(TexFilter::SmoothMipmaps) => (9729, 9987),
+    };
+    s["magFilter"] = json!(mag);
+    s["minFilter"] = json!(min);
+    s
+}
+
+/// Serialize a node tree into a `.glb` byte vector. `textures` are embedded as
+/// PNG, each sampled as `filters` says at the same index (absent or `None`:
+/// the file names no filter).
+pub fn write_glb(
+    nodes: &[WriteNode],
+    skins: &[WriteSkin],
+    textures: &[TextureData],
+    filters: &[Option<TexFilter>],
+) -> Vec<u8> {
     let mut bin = BinBuf::default();
     let mut accessors: Vec<Value> = Vec::new();
     let mut meshes: Vec<Value> = Vec::new();
     let mut materials: Vec<Value> = Vec::new();
     let mut images: Vec<Value> = Vec::new();
     let mut gltf_textures: Vec<Value> = Vec::new();
+    // One sampler per distinct filter, in first-use order.
+    let mut samplers: Vec<Option<TexFilter>> = Vec::new();
 
     // ---- embedded textures (PNG in a bufferView) ----
-    for tex in textures {
+    for (i, tex) in textures.iter().enumerate() {
         let png = crate::texture::encode_png(tex).unwrap_or_default();
         let view = bin.view(&png, None);
         let img = images.len();
         images.push(json!({ "bufferView": view, "mimeType": "image/png" }));
-        gltf_textures.push(json!({ "source": img, "sampler": 0 }));
+        let filter = filters.get(i).copied().flatten();
+        let sampler = samplers.iter().position(|f| *f == filter).unwrap_or_else(|| {
+            samplers.push(filter);
+            samplers.len() - 1
+        });
+        gltf_textures.push(json!({ "source": img, "sampler": sampler }));
     }
 
     // ---- one mesh + material per node that has geometry ----
@@ -290,7 +321,7 @@ pub fn write_glb(nodes: &[WriteNode], skins: &[WriteSkin], textures: &[TextureDa
         .collect();
 
     let mut root = json!({
-        "asset": { "version": "2.0", "generator": "Floptle glb_write" },
+        "asset": { "version": "2.0", "generator": crate::gltf_import::GENERATOR },
         "scene": 0,
         "scenes": [ { "nodes": roots } ],
         "nodes": json_nodes,
@@ -305,7 +336,7 @@ pub fn write_glb(nodes: &[WriteNode], skins: &[WriteSkin], textures: &[TextureDa
     if !images.is_empty() {
         root["images"] = json!(images);
         root["textures"] = json!(gltf_textures);
-        root["samplers"] = json!([ { "magFilter": 9729, "minFilter": 9987, "wrapS": 10497, "wrapT": 10497 } ]);
+        root["samplers"] = Value::Array(samplers.into_iter().map(sampler_json).collect());
     }
     if !gltf_skins.is_empty() {
         root["skins"] = json!(gltf_skins);

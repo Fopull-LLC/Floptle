@@ -19,7 +19,7 @@ use std::path::Path;
 
 use floptle_anim::{Clip, Interp, NodeChannels, SkelNode, Skeleton, Track, TransformTRS};
 use floptle_core::math::{Mat4, Quat, Vec3};
-use floptle_render::{MeshData, TextureData, Vertex};
+use floptle_render::{MeshData, TexFilter, TextureData, Vertex};
 
 use crate::gltf_import::ImportError;
 
@@ -31,6 +31,9 @@ pub struct RiggedModel {
     pub parts: Vec<RiggedPart>,
     /// Decoded base-color textures, indexed by `RiggedPart::texture`.
     pub textures: Vec<TextureData>,
+    /// How the file says each of `textures` is filtered, in the same order:
+    /// `None` where it does not say.
+    pub texture_filters: Vec<Option<TexFilter>>,
     pub skeleton: Skeleton,
     pub clips: Vec<Clip>,
     /// Rough world size (rest pose), for framing/preview — same contract as
@@ -114,6 +117,7 @@ pub(crate) fn build_rigged(
     }
 
     let textures: Vec<TextureData> = images.iter().map(crate::gltf_import::to_rgba8).collect();
+    let texture_filters = crate::gltf_import::image_filters(doc, textures.len());
 
     // ---- skeleton: every node in the default scene, topologically sorted ----
     let mut nodes: Vec<SkelNode> = Vec::new();
@@ -402,6 +406,7 @@ pub(crate) fn build_rigged(
         name,
         parts,
         textures,
+        texture_filters,
         skeleton,
         clips,
         size,

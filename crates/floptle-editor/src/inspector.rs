@@ -4346,12 +4346,18 @@ impl EditorTabViewer<'_> {
         if asset.part_meta.iter().any(|m| m.textured) {
             let cur = asset.tex_filter;
             let label = |f: Option<crate::assets::FilterMode>| match f {
-                None | Some(crate::assets::FilterMode::Pixelated) => "crisp (pixelated)",
+                None => "as the model file says",
+                Some(crate::assets::FilterMode::Pixelated) => "crisp (pixelated)",
                 Some(crate::assets::FilterMode::Smooth) => "smooth",
                 Some(crate::assets::FilterMode::SmoothMipmaps) => "smooth + mipmaps",
             };
             ui.horizontal_wrapped(|ui| {
-                ui.label("embedded texture filter");
+                ui.label("embedded texture filter").on_hover_text(
+                    "Each texture in a model file says how it is filtered: nearest keeps \
+                     crisp pixels, linear draws smooth. Blender writes linear unless an \
+                     image's interpolation is set to Closest. Choose here to filter every \
+                     texture in this model one way.",
+                );
                 egui::ComboBox::from_id_salt(("model_tex_filter", path))
                     .width(crate::responsive::fit_here(ui, 220.0))
                 .wrap_mode(egui::TextWrapMode::Truncate)
@@ -4359,6 +4365,7 @@ impl EditorTabViewer<'_> {
                     .show_ui(ui, |ui| {
                         for opt in [
                             None,
+                            Some(crate::assets::FilterMode::Pixelated),
                             Some(crate::assets::FilterMode::Smooth),
                             Some(crate::assets::FilterMode::SmoothMipmaps),
                         ] {

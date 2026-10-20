@@ -156,7 +156,9 @@ impl Scene {
 
         self.report.meshes = nodes.len();
         self.report.textures = self.textures.len();
-        let bytes = write_glb(&nodes, &[], &self.textures);
+        // An FBX names no filter, so the bake names none and the engine's
+        // default applies, as it did to the source.
+        let bytes = write_glb(&nodes, &[], &self.textures, &[]);
         Ok((bytes, self.report))
     }
 }

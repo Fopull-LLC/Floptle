@@ -135,6 +135,19 @@ impl Editor {
         Some(id)
     }
 
+    /// Give each newly extracted texture the filter its model draws it with,
+    /// so a material made from it looks like the part it came from. A file
+    /// that already has settings keeps them: someone chose those.
+    pub(crate) fn adopt_extracted_filters(&mut self, written: &[crate::model_textures::Extracted]) {
+        for e in written {
+            if self.texture_settings.contains_key(&e.path) {
+                continue;
+            }
+            let setting = crate::assets::TexSetting { filter: e.filter, ..Default::default() };
+            self.apply_texture_setting(&e.path, setting);
+        }
+    }
+
     /// Persist the per-texture sampling settings to `.floptle/textures.ron`.
     /// Store one texture's import settings and make everything holding the old
     /// ones let go.
@@ -580,9 +593,7 @@ impl Editor {
         let overrides = crate::rig_overrides::RigOverrides::load(file);
         // The embedded textures' filter, applied as the parts register: "smooth
         // + mipmaps" needs its mip chain built from the pixels at upload.
-        let sampling =
-            crate::assets::TexSetting { filter: overrides.texture_filter.unwrap_or_default(), ..Default::default() }
-                .to_sampling();
+        let chosen = overrides.texture_filter;
         match decoded {
             // Rigged: any glTF with animations keeps its node tree + clips
             // (parts stay node-local and get posed each frame).
@@ -590,7 +601,10 @@ impl Editor {
                 let parts: Vec<MeshId> = model
                     .parts
                     .iter()
-                    .map(|p| raster.register_sampled(gpu, &p.mesh, p.texture.map(|i| &model.textures[i]), sampling))
+                    .map(|p| {
+                        let sampling = embedded_sampling(chosen, &model.texture_filters, p.texture);
+                        raster.register_sampled(gpu, &p.mesh, p.texture.map(|i| &model.textures[i]), sampling)
+                    })
                     .collect();
                 let mut images = std::collections::HashMap::new();
                 let part_meta = model
@@ -603,9 +617,9 @@ impl Editor {
                         imported: imported_look(
                             gpu,
                             raster,
-                            &model.textures,
+                            (&model.textures, &model.texture_filters),
                             (p.texture, p.base_color, &p.maps),
-                            overrides.texture_filter,
+                            chosen,
                             &mut images,
                         ),
                     })
@@ -644,7 +658,10 @@ impl Editor {
                 let parts: Vec<MeshId> = model
                     .parts
                     .iter()
-                    .map(|p| raster.register_sampled(gpu, &p.mesh, p.texture.map(|i| &model.textures[i]), sampling))
+                    .map(|p| {
+                        let sampling = embedded_sampling(chosen, &model.texture_filters, p.texture);
+                        raster.register_sampled(gpu, &p.mesh, p.texture.map(|i| &model.textures[i]), sampling)
+                    })
                     .collect();
                 let mut images = std::collections::HashMap::new();
                 let part_meta = model
@@ -657,9 +674,9 @@ impl Editor {
                         imported: imported_look(
                             gpu,
                             raster,
-                            &model.textures,
+                            (&model.textures, &model.texture_filters),
                             (p.texture, p.base_color, &p.maps),
-                            overrides.texture_filter,
+                            chosen,
                             &mut images,
                         ),
                     })
@@ -2953,22 +2970,62 @@ pub(crate) fn scenes_shadowed_by_a_root_copy(root: &Path) -> Vec<String> {
 /// the classic model, because glTF's default factors (metallic 1, roughness 1)
 /// would turn every untextured export into black metal. Each image is uploaded
 /// once per model however many parts and slots use it (`images`).
+/// How one of a model's own textures is sampled: as chosen for the model in
+/// the Inspector when someone chose, else as the model file says for that
+/// texture, else crisp. A file made in a pixel-art tool says nearest and one
+/// from Blender's default material says linear, so each keeps the look it
+/// was made with.
+pub(crate) fn embedded_sampling(
+    chosen: Option<crate::assets::FilterMode>,
+    file_filters: &[Option<floptle_render::TexFilter>],
+    texture: Option<usize>,
+) -> floptle_render::TexSampling {
+    if let Some(filter) = chosen {
+        return crate::assets::TexSetting { filter, ..Default::default() }.to_sampling();
+    }
+    let file = texture.and_then(|i| file_filters.get(i).copied().flatten());
+    floptle_render::TexSampling { filter: file.unwrap_or(floptle_render::TexFilter::Pixelated), ..Default::default() }
+}
+
+#[cfg(test)]
+mod embedded_sampling_tests {
+    use super::embedded_sampling;
+    use crate::assets::FilterMode;
+    use floptle_render::TexFilter as F;
+
+    /// **A model's texture draws the way its file says, unless someone chose.**
+    /// Each texture has its own say; a choice made in the Inspector covers the
+    /// whole model; a texture the file says nothing about stays crisp, as
+    /// every model's did before.
+    #[test]
+    fn the_file_decides_unless_someone_chose() {
+        let file = [Some(F::Pixelated), Some(F::SmoothMipmaps), None];
+        let of = |chosen, i| embedded_sampling(chosen, &file, i).filter;
+        assert_eq!(of(None, Some(0)), F::Pixelated);
+        assert_eq!(of(None, Some(1)), F::SmoothMipmaps);
+        assert_eq!(of(None, Some(2)), F::Pixelated, "a file that says nothing stays crisp");
+        assert_eq!(of(None, None), F::Pixelated);
+        assert_eq!(of(Some(FilterMode::Smooth), Some(0)), F::Smooth, "the Inspector's choice wins");
+        assert_eq!(of(Some(FilterMode::Pixelated), Some(1)), F::Pixelated, "crisp is a choice too");
+    }
+}
+
 pub(crate) fn imported_look(
     gpu: &floptle_render::Gpu,
     raster: &mut floptle_render::Raster,
-    textures: &[floptle_render::TextureData],
+    (textures, file_filters): (&[floptle_render::TextureData], &[Option<floptle_render::TexFilter>]),
     part: (Option<usize>, [f32; 3], &floptle_assets::gltf_import::PartMaps),
-    filter: Option<crate::assets::FilterMode>,
+    chosen: Option<crate::assets::FilterMode>,
     images: &mut std::collections::HashMap<usize, floptle_render::TexId>,
 ) -> Option<crate::ImportedLook> {
     let (base_image, base_color, maps) = part;
     if !maps.any() {
         return None;
     }
-    let sampling = crate::assets::TexSetting { filter: filter.unwrap_or_default(), ..Default::default() }.to_sampling();
     let mut tex = |i: Option<usize>| -> Option<floptle_render::TexId> {
         let i = i?;
         let data = textures.get(i)?;
+        let sampling = embedded_sampling(chosen, file_filters, Some(i));
         Some(*images.entry(i).or_insert_with(|| raster.register_texture(gpu, data, sampling)))
     };
     let mut m = floptle_core::Material::tinted(base_color);

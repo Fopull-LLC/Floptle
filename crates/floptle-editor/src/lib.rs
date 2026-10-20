@@ -815,7 +815,7 @@ struct EditorCmd {
     /// Set an object/bone's rotation pivot (rigged-mesh entity, node name, pivot xyz in
     /// node-local space) — from the Inspector's numeric pivot fields.
     set_object_pivot: Option<(Entity, String, [f32; 3])>,
-    /// Set a model asset's embedded-texture filter (`None` = back to crisp),
+    /// Set a model asset's embedded-texture filter (`None` = as the file says),
     /// persisted in its `.rig.ron` sidecar; the model re-imports live.
     set_model_filter: Option<(String, Option<crate::assets::FilterMode>)>,
     /// Attach any scene child below a rigged mesh to one of that mesh's bones.  The
@@ -3934,8 +3934,8 @@ struct MeshAsset {
     /// factor, whether the material carried a texture) — drives the Inspector's
     /// embedded-materials list and per-object material overrides.
     part_meta: Vec<PartMeta>,
-    /// The model's embedded-texture filter (from its `.rig.ron` sidecar);
-    /// `None` = the crisp default.
+    /// The model's embedded-texture filter as chosen in the Inspector (from
+    /// its `.rig.ron` sidecar); `None` = each texture as the file says.
     tex_filter: Option<crate::assets::FilterMode>,
     size: f32,
     rig: Option<anim::RigAsset>,

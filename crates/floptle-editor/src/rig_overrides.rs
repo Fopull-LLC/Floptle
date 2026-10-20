@@ -23,8 +23,9 @@ pub(crate) struct RigOverrides {
     /// baked object whose origin is at the model root rotate about its real joint.
     #[serde(default)]
     pub pivot: BTreeMap<String, [f32; 3]>,
-    /// Filtering for the model's embedded textures (all of them — per-model, not
-    /// per-image). Absent = the engine default (crisp/pixelated).
+    /// Filtering for the model's embedded textures, as chosen in the Inspector
+    /// (all of them — per-model, not per-image). Absent = each texture as the
+    /// model file says, and crisp where it says nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub texture_filter: Option<crate::assets::FilterMode>,
 }

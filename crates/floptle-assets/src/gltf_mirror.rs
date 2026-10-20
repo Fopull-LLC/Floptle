@@ -41,7 +41,7 @@ pub(crate) struct Obj {
 
 /// Run Mirror-apply on `model_path`, writing `<stem>.mirrored.glb` beside it.
 pub fn mirror_apply(model_path: &Path) -> Result<MirrorReport, ImportError> {
-    let (objs, textures) = gather_objects(model_path)?;
+    let (objs, textures, filters) = gather_objects(model_path)?;
 
     // Model bounds → epsilon for "touches the plane" (1% of the largest extent).
     let mut lo = Vec3::splat(f32::INFINITY);
@@ -111,7 +111,7 @@ pub fn mirror_apply(model_path: &Path) -> Result<MirrorReport, ImportError> {
         }
     }
 
-    let bytes = write_glb(&out_nodes, &[], &textures);
+    let bytes = write_glb(&out_nodes, &[], &textures, &filters);
     let output = model_path.with_extension("mirrored.glb");
     floptle_vfs::write(&output, bytes).map_err(|e| ImportError::Gltf(gltf::Error::Io(e)))?;
     report.output = output;
@@ -121,10 +121,9 @@ pub fn mirror_apply(model_path: &Path) -> Result<MirrorReport, ImportError> {
 /// Gather per-object model-space geometry + the decoded texture set from a model
 /// (rigged/structured import preferred so objects keep their names; static import
 /// → one object). The returned `texture` indices in each object index into the
-/// returned texture vec.
-pub(crate) fn gather_objects(
-    path: &Path,
-) -> Result<(Vec<Obj>, Vec<floptle_render::TextureData>), ImportError> {
+/// returned texture vec, and the filters are the source's, one per texture, so
+/// a bake keeps the filtering its source stated.
+pub(crate) fn gather_objects(path: &Path) -> Result<Gathered, ImportError> {
     if let Some(model) = crate::import_rigged(path)? {
         let mut rest_world = Vec::new();
         model.skeleton.world_matrices(&model.skeleton.rest_pose(), &mut rest_world);
@@ -137,7 +136,7 @@ pub(crate) fn gather_objects(
                 mesh: bake_part(&part.mesh, w, part.base_color, part.texture),
             });
         }
-        Ok((objs, model.textures))
+        Ok((objs, model.textures, model.texture_filters))
     } else {
         let model = crate::gltf_import::import(path)?;
         let mut objs = Vec::new();
@@ -153,9 +152,13 @@ pub(crate) fn gather_objects(
                 mesh: bake_part(&part.mesh, Mat4::IDENTITY, part.base_color, part.texture),
             });
         }
-        Ok((objs, model.textures))
+        Ok((objs, model.textures, model.texture_filters))
     }
 }
+
+/// [`gather_objects`]'s answer: the objects, their textures, and how the
+/// source filters each texture.
+pub(crate) type Gathered = (Vec<Obj>, Vec<floptle_render::TextureData>, Vec<Option<floptle_render::TexFilter>>);
 
 fn unique_name(used: &mut std::collections::HashMap<String, u32>, base: &str) -> String {
     let n = used.entry(base.to_string()).or_insert(0);
@@ -286,7 +289,7 @@ mod tests {
         let arm = box_mesh([0.7, 0.0, 0.0], [1.3, 0.5, 0.3]);
         let nodes =
             vec![WriteNode::mesh_node("Head", head), WriteNode::mesh_node("Arm", arm)];
-        let bytes = write_glb(&nodes, &[], &[]);
+        let bytes = write_glb(&nodes, &[], &[], &[]);
         assert!(bytes.len() > 12 && &bytes[0..4] == b"glTF", "valid GLB header");
 
         let dir = std::env::temp_dir().join("floptle_mirror_test");
