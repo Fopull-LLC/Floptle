@@ -932,6 +932,8 @@ mod tests {
     /// was projected off by the planet's motion since the last draw — 0, 1 or
     /// 2 ticks' worth — and shook by tens of pixels. The renderer's feed is
     /// emulated after every step, the way the window does it.
+    // Drives `shot::feed_view`, which only the editor build has.
+    #[cfg(feature = "editor-ui")]
     #[test]
     fn a_planet_fixed_point_projected_in_late_update_holds_still_on_screen() {
         use floptle_core::{Matter, Name, Parent};
