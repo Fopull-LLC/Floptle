@@ -578,10 +578,28 @@ impl Editor {
     /// Splits are performed here — spawn a fresh vessel root, split the physics
     /// compound onto it, re-parent the detached part nodes (world pose kept),
     /// then hand the new root to the script callback.
+    ///
+    /// What those callbacks queue is drained here too, round after round, not
+    /// at the next drain: by then a tick may have carried the craft with its
+    /// planet, and an `impulseAt` aimed at the centre of mass a callback had
+    /// just read landed metres off it. A one-part craft launched at 140 m/s
+    /// left its rebuild spinning at 12,000 rad/s and came off the ground at
+    /// 825 m/s. The rounds are bounded so callbacks that keep queueing each
+    /// other cannot hold the frame.
     pub(crate) fn drain_assembly_cmds(&mut self) {
+        for _ in 0..8 {
+            if !self.drain_assembly_cmds_once() {
+                break;
+            }
+        }
+    }
+
+    /// One round of [`Self::drain_assembly_cmds`]. Whether there was anything
+    /// to drain.
+    fn drain_assembly_cmds_once(&mut self) -> bool {
         let cmds = self.script_host.take_assembly_cmds();
         if cmds.is_empty() {
-            return;
+            return false;
         }
         use floptle_core::math::{DVec3, Vec3};
         for cmd in cmds {
@@ -698,6 +716,7 @@ impl Editor {
                 }
             }
         }
+        true
     }
 
     /// Split `parts` out of the assembly rooted at `root_eid` into a new root

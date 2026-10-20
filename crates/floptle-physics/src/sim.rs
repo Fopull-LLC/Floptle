@@ -431,7 +431,10 @@ impl Sim {
             if let Some(bl) = b {
                 let (pos_b, qb) = self.link_pose(bl);
                 if anchor_b == Vec3::ZERO
-                    && matches!(jc.kind, JointKind::Hinge | JointKind::Fixed | JointKind::Slider | JointKind::Wheel)
+                    && matches!(
+                        jc.kind,
+                        JointKind::Hinge | JointKind::Fixed | JointKind::Slider | JointKind::Wheel | JointKind::Ball
+                    )
                 {
                     anchor_b = qb.inverse() * (pa - pos_b);
                 } else if let Some(o) = other {
@@ -460,10 +463,10 @@ impl Sim {
             if let (Some(Link::Compound(_)), Some(o)) = (b, other) {
                 axis = (qb.inverse() * (world_transform(ecs, o).rotation * axis)).normalize_or(Vec3::Z);
             }
-            let angular = matches!(jc.kind, JointKind::Hinge | JointKind::Wheel);
+            let angular = jc.kind.turns();
             let to_rad = |v: f32| if angular { v.to_radians() } else { v };
             let length = if jc.length < 0.0 { (pb - pa).length() } else { jc.length };
-            let hinge_limits = jc.kind == JointKind::Hinge;
+            let hinge_limits = matches!(jc.kind, JointKind::Hinge | JointKind::Ball);
             out.push(crate::joints::JointRt {
                 owner: e.index(),
                 kind: jc.kind,
@@ -492,6 +495,7 @@ impl Sim {
                 speed: 0.0,
                 servo: jc.servo,
                 goal: if hinge_limits { jc.goal.to_radians() } else { jc.goal },
+                steer: jc.steer.to_radians(),
                 scripted: false,
                 on_collider: None,
                 collider_eid: None,
@@ -591,6 +595,7 @@ impl Sim {
             speed: 0.0,
             servo: false,
             goal: 0.0,
+            steer: 0.0,
             scripted: true,
             on_collider: collider,
             collider_eid: collider.and_then(|i| self.world.colliders[i].eid),
@@ -679,13 +684,28 @@ impl Sim {
 
     /// An anchor given in node `e`'s own space, in link `l`'s frame. A body's
     /// frame is its node's; a compound's is its centre of mass and turn, so
-    /// the point goes through the node's world pose (its scale included).
+    /// the point goes through the node's pose (its scale included).
+    ///
+    /// For a compound the point is taken against the assembly's root node,
+    /// both read from the nodes, and only then into the compound's frame:
+    /// the same rule `compound_from` lays the parts out by. A node is drawn
+    /// where its body was partway through the last tick, and on a planet
+    /// moving on its rails that is a tick's carry behind the body, so going
+    /// straight from the node's world pose put the pivot of an arm hinged to
+    /// its chassis half a metre from where the script asked for it.
     fn anchor_in(&self, l: crate::joints::Link, ecs: &World, e: Entity, local: Vec3) -> Vec3 {
         match l {
             crate::joints::Link::Body(_) => local,
             crate::joints::Link::Compound(i) => {
                 let c = &self.world.compounds[i];
                 let wt = world_transform(ecs, e);
+                if let Some(root) = self.cmap.iter().find(|l| l.compound == i).map(|l| l.entity) {
+                    let rt = world_transform(ecs, root);
+                    let world = wt.translation + (wt.rotation * (local * wt.scale)).as_dvec3();
+                    let in_root = (rt.rotation.inverse() * (world - rt.translation).as_vec3())
+                        / rt.scale.max(Vec3::splat(1e-6));
+                    return in_root + c.local_origin;
+                }
                 let p = (wt.translation - self.world.origin).as_vec3() + wt.rotation * (local * wt.scale);
                 c.orient.inverse() * (p - c.pos)
             }
@@ -723,7 +743,7 @@ impl Sim {
             }
             let Some(e) = ecs.entity_with::<floptle_core::joint::Joint>(j.owner) else { continue };
             let Some(jc) = ecs.get_mut::<floptle_core::joint::Joint>(e) else { continue };
-            let angular = matches!(j.kind, JointKind::Hinge | JointKind::Wheel);
+            let angular = j.kind.turns();
             j.motor = jc.motor;
             j.motor_speed = if angular { jc.motor_speed.to_radians() } else { jc.motor_speed };
             j.max_force = jc.max_force;
@@ -733,7 +753,8 @@ impl Sim {
             j.limit = jc.limit;
             j.servo = jc.servo;
             j.goal = if j.kind == JointKind::Hinge { jc.goal.to_radians() } else { jc.goal };
-            if j.kind == JointKind::Hinge {
+            j.steer = jc.steer.to_radians();
+            if matches!(j.kind, JointKind::Hinge | JointKind::Ball) {
                 j.min = jc.min.to_radians();
                 j.max = jc.max.to_radians();
             } else {
@@ -756,7 +777,7 @@ impl Sim {
                 }
             }
             jc.force = j.force;
-            let angular = matches!(j.kind, JointKind::Hinge | JointKind::Wheel);
+            let angular = j.kind.turns();
             let shown = |v: f32| if angular { v.to_degrees() } else { v };
             jc.position = shown(j.position);
             jc.speed = shown(j.speed);
@@ -1153,6 +1174,22 @@ impl Sim {
                 l.body = bi;
             }
         }
+        // Joints follow the swap, as they do a compound's: one on the body that
+        // went is dropped (a component joint comes back at the rebuild the
+        // stale flag asks for, if both its ends still exist). Left alone, a
+        // joint named the body by its old slot, and the next rebuild of the
+        // joints read past the end of the list.
+        use crate::joints::Link;
+        let gone = |l: &Link| *l == Link::Body(bi);
+        self.world.joints.retain(|j| !gone(&j.a) && !j.b.as_ref().is_some_and(gone));
+        for j in &mut self.world.joints {
+            for l in std::iter::once(&mut j.a).chain(j.b.as_mut()) {
+                if *l == Link::Body(last) {
+                    *l = Link::Body(bi);
+                }
+            }
+        }
+        self.joints_stale = true;
         // Both hold body indices from before the swap: contacts are transient
         // (rebuilt every step) and the interpolation anchors rebuild next tick
         // (writeback falls back to each body's own prev_pos meanwhile).
@@ -1918,7 +1955,10 @@ impl Sim {
         let alpha = alpha.clamp(0.0, 1.0);
         for link in &self.map {
             let b = &self.world.bodies[link.body];
-            if !b.live() || b.kinematic {
+            // A switched-off body is still written: it stands where it
+            // stopped, but rides its planet's carry, and its node (and what
+            // hangs under it) has to ride along rather than stay behind.
+            if !b.active || b.kinematic {
                 // Snapshot-driven / kinematic: the transform is authoritative
                 // (interp or scripts own it) — never write the body pose back.
                 continue;
@@ -1938,7 +1978,8 @@ impl Sim {
     fn writeback_compounds(&self, ecs: &mut World, alpha: f32, ticked: bool) {
         for link in &self.cmap {
             let c = &self.world.compounds[link.compound];
-            if !c.live() {
+            // Switched off, as for a body: still carried, so still written.
+            if !c.active {
                 continue;
             }
             let (from_pos, from_rot) = if ticked {
@@ -2178,6 +2219,25 @@ impl Sim {
         self.joints_stale = true;
         self.world.compound_contacts.clear();
         self.tick_prev_c.clear();
+    }
+
+    /// A gameplay tick that runs no physics (`physics.pause`): every render
+    /// anchor catches up to its body's pose. Left on the last stepped tick,
+    /// a paused body drew partway back along that tick's travel, and one a
+    /// script moved while paused drew where the move had never happened.
+    pub fn hold_tick(&mut self) {
+        self.tick_prev.clear();
+        self.tick_prev.extend(self.world.bodies.iter().map(|b| b.pos));
+        self.tick_prev_c.clear();
+        self.tick_prev_c.extend(self.world.compounds.iter().map(|c| (c.pos, c.orient)));
+        for b in &mut self.world.bodies {
+            b.prev_pos = b.pos;
+            b.prev_orient = b.orient;
+        }
+        for c in &mut self.world.compounds {
+            c.prev_pos = c.pos;
+            c.prev_orient = c.orient;
+        }
     }
 
     /// Advance one body by one gameplay tick (the prediction-replay driver,
@@ -2466,6 +2526,9 @@ impl Sim {
             if l.entity.index() == eid {
                 let local = (pos - self.world.origin).as_vec3();
                 self.world.bodies[l.body].pos = local;
+                // Both anchors: before the first tick there is no tick one,
+                // and the writeback falls back to the step's.
+                self.world.bodies[l.body].prev_pos = local;
                 if let Some(p) = self.tick_prev.get_mut(l.body) {
                     *p = local;
                 }
@@ -2499,7 +2562,7 @@ impl Sim {
     /// added to avoid the mirror image of. Done here rather than at each call
     /// site because this is the only way the field is handed out.
     pub fn terrain_field_mut(&mut self, eid: u32) -> Option<&mut floptle_field::ChunkField> {
-        self.world.level_edits += 1;
+        self.world.note_level_edit(&[None]);
         self.world
             .colliders
             .iter_mut()
@@ -2515,7 +2578,7 @@ impl Sim {
     /// changes: the collider forgets only the triangles those chunks could
     /// have given it, rather than every chunk it had meshed.
     pub fn terrain_chunks_mut(&mut self, eid: u32, written: &[[i32; 3]]) -> Option<&mut floptle_field::ChunkField> {
-        self.world.level_edits += 1;
+        self.note_terrain_chunks(eid, written);
         self.world
             .colliders
             .iter_mut()
@@ -2531,8 +2594,42 @@ impl Sim {
     /// collision meshes itself ([`ChunkTerrain::adopt_mesh`]): nothing cached
     /// is forgotten, so until those land the old triangles stand.
     pub fn terrain_collider_mut(&mut self, eid: u32) -> Option<&mut ChunkTerrain> {
-        self.world.level_edits += 1;
+        self.world.note_level_edit(&[None]);
         self.world.colliders.iter_mut().find(|c| c.eid == Some(eid)).and_then(|c| c.shape.chunk_terrain_mut())
+    }
+
+    /// [`Self::terrain_collider_mut`] for an edit or a re-mesh that knows
+    /// which chunks it changes: the edit is recorded as those chunks' bounds,
+    /// so what rests on the level elsewhere is not disturbed by it.
+    pub fn terrain_collider_mut_at(&mut self, eid: u32, chunks: &[[i32; 3]]) -> Option<&mut ChunkTerrain> {
+        self.note_terrain_chunks(eid, chunks);
+        self.world.colliders.iter_mut().find(|c| c.eid == Some(eid)).and_then(|c| c.shape.chunk_terrain_mut())
+    }
+
+    /// Record an edit of `chunks` of node `eid`'s terrain, each as its
+    /// world-space sphere ([`ChunkTerrain::chunk_sphere`]). No such terrain,
+    /// or no chunks named, is an edit that could be anywhere.
+    fn note_terrain_chunks(&mut self, eid: u32, chunks: &[[i32; 3]]) {
+        let origin = self.world.origin;
+        let regions: Vec<Option<(DVec3, f64)>> = match self
+            .world
+            .colliders
+            .iter_mut()
+            .find(|c| c.eid == Some(eid))
+            .and_then(|c| {
+                let offset = (c.anchor - origin).as_vec3();
+                c.shape.chunk_terrain_mut().map(|t| (t, offset))
+            }) {
+            Some((t, offset)) if !chunks.is_empty() => chunks
+                .iter()
+                .map(|&k| {
+                    let (centre, r) = t.chunk_sphere(k);
+                    Some((origin + (centre + offset).as_dvec3(), r as f64))
+                })
+                .collect(),
+            _ => vec![None],
+        };
+        self.world.note_level_edit(&regions);
     }
 
     /// Put the body on node `eid` to sleep now, or wake it.
@@ -2769,9 +2866,18 @@ impl Sim {
     /// takes the velocity that point of the old body had and the spin is kept,
     /// so a moving vessel that gains or loses parts flies on instead of
     /// stopping dead. The anchor and the switched-off flag carry over too.
+    ///
+    /// The parts are gathered from the nodes, but the pose comes from the old
+    /// body: a node shows the pose interpolated between the last two ticks,
+    /// so building from it set a moving craft back by up to a tick's travel
+    /// (2 m at 130 m/s), and measured the centre of mass's shift from a point
+    /// the craft had already left (10 m/s of false velocity at 5 rad/s).
     /// Returns whether a compound exists afterwards.
     pub fn rebuild_compound(&mut self, root_eid: u32, ecs: &World) -> bool {
-        let old = self.compound_of(root_eid).map(|c| (c.pos, c.vel, c.ang_vel, c.anchored, c.off));
+        let old = self.compound_of(root_eid).map(|c| {
+            let prev_origin = c.prev_pos + c.prev_orient * c.local_origin;
+            (c.pos, c.vel, c.ang_vel, c.anchored, c.off, c.origin(), c.orient, prev_origin, c.prev_orient)
+        });
         // Its grips, with their anchors as world points, to put back on the
         // new compound (removing it drops them).
         let ci = self.cmap.iter().find(|l| l.entity.index() == root_eid).map(|l| l.compound);
@@ -2794,9 +2900,15 @@ impl Sim {
         if !self.add_compound_for(root, ecs) {
             return false;
         }
-        if let Some((pos, vel, ang_vel, anchored, off)) = old
+        if let Some((pos, vel, ang_vel, anchored, off, origin, orient, prev_origin, prev_orient)) = old
             && let Some(c) = self.compound_of_mut(root_eid)
         {
+            // The assembly origin stays where the old body had it; the new
+            // centre of mass sits at its own offset from there.
+            c.orient = orient;
+            c.pos = origin - orient * c.local_origin;
+            c.prev_orient = prev_orient;
+            c.prev_pos = prev_origin - prev_orient * c.local_origin;
             c.vel = vel + ang_vel.cross(c.pos - pos);
             c.ang_vel = ang_vel;
             c.anchored = anchored;
@@ -2855,7 +2967,7 @@ impl Sim {
     fn writeback_transforms(&self, ecs: &mut World, alpha: f32) {
         for link in &self.map {
             let b = &self.world.bodies[link.body];
-            if !b.live() || b.kinematic {
+            if !b.active || b.kinematic {
                 continue;
             }
             let p = b.prev_pos.lerp(b.pos, alpha);

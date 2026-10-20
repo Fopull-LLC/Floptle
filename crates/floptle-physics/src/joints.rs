@@ -70,6 +70,9 @@ pub struct JointRt {
     /// how fast it may go getting there.
     pub servo: bool,
     pub goal: f32,
+    /// A wheel's steering, radians: its axle turned about the suspension
+    /// axis from the other end's Z.
+    pub steer: f32,
     /// The servo's error, summed over time: what holds it at its goal against
     /// a steady load (an arm's own weight), which the error alone cannot.
     pub servo_sum: f32,
@@ -393,6 +396,30 @@ impl PhysicsWorld {
 
     /// How far B has turned relative to A about the joint's axis since play
     /// started, in radians.
+    /// A ball joint's lean: the angle between this node's axis (as it sat
+    /// against the other's when play started) and the other's, and the axis
+    /// that turns the first onto the second.
+    fn ball_lean(&self, j: usize) -> (f32, Vec3) {
+        let jt = &self.joints[j];
+        let ax = jt.axis.normalize_or(Vec3::Z);
+        let axis_a = self.orient_of(Some(jt.a)) * (jt.rel0 * ax);
+        let axis_b = self.orient_of(jt.b) * ax;
+        let lean = axis_a.dot(axis_b).clamp(-1.0, 1.0).acos();
+        (lean, axis_a.cross(axis_b).normalize_or_zero())
+    }
+
+    /// A wheel's axle, sim frame: Z of what it hangs from, turned about the
+    /// suspension axis by its steering.
+    fn wheel_axle(&self, jt: &JointRt) -> Vec3 {
+        let q = self.orient_of(jt.b);
+        let axle = q * Vec3::Z;
+        if jt.steer == 0.0 {
+            return axle;
+        }
+        let about = q * jt.axis.normalize_or(Vec3::Y);
+        Quat::from_axis_angle(about, jt.steer) * axle
+    }
+
     fn hinge_angle(&self, j: usize) -> f32 {
         let jt = &self.joints[j];
         let qa = self.orient_of(Some(jt.a));
@@ -454,11 +481,17 @@ impl PhysicsWorld {
             }
             // A wheel's travel on its suspension, and its spin about the axle.
             JointKind::Wheel => {
-                let axle = self.orient_of(jt.b) * Vec3::Z;
+                let axle = self.wheel_axle(jt);
                 let w = (self.ang_vel_of(Some(jt.a)) - self.ang_vel_of(jt.b)).dot(axle);
                 (axis_w.dot(ea.p - eb.p), w)
             }
             JointKind::Slider => (-axis_w.dot(eb.p - ea.p), rel_v.dot(axis_w)),
+            // How far this node's axis leans from the other's, and how fast
+            // the two are turning against each other, every way at once.
+            JointKind::Ball => {
+                let w = (self.ang_vel_of(Some(jt.a)) - self.ang_vel_of(jt.b)).length();
+                (self.ball_lean(j).0, w)
+            }
             JointKind::Distance | JointKind::Rope | JointKind::Spring => {
                 let c = eb.p - ea.p;
                 (c.length(), -c.normalize_or_zero().dot(rel_v))
@@ -527,6 +560,18 @@ impl PhysicsWorld {
                         if over != 0.0 {
                             spent += self.close_turn(j, axis_w * over, dt);
                         }
+                    }
+                }
+            }
+            JointKind::Ball => {
+                if let Some(n) = c.try_normalize() {
+                    spent += self.close_gap(j, n, c.length(), dt);
+                }
+                if self.joints[j].limit {
+                    let (lean, about) = self.ball_lean(j);
+                    let over = lean - self.joints[j].max.max(0.0);
+                    if over > 0.0 && about != Vec3::ZERO {
+                        spent += self.close_turn(j, -about * over, dt);
                     }
                 }
             }
@@ -617,7 +662,7 @@ impl PhysicsWorld {
                 // about nothing else relative to it: a wheel left free to spin
                 // about the upright creeps sideways down any slope it is
                 // parked on.
-                let axle = self.orient_of(jt.b) * Vec3::Z;
+                let axle = self.wheel_axle(&jt);
                 let rel = self.ang_vel_of(Some(jt.a)) - self.ang_vel_of(jt.b);
                 let off_axle = rel - axle * rel.dot(axle);
                 let n = off_axle.normalize_or_zero();
@@ -761,7 +806,16 @@ impl PhysicsWorld {
         // ground it stopped on. Cancelling its speed each step still lets a
         // parked rover creep by what the joints' position fixes leave over;
         // holding the spot does not, and the spot rides the collider.
-        if braked && need <= budget {
+        // Once parked, a wheel stays parked while its ground could hold it
+        // at all (the slope's pull within what friction allows), not just on
+        // steps where its own grip alone can stop the whole craft: each
+        // wheel's share of stopping the chassis counts the chassis whole,
+        // so on a slope close to the limit some wheel came up short every
+        // few steps, let go and parked afresh a hair downhill. That was a
+        // parked rover creeping centimetres a second on a hill it could hold.
+        let could_hold = g_t.length() <= mu * (-g).dot(n).max(0.0);
+        let keep = could_hold && self.joints[j].park.is_some();
+        if braked && (need <= budget || keep) {
             self.park_wheel(j, i, n);
         } else {
             self.joints[j].park = None;

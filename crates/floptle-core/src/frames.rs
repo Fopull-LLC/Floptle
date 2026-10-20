@@ -211,6 +211,10 @@ pub struct Body {
     pub atmosphere: Option<Atmosphere>,
 }
 
+/// How many of its own radii a body's automatic sphere of influence reaches
+/// at the least (see [`System::auto_soi`]).
+pub const SMALL_BODY_REACH: f64 = 4.0;
+
 /// A solar system on rails: bodies + the queries the demo hangs off.
 #[derive(Clone, Debug, Default)]
 pub struct System {
@@ -279,6 +283,18 @@ impl System {
     /// a primary of `parent_mu` at semi-major axis `a`.
     pub fn soi_radius(a: f64, mu: f64, parent_mu: f64) -> f64 {
         a * (mu / parent_mu).powf(0.4)
+    }
+
+    /// The sphere of influence a body gets when none is authored: its
+    /// Laplace radius, but never less than [`SMALL_BODY_REACH`] of its own
+    /// radii. A small body (an asteroid, a rock in a belt, one with no mass
+    /// at all) has a Laplace sphere inside its own ground, so nothing that
+    /// landed on it was ever in its frame: the rock sailed on along its orbit
+    /// and left the drone standing on it behind. Inside the floor, what is on
+    /// it rides it, the way a moon carries what stands on a moon.
+    pub fn auto_soi(a: f64, mu: f64, parent_mu: f64, body_radius: f64) -> f64 {
+        let laplace = if mu > 0.0 && parent_mu > 0.0 { Self::soi_radius(a, mu, parent_mu) } else { 0.0 };
+        laplace.max(body_radius.max(0.0) * SMALL_BODY_REACH)
     }
 }
 

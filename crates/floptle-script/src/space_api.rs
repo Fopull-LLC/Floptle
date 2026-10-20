@@ -61,6 +61,37 @@ fn body_table(lua: &Lua, b: &SpaceBodyInfo) -> mlua::Result<mlua::Table> {
     Ok(t)
 }
 
+/// Every key `space.beltOrbits{...}` reads.
+pub(crate) const BELT_KEYS: &[&str] = &["count", "seed", "aMin", "aMax", "eMax", "iMax", "radiusMin", "radiusMax"];
+
+/// The rows of `space.beltOrbits`: `count` orbits drawn from `seed` alone,
+/// as `(a, e, i, lan, arg_pe, m0, body_radius)`, angles in radians. The same
+/// seed gives the same belt on every machine, so a belt need never be saved.
+pub fn belt_orbits(
+    count: usize,
+    seed: u32,
+    a: (f64, f64),
+    e_max: f64,
+    i_max: f64,
+    radius: (f64, f64),
+) -> Vec<[f64; 7]> {
+    let mut rng = floptle_core::noise::Rng::new(seed);
+    let tau = std::f64::consts::TAU;
+    (0..count)
+        .map(|_| {
+            let sma = rng.range(a.0, a.1);
+            // Most rocks near circular and near the plane, a few well off it.
+            let e = e_max.max(0.0) * rng.next_f64().powi(2);
+            let i = i_max.max(0.0) * (rng.next_f64() * 2.0 - 1.0);
+            let lan = rng.range(0.0, tau);
+            let arg_pe = rng.range(0.0, tau);
+            let m0 = rng.range(0.0, tau);
+            let r = rng.range(radius.0, radius.1);
+            [sma, e.min(0.99), i, lan, arg_pe, m0, r]
+        })
+        .collect()
+}
+
 pub(crate) fn install_space_api(
     lua: &Lua,
     info: Rc<RefCell<SpaceInfo>>,
@@ -208,6 +239,41 @@ pub(crate) fn install_space_api(
         }
     }
 
+    // space.beltOrbits{ count, seed, aMin, aMax, eMax, iMax, radiusMin,
+    // radiusMax } → a list of orbits, each a table setCelestial takes as it is.
+    {
+        if let Ok(f) = lua.create_function(|lua, opts: mlua::Table| {
+            crate::opts::check_keys(&opts, BELT_KEYS, "space.beltOrbits")?;
+            let num = |k: &str, d: f64| -> mlua::Result<f64> { Ok(opts.get::<Option<f64>>(k)?.unwrap_or(d)) };
+            let count = opts.get::<Option<i64>>("count")?.unwrap_or(0);
+            if !(0..=100_000).contains(&count) {
+                return Err(mlua::Error::runtime(format!(
+                    "space.beltOrbits: count is {count}, it takes 0 to 100000"
+                )));
+            }
+            let seed = opts.get::<Option<i64>>("seed")?.unwrap_or(1) as u32;
+            let (a0, a1) = (num("aMin", 0.0)?, num("aMax", 0.0)?);
+            if !(a0 > 0.0 && a1 >= a0) {
+                return Err(mlua::Error::runtime(format!(
+                    "space.beltOrbits: aMin {a0} and aMax {a1} must be above 0, with aMax at least aMin"
+                )));
+            }
+            let (r0, r1) = (num("radiusMin", 1.0)?, num("radiusMax", 1.0)?);
+            let rows = belt_orbits(count as usize, seed, (a0, a1), num("eMax", 0.05)?, num("iMax", 0.05)?, (r0, r1.max(r0)));
+            let out = lua.create_table()?;
+            for (k, r) in rows.iter().enumerate() {
+                let t = lua.create_table()?;
+                for (key, v) in ["a", "e", "i", "lan", "argPe", "m0", "bodyRadius"].iter().zip(r) {
+                    t.set(*key, *v)?;
+                }
+                out.raw_set(k + 1, t)?;
+            }
+            Ok(out)
+        }) {
+            let _ = t.set("beltOrbits", f);
+        }
+    }
+
     let _ = lua.globals().set("space", t);
 }
 
@@ -221,6 +287,36 @@ mod tests {
         let warp = Rc::new(RefCell::new(None));
         install_space_api(&lua, info, warp);
         lua
+    }
+
+    /// A belt is a function of its seed: the same seed gives the same rocks,
+    /// another gives others, and every orbit is inside the ranges asked for.
+    #[test]
+    fn a_belt_is_the_same_belt_from_the_same_seed() {
+        let lua = test_lua();
+        let belt = |seed: u32| -> Vec<(f64, f64, f64, f64)> {
+            let t: mlua::Table = lua
+                .load(format!("return space.beltOrbits{{ count = 200, seed = {seed}, aMin = 5000, aMax = 8000, eMax = 0.1, iMax = 0.2, radiusMin = 5, radiusMax = 40 }}"))
+                .eval()
+                .unwrap();
+            t.sequence_values::<mlua::Table>()
+                .map(|r| {
+                    let r = r.unwrap();
+                    (r.get("a").unwrap(), r.get("e").unwrap(), r.get("i").unwrap(), r.get("bodyRadius").unwrap())
+                })
+                .collect()
+        };
+        let (a, b, c) = (belt(7), belt(7), belt(8));
+        assert_eq!(a.len(), 200);
+        assert_eq!(a, b, "the same seed gave a different belt");
+        assert_ne!(a, c, "another seed gave the same belt");
+        for &(sma, e, i, r) in &a {
+            assert!((5000.0..8000.0).contains(&sma) && (0.0..=0.1).contains(&e) && i.abs() <= 0.2 && (5.0..40.0).contains(&r));
+        }
+        // Not all in one place: the rocks spread across the range.
+        let lo = a.iter().filter(|r| r.0 < 6500.0).count();
+        assert!(lo > 60 && lo < 140, "{lo} of 200 in the inner half");
+        assert!(lua.load("return space.beltOrbits{ count = 3, aMin = 10, aMax = 20, spread = 1 }").eval::<mlua::Value>().is_err());
     }
 
     #[test]

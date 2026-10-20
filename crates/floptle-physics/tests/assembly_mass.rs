@@ -140,3 +140,74 @@ fn a_rebuilt_moving_assembly_keeps_its_velocity_and_spin() {
     assert!((c.ang_vel - w0).length() < 1e-6, "spin {w0:?} -> {:?}", c.ang_vel);
     assert!((c.vel - v0).length() < 1e-3, "velocity {v0:?} -> {:?}", c.vel);
 }
+
+/// Two copies of one moving, spinning craft: `a` is rebuilt with the same
+/// parts mid-flight and `b` is not. Each tick's node pose is written at the
+/// start of the tick (alpha 0), the most a node can lag its body.
+fn rebuilt_and_twin(vel: Vec3, spin: Vec3) -> (Vec3, Vec3, Vec3, Vec3) {
+    let parts = [
+        (Vec3::new(0.0, -1.0, 0.0), [0.5, 0.5, 0.5], Vec3::ONE, 3.0),
+        (Vec3::new(1.0, 1.5, 0.0), [0.5, 0.5, 0.5], Vec3::ONE, 1.0),
+    ];
+    let fly = |rebuild: bool| {
+        let mut ecs = World::default();
+        let (root, _) = vessel(&mut ecs, DVec3::new(10.0, 20.0, 30.0), &parts);
+        let mut sim = build(&ecs);
+        {
+            let c = sim.compound_of_mut(root.index()).unwrap();
+            c.vel = vel;
+            c.ang_vel = spin;
+        }
+        for _ in 0..5 {
+            sim.step_tick(DT, None);
+            sim.writeback_interpolated(&mut ecs, 0.0);
+        }
+        if rebuild {
+            assert!(sim.rebuild_compound(root.index(), &ecs));
+        }
+        sim.step_tick(DT, None);
+        let c = sim.compound_of(root.index()).unwrap();
+        (c.origin(), c.vel)
+    };
+    let (pa, va) = fly(true);
+    let (pb, vb) = fly(false);
+    (pa, va, pb, vb)
+}
+
+/// A rebuild keeps a fast craft where its body is, not where its node was
+/// last drawn a tick behind it.
+#[test]
+fn a_rebuild_does_not_set_a_fast_craft_back_a_tick() {
+    let (pa, _, pb, _) = rebuilt_and_twin(Vec3::new(130.0, 0.0, 0.0), Vec3::ZERO);
+    assert!((pa - pb).length() < 0.01, "the rebuilt craft is {} m from its twin", (pa - pb).length());
+}
+
+/// A rebuild with the same parts leaves a spinning craft's centre of mass
+/// moving as it was.
+#[test]
+fn a_rebuild_keeps_a_spinning_crafts_centre_of_mass_velocity() {
+    let (pa, va, pb, vb) = rebuilt_and_twin(Vec3::new(130.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 5.0));
+    assert!((va - vb).length() < 0.01, "velocity {va:?}, its twin's {vb:?}");
+    assert!((pa - pb).length() < 0.01, "the rebuilt craft is {} m from its twin", (pa - pb).length());
+}
+
+/// The half of an assembly a split keeps is still that assembly: it keeps
+/// its root node as owner, so a pair the game ignores stays ignored, and an
+/// anchored craft stays anchored.
+#[test]
+fn the_half_a_split_keeps_is_still_its_assembly() {
+    let mut ecs = World::default();
+    let parts = [
+        (Vec3::new(0.0, 0.0, 0.0), [0.5, 0.5, 0.5], Vec3::ONE, 2.0),
+        (Vec3::new(2.0, 0.0, 0.0), [0.5, 0.5, 0.5], Vec3::ONE, 1.0),
+    ];
+    let (root, ps) = vessel(&mut ecs, DVec3::ZERO, &parts);
+    let mut sim = build(&ecs);
+    sim.set_compound_anchored(root.index(), true);
+    let stage = ecs.spawn();
+    ecs.insert(stage, Transform::IDENTITY);
+    assert!(sim.split_compound(root.index(), &[ps[1].index()], stage, &mut ecs));
+    let kept = sim.compound_of(root.index()).unwrap();
+    assert_eq!(kept.owner, root.index(), "the kept half lost its owner");
+    assert!(kept.anchored, "the kept half of an anchored craft let go");
+}

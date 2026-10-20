@@ -1,5 +1,5 @@
 //! Joints: a node's body held to another node, or to the world, by a hinge,
-//! a weld, a rope, a spring, a slider or a wheel.
+//! a weld, a rope, a spring, a slider, a wheel or a ball joint.
 //!
 //! A joint goes on the part that moves and names what it hangs from by its
 //! node name, the way a 2D camera names what it follows: a door names its
@@ -38,10 +38,15 @@ pub enum JointKind {
     /// `stiffness` and no more force than `max_force`: picking things up and
     /// dragging them about.
     Target,
+    /// The two anchors stay together and the bodies turn about it every
+    /// way: a shoulder, a hip, a tow hitch, a gimballed engine mount. With
+    /// `limit`, this node's `axis` leans no more than `max` degrees from the
+    /// other's: a cone.
+    Ball,
 }
 
 impl JointKind {
-    pub const ALL: [JointKind; 8] = [
+    pub const ALL: [JointKind; 9] = [
         JointKind::Hinge,
         JointKind::Fixed,
         JointKind::Distance,
@@ -50,6 +55,7 @@ impl JointKind {
         JointKind::Slider,
         JointKind::Wheel,
         JointKind::Target,
+        JointKind::Ball,
     ];
 
     pub fn name(self) -> &'static str {
@@ -62,7 +68,14 @@ impl JointKind {
             JointKind::Slider => "slider",
             JointKind::Wheel => "wheel",
             JointKind::Target => "target",
+            JointKind::Ball => "ball",
         }
+    }
+
+    /// Its limits, motor speed and position are a turn (degrees to a script,
+    /// radians to the solver) rather than a travel.
+    pub fn turns(self) -> bool {
+        matches!(self, JointKind::Hinge | JointKind::Wheel | JointKind::Ball)
     }
 
     pub fn parse(s: &str) -> Option<Self> {
@@ -141,6 +154,10 @@ pub struct Joint {
     /// saved.
     pub position: f32,
     pub speed: f32,
+    /// A wheel's steering: degrees its axle is turned about the suspension
+    /// axis from the other node's Z, the way a front wheel turns. Set by a
+    /// script each tick. Not saved.
+    pub steer: f32,
 }
 
 impl Default for Joint {
@@ -170,6 +187,7 @@ impl Default for Joint {
             goal: 0.0,
             position: 0.0,
             speed: 0.0,
+            steer: 0.0,
         }
     }
 }

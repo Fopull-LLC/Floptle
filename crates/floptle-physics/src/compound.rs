@@ -451,6 +451,13 @@ impl Compound {
         detached.active = self.active;
         kept.off = self.off;
         detached.off = self.off;
+        // The kept half is still the same assembly: it answers to the same
+        // node, and a craft held by its launch clamps stays held. Dropped, the
+        // owner took the half out of every ignored pair (an arm split off its
+        // chassis to hinge on it then shoved against it), and the anchor let
+        // a clamped chassis fall away from what was jointed to it.
+        kept.owner = self.owner;
+        kept.anchored = self.anchored;
         *self = kept;
         Some(detached)
     }

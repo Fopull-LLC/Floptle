@@ -161,7 +161,7 @@ impl Editor {
             let soi = if b.soi > 0.0 {
                 b.soi
             } else if let Some(p) = parent {
-                System::soi_radius(b.a.abs(), b.mu, cb[p].1.mu)
+                System::auto_soi(b.a.abs(), b.mu, cb[p].1.mu, b.body_radius)
             } else {
                 f64::INFINITY
             };

@@ -97,7 +97,7 @@ fn run(ed: &mut crate::Editor, frames: usize) {
 /// 100 m/s from `rebuild`'s callback in the same frame: the next frame it
 /// is moving at 100 m/s, and while it coasts in LOD `assembly.info` says so
 /// (free, not grounded, the rails velocity) rather than reporting the LOD's
-/// anchored stand-in.
+/// anchored stand-in, and so does its root node's `vx`.
 #[test]
 fn a_far_assembly_pushed_as_it_is_built_moves_and_reads_true_in_lod() {
     let (mut ed, dir) = project(
@@ -128,7 +128,7 @@ function update(node, dt)
   if ship then
     local inf = assembly.info(ship)
     if inf then
-      log(string.format("INFO %.3f %s %s %d", inf.vel.x, tostring(inf.anchored), tostring(inf.grounded), frame))
+      log(string.format("INFO %.3f %s %s %d %.3f", inf.vel.x, tostring(inf.anchored), tostring(inf.grounded), frame, ship.vx))
     end
   end
 end
@@ -150,6 +150,9 @@ end
         assert!((v - 100.0).abs() <= 1.0, "speed {v} (want 100 ± 1): {info:?}");
         assert_eq!(it.next(), Some("false"), "a coasting craft is not anchored: {info:?}");
         assert_eq!(it.next(), Some("false"), "a coasting craft is not grounded: {info:?}");
+        // Its root node reads the same velocity, not the stand-in's zero.
+        let vx: f32 = it.nth(1).unwrap().parse().unwrap();
+        assert!((vx - v).abs() <= 1e-3, "node.vx {vx}, assembly.info {v}: {info:?}");
     }
     let root = ed.world.query::<Name>().find(|(_, n)| n.0 == "Vessel").map(|(e, _)| e.index()).unwrap();
     assert!(ed.compound_lod.contains_key(&root), "2 km out, the craft should be in LOD for this test to mean anything");
@@ -266,8 +269,8 @@ end
 }
 
 /// A body switched off on a planet that is moving on its rails rides the
-/// planet while it is off, and is where it was relative to the planet when
-/// it is switched back on.
+/// planet while it is off, node and all, and is where it was relative to the
+/// planet when it is switched back on.
 #[test]
 fn a_switched_off_body_rides_its_planet_and_resumes_where_it_was_on_it() {
     let (mut ed, dir) = project(
@@ -282,6 +285,8 @@ function update(node, dt)
   if step == 30 then
     log(string.format("REL before %.2f %.2f %.2f %.2f %.2f %.2f", rx, ry, rz, planet.x, planet.y, planet.z))
     ball.enabled = false
+  elseif step == 60 then
+    log(string.format("REL off %.2f %.2f %.2f %.2f %.2f %.2f", rx, ry, rz, planet.x, planet.y, planet.z))
   elseif step == 90 then
     ball.enabled = true
   elseif step == 93 then
@@ -317,9 +322,12 @@ end
     ed.toggle_play();
     run(&mut ed, 100);
     let rel = lines(&mut ed, "REL");
-    assert_eq!(rel.len(), 2, "{rel:?}");
+    assert_eq!(rel.len(), 3, "{rel:?}");
     let num = |l: &str| -> Vec<f64> { l.split(' ').skip(1).map(|v| v.parse().unwrap()).collect() };
-    let (a, b) = (num(&rel[0]), num(&rel[1]));
+    let (a, off, b) = (num(&rel[0]), num(&rel[1]), num(&rel[2]));
+    // While it is off its node rides the planet too, not only its body.
+    let d_off = ((a[0] - off[0]).powi(2) + (a[1] - off[1]).powi(2) + (a[2] - off[2]).powi(2)).sqrt();
+    assert!(d_off < 0.5, "half a second off, its node is {d_off} m from where it was on its planet: {rel:?}");
     let d = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
     let moved = ((a[3] - b[3]).powi(2) + (a[4] - b[4]).powi(2) + (a[5] - b[5]).powi(2)).sqrt();
     assert!(moved > 50.0, "the planet should have moved on its rails meanwhile: {rel:?}");
@@ -520,5 +528,304 @@ end
     assert_eq!(got.len(), 2, "{got:?}");
     let y = |l: &str| -> f32 { l.split(' ').nth(1).unwrap().parse().unwrap() };
     assert!(y(&got[1]) > y(&got[0]) + 5.0, "a second of 20 m/s² should lift it well clear: {got:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A body a script moves while physics is paused is moved: its node's
+/// transform carries the move the same frame, so every handle (a persistent
+/// node's included) and every engine system that follows bodies sees it.
+#[test]
+fn a_body_moved_while_physics_is_paused_reaches_its_node() {
+    let (mut ed, dir) = project(
+        "pausedmove",
+        r#"
+function start(node) physics.pause(true) end
+function update(node, dt)
+  local b = find("Ball")
+  b.x, b.y, b.z = 5000 + time, 0, 0
+end
+"#,
+    );
+    let ball = ed.world.spawn();
+    ed.world.insert(ball, Transform::from_translation(DVec3::new(28.0, 190.0, -4739.0)));
+    ed.world.insert(ball, Name("Ball".into()));
+    ed.world.insert(ball, Matter::Empty);
+    ed.world.insert(ball, RigidBody { gravity: false, radius: 0.5, ..Default::default() });
+    ed.toggle_play();
+    run(&mut ed, 30);
+    let p = floptle_core::world_transform(&ed.world, ball).translation;
+    assert!(p.x > 5000.0 && p.y.abs() < 1e-6 && p.z.abs() < 1e-6, "the ball's node is at {p:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A moving body stands still where physics paused it. Frames between ticks
+/// used to draw it partway back along its last tick, so at 144 fps a craft
+/// paused at 100 m/s shook by up to a tick's travel.
+#[test]
+fn a_body_paused_mid_flight_stands_still() {
+    let (mut ed, dir) = project(
+        "pausedstill",
+        r#"
+local n = 0
+function update(node, dt)
+  n = n + 1
+  if n == 30 then physics.pause(true) end
+end
+"#,
+    );
+    let ball = ed.world.spawn();
+    ed.world.insert(ball, Transform::IDENTITY);
+    ed.world.insert(ball, Name("Ball".into()));
+    ed.world.insert(ball, Matter::Empty);
+    ed.world.insert(ball, RigidBody { gravity: false, radius: 0.5, ..Default::default() });
+    ed.toggle_play();
+    ed.sim.as_mut().unwrap().set_body_velocity(ball.index(), Vec3::new(100.0, 0.0, 0.0));
+    let mut xs = Vec::new();
+    for f in 0..60 {
+        ed.play_step(1.0 / 144.0, true);
+        if f >= 35 {
+            xs.push(floptle_core::world_transform(&ed.world, ball).translation.x);
+        }
+    }
+    let (lo, hi) = xs.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &x| (lo.min(x), hi.max(x)));
+    assert!(lo > 5.0, "the ball never flew: {xs:?}");
+    assert!(hi - lo < 1e-6, "a paused ball moved {} m: {xs:?}", hi - lo);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An impulse a rebuild callback aims at the centre of mass it has just
+/// read lands there, on a planet moving on its rails too: the craft flies
+/// off without a spin. It used to wait for the next drain, after a tick had
+/// carried the craft a tick's travel of its planet away from the point, and
+/// came out spinning at hundreds of radians a second.
+#[test]
+fn a_push_from_a_rebuild_callback_on_a_moving_planet_lands_at_the_centre_of_mass() {
+    let (mut ed, dir) = project(
+        "rebuildpush",
+        r#"
+local asked, ship, frame = false, nil, 0
+function update(node, dt)
+  frame = frame + 1
+  local planet = find("Planet")
+  if not planet then return end
+  if not asked then
+    asked = true
+    local at = vec3(planet.x, planet.y + 30, planet.z)
+    spawn("Vessel", at, function(v)
+      ship = v
+      spawn("Part", at, function(p)
+        assembly.rebuild(v, function(s)
+          local inf = assembly.info(s)
+          assembly.impulseAt(s, vec3(0, 50 * inf.mass, 0), inf.com)
+        end)
+      end, v)
+    end)
+  elseif ship then
+    local inf = assembly.info(ship)
+    if inf then
+      log(string.format("SPIN %.4f %.3f %d", math.sqrt(inf.angVel.x ^ 2 + inf.angVel.y ^ 2 + inf.angVel.z ^ 2), inf.vel.y, frame))
+    end
+  end
+end
+"#,
+    );
+    // A planet on a fast orbit about the star (100 m/s), with the camera on
+    // it so the craft stays in full physics.
+    let star = ed.world.query::<Name>().find(|(_, n)| n.0 == "Star").map(|(e, _)| e).unwrap();
+    ed.world.get_mut::<CelestialBody>(star).unwrap().mu = 1.0e7;
+    let planet = ed.world.spawn();
+    ed.world.insert(planet, Transform::IDENTITY);
+    ed.world.insert(planet, Name("Planet".into()));
+    ed.world.insert(planet, Matter::Empty);
+    ed.world.insert(
+        planet,
+        CelestialBody { mu: 1000.0, body_radius: 5.0, soi: 200.0, parent: "Star".into(), a: 1000.0, ..Default::default() },
+    );
+    ed.toggle_play();
+    run(&mut ed, 1);
+    let p = floptle_core::world_transform(&ed.world, planet).translation;
+    ed.toggle_play();
+    ed.world.get_mut::<Transform>(planet).unwrap().translation = p;
+    let cam = ed.world.query::<Name>().find(|(_, n)| n.0 == "Camera").map(|(e, _)| e).unwrap();
+    ed.world.get_mut::<Transform>(cam).unwrap().translation = p + DVec3::new(0.0, 0.0, 40.0);
+    ed.toggle_play();
+    run(&mut ed, 20);
+    let spin = lines(&mut ed, "SPIN");
+    assert!(spin.len() >= 10, "{spin:?}");
+    for l in &spin {
+        let mut it = l.split(' ');
+        let w: f32 = it.next().unwrap().parse().unwrap();
+        let vy: f32 = it.next().unwrap().parse().unwrap();
+        assert!(w < 0.05, "spinning at {w} rad/s after a push at its centre of mass: {spin:?}");
+        assert!((vy - 50.0).abs() < 1.0, "pushed to {vy} m/s, not 50: {spin:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A cold planet whose field is on disk streams in around a body a script
+/// moves next to it while physics is paused, the way a loading screen parks
+/// the crew over the world it is waiting for. Residency follows the body's
+/// node, which only learnt about a paused move once the move reached it.
+#[test]
+fn a_cold_planet_streams_in_around_a_body_moved_to_it_while_paused() {
+    let (mut ed, dir) = project(
+        "pausedstream",
+        r#"
+function start(node) physics.pause(true) end
+function update(node, dt)
+  local rock, b = find("Rock"), find("Ball")
+  if rock and b then b.x, b.y, b.z = rock.x, rock.y + 30, rock.z end
+end
+"#,
+    );
+    // A small planet on a wide orbit, its field written to the project the
+    // way a saved world's is.
+    let field = floptle_field::procgen::generate_planet(&floptle_field::procgen::PlanetFill {
+        radius: 20.0,
+        voxel: 1.5,
+        relief: 2.0,
+        cave_depth: 6.0,
+        core_r: 3.0,
+        seed: 1234,
+        ..Default::default()
+    });
+    let path = ed.terrain_field_path_id(7);
+    floptle_vfs::create_dir_all(path.parent().unwrap()).unwrap();
+    floptle_vfs::write(&path, field.to_bytes()).unwrap();
+    let rock = ed.world.spawn();
+    ed.world.insert(rock, Transform::from_translation(DVec3::new(5000.0, -100_000.0, 0.0)));
+    ed.world.insert(rock, Name("Rock".into()));
+    ed.world.insert(rock, Matter::Terrain { id: 7, collision: Default::default() });
+    ed.world.insert(rock, CelestialBody { mu: 0.0, body_radius: 20.0, parent: "Star".into(), a: 5000.0, ..Default::default() });
+    let ball = ed.world.spawn();
+    ed.world.insert(ball, Transform::IDENTITY);
+    ed.world.insert(ball, Name("Ball".into()));
+    ed.world.insert(ball, Matter::Empty);
+    ed.world.insert(ball, RigidBody { gravity: false, radius: 0.5, ..Default::default() });
+    ed.toggle_play();
+    assert!(!ed.terrains.contains_key(&rock), "the planet should start cold for this test to mean anything");
+    for _ in 0..30 {
+        ed.play_step(1.0 / 60.0, true);
+        ed.pump_world_streaming();
+        if ed.terrains.contains_key(&rock) {
+            break;
+        }
+    }
+    let at = floptle_core::world_transform(&ed.world, ball).translation;
+    let rp = floptle_core::world_transform(&ed.world, rock).translation;
+    assert!(ed.terrains.contains_key(&rock), "the planet never streamed in; the ball's node is {} m from it", (at - rp).length());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// On a planet moving on its rails, a body spawned from `fixedUpdate` and
+/// an assembly built from a spawn callback land where they were placed on
+/// the planet, and stay there: both arrive before the next carry.
+#[test]
+fn spawns_and_rebuilds_on_a_moving_planet_land_where_they_were_placed() {
+    let (mut ed, dir) = project(
+        "railspawn",
+        r#"
+local n, ball, ship = 0, nil, nil
+function fixedUpdate(node, dt)
+  n = n + 1
+  local planet = find("Planet")
+  if not planet then return end
+  local px, py, pz = planet.x, planet.y, planet.z
+  if n == 5 then
+    spawn("Part", vec3(px, py + 20, pz), function(p) ball = p end)
+    spawn("Vessel", vec3(px + 10, py + 20, pz), function(v)
+      ship = v
+      spawn("Part", vec3(px + 10, py + 20, pz), function(p) assembly.rebuild(v) end, v)
+    end)
+  elseif n == 40 and ball and ship then
+    local t = ball.tickPos
+    local o = assembly.info(ship).origin
+    log(string.format("REL %.4f %.4f %.4f %.4f %.4f %.4f", t.x - px, t.y - py, t.z - pz, o.x - px, o.y - py, o.z - pz))
+  end
+end
+"#,
+    );
+    let star = ed.world.query::<Name>().find(|(_, n)| n.0 == "Star").map(|(e, _)| e).unwrap();
+    ed.world.get_mut::<CelestialBody>(star).unwrap().mu = 1.0e8;
+    let planet = ed.world.spawn();
+    ed.world.insert(planet, Transform::IDENTITY);
+    ed.world.insert(planet, Name("Planet".into()));
+    ed.world.insert(planet, Matter::Empty);
+    ed.world.insert(
+        planet,
+        CelestialBody { mu: 1000.0, body_radius: 5.0, soi: 200.0, parent: "Star".into(), a: 1000.0, ..Default::default() },
+    );
+    ed.toggle_play();
+    run(&mut ed, 1);
+    let p = floptle_core::world_transform(&ed.world, planet).translation;
+    ed.toggle_play();
+    ed.world.get_mut::<Transform>(planet).unwrap().translation = p;
+    let cam = ed.world.query::<Name>().find(|(_, n)| n.0 == "Camera").map(|(e, _)| e).unwrap();
+    ed.world.get_mut::<Transform>(cam).unwrap().translation = p + DVec3::new(0.0, 0.0, 40.0);
+    ed.toggle_play();
+    // Frames of 2.5 ticks, so spawns are asked for between ticks of a frame.
+    for _ in 0..30 {
+        ed.play_step(2.5 / 60.0, true);
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+    }
+    let rel = lines(&mut ed, "REL");
+    assert_eq!(rel.len(), 1, "{rel:?}");
+    let v: Vec<f64> = rel[0].split(' ').map(|x| x.parse().unwrap()).collect();
+    let ball = ((v[0]).powi(2) + (v[1] - 20.0).powi(2) + v[2].powi(2)).sqrt();
+    let ship = ((v[3] - 10.0).powi(2) + (v[4] - 20.0).powi(2) + v[5].powi(2)).sqrt();
+    assert!(ball < 0.01, "the spawned body is {ball} m from where it was placed on its planet: {rel:?}");
+    assert!(ship < 0.01, "the rebuilt craft is {ship} m from where it was placed on its planet: {rel:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A small body with no mass of its own, on a fast orbit, carries what is
+/// standing just off it, as a planet does: its sphere of influence reaches
+/// a few of its radii however small its Laplace sphere is.
+#[test]
+fn a_massless_rock_on_its_orbit_carries_what_is_beside_it() {
+    let (mut ed, dir) = project(
+        "rockride",
+        r#"
+local step = 0
+function update(node, dt)
+  step = step + 1
+  local ball, rock = find("Ball"), find("Rock")
+  if not (ball and rock) then return end
+  if step == 10 or step == 70 then
+    log(string.format("REL %.3f %.3f %.3f %.2f %.2f %.2f", ball.x - rock.x, ball.y - rock.y, ball.z - rock.z, rock.x, rock.y, rock.z))
+  end
+end
+"#,
+    );
+    let star = ed.world.query::<Name>().find(|(_, n)| n.0 == "Star").map(|(e, _)| e).unwrap();
+    ed.world.get_mut::<CelestialBody>(star).unwrap().mu = 1.0e7;
+    let rock = ed.world.spawn();
+    ed.world.insert(rock, Transform::IDENTITY);
+    ed.world.insert(rock, Name("Rock".into()));
+    ed.world.insert(rock, Matter::Empty);
+    ed.world.insert(rock, CelestialBody { mu: 0.0, body_radius: 10.0, parent: "Star".into(), a: 1000.0, ..Default::default() });
+    let ball = ed.world.spawn();
+    ed.world.insert(ball, Transform::IDENTITY);
+    ed.world.insert(ball, Name("Ball".into()));
+    ed.world.insert(ball, Matter::Empty);
+    ed.world.insert(ball, RigidBody { gravity: false, radius: 0.5, ..Default::default() });
+    ed.toggle_play();
+    run(&mut ed, 1);
+    let p = floptle_core::world_transform(&ed.world, rock).translation;
+    ed.toggle_play();
+    ed.world.get_mut::<Transform>(rock).unwrap().translation = p;
+    ed.world.get_mut::<Transform>(ball).unwrap().translation = p + DVec3::new(0.0, 15.0, 0.0);
+    let cam = ed.world.query::<Name>().find(|(_, n)| n.0 == "Camera").map(|(e, _)| e).unwrap();
+    ed.world.get_mut::<Transform>(cam).unwrap().translation = p + DVec3::new(0.0, 0.0, 40.0);
+    ed.toggle_play();
+    run(&mut ed, 80);
+    let rel = lines(&mut ed, "REL");
+    assert_eq!(rel.len(), 2, "{rel:?}");
+    let num = |l: &str| -> Vec<f64> { l.split(' ').map(|v| v.parse().unwrap()).collect() };
+    let (a, b) = (num(&rel[0]), num(&rel[1]));
+    let moved = ((a[3] - b[3]).powi(2) + (a[4] - b[4]).powi(2) + (a[5] - b[5]).powi(2)).sqrt();
+    let d = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+    assert!(moved > 50.0, "the rock should have moved on its orbit: {rel:?}");
+    assert!(d < 0.5, "the ball beside the rock was left {d} m behind it: {rel:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -95,9 +95,10 @@ pub struct Body {
     /// transforms (`docs/multiplayer.md` §6). Default true.
     pub active: bool,
     /// Its node is switched off (`node.enabled = false`): out of the step, the
-    /// pair pass, touch events, rays and writeback until it is switched on,
-    /// when it carries on from where it stopped. Separate from `active`, which
-    /// networking owns.
+    /// pair pass, touch events and rays until it is switched on, when it
+    /// carries on from where it stopped. Its pose is still written back, so a
+    /// node switched off on a moving planet rides the planet with its body.
+    /// Separate from `active`, which networking owns.
     pub off: bool,
     /// Collision-layer bit index (resolved from the node's named layer by
     /// `floptle_core::Layers`). The solver only resolves this body against

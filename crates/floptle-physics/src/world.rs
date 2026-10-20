@@ -146,6 +146,9 @@ thread_local! {
     pub(crate) static REINDEXES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+/// How many recent level edits [`PhysicsWorld::level_edit_log`] keeps.
+pub const LEVEL_EDIT_LOG: usize = 512;
+
 /// The collision world for one scene: a gravity field, a set of colliders, and the
 /// dynamic bodies, advanced together on a fixed timestep.
 ///
@@ -212,6 +215,13 @@ pub struct PhysicsWorld {
     /// terrain dig). What [`Self::level_revision`] folds in for the changes a
     /// collider's bounds cannot show.
     pub level_edits: u64,
+    /// Where the latest in-place edits landed, as `(level_edits after the
+    /// edit, world-space bounding sphere)`; `None` for an edit that could be
+    /// anywhere in its collider. Lets a reader that rests things on the level
+    /// (particles) wake only what lies near a re-meshed chunk. Holds the last
+    /// [`LEVEL_EDIT_LOG`] edits; a reader that falls further behind than that
+    /// treats the level as changed everywhere.
+    pub level_edit_log: std::collections::VecDeque<(u64, Option<(DVec3, f64)>)>,
     /// Compound rigid bodies (multi-shape 6-DOF assemblies — see `compound.rs`),
     /// stepped alongside `bodies` with the same collider set and layer matrix.
     pub compounds: Vec<Compound>,
@@ -279,6 +289,7 @@ impl Default for PhysicsWorld {
             index_fresh: false,
             indexed_hash: 0,
             level_edits: 0,
+            level_edit_log: std::collections::VecDeque::new(),
             resting: Vec::new(),
             resting_check_elapsed: 0.0,
             last_revalidated_collider_count: usize::MAX,
@@ -1131,6 +1142,23 @@ impl PhysicsWorld {
             cand.dedup();
         }
         surface_hit(&self.colliders, &cand, origin, rd, max_dist)
+    }
+
+    /// Record one in-place edit of the level and where it reached: each
+    /// region a world-space bounding sphere, `None` for "somewhere in the
+    /// collider". Bumps [`Self::level_edits`] once however many regions it names.
+    pub fn note_level_edit(&mut self, regions: &[Option<(DVec3, f64)>]) {
+        self.level_edits += 1;
+        let seq = self.level_edits;
+        if regions.is_empty() {
+            self.level_edit_log.push_back((seq, None));
+        }
+        for r in regions {
+            self.level_edit_log.push_back((seq, *r));
+        }
+        while self.level_edit_log.len() > LEVEL_EDIT_LOG {
+            self.level_edit_log.pop_front();
+        }
     }
 
     /// A number that changes when the level changes shape: a collider added,
