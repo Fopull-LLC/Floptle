@@ -98,7 +98,11 @@ impl Editor {
         crate::worker::spawn("planet-gen", move || {
             for (id, fill) in gens {
                 let t0 = floptle_core::time::Instant::now();
-                let field = floptle_field::procgen::generate_planet(&fill);
+                let mut field = floptle_field::procgen::generate_planet(&fill);
+                // The recipe goes with the field, so its saves hold only edits.
+                if let Ok(spec) = ron::to_string(&fill) {
+                    field.set_spec(spec);
+                }
                 if tx.send((id, field, t0.elapsed().as_millis() as u64)).is_err() {
                     return;
                 }

@@ -125,6 +125,87 @@ pub(crate) struct TerrainRender {
     /// The impostor sphere's albedo — the body's average surface color, sampled
     /// from the field once on the first switch to impostor mode.
     pub impostor_color: Option<[f32; 3]>,
+    /// The meshes of the chunks drawn at the coarsest level, kept so they can
+    /// be drawn [`FAR_GROUP`]³ to a draw ([`Self::groups`]).
+    pub far: HashMap<[i32; 3], floptle_field::ChunkMesh>,
+    /// One merged mesh per group of far chunks, keyed by group.
+    pub groups: HashMap<[i32; 3], MeshId>,
+    /// Groups whose far chunks changed since their mesh was merged.
+    pub groups_dirty: std::collections::HashSet<[i32; 3]>,
+}
+
+/// Chunks along each edge of a far group: the coarsest chunks are drawn this
+/// many cubed to a draw. One draw a chunk was 6,100 draws for a 1 km planet
+/// seen from orbit, and most of a 24 ms frame.
+pub(crate) const FAR_GROUP: i32 = 4;
+
+/// The level whose chunks are drawn in groups: stride 8, beyond the last ring.
+const FAR_LOD: u8 = 3;
+
+fn far_group_of(c: [i32; 3]) -> [i32; 3] {
+    c.map(|v| v.div_euclid(FAR_GROUP))
+}
+
+impl TerrainRender {
+    /// Forget chunk `c`'s far mesh, if it had one: it is no longer drawn at the
+    /// coarsest level, and its group is merged again without it.
+    fn forget_far(&mut self, c: [i32; 3]) {
+        if self.far.remove(&c).is_some() {
+            self.groups_dirty.insert(far_group_of(c));
+        }
+    }
+
+    /// Free every mesh this terrain draws: its chunks' and its groups'.
+    pub(crate) fn free_all(&mut self, raster: &mut floptle_render::Raster) {
+        for (_, (mid, _)) in self.slots.drain() {
+            raster.free_dynamic(mid);
+        }
+        for (_, mid) in self.groups.drain() {
+            raster.free_dynamic(mid);
+        }
+        self.far.clear();
+        self.groups_dirty.clear();
+    }
+
+    /// Merge each changed group's far chunks into its one mesh.
+    fn merge_far_groups(&mut self, gpu: &floptle_render::Gpu, raster: &mut floptle_render::Raster, chunk_units: f32) {
+        for g in std::mem::take(&mut self.groups_dirty) {
+            let origin = Vec3::new(g[0] as f32, g[1] as f32, g[2] as f32) * (FAR_GROUP as f32 * chunk_units);
+            let mut merged = floptle_field::ChunkMesh { origin: origin.to_array(), ..Default::default() };
+            for dz in 0..FAR_GROUP {
+                for dy in 0..FAR_GROUP {
+                    for dx in 0..FAR_GROUP {
+                        let c = [g[0] * FAR_GROUP + dx, g[1] * FAR_GROUP + dy, g[2] * FAR_GROUP + dz];
+                        let Some(m) = self.far.get(&c) else { continue };
+                        let shift = Vec3::from(m.origin) - origin;
+                        let base = merged.positions.len() as u32;
+                        merged.positions.extend(m.positions.iter().map(|p| (Vec3::from(*p) + shift).to_array()));
+                        merged.normals.extend_from_slice(&m.normals);
+                        merged.colors.extend_from_slice(&m.colors);
+                        merged.indices.extend(m.indices.iter().map(|i| i + base));
+                    }
+                }
+            }
+            if merged.is_empty() {
+                if let Some(mid) = self.groups.remove(&g) {
+                    raster.free_dynamic(mid);
+                }
+                continue;
+            }
+            let data = floptle_render::chunk_mesh_data(&merged);
+            match self.groups.get(&g).copied() {
+                Some(mid) if raster.replace_dynamic(gpu, mid, &data) => {}
+                old => {
+                    if let Some(mid) = old {
+                        raster.free_dynamic(mid);
+                    }
+                    let id = raster.register_dynamic(gpu, data.vertices.len() as u32, data.indices.len() as u32, true);
+                    raster.replace_dynamic(gpu, id, &data);
+                    self.groups.insert(g, id);
+                }
+            }
+        }
+    }
 }
 
 /// P4 LOD ring radii, in chunks of Chebyshev distance from the camera's chunk:
@@ -290,27 +371,40 @@ const CHECKPOINT_FORCE_SECS: f64 = 20.0;
 fn load_terrain_from(sources: Vec<TerrainSource>) -> Option<EditorTerrain> {
     // A saved field of a planet whose caves wait knows which chunks are still
     // to make but not how: the body's genspec, when it has one, does.
-    let spec: Option<floptle_field::procgen::PlanetFill> = sources.iter().find_map(|s| match s {
-        TerrainSource::Generate(spec) => ron::from_str(spec).ok(),
+    let genspec: Option<String> = sources.iter().find_map(|s| match s {
+        TerrainSource::Generate(spec) => Some(spec.clone()),
         TerrainSource::File(_) => None,
     });
+    let spec: Option<floptle_field::procgen::PlanetFill> = genspec.as_deref().and_then(|s| ron::from_str(s).ok());
     for src in sources {
         let field = match src {
             TerrainSource::File(path) => floptle_vfs::read(&path)
                 .ok()
                 .and_then(|b| floptle_field::ChunkField::from_bytes(&b))
-                .map(|mut f| {
-                    if f.pending_count() > 0
+                .and_then(|f| {
+                    if f.is_delta() {
+                        return whole_field(f);
+                    }
+                    let mut f = f;
+                    if let (Some(fill), Some(text)) = (spec.as_ref(), genspec.as_ref()) {
+                        // A save from before edits were tracked: what differs
+                        // from a fresh generation is what was dug, and from
+                        // here on only that is saved.
+                        f.set_spec(text.clone());
+                        f.adopt_generation(&floptle_field::procgen::generate_planet(fill));
+                    } else if f.pending_count() > 0
                         && let Some(source) = spec.as_ref().and_then(floptle_field::procgen::pending_source_for)
                     {
                         f.set_pending_source(source);
                     }
-                    f
+                    Some(f)
                 }),
-            TerrainSource::Generate(spec) => ron::from_str(&spec)
+            TerrainSource::Generate(text) => ron::from_str(&text)
                 .ok()
                 .map(|fill: floptle_field::procgen::PlanetFill| {
-                    floptle_field::procgen::generate_planet(&fill)
+                    let mut f = floptle_field::procgen::generate_planet(&fill);
+                    f.set_spec(text);
+                    f
                 }),
         };
         if let Some(field) = field {
@@ -318,6 +412,17 @@ fn load_terrain_from(sources: Vec<TerrainSource>) -> Option<EditorTerrain> {
         }
     }
     None
+}
+
+/// A field read from a save holding only its edits, laid over the ground they
+/// were dug into, made again from the recipe the save carries. A whole field
+/// comes back as it is. `None` when the recipe does not parse.
+fn whole_field(f: floptle_field::ChunkField) -> Option<floptle_field::ChunkField> {
+    if !f.is_delta() {
+        return Some(f);
+    }
+    let fill: floptle_field::procgen::PlanetFill = ron::from_str(f.spec()?).ok()?;
+    Some(f.lay_over(floptle_field::procgen::generate_planet(&fill)))
 }
 
 /// Stable hash of a genspec string — recorded in the `.meta` sidecar when a
@@ -504,15 +609,30 @@ impl TerrainWorker {
     pub(crate) fn spawn() -> Self {
         let (jtx, jrx) = std::sync::mpsc::channel::<RemeshJob>();
         let (dtx, drx) = std::sync::mpsc::channel::<RemeshDone>();
+        // A few threads share the queue. One alone was the mining laser's
+        // hitch on a busy machine: a bite dirties up to eight collision chunks
+        // at a millisecond or two each, due two frames later, and when the one
+        // thread had not finished them the frame waited for it.
         #[cfg(not(target_arch = "wasm32"))]
         {
-            crate::worker::spawn("terrain-remesh", move || {
-                while let Ok(job) = jrx.recv() {
-                    if !Self::run(job, &dtx) {
-                        break; // editor gone
+            let threads = std::thread::available_parallelism().map_or(2, |n| (n.get() / 4).clamp(1, 4));
+            let jrx = std::sync::Arc::new(std::sync::Mutex::new(jrx));
+            for _ in 0..threads {
+                let (jrx, dtx) = (jrx.clone(), dtx.clone());
+                crate::worker::spawn("terrain-remesh", move || {
+                    loop {
+                        // Take one job with the queue held, run it with the queue free.
+                        let job = match jrx.lock() {
+                            Ok(q) => q.recv(),
+                            Err(_) => break,
+                        };
+                        let Ok(job) = job else { break };
+                        if !Self::run(job, &dtx) {
+                            break; // editor gone
+                        }
                     }
-                }
-            });
+                });
+            }
             Self { tx: jtx, rx: drx, in_flight: 0, early: Vec::new() }
         }
         #[cfg(target_arch = "wasm32")]
@@ -637,9 +757,7 @@ impl Editor {
             if live.contains(e) {
                 return true;
             }
-            for (_, (mid, _)) in r.slots.drain() {
-                raster.free_dynamic(mid);
-            }
+            r.free_all(raster);
             r.born.clear();
             false
         });
@@ -662,6 +780,7 @@ impl Editor {
                     if let Some((mid, _)) = render.slots.remove(&done.coord) {
                         raster.free_dynamic(mid);
                     }
+                    render.forget_far(done.coord);
                     render.born.remove(&done.coord);
                     render.empty.insert(done.coord);
                 } else {
@@ -708,9 +827,7 @@ impl Editor {
                 if render.impostor {
                     render.pending.clear();
                     render.empty.clear();
-                    for (_, (mid, _)) in render.slots.drain() {
-                        raster.free_dynamic(mid);
-                    }
+                    render.free_all(raster);
                     render.born.clear();
                     continue;
                 }
@@ -778,6 +895,10 @@ impl Editor {
                         false
                     }
                 });
+                let gone: Vec<[i32; 3]> = render.far.keys().filter(|c| !has.contains(*c)).copied().collect();
+                for c in gone {
+                    render.forget_far(c);
+                }
                 // A chunk the field no longer fills gives its stamp back with
                 // its slot, so coming back later is an arrival and fades again.
                 render.born.retain(|c, _| has.contains(c));
@@ -791,6 +912,7 @@ impl Editor {
             // main thread. Dirty jobs bypass the in-flight cap (a stale mesh is
             // worse than a deep queue).
             let sync_near = !self.playing;
+            let dug = |c: [i32; 3]| terrain.field.is_generated() && terrain.field.is_edited(c);
             if let Some(mut d) = dirty {
                 d.sort_unstable();
                 d.dedup();
@@ -798,10 +920,14 @@ impl Editor {
                     render.empty.remove(&coord);
                     let dist = dist_of(coord);
                     let cur = render.slots.get(&coord).map(|&(_, l)| l);
-                    // A dug chunk the player is near is remeshed at full detail
-                    // whatever it was drawn at: a coarse remesh of a pit draws a
-                    // mound over it, or nothing.
+                    // A dug chunk is remeshed at full detail whatever it was
+                    // drawn at: a coarse remesh of a pit draws a mound over it,
+                    // or nothing. On a generated world that holds as far as it
+                    // is drawn at all, since the coarse levels cannot draw a
+                    // pit narrower than their cells; elsewhere every chunk is
+                    // the author's and it holds near the player.
                     let lod = match cur {
+                        _ if dug(coord) => 0,
                         Some(c) if raw_lod(dist, rings) > 0 => c,
                         _ => raw_lod(dist, rings),
                     };
@@ -814,6 +940,7 @@ impl Editor {
                             if let Some((mid, _)) = render.slots.remove(&coord) {
                                 raster.free_dynamic(mid);
                             }
+                            render.forget_far(coord);
                             render.born.remove(&coord);
                             render.empty.insert(coord);
                         } else {
@@ -861,17 +988,28 @@ impl Editor {
                                 upload_chunk(gpu, raster, render, coord, &cm, 0, now);
                             }
                         } else {
-                            queue.push((prio_of(coord), e, coord, raw_lod(d, rings)));
+                            let lod = if dug(coord) { 0 } else { raw_lod(d, rings) };
+                            queue.push((prio_of(coord), e, coord, lod));
                         }
                     }
                     Some(&(_, cur)) => {
-                        let want = lod_for(dist_of(coord), cur, rings);
+                        let want = if dug(coord) { 0 } else { lod_for(dist_of(coord), cur, rings) };
                         if want != cur && !render.pending.contains_key(&coord) {
                             queue.push((prio_of(coord), e, coord, want));
                         }
                     }
                 }
             }
+        }
+
+        // The far chunks that changed this frame, merged into their groups'
+        // meshes before anything draws them.
+        for (e, render) in self.terrain_render.iter_mut() {
+            if render.groups_dirty.is_empty() {
+                continue;
+            }
+            let Some(t) = self.terrains.get(e) else { continue };
+            render.merge_far_groups(gpu, raster, floptle_field::CHUNK as f32 * t.field.voxel());
         }
 
         // ---- 5: top up the worker — dirty edits first (uncapped), then nearest ----
@@ -1036,7 +1174,27 @@ pub(crate) fn push_terrain_instances(
             .get::<floptle_core::CelestialBody>(e)
             .map(|cb| cb.occluder_radius as f32 * scale)
             .unwrap_or(0.0);
+        // Far chunks draw in their groups, a group to a draw.
+        let group_units = chunk_units * FAR_GROUP as f32;
+        for (g, &mid) in &render.groups {
+            if chunk_units > 0.0 {
+                let local = Vec3::new(g[0] as f32 + 0.5, g[1] as f32 + 0.5, g[2] as f32 + 0.5) * (group_units / scale);
+                let center = rel + rot * (local * scale);
+                // Half the group's diagonal, and the reach of its members' skirts.
+                let r = group_units * 0.87 + chunk_units * 0.45;
+                if !in_frustum(center, r) || (occ_r > 0.0 && occluded(center, r, rel, occ_r)) {
+                    continue;
+                }
+            }
+            let mut mp = *base_mat;
+            mp.terrain_paint_base = raster.dyn_paint_base(mid);
+            mp.terrain_splat = true;
+            instances.push((mid, None, floptle_render::instance_of_mat(model, &mp)));
+        }
         for (coord, &(mid, _)) in &render.slots {
+            if render.far.contains_key(coord) {
+                continue;
+            }
             if chunk_units > 0.0 {
                 let local = Vec3::new(
                     (coord[0] as f32 + 0.5) * chunk_units / scale,
@@ -1107,6 +1265,14 @@ fn upload_chunk(
     lod: u8,
     now: Option<f32>,
 ) {
+    // The coarsest chunks are drawn in groups, from a copy of their mesh;
+    // anything finer draws on its own.
+    if lod == FAR_LOD {
+        render.far.insert(coord, cm.clone());
+        render.groups_dirty.insert(far_group_of(coord));
+    } else {
+        render.forget_far(coord);
+    }
     let data = floptle_render::chunk_mesh_data(cm);
     // Before the match, because two of its three arms are also "already
     // resident" — an LOD swap and an outgrown slot are both re-meshes of
@@ -1703,7 +1869,9 @@ impl Editor {
             }
         };
         let t = &self.terrains[&e];
-        match self.sim.as_mut().and_then(|s| s.terrain_collider_mut(e.index())) {
+        // Recorded as the chunks it copies, so particles resting elsewhere
+        // on the level are left alone.
+        match self.sim.as_mut().and_then(|s| s.terrain_collider_mut_at(e.index(), &copy)) {
             Some(collider) => {
                 collider.field.copy_chunks_from(&t.field, &copy);
                 // The stale collision meshes are rebuilt off this thread and the
@@ -1771,7 +1939,7 @@ impl Editor {
                 }
                 self.collision_pending.remove(&key);
                 if let (Some(collider), Some(built)) =
-                    (self.sim.as_mut().and_then(|s| s.terrain_collider_mut(done.entity.index())), done.collision)
+                    (self.sim.as_mut().and_then(|s| s.terrain_collider_mut_at(done.entity.index(), &[done.coord])), done.collision)
                 {
                     collider.adopt(done.coord, built);
                 }
@@ -2946,6 +3114,7 @@ impl Editor {
             let loaded = floptle_vfs::read(self.terrain_field_path_id(id))
                 .ok()
                 .and_then(|b| floptle_field::ChunkField::from_bytes(&b))
+                .and_then(whole_field)
                 .or_else(dense_migration);
             // A terrain node in a saved scene that has no field on disk is the
             // shape of lost work, not of a new terrain — say so rather than
@@ -3747,6 +3916,146 @@ mod tests {
 #[cfg(test)]
 mod residency_tests {
     use super::*;
+
+    /// **A bite of a mining laser costs the main thread a few milliseconds at
+    /// most, even in a debug build.** Each bite on a generated planet cost the
+    /// frame it landed in 9 ms, then 33 to 61 ms on bigger worlds, in a release
+    /// build: the dug chunks re-meshed for collision on the main thread, the
+    /// sim's copy of the field took deep copies of every chunk the dig reached,
+    /// and the collider forgot every cached triangle. Thirty bites down a
+    /// trench through the path a script's `terrain.dig` takes, timed without
+    /// the collision meshes landing (they are built on worker threads).
+    #[test]
+    fn a_bite_costs_the_main_thread_a_few_milliseconds() {
+        let fill = floptle_field::procgen::PlanetFill { seed: 6, radius: 200.0, voxel: 1.5, relief: 12.0, cave_depth: 60.0, core_r: 10.0, defer_caves: true, ..Default::default() };
+        let mut ed = crate::Editor::default();
+        let field = floptle_field::procgen::generate_planet(&fill);
+        let ground = field.raycast(Vec3::new(0.0, 260.0, 0.0), Vec3::NEG_Y, 260.0).unwrap();
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        ed.terrains.insert(e, EditorTerrain::new(field));
+        ed.toggle_play();
+        {
+            // Something stands here: the collision chunks the bites reach are meshed.
+            use floptle_physics::CollisionShape;
+            let _ = ed.sim.as_mut().unwrap().terrain_collider_mut(e.index()).unwrap().distance(ground);
+        }
+        let mut each = Vec::new();
+        for i in 0..30 {
+            let p = ground - Vec3::new(0.0, i as f32 * 0.3, i as f32 * 0.35);
+            let op = floptle_script::TerrainOp {
+                pos: [p.x as f64, p.y as f64, p.z as f64],
+                radius: 2.4,
+                strength: 0.85,
+                mode: floptle_script::TerrainOpMode::Lower,
+                id: 0,
+                normal: None,
+            };
+            let t = std::time::Instant::now();
+            let mut batch: HashMap<Entity, TerrainBatch> = HashMap::new();
+            ed.apply_terrain_op(&op, &mut batch);
+            for (e, mut b) in batch {
+                b.touched.sort_unstable();
+                b.touched.dedup();
+                ed.mirror_terrain_chunks_to_sim(e, &b.touched);
+                let mut touched = Some(b.touched);
+                for (lo, hi) in b.boxes {
+                    let c = (lo + hi) * 0.5;
+                    let r = ((hi - lo) * 0.5).max_element();
+                    ed.queue_terrain_dirty(e, c, r, b.geom, touched.take().unwrap_or_default());
+                }
+            }
+            each.push(t.elapsed().as_secs_f64() * 1e3);
+            for _ in 0..COLLISION_MESH_FRAMES {
+                ed.pump_collision_meshes();
+            }
+        }
+        each.sort_by(f64::total_cmp);
+        let p90 = each[each.len() * 9 / 10];
+        assert!(p90 < 12.0, "a bite costs the main thread {p90:.2} ms (90th percentile, debug build)");
+    }
+
+    /// Sync terrain `e`'s meshes from `cam` until every chunk the field holds
+    /// is drawn or known empty and nothing is in flight.
+    fn settle(ed: &mut crate::Editor, e: Entity, cam: DVec3) {
+        let all = ed.terrains[&e].field.chunk_coords().len();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        loop {
+            ed.sync_terrain_meshes(false, cam);
+            let r = &ed.terrain_render[&e];
+            if r.pending.is_empty() && r.slots.len() + r.empty.len() >= all {
+                break;
+            }
+            assert!(std::time::Instant::now() < until, "the world never finished meshing");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    /// **A dug chunk of a generated world is drawn at full detail however far
+    /// away it is.** The coarse levels cannot draw a pit narrower than their
+    /// cells: re-meshed at its ring's stride, a 3.5 m laser trench drew 3 to
+    /// 8 m above its floor, as a mound or as nothing, and every pit was
+    /// invisible from 70 m. Ground no one has dug keeps its rings.
+    #[test]
+    fn a_dug_chunk_of_a_generated_world_is_drawn_at_full_detail_at_any_distance() {
+        use floptle_field::{Brush, BrushProfile};
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let fill = floptle_field::procgen::PlanetFill { seed: 3, radius: 120.0, voxel: 1.5, relief: 6.0, cave_depth: 0.0, ..Default::default() };
+        let mut field = floptle_field::procgen::generate_planet(&fill);
+        let ground = field.raycast(Vec3::new(0.0, 200.0, 0.0), Vec3::NEG_Y, 200.0).unwrap();
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        // The camera on the far side of the world, so the dug ground is in the
+        // coarsest ring.
+        let cam = DVec3::new(0.0, -400.0, 0.0);
+        let touched = field.sculpt(Brush::Lower, ground, 2.4, 1.0, BrushProfile::default());
+        let c = *touched.iter().max_by_key(|c| c[1]).unwrap();
+        let undug = [c[0] + 2, c[1], c[2]];
+        ed.terrains.insert(e, EditorTerrain::new(field));
+        ed.sync_terrain_meshes(true, cam);
+        settle(&mut ed, e, cam);
+        let lod_of = |ed: &crate::Editor, c: [i32; 3]| {
+            let r = &ed.terrain_render[&e];
+            r.pending.get(&c).map(|p| p.0).or_else(|| r.slots.get(&c).map(|s| s.1))
+        };
+        assert_eq!(lod_of(&ed, c), Some(0), "the dug chunk is drawn at stride {}", lod_of(&ed, c).map_or(0, |l| 1 << l));
+        assert!(lod_of(&ed, undug).is_none_or(|l| l > 0), "undug ground beside it lost its ring");
+    }
+
+    /// **A world seen from orbit is drawn a few dozen draws, not a draw a
+    /// chunk.** The coarsest chunks are merged [`FAR_GROUP`]³ to a mesh: a
+    /// 1 km planet from orbit was 6,100 draws and most of a 24 ms frame.
+    #[test]
+    fn a_world_seen_from_orbit_draws_its_far_chunks_in_groups() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let fill = floptle_field::procgen::PlanetFill { seed: 6, radius: 260.0, voxel: 2.0, relief: 12.0, cave_depth: 0.0, ..Default::default() };
+        let field = floptle_field::procgen::generate_planet(&fill);
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        ed.terrains.insert(e, EditorTerrain::new(field));
+        // Past the outer ring, so every chunk is at the coarsest level.
+        let cam = DVec3::new(0.0, 0.0, 2600.0);
+        settle(&mut ed, e, cam);
+        let render = &ed.terrain_render[&e];
+        let far = render.slots.values().filter(|s| s.1 == FAR_LOD).count();
+        assert!(far > 100, "only {far} chunks drawn at the coarsest level");
+        let view_proj = Mat4::perspective_rh(1.0, 1.0, 0.5, 10000.0) * Mat4::look_at_rh(Vec3::new(0.0, 0.0, 2600.0), Vec3::ZERO, Vec3::Y);
+        let mut instances = Vec::new();
+        push_terrain_instances(
+            &ed.terrain_render,
+            &ed.terrains,
+            &ed.world,
+            ed.raster.as_ref().unwrap(),
+            &MaterialParams::flat([0.5, 0.5, 0.5]),
+            cam,
+            view_proj,
+            ed.mesh_ids[floptle_core::Shape::Sphere as usize],
+            None,
+            &mut instances,
+        );
+        assert!(!instances.is_empty(), "nothing drawn");
+        assert!(instances.len() * 6 < far, "{} draws for {far} far chunks", instances.len());
+    }
 
     /// **In Play a dig is meshed off the main thread.** A mining laser biting
     /// every eighth of a second spent 3+ ms of each bite's frame meshing the

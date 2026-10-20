@@ -66,7 +66,10 @@ enum Chunk {
     /// Every voxel holds this exact value — the whole point of the sparse store. `+band`
     /// is sky, `-band` is deep interior; a hollow mountain costs two enums.
     Uniform(f32),
-    Data(Box<ChunkData>),
+    /// Shared between copies of a field until one of them writes it: the play
+    /// session's snapshot of a field and the physics sim's copy of it hold the
+    /// same chunks as the field itself, not three of everything.
+    Data(std::sync::Arc<ChunkData>),
 }
 
 
@@ -102,6 +105,24 @@ pub struct ChunkField {
     /// comes near, and [`Self::realize`] makes them from `source`.
     pending: std::collections::HashSet<[i32; 3]>,
     source: Option<Source>,
+    /// Was this field generated (from a planet's spec or any other source)?
+    /// Only then do its unedited chunks mean anything: they are what the
+    /// generator makes, and need not be kept or saved.
+    generated: bool,
+    /// The chunks written since the field was generated: by an edit, or by
+    /// the projection an edit runs spilling into a neighbour. Everything else
+    /// is what the generator made, voxel for voxel.
+    edited: std::collections::HashSet<[i32; 3]>,
+    /// Writes are the generator's own while this is set, and mark nothing.
+    quiet: bool,
+    /// Read from a file holding only the edited chunks: every other chunk is
+    /// the generator's, and the field is not whole until it is laid over a
+    /// fresh generation ([`Self::lay_over`]).
+    delta: bool,
+    /// What it was generated from, as its maker wrote it down: saved with the
+    /// edits, so a save is laid back over the ground it was dug into even if
+    /// the recipe has changed since.
+    spec: Option<String>,
 }
 
 /// What makes a field's pending chunks: see [`ChunkField::generate_deferring`].
@@ -164,6 +185,10 @@ impl Default for ChunkField {
 /// Holds the chunk worklist and the growing blob; the field it came from does the
 /// encoding ([`ChunkField::save_step`]), a budget of chunks per call.
 pub struct FieldSaver {
+    /// Writing only the edited chunks; one edited down to air is written too,
+    /// or the generator's rock would come back on load.
+    delta: bool,
+    spec: Option<String>,
     coords: Vec<[i32; 3]>,
     at: usize,
     written: u32,
@@ -187,6 +212,13 @@ impl FieldSaver {
     pub fn finish(mut self) -> Vec<u8> {
         self.buf[self.count_pos..self.count_pos + 4]
             .copy_from_slice(&self.written.to_le_bytes());
+        // The recipe a file of edits is laid back over. Only such a file has
+        // one, and only a reader that knows version 2 reads such a file.
+        if let Some(spec) = &self.spec {
+            self.buf.extend_from_slice(b"SPEC");
+            self.buf.extend_from_slice(&(spec.len() as u32).to_le_bytes());
+            self.buf.extend_from_slice(spec.as_bytes());
+        }
         // Which of the solid chunks are not generated yet, after the chunks: a
         // reader that does not know the section stops before it and reads them
         // as the rock they stand in for.
@@ -215,6 +247,11 @@ impl ChunkField {
             changed: None,
             pending: std::collections::HashSet::new(),
             source: None,
+            generated: false,
+            edited: std::collections::HashSet::new(),
+            quiet: false,
+            delta: false,
+            spec: None,
         }
     }
 
@@ -250,6 +287,141 @@ impl ChunkField {
                 Chunk::Uniform(_) => 0,
             })
             .sum()
+    }
+
+    /// Was this field generated, so that its unedited chunks are the generator's?
+    pub fn is_generated(&self) -> bool {
+        self.generated
+    }
+
+    /// Has chunk `c` been written since the field was generated? Always true
+    /// of every chunk of a field that was not.
+    pub fn is_edited(&self, c: [i32; 3]) -> bool {
+        !self.generated || self.edited.contains(&c)
+    }
+
+    /// How many chunks have been written since the field was generated.
+    pub fn edited_count(&self) -> usize {
+        self.edited.len()
+    }
+
+    /// Record what this field was generated from. A generated field with a
+    /// recipe saves only its edits and the recipe ([`Self::begin_save`]).
+    pub fn set_spec(&mut self, spec: String) {
+        self.spec = Some(spec);
+    }
+
+    /// Forget the recipe: the field saves whole again.
+    pub fn clear_spec(&mut self) {
+        self.spec = None;
+    }
+
+    /// What this field was generated from, if its maker said.
+    pub fn spec(&self) -> Option<&str> {
+        self.spec.as_deref()
+    }
+
+    /// Was this read from a file holding only the edits? Such a field is laid
+    /// over a fresh generation from its [`Self::spec`] with [`Self::lay_over`]
+    /// before it is used.
+    pub fn is_delta(&self) -> bool {
+        self.delta
+    }
+
+    /// Lay these edits over `base`, the field generated from their spec: the
+    /// edited chunks replace the generator's, and every other chunk stays the
+    /// generator's. The result saves as edits again.
+    pub fn lay_over(self, mut base: ChunkField) -> ChunkField {
+        let band = base.band();
+        for (c, ch) in self.chunks {
+            base.pending.remove(&c);
+            match ch {
+                Chunk::Uniform(v) if v >= band - 1e-6 => {
+                    base.chunks.remove(&c);
+                }
+                ch => {
+                    base.chunks.insert(c, ch);
+                }
+            }
+        }
+        base.edited = self.edited;
+        base.generated = true;
+        base.spec = self.spec;
+        base.changed = None;
+        base
+    }
+
+    /// Find which chunks of this field, read from a whole-field save, differ
+    /// from `base`, the field its spec generates, and take the generator's
+    /// chunk for every one that does not: it is the same ground, held exactly
+    /// rather than as the file rounded it. From then on the field saves only
+    /// its edits. A save from before edits were tracked holds no record of
+    /// them, so this is how one becomes small.
+    pub fn adopt_generation(&mut self, base: &ChunkField) {
+        let band = self.band();
+        let q = |v: f32| ((v / band) * 127.0).round().clamp(-127.0, 127.0) as i8;
+        let dist = |ch: Option<&Chunk>, li: usize| match ch {
+            None => band,
+            Some(Chunk::Uniform(v)) => *v,
+            Some(Chunk::Data(d)) => d.dist(li),
+        };
+        let color = |ch: Option<&Chunk>, li: usize, base_color: [u8; 4]| match ch {
+            Some(Chunk::Data(d)) => d.color(li),
+            _ => base_color,
+        };
+        let mut coords: Vec<[i32; 3]> = self.chunks.keys().chain(base.chunks.keys()).copied().collect();
+        coords.sort_unstable();
+        coords.dedup();
+        let source = base.pending_source();
+        let mut edited = std::collections::HashSet::new();
+        for c in coords {
+            // Never made in this field: the generator's, whatever it is.
+            if self.pending.contains(&c) {
+                continue;
+            }
+            // Made since by a dig or a visit: compare with what the generator
+            // makes of it now.
+            let made;
+            let theirs = if base.pending.contains(&c) {
+                match &source {
+                    Some(src) => {
+                        made = src.generate(c).0;
+                        made.as_ref()
+                    }
+                    None => {
+                        edited.insert(c);
+                        continue;
+                    }
+                }
+            } else {
+                base.chunks.get(&c)
+            };
+            let ours = self.chunks.get(&c);
+            let same = (0..CHUNK_VOXELS).all(|li| {
+                q(dist(ours, li)) == q(dist(theirs, li))
+                    && (dist(ours, li) >= band - 1e-6 || color(ours, li, self.base_color) == color(theirs, li, base.base_color))
+            });
+            if !same {
+                edited.insert(c);
+            }
+        }
+        // The generator's field, with this one's differing chunks laid over it.
+        let mut out = base.clone();
+        for &c in &edited {
+            out.pending.remove(&c);
+            match self.chunks.get(&c) {
+                Some(ch) => {
+                    out.chunks.insert(c, ch.clone());
+                }
+                None => {
+                    out.chunks.remove(&c);
+                }
+            }
+        }
+        out.edited = edited;
+        out.generated = true;
+        out.spec = self.spec.take().or_else(|| base.spec.clone());
+        *self = out;
     }
 
     /// Every stored chunk coordinate — data and uniform sentinels. The undo-snapshot
@@ -402,14 +574,17 @@ impl ChunkField {
         if self.pending.contains(&c) {
             self.realize_now(&[c]);
         }
+        if !self.quiet {
+            self.edited.insert(c);
+        }
         let band = BAND_VOXELS * self.voxel;
         let base = self.base_color;
         let entry = self.chunks.entry(c).or_insert(Chunk::Uniform(band));
         if let Chunk::Uniform(v) = *entry {
-            *entry = Chunk::Data(Box::new(ChunkData::new(v, base)));
+            *entry = Chunk::Data(std::sync::Arc::new(ChunkData::new(v, base)));
         }
         match entry {
-            Chunk::Data(d) => d,
+            Chunk::Data(d) => std::sync::Arc::make_mut(d),
             Chunk::Uniform(_) => unreachable!("just materialized"),
         }
     }
@@ -701,7 +876,11 @@ impl ChunkField {
                         Some(v) if v.abs() >= band - 1e-6 => Some(v),
                         _ => {
                             // What stays data is packed down to what it says.
-                            d.shrink();
+                            // A chunk another copy still shares was packed when
+                            // it was written.
+                            if let Some(d) = std::sync::Arc::get_mut(d) {
+                                d.shrink();
+                            }
                             None
                         }
                     }
@@ -818,10 +997,8 @@ fn gen_chunk<S: VoxelSource>(
     base: [u8; 4],
     src: &S,
 ) -> Option<Chunk> {
-    let mut data: Option<Box<ChunkData>> = None;
-    let fresh = || {
-        Box::new(ChunkData::new(band, base))
-    };
+    let mut data: Option<ChunkData> = None;
+    let fresh = || ChunkData::new(band, base);
     let at = |i: [i32; 3]| Vec3::new(i[0] as f32, i[1] as f32, i[2] as f32) * voxel;
     // The whole chunk first: most of a planet's cube is sky or buried rock.
     let b = [c[0] * CHUNK, c[1] * CHUNK, c[2] * CHUNK];
@@ -886,7 +1063,7 @@ fn gen_chunk<S: VoxelSource>(
     }
     // A block that might have held ground but did not leaves no chunk, as an
     // unwritten one never existed.
-    data.filter(|_| wrote > 0).map(Chunk::Data)
+    data.filter(|_| wrote > 0).map(|d| Chunk::Data(std::sync::Arc::new(d)))
 }
 
 /// How many threads a bulk field job shares out across: every core but one,
@@ -1531,9 +1708,12 @@ impl ChunkField {
             }
         }
         // As `fill_with_rgba`: project back onto 1-Lipschitz, then collapse what
-        // came out uniform.
+        // came out uniform. The generator's own writes, not edits.
+        field.quiet = true;
         field.renormalize(&touched);
         field.compact(&touched);
+        field.quiet = false;
+        field.generated = true;
         (field, (ilo, ihi))
     }
 
@@ -1952,9 +2132,10 @@ impl ChunkField {
             (color[2] * 255.0).round().clamp(0.0, 255.0) as u8,
         ];
         self.base_color = [rgb[0], rgb[1], rgb[2], self.base_color[3]];
+        self.edited.extend(self.chunks.keys().copied());
         for c in self.chunks.values_mut() {
             if let Chunk::Data(d) = c {
-                d.map_colors(|v| [rgb[0], rgb[1], rgb[2], v[3]]);
+                std::sync::Arc::make_mut(d).map_colors(|v| [rgb[0], rgb[1], rgb[2], v[3]]);
             }
         }
     }
@@ -1964,9 +2145,10 @@ impl ChunkField {
     /// and the splat shader. Leaves shape + RGB tint.
     pub fn fill_texture(&mut self, slot: u8) {
         self.base_color[3] = slot;
+        self.edited.extend(self.chunks.keys().copied());
         for c in self.chunks.values_mut() {
             if let Chunk::Data(d) = c {
-                d.map_colors(|v| [v[0], v[1], v[2], slot]);
+                std::sync::Arc::make_mut(d).map_colors(|v| [v[0], v[1], v[2], slot]);
             }
         }
     }
@@ -2094,6 +2276,7 @@ impl ChunkField {
             // Whole chunks change hands, so the whole chunk changed.
             self.note_changed([c[0] * CHUNK, c[1] * CHUNK, c[2] * CHUNK]);
             self.note_changed([c[0] * CHUNK + CHUNK - 1, c[1] * CHUNK + CHUNK - 1, c[2] * CHUNK + CHUNK - 1]);
+            self.edited.insert(*c);
             match ch {
                 Some(ch) => {
                     self.chunks.insert(*c, ch.clone());
@@ -2131,28 +2314,37 @@ impl ChunkField {
     /// torn snapshot mixing edit generations. Callers detect that (edit stamp)
     /// and keep such a field dirty for the next checkpoint.
     pub fn begin_save(&self) -> FieldSaver {
+        // A generated field whose recipe is known saves what was done to it and
+        // the recipe: the rest is made again on load. A dug 800 m planet wrote
+        // its whole 400 MB field on every save.
+        let delta = self.generated && self.spec.is_some();
         let mut buf = Vec::with_capacity(64 * 1024);
         buf.extend_from_slice(b"FCF1");
-        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&(if delta { 2u32 } else { 1u32 }).to_le_bytes());
         buf.extend_from_slice(&self.voxel.to_le_bytes());
         buf.extend_from_slice(&self.base_color);
         let band = self.band();
         // Stored chunks: data + non-air uniforms (solid interior). Air is implicit.
-        let mut coords: Vec<[i32; 3]> = self
-            .chunks
-            .iter()
-            .filter(|(_, ch)| match ch {
-                Chunk::Data(_) => true,
-                Chunk::Uniform(v) => *v < band - 1e-6,
-            })
-            .map(|(c, _)| *c)
-            .collect();
+        let mut coords: Vec<[i32; 3]> = if delta {
+            self.edited.iter().copied().collect()
+        } else {
+            self.chunks
+                .iter()
+                .filter(|(_, ch)| match ch {
+                    Chunk::Data(_) => true,
+                    Chunk::Uniform(v) => *v < band - 1e-6,
+                })
+                .map(|(c, _)| *c)
+                .collect()
+        };
         coords.sort_unstable(); // deterministic output (byte-identical saves)
         let count_pos = buf.len();
         buf.extend_from_slice(&0u32.to_le_bytes()); // patched by finish()
-        let mut pending: Vec<[i32; 3]> = self.pending.iter().copied().collect();
+        // A delta's pending chunks are the generator's, made again with it.
+        let mut pending: Vec<[i32; 3]> = if delta { Vec::new() } else { self.pending.iter().copied().collect() };
         pending.sort_unstable();
-        FieldSaver { coords, at: 0, written: 0, count_pos, buf, pending }
+        let spec = if delta { self.spec.clone() } else { None };
+        FieldSaver { delta, spec, coords, at: 0, written: 0, count_pos, buf, pending }
     }
 
     /// Encode up to `max_chunks` more chunks into `s`. Returns `true` once the
@@ -2163,10 +2355,13 @@ impl ChunkField {
         while s.at < end {
             let c = s.coords[s.at];
             s.at += 1;
-            // Edited away since begin_save (dug to implicit air): drop out.
+            // Edited away since begin_save (dug to implicit air): drop out —
+            // unless only edits are written, where air has to say so.
+            let air = Chunk::Uniform(band);
             let ch = match self.chunks.get(&c) {
-                Some(Chunk::Uniform(v)) if *v >= band - 1e-6 => continue,
+                Some(Chunk::Uniform(v)) if *v >= band - 1e-6 && !s.delta => continue,
                 Some(ch) => ch,
+                None if s.delta => &air,
                 None => continue,
             };
             for k in c {
@@ -2227,7 +2422,8 @@ impl ChunkField {
             return None;
         }
         let u32_at = |s: &[u8]| u32::from_le_bytes(s.try_into().ok().unwrap_or([0; 4]));
-        if u32_at(take(&mut at, 4)?) != 1 {
+        let version = u32_at(take(&mut at, 4)?);
+        if version != 1 && version != 2 {
             return None;
         }
         let voxel = f32::from_le_bytes(take(&mut at, 4)?.try_into().ok()?);
@@ -2235,6 +2431,7 @@ impl ChunkField {
             return None;
         }
         let mut f = Self::new(voxel);
+        f.delta = version == 2;
         f.base_color = take(&mut at, 4)?.try_into().ok()?;
         let band = f.band();
         let count = u32_at(take(&mut at, 4)?) as usize;
@@ -2282,10 +2479,21 @@ impl ChunkField {
                     if color.len() != CHUNK_VOXELS {
                         return None;
                     }
-                    f.chunks.insert(c, Chunk::Data(Box::new(ChunkData::from_flat(&dist, &color))));
+                    f.chunks.insert(c, Chunk::Data(std::sync::Arc::new(ChunkData::from_flat(&dist, &color))));
                 }
                 _ => return None,
             }
+            if f.delta {
+                f.edited.insert(c);
+            }
+        }
+        if data.get(at..at + 4) == Some(b"SPEC".as_slice()) {
+            at += 4;
+            let n = u32_at(take(&mut at, 4)?) as usize;
+            f.spec = Some(String::from_utf8(take(&mut at, n)?.to_vec()).ok()?);
+        }
+        if f.delta && f.spec.is_none() {
+            return None; // edits with nothing to lay them over
         }
         if data.get(at..at + 4) == Some(b"PEND".as_slice()) {
             at += 4;
@@ -2604,6 +2812,31 @@ mod tests {
             );
         }
         f
+    }
+
+    /// **A copy of a field costs nothing until it is written.** Play keeps a
+    /// copy of every field to put back on Stop, and the physics sim keeps its
+    /// own to collide with: three of a 3.8 GB planet. Copies share their
+    /// chunks, and a write gives the one chunk it lands in to the field that
+    /// wrote it; the other copies keep the chunk as it was.
+    #[test]
+    fn a_copy_of_a_field_shares_its_chunks_until_one_is_written() {
+        let f = rolling_terrain();
+        let mut copy = f.clone();
+        let shared = |a: &ChunkField, b: &ChunkField| {
+            a.chunks
+                .iter()
+                .filter(|(c, ch)| matches!((ch, b.chunks.get(*c)), (Chunk::Data(x), Some(Chunk::Data(y))) if std::sync::Arc::ptr_eq(x, y)))
+                .count()
+        };
+        let data = f.data_chunks();
+        assert!(data > 4);
+        assert_eq!(shared(&f, &copy), data, "a copy holds chunks of its own");
+        let before = f.d(Vec3::new(0.0, 0.0, 0.0));
+        let touched = copy.sculpt(Brush::Lower, Vec3::new(0.0, 0.0, 0.0), 3.0, 1.0, BrushProfile::default());
+        assert_eq!(f.d(Vec3::ZERO), before, "writing the copy changed the field it was copied from");
+        assert!(copy.d(Vec3::ZERO) > before, "the copy did not take the dig");
+        assert!(shared(&f, &copy) >= data - touched.len() - 8, "a dig unshared {} chunks", data - shared(&f, &copy));
     }
 
     /// The incremental saver is `to_bytes`, just spread across calls: tiny

@@ -87,12 +87,32 @@ pub struct MeshScratch {
     /// from the scratch alone and never touches the live field; trap T4).
     chunk: [i32; 3],
     stride: i32,
+    /// The first voxel meshed, and how many cells along each edge: a chunk's
+    /// own, or the small box [`mesh_box`] asks for.
+    base: [i32; 3],
+    cells: i32,
     /// Which of the 27 chunks around this one hold data, bit `(z+1)*9 + (y+1)*3 + (x+1)`
     /// for neighbour offset `(x, y, z)`.
     meshed: u32,
 }
 
 impl MeshScratch {
+    /// The neighbourhood of `cells`³ full-detail cells from voxel `base`, for
+    /// [`mesh_box`].
+    fn new_box(field: &ChunkField, base: [i32; 3], cells: i32) -> Self {
+        // Full detail reads no further than this from its cells.
+        let margin = mesh_depends(1);
+        let lo = base.map(|v| v - margin);
+        let dim = (cells + 2 * margin + 1) as usize;
+        let mut dist = Vec::new();
+        let mut color = Vec::new();
+        field.gather(lo, dim, &mut dist, &mut color);
+        // At full detail no corner takes a minimum, so which chunks hold data
+        // is never asked.
+        let chunk = base.map(|v| v.div_euclid(CHUNK));
+        Self { lo, dim, dist, color, voxel: field.voxel(), band: field.band(), chunk, stride: 1, base, cells, meshed: 0 }
+    }
+
     fn new(field: &ChunkField, chunk: [i32; 3], stride: i32) -> Self {
         // Cells reach one stride past the chunk on each side: the borrowed -1 layer below,
         // and at coarse strides the skirted overlap layer above. Each coarse corner is the
@@ -124,7 +144,9 @@ impl MeshScratch {
                 meshed |= 1 << bit;
             }
         }
-        Self { lo, dim, dist, color, voxel: field.voxel(), band: field.band(), chunk, stride, meshed }
+        let base = chunk.map(|v| v * CHUNK);
+        let cells = (CHUNK / stride).max(1);
+        Self { lo, dim, dist, color, voxel: field.voxel(), band: field.band(), chunk, stride, base, cells, meshed }
     }
 
     /// Flat scratch index for a global voxel, without bounds checks.
@@ -531,18 +553,22 @@ impl MeshScratch {
         if prev < 0.0 {
             return p;
         }
-        let steps = (reach / step).ceil() as i32;
-        for k in 1..=steps {
-            let t = k as f32 * step;
+        // Strides of half the distance the field reports, never under half a voxel:
+        // the field rises no faster than distance, so a stride that size cannot step
+        // over the ground, and the long reach a deep hollow needs costs a few samples.
+        let mut t_prev = 0.0f32;
+        while t_prev < reach {
+            let t = (t_prev + (prev * 0.5).max(step)).min(reach);
             let dk = self.d(p - dir * t);
             if dk >= 0.0 {
                 prev = dk;
+                t_prev = t;
                 continue;
             }
             // Half a voxel is short enough for the field to be nearly straight along it:
             // two rounds of interpolating between the bracketing samples land within a
             // hair of the crossing.
-            let (mut a, mut da, mut b, mut db) = (t - step, prev, t, dk);
+            let (mut a, mut da, mut b, mut db) = (t_prev, prev, t, dk);
             for _ in 0..2 {
                 let m = a + (b - a) * (da / (da - db)).clamp(0.05, 0.95);
                 let dm = self.d(p - dir * m);
@@ -567,7 +593,11 @@ impl MeshScratch {
             // the ground itself; either agreeing is ground the coarse surface can
             // stand on.
             let h = (self.stride / 2).max(1) as f32 * self.voxel;
-            let agrees = |n: Vec3| n.dot(dir) >= 0.5;
+            // Ground found further down than a cell has to face the coarse surface's
+            // way more closely: a vertex dropped that far that lands on a slope its
+            // neighbours did not reach folds the triangles between them.
+            let far = (q - p).length() > (self.stride as f32 + 0.5) * self.voxel;
+            let agrees = |n: Vec3| n.dot(dir) >= if far { 0.7 } else { 0.5 };
             return if agrees(facing(h)) || agrees(facing(self.voxel)) { q } else { p };
         }
         p
@@ -622,6 +652,14 @@ pub fn mesh_chunk(field: &ChunkField, chunk: [i32; 3], stride: i32, skirt: bool)
     mesh_scratch(&scratch_for_chunk(field, chunk, stride), skirt)
 }
 
+/// The full-detail surface in the box of `cells`³ cells from voxel `base`: the
+/// same triangles the chunks it lies in mesh there, for a caller that wants a
+/// few cells of the drawn surface and not the cost of a chunk of it. Edges
+/// whose low corner is in the box are meshed, as a chunk meshes its own.
+pub fn mesh_box(field: &ChunkField, base: [i32; 3], cells: i32) -> ChunkMesh {
+    mesh_scratch(&MeshScratch::new_box(field, base, cells.max(1)), false)
+}
+
 /// Gather everything `mesh_scratch` needs for one chunk into a self-contained scratch —
 /// the cheap part (~0.07 ms bulk copy), done on the thread that owns the field. The
 /// returned scratch can be shipped to a worker thread and meshed there without ever
@@ -633,19 +671,14 @@ pub fn scratch_for_chunk(field: &ChunkField, chunk: [i32; 3], stride: i32) -> Me
 /// The heavy half of [`mesh_chunk`] (surface nets + per-vertex gradients, ~1-2 ms):
 /// meshes entirely from the scratch, safe on any thread.
 pub fn mesh_scratch(s: &MeshScratch, skirt: bool) -> ChunkMesh {
-    let chunk = s.chunk;
     let stride = s.stride;
     let voxel = s.voxel;
-    let base = [chunk[0] * CHUNK, chunk[1] * CHUNK, chunk[2] * CHUNK];
-    let origin = Vec3::new(
-        chunk[0] as f32 * CHUNK as f32 * voxel,
-        chunk[1] as f32 * CHUNK as f32 * voxel,
-        chunk[2] as f32 * CHUNK as f32 * voxel,
-    );
+    let base = s.base;
+    let origin = Vec3::new(base[0] as f32 * voxel, base[1] as f32 * voxel, base[2] as f32 * voxel);
     // Cells across the chunk at this stride. We mesh cells whose min-corner is inside
     // the chunk; their max corner reaches 1 stride into the neighbour, which the
     // border-transparent sampler serves — that overlap is what makes seams agree.
-    let n = (CHUNK / stride).max(1);
+    let n = s.cells;
     // Cell indices run -1 ..= hi-1 on every axis, stored offset by +1.
     //
     // The extra negative layer is not an optimisation, it is what closes the mesh. A quad
@@ -715,8 +748,10 @@ pub fn mesh_scratch(s: &MeshScratch, skirt: bool) -> ChunkMesh {
         (((z + 1) as usize * grid) + (y + 1) as usize) * grid + (x + 1) as usize
     };
     // The minimum over half a stride moves a flat surface with unit normal n outward by
-    // half·|n|₁ voxels, at most half·√3; settling looks a little further than that.
-    let settle_reach = (2 * half) as f32 * voxel + 0.5 * voxel;
+    // half·|n|₁ voxels, at most half·√3, and fills a hollow narrower than a cell: a
+    // vertex over a 30 m bowl at stride 8 stood 20 m over its floor. Settling looks
+    // twice a cell down, so it reaches the floor of any hollow the minimum filled.
+    let settle_reach = (4 * half) as f32 * voxel + voxel;
 
     // ---- pass 1: one vertex per sheet of surface in each cell, at the mean of that
     // sheet's edge crossings.
@@ -927,21 +962,53 @@ pub fn mesh_scratch(s: &MeshScratch, skirt: bool) -> ChunkMesh {
 
     // A vertex that settled onto ground its neighbours did not settle onto folds the
     // triangles between them over, and a folded triangle faces against its normals:
-    // a dark shard. Such a vertex goes back to where the solid-keeping filter put it,
-    // a little proud of the ground, and the triangles are built again. Only a vertex
-    // of this chunk's own cells: one in the outer layer is shared with a neighbour,
-    // which has to place it the same way.
-    let mut back: Vec<usize> = Vec::new();
-    for t in m.indices.as_chunks::<3>().0 {
-        if facing(&m, t[0], t[1], t[2]) < 0.0 {
-            back.extend(t.iter().map(|v| *v as usize).filter(|v| !rim[*v] && unsettle[*v].is_some()));
+    // a dark shard. Such a vertex moves halfway to the middle of the vertices it is
+    // joined to, a few times over, and the triangles are built again each time; one
+    // still folded after that goes back to where the solid-keeping filter put it, a
+    // little proud of the ground. Straight back the first time, a fold stood the
+    // vertex up to most of a cell over the ground, and its neighbours folded and went
+    // back after it: a stride-8 plateau 11 m over a shallow basin, where the fold was a
+    // sliver. Only a vertex of this chunk's own cells: one in the outer layer is shared
+    // with a neighbour, which has to place it the same way.
+    const UNFOLD_ROUNDS: usize = 6;
+    for round in 0..UNFOLD_ROUNDS {
+        let mut back: Vec<usize> = Vec::new();
+        for t in m.indices.as_chunks::<3>().0 {
+            if facing(&m, t[0], t[1], t[2]) < 0.0 {
+                back.extend(t.iter().map(|v| *v as usize).filter(|v| !rim[*v] && unsettle[*v].is_some()));
+            }
         }
-    }
-    if !back.is_empty() {
-        for v in back {
-            if let Some((raw, dir)) = unsettle[v].take() {
-                m.positions[v] = (raw - origin).to_array();
-                m.normals[v] = vertex_normal(s, raw, dir);
+        if back.is_empty() {
+            break;
+        }
+        back.sort_unstable();
+        back.dedup();
+        if round + 1 < UNFOLD_ROUNDS {
+            let mut ring = vec![(Vec3::ZERO, 0.0f32); m.positions.len()];
+            for t in m.indices.as_chunks::<3>().0 {
+                for k in 0..3 {
+                    let (a, b) = (t[k] as usize, t[(k + 1) % 3] as usize);
+                    ring[a].0 += Vec3::from(m.positions[b]);
+                    ring[a].1 += 1.0;
+                    ring[b].0 += Vec3::from(m.positions[a]);
+                    ring[b].1 += 1.0;
+                }
+            }
+            for v in back {
+                let Some((_, dir)) = unsettle[v] else { continue };
+                if ring[v].1 == 0.0 {
+                    continue;
+                }
+                let p = (Vec3::from(m.positions[v]) + ring[v].0 / ring[v].1) * 0.5 + origin;
+                m.positions[v] = (p - origin).to_array();
+                m.normals[v] = vertex_normal(s, p, dir);
+            }
+        } else {
+            for v in back {
+                if let Some((raw, dir)) = unsettle[v].take() {
+                    m.positions[v] = (raw - origin).to_array();
+                    m.normals[v] = vertex_normal(s, raw, dir);
+                }
             }
         }
         m.indices.clear();
@@ -1164,6 +1231,47 @@ mod tests {
     /// `facing_normal`, which took its cue from the interpolated normal instead of the
     /// winding, had been quietly papering over it. Vertex normals being right (they are,
     /// to <5°) says nothing about winding — they are independent, so this is its own gate.
+    /// **A box of the surface is the chunk's surface there.** A ray asking
+    /// where the drawn ground is needs a few cells of it, not a chunk: the
+    /// box's triangles are the chunk mesh's, for every edge whose low corner is
+    /// in the box (to a thousandth of a unit: each mesh places its vertices
+    /// from its own origin).
+    #[test]
+    fn a_box_of_the_surface_is_the_chunks_surface_there() {
+        let f = solar_planet();
+        let key = |p: Vec3| p.to_array().map(|v| (v * 1000.0).round() as i32 as u32);
+        let tris = |m: &ChunkMesh| -> std::collections::HashSet<[[u32; 3]; 3]> {
+            let o = Vec3::from(m.origin);
+            m.indices[..(m.tri_count() - m.skirt_tris) * 3]
+                .chunks(3)
+                .map(|t| {
+                    let mut v = [0usize, 1, 2].map(|k| key(Vec3::from(m.positions[t[k] as usize]) + o));
+                    v.sort();
+                    v
+                })
+                .collect()
+        };
+        let mut boxes = 0;
+        for d in directions(40) {
+            let Some(hit) = f.raycast(d * 170.0, -d, 170.0) else { continue };
+            let v = (hit / f.voxel()).floor();
+            let base = [v.x as i32 - 3, v.y as i32 - 3, v.z as i32 - 3];
+            let c = base.map(|b| b.div_euclid(CHUNK));
+            // Inside one chunk, so the chunk's mesh holds every edge the box does.
+            if base.iter().zip(c).any(|(b, c)| b + 6 > (c + 1) * CHUNK) {
+                continue;
+            }
+            let small = tris(&mesh_box(f, base, 6));
+            let whole = tris(&mesh_chunk(f, c, 1, false));
+            assert!(!small.is_empty(), "no surface in the box at {hit:?}");
+            for t in &small {
+                assert!(whole.contains(t), "a box triangle at {hit:?} is not in its chunk's mesh");
+            }
+            boxes += 1;
+        }
+        assert!(boxes > 10, "only {boxes} boxes inside one chunk");
+    }
+
     #[test]
     fn triangles_wind_outward() {
         let (voxel, radius) = (1.0f32, 8.0f32);
@@ -1986,9 +2094,17 @@ mod tests {
     /// where the solid-keeping filter pushed them: faces rising metres over the
     /// hills, which shrank into small hills as you walked up. Settling now
     /// takes ground within 60°, and the fold check undoes any it should not.
-    /// Measured down 1,500 directions on a cratered moon with 15 m of relief;
-    /// a stride-8 cell is 12 m across, wider than the moon's smaller bumps, so
-    /// it is held at its 95th percentile.
+    /// Measured down 1,500 directions on a cratered moon with 15 m of relief.
+    ///
+    /// A stride-8 cell is 12 m across, wider than the moon's smaller bumps, and
+    /// its minimum fills any hollow narrower than that; a vertex over one looked
+    /// only a cell down for ground and missed the floor, and one whose settling
+    /// folded a sliver went straight back up. Together they drew bowls as peaks
+    /// standing over their rims: 18 m over the ground here at worst and 7 m at
+    /// the 99th percentile, 20 m on a larger world. Settling now looks two cells
+    /// down and a fold is eased out toward the vertices around it before
+    /// anything goes back up. The craters here are steep 15 m pits two stride-8
+    /// cells across, which is what the worst case still is.
     #[test]
     fn coarse_ground_stays_near_the_ground_on_a_rough_moon() {
         let f = crate::procgen::generate_planet(&crate::procgen::PlanetFill {
@@ -2001,7 +2117,7 @@ mod tests {
             craters: 4,
             ..Default::default()
         });
-        for (stride, pct, limit) in [(2, 0.99, 1.0f32), (4, 0.99, 2.5), (8, 0.95, 3.0)] {
+        for (stride, p99, worst) in [(2, 0.8f32, 2.0f32), (4, 1.6, 5.0), (8, 4.5, 13.0)] {
             let hulls: Vec<Hull> = f.chunk_coords().into_iter().map(|c| hull(&mesh_chunk(&f, c, stride, false))).collect();
             let mut above = Vec::new();
             for d in directions(1500) {
@@ -2011,8 +2127,10 @@ mod tests {
                 above.push((truth - ro).length() - t);
             }
             above.sort_by(f32::total_cmp);
-            let at = above[((above.len() - 1) as f64 * pct) as usize];
-            assert!(at <= limit, "stride {stride}: the {:.0}th percentile of coarse ground stands {at:.2} m over the real ground (limit {limit})", pct * 100.0);
+            let at = above[((above.len() - 1) as f64 * 0.99) as usize];
+            let top = above[above.len() - 1];
+            assert!(at <= p99, "stride {stride}: the 99th percentile of coarse ground stands {at:.2} m over the real ground (limit {p99})");
+            assert!(top <= worst, "stride {stride}: coarse ground stands {top:.2} m over the real ground at worst (limit {worst})");
         }
     }
 

@@ -18,7 +18,7 @@ Every key is optional, and so is every key inside a layer's table. A planet with
 
 Mountains, warp, plateaus, terraces, ravines and rivers all shape the ground's height in each direction. `overhangs` is the one that works in three dimensions, so it is the one that can make ground with air under it.
 
-Rivers start at the highest ground and follow the slope down until they reach `seaLevel` or a basin they cannot leave. A river that ends in a basin is where a lake belongs. To find where the rivers and ravines went without generating anything, call `terrain.planetRivers(opts)` with the same opts:
+Rivers start at the highest ground and run the way water drains from there: down the slope, and across any basin on the way at the height it fills to, out where it spills, until they reach `seaLevel`. A river that meets one already traced joins it. On a world with nothing below `seaLevel`, rivers end at its lowest ground, which is where its lake is. To find where the rivers and ravines went without generating anything, call `terrain.planetRivers(opts)` with the same opts:
 
 ```lua
 for _, ch in ipairs(terrain.planetRivers(opts)) do
@@ -43,6 +43,15 @@ end
 ```
 
 Ground below the rivers' `seaLevel` is sea, not a lake; pass `seaLevel` to set it yourself. With no sea at all, the planet's lowest point is where it drains, and it holds no lake. Lakes are found on a grid of cells about `cell` metres across (3 by default), and only water deeper than `minDepth` (0.5 m by default) counts.
+
+Both questions cost what working the ground out costs, which on a world of several hundred metres is seconds: too long for a script to wait on. Pass a function last, and the call returns nothing, the work runs off the script thread, and the function gets the answer in a later frame:
+
+```lua
+terrain.planetLakes(opts, { minDepth = 1 }, function(lakes)
+  for _, lake in ipairs(lakes) do placeWater(lake) end
+end)
+terrain.planetRivers(opts, function(channels) rivers = channels end)
+```
 
 ## Surface materials by climate
 

@@ -330,10 +330,23 @@ fn random_dir(rng: &mut Rng) -> Vec3 {
     }
 }
 
-/// Rivers: from the highest of a field of candidate springs, downhill along
-/// the ground's slope (and a little meander) until they reach the sea or a
-/// basin they cannot leave.
-fn trace_rivers(r: &Rivers, radius: f32, ground: &impl Fn(Vec3) -> f32, rng: &mut Rng, noise: &Noise) -> Vec<Channel> {
+/// Rivers: from the highest of a field of candidate springs, the way water
+/// drains from there to the sea.
+///
+/// Each follows [`crate::water::drainage`] over the trace grid: downhill, and
+/// across any basin on its way at the height the basin fills to, toward where
+/// it spills, so it ends at the sea (or, on a world with no sea, the lowest
+/// ground, where its lake is). A river that reaches one already traced joins
+/// it there. The path, a staircase of cells, is rounded off and given its
+/// meander after.
+///
+/// They used to march downhill a step at a time and stop once forty steps in
+/// a row had not gone down. That never ended a river circling a pit, since a
+/// step down reset the count, and on an 800 m world every river ran to the
+/// step cap, carving the same basin over and over: rivers doubled the cost of
+/// generating a world.
+fn trace_rivers(r: &Rivers, radius: f32, ground: &(impl Fn(Vec3) -> f32 + Sync), rng: &mut Rng, noise: &Noise) -> Vec<Channel> {
+    use crate::water::{drainage, sphere_cell, sphere_centre, WaterGrid, WALL};
     let mut springs: Vec<(f32, Vec3)> = (0..2048).map(|_| random_dir(rng)).map(|d| (ground(d), d)).collect();
     springs.sort_by(|a, b| b.0.total_cmp(&a.0));
     // Spread apart, so the rivers drain different country.
@@ -347,39 +360,71 @@ fn trace_rivers(r: &Rivers, radius: f32, ground: &impl Fn(Vec3) -> f32, rng: &mu
             chosen.push(d);
         }
     }
+    let n = TRACE_CELLS;
+    let grid = WaterGrid::sphere(n, radius, ground);
+    let down = drainage(&grid, r.sea_level);
     let step = (r.width.max(0.5) * 1.5 / radius.max(1.0)).clamp(1e-4, 0.05);
-    let e = step * 0.5;
-    chosen
-        .into_iter()
-        .map(|mut d| {
-            let (mut points, mut widths) = (vec![d], vec![r.width * 0.5]);
-            let mut stuck = 0;
-            for k in 0..4000 {
-                let h = ground(d);
-                if h < r.sea_level {
-                    break;
-                }
-                let t1 = d.any_orthonormal_vector();
-                let t2 = d.cross(t1);
-                let g = t1 * (ground((d + t1 * e).normalize()) - ground((d - t1 * e).normalize()))
-                    + t2 * (ground((d + t2 * e).normalize()) - ground((d - t2 * e).normalize()));
-                let down = (-g).try_normalize().unwrap_or(t1);
-                let side = d.cross(down);
-                let wander = noise.fbm(d * 40.0 + Vec3::splat(k as f32 * 0.01), 2) * r.meander;
-                let next = (d + (down + side * wander).normalize_or_zero() * step).normalize();
-                stuck = if ground(next) >= h { stuck + 1 } else { 0 };
-                if stuck > 40 {
-                    break; // a basin: the river ends in a lake
-                }
-                d = next;
-                points.push(d);
+    let mut taken = vec![false; grid.len()];
+    let mut out = Vec::new();
+    for spring in chosen {
+        // The cells the water runs through, to the sea or into a river
+        // already traced.
+        let mut cells = Vec::new();
+        let mut c = sphere_cell(n, spring);
+        loop {
+            cells.push(c);
+            if taken[c] || grid.ground[c] < r.sea_level || cells.len() > grid.len() {
+                break;
+            }
+            match down[c] {
+                WALL => break,
+                next => c = next as usize,
+            }
+        }
+        for &c in &cells {
+            taken[c] = true;
+        }
+        let mut path: Vec<Vec3> = std::iter::once(spring).chain(cells[1..].iter().map(|&c| sphere_centre(n, c))).collect();
+        // Round the staircase off: each pass cuts every corner a quarter of
+        // the way along both of its edges.
+        for _ in 0..3 {
+            if path.len() < 3 {
+                break;
+            }
+            let mut cut = vec![path[0]];
+            for w in path.windows(2) {
+                cut.push((w[0] * 0.75 + w[1] * 0.25).normalize());
+                cut.push((w[0] * 0.25 + w[1] * 0.75).normalize());
+            }
+            cut.push(path[path.len() - 1]);
+            path = cut;
+        }
+        // Points `step` apart along it, each swung aside by the meander.
+        let mut points = vec![path[0]];
+        let mut widths = vec![r.width * 0.5];
+        let mut left = step;
+        for w in path.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let len = a.angle_between(b);
+            let mut t = 0.0;
+            while len - t >= left {
+                t += left;
+                left = step;
+                let p = a.slerp(b, t / len.max(1e-9));
+                let k = points.len();
+                let side = p.cross(b - a).normalize_or_zero();
+                let swing = noise.fbm(p * 40.0, 2) * r.meander * 2.0 * step;
+                points.push((p + side * swing).normalize());
                 // Wider as it gathers water, up to the asked width.
                 widths.push(r.width * (0.5 + 0.5 * (k as f32 / 200.0).min(1.0)));
             }
-            Channel { points, widths, depth: r.depth, river: true }
-        })
-        .filter(|c| c.points.len() > 4)
-        .collect()
+            left -= len - t;
+        }
+        if points.len() > 4 {
+            out.push(Channel { points, widths, depth: r.depth, river: true });
+        }
+    }
+    out
 }
 
 /// Ravines: long meandering cuts with steep walls, laid without regard to the
@@ -553,6 +598,54 @@ mod tests {
                 let v = relief.height(p.normalize());
                 assert!(v >= lo - 1e-3 && v <= hi + 1e-3, "{v} outside [{lo}, {hi}]");
             }
+        }
+    }
+
+    /// **A river runs to the sea, or into another river, and never round in
+    /// circles.** Rivers used to march downhill and give up only after forty
+    /// steps in a row that did not go down, which a river circling a pit never
+    /// takes: on an 800 m world every one ran to the 4,000-step cap, back and
+    /// forth over the same basin, and rivers doubled what the world cost to
+    /// generate. On this world the old trace ran its first river 48 km, to end
+    /// 73 m from its spring.
+    #[test]
+    fn a_river_runs_to_the_sea_and_never_round_in_circles() {
+        let spec = PlanetFill {
+            seed: 758290297,
+            radius: 300.0,
+            voxel: 1.5,
+            relief: 20.0,
+            bump_freq: 4.0,
+            mountains: Some(crate::procgen::Mountains { height: 30.0, scale: 3.0, sharpness: 2.0, coverage: 0.5, octaves: 4 }),
+            warp: Some(crate::procgen::Warp { strength: 0.2, scale: 2.0 }),
+            rivers: Some(Rivers { count: 5, depth: 5.0, width: 8.0, sea_level: -6.0, meander: 1.0 }),
+            ..PlanetFill::default()
+        };
+        let layers = Layers { spec: &spec, noise: Noise::new(spec.seed) };
+        let rivers = channels_of(&spec);
+        assert_eq!(rivers.len(), 5, "every spring should make a river");
+        let step = 8.0 * 1.5 / spec.radius;
+        for (k, r) in rivers.iter().enumerate() {
+            let (start, end) = (r.points[0], *r.points.last().unwrap());
+            let run: f32 = r.points.windows(2).map(|w| w[0].angle_between(w[1])).sum();
+            let straight = start.angle_between(end);
+            assert!(
+                run <= 3.0 * straight + 20.0 * step,
+                "river {k} runs {:.0} m to end {:.0} m from its spring",
+                run * spec.radius,
+                straight * spec.radius
+            );
+            for i in 20..r.points.len() {
+                for j in 0..i - 20 {
+                    assert!(
+                        r.points[i].angle_between(r.points[j]) > 0.5 * step,
+                        "river {k} comes back past point {j} at point {i}"
+                    );
+                }
+            }
+            let at_sea = layers.height(end) < spec.rivers.unwrap().sea_level + spec.relief * 0.25;
+            let joined = rivers[..k].iter().any(|o| o.points.iter().any(|p| p.angle_between(end) < 4.0 * step));
+            assert!(at_sea || joined, "river {k} ends {:.1} m up, away from the sea and every other river", layers.height(end));
         }
     }
 }

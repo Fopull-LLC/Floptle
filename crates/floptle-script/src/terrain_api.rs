@@ -51,10 +51,121 @@ impl TerrainOp {
 }
 
 /// The op-id counter and the inbox measured reports land in — the two halves of
-/// "a queued edit tells you what it did".
+/// "a queued edit tells you what it did" — and the planet questions answered
+/// off the script thread.
 pub(crate) struct TerrainReceipts {
     pub yields: Rc<RefCell<Vec<TerrainYield>>>,
     pub next_op_id: Rc<std::cell::Cell<u64>>,
+    pub planet: Rc<RefCell<PlanetQueries>>,
+}
+
+/// What a planet question comes back with.
+enum PlanetAnswer {
+    Lakes(Vec<floptle_field::procgen::Lake>, f32),
+    Channels(Vec<floptle_field::relief::Channel>, f32),
+}
+
+/// `terrain.planetLakes` and `terrain.planetRivers` asked with a callback: the
+/// work runs on a thread of its own, and each callback waits here for its
+/// answer. A large world's lakes take seconds to find, past the script
+/// watchdog; asked this way the script thread pays for reading the opts.
+#[derive(Default)]
+pub(crate) struct PlanetQueries {
+    waiting: Vec<(std::sync::mpsc::Receiver<PlanetAnswer>, mlua::RegistryKey)>,
+}
+
+impl PlanetQueries {
+    /// Forget every callback still waiting: its answer lands on nothing.
+    pub(crate) fn cancel_all(&mut self) {
+        self.waiting.clear();
+    }
+
+    fn ask(&mut self, lua: &Lua, cb: mlua::Function, work: impl FnOnce() -> PlanetAnswer + Send + 'static) -> mlua::Result<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        #[cfg(not(target_arch = "wasm32"))]
+        std::thread::spawn(move || {
+            let _ = tx.send(work());
+        });
+        // A page has no threads: it answers now, and the callback still runs
+        // in a later frame pass, as it does everywhere else.
+        #[cfg(target_arch = "wasm32")]
+        let _ = tx.send(work());
+        self.waiting.push((rx, lua.create_registry_value(cb)?));
+        Ok(())
+    }
+}
+
+/// Hand every finished planet question to its callback. Runs in the frame
+/// pass, like every other reply a script waits for.
+pub(crate) fn drain_planet_queries(lua: &Lua, state: &Rc<RefCell<PlanetQueries>>, logs: &Rc<RefCell<Vec<crate::ScriptLog>>>) {
+    // Collect with the borrow held, call with it released: a callback that
+    // asks again re-borrows the state.
+    let ready: Vec<(PlanetAnswer, mlua::RegistryKey)> = {
+        let Ok(mut s) = state.try_borrow_mut() else { return };
+        let mut ready = Vec::new();
+        let mut still = Vec::new();
+        for (rx, key) in std::mem::take(&mut s.waiting) {
+            match rx.try_recv() {
+                Ok(answer) => ready.push((answer, key)),
+                Err(std::sync::mpsc::TryRecvError::Empty) => still.push((rx, key)),
+                // The work panicked: there is no answer to wait for.
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+            }
+        }
+        s.waiting = still;
+        ready
+    };
+    for (answer, key) in ready {
+        let Ok(cb) = lua.registry_value::<mlua::Function>(&key) else { continue };
+        let _ = lua.remove_registry_value(key);
+        let (what, table) = match answer {
+            PlanetAnswer::Lakes(lakes, radius) => ("terrain.planetLakes", lakes_table(lua, &lakes, radius)),
+            PlanetAnswer::Channels(channels, radius) => ("terrain.planetRivers", channels_table(lua, &channels, radius)),
+        };
+        if let Err(e) = table.and_then(|t| cb.call::<()>(t)) {
+            logs.borrow_mut().push(crate::ScriptLog {
+                level: crate::LogLevel::Error,
+                msg: format!("{what} callback: {e}"),
+                source: None,
+            });
+        }
+    }
+}
+
+/// `terrain.planetLakes`' answer as Lua sees it.
+fn lakes_table(lua: &Lua, lakes: &[floptle_field::procgen::Lake], radius: f32) -> mlua::Result<Table> {
+    let out = lua.create_table()?;
+    for (i, l) in lakes.iter().enumerate() {
+        let row = lua.create_table()?;
+        row.set("level", l.level)?;
+        row.set("center", crate::math_api::LuaVec3((l.centre * (radius + l.level)).as_dvec3()))?;
+        row.set("reach", l.reach)?;
+        row.set("area", l.area)?;
+        row.set("depth", l.depth)?;
+        out.raw_set(i + 1, row)?;
+    }
+    Ok(out)
+}
+
+/// `terrain.planetRivers`' answer as Lua sees it.
+fn channels_table(lua: &Lua, channels: &[floptle_field::relief::Channel], radius: f32) -> mlua::Result<Table> {
+    let out = lua.create_table()?;
+    for (i, c) in channels.iter().enumerate() {
+        let ch = lua.create_table()?;
+        ch.set("river", c.river)?;
+        ch.set("depth", c.depth)?;
+        let pts = lua.create_table_with_capacity(c.points.len() * 3, 0)?;
+        for (k, p) in c.points.iter().enumerate() {
+            let p = *p * radius;
+            pts.raw_set(k * 3 + 1, p.x)?;
+            pts.raw_set(k * 3 + 2, p.y)?;
+            pts.raw_set(k * 3 + 3, p.z)?;
+        }
+        ch.set("points", pts)?;
+        ch.set("widths", lua.create_sequence_from(c.widths.iter().copied())?)?;
+        out.raw_set(i + 1, ch)?;
+    }
+    Ok(out)
 }
 
 /// What one applied op actually moved, in world cubic units.
@@ -148,7 +259,7 @@ pub(crate) fn install_terrain_api(
     receipts: TerrainReceipts,
 ) {
     let TerrainStreamShared { save_dir, lod_anchor, warm, flush, busy, paths } = stream;
-    let TerrainReceipts { yields, next_op_id } = receipts;
+    let TerrainReceipts { yields, next_op_id, planet } = receipts;
     let Ok(t) = lua.create_table() else { return };
 
     // terrain.deleteSaveDir(path) — delete a save slot's persisted terrain from
@@ -496,58 +607,71 @@ pub(crate) fn install_terrain_api(
         }
     }
 
-    // terrain.planetRivers(opts) → the rivers and ravines `generatePlanet`
-    // with the same opts carves, without generating: { {river=, depth=,
-    // points={x1,y1,z1, ...}, widths={...}}, ... }. Points are planet-local,
-    // on the sphere of the planet's radius; the ground there is the carved bed.
-    if let Ok(f) = lua.create_function(|lua, opts: Option<Table>| {
-        let fill = planet_fill_from_table(opts.as_ref())?;
-        let out = lua.create_table()?;
-        for (i, c) in floptle_field::relief::channels_of(&fill).iter().enumerate() {
-            let ch = lua.create_table()?;
-            ch.set("river", c.river)?;
-            ch.set("depth", c.depth)?;
-            let pts = lua.create_table_with_capacity(c.points.len() * 3, 0)?;
-            for (k, p) in c.points.iter().enumerate() {
-                let p = *p * fill.radius;
-                pts.raw_set(k * 3 + 1, p.x)?;
-                pts.raw_set(k * 3 + 2, p.y)?;
-                pts.raw_set(k * 3 + 3, p.z)?;
+    // terrain.planetRivers(opts [, callback]) → the rivers and ravines
+    // `generatePlanet` with the same opts carves, without generating: { {river=,
+    // depth=, points={x1,y1,z1, ...}, widths={...}}, ... }. Points are
+    // planet-local, on the sphere of the planet's radius; the ground there is
+    // the carved bed. Given a callback, the work runs off the script thread and
+    // the callback gets the answer in a later frame.
+    {
+        let planet = planet.clone();
+        if let Ok(f) = lua.create_function(move |lua, (opts, cb): (Option<Table>, Option<mlua::Function>)| {
+            let fill = planet_fill_from_table(opts.as_ref())?;
+            match cb {
+                Some(cb) => {
+                    planet.borrow_mut().ask(lua, cb, move || {
+                        PlanetAnswer::Channels(floptle_field::relief::channels_of(&fill), fill.radius)
+                    })?;
+                    Ok(Value::Nil)
+                }
+                None => Ok(Value::Table(channels_table(lua, &floptle_field::relief::channels_of(&fill), fill.radius)?)),
             }
-            ch.set("points", pts)?;
-            ch.set("widths", lua.create_sequence_from(c.widths.iter().copied())?)?;
-            out.raw_set(i + 1, ch)?;
+        }) {
+            let _ = t.set("planetRivers", f);
         }
-        Ok(out)
-    }) {
-        let _ = t.set("planetRivers", f);
     }
 
-    // terrain.planetLakes(opts [, { cell, minDepth, seaLevel }]) → the lakes
-    // the planet's basins hold, without generating it: { {level=, center=,
-    // reach=, area=, depth=}, ... }, largest first. `center` is planet-local,
-    // on the lake's surface.
-    if let Ok(f) = lua.create_function(|lua, (opts, query): (Option<Table>, Option<Table>)| {
-        let fill = planet_fill_from_table(opts.as_ref())?;
-        if let Some(q) = &query {
-            crate::opts::check_keys(q, &["cell", "minDepth", "seaLevel"], "terrain.planetLakes")?;
+    // terrain.planetLakes(opts [, { cell, minDepth, seaLevel }] [, callback]) →
+    // the lakes the planet's basins hold, without generating it: { {level=,
+    // center=, reach=, area=, depth=}, ... }, largest first. `center` is
+    // planet-local, on the lake's surface. Given a callback, the work runs off
+    // the script thread and the callback gets the answer in a later frame.
+    {
+        let planet = planet.clone();
+        if let Ok(f) = lua.create_function(move |lua, args: mlua::MultiValue| {
+            let mut args = args.into_iter();
+            let opts = match args.next() {
+                None | Some(Value::Nil) => None,
+                Some(Value::Table(t)) => Some(t),
+                Some(_) => return Err(mlua::Error::runtime("terrain.planetLakes: opts must be a table")),
+            };
+            let (query, cb) = match (args.next(), args.next()) {
+                (Some(Value::Function(f)), _) => (None, Some(f)),
+                (Some(Value::Table(q)), Some(Value::Function(f))) => (Some(q), Some(f)),
+                (Some(Value::Table(q)), None | Some(Value::Nil)) => (Some(q), None),
+                (None | Some(Value::Nil), Some(Value::Function(f))) => (None, Some(f)),
+                (None | Some(Value::Nil), None | Some(Value::Nil)) => (None, None),
+                _ => return Err(mlua::Error::runtime("terrain.planetLakes(opts [, query] [, callback]): query is a table and callback a function")),
+            };
+            let fill = planet_fill_from_table(opts.as_ref())?;
+            if let Some(q) = &query {
+                crate::opts::check_keys(q, &["cell", "minDepth", "seaLevel"], "terrain.planetLakes")?;
+            }
+            let get = |k: &str| query.as_ref().and_then(|q| q.get::<Option<f32>>(k).ok().flatten());
+            let sea = get("seaLevel").unwrap_or(fill.rivers.as_ref().map_or(f32::NEG_INFINITY, |r| r.sea_level));
+            let (cell, min_depth) = (get("cell").unwrap_or(3.0), get("minDepth").unwrap_or(0.5));
+            match cb {
+                Some(cb) => {
+                    planet.borrow_mut().ask(lua, cb, move || {
+                        PlanetAnswer::Lakes(floptle_field::procgen::lakes_of(&fill, cell, min_depth, sea), fill.radius)
+                    })?;
+                    Ok(Value::Nil)
+                }
+                None => Ok(Value::Table(lakes_table(lua, &floptle_field::procgen::lakes_of(&fill, cell, min_depth, sea), fill.radius)?)),
+            }
+        }) {
+            let _ = t.set("planetLakes", f);
         }
-        let get = |k: &str| query.as_ref().and_then(|q| q.get::<Option<f32>>(k).ok().flatten());
-        let sea = get("seaLevel").unwrap_or(fill.rivers.as_ref().map_or(f32::NEG_INFINITY, |r| r.sea_level));
-        let lakes = floptle_field::procgen::lakes_of(&fill, get("cell").unwrap_or(3.0), get("minDepth").unwrap_or(0.5), sea);
-        let out = lua.create_table()?;
-        for (i, l) in lakes.iter().enumerate() {
-            let row = lua.create_table()?;
-            row.set("level", l.level)?;
-            row.set("center", crate::math_api::LuaVec3((l.centre * (fill.radius + l.level)).as_dvec3()))?;
-            row.set("reach", l.reach)?;
-            row.set("area", l.area)?;
-            row.set("depth", l.depth)?;
-            out.raw_set(i + 1, row)?;
-        }
-        Ok(out)
-    }) {
-        let _ = t.set("planetLakes", f);
     }
 
     // terrain.yields() → the reports for edits that have landed since the last

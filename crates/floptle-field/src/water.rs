@@ -69,20 +69,8 @@ impl WaterGrid {
     pub fn sphere(n: usize, radius: f32, ground: impl Fn(Vec3) -> f32 + Sync) -> Self {
         let n = n.max(1);
         let cells = 6 * n * n;
-        let centre = |c: usize| {
-            let (f, r) = (c / (n * n), c % (n * n));
-            let (i, j) = (r % n, r / n);
-            let u = -1.0 + (i as f32 + 0.5) * 2.0 / n as f32;
-            let v = -1.0 + (j as f32 + 0.5) * 2.0 / n as f32;
-            from_face(f, u, v)
-        };
-        let cell_of = |d: Vec3| {
-            let (f, u, v) = to_face(d);
-            let i = (((u + 1.0) * 0.5 * n as f32) as usize).min(n - 1);
-            let j = (((v + 1.0) * 0.5 * n as f32) as usize).min(n - 1);
-            f * n * n + j * n + i
-        };
-        let dirs: Vec<Vec3> = (0..cells).map(centre).collect();
+        let cell_of = |d: Vec3| sphere_cell(n, d);
+        let dirs: Vec<Vec3> = (0..cells).map(|c| sphere_centre(n, c)).collect();
         let ground: Vec<f32> = crate::chunks::par_map(cells, |c| ground(dirs[c]));
         let step = 2.0 / n as f32;
         let mut g = WaterGrid {
@@ -187,8 +175,25 @@ impl Ord for Lowest {
 /// Priority flood, from the outlets outwards: a cell's surface is the lowest
 /// height water can reach it from an outlet at, which is its spill height.
 pub fn lake_levels(grid: &WaterGrid, sea_level: f32) -> Vec<f32> {
+    flood(grid, sea_level).0
+}
+
+/// Where water runs from every cell: the neighbour it drains into, or
+/// [`WALL`] at an outlet (the sea, a flat grid's edge, or a closed world's
+/// lowest cell). Following it from any cell reaches an outlet without ever
+/// climbing above the cell's [`lake_levels`] surface: down the ground, across
+/// each lake it fills toward the lake's spill point, and on.
+pub fn drainage(grid: &WaterGrid, sea_level: f32) -> Vec<u32> {
+    flood(grid, sea_level).1
+}
+
+/// Priority flood, from the outlets outwards: a cell's surface is the lowest
+/// height water can reach it from an outlet at, which is its spill height, and
+/// the cell it was reached from is the one it drains into.
+fn flood(grid: &WaterGrid, sea_level: f32) -> (Vec<f32>, Vec<u32>) {
     let n = grid.len();
     let mut level = vec![f32::INFINITY; n];
+    let mut from = vec![WALL; n];
     let mut heap = BinaryHeap::new();
     let seed = |c: usize, at: f32, level: &mut [f32], heap: &mut BinaryHeap<Lowest>| {
         level[c] = at;
@@ -223,11 +228,31 @@ pub fn lake_levels(grid: &WaterGrid, sea_level: f32) -> Vec<f32> {
             let lo = at.max(grid.ground[o as usize]);
             if lo < level[o as usize] {
                 level[o as usize] = lo;
+                from[o as usize] = c;
                 heap.push(Lowest(lo, o));
             }
         }
     }
-    level
+    (level, from)
+}
+
+/// The cell of an `n`-cell-a-face [`WaterGrid::sphere`] that direction `d`
+/// falls in.
+pub fn sphere_cell(n: usize, d: Vec3) -> usize {
+    let n = n.max(1);
+    let (f, u, v) = to_face(d);
+    let i = (((u + 1.0) * 0.5 * n as f32) as usize).min(n - 1);
+    let j = (((v + 1.0) * 0.5 * n as f32) as usize).min(n - 1);
+    f * n * n + j * n + i
+}
+
+/// The direction through the middle of cell `c` of an `n`-cell-a-face
+/// [`WaterGrid::sphere`].
+pub fn sphere_centre(n: usize, c: usize) -> Vec3 {
+    let n = n.max(1);
+    let (f, r) = (c / (n * n), c % (n * n));
+    let (i, j) = (r % n, r / n);
+    from_face(f, -1.0 + (i as f32 + 0.5) * 2.0 / n as f32, -1.0 + (j as f32 + 0.5) * 2.0 / n as f32)
 }
 
 /// A surface difference below this is level, metres.

@@ -34,7 +34,7 @@ pub mod terrain;
 
 pub use mesh2sdf::{bake, bake_occluder, BakedSdf, TexRef};
 pub use chunks::{BlockClass, ChunkField, ChunkUndo, FieldSaver, Generated, PendingSource, SculptYield, VoxelSource, BAND_VOXELS, CHUNK};
-pub use mesher::{mesh_chunk, mesh_depends, mesh_field, mesh_reads, mesh_scratch, scratch_for_chunk, ChunkMesh, MeshScratch};
+pub use mesher::{mesh_box, mesh_chunk, mesh_depends, mesh_field, mesh_reads, mesh_scratch, scratch_for_chunk, ChunkMesh, MeshScratch};
 pub use terrain::{Brush, BrushProfile, Falloff, Terrain};
 
 /// Polynomial smooth-minimum: blends two distances over radius `k` (k→0 = hard

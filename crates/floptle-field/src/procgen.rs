@@ -364,6 +364,15 @@ impl PlanetShape {
 
     /// [`Self::body`] with the bump already known.
     fn body_with(&self, p: Vec3, bump: f32) -> f32 {
+        let mut body = self.ground_with(p, bump);
+        for (c, cr) in &self.craters {
+            body = body.max(-((p - *c).length() - cr));
+        }
+        body
+    }
+
+    /// The ground with its overhangs, before the craters: negative under it.
+    fn ground_with(&self, p: Vec3, bump: f32) -> f32 {
         let mut body = p.length() - (self.radius + bump);
         if let Some(o) = &self.overhangs
             && o.strength != 0.0
@@ -374,9 +383,6 @@ impl PlanetShape {
                 let s = shell * shell * (3.0 - 2.0 * shell);
                 body += o.strength * s * self.noise.fbm(p * o.scale + Vec3::splat(431.0), 3);
             }
-        }
-        for (c, cr) in &self.craters {
-            body = body.max(-((p - *c).length() - cr));
         }
         body
     }
@@ -598,6 +604,12 @@ impl Planet {
     }
 
     /// The colour a voxel at `p` is painted, the ground there raised `bump`.
+    ///
+    /// Its depth is how far it is under the ground as the overhangs leave it,
+    /// not under the ground's height in its direction: an overhang lifts the
+    /// surface up to its strength off that height, and the subsoil and strata
+    /// counted from the height came up through undug ground in blotches, with
+    /// crystal pockets on the spires.
     fn paint(&self, p: Vec3, bump: f32, k: &mut Caches) -> [u8; 4] {
         let (spec, noise) = (&self.spec, &self.shape.noise);
         let (radius, relief, cave_depth, core_r) =
@@ -605,7 +617,7 @@ impl Planet {
         let r = p.length();
         let dir = if r > 1e-3 { p / r } else { Vec3::X };
         let alt = (r - radius) / relief.max(1.0);
-        let depth = (radius + bump) - r;
+        let depth = -self.shape.ground_with(p, bump);
         let vary = noise.fbm_cached(p * 0.05 + Vec3::splat(83.0), 2, &mut k.vary);
         let patch = noise.fbm_cached(dir * 9.0 + Vec3::splat(37.0), 3, &mut k.patch);
 
@@ -841,6 +853,42 @@ impl crate::VoxelSource for Planet {
 
 #[cfg(test)]
 mod tests {
+    /// **Overhangs do not bring the subsoil up through undug ground.** The
+    /// paint's depth was counted from the ground's height in a voxel's
+    /// direction, while overhangs move the surface up to their strength off
+    /// that height: with subsoil two voxels down and overhangs of 6, 3% of this
+    /// world's undug ground showed a deeper layer. Read half a voxel under the
+    /// surface down 600 directions.
+    #[test]
+    fn overhangs_do_not_bring_the_subsoil_up_through_undug_ground() {
+        let spec = PlanetFill {
+            seed: 77,
+            radius: 120.0,
+            voxel: 1.5,
+            relief: 8.0,
+            cave_depth: 30.0,
+            subsoil_depth: 3.0,
+            subsoil: LayerPaint { slot: 9, color: [0.5, 0.5, 0.5] },
+            overhangs: Some(Overhangs { depth: 10.0, scale: 0.08, strength: 6.0 }),
+            ..PlanetFill::default()
+        };
+        let field = generate_planet(&spec);
+        let golden = std::f32::consts::PI * (3.0 - 5f32.sqrt());
+        let (mut seen, mut subsoil) = (0, 0);
+        for i in 0..600 {
+            let y = 1.0 - 2.0 * (i as f32 + 0.5) / 600.0;
+            let r = (1.0 - y * y).sqrt();
+            let d = Vec3::new(r * (golden * i as f32).cos(), y, r * (golden * i as f32).sin());
+            let Some(hit) = field.raycast(d * 200.0, -d, 200.0) else { continue };
+            let n = field.grad(hit).normalize_or_zero();
+            seen += 1;
+            // Anything but the two surface slots is a deeper layer showing.
+            subsoil += usize::from(!matches!(field.slot_at(hit - n * 0.5 * spec.voxel), Some(1 | 2)));
+        }
+        assert!(seen > 500, "only {seen} rays found the ground");
+        assert!(subsoil * 100 <= seen, "{subsoil} of {seen} points of undug ground show a deeper layer");
+    }
+
     /// **A lake's ground is the ground the planet is generated with.** The
     /// height `lakes_of` reads in a direction is where a ray from outside the
     /// generated field meets its surface, craters included, to within a voxel.
@@ -1053,6 +1101,106 @@ mod tests {
         }
         assert!(sign * 1000 < band, "{sign} of {band} band voxels changed side against the planet filled whole");
         assert!(differ * 50 < band, "{differ} of {band} band voxels differ by more than a twentieth of a voxel");
+    }
+
+    /// A dug planet for the save tests: ten bites of a mining laser down into
+    /// the cave zone and a flattened pad, with the recipe written on it.
+    fn dug_planet(spec: &PlanetFill) -> ChunkField {
+        let mut f = generate_planet(spec);
+        f.set_spec(ron_like(spec));
+        let top = Vec3::new(0.0, spec.radius + spec.relief * 2.0 + 10.0, 0.0);
+        let ground = f.raycast(top, Vec3::NEG_Y, top.y).expect("the planet is there");
+        for i in 0..10 {
+            f.sculpt(crate::Brush::Lower, ground - Vec3::new(0.0, i as f32 * 1.6, i as f32 * 0.4), 2.4, 0.85, crate::BrushProfile::default());
+        }
+        let pad = (Vec3::new(1.0, 1.0, 0.3).normalize() * (spec.radius + 2.0)).normalize();
+        let at = f.raycast(pad * (spec.radius * 1.5), -pad, spec.radius).expect("the pad's ground");
+        f.flatten_to_plane(at, pad, 6.0, 1.0, crate::BrushProfile::default());
+        f
+    }
+
+    /// The spec as a string a save can carry: anything the test can turn back
+    /// into the same planet.
+    fn ron_like(spec: &PlanetFill) -> String {
+        format!("{}", spec.seed)
+    }
+
+    /// Every chunk of `a` and `b` reads the same, to the precision a save keeps.
+    fn same_as_saved(a: &ChunkField, b: &ChunkField) -> Result<(), String> {
+        let band = a.band();
+        let q = |v: f32| ((v / band) * 127.0).round() as i32;
+        let mut coords = a.all_chunk_coords();
+        coords.extend(b.all_chunk_coords());
+        coords.sort_unstable();
+        coords.dedup();
+        let (mut da, mut ca, mut db, mut cb) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for c in coords {
+            let lo = [c[0] * crate::CHUNK, c[1] * crate::CHUNK, c[2] * crate::CHUNK];
+            a.gather(lo, crate::CHUNK as usize, &mut da, &mut ca);
+            b.gather(lo, crate::CHUNK as usize, &mut db, &mut cb);
+            for i in 0..da.len() {
+                if q(da[i]) != q(db[i]) {
+                    return Err(format!("chunk {c:?} voxel {i}: {} against {}", da[i], db[i]));
+                }
+                if da[i] < band - 1e-6 && ca[i] != cb[i] {
+                    return Err(format!("chunk {c:?} voxel {i}: colour {:?} against {:?}", ca[i], cb[i]));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// **A generated planet saves what was done to it, not the whole field.**
+    /// Every save of a dug 800 m planet wrote its 400 MB field, though all but
+    /// a few chunks of it were what the generator makes. Now a save holds the
+    /// edited chunks and the recipe; loading lays them over a fresh generation
+    /// and gets back the same planet, the edits as the save kept them.
+    #[test]
+    fn a_dug_planet_saves_its_edits_and_comes_back_the_same() {
+        let spec = PlanetFill { seed: 41, radius: 140.0, voxel: 1.5, relief: 6.0, cave_depth: 80.0, core_r: 5.0, defer_caves: true, ..PlanetFill::default() };
+        let dug = dug_planet(&spec);
+        assert!(dug.edited_count() > 0 && dug.edited_count() < 40, "{} chunks edited", dug.edited_count());
+        let edits = dug.to_bytes();
+        let mut whole = dug.clone();
+        whole.clear_spec();
+        let whole = whole.to_bytes();
+        assert!(edits.len() * 5 < whole.len(), "the save is {} bytes against {} for the whole field", edits.len(), whole.len());
+
+        let back = ChunkField::from_bytes(&edits).expect("the save loads");
+        assert!(back.is_delta() && back.spec() == Some(ron_like(&spec).as_str()));
+        let mut back = back.lay_over(generate_planet(&spec));
+        same_as_saved(&dug, &back).unwrap();
+        // The pit is still dug where it was, and the next save is edits again.
+        assert_eq!(back.edited_count(), dug.edited_count());
+        assert_eq!(back.to_bytes(), edits, "saving the loaded planet wrote something else");
+        // The caves still to make are made the same as they would have been.
+        let mut fresh = dug.clone();
+        let deep = fresh.pending_in_box(Vec3::splat(-spec.radius), Vec3::splat(spec.radius));
+        assert!(!deep.is_empty(), "no caves left to make: {} pending", fresh.pending_count());
+        fresh.realize(&deep);
+        back.realize(&deep);
+        same_as_saved(&fresh, &back).unwrap();
+    }
+
+    /// **A save from before edits were tracked still loads, and becomes
+    /// small.** It holds the whole field and no record of what was edited;
+    /// compared with a fresh generation, the chunks that differ are the edits,
+    /// and the field saves only those from then on.
+    #[test]
+    fn a_whole_field_save_still_loads_and_finds_its_edits() {
+        let spec = PlanetFill { seed: 42, radius: 90.0, voxel: 1.5, relief: 6.0, cave_depth: 25.0, core_r: 5.0, defer_caves: true, ..PlanetFill::default() };
+        let mut dug = dug_planet(&spec);
+        let edited = dug.edited_count();
+        dug.clear_spec();
+        let old = dug.to_bytes();
+        let mut back = ChunkField::from_bytes(&old).expect("an old save loads");
+        assert!(!back.is_delta());
+        back.set_spec(ron_like(&spec));
+        back.adopt_generation(&generate_planet(&spec));
+        same_as_saved(&dug, &back).unwrap();
+        assert!(back.edited_count() <= edited, "{} chunks taken for edits, {edited} were edited", back.edited_count());
+        assert!(back.edited_count() > 0, "the dig was lost");
+        assert!(back.to_bytes().len() * 5 < old.len(), "it still saves whole: {} of {} bytes, {} chunks edited of {edited}", back.to_bytes().len(), old.len(), back.edited_count());
     }
 
     /// **Mountains taller than the base relief are generated whole.** The fill

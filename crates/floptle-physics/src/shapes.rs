@@ -469,6 +469,10 @@ struct Surface {
     /// one that extracted a thousand triangles, so it is not re-meshed every
     /// query.
     chunks: std::collections::HashMap<[i32; 3], CollisionChunk>,
+    /// How many rays found the drawn surface in each chunk not meshed yet,
+    /// from a few cells meshed for the asking. A chunk asked about often is
+    /// worth meshing whole.
+    asked: std::collections::HashMap<[i32; 3], u8>,
 }
 
 impl Surface {
@@ -629,6 +633,17 @@ impl ChunkTerrain {
         Self { rot, scale, ..Self::new(field) }
     }
 
+    /// The sphere around chunk `c`, anchor-relative like every query, grown
+    /// by one voxel: a re-mesh moves the surface up to the chunk's border and
+    /// a voxel past it.
+    pub fn chunk_sphere(&self, c: [i32; 3]) -> (Vec3, f32) {
+        let v = self.field.voxel();
+        let side = floptle_field::CHUNK as f32 * v;
+        let centre = self.field.chunk_origin(c) + Vec3::splat(side * 0.5);
+        let s = self.scale.max(1e-6);
+        (self.rot * (centre * s), (side * 0.5 * 3f32.sqrt() + v) * s)
+    }
+
     /// Anchor-relative world point → the field's local frame.
     #[inline]
     fn to_local(&self, p: Vec3) -> Vec3 {
@@ -737,6 +752,59 @@ impl ChunkTerrain {
         }
     }
 
+    /// The first drawn triangle a ray from `o` along `d` (local, unit) meets
+    /// near `t0`, where it first comes within a voxel of the field, and its
+    /// face normal toward the ray: the cells along that stretch of it meshed
+    /// for the asking, a small box at a time. The drawn surface stands up to
+    /// half a voxel off the field's, so a ray near square to the ground can
+    /// cross it a little before `t0`, and the walk starts back from there.
+    /// `None` when it meets nothing.
+    fn hit_drawn_box(&self, o: Vec3, d: Vec3, t0: f32, tmax: f32) -> Option<(f32, Vec3)> {
+        const CELLS: i32 = 8;
+        // A triangle near a point is meshed in a box when the point is this far
+        // inside it: the edge it is built round has its low corner in the box.
+        const CORE: f32 = CELLS as f32 * 0.5 - 1.5;
+        let voxel = self.field.voxel();
+        let mut t = (t0 - 1.5 * voxel).max(0.0);
+        while t <= (t0 + 6.0 * voxel).min(tmax) {
+            let p = o + d * t;
+            let centre = (p / voxel).round();
+            let base = [
+                centre.x as i32 - CELLS / 2,
+                centre.y as i32 - CELLS / 2,
+                centre.z as i32 - CELLS / 2,
+            ];
+            let m = floptle_field::mesh_box(&self.field, base, CELLS);
+            let origin = Vec3::from(m.origin);
+            let mut best: Option<(f32, Vec3)> = None;
+            for tri in m.indices.chunks(3) {
+                let [a, b, c] = [0, 1, 2].map(|k| Vec3::from(m.positions[tri[k] as usize]) + origin);
+                if let Some(h) = ray_triangle(o, d, a, b, c)
+                    && h > 0.0
+                    && h <= tmax
+                    && ((o + d * h) / voxel - centre).abs().max_element() <= CORE
+                    && best.is_none_or(|(bt, _)| h < bt)
+                {
+                    let n = (b - a).cross(c - a).normalize_or_zero();
+                    best = Some((h, if n.dot(d) > 0.0 { -n } else { n }));
+                }
+            }
+            if best.is_some() {
+                return best;
+            }
+            // On to the next box, overlapping this one's core.
+            t += CORE * voxel;
+        }
+        None
+    }
+
+    /// Is every chunk the drawn surface near `local` is read from meshed?
+    fn meshed_near(&self, local: Vec3) -> bool {
+        let r = Vec3::splat(self.reach());
+        let s = self.surface.borrow();
+        self.field.chunks_in_world_box(local - r, local + r).iter().all(|c| s.chunks.contains_key(c))
+    }
+
     /// Mesh chunk `c` into the surface, unless it is there already.
     fn mesh_into(&self, c: [i32; 3], s: &mut Surface) {
         if s.chunks.contains_key(&c) {
@@ -814,6 +882,11 @@ impl ChunkTerrain {
     }
 }
 
+/// Rays into a chunk answered from a few of its cells before the chunk is
+/// meshed whole for collision: a box of cells costs a few times what a ray at
+/// a meshed chunk does, so a chunk asked about this often is worth meshing.
+const RAYS_BEFORE_MESHING: u8 = 4;
+
 /// The triangles of one chunk as drawn: stride 1, no skirt — the LOD-0
 /// surface, which is what the renderer draws up close (it adds skirts to every
 /// chunk it draws). A skirt is a curtain hung over the crack between two LODs;
@@ -888,6 +961,37 @@ impl CollisionShape for ChunkTerrain {
         };
         let voxel = lvoxel * scale;
         let field_t = near * scale;
+        // Where the drawn surface has not been meshed for collision yet, the
+        // few cells of it the ray reaches are meshed for this ray alone: the
+        // same triangles, a few hundredths of the cost. Meshing the chunks
+        // there, a chunk or eight a ray at full detail, made six script rays
+        // cost 12.5 ms on a 1 km planet just after it was made, seventy times
+        // what they cost once something had stood there.
+        //
+        // Only for a ray within about 37° of square to the ground: the march stops
+        // within 0.02 of the surface, which a grazing ray reaches well before it
+        // crosses, and the two answers must agree. A chunk a few rays have asked
+        // about is meshed whole, as before, so a place asked about again and
+        // again is cached: the first rays anywhere are cheap, and so are all
+        // the ones after them.
+        let at = local + ld * near;
+        if self.mesh_accurate
+            && !self.meshed_near(at)
+            && self.field.grad(at).normalize_or_zero().dot(-ld) > 0.8
+        {
+            let c = (at / lvoxel).floor().to_array().map(|v| (v as i32).div_euclid(floptle_field::CHUNK));
+            let asked = {
+                let mut s = self.surface.borrow_mut();
+                let n = s.asked.entry(c).or_insert(0);
+                *n = n.saturating_add(1);
+                *n
+            };
+            if asked <= RAYS_BEFORE_MESHING
+                && let Some((t, n)) = self.hit_drawn_box(local, ld, near, tmax / scale)
+            {
+                return RayAnswer::Hit(t * scale, (self.rot * n).normalize_or_zero());
+            }
+        }
         let (mut t, end) = (field_t, (field_t + 6.0 * voxel).min(tmax));
         for _ in 0..512 {
             if t > end {
@@ -2617,6 +2721,74 @@ mod drawn_surface_tests {
         }
         // Against the march on the same rays, so a slow machine slows both.
         assert!(ms < march_ms, "a 5 m ray costs {ms:.4} ms against the march's {march_ms:.4}");
+    }
+
+    /// **A ray at a planet nothing has stood on costs about what one at
+    /// ground already meshed for collision does.** A ray meshed the collision
+    /// chunks where it landed, a chunk or eight at full detail, so six script
+    /// rays at a 1 km planet just made cost 12.5 ms, against 0.18 ms once the
+    /// ground there was meshed. Rays straight down at 60 places, each on a
+    /// fresh collider and on one whose ground is meshed already; the answers
+    /// agree.
+    #[test]
+    fn a_ray_at_ground_never_stood_on_costs_about_what_one_at_meshed_ground_does() {
+        let radius = 150.0;
+        let field = floptle_field::procgen::generate_planet(&floptle_field::procgen::PlanetFill {
+            seed: 11,
+            radius,
+            voxel: 1.5,
+            relief: radius * 0.065,
+            cave_depth: radius * 0.35,
+            core_r: 10.5,
+            ..Default::default()
+        });
+        let golden = std::f32::consts::PI * (3.0 - 5f32.sqrt());
+        // Down at ground no steeper than about 30°, where a script places
+        // things; a ray at a cliff meshes the chunk as it always did.
+        let rays: Vec<(Vec3, Vec3)> = (0..1000)
+            .map(|i| {
+                let y = 1.0 - 2.0 * (i as f32 + 0.5) / 1000.0;
+                let r = (1.0 - y * y).sqrt();
+                let d = Vec3::new(r * (golden * i as f32).cos(), y, r * (golden * i as f32).sin());
+                (d * (radius * 1.3), -d)
+            })
+            .filter(|(o, d)| field.raycast(*o, *d, radius).is_some_and(|p| field.grad(p).normalize_or_zero().dot(-*d) > 0.87))
+            // A chunk apiece: the first rays into a chunk are the ones in question.
+            .filter({
+                let mut seen = std::collections::HashSet::new();
+                let field = &field;
+                move |(o, d)| {
+                    let p = field.raycast(*o, *d, radius).unwrap_or(Vec3::ZERO);
+                    seen.insert((p / (field.voxel() * floptle_field::CHUNK as f32)).floor().to_array().map(|v| v as i32))
+                }
+            })
+            .take(60)
+            .collect();
+        assert_eq!(rays.len(), 60);
+        let cast = |cols: &[crate::AnchoredCollider]| {
+            let t = std::time::Instant::now();
+            let hits: Vec<Option<f32>> = rays.iter().map(|(o, d)| crate::raycast_colliders(cols, *o, *d, radius, !0).map(|h| h.distance)).collect();
+            (hits, t.elapsed().as_secs_f64())
+        };
+        // Meshed where the rays land: the cost a ray pays at ground a body has
+        // stood on.
+        let meshed = ChunkTerrain::new(field.clone());
+        for (o, d) in &rays {
+            if let Some(p) = field.raycast(*o, *d, radius) {
+                let _ = meshed.distance(p);
+            }
+        }
+        let meshed = vec![crate::AnchoredCollider::world(Box::new(meshed))];
+        let (want, built) = cast(&meshed);
+        let fresh = vec![crate::AnchoredCollider::world(Box::new(ChunkTerrain::new(field)))];
+        let (got, cold) = cast(&fresh);
+        for (i, (a, b)) in got.iter().zip(&want).enumerate() {
+            match (a, b) {
+                (Some(a), Some(b)) => assert!((a - b).abs() < 0.05, "ray {i}: {a} against {b} on meshed ground"),
+                _ => assert_eq!(a.is_some(), b.is_some(), "ray {i}: {a:?} against {b:?}"),
+            }
+        }
+        assert!(cold < 8.0 * built, "60 rays at fresh ground took {:.2} ms, at meshed ground {:.2} ms", cold * 1e3, built * 1e3);
     }
 
     /// A terrain collider that leaves every ray to the general march, as all
