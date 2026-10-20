@@ -2627,11 +2627,14 @@ impl ScriptHost {
         let water_volumes: Rc<RefCell<Vec<crate::water_api::WaterInfo>>> =
             Rc::new(RefCell::new(Vec::new()));
         let water_freeze: Rc<RefCell<Vec<(u32, bool)>>> = Rc::new(RefCell::new(Vec::new()));
+        let water_declared: Rc<RefCell<Vec<floptle_core::water::DeclaredWater>>> = Rc::default();
         crate::water_api::install_water_api(
             &lua,
             crate::water_api::WaterShared {
                 volumes: water_volumes.clone(),
                 freeze: water_freeze.clone(),
+                declared: water_declared.clone(),
+                next_id: Rc::default(),
             },
         );
 
@@ -2640,6 +2643,10 @@ impl ScriptHost {
         let scatter_sources: crate::scatter_api::Sources = Rc::new(RefCell::new(Vec::new()));
         let scatter_next_id: Rc<std::cell::Cell<u32>> = Rc::new(std::cell::Cell::new(0));
         let scatter_owners = crate::scatter_api::Owners::default();
+        // The scripts' copy of the scene, made here rather than with the rest
+        // of the handle layer below: a source that rides a node reads where
+        // that node stands the moment it is created.
+        let scene_mirror: Rc<RefCell<SceneMirror>> = Rc::default();
         crate::scatter_api::install_scatter_api(
             &lua,
             scatter_sources.clone(),
@@ -2647,6 +2654,7 @@ impl ScriptHost {
             net.current.clone(),
             scatter_next_id.clone(),
             logs.clone(),
+            scene_mirror.clone(),
         );
 
         // `weather.*` — the wind every system is moved by.
@@ -2694,7 +2702,7 @@ impl ScriptHost {
         // `install_handle_api`). Shared (interior-mutable) with the handle closures.
         let shared = Shared {
             destroy_queue: destroy_queue.clone(),
-            scene: Rc::new(RefCell::new(SceneMirror::default())),
+            scene: scene_mirror,
             bodies: Rc::new(RefCell::new(HashMap::new())),
             ui_rects: Rc::new(RefCell::new(HashMap::new())),
             body_changes: Rc::new(RefCell::new(HashMap::new())),
@@ -2891,6 +2899,7 @@ impl ScriptHost {
         let terrain_yields: Rc<RefCell<Vec<crate::terrain_api::TerrainYield>>> =
             Rc::new(RefCell::new(Vec::new()));
         let terrain_op_id: Rc<std::cell::Cell<u64>> = Rc::new(std::cell::Cell::new(0));
+        let terrain_planet: Rc<RefCell<crate::terrain_api::PlanetQueries>> = Rc::default();
         crate::terrain_api::install_terrain_api(
             &lua,
             terrain_ops.clone(),
@@ -2908,6 +2917,7 @@ impl ScriptHost {
             crate::terrain_api::TerrainReceipts {
                 yields: terrain_yields.clone(),
                 next_op_id: terrain_op_id.clone(),
+                planet: terrain_planet.clone(),
             },
         );
         // `decals.*`: marks laid on the static colliders lent for the pass.
@@ -3078,6 +3088,7 @@ impl ScriptHost {
             sim_origin,
             terrain_ops,
             terrain_yields,
+            terrain_planet,
             terrain_generates,
             terrain_save_dir,
             terrain_warm,
@@ -3138,6 +3149,7 @@ impl ScriptHost {
             scene_loaded,
             water_volumes,
             water_freeze,
+            water_declared,
             scatter_sources,
             scatter_owners,
             scatter_next_id,
@@ -3517,6 +3529,32 @@ impl ScriptHost {
         }
     }
 
+    /// Bring every anchored source's frame to where its node stands in the
+    /// scripts' copy of the scene. Run with each refresh of that copy, so
+    /// `scatter.near` answers in the right place in every pass, including
+    /// under a headless `run` that never draws. The driver's per-frame
+    /// [`set_scatter_frame`](Self::set_scatter_frame) still has the last word
+    /// before a draw. A lookup by name per source, never a walk of the scene.
+    fn refresh_scatter_frames(&self) {
+        let mut sources = self.scatter_sources.borrow_mut();
+        if sources.iter().all(|s| s.anchor.is_none()) {
+            return;
+        }
+        let Ok(scene) = self.scene.try_borrow() else { return };
+        for src in sources.iter_mut() {
+            if let Some(f) = src.anchor.as_deref().and_then(|a| crate::scatter_api::anchor_frame(&scene, a)) {
+                src.frame = f;
+            }
+        }
+    }
+
+    /// The entity index the scripts' copy of the scene has under `name`: an
+    /// O(1) lookup, for a driver that would otherwise walk every named node.
+    /// It can be a pass behind the world; check the name before trusting it.
+    pub fn mirror_entity_named(&self, name: &str) -> Option<u32> {
+        self.scene.try_borrow().ok()?.by_name.get(name).copied()
+    }
+
     /// Every source that rides a node, as `(id, node name)`.
     pub fn anchored_scatter(&self) -> Vec<(u32, String)> {
         self.scatter_sources
@@ -3571,6 +3609,30 @@ impl ScriptHost {
     /// `water.depthAt` and friends answer from.
     pub fn set_water_volumes(&mut self, v: Vec<crate::water_api::WaterInfo>) {
         *self.water_volumes.borrow_mut() = v;
+    }
+
+    /// The water scripts declared with `water.addVolume`, frames as of the
+    /// last [`Self::set_water_frame`].
+    pub fn declared_water(&self) -> std::cell::Ref<'_, Vec<floptle_core::water::DeclaredWater>> {
+        self.water_declared.borrow()
+    }
+
+    /// Every declared water that lies on a node, as `(id, node name)`.
+    pub fn anchored_water(&self) -> Vec<(u32, String)> {
+        self.water_declared.borrow().iter().filter_map(|w| w.anchor.clone().map(|a| (w.id, a))).collect()
+    }
+
+    /// Tell declared water where its anchor node has got to, once a frame, as
+    /// [`Self::set_wind_frame`] does for wind.
+    pub fn set_water_frame(&self, id: u32, frame: floptle_core::scatter::Frame) {
+        if let Some(w) = self.water_declared.borrow_mut().iter_mut().find(|w| w.id == id) {
+            w.frame = frame;
+        }
+    }
+
+    /// Drop every declared water — a scene switch, like [`Self::clear_weather`].
+    pub fn clear_declared_water(&mut self) {
+        self.water_declared.borrow_mut().clear();
     }
 
     /// Drain `water.setFrozen(node, on)` calls made this frame.
@@ -4377,6 +4439,7 @@ impl ScriptHost {
         self.account.borrow_mut().set_playing(playing);
         if !playing {
             self.preloads.borrow_mut().cancel_all();
+            self.terrain_planet.borrow_mut().cancel_all();
             self.textures.borrow_mut().reset();
             self.meshes.borrow_mut().reset();
             self.captures.borrow_mut().cancel_all();
@@ -4395,6 +4458,7 @@ impl ScriptHost {
         self.http.borrow_mut().cancel_all();
         self.account.borrow_mut().cancel_all();
         self.preloads.borrow_mut().cancel_all();
+        self.terrain_planet.borrow_mut().cancel_all();
         self.textures.borrow_mut().cancel_all();
         self.captures.borrow_mut().cancel_all();
         self.steam_state.borrow_mut().cancel_all();
@@ -5842,6 +5906,7 @@ impl ScriptHost {
         crate::preload_api::drain(&self.lua, &self.preloads, &self.logs);
         crate::capture_api::drain(&self.lua, &self.captures, &self.logs);
         crate::texture_api::drain(&self.lua, &self.textures, &self.logs);
+        crate::terrain_api::drain_planet_queries(&self.lua, &self.terrain_planet, &self.logs);
         // Pumps the platform backend's callbacks and fires
         // `steam.onPersonaChanged` — a no-op under `NullPlatform`.
         crate::steam_api::drain(&self.lua, &self.platform, &self.steam_state, &self.logs);
@@ -6696,6 +6761,7 @@ impl ScriptHost {
     fn sync_scene(&self, world: &World) {
         let span = self.profile.borrow().enabled().then(floptle_core::profile::Span::new);
         self.sync_scene_inner(world);
+        self.refresh_scatter_frames();
         if let Some(span) = span {
             self.profile.borrow_mut().record(floptle_core::profile::Bucket::Mirror, span.ms());
         }
@@ -6728,7 +6794,7 @@ impl ScriptHost {
             None => Some(if s.order.is_empty() {
                 "first sync".to_string()
             } else {
-                "the scene was replaced, or a whole component column was rewritten".to_string()
+                world.why_changes_unknown(cursor)
             }),
             Some(changes) => Self::refresh_touched(&mut s, world, changes),
         };

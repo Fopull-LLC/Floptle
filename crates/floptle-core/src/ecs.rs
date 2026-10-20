@@ -124,9 +124,9 @@ pub struct Change {
     pub what: &'static str,
 }
 
-/// Entries the log keeps before it gives up and reads as "everything changed".
-/// A frame of ordinary gameplay writes a few dozen; a level load writes one per
-/// component, and the reader that follows a load rebuilds anyway.
+/// Entries the log holds before it drops its older half. A frame of ordinary
+/// gameplay writes a few dozen; a level load writes one per component, and the
+/// reader that follows a load rebuilds anyway.
 const CHANGE_LOG_CAP: usize = 16_384;
 
 /// Distinguishes worlds, so a cursor into one world's log is never mistaken
@@ -146,6 +146,9 @@ pub struct World {
     /// Sequence number of `log[0]`. Everything older was dropped, and a cursor
     /// older than this reads as "unknown".
     log_base: u64,
+    /// Why entries before `log_base` were last dropped, for a reader that has
+    /// to say why it rebuilt.
+    forgot: &'static str,
 }
 
 impl Default for World {
@@ -163,6 +166,7 @@ impl Default for World {
             id: NEXT_WORLD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             log: Vec::new(),
             log_base: 0,
+            forgot: "",
         }
     }
 }
@@ -254,19 +258,40 @@ impl World {
         });
     }
 
+    /// Why [`changes_since`](Self::changes_since) cannot answer for `cursor`,
+    /// in words a profiler can show: which column was rewritten, or that the
+    /// log moved past it. Empty when it can answer.
+    pub fn why_changes_unknown(&self, cursor: ChangeCursor) -> String {
+        if cursor.world != self.id {
+            "the scene was replaced".to_string()
+        } else if cursor.seq < self.log_base {
+            self.forgot.to_string()
+        } else {
+            String::new()
+        }
+    }
+
     fn push_change(&mut self, change: Change) {
         if self.log.len() >= CHANGE_LOG_CAP {
-            self.forget_changes();
+            // Only the older half goes. A reader that drains the log every
+            // frame is never that far behind, so it keeps its place; clearing
+            // the whole log here turned a steady few dozen writes a frame into
+            // a full rebuild of every reader every few seconds.
+            let drop = CHANGE_LOG_CAP / 2;
+            self.log.drain(..drop);
+            self.log_base += drop as u64;
+            self.forgot = "more than 8,192 changes happened between two reads of the change log";
         }
         self.log.push(change);
     }
 
     /// Drop the whole log, so every outstanding cursor reads as "unknown".
-    fn forget_changes(&mut self) {
+    fn forget_changes(&mut self, why: &'static str) {
         // One past the end: a cursor taken before this is now older than the
         // base, and one taken after starts from an empty log.
         self.log_base += self.log.len() as u64 + 1;
         self.log.clear();
+        self.forgot = why;
     }
 
     /// Number of live entities.
@@ -414,12 +439,23 @@ impl World {
         // Which rows the caller writes is unknowable from here, so a reader of
         // the log has to assume all of them.
         if TypeId::of::<T>() != TypeId::of::<crate::Transform>() {
-            self.forget_changes();
+            self.forget_changes(query_mut_reason::<T>());
         }
         let col = self.column_mut::<T>();
         col.revision += 1;
         col.rows.iter_mut().map(|(e, v)| (*e, v))
     }
+}
+
+/// "every `Material` was rewritten at once": one string per type, made once,
+/// because the log keeps a `&'static str`.
+fn query_mut_reason<T: 'static>() -> &'static str {
+    use std::sync::{Mutex, OnceLock};
+    static REASONS: OnceLock<Mutex<HashMap<TypeId, &'static str>>> = OnceLock::new();
+    let mut map = REASONS.get_or_init(Default::default).lock().unwrap_or_else(|p| p.into_inner());
+    map.entry(TypeId::of::<T>()).or_insert_with(|| {
+        Box::leak(format!("every {} was rewritten at once (query_mut)", short_type_name::<T>()).into_boxed_str())
+    })
 }
 
 /// `floptle_core::Visible` → `Visible`: the name a developer wrote, for messages.
@@ -522,6 +558,33 @@ mod tests {
             let _ = w.get_mut::<Lamp>(b);
         }
         assert!(w.changes_since(cur).is_none(), "an overflowed log must read as unknown");
+        assert!(w.why_changes_unknown(cur).contains("8,192"), "{}", w.why_changes_unknown(cur));
+    }
+
+    /// **A reader that keeps up never loses its place, however long the game
+    /// runs.** A full log used to clear itself, so a steady 50 writes a frame
+    /// sent every reader into a full rebuild every 330 frames — the scripts'
+    /// mirror rebuilt the whole scene about every five seconds of play.
+    #[test]
+    fn a_reader_that_keeps_up_survives_the_log_filling() {
+        struct Lamp(f32);
+        let mut w = World::new();
+        let e = w.spawn();
+        w.insert(e, Lamp(0.0));
+        let mut cur = w.change_cursor();
+        for frame in 0..(CHANGE_LOG_CAP * 3 / 50) {
+            for _ in 0..50 {
+                w.get_mut::<Lamp>(e).unwrap().0 += 1.0;
+            }
+            let seen = w.changes_since(cur).map(<[_]>::len);
+            assert_eq!(seen, Some(50), "frame {frame}: {}", w.why_changes_unknown(cur));
+            cur = w.change_cursor();
+        }
+        // …and a whole-column write still names the column.
+        for _ in w.query_mut::<Lamp>() {}
+        assert!(w.changes_since(cur).is_none());
+        assert_eq!(w.why_changes_unknown(cur), "every Lamp was rewritten at once (query_mut)");
+        assert!(World::new().why_changes_unknown(cur).contains("replaced"));
     }
 
     #[derive(Debug, PartialEq)]

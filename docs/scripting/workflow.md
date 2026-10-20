@@ -270,7 +270,8 @@ node's worth. Renaming, reparenting, retagging and attaching a script patch
 that node and the lists that name it (`find`, `findTagged`, children), so
 streaming plants in under a tagged parent costs the plants, not the level.
 What still rebuilds the whole copy, in time proportional to the whole scene,
-is the scene being replaced or a node id handed to a new node in one step.
+is the scene being replaced, a node id handed to a new node in one step, or
+more than 8,192 changes landing between two passes (a level load does that).
 When a rebuild happens on every frame for half a second, the Console says so
 and names the cause.
 

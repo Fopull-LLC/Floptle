@@ -144,8 +144,9 @@ end
 
 /// **A bone read sees the write a script just made.** `lateUpdate` moves a
 /// bone with `setBonePos` and reads it straight back: the answer is where the
-/// bone was sent, and the same place the next frame reads once the pose the
-/// frame drew is published — not the animator's pose from before the write.
+/// bone was sent, not the animator's pose from before the write. The write
+/// lasts its frame, so the next frame, read before it writes, is back at the
+/// animator's pose.
 #[test]
 fn a_bone_read_after_a_late_write_sees_the_write() {
     let d = std::env::temp_dir().join(format!("flrunbonewrite-{}", std::process::id()));
@@ -161,7 +162,7 @@ fn a_bone_read_after_a_late_write_sees_the_write() {
 local function fmt(p) return string.format("%.4f %.4f %.4f", p.x, p.y, p.z) end
 function update(node, dt)
   if frames == 5 then
-    print("drawn " .. fmt(find('Sae'):animator():boneWorld('Head')))
+    print("next " .. fmt(find('Sae'):animator():boneWorld('Head')))
   end
 end
 function lateUpdate(node, dt)
@@ -205,9 +206,11 @@ end
         [v[0], v[1], v[2]]
     };
     let dist = |a: [f64; 3], b: [f64; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
-    let (before, after, pos, drawn) = (read("before "), read("after "), read("pos "), read("drawn "));
+    let (before, after, pos, next) = (read("before "), read("after "), read("pos "), read("next "));
     assert!(dist(before, after) > 0.5, "the read ignored the write: before {before:?}, after {after:?}");
-    assert!(dist(after, drawn) < 1e-3, "the read and the drawn pose disagree: after {after:?}, drawn {drawn:?}");
-    assert!(dist(pos, drawn) < 1e-3, "bonePos and the drawn pose disagree: {pos:?} vs {drawn:?}");
+    assert!(dist(pos, after) < 1e-3, "bonePos and boneWorld disagree after the write: {pos:?} vs {after:?}");
+    // A write lasts its frame: the next frame, read before anything is
+    // written, is the animator's pose again, not last frame's write.
+    assert!(dist(next, before) < 1e-3, "last frame's write leaked into the next frame: {next:?}, rest {before:?}");
     let _ = std::fs::remove_dir_all(&d);
 }

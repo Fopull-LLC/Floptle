@@ -421,7 +421,8 @@ impl AnimSystem {
                 && inst.ctl.pose().len() == nodes.len()
             {
                 let applied = if inst.pose_fresh { inst.pose_ops.as_slice() } else { &[] };
-                out.set_rig(e.index(), &skel, rig.offset, inst.ctl.pose(), applied);
+                let held = self.overrides.get(e).is_some_and(|o| o.hold_pose);
+                out.set_rig(e.index(), &skel, rig.offset, inst.ctl.pose(), applied, held);
             }
         }
         out.end();
@@ -3847,6 +3848,54 @@ mod tests {
             let got = world.get::<Transform>(reader).unwrap().translation;
             let want = floptle_core::math::DVec3::new(10.25, 1.9, 0.5);
             assert!(got.distance(want) < 1e-5, "frame {i}: the late read is {got}, not {want}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A read before this frame's write sees the animator's pose.** `update`
+    /// reads an unkeyed bone and only then writes a fixed offset to it, every
+    /// frame. With nothing queued yet, the read used to answer with last
+    /// frame's drawn pose, which still held last frame's write: rest + offset
+    /// on every frame after the first, although this frame's write had not
+    /// happened. A held pose is the exception, and still reads as drawn.
+    #[test]
+    fn a_bone_read_before_its_write_reads_the_animator_pose() {
+        let mut reg: HashMap<String, crate::MeshAsset> = HashMap::new();
+        reg.insert("models/chain.glb".to_string(), chain_rig(3));
+        let mut world = World::new();
+        rigged(&mut world, "Chain", 10.0);
+        rigged(&mut world, "Held", 20.0);
+        let dir = std::env::temp_dir().join(format!("floptle_bone_before_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("after.lua"),
+            "local f = 0\nfunction update(node, dt)\n  f = f + 1\n  local a = find('Chain'):animator()\n  \
+             local p = a:boneWorld('B2')\n  if p then node.x, node.y = p.x, p.y end\n  \
+             a:addBonePos('B2', vec3(0.25, -0.1, 0))\n  \
+             local h = find('Held'):animator()\n  \
+             if f == 2 then h:holdPose(true); h:addBonePos('B2', vec3(0.5, 0, 0)) end\n  \
+             local q = h:boneWorld('B2')\n  if q then node.z = q.x end\nend\n",
+        )
+        .unwrap();
+        let reader = scripted(&mut world, "after");
+        let mut host = floptle_script::ScriptHost::new();
+        let mut system = AnimSystem::default();
+        frame(&mut host, &mut system, &mut world, &reg, &dir, 0);
+        for i in 1..6 {
+            frame(&mut host, &mut system, &mut world, &reg, &dir, i);
+            if i < 2 {
+                continue;
+            }
+            // Rest: B2 at y = 2 under the node at x = 10.
+            let got = world.get::<Transform>(reader).unwrap().translation;
+            assert!(
+                (got.x - 10.0).abs() < 1e-5 && (got.y - 2.0).abs() < 1e-5,
+                "frame {i}: B2 read before the write at ({}, {}), not the rest pose (10, 2)",
+                got.x,
+                got.y
+            );
+            // The held write stays drawn, so it stays read.
+            assert!((got.z - 20.5).abs() < 1e-5, "frame {i}: the held bone reads x = {}, not 20.5", got.z);
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

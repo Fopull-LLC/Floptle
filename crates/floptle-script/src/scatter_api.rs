@@ -45,6 +45,14 @@ pub(crate) fn drop_owned(sources: &Sources, owners: &Owners, key: &(u32, String)
     sources.borrow_mut().retain(|s| !gone.contains(&s.id));
 }
 
+/// Where the node a source rides stands, as the scripts' copy of the scene has
+/// it: the frame its region is expressed in. `None` when no node has the name.
+pub(crate) fn anchor_frame(scene: &crate::SceneMirror, name: &str) -> Option<floptle_core::scatter::Frame> {
+    let &e = scene.by_name.get(name)?;
+    let wt = crate::api::world_transform_of(scene, e);
+    Some(floptle_core::scatter::Frame { origin: wt.translation, rot: wt.rotation.normalize() })
+}
+
 /// Read `key` from an options table as a number, falling back to `d`.
 fn num(t: &Table, key: &str, d: f64) -> f64 {
     t.get::<Option<f64>>(key).ok().flatten().unwrap_or(d)
@@ -93,6 +101,7 @@ pub(crate) fn install_scatter_api(
     current: Rc<RefCell<Option<(u32, String)>>>,
     next_id: Rc<std::cell::Cell<u32>>,
     logs: Rc<RefCell<Vec<crate::ScriptLog>>>,
+    scene: Rc<RefCell<crate::SceneMirror>>,
 ) {
     use floptle_core::scatter::{Align, Band, Region, ScatterSource};
     let Ok(t) = lua.create_table() else { return };
@@ -105,6 +114,7 @@ pub(crate) fn install_scatter_api(
         let cur = current.clone();
         let ids = next_id.clone();
         let lg = logs.clone();
+        let scene = scene.clone();
         if let Ok(f) = lua.create_function(move |_, opts: Table| {
             check_keys(&opts, CREATE_KEYS, "scatter.create")?;
             // LOD bands: `lod = { {asset, distance}, ... }`, nearest first.
@@ -209,6 +219,14 @@ pub(crate) fn install_scatter_api(
             };
             let id = ids.get().wrapping_add(1).max(1);
             ids.set(id);
+            let anchor = opts.get::<Option<String>>("parent").ok().flatten().filter(|s| !s.is_empty());
+            // Where the anchor stands now, so `near` and the first draw are
+            // right on the frame the source is made, and not only once the
+            // driver next refreshes the frames.
+            let frame = anchor
+                .as_deref()
+                .and_then(|a| scene.try_borrow().ok().and_then(|sc| anchor_frame(&sc, a)))
+                .unwrap_or_default();
             let src = ScatterSource {
                 id,
                 seed: num(&opts, "seed", 1.0) as u64,
@@ -227,12 +245,8 @@ pub(crate) fn install_scatter_api(
                 // The node this region rides. Without it a
                 // region is pinned to the world, and every prop on a planet
                 // that orbits is left behind by its own planet within seconds.
-                anchor: opts
-                    .get::<Option<String>>("parent")
-                    .ok()
-                    .flatten()
-                    .filter(|s| !s.is_empty()),
-                frame: Default::default(),
+                anchor,
+                frame,
                 look: floptle_core::scatter::ScatterLook {
                     tint: color_opt(&opts, "tint").unwrap_or([1.0; 3]),
                     emissive: color_opt(&opts, "emissive").unwrap_or([1.0; 3]),
@@ -459,6 +473,7 @@ mod tests {
             Rc::default(),
             Rc::new(std::cell::Cell::new(0)),
             logs.clone(),
+            Rc::default(),
         );
         (lua, sources, logs)
     }

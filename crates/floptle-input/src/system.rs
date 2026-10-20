@@ -17,7 +17,7 @@
 
 use crate::context::{AllowMask, Context, ContextStack};
 use crate::history::{dir_of, History};
-use crate::map::InputMap;
+use crate::map::{Binding, InputMap};
 use crate::raw::RawInput;
 use crate::rebind::{BindFilter, Capture};
 use crate::runtime::{ActionRuntime, ActionState};
@@ -82,6 +82,9 @@ pub struct InputSystem {
     facing: Vec<f32>,
     contexts: ContextStack,
     rebind: Option<PendingRebind>,
+    /// The actions as the project declared them, before any player rebound
+    /// one: what [`InputSystem::reset_bindings`] puts back.
+    authored: Vec<crate::map::Action>,
 }
 
 impl Default for InputSystem {
@@ -94,6 +97,7 @@ impl InputSystem {
     pub fn new(map: InputMap) -> Self {
         let mut s = Self {
             pads: Vec::new(),
+            authored: map.actions.clone(),
             map,
             frame: Vec::new(),
             tick: Vec::new(),
@@ -121,6 +125,7 @@ impl InputSystem {
     /// it). All per-player state resets: indices may have moved, so keeping the
     /// old held mask would report the wrong actions as down.
     pub fn set_map(&mut self, map: InputMap) {
+        self.authored = map.actions.clone();
         self.map = map;
         self.size_to_players();
         self.reset();
@@ -418,6 +423,89 @@ impl InputSystem {
         }
         action.bindings.push(binding);
         true
+    }
+
+    /// Make the captured binding the action's only one of its kind, and disarm.
+    ///
+    /// What a game's Controls page means by "rebind": the player pressed G for
+    /// Jump, so Jump is G — not Space *and* G. The binding replaces the ones
+    /// on the same kind of device (keyboard and mouse together, or a pad) that
+    /// reach the player being rebound; a pad binding survives a keyboard
+    /// rebind, and another couch player's keys are left alone. The new binding
+    /// keeps the player scope of what it replaced.
+    ///
+    /// Returns false when nothing changed: the action has vanished, or the
+    /// press was already its only binding of that kind.
+    pub fn commit_rebind_replacing(&mut self, capture: Capture) -> bool {
+        let Some(pending) = self.rebind.take() else { return false };
+        let mut binding = capture.binding();
+        let Some(action) = self.map.actions.iter_mut().find(|a| a.name == pending.action) else {
+            return false;
+        };
+        let pad = |b: &Binding| b.source.device() == crate::source::Device::Pad;
+        let slot = pending.slot;
+        let reaches = |b: &Binding| {
+            let scoped = b.player.is_none_or(|p| p == slot);
+            match b.source {
+                crate::source::Source::Pad { id, .. } => scoped && id.matches(slot),
+                _ => scoped,
+            }
+        };
+        let replaced: Vec<Binding> = action
+            .bindings
+            .iter()
+            .filter(|b| pad(b) == pad(&binding) && reaches(b))
+            .cloned()
+            .collect();
+        if replaced.iter().any(|b| b.player == Some(slot)) {
+            binding.player = Some(slot);
+        }
+        if replaced.len() == 1 && replaced[0] == binding {
+            return false;
+        }
+        action.bindings.retain(|b| !(pad(b) == pad(&binding) && reaches(b)));
+        action.bindings.push(binding);
+        true
+    }
+
+    /// Every action's bindings as text, for a game to keep with `save.set` and
+    /// hand back to [`InputSystem::load_bindings`] on the next run. Axes and
+    /// motions are not included: rebinding reaches actions only.
+    pub fn save_bindings(&self) -> String {
+        ron::to_string(&self.map.actions).unwrap_or_default()
+    }
+
+    /// Put back bindings [`InputSystem::save_bindings`] wrote. An action the
+    /// text names that the project no longer declares is skipped, and one the
+    /// text leaves out keeps what it has, so a save from an older build still
+    /// loads. Returns how many actions were set, or why the text is not a
+    /// bindings save.
+    pub fn load_bindings(&mut self, text: &str) -> Result<usize, String> {
+        let saved: Vec<crate::map::Action> = ron::from_str(text).map_err(|e| e.to_string())?;
+        let mut n = 0;
+        for a in saved {
+            if let Some(live) = self.map.actions.iter_mut().find(|l| l.name == a.name) {
+                live.bindings = a.bindings;
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    /// Back to the bindings the project declares, for one action or (`None`)
+    /// all of them. Returns false for an action the project does not declare.
+    pub fn reset_bindings(&mut self, action: Option<&str>) -> bool {
+        let mut found = action.is_none();
+        for live in &mut self.map.actions {
+            if action.is_some_and(|n| n != live.name) {
+                continue;
+            }
+            if let Some(a) = self.authored.iter().find(|a| a.name == live.name) {
+                live.bindings = a.bindings.clone();
+                found = true;
+            }
+        }
+        found
     }
 
     /// The context mask currently in force — the Input settings' live tester
@@ -918,6 +1006,64 @@ mod tests {
         sys.reset();
         sys.resolve_frame(&keys(&[Key::KeyJ]), 0.016);
         assert!(sys.action(Domain::Frame, 0, "Punch"));
+    }
+
+    /// **A game's rebind replaces.** Punch on J, rebound to U: J stops
+    /// punching and U starts. A pad button on the same action is a different
+    /// kind of binding, so a keyboard rebind leaves it, and rebinding to the
+    /// key it already is changes nothing.
+    #[test]
+    fn a_replacing_rebind_takes_the_old_key_away_and_keeps_the_pad() {
+        use crate::source::{PadButton, PadControl, PadId};
+        let mut map = fighter_map(1);
+        let pad = Binding::new(Source::Pad { id: PadId::Any, ctrl: PadControl::Button(PadButton::South) });
+        map.actions[0].bindings.push(pad.clone());
+        let mut sys = InputSystem::new(map);
+        sys.start_rebind("Punch", 0, BindFilter::AnyButton);
+        let got = sys.poll_rebind(&keys(&[Key::KeyU])).expect("captured");
+        assert!(sys.commit_rebind_replacing(got));
+        assert!(sys.pending_rebind().is_none());
+        sys.resolve_frame(&keys(&[Key::KeyU]), 0.016);
+        assert!(sys.action(Domain::Frame, 0, "Punch"), "the new key punches");
+        sys.reset();
+        sys.resolve_frame(&keys(&[Key::KeyJ]), 0.016);
+        assert!(!sys.action(Domain::Frame, 0, "Punch"), "the old key still punches");
+        let punch = &sys.map().actions[0].bindings;
+        assert_eq!(punch.len(), 2, "{punch:?}");
+        assert!(punch.contains(&pad), "a keyboard rebind took the pad binding");
+
+        sys.start_rebind("Punch", 0, BindFilter::AnyButton);
+        let again = sys.poll_rebind(&keys(&[Key::KeyU])).unwrap();
+        assert!(!sys.commit_rebind_replacing(again), "the same key again is no change");
+    }
+
+    /// **Bindings a player chose come back next run.** The text a game keeps
+    /// with `save.set` loads into a fresh system; an action the project has
+    /// since dropped is skipped; reset puts back what the project declares.
+    #[test]
+    fn saved_bindings_load_back_and_reset_restores_the_project_ones() {
+        let mut sys = InputSystem::new(fighter_map(1));
+        sys.start_rebind("Kick", 0, BindFilter::AnyButton);
+        let got = sys.poll_rebind(&keys(&[Key::KeyL])).unwrap();
+        assert!(sys.commit_rebind_replacing(got));
+        let saved = sys.save_bindings();
+
+        let mut next = InputSystem::new(fighter_map(1));
+        assert_eq!(next.load_bindings(&saved), Ok(2));
+        assert_eq!(next.map().actions, sys.map().actions);
+        next.resolve_frame(&keys(&[Key::KeyL]), 0.016);
+        assert!(next.action(Domain::Frame, 0, "Kick"));
+
+        let mut fewer = fighter_map(1);
+        fewer.actions.truncate(1);
+        let mut older = InputSystem::new(fewer);
+        assert_eq!(older.load_bindings(&saved), Ok(1), "an action the project dropped is skipped");
+        assert!(older.load_bindings("not a save").is_err());
+
+        assert!(next.reset_bindings(Some("Kick")));
+        assert_eq!(next.map().actions, fighter_map(1).actions);
+        assert!(!next.reset_bindings(Some("Nope")));
+        assert!(next.reset_bindings(None));
     }
 
     #[test]

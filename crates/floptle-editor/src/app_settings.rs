@@ -41,11 +41,9 @@ pub(crate) struct DisplayCache {
 /// each. A mode a monitor lists once per colour depth is listed once.
 fn gather_displays(window: &winit::window::Window) -> (Vec<MonitorInfo>, Vec<DisplayMode>) {
     let current = window.current_monitor();
-    let mut monitors = Vec::new();
-    let mut modes = Vec::new();
-    for (i, m) in window.available_monitors().enumerate() {
+    let raw = window.available_monitors().map(|m| {
         let (size, pos) = (m.size(), m.position());
-        monitors.push(MonitorInfo {
+        let info = MonitorInfo {
             name: m.name().unwrap_or_default(),
             width: size.width,
             height: size.height,
@@ -53,15 +51,58 @@ fn gather_displays(window: &winit::window::Window) -> (Vec<MonitorInfo>, Vec<Dis
             x: pos.x,
             y: pos.y,
             current: current.as_ref() == Some(&m),
-        });
-        let mut own: Vec<DisplayMode> = m
+        };
+        let modes = m
             .video_modes()
-            .map(|v| DisplayMode {
-                width: v.size().width,
-                height: v.size().height,
-                refresh: v.refresh_rate_millihertz() as f32 / 1000.0,
-                monitor: i + 1,
-            })
+            .map(|v| (v.size().width, v.size().height, v.refresh_rate_millihertz() as f32 / 1000.0))
+            .collect();
+        (info, modes)
+    });
+    merge_displays(raw)
+}
+
+/// Monitor `n` (1-based) as `app.monitors()` numbers them: copies of one
+/// screen count once, the way [`merge_displays`] lists them.
+fn nth_monitor(window: &winit::window::Window, n: usize) -> Option<winit::monitor::MonitorHandle> {
+    let mut seen: Vec<(Option<String>, winit::dpi::PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>)> = Vec::new();
+    window
+        .available_monitors()
+        .filter(|m| {
+            let key = (m.name(), m.position(), m.size());
+            let fresh = !seen.contains(&key);
+            if fresh {
+                seen.push(key);
+            }
+            fresh
+        })
+        .nth(n.checked_sub(1)?)
+}
+
+/// One entry per physical monitor, numbered from 1, with its modes largest
+/// first.
+///
+/// Some platforms hand the same monitor over more than once (X11 and some
+/// Wayland compositors list one per output and again per CRTC), so a settings
+/// page offered each screen twice, with two marked current. The same name at
+/// the same place and size is the same screen; its copies add nothing but
+/// their `current` flag.
+fn merge_displays(
+    raw: impl IntoIterator<Item = (MonitorInfo, Vec<(u32, u32, f32)>)>,
+) -> (Vec<MonitorInfo>, Vec<DisplayMode>) {
+    let mut monitors: Vec<MonitorInfo> = Vec::new();
+    let mut modes = Vec::new();
+    for (info, own) in raw {
+        let same = |m: &MonitorInfo| {
+            (&m.name, m.x, m.y, m.width, m.height) == (&info.name, info.x, info.y, info.width, info.height)
+        };
+        if let Some(seen) = monitors.iter_mut().find(|m| same(m)) {
+            seen.current |= info.current;
+            continue;
+        }
+        monitors.push(info);
+        let mut own: Vec<DisplayMode> = own
+            .into_iter()
+            .map(|(width, height, refresh)| DisplayMode { width, height, refresh, monitor: monitors.len() })
             .collect();
         own.sort_by(|a, b| (b.width, b.height).cmp(&(a.width, a.height)).then(b.refresh.total_cmp(&a.refresh)));
         own.dedup();
@@ -257,7 +298,7 @@ impl crate::Editor {
         let Some(window) = self.window.as_ref() else { return };
         let target = d
             .monitor
-            .and_then(|i| window.available_monitors().nth(i.saturating_sub(1)))
+            .and_then(|i| nth_monitor(window, i))
             .or_else(|| window.current_monitor());
         let full = d.fullscreen.unwrap_or(window.fullscreen().is_some());
         if full {
@@ -523,5 +564,35 @@ mod tests {
         let _ = fresh.read_project_config();
         assert!(fresh.console.entries.is_empty(), "a missing project.ron is not an error");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+
+    fn monitor(name: &str, x: i32, current: bool) -> MonitorInfo {
+        MonitorInfo { name: name.into(), width: 2560, height: 1440, refresh: Some(144.0), x, y: 0, current }
+    }
+
+    /// **Each screen is listed once.** A platform that reports two monitors
+    /// twice each gave `app.monitors()` four entries, two of them current;
+    /// the copies fold into the first, keep its number, and add no modes.
+    #[test]
+    fn a_monitor_reported_twice_is_listed_once() {
+        let modes = || vec![(2560, 1440, 144.0), (1920, 1080, 60.0), (2560, 1440, 144.0)];
+        let (monitors, listed) = merge_displays([
+            (monitor("DP-2", 0, false), modes()),
+            (monitor("HDMI-A-1", 2560, false), modes()),
+            (monitor("DP-2", 0, true), modes()),
+            (monitor("HDMI-A-1", 2560, false), modes()),
+        ]);
+        let names: Vec<&str> = monitors.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["DP-2", "HDMI-A-1"]);
+        assert_eq!(monitors.iter().filter(|m| m.current).count(), 1, "one current screen");
+        assert!(monitors[0].current, "the copy's current flag reaches the screen it copies");
+        assert_eq!(listed.len(), 4, "two modes each: {listed:?}");
+        assert_eq!(listed.iter().filter(|d| d.monitor == 2).count(), 2);
+        assert!(listed.iter().all(|d| d.monitor <= 2));
     }
 }

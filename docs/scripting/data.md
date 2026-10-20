@@ -468,6 +468,38 @@ end
 function update(node, dt) page:update() end
 ```
 
+A slot in `styles` is a style name, or a table of `ui.make` properties laid
+onto that element, a `style` among them: `row = { style = "settingsRow", w =
+480, h = 40 }`. That is how the page gets sizes and insets, which a style does
+not set.
+
+**Inside a screen you describe every frame**, pass `nil` for the container and
+place `page:tree()` in your own description. A page built into a container of
+its own would be taken down by your next `ui.make` of the screen, which does
+not describe the page's rows:
+
+```lua
+function start(node) page = ui.engineSettings(nil, "accessibility") end
+function update(node, dt)
+  page:update()
+  ui.make(node, { "col", { "text", text = "Settings" }, page:tree() })
+end
+```
+
+**A rebind replaces.** The key the player presses becomes the action's
+keyboard binding (or its pad binding, for a pad button), and a binding on the
+other kind of device stays. The engine does not keep it across runs, so keep
+it yourself:
+
+```lua
+-- in onChanged("binding", action), and once at start:
+save.set("bindings", input.saveBindings())
+local saved = save.get("bindings")
+if saved then input.loadBindings(saved) end
+-- a "Reset to defaults" button
+input.resetBindings()
+```
+
 Rebinding reaches **actions only**: a script that reads `input.key("space")`
 gets nothing from a rebind. See [moving key reads to
 actions](input.md#moving-key-reads-to-actions-so-rebinding-reaches-them).

@@ -70,6 +70,9 @@ pub(crate) struct ScatterCache {
     /// The resident key list per source — swept when the eye crosses a chunk
     /// boundary, not once a frame.
     sweeps: HashMap<u32, Sweep>,
+    /// Settle everything in range now, budget or no budget: a single picture
+    /// (`floptle shot`) has no later frames for the field to fill in over.
+    pub(crate) settle_all: bool,
 }
 
 impl ScatterCache {
@@ -182,6 +185,55 @@ pub(crate) fn resolve_parts(
         .collect()
 }
 
+/// Where each anchored source's node stands this frame, as `(source id,
+/// frame)`.
+///
+/// A celestial body orbits at ~99 units/s, so a region pinned to the world
+/// slides out from under its own props in about two seconds. Refreshing one
+/// transform per source is the whole cost of following it: placement lives in
+/// this frame, so nothing downstream is recomputed.
+pub(crate) fn anchor_frames(
+    script_host: &floptle_script::ScriptHost,
+    world: &floptle_core::World,
+) -> Vec<(u32, scatter::Frame)> {
+    let mut out = Vec::new();
+    // Each anchor is found through the scripts' name index, checked against
+    // the world's own name: O(1) a source. Only a node renamed since the
+    // scripts last looked costs a walk of the scene's names, once. A walk
+    // every frame was the part of a source's cost that grew with the level.
+    let anchored = script_host.anchored_scatter();
+    let mut nodes: HashMap<&str, floptle_core::Entity> = HashMap::new();
+    let mut missed = false;
+    for (_, name) in &anchored {
+        let hit = script_host
+            .mirror_entity_named(name)
+            .and_then(|i| world.entity_at(i))
+            .filter(|&e| world.get::<floptle_core::Name>(e).is_some_and(|n| n.0 == *name));
+        match hit {
+            Some(e) => {
+                nodes.insert(name.as_str(), e);
+            }
+            None => missed |= script_host.mirror_entity_named(name).is_some(),
+        }
+    }
+    if missed {
+        for (e, n) in world.query::<floptle_core::Name>() {
+            if anchored.iter().any(|(_, a)| *a == n.0) {
+                nodes.entry(n.0.as_str()).or_insert(e);
+            }
+        }
+    }
+    for (id, name) in &anchored {
+        let node = nodes.get(name.as_str()).copied();
+        let frame = node.map_or(scatter::Frame::IDENTITY, |e| {
+            let wt = floptle_core::world_transform(world, e);
+            scatter::Frame { origin: wt.translation, rot: wt.rotation.normalize() }
+        });
+        out.push((*id, frame));
+    }
+    out
+}
+
 /// Every scatter source's props for a camera at `eye`, pushed onto `out`;
 /// returns how many. Anchored sources first follow their node to where it is
 /// this frame.
@@ -204,30 +256,8 @@ pub(crate) fn push_scatter(
     out: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
 ) -> usize {
     // Where each anchored source's node has got to this frame.
-    // A celestial body orbits at ~99 units/s, so a
-    // region pinned to the world slides out from under its own props in
-    // about two seconds. Refreshing one transform per source is the
-    // whole cost of following it: placement lives in this frame, so
-    // nothing downstream is recomputed.
-    // One pass over the scene's names for every anchor at once: a scan per
-    // anchored source was a walk of every named node in the scene, per source,
-    // every frame.
-    let anchored = script_host.anchored_scatter();
-    let mut nodes: HashMap<&str, floptle_core::Entity> = HashMap::new();
-    if !anchored.is_empty() {
-        for (e, n) in world.query::<floptle_core::Name>() {
-            if anchored.iter().any(|(_, a)| *a == n.0) {
-                nodes.entry(n.0.as_str()).or_insert(e);
-            }
-        }
-    }
-    for (id, name) in &anchored {
-        let node = nodes.get(name.as_str()).copied();
-        let frame = node.map_or(scatter::Frame::IDENTITY, |e| {
-            let wt = floptle_core::world_transform(world, e);
-            scatter::Frame { origin: wt.translation, rot: wt.rotation.normalize() }
-        });
-        script_host.set_scatter_frame(*id, frame);
+    for (id, frame) in anchor_frames(script_host, world) {
+        script_host.set_scatter_frame(id, frame);
     }
     // Borrowed, not cloned: a source carries its density grid and every id it
     // has lost, and copying all of them was a per-source cost every frame.
@@ -301,15 +331,21 @@ pub(crate) fn build_instances(
 ) {
     // Disjoint borrows: the sweep list and the resolved chunks are read and
     // written in the same loop.
-    let ScatterCache { chunks: resolved, sweeps } = cache;
+    let ScatterCache { chunks: resolved, sweeps, settle_all } = cache;
+    let settle_all = *settle_all;
     sweeps.retain(|id, _| sources.iter().any(|s| s.id == *id));
     // Shared across sources, because it is a frame budget. A source that eats
     // it all is fully resident afterwards and stops asking, so the next source
     // gets the next frame's — it converges rather than starving anyone.
     let mut settled = 0usize;
-    // Time spent settling, and only that: the draw work around it is the
-    // frame's anyway, and counting it spent the budget before a prop settled.
+    // Time spent rolling and settling, and only that: the draw work around it
+    // is the frame's anyway, and counting it spent the budget before a prop
+    // settled.
     let mut settle_ms = 0.0f32;
+    // Whether this frame has done any of that work yet. The first piece always
+    // goes, so a field that is never cheap still arrives; every piece after it
+    // waits for the budget.
+    let mut worked = false;
     for src in sources {
         let range = src.range();
         if range <= 0.0 || src.bands.is_empty() {
@@ -357,35 +393,58 @@ pub(crate) fn build_instances(
             let chunk = match resolved.entry((src.id, key)) {
                 std::collections::hash_map::Entry::Occupied(e) => {
                     let chunk = e.into_mut();
-                    // Something has been cut since this chunk was resolved:
-                    // redo it now, budget or no budget. That is one chunk, it
-                    // is the player's own doing, and a prop that survives the
-                    // swing that felled it is a bug.
+                    // Something was cut, or put back, since this chunk was
+                    // resolved. A cut prop goes this frame — a prop that
+                    // survives the swing that felled it is a bug — and that
+                    // needs no ray: the props left standing are where they
+                    // were. Re-settling the chunk here did, and since any cut
+                    // anywhere in the source changes the count every chunk
+                    // compares against, one harvest re-settled the whole field
+                    // in one frame.
                     if chunk.removed_len != src.removed.len() {
-                        let rolled = scatter::chunk_instances(src, key);
-                        settled += rolled.len();
-                        let instances = rolled.into_iter().filter_map(|i| settle(src, i, ground)).collect();
-                        *chunk = ResolvedChunk { instances, pending: Vec::new(), removed_len: src.removed.len() };
+                        let shrank = src.removed.len() < chunk.removed_len;
+                        chunk.instances.retain(|i| !src.removed.contains(&i.id));
+                        chunk.pending.retain(|i| !src.removed.contains(&i.id));
+                        // A prop put back is rolled again and waits its turn
+                        // like any arriving one.
+                        if shrank {
+                            let have: std::collections::HashSet<_> =
+                                chunk.instances.iter().chain(&chunk.pending).map(|i| i.id).collect();
+                            let back = scatter::chunk_instances(src, key).into_iter().filter(|i| !have.contains(&i.id));
+                            chunk.pending.extend(back);
+                        }
+                        chunk.removed_len = src.removed.len();
                     }
                     chunk
                 }
                 // Arriving is the other case, and it is thousands of props at
-                // once: they wait their turn, a prop at a time, below.
-                std::collections::hash_map::Entry::Vacant(e) => e.insert(ResolvedChunk {
-                    instances: Vec::new(),
-                    pending: scatter::chunk_instances(src, key),
-                    removed_len: src.removed.len(),
-                }),
+                // once: a chunk is rolled within the frame's budget, and its
+                // props wait their turn, a prop at a time, below. Rolling
+                // every chunk a sweep turned up in the frame it did was most
+                // of a walking frame's spike on a field of small chunks.
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    if !(settle_all || !worked || settle_ms <= SETTLE_MS) {
+                        continue;
+                    }
+                    let span = floptle_core::profile::Span::new();
+                    let pending = scatter::chunk_instances(src, key);
+                    settle_ms += span.ms();
+                    worked = true;
+                    e.insert(ResolvedChunk { instances: Vec::new(), pending, removed_len: src.removed.len() })
+                }
             };
             if !chunk.pending.is_empty() {
                 // Within the frame's budget, by count and by time, but always
                 // one, so a field that is never cheap still arrives.
                 let span = floptle_core::profile::Span::new();
                 while !chunk.pending.is_empty()
-                    && (settled == 0 || (settled < SETTLE_BUDGET && settle_ms + span.ms() <= SETTLE_MS))
+                    && (settle_all
+                        || !worked
+                        || (settled < SETTLE_BUDGET && settle_ms + span.ms() <= SETTLE_MS))
                 {
                     let inst = chunk.pending.pop().expect("not empty");
                     settled += 1;
+                    worked = true;
                     if let Some(on) = settle(src, inst, ground) {
                         chunk.instances.push(on);
                     }
@@ -1089,6 +1148,149 @@ mod tests {
         );
         assert_eq!(casts, 0, "a stationary camera re-settled ground it had already settled");
         assert!(!out.is_empty(), "…while still drawing the field");
+    }
+
+    /// **A sweep's arriving chunks are rolled within the frame's budget too.**
+    /// The first frame over a field of small chunks used to roll every chunk
+    /// the sweep found — thousands — before a single prop settled, and that
+    /// roll was the spike walking through a game's flora showed. A slow ray
+    /// costs at most one over the budget, and a shot settles the lot at once.
+    #[test]
+    fn arriving_chunks_are_rolled_within_the_budget_and_a_shot_settles_all() {
+        let s = big_field();
+        let keys = scatter::chunks_near(&s, DVec3::ZERO, s.range() as f64).len();
+        assert!(keys > 2000, "not a field of small chunks: {keys}");
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]);
+        // A ray that takes a quarter of a millisecond, like one over real ground.
+        let slow = |casts: &mut usize| {
+            *casts += 1;
+            let t = std::time::Instant::now();
+            while t.elapsed().as_secs_f64() < 0.000_25 {}
+            Some((60.0f32, Vec3::Y))
+        };
+        let mut cache = ScatterCache::default();
+        let mut worst_ms = 0.0f64;
+        for _ in 0..5 {
+            let mut casts = 0usize;
+            let mut ground = |_: DVec3, _: Vec3, _: f32| slow(&mut casts);
+            let mut out = Vec::new();
+            let t = std::time::Instant::now();
+            build_instances(
+                &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground,
+                &floptle_render::Frustum::everything(), 20_000, &mut out,
+            );
+            worst_ms = worst_ms.max(t.elapsed().as_secs_f64() * 1000.0);
+            assert!(casts <= (SETTLE_MS / 0.25) as usize + 1, "one frame cast {casts} slow rays");
+        }
+        assert!(cache.len() < keys / 2, "the first frames rolled {} of {keys} chunks", cache.len());
+        // Generous, for a shared machine: the budget is 1 ms of work plus one
+        // piece over it, and the draw of what has settled.
+        assert!(worst_ms < 8.0, "a frame spent {worst_ms:.2} ms");
+
+        let mut shot = ScatterCache { settle_all: true, ..Default::default() };
+        let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
+        let mut out = Vec::new();
+        build_instances(
+            &mut shot, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground,
+            &floptle_render::Frustum::everything(), 200_000, &mut out,
+        );
+        assert_eq!(shot.len(), keys, "a shot left chunks unrolled");
+        assert!(shot.chunks.values().all(|c| c.pending.is_empty()), "a shot left props unsettled");
+    }
+
+    /// **A harvest costs no rays.** Cutting one prop used to re-settle every
+    /// resident chunk of its source in that frame, because each compares the
+    /// source's whole removal count. Now the cut prop goes and the rest stay
+    /// where they stood; putting it back settles that one prop again.
+    #[test]
+    fn a_cut_re_settles_nothing_and_a_restore_brings_the_prop_back() {
+        let mut cache = ScatterCache::default();
+        let mut s = src();
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]);
+        let mut frame = |cache: &mut ScatterCache, s: &ScatterSource| {
+            let mut casts = 0usize;
+            let mut ground = |_: DVec3, _: Vec3, _: f32| {
+                casts += 1;
+                Some((60.0f32, Vec3::Y))
+            };
+            let mut out = Vec::new();
+            build_instances(
+                cache, std::slice::from_ref(s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground,
+                &floptle_render::Frustum::everything(), 10_000, &mut out,
+            );
+            (out.len(), casts)
+        };
+        let mut drawn = 0;
+        for _ in 0..50 {
+            let (n, casts) = frame(&mut cache, &s);
+            drawn = n;
+            if casts == 0 {
+                break;
+            }
+        }
+        assert!(drawn > 10, "nothing settled");
+        let victim = scatter::chunk_instances(&s, (0, 0))[0].id;
+        s.removed.insert(victim);
+        assert_eq!(frame(&mut cache, &s), (drawn - 1, 0), "a cut re-settled ground");
+        s.removed.remove(&victim);
+        assert_eq!(frame(&mut cache, &s), (drawn, 1), "a restore should settle the one prop it put back");
+    }
+
+    /// **Following a planet costs a lookup a source, not a walk of the
+    /// level.** Each frame every anchored source asks where its node is; that
+    /// was a pass over every named node in the scene, so a field's cost grew
+    /// with everything else in the level. Timed against a level a hundred
+    /// times bigger, as a ratio, and the frame is checked to be the node's.
+    #[test]
+    fn finding_a_sources_anchor_does_not_walk_the_level() {
+        fn level(nodes: usize) -> (floptle_script::ScriptHost, floptle_core::World) {
+            let dir = std::env::temp_dir().join(format!("floptle_scatter_anchor_{}_{nodes}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            std::fs::write(
+                dir.join("field.lua"),
+                "function start() for i = 1, 8 do scatter.create{ asset = 'rock.glb', parent = 'Planet' } end end\n",
+            )
+            .unwrap();
+            let mut world = floptle_core::World::new();
+            for i in 0..nodes {
+                let e = world.spawn();
+                world.insert(e, floptle_core::Transform::IDENTITY);
+                world.insert(e, floptle_core::Name(format!("Rock {i}")));
+            }
+            let planet = world.spawn();
+            world.insert(planet, floptle_core::Transform::from_translation(DVec3::new(9.0, 0.0, 0.0)));
+            world.insert(planet, floptle_core::Name("Planet".into()));
+            let e = world.spawn();
+            world.insert(e, floptle_core::Transform::IDENTITY);
+            world.insert(e, floptle_core::Scripts(vec![floptle_core::ScriptInst::new("field")]));
+            let mut host = floptle_script::ScriptHost::new();
+            host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+            assert!(host.errors().is_empty(), "{:?}", host.errors());
+            let _ = std::fs::remove_dir_all(&dir);
+            (host, world)
+        }
+        let time = |host: &floptle_script::ScriptHost, world: &floptle_core::World| {
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t = std::time::Instant::now();
+                for _ in 0..50 {
+                    std::hint::black_box(anchor_frames(host, world));
+                }
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        };
+        let (small_host, small) = level(100);
+        let (big_host, big) = level(10_000);
+        let frames = anchor_frames(&big_host, &big);
+        assert_eq!(frames.len(), 8);
+        assert!(frames.iter().all(|(_, f)| f.origin == DVec3::new(9.0, 0.0, 0.0)), "{frames:?}");
+        let (mut a, mut b) = (f64::MAX, f64::MAX);
+        for _ in 0..3 {
+            a = a.min(time(&small_host, &small));
+            b = b.min(time(&big_host, &big));
+        }
+        assert!(b < a * 5.0, "a level 100x bigger made finding anchors {:.1}x slower", b / a);
     }
 
     /// The draw budget cuts the horizon, not your feet. The sweep is ordered

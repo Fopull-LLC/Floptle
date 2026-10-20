@@ -330,7 +330,8 @@ end
 | `input.player(n)`                     | the same table, bound to local player `n` |
 | `input.pushContext(n, opts)` / `input.popContext(n)` | manage the context stack   |
 | `input.actions()` / `input.bindingsOf(n)` | drive an in-game controls screen      |
-| `input.startRebind(n [, filter])` / `pendingRebind()` / `commitRebind()` / `cancelRebind()` | press-to-bind from a settings menu |
+| `input.startRebind(n [, filter])` / `pendingRebind()` / `commitRebind([how])` / `cancelRebind()` | press-to-bind from a settings menu; the press replaces the action's binding on that kind of device (`"add"` keeps the old one) |
+| `input.saveBindings()` / `input.loadBindings(text)` / `input.resetBindings([action])` | keep a player's bindings with `save.set` and put them back next run, or return to `input.ron`'s |
 
 Which **domain** a call reads is decided by the pass it runs in, not by the
 call: `fixedUpdate` sees the tick domain (the one with history), `update` and

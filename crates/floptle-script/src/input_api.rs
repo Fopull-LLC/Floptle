@@ -190,16 +190,51 @@ fn install_for_slot(
         })?,
     )?;
 
+    // Replaces by default: a player who rebinds Jump to G means Jump is G,
+    // not Space and G. "add" keeps the old binding too, the way the editor's
+    // Input settings collect chips.
     let s = sys.clone();
     t.set(
         "commitRebind",
-        lua.create_function(move |_, ()| {
+        lua.create_function(move |_, how: Option<String>| {
+            let add = match how.as_deref() {
+                None | Some("replace") => false,
+                Some("add") => true,
+                Some(other) => {
+                    return Err(mlua::Error::runtime(format!(
+                        "input.commitRebind: \"{other}\" is not a way to commit — it takes \"replace\" (the default) or \"add\""
+                    )));
+                }
+            };
             let captured = s.borrow().pending_rebind().and_then(|p| p.captured.clone());
             Ok(match captured {
-                Some(c) => s.borrow_mut().commit_rebind(c),
+                Some(c) if add => s.borrow_mut().commit_rebind(c),
+                Some(c) => s.borrow_mut().commit_rebind_replacing(c),
                 None => false,
             })
         })?,
+    )?;
+
+    // A player's bindings outlive the run only if the game keeps them: these
+    // hand them over as text for save.set, and take them back.
+    let s = sys.clone();
+    t.set("saveBindings", lua.create_function(move |_, ()| Ok(s.borrow().save_bindings()))?)?;
+
+    let s = sys.clone();
+    t.set(
+        "loadBindings",
+        lua.create_function(move |_, text: String| {
+            Ok(match s.borrow_mut().load_bindings(&text) {
+                Ok(_) => (true, None),
+                Err(e) => (false, Some(format!("input.loadBindings: not a saved set of bindings ({e})"))),
+            })
+        })?,
+    )?;
+
+    let s = sys.clone();
+    t.set(
+        "resetBindings",
+        lua.create_function(move |_, action: Option<String>| Ok(s.borrow_mut().reset_bindings(action.as_deref())))?,
     )?;
 
     let s = sys.clone();
@@ -573,6 +608,39 @@ mod tests {
 
         sys.borrow_mut().resolve_frame(&keys(&[Key::KeyU]), 0.016);
         assert!(lua.load(r#"return input.action("Punch")"#).eval::<bool>().unwrap());
+        // It replaced J rather than joining it.
+        let chips: Vec<String> = lua.load(r#"return input.bindingsOf("Punch")"#).eval().unwrap();
+        assert_eq!(chips, vec!["⌨ U".to_string()]);
+    }
+
+    /// **A rebind survives a restart through `save`.** The text saveBindings
+    /// returns loads back into a fresh map; resetBindings returns to
+    /// input.ron's; "add" keeps the old key beside the new one.
+    #[test]
+    fn saved_bindings_round_trip_through_lua() {
+        let (lua, sys, _d) = fixture();
+        lua.load(r#"input.startRebind("Punch", "keyboard")"#).exec().unwrap();
+        sys.borrow_mut().poll_rebind(&keys(&[Key::KeyU])).expect("captured");
+        assert!(lua.load("return input.commitRebind()").eval::<bool>().unwrap());
+        let saved: String = lua.load("return input.saveBindings()").eval().unwrap();
+
+        assert!(lua.load("return input.resetBindings()").eval::<bool>().unwrap());
+        let chips: Vec<String> = lua.load(r#"return input.bindingsOf("Punch")"#).eval().unwrap();
+        assert_eq!(chips, vec!["⌨ J".to_string()], "reset puts input.ron's binding back");
+
+        lua.globals().set("saved", saved).unwrap();
+        assert!(lua.load("return input.loadBindings(saved)").eval::<bool>().unwrap());
+        let chips: Vec<String> = lua.load(r#"return input.bindingsOf("Punch")"#).eval().unwrap();
+        assert_eq!(chips, vec!["⌨ U".to_string()]);
+        let (ok, err): (bool, Option<String>) = lua.load(r#"return input.loadBindings("junk")"#).eval().unwrap();
+        assert!(!ok && err.is_some_and(|e| e.contains("not a saved set")));
+
+        lua.load(r#"input.startRebind("Punch", "keyboard")"#).exec().unwrap();
+        sys.borrow_mut().poll_rebind(&keys(&[Key::KeyI])).expect("captured");
+        assert!(lua.load(r#"return input.commitRebind("add")"#).eval::<bool>().unwrap());
+        let chips: Vec<String> = lua.load(r#"return input.bindingsOf("Punch")"#).eval().unwrap();
+        assert_eq!(chips, vec!["⌨ U".to_string(), "⌨ I".to_string()]);
+        assert!(lua.load(r#"return input.commitRebind("both")"#).exec().is_err());
     }
 
     #[test]

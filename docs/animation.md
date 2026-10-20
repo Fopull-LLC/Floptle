@@ -336,8 +336,9 @@ end
   `lateUpdate`: set a bone, then read it, and you get where you sent it. The
   writes are counted once: they land on the animator's pose, not on last
   frame's drawn pose, which already held last frame's writes. Read before any
-  write, it gives the pose last drawn. It works under `floptle run` and on a
-  dedicated server too.
+  write, it gives the animator's pose for this frame, without last frame's
+  writes, unless `anim:holdPose(true)` is keeping them. It works under
+  `floptle run` and on a dedicated server too.
 - Reads: `anim:state([layer])`, `anim:time([layer])`, `anim:finished([layer])`,
   `anim:isPlaying([state])`, `anim:clips()`, `anim:layers()`.
 - Authored data, from the asset rather than playback (so it works in `start()`):

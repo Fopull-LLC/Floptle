@@ -896,6 +896,54 @@ fn streaming_nodes_into_a_big_scene_patches_the_mirror() {
     );
 }
 
+/// **Streaming never rebuilds, however long it goes on.** Thirty plants join
+/// and thirty leave a 2,000-node level every frame for 400 frames — long
+/// enough for the world's change log to fill several times over. A full log
+/// used to clear itself, which sent the mirror into a full rebuild about every
+/// 330 frames of steady streaming: the "every five seconds" a walk through a
+/// game's flora showed.
+#[test]
+fn streaming_for_minutes_never_rebuilds_the_mirror() {
+    let mut world = World::default();
+    for i in 0..2000 {
+        let e = world.spawn();
+        world.insert(e, Transform::from_translation(glam::DVec3::new(i as f64, 0.0, 0.0)));
+        world.insert(e, floptle_core::Name(format!("Rock {i}")));
+    }
+    let flora = world.spawn();
+    world.insert(flora, Transform::IDENTITY);
+    world.insert(flora, floptle_core::Name("Flora".into()));
+    let host = ScriptHost::new();
+    host.profile().borrow_mut().enable(true);
+    host.sync_scene_for_test(&world);
+    crate::host::FULL_SYNCS.with(|c| c.set(0));
+    let mut live: std::collections::VecDeque<floptle_core::Entity> = Default::default();
+    for f in 0..400u32 {
+        for k in 0..30 {
+            let e = world.spawn();
+            world.insert(e, Transform::IDENTITY);
+            world.insert(e, floptle_core::Name(format!("Plant {f}.{k}")));
+            world.insert(e, floptle_core::Tags(vec!["plant".into()]));
+            world.insert(e, floptle_core::Parent(flora));
+            live.push_back(e);
+        }
+        while live.len() > 300 {
+            world.despawn(live.pop_front().unwrap());
+        }
+        world.insert(flora, floptle_core::Tags(vec![format!("wave{f}")]));
+        for _ in 0..3 {
+            host.sync_scene_for_test(&world);
+        }
+        host.profile().borrow_mut().end_frame();
+        assert_eq!(
+            crate::host::FULL_SYNCS.with(|c| c.get()),
+            0,
+            "frame {f}: streaming rebuilt the mirror ({:?})",
+            host.profile().borrow().mirror_cause()
+        );
+    }
+}
+
 /// **A component a `createNode` callback adds is readable afterwards.** The
 /// drain mirrors the new node before its callback runs, so the next sync finds
 /// the spawn and the callback's write in the same batch, on a node the mirror
@@ -1181,4 +1229,114 @@ fn planet_lakes_reports_the_lakes_a_planet_holds() {
     assert!(first[2] > 1.0 && first[3] > 100.0, "{said:?}");
     assert!(said[1].starts_with("false") && said[1].contains("mindepth"), "{said:?}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A planet question asked with a callback costs the script thread almost
+/// nothing.** `terrain.planetLakes` on an 800 m world took 7 s on the script
+/// thread, past the watchdog. Given a callback, the call returns at once, the
+/// work runs on a thread of its own, and the callback gets the same answer the
+/// plain call gives in a later frame pass.
+#[test]
+fn planet_questions_with_a_callback_answer_off_the_script_thread() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_planet_async_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "ask",
+        "local opts = { seed = 8, radius = 150, voxel = 1.5, relief = 4, caveDepth = 0, craters = 2, craterMin = 0.15, craterMax = 0.3,\n\
+                         mountains = { height = 12 }, rivers = { count = 3, seaLevel = -2 } }\n\
+         function start()\n\
+           local t0 = os.clock()\n\
+           local lakes = terrain.planetLakes(opts, { minDepth = 0.5 })\n\
+           local rivers = terrain.planetRivers(opts)\n\
+           local t1 = os.clock()\n\
+           local none = terrain.planetLakes(opts, { minDepth = 0.5 }, function(l) gotLakes = l end)\n\
+           terrain.planetRivers(opts, function(r) gotRivers = r end)\n\
+           local t2 = os.clock()\n\
+           log(string.format(\"%s %d %d %.6f %.6f %s\", tostring(none), #lakes, #rivers, t1 - t0, t2 - t1, tostring(gotLakes)))\n\
+           want = { #lakes, lakes[1] and lakes[1].level or 0, #rivers }\n\
+         end\n\
+         function update()\n\
+           if gotLakes and gotRivers and not said then\n\
+             said = true\n\
+             log(string.format(\"%d %d %.4f %.4f %d %d\", #gotLakes, want[1], gotLakes[1] and gotLakes[1].level or 0, want[2], #gotRivers, want[3]))\n\
+           end\n\
+         end\n",
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(e, Scripts(vec![floptle_core::ScriptInst {
+        kind: "ask".into(),
+        enabled: true,
+        params: Vec::new(),
+        refs: Vec::new(),
+        strs: Vec::new(),
+        pinned_bools: None,
+    }]));
+    let mut host = ScriptHost::new();
+    host.set_playing(true);
+    let mut said: Vec<String> = Vec::new();
+    for _ in 0..3000 {
+        host.run(&mut world, &dir, 0.016, 0.016);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        said.extend(host.drain_logs().into_iter().map(|l| l.msg));
+        if said.len() >= 2 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(said.len(), 2, "the callbacks never ran: {said:?}");
+    let first: Vec<&str> = said[0].split(' ').collect();
+    assert_eq!(first[0], "nil", "a call with a callback answers nothing itself: {said:?}");
+    assert_eq!(first[5], "nil", "the callback ran inside the call: {said:?}");
+    let (sync, ask): (f64, f64) = (first[3].parse().unwrap(), first[4].parse().unwrap());
+    assert!(ask < 0.1 * sync, "asking with a callback took {ask} s on the script thread, the plain calls {sync} s");
+    let second: Vec<f64> = said[1].split(' ').map(|v| v.parse().unwrap()).collect();
+    assert!(second[1] >= 1.0 && second[5] >= 1.0, "nothing to compare: {said:?}");
+    assert_eq!((second[0], second[2], second[4]), (second[1], second[3], second[5]), "the callback's answer differs from the plain call's: {said:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **`scatter.near` on a planet's field answers on the planet from the start.**
+/// A source's region is in its anchor's frame, and that frame was set only
+/// when the field was drawn: on the frame a source was created, and in every
+/// frame of a headless `run`, `near` asked about the world origin instead and
+/// found nothing beside a player standing on the surface.
+#[test]
+fn scatter_near_on_a_parented_field_is_right_without_a_draw() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_scatter_near_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "flora",
+        "function start(node)\n\
+         \x20 id = scatter.create{ asset = 'rock.glb', parent = 'Planet', center = vec3(0, 0, 0), radius = 100, perChunk = 40 }\n\
+         \x20 first = #scatter.near(id, vec3(5000, 100, 0), 12)\n\
+         end\n\
+         function update(node, dt)\n\
+         \x20 local p = find('Planet')\n\
+         \x20 later = #scatter.near(id, vec3(p.x, p.y + 100, p.z), 12)\n\
+         end\n",
+    );
+    let mut world = World::default();
+    let planet = world.spawn();
+    world.insert(planet, Transform::from_translation(glam::DVec3::new(5000.0, 0.0, 0.0)));
+    world.insert(planet, floptle_core::Name("Planet".into()));
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(e, Scripts(vec![floptle_core::ScriptInst::new("flora")]));
+    let mut host = ScriptHost::new();
+    // The planet moves on between frames, as one on rails does.
+    for i in 0..3 {
+        host.run(&mut world, &dir, 1.0 / 60.0, i as f32 / 60.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        world.get_mut::<Transform>(planet).unwrap().translation.x += 700.0;
+    }
+    let env = host.instance_env(e.index(), "flora").unwrap();
+    let (first, later): (u32, u32) = (env.get("first").unwrap(), env.get("later").unwrap());
+    assert!(first > 0, "the creation frame's near found nothing on the planet");
+    assert!(later > 0, "a frame that was never drawn found nothing on the planet");
 }

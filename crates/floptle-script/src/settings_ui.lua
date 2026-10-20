@@ -7,6 +7,11 @@
 -- buttons. A rebind needs one poll a frame (the key the player presses arrives
 -- between frames), so the page hands back a handle whose :update() the
 -- game's own update calls while the page is open.
+--
+-- With no container the page builds nothing itself: panel:tree() is its
+-- description, for a screen the game describes with ui.make every frame. Built
+-- into a container of its own, the page would be taken down by the game's next
+-- ui.make of that screen, which does not describe the page's rows.
 
 local PAGES = { controls = true, accessibility = true }
 local KEYS = { styles = true, onChanged = true, filter = true }
@@ -18,9 +23,12 @@ local function check(opts)
       error("ui.engineSettings: no option `" .. tostring(k) .. "` — it takes styles, onChanged, filter", 3)
     end
   end
-  for k in pairs(opts.styles or {}) do
+  for k, v in pairs(opts.styles or {}) do
     if not STYLE_KEYS[k] then
       error("ui.engineSettings: no style slot `" .. tostring(k) .. "` — it takes page, row, label, value, button", 3)
+    end
+    if type(v) ~= "string" and type(v) ~= "table" then
+      error("ui.engineSettings: style slot `" .. k .. "` is a style name or a table of ui.make properties, not a " .. type(v), 3)
     end
   end
 end
@@ -35,19 +43,46 @@ function ui.engineSettings(container, page, opts)
   local changed = opts.onChanged or function() end
   local panel = { page = page, waiting = nil }
 
+  -- A slot is a style name, or a table of ui.make properties (a style among
+  -- them) laid onto that element: sizes, insets, stretch — what a style
+  -- cannot say.
+  local function dress(el, slot)
+    local v = st[slot]
+    if type(v) == "string" then
+      el.style = v
+    elseif type(v) == "table" then
+      for k, x in pairs(v) do
+        if type(k) == "string" then el[k] = x end
+      end
+    end
+    return el
+  end
+
   local function row(key, label, value, onClicked)
-    return {
-      "row", key = key, style = st.row,
-      { "text", key = "label", text = label, style = st.label },
-      { "button", key = "value", style = st.button, onClicked = onClicked,
-        { "text", key = "text", text = value, style = st.value } },
-    }
+    return dress({
+      "row", key = key,
+      dress({ "text", key = "label", text = label }, "label"),
+      dress({ "button", key = "value", onClicked = onClicked,
+        dress({ "text", key = "text", text = value }, "value") }, "button"),
+    }, "row")
+  end
+
+  -- A chip leads with a device glyph (the editor's fonts carry it; a game's
+  -- seldom does, and a missing glyph draws as an empty box). Here a key reads
+  -- as its name, and a pad button says it is one.
+  local PAD = "\226\151\137" -- the pad chip's glyph
+  local function plain(chip)
+    local icon, rest = chip:match("^(%S+)%s+(.+)$")
+    if icon == PAD then return "Pad " .. rest end
+    if icon and icon:byte(1) >= 128 then return rest end
+    return chip
   end
 
   local function controls()
-    local rows = { "col", key = "controls", style = st.page }
+    local rows = dress({ "col", key = "controls" }, "page")
     for _, action in ipairs(input.actions()) do
-      local chips = input.bindingsOf(action)
+      local chips = {}
+      for i, c in ipairs(input.bindingsOf(action)) do chips[i] = plain(c) end
       local value
       if panel.waiting == action then
         value = "press a key..."
@@ -75,8 +110,8 @@ function ui.engineSettings(container, page, opts)
       end
     end
     local function onoff(b) return b and "on" or "off" end
-    return {
-      "col", key = "accessibility", style = st.page,
+    return dress({
+      "col", key = "accessibility",
       row("textScale", "Text size", string.format("%d%%", math.floor(access.textScale() * 100 + 0.5)), function()
         -- 100 → 125 → 150 → 200 → 75 → 100: a button a pad can cycle, with
         -- no slider for a player to drag past the end of.
@@ -111,11 +146,18 @@ function ui.engineSettings(container, page, opts)
         changed("captions", on)
         panel:refresh()
       end),
-    }
+    }, "page")
+  end
+
+  -- The page as a ui.make description, for a screen of the game's own.
+  function panel:tree()
+    return page == "controls" and controls() or accessibility()
   end
 
   function panel:refresh()
-    ui.make(container, page == "controls" and controls() or accessibility())
+    if container ~= nil then
+      ui.make(container, self:tree())
+    end
   end
 
   -- Call every frame while the page is open: a captured key is committed and

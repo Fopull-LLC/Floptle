@@ -1138,6 +1138,88 @@ fn string_field_applier_swaps_ui_image() {
     assert_eq!(world.get::<floptle_ui::ElementSpec>(e).unwrap().opacity, 0.5);
 }
 
+/// **The Controls page lives inside a screen the game describes every frame.**
+/// `ui.engineSettings` with no container hands back `panel:tree()`, which the
+/// game's own `ui.make` places among its elements. Built into a container of
+/// its own instead, the game's next `ui.make` of the screen deleted the page's
+/// rows, because they were not in its description. A slot given as a table
+/// carries sizes onto its element, and a rebind replaces the old key.
+#[test]
+fn engine_settings_page_embeds_in_a_screen_described_every_frame() {
+    use floptle_input::{Action, Binding, InputMap, Key, RawInput, Source};
+    let dir = std::env::temp_dir().join(format!("floptle_engine_settings_embed_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "screen",
+        "function start(node)\n\
+         \x20 panel = ui.engineSettings(nil, 'controls', { styles = { row = { w = 320, gap = 8 }, label = 'muted' } })\n\
+         end\n\
+         function update(node, dt)\n\
+         \x20 panel:update()\n\
+         \x20 ui.make(node, { 'col', key = 'screen', { 'text', key = 'title', text = 'Settings' }, panel:tree() })\n\
+         end\n",
+    );
+    let mut world = World::default();
+    let screen = world.spawn();
+    world.insert(screen, Transform::IDENTITY);
+    world.insert(screen, floptle_core::Name("Screen".into()));
+    world.insert(screen, floptle_ui::ElementSpec::default());
+    world.insert(screen, Scripts(vec![floptle_core::ScriptInst::new("screen")]));
+    let host = &mut ScriptHost::new();
+    host.set_input_map(InputMap {
+        actions: vec![Action { name: "Jump".into(), bindings: vec![Binding::new(Source::Key(Key::Space))] }],
+        ..Default::default()
+    });
+    let mut t = 0.0;
+    let mut frame = |host: &mut ScriptHost, world: &mut World| {
+        host.run(world, &dir, 1.0 / 60.0, t);
+        t += 1.0 / 60.0;
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        host.apply_ui_makes(world);
+    };
+    let made = |world: &World, key: &str| world.query::<floptle_core::Made>().find(|(_, m)| m.key == key).map(|(e, _)| e);
+    let text_under = |world: &World, button: floptle_core::Entity| -> String {
+        let text = world
+            .query::<floptle_core::Made>()
+            .find(|(e, m)| m.key == "text" && world.get::<floptle_core::Parent>(*e).is_some_and(|p| p.0 == button))
+            .expect("text")
+            .0;
+        world.get::<floptle_ui::ElementSpec>(text).unwrap().text.as_ref().unwrap().text.clone()
+    };
+    for _ in 0..3 {
+        frame(host, &mut world);
+    }
+    let row = made(&world, "Jump").expect("the page's row is gone after the screen was described again");
+    assert!(made(&world, "title").is_some());
+    let spec = world.get::<floptle_ui::ElementSpec>(row).unwrap();
+    assert_eq!(spec.size[0], floptle_ui::Size::Fixed(320.0), "the row slot's width did not reach the row");
+    let label = world
+        .query::<floptle_core::Made>()
+        .find(|(e, m)| m.key == "label" && world.get::<floptle_core::Parent>(*e).is_some_and(|p| p.0 == row))
+        .unwrap()
+        .0;
+    assert_eq!(world.get::<floptle_ui::ElementSpec>(label).unwrap().style, "muted");
+
+    // Click, wait, press U: the row shows U alone.
+    let button = world
+        .query::<floptle_core::Made>()
+        .find(|(e, m)| m.key == "value" && world.get::<floptle_core::Parent>(*e).is_some_and(|p| p.0 == row))
+        .unwrap()
+        .0;
+    host.run_ui_hooks(&mut world, &[(button.index(), "clicked")]);
+    frame(host, &mut world);
+    assert_eq!(text_under(&world, button), "press a key...");
+    let raw = RawInput { keys: [Key::KeyU].into_iter().collect(), ..Default::default() };
+    host.input_system().borrow_mut().poll_rebind(&raw).expect("captured");
+    frame(host, &mut world);
+    let shown = text_under(&world, button);
+    assert!(shown.contains('U') && !shown.contains("Space"), "the rebind did not replace Space: {shown}");
+    // …in words a game's font has: no device glyph, which draws as an empty box.
+    assert_eq!(shown, "U");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// **A game opens the engine's Controls and Accessibility pages in its own
 /// container.** Controls lists every action with its binding; a click arms
 /// the rebind and the row says so; the key the player presses is committed by

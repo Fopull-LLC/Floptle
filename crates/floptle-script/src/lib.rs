@@ -729,6 +729,9 @@ pub struct ScriptHost {
     terrain_ops: Rc<RefCell<Vec<terrain_api::TerrainOp>>>,
     /// Measured yield reports posted back by the engine after ops are applied.
     terrain_yields: Rc<RefCell<Vec<terrain_api::TerrainYield>>>,
+    /// `terrain.planetLakes` / `planetRivers` asked with a callback, waiting
+    /// for the thread working each one out.
+    terrain_planet: Rc<RefCell<terrain_api::PlanetQueries>>,
     /// `terrain.generatePlanet(id, opts)` requests — heavyweight whole-field
     /// generations the editor runs on a background thread.
     terrain_generates: Rc<RefCell<Vec<(u32, floptle_field::procgen::PlanetFill)>>>,
@@ -938,6 +941,8 @@ pub struct ScriptHost {
     water_volumes: Rc<RefCell<Vec<water_api::WaterInfo>>>,
     /// `water.setFrozen(node, on)` requests, drained by the driver.
     water_freeze: Rc<RefCell<Vec<(u32, bool)>>>,
+    /// Water scripts declared with `water.addVolume`.
+    water_declared: Rc<RefCell<Vec<floptle_core::water::DeclaredWater>>>,
     /// Scatter sources scripts declared — resolved into
     /// drawable instances by the driver, never into scene nodes.
     scatter_sources: scatter_api::Sources,
@@ -1185,6 +1190,12 @@ struct NodeBones {
     offset: glam::Mat4,
     local: Vec<floptle_anim::TransformTRS>,
     applied: Vec<AnimPoseOp>,
+    /// The writes are held (`anim:holdPose`), so the frame draws them again
+    /// whether or not a script rewrites them.
+    held: bool,
+    /// `model` holds last frame's writes, which this frame will not draw
+    /// unless a script queues them again: a read rebuilds from `local`.
+    stale: bool,
 }
 
 impl BonePoses {
@@ -1204,6 +1215,8 @@ impl BonePoses {
             offset: glam::Mat4::IDENTITY,
             local: Vec::new(),
             applied: Vec::new(),
+            held: false,
+            stale: false,
         });
         if !Rc::ptr_eq(&nb.names, names) {
             nb.names = names.clone();
@@ -1212,6 +1225,7 @@ impl BonePoses {
         nb.model.extend_from_slice(model);
         nb.frame = frame;
         nb.skeleton = None;
+        nb.stale = false;
     }
 
     /// The rig behind node `eid`'s pose, set after [`BonePoses::set`]: the
@@ -1219,7 +1233,8 @@ impl BonePoses {
     /// script write (`local`), and the writes the model-space matrices hold on
     /// top of it (`applied`). With it, a bone read answers with this frame's
     /// queued writes applied to the pose they will land on, the way the frame
-    /// will draw it.
+    /// will draw it. `held` says the frame keeps drawing those writes while
+    /// nothing rewrites them (`anim:holdPose`).
     pub fn set_rig(
         &mut self,
         eid: u32,
@@ -1227,6 +1242,7 @@ impl BonePoses {
         offset: glam::Mat4,
         local: &[floptle_anim::TransformTRS],
         applied: &[AnimPoseOp],
+        held: bool,
     ) {
         let Some(nb) = self.nodes.get_mut(&eid) else { return };
         nb.skeleton = Some(skeleton.clone());
@@ -1235,14 +1251,19 @@ impl BonePoses {
         nb.local.extend_from_slice(local);
         nb.applied.clear();
         nb.applied.extend_from_slice(applied);
+        nb.held = held;
+        nb.stale = false;
     }
 
     /// A new frame's script pass begins: the writes the published pose holds
     /// were last frame's, and writes queued from now on replace them rather
     /// than add to them. Without this a bone written every frame read its own
-    /// write twice.
+    /// write twice. A pose whose writes are not held no longer stands for
+    /// what this frame draws, so a read before any new write answers with the
+    /// animator's pose instead of last frame's writes.
     pub fn frame_pass_starts(&mut self) {
         for nb in self.nodes.values_mut() {
+            nb.stale |= !nb.held && !nb.applied.is_empty();
             nb.applied.clear();
         }
     }
@@ -1268,7 +1289,9 @@ impl BonePoses {
     /// since the pose was made — applied the way the frame will apply them:
     /// onto the animator's pose plus whatever writes of this frame it already
     /// holds, solved against the node's world matrix `node_world`. Without
-    /// queued writes, or without a rig to solve on, it is the published pose.
+    /// queued writes, or without a rig to solve on, it is the published pose —
+    /// unless that pose still carries last frame's writes, which this frame
+    /// will not draw.
     pub(crate) fn bone_posed(
         &self,
         eid: u32,
@@ -1279,7 +1302,7 @@ impl BonePoses {
         let published = self.bone(eid, name)?;
         let Some(nb) = self.nodes.get(&eid) else { return Ok(published) };
         let Some(skel) = nb.skeleton.as_deref() else { return Ok(published) };
-        if ops.is_empty() || nb.local.len() != skel.nodes.len() {
+        if (ops.is_empty() && !nb.stale) || nb.local.len() != skel.nodes.len() {
             return Ok(published);
         }
         let Some(i) = skel.index_of(name) else { return Ok(published) };

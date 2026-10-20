@@ -654,7 +654,13 @@ pub(crate) fn render_frame_pixels(
     // them a material or UI image wearing `rt:<name>` drew white, because the
     // texture was never made.
     ed.update_render_targets(ed.play_t);
-    let color = crate::capture::render_frame_texture(ed, cam, stack_of, w, h, cull_mask, ui, true)?;
+    // A picture has no later frames for a scatter field to fill in over: the
+    // frames `--after` played were never drawn, and drawing is when props
+    // settle, so the field is settled whole for this one.
+    ed.scatter_cache.settle_all = true;
+    let color = crate::capture::render_frame_texture(ed, cam, stack_of, w, h, cull_mask, ui, true);
+    ed.scatter_cache.settle_all = false;
+    let color = color?;
     // The readback waits on the device, which is also what lands the timing
     // query's own readback — `run` polls it after this returns.
     Some(readback(ed.gpu.as_ref()?, &color, w, h))
