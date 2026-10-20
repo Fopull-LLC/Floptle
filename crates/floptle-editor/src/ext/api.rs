@@ -522,6 +522,16 @@ fn base_globals(lua: &Lua, env: &Table) -> mlua::Result<()> {
         }
         env.set("os", trimmed)?;
     }
+    // `debug.traceback` and nothing else: stack text for `xpcall`'s handler.
+    // The rest of `debug` reads and writes other functions' locals and
+    // upvalues, which is a route out of the allow-list.
+    if let Ok(debug) = g.get::<Table>("debug") {
+        let trimmed = lua.create_table()?;
+        if let Ok(v) = debug.get::<Value>("traceback") {
+            trimmed.set("traceback", v)?;
+        }
+        env.set("debug", trimmed)?;
+    }
     Ok(())
 }
 

@@ -1438,9 +1438,9 @@ fn every_name_in_the_environment_is_in_the_reference() {
             .map(|(k, _)| k)
             .collect();
         // Lua's own, which the reference does not document because they are
-        // Lua's, and the two `os` carries.
+        // Lua's, and the trimmed `os` and `debug`, which its prose lists.
         tables.retain(|k| {
-            !matches!(k.as_str(), "string" | "table" | "math" | "coroutine" | "bit" | "os")
+            !matches!(k.as_str(), "string" | "table" | "math" | "coroutine" | "bit" | "os" | "debug")
         });
         tables.sort();
         assert_eq!(
@@ -3051,6 +3051,9 @@ fn a_read_alone_is_answered_on_the_next_frame() {
             scene.docs({ 99 }, function(docs, missing)
                 ed.log("served, missing " .. table.concat(missing, ","))
             end)
+            mesh.read(99, function(m, err)
+                ed.log("mesh served: " .. tostring(err))
+            end)
         end)
         "#,
     );
@@ -3063,5 +3066,31 @@ fn a_read_alone_is_answered_on_the_next_frame() {
     ed.drain_ext_log();
     let s = ed.console.entries.iter().map(|e| e.msg.as_str()).collect::<Vec<_>>().join("\n");
     assert!(s.contains("served, missing 99"), "the read was not answered:\n{s}");
+    assert!(s.contains("mesh served:"), "the mesh read was not answered:\n{s}");
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// **`xpcall(f, debug.traceback)` catches.** Without `debug` in the sandbox
+/// the handler argument was nil, and `xpcall` raised instead of protecting.
+/// Only `traceback` is there: the rest of `debug` reaches other functions'
+/// locals.
+#[test]
+fn xpcall_with_a_traceback_catches_the_error() {
+    let proj = temp("traceback");
+    install(
+        &proj,
+        "com.t.trace",
+        "",
+        r#"
+        local ok, msg = xpcall(function() error("boom") end, debug.traceback)
+        ed.log("ok=" .. tostring(ok) .. " boom=" .. tostring(msg:find("boom") ~= nil)
+            .. " getlocal=" .. tostring(debug.getlocal))
+        "#,
+    );
+    let mut ed = crate::Editor { project_root: proj.clone(), ..Default::default() };
+    ed.load_packages();
+    ed.drain_ext_log();
+    let s = ed.console.entries.iter().map(|e| e.msg.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(s.contains("ok=false boom=true getlocal=nil"), "{s}");
     let _ = std::fs::remove_dir_all(&proj);
 }

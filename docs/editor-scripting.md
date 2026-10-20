@@ -1077,8 +1077,10 @@ Standard Lua: `assert` `error` `ipairs` `next` `pairs` `pcall` `xpcall` `select`
 `type` `tostring` `tonumber` `rawget` `rawset` `rawequal` `rawlen`
 `setmetatable` `getmetatable` `unpack`, plus `string`, `table`, `math`,
 `coroutine`, `bit` (LuaJIT's signed 32-bit semantics, for hashing and packing —
-provided on every build, whichever Lua it runs), and `os.time` /
-`os.clock` / `os.date` / `os.difftime`.
+provided on every build, whichever Lua it runs), `os.time` /
+`os.clock` / `os.date` / `os.difftime`, and `debug.traceback`, so
+`xpcall(f, debug.traceback)` catches an error with the stack that raised it.
+The rest of `debug` is not there.
 
 `vec3` here is always the **exact** one — 64-bit and mutable — whatever the open
 project's own `script_vec3` says. That setting is about the game's scripts; an
