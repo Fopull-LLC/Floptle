@@ -1,5 +1,10 @@
 ## Just shipped
 
+**v0.117.0-rc3 — "Whole Worlds"** (beta). Water to float on and drift with,
+shaders that read the scene behind them, wind that carries smoke and bends
+plants, planets that save only what you dug, and craft that keep their place
+and their hinges on a moving world.
+
 **v0.117.0-rc2 — "Whole Worlds"** (beta). Planets several times the size
 generate in seconds, with mountain ranges, rivers, lakes and climates, and
 ground near you is drawn the way it collides. Wind and lightning for scripts,
