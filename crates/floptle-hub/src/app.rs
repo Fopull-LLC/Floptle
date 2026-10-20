@@ -352,6 +352,14 @@ impl HubApp {
         // Fetch the available-versions list up front so the Installs tab is populated without
         // a manual click (best-effort — an offline start just shows an error there).
         app.start_manifest_fetch();
+        // Today's install ping, in the background, if it is on and its notice
+        // has been acknowledged.
+        crate::ping::start(
+            &app.paths,
+            app.config.settings.install_ping,
+            app.config.settings.ping_notice_seen,
+            app.config.settings.channel.clone(),
+        );
         // Proactively refresh a restored session whose access token is near expiry.
         app.refresh_session_if_stale();
         app
@@ -1404,6 +1412,34 @@ impl eframe::App for HubApp {
             });
         });
 
+        // The install ping's notice, until it is answered: nothing is sent
+        // before someone has been told what it is and how to turn it off.
+        if !self.config.settings.ping_notice_seen
+            && self.config.settings.install_ping
+            && !crate::ping::env_says_off(std::env::var("FOPULL_NO_PING").ok().as_deref())
+        {
+            let (mut ok, mut off) = (false, false);
+            egui::Panel::top("ping-notice").frame(banner_frame(ui)).show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(crate::ping::NOTICE);
+                    ui.hyperlink_to("What is sent", crate::ping::PRIVACY_URL);
+                    ok = ui.button("OK").clicked();
+                    off = ui.button("Turn it off").clicked();
+                });
+            });
+            if ok || off {
+                self.config.settings.ping_notice_seen = true;
+                self.config.settings.install_ping = ok;
+                if off {
+                    crate::ping::forget(&self.paths);
+                }
+                self.save();
+                if ok {
+                    crate::ping::start(&self.paths, true, true, self.config.settings.channel.clone());
+                }
+            }
+        }
+
         // the HUB itself is out of date. Above the engine banner, because an old Hub is
         // the thing that would stop the rest of this working — and it is the one update a
         // user cannot perform any other way without leaving the app.
@@ -2320,6 +2356,21 @@ impl HubApp {
 
             ui.label("Manifest URL");
             changed |= ui.text_edit_singleline(&mut self.config.settings.manifest_url).changed();
+            ui.end_row();
+
+            ui.label("Install ping");
+            ui.vertical(|ui| {
+                let r = ui.checkbox(&mut self.config.settings.install_ping, "Send an anonymous daily install ping");
+                if r.changed() {
+                    changed = true;
+                    // Off means no request, and no id left on this machine.
+                    if !self.config.settings.install_ping {
+                        crate::ping::forget(&self.paths);
+                    }
+                }
+                ui.small(crate::ping::NOTICE);
+                ui.hyperlink_to("What is sent", crate::ping::PRIVACY_URL);
+            });
             ui.end_row();
 
             ui.label("Account (auth) URL");

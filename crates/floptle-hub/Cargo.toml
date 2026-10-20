@@ -24,6 +24,8 @@ serde_json = { workspace = true }
 directories = "6"
 ureq = { workspace = true }
 sha2 = "0.10"
+# The install ping's random id (contracts/install-ping.md §3).
+getrandom = "0.2"
 log = { workspace = true }
 env_logger = { workspace = true }
 # OAuth device-flow login (task 0002). Lived here until the engine needed the same

@@ -90,6 +90,17 @@ pub struct Settings {
     /// banner stays hidden for that version and reappears for anything newer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dismissed_update: Option<String>,
+    /// The anonymous daily install ping (see `ping.rs`). On unless turned off.
+    #[serde(default = "default_true")]
+    pub install_ping: bool,
+    /// Whether the ping's notice has been shown and acknowledged. Nothing is
+    /// sent before it has.
+    #[serde(default)]
+    pub ping_notice_seen: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_channel() -> String {
@@ -122,6 +133,8 @@ impl Default for Settings {
             projects_dir: None,
             auth_base_url: default_auth_base_url(),
             dismissed_update: None,
+            install_ping: true,
+            ping_notice_seen: false,
         }
     }
 }

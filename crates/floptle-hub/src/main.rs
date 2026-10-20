@@ -11,6 +11,7 @@ mod config;
 mod install;
 mod launch;
 mod notes;
+mod ping;
 mod registry;
 mod releases;
 mod selfupdate;

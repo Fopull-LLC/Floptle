@@ -1829,6 +1829,7 @@ dependencies = [
  "floptle-dist",
  "floptle-scene",
  "floptle-theme",
+ "getrandom 0.2.17",
  "image",
  "log",
  "serde",
