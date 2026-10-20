@@ -342,6 +342,31 @@ if t then t.alpha = t.alpha - dt end       -- fade the whole model out
 | this model, but it READS across the room | `node:setTint{ rim =, ambient = }` |
 | this one part looks different | `node:material("<name>")` |
 
+### Meshes and textures a script makes
+
+`mesh.build` turns number lists into a mesh, and answers a name that goes anywhere
+a model path does:
+
+```lua
+local quad = mesh.build{
+  positions = { 0,0,0,  1,0,0,  1,1,0,  0,1,0 },
+  uvs       = { 0,1,    1,1,    1,0,    0,0 },
+  indices   = { 1,2,3,  1,3,4 },          -- 1-based, three a triangle
+  -- normals = {...}, colors = { r,g,b,a, ... } (0-1) are optional
+}
+node.model = quad                          -- or scatter.create{ asset = quad }
+mesh.free(quad)                            -- when you are done with it
+```
+
+Missing normals are worked out from the faces. Vertex colours multiply into the
+node's material. A list of the wrong length, an index past the end, or a number
+that is not finite raises, naming the list.
+
+`assets.textureFromPixels(w, h, pixels)` makes a texture from raw RGBA8, row by
+row from the top, as a byte string or a flat list of 0-255, and answers its name
+at once. `assets.release(name)` frees it. Built meshes and textures go when Play
+stops; on a host with nothing to draw with they are named but never drawn.
+
 ### Getting a model's own textures out
 
 A `.glb` keeps its images inside itself, so nothing outside it can point at one.

@@ -1,6 +1,6 @@
 # Maths & the world
 
-Vectors, terrain, water, scattered props, decals, and orbital time.
+Vectors, terrain, water, scattered props, decals, weather, and orbital time.
 
 Part of the [scripting guide](../scripting.md) · [every call, as a reference](../lua-api.md)
 
@@ -11,6 +11,7 @@ Part of the [scripting guide](../scripting.md) · [every call, as a reference](.
 - [22a. Water: volumes, buoyancy & `water.*`](#22a-water-volumes-buoyancy-water)
 - [22b. Scatter: thousands of props from a seed](#22b-scatter-thousands-of-props-from-a-seed)
 - [22c. Decals: marks on the world's surfaces](#22c-decals-marks-on-the-worlds-surfaces)
+- [22d. Weather: wind & lightning](#22d-weather-wind-lightning)
 - [25. Space: orbits, gravity & time-warp](#25-space-orbits-gravity-time-warp)
 
 ---
@@ -519,7 +520,7 @@ end
 | Call | Does |
 | --- | --- |
 | `scatter.create{...}` | declare a source; returns its id |
-| `scatter.near(id, point, radius)` | instances around a point, nearest first: `{id, distance, pos, scale, param}` |
+| `scatter.near(id, point, radius)` | instances around a point, nearest first: `{id, distance, pos, scale, param, up, yaw}` |
 | `scatter.remove(id, instanceId)` | remove one, permanently |
 | `scatter.restore(id [, instanceId])` | put one back, or all of them (regrowth) |
 | `scatter.removed(id)` | the ids this source has lost — **this** is what you save |
@@ -528,13 +529,98 @@ end
 
 `param` is a stable per-instance 0..1 you can map to a variant or a yield. It
 also rides the albedo, so one species gets a spread of shades without a material
-per plant.
+per plant. `up` is the way an instance stands and `yaw` its turn about that, in
+radians. An instance id is an exact Lua number, so the `id` `near` hands you is
+the one `remove` takes.
+
+### How the props look
+
+A prop draws its model's own look: base colour, vertex colours, texture, surface
+maps and glow, as a Mesh node with no Material of its own does. A source can
+shade every prop it draws without a material per colour:
+
+```lua
+scatter.create{
+  asset = "models/rock.glb", seed = 4, center = vec3(0, 0, 0), radius = 300, parent = "Kail",
+  tint = { 0.8, 0.6, 0.5 },               -- multiplies the model's own colour
+  emissive = { 0.2, 1, 0.6 }, emissiveStrength = 1.5,   -- a glow, over the model's
+}
+```
+
+A prototype can be a mesh file, a `.prefab.ron` (each of its Mesh nodes drawn at
+its place in the prop), or a mesh a script built with `mesh.build`.
+
+### Sources belong to the script that made them
+
+A source goes when the node whose script created it is destroyed, and when that
+script is hot-reloaded (the reload makes its own). Tuning a field in `start`
+and saving ten times leaves one field, not eleven. Every source goes when the
+scene changes.
 
 ### Not yet
 
 **No per-instance colliders.** You cannot walk into a scattered tree and a
 raycast will not hit one — aim with `scatter.near`, which is a proximity query,
-not a ray. Prototypes are **mesh assets**, not prefabs or script-built subtrees.
+not a ray.
+
+---
+
+## 22d. Weather: wind & lightning
+
+### Wind
+
+A wind is something your game declares and every system can ask about:
+
+```lua
+local prevailing = weather.addWind{
+  velocity = vec3(6, 0, 1),      -- metres a second
+  gust = 0.4,                    -- the speed swings 0.6x to 1.4x…
+  gustPeriod = 6,                -- …roughly every six seconds
+  turbulence = 0.2, scale = 40,  -- eddies 40 m across
+  parent = "Kail",               -- blows in the planet's frame, and turns with it
+}
+
+-- A storm cell on top of it: adds to the wind under it, fades out at its edge.
+local storm = weather.addWind{ velocity = vec3(0, 0, 18), center = vec3(120, 300, 0), radius = 80, parent = "Kail" }
+
+local v = weather.windAt(player.pos)          -- vec3, every wind there added up
+weather.setWind(storm, { gust = 0.9 })        -- change what you name, keep the rest
+weather.removeWind(storm)
+```
+
+A gust travels downwind at the wind's speed, so it is seen crossing a field
+rather than everything moving at once, and eddies drift with the wind. The
+field is a pure function of place and time: every machine gets the same answer
+and a wind costs nothing until something asks. Every wind goes when the scene
+changes.
+
+### Lightning
+
+`weather.bolt(from, to [, { seed, branches, jag }])` gives a bolt as strands to
+draw: the main channel from `from` to `to` first, then forks that name it as
+`parent`, each with a `width` relative to the channel. The same seed gives the
+same bolt on every machine, so a strike the host announces looks the same to
+every player.
+
+```lua
+local strands = weather.bolt(cloud, ground, { seed = strikeSeed, branches = 4, jag = 0.15 })
+function lateUpdate()
+  for _, s in ipairs(strands) do
+    local p = s.points                 -- x1, y1, z1, x2, y2, z2, ...
+    for i = 1, #p - 3, 3 do
+      draw.line(p[i], p[i + 1], p[i + 2], p[i + 3], p[i + 4], p[i + 5], 0.8, 0.85, 1)
+    end
+  end
+end
+```
+
+Thunder is yours: sound travels about 343 m a second, so the delay is the
+distance to the strike over that.
+
+### Not yet
+
+Particles, props and bodies do not read the wind on their own yet; a script
+reads `weather.windAt` and applies it. There is no rain, snow or wetness.
 
 ---
 

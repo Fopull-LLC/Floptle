@@ -221,6 +221,22 @@ assert(c.props < 20000, "the forest is asking for too much")
 
 Counts are free to keep, so `perf.counts()` works even while collection is off.
 
+### The rest of the frame
+
+Besides the work buckets, three name what is not the engine's own work, and one
+names what nothing measured:
+
+| Bucket | Is |
+| --- | --- |
+| `assets` | textures, shaders and materials used for the first time |
+| `gpuWait` | waiting for a swapchain image (the GPU still drawing an earlier frame, or with vsync the display not wanting one yet) and for readbacks |
+| `present` | handing the finished image to the compositor |
+| `untimed` | the time between frames no bucket measured |
+
+A hitch whose time is in `untimed` happened outside everything the engine times:
+another program, the OS, or work not yet given a bucket. `perf.ms("other")`
+still answers `untimed`, its old name.
+
 ### GPU time
 
 The buckets above are the CPU's side of a frame. The GPU's side is

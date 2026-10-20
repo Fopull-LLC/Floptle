@@ -312,6 +312,33 @@ soft landing on legs reads as a low `speed` on the leg parts; a nose-first
 lithobrake reads as a high `speed` on the nose. The solar demo's vessels break
 exactly this way (`solar/scripts/vessel_controller.lua`).
 
+#### Joints between assemblies: articulated craft, rovers and grips
+
+Either end of a Joint can be an assembly, with its root or any of its parts
+standing for the whole craft, so a vessel built from several assemblies moves
+against itself: a hinged arm, a piston, a rotor, a docking clamp.
+
+```lua
+-- A hinge or slider motor as a servo: it drives to a goal and holds it.
+arm:setJoint{ goal = 45 }                    -- degrees for a hinge, metres for a slider
+local j = arm:getcomponent("Joint")
+j.goal = 30                                  -- set every tick if you like; no rebuild
+print(j.position, j.speed)                   -- where it is, and how fast it moves
+```
+
+A **wheel** joint hung from an assembly chassis turns only about its axle, grips
+the ground by the load its suspension carries, and parks on a slope with its
+motor held at zero.
+
+`assembly.grip(node, at [, target] [, breakForce])` welds a craft at a point to a
+body, another assembly, or the ground under it; it rides that ground when the
+ground moves. `assembly.release(node)` lets go, and `assembly.info(node).gripped`
+says whether it still holds.
+
+A part's mass is read and written as `rb.mass`; the assembly re-weighs itself
+on the next tick. `assembly.info` reports the inertia the solver uses, and a
+parked assembly falls asleep like a single body (`node.asleep`).
+
 ### 4.2 Two telegraph layers: `draw.*` (game) vs `gizmo.*` (debug)
 
 They look similar but serve different masters:

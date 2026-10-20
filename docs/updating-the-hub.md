@@ -158,6 +158,18 @@ From here on, when a new Hub ships you get:
 
 One click, and it reopens itself.
 
+## The install ping
+
+The Hub sends an anonymous ping to fopull.com once a day, so we can count
+installs rather than downloads. It holds a random install id made on your
+machine, the Hub's version, your OS and CPU type, and its update channel, and
+nothing that identifies you. The editor never pings.
+
+The Hub tells you before it sends anything. **Settings ▸ Install ping** turns it
+off and deletes the install id. `FOPULL_NO_PING=1` in the environment turns it
+off for every Fopull app, whatever the setting says, which is the switch for CI,
+packagers and managed machines.
+
 ## If "Update and restart" won't work later
 
 The Hub tells you why rather than failing halfway. The usual cause is that it
