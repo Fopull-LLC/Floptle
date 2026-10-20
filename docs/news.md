@@ -1,5 +1,12 @@
 ## Just shipped
 
+**v0.117.0-rc1 — "Whole Worlds"** (beta). Planets several times the size
+generate in seconds, with mountain ranges, rivers, lakes and climates, and
+ground near you is drawn the way it collides. Wind and lightning for scripts,
+scattered props that keep their model's look, craft that articulate with
+hinges, pistons and gripping wheels, and meshes and textures a script builds
+itself. Models keep their PBR maps, and the sky keeps its sun through the fog.
+
 **v0.116.1 — "Clear Skies"**. A world with air has a real daytime sky that
 thins into space as you climb, with no sky shader to write. Fog can follow a
 round planet, post shaders get `sceneRay` and `cameraPosition`, a bone you
