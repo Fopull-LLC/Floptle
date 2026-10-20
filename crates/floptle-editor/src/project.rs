@@ -2961,15 +2961,6 @@ pub(crate) fn scenes_shadowed_by_a_root_copy(root: &Path) -> Vec<String> {
     out
 }
 
-/// A model part's surface from its file — `(base image, base colour, maps)` —
-/// as a material and the images it binds, or `None` when the file names only
-/// a base colour (the part then draws as it always has).
-///
-/// glTF materials are metal-rough, so a part with a metallic-roughness map
-/// shades physically; one with only a normal, occlusion or emissive map keeps
-/// the classic model, because glTF's default factors (metallic 1, roughness 1)
-/// would turn every untextured export into black metal. Each image is uploaded
-/// once per model however many parts and slots use it (`images`).
 /// How one of a model's own textures is sampled: as chosen for the model in
 /// the Inspector when someone chose, else as the model file says for that
 /// texture, else crisp. A file made in a pixel-art tool says nearest and one
@@ -3010,6 +3001,17 @@ mod embedded_sampling_tests {
     }
 }
 
+/// A model part's surface from its file — `(base image, base colour, maps)` —
+/// as a material and the images it binds, or `None` when the file names only
+/// a base colour (the part then draws as it always has).
+///
+/// glTF materials are metal-rough, so a part with a metallic-roughness map
+/// shades physically; one with only a normal, occlusion or emissive map keeps
+/// the classic model, because glTF's default factors (metallic 1, roughness 1)
+/// would turn every untextured export into black metal. Each image is uploaded
+/// once however many parts, slots and models use it: `images` remembers it
+/// within a model, and the renderer shares it across models by its pixels and
+/// sampling, so a kit of models pointing at one texture library binds it once.
 pub(crate) fn imported_look(
     gpu: &floptle_render::Gpu,
     raster: &mut floptle_render::Raster,
@@ -3026,7 +3028,7 @@ pub(crate) fn imported_look(
         let i = i?;
         let data = textures.get(i)?;
         let sampling = embedded_sampling(chosen, file_filters, Some(i));
-        Some(*images.entry(i).or_insert_with(|| raster.register_texture(gpu, data, sampling)))
+        Some(*images.entry(i).or_insert_with(|| raster.register_texture_shared(gpu, data, sampling)))
     };
     let mut m = floptle_core::Material::tinted(base_color);
     if maps.metallic_roughness.is_some() {

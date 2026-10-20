@@ -287,6 +287,20 @@ impl Editor {
                     floptle_shader::Blend::Alpha => FlslBlend::Alpha,
                     floptle_shader::Blend::Additive => FlslBlend::Additive,
                 };
+                // A shader this GPU cannot bind is said by name here, and
+                // keeps the last build that worked: pipeline validation would
+                // only say a count was over a limit.
+                if let Some(gpu) = self.gpu.as_ref()
+                    && let Err(why) = floptle_render::Raster::flsl_fits(gpu, compiled.textures.len())
+                {
+                    let msg = report(self, why);
+                    let old = self.flsl_cache.remove(rel);
+                    self.flsl_cache.insert(
+                        rel.to_string(),
+                        FlslEntry { mtime, compiled: old.and_then(|o| o.compiled), error: Some(msg) },
+                    );
+                    return;
+                }
                 let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
                     return;
                 };

@@ -232,6 +232,54 @@ fn timing_features(adapter: &wgpu::Adapter) -> wgpu::Features {
     adapter.features() & want
 }
 
+/// Sampled textures (and samplers) per shader stage the engine asks a device for: the
+/// lighting the engine binds for every surface, a material shader's own
+/// texture slots, and room to grow. wgpu's default is 16, which the engine's
+/// own bindings fill on their own.
+pub const SAMPLED_TEXTURES_WANTED: u32 = 32;
+
+/// The limits to ask a device for: wgpu's defaults, with as many sampled
+/// textures per stage as the adapter offers up to [`SAMPLED_TEXTURES_WANTED`].
+/// Never more than it offers, so a device that has fewer still starts, and
+/// [`crate::Raster::flsl_texture_slots`] says what a material can use on it.
+fn wanted_limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
+    let base = wgpu::Limits::default();
+    let have = adapter.limits();
+    let ask = |offered: u32, default: u32| offered.min(SAMPLED_TEXTURES_WANTED).max(default.min(offered));
+    wgpu::Limits {
+        max_sampled_textures_per_shader_stage: ask(
+            have.max_sampled_textures_per_shader_stage,
+            base.max_sampled_textures_per_shader_stage,
+        ),
+        // Every material slot brings its own sampler, so samplers run out
+        // alongside textures.
+        max_samplers_per_shader_stage: ask(have.max_samplers_per_shader_stage, base.max_samplers_per_shader_stage),
+        ..base
+    }
+}
+
+/// The per-stage sampled-texture and sampler limits a device on this
+/// machine's GPU is given, without making one: what `floptle check` holds a
+/// shader's texture slots against. `None` with no GPU to ask.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn adapter_stage_limits() -> Option<(u32, u32)> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: backends_from_env(),
+        flags: wgpu::InstanceFlags::default(),
+        memory_budget_thresholds: Default::default(),
+        backend_options: Default::default(),
+        display: None,
+    });
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        force_fallback_adapter: false,
+        compatible_surface: None,
+    }))
+    .ok()?;
+    let l = wanted_limits(&adapter);
+    Some((l.max_sampled_textures_per_shader_stage, l.max_samplers_per_shader_stage))
+}
+
 impl Gpu {
     /// Create the GPU connection for `window` and configure its surface. Picks a
     /// high-performance adapter, an sRGB surface format when available, and Mailbox
@@ -275,7 +323,7 @@ impl Gpu {
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("floptle-device"),
                 required_features: timing_features(&adapter),
-                required_limits: wgpu::Limits::default(),
+                required_limits: wanted_limits(&adapter),
                 experimental_features: wgpu::ExperimentalFeatures::default(),
                 memory_hints: wgpu::MemoryHints::Performance,
                 trace: wgpu::Trace::Off,
@@ -386,7 +434,16 @@ impl Gpu {
     /// caller supplies its own color target (a texture with `COPY_SRC`) to read
     /// back. Used by render tests and tools.
     pub fn headless(width: u32, height: u32) -> Self {
-        Self::headless_with(width, height, None)
+        Self::headless_with(width, height, None, None)
+    }
+
+    /// [`headless`](Self::headless) on a device asked for exactly `textures`
+    /// sampled textures and `samplers` samplers per shader stage (no more than
+    /// the adapter offers), so a test can stand at a smaller GPU's limit on a
+    /// bigger one.
+    #[doc(hidden)]
+    pub fn headless_with_stage_limits(width: u32, height: u32, textures: u32, samplers: u32) -> Self {
+        Self::headless_with(width, height, None, Some((textures, samplers)))
     }
 
     /// [`headless`](Self::headless) with the HDR scene format the windowed path
@@ -397,10 +454,10 @@ impl Gpu {
     /// tightly-packed RGBA8 and none of them is about the format. This is the
     /// opt-in for the ones that are.
     pub fn headless_hdr(width: u32, height: u32) -> Self {
-        Self::headless_with(width, height, Some(Self::HDR_FORMAT))
+        Self::headless_with(width, height, Some(Self::HDR_FORMAT), None)
     }
 
-    fn headless_with(width: u32, height: u32, scene: Option<wgpu::TextureFormat>) -> Self {
+    fn headless_with(width: u32, height: u32, scene: Option<wgpu::TextureFormat>, stage: Option<(u32, u32)>) -> Self {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: backends_from_env(),
             flags: wgpu::InstanceFlags::default(),
@@ -421,7 +478,15 @@ impl Gpu {
             // intersection with what the adapter offers, so it cannot refuse a
             // device that lacks them — see `timing_features`.
             required_features: timing_features(&adapter),
-            required_limits: wgpu::Limits::default(),
+            required_limits: {
+                let mut l = wanted_limits(&adapter);
+                if let Some((textures, samplers)) = stage {
+                    let have = adapter.limits();
+                    l.max_sampled_textures_per_shader_stage = textures.min(have.max_sampled_textures_per_shader_stage);
+                    l.max_samplers_per_shader_stage = samplers.min(have.max_samplers_per_shader_stage);
+                }
+                l
+            },
             experimental_features: wgpu::ExperimentalFeatures::default(),
             memory_hints: wgpu::MemoryHints::Performance,
             trace: wgpu::Trace::Off,

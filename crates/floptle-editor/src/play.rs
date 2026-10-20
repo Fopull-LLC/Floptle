@@ -129,7 +129,7 @@ impl Editor {
             } else if let Some((_, pb, _)) =
                 cb.iter().find(|(pe, ..)| name_of(*pe) == b.parent)
             {
-                floptle_core::frames::System::soi_radius(b.a.abs(), b.mu, pb.mu)
+                floptle_core::frames::System::auto_soi(b.a.abs(), b.mu, pb.mu, b.body_radius)
             } else {
                 0.0
             };
@@ -679,6 +679,7 @@ impl Editor {
         // includes the same water. A referee whose seas were dry would call
         // every splashdown a desync.
         sim.world.water = Self::build_water_field(world, origin);
+        sim.world.water.volumes.extend(self.declared_water_volumes(origin));
         sim
     }
 
@@ -867,9 +868,7 @@ impl Editor {
             // chunk meshes (unlike an eviction, which only fires far away where
             // impostor mode already emptied them).
             if let Some(raster) = self.raster.as_mut() {
-                for (_, (mid, _)) in render.slots.drain() {
-                    raster.free_dynamic(mid);
-                }
+                render.free_all(raster);
             }
             render.pending.clear();
             render.empty.clear();
@@ -1405,6 +1404,8 @@ impl Editor {
         self.scatter_cache.clear();
         // …and so does a wind: the bodies it blew on are going too.
         self.script_host.clear_weather();
+        // …and a lake a script declared lay on ground that is going.
+        self.script_host.clear_declared_water();
         self.script_gizmos.clear();
         self.audio_stop_play();
         // …swap the world…

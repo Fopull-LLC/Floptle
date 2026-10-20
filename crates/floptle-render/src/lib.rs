@@ -49,7 +49,9 @@ pub mod woff2;
 pub use camera::{FlyCamera, Input, ViewLock};
 pub use camera_stack::{StackComposite, StackLayer};
 pub use cull::Frustum;
-pub use device::{Gpu, Vsync, gpu_trouble, report_gpu_error, take_gpu_errors};
+pub use device::{Gpu, Vsync, gpu_trouble, report_gpu_error, take_gpu_errors, SAMPLED_TEXTURES_WANTED};
+#[cfg(not(target_arch = "wasm32"))]
+pub use device::adapter_stage_limits;
 pub use env::{EnvMap, ENV_H, ENV_W};
 pub use frame::{ORTHO_DEPTH, Projection, RenderCamera};
 pub use gi::GiVolume;
@@ -72,7 +74,7 @@ pub use ui::{Ui, UiBatch, UiBindingId, UiInstance, UiPlane, UiShaderId, UiTex};
 pub use raster::{
     ext_index_of, instance_of, instance_of_mat, pass_prelude, raster_custom_source, set_ext_index,
     FlslBindingId, FlslBlend, FlslDraw, FlslShaderId, Globals, InstanceRaw, MaterialParams, Raster,
-    SkinDraw, SurfaceExtras, TexFilter, TexId, TexSampling, TexWrap, sun_shadow_matrix, SUN_MAP_SIZE,
+    SkinDraw, SurfaceExtras, TexFilter, TexId, TexSampling, TexWrap, sun_shadow_matrix, FLSL_ENGINE_SAMPLERS, FLSL_ENGINE_TEXTURES, SUN_MAP_SIZE, flsl_fits_within, flsl_slots_within,
 };
 pub use raymarch::{
     AtlasRefused, Raymarch, RaymarchGlobals, MAX_FIELD_SHAPES, MAX_SHADOW_PROXIES, MAX_VOLUMES, TERRAIN_SLOTS,

@@ -142,6 +142,10 @@ pub(crate) fn render_frame_texture(
         (cw, ch),
         crate::offscreen::OffscreenOpts {
             depth_tex: Some(&depth_tex),
+            // The Game view's own picture store, so a shot draws glass and the
+            // surfaces that show the scene behind them as the Game view does:
+            // without one there is nothing to capture what is behind them into.
+            history: crate::offscreen::HistorySlot::GamePanel,
             ..Default::default()
         },
     );

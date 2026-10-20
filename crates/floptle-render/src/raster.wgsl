@@ -129,7 +129,7 @@ fn sun_map_vis(p: vec3<f32>, n: vec3<f32>) -> f32 {
 // indexed by `ext_index` (which arrives packed above the modulate bit in n1.w):
 //   mat_ext[i*3 + 0] = roughness, metallic, normal strength, occlusion strength
 //   mat_ext[i*3 + 1] = flag bits, retro jitter, reflectivity, transmission
-//   mat_ext[i*3 + 2] = ior, thickness, 0, 0
+//   mat_ext[i*3 + 2] = ior, thickness, sway, backlight
 // Entry 0 is the reserved NEUTRAL: an instance that sets none of this reads it
 // and shades exactly as it did before these lanes existed.
 @group(0) @binding(10) var<storage, read> mat_ext: array<vec4<f32>>;
@@ -176,6 +176,8 @@ struct Ext {
     transmit: f32,
     ior: f32,
     thick: f32,
+    sway: f32,
+    backlight: f32,
 };
 
 // Read entry `idx`, clamped into the store. The store always holds at least the
@@ -186,7 +188,7 @@ fn ext_at(idx: u32) -> Ext {
     let a = mat_ext[i];
     let b = mat_ext[i + 1u];
     let c = mat_ext[i + 2u];
-    return Ext(a.x, a.y, a.z, a.w, u32(b.x + 0.5), b.y, b.z, b.w, c.x, c.y);
+    return Ext(a.x, a.y, a.z, a.w, u32(b.x + 0.5), b.y, b.z, b.w, c.x, c.y, c.z, c.w);
 }
 
 fn ext_has(e: Ext, bit: u32) -> bool {
@@ -561,6 +563,47 @@ fn ssr_trace(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>, rough: f32, pix: vec2<u32
     return out;
 }
 
+// `sceneColor` / `sceneDepth` in a surface shader (FLSL). A shader that reads
+// them is drawn after the scene behind it has been captured, in the glass
+// pass, so `scene_tex` holds this frame's picture without the surface itself:
+// what water refracts, and what its thickness is measured against.
+
+// Where camera-relative point `p` lands on the screen, 0..1 with y down.
+fn flsl_frag_uv_of(p: vec3<f32>) -> vec2<f32> {
+    let clip = G.view_proj * vec4<f32>(p, 1.0);
+    let ndc = clip.xy / max(clip.w, 1e-6);
+    return vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+}
+
+// The scene behind the surface at screen `uv`, in linear light. Black where
+// there is no capture (an offscreen preview, a probe).
+fn flsl_frag_scene_color(uv: vec2<f32>) -> vec4<f32> {
+    let dims = textureDimensions(scene_tex, 0);
+    if (dims.x <= 1u || dims.y <= 1u) {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
+    return textureSampleLevel(scene_tex, scene_samp, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)), 0.0);
+}
+
+// How far the camera is from the solid surface seen at screen `uv`, in world
+// units: the opaque depth prepass, so water and glass are not in it. Very
+// large where nothing solid is (the sky) or there is no prepass.
+fn flsl_frag_scene_depth(uv: vec2<f32>) -> f32 {
+    let dims = textureDimensions(prime_tex, 0);
+    if (dims.x <= 1u || dims.y <= 1u) {
+        return 1e9;
+    }
+    let fd = vec2<f32>(dims);
+    let texel = vec2<i32>(clamp(uv * fd, vec2<f32>(0.0), fd - vec2<f32>(1.0)));
+    let d = textureLoad(prime_tex, texel, 0).x;
+    if (d >= 1.0) {
+        return 1e9;
+    }
+    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    let sp = G.inv_view_proj * vec4<f32>(ndc, d, 1.0);
+    return length(sp.xyz / sp.w);
+}
+
 // What you can see THROUGH this surface: the scene behind it, bent.
 //
 // **Where the picture comes from.** `scene_tex` during the refraction pass holds
@@ -922,8 +965,6 @@ fn build_vs(in: VsIn, pos: vec3<f32>, normal: vec3<f32>, tbase_in: u32, tsplat_i
     let model = mat4x4<f32>(in.m0, in.m1, in.m2, in.m3);
     let nmat = mat3x3<f32>(in.n0.xyz, in.n1.xyz, in.n2.xyz);
     var out: VsOut;
-    let view_pos = model * vec4<f32>(pos, 1.0);
-    var clip = g.view_proj * view_pos;
 
     // --- The surface extras, decoded ONCE, here. ---------------------------
     // `n1.w` packs `modulate_bit | (ext_index << 1)` on the same rule params.z
@@ -934,6 +975,24 @@ fn build_vs(in: VsIn, pos: vec3<f32>, normal: vec3<f32>, tbase_in: u32, tsplat_i
     let ext_index = nw >> 1u;
     let ext = ext_at(ext_index);
     out.imeta = vec2<f32>(tsplat_in, f32(ext_index));
+
+    var view_pos = model * vec4<f32>(pos, 1.0);
+    // SWAY — the game's wind bends the surface. Measured from the node's own
+    // origin in metres, as the square of the height, so a stem stays rooted
+    // and its tip swings; a little flutter along the mesh keeps a field from
+    // moving as one sheet. Every pass that draws the surface (the depth
+    // prepass, the sun's shadow map) runs this same function, so the bent
+    // surface is the one that is depth-tested and shadowed.
+    if (ext.sway > 0.0) {
+        let wind = g.time.yzw;
+        let up = normalize(in.m1.xyz);
+        let h = max(dot(view_pos.xyz - in.m3.xyz, up), 0.0);
+        let flutter = 1.0 + 0.25 * sin(g.time.x * 2.7 + dot(pos, vec3<f32>(1.7, 2.3, 1.1)) * 3.0);
+        let bend = wind * (0.1 * ext.sway * h * h * flutter);
+        // No push along the stem: a bent blade is no taller than a still one.
+        view_pos = vec4<f32>(view_pos.xyz + bend - up * dot(bend, up), 1.0);
+    }
+    var clip = g.view_proj * view_pos;
 
     // RETRO — vertex jitter. The PS1 had no fractional vertex coordinates: it
     // snapped to a screen grid, and geometry near the camera wobbled between
@@ -1624,6 +1683,15 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
         // Placeable point lights (camera-relative; in.view_pos is in the same space).
         lit += albedo * point_diffuse_lit(in.view_pos, n, pix) * gi_only_gate();
         lit += in.specular.rgb * kl.spec * in.specular.a;
+    }
+
+    // BACKLIGHT — the key light on the far side of a thin surface, coming
+    // through: a leaf against the sun glows, and it is shadowed exactly as the
+    // back face would be. Asked only of surfaces that let light through, so
+    // every other surface pays nothing for it.
+    if (ext.backlight > 0.0) {
+        let behind = key_light(in.view_pos, -n, v, 1.0, pix);
+        lit += albedo * behind.diffuse * clamp(ext.backlight, 0.0, 1.0);
     }
 
     // Rim / fresnel — a cheap stylized edge glow. Available under BOTH models:

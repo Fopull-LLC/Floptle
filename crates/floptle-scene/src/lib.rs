@@ -3452,6 +3452,14 @@ pub struct MaterialDoc {
     pub ior: f32,
     #[serde(default = "default_thickness", skip_serializing_if = "is_default_thickness")]
     pub thickness: f32,
+    /// How far the game's wind bends the surface (see
+    /// [`floptle_core::Material::sway`]). Absent is still.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub sway: f32,
+    /// Key light through the back of the surface (see
+    /// [`floptle_core::Material::backlight`]). Absent is none.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub backlight: f32,
     #[serde(default, skip_serializing_if = "ShadingDoc::is_classic")]
     pub shading: ShadingDoc,
     #[serde(default, skip_serializing_if = "RetroDoc::is_off")]
@@ -3703,6 +3711,8 @@ impl MaterialDoc {
             // does, and the maths behind it (`1/ior`) divides.
             ior: self.ior.clamp(1.0, 3.0),
             thickness: self.thickness.clamp(0.0, 100.0),
+            sway: self.sway.clamp(0.0, 100.0),
+            backlight: self.backlight.clamp(0.0, 1.0),
             shading: self.shading.to_shading(),
             retro: self.retro.to_retro(),
             source: self.source.clone(),
@@ -3749,6 +3759,8 @@ impl MaterialDoc {
             transmission: m.transmission,
             ior: m.ior,
             thickness: m.thickness,
+            sway: m.sway,
+            backlight: m.backlight,
             shading: ShadingDoc::from_shading(m.shading),
             retro: RetroDoc::from_retro(m.retro),
             source: m.source.clone(),

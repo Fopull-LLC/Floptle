@@ -1259,6 +1259,25 @@ fn mat_shading_ui(ui: &mut egui::Ui, ctx: &mut MatCtx, m: &mut Material, r: &mut
                     );
                     ui.end_row();
                 }
+                // ---- wind ---------------------------------------------------
+                ui.label("sway").on_hover_text(
+                    "How far the game's wind bends this surface: the metres a point \
+                     one metre above the node's origin moves in a 10 m/s wind, more \
+                     with height, so a stem stays rooted and its tip swings.\n\n\
+                     The wind is what a script declares with weather.addWind, so \
+                     the gust that carries the smoke bends the grass. 0 stands still.",
+                );
+                r.changed |=
+                    crate::responsive::slider(ui, egui::Slider::new(&mut m.sway, 0.0..=2.0), "").changed();
+                ui.end_row();
+                ui.label("backlight").on_hover_text(
+                    "How much of the key light on the BACK of this surface comes \
+                     through to the front: a leaf, a petal or a sail lit from behind \
+                     glows. Shadowed as the back face would be. 0 stops the light.",
+                );
+                r.changed |=
+                    crate::responsive::slider(ui, egui::Slider::new(&mut m.backlight, 0.0..=1.0), "").changed();
+                ui.end_row();
             });
         });
     }
@@ -6886,6 +6905,7 @@ impl EditorTabViewer<'_> {
                 JointKind::Slider => "slides along the other's axis without turning",
                 JointKind::Wheel => "a wheel on the other, on a suspension spring",
                 JointKind::Target => "pulled toward a point a script sets",
+                JointKind::Ball => "a ball joint: turns every way about the anchor",
             });
             if j.kind != JointKind::Target {
                 ui.horizontal_wrapped(|ui| {
@@ -6930,12 +6950,13 @@ impl EditorTabViewer<'_> {
                     "where on the other node, in its space. All zero: wherever this anchor is when play starts",
                 );
             }
-            if matches!(j.kind, JointKind::Slider | JointKind::Wheel | JointKind::Hinge) {
+            if matches!(j.kind, JointKind::Slider | JointKind::Wheel | JointKind::Hinge | JointKind::Ball) {
                 changed |= v3(
                     ui,
                     "axis",
                     &mut j.axis,
-                    "the slider's rail, the wheel's suspension, or a 3D hinge's axle, in the other node's space",
+                    "the slider's rail, the wheel's suspension, a 3D hinge's axle, or the line a ball joint's cone \
+                     is about, in the other node's space",
                 );
             }
             if matches!(j.kind, JointKind::Distance | JointKind::Rope | JointKind::Spring) {
@@ -6948,6 +6969,17 @@ impl EditorTabViewer<'_> {
                     if !auto {
                         changed |= ui
                             .add(egui::DragValue::new(&mut j.length).speed(0.01).range(0.0..=1000.0).prefix("length "))
+                            .changed();
+                    }
+                });
+            }
+            if j.kind == JointKind::Ball {
+                ui.horizontal_wrapped(|ui| {
+                    changed |= ui.checkbox(&mut j.limit, "limit").changed();
+                    if j.limit {
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut j.max).speed(0.5).range(0.0..=180.0).prefix("cone ").suffix("°"))
+                            .on_hover_text("how far this node's axis may lean from the other's")
                             .changed();
                     }
                 });

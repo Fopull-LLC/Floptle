@@ -444,7 +444,9 @@ impl Editor {
         // reflect the scene but to see through it. So the texture is allocated
         // when either asks, and a scene with a single window in it gets one
         // without having to switch reflections on as well.
-        let glass = raster.any_transmissive(instances);
+        // …and so does a surface shader that shows the scene behind it
+        // (`sceneColor`): water refracting the ground under it.
+        let glass = raster.any_transmissive(instances) || raster.flsl_draws_read_scene(&gather.flsl_draws);
         {
             let fmt = gpu.scene_format();
             let rebuilt = if ssr_on || glass {

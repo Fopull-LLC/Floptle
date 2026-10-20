@@ -226,6 +226,21 @@ Start small (the ADR-0007 subset), grow over time. Categories, with examples:
 - **Screen** (`stage post` only) — `sceneColor`, `sceneDepth`, `sceneNormal`,
   `sceneRay`, `cameraPosition`, `screenTexel`: the finished frame, readable at any pixel rather than only this
   one. See [`./post-processing.md`](./post-processing.md).
+- **Behind a surface** (`stage fragment`) — `sceneColor(uv)` and `sceneDepth(uv)`
+  read the scene behind the surface at a screen position, and `screenUv(p)` is
+  where a point lands on the screen (`screenUv(worldPos)` is this pixel). A
+  shader that reads `sceneColor` is drawn after the rest of the scene is
+  captured, as glass is, so it sees what is behind it and never itself; that is
+  refraction. `sceneDepth` is the solid scene's distance from the camera (water
+  and glass are not in it), so `sceneDepth(uv) - length(worldPos)` is how much
+  water a view ray crosses: what depth colour and absorption are made of.
+
+  ```
+  let suv = screenUv(worldPos) + bend
+  let thick = max(sceneDepth(suv) - length(worldPos), 0)
+  let absorb = vec3(exp(-thick * 0.9), exp(-thick * 0.25), exp(-thick * 0.15))
+  output color = vec4(sceneColor(suv).rgb * absorb + deep * (vec3(1) - absorb), 1)
+  ```
 
 `stdlib::CATEGORIES` is the one list of these, and both palettes (the graph tab's
 node menu, the IDE's autocomplete) walk it. They used to hold a hardcoded copy
@@ -375,6 +390,16 @@ A **material** binds a compiled shader plus its **param block** (uniform values,
 texture slots, tiling). Many materials can share one shader with different params;
 changing a param is a uniform write, not a recompile. Full design and the RON
 shape live in [`./materials-and-textures.md`](./materials-and-textures.md).
+
+**Limits.** A shader exposes up to 32 uniforms and 8 texture slots. Each slot
+is a texture and a sampler in the fragment stage, on top of the 16 textures and
+13 samplers the engine binds there for its own lighting (shadows, the terrain
+palette, the surface's maps, the field, GI, the sky, reflections). Desktop GPUs
+are asked for room for all 8; a GPU that offers only wgpu's floor of 16 sampled
+textures per stage, as many browsers do, has room for none, and a textured
+material draws its fallback look there. The editor's Console and `floptle
+check` name the numbers when a shader does not fit (`Raster::flsl_fits`), rather
+than leaving it to fail pipeline validation.
 
 ```
 material "lava.ron" ─▶ shader "plasma.flsl" (compiled WGSL)

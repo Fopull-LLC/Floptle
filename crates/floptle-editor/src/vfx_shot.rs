@@ -108,6 +108,28 @@ fn weigh(inst: &EffectInstance, mut each: impl FnMut(Vec3, f32)) -> f32 {
             }
         });
     }
+    // A beam has no particles: it is one ribbon from the origin to its end,
+    // as wide as its size row and as opaque as its colour row at this moment.
+    // Without it an effect made only of beams was framed on nothing and
+    // reported as showing nothing.
+    let finished = inst.effect.playback == floptle_vfx::Playback::OneShot
+        && inst.t >= inst.effect.lifetime
+        && inst.effect.end == floptle_vfx::EndBehavior::Destroy;
+    if !finished {
+        let un = (inst.t / inst.effect.lifetime.max(1e-3)).clamp(0.0, 1.0);
+        for (ti, ct) in inst.beam_tracks() {
+            let (width, alpha) = (ct.size.sample(un).max(0.0), ct.color.sample(un)[3] * inst.tint[3]);
+            if alpha <= MIN_ALPHA || width <= 0.0 {
+                continue;
+            }
+            let end = inst.beam_end(ti);
+            let reach = (ct.wave_amplitude + ct.jitter).max(0.0);
+            w += alpha * width * end.length().max(width);
+            for k in 0..=8 {
+                each(end * (k as f32 / 8.0), width.max(reach));
+            }
+        }
+    }
     w
 }
 
@@ -923,6 +945,40 @@ mod tests {
         // A loop has no end to reach — one lifetime, and past that it repeats.
         doc.playback = VfxPlaybackDoc::Looping;
         assert!((span_ceiling(&doc) - 0.9).abs() < 1e-5);
+    }
+
+    /// **An effect made only of beams is seen for its whole life.** A beam has
+    /// no particles, and the measure counted only particles, so a lightning
+    /// stroke of beams was framed on nothing and reported as showing nothing.
+    /// The one-shot itself lives its lifetime with no particle to hold it open.
+    #[test]
+    fn a_beam_only_one_shot_is_visible_for_its_life() {
+        use floptle_vfx::{EffectInstance, Look, ParticleEffect, Playback, RenderMode, Track};
+        let fx = std::sync::Arc::new(
+            ParticleEffect {
+                lifetime: 0.45,
+                playback: Playback::OneShot,
+                tracks: vec![Track {
+                    look: Look { render: RenderMode::Beam { texture: None }, ..Look::default() },
+                    beam_end: Vec3::new(0.0, 40.0, 0.0),
+                    jitter: 1.0,
+                    ..Track::default()
+                }],
+                ..ParticleEffect::default()
+            }
+            .compile(),
+        );
+        let (first, last) =
+            measure(&fx, 0.45, floptle_core::transform::Transform::IDENTITY).expect("a beam is something to see");
+        assert!(first < 0.05 && last > 0.4, "visible over {first}..{last}");
+        let mut framed = Vec::new();
+        let mut inst = EffectInstance::new(std::sync::Arc::clone(&fx), 1);
+        inst.advance(0.2, crate::vfx::VFX_GRAVITY);
+        assert!(!inst.is_done(), "a beam-only one-shot ended before its lifetime");
+        weigh(&inst, |p, _| framed.push(p));
+        assert!(framed.iter().any(|p| p.y > 30.0), "framed on the beam's far end too");
+        inst.advance(0.3, crate::vfx::VFX_GRAVITY);
+        assert!(inst.is_done());
     }
 
     /// The times reach the caller through the file names, so they have to be in

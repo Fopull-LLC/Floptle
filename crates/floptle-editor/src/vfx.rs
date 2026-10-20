@@ -254,6 +254,9 @@ pub struct VfxSystem {
     /// Monotonic spawn counter — the detached seed ordinal, so repeats at a fixed
     /// point don't march in lockstep (the live pool length would collide as it reaps).
     detached_seq: u32,
+    /// The game's wind (`weather.*`) and the time it blows at, refreshed each
+    /// Play frame: what a track's `Wind` force carries its particles on.
+    pub wind: (floptle_core::weather::WindField, f64),
     /// The Particles tab's edit-mode preview (drawn only outside Play).
     pub preview: Option<VfxPreview>,
     /// Each node instance's frame and the frame's pose at its last advance,
@@ -263,7 +266,126 @@ pub struct VfxSystem {
     node_tints: HashMap<Entity, [f32; 4]>,
     /// The level's shape as particles resting on it last saw it — see
     /// [`Self::note_level`].
-    level_revision: Option<u64>,
+    level: LevelWatch,
+}
+
+/// One collider as a resting particle cares about it: which node it is, and
+/// its shape's own bound. The bound is the shape's, not where it stands, so a
+/// planet on rails re-anchoring its terrain every tick changes nothing here.
+#[derive(Clone, Copy, PartialEq)]
+struct LevelSig {
+    eid: Option<u32>,
+    bound: Option<([u32; 3], u32)>,
+    /// Where it stands in the world, for waking what rests near it.
+    at: Option<(floptle_core::math::DVec3, f64)>,
+}
+
+/// What changed in the level since the last frame, as resting particles
+/// need to hear it.
+#[derive(Debug, PartialEq)]
+pub enum LevelChange {
+    Nothing,
+    /// Something without a bound changed (a terrain field was edited), or the
+    /// level was replaced: every resting particle asks again.
+    Everywhere,
+    /// Colliders arrived, left or were rebuilt here: `(world centre, radius)`.
+    Near(Vec<(floptle_core::math::DVec3, f64)>),
+}
+
+impl LevelChange {
+    /// Wake what rests where the level changed.
+    pub fn wake(&self, inst: &mut floptle_vfx::EffectInstance) {
+        match self {
+            LevelChange::Nothing => {}
+            LevelChange::Everywhere => inst.wake_resting(),
+            // A particle rests on a surface, which is within a skin of the
+            // changed bound; a metre of slack covers the skin and the f32
+            // rounding of a bound far from the origin. (A terrain chunk's
+            // bound already carries a voxel of its own.)
+            LevelChange::Near(regions) => {
+                for (c, r) in regions {
+                    inst.wake_resting_near(*c, r + 1.0);
+                }
+            }
+        }
+    }
+}
+
+/// The level as particles last saw it, so a frame can say where it changed.
+///
+/// A level revision woke every resting particle in the scene whenever
+/// anything anywhere changed. A game whose world never holds still — a
+/// statue rebuilt as it turns, a node with a collider streamed in a kilometre
+/// away — woke them every tick, and landed debris cost a ray a particle a
+/// frame forever. Now the change is placed, and only what rests near it wakes.
+#[derive(Default)]
+pub struct LevelWatch {
+    sigs: Vec<LevelSig>,
+    edits: Option<u64>,
+}
+
+impl LevelWatch {
+    /// Compare the level with last frame's.
+    pub fn changes(&mut self, world: &floptle_physics::PhysicsWorld) -> LevelChange {
+        let bits = |v: floptle_core::math::Vec3| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()];
+        let now: Vec<LevelSig> = world
+            .colliders
+            .iter()
+            .map(|c| LevelSig {
+                eid: c.eid,
+                bound: c.shape.bounds().map(|(centre, r)| (bits(centre), r.to_bits())),
+                at: c.bounds().map(|(centre, r)| (world.origin + centre.as_dvec3(), r as f64)),
+            })
+            .collect();
+        let Some(since) = self.edits.replace(world.level_edits) else {
+            self.sigs = now;
+            return LevelChange::Nothing;
+        };
+        let prev = std::mem::replace(&mut self.sigs, now);
+        // In-place edits first: a terrain re-mesh says which chunks it was, so
+        // only what rests on those wakes. An edit that names no place, or one
+        // the log no longer holds, could be anywhere.
+        let mut near = Vec::new();
+        if world.level_edits != since {
+            let log = &world.level_edit_log;
+            if log.front().is_none_or(|(seq, _)| *seq > since + 1) {
+                return LevelChange::Everywhere;
+            }
+            for (_, region) in log.iter().filter(|(seq, _)| *seq > since) {
+                match region {
+                    Some(r) => near.push(*r),
+                    None => return LevelChange::Everywhere,
+                }
+            }
+        }
+        let same = |a: &LevelSig, b: &LevelSig| a.eid == b.eid && a.bound == b.bound;
+        if prev.len() == self.sigs.len() && prev.iter().zip(&self.sigs).all(|(a, b)| same(a, b)) {
+            return if near.is_empty() { LevelChange::Nothing } else { LevelChange::Near(near) };
+        }
+        // What is in one list and not the other, either way, counted so two
+        // colliders of one node are two.
+        type Key = (Option<u32>, Option<([u32; 3], u32)>);
+        let mut count: HashMap<Key, i32> = HashMap::new();
+        for s in &prev {
+            *count.entry((s.eid, s.bound)).or_default() += 1;
+        }
+        for s in &self.sigs {
+            *count.entry((s.eid, s.bound)).or_default() -= 1;
+        }
+        // Positive: in last frame's list and gone now. Negative: new.
+        for (s, side) in prev.iter().map(|s| (s, 1)).chain(self.sigs.iter().map(|s| (s, -1))) {
+            let n = count.get_mut(&(s.eid, s.bound)).expect("counted");
+            if *n * side <= 0 {
+                continue;
+            }
+            *n -= side;
+            match s.at {
+                Some(region) => near.push(region),
+                None => return LevelChange::Everywhere,
+            }
+        }
+        if near.is_empty() { LevelChange::Nothing } else { LevelChange::Near(near) }
+    }
 }
 
 impl Default for VfxSystem {
@@ -275,10 +397,11 @@ impl Default for VfxSystem {
             max_detached: 256,
             detached_dropped: 0,
             detached_seq: 0,
+            wind: Default::default(),
             preview: None,
             node_frames: HashMap::new(),
             node_tints: HashMap::new(),
-            level_revision: None,
+            level: LevelWatch::default(),
         }
     }
 }
@@ -289,20 +412,23 @@ pub(crate) fn effect_stem(key: &str) -> &str {
 }
 
 impl VfxSystem {
-    /// Tell the particles what shape the level is in this frame
-    /// (`PhysicsWorld::level_revision`). When it changed, every particle
-    /// resting on it wakes and asks it again: the ground under a pile of
-    /// debris may have been dug out or streamed away.
-    pub fn note_level(&mut self, revision: Option<u64>) {
-        if revision == self.level_revision {
-            return;
-        }
-        self.level_revision = revision;
+    /// Tell the particles what shape the level is in this frame. Where it
+    /// changed, the particles resting there wake and ask it again: the ground
+    /// under a pile of debris may have been dug out or streamed away. Resting
+    /// particles anywhere else stay as they are.
+    pub fn note_level(&mut self, world: Option<&floptle_physics::PhysicsWorld>) {
+        let change = match world {
+            Some(w) => self.level.changes(w),
+            None => {
+                self.level = LevelWatch::default();
+                LevelChange::Nothing
+            }
+        };
         for (_, inst) in self.instances.values_mut() {
-            inst.wake_resting();
+            change.wake(inst);
         }
         for d in &mut self.detached {
-            d.inst.wake_resting();
+            change.wake(&mut d.inst);
         }
     }
 
@@ -551,6 +677,7 @@ impl VfxSystem {
                 _ => None,
             }
             .unwrap_or(emitter.rotation * Vec3::Y);
+            inst.wind = wind_at(&self.wind, emitter.translation);
             inst.advance_in_level(dt, g, emitter, level);
         }
         // Spawn for play-on-start systems without an instance: an asset swapped
@@ -591,6 +718,7 @@ impl VfxSystem {
             d.rot = emitter.rotation;
             d.scale = emitter.scale.x;
             let g = grav_at(d.pos, d.inst.gravity_mode());
+            d.inst.wind = wind_at(&self.wind, emitter.translation);
             d.inst.advance_moving_in_level(dt, g, emitter, d.vel, level);
             // Carry the emit point along with the inherited motion so a still-emitting
             // effect keeps pace with the vessel it was fired from. In a frame the
@@ -925,6 +1053,9 @@ pub fn starter_effect_doc(name: &str) -> VfxEffectDoc {
         wave_amplitude: 0.0,
         wave_frequency: 2.0,
         scroll: 0.0,
+        jitter: 0.0,
+        jitter_rate: 0.0,
+        jitter_seed: 0,
         lit: false,
         translucency: 0.0,
         soft: floptle_scene::vfx::DEFAULT_SOFT,
@@ -1175,6 +1306,9 @@ pub fn effect_from_doc(doc: &VfxEffectDoc) -> ParticleEffect {
                 wave_amplitude: t.wave_amplitude,
                 wave_frequency: t.wave_frequency,
                 scroll: t.scroll,
+                jitter: t.jitter,
+                jitter_rate: t.jitter_rate,
+                jitter_seed: t.jitter_seed,
             })
             .collect(),
         gravity_mode: match doc.gravity_mode {
@@ -1208,6 +1342,12 @@ fn flipbook_from_doc(f: &VfxFlipbookDoc) -> Flipbook {
     }
 }
 
+/// The wind at an effect's emitter: one sample per effect per frame, since an
+/// effect is small beside the eddies and cells a wind is made of.
+fn wind_at(wind: &(floptle_core::weather::WindField, f64), p: DVec3) -> Vec3 {
+    if wind.0.is_empty() { Vec3::ZERO } else { wind.0.at(p, wind.1) }
+}
+
 fn force_from_doc(f: &VfxForceDoc) -> Force {
     match *f {
         VfxForceDoc::Directional { dir, strength } => {
@@ -1222,6 +1362,7 @@ fn force_from_doc(f: &VfxForceDoc) -> Force {
             strength,
         },
         VfxForceDoc::Turbulence { frequency, strength } => Force::Turbulence { frequency, strength },
+        VfxForceDoc::Wind { coupling } => Force::Wind { coupling },
     }
 }
 
@@ -1621,5 +1762,127 @@ mod profile_tests {
         lamps.light(&mut off, Some(1));
         assert!(on[0].params[1] > 0.4, "{:?}", on[0].params);
         assert_eq!(off[0].params[1], 0.0, "a layer the light does not reach");
+    }
+}
+
+#[cfg(test)]
+mod level_watch_tests {
+    use super::*;
+    use floptle_physics::{PhysicsWorld, Plane, SphereShape};
+
+    fn ball(w: &mut PhysicsWorld, eid: u32, at: DVec3) {
+        w.add_collider_tagged(at, Box::new(SphereShape { center: Vec3::ZERO, radius: 2.0 }), 0, Some(eid), false);
+    }
+
+    /// **A level that only moves, or rebuilds a piece unchanged, wakes
+    /// nothing; a piece that changes wakes only around itself.** A planet on
+    /// rails re-anchors its colliders every tick, and a turning static node
+    /// is rebuilt every tick; either used to read as "the level changed" and
+    /// wake every resting particle in the scene, every tick.
+    #[test]
+    fn the_level_says_where_it_changed() {
+        let mut w = PhysicsWorld::default();
+        ball(&mut w, 1, DVec3::new(0.0, 0.0, 0.0));
+        ball(&mut w, 2, DVec3::new(1000.0, 0.0, 0.0));
+        let mut watch = LevelWatch::default();
+        assert_eq!(watch.changes(&w), LevelChange::Nothing, "the first look is a baseline");
+        assert_eq!(watch.changes(&w), LevelChange::Nothing);
+
+        // On rails: everything moves 1.45 m.
+        for c in &mut w.colliders {
+            let a = c.anchor + DVec3::new(1.45, 0.0, 0.0);
+            c.re_anchor(a, DVec3::ZERO);
+        }
+        assert_eq!(watch.changes(&w), LevelChange::Nothing, "moving on rails is not a change of shape");
+
+        // A turned static, rebuilt as it was: out of the list and back in at the end.
+        let c = w.colliders.remove(0);
+        w.colliders.push(c);
+        assert_eq!(watch.changes(&w), LevelChange::Nothing, "a rebuild that changed nothing");
+
+        // A collider arrives a kilometre out: only there.
+        ball(&mut w, 3, DVec3::new(0.0, 0.0, 1000.0));
+        match watch.changes(&w) {
+            LevelChange::Near(r) => {
+                assert_eq!(r.len(), 1, "{r:?}");
+                assert!((r[0].0 - DVec3::new(0.0, 0.0, 1000.0)).length() < 1e-3 && (r[0].1 - 2.0).abs() < 1e-6);
+            }
+            other => panic!("a new collider far away should wake only near it, not {other:?}"),
+        }
+        // …and leaves.
+        w.colliders.pop();
+        assert!(matches!(watch.changes(&w), LevelChange::Near(r) if r.len() == 1));
+
+        // A field edit that names no place, or anything without a bound, is
+        // everywhere.
+        w.level_edits += 1;
+        assert_eq!(watch.changes(&w), LevelChange::Everywhere);
+        w.add_collider(Box::new(Plane::ground(0.0)));
+        assert_eq!(watch.changes(&w), LevelChange::Everywhere);
+    }
+
+    /// **A terrain re-mesh wakes only what rests on the chunks it re-meshed.**
+    /// Two hundred particles at rest on a planet's ground; a collision chunk
+    /// 30 m away re-meshes, as terrain streaming around a player does every
+    /// few frames, and not one wakes. The chunk under them re-meshes and every
+    /// one does. A re-mesh used to bump one counter that named no place, so
+    /// landed debris near streaming terrain cast a ray a particle a frame.
+    #[test]
+    fn a_terrain_re_mesh_wakes_only_what_rests_on_it() {
+        use floptle_vfx::{Clip, Emit, ParticleEffect, Space, Track, Value, ValueOrCurve};
+        // Far from the origin, where f32 rounding is real.
+        let anchor = DVec3::new(0.0, 4.9e6, 0.0);
+        let field = floptle_field::ChunkField::new(0.5);
+        let ecs = World::new();
+        let mut sim = floptle_physics::Sim::build(&ecs, &[], floptle_physics::GravityField::uniform(Vec3::ZERO), anchor);
+        sim.world.add_collider_tagged(anchor, Box::new(floptle_physics::ChunkTerrain::new(field)), 0, Some(7), false);
+        let mut watch = LevelWatch::default();
+        assert_eq!(watch.changes(&sim.world), LevelChange::Nothing);
+
+        // 200 particles landed on the ground at the anchor, at rest.
+        let mut t = Track {
+            space: Space::World,
+            gravity: 1.0,
+            velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
+            collide: Some(floptle_vfx::Collide { bounce: 0.0, friction: 1.0, die: false }),
+            ..Track::default()
+        };
+        t.clips = vec![Clip {
+            start: 0.0,
+            end: 30.0,
+            lifetime_jitter: 0.0,
+            emit: Emit::Burst { count: 200, count_jitter: 0.0, pulses: 1, interval: 0.0, interval_jitter: 0.0 },
+        }];
+        let fx = std::sync::Arc::new(ParticleEffect { lifetime: 30.0, tracks: vec![t], ..ParticleEffect::default() }.compile());
+        let mut inst = floptle_vfx::EffectInstance::new(fx, 3);
+        let ground = |from: DVec3, to: DVec3| {
+            let y = anchor.y;
+            (from.y >= y && to.y < y).then(|| (from + (to - from) * ((from.y - y) / (from.y - to.y)), Vec3::Y))
+        };
+        let level: floptle_vfx::LevelHit<'_> = &ground;
+        let at = floptle_core::transform::Transform::from_translation(anchor + DVec3::new(0.0, 0.5, 0.0));
+        for _ in 0..90 {
+            inst.advance_in_level(1.0 / 60.0, Vec3::new(0.0, -9.81, 0.0), at, Some(level));
+        }
+        assert_eq!((inst.alive(), inst.resting()), (200, 200), "the pile did not come to rest");
+
+        // A chunk two chunks over (16 m chunks at a 0.5 m voxel) re-meshes.
+        let _ = sim.terrain_collider_mut_at(7, &[[2, -1, 0]]);
+        let change = watch.changes(&sim.world);
+        change.wake(&mut inst);
+        assert_eq!(inst.resting(), 200, "a re-mesh 30 m away woke {} particles ({change:?})", 200 - inst.resting());
+
+        // The chunk under the pile re-meshes.
+        let _ = sim.terrain_collider_mut_at(7, &[[0, -1, 0], [-1, -1, -1]]);
+        watch.changes(&sim.world).wake(&mut inst);
+        assert_eq!(inst.resting(), 0, "a re-mesh under the pile left {} asleep", inst.resting());
+
+        // An edit that names no chunk still wakes everything.
+        for _ in 0..30 {
+            inst.advance_in_level(1.0 / 60.0, Vec3::new(0.0, -9.81, 0.0), at, Some(level));
+        }
+        assert_eq!(inst.resting(), 200);
+        let _ = sim.terrain_collider_mut(7);
+        assert_eq!(watch.changes(&sim.world), LevelChange::Everywhere);
     }
 }

@@ -20,10 +20,13 @@
 //! source, so `Sim::step_body_tick` stays bit-for-bit exact and rollback
 //! resimulation is untouched.
 
-use floptle_core::math::{Quat, Vec3};
+use std::sync::Arc;
+
+use floptle_core::math::{DVec3, Quat, Vec3};
+use floptle_core::water::DeclaredWater;
 
 /// The shape of a body of water.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum WaterShape {
     /// A planet's sea: everything within `radius` of `center` is submerged, and
     /// depth is measured along the radius. The sea's "up" is different at every
@@ -34,10 +37,16 @@ pub enum WaterShape {
     /// its top face, so the surface is flat and the sides are walls — a pool
     /// does not spill sideways.
     Box { center: Vec3, half: Vec3, rot: Quat },
+    /// Water a script declared (`water.addVolume`): a lake fitted to its
+    /// basin on a round world, or a grid of levels, with its current. The
+    /// shape is the one `water.at` answers from, evaluated in f64 world space,
+    /// so the solver and the script cannot disagree about where its surface
+    /// is. `origin` is the sim frame's, which every other shape has folded in.
+    Declared { water: Arc<DeclaredWater>, origin: DVec3 },
 }
 
 /// One body of water in the sim.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct WaterVolume {
     pub shape: WaterShape,
     /// Density, kg/m³ (fresh water ≈ 1000). What decides whether a thing floats
@@ -70,10 +79,10 @@ impl WaterVolume {
         if self.frozen {
             return 0.0;
         }
-        match self.shape {
-            WaterShape::Sphere { center, radius } => (radius - (p - center).length()).max(0.0),
+        match &self.shape {
+            WaterShape::Sphere { center, radius } => (radius - (p - *center).length()).max(0.0),
             WaterShape::Box { center, half, rot } => {
-                let local = rot.inverse() * (p - center);
+                let local = rot.inverse() * (p - *center);
                 // Outside the footprint at all → not in this lake, whatever the
                 // height says. (A pool's sides are walls, not a level set.)
                 if local.x.abs() > half.x || local.z.abs() > half.z || local.y < -half.y {
@@ -81,15 +90,44 @@ impl WaterVolume {
                 }
                 (half.y - local.y).max(0.0)
             }
+            WaterShape::Declared { water, origin } => water.at(*origin + p.as_dvec3()).depth as f32,
+        }
+    }
+
+    /// The water's own velocity at `p`, m/s in the sim frame: a river's
+    /// current, zero in still water and out of it. Drag acts on the velocity
+    /// relative to this, so a current carries what floats in it.
+    pub fn flow_at(&self, p: Vec3) -> Vec3 {
+        match &self.shape {
+            WaterShape::Declared { water, origin } if !self.frozen => water.at(*origin + p.as_dvec3()).flow.as_vec3(),
+            _ => Vec3::ZERO,
         }
     }
 
     /// The direction "up" out of the water at `p` — radially outward for a sea,
     /// the box's own +Y for a lake. Buoyancy pushes along this.
     pub fn up_at(&self, p: Vec3) -> Vec3 {
-        match self.shape {
-            WaterShape::Sphere { center, .. } => (p - center).try_normalize().unwrap_or(Vec3::Y),
-            WaterShape::Box { rot, .. } => rot * Vec3::Y,
+        match &self.shape {
+            WaterShape::Sphere { center, .. } => (p - *center).try_normalize().unwrap_or(Vec3::Y),
+            WaterShape::Box { rot, .. } => *rot * Vec3::Y,
+            WaterShape::Declared { water, origin } => water.at(*origin + p.as_dvec3()).up.as_vec3(),
+        }
+    }
+
+    /// Signed metres above this volume's surface at `p` (infinite where it
+    /// has no surface over `p`).
+    fn height_above(&self, p: Vec3) -> f32 {
+        match &self.shape {
+            WaterShape::Sphere { center, radius } => (p - *center).length() - radius,
+            WaterShape::Box { center, half, rot } => {
+                let local = rot.inverse() * (p - *center);
+                if local.x.abs() > half.x || local.z.abs() > half.z {
+                    f32::INFINITY
+                } else {
+                    local.y - half.y
+                }
+            }
+            WaterShape::Declared { water, origin } => water.at(*origin + p.as_dvec3()).above as f32,
         }
     }
 }
@@ -111,6 +149,8 @@ pub struct WaterSample {
     pub density: f32,
     /// The node whose volume this is (`None` when dry).
     pub entity: Option<u32>,
+    /// The water's velocity there, m/s (zero in still water).
+    pub flow: Vec3,
 }
 
 impl WaterField {
@@ -128,6 +168,7 @@ impl WaterField {
                     up: v.up_at(p),
                     density: v.density,
                     entity: Some(v.entity),
+                    flow: v.flow_at(p),
                 };
             }
         }
@@ -185,17 +226,7 @@ impl WaterField {
             if v.frozen {
                 continue;
             }
-            let h = match v.shape {
-                WaterShape::Sphere { center, radius } => (p - center).length() - radius,
-                WaterShape::Box { center, half, rot } => {
-                    let local = rot.inverse() * (p - center);
-                    if local.x.abs() > half.x || local.z.abs() > half.z {
-                        f32::INFINITY
-                    } else {
-                        local.y - half.y
-                    }
-                }
-            };
+            let h = v.height_above(p);
             if h < best {
                 best = h;
             }
@@ -256,19 +287,16 @@ pub fn buoyancy_accel(
     // A shape whose centre is above water still has a wet cap, and `sample`
     // reports dry there — take the nearest volume's properties instead of
     // giving a half-submerged hull no push at all.
-    let (density, drag, ang, up) = match s.entity {
+    let (density, drag, ang, up, flow) = match s.entity {
         Some(_) => {
-            let v = field
-                .volumes
-                .iter()
-                .find(|v| Some(v.entity) == s.entity)
-                .copied()
-                .unwrap_or(field.volumes[0]);
-            (v.density, v.drag, v.angular_drag, s.up)
+            let v = field.volumes.iter().find(|v| Some(v.entity) == s.entity).unwrap_or(&field.volumes[0]);
+            (v.density, v.drag, v.angular_drag, s.up, s.flow)
         }
         None => {
             let v = nearest_volume(field, p)?;
-            (v.density, v.drag, v.angular_drag, v.up_at(p))
+            // A wet cap above the surface rides the current just under it.
+            let below = p - v.up_at(p) * radius.max(1e-4);
+            (v.density, v.drag, v.angular_drag, v.up_at(p), v.flow_at(below))
         }
     };
     let _ = ang;
@@ -278,39 +306,32 @@ pub fn buoyancy_accel(
     // Archimedes: the weight of the fluid displaced, pushed along the water's
     // own up (not −gravity — on a sea they agree, in a tilted tank they do not).
     let buoyant = up * (density * volume * g.length()) / mass;
-    // Quadratic drag over the wet cross-section. Capped at the acceleration
-    // that would bring the body exactly to rest this step: an explicit
-    // quadratic term is unstable at high speed and would otherwise fling a
-    // fast-entering hull back out harder than it arrived.
-    let speed = vel.length();
+    // Quadratic drag over the wet cross-section, on the velocity relative to
+    // the water, so a current carries a floating crate downstream. Capped at
+    // the acceleration that would bring the body exactly to the water's
+    // speed this step: an explicit quadratic term is unstable at high speed
+    // and would otherwise fling a fast-entering hull back out harder than it
+    // arrived.
+    let rel = vel - flow;
+    let speed = rel.length();
     let drag_acc = if speed > 1e-5 {
         let area = core::f32::consts::PI * r * r * f;
         let mag = (0.5 * density * drag * area * speed * speed) / mass;
         let max = speed / dt.max(1e-5);
-        -vel / speed * mag.min(max)
+        -rel / speed * mag.min(max)
     } else {
         Vec3::ZERO
     };
     Some(buoyant + drag_acc)
 }
 
-fn nearest_volume(field: &WaterField, p: Vec3) -> Option<WaterVolume> {
-    field
-        .volumes
-        .iter()
-        .filter(|v| !v.frozen)
-        .min_by(|a, b| {
-            let da = match a.shape {
-                WaterShape::Sphere { center, radius } => ((p - center).length() - radius).abs(),
-                WaterShape::Box { center, .. } => (p - center).length(),
-            };
-            let db = match b.shape {
-                WaterShape::Sphere { center, radius } => ((p - center).length() - radius).abs(),
-                WaterShape::Box { center, .. } => (p - center).length(),
-            };
-            da.total_cmp(&db)
-        })
-        .copied()
+fn nearest_volume(field: &WaterField, p: Vec3) -> Option<&WaterVolume> {
+    let distance = |v: &WaterVolume| match &v.shape {
+        WaterShape::Sphere { center, radius } => ((p - *center).length() - radius).abs(),
+        WaterShape::Box { center, .. } => (p - *center).length(),
+        WaterShape::Declared { .. } => v.height_above(p).abs(),
+    };
+    field.volumes.iter().filter(|v| !v.frozen).min_by(|a, b| distance(a).total_cmp(&distance(b)))
 }
 
 #[cfg(test)]
@@ -422,6 +443,74 @@ mod tests {
         assert!(p.y > 95.0, "it sank: {}", p.y);
     }
 
+    /// A script's lake on a round world, 805 m from the planet's centre and 60 m
+    /// across, flowing east at `current` m/s.
+    fn planet_lake(current: Vec3) -> WaterField {
+        use floptle_core::water::{DeclaredWater, Surface};
+        let water = DeclaredWater {
+            id: 1,
+            anchor: None,
+            frame: floptle_core::scatter::Frame::IDENTITY,
+            surface: Surface::Lake { radius: 805.0, axis: DVec3::Y, reach: 60.0 },
+            density: 1000.0,
+            drag: 1.0,
+            angular_drag: 1.0,
+            current,
+        };
+        WaterField {
+            volumes: vec![WaterVolume {
+                shape: WaterShape::Declared { water: Arc::new(water), origin: DVec3::new(0.0, 800.0, 0.0) },
+                density: 1000.0,
+                drag: 1.0,
+                angular_drag: 1.0,
+                frozen: false,
+                entity: 9,
+            }],
+        }
+    }
+
+    /// **A crate floats on a script's lake, at the lake's own level.** Its
+    /// surface is part of the planet's sphere, so the crate settles where the
+    /// script's `water.at` says the surface is, in the sim's frame.
+    #[test]
+    fn a_crate_floats_on_a_declared_lake() {
+        let f = planet_lake(Vec3::ZERO);
+        let g = Vec3::new(0.0, -9.81, 0.0);
+        let (r, dt) = (0.5, 1.0 / 60.0);
+        let mass = 400.0 * 4.0 / 3.0 * core::f32::consts::PI * r * r * r;
+        // The sim frame sits 800 m up the planet's +Y: the surface is at y = 5.
+        let (mut p, mut v) = (Vec3::new(0.0, 7.0, 0.0), Vec3::ZERO);
+        for _ in 0..1500 {
+            v += (g + buoyancy_accel(&f, p, r, mass, v, g, dt).unwrap_or(Vec3::ZERO)) * dt;
+            p += v * dt;
+        }
+        assert!(v.length() < 0.1, "still moving at {}", v.length());
+        assert!((p.y - 5.0).abs() < r, "floats at {} against a surface at 5", p.y);
+        // Past the farthest shore it is dry, however low.
+        assert_eq!(f.depth_at(Vec3::new(80.0, 0.0, 0.0)), 0.0);
+    }
+
+    /// **A current carries what floats in it.** Drag acts on the velocity
+    /// relative to the water, so a 1 kg crate dropped still into a 1 m/s river
+    /// is going nearly 1 m/s downstream within five seconds. Against still water
+    /// the same drag would only ever slow it down.
+    #[test]
+    fn a_current_carries_a_floating_crate_downstream() {
+        let f = planet_lake(Vec3::new(1.0, 0.0, 0.0));
+        let dt = 1.0 / 60.0;
+        let (mass, r) = (1.0, 0.1);
+        let (mut p, mut v) = (Vec3::new(0.0, 5.0, 0.0), Vec3::ZERO);
+        for _ in 0..300 {
+            // The planet's own gravity, toward its centre 800 m below.
+            let g = -(p + Vec3::new(0.0, 800.0, 0.0)).normalize() * 9.81;
+            v += (g + buoyancy_accel(&f, p, r, mass, v, g, dt).unwrap_or(Vec3::ZERO)) * dt;
+            p += v * dt;
+        }
+        assert!(v.x >= 0.8, "only {} m/s downstream after 5 s", v.x);
+        assert!(v.x <= 1.0 + 1e-3, "faster than the water: {}", v.x);
+        assert_eq!(f.sample(Vec3::new(0.0, 4.0, 0.0)).flow, Vec3::new(1.0, 0.0, 0.0));
+    }
+
     /// …and the other half of the same line: a dense body sinks. Buoyancy that
     /// floats everything is just an upward force.
     #[test]
@@ -507,7 +596,7 @@ mod tests {
             entity: 9,
         };
         let p = Vec3::new(0.0, -1.0, 0.0);
-        let a = WaterField { volumes: vec![tank, ocean] };
+        let a = WaterField { volumes: vec![tank.clone(), ocean.clone()] };
         let b = WaterField { volumes: vec![ocean, tank] };
         assert_eq!(a.sample(p).entity, b.sample(p).entity, "order changed the answer");
         assert_eq!(a.sample(p).density, 1300.0, "the deeper (tank) volume should win");

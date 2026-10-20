@@ -760,6 +760,9 @@ impl Editor {
                 let map_draws = crate::shading::with_shadow_casters(&instances, &shadow_casters);
                 raster.sun_shadow_pass(gpu, globals, &map_draws, &flsl_draws, &skin_draws);
                 gpu_mark!("opaque + lighting");
+                // The surfaces that show the scene behind them wait for the
+                // capture the glass takes below, when there is one to take.
+                raster.defer_scene_readers(glass && scene_history.is_some());
                 raster.draw_scene_with(
                     gpu, color, depth, globals, &instances, &flsl_draws, &skin_draws,
                     raster_clear, Some(raymarch.field_bind()),
@@ -835,6 +838,15 @@ impl Editor {
                         raster.draw_transmissive(
                             gpu, color, depth, globals, &instances, &skin_draws,
                             Some(raymarch.field_bind()), &cuts, layer,
+                        );
+                    }
+                    // Surface shaders that read `sceneColor`, on the last
+                    // capture: everything behind them, the glass included.
+                    if raster.flsl_draws_read_scene(&flsl_draws) {
+                        h.capture(gpu, color, view_proj, cam.world_position);
+                        raster.draw_flsl_scene_readers(
+                            gpu, color, depth, globals, &flsl_draws, &skin_draws,
+                            Some(raymarch.field_bind()),
                         );
                     }
                 }

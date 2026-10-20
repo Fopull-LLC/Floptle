@@ -503,6 +503,11 @@ pub struct SurfaceExtras {
     /// How far the bent ray travels inside the material — what turns an index of
     /// refraction into an actual displacement on screen.
     pub thickness: f32,
+    /// How far the wind bends it ([`floptle_core::Material::sway`]), applied
+    /// in the vertex stage against [`Globals::time`]`[1..4]`, the wind.
+    pub sway: f32,
+    /// Key light through the back ([`floptle_core::Material::backlight`]).
+    pub backlight: f32,
 }
 
 impl Default for SurfaceExtras {
@@ -519,6 +524,8 @@ impl Default for SurfaceExtras {
             transmission: 0.0,
             ior: 1.5,
             thickness: 0.5,
+            sway: 0.0,
+            backlight: 0.0,
         }
     }
 }
@@ -560,6 +567,8 @@ impl SurfaceExtras {
             transmission: m.transmission,
             ior: m.ior,
             thickness: m.thickness,
+            sway: m.sway,
+            backlight: m.backlight,
         }
     }
 
@@ -600,7 +609,7 @@ impl SurfaceExtras {
         [
             [self.roughness, self.metallic, self.normal_strength, self.occlusion_strength],
             [self.flags() as f32, self.retro.jitter, self.reflectivity, self.transmission],
-            [self.ior, self.thickness, 0.0, 0.0],
+            [self.ior, self.thickness, self.sway, self.backlight],
         ]
     }
 
@@ -863,11 +872,19 @@ pub struct Raster {
     /// its own file carrying the same 4096×4096 skin, was eleven copies of
     /// 64 MB. Kept as long as the meshes are, which is the session.
     mesh_textures: HashMap<u64, wgpu::Texture>,
+    /// Material textures registered through [`Raster::register_texture_shared`],
+    /// by their pixels and sampling. A kit of models pointing at one texture
+    /// library binds each map once, not once per model.
+    shared_textures: HashMap<(u64, TexSampling), TexId>,
     /// Standalone material textures (decoupled from meshes), bound per-instance so
     /// a Material can re-texture any shape. Indexed by [`TexId`].
     textures: Vec<TexBind>,
     /// Compiled `.flsl` fragment pipelines, indexed by [`FlslShaderId`].
     flsl_shaders: Vec<FlslShader>,
+    /// This frame's host will capture the scene and call
+    /// [`Raster::draw_flsl_scene_readers`], so the main pass leaves the
+    /// shaders that read `sceneColor` to it. See [`Raster::defer_scene_readers`].
+    scene_readers_deferred: bool,
     /// Live material bindings (group(3) params + textures), indexed by [`FlslBindingId`].
     flsl_bindings: Vec<FlslBinding>,
     /// The group-0/1/2 layouts, kept so flsl pipelines can be built later.
@@ -995,6 +1012,9 @@ struct FlslShader {
     /// to have run this frame. Recorded at compile time rather than asked of the
     /// source later: this is the one place that knows what the chunk contains.
     reads_scene_depth: bool,
+    /// The chunk calls `flsl_frag_scene_color`: it shows the scene behind it,
+    /// so it is drawn after that scene is captured, as glass is.
+    reads_scene_color: bool,
 }
 
 struct FlslBinding {
@@ -1529,6 +1549,8 @@ impl Raster {
             instance_cap,
             meshes: Vec::new(),
             mesh_textures: HashMap::new(),
+            scene_readers_deferred: false,
+            shared_textures: HashMap::new(),
             textures: Vec::new(),
             flsl_shaders: Vec::new(),
             flsl_bindings: Vec::new(),
@@ -1733,6 +1755,27 @@ impl Raster {
     /// this builds the pipeline unconditionally. `replace` swaps an existing
     /// shader in place (hot reload): live bindings stay valid when the slot
     /// count is unchanged; the editor rebuilds them right after anyway.
+    /// How many texture slots a material shader can use on this device.
+    ///
+    /// The engine binds [`FLSL_ENGINE_TEXTURES`] sampled textures to every
+    /// surface's fragment stage (shadows, the terrain palette, the surface's
+    /// own maps, the field, GI, the sky, reflections), and a shader's own
+    /// slots come on top, so what is left of the device's per-stage limit is
+    /// what a shader has. Desktop GPUs are asked for enough for every slot
+    /// FLSL allows; a device that offers only wgpu's default of 16 has none.
+    pub fn flsl_texture_slots(gpu: &Gpu) -> usize {
+        let l = gpu.device.limits();
+        flsl_slots_within(l.max_sampled_textures_per_shader_stage, l.max_samplers_per_shader_stage)
+    }
+
+    /// Can a material shader with `tex_slots` texture slots be built on this
+    /// device? The refusal names the numbers, so a shader that cannot build
+    /// says why instead of failing pipeline validation.
+    pub fn flsl_fits(gpu: &Gpu, tex_slots: usize) -> Result<(), String> {
+        let l = gpu.device.limits();
+        flsl_fits_within(tex_slots, l.max_sampled_textures_per_shader_stage, l.max_samplers_per_shader_stage)
+    }
+
     pub fn register_flsl_shader(
         &mut self,
         gpu: &Gpu,
@@ -1910,7 +1953,8 @@ impl Raster {
             opaque,
             // The transpiler emits this identifier and nothing else does, so
             // its presence in the generated chunk is the question being asked.
-            reads_scene_depth: chunk.contains("flsl_surface_gap"),
+            reads_scene_depth: chunk.contains("flsl_surface_gap") || chunk.contains("flsl_frag_scene_depth("),
+            reads_scene_color: chunk.contains("flsl_frag_scene_color("),
             chunk: chunk.to_string(),
             blend,
         };
@@ -1966,6 +2010,25 @@ impl Raster {
     /// — opaque flsl instances also join the depth prepass.
     pub fn flsl_shader_is_opaque(&self, id: FlslShaderId) -> bool {
         self.flsl_shaders.get(id.0 as usize).is_some_and(|s| s.opaque)
+    }
+
+    /// Does any `.flsl` draw show the scene behind it (`sceneColor`)? The
+    /// host captures the scene and draws those last when it does.
+    pub fn flsl_draws_read_scene(&self, draws: &[FlslDraw]) -> bool {
+        draws.iter().any(|(_, _, binding, _)| {
+            self.flsl_bindings
+                .get(binding.0 as usize)
+                .and_then(|b| self.flsl_shaders.get(b.shader.0 as usize))
+                .is_some_and(|s| s.reads_scene_color)
+        })
+    }
+
+    /// Will this frame capture the scene and then draw the shaders that read
+    /// it ([`Self::draw_flsl_scene_readers`])? Set before the main pass. When
+    /// it is not, they draw in the main pass, seeing whatever the last capture
+    /// held (or black), rather than not at all.
+    pub fn defer_scene_readers(&mut self, deferred: bool) {
+        self.scene_readers_deferred = deferred;
     }
 
     /// Does any of `draws` use a shader that reads the opaque depth prepass
@@ -2422,8 +2485,31 @@ impl Raster {
         id
     }
 
+    /// [`Self::register_texture`] for a picture that many models may bring:
+    /// the same pixels with the same sampling answer the same id, and the
+    /// pixels go to the GPU once, shared with any mesh that wears them as its
+    /// own texture. A model's maps come through here, so twenty-five models
+    /// pointing at one texture library cost what one does.
+    pub fn register_texture_shared(&mut self, gpu: &Gpu, data: &TextureData, sampling: TexSampling) -> TexId {
+        let mips = matches!(sampling.filter, TexFilter::SmoothMipmaps);
+        let key = (picture_key(data, mips), sampling);
+        if let Some(&id) = self.shared_textures.get(&key) {
+            return id;
+        }
+        let texture = self.mesh_textures.entry(key.0).or_insert_with(|| upload_texture_mips(gpu, data, mips)).clone();
+        let id = TexId(self.textures.len() as u32);
+        let bind = self.tex_bind_from(gpu, texture, sampling);
+        self.textures.push(bind);
+        self.shared_textures.insert(key, id);
+        id
+    }
+
     fn tex_bind(&mut self, gpu: &Gpu, data: &TextureData, sampling: TexSampling) -> TexBind {
         let texture = upload_texture_mips(gpu, data, matches!(sampling.filter, TexFilter::SmoothMipmaps));
+        self.tex_bind_from(gpu, texture, sampling)
+    }
+
+    fn tex_bind_from(&mut self, gpu: &Gpu, texture: wgpu::Texture, sampling: TexSampling) -> TexBind {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let linear_view = linear_view_of(&texture);
         let sampler = self.sampler_for(gpu, sampling);
@@ -2442,6 +2528,9 @@ impl Raster {
         if self.white_tex == Some(id) {
             return;
         }
+        // A shared picture released by one holder is gone for the rest too,
+        // so the next model to bring it uploads it afresh.
+        self.shared_textures.retain(|_, t| *t != id);
         let blank = TextureData { pixels: vec![0; 4], width: 1, height: 1 };
         self.textures[id.0 as usize] = self.tex_bind(gpu, &blank, sampling);
     }
@@ -3248,13 +3337,7 @@ impl Raster {
     /// mesh brought the same pixels, otherwise a new one. With and without a
     /// mip chain are two copies: the same pixels sampled two ways.
     fn mesh_texture(&mut self, gpu: &Gpu, t: &TextureData, mips: bool) -> wgpu::Texture {
-        use std::hash::Hasher;
-        let mut h = rustc_hash::FxHasher::default();
-        h.write_u32(t.width);
-        h.write_u32(t.height);
-        h.write_u8(mips as u8);
-        h.write(&t.pixels);
-        self.mesh_textures.entry(h.finish()).or_insert_with(|| upload_texture_mips(gpu, t, mips)).clone()
+        self.mesh_textures.entry(picture_key(t, mips)).or_insert_with(|| upload_texture_mips(gpu, t, mips)).clone()
     }
 
     /// How many mip levels mesh `id`'s own texture has; `None` without one.
@@ -3537,8 +3620,12 @@ impl Raster {
 
         // flsl buckets: (mesh, texture, binding) — phase comes from the SHADER
         // (its blend declaration), not the instance alpha.
-        let flsl_opaque = self.bucket_flsl(flsl, skins, &mut raws, |sh| sh.opaque);
-        let flsl_blended = self.bucket_flsl(flsl, skins, &mut raws, |sh| !sh.opaque);
+        // A shader that shows the scene behind it waits for that scene to be
+        // captured, when the host says it will be.
+        let deferred = self.scene_readers_deferred;
+        let here = |sh: &FlslShader| !(deferred && sh.reads_scene_color);
+        let flsl_opaque = self.bucket_flsl(flsl, skins, &mut raws, |sh| sh.opaque && here(sh));
+        let flsl_blended = self.bucket_flsl(flsl, skins, &mut raws, |sh| !sh.opaque && here(sh));
         // Skinned draws split opaque/blended on the same rule and draw in the same
         // two phases — a translucent character is still a translucent character.
         let skin_opaque = self.bucket_skins(skins, &mut raws, is_opaque);
@@ -3621,6 +3708,74 @@ impl Raster {
                 draw(&mut rp, &skin_blended);
             }
             draw_flsl(&mut rp, &flsl_blended);
+        }
+        gpu.queue.submit([encoder.finish()]);
+    }
+
+    /// Draw the `.flsl` surfaces that read `sceneColor`, once the scene behind
+    /// them has been captured into the `field` bind group's scene texture: the
+    /// same terms glass gets in [`Self::draw_transmissive`]. Water refracts
+    /// the ground under it this way, without seeing itself. Depth is tested
+    /// and, for an opaque shader, written.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_flsl_scene_readers(
+        &mut self,
+        gpu: &Gpu,
+        color: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        globals: Globals,
+        flsl: &[FlslDraw],
+        skins: &[SkinDraw],
+        field: Option<&wgpu::BindGroup>,
+    ) {
+        let mut raws: Vec<InstanceRaw> = Vec::new();
+        let opaque = self.bucket_flsl(flsl, skins, &mut raws, |sh| sh.reads_scene_color && sh.opaque);
+        let blended = self.bucket_flsl(flsl, skins, &mut raws, |sh| sh.reads_scene_color && !sh.opaque);
+        if raws.is_empty() {
+            return;
+        }
+        self.begin_pass(gpu, globals);
+        self.ensure_instances(gpu, raws.len() as u32);
+        gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster-scene-readers") });
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("raster-scene-readers"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rp.set_bind_group(0, &self.globals_bind, &[]);
+            rp.set_bind_group(2, field.unwrap_or(&self.empty_field_bind), &[]);
+            rp.set_vertex_buffer(1, self.instance_buf.slice(..));
+            for &(mesh_idx, tex_key, bind_id, skinned, start, count) in opaque.iter().chain(&blended) {
+                let binding = &self.flsl_bindings[bind_id as usize];
+                let shader = &self.flsl_shaders[binding.shader.0 as usize];
+                let mesh = &self.meshes[mesh_idx];
+                let bind = match tex_key {
+                    Some(t) => &self.textures[t as usize].bind,
+                    None => &mesh.tex_bind,
+                };
+                rp.set_pipeline(if skinned { &shader.skin_pipeline } else { &shader.pipeline });
+                rp.set_bind_group(1, bind, &[]);
+                rp.set_bind_group(3, &binding.bind, &[]);
+                rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
+                rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+            }
         }
         gpu.queue.submit([encoder.finish()]);
     }
@@ -4274,6 +4429,52 @@ impl Raster {
         );
         gpu.queue.submit([encoder.finish()]);
     }
+}
+
+/// The sampled textures the engine binds to every raster surface's fragment
+/// stage before a material shader's own slots: the terrain palette twice and
+/// the sun shadow map (group 0), the surface's six maps (group 1), and the
+/// field, its colour, GI, the depth prepass, the sky, the scene history and
+/// the reflection probes (group 2). Guarded against the layouts by
+/// `tests/flsl_texture_slots.rs`, which builds a shader at exactly the limit
+/// this leaves.
+pub const FLSL_ENGINE_TEXTURES: u32 = 16;
+
+/// Material texture slots a device with these per-stage limits leaves: each
+/// slot is a texture and its sampler, and either can run out.
+pub fn flsl_slots_within(textures: u32, samplers: u32) -> usize {
+    textures.saturating_sub(FLSL_ENGINE_TEXTURES).min(samplers.saturating_sub(FLSL_ENGINE_SAMPLERS)) as usize
+}
+
+/// [`Raster::flsl_fits`] for a device with these per-stage limits.
+pub fn flsl_fits_within(tex_slots: usize, textures: u32, samplers: u32) -> Result<(), String> {
+    let free = flsl_slots_within(textures, samplers);
+    if tex_slots <= free {
+        return Ok(());
+    }
+    Err(format!(
+        "uses {tex_slots} texture slot(s), and this GPU allows {free}: it binds {textures} sampled textures \
+         and {samplers} samplers per fragment stage, and the engine's own lighting takes \
+         {FLSL_ENGINE_TEXTURES} and {FLSL_ENGINE_SAMPLERS} of them. Drop a slot, or build the texture \
+         from noise in the shader"
+    ))
+}
+
+/// The samplers the engine binds beside them: the palette's two and the
+/// shadow comparison (group 0), one per surface map (group 1), and the
+/// field's, the sky's, the scene history's and the probes' (group 2).
+pub const FLSL_ENGINE_SAMPLERS: u32 = 13;
+
+/// A picture's identity on the GPU: its shape, its pixels, and whether it
+/// carries a mip chain (the same pixels with and without are two uploads).
+fn picture_key(t: &TextureData, mips: bool) -> u64 {
+    use std::hash::Hasher;
+    let mut h = rustc_hash::FxHasher::default();
+    h.write_u32(t.width);
+    h.write_u32(t.height);
+    h.write_u8(mips as u8);
+    h.write(&t.pixels);
+    h.finish()
 }
 
 /// Upload an RGBA8 image as a single-level sRGB texture (base-color data is sRGB).

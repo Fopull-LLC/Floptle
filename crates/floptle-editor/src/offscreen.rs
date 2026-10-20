@@ -502,7 +502,7 @@ impl Editor {
             sun_vp,
             sun_map,
             sun_extra,
-            time: [elapsed, 0.0, 0.0, 0.0],
+            time: { let w = self.sway_wind(cam.world_position); [elapsed, w.x, w.y, w.z] },
             light_dir: sun,
             light_color: [light_node.color[0] * li, light_node.color[1] * li, light_node.color[2] * li, 0.0],
             ambient: [light_node.ambient[0], light_node.ambient[1], light_node.ambient[2], 0.0],
@@ -1026,7 +1026,7 @@ impl Editor {
         // path. Asked of the raster's material store, which is shared, so the
         // answer is the same one the window path gets for the same scene.
         let glass = opts.history != HistorySlot::None
-            && self.raster.as_ref().is_some_and(|r| r.any_transmissive(&instances));
+            && self.raster.as_ref().is_some_and(|r| r.any_transmissive(&instances) || r.flsl_draws_read_scene(&flsl_draws));
         let ssr_rebuilt = self.sync_offscreen_history(opts.history, want_ssr || glass, size);
         let history = self.history_slot(opts.history);
         let ssr = crate::shading::ssr_uniform(
@@ -1271,6 +1271,7 @@ impl Editor {
             let map_draws = crate::shading::with_shadow_casters(&instances, &shadow_casters);
             raster.sun_shadow_pass(gpu, globals, &map_draws, &flsl_draws, &skin_draws);
             headless_mark!("opaque + lighting");
+            raster.defer_scene_readers(glass);
             raster.draw_scene_with(
                 gpu, color, depth, globals, &instances, &flsl_draws, &skin_draws,
                 raster_clear, Some(raymarch.field_bind()),
@@ -1325,6 +1326,13 @@ impl Editor {
                     raster.draw_transmissive(
                         gpu, color, depth, globals, &instances, &skin_draws,
                         Some(raymarch.field_bind()), &cuts, layer,
+                    );
+                }
+                if raster.flsl_draws_read_scene(&flsl_draws) {
+                    h.capture(gpu, color, view_proj, cam.world_position);
+                    raster.draw_flsl_scene_readers(
+                        gpu, color, depth, globals, &flsl_draws, &skin_draws,
+                        Some(raymarch.field_bind()),
                     );
                 }
             }

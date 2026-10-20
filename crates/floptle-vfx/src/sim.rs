@@ -127,6 +127,8 @@ fn force_accel(f: &Force, pos: Vec3, world: Vec3) -> Vec3 {
             axis.normalize_or_zero().cross(pos - center).normalize_or_zero() * strength
         }
         Force::Turbulence { frequency, strength } => noise3(world * frequency) * strength,
+        // Relaxes the velocity rather than adding to it: see `integrate`.
+        Force::Wind { .. } => Vec3::ZERO,
     }
 }
 
@@ -260,6 +262,13 @@ pub struct EffectInstance {
     /// Script override for every Beam track's endpoint (effect-local offset), set
     /// via [`Self::set_beam_end`]. `None` = each track's authored `beam_end`.
     beam_end_override: Option<Vec3>,
+    /// Loops a looping effect has completed since it started: each loop is a
+    /// new pulse, and a beam's jitter is thrown again per pulse.
+    loops: u32,
+    /// The wind where this effect plays, world space, m/s: what a
+    /// [`Force::Wind`] carries its particles toward. The host sets it before
+    /// each advance; still air until it does.
+    pub wind: Vec3,
     /// The way up where the effect plays, in world space: what Vertical
     /// billboards stand along and Horizontal ones lie across. The host sets it
     /// (the emitter's up, or against gravity on a round world); world +Y until
@@ -298,6 +307,8 @@ impl EffectInstance {
             anchored: false,
             pending_emit_vel: Vec3::ZERO,
             beam_end_override: None,
+            loops: 0,
+            wind: Vec3::ZERO,
             up: Vec3::Y,
             tint: [1.0; 4],
         }
@@ -351,6 +362,16 @@ impl EffectInstance {
         self.beam_end_override = Some(local);
     }
 
+    /// The seed a Beam track's jitter is thrown from right now: the track's own
+    /// seed, this instance, and which pulse it is in — a new loop, or a new
+    /// `jitter_rate` tick, is a new throw. Two tracks with one seed share a
+    /// channel, so a bolt's core and its glow stay together.
+    pub fn beam_jitter_seed(&self, track: usize) -> u32 {
+        let ct = &self.effect.tracks[track];
+        let tick = if ct.jitter_rate > 0.0 { (self.t * ct.jitter_rate).floor() as u32 } else { 0 };
+        hash3(hash(self.instance_seed ^ hash(self.effect.seed)) ^ ct.jitter_seed, self.loops, tick)
+    }
+
     /// The endpoint a Beam track's ribbon reaches (script override, else authored).
     pub fn beam_end(&self, track: usize) -> Vec3 {
         self.beam_end_override.unwrap_or(self.effect.tracks[track].beam_end)
@@ -377,6 +398,7 @@ impl EffectInstance {
         self.t = 0.0;
         self.prev_t = START_EPS;
         self.anchored = false;
+        self.loops = 0;
         for ts in &mut self.tracks {
             ts.particles.clear();
             ts.acc.iter_mut().for_each(|a| *a = 0.0);
@@ -391,6 +413,22 @@ impl EffectInstance {
         for ts in &mut self.tracks {
             for m in &mut ts.particles.misc {
                 m.z = 0.0;
+            }
+        }
+    }
+
+    /// Wake the particles resting within `radius` of world point `centre`:
+    /// the level changed shape there and nowhere else. A rest is only ever a
+    /// World track's (see `integrate`), so its world point is the anchor plus
+    /// its stored position.
+    pub fn wake_resting_near(&mut self, centre: DVec3, radius: f64) {
+        let r2 = radius * radius;
+        for ts in &mut self.tracks {
+            let p = &mut ts.particles;
+            for i in 0..p.count {
+                if p.misc[i].z > 0.0 && (self.anchor + p.pos_age[i].truncate().as_dvec3() - centre).length_squared() <= r2 {
+                    p.misc[i].z = 0.0;
+                }
             }
         }
     }
@@ -563,6 +601,7 @@ impl EffectInstance {
                     Playback::Looping => {
                         self.t = 0.0;
                         self.prev_t = START_EPS;
+                        self.loops = self.loops.wrapping_add(1);
                         // Guard: a dt many lifetimes long must still terminate.
                         if seg <= 0.0 {
                             break;
@@ -674,6 +713,13 @@ impl EffectInstance {
             // its emitter past the level, and a force or a velocity curve moves
             // it on its own.
             let may_rest = is_world && ct.forces.is_empty() && !ct.velocity_is_curve;
+            // The wind in this track's own space: a Local track's particles
+            // live in the emitter's frame, turned and scaled with it.
+            let wind = if is_world {
+                self.wind
+            } else {
+                (emitter.rotation.inverse() * self.wind) / emitter.scale.max(Vec3::splat(1e-4))
+            };
             let mut i = 0;
             while i < p.count {
                 let age = p.pos_age[i].w + dt;
@@ -703,6 +749,15 @@ impl EffectInstance {
                         acc += force_accel(force, pos, world);
                     }
                     vel += acc * dt;
+                    // Carried by the wind: the velocity relative to the air
+                    // decays at `coupling` per second, exactly, so a strong
+                    // coupling at a long step settles on the wind rather than
+                    // overshooting it.
+                    for force in &ct.forces {
+                        if let Force::Wind { coupling } = *force {
+                            vel = wind + (vel - wind) * (-coupling.max(0.0) * dt).exp();
+                        }
+                    }
                 }
                 let base = if ct.velocity_is_curve {
                     let q = p.frame[i];
@@ -1241,7 +1296,14 @@ mod tests {
         let per_frame = t.elapsed().as_secs_f64() * 1000.0 / 60.0;
         assert_eq!(rays.get(), 0, "resting particles cast {} rays in a second", rays.get());
         eprintln!("200 resting particles: {per_frame:.4} ms a frame");
-        inst.wake_resting();
+        // A change of the level far from the pile leaves it resting…
+        inst.wake_resting_near(DVec3::new(500.0, 0.0, 0.0), 20.0);
+        step(&mut inst);
+        assert_eq!(rays.get(), 0, "a change 500 m away woke {} particles", rays.get());
+        // …and one under it wakes every particle there.
+        let mut at = Vec::new();
+        inst.sample_track(0, |p| at.push(p.pos));
+        inst.wake_resting_near(at[0].as_dvec3(), 50.0);
         step(&mut inst);
         assert_eq!(rays.get(), 200, "woken, each particle asks the level once");
         for _ in 0..10 {
@@ -1584,6 +1646,41 @@ mod tests {
         let p = inst.track_particles(0).pos_age[0].truncate();
         assert!(p.x > 0.3, "wind should push +X, got {p}");
         assert!(p.y.abs() < 1e-3 && p.z.abs() < 1e-3, "only +X, got {p}");
+    }
+
+    /// **A track that opts into the game's wind is carried by it.** Its
+    /// particles relax to the wind's velocity at the coupling's rate and never
+    /// past it, whatever the step; a Local track feels the wind in its
+    /// emitter's turned frame, so it still blows the same way in the world; a
+    /// track that did not opt in feels nothing.
+    #[test]
+    fn the_games_wind_carries_a_track_that_asks_for_it() {
+        let track = |forces: Vec<Force>| Track {
+            clips: vec![burst_clip(0.0, 1, 10.0)],
+            velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
+            forces,
+            ..Track::default()
+        };
+        let run = |forces: Vec<Force>, emitter: Transform, dt: f32| {
+            let mut inst = EffectInstance::new(one_track_effect(track(forces), 1.0, Playback::OneShot), 1);
+            inst.wind = Vec3::new(6.0, 0.0, 0.0);
+            let mut t = 0.0;
+            while t < 0.9 {
+                inst.advance_at(dt, NO_G, emitter);
+                t += dt;
+            }
+            inst.track_particles(0).vel_life[0].truncate()
+        };
+        let v = run(vec![Force::Wind { coupling: 4.0 }], Transform::IDENTITY, 1.0 / 60.0);
+        assert!(v.x > 5.0 && v.x <= 6.0 + 1e-4 && v.y.abs() < 1e-5, "carried at {v}");
+        // A long step settles on the wind instead of overshooting it.
+        let v = run(vec![Force::Wind { coupling: 50.0 }], Transform::IDENTITY, 0.25);
+        assert!((v.x - 6.0).abs() < 1e-3, "overshot to {v}");
+        // Turned a quarter about +Y, the emitter's local -Z is world +X.
+        let turned = Transform { rotation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), ..Transform::IDENTITY };
+        let v = run(vec![Force::Wind { coupling: 4.0 }], turned, 1.0 / 60.0);
+        assert!((turned.rotation * v - Vec3::new(v.length(), 0.0, 0.0)).length() < 1e-3, "blew the wrong way: {v}");
+        assert_eq!(run(Vec::new(), Transform::IDENTITY, 1.0 / 60.0), Vec3::ZERO, "no wind without asking");
     }
 
     #[test]

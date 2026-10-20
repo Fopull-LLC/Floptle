@@ -595,6 +595,23 @@ fn beam_editor(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, dirty:
             .on_hover_text("ripple cycles along the beam, animated by effect time")
             .changed();
     });
+    ui.horizontal(|ui| {
+        ui.label("jitter");
+        *dirty |= ui
+            .add(egui::DragValue::new(&mut track.jitter).speed(0.01).range(0.0..=100.0))
+            .on_hover_text("how far each point along the beam is thrown sideways at random: a jagged channel, for lightning (0 = straight)")
+            .changed();
+        ui.label("rate");
+        *dirty |= ui
+            .add(egui::DragValue::new(&mut track.jitter_rate).speed(0.1).range(0.0..=120.0).suffix("/s"))
+            .on_hover_text("new shapes per second (0 = one per pulse: each loop, or the whole of a one-shot)")
+            .changed();
+        ui.label("seed");
+        *dirty |= ui
+            .add(egui::DragValue::new(&mut track.jitter_seed).speed(1.0))
+            .on_hover_text("which shape: tracks with one seed and one segment count draw one channel, so a core and its glow line up")
+            .changed();
+    });
     hint(
         ui,
         "One ribbon from the emitter to its end point; width is the size row and tint the \
@@ -940,6 +957,7 @@ fn forces_section(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, dir
             ("🎯 attractor (point)", F::Point { center: [0.0, 0.0, 0.0], strength: 3.0 }),
             ("🌀 vortex", F::Vortex { center: [0.0; 3], axis: [0.0, 1.0, 0.0], strength: 3.0 }),
             ("〰 turbulence", F::Turbulence { frequency: 0.5, strength: 2.0 }),
+            ("💨 the game's wind", F::Wind { coupling: 2.0 }),
         ] {
             if ui.button(lbl).clicked() {
                 add = Some(f);
@@ -973,6 +991,7 @@ fn forces_section(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, dir
             F::Point { .. } => "🎯 attractor",
             F::Vortex { .. } => "🌀 vortex",
             F::Turbulence { .. } => "〰 turbulence",
+            F::Wind { .. } => "💨 the game's wind",
         };
         ui.horizontal(|ui| {
             ui.strong(title);
@@ -1015,6 +1034,13 @@ fn forces_section(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, dir
                     ui.end_row();
                     ui.label("strength");
                     dv(ui, strength, dirty);
+                    ui.end_row();
+                }
+                F::Wind { coupling } => {
+                    ui.label("coupling").on_hover_text(
+                        "how fast particles are carried to the wind's speed, per second: a few for smoke, more for dust and rain. The wind is what weather.addWind declares",
+                    );
+                    dv(ui, coupling, dirty);
                     ui.end_row();
                 }
             }

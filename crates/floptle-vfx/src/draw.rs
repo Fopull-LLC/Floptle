@@ -300,6 +300,9 @@ pub fn collect_beams(
             if ripple_dir.length_squared() < 1e-10 { cam_right } else { ripple_dir.normalize() };
         let n = ct.segments.max(1);
         let amp = ct.wave_amplitude * scale;
+        let jitter = ct.jitter * scale;
+        let side = axis.cross(ripple_dir).normalize_or_zero();
+        let seed = inst.beam_jitter_seed(ti);
         let point = |k: u32| -> Vec3 {
             let u = k as f32 / n as f32;
             let mut p = origin.lerp(end, u);
@@ -308,6 +311,10 @@ pub fn collect_beams(
                 // cycle per second; sin(πu) pins both endpoints in place.
                 let phase = std::f32::consts::TAU * (u * ct.wave_frequency + inst.t);
                 p += ripple_dir * (amp * phase.sin() * (std::f32::consts::PI * u).sin());
+            }
+            if jitter != 0.0 {
+                let [a, b] = jitter_offset(seed, k);
+                p += (ripple_dir * a + side * b) * (jitter * (std::f32::consts::PI * u).sin().max(0.0).sqrt());
             }
             p
         };
@@ -329,6 +336,21 @@ pub fn collect_beams(
             range: start as u32..instances.len() as u32,
         });
     }
+}
+
+/// Where chain point `k` of a jittered beam is thrown, as two sideways
+/// components in `[-1, 1]`: a coarse walk through every fourth point carries
+/// the channel's big turns and a per-point kick its kinks, which is what makes
+/// a bolt read as a bolt rather than as noise. The same seed and point always
+/// land in the same place, so a frame is stable until the seed is thrown again.
+fn jitter_offset(seed: u32, k: u32) -> [f32; 2] {
+    const STRIDE: u32 = 4;
+    let r = |i: u32, salt: u32| (crate::sim::hash(seed ^ crate::sim::hash(i.wrapping_mul(4).wrapping_add(salt))) >> 8) as f32
+        / (1u32 << 23) as f32
+        - 1.0;
+    let (i0, f) = (k / STRIDE, (k % STRIDE) as f32 / STRIDE as f32);
+    let coarse = |salt: u32| r(i0, salt) + (r(i0 + 1, salt) - r(i0, salt)) * f;
+    [0.7 * coarse(0) + 0.3 * r(k, 2), 0.7 * coarse(1) + 0.3 * r(k, 3)]
 }
 
 /// The GPU blend mode for an authoring [`Blend`].
@@ -920,6 +942,74 @@ mod tests {
             (Vec3::new(mid.x, 0.0, mid.z) - Vec3::new(0.0, 0.0, 8.0)).length() > 0.05
         });
         assert!(off_axis, "wave amplitude must displace interior points");
+    }
+
+    /// **A jittered beam is a jagged channel, thrown again per pulse.** A beam
+    /// could only wave as one sine, so a bolt was a smooth curve. Jitter throws
+    /// each chain point sideways from a seed: the ends stay pinned, two tracks
+    /// with one seed draw one channel (a core and its glow), the same moment
+    /// draws the same shape, and a new loop or a `jitter_rate` tick throws a new
+    /// one.
+    #[test]
+    fn a_jittered_beam_is_jagged_and_rethrown_per_pulse() {
+        use crate::effect::{Look, RenderMode};
+        let beam = |seed: u32, rate: f32| Track {
+            look: Look { render: RenderMode::Beam { texture: None }, ..Look::default() },
+            segments: 16,
+            beam_end: Vec3::new(0.0, 8.0, 0.0),
+            jitter: 1.0,
+            jitter_rate: rate,
+            jitter_seed: seed,
+            ..Track::default()
+        };
+        let fx = |tracks: Vec<Track>| {
+            Arc::new(
+                ParticleEffect { lifetime: 1.0, playback: Playback::Looping, tracks, ..ParticleEffect::default() }
+                    .compile(),
+            )
+        };
+        let xf = Mat4::from_translation(Vec3::new(0.0, 0.0, 10.0));
+        let chain = |inst: &EffectInstance| {
+            let (mut packed, mut draws) = (Vec::new(), Vec::new());
+            collect_beams(inst, xf, xf, Vec3::X, &mut packed, &mut draws);
+            packed.iter().map(|p| segment_ends(p).0).collect::<Vec<Vec3>>()
+        };
+        let mut inst = EffectInstance::new(fx(vec![beam(3, 0.0), beam(3, 0.0), beam(4, 0.0)]), 1);
+        inst.simulate_to(0.3, Vec3::ZERO);
+        let all = chain(&inst);
+        let (core, glow, other) = (&all[0..16], &all[16..32], &all[32..48]);
+        assert!((core[0] - Vec3::new(0.0, 0.0, 10.0)).length() < 1e-4, "the origin stays pinned");
+        let (_, tip) = segment_ends(&{
+            let (mut packed, mut draws) = (Vec::new(), Vec::new());
+            collect_beams(&inst, xf, xf, Vec3::X, &mut packed, &mut draws);
+            packed[15]
+        });
+        assert!((tip - Vec3::new(0.0, 8.0, 10.0)).length() < 1e-4, "the end stays pinned: {tip}");
+        let sideways: Vec<f32> = core.iter().map(|p| Vec3::new(p.x, 0.0, p.z - 10.0).length()).collect();
+        let widest = sideways.iter().cloned().fold(0.0, f32::max);
+        assert!(widest > 0.3 && widest <= 1.0 + 1e-4, "thrown sideways within the jitter: {widest}");
+        // Jagged, not a smooth curve: neighbouring segments turn sharply somewhere.
+        let turns = core.windows(3).filter(|w| (w[1] - w[0]).normalize().dot((w[2] - w[1]).normalize()) < 0.97).count();
+        assert!(turns >= 3, "only {turns} kinks");
+        assert_eq!(core, glow, "one seed, one channel");
+        assert_ne!(core, other, "another seed, another channel");
+        // The same moment draws the same shape…
+        let mut again = EffectInstance::new(Arc::clone(&inst.effect), 1);
+        again.simulate_to(0.3, Vec3::ZERO);
+        assert_eq!(chain(&again), all);
+        // …a later moment in the same pulse too, and the next loop another.
+        inst.simulate_to(0.9, Vec3::ZERO);
+        assert_eq!(&chain(&inst)[0..16], core, "rethrown inside one pulse");
+        inst.advance(0.2, Vec3::ZERO);
+        assert_ne!(&chain(&inst)[0..16], core, "the next loop is a new throw");
+        // A rate rethrows within a pulse.
+        let mut fast = EffectInstance::new(fx(vec![beam(3, 10.0)]), 1);
+        fast.simulate_to(0.31, Vec3::ZERO);
+        let first = chain(&fast);
+        fast.simulate_to(0.34, Vec3::ZERO);
+        assert_eq!(chain(&fast), first, "steady inside one tick");
+        fast.simulate_to(0.46, Vec3::ZERO);
+        assert_ne!(chain(&fast), first, "a tick is a new throw");
     }
 
     #[test]

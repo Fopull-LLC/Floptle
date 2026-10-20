@@ -436,6 +436,11 @@ fn map_d(p: vec3<f32>) -> f32 { return p.y + 0.55; }
 // flat swatch — which tells you nothing about the one thing you opened the
 // preview to look at.
 fn flsl_surface_gap(p: vec3<f32>) -> f32 { return max(p.y + 0.55, 0.0); }
+// A thumbnail has no scene behind a surface either: a dim backdrop for
+// sceneColor, and the same ground for sceneDepth.
+fn flsl_frag_uv_of(p: vec3<f32>) -> vec2<f32> { return vec2<f32>(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5); }
+fn flsl_frag_scene_color(uv: vec2<f32>) -> vec4<f32> { return vec4<f32>(vec3<f32>(0.12 + 0.1 * uv.y), 1.0); }
+fn flsl_frag_scene_depth(uv: vec2<f32>) -> f32 { return 3.0 + uv.y; }
 fn base_texel(in: VsOut) -> vec4<f32> { return textureSample(tex, samp, in.uv); }
 fn facing_normal(n: vec3<f32>, front: bool) -> vec3<f32> { return select(-n, n, front); }
 // A thumbnail has no Material maps or sky to reflect: `litPbr` previews as the

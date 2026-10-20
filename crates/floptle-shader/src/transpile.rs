@@ -29,7 +29,7 @@ impl TranspileError {
 /// Hard caps (proposal §6.2): keeps the generated bind group comfortably under
 /// every backend's per-stage limits.
 pub const MAX_TEXTURE_SLOTS: usize = 8;
-pub const MAX_UNIFORMS: usize = 16;
+pub const MAX_UNIFORMS: usize = 32;
 
 /// A fragment-stage shader compiled to a WGSL chunk, ready for the renderer.
 #[derive(Clone, Debug)]
@@ -603,6 +603,16 @@ impl<'a> Writer<'a> {
                 // The screen ops. Each takes an optional uv defaulting to this
                 // pixel's, so `sceneColor()` is the whole of a colour grade and
                 // `sceneColor(uv + off)` is the whole of a warp.
+                // On a surface: the scene captured behind it, at a screen uv
+                // (this pixel's when omitted).
+                "sceneColor" | "sceneDepth" if matches!(self.ctx, EmitCtx::Fragment) => {
+                    let uv = match &call.args[0] {
+                        ResolvedArg::Default(_) => "flsl_frag_uv_of(in.view_pos)".to_string(),
+                        a => self.emit_resolved(a, Some(Ty::Vec2))?,
+                    };
+                    let f = if op.name == "sceneColor" { "flsl_frag_scene_color" } else { "flsl_frag_scene_depth" };
+                    Ok(format!("{f}({uv})"))
+                }
                 "sceneColor" | "sceneDepth" | "sceneNormal" | "sceneRay" => {
                     let uv = match &call.args[0] {
                         ResolvedArg::Default(_) => "in.uv".to_string(),

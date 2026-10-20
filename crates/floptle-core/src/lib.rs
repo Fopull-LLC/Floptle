@@ -40,6 +40,7 @@ pub mod spatial;
 pub mod tile;
 pub mod time;
 pub mod transform;
+pub mod water;
 
 pub use ecs::{Change, ChangeCursor, ChangeKind, Entity, World};
 pub use layers::Layers;

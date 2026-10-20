@@ -81,6 +81,7 @@ struct Track {
     // Beam tracks only:
     segments: u32, beam_end: Vec3,
     wave_amplitude: f32, wave_frequency: f32, scroll: f32,
+    jitter: f32, jitter_rate: f32, jitter_seed: u32,
 }
 ```
 
@@ -118,10 +119,12 @@ the level** on the track.
 A `World` track's particle that lands and stays — gravity holds it on the
 surface, it has stopped bouncing, and its friction is enough to hold it on the
 slope — comes to rest: it stays exactly where it landed and asks the level
-nothing more until the level changes shape (a collider added, removed or
-resized, or terrain dug), when every resting particle asks again. A track with
-force fields or a velocity curve never rests, and neither does a `Local` one,
-which rides its emitter. The hit point is worked out in double precision from
+nothing more until the level changes shape near it: a collider added, removed
+or resized there wakes the particles resting within its bounds, and terrain
+dug or re-meshed wakes only the particles on the chunks it changed. A level that only moves (a planet on rails
+carrying its ground and what lies on it) wakes nothing. A track with force
+fields or a velocity curve never rests, and neither does a `Local` one, which
+rides its emitter, so leave forces off a debris track that should settle. The hit point is worked out in double precision from
 the step, so debris lies as still megametres from the origin as at it.
 
 ### Emission — clips, not a rate field
@@ -162,10 +165,17 @@ enum Force {                              // added to velocity each step
     Point       { center: Vec3, strength: f32 },       // a gravity well (or a push)
     Vortex      { center: Vec3, axis: Vec3, strength: f32 },
     Turbulence  { frequency: f32, strength: f32 },     // value-noise wander
+    Wind        { coupling: f32 },                     // the game's wind (weather.addWind)
 }
 ```
 
-`forces` is empty by default and costs nothing when it is. A `Trail` is a
+`forces` is empty by default and costs nothing when it is. `Wind` is the one
+force a track opts into rather than authors: the wind the game declared with
+`weather.addWind`, sampled at the emitter each frame, carries the particles
+toward its velocity at `coupling` per second (a few for smoke, more for dust
+and rain). The velocity relaxes exactly rather than being pushed, so a strong
+coupling settles on the wind instead of overshooting it, and a Local track
+feels the wind turned into its emitter's frame. Outside Play there is no wind. A `Trail` is a
 per-particle ribbon on billboard tracks, spanning `time` seconds of history at
 `width` world units, optionally tapering to nothing (`fade`); a track with no
 trail records no history and pays for none.
@@ -249,6 +259,11 @@ alike. In the Inspector it is the 🎲 on a curve row.
   all: its width and colour are its `size` and `color` sampled at the *effect's*
   time, and `wave_amplitude` / `wave_frequency` / `scroll` animate it. Lasers,
   tethers, a mining beam.
+  `jitter` throws each point along the chain sideways at random, up to that
+  distance, for a jagged channel: lightning, arcing electricity. The shape is
+  thrown again each pulse (each loop, or once for a one-shot) and
+  `jitter_rate` times a second on top. Tracks with the same `jitter_seed` and
+  `segments` draw the same channel, so a bolt's core and its glow line up.
 
 `blend` is `Alpha`, `Additive`, `Premultiplied`, `Screen`, `Multiply` or
 `Distortion`. `Distortion` is heat haze: it bends a picture of the scene behind

@@ -78,6 +78,9 @@ const UIONLY: &[Stage] = &[Stage::Ui];
 // Post only: the finished frame, its depth and the normals reconstructed from
 // that depth. None of these exist anywhere else in the pipeline.
 const POSTONLY: &[Stage] = &[Stage::Post];
+// Fragment + Post: the scene behind a surface (a surface shader that reads it
+// is drawn after the scene is captured) and the finished frame in a pass.
+const FRAGPOST: &[Stage] = &[Stage::Fragment, Stage::Post];
 
 const F: SigTy = SigTy::Exact(Ty::Float);
 const V2: SigTy = SigTy::Exact(Ty::Vec2);
@@ -197,8 +200,9 @@ pub static OPS: &[OpSpec] = &[
     // default is what makes a colour grade a one-liner; the argument is what makes
     // an edge detect, a blur and a warp possible at all, and no varying could
     // offer it.
-    OpSpec { name: "sceneColor", inputs: &[opt("uv", V2, f64::NAN)], output: V4, stages: POSTONLY, emit: Emit::Special, doc: "The frame so far, in real light (a bright light really is brighter than 1). Omit uv for this pixel.", category: "screen" },
-    OpSpec { name: "sceneDepth", inputs: &[opt("uv", V2, f64::NAN)], output: F, stages: POSTONLY, emit: Emit::Special, doc: "How far the camera is from what it sees, in world units. Sky reads a very large number, so a silhouette is an edge.", category: "screen" },
+    OpSpec { name: "sceneColor", inputs: &[opt("uv", V2, f64::NAN)], output: V4, stages: FRAGPOST, emit: Emit::Special, doc: "The frame so far, in real light (a bright light really is brighter than 1). Omit uv for this pixel. On a surface it is the scene BEHIND the surface (the surface is drawn after the rest is captured, as glass is), and uv is a screen position: screenUv(worldPos) plus a bend is refraction.", category: "screen" },
+    OpSpec { name: "sceneDepth", inputs: &[opt("uv", V2, f64::NAN)], output: F, stages: FRAGPOST, emit: Emit::Special, doc: "How far the camera is from what it sees, in world units. Sky reads a very large number, so a silhouette is an edge. On a surface it is the solid scene behind it (water and glass are not in it), so sceneDepth() - length(worldPos) (worldPos is measured from the camera) is how much water the view ray crosses.", category: "screen" },
+    OpSpec { name: "screenUv", inputs: &[req("p", V3)], output: V2, stages: FRAG, emit: Emit::Fn("flsl_frag_uv_of"), doc: "Where world point p lands on the screen, 0..1 with y down: the uv sceneColor and sceneDepth take. screenUv(worldPos) is this pixel.", category: "screen" },
     OpSpec { name: "sceneNormal", inputs: &[opt("uv", V2, f64::NAN)], output: V3, stages: POSTONLY, emit: Emit::Special, doc: "Which way the surface faces, in view space (+z toward the camera) — worked out from depth, so every kind of geometry has one.", category: "screen" },
     OpSpec { name: "sceneRay", inputs: &[opt("uv", V2, f64::NAN)], output: V3, stages: POSTONLY, emit: Emit::Special, doc: "The world-space direction the camera looks through at this pixel, unit length. With cameraPosition and sceneDepth it places a pixel in the world: a sky or atmosphere pass, height fog, a world-space grid.", category: "screen" },
     OpSpec { name: "cameraPosition", inputs: &[], output: V3, stages: POSTONLY, emit: Emit::Fn("flsl_post_camera"), doc: "Where the camera is in the world. Far from the origin this is coarse (it is 32-bit); measure heights from a nearby point, not from zero.", category: "screen" },
@@ -618,9 +622,13 @@ mod tests {
     /// the post stage can reach the frame.
     #[test]
     fn the_post_stage_can_read_the_screen() {
-        for name in ["sceneColor", "sceneDepth", "sceneNormal", "sceneRay", "cameraPosition", "screenTexel"] {
+        for name in ["sceneNormal", "sceneRay", "cameraPosition", "screenTexel"] {
             let o = op(name).unwrap_or_else(|| panic!("`{name}` exists"));
             assert_eq!(o.stages, POSTONLY, "`{name}` is post-only");
+        }
+        // A surface can read the scene behind it, which is what water refracts.
+        for name in ["sceneColor", "sceneDepth"] {
+            assert_eq!(op(name).unwrap().stages, FRAGPOST, "`{name}` reaches surfaces and post");
         }
         assert!(op("saturate").unwrap().stages.contains(&Stage::Post), "math reaches post");
         assert!(op("posterize").unwrap().stages.contains(&Stage::Post), "colour reaches post");

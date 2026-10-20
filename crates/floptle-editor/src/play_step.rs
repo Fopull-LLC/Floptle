@@ -414,29 +414,8 @@ impl Editor {
         let dir = self.project_root.join("scripts");
         // Feed the physics body state to scripts so they can read node.grounded and
         // read/write node.vx/vy/vz (a script sets velocity, physics then integrates).
-        if let Some(sim) = self.sim.as_ref() {
-            let mut states = HashMap::new();
-            for r in sim.body_states() {
-                states.insert(r.entity.index(), crate::play::body_state(&r));
-            }
-            for (eid, vel, up, grounded, pos, asleep) in sim.compound_states() {
-                states.insert(
-                    eid,
-                    floptle_script::BodyState {
-                        vel: [vel.x, vel.y, vel.z],
-                        up: [up.x, up.y, up.z],
-                        grounded,
-                        height: 0.0,
-                        pos: [pos.x, pos.y, pos.z],
-                        // Compounds resolve contacts per shape with real
-                        // impulses; "the floor under it" isn't one normal.
-                        ground_normal: None,
-                        wall_normal: None,
-                        asleep,
-                        spin: 0.0,
-                    },
-                );
-            }
+        if self.sim.is_some() {
+            let states = self.script_body_states();
             self.script_host.set_bodies(states);
         }
         // The active camera's view angles ride every input snapshot
@@ -739,8 +718,10 @@ impl Editor {
         if let Some(sim) = self.sim.as_mut() {
             sim.world.set_colliders(self.script_host.take_colliders());
         }
+        self.land_spawns_on_moving_worlds();
         self.follow_static_colliders();
         self.follow_tile_colliders();
+        let declared_water = self.sim.as_ref().map(|s| self.declared_water_volumes(s.world.origin)).unwrap_or_default();
         if let Some(sim) = self.sim.as_mut() {
             sim.world.gravity = Self::build_gravity_field(&self.world, sim.world.origin);
             // Water is rebuilt every frame for the same reason gravity is:
@@ -755,6 +736,8 @@ impl Editor {
             // claim about determinism within one tick, not about being
             // built once per session.
             sim.world.water = Self::build_water_field(&self.world, sim.world.origin);
+            // …and the water scripts declared, which no node carries.
+            sim.world.water.volumes.extend(declared_water);
             // Live Inspector edits: re-read RigidBody tunables (shape/size, friction,
             // restitution, gravity, pos/rot locks) into the running bodies each frame —
             // no teleport.
@@ -791,6 +774,63 @@ impl Editor {
         // applied to the authority field + the sim's collider copy before any
         // tick steps.
         self.drain_script_terrain_ops();
+    }
+
+    /// Land the nodes scripts asked to spawn now, rather than at the end of
+    /// the frame, while celestial bodies are moving on their rails. A script
+    /// places a spawn against where a planet is this pass; the ticks in
+    /// between carry everything already on the planet along with it, and a
+    /// node that arrived after them was left where the planet had been, 4 to
+    /// 6 m off at a planet's orbital speed, along with any assembly a spawn
+    /// callback built from it. A world with nothing on rails keeps the
+    /// frame-end landing.
+    fn land_spawns_on_moving_worlds(&mut self) {
+        if self.space_rails_prev.is_empty() {
+            return;
+        }
+        for _ in 0..8 {
+            let spawns = self.script_host.take_spawn_requests();
+            let creates = self.script_host.take_create_requests();
+            if spawns.is_empty() && creates.is_empty() {
+                break;
+            }
+            self.apply_spawn_batch(spawns, creates);
+        }
+    }
+
+    /// The body state scripts read (`node.vx`, `node.grounded`, …) for every
+    /// dynamic body and every assembly root. A craft in distant-craft LOD
+    /// reads as the craft, the same as `assembly.info`: free, and moving at
+    /// its rails velocity, not the anchored stand-in the sim holds for it.
+    pub(crate) fn script_body_states(&self) -> HashMap<u32, floptle_script::BodyState> {
+        let mut states = HashMap::new();
+        let Some(sim) = self.sim.as_ref() else { return states };
+        for r in sim.body_states() {
+            states.insert(r.entity.index(), crate::play::body_state(&r));
+        }
+        for (eid, vel, up, grounded, pos, asleep) in sim.compound_states() {
+            let (vel, grounded) = match self.lod_state(eid) {
+                Some((_, grounded, v)) => (v, grounded),
+                None => ([vel.x, vel.y, vel.z], grounded),
+            };
+            states.insert(
+                eid,
+                floptle_script::BodyState {
+                    vel,
+                    up: [up.x, up.y, up.z],
+                    grounded,
+                    height: 0.0,
+                    pos: [pos.x, pos.y, pos.z],
+                    // Compounds resolve contacts per shape with real
+                    // impulses; "the floor under it" isn't one normal.
+                    ground_normal: None,
+                    wall_normal: None,
+                    asleep,
+                    spin: 0.0,
+                },
+            );
+        }
+        states
     }
 
     /// The gameplay tick loop: fixed steps against the accumulated clock,
@@ -898,29 +938,12 @@ impl Editor {
                 } else {
                     self.resolve_tick_actions(self.game_tick.step, game_focused);
                 }
-                if let Some(sim) = self.sim.as_mut() {
+                if self.sim.is_some() {
                     // Fresh body state for this tick (post previous tick's physics).
-                    let mut states = HashMap::new();
-                    for r in sim.body_states() {
-                        states.insert(r.entity.index(), crate::play::body_state(&r));
-                    }
-                    for (eid, vel, up, grounded, pos, asleep) in sim.compound_states() {
-                        states.insert(
-                            eid,
-                            floptle_script::BodyState {
-                                vel: [vel.x, vel.y, vel.z],
-                                up: [up.x, up.y, up.z],
-                                grounded,
-                                height: 0.0,
-                                pos: [pos.x, pos.y, pos.z],
-                                ground_normal: None,
-                                wall_normal: None,
-                                asleep,
-                                spin: 0.0,
-                            },
-                        );
-                    }
+                    let states = self.script_body_states();
                     self.script_host.set_bodies(states);
+                }
+                if let Some(sim) = self.sim.as_mut() {
                     // Lend colliders so `raycast(...)` works inside `fixedUpdate` too.
                     self.script_host.set_colliders(
                         std::mem::take(&mut sim.world.colliders),
@@ -979,6 +1002,9 @@ impl Editor {
                 self.queue_script_effects();
                 if let Some(sim) = self.sim.as_mut() {
                     sim.world.set_colliders(self.script_host.take_colliders()); // reclaim
+                }
+                self.land_spawns_on_moving_worlds();
+                if let Some(sim) = self.sim.as_mut() {
                     // Apply the tick's writes, then step physics exactly one tick.
                     sim.sync_dynamic_params(&self.world);
                     sim.sync_joints(&mut self.world);
@@ -1052,6 +1078,7 @@ impl Editor {
                 if let Some(sim) = self.sim.as_mut() {
                     if self.physics_paused {
                         sim.clear_held_forces();
+                        sim.hold_tick();
                     } else {
                         // Physics. Timed per tick and
                         // accumulated, because a frame can run several — a
@@ -1197,33 +1224,13 @@ impl Editor {
         // wall raycast would see no static geometry. Hulls and body state are
         // refreshed too — post-step, so `raycast` hits bodies where they
         // rendered and `node.vx/grounded` reads this frame's final values.
-        if let Some(sim) = self.sim.as_mut() {
-            let mut states = HashMap::new();
-            for r in sim.body_states() {
-                states.insert(r.entity.index(), crate::play::body_state(&r));
-            }
-            // Compound roots read like bodies too (node.vx / up_x /
-            // grounded on a vessel) — before the collider hand-off, since
-            // their gravity-up needs the collider set.
-            for (eid, vel, up, grounded, pos, asleep) in sim.compound_states() {
-                states.insert(
-                    eid,
-                    floptle_script::BodyState {
-                        vel: [vel.x, vel.y, vel.z],
-                        up: [up.x, up.y, up.z],
-                        grounded,
-                        height: 0.0,
-                        pos: [pos.x, pos.y, pos.z],
-                        // Compounds resolve contacts per shape with real
-                        // impulses; "the floor under it" isn't one normal.
-                        ground_normal: None,
-                        wall_normal: None,
-                        asleep,
-                        spin: 0.0,
-                    },
-                );
-            }
+        if self.sim.is_some() {
+            // Before the collider hand-off: a compound root's gravity-up
+            // needs the collider set.
+            let states = self.script_body_states();
             self.script_host.set_bodies(states);
+        }
+        if let Some(sim) = self.sim.as_mut() {
             self.script_host
                 .set_colliders(std::mem::take(&mut sim.world.colliders), sim.world.origin);
         }
@@ -1407,7 +1414,7 @@ impl Editor {
         if let Some(sim) = self.sim.as_mut() {
             sim.world.index_colliders();
         }
-        self.vfx.note_level(self.sim.as_ref().map(|s| s.world.level_revision()));
+        self.vfx.note_level(self.sim.as_ref().map(|s| &s.world));
         // Hand particles the live gravity field so `GravityMode::Field` effects fall
         // toward planets (same field the rigidbodies use), not world −Y.
         let vfx_grav = self.sim.as_ref().map(|s| crate::vfx::VfxGravity {

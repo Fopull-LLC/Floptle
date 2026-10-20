@@ -20,7 +20,7 @@ each group, and meant to be searched.
 - [vectors, directions & easing](#vectors-directions--easing) — 51
 - [scene lookups & raycast](#scene-lookups--raycast) — 16
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
-- [input — keyboard & mouse](#input--keyboard--mouse) — 45
+- [input — keyboard & mouse](#input--keyboard--mouse) — 48
 - [drawing — draw.*](#drawing--draw) — 18
 - [the web — http.*, json.*](#the-web--http-json) — 15
 - [the player's account — account.*](#the-players-account--account) — 13
@@ -29,7 +29,7 @@ each group, and meant to be searched.
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 18
 - [pathfinding — nav.*](#pathfinding--nav) — 26
-- [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 6
+- [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 10
 - [weather — wind](#weather--wind) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 8
 - [2D — sprites, sorting & the flat camera](#2d--sprites-sorting--the-flat-camera) — 38
@@ -40,7 +40,7 @@ each group, and meant to be searched.
 - [accessibility — access.*](#accessibility--access) — 11
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
-- [space — orbits & time-warp](#space--orbits--time-warp) — 19
+- [space — orbits & time-warp](#space--orbits--time-warp) — 20
 - [components — getcomponent](#components--getcomponent) — 111
 - [animation — node:animator](#animation--nodeanimator) — 29
 - [particles — effects from script](#particles--effects-from-script) — 11
@@ -1208,9 +1208,9 @@ Deliberately offsets rather than named effects: which characters move, by how mu
 
 node:setJoint{ kind = "rope", to = hook, length = 4 } — hold this node's body to another node, or (with no `to`) to where it is now. Replaces any joint the node had.
 
-Kinds: "hinge" (a pin it turns about), "fixed" (a weld), "distance" (a rod), "rope" (no further apart than its length), "spring", "slider" (along the other's axis), "wheel" (a wheel on the other, on a suspension), "target" (pulled toward a point; see node:setJointTarget).
+Kinds: "hinge" (a pin it turns about), "fixed" (a weld), "distance" (a rod), "rope" (no further apart than its length), "spring", "slider" (along the other's axis), "wheel" (a wheel on the other, on a suspension), "target" (pulled toward a point; see node:setJointTarget), "ball" (turns every way about the anchor: a shoulder, a hitch; max is the cone its axis may lean, in degrees).
 
-Options: to (a node or a node's name), anchor and otherAnchor (vec2 or vec3, in each node's own space), axis, length, min and max (a hinge's degrees or a slider's units; setting either turns the limit on), motorSpeed (degrees or units a second; setting it turns the motor on), goal (a servo's or a piston's target, degrees or units; setting it turns the motor on and makes it a servo), maxForce, stiffness (cycles a second), damping, breakForce, collide.
+Options: to (a node or a node's name), anchor and otherAnchor (vec2 or vec3, in each node's own space), axis, length, min and max (a hinge's degrees or a slider's units; setting either turns the limit on), motorSpeed (degrees or units a second; setting it turns the motor on), goal (a servo's or a piston's target, degrees or units; setting it turns the motor on and makes it a servo), steer (a wheel's steering in degrees, about its suspension axis), maxForce, stiffness (cycles a second), damping, breakForce, collide.
 
 The joint goes on the part that moves and names what it hangs from: a wheel names the car, a link names the link above. Either end may be an assembly (its root or any of its parts stands for the whole craft), so a vessel built from sub-assemblies articulates: a hinge, a piston, a rotor (a hinge with a motor), a robotic arm. A wheel hung from an assembly chassis grips the ground by its suspension load, and a braked wheel (motor on, motorSpeed 0) holds the spot it stopped on. For a grappling hook, set a rope to the hook's node when it lands and removeJoint when the player lets go.
 
@@ -1233,6 +1233,8 @@ Surface maps: normalMap / roughnessMap / metallicMap / occlusionMap / emissiveMa
 Under physical shading a surface also REFLECTS the sky. A mirror is metallic=1 with roughness=0; raise the roughness and the same reflection blurs. reflectivity scales it (1 = the real amount and the default, 0 = none, above 1 = a deliberate cheat).
 
 fog=false exempts the surface from the scene's fog — both the distance ramp and the volumetric layer — so it draws at its own colour however far away it is. For the things that are not really in the world at that distance: a first-person weapon, a backdrop card, a marker that has to stay readable through the weather. A planet's atmosphere is a separate effect and still applies.
+
+sway=0.3 bends the surface in the game's wind (weather.addWind): the metres a point one metre above the node's origin moves in a 10 m/s wind, growing with the square of the height, so a stem stays rooted and its tip swings. Grass, leaves, flags, a scatter field of plants. backlight=0.6 lets the key light on the back of a thin surface through to the front, shadowed as the back face is: a leaf against the sun.
 
 Retro artefacts: jitter (screen-grid vertex snapping, 0 = follow the project), affineUv, vertexLit, ditherAlpha. The project can ask for all four at once (Project Settings ⏵ Rendering); retroExempt=true takes none of them, which is how you hold a viewmodel steady in a world that wobbles.
 
@@ -1783,7 +1785,7 @@ input.clicked(0) — true only on the frame a mouse button goes down.
 
 ### `input.commitRebind`
 
-input.commitRebind() — accept the captured binding. Returns false if nothing was captured yet.
+input.commitRebind(["replace" | "add"]) — accept the captured binding. It replaces the action's bindings on the same kind of device for this player (keyboard and mouse together, or a pad), so a pad binding survives a keyboard rebind; "add" keeps the old ones beside it. Returns false if nothing was captured yet or nothing changed.
 
 ### `input.consume`
 
@@ -1816,6 +1818,10 @@ input.justReleased("Block") — true only on the frame/tick the action goes up.
 ### `input.key`
 
 input.key("w") — true while the key is held. Names: a-z, 0-9, space, enter, shift, ctrl, alt, left/right/up/down, escape, tab.
+
+### `input.loadBindings`
+
+input.loadBindings(text) → ok, err — put back bindings input.saveBindings() wrote. Actions the project no longer declares are skipped, and actions the text leaves out keep theirs, so an older save still loads.
 
 ### `input.lockMouse`
 
@@ -1872,6 +1878,14 @@ input.pushContext("menu", { priority = 100, consume = true, enabled = { "Pause" 
 ### `input.released`
 
 input.released("space") — true only on the frame the key goes up (an edge).
+
+### `input.resetBindings`
+
+input.resetBindings([action]) → bool — back to input.ron's bindings, for one action or all of them. False for an action the project does not declare.
+
+### `input.saveBindings`
+
+input.saveBindings() → text — every action's current bindings, for save.set. The engine does not keep a player's rebinds across runs; this is how the game does.
 
 ### `input.scroll`
 
@@ -2397,7 +2411,7 @@ ui.dropTarget() — the drop target the drag is currently over, as a node, or ni
 
 ### `ui.engineSettings`
 
-ui.engineSettings(container, "controls" | "accessibility" [, { styles = { page=, row=, label=, value=, button= }, onChanged = function(key, value) end, filter = "keyboard" }]) → panel — build the engine's own settings page into a container of yours, with ui.make. controls: one row per input.ron action with its bindings; clicking a row arms press-to-bind (filter narrows it to "keyboard", "pad" or "axis"). accessibility: text size, colour filter, reduce motion and captions, each a button that steps through its values. Nothing is painted: every element takes the style you name for its slot, so the page wears your theme. Call panel:update() from your update while the page is open — a pressed key arrives between frames, and update commits it; panel:refresh() redraws after you change a setting yourself. onChanged(key, value) fires after each change ("textScale", "colorFilter", "reducedMotion", "captions", or "binding" with the action) so you can save.set it: the settings are the player's, and the engine does not save them for you. Rebinding reaches only actions: a script reading raw input.key gets nothing from it.
+ui.engineSettings(container, "controls" | "accessibility" [, { styles = { page=, row=, label=, value=, button= }, onChanged = function(key, value) end, filter = "keyboard" }]) → panel — build the engine's own settings page into a container of yours, with ui.make. controls: one row per input.ron action with its bindings; clicking a row arms press-to-bind (filter narrows it to "keyboard", "pad" or "axis"). accessibility: text size, colour filter, reduce motion and captions, each a button that steps through its values. Nothing is painted: every element takes the style you name for its slot, so the page wears your theme; a slot can instead be a table of ui.make properties (a style among them, and sizes such as w and h, which a style cannot set). Call panel:update() from your update while the page is open — a pressed key arrives between frames, and update commits it; panel:refresh() redraws after you change a setting yourself. Pass nil as the container to build nothing and place panel:tree() in a screen you describe with ui.make every frame. A rebind replaces the action's binding on that kind of device; keep it with input.saveBindings(). onChanged(key, value) fires after each change ("textScale", "colorFilter", "reducedMotion", "captions", or "binding" with the action) so you can save.set it: the settings are the player's, and the engine does not save them for you. Rebinding reaches only actions: a script reading raw input.key gets nothing from it.
 
 ```lua
 -- the engine's Controls page, in your panel, in your styles
@@ -2743,11 +2757,11 @@ terrain.paintTexture(x,y,z, radius, slot) — paint a terrain-palette texture sl
 
 ### `terrain.planetLakes`
 
-terrain.planetLakes(opts [, { cell = 3, minDepth = 0.5, seaLevel = ... }]) → the lakes the planet's basins hold, without generating anything: { {level=, center=, reach=, area=, depth=}, ... }, largest first. Every basin is filled to the height it spills at. `level` is metres above the radius, `center` a planet-local point on the lake's surface, `reach` how far its farthest shore is from the centre and `depth` its deepest point, all in metres. Ground below `seaLevel` (default: the rivers' seaLevel, or none) is sea and not a lake; with no sea, the planet's lowest point is where it drains, and holds none. Found on a grid of cells `cell` metres across; only water deeper than `minDepth` counts. For placing water at the level it would settle at.
+terrain.planetLakes(opts [, { cell = 3, minDepth = 0.5, seaLevel = ... }] [, callback]) → the lakes the planet's basins hold, without generating anything: { {level=, center=, reach=, area=, depth=}, ... }, largest first. Every basin is filled to the height it spills at. `level` is metres above the radius, `center` a planet-local point on the lake's surface, `reach` how far its farthest shore is from the centre and `depth` its deepest point, all in metres. Ground below `seaLevel` (default: the rivers' seaLevel, or none) is sea and not a lake; with no sea, the planet's lowest point is where it drains, and holds none. Found on a grid of cells `cell` metres across; only water deeper than `minDepth` counts. For placing water at the level it would settle at. A large world's lakes take seconds to find: given a callback, the call returns nothing, the work runs off the script thread, and callback(lakes) runs in a later frame.
 
 ### `terrain.planetRivers`
 
-terrain.planetRivers(opts) → the rivers and ravines terrain.generatePlanet carves with the same opts, without generating anything: { {river=true|false, depth=, points={x1,y1,z1, x2,y2,z2, ...}, widths={...}}, ... }, river ones source first. Points are planet-local, on the sphere of the planet's radius (the carved bed is below the ground there); widths are per point in world units. For laying water, bridges or missions along them.
+terrain.planetRivers(opts [, callback]) → the rivers and ravines terrain.generatePlanet carves with the same opts, without generating anything: { {river=true|false, depth=, points={x1,y1,z1, x2,y2,z2, ...}, widths={...}}, ... }, river ones source first. Points are planet-local, on the sphere of the planet's radius (the carved bed is below the ground there); widths are per point in world units. A river runs from its spring the way water drains, across any basin on its way, to the sea or into another river. For laying water, bridges or missions along them. Given a callback, the call returns nothing, the work runs off the script thread, and callback(channels) runs in a later frame.
 
 ### `terrain.query`
 
@@ -2885,6 +2899,10 @@ nav.settings() — the character the mesh was baked for: radius, height, maxSlop
 
 Water volumes: how deep a point is (water.depthAt), what is in the water (water.at), freezing and thawing (water.setFrozen). The engine already does buoyancy and drag — these are the questions a GAME still has to answer: swimming, drowning, flooding, a gauge going red.
 
+### `water.addVolume`
+
+water.addVolume{ shape = "lake" | "heightfield", parent = "Planet", ... } → an id. Water no node carries, in the frame of the node it lies on, so it turns with its planet. A lake takes `center` (a point on its surface) and `reach` (how far its farthest shore is), exactly as terrain.planetLakes gives them; a heightfield takes `origin`, `cell`, `columns`, `rows` and `levels` (false = dry), with an optional `flow`. It floats things, carries them on its `current`, and water.at answers for it.
+
 ### `water.at`
 
 water.at(point) — nil in air, else { depth, density, frozen, node, up }. `up` is the way OUT of the water (radial on a sea, the pool's own +Y) — what a swim controller pushes along, and NOT the same as -gravity in a tilted tank. Innermost volume wins, so a tank inside an ocean answers as the tank.
@@ -2893,13 +2911,25 @@ water.at(point) — nil in air, else { depth, density, frozen, node, up }. `up` 
 
 water.depthAt(x, y, z) — or a vec3, or a node. Metres BELOW the surface at that point; 0 in air. The one number everything else is derived from, and it is the same rule the solver uses, so a swim state can never disagree with the physics that floats you. A frozen volume reads 0 everywhere.
 
+### `water.flowAt`
+
+water.flowAt(point) → vec3, the water's velocity there in m/s: a river's current, zero in still water and in air. The same current the physics carries a floating crate or a swimmer in.
+
 ### `water.isUnderwater`
 
 water.isUnderwater(point) — the yes/no, for when you don't need the depth. Takes x,y,z or a vec3 or a node: if water.isUnderwater(node) then stamina = stamina - dt end
 
+### `water.removeVolume`
+
+water.removeVolume(id) → true if there was such water. Takes away what water.addVolume declared.
+
 ### `water.setFrozen`
 
 water.setFrozen(node, true) — freeze a water volume. Freezing is a STATE, not a second system: the same node with a flag flipped, and both the physics (no buoyancy, no drag) and the look follow from it. A world that thaws is one call back.
+
+### `water.surface`
+
+water.surface(id [, { cells = 48 }]) → the arrays mesh.build takes for that declared water's surface, in its parent's frame: mesh.build(water.surface(id)) on a node at the parent's origin draws exactly the surface water.at answers for. A lake is a disc laid on its sphere out past its farthest shore; uvs are metres. nil for no such water.
 
 ### `water.volumes`
 
@@ -3285,7 +3315,7 @@ perf.hitches() → every frame since the last call that took 50 ms or more, olde
 
 ### `perf.mirrorCause`
 
-perf.mirrorCause() → why the scripts' copy of the scene was last rebuilt from scratch — "first sync", the scene replaced, or a node id handed to a new node — or nil if it never has. Changing a component's value (a camera's fovY, a light's intensity, visible) re-reads only that node; spawning, destroying, renaming, reparenting, retagging or attaching a script patches that node and the lists naming it, never the whole copy. If perf.counts().mirrorRebuilds is nonzero every frame, this names what is doing it. Readable while collection is off.
+perf.mirrorCause() → why the scripts' copy of the scene was last rebuilt from scratch — "first sync", the scene replaced, a node id handed to a new node, or more than 8,192 changes between two passes — or nil if it never has. Changing a component's value (a camera's fovY, a light's intensity, visible) re-reads only that node; spawning, destroying, renaming, reparenting, retagging or attaching a script patches that node and the lists naming it, never the whole copy. If perf.counts().mirrorRebuilds is nonzero every frame, this names what is doing it. Readable while collection is off.
 
 ### `perf.ms`
 
@@ -3473,6 +3503,10 @@ World Z of the body's centre.
 ### `space`
 
 On-rails celestial mechanics: where the bodies are, which one's gravity owns a point, the orbit a craft is on, and time-warp.
+
+### `space.beltOrbits`
+
+space.beltOrbits{ count, seed, aMin, aMax, eMax = 0.05, iMax = 0.05, radiusMin = 1, radiusMax = 1 } → a list of orbits for a belt of small bodies, each a table of a, e, i, lan, argPe, m0 and bodyRadius that node:setCelestial takes as it is (add the parent). Angles are radians, like setCelestial's. The belt is a function of its seed: the same seed gives the same rocks on every machine, so a game rebuilds it rather than saving it. Most orbits come out near circular and near the plane, up to eMax and iMax. Refuses: an aMin not above 0, an aMax below aMin, a count outside 0 to 100000, and any option it does not list.
 
 ### `space.bodies`
 

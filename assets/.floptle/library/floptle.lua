@@ -59,7 +59,7 @@
 ---@field setTextSpans fun(self: Node, spans: table) Colour stretches of this UI element's text instead of the whole string: `n:setTextSpans{ {len=10}, {len=3, color={1,0.3,0.3}} }`. `len` is CHARACTERS of the authored string, spans run end to end from the start, and a span with no `color` is how you spell a gap. Spans style but never lay out — a two-colour run wraps exactly where the same string in one colour does — which is why a span cannot change size or font. `{}` clears.
 ---@field setGlyphOffsets fun(self: Node, offsets: table) Displace individual characters at draw time, in design units, one vec2 per character of the authored string: `n:setGlyphOffsets{ vec2(0,0), vec2(0,-3) }`. Shorter is fine (the rest stay still) and `{}` clears. Applied AFTER layout, so a moved glyph never re-wraps its line or shifts its neighbours — wobble, shake and per-glyph reveal are yours to write.
 ---@field setBodyOutline fun(self: Node, corners: table) Make this node's Rigidbody a 2D polygon of these corners, x and y from the node: `n:setBodyOutline{ vec2(-0.4, 0), vec2(0.4, 0), vec2(0, 1) }`. Kept convex, at most 8 corners; at least three, not all in a line.
----@field setJoint fun(self: Node, opts: table) Hold this node's body to another node, or to where it is: `n:setJoint{ kind = "rope", to = hook, length = 4 }`. Kinds: hinge, fixed, distance, rope, spring, slider, wheel, target. Replaces any joint the node had.
+---@field setJoint fun(self: Node, opts: table) Hold this node's body to another node, or to where it is: `n:setJoint{ kind = "rope", to = hook, length = 4 }`. Kinds: hinge, fixed, distance, rope, spring, slider, wheel, target, ball. Replaces any joint the node had.
 ---@field removeJoint fun(self: Node) Take this node's joint off: it lets go.
 ---@field setJointTarget fun(self: Node, point: any) Where this node's target joint pulls, in world space; nil lets go.
 ---@field setCamera fun(self: Node, t: table) Construction API: aim a camera and point it at a RENDER TARGET. Fields: fovY (RADIANS, 0.05–3), active (bool — true clears every other camera's authority), target (a bare name; the picture is the texture "rt:<name>", usable on any material or UI image), width/height (the target's pixels, 8–4096), hz (redraws per second, 0 = every frame), cullMask (layer bitmask), stack (a list of camera names drawn over this one's picture, bottom first — first-person arms on their own layer that never clip into walls; replaces the list, {} clears it). A node that is not a camera becomes one. Minimaps, mirrors, security monitors, scopes, split-screen.
@@ -744,9 +744,11 @@ function ui.make(container, tree) end
 
 ---The engine's Controls or Accessibility page, built into `container` with
 ---ui.make and styled by the slots you name (`page`, `row`, `label`, `value`,
----`button`). Call `panel:update()` every frame while it is open so a rebind is
----committed; `onChanged(key, value)` fires after each change so you can save it.
----@param container Node
+---`button`): a style name, or a table of ui.make properties such as `w`. Call
+---`panel:update()` every frame while it is open so a rebind is committed;
+---`onChanged(key, value)` fires after each change so you can save it. With a nil
+---container, place `panel:tree()` in a screen you describe yourself.
+---@param container Node|nil
 ---@param page string controls or accessibility
 ---@param opts? { styles?: table, onChanged?: fun(key: string, value: any), filter?: string }
 ---@return table panel
@@ -1245,10 +1247,24 @@ function input.startRebind(name, filter) end
 ---or nil when nothing is armed.
 ---@return string|nil
 function input.pendingRebind() end
----Apply the captured binding. Returns false if nothing was captured, or if
----that binding already existed.
+---Apply the captured binding. It replaces the action's bindings on the same
+---kind of device; "add" keeps them. Returns false if nothing was captured, or
+---if nothing changed.
+---@param how? string replace or add
 ---@return boolean
-function input.commitRebind() end
+function input.commitRebind(how) end
+---Every action's bindings as text, for save.set.
+---@return string
+function input.saveBindings() end
+---Put back bindings input.saveBindings() wrote.
+---@param text string
+---@return boolean ok
+---@return string|nil err
+function input.loadBindings(text) end
+---Back to input.ron's bindings, for one action or all of them.
+---@param action? string
+---@return boolean
+function input.resetBindings(action) end
 function input.cancelRebind() end
 
 ---The active game camera's projection — turn a world point into a screen pixel
@@ -1741,12 +1757,14 @@ water = {}
 ---@param z? number
 ---@return number
 function water.depthAt(x, y, z) end
----nil in air, else `{depth, density, frozen, node, up}` — `up` being the
----direction OUT of the water (radial on a sea; NOT −gravity in a tilted tank).
+---nil in air, else `{depth, density, frozen, node, up, flow, volume}` — `up`
+---being the direction OUT of the water (radial on a sea; NOT −gravity in a
+---tilted tank) and `flow` its current. `node` is the Water Volume node; water a
+---script declared has `volume`, its id, instead.
 ---@param x number|Vec3|Node
 ---@param y? number
 ---@param z? number
----@return { depth: number, density: number, frozen: boolean, node: Node, up: Vec3 }|nil
+---@return { depth: number, density: number, frozen: boolean, node?: Node, up: Vec3, flow: Vec3, volume?: integer }|nil
 function water.at(x, y, z) end
 ---The yes/no, when that is all you wanted.
 ---@param x number|Vec3|Node
@@ -1763,6 +1781,37 @@ function water.setFrozen(node, frozen) end
 ---Every water volume in the scene, as nodes.
 ---@return Node[]
 function water.volumes() end
+---The water's velocity at a point, m/s in world space: a river's current, zero
+---in still water and in air. The same current the physics carries bodies in.
+---@param x number|Vec3|Node
+---@param y? number
+---@param z? number
+---@return Vec3
+function water.flowAt(x, y, z) end
+---Declare water no node carries, in the frame of the node it lies on: a lake
+---fitted to its basin on a round world (`shape = "lake"`, `center` a point on
+---its surface and `reach` how far its farthest shore is, as
+---`terrain.planetLakes` gives them), or a grid of surface heights
+---(`shape = "heightfield"`, `origin`, `cell`, `columns`, `rows`, `levels`, one
+---per point with `false` for dry ground, and an optional `flow` of x, z per
+---point). It floats things, slows them and carries them on its `current`, and
+---`water.at` answers for it. Returns an id.
+---@param opts { shape?: "lake"|"heightfield", parent?: string, center?: Vec3, radius?: number, reach?: number, origin?: Vec3, cell?: number, columns?: integer, rows?: integer, levels?: (number|boolean)[], flow?: number[], density?: number, drag?: number, angularDrag?: number, current?: Vec3 }
+---@return integer
+function water.addVolume(opts) end
+---The surface of water `water.addVolume` declared, as the arrays `mesh.build`
+---takes, in the parent's frame: `mesh.build(water.surface(id))` on a node at the
+---parent's origin draws exactly the surface `water.at` answers for. A lake is a
+---disc of `cells` across (default 48) laid on its sphere out past its farthest
+---shore; `uvs` are metres across the surface. nil for no such water.
+---@param id integer
+---@param opts? { cells?: integer }
+---@return { positions: number[], normals: number[], uvs: number[], indices: integer[] }|nil
+function water.surface(id, opts) end
+---Take away water `water.addVolume` declared. true if there was some.
+---@param id integer
+---@return boolean
+function water.removeVolume(id) end
 
 ---Pictures laid on the world's static surfaces: blood, scorch marks, bullet
 ---holes, paint. Not nodes. A decal folds over edges and into corners and is lit
@@ -1863,18 +1912,24 @@ function terrain.paintTexture(x, y, z, radius, slot) end
 function terrain.generatePlanet(id, opts) end
 ---The rivers and ravines `terrain.generatePlanet` carves with these opts,
 ---without generating: { {river=, depth=, points={x1,y1,z1, ...}, widths={...}}, ... }.
----Points are planet-local, on the sphere of the planet's radius.
+---Points are planet-local, on the sphere of the planet's radius. Given a
+---callback, the call returns nothing, the work runs off the script thread,
+---and the callback gets the channels in a later frame.
 ---@param opts table The same opts table `terrain.generatePlanet` takes.
----@return table[]
-function terrain.planetRivers(opts) end
+---@param callback? fun(channels: table[])
+---@return table[]?
+function terrain.planetRivers(opts, callback) end
 ---The lakes the planet's basins hold, without generating: every basin filled to
 ---the height it spills at. { {level=, center=, reach=, area=, depth=}, ... },
 ---largest first; `center` is planet-local, on the lake's surface. Ground below
----`seaLevel` is sea, not a lake.
+---`seaLevel` is sea, not a lake. A large world's lakes take seconds to find:
+---given a callback, the call returns nothing, the work runs off the script
+---thread, and the callback gets the lakes in a later frame.
 ---@param opts table The same opts table `terrain.generatePlanet` takes.
 ---@param query? { cell?: number, minDepth?: number, seaLevel?: number }
----@return { level: number, center: Vec3, reach: number, area: number, depth: number }[]
-function terrain.planetLakes(opts, query) end
+---@param callback? fun(lakes: { level: number, center: Vec3, reach: number, area: number, depth: number }[])
+---@return { level: number, center: Vec3, reach: number, area: number, depth: number }[]?
+function terrain.planetLakes(opts, query, callback) end
 ---Set (or read, with no argument) the game's SAVE-SLOT directory for
 ---player-edited terrain, relative to the project root (e.g.
 ---"saves/slot1/terrain"). While set, streaming loads a body's field from here
@@ -2217,3 +2272,9 @@ function space.elements(x, y, z, vx, vy, vz) end
 ---@param mu number @param dt number
 ---@return number, number, number, number, number, number
 function space.propagate(px, py, pz, vx, vy, vz, mu, dt) end
+---Orbits for a belt of small bodies, from its seed alone: each row is
+---{ a, e, i, lan, argPe, m0, bodyRadius }, ready for node:setCelestial (add
+---the parent). Angles in radians. The same seed gives the same belt.
+---@param opts { count: integer, seed?: integer, aMin: number, aMax: number, eMax?: number, iMax?: number, radiusMin?: number, radiusMax?: number }
+---@return table[]
+function space.beltOrbits(opts) end

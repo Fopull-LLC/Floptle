@@ -383,6 +383,17 @@ pub struct Material {
     /// through a solid ball throws it right across. Set it to roughly the size
     /// of the object.
     pub thickness: f32,
+    /// How far the game's wind bends this surface: the metres a point one
+    /// metre above the node's origin moves in a 10 m/s wind, growing with the
+    /// square of the height, so a stem stays rooted and its tip swings. `0`
+    /// (the default) stands still. Grass, leaves, flags, a scatter field of
+    /// plants: the wind is what `weather.addWind` declares, so the gust that
+    /// carries the smoke is the gust that bends the grass.
+    pub sway: f32,
+    /// How much of the key light shining on the BACK of this surface comes
+    /// through to the front, 0..1: a leaf, a petal, a paper lantern, a sail
+    /// lit from behind. `0` (the default) is a surface light stops at.
+    pub backlight: f32,
     /// Which lighting model this surface answers to.
     pub shading: Shading,
     /// Deliberate PS1/N64-era artefacts. All off by default.
@@ -460,6 +471,8 @@ impl Default for Material {
             transmission: 0.0,
             ior: 1.5,
             thickness: 0.5,
+            sway: 0.0,
+            backlight: 0.0,
             shading: Shading::Classic,
             retro: Retro::default(),
             shader: None,

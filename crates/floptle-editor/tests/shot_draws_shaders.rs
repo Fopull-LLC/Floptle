@@ -237,3 +237,101 @@ fn a_pbr_surface_shader_shows_the_materials_normal_map() {
     assert!(ridges > 8.0, "the shader drew the wall the same with and without its normal map ({ridges:.2} apart)");
     assert!(same < 2.0, "litPbr differs from the built-in Physical look by {same:.2} a channel");
 }
+
+/// Run `shot` on `scene` in `d`; the picture, or `None` on a machine that
+/// cannot render.
+fn shoot(d: &Path, scene: &str) -> Option<image::RgbaImage> {
+    let out = d.join(format!("{scene}.png"));
+    let r = Command::new(bin())
+        .args(["shot", &d.to_string_lossy(), "--scene", scene, "--size", "160x90", "--out", &out.to_string_lossy()])
+        .output()
+        .expect("run shot");
+    if !r.status.success() {
+        let why = String::from_utf8_lossy(&r.stderr);
+        assert!(cannot_render(&why), "shot failed for a reason that is not the adapter:\n{why}");
+        return None;
+    }
+    Some(image::open(&out).expect("a PNG was written").to_rgba8())
+}
+
+/// A wall of `size` at `z` wearing `shader`, as a scene node.
+fn shaded_wall(name: &str, z: f32, size: f32, shader: &str) -> String {
+    format!(
+        "(name: \"{name}\", transform: (translation: (0.0, 0.0, {z}), rotation: (0.0, 0.0, 0.0, 1.0), \
+         scale: ({size}, {size}, 0.2)), matter: Primitive(shape: Cube, color: (1.0, 1.0, 1.0)), scripts: [], \
+         material: Some((shader: Some(\"shaders/{shader}.flsl\"))))"
+    )
+}
+
+fn camera_scene(name: &str, walls: &[String]) -> String {
+    format!(
+        "(name: \"{name}\", nodes: [(name: \"Camera\", transform: (translation: (0.0, 0.0, 0.0), \
+         rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)), matter: Camera(fov_y: 1.0, active: true), \
+         scripts: []), {}])",
+        walls.join(", ")
+    )
+}
+
+/// **A material shader can use all eight of its texture slots.** The engine
+/// binds sixteen textures of its own to every surface, and the device kept
+/// wgpu's default limit of sixteen, so even one `texture` slot failed pipeline
+/// validation and the shot stopped. Eight slots beside surfaceGap and
+/// fieldDistance now draw: the first slot's green is what shows.
+#[test]
+fn a_shot_draws_a_material_with_eight_texture_slots() {
+    let d = temp("slots");
+    scaffold(&d);
+    std::fs::create_dir_all(d.join("shaders")).unwrap();
+    std::fs::create_dir_all(d.join("art")).unwrap();
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 255, 0, 255])).save(d.join("art/green.png")).unwrap();
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 0, 255])).save(d.join("art/black.png")).unwrap();
+    let names = ["a", "b", "c", "d", "e", "f", "h", "k"];
+    let decl: String = names
+        .iter()
+        .map(|n| format!("  texture {n} = \"art/{}.png\"\n", if *n == "a" { "green" } else { "black" }))
+        .collect();
+    let sum: Vec<String> = names.iter().map(|n| format!("sample({n}, uv).rgb")).collect();
+    std::fs::write(
+        d.join("shaders/eight.flsl"),
+        format!(
+            "shader eight {{\n  stage fragment\n{decl}  let gap = surfaceGap(worldPos) + fieldDistance(worldPos)\n  \
+             output color = vec4({} + vec3(gap * 0.0), 1)\n}}\n",
+            sum.join(" + ")
+        ),
+    )
+    .unwrap();
+    std::fs::write(d.join("scenes/eight.ron"), camera_scene("eight", &[shaded_wall("Wall", -6.0, 8.0, "eight")])).unwrap();
+    let Some(img) = shoot(&d, "eight") else { return };
+    let p = img.get_pixel(80, 45);
+    assert!(p[1] > 180 && p[0] < 60 && p[2] < 60, "the wall is {p:?}, not its first texture's green");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// **A surface shader sees the scene behind it.** `sceneColor()` on a surface
+/// is the scene captured before the surface is drawn, as glass gets: a pane in
+/// front of a green wall that shows `sceneColor` with its red and blue taken
+/// out shows the wall's green, where drawing it with the rest of the scene
+/// would show black, or the pane itself.
+#[test]
+fn a_surface_shader_shows_the_scene_behind_it() {
+    let d = temp("behind");
+    scaffold(&d);
+    std::fs::create_dir_all(d.join("shaders")).unwrap();
+    std::fs::write(d.join("shaders/green.flsl"), "shader green {\n  stage fragment\n  output color = vec4(0.1, 0.9, 0.1, 1)\n}\n").unwrap();
+    std::fs::write(
+        d.join("shaders/pane.flsl"),
+        "shader pane {\n  stage fragment\n  let behind = sceneColor()\n  output color = vec4(behind.g, behind.g * 0.5, 0, 1)\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        d.join("scenes/behind.ron"),
+        camera_scene("behind", &[shaded_wall("Wall", -8.0, 12.0, "green"), shaded_wall("Pane", -4.0, 1.5, "pane")]),
+    )
+    .unwrap();
+    let Some(img) = shoot(&d, "behind") else { return };
+    let (pane, wall) = (img.get_pixel(80, 45), img.get_pixel(10, 10));
+    assert!(wall[1] > 150, "the wall is {wall:?}");
+    // The pane turned the green behind it into orange: red from its green.
+    assert!(pane[0] > 120 && pane[1] > 40 && pane[2] < 40, "the pane is {pane:?}: it did not show the wall behind it");
+    let _ = std::fs::remove_dir_all(&d);
+}

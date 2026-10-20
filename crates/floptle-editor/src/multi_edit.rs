@@ -124,6 +124,8 @@ field_diff!(Material {
     transmission,
     ior,
     thickness,
+    sway,
+    backlight,
     shading,
     retro,
     shader,

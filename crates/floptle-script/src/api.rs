@@ -622,7 +622,7 @@ pub const OBJECT_MATERIAL_PREFIX: &str = "Material:";
 /// each other by a test.
 pub(crate) const MATERIAL_NUM_FIELDS: &[&str] = &[
     "cell", "sheetCols", "sheetRows", "roughness", "metallic", "normalStrength",
-    "occlusionStrength", "reflectivity", "transmission", "ior", "thickness", "jitter",
+    "occlusionStrength", "reflectivity", "transmission", "ior", "thickness", "sway", "backlight", "jitter",
     "alpha", "opacity", "ambient", "r", "g", "b", "emissiveR", "emissiveG", "emissiveB",
     "emissiveStrength", "specularR", "specularG", "specularB", "specularStrength",
     "shininess", "rimR", "rimG", "rimB", "rimStrength", "unlit", "fog",
@@ -715,6 +715,8 @@ fn material_fields(m: &floptle_core::Material, cell: u32) -> HashMap<String, f64
         ("transmission".to_string(), m.transmission as f64),
         ("ior".to_string(), m.ior as f64),
         ("thickness".to_string(), m.thickness as f64),
+        ("sway".to_string(), m.sway as f64),
+        ("backlight".to_string(), m.backlight as f64),
         ("jitter".to_string(), m.retro.jitter as f64),
     ])
 }
@@ -1377,6 +1379,8 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 // travel, and how fast it is changing a second.
                 ("position".to_string(), j.position as f64),
                 ("speed".to_string(), j.speed as f64),
+                // A wheel's steering, degrees about its suspension axis.
+                ("steer".to_string(), j.steer as f64),
             ]),
         );
     }
@@ -1785,6 +1789,8 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "transmission" => m.transmission = (val as f32).clamp(0.0, 1.0),
                     "ior" => m.ior = (val as f32).clamp(1.0, 3.0),
                     "thickness" => m.thickness = (val as f32).clamp(0.0, 100.0),
+                    "sway" => m.sway = (val as f32).clamp(0.0, 100.0),
+                    "backlight" => m.backlight = (val as f32).clamp(0.0, 1.0),
                     "jitter" => m.retro.jitter = val as f32,
                     // The look. These were reachable from `setMaterial` and
                     // from nowhere else, which quietly meant **not animatable**
@@ -2198,6 +2204,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "broken" => j.broken = val != 0.0,
                     "servo" => j.servo = val != 0.0,
                     "goal" => j.goal = val as f32,
+                    "steer" => j.steer = val as f32,
                     _ => {}
                 }
             }
@@ -2385,6 +2392,10 @@ pub(crate) fn apply_rich_sets(
                         "thickness" => {
                             m.thickness =
                                 num(v).map(|n| (n as f32).clamp(0.0, 100.0)).unwrap_or(m.thickness)
+                        }
+                        "sway" => m.sway = num(v).map(|n| (n as f32).clamp(0.0, 100.0)).unwrap_or(m.sway),
+                        "backlight" => {
+                            m.backlight = num(v).map(|n| (n as f32).clamp(0.0, 1.0)).unwrap_or(m.backlight)
                         }
                         // A bad name here would silently pick a lighting model,
                         // so an unparseable one leaves the material alone and the
@@ -3060,7 +3071,7 @@ pub(crate) const MATERIAL_KEYS: &[&str] = &[
     "rimStrength", "unlit", "fog", "ambient", "alpha", "texture", "cell", "sheetCols", "sheetRows", "slice",
     "normalMap", "normalStrength", "roughnessMap", "roughness", "metallicMap", "metallic",
     "occlusionMap", "occlusionStrength", "emissiveMap", "reflectivity", "transmission", "ior", "thickness",
-    "shading", "jitter", "affineUv", "vertexLit",
+    "sway", "backlight", "shading", "jitter", "affineUv", "vertexLit",
     "ditherAlpha", "retroExempt",
 ];
 
@@ -3075,7 +3086,7 @@ pub(crate) const CELESTIAL_KEYS: &[&str] = &[
 pub(crate) const TILEMAP_KEYS: &[&str] = &["cols", "rows", "tile", "data", "tileset"];
 pub(crate) const JOINT_KEYS: &[&str] = &[
     "kind", "to", "anchor", "otherAnchor", "axis", "length", "limit", "min", "max", "motor", "motorSpeed",
-    "maxForce", "stiffness", "damping", "breakForce", "collide", "goal",
+    "maxForce", "stiffness", "damping", "breakForce", "collide", "goal", "steer",
 ];
 
 /// Every key `node:setSorting{...}` reads.
@@ -6693,6 +6704,7 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                 if let Some(v) = t.get::<Option<bool>>("collide")? { j.collide_connected = v; }
                 // A goal makes the motor a servo: it drives there and holds.
                 if let Some(v) = num("goal")? { j.goal = v; j.servo = true; j.motor = true; }
+                if let Some(v) = num("steer")? { j.steer = v; }
                 q.borrow_mut().push((e, crate::RichSet::Joint(Some((j, other)))));
                 Ok(())
             })?,

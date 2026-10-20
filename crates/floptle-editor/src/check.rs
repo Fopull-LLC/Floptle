@@ -729,7 +729,11 @@ fn check_shader_file(path: &Path, where_: &str, r: &mut Report) {
         Ok(t) => t,
         Err(e) => return r.error(Some(where_.into()), format!("{e}")),
     };
-    let Err(msg) = crate::shaders::compile_any_stage(&src) else { return };
+    let msg = match crate::shaders::compile_any_stage(&src) {
+        Ok(floptle_shader::Stage::Fragment) => return check_shader_slots(&src, where_, r),
+        Ok(_) => return,
+        Err(msg) => msg,
+    };
     // One finding per line of the compiler's answer, each at its own place in
     // the file when the line carries one (`12:5: unknown name`).
     for line in msg.lines().filter(|l| !l.trim().is_empty()) {
@@ -739,6 +743,35 @@ fn check_shader_file(path: &Path, where_: &str, r: &mut Report) {
             (Some(l), Some(c), Some(rest)) => r.error(Some(format!("{where_}:{l}:{c}")), rest.trim().to_string()),
             _ => r.error(Some(where_.into()), line.to_string()),
         }
+    }
+}
+
+/// A surface shader's texture slots against what a GPU can bind beside the
+/// engine's own lighting. Compiling cannot see it: the shader is valid, and
+/// the pipeline is refused at draw time with only a count over a limit.
+fn check_shader_slots(src: &str, where_: &str, r: &mut Report) {
+    let Ok(compiled) = floptle_shader::compile_fragment(src) else { return };
+    let slots = compiled.textures.len();
+    if slots == 0 {
+        return;
+    }
+    // This machine's GPU, asked once per run.
+    static HERE: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
+    if let Some((textures, samplers)) = *HERE.get_or_init(floptle_render::adapter_stage_limits)
+        && let Err(why) = floptle_render::flsl_fits_within(slots, textures, samplers)
+    {
+        return r.error(Some(where_.into()), format!("this shader {why}"));
+    }
+    // wgpu's floor, which is what a browser's GPU often offers.
+    let floor = floptle_render::flsl_slots_within(16, 16);
+    if slots > floor {
+        r.warn(
+            Some(where_.into()),
+            format!(
+                "uses {slots} texture slot(s); a GPU that offers only 16 sampled textures per stage, as many \
+                 browsers do, has room for {floor} beside the engine's own, and draws this material's fallback look"
+            ),
+        );
     }
 }
 
@@ -1346,6 +1379,34 @@ mod tests {
 
         std::fs::write(d.join("scenes/first.ron"), scene(&format!("{cam}, {sky}"))).unwrap();
         assert!(examine(&d).findings.iter().all(|f| !f.message.contains("no Skybox")), "a scene with a sky was warned");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **A shader's texture slots are held against what a GPU can bind.** It
+    /// compiles either way; the pipeline is what refuses it, at draw time,
+    /// with nothing but a count over a limit. This machine's GPU decides the
+    /// error, and a GPU at wgpu's floor of 16, as many browsers are, decides
+    /// the warning.
+    #[test]
+    fn a_shaders_texture_slots_are_held_against_the_gpu() {
+        let d = temp("slots");
+        std::fs::create_dir_all(d.join("shaders")).unwrap();
+        std::fs::write(
+            d.join("shaders/ripples.flsl"),
+            "shader ripples {\n  stage fragment\n  texture ripples\n  output color = sample(ripples, uv)\n}\n",
+        )
+        .unwrap();
+        std::fs::write(d.join("shaders/plain.flsl"), "shader plain {\n  stage fragment\n  output color = vec4(1, 0, 0, 1)\n}\n").unwrap();
+        let r = examine(&d);
+        let about: Vec<_> = r.findings.iter().filter(|f| f.message.contains("texture slot")).collect();
+        assert!(!about.is_empty(), "a textured shader was not held against any limit: {:?}", r.findings);
+        assert!(about.iter().all(|f| f.file.as_deref() == Some("shaders/ripples.flsl")), "{about:?}");
+        let here = floptle_render::adapter_stage_limits();
+        let fits_here = here.is_some_and(|(t, s)| floptle_render::flsl_slots_within(t, s) >= 1);
+        if fits_here {
+            assert!(about.iter().all(|f| f.level == Level::Warning), "fits this GPU, so a warning only: {about:?}");
+            assert!(about[0].message.contains("browsers"), "{}", about[0].message);
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

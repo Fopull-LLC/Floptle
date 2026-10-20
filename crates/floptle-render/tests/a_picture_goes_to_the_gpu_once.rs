@@ -69,3 +69,40 @@ fn a_mesh_texture_sampled_with_mipmaps_has_a_mip_chain() {
     let untextured = raster.register_sampled(&gpu, &quad(), None, TexSampling { filter: TexFilter::SmoothMipmaps, ..Default::default() });
     assert_eq!(raster.mesh_texture_mips(untextured), None);
 }
+
+/// **A model's maps are shared across models too.** A kit of models pointing at
+/// one texture library bound each map once per model, so twenty-five parts
+/// carried twenty-five copies of the same normal map. The same pixels with the
+/// same sampling now answer the same id, the pixels are one upload shared with
+/// any mesh that wears them, and different sampling is a different binding of
+/// that one upload.
+#[test]
+fn a_shared_map_is_one_texture_across_models() {
+    use floptle_render::{TexFilter, TexSampling};
+    let gpu = Gpu::headless(8, 8);
+    if !gpu.adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::VIEW_FORMATS) {
+        return; // this device cannot build the raster pass
+    }
+    let mut raster = Raster::new(&gpu);
+    let normal = picture(5);
+    let crisp = TexSampling::default();
+    let first = raster.register_texture_shared(&gpu, &normal, crisp);
+    for _ in 0..24 {
+        assert_eq!(raster.register_texture_shared(&gpu, &normal, crisp), first, "the same map, the same id");
+    }
+    assert_eq!(raster.mesh_texture_count(), 1, "twenty-five models, one upload");
+    // A mesh wearing the same pixels as its own texture shares the upload.
+    raster.register(&gpu, &quad(), Some(&normal));
+    assert_eq!(raster.mesh_texture_count(), 1);
+    // Smooth is the same upload sampled another way; mipmapped needs a chain.
+    let smooth = raster.register_texture_shared(&gpu, &normal, TexSampling { filter: TexFilter::Smooth, ..crisp });
+    assert_ne!(smooth, first);
+    assert_eq!(raster.mesh_texture_count(), 1);
+    raster.register_texture_shared(&gpu, &normal, TexSampling { filter: TexFilter::SmoothMipmaps, ..crisp });
+    assert_eq!(raster.mesh_texture_count(), 2);
+    // Other pixels are another texture.
+    assert_ne!(raster.register_texture_shared(&gpu, &picture(6), crisp), first);
+    // A released id is never handed back: the next model uploads afresh.
+    raster.release_texture(&gpu, first);
+    assert_ne!(raster.register_texture_shared(&gpu, &normal, crisp), first);
+}

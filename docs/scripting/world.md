@@ -363,10 +363,34 @@ end
 | Call | Answers |
 | --- | --- |
 | `water.depthAt(x, y, z)` | metres below the surface; `0` in air. Takes a vec3 or a node too. |
-| `water.at(x, y, z)` | `nil` in air, else `{depth, density, frozen, node, up}`. |
+| `water.at(x, y, z)` | `nil` in air, else `{depth, density, frozen, node, up, flow}` (`volume`, not `node`, for water a script declared). |
 | `water.isUnderwater(x, y, z)` | the yes/no, when that's all you wanted. |
 | `water.setFrozen(node, on)` | freeze or thaw a volume. |
 | `water.volumes()` | every water node in the scene. |
+| `water.flowAt(x, y, z)` | the water's velocity there, m/s; zero in still water. |
+| `water.addVolume{...}` | declare a lake or a heightfield of water no node carries; returns an id. |
+| `water.surface(id [, {cells}])` | its surface as the arrays `mesh.build` takes, in the parent's frame. |
+| `water.removeVolume(id)` | take it away again. |
+
+A lake on a round world is part of a sphere about the planet's centre, and only
+inside its basin — neither a sea nor a box. `water.addVolume` declares one in the
+planet's frame, from what `terrain.planetLakes` says:
+
+```lua
+for _, lake in ipairs(terrain.planetLakes(opts)) do
+  water.addVolume{ shape = "lake", parent = "Planet", center = lake.center, reach = lake.reach }
+end
+```
+
+It floats crates, lets a crew swim, and turns with the planet. To draw it,
+`mesh.build(water.surface(id))` on a node at the planet's origin is exactly the
+surface `water.at` answers for, ready for a water material (a surface shader can
+refract the lake bed with `sceneColor` and `sceneDepth`). A
+`shape = "heightfield"` volume is a grid of surface heights over the parent's
+x–z plane instead: `origin`, `cell`, `columns`, `rows`, and `levels` (one per
+point, `false` for dry ground), with an optional `flow` (x, z per point) for a
+river. `current = vec3(...)` adds a current everywhere in it. Drag acts on a
+body's velocity relative to the water, so a current carries what floats in it.
 
 `water.depthAt` and the solver answer from the **same geometry**, so a swim
 state can't disagree with the physics floating it — which is exactly what

@@ -135,6 +135,11 @@ pub enum Force {
     /// Smooth value-noise turbulence — a chaotic push that makes smoke/embers wander.
     /// `frequency` is the spatial scale (higher = finer), `strength` the magnitude.
     Turbulence { frequency: f32, strength: f32 },
+    /// The game's wind (`weather.addWind`) where the effect plays: particles
+    /// are carried toward the wind's velocity at `coupling` per second, so a
+    /// gust that bends the grass carries the smoke beside it. 0 ignores it; a
+    /// few per second is smoke, more is dust and rain.
+    Wind { coupling: f32 },
 }
 
 /// The simulation space of a track's particles.
@@ -458,6 +463,14 @@ pub struct Track {
     /// Beam tracks only: UV scroll speed (texture-lengths/sec) so the texture flows
     /// along the beam.
     pub scroll: f32,
+    /// Beam tracks only: how far each point along the chain is thrown sideways at
+    /// random (0 = none), for a jagged channel rather than a smooth wave.
+    pub jitter: f32,
+    /// Beam tracks only: jitter re-rolls per second (0 = once per pulse).
+    pub jitter_rate: f32,
+    /// Beam tracks only: which jagged shape the track draws; tracks sharing a seed
+    /// and a segment count draw one channel.
+    pub jitter_seed: u32,
 }
 
 impl Default for Track {
@@ -488,6 +501,9 @@ impl Default for Track {
             wave_amplitude: 0.0,
             wave_frequency: 2.0,
             scroll: 0.0,
+            jitter: 0.0,
+            jitter_rate: 0.0,
+            jitter_seed: 0,
         }
     }
 }
@@ -568,6 +584,9 @@ pub struct CompiledTrack {
     pub wave_amplitude: f32,
     pub wave_frequency: f32,
     pub scroll: f32,
+    pub jitter: f32,
+    pub jitter_rate: f32,
+    pub jitter_seed: u32,
 
     // Automation lanes folded per target, domain = effect time normalized [0..1].
     pub lane_rate: Prop1,
@@ -743,6 +762,9 @@ impl Track {
             wave_amplitude: self.wave_amplitude,
             wave_frequency: self.wave_frequency,
             scroll: self.scroll,
+            jitter: self.jitter.max(0.0),
+            jitter_rate: self.jitter_rate.max(0.0),
+            jitter_seed: self.jitter_seed,
             lane_rate,
             lane_count,
             lane_speed: fold_lanes1(&self.automation, LaneTarget::Speed, lifetime),

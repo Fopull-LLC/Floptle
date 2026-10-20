@@ -246,6 +246,9 @@ pub enum VfxForceDoc {
     Point { center: [f32; 3], strength: f32 },
     Vortex { center: [f32; 3], axis: [f32; 3], strength: f32 },
     Turbulence { frequency: f32, strength: f32 },
+    /// The game's wind where the effect plays, carrying particles at
+    /// `coupling` per second (see `weather.addWind`).
+    Wind { coupling: f32 },
 }
 
 /// How a clip releases its particles across its span.
@@ -358,6 +361,21 @@ pub struct VfxTrackDoc {
     /// along the beam (0 = static).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub scroll: f32,
+    /// Beam tracks only: how far each point along the chain is thrown sideways
+    /// at random, in the effect's units (0 = none). A jagged channel rather than
+    /// a smooth wave: lightning, arcing electricity.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub jitter: f32,
+    /// Beam tracks only: how many times a second the jitter is thrown again
+    /// (0 = once per pulse — each loop of a looping effect, or the whole of a
+    /// one-shot).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub jitter_rate: f32,
+    /// Beam tracks only: which jagged shape a track draws. Two tracks with one
+    /// seed and one segment count draw the same channel, so a core and its
+    /// glow line up; another seed is another channel.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub jitter_seed: u32,
     /// Full scene lighting per particle (default off — classic crisp VFX).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lit: bool,
@@ -584,6 +602,9 @@ fn is_ten(v: &f32) -> bool {
 fn is_zero(v: &f32) -> bool {
     *v == 0.0
 }
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
 fn twelve_f32() -> f32 {
     12.0
 }
@@ -770,6 +791,9 @@ mod tests {
                 wave_amplitude: 0.0,
                 wave_frequency: 2.0,
                 scroll: 0.0,
+                jitter: 0.0,
+                jitter_rate: 0.0,
+                jitter_seed: 0,
                 lit: false,
                 translucency: 0.0,
                 soft: DEFAULT_SOFT,
@@ -1061,9 +1085,10 @@ mod tests {
         assert_eq!(t.wave_amplitude, 0.0);
         assert_eq!(t.wave_frequency, 2.0);
         assert_eq!(t.scroll, 0.0);
+        assert_eq!((t.jitter, t.jitter_rate, t.jitter_seed), (0.0, 0.0, 0));
         // …and the defaults don't bloat a fresh save.
         let text = ron::ser::to_string_pretty(&doc, Default::default()).unwrap();
-        for field in ["trail", "segments", "beam_end", "wave_amplitude", "wave_frequency", "scroll"] {
+        for field in ["trail", "segments", "beam_end", "wave_amplitude", "wave_frequency", "scroll", "jitter"] {
             assert!(!text.contains(field), "default {field} must not serialize: {text}");
         }
     }
@@ -1077,6 +1102,9 @@ mod tests {
         track.wave_amplitude = 0.4;
         track.wave_frequency = 3.0;
         track.scroll = 1.5;
+        track.jitter = 0.8;
+        track.jitter_rate = 12.0;
+        track.jitter_seed = 7;
         let mut trailed = minimal_track();
         trailed.trail = Some(VfxTrailDoc::default());
         let mut doc: VfxEffectDoc = ron::from_str(r#"(name: "Beamy")"#).unwrap();

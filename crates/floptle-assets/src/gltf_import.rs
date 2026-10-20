@@ -249,6 +249,21 @@ pub(crate) fn read_gltf(
     let mut images = Vec::new();
     if want_images {
         for image in document.images() {
+            // An image in a file beside the model is decoded once per session
+            // however many models name it: a kit of parts pointing at one
+            // texture library reads and decodes the library once.
+            if let gltf::image::Source::Uri { uri, .. } = image.source()
+                && let Some(file) = uri_file(base, uri)
+            {
+                let decoded = shared_image(&file)?;
+                images.push(gltf::image::Data {
+                    pixels: decoded.pixels.clone(),
+                    format: gltf::image::Format::R8G8B8A8,
+                    width: decoded.width,
+                    height: decoded.height,
+                });
+                continue;
+            }
             let encoded: std::borrow::Cow<[u8]> = match image.source() {
                 gltf::image::Source::View { view, .. } => {
                     let parent = &buffers[view.buffer().index()].0;
@@ -257,19 +272,97 @@ pub(crate) fn read_gltf(
                 }
                 gltf::image::Source::Uri { uri, .. } => std::borrow::Cow::Owned(read_uri(base, uri)?),
             };
-            let decoded = image::load_from_memory(&encoded)
-                .map_err(|e| ImportError::Gltf(gltf::Error::Io(std::io::Error::other(e.to_string()))))?
-                .to_rgba8();
-            let (width, height) = decoded.dimensions();
-            images.push(gltf::image::Data {
-                pixels: decoded.into_raw(),
-                format: gltf::image::Format::R8G8B8A8,
-                width,
-                height,
-            });
+            images.push(decode_image(&encoded)?);
         }
     }
     Ok((document, buffers, images))
+}
+
+/// Encoded image bytes to RGBA8.
+fn decode_image(encoded: &[u8]) -> Result<gltf::image::Data, ImportError> {
+    let decoded = image::load_from_memory(encoded)
+        .map_err(|e| ImportError::Gltf(gltf::Error::Io(std::io::Error::other(e.to_string()))))?
+        .to_rgba8();
+    let (width, height) = decoded.dimensions();
+    Ok(gltf::image::Data { pixels: decoded.into_raw(), format: gltf::image::Format::R8G8B8A8, width, height })
+}
+
+/// The file a relative glTF URI names, or `None` for a data URI (whose bytes
+/// are the model's own).
+fn uri_file(base: Option<&Path>, uri: &str) -> Option<PathBuf> {
+    if uri.starts_with("data:") {
+        return None;
+    }
+    // A relative URI is percent-encoded; the common case is a plain name.
+    let name = uri.replace("%20", " ");
+    Some(base.map(|b| b.join(&name)).unwrap_or_else(|| PathBuf::from(&name)))
+}
+
+/// One decoded image file, as [`shared_image`] keeps it.
+#[derive(Debug)]
+pub(crate) struct SharedImage {
+    pub pixels: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Decoded pixels kept for this many bytes at most. A texture library shared
+/// by a kit of models fits many times over; past it the least recently used
+/// image is dropped and decoded again if asked for.
+const IMAGE_CACHE_BYTES: usize = 256 << 20;
+
+#[derive(Default)]
+struct ImageCache {
+    /// Path + when it was last written → the decoded image and when it was
+    /// last asked for.
+    map: HashMap<(PathBuf, Option<SystemTime>), (Arc<SharedImage>, u64)>,
+    bytes: usize,
+    clock: u64,
+}
+
+/// The decoded image in `file`, decoded once and shared by every model that
+/// names it. Keyed on modification time as well as path, so an image saved
+/// over mid-session is read afresh.
+pub(crate) fn shared_image(file: &Path) -> Result<Arc<SharedImage>, ImportError> {
+    static CACHE: OnceLock<Mutex<ImageCache>> = OnceLock::new();
+    let file = floptle_vfs::normalize(file);
+    let stamp = floptle_vfs::modified(&file);
+    let key = (file.clone(), stamp);
+    let cache = CACHE.get_or_init(Default::default);
+    if let Ok(mut c) = cache.lock() {
+        c.clock += 1;
+        let now = c.clock;
+        if let Some((hit, used)) = c.map.get_mut(&key) {
+            *used = now;
+            return Ok(hit.clone());
+        }
+    }
+    let encoded = floptle_vfs::read(&file).map_err(|e| ImportError::Gltf(gltf::Error::Io(e)))?;
+    let d = decode_image(&encoded)?;
+    let image = Arc::new(SharedImage { pixels: d.pixels, width: d.width, height: d.height });
+    if let Ok(mut c) = cache.lock() {
+        let size = image.pixels.len();
+        // The same file's older stamps are stale now.
+        let stale: Vec<_> = c.map.keys().filter(|(p, s)| *p == file && *s != stamp).cloned().collect();
+        for k in stale {
+            if let Some((old, _)) = c.map.remove(&k) {
+                c.bytes -= old.pixels.len();
+            }
+        }
+        while c.bytes + size > IMAGE_CACHE_BYTES && !c.map.is_empty() {
+            let Some(oldest) = c.map.iter().min_by_key(|(_, (_, used))| *used).map(|(k, _)| k.clone()) else { break };
+            if let Some((old, _)) = c.map.remove(&oldest) {
+                c.bytes -= old.pixels.len();
+            }
+        }
+        if size <= IMAGE_CACHE_BYTES {
+            c.clock += 1;
+            let now = c.clock;
+            c.bytes += size;
+            c.map.insert(key, (image.clone(), now));
+        }
+    }
+    Ok(image)
 }
 
 /// The bytes a glTF URI names: a base64 data URI decoded, or a file beside
@@ -282,9 +375,7 @@ fn read_uri(base: Option<&Path>, uri: &str) -> Result<Vec<u8>, ImportError> {
             .decode(payload)
             .map_err(|e| ImportError::Gltf(gltf::Error::Io(std::io::Error::other(format!("data URI: {e}")))));
     }
-    // A relative URI is percent-encoded; the common case is a plain name.
-    let name = uri.replace("%20", " ");
-    let file = base.map(|b| b.join(&name)).unwrap_or_else(|| PathBuf::from(&name));
+    let file = uri_file(base, uri).unwrap_or_default();
     floptle_vfs::read(&file).map_err(|e| ImportError::Gltf(gltf::Error::Io(e)))
 }
 
@@ -560,6 +651,61 @@ pub(crate) fn to_rgba8(img: &gltf::image::Data) -> TextureData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **An image file named by many models is decoded once.** A kit of
+    /// parts pointing at one texture library decoded the library once per
+    /// part, and carried a copy per part on the GPU. The decode is now shared
+    /// by the file's resolved path, through `../` and all, and an image saved
+    /// over mid-session is read afresh.
+    #[test]
+    fn an_image_file_many_models_name_is_decoded_once() {
+        use base64::Engine as _;
+        let dir = std::env::temp_dir().join(format!("floptle-shared-image-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("parts")).unwrap();
+        let png = |rgba: [u8; 4]| {
+            let img = image::RgbaImage::from_pixel(2, 2, image::Rgba(rgba));
+            let mut out = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+            out.into_inner()
+        };
+        std::fs::write(dir.join("library.png"), png([10, 20, 30, 255])).unwrap();
+        // One triangle and an index list, with the image by relative URI.
+        let mut bin = Vec::new();
+        for v in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
+            bin.extend_from_slice(&v.to_le_bytes());
+        }
+        bin.extend_from_slice(&[0, 0, 1, 0, 2, 0, 0, 0]);
+        let data = base64::engine::general_purpose::STANDARD.encode(&bin);
+        let gltf = |uri: &str| {
+            format!(
+                r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0}}],
+                "meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}},"indices":1,"material":0}}]}}],
+                "materials":[{{"pbrMetallicRoughness":{{"baseColorTexture":{{"index":0}}}}}}],
+                "textures":[{{"source":0}}],"images":[{{"uri":"{uri}"}}],
+                "buffers":[{{"byteLength":44,"uri":"data:application/octet-stream;base64,{data}"}}],
+                "bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":36}},{{"buffer":0,"byteOffset":36,"byteLength":6}}],
+                "accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}},
+                {{"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"}}]}}"#
+            )
+        };
+        std::fs::write(dir.join("a.gltf"), gltf("library.png")).unwrap();
+        std::fs::write(dir.join("parts/b.gltf"), gltf("../library.png")).unwrap();
+        let a = import(&dir.join("a.gltf")).unwrap();
+        let b = import(&dir.join("parts/b.gltf")).unwrap();
+        assert_eq!(a.textures[0].pixels[..4], [10, 20, 30, 255]);
+        assert_eq!(a.textures[0].pixels, b.textures[0].pixels);
+        // Both models' decodes are one decode.
+        let lib = dir.join("library.png");
+        let once = shared_image(&lib).unwrap();
+        assert!(Arc::ptr_eq(&once, &shared_image(&dir.join("parts/../library.png")).unwrap()), "decoded again");
+        // Saved over: the new pixels, not the remembered ones.
+        std::fs::write(&lib, png([200, 100, 50, 255])).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&lib).unwrap().set_modified(later).unwrap();
+        assert_eq!(import(&dir.join("a.gltf")).unwrap().textures[0].pixels[..4], [200, 100, 50, 255]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn flat_normals_point_along_face() {

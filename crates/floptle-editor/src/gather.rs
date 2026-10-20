@@ -1539,7 +1539,7 @@ impl Editor {
                             center: Vec3::from(center),
                             axis: Vec3::from(axis),
                         }),
-                        VfxForceDoc::Turbulence { .. } => None,
+                        VfxForceDoc::Turbulence { .. } | VfxForceDoc::Wind { .. } => None,
                     })
                     .collect();
                 // World-space forces act in world/anchor space (translation only);
@@ -1675,7 +1675,7 @@ impl Editor {
             sun_vp,
             sun_map,
             sun_extra,
-            time: [elapsed, 0.0, 0.0, 0.0],
+            time: { let w = self.sway_wind(cam.world_position); [elapsed, w.x, w.y, w.z] },
             light_dir: sun,
             light_color: [light_node.color[0] * li, light_node.color[1] * li, light_node.color[2] * li, 0.0],
             ambient: [light_node.ambient[0], light_node.ambient[1], light_node.ambient[2], 0.0],
