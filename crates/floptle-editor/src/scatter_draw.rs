@@ -143,28 +143,41 @@ fn settle(
 pub(crate) type Part = (MeshId, Option<TexId>, Mat4, MaterialParams);
 
 /// A prototype part as baked: everything about its look that the model file
-/// fixed, kept as facts and turned into a material once per prototype per
-/// frame (see [`resolve_parts`]).
+/// fixed, kept as facts rather than as a [`MaterialParams`].
+///
+/// A drawn material carries an index into the renderer's surface store, and
+/// that store is rebuilt when the project's artefacts change, so a material
+/// baked once would point at the wrong entry afterwards. The facts are turned
+/// into a material once per prototype per frame instead (see [`resolve_parts`]).
 #[derive(Clone)]
 pub(crate) struct BakedPart {
     pub mesh: MeshId,
     pub local: Mat4,
     /// The part's imported base-colour factor.
     pub base: [f32; 3],
+    /// Its maps and glow, when its file names more than a base colour.
+    pub imported: Option<crate::ImportedLook>,
 }
 
 /// A baked prototype's parts with their materials, for this frame — the same
 /// look an ordinary Mesh node with no Material of its own draws: the imported
-/// base colour, and the model's own vertex colours.
-pub(crate) fn resolve_parts(raster: &floptle_render::Raster, baked: &[BakedPart]) -> Vec<Part> {
+/// base colour, maps and glow, and the model's own vertex colours.
+pub(crate) fn resolve_parts(
+    raster: &mut floptle_render::Raster,
+    gpu: &floptle_render::Gpu,
+    baked: &[BakedPart],
+) -> Vec<Part> {
     baked
         .iter()
         .map(|b| {
-            let mut mp = MaterialParams::flat(b.base);
+            let (tex, mut mp) = match &b.imported {
+                Some(look) => crate::shading::material_draw_with(raster, gpu, &look.material, look.base, Some(look.maps)),
+                None => (None, MaterialParams::flat(b.base)),
+            };
             // Imported COLOR_0 is a plain multiply (white is identity), as on
             // a Mesh node.
             mp.paint_base = raster.mesh_paint_base(b.mesh);
-            (b.mesh, None, b.local, mp)
+            (b.mesh, tex, b.local, mp)
         })
         .collect()
 }
@@ -181,7 +194,8 @@ pub(crate) fn push_scatter(
     script_host: &mut floptle_script::ScriptHost,
     world: &floptle_core::World,
     sim: Option<&floptle_physics::Sim>,
-    raster: &floptle_render::Raster,
+    raster: &mut floptle_render::Raster,
+    gpu: &floptle_render::Gpu,
     protos: &HashMap<String, Vec<BakedPart>>,
     proto_radius: &HashMap<String, f32>,
     cache: &mut ScatterCache,
@@ -241,7 +255,7 @@ pub(crate) fn push_scatter(
                 && let Some((name, baked)) = protos.get_key_value(&band.asset)
                 && !baked.is_empty()
             {
-                looks.insert(name.as_str(), resolve_parts(raster, baked));
+                looks.insert(name.as_str(), resolve_parts(raster, gpu, baked));
             }
         }
     }
@@ -610,6 +624,7 @@ fn baked_parts(a: &crate::MeshAsset, local: Mat4) -> Vec<BakedPart> {
                 mesh,
                 local,
                 base: meta.map_or([1.0; 3], |m| m.base_color),
+                imported: meta.and_then(|m| m.imported.clone()),
             }
         })
         .collect()
@@ -748,6 +763,11 @@ mod tests {
         };
         let baked = baked_parts(&asset, Mat4::IDENTITY);
         assert_eq!(baked[0].base, [0.2, 0.4, 0.8], "the bake dropped the part's base colour");
+        // A part whose file names maps or a glow keeps them through the bake.
+        let mut mapped = asset.part_meta[0].clone();
+        mapped.imported = Some(crate::ImportedLook { material: floptle_core::Material::default(), base: None, maps: [None; 5] });
+        let with_maps = crate::MeshAsset { parts: vec![MeshId(4)], part_meta: vec![mapped], tex_filter: None, size: 1.0, rig: None };
+        assert!(baked_parts(&with_maps, Mat4::IDENTITY)[0].imported.is_some(), "the bake dropped the part's imported maps");
         let s = ScatterSource { look: scatter::ScatterLook { tint: [1.0, 0.5, 1.0], ..Default::default() }, ..src() };
         let mut cache = ScatterCache::default();
         let mut mesh = |_: &str| Some(vec![(MeshId(4), None, Mat4::IDENTITY, look)]);

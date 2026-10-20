@@ -2201,6 +2201,7 @@ impl Editor {
             &self.world,
             self.sim.as_ref(),
             raster,
+            gpu,
             &self.scatter_protos,
             &self.scatter_proto_radius,
             &mut self.scatter_cache,

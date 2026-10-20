@@ -940,12 +940,13 @@ impl Editor {
         }
         // Scatter too, through the window gather's own function: a capture
         // without it photographs bare ground under everything that stands on it.
-        let scatter_props = match (opts.overlay, self.raster.as_ref()) {
-            (false, Some(raster)) => crate::scatter_draw::push_scatter(
+        let scatter_props = match (opts.overlay, self.raster.as_mut(), self.gpu.as_ref()) {
+            (false, Some(raster), Some(gpu)) => crate::scatter_draw::push_scatter(
                 &mut self.script_host,
                 &self.world,
                 self.sim.as_ref(),
                 raster,
+                gpu,
                 &self.scatter_protos,
                 &self.scatter_proto_radius,
                 &mut self.scatter_cache,
