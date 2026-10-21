@@ -245,6 +245,19 @@ impl Compound {
         }
     }
 
+    /// How far its furthest part reaches from the centre of mass: every shape
+    /// sample's distance plus its radius.
+    pub fn reach(&self) -> f32 {
+        let mut reach = 0.0f32;
+        for si in 0..self.shapes.len() {
+            let (centres, n, r) = self.shape_samples(si);
+            for p in &centres[..n] {
+                reach = reach.max(p.distance(self.pos) + r);
+            }
+        }
+        reach
+    }
+
     /// The assembly origin (the pose callers authored shapes around), sim frame.
     pub fn origin(&self) -> Vec3 {
         self.pos + self.orient * self.local_origin

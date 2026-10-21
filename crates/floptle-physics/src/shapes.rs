@@ -88,6 +88,13 @@ pub trait CollisionShape {
         let _ = (o, rd, tmax);
         RayAnswer::March
     }
+    /// [`Self::ray_cast`] for a question asked thousands of times over new
+    /// ground (dropping scattered props onto it): the same answer, by a way
+    /// that never does lasting work such as meshing a terrain chunk for
+    /// collision. The default is the ordinary ray.
+    fn ground_cast(&self, o: Vec3, rd: Vec3, tmax: f32) -> RayAnswer {
+        self.ray_cast(o, rd, tmax)
+    }
     /// Push every face of this shape that may cross the box `(lo, hi)` onto
     /// `out`, in the shape's own frame, and say whether the shape can answer at
     /// all. A projected decal lays itself on what comes back.
@@ -726,6 +733,11 @@ impl ChunkTerrain {
         self.surface.borrow().chunks.contains_key(&c)
     }
 
+    /// How many chunks' collision meshes are cached.
+    pub fn meshed_chunks(&self) -> usize {
+        self.surface.borrow().chunks.len()
+    }
+
     pub fn adopt_mesh(&mut self, c: [i32; 3], m: &floptle_field::ChunkMesh) {
         let built = CollisionChunk::from_mesh(m, self.bucket());
         self.adopt(c, built);
@@ -821,8 +833,10 @@ impl ChunkTerrain {
             return None;
         }
         // Cheap reject before any meshing: outside the band the field saturates
-        // and there is nothing for a triangle to correct.
-        if self.field.d(local).abs() > self.reach() {
+        // and there is nothing for a triangle to correct. Saturated, it reads
+        // the band exactly, not more, so the band itself is the test: asking
+        // for more than it let every query in open air run the whole search.
+        if self.field.d(local).abs() >= self.field.band() {
             return None;
         }
         let mut s = self.surface.borrow_mut();
@@ -1005,6 +1019,53 @@ impl CollisionShape for ChunkTerrain {
             t += d.clamp(0.02, 1.0);
         }
         RayAnswer::March
+    }
+    /// The drawn surface where its triangles are cached, and the field's own
+    /// surface where they are not: a height straight from the voxels, within
+    /// a fraction of a voxel of the drawn one, for about a hundredth of a
+    /// millisecond. Never meshes anything. A ray asks a chunk about the fifth
+    /// time it meshes the chunk whole, tens of milliseconds on the main thread,
+    /// and settling a scatter field asked every new chunk hundreds of times;
+    /// meshing even the few cells under one ray was ten times this.
+    fn ground_cast(&self, o: Vec3, rd: Vec3, tmax: f32) -> RayAnswer {
+        let scale = self.scale.max(1e-6);
+        let local = self.to_local(o);
+        // Starting in rock, there is no ground under it to stand on.
+        if self.field.d(local) < 0.0 {
+            return RayAnswer::Miss;
+        }
+        let ld = (self.rot.inverse() * rd).normalize_or_zero();
+        let lvoxel = self.field.voxel();
+        let Some(near) = self.field.raycast_within(local, ld, tmax / scale, lvoxel) else {
+            return RayAnswer::Miss;
+        };
+        let at = local + ld * near;
+        if self.mesh_accurate && self.meshed_near(at) {
+            let voxel = lvoxel * scale;
+            let (mut t, end) = (near * scale, (near * scale + 6.0 * voxel).min(tmax));
+            while t <= end {
+                let p = o + rd * t;
+                let d = self.distance(p);
+                if d < 0.02 {
+                    return RayAnswer::Hit(t, self.ray_normal(p, rd));
+                }
+                t += d.clamp(0.02, 1.0);
+            }
+        }
+        // The field's surface, traced the rest of the way.
+        let mut t = near;
+        for _ in 0..32 {
+            let d = self.field.d(local + ld * t);
+            if d.abs() < lvoxel * 1e-3 {
+                break;
+            }
+            t += d;
+        }
+        if t * scale > tmax {
+            return RayAnswer::Miss;
+        }
+        let n = self.rot * self.field.grad(local + ld * t).normalize_or_zero();
+        RayAnswer::Hit(t * scale, if n.dot(rd) > 0.0 { -n } else { n })
     }
     fn distance(&self, p: Vec3) -> f32 {
         let local = self.to_local(p);
@@ -2522,13 +2583,15 @@ mod drawn_surface_tests {
             "the probe is outside the band at {before}; the collider never meshes there"
         );
         // Carve straight down from under the probe, hard enough that the drawn
-        // surface visibly drops away from it.
-        for _ in 0..40 {
+        // surface visibly drops away from it, and gently enough that the probe
+        // stays inside the band: past it the field answers on its own and the
+        // cache is never asked.
+        for _ in 0..3 {
             t.field.sculpt(
                 Brush::Lower,
                 probe - Vec3::Y * 0.5,
                 3.0,
-                1.0,
+                0.2,
                 BrushProfile::default(),
             );
         }
@@ -2600,6 +2663,59 @@ mod drawn_surface_tests {
     /// the hole. Forgetting every touched chunk and its neighbours made the next
     /// query re-mesh a few dozen of them on the main thread, tens of milliseconds
     /// a bite. What is left on it is the copy, the gathers and the bucketing.
+    /// **Dropping props onto new ground meshes nothing.** Six hundred settle
+    /// rays straight down onto a patch of planet nobody has stood on. The
+    /// ordinary ray meshes each chunk whole once a few rays have asked it,
+    /// tens of milliseconds on the main thread apiece: every spike of a
+    /// scatter field arriving under a walking or flying player. The ground
+    /// query reads the height from the field there, meshes no chunk, lands
+    /// within a fraction of a voxel of the drawn triangles, and costs a small
+    /// part of the ordinary rays' time. Totals, not single rays, so a busy
+    /// machine pausing one ray cannot decide it.
+    #[test]
+    fn a_ground_query_meets_the_drawn_surface_without_meshing_it() {
+        let radius = 150.0;
+        let voxel = 1.5;
+        let field = floptle_field::procgen::generate_planet(&floptle_field::procgen::PlanetFill {
+            seed: 11,
+            radius,
+            voxel,
+            relief: radius * 0.065,
+            cave_depth: radius * 0.35,
+            core_r: 10.5,
+            ..Default::default()
+        });
+        let ray = ChunkTerrain::new(field.clone());
+        let ground = ChunkTerrain::new(field);
+        let (mut ray_s, mut ground_s, mut far, mut n) = (0f64, 0f64, 0f32, 0);
+        for k in 0..600 {
+            // A patch about 40 m across on one side of the planet.
+            let (a, b) = ((k % 25) as f32 * 0.011, (k / 25) as f32 * 0.011);
+            let up = Vec3::new(a.sin(), b.sin(), 1.0).normalize();
+            let from = up * (radius + 60.0);
+            let t = std::time::Instant::now();
+            let r = ray.ray_cast(from, -up, 150.0);
+            ray_s += t.elapsed().as_secs_f64();
+            let t = std::time::Instant::now();
+            let g = ground.ground_cast(from, -up, 150.0);
+            ground_s += t.elapsed().as_secs_f64();
+            if let (RayAnswer::Hit(tr, _), RayAnswer::Hit(tg, _)) = (r, g) {
+                far = far.max((tr - tg).abs());
+                n += 1;
+            }
+        }
+        assert!(n > 500, "only {n} of 600 rays hit both ways");
+        assert!(!ray.surface.borrow().chunks.is_empty(), "the ordinary ray meshed nothing; the comparison means nothing");
+        assert_eq!(ground.surface.borrow().chunks.len(), 0, "the ground query meshed a chunk");
+        assert!(far < voxel * 0.25, "the ground query is up to {far} m off the drawn surface");
+        assert!(
+            ground_s * 4.0 < ray_s,
+            "600 ground queries took {:.2} ms against the ordinary rays' {:.2} ms",
+            ground_s * 1e3,
+            ray_s * 1e3
+        );
+    }
+
     #[test]
     fn a_dig_re_meshes_no_collision_chunk_on_the_main_thread() {
         use floptle_field::{Brush, BrushProfile};

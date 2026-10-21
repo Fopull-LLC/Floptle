@@ -123,6 +123,7 @@ pub(super) fn menu_world(script: &str, n: usize) -> (World, floptle_core::Entity
 pub(super) fn hull(eid: u32, x: f32) -> floptle_physics::BodyHull {
     floptle_physics::BodyHull {
         eid,
+        owner: eid,
         pos: glam::Vec3::new(x, 0.0, 0.0),
         radius: 0.4,
         shape: floptle_physics::BodyShape::Capsule { half_height: 0.6 },

@@ -144,6 +144,9 @@ pub struct TouchEvent {
     pub sensor: bool,
 }
 
+/// How far beyond a craft's parts `Sim::grip` still takes hold, in units.
+pub const GRIP_REACH: f32 = 1.0;
+
 /// One terrain volume handed to the sim build: the node's world placement
 /// (anchor + rotation + uniform scale) around its node-local field, plus its
 /// collision identity (layer bit, entity index for touch events).
@@ -394,8 +397,8 @@ impl Sim {
             self.world.ignore_pair(oa, ob, Some(0.0));
         }
         // Grips a script made are not the components' to rebuild.
-        let scripted: Vec<crate::joints::JointRt> =
-            self.world.joints.drain(..).filter(|j| j.scripted).collect();
+        let (scripted, before): (Vec<crate::joints::JointRt>, Vec<crate::joints::JointRt>) =
+            self.world.joints.drain(..).partition(|j| j.scripted);
         self.joints_stale = false;
         let origin = self.world.origin;
         let mut out = Vec::new();
@@ -416,6 +419,24 @@ impl Sim {
             let b = other.and_then(|o| self.link_of(o));
             // Two parts of one assembly are one rigid body already.
             if b == Some(a) {
+                continue;
+            }
+            // A joint still between the same two bodies and made the same way
+            // keeps what it was made with: where it found the other end, and
+            // how the two were turned, are facts about the moment it was made.
+            // Measured again at every rebuild (anything added or removed
+            // anywhere asks for one), the sag of the moment became the rest,
+            // and a parked rover's wheels crept up their mounts. Its settings
+            // (motor, brake, limits) are read fresh every step regardless.
+            let shape = crate::joints::JointShape::of(jc);
+            if let Some(kept) = before.iter().find(|j| j.owner == e.index() && j.a == a && j.b == b && j.built_from == shape) {
+                out.push(kept.clone());
+                if let Some(bl) = b
+                    && !jc.collide_connected
+                {
+                    let (oa, ob) = (self.link_owner(a), self.link_owner(bl));
+                    self.world.ignore_pair(oa, ob, None);
+                }
                 continue;
             }
             let (pos_a, qa) = self.link_pose(a);
@@ -532,6 +553,12 @@ impl Sim {
         let a = Link::Compound(ci);
         let p = (at - self.world.origin).as_vec3();
         let (pos_a, qa) = self.link_pose(a);
+        // A grip is made where the craft touches: a point well clear of every
+        // part is a point worked out from somewhere the craft is not, and a
+        // weld that far out tears the craft about its lever.
+        if (p - pos_a).length() > self.world.compounds[ci].reach() + GRIP_REACH {
+            return false;
+        }
         let anchor_a = qa.inverse() * (p - pos_a);
         let other = target.and_then(|eid| {
             if let Some(l) = self.map.iter().find(|l| l.entity.index() == eid) {
@@ -1832,6 +1859,7 @@ impl Sim {
                 }
                 let hull = crate::world::BodyHull {
                     eid: b_eid,
+                    owner: b_eid,
                     pos: b.pos,
                     radius: b.radius,
                     shape: b.shape,
@@ -1996,6 +2024,23 @@ impl Sim {
                 t.translation = local;
                 t.rotation = local_rot;
             }
+        }
+    }
+
+    /// Write the assembly rooted at `eid` to its root node now, at its pose
+    /// this tick, rather than at the next writeback. For a craft a script has
+    /// just moved: until the frame's writeback the node read where the craft
+    /// used to be, and everything a later tick of the same frame worked out
+    /// from it (a ray cast from a claw's tip) was worked out from there.
+    pub fn write_compound_node(&self, eid: u32, ecs: &mut World) {
+        let Some(c) = self.compound_of(eid) else { return };
+        let Some(root) = self.cmap.iter().find(|l| l.entity.index() == eid).map(|l| l.entity) else { return };
+        let p = c.origin();
+        let world_pos = self.world.origin + DVec3::new(p.x as f64, p.y as f64, p.z as f64);
+        let (local, local_rot) = local_pose_for(ecs, root, world_pos, c.orient);
+        if let Some(t) = ecs.get_mut::<Transform>(root) {
+            t.translation = local;
+            t.rotation = local_rot;
         }
     }
 
@@ -2383,6 +2428,7 @@ impl Sim {
                 };
                 BodyHull {
                     eid: l.entity.index(),
+                    owner: l.entity.index(),
                     pos,
                     radius: b.radius,
                     shape: b.shape,
@@ -2391,7 +2437,38 @@ impl Sim {
                     orient: b.orient,
                 }
             })
+            .chain(self.part_hulls())
             .collect()
+    }
+
+    /// Every part of every live assembly as a hull, so a ray, a sphere cast
+    /// or an overlap finds the part it touches, named by the part's node and
+    /// owned by the craft's root. A craft's parts were invisible to every
+    /// query, so a chase camera went through the craft it followed.
+    fn part_hulls(&self) -> impl Iterator<Item = BodyHull> + '_ {
+        use crate::compound::ShapeGeom;
+        self.cmap.iter().filter(|l| self.world.compounds[l.compound].live()).flat_map(move |l| {
+            let c = &self.world.compounds[l.compound];
+            (0..c.shapes.len()).map(move |si| {
+                let s = &c.shapes[si];
+                let orient = (c.orient * s.rot).normalize();
+                let (radius, shape) = match s.geom {
+                    ShapeGeom::Sphere { radius } => (radius, BodyShape::Sphere),
+                    ShapeGeom::Capsule { radius, half_height } => (radius, BodyShape::Capsule { half_height }),
+                    ShapeGeom::Box { half } => (half.min_element(), BodyShape::Box { half }),
+                };
+                BodyHull {
+                    eid: s.id as u32,
+                    owner: l.entity.index(),
+                    pos: c.shape_center(si),
+                    radius,
+                    shape,
+                    up: orient * Vec3::Y,
+                    layer: c.layer,
+                    orient,
+                }
+            })
+        })
     }
 
     /// Activate/deactivate a body by entity index. Inactive bodies neither
@@ -2812,6 +2889,7 @@ impl Sim {
                 let eid = self.map.iter().find(|l| l.body == bi)?.entity.index();
                 Some(BodyHull {
                     eid,
+                    owner: eid,
                     pos: b.pos,
                     radius: b.radius,
                     shape: b.shape,

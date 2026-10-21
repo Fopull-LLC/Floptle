@@ -667,6 +667,7 @@ impl Editor {
                 floptle_script::AssemblyCmd::Teleport { root, pos } => {
                     if let Some(sim) = self.sim.as_mut() {
                         sim.set_compound_origin(root, DVec3::new(pos[0], pos[1], pos[2]));
+                        sim.write_compound_node(root, &mut self.world);
                     }
                 }
                 floptle_script::AssemblyCmd::SyncColliders { root } => {
@@ -702,8 +703,8 @@ impl Editor {
                         self.console.push(
                             floptle_script::LogLevel::Warn,
                             format!(
-                                "assembly.grip: node {root} is not an assembly with a body, or the target is \
-                                 part of it — nothing was gripped"
+                                "assembly.grip: node {root} is not an assembly with a body, the target is \
+                                 part of it, or the point is out of the craft's reach — nothing was gripped"
                             ),
                             None,
                         );

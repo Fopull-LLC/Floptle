@@ -112,6 +112,11 @@ impl AnchoredCollider {
         self.shape.ray_cast(o - self.offset, rd, tmax)
     }
 
+    /// [`CollisionShape::ground_cast`] from sim-frame `o`.
+    pub fn ground_cast(&self, o: Vec3, rd: Vec3, tmax: f32) -> crate::RayAnswer {
+        self.shape.ground_cast(o - self.offset, rd, tmax)
+    }
+
     /// The normal a ray travelling along unit `rd` reports where it stopped,
     /// at sim-frame `p` — see [`CollisionShape::ray_normal`].
     pub fn ray_normal(&self, p: Vec3, rd: Vec3) -> Vec3 {
@@ -361,6 +366,24 @@ pub fn raycast_colliders(
     max_dist: f32,
     mask: u32,
 ) -> Option<RayHit> {
+    cast_colliders(colliders, origin, dir, max_dist, mask, false)
+}
+
+/// [`raycast_colliders`], asking each collider its
+/// [`ground_cast`](crate::CollisionShape::ground_cast) answer: the ray a
+/// scatter prop is dropped onto the ground with.
+pub fn raycast_ground_colliders(colliders: &[AnchoredCollider], origin: Vec3, dir: Vec3, max_dist: f32) -> Option<RayHit> {
+    cast_colliders(colliders, origin, dir, max_dist, !0, true)
+}
+
+fn cast_colliders(
+    colliders: &[AnchoredCollider],
+    origin: Vec3,
+    dir: Vec3,
+    max_dist: f32,
+    mask: u32,
+    ground: bool,
+) -> Option<RayHit> {
     // A march stops within 0.02 of a surface, so a box grazed by that much
     // must still be marched.
     const SLACK: f32 = 0.05;
@@ -391,7 +414,8 @@ pub fn raycast_colliders(
             None => Some((0.0, max_dist)),
         };
         let Some((t0, t1)) = span else { continue };
-        match c.ray_cast(origin, rd, max_dist) {
+        let answer = if ground { c.ground_cast(origin, rd, max_dist) } else { c.ray_cast(origin, rd, max_dist) };
+        match answer {
             crate::RayAnswer::March => {
                 marched.push(i);
                 m_lo = m_lo.min(t0);
@@ -559,6 +583,10 @@ fn surface_hit(colliders: &[AnchoredCollider], cand: &[u32], origin: Vec3, rd: V
 pub struct BodyHull {
     /// ECS entity index of the body's node.
     pub eid: u32,
+    /// What it answers to when a query is told to pass through a node: its
+    /// own node for a body, the assembly's root for one part of a craft, so
+    /// a craft's ray that ignores the craft ignores every part of it.
+    pub owner: u32,
     /// Body center, sim frame.
     pub pos: Vec3,
     pub radius: f32,
@@ -645,7 +673,7 @@ pub fn raycast_hulls(
         let mut dmin = f32::MAX;
         let mut hit: Option<&BodyHull> = None;
         for h in hulls {
-            if exclude.contains(&h.eid) || (mask >> h.layer) & 1 == 0 {
+            if exclude.contains(&h.eid) || exclude.contains(&h.owner) || (mask >> h.layer) & 1 == 0 {
                 continue;
             }
             let d = h.distance(p);
@@ -732,7 +760,7 @@ pub fn overlap_sphere_hulls(
 ) -> Vec<ShapeHit> {
     let mut out = Vec::new();
     for h in hulls {
-        if exclude.contains(&h.eid) || (mask >> h.layer) & 1 == 0 {
+        if exclude.contains(&h.eid) || exclude.contains(&h.owner) || (mask >> h.layer) & 1 == 0 {
             continue;
         }
         let d = h.distance(center);
@@ -803,7 +831,7 @@ pub fn spherecast(
             .chain(
                 hulls
                     .iter()
-                    .filter(|h| !exclude.contains(&h.eid) && (mask >> h.layer) & 1 == 1)
+                    .filter(|h| !(exclude.contains(&h.eid) || exclude.contains(&h.owner)) && (mask >> h.layer) & 1 == 1)
                     .map(|h| h.distance(origin)),
             )
             .fold(f32::INFINITY, f32::min);
@@ -828,7 +856,7 @@ pub fn spherecast(
             }
         }
         for h in hulls {
-            if exclude.contains(&h.eid) || (mask >> h.layer) & 1 == 0 {
+            if exclude.contains(&h.eid) || exclude.contains(&h.owner) || (mask >> h.layer) & 1 == 0 {
                 continue;
             }
             let d = h.distance(p) - r;
@@ -983,7 +1011,7 @@ pub fn overlap_box_2d(
         }
     }
     for h in hulls {
-        if exclude.contains(&h.eid) || (mask >> h.layer) & 1 == 0 {
+        if exclude.contains(&h.eid) || exclude.contains(&h.owner) || (mask >> h.layer) & 1 == 0 {
             continue;
         }
         let (d, p) = deepest(&|q| h.distance(q));
@@ -1093,9 +1121,21 @@ impl PhysicsWorld {
         for (_, _, p, _) in &mut self.kin_contacts {
             *p += delta;
         }
+        // Every source with a centre moves with the frame. A planet's pull
+        // left behind pointed at where the planet had been in the old frame,
+        // kilometres off, for the tick until the rails rebuilt the field: up
+        // swung by as much as 88° on every recentre.
         for s in &mut self.gravity.sources {
-            if let GravitySource::Point { center, .. } = s {
-                *center += delta;
+            match s {
+                GravitySource::Point { center, .. } | GravitySource::InvSq { center, .. } => *center += delta,
+                _ => {}
+            }
+        }
+        // Water too, or it sat a recentre away from its basin for the tick.
+        for v in &mut self.water.volumes {
+            match &mut v.shape {
+                crate::WaterShape::Sphere { center, .. } | crate::WaterShape::Box { center, .. } => *center += delta,
+                crate::WaterShape::Declared { origin, .. } => *origin = new_origin,
             }
         }
         self.origin = new_origin;
@@ -1114,6 +1154,13 @@ impl PhysicsWorld {
     /// None. See [`raycast_colliders`].
     pub fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<RayHit> {
         raycast_colliders(&self.colliders, origin, dir, max_dist, !0)
+    }
+
+    /// [`Self::raycast`] for dropping a prop onto the ground: the same hit,
+    /// found without doing lasting work for it (see
+    /// [`CollisionShape::ground_cast`]).
+    pub fn raycast_ground(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<RayHit> {
+        raycast_ground_colliders(&self.colliders, origin, dir, max_dist)
     }
 
     /// Bring the collider broadphase up to date for queries made between
@@ -1468,6 +1515,11 @@ impl PhysicsWorld {
     /// the body.
     pub fn step_compound(&mut self, ci: usize, dt: f32) {
         let dt = dt.clamp(0.0, 0.1);
+        if !self.index_fresh {
+            // Reached directly, so nothing has built the broadphase yet.
+            self.reindex_colliders();
+            self.index_fresh = false;
+        }
         if !self.compounds[ci].live() {
             return;
         }
@@ -1569,6 +1621,17 @@ impl PhysicsWorld {
         let mut push_budget = 0.35f32;
         let mut rot_budget = 0.12f32;
         for _pass in 0..2 {
+            // Only the colliders the craft can reach this pass: a sphere round
+            // every sample, grown by the most the pass's pushes can move it.
+            // Every collider for every sample was most of the physics a frame
+            // for a craft near anything at all.
+            let cand = {
+                let c = &self.compounds[ci];
+                let mut cand = std::mem::take(&mut self.cand);
+                cand.clear();
+                self.collider_index.sphere(c.pos, c.reach() + push_budget + 0.01, &mut cand);
+                cand
+            };
             // Explicit indices throughout: each resolve moves the body, so the
             // sample position is recomputed fresh for every (shape, sample,
             // collider) triple — a corrected corner must not be re-pushed from
@@ -1576,7 +1639,8 @@ impl PhysicsWorld {
             for si in 0..self.compounds[ci].shapes.len() {
                 let n_samples = self.compounds[ci].shape_samples(si).1;
                 for k in 0..n_samples {
-                    for coli in 0..self.colliders.len() {
+                    for &coli in &cand {
+                        let coli = coli as usize;
                         if (row >> self.colliders[coli].layer) & 1 == 0
                             || self.colliders[coli].sensor
                         {
@@ -1680,6 +1744,7 @@ impl PhysicsWorld {
                     }
                 }
             }
+            self.cand = cand;
         }
 
         // Rest threshold: a grounded compound whose residual motion is below
@@ -3437,11 +3502,13 @@ mod step_body_tests {
             meshed.bodies.iter().all(|b| !b.asleep) && boxed.bodies.iter().all(|b| !b.asleep),
             "the fixture is wrong, not the property: a body slept through the window"
         );
-        let (mut b_ms, mut m_ms) = (0.0, 0.0);
-        // Interleaved, so a thermal wobble lands on both.
+        let (mut b_ms, mut m_ms) = (f64::MAX, f64::MAX);
+        // Interleaved, keeping each side's fastest: interference on a shared
+        // machine only ever adds time, and one interrupted sample in a sum
+        // read 15x where the floor itself costs a few times a box.
         for _ in 0..8 {
-            b_ms += time_n(&mut boxed, 5);
-            m_ms += time_n(&mut meshed, 5);
+            b_ms = b_ms.min(time_n(&mut boxed, 5));
+            m_ms = m_ms.min(time_n(&mut meshed, 5));
         }
         let ratio = m_ms / b_ms.max(1e-12);
         assert!(
@@ -3533,6 +3600,7 @@ mod step_body_tests {
         // A kinematic hull sweeps in from the side, on a collision course.
         w.kin_hulls.push(BodyHull {
             eid: 999,
+            owner: 999,
             pos: Vec3::new(-0.3, 0.5, 0.0),
             radius: 0.5,
             shape: BodyShape::Sphere,
@@ -3618,6 +3686,7 @@ mod hull_tests {
     fn capsule_at(eid: u32, x: f32) -> BodyHull {
         BodyHull {
             eid,
+            owner: eid,
             pos: Vec3::new(x, 1.0, 0.0),
             radius: 0.4,
             shape: BodyShape::Capsule { half_height: 0.6 },
@@ -3692,7 +3761,7 @@ mod shape_query_tests {
     use crate::BodyShape;
 
     fn hull(eid: u32, at: Vec3, radius: f32) -> BodyHull {
-        BodyHull { eid, pos: at, radius, shape: BodyShape::Sphere, up: Vec3::Y, layer: 0, orient: Quat::IDENTITY }
+        BodyHull { eid, owner: eid, pos: at, radius, shape: BodyShape::Sphere, up: Vec3::Y, layer: 0, orient: Quat::IDENTITY }
     }
 
     /// The question `raycast` could not answer: what is inside this volume. A
@@ -4286,6 +4355,7 @@ mod feet {
         w.add_collider(Box::new(Plane::ground(0.0)));
         w.kin_hulls.push(BodyHull {
             eid: 7,
+            owner: 7,
             pos: Vec3::new(0.0, -0.2, 0.0),
             radius: 0.5,
             shape: BodyShape::Box { half: Vec3::new(2.0, 0.5, 2.0) },
@@ -4807,6 +4877,7 @@ mod polygon_hull_tests {
         let outline = floptle_core::outline::Outline::convex(&[[-1.0, -1.0], [1.0, -1.0], [-1.0, 1.0]]);
         let hull = BodyHull {
             eid: 7,
+            owner: 7,
             pos: Vec3::ZERO,
             radius: 0.5,
             shape: BodyShape::Polygon { outline, half_depth: 0.5 },

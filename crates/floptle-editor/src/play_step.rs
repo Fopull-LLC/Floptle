@@ -776,6 +776,26 @@ impl Editor {
         self.drain_script_terrain_ops();
     }
 
+    /// Water on a world moving on its rails, rebuilt where this tick's rails
+    /// put it, as gravity is. Built once a frame before the ticks, a lake
+    /// stayed where its planet had been while the planet moved on a tick at
+    /// a time: at 280 m/s that is metres a tick, and a crate over a lake rose
+    /// out of it or sank to the bed. A world with nothing on rails keeps the
+    /// frame's build.
+    fn water_rides_its_rails(&mut self) {
+        if self.space_rails_prev.is_empty() {
+            return;
+        }
+        self.refresh_wind_frames();
+        let Some(origin) = self.sim.as_ref().map(|s| s.world.origin) else { return };
+        let declared = self.declared_water_volumes(origin);
+        let mut water = Self::build_water_field(&self.world, origin);
+        water.volumes.extend(declared);
+        if let Some(sim) = self.sim.as_mut() {
+            sim.world.water = water;
+        }
+    }
+
     /// Land the nodes scripts asked to spawn now, rather than at the end of
     /// the frame, while celestial bodies are moving on their rails. A script
     /// places a spawn against where a planet is this pass; the ticks in
@@ -881,6 +901,7 @@ impl Editor {
                 // terrain collider anchors + gravity centers + the space.*
                 // snapshot all reflect this tick before scripts and physics.
                 self.update_space_rails(self.game_tick.step as f64);
+                self.water_rides_its_rails();
                 // Per-tick input: consume the tick accumulators (edges bank between
                 // ticks so a between-tick press is never lost). Neutral when the
                 // Game view isn't focused — but still consumed, so stale edges

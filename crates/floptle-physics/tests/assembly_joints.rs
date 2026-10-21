@@ -508,3 +508,179 @@ fn a_rover_with_steered_front_wheels_turns() {
     let turned = rover_heading_after_driving(25.0);
     assert!(turned > 20.0, "with the front wheels steered 25° it turned only {turned}°");
 }
+
+/// A lander dropped onto a 19° bank of voxel terrain carried on its rails,
+/// gripping the ground the tick it touches down (as a landing claw does),
+/// with a weld that lets go past `hold`. Optionally one of its parts is
+/// re-posed every tick (a claw's moving fingers). Returns whether the grip
+/// held to the end, how far the lander drifted along the ground over the
+/// 60 s after it took hold, and its largest speed change in one tick.
+fn claw_landing(hold: f32, repose: bool) -> (bool, f32, f32) {
+    let tilt = Quat::from_rotation_z(19f32.to_radians());
+    let up = tilt * Vec3::Y;
+    let mut field = floptle_field::ChunkField::new(0.75);
+    field.fill_with(
+        Vec3::new(-20.0, -12.0, -10.0),
+        Vec3::new(20.0, 12.0, 10.0),
+        |p| p.dot(up).max(-p.dot(up) - 4.0),
+        |_| [0.5; 3],
+    );
+    let mut ecs = World::default();
+    let lander = segment(&mut ecs, "Lander", (up * 1.2).as_dvec3(), [0.5, 0.3, 0.5], 0.8);
+    ecs.get_mut::<Transform>(lander).unwrap().rotation = tilt;
+    let claw = ecs.spawn();
+    ecs.insert(claw, Transform::from_translation(DVec3::new(0.0, -0.45, 0.0)));
+    ecs.insert(claw, Parent(lander));
+    ecs.insert(claw, RigidBody { kind: BodyKind::Box, half_extents: [0.1, 0.15, 0.1], mass: 0.04, ..Default::default() });
+    let mut sim = Sim::build_layered(
+        &ecs,
+        &[floptle_physics::TerrainVolume { eid: Some(9999), ..floptle_physics::TerrainVolume::new(DVec3::ZERO, &field) }],
+        GravityField::uniform(Vec3::new(0.0, -6.5, 0.0)),
+        DVec3::ZERO,
+        floptle_core::Layers::default(),
+    );
+    let carry = DVec3::new(-1.47, 0.0, 3.75);
+    let mut moved = DVec3::ZERO;
+    let (mut gripped_at, mut rest, mut worst_kick) = (None, DVec3::ZERO, 0.0f32);
+    let mut last_v = Vec3::ZERO;
+    for tick in 0..(4 * 60 + 60 * 60) {
+        moved += carry;
+        sim.set_collider_anchor(9999, moved);
+        sim.shift_compound(lander.index(), carry);
+        if repose {
+            // The fingers open and close: the part node moves under its root.
+            let s = (tick as f32 * 0.2).sin() * 0.03;
+            ecs.get_mut::<Transform>(claw).unwrap().translation = DVec3::new(s as f64, -0.45, 0.0);
+            sim.resync_compound_shapes(lander.index(), &ecs);
+        }
+        sim.sync_joints(&mut ecs);
+        sim.step_tick(DT, Some(moved));
+        let (cpos, cvel) = {
+            let c = sim.compound_of(lander.index()).unwrap();
+            (c.pos, c.vel)
+        };
+        let world = cpos.as_dvec3() + sim.world.origin - moved;
+        if let Some(at) = gripped_at {
+            worst_kick = worst_kick.max((cvel - last_v).length());
+            if tick == at + 30 {
+                rest = world;
+            }
+        } else {
+            let touching = sim.compound_impacts().into_iter().find(|i| i.0 == lander.index());
+            if let Some(hit) = touching {
+                // Grip the ground where it touched, as a claw's ray finds it.
+                assert!(sim.grip(lander.index(), hit.5, None, hold));
+                gripped_at = Some(tick);
+                rest = world;
+            }
+        }
+        last_v = cvel;
+    }
+    let c = sim.compound_of(lander.index()).unwrap();
+    let drift = (c.pos.as_dvec3() + sim.world.origin - moved - rest).length() as f32;
+    (sim.gripped(lander.index()) && gripped_at.is_some(), drift, worst_kick)
+}
+
+/// On a 19° slope of a planet moving on its rails, a lander that grips the
+/// ground as it touches down holds there: the grip is not torn loose, it
+/// drifts less than 5 cm in a minute, and a grip strong enough never to
+/// break takes hold without a kick. The same with a part re-posed every tick.
+#[test]
+fn a_lander_gripping_a_carried_slope_at_touchdown_holds() {
+    for repose in [false, true] {
+        let (held, drift, _) = claw_landing(400.0, repose);
+        assert!(held, "the grip let go (re-posed part: {repose})");
+        assert!(drift < 0.05, "it drifted {drift} m on the slope in 60 s (re-posed part: {repose})");
+        let (held, drift, kick) = claw_landing(1.0e9, repose);
+        assert!(held && drift < 0.05, "an unbreakable grip held {held}, drifted {drift} m (re-posed part: {repose})");
+        assert!(kick < 1.0, "taking hold kicked it {kick} m/s in a tick (re-posed part: {repose})");
+    }
+}
+
+/// A grip is taken where the craft is: at its foot it holds, and a point
+/// 50 m clear of it (worked out from somewhere the craft is not) is refused
+/// rather than welded about a 50 m lever.
+#[test]
+fn a_grip_out_of_the_crafts_reach_is_refused() {
+    let mut ecs = World::default();
+    let pad = ecs.spawn();
+    ecs.insert(pad, Transform::from_translation(DVec3::new(0.0, -1.0, 0.0)));
+    ecs.insert(pad, RigidBody { kind: BodyKind::Box, mode: BodyMode::Static, half_extents: [100.0, 1.0, 100.0], ..Default::default() });
+    let lander = segment(&mut ecs, "Lander", DVec3::new(0.0, 0.4, 0.0), [0.4, 0.4, 0.4], 1.0);
+    let mut sim = build(&ecs);
+    assert!(!sim.grip(lander.index(), DVec3::new(50.0, 0.0, 0.0), None, 0.0), "a grip 50 m off was taken");
+    assert!(!sim.gripped(lander.index()));
+    assert!(sim.grip(lander.index(), DVec3::new(0.0, 0.0, 0.0), None, 0.0), "a grip at its foot was refused");
+}
+
+/// Where each wheel of a rover parked on a 20° slope sits on its mount, in
+/// the chassis's frame, after 13 s. Its wheel joints name no anchor on the
+/// chassis, so each was made where its wheel stood. With `visitors`, another
+/// craft arrives far away and leaves again, ten times, and each arrival and
+/// departure rebuilds the joints.
+fn parked_wheel_offsets(visitors: bool) -> Vec<Vec3> {
+    let mut ecs = World::default();
+    let tilt = Quat::from_rotation_z(20f32.to_radians());
+    let ramp = ecs.spawn();
+    ecs.insert(ramp, Transform { translation: (tilt * Vec3::new(0.0, -1.0, 0.0)).as_dvec3(), rotation: tilt, scale: Vec3::ONE });
+    ecs.insert(ramp, RigidBody { kind: BodyKind::Box, mode: BodyMode::Static, half_extents: [60.0, 1.0, 10.0], friction: 1.0, ..Default::default() });
+    let (up, along) = (tilt * Vec3::Y, tilt * Vec3::X);
+    let centre = up * 0.9;
+    let chassis = segment(&mut ecs, "Chassis", centre.as_dvec3(), [1.2, 0.2, 0.7], 40.0);
+    ecs.get_mut::<Transform>(chassis).unwrap().rotation = tilt;
+    let mut wheels = Vec::new();
+    for (dx, dz) in [(-1.0f32, -0.9f32), (1.0, -0.9), (-1.0, 0.9), (1.0, 0.9)] {
+        let w = ecs.spawn();
+        let at = centre + along * dx + tilt * Vec3::new(0.0, -0.45, dz);
+        ecs.insert(w, Transform { translation: at.as_dvec3(), rotation: tilt, scale: Vec3::ONE });
+        ecs.insert(w, RigidBody { radius: 0.45, mass: 5.0, friction: 1.0, rotates: true, ..Default::default() });
+        ecs.insert(
+            w,
+            Joint {
+                kind: JointKind::Wheel,
+                other: "Chassis".into(),
+                axis: [0.0, 1.0, 0.0],
+                stiffness: 1.5,
+                damping: 0.8,
+                motor: true,
+                motor_speed: 0.0,
+                max_force: 400.0,
+                ..Default::default()
+            },
+        );
+        wheels.push(w);
+    }
+    let mut sim = build(&ecs);
+    run(&mut sim, &mut ecs, 3.0);
+    for k in 0..10 {
+        if visitors {
+            let visitor = segment(&mut ecs, "Visitor", DVec3::new(300.0 + k as f64 * 5.0, 50.0, 0.0), [0.3, 0.3, 0.3], 1.0);
+            assert!(sim.add_compound_for(visitor, &ecs));
+            run(&mut sim, &mut ecs, 0.5);
+            sim.remove_compound(visitor.index());
+            ecs.despawn(visitor);
+            run(&mut sim, &mut ecs, 0.5);
+        } else {
+            run(&mut sim, &mut ecs, 1.0);
+        }
+    }
+    let c = sim.compound_of(chassis.index()).unwrap();
+    wheels
+        .iter()
+        .map(|w| {
+            let p = sim.body_states().find(|r| r.entity == *w).unwrap().pos.as_vec3();
+            c.orient.inverse() * (p - c.pos)
+        })
+        .collect()
+}
+
+/// Craft coming and going far from a parked rover leave its wheels where
+/// they sit with nobody about, to a centimetre, rather than each rebuild of
+/// the joints taking the suspension's sag of the moment as the new rest.
+#[test]
+fn a_joints_rest_survives_the_joints_being_rebuilt() {
+    let (still, visited) = (parked_wheel_offsets(false), parked_wheel_offsets(true));
+    for (k, (a, b)) in still.iter().zip(&visited).enumerate() {
+        assert!((*a - *b).length() < 0.01, "wheel {k} is {} m from where it sits with no visitors: {a:?} -> {b:?}", (*a - *b).length());
+    }
+}

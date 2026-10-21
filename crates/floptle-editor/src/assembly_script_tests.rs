@@ -829,3 +829,170 @@ end
     assert!(d < 0.5, "the ball beside the rock was left {d} m behind it: {rel:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A craft a script teleports is where it was sent from the next tick on,
+/// as its node reads it: within one frame of several ticks, a tick after
+/// the teleport reads the new place, not the old one. A landing claw that
+/// cast its ray from the node's old place gripped ground 190 m behind the
+/// craft, and the weld tore it apart.
+#[test]
+fn a_teleported_craft_reads_where_it_was_sent_on_the_next_tick() {
+    let (mut ed, dir) = project(
+        "teleportread",
+        r#"
+local n, ship = 0, nil
+function fixedUpdate(node, dt)
+  n = n + 1
+  if n == 1 then
+    spawn("Vessel", vec3(0, 0, 0), function(v)
+      spawn("Part", vec3(0, 0, 0), function(p) assembly.rebuild(v, function(s) ship = s end) end, v)
+    end)
+  elseif ship and n == 10 then
+    assembly.teleport(ship, vec3(200, 0, 0))
+  elseif ship and n == 11 then
+    log(string.format("AT %.2f", ship.x))
+  end
+end
+"#,
+    );
+    ed.toggle_play();
+    // Frames of three ticks, so the tick after the teleport is in its frame.
+    for _ in 0..8 {
+        ed.play_step(3.0 / 60.0, true);
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+    }
+    let at = lines(&mut ed, "AT");
+    assert_eq!(at.len(), 1, "{at:?}");
+    let x: f64 = at[0].parse().unwrap();
+    assert!((x - 200.0).abs() < 0.5, "the tick after the teleport the craft's node read x = {x}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A lake declared on a planet moving fast on its rails, on the face the
+/// planet is moving along, floats a light body at its surface, where it is
+/// drawn: the water rides the planet every tick, not once a frame behind it.
+#[test]
+fn a_declared_lake_on_a_fast_planet_floats_a_body_at_its_surface() {
+    let (mut ed, dir) = project(
+        "lakeride",
+        r#"
+local n, made = 0, false
+function update(node, dt)
+  n = n + 1
+  local ball, planet = find("Ball"), find("Planet")
+  if not (ball and planet) then return end
+  if not made then
+    made = true
+    water.addVolume{ shape = "lake", parent = "Planet", center = vec3(0, 0, 100), reach = 40 }
+  end
+  if n % 20 == 0 then
+    local dx, dy, dz = ball.x - planet.x, ball.y - planet.y, ball.z - planet.z
+    log(string.format("H %d %.3f", n, math.sqrt(dx * dx + dy * dy + dz * dz)))
+  end
+end
+"#,
+    );
+    let star = ed.world.query::<Name>().find(|(_, n)| n.0 == "Star").map(|(e, _)| e).unwrap();
+    ed.world.get_mut::<CelestialBody>(star).unwrap().mu = 7.84e7;
+    let planet = ed.world.spawn();
+    ed.world.insert(planet, Transform::IDENTITY);
+    ed.world.insert(planet, Name("Planet".into()));
+    ed.world.insert(planet, Matter::Empty);
+    ed.world.insert(planet, CelestialBody { mu: 9.8e4, body_radius: 95.0, soi: 2000.0, parent: "Star".into(), a: 1000.0, ..Default::default() });
+    let ball = ed.world.spawn();
+    ed.world.insert(ball, Transform::IDENTITY);
+    ed.world.insert(ball, Name("Ball".into()));
+    ed.world.insert(ball, Matter::Empty);
+    ed.world.insert(ball, RigidBody { radius: 0.5, mass: 20.0, ..Default::default() });
+    ed.toggle_play();
+    run(&mut ed, 1);
+    let p = floptle_core::world_transform(&ed.world, planet).translation;
+    ed.toggle_play();
+    ed.world.get_mut::<Transform>(planet).unwrap().translation = p;
+    ed.world.get_mut::<Transform>(ball).unwrap().translation = p + DVec3::new(0.0, 0.0, 100.6);
+    let cam = ed.world.query::<Name>().find(|(_, n)| n.0 == "Camera").map(|(e, _)| e).unwrap();
+    ed.world.get_mut::<Transform>(cam).unwrap().translation = p + DVec3::new(20.0, 0.0, 110.0);
+    ed.toggle_play();
+    // Frames of three ticks: the water is built once a frame before them.
+    for _ in 0..120 {
+        ed.play_step(3.0 / 60.0, true);
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+    }
+    let h = lines(&mut ed, "H");
+    let last: Vec<f64> = h.iter().rev().take(4).map(|l| l.split(' ').nth(1).unwrap().parse().unwrap()).collect();
+    for r in &last {
+        assert!((r - 100.0).abs() < 0.6, "the ball floats at {r} from the planet's centre, the lake's surface is at 100: {h:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A ray, a sphere cast and an overlap through each part of a four-part
+/// craft each report that part, in a flat scene and on a planet moving on
+/// its rails; and a ray told to ignore the craft passes through all of it.
+fn queries_find_each_part(on_rails: bool) {
+    let (mut ed, dir) = project(
+        if on_rails { "partqueryrails" } else { "partquery" },
+        r#"
+local n, ship, parts, base = 0, nil, {}, nil
+function fixedUpdate(node, dt)
+  n = n + 1
+  local planet = find("Planet")
+  base = planet and vec3(planet.x, planet.y, planet.z) or vec3(0, 0, 0)
+  if n == 2 then
+    spawn("Vessel", base, function(v)
+      ship = v
+      for i = 1, 4 do
+        spawn("Part", vec3(base.x + (i - 1) * 2, base.y, base.z), function(p)
+          parts[i] = p
+          if #parts == 4 then assembly.rebuild(v) end
+        end, v)
+      end
+    end)
+  elseif n == 10 and ship then
+    for i = 1, 4 do
+      local x = base.x + (i - 1) * 2
+      local r = raycast(x, base.y + 5, base.z, 0, -1, 0, 10)
+      local s = spherecast(vec3(x, base.y + 5, base.z), vec3(0, -1, 0), 0.2, 10)
+      local o = overlapSphere(vec3(x, base.y, base.z), 0.3)
+      local on = o[1] and o[1].node
+      local id = parts[i].__id
+      log(string.format("PART %d %s %s %s", i, tostring(r and r.node.__id == id), tostring(s and s.node.__id == id), tostring(on and on.__id == id)))
+    end
+    local through = raycast(base.x, base.y + 5, base.z, 0, -1, 0, 10, ship)
+    log("IGNORED " .. tostring(through == nil or through.node.__id ~= parts[1].__id))
+  end
+end
+"#,
+    );
+    if on_rails {
+        let star = ed.world.query::<Name>().find(|(_, n)| n.0 == "Star").map(|(e, _)| e).unwrap();
+        ed.world.get_mut::<CelestialBody>(star).unwrap().mu = 1.0e7;
+        let planet = ed.world.spawn();
+        ed.world.insert(planet, Transform::IDENTITY);
+        ed.world.insert(planet, Name("Planet".into()));
+        ed.world.insert(planet, Matter::Empty);
+        ed.world.insert(planet, CelestialBody { mu: 0.0, body_radius: 5.0, soi: 200.0, parent: "Star".into(), a: 1000.0, ..Default::default() });
+        ed.toggle_play();
+        run(&mut ed, 1);
+        let p = floptle_core::world_transform(&ed.world, planet).translation;
+        ed.toggle_play();
+        ed.world.get_mut::<Transform>(planet).unwrap().translation = p;
+        let cam = ed.world.query::<Name>().find(|(_, n)| n.0 == "Camera").map(|(e, _)| e).unwrap();
+        ed.world.get_mut::<Transform>(cam).unwrap().translation = p + DVec3::new(0.0, 0.0, 30.0);
+    }
+    ed.toggle_play();
+    run(&mut ed, 14);
+    let parts = lines(&mut ed, "PART");
+    assert_eq!(parts.len(), 4, "{parts:?}");
+    for l in &parts {
+        assert!(l.ends_with("true true true"), "a query missed its part (rails: {on_rails}): {parts:?}");
+    }
+    assert_eq!(lines(&mut ed, "IGNORED"), vec!["true".to_string()], "a ray told to ignore the craft hit it");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn rays_casts_and_overlaps_find_an_assemblys_parts() {
+    queries_find_each_part(false);
+    queries_find_each_part(true);
+}
