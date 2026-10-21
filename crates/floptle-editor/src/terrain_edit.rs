@@ -368,12 +368,19 @@ const CHECKPOINT_FORCE_SECS: f64 = 20.0;
 /// recipe is right there on the node. File read+parse or full procgen, plus
 /// the shadow-proxy derivation; runs on background threads (and blockingly
 /// for file sources at the emergency radius). None = every candidate failed.
-fn load_terrain_from(sources: Vec<TerrainSource>) -> Option<EditorTerrain> {
+///
+/// `genspec` is the body's recipe, passed apart from the sources: a load that
+/// may not generate (a batch owns the cores) still needs it, to find a whole-
+/// field save's edits. Dropped with the Generate source, an old save loaded,
+/// never learnt its edits, and was written back whole on every save.
+fn load_terrain_from(sources: Vec<TerrainSource>, genspec: Option<String>) -> Option<EditorTerrain> {
     // A saved field of a planet whose caves wait knows which chunks are still
     // to make but not how: the body's genspec, when it has one, does.
-    let genspec: Option<String> = sources.iter().find_map(|s| match s {
-        TerrainSource::Generate(spec) => Some(spec.clone()),
-        TerrainSource::File(_) => None,
+    let genspec = genspec.or_else(|| {
+        sources.iter().find_map(|s| match s {
+            TerrainSource::Generate(spec) => Some(spec.clone()),
+            TerrainSource::File(_) => None,
+        })
     });
     let spec: Option<floptle_field::procgen::PlanetFill> = genspec.as_deref().and_then(|s| ron::from_str(s).ok());
     for src in sources {
@@ -1683,6 +1690,12 @@ impl Editor {
     /// colliders and before stepping physics, so a dig affects the same tick.
     pub(crate) fn drain_script_terrain_ops(&mut self) {
         let ops = self.script_host.take_terrain_ops();
+        self.apply_script_terrain_ops(ops);
+    }
+
+    /// Apply a frame's script terrain ops: the work of
+    /// [`Self::drain_script_terrain_ops`], for ops from anywhere.
+    pub(crate) fn apply_script_terrain_ops(&mut self, ops: Vec<floptle_script::TerrainOp>) {
         if ops.is_empty() {
             return;
         }
@@ -1724,7 +1737,9 @@ impl Editor {
                 self.queue_terrain_dirty(e, c, r, b.geom, touched.take().unwrap_or_default());
             }
         }
-        self.profile_record(floptle_core::profile::Bucket::Terrain, t0.ms());
+        let ms = t0.ms();
+        self.profile_record(floptle_core::profile::Bucket::Terrain, ms);
+        self.script_host.profile().borrow_mut().record_part("terrainEdits", ms);
         if !dirty.is_empty() {
             let sources: Vec<floptle_core::scatter::ScatterSource> =
                 self.script_host.scatter_sources().clone();
@@ -1950,7 +1965,11 @@ impl Editor {
             }
             w.wait();
         }
-        self.profile_record(floptle_core::profile::Bucket::Terrain, t0.ms());
+        let ms = t0.ms();
+        self.profile_record(floptle_core::profile::Bucket::Terrain, ms);
+        // Named inside `terrain`: a slow frame here is the collider's rebuilt
+        // triangles landing, or the frame waiting for them.
+        self.script_host.profile().borrow_mut().record_part("collisionRebuild", ms);
     }
 
     /// Queue the render/shadow refresh for a terrain write at `local` (node-local):
@@ -2834,6 +2853,7 @@ impl Editor {
             return;
         }
         let mut sources = self.resolve_terrain_source(e, id);
+        let genspec = self.world.get::<floptle_core::TerrainGen>(e).map(|g| g.0.clone());
         // A running `terrain.generatePlanet` batch owns generation: while the
         // game's spawn planet (or any explicit fill) is being built, residency
         // must not start more generations behind it — the player is standing
@@ -2873,7 +2893,7 @@ impl Editor {
         );
         let (tx, rx) = std::sync::mpsc::channel();
         crate::worker::spawn("terrain-load", move || {
-            let _ = tx.send(load_terrain_from(sources));
+            let _ = tx.send(load_terrain_from(sources, genspec));
         });
         self.terrain_load_jobs.push(TerrainLoadJob {
             e,
@@ -2906,21 +2926,30 @@ impl Editor {
                 self.kick_terrain_load(e, id);
                 false
             }
+            // A body with a recipe generates on every load: a file of edits is
+            // laid over a fresh generation, and a whole-field file is compared
+            // with one to find its edits. Neither belongs in a frame.
+            Some(TerrainSource::File(_)) if self.world.get::<floptle_core::TerrainGen>(e).is_some() => {
+                self.kick_terrain_load(e, id);
+                false
+            }
             Some(TerrainSource::File(_)) => {
                 // Synchronously try the file candidates only — a corrupt file
                 // must fall back to the background chain (which ends in the
                 // genspec), never to an in-frame generation.
-                let files: Vec<TerrainSource> = sources
-                    .into_iter()
-                    .filter(|s| matches!(s, TerrainSource::File(_)))
-                    .collect();
-                match load_terrain_from(files) {
-                    Some(t) => {
+                // A file of edits is laid over a generation, so it goes to the
+                // background too.
+                let field = sources.iter().find_map(|s| match s {
+                    TerrainSource::File(p) => floptle_vfs::read(p).ok().and_then(|b| floptle_field::ChunkField::from_bytes(&b)),
+                    TerrainSource::Generate(_) => None,
+                });
+                match field {
+                    Some(f) if !f.is_delta() => {
                         self.terrain_load_jobs.retain(|j| j.e != e); // job now stale
-                        self.finish_terrain_load(e, t);
+                        self.finish_terrain_load(e, EditorTerrain::new(f));
                         true
                     }
-                    None => {
+                    _ => {
                         self.kick_terrain_load(e, id);
                         false
                     }
@@ -3972,7 +4001,20 @@ mod residency_tests {
         }
         each.sort_by(f64::total_cmp);
         let p90 = each[each.len() * 9 / 10];
-        assert!(p90 < 12.0, "a bite costs the main thread {p90:.2} ms (90th percentile, debug build)");
+        // Against meshing one chunk at full detail, timed here too, so a busy
+        // machine slows both: a bite costs about two of them, and with the
+        // collision meshes built on the main thread it cost thirty.
+        let field = &ed.terrains[&e].field;
+        let c = (ground / (field.voxel() * floptle_field::CHUNK as f32)).floor().to_array().map(|v| v as i32);
+        let mut mesh: Vec<f64> = (0..5)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                let _ = floptle_field::mesh_chunk(field, c, 1, false);
+                t.elapsed().as_secs_f64() * 1e3
+            })
+            .collect();
+        mesh.sort_by(f64::total_cmp);
+        assert!(p90 < 5.0 * mesh[2], "a bite costs the main thread {p90:.2} ms (90th percentile), a chunk's mesh {:.2} ms", mesh[2]);
     }
 
     /// Sync terrain `e`'s meshes from `cam` until every chunk the field holds
@@ -4145,6 +4187,160 @@ mod residency_tests {
         assert!(after > before + 0.5, "the collider does not see the hole: {before} -> {after}");
     }
 
+    /// **A mining laser's bites cost the frames they land in little.** Each
+    /// bite on a generated planet cost its frame 9 ms, then 33 to 61 ms on the
+    /// bigger worlds, in a release build. Whole player frames, as a build
+    /// runs them (headless, so the draw itself is skipped: the bites' cost is
+    /// in the step and the terrain work around it): 60 without digging, then
+    /// 60 with a bite every seventh, as a laser biting every 0.12 s does at
+    /// 60 fps. The slowest bite frames stand against the slowest of the
+    /// others, so a slow machine slows both; a release build holds the card's
+    /// 4 ms, a debug one cannot, so the bound is the debug one.
+    #[test]
+    fn a_mining_lasers_bites_cost_their_frames_little() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let fill = floptle_field::procgen::PlanetFill { seed: 6, radius: 200.0, voxel: 1.5, relief: 12.0, cave_depth: 60.0, core_r: 10.0, defer_caves: true, ..Default::default() };
+        let field = floptle_field::procgen::generate_planet(&fill);
+        let ground = field.raycast(Vec3::new(0.0, 260.0, 0.0), Vec3::NEG_Y, 260.0).unwrap();
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        ed.world.insert(e, floptle_core::Matter::Terrain { id: 1, collision: Default::default() });
+        ed.terrains.insert(e, EditorTerrain::new(field));
+        let cam = ed.world.spawn();
+        ed.world.insert(cam, floptle_core::Transform::from_translation(DVec3::new(0.0, ground.y as f64 + 6.0, 12.0)));
+        ed.world.insert(cam, floptle_core::Matter::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: !0, target_w: 0, target_h: 0, target_hz: 0.0, ortho: false, ortho_height: 10.0, stack: Vec::new() });
+        ed.toggle_play();
+        {
+            // Something stands where the laser bites, so its collision is meshed.
+            use floptle_physics::CollisionShape;
+            let _ = ed.sim.as_mut().unwrap().terrain_collider_mut(e.index()).unwrap().distance(ground);
+        }
+        // Settle: the ground around the camera meshed.
+        for _ in 0..60 {
+            ed.player_frame(false);
+        }
+        let frame = |ed: &mut crate::Editor, bite: Option<Vec3>| {
+            let t = std::time::Instant::now();
+            if let Some(p) = bite {
+                ed.apply_script_terrain_ops(vec![floptle_script::TerrainOp {
+                    pos: [p.x as f64, p.y as f64, p.z as f64],
+                    radius: 2.4,
+                    strength: 0.85,
+                    mode: floptle_script::TerrainOpMode::Lower,
+                    id: 0,
+                    normal: None,
+                }]);
+            }
+            ed.player_frame(false);
+            t.elapsed().as_secs_f64() * 1e3
+        };
+        let mut quiet: Vec<f64> = (0..60).map(|_| frame(&mut ed, None)).collect();
+        let mut bites = Vec::new();
+        for i in 0..60 {
+            let k = i / 7;
+            let ms = frame(&mut ed, (i % 7 == 0).then(|| ground - Vec3::new(0.0, k as f32 * 0.3, k as f32 * 0.35)));
+            if i % 7 == 0 {
+                bites.push(ms);
+            }
+        }
+        let p95 = |v: &mut Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[(v.len() - 1) * 95 / 100]
+        };
+        let (q, b) = (p95(&mut quiet), p95(&mut bites));
+        // A debug build: a bite's frame is a few milliseconds of release work,
+        // 7 to 25 ms here depending on what else is running, and the
+        // main-thread collision meshing this guards against was 90.
+        assert!(b - q < 35.0, "the slowest bite frames took {b:.1} ms against {q:.1} ms for frames without one");
+    }
+
+    /// **A generated world lands without stalling the frame it lands in.**
+    /// The shadow proxy was derived from the whole field on the main thread
+    /// when a `generatePlanet` fill arrived: on a 600 m world that was one
+    /// 25 s frame near the end of generation. Every frame from asking to
+    /// landed, through the path the frame loop takes, stays short.
+    #[test]
+    fn a_generated_world_lands_without_stalling_a_frame() {
+        let mut ed = crate::Editor::default();
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        ed.world.insert(e, floptle_core::Matter::Terrain { id: 4, collision: Default::default() });
+        let fill = floptle_field::procgen::PlanetFill {
+            seed: 16,
+            radius: 220.0,
+            voxel: 1.5,
+            relief: 10.0,
+            cave_depth: 30.0,
+            mountains: Some(floptle_field::procgen::Mountains { height: 20.0, ..Default::default() }),
+            rivers: Some(floptle_field::procgen::Rivers::default()),
+            defer_caves: true,
+            ..Default::default()
+        };
+        ed.start_terrain_generates(vec![(4, fill)]);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        let mut worst = 0.0f64;
+        while !ed.terrains.contains_key(&e) {
+            assert!(std::time::Instant::now() < until, "the world never landed");
+            let t = std::time::Instant::now();
+            ed.pump_world_streaming();
+            worst = worst.max(t.elapsed().as_secs_f64() * 1e3);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(worst < 100.0, "a frame of the generation took {worst:.0} ms on the main thread");
+    }
+
+    /// **An old whole-field save of a generated world comes back saving only
+    /// its edits, through either way it streams in.** The emergency load read
+    /// only the file, and a load kicked while a `generatePlanet` batch ran
+    /// dropped the genspec with the generation, so the save never learnt what
+    /// was dug and was written back whole: 682 MB, every save. Both paths,
+    /// from a version-1 file of a dug planet.
+    #[test]
+    fn an_old_whole_field_save_saves_small_after_either_load() {
+        use floptle_field::{Brush, BrushProfile};
+        let fill = floptle_field::procgen::PlanetFill { seed: 9, radius: 90.0, voxel: 1.5, relief: 5.0, cave_depth: 0.0, ..Default::default() };
+        let genspec = ron::to_string(&fill).unwrap();
+        let mut dug = floptle_field::procgen::generate_planet(&fill);
+        let ground = dug.raycast(Vec3::new(0.0, 150.0, 0.0), Vec3::NEG_Y, 150.0).unwrap();
+        for i in 0..6 {
+            dug.sculpt(Brush::Lower, ground - Vec3::Y * (i as f32), 2.4, 1.0, BrushProfile::default());
+        }
+        // Written as the engine wrote it before edits were tracked: whole.
+        let old = dug.to_bytes();
+        assert_eq!(&old[4..8], &1u32.to_le_bytes());
+        for kicked in [false, true] {
+            let dir = std::env::temp_dir().join(format!("floptle-oldsave-{}-{kicked}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let mut ed = crate::Editor { project_root: dir.clone(), scene_name: "s".into(), ..Default::default() };
+            let e = ed.world.spawn();
+            ed.world.insert(e, floptle_core::Transform::IDENTITY);
+            ed.world.insert(e, floptle_core::Matter::Terrain { id: 1, collision: Default::default() });
+            ed.world.insert(e, floptle_core::CelestialBody { body_radius: 90.0, ..Default::default() });
+            ed.world.insert(e, floptle_core::TerrainGen(genspec.clone()));
+            let path = ed.terrain_field_path_id(1);
+            floptle_vfs::create_dir_all(path.parent().unwrap()).unwrap();
+            floptle_vfs::write(&path, &old).unwrap();
+            ed.write_terrain_meta(1, [0.5, 0.5, 0.5], Some(genspec_hash(&genspec)));
+            if kicked {
+                // A game's generation batch is running: only files may load.
+                ed.planet_gen_pending.insert(99);
+                ed.kick_terrain_load(e, 1);
+            } else {
+                assert!(!ed.load_terrain_blocking(e, 1), "a body with a recipe loaded in the frame");
+            }
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            while !ed.terrains.contains_key(&e) {
+                assert!(std::time::Instant::now() < until, "the save never streamed in");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                ed.pump_world_streaming();
+            }
+            let saved = ed.terrains[&e].field.to_bytes();
+            assert_eq!(&saved[4..8], &2u32.to_le_bytes(), "saved as version {} after the {} load", saved[4], if kicked { "kicked" } else { "blocking" });
+            assert!(saved.len() * 5 < old.len(), "saved {} bytes of a {}-byte field", saved.len(), old.len());
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
     /// The full genspec streaming pipeline, headless: a PlanetFill serialized
     /// exactly like `node:setTerrainGen` does (ron::to_string) must round-trip
     /// through `load_terrain_from(Generate(..))` into a real, non-empty terrain
@@ -4164,7 +4360,7 @@ mod residency_tests {
         let spec = ron::to_string(&fill).expect("genspec serializes");
         let color = genspec_impostor_color(&spec).expect("impostor color from genspec");
         assert_eq!(color, fill.surface_a.color);
-        let t = load_terrain_from(vec![TerrainSource::Generate(spec.clone())])
+        let t = load_terrain_from(vec![TerrainSource::Generate(spec.clone())], None)
             .expect("genspec generates a terrain");
         assert!(t.field.data_chunks() > 0, "generated field is empty");
         // The surface is really there: a ray from outside hits near the radius.
@@ -4179,7 +4375,7 @@ mod residency_tests {
             fill.radius
         );
         // A garbled genspec fails cleanly (None → the loud-failure path), never panics.
-        assert!(load_terrain_from(vec![TerrainSource::Generate("(not ron".into())]).is_none());
+        assert!(load_terrain_from(vec![TerrainSource::Generate("(not ron".into())], None).is_none());
         assert!(genspec_impostor_color("(not ron").is_none());
         // A corrupt file falls back to the genspec instead of failing the stream —
         // the exact failure seen in practice (LFS pointer stubs where fields should be).
@@ -4190,7 +4386,7 @@ mod residency_tests {
         let t2 = load_terrain_from(vec![
             TerrainSource::File(bad),
             TerrainSource::Generate(spec),
-        ])
+        ], None)
         .expect("corrupt file falls back to genspec generation");
         assert!(t2.field.data_chunks() > 0);
         let _ = std::fs::remove_dir_all(&dir);

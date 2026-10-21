@@ -164,6 +164,9 @@ const EXT_DITHER_ALPHA: u32 = 8u;
 // neutral entry's all-zero flags still mean "fogged", which is what every
 // instance authored before this bit existed meant.
 const EXT_NO_FOG: u32 = 16u;
+// With EXT_DITHER_ALPHA: dither on the pattern's complement, so two surfaces
+// cross-fading (a scatter prop's LOD bands) cover each pixel once between them.
+const EXT_DITHER_INVERT: u32 = 32u;
 
 struct Ext {
     rough: f32,
@@ -1376,11 +1379,23 @@ fn splat_slot_at(vi: u32, c: vec3<i32>) -> u32 {
 // DISTINCT slot's triplanar sample by its trilinear weight — smooth transitions
 // between ANY two slots, at any palette size. Fragments outside any resident
 // volume (a skirt sliver, an evicted terrain) fall back to the old behavior.
-fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>) -> vec4<f32> {
+fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32) -> vec4<f32> {
     let tint = in.vcolor.rgb;
     let av = in.vcolor.a * 255.0; // vertex slot: 1-based; 0 untextured, 255 legacy sentinel
     if (av < 0.5 || av > 254.5) {
         return vec4<f32>(tint, 0.0);
+    }
+    // All three corners carry one slot (`aw`, the slot's change across the
+    // pixel, is nil and the slot whole): the triangle is that material, read
+    // from the voxels at its own corners. The atlas below is a cell of two or
+    // three voxels, and on undug ground its cells reached the subsoil a voxel
+    // down and blotched it through. Only a triangle whose corners differ is
+    // blended from the atlas.
+    let whole = round(av);
+    if (aw < 0.01 && abs(av - whole) < 0.01) {
+        let layer = i32(whole) - 1;
+        let c = terrain_triplanar(layer, in.lpos, in.lnorm, dpx, dpy) * tint * 1.6;
+        return vec4<f32>(c, f32((g.terrain_bits.y >> u32(max(layer, 0))) & 1u));
     }
     let vi = splat_volume(in.view_pos);
     if (vi < 0) {
@@ -1531,9 +1546,10 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     // non-terrain fragments skip the splat's voxel reads entirely.
     let tp_dpx = dpdx(in.lpos);
     let tp_dpy = dpdy(in.lpos);
+    let tp_aw = fwidth(in.vcolor.a * 255.0);
     var tsplat_val = vec4<f32>(0.0);
     if (terrain) {
-        tsplat_val = terrain_splat(in, tp_dpx, tp_dpy);
+        tsplat_val = terrain_splat(in, tp_dpx, tp_dpy, tp_aw);
     }
     let albedo = select(texel.rgb * in.color.rgb * in.vcolor.rgb, tsplat_val.rgb * in.color.rgb, terrain);
     let emissive = in.emissive.rgb * in.emissive.a * emit_s;
@@ -1583,7 +1599,8 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     // dither of fully-opaque pixels, so the surface stays in the OPAQUE pass and
     // needs no sorting at all. (`is_opaque` on the CPU side keeps it there; a
     // dithered surface in the blended pass would dither AND blend.)
-    if (ext_has(ext, EXT_DITHER_ALPHA) && alpha < 0.999 && bayer4(pix) >= alpha) {
+    let door = select(bayer4(pix), 1.0 - bayer4(pix), ext_has(ext, EXT_DITHER_INVERT));
+    if (ext_has(ext, EXT_DITHER_ALPHA) && alpha < 0.999 && door >= alpha) {
         discard;
     }
     // Once it dithers, what survives is fully opaque — anything less would blend

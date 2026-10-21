@@ -641,8 +641,10 @@ impl Planet {
         {
             return rgba(tint(sm.paint.color, vary), sm.paint.slot);
         }
-        // Depth layers: deep cave walls → strata → subsoil.
-        if depth > cave_depth * 0.5 {
+        // Depth layers: deep cave walls → strata → subsoil. A world with no
+        // cave zone has no deep cave rock: at a zone of zero, everything a
+        // hair under the ground was deep rock, and no subsoil or strata showed.
+        if cave_depth > 0.0 && depth > cave_depth * 0.5 {
             return rgba(tint(spec.deep.color, vary), spec.deep.slot);
         }
         if depth > spec.strata_depth {

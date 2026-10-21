@@ -144,6 +144,9 @@ pub struct Hitch {
     pub ms: f32,
     /// Every bucket that spent anything, most expensive first.
     pub buckets: Vec<(Bucket, f32)>,
+    /// Named pieces of work inside the buckets ([`FrameProfile::record_part`]),
+    /// most expensive first: what in `terrain` the time went to.
+    pub parts: Vec<(&'static str, f32)>,
 }
 
 /// How many frames the "worst recently" window covers.
@@ -293,6 +296,8 @@ pub struct FrameProfile {
     /// buckets add up to is set against it, and the rest is [`Bucket::Other`].
     last_end: Option<crate::time::Instant>,
     hitches: std::collections::VecDeque<Hitch>,
+    /// This frame's named parts, folded into a hitch when it is one.
+    parts_frame: Vec<(&'static str, f32)>,
     /// The GPU's own per-pass times for the last frame whose timestamps have
     /// landed, and their total. `None` when nothing measured them: timing off,
     /// or a device without timestamp queries.
@@ -354,6 +359,20 @@ impl FrameProfile {
             return;
         }
         *self.frame.entry(bucket).or_default() += ms;
+    }
+
+    /// Name a piece of work inside a bucket: `ms` of what the bucket already
+    /// counts went to `part`. Not added to any bucket. A slow frame keeps its
+    /// parts, so a hitch says which work in the bucket it was, where the bucket
+    /// alone says only "terrain".
+    pub fn record_part(&mut self, part: &'static str, ms: f32) {
+        if !self.on {
+            return;
+        }
+        match self.parts_frame.iter_mut().find(|(p, _)| *p == part) {
+            Some((_, v)) => *v += ms,
+            None => self.parts_frame.push((part, ms)),
+        }
     }
 
     /// Add `ms` to one script kind's total.
@@ -537,12 +556,14 @@ impl FrameProfile {
             }
         }
         let total: f32 = spent.iter().map(|(_, ms)| ms).sum();
+        let mut parts = std::mem::take(&mut self.parts_frame);
         if total >= HITCH_MS {
             spent.sort_by(|a, b| b.1.total_cmp(&a.1));
+            parts.sort_by(|a, b| b.1.total_cmp(&a.1));
             if self.hitches.len() >= MAX_HITCHES {
                 self.hitches.pop_front();
             }
-            self.hitches.push_back(Hitch { frame: self.frames, ms: total, buckets: spent });
+            self.hitches.push_back(Hitch { frame: self.frames, ms: total, buckets: spent, parts });
         }
         // A script that stopped running this frame gets a zero for the same
         // reason, and a script that has been destroyed stops being listed at all.
@@ -719,6 +740,27 @@ mod tests {
         let other = h[0].buckets.iter().find(|(b, _)| *b == Bucket::Other).map(|(_, ms)| *ms);
         assert!(other.is_some_and(|ms| ms >= 45.0), "the unmeasured time must be named: {h:?}");
         assert_eq!(h[0].buckets[0].0, Bucket::Other, "and it is the costliest part");
+    }
+
+    /// **A hitch names the work inside its bucket.** A mining laser's slow
+    /// frames read `terrain` and nothing more; the parts a frame reported say
+    /// whether it was the collider's rebuild or the edits themselves. A fast
+    /// frame's parts do not carry over into the next slow one.
+    #[test]
+    fn a_hitch_names_the_work_inside_its_bucket() {
+        let mut p = FrameProfile::default();
+        p.enable(true);
+        p.record(Bucket::Terrain, 2.0);
+        p.record_part("terrainEdits", 2.0);
+        p.end_frame();
+        p.record(Bucket::Terrain, 90.0);
+        p.record_part("terrainEdits", 5.0);
+        p.record_part("collisionRebuild", 60.0);
+        p.record_part("collisionRebuild", 25.0);
+        p.end_frame();
+        let h = p.take_hitches();
+        assert_eq!(h.len(), 1, "{h:?}");
+        assert_eq!(h[0].parts, vec![("collisionRebuild", 85.0), ("terrainEdits", 5.0)]);
     }
 
     #[test]

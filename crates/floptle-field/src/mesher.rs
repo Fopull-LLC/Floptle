@@ -634,6 +634,25 @@ impl MeshScratch {
 /// Mesh one chunk at `stride` (1 = full detail; 2^ℓ for LOD ℓ — the field resamples at
 /// any stride, so LOD costs no extra storage).
 ///
+/// # How far a coarse stride is from the field
+///
+/// Measured down radial rays at the drawn mesh against the field it came
+/// from, on ground with 15 to 35 m of relief (drawn above the field is the
+/// sign that matters: a coarse chunk is never the one a player stands on):
+///
+/// | Stride | Cell, 1.5 m voxel | p99 | Worst |
+/// |---|---|---|---|
+/// | 2 | 3 m | 0.5–0.65 m | 1.2–1.3 m |
+/// | 4 | 6 m | 1.1–1.45 m | 3.0–4.1 m |
+/// | 8 | 12 m | 2.8–4.1 m | 7.4–12.2 m |
+///
+/// Most of it is the triangles chording across bumps narrower than a cell,
+/// which no placement of the vertices removes. The worst cases are pits
+/// narrower than two cells, which the solid-keeping minimum fills: a crater
+/// 25 m across and 15 m deep is drawn half full at stride 8. Dug ground is
+/// meshed at full detail at any distance for that reason (the terrain
+/// streamer's rule, not this function's).
+///
 /// A coarse corner is the minimum of the voxels it stands for, not a point sample, so
 /// rock thinner than a coarse cell stays solid instead of falling between samples and
 /// opening a view into the cave behind it. Each coarse vertex then settles back onto the
@@ -1231,6 +1250,38 @@ mod tests {
     /// `facing_normal`, which took its cue from the interpolated normal instead of the
     /// winding, had been quietly papering over it. Vertex normals being right (they are,
     /// to <5°) says nothing about winding — they are independent, so this is its own gate.
+    /// **Every corner of undug ground carries the ground's own slot, with the
+    /// subsoil a voxel under it.** The terrain shader draws a triangle whose
+    /// corners agree from that slot alone; only a triangle whose corners
+    /// differ is blended from the shadow atlas, whose cells are two or three
+    /// voxels across and reached the subsoil through undug ground. So the
+    /// corners must not reach it either.
+    #[test]
+    fn the_corners_of_undug_ground_carry_its_own_slot() {
+        let f = crate::procgen::generate_planet(&crate::procgen::PlanetFill {
+            seed: 5,
+            radius: 100.0,
+            voxel: 1.5,
+            relief: 8.0,
+            cave_depth: 0.0,
+            subsoil_depth: 1.5,
+            subsoil: crate::procgen::LayerPaint { slot: 9, color: [0.5, 0.5, 0.5] },
+            ..Default::default()
+        });
+        let (mut corners, mut deeper) = (0usize, 0usize);
+        for c in f.chunk_coords() {
+            let m = mesh_chunk(&f, c, 1, false);
+            for col in &m.colors {
+                corners += 1;
+                deeper += usize::from(!matches!(col[3], 1 | 2));
+            }
+        }
+        assert!(corners > 10_000, "{corners} corners");
+        // A handful on the steepest slopes, where the subsoil a voxel down by
+        // the radius is less than a voxel down by the slope: real exposure.
+        assert!(deeper * 1000 <= corners, "{deeper} of {corners} corners of undug ground carry a deeper layer's slot");
+    }
+
     /// **A box of the surface is the chunk's surface there.** A ray asking
     /// where the drawn ground is needs a few cells of it, not a chunk: the
     /// box's triangles are the chunk mesh's, for every edge whose low corner is
@@ -2117,7 +2168,9 @@ mod tests {
             craters: 4,
             ..Default::default()
         });
-        for (stride, p99, worst) in [(2, 0.8f32, 2.0f32), (4, 1.6, 5.0), (8, 4.5, 13.0)] {
+        // What this measures today (see `mesh_chunk`): p99 0.63 / 1.43 / 4.12 m
+        // and worst 1.32 / 4.10 / 12.2 m at strides 2 / 4 / 8.
+        for (stride, p99, worst) in [(2, 0.75f32, 1.6f32), (4, 1.65, 4.7), (8, 4.75, 13.0)] {
             let hulls: Vec<Hull> = f.chunk_coords().into_iter().map(|c| hull(&mesh_chunk(&f, c, stride, false))).collect();
             let mut above = Vec::new();
             for d in directions(1500) {

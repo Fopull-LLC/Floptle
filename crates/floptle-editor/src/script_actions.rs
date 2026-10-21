@@ -75,6 +75,12 @@ impl Editor {
     /// via [`Self::poll_terrain_generates`] as they finish.
     pub(crate) fn drain_terrain_generates(&mut self) {
         let gens = self.script_host.take_terrain_generates();
+        self.start_terrain_generates(gens);
+    }
+
+    /// Start a batch of planet fills on a background thread: the work of
+    /// [`Self::drain_terrain_generates`], for fills from anywhere.
+    pub(crate) fn start_terrain_generates(&mut self, gens: Vec<(u32, floptle_field::procgen::PlanetFill)>) {
         if gens.is_empty() {
             return;
         }
@@ -103,7 +109,10 @@ impl Editor {
                 if let Ok(spec) = ron::to_string(&fill) {
                     field.set_spec(spec);
                 }
-                if tx.send((id, field, t0.elapsed().as_millis() as u64)).is_err() {
+                // The shadow proxy is derived here, with the field: on the main
+                // thread it was the 6 to 26 s frame a big world landed in.
+                let terrain = crate::terrain_edit::EditorTerrain::new(field);
+                if tx.send((id, terrain, t0.elapsed().as_millis() as u64)).is_err() {
                     return;
                 }
             }
@@ -126,7 +135,9 @@ impl Editor {
                 }
             }
         }
-        for (id, field, ms) in arrived {
+        let t0 = floptle_core::profile::Span::new();
+        let landed = !arrived.is_empty();
+        for (id, terrain, ms) in arrived {
             self.planet_gen_pending.remove(&id);
             let target = self
                 .world
@@ -143,8 +154,8 @@ impl Editor {
                 );
                 continue;
             };
-            let chunks = field.data_chunks();
-            self.terrains.insert(e, crate::terrain_edit::EditorTerrain::new(field));
+            let chunks = terrain.field.data_chunks();
+            self.terrains.insert(e, terrain);
             // A generated field exists only in RAM until the scene is saved — an
             // eviction (G1 residency) must write it to disk before dropping it.
             self.touch_terrain_edit(e);
@@ -170,6 +181,12 @@ impl Editor {
                 format!("Δ terrain id {id} ready — {chunks} chunks in {:.1}s", ms as f64 / 1000.0),
                 None,
             );
+        }
+        if landed {
+            // What a generated world costs the frame it lands in, named.
+            let ms = t0.ms();
+            self.profile_record(floptle_core::profile::Bucket::Terrain, ms);
+            self.script_host.profile().borrow_mut().record_part("planetLanded", ms);
         }
         if done {
             self.planet_gen_job = None;

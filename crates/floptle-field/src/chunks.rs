@@ -373,11 +373,12 @@ impl ChunkField {
         coords.sort_unstable();
         coords.dedup();
         let source = base.pending_source();
-        let mut edited = std::collections::HashSet::new();
-        for c in coords {
+        // On every core: a big planet is thousands of chunks of 32,768 voxels.
+        let differs = par_map(coords.len(), |k| {
+            let c = coords[k];
             // Never made in this field: the generator's, whatever it is.
             if self.pending.contains(&c) {
-                continue;
+                return false;
             }
             // Made since by a dig or a visit: compare with what the generator
             // makes of it now.
@@ -388,23 +389,19 @@ impl ChunkField {
                         made = src.generate(c).0;
                         made.as_ref()
                     }
-                    None => {
-                        edited.insert(c);
-                        continue;
-                    }
+                    None => return true,
                 }
             } else {
                 base.chunks.get(&c)
             };
             let ours = self.chunks.get(&c);
-            let same = (0..CHUNK_VOXELS).all(|li| {
+            !(0..CHUNK_VOXELS).all(|li| {
                 q(dist(ours, li)) == q(dist(theirs, li))
                     && (dist(ours, li) >= band - 1e-6 || color(ours, li, self.base_color) == color(theirs, li, base.base_color))
-            });
-            if !same {
-                edited.insert(c);
-            }
-        }
+            })
+        });
+        let edited: std::collections::HashSet<[i32; 3]> =
+            coords.iter().zip(differs).filter(|(_, d)| *d).map(|(c, _)| *c).collect();
         // The generator's field, with this one's differing chunks laid over it.
         let mut out = base.clone();
         for &c in &edited {
@@ -2605,15 +2602,36 @@ impl ChunkField {
         // A cell and a half: every cell whose colour can blend into a pixel on
         // the surface.
         let near = 1.5 * vs.max_element();
-        for iz in mn[2]..=mx[2] {
+        // A layer of cells to a job, on every core: a whole 1 km planet's proxy
+        // is six million cells at eight voxel reads each, and on one thread it
+        // was 25 s of the frame a generated world landed in.
+        // A dab's few thousand cells stay on this thread: starting the
+        // workers costs more than they would save.
+        let cells = (mx[0] + 1 - mn[0]) as usize * (mx[1] + 1 - mn[1]) as usize * (mx[2] + 1 - mn[2]) as usize;
+        let layer = |k: usize| {
+            let iz = mn[2] + k as u32;
+            let mut out = Vec::with_capacity(((mx[1] + 1 - mn[1]) * (mx[0] + 1 - mn[0])) as usize);
             for iy in mn[1]..=mx[1] {
                 for ix in mn[0]..=mx[0] {
-                    let p = lo
-                        + Vec3::new(ix as f32 + 0.5, iy as f32 + 0.5, iz as f32 + 0.5) * vs;
-                    let i = ((iz * h + iy) * w + ix) as usize;
+                    let p = lo + Vec3::new(ix as f32 + 0.5, iy as f32 + 0.5, iz as f32 + 0.5) * vs;
                     let d = self.d(p);
-                    baked.distance[i] = d;
-                    baked.color[i] = self.surface_color(p, d, near);
+                    out.push((d, self.surface_color(p, d, near)));
+                }
+            }
+            out
+        };
+        let n = (mx[2] + 1).saturating_sub(mn[2]) as usize;
+        let layers: Vec<Vec<(f32, [u8; 4])>> = if cells > 1 << 16 { par_map(n, layer) } else { (0..n).map(layer).collect() };
+        for (k, layer) in layers.into_iter().enumerate() {
+            let iz = mn[2] + k as u32;
+            let mut cells = layer.into_iter();
+            for iy in mn[1]..=mx[1] {
+                for ix in mn[0]..=mx[0] {
+                    let i = ((iz * h + iy) * w + ix) as usize;
+                    if let Some((d, c)) = cells.next() {
+                        baked.distance[i] = d;
+                        baked.color[i] = c;
+                    }
                 }
             }
         }

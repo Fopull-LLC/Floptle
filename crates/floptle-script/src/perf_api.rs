@@ -257,6 +257,11 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
                     buckets.set(b.name(), *ms)?;
                 }
                 row.set("buckets", buckets)?;
+                let parts = lua.create_table()?;
+                for (name, ms) in &h.parts {
+                    parts.set(*name, *ms)?;
+                }
+                row.set("parts", parts)?;
                 list.raw_set(i + 1, row)?;
             }
             Ok(list)

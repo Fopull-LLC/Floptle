@@ -144,20 +144,31 @@ impl Relief {
         let layers = Layers { spec: s, noise: Noise::new(s.seed) };
         let channels = trace_channels(s, &layers);
         let index = ChannelIndex::new(&channels, s.radius);
-        let faces = crate::chunks::par_map(6, |f| {
-            let mut h = vec![0.0f32; (n + 1) * (n + 1)];
-            let mut water = vec![FAR; (n + 1) * (n + 1)];
-            for j in 0..=n {
-                for i in 0..=n {
+        // A row of a face to a job: six faces to six threads left most of a
+        // machine idle through the slowest part of making a layered world.
+        let rows = crate::chunks::par_map(6 * (n + 1), |k| {
+            let (f, j) = (k / (n + 1), k % (n + 1));
+            (0..=n)
+                .map(|i| {
                     let d = from_face(f, -1.0 + 2.0 * i as f32 / n as f32, -1.0 + 2.0 * j as f32 / n as f32);
                     let (carve, river) = index.carve(d, s.radius);
-                    h[j * (n + 1) + i] = layers.height(d) - carve;
-                    water[j * (n + 1) + i] = river;
+                    (layers.height(d) - carve, river)
+                })
+                .collect::<Vec<_>>()
+        });
+        let mut faces = Vec::with_capacity(6);
+        for f in 0..6 {
+            let mut h = Vec::with_capacity((n + 1) * (n + 1));
+            let mut water = Vec::with_capacity((n + 1) * (n + 1));
+            for row in &rows[f * (n + 1)..(f + 1) * (n + 1)] {
+                for &(hv, w) in row {
+                    h.push(hv);
+                    water.push(w);
                 }
             }
             let mips = pyramid(&h, n);
-            Face { h, water, mips }
-        });
+            faces.push(Face { h, water, mips });
+        }
         let lo = faces.iter().flat_map(|f| f.h.iter()).fold(f32::INFINITY, |a, b| a.min(*b));
         let hi = faces.iter().flat_map(|f| f.h.iter()).fold(f32::NEG_INFINITY, |a, b| a.max(*b));
         Relief { n, faces, lo, hi }
