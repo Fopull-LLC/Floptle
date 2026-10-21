@@ -2904,16 +2904,29 @@ mod drawn_surface_tests {
             }
         }
         let meshed = vec![crate::AnchoredCollider::world(Box::new(meshed))];
-        let (want, built) = cast(&meshed);
-        let fresh = vec![crate::AnchoredCollider::world(Box::new(ChunkTerrain::new(field)))];
-        let (got, cold) = cast(&fresh);
+        let (want, mut built) = cast(&meshed);
+        // A fresh collider each time, since the first rays into a chunk are
+        // the subject, alternating with the meshed one and keeping each side's
+        // fastest: interference on a shared machine only ever adds time, and
+        // one slow reading read 9.2x on a release runner.
+        let mut got = Vec::new();
+        let mut cold = f64::MAX;
+        for _ in 0..4 {
+            let fresh = vec![crate::AnchoredCollider::world(Box::new(ChunkTerrain::new(field.clone())))];
+            let (hits, t) = cast(&fresh);
+            cold = cold.min(t);
+            got = hits;
+            built = built.min(cast(&meshed).1);
+        }
         for (i, (a, b)) in got.iter().zip(&want).enumerate() {
             match (a, b) {
                 (Some(a), Some(b)) => assert!((a - b).abs() < 0.05, "ray {i}: {a} against {b} on meshed ground"),
                 _ => assert_eq!(a.is_some(), b.is_some(), "ray {i}: {a:?} against {b:?}"),
             }
         }
-        assert!(cold < 8.0 * built, "60 rays at fresh ground took {:.2} ms, at meshed ground {:.2} ms", cold * 1e3, built * 1e3);
+        // About 4x in a release build and 6x in a debug one; meshing each
+        // chunk a ray reaches, the cost this guards, read 280x.
+        assert!(cold < 20.0 * built, "60 rays at fresh ground took {:.2} ms, at meshed ground {:.2} ms", cold * 1e3, built * 1e3);
     }
 
     /// A terrain collider that leaves every ray to the general march, as all
