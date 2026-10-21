@@ -103,7 +103,7 @@ pub(crate) enum ResolvedRef {
 pub(crate) fn params_table(
     lua: &Lua,
     env: &Table,
-    params: &[(String, f32)],
+    params: &[(String, f64)],
     refs: &[(String, ResolvedRef)],
     strs: &[(String, String)],
 ) -> mlua::Result<Table> {
@@ -132,7 +132,7 @@ pub(crate) fn params_table(
         if declared_bool {
             t.set(k.as_str(), *v != 0.0)?;
         } else {
-            t.set(k.as_str(), *v as f64)?;
+            t.set(k.as_str(), *v)?;
         }
     }
     // Stored string overrides land over the defaults, like the numbers above.

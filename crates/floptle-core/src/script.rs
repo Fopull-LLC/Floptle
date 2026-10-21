@@ -15,7 +15,10 @@
 pub struct ScriptInst {
     pub kind: String,
     pub enabled: bool,
-    pub params: Vec<(String, f32)>,
+    /// Numeric params, in f64: a seed or an id is an integer a script compares
+    /// exactly, and f32 rounded 1911564384 to 1911564416. Every integer up to
+    /// 2^53 survives.
+    pub params: Vec<(String, f64)>,
     /// Node-reference params (declared `name = noderef()` in the script's
     /// `defaults`): param name → the target node's name, wired in the Inspector
     /// and resolved by name each tick (O(1) via the host's name index). The
@@ -38,7 +41,7 @@ pub struct ScriptInst {
 impl ScriptInst {
     /// Look up a parameter, falling back to `default`.
     pub fn param(&self, name: &str, default: f32) -> f32 {
-        self.params.iter().find(|(k, _)| k == name).map(|(_, v)| *v).unwrap_or(default)
+        self.params.iter().find(|(k, _)| k == name).map(|(_, v)| *v as f32).unwrap_or(default)
     }
 
     /// Look up a string parameter, falling back to `default`.

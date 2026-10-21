@@ -410,7 +410,7 @@ end
         world.insert(e, Scripts(vec![floptle_core::ScriptInst {
             kind: "manager".into(),
             enabled: true,
-            params: vec![("id".into(), i as f32)],
+            params: vec![("id".into(), i as f64)],
             refs: Vec::new(),
             strs: Vec::new(),
             pinned_bools: None,

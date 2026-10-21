@@ -31,7 +31,7 @@ pub use anim::{
 };
 pub mod vfx;
 pub use vfx::{
-    load_vfx_effect, save_vfx_effect, VfxBlendDoc, VfxBurstDoc, VfxClipDoc, VfxCurveDoc,
+    load_vfx_effect, migrate_vfx_effect_file, save_vfx_effect, VfxBlendDoc, VfxBurstDoc, VfxClipDoc, VfxCurveDoc,
     VfxEffectDoc, VfxEmitDoc, VfxEndDoc, VfxExtrapolateDoc, VfxFlipModeDoc, VfxFlipbookDoc,
     VfxCollideDoc, VfxForceDoc, VfxGravityDoc, VfxInterpDoc, VfxKeyDoc, VfxLaneDoc, VfxLaneTargetDoc,
     VfxLifetimeScaleDoc, VfxOrientDoc, VfxPlaybackDoc, VfxPropDoc, VfxRenderDoc, VfxShapeDoc,
@@ -887,8 +887,9 @@ pub struct ScriptDoc {
     pub kind: String,
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// f64, so a seed keeps every digit (see `ScriptInst::params`).
     #[serde(default)]
-    pub params: Vec<(String, f32)>,
+    pub params: Vec<(String, f64)>,
     /// Node-reference params: param name → target node name (Inspector-wired).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refs: Vec<(String, String)>,

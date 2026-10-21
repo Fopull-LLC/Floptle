@@ -41,18 +41,28 @@ pub enum VfxExtrapolateDoc {
 pub struct VfxKeyDoc {
     pub t: f32,
     pub v: VfxValueDoc,
-    #[serde(default)]
+    // Defaults are left out of a saved file: a key is `(t: 0.5, v: F32(1.0))`
+    // unless it says otherwise, as an author writes it.
+    #[serde(default, skip_serializing_if = "is_linear")]
     pub interp: VfxInterpDoc,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub in_tan: f32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub out_tan: f32,
+}
+
+fn is_linear(i: &VfxInterpDoc) -> bool {
+    *i == VfxInterpDoc::Linear
+}
+
+fn is_clamp(e: &VfxExtrapolateDoc) -> bool {
+    *e == VfxExtrapolateDoc::Clamp
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct VfxCurveDoc {
     pub keys: Vec<VfxKeyDoc>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_clamp")]
     pub extrapolate: VfxExtrapolateDoc,
 }
 
@@ -732,11 +742,35 @@ use std::path::Path;
 pub fn load_vfx_effect(path: &Path) -> Result<VfxEffectDoc, SceneError> {
     let text = crate::portable::read(path).map_err(SceneError::Io)?;
     let mut doc: VfxEffectDoc = ron::from_str(&text).map_err(SceneError::Ron)?;
+    migrate_doc(&mut doc);
+    Ok(doc)
+}
+
+/// Every format upgrade an effect read from disk goes through.
+fn migrate_doc(doc: &mut VfxEffectDoc) {
     for t in &mut doc.tracks {
         upgrade_rotation(&mut t.rotation); // legacy scalar spin → Vec3 Euler
         migrate_clips(t); // legacy track rate/bursts/lifetime → per-clip emit
     }
-    Ok(doc)
+}
+
+/// Bring the effect file at `path` up to the current format, writing it only
+/// when that changed something. Returns whether it was rewritten.
+///
+/// Loading migrates in memory, and `migrate` used to save every effect it had
+/// loaded: an upgrade with nothing to migrate re-serialized every effect in a
+/// project, dropping each one's comments and spelling out every default. A
+/// file already in the current format is now left byte for byte as it was.
+pub fn migrate_vfx_effect_file(path: &Path) -> Result<bool, SceneError> {
+    let text = crate::portable::read(path).map_err(SceneError::Io)?;
+    let raw: VfxEffectDoc = ron::from_str(&text).map_err(SceneError::Ron)?;
+    let mut doc = raw.clone();
+    migrate_doc(&mut doc);
+    if doc == raw {
+        return Ok(false);
+    }
+    save_vfx_effect(&doc, path)?;
+    Ok(true)
 }
 
 pub fn save_vfx_effect(doc: &VfxEffectDoc, path: &Path) -> Result<(), SceneError> {
@@ -751,6 +785,46 @@ pub fn save_vfx_effect(doc: &VfxEffectDoc, path: &Path) -> Result<(), SceneError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **An upgrade leaves a current effect file exactly as its author wrote
+    /// it.** `migrate` re-saved every effect it loaded, so a project upgraded
+    /// with nothing to migrate lost every effect's comments and had each
+    /// one-line clip and curve spelled out field by field, ten times longer.
+    /// A file already current is now not written at all. One in an old format
+    /// is rewritten, and then without the defaults it never said.
+    #[test]
+    fn migrating_a_current_effect_leaves_the_file_byte_for_byte() {
+        let dir = std::env::temp_dir().join(format!("floptle_vfx_migrate_{}", std::process::id()));
+        let _ = floptle_vfs::create_dir_all(&dir);
+        let current = dir.join("Flame.vfx.ron");
+        let authored = "// Rocket exhaust: a white core. vfx.lua drives it by throttle.\n\
+            (\n    name: \"Flame\",\n    lifetime: 0.5,\n    playback: Looping,\n    tracks: [\n        (\n\
+            \x20           name: \"Core\", // the hot middle\n\
+            \x20           clips: [(start: 0.0, end: 0.11, emit: Some(Rate(rate: 150.0))), (start: 0.11, end: 0.22, emit: Some(Rate(rate: 150.0)))],\n\
+            \x20           size: Curve((keys: [(t: 0.0, v: F32(0.85), interp: Linear), (t: 1.0, v: F32(0.25))], extrapolate: Clamp)),\n\
+            \x20       ),\n    ],\n)\n";
+        floptle_vfs::write(&current, authored).unwrap();
+        load_vfx_effect(&current).expect("the fixture is a valid effect");
+        assert!(!migrate_vfx_effect_file(&current).unwrap(), "a current effect was rewritten");
+        assert_eq!(floptle_vfs::read_to_string(&current).unwrap(), authored, "the file changed");
+
+        // An old one: a track-level rate and no per-clip emit.
+        let old = dir.join("Old.vfx.ron");
+        floptle_vfs::write(
+            &old,
+            "(name: \"Old\", tracks: [(name: \"A\", rate: 20.0, clips: [(start: 0.0, end: 1.0)], \
+             size: Curve((keys: [(t: 0.0, v: F32(1.0)), (t: 1.0, v: F32(0.0))])))])",
+        )
+        .unwrap();
+        assert!(migrate_vfx_effect_file(&old).unwrap(), "an old effect was left in the old format");
+        let text = floptle_vfs::read_to_string(&old).unwrap();
+        for default in ["interp", "in_tan", "out_tan", "extrapolate"] {
+            assert!(!text.contains(default), "the rewrite spelled out `{default}`:\n{text}");
+        }
+        assert_eq!(load_vfx_effect(&old).unwrap().tracks[0].clips[0].emit, Some(VfxEmitDoc::Rate { rate: 20.0 }));
+        assert!(!migrate_vfx_effect_file(&old).unwrap(), "a migrated effect is current");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn effect_doc_round_trips() {

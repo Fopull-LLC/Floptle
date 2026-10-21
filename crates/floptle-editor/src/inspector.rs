@@ -472,12 +472,13 @@ fn pinned_badge(ui: &mut egui::Ui, declared: Option<&str>) -> bool {
 /// bounded by `--@range`, stepped by `--@step`, suffixed by `--@units`.
 fn num_param_row(
     ui: &mut egui::Ui,
-    (k, v): &mut (String, f32),
+    (k, v): &mut (String, f64),
     pm: Option<&crate::script_meta::ParamMeta>,
     salt: (u32, usize),
 ) -> bool {
     let mut changed = false;
     let (lo, hi) = pm.map(|m| m.bounds()).unwrap_or((f32::MIN, f32::MAX));
+    let (lo, hi) = (lo as f64, hi as f64);
     let step = pm.and_then(|m| m.step);
     let units = pm.and_then(|m| m.units.clone()).unwrap_or_default();
     ui.horizontal_wrapped(|ui| {
@@ -485,14 +486,14 @@ fn num_param_row(
             let mut on = *v != 0.0;
             let r = with_desc(crate::responsive::check(ui, &mut on, k.as_str()), pm);
             if r.changed() {
-                *v = f32::from(on);
+                *v = f64::from(u8::from(on));
                 changed = true;
             }
             return;
         }
         if let Some(opts) = pm.map(|m| &m.options).filter(|o| !o.is_empty()) {
             with_desc(ui.label(k.as_str()), pm);
-            let cur = (*v).clamp(0.0, (opts.len() - 1) as f32).round() as usize;
+            let cur = (*v).clamp(0.0, (opts.len() - 1) as f64).round() as usize;
             egui::ComboBox::from_id_salt(("param_opt", salt, k.as_str()))
                 .width(crate::responsive::fit_here(ui, 220.0))
                 .wrap_mode(egui::TextWrapMode::Truncate)
@@ -500,7 +501,7 @@ fn num_param_row(
                 .show_ui(ui, |ui| {
                     for (i, label) in opts.iter().enumerate() {
                         if ui.selectable_label(i == cur, label).clicked() {
-                            *v = i as f32;
+                            *v = i as f64;
                             changed = true;
                         }
                     }

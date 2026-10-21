@@ -668,7 +668,7 @@ fn raycast_hits_body_hulls_with_node_identity_and_self_exclusion() {
         Scripts(vec![floptle_core::ScriptInst {
             kind: "caster".into(),
             enabled: true,
-            params: vec![("targetid".into(), (e.index() + 1000) as f32)], refs: Vec::new(),
+            params: vec![("targetid".into(), (e.index() + 1000) as f64)], refs: Vec::new(),
             strs: Vec::new(),
             pinned_bools: None,
         }]),

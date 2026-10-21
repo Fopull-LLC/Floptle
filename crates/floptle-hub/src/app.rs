@@ -94,13 +94,38 @@ struct InstallJob {
     frac: f32,
 }
 
+/// The files a migration says it rewrote: its `rewrote <path> (…)` lines.
+fn rewritten_files(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("rewrote "))
+        .map(|rest| rest.split(" (").next().unwrap_or(rest).to_string())
+        .collect()
+}
+
+/// What an upgrade tells the user: which of their files it rewrote, so they
+/// can review or revert them, or that it rewrote none.
+fn upgrade_summary(rewrote: &[String]) -> String {
+    const SHOWN: usize = 4;
+    match rewrote.len() {
+        0 => "project upgraded; no files rewritten".into(),
+        n => {
+            let mut names = rewrote.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", ");
+            if n > SHOWN {
+                names.push_str(&format!(" and {} more", n - SHOWN));
+            }
+            format!("project upgraded; rewrote {n} file{}: {names}", if n == 1 { "" } else { "s" })
+        }
+    }
+}
+
 /// A create/upgrade running off the UI thread (it shells out to the editor's headless
 /// --new / --migrate, which can be slow on a big project — so it must not block repaint).
 enum ProcOutcome {
     Created(Project),
     /// The upgraded project's path — not its index, which an open during the
-    /// upgrade moves.
-    Upgraded(PathBuf),
+    /// upgrade moves — and the files the migration rewrote.
+    Upgraded(PathBuf, Vec<String>),
     Failed(String),
 }
 struct ProcJob {
@@ -1042,12 +1067,12 @@ impl HubApp {
                 self.config.mark_opened(&path, now_iso8601());
                 self.save();
             }
-            ProcOutcome::Upgraded(path) => {
+            ProcOutcome::Upgraded(path, rewrote) => {
                 if let Some(p) = self.config.projects.iter_mut().find(|p| p.path == path) {
                     p.refresh();
                 }
                 self.save();
-                self.toast = Some(("project upgraded".into(), false));
+                self.toast = Some((upgrade_summary(&rewrote), false));
             }
             ProcOutcome::Failed(e) => self.toast = Some((e, true)),
         }
@@ -1181,13 +1206,13 @@ impl HubApp {
                 .arg(&path)
                 .arg("--engine-version")
                 .arg(&pin)
-                .status()
+                .output()
             {
-                Ok(s) if s.success() => {
+                Ok(o) if o.status.success() => {
                     // The Hub is the authority: re-point the pin even if the target binary
                     // is old and re-stamped its own version.
                     pin_engine_version(&path, &pin);
-                    ProcOutcome::Upgraded(path)
+                    ProcOutcome::Upgraded(path, rewritten_files(&String::from_utf8_lossy(&o.stdout)))
                 }
                 Ok(_) => ProcOutcome::Failed("migration exited with an error".into()),
                 Err(e) => ProcOutcome::Failed(format!("upgrade failed: {e}")),
@@ -2555,6 +2580,21 @@ impl HubApp {
 #[cfg(test)]
 mod tests {
     use super::pin_engine_version;
+    use super::{rewritten_files, upgrade_summary};
+
+    /// **An upgrade names the files it rewrote.** A migration that rewrote
+    /// every effect in a project said only "project upgraded", and the files
+    /// turned up changed in version control with nothing to say why.
+    #[test]
+    fn an_upgrade_names_the_files_it_rewrote() {
+        let out = "pinned script_vec3 to exact\nrewrote vfx/Old.vfx.ron (its format changed)\n\
+                   migrated 1 effect(s) in /p; 38 already current, left as they were\n";
+        assert_eq!(rewritten_files(out), vec!["vfx/Old.vfx.ron".to_string()]);
+        assert_eq!(upgrade_summary(&[]), "project upgraded; no files rewritten");
+        assert_eq!(upgrade_summary(&rewritten_files(out)), "project upgraded; rewrote 1 file: vfx/Old.vfx.ron");
+        let many: Vec<String> = (0..6).map(|i| format!("vfx/{i}.vfx.ron")).collect();
+        assert!(upgrade_summary(&many).ends_with("vfx/3.vfx.ron and 2 more"), "{}", upgrade_summary(&many));
+    }
 
     /// Render the Installs tab to a PNG so a layout change can be looked at.
     ///

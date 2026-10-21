@@ -941,7 +941,7 @@ mod tests {
     #[test]
     fn a_script_parameter_travels_by_name_to_every_node_running_that_script() {
         let mut w = World::new();
-        let mk = |w: &mut World, speed: f32, extra: bool| {
+        let mk = |w: &mut World, speed: f64, extra: bool| {
             let e = w.spawn();
             let mut list = vec![ScriptInst {
                 kind: "chase".into(),

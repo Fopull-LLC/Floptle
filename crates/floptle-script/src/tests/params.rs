@@ -279,7 +279,7 @@ fn a_scene_param_the_script_does_not_declare_says_so_once() {
 /// Run one frame of `defaults = { pixelSnap = true, speed = 3, label = 5 }`
 /// with these pins, and return the warnings it logged.
 fn retype_warnings(
-    params: Vec<(String, f32)>,
+    params: Vec<(String, f64)>,
     strs: Vec<(String, String)>,
     pinned_bools: Option<Vec<String>>,
     tag: &str,

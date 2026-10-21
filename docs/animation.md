@@ -435,11 +435,13 @@ function update(node, dt)
 end
 ```
 
-Take the targets from a fixed stance like this, not from `anim:boneWorld(foot)`.
-`boneWorld` read before the reach answers last frame's pose *after* its reach, so a foot placed from
-it is placed from where the reach last put it, and on a slope each frame's
-target lands a little lower than the one before: the feet creep downhill and
-the legs stretch out from under the hips. Keep the hips' drop under the length
+Take the targets from a fixed stance like this, not from where the feet were
+last drawn. A target taken from a foot the reach already moved (last frame's
+drawn pose, or `anim:boneWorld(foot)` read after this frame's `reach`) starts
+from where the reach put it, and on a slope each frame's target lands a little
+lower than the one before: the feet creep downhill and the legs stretch out
+from under the hips. Read before this frame's reach, `boneWorld` gives the
+animator's pose, which is a fine place to start from. Keep the hips' drop under the length
 of a bent leg, or a foot on a deep step can't get there and straightens instead.
 
 **Looking at something.** Share the turn along the neck so one bone isn't

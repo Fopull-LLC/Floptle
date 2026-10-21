@@ -41,6 +41,11 @@ pub(crate) struct DisplayCache {
 /// each. A mode a monitor lists once per colour depth is listed once.
 fn gather_displays(window: &winit::window::Window) -> (Vec<MonitorInfo>, Vec<DisplayMode>) {
     let current = window.current_monitor();
+    // The same screen by what it is as well as by handle: a platform that
+    // hands back a fresh handle for the same output would otherwise mark no
+    // monitor current, which is what a game saw under Wayland.
+    let key = |m: &winit::monitor::MonitorHandle| (m.name(), m.position(), m.size());
+    let current_key = current.as_ref().map(key);
     let raw = window.available_monitors().map(|m| {
         let (size, pos) = (m.size(), m.position());
         let info = MonitorInfo {
@@ -50,7 +55,7 @@ fn gather_displays(window: &winit::window::Window) -> (Vec<MonitorInfo>, Vec<Dis
             refresh: m.refresh_rate_millihertz().map(|r| r as f32 / 1000.0),
             x: pos.x,
             y: pos.y,
-            current: current.as_ref() == Some(&m),
+            current: current.as_ref() == Some(&m) || current_key.as_ref().is_some_and(|k| *k == key(&m)),
         };
         let modes = m
             .video_modes()

@@ -353,7 +353,7 @@ end\n";
                 Scripts(vec![ScriptInst {
                     kind: "fighter".into(),
                     enabled: true,
-                    params: vec![("player".into(), i as f32 + 1.0)],
+                    params: vec![("player".into(), i as f64 + 1.0)],
                     refs: Vec::new(),
                     strs: Vec::new(),
                     pinned_bools: None,

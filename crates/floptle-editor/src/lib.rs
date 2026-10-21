@@ -1902,9 +1902,12 @@ fn migrate_project(path: &Path, stamp: &str) -> i32 {
         floptle_say::say_err!("{} is not a directory", path.display());
         return 1;
     }
-    // Recursively re-serialize effects (load runs migrate_clips), skipping hidden/target.
+    // Recursively bring effects up to the current format, skipping
+    // hidden/target. Only an effect whose format changed is written, and each
+    // one written is named, so whoever upgraded can review it.
     let mut stack = vec![path.to_path_buf()];
     let mut migrated = 0usize;
+    let mut current = 0usize;
     while let Some(dir) = stack.pop() {
         let Ok(rd) = floptle_vfs::read_dir(&dir) else { continue };
         for entry in rd {
@@ -1915,11 +1918,16 @@ fn migrate_project(path: &Path, stamp: &str) -> i32 {
                 if !name.starts_with('.') && name != "target" {
                     stack.push(p);
                 }
-            } else if p.to_string_lossy().ends_with(floptle_scene::VFX_EXT)
-                && let Ok(doc) = floptle_scene::load_vfx_effect(&p)
-                && floptle_scene::save_vfx_effect(&doc, &p).is_ok()
-            {
-                migrated += 1;
+            } else if p.to_string_lossy().ends_with(floptle_scene::VFX_EXT) {
+                match floptle_scene::migrate_vfx_effect_file(&p) {
+                    Ok(true) => {
+                        migrated += 1;
+                        let shown = p.strip_prefix(path).unwrap_or(&p);
+                        floptle_say::say!("rewrote {} (its format changed)", shown.display());
+                    }
+                    Ok(false) => current += 1,
+                    Err(e) => floptle_say::say_err!("left {} untouched (won't parse: {e})", p.display()),
+                }
             }
         }
     }
@@ -1950,7 +1958,10 @@ fn migrate_project(path: &Path, stamp: &str) -> i32 {
     // Gap-filling only: existing bindings and custom actions are untouched.
     let ed = Editor { project_root: path.to_path_buf(), ..Default::default() };
     ed.seed_input_map();
-    floptle_say::say!("migrated {migrated} effect(s) in {}", path.display());
+    floptle_say::say!(
+        "migrated {migrated} effect(s) in {}; {current} already current, left as they were",
+        path.display()
+    );
     0
 }
 
@@ -3816,7 +3827,7 @@ struct Editor {
     new_terrain_cfg: Option<NewTerrainCfg>,
     /// A running background `terrain.generatePlanet` batch (editor actions).
     planet_gen_job:
-        Option<std::sync::mpsc::Receiver<(u32, floptle_field::ChunkField, u64)>>,
+        Option<std::sync::mpsc::Receiver<(u32, crate::terrain_edit::EditorTerrain, u64)>>,
     /// The scene has unsaved edits (drives the "save before opening?" prompt).
     scene_dirty: bool,
     /// A scene the user asked to open while there were unsaved changes — the
@@ -5497,6 +5508,24 @@ mod cli_tests {
 
 #[cfg(test)]
 mod migrate_tests {
+    /// **Upgrading a project leaves its current effects alone.** The upgrade
+    /// re-saved every `.vfx.ron` it found, so a project with nothing to
+    /// migrate lost its effects' comments and layout to an engine version
+    /// bump.
+    #[test]
+    fn migrate_leaves_a_current_commented_effect_untouched() {
+        let dir = std::env::temp_dir().join(format!("floptle_migrate_vfx_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("vfx")).unwrap();
+        let fx = dir.join("vfx/Spark.vfx.ron");
+        let authored = "// Sparks off a grinder. Kept short on purpose.\n(name: \"Spark\", tracks: [(name: \"A\", \
+                        clips: [(start: 0.0, end: 0.2, emit: Some(Rate(rate: 40.0)))])])\n";
+        floptle_vfs::write(&fx, authored).unwrap();
+        assert_eq!(super::migrate_project(&dir, "0.118.0"), 0);
+        assert_eq!(floptle_vfs::read_to_string(&fx).unwrap(), authored);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// **`floptle migrate` records an existing project's `vec3` choice.** The
     /// windowed editor pins it on open; a project upgraded from the command
     /// line alone never opened in the editor, and left unpinned it carries the
@@ -5525,6 +5554,34 @@ mod migrate_tests {
         floptle_scene::save_project(&chosen, &cfg).unwrap();
         assert_eq!(super::migrate_project(&dir, "0.84.1"), 0);
         assert_eq!(floptle_scene::load_project(&cfg).script_vec3, Some(floptle_scene::ScriptVec3Doc::Fast));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod scene_param_tests {
+    /// **A seed in a scene reaches its script with every digit.** Script
+    /// params were f32, so 1911564384 in a scene file arrived as 1911564416
+    /// and a game seeded from it built a different world from the one its
+    /// save named. Through a scene file, a save of it, and into Lua.
+    #[test]
+    fn a_seed_in_a_scene_param_reads_back_exactly() {
+        let dir = std::env::temp_dir().join(format!("floptle_seed_param_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("seeded.lua"), "defaults = { seed = 0 }\nfunction update(node, dt) seen = string.format('%d', params.seed) end\n").unwrap();
+        let ron = r#"(name: "s", nodes: [(name: "World", transform: (translation: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)), matter: Empty, scripts: [(kind: "seeded", params: [("seed", 1911564384.0)])])])"#;
+        let doc = floptle_scene::from_ron(ron).expect("the scene parses");
+        let mut world = floptle_core::World::new();
+        floptle_scene::spawn_into(&doc, &mut world);
+        // …and saved again, the number is still whole.
+        let saved = floptle_scene::to_ron(&floptle_scene::to_doc("s", &world)).unwrap();
+        assert!(saved.contains("1911564384"), "the saved scene rounded the seed:\n{saved}");
+        let mut host = floptle_script::ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let e = world.query::<floptle_core::Name>().find(|(_, n)| n.0 == "World").unwrap().0;
+        let seen: String = host.instance_env(e.index(), "seeded").unwrap().get("seen").unwrap();
+        assert_eq!(seen, "1911564384");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
