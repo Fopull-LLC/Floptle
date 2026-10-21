@@ -1,6 +1,6 @@
 ## Just shipped
 
-**v0.117.0-rc5 — "Whole Worlds"** (beta). Craft fly low without dragging the
+**v0.117.0-rc6 — "Whole Worlds"** (beta). Craft fly low without dragging the
 frame down, grips and gravity hold on a moving planet, big worlds load and
 land without stalling, and scattered plants sway like the plant.
 
