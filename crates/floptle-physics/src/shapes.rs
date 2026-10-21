@@ -2216,17 +2216,18 @@ mod drawn_surface_tests {
     /// field collider, never as a duration, so runner speed cancels.
     ///
     /// Twenty bodies resting on rough ground, the state a game is in almost
-    /// all of the time and the one the query is asked hardest. About 3.2×: 39
-    /// µs against 123 µs a step here, under one percent of a frame.
+    /// all of the time and the one the query is asked hardest. About 3.5–4.5×,
+    /// a few hundred µs a step, well under a frame. The field collider got
+    /// cheaper when it stopped searching in open air, which raised the ratio
+    /// from the 3.2× it read before.
     ///
     /// The ceiling sits close to that on purpose. Triangle buckets sized to the
     /// query reach rather than to a voxel put every triangle in the band into
     /// the bucket a resting body stands in, and finding the triangle under its
-    /// feet walked hundreds of them; a comfortable ceiling would let that
-    /// through.
+    /// feet walked hundreds of them: that reads about 10×.
     #[test]
     fn colliding_with_the_drawn_surface_is_not_dear() {
-        let cost = |accurate: bool| {
+        let world = |accurate: bool| {
             let mut t = ChunkTerrain::new(rough());
             t.mesh_accurate = accurate;
             let mut w = crate::PhysicsWorld::new(Default::default());
@@ -2241,22 +2242,30 @@ mod drawn_surface_tests {
             for _ in 0..120 {
                 w.step(1.0 / 60.0); // let them land — settle is not the subject
             }
+            w
+        };
+        let window = |w: &mut crate::PhysicsWorld| {
             let t0 = std::time::Instant::now();
-            for _ in 0..60 {
+            for _ in 0..10 {
                 w.step(1.0 / 60.0);
             }
-            t0.elapsed().as_secs_f64() / 60.0
+            t0.elapsed().as_secs_f64() / 10.0
         };
-        // The field first, so a cold cache and a cold branch predictor are not
-        // charged to the feature.
-        let field = cost(false);
-        let mesh = cost(true);
+        // Both worlds built first, then timed in alternating windows, each side
+        // keeping its fastest: interference on a shared machine only ever adds
+        // time, and one slow reading of the field alone read 6.6x on a runner.
+        let (mut fw, mut mw) = (world(false), world(true));
+        let (mut field, mut mesh) = (f64::MAX, f64::MAX);
+        for _ in 0..6 {
+            field = field.min(window(&mut fw));
+            mesh = mesh.min(window(&mut mw));
+        }
         let ratio = mesh / field.max(1e-9);
         eprintln!("step cost: field {:.0} us, mesh {:.0} us, ratio {ratio:.2}x", field * 1e6, mesh * 1e6);
         assert!(
-            ratio < 6.0,
+            ratio < 7.0,
             "colliding against the drawn triangles costs {ratio:.1}x the field collider \
-             ({:.0} µs against {:.0} µs a step). Measured at 3.2x; past 6 something has \
+             ({:.0} µs against {:.0} µs a step). Measured at about 4x; past 7 something has \
              stopped narrowing — check that the triangle buckets are still one VOXEL and \
              not one reach, and that the expanding-ring search still stops early.",
             mesh * 1e6,
