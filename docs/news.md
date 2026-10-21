@@ -1,5 +1,9 @@
 ## Just shipped
 
+**v0.117.0-rc4 — "Whole Worlds"** (beta). Craft fly low without dragging the
+frame down, grips and gravity hold on a moving planet, big worlds load and
+land without stalling, and scattered plants sway like the plant.
+
 **v0.117.0-rc3 — "Whole Worlds"** (beta). Water to float on and drift with,
 shaders that read the scene behind them, wind that carries smoke and bends
 plants, planets that save only what you dug, and craft that keep their place
