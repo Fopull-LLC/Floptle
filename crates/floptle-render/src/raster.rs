@@ -550,6 +550,9 @@ pub(crate) const EXT_DITHER_ALPHA: u32 = 8;
 /// "no fog" rather than "fog" — so the neutral entry stays all-zero flags and
 /// every existing instance keeps meaning what it meant.
 pub(crate) const EXT_NO_FOG: u32 = 16;
+/// With [`EXT_DITHER_ALPHA`]: dither on the complement of the pattern, so
+/// two surfaces fading across each other cover every pixel exactly once.
+pub(crate) const EXT_DITHER_INVERT: u32 = 32;
 
 impl SurfaceExtras {
     /// Read a material's extras. `Classic` still carries the normal and
@@ -2320,6 +2323,21 @@ impl Raster {
     /// The project's artefacts are folded in here, before the neutral test, and
     /// the test is against the folded neutral — so a material that sets nothing
     /// still lands on index 0 and still shares one entry with every other.
+    /// Entry `ext` with screen-door transparency switched on, on the pattern
+    /// or (`invert`) its complement: what two LOD bands cross-fading wear, so
+    /// the band leaving and the band arriving dissolve into each other in the
+    /// opaque pass instead of blending at half alpha each.
+    pub fn dithered_extras(&mut self, ext: u32, invert: bool) -> u32 {
+        let start = ext as usize * EXT_LANES;
+        let Some(Ok(mut lanes)) = self.mat_ext_cpu.get(start..start + EXT_LANES).map(<[[f32; 4]; EXT_LANES]>::try_from)
+        else {
+            return ext;
+        };
+        let flags = lanes[1][0] as u32 | EXT_DITHER_ALPHA | if invert { EXT_DITHER_INVERT } else { 0 };
+        lanes[1][0] = flags as f32;
+        self.push_ext_lanes(lanes)
+    }
+
     pub fn push_surface_extras(&mut self, mut e: SurfaceExtras) -> u32 {
         e.retro = e.retro.under(self.retro_defaults);
         if e == self.neutral_extras() {
@@ -2331,6 +2349,22 @@ impl Raster {
         }
         let i = (self.mat_ext_cpu.len() / EXT_LANES) as u32;
         self.mat_ext_cpu.extend_from_slice(&e.lanes());
+        self.mat_ext_index.insert(key, i);
+        self.mat_ext_dirty = true;
+        i
+    }
+
+    /// Store raw lanes, sharing an entry that already holds the same bits.
+    fn push_ext_lanes(&mut self, lanes: [[f32; 4]; EXT_LANES]) -> u32 {
+        let mut key = [0u32; EXT_LANES * 4];
+        for (k, v) in key.iter_mut().zip(lanes.iter().flatten()) {
+            *k = v.to_bits();
+        }
+        if let Some(&i) = self.mat_ext_index.get(&key) {
+            return i;
+        }
+        let i = (self.mat_ext_cpu.len() / EXT_LANES) as u32;
+        self.mat_ext_cpu.extend_from_slice(&lanes);
         self.mat_ext_index.insert(key, i);
         self.mat_ext_dirty = true;
         i

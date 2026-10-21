@@ -475,6 +475,7 @@ impl<'a> Writer<'a> {
                 }
                 (_, Input::Time) => "G.params.x".into(),
                 (EmitCtx::Fragment, Input::InstanceColor) => "in.color".into(),
+                (EmitCtx::Fragment, Input::VertexColor) => "in.vcolor".into(),
                 // Sky shaders read the ray direction (`dir`, the fn's parameter).
                 (EmitCtx::Sky, Input::SkyDir) => "dir".into(),
                 // In a preview tile the dome normal is the stand-in ray.

@@ -175,7 +175,15 @@ force a track opts into rather than authors: the wind the game declared with
 toward its velocity at `coupling` per second (a few for smoke, more for dust
 and rain). The velocity relaxes exactly rather than being pushed, so a strong
 coupling settles on the wind instead of overshooting it, and a Local track
-feels the wind turned into its emitter's frame. Outside Play there is no wind. A `Trail` is a
+feels the wind turned into its emitter's frame. It relaxes all three axes, the
+vertical one too: gravity is applied before it and then pulled toward the
+wind's own vertical speed (usually zero), so a falling track with a strong
+coupling stops falling. Give such a track a downward wind component, or a
+smaller coupling, or add the fall back with a `Directional` force. The
+`Directional`, `Point` and `Vortex` vectors of a `World` track are in world
+axes, not along a planet's up: on a planet, build them from the up where the
+effect plays, or use a `Local` track on a node aligned to the ground. Outside
+Play there is no wind. A `Trail` is a
 per-particle ribbon on billboard tracks, spanning `time` seconds of history at
 `width` world units, optionally tapering to nothing (`fade`); a track with no
 trail records no history and pays for none.
@@ -264,6 +272,10 @@ alike. In the Inspector it is the 🎲 on a curve row.
   thrown again each pulse (each loop, or once for a one-shot) and
   `jitter_rate` times a second on top. Tracks with the same `jitter_seed` and
   `segments` draw the same channel, so a bolt's core and its glow line up.
+  The segments are mitred where they meet, so a wide glow is one ribbon
+  rather than a fan of square-ended shards; a kink sharper than the mitre
+  limit (one ribbon width of mitre) keeps a small notch instead of throwing a
+  spike. A beam with the `Distortion` blend keeps square ends.
 
 `blend` is `Alpha`, `Additive`, `Premultiplied`, `Screen`, `Multiply` or
 `Distortion`. `Distortion` is heat haze: it bends a picture of the scene behind

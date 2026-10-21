@@ -335,3 +335,47 @@ fn a_surface_shader_shows_the_scene_behind_it() {
     assert!(pane[0] > 120 && pane[1] > 40 && pane[2] < 40, "the pane is {pane:?}: it did not show the wall behind it");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// **A surface shader reads the mesh's own vertex colours and the sky.** A
+/// game bakes data into a mesh's colours (a river's flow, a lake's depth) and
+/// a shader could not see them; it reflected a sky it had to fake with a
+/// gradient. `vertexColor` is the colour a vertex carries, and `skyRadiance`
+/// the captured sky along a direction. The guard: a quad whose vertices are
+/// red, drawn by a shader that shows `vertexColor` and adds the sky only where
+/// the sky is captured (so a machine without one still sees red), reads red.
+#[test]
+fn a_surface_shader_reads_vertex_colours_and_the_sky() {
+    let d = temp("vcolor");
+    scaffold(&d);
+    std::fs::create_dir_all(d.join("shaders")).unwrap();
+    std::fs::create_dir_all(d.join("models")).unwrap();
+    let v = |x: f32, y: f32| [x, y, 0.0];
+    let mesh = floptle_assets::WriteMesh {
+        positions: vec![v(-1.0, -1.0), v(1.0, -1.0), v(1.0, 1.0), v(-1.0, 1.0)],
+        normals: vec![[0.0, 0.0, 1.0]; 4],
+        uvs: None,
+        colors: Some(vec![[255, 0, 0, 255]; 4]),
+        joints: None,
+        weights: None,
+        indices: vec![0, 1, 2, 0, 2, 3],
+        base_color: [1.0; 4],
+        texture: None,
+    };
+    let glb = floptle_assets::write_glb(&[floptle_assets::WriteNode::mesh_node("panel", mesh)], &[], &[], &[]);
+    std::fs::write(d.join("models/panel.glb"), glb).unwrap();
+    std::fs::write(
+        d.join("shaders/painted.flsl"),
+        "shader painted {\n  stage fragment\n  let sky = skyRadiance(reflect(-viewDir, normal), 0.5)\n  \
+         output color = vec4(vertexColor.rgb + sky * 0.0, 1)\n}\n",
+    )
+    .unwrap();
+    let scene = "(name: \"painted\", nodes: [(name: \"Camera\", transform: (translation: (0.0, 0.0, 0.0), \
+         rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)), matter: Camera(fov_y: 1.0, active: true), scripts: []), \
+         (name: \"Panel\", transform: (translation: (0.0, 0.0, -4.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (3.0, 3.0, 1.0)), \
+         matter: Mesh(asset_path: \"models/panel.glb\"), scripts: [], material: Some((shader: Some(\"shaders/painted.flsl\"))))])";
+    std::fs::write(d.join("scenes/painted.ron"), scene).unwrap();
+    let Some(img) = shoot(&d, "painted") else { return };
+    let p = img.get_pixel(80, 45);
+    assert!(p[0] > 180 && p[1] < 60 && p[2] < 60, "the panel is {p:?}, not its vertices' red");
+    let _ = std::fs::remove_dir_all(&d);
+}

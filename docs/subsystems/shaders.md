@@ -226,6 +226,13 @@ Start small (the ADR-0007 subset), grow over time. Categories, with examples:
 - **Screen** (`stage post` only) — `sceneColor`, `sceneDepth`, `sceneNormal`,
   `sceneRay`, `cameraPosition`, `screenTexel`: the finished frame, readable at any pixel rather than only this
   one. See [`./post-processing.md`](./post-processing.md).
+- **The mesh and the sky** (`stage fragment`) — `vertexColor` is the colour
+  each vertex carries (`mesh.build`'s `colors`, a glTF's COLOR_0, vertex paint;
+  white where a mesh has none), so data a game bakes into a mesh, such as a
+  river's flow or a lake's depth, reaches the shader. `skyRadiance(dir
+  [, roughness])` is the sky the engine captured this frame along a world
+  direction, in real light: water reflects `skyRadiance(reflect(-viewDir, n))`
+  rather than a gradient of its own.
 - **Behind a surface** (`stage fragment`) — `sceneColor(uv)` and `sceneDepth(uv)`
   read the scene behind the surface at a screen position, and `screenUv(p)` is
   where a point lands on the screen (`screenUv(worldPos)` is this pixel). A

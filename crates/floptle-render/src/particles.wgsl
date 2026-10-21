@@ -111,9 +111,19 @@ fn vs(in: VsIn) -> VsOut {
         in.corner.x * ca - in.corner.y * sa,
         in.corner.x * sa + in.corner.y * ca,
     );
-    let world = in.pos_rot.xyz
+    var world = in.pos_rot.xyz
         + in.basis_right.xyz * (c.x * in.size.x)
         + in.basis_up.xyz * (c.y * in.size.y);
+    // A mitred ribbon segment (`extra.z < 0`, a beam): each corner slides
+    // along the segment by its own mitre (+right: `extra.x` tail, `.y` head;
+    // -right: `size.z` tail, `extra.w` head), so the segment meets its
+    // neighbours on the mitre line with no wedge between.
+    let mitred = in.extra.z < 0.0;
+    if (mitred) {
+        let plus = select(in.extra.x, in.extra.y, in.corner.y > 0.0);
+        let minus = select(in.size.z, in.extra.w, in.corner.y > 0.0);
+        world += normalize(in.basis_up.xyz) * select(minus, plus, in.corner.x > 0.0);
+    }
 
     var out: VsOut;
     out.clip = g.view_proj * vec4<f32>(world, 1.0);
@@ -121,10 +131,10 @@ fn vs(in: VsIn) -> VsOut {
     // flipbook UV sub-rect [min_u, min_v, du, dv] rides the spare instance channels
     // (size.zw + the two basis .w's); a plain texture packs the full quad [0,0,1,1].
     let base_uv = vec2<f32>(in.corner.x + 0.5, 0.5 - in.corner.y);
-    let rect = vec4<f32>(in.size.z, in.size.w, in.basis_right.w, in.basis_up.w);
+    let rect = vec4<f32>(select(in.size.z, 0.0, in.extra.z < 0.0), in.size.w, in.basis_right.w, in.basis_up.w);
     out.uv = base_uv * rect.zw + rect.xy;
-    out.uv_next = base_uv * rect.zw + in.extra.xy;
-    out.extra = in.extra.zw;
+    out.uv_next = select(base_uv * rect.zw + in.extra.xy, out.uv, mitred);
+    out.extra = select(in.extra.zw, vec2<f32>(0.0), mitred);
     out.color = in.color;
     out.view_pos = world;
     out.soft = in.params.x;

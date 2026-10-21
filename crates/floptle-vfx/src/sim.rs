@@ -1253,6 +1253,60 @@ mod tests {
         assert_eq!(alive, 0, "set to die on contact, every one ends at the floor");
     }
 
+    /// **Debris on a 20° slope with friction 0.1 slides, and slides on the
+    /// surface.** The slope is steeper than that friction can hold, so the
+    /// particles must keep going downhill, never at rest, and must stay in
+    /// contact while they do: a hit that counted from the start of a step
+    /// used to throw the sideways motion away and leave them hovering. Every
+    /// frame after landing, every particle is within 0.015 m of the surface.
+    #[test]
+    fn debris_on_a_low_friction_slope_slides_and_stays_on_it() {
+        let a = 20f32.to_radians();
+        let n = Vec3::new(a.sin(), a.cos(), 0.0);
+        let nd = n.as_dvec3();
+        let slope = move |from: DVec3, to: DVec3| {
+            let (df, dt) = (from.dot(nd), to.dot(nd));
+            (df >= 0.0 && dt < 0.0).then(|| (from + (to - from) * (df / (df - dt)), n))
+        };
+        let fx = one_track_effect(
+            Track {
+                clips: vec![burst_clip(0.0, 50, 10.0)],
+                velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
+                gravity: 1.0,
+                space: Space::World,
+                collide: Some(crate::effect::Collide { bounce: 0.0, friction: 0.1, die: false }),
+                ..Track::default()
+            },
+            10.0,
+            Playback::OneShot,
+        );
+        let mut inst = EffectInstance::new(fx, 9);
+        let level: LevelHit<'_> = &slope;
+        let at = Transform::from_translation(DVec3::new(0.0, 0.5, 0.0));
+        let (mut first, mut highest, mut landed_frames) = (Vec::new(), 0f64, 0);
+        for f in 0..180 {
+            inst.advance_in_level(1.0 / 60.0, Vec3::new(0.0, -9.81, 0.0), at, Some(level));
+            let mut heights = Vec::new();
+            inst.sample_track(0, |p| heights.push((p.pos.as_dvec3() + DVec3::new(0.0, 0.5, 0.0)).dot(nd)));
+            if f == 30 {
+                inst.sample_track(0, |p| first.push(p.pos));
+            }
+            // A drop of 0.5 m lands within half a second.
+            if f >= 30 {
+                landed_frames += 1;
+                highest = heights.iter().copied().fold(highest, f64::max);
+                assert!(heights.iter().all(|h| *h >= -1e-4), "frame {f}: a particle went into the slope");
+            }
+        }
+        assert!(landed_frames > 100);
+        assert!(highest <= 0.015, "a sliding particle rode {highest:.4} m off the slope");
+        assert_eq!(inst.resting(), 0, "friction 0.1 cannot hold on 20°, yet particles came to rest");
+        let mut last = Vec::new();
+        inst.sample_track(0, |p| last.push(p.pos));
+        let slid = first.iter().zip(&last).map(|(a, b)| b.x - a.x).fold(f32::INFINITY, f32::min);
+        assert!(slid > 1.0, "the least a particle slid downhill in 2.5 s was {slid} m");
+    }
+
     /// **Debris that has landed asks the level nothing.** Two hundred
     /// particles dropped onto a floor come to rest, and from then on not one
     /// ray is cast for them, until the level changes and wakes them — when

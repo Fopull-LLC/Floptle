@@ -21,6 +21,12 @@ use crate::opts::check_keys;
 /// A scatter source a script declared, plus the ids it has removed.
 pub type Sources = Rc<RefCell<Vec<floptle_core::scatter::ScatterSource>>>;
 
+/// Where the driver dropped each prop onto the ground, by `(source id,
+/// instance id)`: its place and up in the source's own frame. `scatter.near`
+/// answers with these where a prop has settled, so a harvest aims at the
+/// plant on the hillside rather than at the region's nominal surface under it.
+pub type Settled = Rc<RefCell<std::collections::HashMap<(u32, u64), (glam::DVec3, glam::Vec3)>>>;
+
 /// The script instance that created each source, by source id.
 ///
 /// A source outlives the call that made it, so without an owner nothing can
@@ -94,6 +100,7 @@ pub(crate) const CREATE_KEYS: &[&str] = &[
 /// prompted this had 4,489, and the two numbers that did it read as a look.
 const LOUD_CHUNKS: u64 = 400;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn install_scatter_api(
     lua: &Lua,
     sources: Sources,
@@ -102,6 +109,7 @@ pub(crate) fn install_scatter_api(
     next_id: Rc<std::cell::Cell<u32>>,
     logs: Rc<RefCell<Vec<crate::ScriptLog>>>,
     scene: Rc<RefCell<crate::SceneMirror>>,
+    settled: Settled,
 ) {
     use floptle_core::scatter::{Align, Band, Region, ScatterSource};
     let Ok(t) = lua.create_table() else { return };
@@ -387,6 +395,7 @@ pub(crate) fn install_scatter_api(
     // to build here" check reads.
     {
         let s = sources.clone();
+        let settled = settled.clone();
         if let Ok(f) = lua.create_function(move |lua, args: mlua::MultiValue| {
             let a: Vec<Value> = args.into_iter().collect();
             let id = match a.first() {
@@ -415,19 +424,27 @@ pub(crate) fn install_scatter_api(
             // frame. Convert once, query locally, and hand back
             // world positions — a game should never have to know the difference.
             let pl = src.frame.to_local(p);
-            let mut found: Vec<(f64, floptle_core::scatter::Instance)> = Vec::new();
+            let on_ground = settled.borrow();
+            let mut found: Vec<(f64, floptle_core::scatter::Instance, bool)> = Vec::new();
             for key in floptle_core::scatter::chunks_near(src, pl, r) {
                 for mut i in floptle_core::scatter::chunk_instances(src, key) {
+                    // Where it stands, once the driver has dropped it onto
+                    // the ground; the region's nominal surface until then.
+                    let landed = on_ground.get(&(src.id, i.id)).copied();
+                    if let Some((pos, up)) = landed {
+                        i.pos = pos;
+                        i.up = up;
+                    }
                     let d = (i.pos - pl).length();
                     if d <= r {
                         i.pos = src.frame.to_world(i.pos);
                         i.up = src.frame.dir_to_world(i.up);
-                        found.push((d, i));
+                        found.push((d, i, landed.is_some()));
                     }
                 }
             }
             found.sort_by(|a, b| a.0.total_cmp(&b.0));
-            for (n, (d, i)) in found.iter().enumerate() {
+            for (n, (d, i, landed)) in found.iter().enumerate() {
                 let row = lua.create_table()?;
                 // A plain number: ids are 53 bits, which a Lua number holds
                 // exactly, and a Lua integer here is 32.
@@ -440,6 +457,9 @@ pub(crate) fn install_scatter_api(
                 // the surface) and its spin about that up, in radians.
                 row.set("up", crate::math_api::LuaVec3(i.up.as_dvec3()))?;
                 row.set("yaw", i.yaw as f64)?;
+                // false: not dropped onto the ground yet (it has not been
+                // near enough a camera), so `pos` is on the region's own surface.
+                row.set("settled", *landed)?;
                 out.set(n + 1, row)?;
             }
             Ok(out)
@@ -473,6 +493,7 @@ mod tests {
             Rc::default(),
             Rc::new(std::cell::Cell::new(0)),
             logs.clone(),
+            Rc::default(),
             Rc::default(),
         );
         (lua, sources, logs)

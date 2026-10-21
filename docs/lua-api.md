@@ -153,7 +153,7 @@ app.dataPath() — the folder a player's own files are in, as a full path: where
 
 ### `app.displayModes`
 
-app.displayModes([monitor]) → { {width=, height=, refresh=, monitor=}, … } — the full-screen modes the monitors offer (one monitor's when you pass its index), largest first, each once. What a Resolution dropdown lists. Empty where there is no window; a browser lists none it can switch to.
+app.displayModes([monitor]) → { {width=, height=, refresh=, monitor=}, … } — the full-screen modes the monitors offer (one monitor's when you pass its index), largest first, each once. What a Resolution dropdown lists. Under Wayland each monitor offers its current mode only: the compositor owns the screen's mode, and a game's full screen there is the monitor as it is set. Empty where there is no window; a browser lists none it can switch to.
 
 ### `app.dynamicResolution`
 
@@ -177,7 +177,7 @@ app.isWeb() — true in a browser build. The same answer as app.platform() == "w
 
 ### `app.monitors`
 
-app.monitors() → { {index=, name=, width=, height=, refresh=, x=, y=, current=}, … } — the displays the game's window could be on, in the system's order; current is the one it is on now. Sizes are physical pixels. An empty list where there is no window (floptle run, a dedicated server). Kept up to date every couple of seconds, so a monitor plugged in while a settings page is open shows up.
+app.monitors() → { {index=, name=, width=, height=, refresh=, x=, y=, current=}, … } — the displays the game's window could be on, in the system's order; current is the one it is on now. Sizes are physical pixels. Under Wayland a window learns which screen it is on only once the compositor has shown it there, so for the first frames (or always, on a compositor that never says) no monitor is current. An empty list where there is no window (floptle run, a dedicated server). Kept up to date every couple of seconds, so a monitor plugged in while a settings page is open shows up.
 
 ### `app.platform`
 
@@ -324,7 +324,7 @@ Pictures laid on the world's static surfaces: blood, scorch marks, bullet holes,
 
 ### `decals.add`
 
-decals.add{ texture, pos, normal, size [, height, depth, up, rotation, color = {r,g,b}, alpha, sheetCols, sheetRows, cell, layers, maxAngle, frame] } → id — lay a picture on the static surfaces under a box standing at pos, facing normal (a raycast hit's point and normal). It folds over edges and into corners, follows curves, and is lit, shadowed and fogged like the surface. No node: every decal sharing a picture is one mesh and one draw. nil when nothing under it can take a mark (the sky, or a sphere or capsule collider, which has no faces). maxAngle (default 100°) is how far a face may turn from normal and still take it. A mark rides what it was laid on as that moves: frame = a node (a ship), or by default the planet on rails whose sphere of influence it is in. Cleared by a new Play or a scene switch.
+decals.add{ texture, pos, normal, size [, height, depth, up, rotation, color = {r,g,b}, alpha, sheetCols, sheetRows, cell, layers, maxAngle, frame] } → id — lay a picture on the static surfaces under a box standing at pos, facing normal (a raycast hit's point and normal). It folds over edges and into corners, follows curves, and is lit, shadowed and fogged like the surface. No node: every decal sharing a picture is one mesh and one draw. nil when nothing under it can take a mark (the sky, or a sphere or capsule collider, which has no faces). maxAngle (default 100°) is how far a face may turn from normal and still take it. A mark rides what it was laid on as that moves: frame = a node (a ship), or by default the planet on rails whose sphere of influence it is in. When the ground under a mark is dug or re-meshed it is laid again on the surface there, and goes if nothing is left to lie on. Cleared by a new Play or a scene switch.
 
 ### `decals.clear`
 
@@ -1234,7 +1234,7 @@ Under physical shading a surface also REFLECTS the sky. A mirror is metallic=1 w
 
 fog=false exempts the surface from the scene's fog — both the distance ramp and the volumetric layer — so it draws at its own colour however far away it is. For the things that are not really in the world at that distance: a first-person weapon, a backdrop card, a marker that has to stay readable through the weather. A planet's atmosphere is a separate effect and still applies.
 
-sway=0.3 bends the surface in the game's wind (weather.addWind): the metres a point one metre above the node's origin moves in a 10 m/s wind, growing with the square of the height, so a stem stays rooted and its tip swings. Grass, leaves, flags, a scatter field of plants. backlight=0.6 lets the key light on the back of a thin surface through to the front, shadowed as the back face is: a leaf against the sun.
+sway=0.3 bends the surface in the game's wind (weather.addWind): the metres a point one metre above the node's origin moves in a 10 m/s wind, growing with the square of the height, so a stem stays rooted and its tip swings. So size it to the prop: a 0.5 m grass blade wants about 1 (its tip moves 0.25 m), a 12 m tree about 0.01 to 0.02 (its crown moves 1.4 to 2.9 m); at 3 a 12 m tree lies flat. Grass, leaves, flags, a scatter field of plants. backlight=0.6 lets the key light on the back of a thin surface through to the front, shadowed as the back face is: a leaf against the sun.
 
 Retro artefacts: jitter (screen-grid vertex snapping, 0 = follow the project), affineUv, vertexLit, ditherAlpha. The project can ask for all four at once (Project Settings ⏵ Rendering); retroExempt=true takes none of them, which is how you hold a viewmodel steady in a world that wobbles.
 
@@ -2929,7 +2929,7 @@ water.setFrozen(node, true) — freeze a water volume. Freezing is a STATE, not 
 
 ### `water.surface`
 
-water.surface(id [, { cells = 48 }]) → the arrays mesh.build takes for that declared water's surface, in its parent's frame: mesh.build(water.surface(id)) on a node at the parent's origin draws exactly the surface water.at answers for. A lake is a disc laid on its sphere out past its farthest shore; uvs are metres. nil for no such water.
+water.surface(id [, { cells = 48 }]) → the arrays mesh.build takes for that declared water's surface, in its parent's frame: mesh.build(water.surface(id)) on a node at the parent's origin draws exactly the surface water.at answers for. A lake is the part of its sphere in its basin: what its centre reaches without crossing the ground, out to a ring under the shore (with no physics running, the whole disc out past its farthest shore); uvs are metres. nil for no such water.
 
 ### `water.volumes`
 
@@ -2973,7 +2973,7 @@ scatter.cost(id) — what this source asks for every frame: { chunks, props, far
 
 ### `scatter.create`
 
-scatter.create{ asset = "tree.glb", seed = 7, perChunk = 24, chunk = 16 } — declare a source, get its id. `tint = {r,g,b}` multiplies every prop's colour, and `emissive = {r,g,b}` with `emissiveStrength` makes them glow, so one model serves a field of any shade. Region: center + radius for a sphere (a planet), or center + halfX/halfZ for ground. `parent = "Umunquo"` anchors the region to a NODE (and then `center` is in that node's frame: the planet's own centre is (0,0,0), not where it is in the world), so a planet that orbits carries its props instead of sliding out from under them — every prop keeps its id, its place on the surface and the ground height it settled at, because none of those were ever expressed in world space. Without a parent the region is pinned to the world, which is right for a landscape that never moves and wrong for every celestial body. Also scaleMin/scaleMax, align = "surface" (default) or "world", fade, and lod = { {asset=, distance=}, ... } nearest-first. Placement is a pure function of the seed, so every machine and every session grows the SAME forest without storing one. `density` is how a world gets biomes: pass a function(x, y, z) -> 0..1 and it is sampled ONCE, at declare time, into a densityRows grid (rows x 2*rows for a sphere's longitude) — 0 means no instance is generated at all, not a hidden one. An option this doesn't list is an error, not a shrug. `asset` may be a mesh file OR a .prefab.ron — a prefab is baked once into one instanced draw per Mesh node it holds, each at its authored place in the prop, which is how a prop your own script assembled gets scattered.
+scatter.create{ asset = "tree.glb", seed = 7, perChunk = 24, chunk = 16 } — declare a source, get its id. `tint = {r,g,b}` multiplies every prop's colour, and `emissive = {r,g,b}` with `emissiveStrength` makes them glow, so one model serves a field of any shade. Region: center + radius for a sphere (a planet), or center + halfX/halfZ for ground. `parent = "Umunquo"` anchors the region to a NODE (and then `center` is in that node's frame: the planet's own centre is (0,0,0), not where it is in the world), so a planet that orbits carries its props instead of sliding out from under them — every prop keeps its id, its place on the surface and the ground height it settled at, because none of those were ever expressed in world space. Without a parent the region is pinned to the world, which is right for a landscape that never moves and wrong for every celestial body. Also scaleMin/scaleMax, align = "surface" (default) or "world", fade, and lod = { {asset=, distance=}, ... } nearest-first. Placement is a pure function of the seed, so every machine and every session grows the SAME forest without storing one. `density` is how a world gets biomes: pass a function(x, y, z) -> 0..1 and it is sampled ONCE, at declare time, into a densityRows grid (rows x 2*rows for a sphere's longitude) — 0 means no instance is generated at all, not a hidden one. An option this doesn't list is an error, not a shrug. `asset` may be a mesh file OR a .prefab.ron — a prefab is baked once into one instanced draw per Mesh node it holds, each at its authored place in the prop and wearing that node's Material (its colour, sway and backlight, so a field of grass moves in the wind), which is how a prop your own script assembled gets scattered.
 
 ### `scatter.destroy`
 
@@ -2981,7 +2981,7 @@ scatter.destroy(id) — remove a whole source and everything it was drawing. Ret
 
 ### `scatter.near`
 
-scatter.near(sourceId, point, radius) — the instances around a point, nearest first: { id, pos, distance, scale, param, up, yaw } — `up` is the way it stands (the ground's normal when it aligns to the surface) and `yaw` its spin about that up, in radians. `id` is exact: hand it to scatter.remove. What a harvest verb aims with, and what a "is there room to build here" check reads.
+scatter.near(sourceId, point, radius) — the instances around a point, nearest first: { id, pos, distance, scale, param, up, yaw, settled } — `up` is the way it stands (the ground's normal when it aligns to the surface) and `yaw` its spin about that up, in radians. `pos` and `up` are where the prop stands on the ground once the field has dropped it there (`settled = true`); a prop that has not been near a camera yet is not settled, and answers with the region's own surface. `id` is exact: hand it to scatter.remove. What a harvest verb aims with, and what a "is there room to build here" check reads.
 
 ### `scatter.remove`
 
@@ -3165,7 +3165,7 @@ assembly.forceAt(node, force, at) — a held world-space force at a world point.
 
 ### `assembly.grip`
 
-assembly.grip(node, at [, target] [, breakForce]) — weld the vessel at world point at to target (a node with a body, any node of an assembly, or a terrain node) or, with no target, to the ground nearest the point: a landing claw, a harpoon, a grab. The pair keeps the pose it has now, the grip rides its ground when that moves (a planet on its rails), and it lets go past breakForce (0: never). assembly.info(node).gripped says whether it still holds. Applied after the script pass.
+assembly.grip(node, at [, target] [, breakForce]) — weld the vessel at world point at to target (a node with a body, any node of an assembly, or a terrain node) or, with no target, to the ground nearest the point: a landing claw, a harpoon, a grab. The pair keeps the pose it has now, the grip rides its ground when that moves (a planet on its rails), and it lets go past breakForce (0: never). assembly.info(node).gripped says whether it still holds. The point must be where the craft is: one more than a unit clear of all its parts is refused with a warning. Applied after the script pass.
 
 ### `assembly.impacts`
 
@@ -3311,7 +3311,7 @@ perf.gpuMs(pass) → one pass's GPU milliseconds last frame ("opaque + lighting"
 
 ### `perf.hitches`
 
-perf.hitches() → every frame since the last call that took 50 ms or more, oldest first: { {frame=, ms=, top="terrain", buckets={terrain=157.4, scripts=30.1, ...}}, ... }. perf.worstMs looks back sixty frames, so a probe that reads every few seconds loses the spike it is hunting; this keeps each one (up to 64) until it is read, with the bucket that spent the time on top. Time no bucket measured is named `untimed`, and waiting on the GPU or the display `gpuWait` and `present`, so a hitch the engine's buckets cannot explain still says so. Needs perf.enable(true).
+perf.hitches() → every frame since the last call that took 50 ms or more, oldest first: { {frame=, ms=, top="terrain", buckets={terrain=157.4, scripts=30.1, ...}, parts={collisionRebuild=140.2, ...}}, ... }. perf.worstMs looks back sixty frames, so a probe that reads every few seconds loses the spike it is hunting; this keeps each one (up to 64) until it is read, with the bucket that spent the time on top. Time no bucket measured is named `untimed`, and waiting on the GPU or the display `gpuWait` and `present`, so a hitch the engine's buckets cannot explain still says so. `parts` names work inside the buckets, in milliseconds already counted there: `terrainEdits` (applying terrain.dig and the other edits), `collisionRebuild` (a terrain collider's rebuilt triangles landing, or the frame waiting for them) and `planetLanded` (a generated world arriving). Needs perf.enable(true).
 
 ### `perf.mirrorCause`
 
@@ -4007,7 +4007,7 @@ anim:boneIndex("Rib12") → number — the bone's number on this model, its plac
 
 ### `anim:boneWorld`
 
-anim:boneWorld("Hand") → pos, yaw, pitch, roll — where the bone is this frame, in world space, after clips, bone writes and IK. A write made earlier in the same pass is already in the answer, counted once, so `setBonePos` then `boneWorld` reads back the moved bone (written every frame, it is not read twice). Read before any write, it is the pose last drawn. nil until the model is posed. Works under `floptle run` and on a dedicated server, which read the rig without its pictures, so a hitbox can follow a hand where nothing is drawn.
+anim:boneWorld("Hand") → pos, yaw, pitch, roll — where the bone is this frame, in world space, after clips, bone writes and IK. A write made earlier in the same pass is already in the answer, counted once, so `setBonePos` then `boneWorld` reads back the moved bone (written every frame, it is not read twice). Read before any write this frame, it is the animator's pose for this frame, without last frame's writes (unless anim:holdPose(true) keeps them). nil until the model is posed. Works under `floptle run` and on a dedicated server, which read the rig without its pictures, so a hitbox can follow a hand where nothing is drawn.
 
 ### `anim:clips`
 

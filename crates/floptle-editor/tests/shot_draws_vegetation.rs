@@ -133,3 +133,102 @@ fn a_backlit_leaf_glows_against_the_sun() {
     assert!(backlit > plain * 2, "the backlit leaf {backlit} is no brighter than the plain one {plain}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A box model `w` wide and `h` tall, as a `.glb` (the importer centres it).
+fn box_glb(w: f32, h: f32) -> Vec<u8> {
+    let (x, y) = (w * 0.5, h * 0.5);
+    let mut positions = Vec::new();
+    let mut indices = Vec::new();
+    // Six faces, each its own four corners.
+    let faces: [([f32; 3], [f32; 3], [f32; 3]); 6] = [
+        ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
+        ([-1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]),
+        ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]),
+        ([0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+        ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+        ([0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]),
+    ];
+    let mut normals = Vec::new();
+    for (n, a, b) in faces {
+        let base = positions.len() as u32;
+        for (sa, sb) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            let p = [0, 1, 2].map(|k| (n[k] + a[k] * sa + b[k] * sb) * [x, y, x][k]);
+            positions.push(p);
+            normals.push(n);
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    let mesh = floptle_assets::WriteMesh {
+        positions,
+        normals,
+        uvs: None,
+        colors: None,
+        joints: None,
+        weights: None,
+        indices,
+        base_color: [1.0; 4],
+        texture: None,
+    };
+    floptle_assets::write_glb(&[floptle_assets::WriteNode::mesh_node("blade", mesh)], &[], &[], &[])
+}
+
+/// **A scattered plant sways like the same plant on a node.** A prefab's
+/// Material used to be dropped when it was baked into a scatter prototype, so
+/// a field of grass could not move however its prefab was made. A blade
+/// scattered from a prefab whose Material sways leans downwind in a 15 m/s
+/// wind and stands straight in still air.
+#[test]
+fn a_scattered_plant_sways_like_the_same_plant_on_a_node() {
+    let shoot_field = |wind: f32, tag: &str| -> Option<image::RgbaImage> {
+        let d = temp(tag);
+        let out = Command::new(bin()).args(["new", &d.to_string_lossy()]).output().expect("run floptle new");
+        assert!(out.status.success(), "scaffold failed: {}", String::from_utf8_lossy(&out.stderr));
+        for dir in ["models", "prefabs", "scripts"] {
+            std::fs::create_dir_all(d.join(dir)).unwrap();
+        }
+        std::fs::write(d.join("models/blade.glb"), box_glb(0.15, 3.0)).unwrap();
+        std::fs::write(
+            d.join("prefabs/blade.prefab.ron"),
+            "[(name: \"Blade\", transform: (translation: (0.0, 1.5, 0.0)), matter: Mesh(asset_path: \"models/blade.glb\"), \
+             material: Some((color: (0.1, 0.9, 0.1), unlit: true, sway: 0.6)))]",
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("scripts/field.lua"),
+            format!(
+                "weather.addWind{{ velocity = vec3({wind}, 0, 0) }}\n\
+                 scatter.create{{ asset = \"prefabs/blade.prefab.ron\", seed = 3, perChunk = 1, chunk = 1, \
+                 center = vec3(0, 0, 0), halfX = 0.5, halfZ = 0.5, align = \"world\" }}\n"
+            ),
+        )
+        .unwrap();
+        let scene = r#"(name: "field", nodes: [
+            (name: "Camera", transform: (translation: (0.0, 1.5, 6.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)), matter: Camera(fov_y: 1.0, active: true), scripts: []),
+            (name: "Ground", transform: (translation: (0.0, -0.5, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (20.0, 1.0, 20.0)), matter: Primitive(shape: Cube, color: (0.4, 0.3, 0.2)), scripts: [], collidable: true),
+            (name: "Field", transform: (translation: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)), matter: Empty, scripts: [(kind: "field")]),
+        ])"#;
+        std::fs::write(d.join("scenes/field.ron"), scene).unwrap();
+        let png = d.join("field.png");
+        let r = Command::new(bin())
+            .args(["shot", &d.to_string_lossy(), "--scene", "field", "--size", "320x180", "--after", "0.5"])
+            .args(["--out", &png.to_string_lossy()])
+            .output()
+            .expect("run shot");
+        if !r.status.success() {
+            let why = String::from_utf8_lossy(&r.stderr);
+            assert!(why.contains("no GPU") || why.contains("could not build the renderer"), "shot failed:\n{why}");
+            let _ = std::fs::remove_dir_all(&d);
+            return None;
+        }
+        let img = image::open(&png).expect("a PNG was written").to_rgba8();
+        let _ = std::fs::remove_dir_all(&d);
+        Some(img)
+    };
+    let (Some(still), Some(windy)) = (shoot_field(0.0, "field-still"), shoot_field(15.0, "field-windy")) else { return };
+    let top = |img: &image::RgbaImage| {
+        let y = (0..img.height()).find(|&y| blade_x(img, y..y + 1).is_some()).expect("no blade was scattered");
+        blade_x(img, y..y + 4).unwrap()
+    };
+    let (still_x, windy_x) = (top(&still), top(&windy));
+    assert!(windy_x > still_x + 20.0, "the scattered blade did not lean downwind: {still_x} → {windy_x}");
+}

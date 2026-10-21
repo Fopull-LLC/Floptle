@@ -1848,8 +1848,9 @@ function water.addVolume(opts) end
 ---The surface of water `water.addVolume` declared, as the arrays `mesh.build`
 ---takes, in the parent's frame: `mesh.build(water.surface(id))` on a node at the
 ---parent's origin draws exactly the surface `water.at` answers for. A lake is a
----disc of `cells` across (default 48) laid on its sphere out past its farthest
----shore; `uvs` are metres across the surface. nil for no such water.
+---grid of `cells` across (default 48) laid on its sphere, kept to its basin:
+---what its centre reaches without crossing the ground, out to a ring under the
+---shore. `uvs` are metres across the surface. nil for no such water.
 ---@param id integer
 ---@param opts? { cells?: integer }
 ---@return { positions: number[], normals: number[], uvs: number[], indices: integer[] }|nil

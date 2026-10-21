@@ -46,12 +46,18 @@ pub(crate) struct ResolvedChunk {
 ///
 /// The cost of the cap is that ground arriving all at once fills in over a few
 /// frames, furthest last. The cost of not having it is a frame that stops.
-const SETTLE_BUDGET: usize = 512;
+const SETTLE_BUDGET: usize = 96;
 
 /// …and the time the same frame may spend doing it. A prop costs a ray down
 /// to the ground, and a ray over a terrain field is a march, so 512 of them
 /// were most of a second on a planet: the count alone does not bound the frame.
 const SETTLE_MS: f32 = 1.0;
+
+/// A frame starts a ray only when the rays so far, plus what a ray has been
+/// costing lately, still fit [`SETTLE_MS`]. When one ray alone costs more
+/// than the whole budget, the field still arrives, a ray every this many
+/// frames, rather than a ray every frame each over budget.
+const SLOW_RAY_EVERY: u64 = 8;
 
 /// Which chunks one source is resident in, and where the eye was standing when
 /// that was worked out.
@@ -63,6 +69,10 @@ struct Sweep {
     keys: Vec<ChunkKey>,
 }
 
+/// Where each prop landed, by `(source id, instance id)`, shared with the
+/// scripts for `scatter.near`.
+type Settled = std::rc::Rc<std::cell::RefCell<HashMap<(u32, u64), (DVec3, Vec3)>>>;
+
 /// Per-source chunk caches, keyed by `(source id, chunk)`.
 #[derive(Default)]
 pub(crate) struct ScatterCache {
@@ -73,6 +83,12 @@ pub(crate) struct ScatterCache {
     /// Settle everything in range now, budget or no budget: a single picture
     /// (`floptle shot`) has no later frames for the field to fill in over.
     pub(crate) settle_all: bool,
+    /// What one settling ray has been costing lately, in ms, decayed.
+    ray_ms: f32,
+    /// Frames this cache has built, for [`SLOW_RAY_EVERY`].
+    frame: u64,
+    /// Where to record each prop as it settles, for `scatter.near`.
+    pub(crate) settled_out: Option<Settled>,
 }
 
 impl ScatterCache {
@@ -143,7 +159,10 @@ fn settle(
 /// holds, each at its authored place — which is what lets a plant be a trunk
 /// and three fronds and still cost one instanced draw per piece rather than a
 /// scene node per piece.
-pub(crate) type Part = (MeshId, Option<TexId>, Mat4, MaterialParams);
+/// A prototype part as drawn: its mesh, texture, place in the prop and look,
+/// and the surface-extras entries it wears while cross-fading between LOD
+/// bands, dissolving out and dissolving in (see [`fade_extras`]).
+pub(crate) type Part = (MeshId, Option<TexId>, Mat4, MaterialParams, [u32; 2]);
 
 /// A prototype part as baked: everything about its look that the model file
 /// fixed, kept as facts rather than as a [`MaterialParams`].
@@ -160,6 +179,18 @@ pub(crate) struct BakedPart {
     pub base: [f32; 3],
     /// Its maps and glow, when its file names more than a base colour.
     pub imported: Option<crate::ImportedLook>,
+    /// The prefab node's own Material, with its images, when it has one: it
+    /// supersedes the model's look exactly as it does on a node, so a plant
+    /// prefab's sway, backlight and colour reach every prop scattered from it.
+    pub node_look: Option<NodeLook>,
+}
+
+/// A prefab node's Material and the images it names, resolved at bake time.
+#[derive(Clone, Debug)]
+pub(crate) struct NodeLook {
+    pub material: floptle_core::Material,
+    pub base: Option<TexId>,
+    pub maps: Option<[Option<TexId>; 5]>,
 }
 
 /// A baked prototype's parts with their materials, for this frame — the same
@@ -173,16 +204,35 @@ pub(crate) fn resolve_parts(
     baked
         .iter()
         .map(|b| {
-            let (tex, mut mp) = match &b.imported {
-                Some(look) => crate::shading::material_draw_with(raster, gpu, &look.material, look.base, Some(look.maps)),
-                None => (None, MaterialParams::flat(b.base)),
+            let (tex, mut mp) = match (&b.node_look, &b.imported) {
+                // A Material with no picture of its own draws untextured, on
+                // purpose, rather than falling back to the model's picture it
+                // is replacing — the rule a Mesh node follows.
+                (Some(n), _) => {
+                    let base = n.base.or_else(|| Some(raster.white_texture(gpu)));
+                    crate::shading::material_draw_with(raster, gpu, &n.material, base, n.maps)
+                }
+                (None, Some(look)) => {
+                    crate::shading::material_draw_with(raster, gpu, &look.material, look.base, Some(look.maps))
+                }
+                (None, None) => (None, MaterialParams::flat(b.base)),
             };
             // Imported COLOR_0 is a plain multiply (white is identity), as on
             // a Mesh node.
             mp.paint_base = raster.mesh_paint_base(b.mesh);
-            (b.mesh, tex, b.local, mp)
+            let fade = fade_extras(raster, mp.ext_index);
+            (b.mesh, tex, b.local, mp, fade)
         })
         .collect()
+}
+
+/// The two surface-extras entries a part wears while its LOD bands cross:
+/// its own, screen-door dithered, once with the pattern and once with its
+/// complement. The band leaving draws the pixels the band arriving does not,
+/// so a crown is whole at every point of the fade and both stay in the opaque
+/// pass. Blending the two at half alpha drew every crown half see-through.
+fn fade_extras(raster: &mut floptle_render::Raster, ext: u32) -> [u32; 2] {
+    [raster.dithered_extras(ext, false), raster.dithered_extras(ext, true)]
 }
 
 /// Where each anchored source's node stands this frame, as `(source id,
@@ -272,7 +322,9 @@ pub(crate) fn push_scatter(
     let mut ground = |from: DVec3, dir: Vec3, max: f32| {
         let sim = sim?;
         let o = (from - sim.world.origin).as_vec3();
-        sim.world.raycast(o, dir, max).map(|h| (h.distance, Vec3::from(h.normal)))
+        // The ground's own answer: the same hit, but a terrain chunk is never
+        // meshed for collision on a prop's account (see `ground_cast`).
+        sim.world.raycast_ground(o, dir, max).map(|h| (h.distance, Vec3::from(h.normal)))
     };
     // Baked before the frame's GPU borrow (see
     // `bake_scatter_prototypes`), and given its materials once a frame
@@ -297,6 +349,7 @@ pub(crate) fn push_scatter(
     // silly density costs a frame-rate dip, never a frame that
     // never ends.
     const SCATTER_BUDGET: usize = 20_000;
+    cache.settled_out = Some(script_host.scatter_settled());
     build_instances(
         cache,
         &sources,
@@ -331,8 +384,13 @@ pub(crate) fn build_instances(
 ) {
     // Disjoint borrows: the sweep list and the resolved chunks are read and
     // written in the same loop.
-    let ScatterCache { chunks: resolved, sweeps, settle_all } = cache;
+    let ScatterCache { chunks: resolved, sweeps, settle_all, ray_ms, frame, settled_out } = cache;
+    let mut landed = settled_out.as_ref().map(|s| s.borrow_mut());
     let settle_all = *settle_all;
+    *frame += 1;
+    // One ray over budget is allowed now and then when a ray alone is more
+    // than the budget; otherwise a ray starts only if it is expected to fit.
+    let slow_turn = *frame % SLOW_RAY_EVERY == 0;
     sweeps.retain(|id, _| sources.iter().any(|s| s.id == *id));
     // Shared across sources, because it is a frame budget. A source that eats
     // it all is fully resident afterwards and stops asking, so the next source
@@ -423,7 +481,7 @@ pub(crate) fn build_instances(
                 // every chunk a sweep turned up in the frame it did was most
                 // of a walking frame's spike on a field of small chunks.
                 std::collections::hash_map::Entry::Vacant(e) => {
-                    if !(settle_all || !worked || settle_ms <= SETTLE_MS) {
+                    if !(settle_all || settle_ms <= SETTLE_MS) {
                         continue;
                     }
                     let span = floptle_core::profile::Span::new();
@@ -433,23 +491,29 @@ pub(crate) fn build_instances(
                     e.insert(ResolvedChunk { instances: Vec::new(), pending, removed_len: src.removed.len() })
                 }
             };
-            if !chunk.pending.is_empty() {
-                // Within the frame's budget, by count and by time, but always
-                // one, so a field that is never cheap still arrives.
-                let span = floptle_core::profile::Span::new();
-                while !chunk.pending.is_empty()
-                    && (settle_all
-                        || !worked
-                        || (settled < SETTLE_BUDGET && settle_ms + span.ms() <= SETTLE_MS))
-                {
-                    let inst = chunk.pending.pop().expect("not empty");
-                    settled += 1;
-                    worked = true;
-                    if let Some(on) = settle(src, inst, ground) {
-                        chunk.instances.push(on);
-                    }
+            // Within the frame's budget, by count and by time, the first ray
+            // included: a ray starts when it is expected to fit. The first
+            // settle of a frame used to run whatever it cost, and one slow ray
+            // was a frame over budget every frame a field was arriving.
+            while !chunk.pending.is_empty() {
+                let fits = settled < SETTLE_BUDGET && settle_ms + *ray_ms <= SETTLE_MS;
+                let slow_ok = !worked && *ray_ms > SETTLE_MS && slow_turn;
+                if !(settle_all || fits || slow_ok) {
+                    break;
                 }
-                settle_ms += span.ms();
+                let span = floptle_core::profile::Span::new();
+                let inst = chunk.pending.pop().expect("not empty");
+                settled += 1;
+                worked = true;
+                if let Some(on) = settle(src, inst, ground) {
+                    if let Some(l) = landed.as_mut() {
+                        l.insert((src.id, on.id), (on.pos, on.up));
+                    }
+                    chunk.instances.push(on);
+                }
+                let ms = span.ms();
+                settle_ms += ms;
+                *ray_ms = *ray_ms * 0.8 + ms * 0.2;
             }
             for inst in &chunk.instances {
                 if out.len() >= budget {
@@ -477,9 +541,9 @@ pub(crate) fn build_instances(
                 let model =
                     Mat4::from_scale_rotation_translation(Vec3::splat(inst.scale), rot, centre);
                 // Mid-fade draws both bands, cross-dissolved. Drawing one and
-                // switching is what a pop is; two half-opaque props for a few
-                // metres of walking is what nobody notices.
-                let mut push = |b: usize, alpha: f32| {
+                // switching is what a pop is; two complementary screen doors
+                // for a few metres of walking is what nobody notices.
+                let mut push = |b: usize, alpha: f32, arriving: bool| {
                     let Some(Some(parts)) = band_parts.get(b) else { return };
                     // The per-instance roll rides the albedo, so a game can
                     // give one species a spread of shades without a material
@@ -490,9 +554,15 @@ pub(crate) fn build_instances(
                     // with its own mesh, texture, look and place within the
                     // prop. They are still one instanced draw each — the prefab
                     // is resolved to this list once, not instantiated per prop.
-                    for (mesh, tex, local, look) in parts {
+                    for (mesh, tex, local, look, fade) in parts {
                         let mut mp = *look;
                         mp.alpha *= alpha;
+                        // Mid-fade: dissolve rather than blend, the band
+                        // leaving on the pattern and the band arriving on
+                        // its complement (`fade_extras`).
+                        if alpha < 1.0 {
+                            mp.ext_index = fade[usize::from(arriving)];
+                        }
                         // The source's tint multiplies the model's own colour,
                         // so a texture's palette is shaded rather than replaced.
                         mp.color = [mp.color[0] * t[0] * tintf, mp.color[1] * t[1] * tintf, mp.color[2] * t[2] * tintf];
@@ -512,11 +582,11 @@ pub(crate) fn build_instances(
                 // see, and every prop in a forest paying that is the cost.
                 const FADE_EPS: f32 = 0.01;
                 match blend {
-                    b if b <= FADE_EPS => push(band, 1.0),
-                    b if b >= 1.0 - FADE_EPS => push(band + 1, 1.0),
+                    b if b <= FADE_EPS => push(band, 1.0, false),
+                    b if b >= 1.0 - FADE_EPS => push(band + 1, 1.0, false),
                     b => {
-                        push(band, 1.0 - b);
-                        push(band + 1, b);
+                        push(band, 1.0 - b, false);
+                        push(band + 1, b, true);
                     }
                 }
             }
@@ -652,7 +722,16 @@ impl crate::Editor {
                     offset.length()
                         + floptle_render::cull::radius_from_longest_edge(a.size, scale),
                 );
-                out.extend(baked_parts(a, local));
+                let parts = baked_parts(a, local);
+                let look = d.material.as_ref().map(|m| {
+                    let material = m.to_material();
+                    let base = material.texture.clone().and_then(|t| self.ensure_texture(&t));
+                    let maps = material.has_maps().then(|| {
+                        material.maps().map(|p| p.cloned().and_then(|p| self.ensure_texture(&p)))
+                    });
+                    NodeLook { material, base, maps }
+                });
+                out.extend(parts.into_iter().map(|p| BakedPart { node_look: look.clone(), ..p }));
             }
             if radius.is_finite() && radius > 0.0 {
                 self.scatter_proto_radius.insert(asset.to_string(), radius);
@@ -684,6 +763,7 @@ fn baked_parts(a: &crate::MeshAsset, local: Mat4) -> Vec<BakedPart> {
                 local,
                 base: meta.map_or([1.0; 3], |m| m.base_color),
                 imported: meta.and_then(|m| m.imported.clone()),
+                node_look: None,
             }
         })
         .collect()
@@ -788,7 +868,7 @@ mod tests {
             ..src()
         };
         let mut cache = ScatterCache::default();
-        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]);
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
         let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
         let mut out = Vec::new();
         for _ in 0..50 {
@@ -829,7 +909,7 @@ mod tests {
         assert!(baked_parts(&with_maps, Mat4::IDENTITY)[0].imported.is_some(), "the bake dropped the part's imported maps");
         let s = ScatterSource { look: scatter::ScatterLook { tint: [1.0, 0.5, 1.0], ..Default::default() }, ..src() };
         let mut cache = ScatterCache::default();
-        let mut mesh = |_: &str| Some(vec![(MeshId(4), None, Mat4::IDENTITY, look)]);
+        let mut mesh = |_: &str| Some(vec![(MeshId(4), None, Mat4::IDENTITY, look, [0, 0])]);
         let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
         let mut out = Vec::new();
         for _ in 0..50 {
@@ -863,15 +943,17 @@ mod tests {
     fn a_scatter_field_submits_only_the_half_it_can_see() {
         let s = src();
         let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
-        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]);
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
         // A measured prototype radius is what makes the cull possible at all;
         // without one the source is submitted whole, as it was before.
         let mut radius = |_: &str| Some(1.0f32);
         let mut count = |frustum: &floptle_render::Frustum,
                          radius: &mut dyn FnMut(&str) -> Option<f32>| {
             let mut out = Vec::new();
+            // Settled whole: this is about culling, not about how fast a
+            // field arrives.
             build_instances(
-                &mut ScatterCache::default(),
+                &mut ScatterCache { settle_all: true, ..Default::default() },
                 std::slice::from_ref(&s),
                 DVec3::ZERO,
                 &mut mesh,
@@ -918,14 +1000,14 @@ mod tests {
         // Two parts: one at the origin, one a metre up.
         let up = Mat4::from_translation(Vec3::new(0.0, 1.0, 0.0));
         let mut mesh = |_: &str| {
-            Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3])), (MeshId(1), None, up, MaterialParams::flat([1.0; 3]))])
+            Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0]), (MeshId(1), None, up, MaterialParams::flat([1.0; 3]), [0, 0])])
         };
         let mut one = Vec::new();
         build_instances(
             &mut ScatterCache::default(),
             std::slice::from_ref(&s),
             DVec3::ZERO,
-            &mut |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]),
+            &mut |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]),
             &mut |_: &str| None,
             &mut ground,
             &floptle_render::Frustum::everything(),
@@ -961,7 +1043,7 @@ mod tests {
     /// Asserted as a ratio, not a duration, so a slow machine cannot fail it.
     #[test]
     fn a_prop_costs_the_same_however_many_sources_overlap() {
-        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]);
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
         let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
         let field = |n: u32| -> Vec<ScatterSource> {
             (0..n)
@@ -977,7 +1059,7 @@ mod tests {
                 .collect()
         };
         let mut per_prop = |sources: &[ScatterSource], ground: &mut dyn FnMut(DVec3, Vec3, f32) -> Option<(f32, Vec3)>| {
-            let mut cache = ScatterCache::default();
+            let mut cache = ScatterCache { settle_all: true, ..Default::default() };
             let mut out = Vec::new();
             let mut g = |a: DVec3, b: Vec3, c: f32| ground(a, b, c);
             // Settled first: this is the cost of standing in a field, not of
@@ -1041,9 +1123,11 @@ mod tests {
     /// so the cache is keyed on the removal set having changed, not on time.
     #[test]
     fn cutting_a_prop_invalidates_the_cache_immediately() {
-        let mut cache = ScatterCache::default();
+        // Settled whole first, so the second frame's count differs by the cut
+        // and nothing else.
+        let mut cache = ScatterCache { settle_all: true, ..Default::default() };
         let mut s = src();
-        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]);
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
         let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
         let mut out = Vec::new();
         build_instances(
@@ -1074,7 +1158,7 @@ mod tests {
         let mut s = src();
         s.per_chunk = 512;
         s.bands = vec![Band { asset: "a".into(), distance: 400.0 }];
-        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]);
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
         let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
         let mut out = Vec::new();
         build_instances(
@@ -1105,7 +1189,7 @@ mod tests {
     fn arriving_ground_is_settled_over_several_frames_not_all_at_once() {
         let s = big_field();
         let mut cache = ScatterCache::default();
-        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]);
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
         let eye = DVec3::ZERO;
 
         // Left alone this configuration is ninety thousand props, every one of
@@ -1160,7 +1244,7 @@ mod tests {
         let s = big_field();
         let keys = scatter::chunks_near(&s, DVec3::ZERO, s.range() as f64).len();
         assert!(keys > 2000, "not a field of small chunks: {keys}");
-        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]);
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
         // A ray that takes a quarter of a millisecond, like one over real ground.
         let slow = |casts: &mut usize| {
             *casts += 1;
@@ -1198,6 +1282,143 @@ mod tests {
         assert!(shot.chunks.values().all(|c| c.pending.is_empty()), "a shot left props unsettled");
     }
 
+    /// **Walking through a planet's flora at 6 m/s keeps scatter inside its
+    /// budget.** A field of about 2,500 resident props on a generated planet,
+    /// settled through the physics world's ground query as the game does, the
+    /// eye walking the surface for five seconds. No terrain chunk is meshed
+    /// for a prop, the field arrives, and no frame's settling comes near the
+    /// cost of meshing one. Settling by the ordinary ray meshed a
+    /// collision chunk at a time on this walk, tens of milliseconds each.
+    #[test]
+    fn walking_through_a_planets_flora_stays_in_budget() {
+        let radius = 150.0;
+        let field = floptle_field::procgen::generate_planet(&floptle_field::procgen::PlanetFill {
+            seed: 11,
+            radius,
+            voxel: 1.5,
+            relief: radius * 0.065,
+            cave_depth: radius * 0.35,
+            core_r: 10.5,
+            ..Default::default()
+        });
+        let mut world = floptle_physics::PhysicsWorld::default();
+        world.add_collider(Box::new(floptle_physics::ChunkTerrain::new(field)));
+        let s = ScatterSource {
+            region: Region::Sphere { center: DVec3::ZERO, radius: radius as f64 },
+            chunk: 18.0,
+            per_chunk: 30,
+            bands: vec![Band { asset: "plant".into(), distance: 70.0 }],
+            ..src()
+        };
+        let mut cache = ScatterCache::default();
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
+        let mut worst_settle = 0.0f64;
+        let mut drawn = 0;
+        for f in 0..300 {
+            // 6 m/s along a great circle, the eye two metres off the ground.
+            let a = f as f64 / 60.0 * 6.0 / radius as f64;
+            let eye = DVec3::new(a.sin(), 0.2, a.cos()).normalize() * (radius as f64 + 2.0);
+            let mut ms = 0.0f64;
+            let mut ground = |from: DVec3, dir: Vec3, max: f32| {
+                let t = std::time::Instant::now();
+                let hit = world.raycast_ground(from.as_vec3(), dir, max).map(|h| (h.distance, Vec3::from(h.normal)));
+                ms += t.elapsed().as_secs_f64() * 1e3;
+                hit
+            };
+            let mut out = Vec::new();
+            build_instances(
+                &mut cache, std::slice::from_ref(&s), eye, &mut mesh, &mut |_: &str| None, &mut ground,
+                &floptle_render::Frustum::everything(), 20_000, &mut out,
+            );
+            worst_settle = worst_settle.max(ms);
+            drawn = out.len();
+        }
+        let meshed = world.colliders[0].shape.chunk_terrain().map_or(0, |t| t.meshed_chunks());
+        assert_eq!(meshed, 0, "settling meshed {meshed} terrain chunks for collision");
+        assert!(drawn > 1000, "the field never arrived: {drawn} props after five seconds");
+        // The work is about a millisecond a frame. The bound only has to catch
+        // a chunk being meshed on a prop's account (tens of ms each), and the
+        // suite runs this beside a thousand other tests.
+        assert!(worst_settle < 25.0, "a frame spent {worst_settle:.2} ms dropping props onto the ground");
+    }
+
+    /// **The first ray of a frame counts against the budget too.** Ground
+    /// whose every ray costs 3 ms, more than the whole budget: a frame used to
+    /// cast one regardless, so every frame a field was arriving went 3 ms
+    /// over. Now a ray that is expected not to fit waits, and the field still
+    /// arrives, one ray every few frames.
+    #[test]
+    fn a_ray_dearer_than_the_budget_does_not_run_every_frame() {
+        let s = src();
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
+        let mut cache = ScatterCache::default();
+        let mut casts = 0usize;
+        let frames = 64;
+        for _ in 0..frames {
+            let mut ground = |_: DVec3, _: Vec3, _: f32| {
+                casts += 1;
+                let t = std::time::Instant::now();
+                while t.elapsed().as_secs_f64() < 0.003 {}
+                Some((60.0f32, Vec3::Y))
+            };
+            let mut out = Vec::new();
+            build_instances(
+                &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground,
+                &floptle_render::Frustum::everything(), 10_000, &mut out,
+            );
+        }
+        // A cheap first guess lets a couple through before the estimate learns.
+        assert!(casts <= frames / SLOW_RAY_EVERY as usize + 3, "{casts} 3 ms rays in {frames} frames");
+        assert!(casts >= frames / SLOW_RAY_EVERY as usize, "the field stopped arriving: {casts} rays");
+    }
+
+    /// **`scatter.near` answers where a prop stands, once it has landed.** It
+    /// rolled the region afresh and gave the region's nominal surface, so a
+    /// harvest on a hillside aimed metres off the plant. A prop the field has
+    /// dropped onto the ground now answers with that place, `settled = true`;
+    /// one not settled yet says so.
+    #[test]
+    fn scatter_near_answers_with_the_settled_place() {
+        let dir = std::env::temp_dir().join(format!("floptle_near_settled_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("field.lua"),
+            "function start() id = scatter.create{ asset = 'a', halfX = 20, halfZ = 20, perChunk = 8, align = 'world' } end\n\
+             function update() local hits = scatter.near(id, vec3(0, 0, 0), 15)\n\
+             \x20 y, landed = hits[1] and hits[1].pos.y, hits[1] and hits[1].settled end\n",
+        )
+        .unwrap();
+        let mut world = floptle_core::World::new();
+        let e = world.spawn();
+        world.insert(e, floptle_core::Transform::IDENTITY);
+        world.insert(e, floptle_core::Scripts(vec![floptle_core::ScriptInst::new("field")]));
+        let mut host = floptle_script::ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let read = |host: &floptle_script::ScriptHost| -> (f64, bool) {
+            let env = host.instance_env(e.index(), "field").unwrap();
+            (env.get("y").unwrap(), env.get("landed").unwrap())
+        };
+        assert_eq!(read(&host), (0.0, false), "before settling: the region's surface, and saying so");
+        // The ground is 2.5 m below the region's surface: dropped from 60 m up.
+        let mut cache = ScatterCache { settle_all: true, settled_out: Some(host.scatter_settled()), ..Default::default() };
+        let mut ground = |_: DVec3, _: Vec3, _: f32| Some((62.5f32, Vec3::Y));
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
+        let mut out = Vec::new();
+        {
+            let sources = host.scatter_sources();
+            build_instances(
+                &mut cache, &sources, DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground,
+                &floptle_render::Frustum::everything(), 10_000, &mut out,
+            );
+        }
+        assert!(!out.is_empty());
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        let (y, landed) = read(&host);
+        assert!(landed && (y + 2.5).abs() < 1e-6, "near answered y = {y} (settled {landed}), not the ground at -2.5");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// **A harvest costs no rays.** Cutting one prop used to re-settle every
     /// resident chunk of its source in that frame, because each compares the
     /// source's whole removal count. Now the cut prop goes and the rest stay
@@ -1206,7 +1427,7 @@ mod tests {
     fn a_cut_re_settles_nothing_and_a_restore_brings_the_prop_back() {
         let mut cache = ScatterCache::default();
         let mut s = src();
-        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]);
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
         let mut frame = |cache: &mut ScatterCache, s: &ScatterSource| {
             let mut casts = 0usize;
             let mut ground = |_: DVec3, _: Vec3, _: f32| {
@@ -1301,7 +1522,7 @@ mod tests {
     fn a_full_budget_drops_the_far_props_and_keeps_the_near_ones() {
         let s = big_field();
         let mut cache = ScatterCache::default();
-        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]);
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
         let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
         let eye = DVec3::ZERO;
 
@@ -1349,7 +1570,7 @@ mod tests {
         let mut s = src();
         s.anchor = Some("Umunquo".into());
         let mut cache = ScatterCache::default();
-        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]);
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
 
         // Frame one: at the origin.
         let casts = std::cell::Cell::new(0usize);
@@ -1429,7 +1650,7 @@ mod tests {
         let s = src();
         assert!(s.anchor.is_none() && s.frame.is_identity());
         let mut cache = ScatterCache::default();
-        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))]);
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
         let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
         let mut out = Vec::new();
         build_instances(
@@ -1457,7 +1678,7 @@ mod tests {
         {
             let mut mesh = |a: &str| {
                 asked.push(a.to_string());
-                Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]))])
+                Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [7, 8])])
             };
             // Stand ~35 m away: inside the first band's 10 m fade window.
             build_instances(
@@ -1478,5 +1699,14 @@ mod tests {
         while let (Some(a), Some(b)) = (fades.pop(), fades.pop()) {
             assert!((a + b - 1.0).abs() < 0.02, "cross-fade sums to {}, not 1", a + b);
         }
+        // **Dissolved, not blended.** Each half wears its screen door — the
+        // band leaving on the pattern, the band arriving on its complement —
+        // so a crown is whole at every point of the fade. Blended at half
+        // alpha each, every crown drew half see-through.
+        let ext: Vec<u32> =
+            out.iter().filter(|(_, _, r)| r.color[3] < 0.999).map(|(_, _, r)| floptle_render::ext_index_of(r)).collect();
+        let (leaving, arriving) = (ext.iter().filter(|&&e| e == 7).count(), ext.iter().filter(|&&e| e == 8).count());
+        assert!(leaving > 0 && leaving == arriving && leaving + arriving == ext.len(), "fade doors {ext:?}");
+        assert!(out.iter().filter(|(_, _, r)| r.color[3] >= 0.999).all(|(_, _, r)| floptle_render::ext_index_of(r) == 0));
     }
 }

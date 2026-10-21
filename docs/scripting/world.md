@@ -385,7 +385,10 @@ end
 It floats crates, lets a crew swim, and turns with the planet. To draw it,
 `mesh.build(water.surface(id))` on a node at the planet's origin is exactly the
 surface `water.at` answers for, ready for a water material (a surface shader can
-refract the lake bed with `sceneColor` and `sceneDepth`). A
+refract the lake bed with `sceneColor` and `sceneDepth`). The mesh keeps to
+the lake's basin: the part of its sphere the centre reaches without crossing the
+ground, with a ring past it that runs under the shore, so a lake that spills
+toward lower ground is not drawn out over it. A
 `shape = "heightfield"` volume is a grid of surface heights over the parent's
 x–z plane instead: `origin`, `cell`, `columns`, `rows`, and `levels` (one per
 point, `false` for dry ground), with an optional `flow` (x, z per point) for a

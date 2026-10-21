@@ -156,6 +156,11 @@ pub enum Input {
     /// The world-space RAY direction (`vec3`, normalized) for a Sky shader — the
     /// direction the camera ray travels toward the horizon/zenith. Sky only.
     SkyDir,
+    /// `vertexColor`: the mesh's own per-vertex colour (`vec4`), interpolated
+    /// across the face: `mesh.build`'s `colors`, a glTF's COLOR_0, vertex
+    /// paint. White on a mesh that has none. Fragment only. Data a game bakes
+    /// into a mesh (a river's flow, a lake's depth, foam) rides it.
+    VertexColor,
 }
 
 impl Input {
@@ -171,6 +176,7 @@ impl Input {
             Input::LightDir => "lightDir",
             Input::LightColor => "lightColor",
             Input::SkyDir => "skyDir",
+            Input::VertexColor => "vertexColor",
         }
     }
 
@@ -185,7 +191,7 @@ impl Input {
             | Input::LightColor
             | Input::SkyDir => Ty::Vec3,
             Input::Time => Ty::Float,
-            Input::InstanceColor => Ty::Vec4,
+            Input::InstanceColor | Input::VertexColor => Ty::Vec4,
         }
     }
 
@@ -201,6 +207,7 @@ impl Input {
             Input::LightDir,
             Input::LightColor,
             Input::SkyDir,
+            Input::VertexColor,
         ]
     }
 

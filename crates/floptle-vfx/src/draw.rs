@@ -158,6 +158,51 @@ fn ribbon_segment(
     }
 }
 
+/// How far a mitred corner may slide, in ribbon widths. Past it a sharp kink
+/// keeps a small notch rather than throwing a spike: the usual mitre limit.
+const MITRE_LIMIT: f32 = 1.0;
+
+/// `extra.z` of a ribbon segment that carries its mitres: how far each corner
+/// slides along the segment, `+right` tail and head in `extra.xy`, `−right`
+/// tail in `size.z` and head in `extra.w` (see `particles.wgsl`). Negative, so
+/// it cannot be a flipbook's crossfade amount.
+const MITRED: f32 = -1.0;
+
+/// How far the corners of the two segments meeting at joint `b` slide along
+/// their own segments so that, seen from the camera, each side lands on one
+/// point: `[(+right: the a→b end, the b→c start), (−right: the same)]`. The
+/// pair then joins on the mitre line, with no wedge between their square
+/// ends. Solved along the line of sight through each corner, because that is
+/// where a gap shows, and each side on its own, because a beam thrown
+/// sideways in depth is not flat. Capped at [`MITRE_LIMIT`] widths, so a
+/// hairpin cannot throw a spike across the screen.
+fn mitre_shifts(a: Vec3, b: Vec3, c: Vec3, width: f32, cam_right: Vec3) -> [(f32, f32); 2] {
+    let right_of = |p: Vec3, q: Vec3| {
+        let dir = (q - p).normalize_or_zero();
+        let r = (0.5 * (p + q)).normalize_or_zero().cross(dir);
+        (dir, if r.length_squared() < 1e-10 { cam_right } else { r.normalize() })
+    };
+    let ((d0, r0), (d1, r1)) = (right_of(a, b), right_of(b, c));
+    let side = |sign: f32| {
+        // side·r0·w/2 + d0·s0 = side·r1·w/2 + d1·s1 + t·(the view ray there),
+        // with the ray re-aimed at the corner it found, twice: the corner of a
+        // sharp kink lands well off the joint, and so does its line of sight.
+        let mut corner = b + (r0 + r1) * (0.25 * width * sign);
+        let mut x = floptle_core::math::Vec3::ZERO;
+        for _ in 0..3 {
+            let m = floptle_core::math::Mat3::from_cols(d0, -d1, -corner.normalize_or_zero());
+            if m.determinant().abs() < 1e-6 {
+                return (0.0, 0.0);
+            }
+            x = m.inverse() * ((r1 - r0) * (0.5 * width * sign));
+            corner = b + r0 * (0.5 * width * sign) + d0 * x.x;
+        }
+        let cap = MITRE_LIMIT * width;
+        (x.x.clamp(-cap, cap), x.y.clamp(-cap, cap))
+    };
+    [side(1.0), side(-1.0)]
+}
+
 /// Pack every trailed billboard track of `inst` as connected ribbon segments,
 /// appending one [`BillboardDraw`] per non-empty track. Each live particle with ≥ 2
 /// polyline points (its recorded history plus its current position as the head)
@@ -322,13 +367,43 @@ pub fn collect_beams(
         // slice as a pair so its gradient never runs backwards across the seam.
         let shift = (inst.t * ct.scroll).rem_euclid(1.0);
         let start = instances.len();
-        let mut prev = point(0);
-        for k in 0..n {
-            let next = point(k + 1);
+        let pts: Vec<Vec3> = (0..=n).map(point).collect();
+        for k in 0..n as usize {
             let r0 = (k as f32 / n as f32 - shift).rem_euclid(1.0);
             let r1 = r0 + 1.0 / n as f32;
-            instances.push(ribbon_segment(prev, next, width, color, r0, r1, cam_right, ct.look.soft.max(0.0)));
-            prev = next;
+            let mut seg = ribbon_segment(pts[k], pts[k + 1], width, color, r0, r1, cam_right, ct.look.soft.max(0.0));
+            // Mitre both ends against the neighbours, so the chain is one
+            // ribbon: without it each kink left a wedge uncovered on its
+            // outside and doubled on its inside.
+            // A distortion beam keeps `extra.w` for its strength, and square ends.
+            if ct.look.blend != crate::effect::Blend::Distortion {
+                let none = [(0.0, 0.0); 2];
+                let tail = if k > 0 { mitre_shifts(pts[k - 1], pts[k], pts[k + 1], width, cam_right) } else { none };
+                let head =
+                    if k + 1 < n as usize { mitre_shifts(pts[k], pts[k + 1], pts[k + 2], width, cam_right) } else { none };
+                // A side may not fold over itself: on the inside of a tight
+                // kink in a wide ribbon both ends slide toward each other, and
+                // past the segment's own length the quad turns into a bow tie
+                // that streaks across the screen. Such a side shortens to a
+                // point and the notch it leaves is the kink's.
+                let len = (pts[k + 1] - pts[k]).length();
+                let unfold = |t: f32, h: f32| {
+                    let over = t - h - len;
+                    if over > 0.0 && t - h > 1e-6 {
+                        let k = len / (t - h);
+                        (t * k, h * k)
+                    } else {
+                        (t, h)
+                    }
+                };
+                let (tp, hp) = unfold(tail[0].1, head[0].0);
+                let (tm, hm) = unfold(tail[1].1, head[1].0);
+                // +right corners in extra.xy, −right in size.z (a ribbon's
+                // u always starts at 0) and extra.w.
+                seg.extra = [tp, hp, MITRED, hm];
+                seg.size[2] = tm;
+            }
+            instances.push(seg);
         }
         draws.push(BillboardDraw {
             texture: texture.clone(),
@@ -1010,6 +1085,103 @@ mod tests {
         assert_eq!(chain(&fast), first, "steady inside one tick");
         fast.simulate_to(0.46, Vec3::ZERO);
         assert_ne!(chain(&fast), first, "a tick is a new throw");
+    }
+
+    /// **A jittered beam is one ribbon, joined at every kink.** Each segment
+    /// was its own square-ended quad, so every kink left a wedge uncovered on
+    /// its outside: a dark sliver in a wide glow, and a fan of shards at 48
+    /// segments. The segments are mitred now, so at every joint the corners of
+    /// the segment arriving are the corners of the segment leaving, as the
+    /// particle shader places them.
+    #[test]
+    fn a_jittered_beams_segments_meet_at_every_joint() {
+        use crate::effect::{Look, RenderMode};
+        let fx = Arc::new(
+            ParticleEffect {
+                lifetime: 1.0,
+                playback: Playback::Looping,
+                tracks: vec![Track {
+                    look: Look { render: RenderMode::Beam { texture: None }, ..Look::default() },
+                    segments: 48,
+                    beam_end: Vec3::new(0.0, 40.0, 0.0),
+                    jitter: 2.5,
+                    size: crate::curve::ValueOrCurve::constant(6.0),
+                    ..Track::default()
+                }],
+                ..ParticleEffect::default()
+            }
+            .compile(),
+        );
+        let mut inst = EffectInstance::new(fx, 1);
+        inst.simulate_to(0.2, Vec3::ZERO);
+        let (mut packed, mut draws) = (Vec::new(), Vec::new());
+        let xf = Mat4::from_translation(Vec3::new(0.0, -20.0, -60.0));
+        collect_beams(&inst, xf, xf, Vec3::X, &mut packed, &mut draws);
+        assert_eq!(packed.len(), 48);
+        // A corner as `particles.wgsl` places it (a ribbon is never spun).
+        let corner = |p: &ParticleInstance, cx: f32, cy: f32| {
+            let v = |a: [f32; 4]| Vec3::new(a[0], a[1], a[2]);
+            let up = v(p.basis_up);
+            let mut w = v(p.pos_rot) + v(p.basis_right) * (cx * p.size[0]) + up * (cy * p.size[1]);
+            if p.extra[2] < 0.0 {
+                let s = match (cx > 0.0, cy > 0.0) {
+                    (true, false) => p.extra[0],
+                    (true, true) => p.extra[1],
+                    (false, false) => p.size[2],
+                    (false, true) => p.extra[3],
+                };
+                w += up.normalize() * s;
+            }
+            w
+        };
+        // On screen, every point across the ribbon from a joint, on the
+        // outside of its turn, is covered: no wedge opens at a kink. (The camera sits at the origin looking down -Z.)
+        let screen = |w: Vec3| (w.x / -w.z, w.y / -w.z);
+        let inside_tri = |p: (f32, f32), a: (f32, f32), b: (f32, f32), c: (f32, f32)| {
+            let cross = |o: (f32, f32), u: (f32, f32), v: (f32, f32)| (u.0 - o.0) * (v.1 - o.1) - (u.1 - o.1) * (v.0 - o.0);
+            let (d1, d2, d3) = (cross(a, b, p), cross(b, c, p), cross(c, a, p));
+            !((d1 < 0.0 || d2 < 0.0 || d3 < 0.0) && (d1 > 0.0 || d2 > 0.0 || d3 > 0.0))
+        };
+        let covers = |q: &ParticleInstance, p: (f32, f32)| {
+            let c = [(-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)].map(|(x, y)| screen(corner(q, x, y)));
+            inside_tri(p, c[0], c[1], c[2]) || inside_tri(p, c[0], c[2], c[3])
+        };
+        let mut holes = 0;
+        for pair in packed.windows(2) {
+            // The joint, and across the ribbon there on each side: along the
+            // bisector of the two segments' screen normals, which is where the
+            // wedge of a square-ended kink opens.
+            let (a, j, b) = (screen(corner(&pair[0], 0.0, -0.5)), screen(corner(&pair[0], 0.0, 0.5)), screen(corner(&pair[1], 0.0, 0.5)));
+            let normal = |p: (f32, f32), q: (f32, f32)| {
+                let (dx, dy) = (q.0 - p.0, q.1 - p.1);
+                let l = (dx * dx + dy * dy).sqrt().max(1e-9);
+                (-dy / l, dx / l)
+            };
+            let (n0, n1) = (normal(a, j), normal(j, b));
+            let (bx, by) = (n0.0 + n1.0, n0.1 + n1.1);
+            let bl = (bx * bx + by * by).sqrt();
+            // A hairpin (turning back on itself past 150°, or a segment seen
+            // end-on) has no mitre short enough to draw; past the mitre limit
+            // a kink keeps a notch, as every ribbon renderer's does.
+            let degenerate = (n0.0 * n0.0 + n0.1 * n0.1) < 0.5 || (n1.0 * n1.0 + n1.1 * n1.1) < 0.5;
+            if degenerate || n0.0 * n1.0 + n0.1 * n1.1 < -0.866 {
+                continue;
+            }
+            // Half the ribbon's width on screen at the joint.
+            let half = 3.0 / -corner(&pair[0], 0.0, 0.5).z;
+            // The outside of the turn, where a square-ended kink opens its
+            // wedge. (On the inside the two segments overlap.)
+            let turn = n0.0 * n1.1 - n0.1 * n1.0;
+            for side in [turn.signum()] {
+                for r in [0.2, 0.5, 0.8, 0.95] {
+                    let p = (j.0 + side * bx / bl * half * r, j.1 + side * by / bl * half * r);
+                    if !packed.iter().any(|q| covers(q, p)) {
+                        holes += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(holes, 0, "points beside a joint that the ribbon does not cover");
     }
 
     #[test]

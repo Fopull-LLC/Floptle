@@ -625,7 +625,7 @@ fn source_writes_params(src: &str) -> bool {
 /// a target that appears or is renamed mid-play. `0` is reserved for "never
 /// built", so a real hash of zero is nudged.
 fn seed_fingerprint(
-    params: &[(String, f32)],
+    params: &[(String, f64)],
     refs: &[(String, String)],
     strs: &[(String, String)],
     structure: u64,
@@ -949,6 +949,8 @@ pub struct ScriptHost {
     /// Which script instance created each source, so a hot reload or a
     /// destroyed node takes its sources with it.
     scatter_owners: scatter_api::Owners,
+    /// Where each scattered prop was dropped onto the ground.
+    scatter_settled: scatter_api::Settled,
     /// The winds scripts declared (`weather.*`) and the clock they blow by.
     weather: weather_api::WeatherShared,
     /// The last source id handed out — where a rebuild's own sources start.
@@ -2475,13 +2477,13 @@ struct Shared {
 /// One queued two-way `params.X = ...` write: a number or a string.
 #[derive(Clone, Debug)]
 pub(crate) enum ParamWrite {
-    Num(f32),
+    Num(f64),
     Str(String),
 }
 
 /// A script's declared defaults surface: numeric params + reference params +
 /// string params (plain non-sentinel string defaults).
-pub type ScriptDefaults = (Vec<(String, f32)>, Vec<(String, RefKind)>, Vec<(String, String)>);
+pub type ScriptDefaults = (Vec<(String, f64)>, Vec<(String, RefKind)>, Vec<(String, String)>);
 
 /// What a script's reference param (declared in `defaults`) binds to — drives
 /// the Inspector's picker (candidate filtering) and the runtime handle type.

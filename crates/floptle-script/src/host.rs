@@ -2635,6 +2635,8 @@ impl ScriptHost {
                 freeze: water_freeze.clone(),
                 declared: water_declared.clone(),
                 next_id: Rc::default(),
+                colliders: colliders.clone(),
+                sim_origin: sim_origin.clone(),
             },
         );
 
@@ -2643,6 +2645,7 @@ impl ScriptHost {
         let scatter_sources: crate::scatter_api::Sources = Rc::new(RefCell::new(Vec::new()));
         let scatter_next_id: Rc<std::cell::Cell<u32>> = Rc::new(std::cell::Cell::new(0));
         let scatter_owners = crate::scatter_api::Owners::default();
+        let scatter_settled = crate::scatter_api::Settled::default();
         // The scripts' copy of the scene, made here rather than with the rest
         // of the handle layer below: a source that rides a node reads where
         // that node stands the moment it is created.
@@ -2655,6 +2658,7 @@ impl ScriptHost {
             scatter_next_id.clone(),
             logs.clone(),
             scene_mirror.clone(),
+            scatter_settled.clone(),
         );
 
         // `weather.*` — the wind every system is moved by.
@@ -3152,6 +3156,7 @@ impl ScriptHost {
             water_declared,
             scatter_sources,
             scatter_owners,
+            scatter_settled,
             scatter_next_id,
             weather,
             scene_name,
@@ -3555,6 +3560,12 @@ impl ScriptHost {
         self.scene.try_borrow().ok()?.by_name.get(name).copied()
     }
 
+    /// Where the driver records each prop it drops onto the ground, for
+    /// `scatter.near` to answer with. See [`crate::scatter_api::Settled`].
+    pub fn scatter_settled(&self) -> crate::scatter_api::Settled {
+        self.scatter_settled.clone()
+    }
+
     /// Every source that rides a node, as `(id, node name)`.
     pub fn anchored_scatter(&self) -> Vec<(u32, String)> {
         self.scatter_sources
@@ -3569,6 +3580,7 @@ impl ScriptHost {
     pub fn clear_scatter(&mut self) {
         self.scatter_sources.borrow_mut().clear();
         self.scatter_owners.borrow_mut().clear();
+        self.scatter_settled.borrow_mut().clear();
     }
 
     /// Every wind scripts have declared — what particles and props read.
@@ -7441,13 +7453,13 @@ impl ScriptHost {
         let mut strs = Vec::new();
         for (k, v) in defaults.pairs::<String, mlua::Value>().flatten() {
             match v {
-                mlua::Value::Number(n) => nums.push((k, n as f32)),
-                mlua::Value::Integer(n) => nums.push((k, n as f32)),
+                mlua::Value::Number(n) => nums.push((k, n)),
+                mlua::Value::Integer(n) => nums.push((k, n as f64)),
                 // A `flag = false` default is a boolean tunable: stored as 0/1
                 // (the param vec is floats), drawn as a checkbox, and handed
                 // back to Lua as a real boolean by `params_table` — so the
                 // script sees the type it declared.
-                mlua::Value::Boolean(b) => nums.push((k, f32::from(b))),
+                mlua::Value::Boolean(b) => nums.push((k, f64::from(u8::from(b)))),
                 mlua::Value::String(s) => {
                     let s = s.to_string_lossy();
                     match crate::env::parse_ref_sentinel(&s) {
@@ -7664,7 +7676,7 @@ impl ScriptHost {
         &self,
         e: Entity,
         name: &str,
-        params: &[(String, f32)],
+        params: &[(String, f64)],
         refs: &[(String, String)],
         strs: &[(String, String)],
     ) {
@@ -7751,7 +7763,7 @@ impl ScriptHost {
         &mut self,
         eid: u32,
         kind: &str,
-        params: &[(String, f32)],
+        params: &[(String, f64)],
         strs: &[(String, String)],
         pinned_bools: Option<&[String]>,
         env: &Table,
@@ -7818,7 +7830,7 @@ impl ScriptHost {
         &mut self,
         eid: u32,
         kind: &str,
-        params: &[(String, f32)],
+        params: &[(String, f64)],
         strs: &[(String, String)],
         pinned_bools: Option<&[String]>,
         env: &Table,
@@ -7879,7 +7891,7 @@ impl ScriptHost {
         &mut self,
         e: Entity,
         name: &str,
-        params: &[(String, f32)],
+        params: &[(String, f64)],
         refs: &[(String, String)],
         strs: &[(String, String)],
         pinned_bools: Option<&[String]>,
@@ -8140,7 +8152,7 @@ impl ScriptHost {
         env: &Table,
         name: &str,
         eid: u32,
-        seeded: &[(String, f32)],
+        seeded: &[(String, f64)],
         seeded_strs: &[(String, String)],
     ) -> bool {
         #[cfg(test)]
@@ -8155,7 +8167,7 @@ impl ScriptHost {
         env: &Table,
         name: &str,
         eid: u32,
-        seeded: &[(String, f32)],
+        seeded: &[(String, f64)],
         seeded_strs: &[(String, String)],
     ) {
         let Ok(pt) = env.get::<Table>("params") else { return };
@@ -8164,13 +8176,13 @@ impl ScriptHost {
             match v {
                 Value::Number(_) | Value::Integer(_) => {
                     let new = match v {
-                        Value::Number(n) => n as f32,
-                        Value::Integer(i) => i as f32,
+                        Value::Number(n) => n,
+                        Value::Integer(i) => i as f64,
                         _ => unreachable!(),
                     };
                     // The value this key was seeded with: the stored override,
-                    // else the declared default. (f32 → f64 → f32 is exact, so
-                    // an untouched param compares bit-equal and costs nothing.)
+                    // else the declared default. (Stored as the f64 Lua holds,
+                    // so an untouched param compares bit-equal and costs nothing.)
                     let seed = seeded
                         .iter()
                         .find(|(pk, _)| *pk == k)
@@ -8179,7 +8191,6 @@ impl ScriptHost {
                             defaults
                                 .as_ref()
                                 .and_then(|d| d.get::<f64>(k.as_str()).ok())
-                                .map(|d| d as f32)
                         });
                     let Some(seed) = seed else { continue }; // undeclared: frame-local
                     if new != seed {
@@ -8219,7 +8230,7 @@ impl ScriptHost {
                 // numeric arm above (stored as 0/1, seeded from the declared
                 // boolean default).
                 Value::Boolean(b) => {
-                    let new = f32::from(b);
+                    let new = f64::from(u8::from(b));
                     let seed = seeded
                         .iter()
                         .find(|(pk, _)| *pk == k)
@@ -8228,7 +8239,7 @@ impl ScriptHost {
                             defaults
                                 .as_ref()
                                 .and_then(|d| d.get::<bool>(k.as_str()).ok())
-                                .map(f32::from)
+                                .map(|b| f64::from(u8::from(b)))
                         });
                     let Some(seed) = seed else { continue };
                     if new != seed {
@@ -8250,7 +8261,7 @@ impl ScriptHost {
     fn tick(
         &self,
         env: &Table,
-        params: &[(String, f32)],
+        params: &[(String, f64)],
         refs: &[(String, crate::env::ResolvedRef)],
         strs: &[(String, String)],
         tr: &mut Transform,

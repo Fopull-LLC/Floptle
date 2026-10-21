@@ -67,6 +67,10 @@ pub struct Decal {
     /// What the mark rides, so it stays on the rock it was put on as that
     /// moves.
     pub frame: DecalFrame,
+    /// What it was asked to be, so it can be laid again when the ground under
+    /// it is dug or re-meshed. Its `normal` and `up` are as they stood when it
+    /// was laid; its centre is `pos`.
+    pub spec: DecalSpec,
 }
 
 /// The node a decal rides, if any.
@@ -183,6 +187,29 @@ impl DecalStore {
         self.decals.insert(id, d);
         self.trim();
         id
+    }
+
+    /// Every decal's id, oldest first.
+    pub fn ids(&self) -> Vec<u32> {
+        self.decals.keys().copied().collect()
+    }
+
+    /// Lay decal `id` again where it now is, on ground that changed shape
+    /// under it: centred at `pos` (world), riding `frame`, facing `spec`'s
+    /// way. A mark with nothing left to lie on goes. True when it stayed.
+    pub fn relaid(&mut self, id: u32, pos: DVec3, frame: DecalFrame, spec: DecalSpec, laid: Laid) -> bool {
+        if laid.indices.is_empty() {
+            self.remove(id);
+            return false;
+        }
+        let Some(d) = self.decals.get_mut(&id) else { return false };
+        d.pos = pos;
+        d.frame = frame;
+        d.spec = spec;
+        d.verts = laid.verts;
+        d.indices = laid.indices;
+        self.dirty.insert(d.texture.clone());
+        true
     }
 
     fn remove(&mut self, id: u32) -> bool {
@@ -514,6 +541,7 @@ pub(crate) fn install_decal_api(lua: &Lua, shared: DecalShared) -> mlua::Result<
             };
             let laid = lay(&s.colliders.borrow(), &spec);
             let mut store = s.store.borrow_mut();
+            let keep = spec.clone();
             if laid.capped {
                 warn_once(
                     &s,
@@ -546,6 +574,7 @@ pub(crate) fn install_decal_api(lua: &Lua, shared: DecalShared) -> mlua::Result<
                 color,
                 alpha,
                 frame: DecalFrame::Asked(frame),
+                spec: keep,
             });
             publish_counts(&s, &store);
             Ok(Some(id))

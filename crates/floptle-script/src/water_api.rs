@@ -70,6 +70,10 @@ pub(crate) struct WaterShared {
     /// one's frame on its anchor and hands them to the solver.
     pub declared: Rc<RefCell<Vec<DeclaredWater>>>,
     pub next_id: Rc<std::cell::Cell<u32>>,
+    /// The level, lent for the frame, so `water.surface` can tell which of a
+    /// lake's sphere lies in its basin and which runs under the ground.
+    pub colliders: Rc<RefCell<Vec<floptle_physics::AnchoredCollider>>>,
+    pub sim_origin: Rc<RefCell<glam::DVec3>>,
 }
 
 /// What `water.at` says about the deepest water at a point: a scene volume or
@@ -128,11 +132,21 @@ pub(crate) struct SurfaceMesh {
     pub indices: Vec<u32>,
 }
 
-/// Triangulate `surface`. A lake is a disc of `cells` across laid on its
-/// sphere by arc length out to its farthest shore (where the ground is above
-/// the level the disc runs under it, so the shore is drawn by the ground); a
-/// heightfield is its own grid, triangles only where all three points are wet.
+/// [`surface_mesh_in`] with no ground: a lake's whole disc.
+#[cfg(test)]
 pub(crate) fn surface_mesh(surface: &Surface, cells: usize) -> SurfaceMesh {
+    surface_mesh_in(surface, cells, &|_| false)
+}
+
+/// Triangulate `surface`. A lake is a grid of `cells` across laid on its
+/// sphere by arc length out past its farthest shore; a heightfield is its own
+/// grid, triangles only where its points are wet. Of a lake only its basin is
+/// kept: the points `under`
+/// says are not below the ground, reached from the lake's centre without
+/// crossing ground, and the shore triangles around them. A lake's sphere
+/// carries on past its spill point over lower ground outside the basin, and
+/// drawing it there put water where there is none.
+pub(crate) fn surface_mesh_in(surface: &Surface, cells: usize, under: &dyn Fn(glam::DVec3) -> bool) -> SurfaceMesh {
     let mut m = SurfaceMesh { positions: Vec::new(), normals: Vec::new(), uvs: Vec::new(), indices: Vec::new() };
     match surface {
         Surface::Lake { radius, axis, reach } => {
@@ -162,7 +176,49 @@ pub(crate) fn surface_mesh(surface: &Surface, cells: usize) -> SurfaceMesh {
                     m.uvs.push([u, v]);
                 }
             }
+            // The basin: flood from the centre across points not under ground.
+            let side = n + 1;
+            let wet: Vec<bool> = index.iter().map(|&k| k != u32::MAX && !under(m.positions[k as usize])).collect();
+            let mut reached = vec![false; index.len()];
+            let centre = (n / 2) * side + n / 2;
+            let mut todo = if wet[centre] { vec![centre] } else { Vec::new() };
+            while let Some(c) = todo.pop() {
+                if reached[c] {
+                    continue;
+                }
+                reached[c] = true;
+                let (i, j) = (c % side, c / side);
+                for (di, dj) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
+                    let (a, b) = (i as i64 + di, j as i64 + dj);
+                    if a >= 0 && b >= 0 && (a as usize) < side && (b as usize) < side {
+                        let k = b as usize * side + a as usize;
+                        if wet[k] && !reached[k] {
+                            todo.push(k);
+                        }
+                    }
+                }
+            }
+            {
+                // Keep what the basin reaches and the ring of points round it,
+                // so the shoreline runs under the ground rather than short of it.
+                let keep: Vec<bool> = (0..index.len())
+                    .map(|c| {
+                        let (i, j) = (c % side, c / side);
+                        reached[c]
+                            || [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)].iter().any(|(di, dj)| {
+                                let (a, b) = (i as i64 + di, j as i64 + dj);
+                                a >= 0 && b >= 0 && (a as usize) < side && (b as usize) < side && reached[b as usize * side + a as usize]
+                            })
+                    })
+                    .collect();
+                for (c, k) in index.iter_mut().enumerate() {
+                    if !keep[c] {
+                        *k = u32::MAX;
+                    }
+                }
+            }
             push_quads(&mut m.indices, &index, n + 1, n + 1);
+            compact(&mut m);
         }
         Surface::Grid(g) => {
             let mut index = vec![u32::MAX; g.columns * g.rows];
@@ -183,6 +239,23 @@ pub(crate) fn surface_mesh(surface: &Surface, cells: usize) -> SurfaceMesh {
         }
     }
     m
+}
+
+/// Drop the vertices no triangle uses, renumbering the rest.
+fn compact(m: &mut SurfaceMesh) {
+    let mut used = vec![u32::MAX; m.positions.len()];
+    let mut out = SurfaceMesh { positions: Vec::new(), normals: Vec::new(), uvs: Vec::new(), indices: Vec::new() };
+    for &i in &m.indices {
+        let i = i as usize;
+        if used[i] == u32::MAX {
+            used[i] = out.positions.len() as u32;
+            out.positions.push(m.positions[i]);
+            out.normals.push(m.normals[i]);
+            out.uvs.push(m.uvs[i]);
+        }
+        out.indices.push(used[i]);
+    }
+    *m = out;
 }
 
 /// Two triangles per grid cell, wound to face +Y in the grid's frame, each
@@ -468,7 +541,25 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
             let cells = (cells.round() as usize).clamp(2, 512);
             let declared = s.declared.borrow();
             let Some(w) = declared.iter().find(|w| w.id == id) else { return Ok(Value::Nil) };
-            let m = surface_mesh(&w.surface, cells);
+            // Under the ground is a point the level has a surface above,
+            // within the lake's own reach. With no level lent (a host with no
+            // physics) nothing is, and the lake is its whole disc.
+            let cols = s.colliders.borrow();
+            let origin = *s.sim_origin.borrow();
+            let under = |local: glam::DVec3| -> bool {
+                if cols.is_empty() {
+                    return false;
+                }
+                let at = w.frame.to_world(local);
+                let up = (w.frame.to_world(local.normalize_or_zero()) - w.frame.origin).normalize_or_zero();
+                let height = match &w.surface {
+                    Surface::Lake { reach, .. } => reach.max(10.0),
+                    Surface::Grid(g) => (g.cell * g.columns.max(g.rows) as f64).max(10.0),
+                };
+                let from = (at + up * height - origin).as_vec3();
+                floptle_physics::raycast_colliders(&cols, from, -up.as_vec3(), height as f32 - 0.01, !0).is_some()
+            };
+            let m = surface_mesh_in(&w.surface, cells, &under);
             let out = lua.create_table()?;
             let flat = |vals: &mut dyn Iterator<Item = f64>| -> mlua::Result<Table> {
                 let t = lua.create_table()?;
@@ -578,6 +669,8 @@ mod tests {
             freeze: Rc::default(),
             declared: Rc::default(),
             next_id: Rc::default(),
+            colliders: Rc::default(),
+            sim_origin: Rc::default(),
         };
         install_water_api(&lua, shared.clone());
         (lua, shared)
@@ -656,6 +749,26 @@ mod tests {
         assert_eq!(m.indices.len(), 3 * 3, "two in the wet cell, one in the half-dry one");
         let [a, b, c] = [0, 1, 2].map(|k| m.positions[m.indices[k] as usize]);
         assert!((b - a).cross(c - a).y > 0.0, "a heightfield faces +Y");
+    }
+
+    /// **A lake's surface stops at its shore.** Its sphere runs on past the
+    /// spill point over lower ground outside the basin, and the disc drew water
+    /// there. Only the part reached from the centre without crossing ground is
+    /// drawn now, with one ring past it that runs under the shore.
+    #[test]
+    fn a_lakes_surface_stays_in_its_basin() {
+        let lake = Surface::Lake { radius: 805.0, axis: glam::DVec3::Y, reach: 60.0 };
+        let along = |p: glam::DVec3| p.normalize().dot(glam::DVec3::Y).clamp(-1.0, 1.0).acos() * 805.0;
+        // The basin is 30 m across; a rim from 30 to 40 m stands above the
+        // water, and past it lower ground the sphere would flood.
+        let under = |p: glam::DVec3| (30.0..40.0).contains(&along(p));
+        let whole = surface_mesh(&lake, 48);
+        let basin = surface_mesh_in(&lake, 48, &under);
+        let farthest = |m: &SurfaceMesh| m.positions.iter().map(|p| along(*p)).fold(0.0, f64::max);
+        assert!(farthest(&whole) > 60.0, "the whole disc reaches {}", farthest(&whole));
+        assert!(farthest(&basin) < 36.0, "the basin's surface reaches {} m, past its rim", farthest(&basin));
+        assert!(farthest(&basin) > 29.0, "the basin's surface stops short of its shore at {}", farthest(&basin));
+        assert!(basin.indices.iter().all(|&i| (i as usize) < basin.positions.len()));
     }
 
     /// It reaches Lua as the arrays `mesh.build` takes.
