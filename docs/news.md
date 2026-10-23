@@ -1,5 +1,10 @@
 ## Just shipped
 
+**v0.117.0-rc7 — "Whole Worlds"** (beta). Models in any common format
+convert themselves with every map in place, a mesh becomes a tumbling physics
+object in one step, big planets hold only the ground near you, and scripts
+keep running on a busy machine.
+
 **v0.117.0-rc6 — "Whole Worlds"** (beta). Craft fly low without dragging the
 frame down, grips and gravity hold on a moving planet, big worlds load and
 land without stalling, and scattered plants sway like the plant.
