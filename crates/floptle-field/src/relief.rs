@@ -95,6 +95,9 @@ impl Layers<'_> {
     fn height(&self, d: Vec3) -> f32 {
         let s = self.spec;
         let n = &self.noise;
+        // Each layer only as far as its latitude band reaches, fading at its
+        // edges; a layer with none is everywhere.
+        let lat = |band: Option<[f32; 2]>, edge: f32| crate::procgen::latitude_weight(band, edge, d);
         let w = match &s.warp {
             Some(w) if w.strength != 0.0 => {
                 let q = d * w.scale;
@@ -102,25 +105,30 @@ impl Layers<'_> {
                     n.fbm(q + Vec3::splat(311.0), 3),
                     n.fbm(q + Vec3::splat(-77.0), 3),
                     n.fbm(q + Vec3::splat(19.5), 3),
-                ) * w.strength
+                ) * (w.strength * lat(w.latitude, w.latitude_edge))
             }
             _ => d,
         };
         let mut h = n.fbm(w * s.bump_freq, 5) * s.relief;
         if let Some(m) = &s.mountains {
-            // Ranges where a slow mask is high, ridged peaks inside them.
-            let edge = 1.0 - m.coverage.clamp(0.0, 1.0);
-            let mask = smoothstep(edge - 0.12, edge + 0.12, 0.5 + 0.5 * n.fbm(w * m.scale * 0.3 + Vec3::splat(241.0), 3));
-            let ridges = n.ridged(w * m.scale + Vec3::splat(57.0), m.octaves.clamp(1, 8), m.sharpness.max(0.1));
-            h += m.height * mask * ridges;
+            let k = lat(m.latitude, m.latitude_edge);
+            if k > 0.0 {
+                // Ranges where a slow mask is high, ridged peaks inside them.
+                let edge = 1.0 - m.coverage.clamp(0.0, 1.0);
+                let mask = smoothstep(edge - 0.12, edge + 0.12, 0.5 + 0.5 * n.fbm(w * m.scale * 0.3 + Vec3::splat(241.0), 3));
+                let ridges = n.ridged(w * m.scale + Vec3::splat(57.0), m.octaves.clamp(1, 8), m.sharpness.max(0.1));
+                h += m.height * mask * ridges * k;
+            }
         }
         if let Some(p) = &s.plateau {
-            h = smin(h, p.height, p.smooth.max(0.01));
+            let k = lat(p.latitude, p.latitude_edge);
+            h += (smin(h, p.height, p.smooth.max(0.01)) - h) * k;
         }
         if let Some(t) = &s.terrace
             && t.step > 0.0
         {
-            h = terrace(h, t.step, t.sharpness);
+            let k = lat(t.latitude, t.latitude_edge);
+            h += (terrace(h, t.step, t.sharpness) - h) * k;
         }
         h
     }
@@ -585,9 +593,9 @@ mod tests {
         let spec = PlanetFill {
             radius: 120.0,
             voxel: 1.0,
-            mountains: Some(crate::procgen::Mountains { height: 30.0, scale: 3.0, sharpness: 2.0, coverage: 0.5, octaves: 4 }),
-            warp: Some(crate::procgen::Warp { strength: 0.2, scale: 2.0 }),
-            terrace: Some(crate::procgen::Terrace { step: 6.0, sharpness: 0.7 }),
+            mountains: Some(crate::procgen::Mountains { height: 30.0, scale: 3.0, sharpness: 2.0, coverage: 0.5, octaves: 4, ..Default::default() }),
+            warp: Some(crate::procgen::Warp { strength: 0.2, scale: 2.0, ..Default::default() }),
+            terrace: Some(crate::procgen::Terrace { step: 6.0, sharpness: 0.7, ..Default::default() }),
             ravines: Some(Ravines { count: 3, depth: 12.0, width: 10.0, length: 300.0, meander: 1.0 }),
             ..PlanetFill::default()
         };
@@ -627,8 +635,8 @@ mod tests {
             voxel: 1.5,
             relief: 20.0,
             bump_freq: 4.0,
-            mountains: Some(crate::procgen::Mountains { height: 30.0, scale: 3.0, sharpness: 2.0, coverage: 0.5, octaves: 4 }),
-            warp: Some(crate::procgen::Warp { strength: 0.2, scale: 2.0 }),
+            mountains: Some(crate::procgen::Mountains { height: 30.0, scale: 3.0, sharpness: 2.0, coverage: 0.5, octaves: 4, ..Default::default() }),
+            warp: Some(crate::procgen::Warp { strength: 0.2, scale: 2.0, ..Default::default() }),
             rivers: Some(Rivers { count: 5, depth: 5.0, width: 8.0, sea_level: -6.0, meander: 1.0 }),
             ..PlanetFill::default()
         };
@@ -658,5 +666,37 @@ mod tests {
             let joined = rivers[..k].iter().any(|o| o.points.iter().any(|p| p.angle_between(end) < 4.0 * step));
             assert!(at_sea || joined, "river {k} ends {:.1} m up, away from the sea and every other river", layers.height(end));
         }
+    }
+
+    /// **Mountains can be kept to the poles.** A layer's only mask was its
+    /// noise, so a game wanting snowy ranges round the poles searched about
+    /// 3,000 seed pairs a world for noise that happened to put them there.
+    /// With `latitude = {60, 90}` and a 5° edge, no ground over a fifth of the
+    /// mountains' height stands south of 55°, and the poles have ranges.
+    #[test]
+    fn mountains_can_be_kept_to_the_poles() {
+        let spec = PlanetFill {
+            seed: 31,
+            radius: 200.0,
+            voxel: 1.5,
+            relief: 1.5,
+            mountains: Some(crate::procgen::Mountains { height: 40.0, coverage: 0.9, latitude: Some([60.0, 90.0]), ..Default::default() }),
+            ..PlanetFill::default()
+        };
+        let layers = Layers { spec: &spec, noise: Noise::new(spec.seed) };
+        let mut r = Rng::new(2);
+        let (mut north, mut south) = (0.0f32, 0.0f32);
+        for _ in 0..40_000 {
+            let d = random_dir(&mut r);
+            let h = layers.height(d);
+            let lat = d.y.abs().asin().to_degrees();
+            if h > 0.2 * 40.0 {
+                assert!(lat > 55.0, "ground {h:.1} m up at {lat:.1}°");
+            }
+            if lat > 60.0 {
+                if d.y > 0.0 { north = north.max(h) } else { south = south.max(h) }
+            }
+        }
+        assert!(north > 20.0 && south > 20.0, "the poles' highest ground is {north:.1} and {south:.1} m");
     }
 }

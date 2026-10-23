@@ -16,6 +16,13 @@ Every key is optional, and so is every key inside a layer's table. A planet with
 | `ravines` | Steep-walled cuts with flat floors | `count`, `depth`, `width`, `length`, `meander` |
 | `rivers` | Rivers that run downhill from the highest ground, each in a valley it carves | `count`, `depth`, `width`, `seaLevel` (where they end, metres above the radius), `meander` |
 
+`mountains`, `warp`, `plateau` and `terrace` also take `latitude = {min, max}`, in degrees from the equator, and `latitudeEdge`, the degrees the layer fades out over past them (5 by default). Both bounds 0 or more mean north and south alike; a negative bound means north is positive, so `{-90, -60}` is the south pole alone. Latitude is measured round the planet's spin axis, the same one `biomes` use. Snowy ranges round both poles:
+
+```lua
+mountains = { height = 60, coverage = 0.8, latitude = {60, 90} },
+biomes = { { slot = 12, color = {0.95, 0.97, 1}, latitude = {58, 90} } },
+```
+
 Mountains, warp, plateaus, terraces, ravines and rivers all shape the ground's height in each direction. `overhangs` is the one that works in three dimensions, so it is the one that can make ground with air under it.
 
 Rivers start at the highest ground and run the way water drains from there: down the slope, and across any basin on the way at the height it fills to, out where it spills, until they reach `seaLevel`. A river that meets one already traced joins it. On a world with nothing below `seaLevel`, rivers end at its lowest ground, which is where its lake is. To find where the rivers and ravines went without generating anything, call `terrain.planetRivers(opts)` with the same opts:

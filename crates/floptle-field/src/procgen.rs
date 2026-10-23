@@ -129,21 +129,39 @@ pub struct Mountains {
     pub sharpness: f32,
     pub coverage: f32,
     pub octaves: u32,
+    /// Only between these latitudes, degrees from the equator: north or
+    /// south when both are 0 or more, north positive when either is
+    /// negative. `None` is everywhere.
+    pub latitude: Option<[f32; 2]>,
+    /// Degrees over which the layer fades out past `latitude`.
+    pub latitude_edge: f32,
 }
 
 impl Default for Mountains {
     fn default() -> Self {
-        Mountains { height: 40.0, scale: 3.0, sharpness: 2.0, coverage: 0.4, octaves: 5 }
+        Mountains { height: 40.0, scale: 3.0, sharpness: 2.0, coverage: 0.4, octaves: 5, latitude: None, latitude_edge: 5.0 }
     }
 }
 
 /// Domain warp: the relief is read at a point pushed up to `strength` (a
 /// fraction of the radius) by noise `scale` across the sphere.
-#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Warp {
     pub strength: f32,
     pub scale: f32,
+    /// Only between these latitudes, degrees from the equator: north or
+    /// south when both are 0 or more, north positive when either is
+    /// negative. `None` is everywhere.
+    pub latitude: Option<[f32; 2]>,
+    /// Degrees over which the layer fades out past `latitude`.
+    pub latitude_edge: f32,
+}
+
+impl Default for Warp {
+    fn default() -> Self {
+        Warp { strength: 0.0, scale: 0.0, latitude: None, latitude_edge: 5.0 }
+    }
 }
 
 /// Peaks above `height` are rounded off into flat tops over `smooth` metres.
@@ -152,11 +170,17 @@ pub struct Warp {
 pub struct Plateau {
     pub height: f32,
     pub smooth: f32,
+    /// Only between these latitudes, degrees from the equator: north or
+    /// south when both are 0 or more, north positive when either is
+    /// negative. `None` is everywhere.
+    pub latitude: Option<[f32; 2]>,
+    /// Degrees over which the layer fades out past `latitude`.
+    pub latitude_edge: f32,
 }
 
 impl Default for Plateau {
     fn default() -> Self {
-        Plateau { height: 20.0, smooth: 3.0 }
+        Plateau { height: 20.0, smooth: 3.0, latitude: None, latitude_edge: 5.0 }
     }
 }
 
@@ -167,11 +191,17 @@ impl Default for Plateau {
 pub struct Terrace {
     pub step: f32,
     pub sharpness: f32,
+    /// Only between these latitudes, degrees from the equator: north or
+    /// south when both are 0 or more, north positive when either is
+    /// negative. `None` is everywhere.
+    pub latitude: Option<[f32; 2]>,
+    /// Degrees over which the layer fades out past `latitude`.
+    pub latitude_edge: f32,
 }
 
 impl Default for Terrace {
     fn default() -> Self {
-        Terrace { step: 6.0, sharpness: 0.6 }
+        Terrace { step: 6.0, sharpness: 0.6, latitude: None, latitude_edge: 5.0 }
     }
 }
 
@@ -455,10 +485,26 @@ impl PlanetShape {
 pub fn generate_planet(spec: &PlanetFill) -> ChunkField {
     let planet = Planet::new(spec);
     let ext = planet.extent();
-    if spec.defer_caves && spec.cave_depth > 0.0 {
-        return ChunkField::generate_deferring(spec.voxel, Vec3::splat(-ext), Vec3::splat(ext), std::sync::Arc::new(planet));
-    }
-    ChunkField::generate(spec.voxel, Vec3::splat(-ext), Vec3::splat(ext), &planet)
+    // Kept as the field's source either way: it makes the deferred caves, and
+    // any chunk put away to save memory, again.
+    let defer = spec.defer_caves && spec.cave_depth > 0.0;
+    ChunkField::generate_sourced(spec.voxel, Vec3::splat(-ext), Vec3::splat(ext), std::sync::Arc::new(planet), defer)
+}
+
+/// [`generate_planet`], making only the chunks within `reach` of `near`
+/// (planet-local) and leaving coarse stand-ins for the rest of the surface,
+/// made exactly as [`generate_planet`] makes them when something comes near
+/// (see [`ChunkField::generate_near`]). For a resume, or any world the player
+/// is not yet on: ready in a fraction of the time.
+pub fn generate_planet_near(spec: &PlanetFill, near: Vec3, reach: f32) -> ChunkField {
+    let planet = Planet::new(spec);
+    let ext = planet.extent();
+    let defer = spec.defer_caves && spec.cave_depth > 0.0;
+    let size = crate::CHUNK as f32 * spec.voxel.clamp(0.25, 16.0);
+    ChunkField::generate_near(spec.voxel, Vec3::splat(-ext), Vec3::splat(ext), std::sync::Arc::new(planet), defer, |c| {
+        let lo = Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32) * size;
+        (near.clamp(lo, lo + Vec3::splat(size)) - near).length() <= reach
+    })
 }
 
 /// One lake on a generated planet: a body of still water standing in a basin.
@@ -524,15 +570,14 @@ pub fn lakes_of(spec: &PlanetFill, cell: f32, min_depth: f32, sea_level: f32) ->
     lakes
 }
 
-/// What makes a deferred planet's pending chunks, for a field loaded from a
-/// file: it knows which chunks are pending but not how to make them. The
-/// spec has to be the one the planet was generated from.
+/// What makes a planet's pending chunks, for a field loaded from a file: it
+/// knows which chunks are pending but not how to make them. The spec has to be
+/// the one the planet was generated from.
 pub fn pending_source_for(spec: &PlanetFill) -> Option<std::sync::Arc<dyn crate::PendingSource>> {
-    (spec.defer_caves && spec.cave_depth > 0.0).then(|| {
-        let planet = Planet::new(spec);
-        let ext = planet.extent();
-        ChunkField::generate_source(spec.voxel, Vec3::splat(-ext), Vec3::splat(ext), std::sync::Arc::new(planet))
-    })
+    let planet = Planet::new(spec);
+    let ext = planet.extent();
+    let defer = spec.defer_caves && spec.cave_depth > 0.0;
+    Some(ChunkField::generate_source_for(spec.voxel, Vec3::splat(-ext), Vec3::splat(ext), std::sync::Arc::new(planet), defer))
 }
 
 /// A planet ready to voxelize: its shape and its paint.
@@ -851,6 +896,23 @@ impl crate::VoxelSource for Planet {
         }
         body_hi <= -(3.0 * s.voxel + band + s.voxel) && self.classify(lo, hi, band) == crate::BlockClass::Mixed
     }
+}
+
+/// How much of a layer limited to `band` (degrees, see [`Mountains::latitude`])
+/// stands in direction `d`, fading over `edge` degrees past the band; the
+/// latitude is measured from the equator round the spin axis, +Y, the axis the
+/// biomes' latitude is measured on.
+pub(crate) fn latitude_weight(band: Option<[f32; 2]>, edge: f32, d: Vec3) -> f32 {
+    let Some([a, b]) = band else { return 1.0 };
+    let (lo, hi) = (a.min(b), a.max(b));
+    let y = d.y.clamp(-1.0, 1.0);
+    let lat = if lo < 0.0 { y.asin() } else { y.abs().asin() }.to_degrees();
+    let e = edge.max(1e-3);
+    let ramp = |x: f32| {
+        let t = x.clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    ramp((lat - (lo - e)) / e) * (1.0 - ramp((lat - hi) / e))
 }
 
 #[cfg(test)]
@@ -1205,6 +1267,151 @@ mod tests {
         assert!(back.to_bytes().len() * 5 < old.len(), "it still saves whole: {} of {} bytes, {} chunks edited of {edited}", back.to_bytes().len(), old.len(), back.edited_count());
     }
 
+    /// Every voxel of `a` and `b`, distance to the bit and colour, the same.
+    fn identical(a: &ChunkField, b: &ChunkField, coords: &[[i32; 3]]) -> Result<(), String> {
+        let (mut da, mut ca, mut db, mut cb) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for &c in coords {
+            let lo = [c[0] * crate::CHUNK, c[1] * crate::CHUNK, c[2] * crate::CHUNK];
+            a.gather(lo, crate::CHUNK as usize, &mut da, &mut ca);
+            b.gather(lo, crate::CHUNK as usize, &mut db, &mut cb);
+            for i in 0..da.len() {
+                if da[i].to_bits() != db[i].to_bits() || (da[i] < a.band() && ca[i] != cb[i]) {
+                    return Err(format!("chunk {c:?} voxel {i}: {} {:?} against {} {:?}", da[i], ca[i], db[i], cb[i]));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// **A chunk put away comes back exactly as the fill made it.** A planet
+    /// kilometres across keeps a coarse stand-in for the ground nobody is
+    /// near, and makes the chunk again on approach; the generator's own
+    /// isolated remaking, which deferred caves use, differs at a chunk's
+    /// borders from the fill, which evened the whole field out at once. Every
+    /// chunk of two worlds, one with its caves deferred and relief layers,
+    /// put away together and made again, to the bit.
+    #[test]
+    fn a_chunk_put_away_comes_back_exactly_as_the_fill_made_it() {
+        let worlds = [
+            PlanetFill { seed: 21, radius: 70.0, voxel: 1.0, relief: 6.0, cave_depth: 16.0, core_r: 5.0, craters: 2, ..PlanetFill::default() },
+            PlanetFill {
+                seed: 22,
+                radius: 110.0,
+                voxel: 1.5,
+                relief: 8.0,
+                cave_depth: 40.0,
+                core_r: 6.0,
+                defer_caves: true,
+                mountains: Some(Mountains { height: 14.0, scale: 3.0, sharpness: 2.0, coverage: 0.5, octaves: 4, ..Default::default() }),
+                overhangs: Some(Overhangs { depth: 6.0, scale: 0.1, strength: 2.0 }),
+                ..PlanetFill::default()
+            },
+        ];
+        for spec in worlds {
+            let mut f = generate_planet(&spec);
+            f.set_spec("test".into());
+            let original = f.clone();
+            let coords = f.chunk_coords();
+            let evicted = f.evict(&coords);
+            assert_eq!(evicted.len(), coords.len(), "every data chunk is evictable");
+            assert_eq!(f.evicted_count(), coords.len());
+            assert!(f.memory_bytes() * 10 < original.memory_bytes(), "{} bytes put away to {}", original.memory_bytes(), f.memory_bytes());
+            f.realize(&coords);
+            assert_eq!(f.evicted_count(), 0);
+            identical(&original, &f, &coords).unwrap();
+        }
+    }
+
+    /// **A world made only near the player is the whole world once it is
+    /// all made.** Resuming a kilometre-wide planet made every chunk before
+    /// the player could stand on it. Made near one point, the rest stands in
+    /// coarse, and every chunk made later is the one the whole fill makes, to
+    /// the bit; the stand-ins cost a small part of the whole.
+    #[test]
+    fn a_world_made_near_the_player_is_the_whole_world_once_made() {
+        let spec = PlanetFill {
+            seed: 25,
+            radius: 110.0,
+            voxel: 1.5,
+            relief: 8.0,
+            cave_depth: 40.0,
+            core_r: 6.0,
+            defer_caves: true,
+            mountains: Some(Mountains { height: 14.0, scale: 3.0, sharpness: 2.0, coverage: 0.5, octaves: 4, ..Default::default() }),
+            ..PlanetFill::default()
+        };
+        let whole = generate_planet(&spec);
+        let near = Vec3::new(0.0, spec.radius, 0.0);
+        let mut lazy = generate_planet_near(&spec, near, 40.0);
+        let stood_in = lazy.evicted_count();
+        assert!(stood_in > lazy.chunk_coords().len() / 2, "only {stood_in} chunks stand in");
+        assert!(lazy.memory_bytes() * 3 < whole.memory_bytes(), "{} bytes against {} whole", lazy.memory_bytes(), whole.memory_bytes());
+        // The ground near the player is there already.
+        let made: Vec<[i32; 3]> = lazy.chunk_coords().into_iter().filter(|c| !lazy.is_evicted(*c)).collect();
+        identical(&whole, &lazy, &made).unwrap();
+        // And the rest is the whole fill's, once made.
+        let rest: Vec<[i32; 3]> = lazy.chunk_coords().into_iter().filter(|c| lazy.is_evicted(*c)).collect();
+        lazy.realize(&rest);
+        let mut all = whole.chunk_coords();
+        all.extend(lazy.chunk_coords());
+        all.sort_unstable();
+        all.dedup();
+        identical(&whole, &lazy, &all).unwrap();
+    }
+
+    /// **An edited chunk is never put away**: it is the player's, and nothing
+    /// could make it again. Nor is a field with no recipe for its saves.
+    #[test]
+    fn an_edited_chunk_is_never_put_away() {
+        let spec = PlanetFill { seed: 23, radius: 70.0, voxel: 1.0, relief: 6.0, cave_depth: 0.0, ..PlanetFill::default() };
+        let mut f = generate_planet(&spec);
+        let coords = f.chunk_coords();
+        assert!(f.evict(&coords).is_empty(), "a field with no recipe put chunks away");
+        f.set_spec("test".into());
+        let top = f.raycast(Vec3::new(0.0, 100.0, 0.0), Vec3::NEG_Y, 100.0).unwrap();
+        let dug = f.sculpt(crate::Brush::Lower, top, 3.0, 1.0, crate::BrushProfile::default());
+        assert!(!dug.is_empty());
+        let evicted: Vec<[i32; 3]> = f.evict(&coords).iter().map(|e| e.coord()).collect();
+        for c in &dug {
+            assert!(!evicted.contains(c), "edited chunk {c:?} was put away");
+            assert!(!f.is_evicted(*c));
+        }
+        assert!(evicted.len() + dug.len() >= coords.len() - 2);
+    }
+
+    /// **From afar, a world put away is the world.** A ray from orbit meets the
+    /// stand-ins near the ground (a lattice point every four voxels, of
+    /// distances that stop four voxels from the surface: within a voxel at the
+    /// 95th percentile, under three at worst), and a write into one makes the
+    /// chunk first, so the dig lands in the real ground.
+    #[test]
+    fn a_world_put_away_reads_as_itself_from_afar() {
+        let spec = PlanetFill { seed: 24, radius: 90.0, voxel: 1.5, relief: 8.0, cave_depth: 20.0, ..PlanetFill::default() };
+        let mut f = generate_planet(&spec);
+        f.set_spec("test".into());
+        let whole = f.clone();
+        f.evict(&f.chunk_coords());
+        let mut r = Rng::new(3);
+        let mut off = Vec::new();
+        for _ in 0..300 {
+            let d = Vec3::new(r.range(-1.0, 1.0) as f32, r.range(-1.0, 1.0) as f32, r.range(-1.0, 1.0) as f32).normalize_or_zero();
+            if d == Vec3::ZERO {
+                continue;
+            }
+            let (a, b) = (whole.raycast(d * 200.0, -d, 200.0), f.raycast(d * 200.0, -d, 200.0));
+            let (Some(a), Some(b)) = (a, b) else { panic!("a ray at {d:?} missed: {a:?} {b:?}") };
+            off.push((a - b).length());
+        }
+        off.sort_by(f32::total_cmp);
+        let (p95, worst) = (off[off.len() * 95 / 100], off[off.len() - 1]);
+        assert!(p95 < spec.voxel && worst < 3.0 * spec.voxel, "the stand-ins' ground is {p95:.2} m off the real at the 95th percentile, {worst:.2} m at worst");
+        let p = whole.raycast(Vec3::Y * 200.0, Vec3::NEG_Y, 200.0).unwrap();
+        let mut real = whole.clone();
+        let dug = real.sculpt(crate::Brush::Lower, p, 2.0, 1.0, crate::BrushProfile::default());
+        f.sculpt(crate::Brush::Lower, p, 2.0, 1.0, crate::BrushProfile::default());
+        identical(&real, &f, &dug).map_err(|e| format!("the dig landed on the stand-in, not the ground: {e}")).unwrap();
+    }
+
     /// **Mountains taller than the base relief are generated whole.** The fill
     /// walked a cube sized by the base relief alone, so a range taller than it
     /// came out sliced flat at the cube's face.
@@ -1216,7 +1423,7 @@ mod tests {
             voxel: 1.0,
             relief: 3.0,
             cave_depth: 0.0,
-            mountains: Some(Mountains { height: 20.0, scale: 2.0, sharpness: 1.5, coverage: 0.7, octaves: 3 }),
+            mountains: Some(Mountains { height: 20.0, scale: 2.0, sharpness: 1.5, coverage: 0.7, octaves: 3, ..Default::default() }),
             ..PlanetFill::default()
         };
         let f = generate_planet(&spec);
@@ -1244,9 +1451,9 @@ mod tests {
     fn relief_layers_add_at_most_a_third_to_the_voxels_evaluated() {
         let plain = PlanetFill { seed: 21, radius: 90.0, voxel: 1.0, relief: 6.0, cave_depth: 16.0, core_r: 5.0, ..PlanetFill::default() };
         let layered = PlanetFill {
-            mountains: Some(Mountains { height: 8.0, scale: 3.0, sharpness: 2.0, coverage: 0.4, octaves: 4 }),
-            warp: Some(Warp { strength: 0.15, scale: 2.5 }),
-            terrace: Some(Terrace { step: 3.0, sharpness: 0.8 }),
+            mountains: Some(Mountains { height: 8.0, scale: 3.0, sharpness: 2.0, coverage: 0.4, octaves: 4, ..Default::default() }),
+            warp: Some(Warp { strength: 0.15, scale: 2.5, ..Default::default() }),
+            terrace: Some(Terrace { step: 3.0, sharpness: 0.8, ..Default::default() }),
             overhangs: Some(Overhangs { depth: 6.0, scale: 0.1, strength: 2.0 }),
             ravines: Some(Ravines { count: 3, depth: 8.0, width: 6.0, length: 150.0, meander: 1.0 }),
             rivers: Some(Rivers { count: 4, depth: 2.0, width: 4.0, sea_level: -2.0, meander: 0.5 }),
@@ -1296,10 +1503,10 @@ mod tests {
                 cave_depth: 14.0,
                 core_r: 4.0,
                 craters: 2,
-                mountains: Some(Mountains { height: 14.0, scale: 2.5, sharpness: 2.0, coverage: 0.6, octaves: 4 }),
-                warp: Some(Warp { strength: 0.15, scale: 2.0 }),
-                plateau: Some(Plateau { height: 10.0, smooth: 2.0 }),
-                terrace: Some(Terrace { step: 3.0, sharpness: 0.7 }),
+                mountains: Some(Mountains { height: 14.0, scale: 2.5, sharpness: 2.0, coverage: 0.6, octaves: 4, ..Default::default() }),
+                warp: Some(Warp { strength: 0.15, scale: 2.0, ..Default::default() }),
+                plateau: Some(Plateau { height: 10.0, smooth: 2.0, ..Default::default() }),
+                terrace: Some(Terrace { step: 3.0, sharpness: 0.7, ..Default::default() }),
                 overhangs: Some(Overhangs { depth: 6.0, scale: 0.12, strength: 2.5 }),
                 ravines: Some(Ravines { count: 2, depth: 8.0, width: 6.0, length: 120.0, meander: 1.0 }),
                 rivers: Some(Rivers { count: 3, depth: 2.0, width: 4.0, sea_level: -1.0, meander: 0.5 }),

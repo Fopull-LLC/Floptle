@@ -70,6 +70,59 @@ enum Chunk {
     /// session's snapshot of a field and the physics sim's copy of it hold the
     /// same chunks as the field itself, not three of everything.
     Data(std::sync::Arc<ChunkData>),
+    /// A chunk put away to save memory: the generator makes it again exactly
+    /// when something comes near ([`ChunkField::evict`]), and until then this
+    /// coarse lattice of it stands in for whoever reads it from afar.
+    Lattice(std::sync::Arc<Lattice>),
+}
+
+/// Voxels between the points of a [`Lattice`].
+const LATTICE_STRIDE: usize = 4;
+/// Points along each edge of a [`Lattice`]: the chunk's corners included, its
+/// far faces being its neighbours' first voxels.
+const LATTICE_N: usize = CHUNK_U / LATTICE_STRIDE + 1;
+
+/// An evicted chunk's stand-in: its distances and colours every
+/// [`LATTICE_STRIDE`] voxels, read back trilinearly. About 6 KB against the
+/// tens or hundreds of KB the chunk holds: what the coarsest meshes, a far
+/// body's collision and a ray from orbit need of ground no one is near.
+#[derive(Clone, Debug)]
+pub(crate) struct Lattice {
+    dist: Vec<f32>,
+    color: Vec<[u8; 4]>,
+}
+
+impl Lattice {
+    #[inline]
+    fn at(x: usize, y: usize, z: usize) -> usize {
+        (z * LATTICE_N + y) * LATTICE_N + x
+    }
+
+    /// The distance at voxel `li` of the chunk, trilinear between the points.
+    #[inline]
+    fn dist(&self, li: usize) -> f32 {
+        let (x, y, z) = (li % CHUNK_U, (li / CHUNK_U) % CHUNK_U, li / (CHUNK_U * CHUNK_U));
+        let (gx, gy, gz) = (x / LATTICE_STRIDE, y / LATTICE_STRIDE, z / LATTICE_STRIDE);
+        let s = LATTICE_STRIDE as f32;
+        let (fx, fy, fz) = ((x % LATTICE_STRIDE) as f32 / s, (y % LATTICE_STRIDE) as f32 / s, (z % LATTICE_STRIDE) as f32 / s);
+        let d = |dx: usize, dy: usize, dz: usize| self.dist[Self::at(gx + dx, gy + dy, gz + dz)];
+        let l = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        let x0 = l(l(d(0, 0, 0), d(1, 0, 0), fx), l(d(0, 1, 0), d(1, 1, 0), fx), fy);
+        let x1 = l(l(d(0, 0, 1), d(1, 0, 1), fx), l(d(0, 1, 1), d(1, 1, 1), fx), fy);
+        l(x0, x1, fz)
+    }
+
+    /// The colour at voxel `li`: the nearest point's.
+    #[inline]
+    fn color(&self, li: usize) -> [u8; 4] {
+        let (x, y, z) = (li % CHUNK_U, (li / CHUNK_U) % CHUNK_U, li / (CHUNK_U * CHUNK_U));
+        let n = |v: usize| (v + LATTICE_STRIDE / 2) / LATTICE_STRIDE;
+        self.color[Self::at(n(x), n(y), n(z))]
+    }
+
+    fn heap_bytes(&self) -> usize {
+        self.dist.len() * 4 + self.color.len() * 4
+    }
 }
 
 
@@ -123,12 +176,31 @@ pub struct ChunkField {
     /// edits, so a save is laid back over the ground it was dug into even if
     /// the recipe has changed since.
     spec: Option<String>,
+    /// Found its edits by [`Self::adopt_generation`]: what is on disk is the
+    /// whole field, and the next save should replace it with the edits.
+    converted: bool,
 }
 
 /// What makes a field's pending chunks: see [`ChunkField::generate_deferring`].
 pub trait PendingSource: Send + Sync {
     /// The chunk at `c`, as the generator that deferred it would have made it.
     fn generate(&self, c: [i32; 3]) -> Generated;
+}
+
+/// One chunk [`ChunkField::evict`] put away: what it was and what stands in
+/// for it, for the field's copies to follow ([`ChunkField::apply_evictions`]).
+#[derive(Clone)]
+pub struct Eviction {
+    c: [i32; 3],
+    old: Chunk,
+    new: Chunk,
+}
+
+impl Eviction {
+    /// The chunk put away.
+    pub fn coord(&self) -> [i32; 3] {
+        self.c
+    }
 }
 
 /// A chunk a [`PendingSource`] made, ready for [`ChunkField::adopt_generated`].
@@ -153,15 +225,204 @@ struct Deferred<S> {
     voxel: f32,
     band: f32,
     base: [u8; 4],
+    /// Did the fill leave the chunks `src` defers for later?
+    defer: bool,
 }
 
+/// Voxels around a chunk its exact remaking samples: a voxel's value after
+/// the fill's six sweeps depends on nothing further away than six.
+const EXACT_APRON: i32 = 7;
+
 impl<S: VoxelSource + Send + Sync + 'static> PendingSource for Deferred<S> {
+    /// A chunk the fill deferred, made on its own (below). Any other chunk,
+    /// made exactly as the fill made it ([`Self::exact`]): an evicted chunk
+    /// comes back as it went.
+    fn generate(&self, c: [i32; 3]) -> Generated {
+        if self.deferred(c) {
+            return self.alone(c);
+        }
+        self.exact(c)
+    }
+}
+
+impl<S: VoxelSource + Send + Sync + 'static> Deferred<S> {
+    /// Did the fill defer chunk `c`?
+    fn deferred(&self, c: [i32; 3]) -> bool {
+        let at = |i: [i32; 3]| Vec3::new(i[0] as f32, i[1] as f32, i[2] as f32) * self.voxel;
+        let (s, e) = ([c[0] * CHUNK, c[1] * CHUNK, c[2] * CHUNK], [c[0] * CHUNK + CHUNK - 1, c[1] * CHUNK + CHUNK - 1, c[2] * CHUNK + CHUNK - 1]);
+        self.defer && self.src.defer(at(s), at(e), self.band)
+    }
+
+    /// Chunk `c` exactly as the fill made it, without making its neighbours.
+    ///
+    /// The fill samples every chunk, then evens the whole field out with six
+    /// sweeps in which each voxel reads only the six beside it as they were
+    /// before the sweep. After six, a voxel's value depends on nothing further
+    /// than six voxels from it. So the chunk and a seven-voxel apron are
+    /// sampled as the fill sampled them (deferred neighbours as the solid
+    /// stand-in the fill held for them, nothing past the fill's box), the same
+    /// six sweeps run over that, and the chunk's own voxels come out as the
+    /// fill's, bit for bit. The apron's outer layers come out wrong, and are
+    /// thrown away.
+    fn exact(&self, c: [i32; 3]) -> Generated {
+        let band = self.band;
+        let h = self.voxel;
+        let Some(chunk) = gen_chunk(c, self.ilo, self.ihi, self.voxel, band, self.base, &*self.src) else {
+            return Generated(None);
+        };
+        let Chunk::Data(data) = chunk else { return Generated(Some(chunk)) };
+        let a = EXACT_APRON;
+        let dim = (CHUNK + 2 * a) as usize;
+        let lo = [c[0] * CHUNK - a, c[1] * CHUNK - a, c[2] * CHUNK - a];
+        let mut d = vec![band; dim * dim * dim];
+        let idx = |x: usize, y: usize, z: usize| (z * dim + y) * dim + x;
+        let at = |i: [i32; 3]| Vec3::new(i[0] as f32, i[1] as f32, i[2] as f32) * self.voxel;
+        let mut scratch = S::Scratch::default();
+        // The fill's raw samples over the box, a classified block at a time.
+        for nz in -1..=1 {
+            for ny in -1..=1 {
+                for nx in -1..=1 {
+                    let nc = [c[0] + nx, c[1] + ny, c[2] + nz];
+                    // The part of the box in this neighbour, in global voxels.
+                    let s = [0, 1, 2].map(|k| (nc[k] * CHUNK).max(lo[k]).max(self.ilo[k]));
+                    let e = [0, 1, 2].map(|k| (nc[k] * CHUNK + CHUNK - 1).min(lo[k] + dim as i32 - 1).min(self.ihi[k]));
+                    if (0..3).any(|k| s[k] > e[k]) {
+                        continue;
+                    }
+                    if nc == c {
+                        for z in s[2]..=e[2] {
+                            for y in s[1]..=e[1] {
+                                for x in s[0]..=e[0] {
+                                    d[idx((x - lo[0]) as usize, (y - lo[1]) as usize, (z - lo[2]) as usize)] = data.dist(local_of([x, y, z]));
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    if self.deferred(nc) {
+                        for z in s[2]..=e[2] {
+                            for y in s[1]..=e[1] {
+                                for x in s[0]..=e[0] {
+                                    d[idx((x - lo[0]) as usize, (y - lo[1]) as usize, (z - lo[2]) as usize)] = -band;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    // Classified in blocks, as the fill does: a block it can
+                    // place is the value it places, and the rest is sampled.
+                    let mut bz = s[2];
+                    while bz <= e[2] {
+                        let ez = (bz.div_euclid(BLOCK) * BLOCK + BLOCK - 1).min(e[2]);
+                        let mut by = s[1];
+                        while by <= e[1] {
+                            let ey = (by.div_euclid(BLOCK) * BLOCK + BLOCK - 1).min(e[1]);
+                            let mut bx = s[0];
+                            while bx <= e[0] {
+                                let ex = (bx.div_euclid(BLOCK) * BLOCK + BLOCK - 1).min(e[0]);
+                                let class = self.src.classify(at([bx, by, bz]), at([ex, ey, ez]), band);
+                                for z in bz..=ez {
+                                    for y in by..=ey {
+                                        for x in bx..=ex {
+                                            let v = match class {
+                                                BlockClass::Air => band,
+                                                BlockClass::Solid => -band,
+                                                BlockClass::Mixed => self
+                                                    .src
+                                                    .sample(at([x, y, z]), band, &mut scratch)
+                                                    .map_or(band, |(v, _)| v.clamp(-band, band)),
+                                            };
+                                            d[idx((x - lo[0]) as usize, (y - lo[1]) as usize, (z - lo[2]) as usize)] = v;
+                                        }
+                                    }
+                                }
+                                bx = ex + 1;
+                            }
+                            by = ey + 1;
+                        }
+                        bz = ez + 1;
+                    }
+                }
+            }
+        }
+        // The fill's six sweeps, as `renormalize` runs them.
+        for _ in 0..6 {
+            let mut writes: Vec<(usize, f32)> = Vec::new();
+            for z in 0..dim {
+                for y in 0..dim {
+                    for x in 0..dim {
+                        let i = idx(x, y, z);
+                        let cur = d[i];
+                        if cur.abs() >= band {
+                            continue;
+                        }
+                        let (mut lo_b, mut hi_b) = (f32::NEG_INFINITY, f32::INFINITY);
+                        let mut nb = |n: f32| {
+                            if n.abs() < band {
+                                lo_b = lo_b.max(n - h);
+                                hi_b = hi_b.min(n + h);
+                            }
+                        };
+                        if x > 0 {
+                            nb(d[i - 1]);
+                        }
+                        if x + 1 < dim {
+                            nb(d[i + 1]);
+                        }
+                        if y > 0 {
+                            nb(d[i - dim]);
+                        }
+                        if y + 1 < dim {
+                            nb(d[i + dim]);
+                        }
+                        if z > 0 {
+                            nb(d[i - dim * dim]);
+                        }
+                        if z + 1 < dim {
+                            nb(d[i + dim * dim]);
+                        }
+                        if !lo_b.is_finite() || !hi_b.is_finite() {
+                            continue;
+                        }
+                        let next = if lo_b > hi_b { 0.5 * (lo_b + hi_b) } else { cur.clamp(lo_b, hi_b) };
+                        if (next - cur).abs() > 1e-6 {
+                            writes.push((i, next));
+                        }
+                    }
+                }
+            }
+            if writes.is_empty() {
+                break;
+            }
+            for (i, v) in writes {
+                d[i] = v.clamp(-band, band);
+            }
+        }
+        let mut out = (*data).clone();
+        for z in 0..CHUNK {
+            for y in 0..CHUNK {
+                for x in 0..CHUNK {
+                    let li = ((z * CHUNK + y) * CHUNK + x) as usize;
+                    out.set_dist(li, d[idx((x + a) as usize, (y + a) as usize, (z + a) as usize)]);
+                }
+            }
+        }
+        // As `compact` leaves it.
+        match out.uniform_dist() {
+            Some(v) if v.abs() >= band - 1e-6 => Generated(Some(Chunk::Uniform(v))),
+            _ => {
+                out.shrink();
+                Generated(Some(Chunk::Data(std::sync::Arc::new(out))))
+            }
+        }
+    }
+
     /// The chunk, evened out on its own, as if nothing were around it: so what
     /// comes back depends on where it is and nothing else, and a chunk made
     /// before its neighbours is the same as one made after them. Two players
     /// whose games made a planet's caves in different orders have the same
     /// caves.
-    fn generate(&self, c: [i32; 3]) -> Generated {
+    fn alone(&self, c: [i32; 3]) -> Generated {
         let Some(chunk) = gen_chunk(c, self.ilo, self.ihi, self.voxel, self.band, self.base, &*self.src) else {
             return Generated(None);
         };
@@ -252,6 +513,7 @@ impl ChunkField {
             quiet: false,
             delta: false,
             spec: None,
+            converted: false,
         }
     }
 
@@ -275,7 +537,7 @@ impl ChunkField {
 
     /// Number of chunks holding real voxel data (Uniform sentinels are free).
     pub fn data_chunks(&self) -> usize {
-        self.chunks.values().filter(|c| matches!(c, Chunk::Data(_))).count()
+        self.chunks.values().filter(|c| matches!(c, Chunk::Data(_) | Chunk::Lattice(_))).count()
     }
 
     /// Resident bytes of voxel data — what the 192 MB dense field is measured against.
@@ -284,6 +546,7 @@ impl ChunkField {
             .values()
             .map(|c| match c {
                 Chunk::Data(d) => d.heap_bytes(),
+                Chunk::Lattice(l) => l.heap_bytes(),
                 Chunk::Uniform(_) => 0,
             })
             .sum()
@@ -309,6 +572,13 @@ impl ChunkField {
     /// recipe saves only its edits and the recipe ([`Self::begin_save`]).
     pub fn set_spec(&mut self, spec: String) {
         self.spec = Some(spec);
+    }
+
+    /// Did this field find its edits in a whole-field save
+    /// ([`Self::adopt_generation`])? Its file is then worth writing again
+    /// even with nothing new dug: the edits alone replace the whole field.
+    pub fn was_converted(&self) -> bool {
+        self.converted
     }
 
     /// Forget the recipe: the field saves whole again.
@@ -364,9 +634,11 @@ impl ChunkField {
             None => band,
             Some(Chunk::Uniform(v)) => *v,
             Some(Chunk::Data(d)) => d.dist(li),
+            Some(Chunk::Lattice(l)) => l.dist(li),
         };
         let color = |ch: Option<&Chunk>, li: usize, base_color: [u8; 4]| match ch {
             Some(Chunk::Data(d)) => d.color(li),
+            Some(Chunk::Lattice(l)) => l.color(li),
             _ => base_color,
         };
         let mut coords: Vec<[i32; 3]> = self.chunks.keys().chain(base.chunks.keys()).copied().collect();
@@ -418,6 +690,7 @@ impl ChunkField {
         out.edited = edited;
         out.generated = true;
         out.spec = self.spec.take().or_else(|| base.spec.clone());
+        out.converted = true;
         *self = out;
     }
 
@@ -457,14 +730,14 @@ impl ChunkField {
     pub fn chunk_coords(&self) -> Vec<[i32; 3]> {
         self.chunks
             .iter()
-            .filter(|(_, c)| matches!(c, Chunk::Data(_)))
+            .filter(|(_, c)| matches!(c, Chunk::Data(_) | Chunk::Lattice(_)))
             .map(|(k, _)| *k)
             .collect()
     }
 
     /// Whether a chunk holds data — the chunks `chunk_coords` lists and a mesher meshes.
     pub fn has_data(&self, c: [i32; 3]) -> bool {
-        matches!(self.chunks.get(&c), Some(Chunk::Data(_)))
+        matches!(self.chunks.get(&c), Some(Chunk::Data(_) | Chunk::Lattice(_)))
     }
 
     /// World position of a chunk's `(0,0,0)` voxel — the origin its mesh is relative to.
@@ -499,6 +772,7 @@ impl ChunkField {
             None => self.band(),
             Some(Chunk::Uniform(v)) => *v,
             Some(Chunk::Data(d)) => d.dist(local_of(i)),
+            Some(Chunk::Lattice(l)) => l.dist(local_of(i)),
         }
     }
 
@@ -506,6 +780,7 @@ impl ChunkField {
     fn color_at(&self, i: [i32; 3]) -> [u8; 4] {
         match self.chunks.get(&chunk_of(i)) {
             Some(Chunk::Data(d)) => d.color(local_of(i)),
+            Some(Chunk::Lattice(l)) => l.color(local_of(i)),
             _ => self.base_color,
         }
     }
@@ -577,12 +852,23 @@ impl ChunkField {
         let band = BAND_VOXELS * self.voxel;
         let base = self.base_color;
         let entry = self.chunks.entry(c).or_insert(Chunk::Uniform(band));
-        if let Chunk::Uniform(v) = *entry {
-            *entry = Chunk::Data(std::sync::Arc::new(ChunkData::new(v, base)));
+        match entry {
+            Chunk::Uniform(v) => *entry = Chunk::Data(std::sync::Arc::new(ChunkData::new(*v, base))),
+            // A stand-in with nothing to make it again from: what it says is
+            // all there is of the chunk now.
+            Chunk::Lattice(l) => {
+                let mut d = ChunkData::new(0.0, base);
+                for li in 0..CHUNK_VOXELS {
+                    d.set_dist(li, l.dist(li));
+                    d.set_color(li, l.color(li));
+                }
+                *entry = Chunk::Data(std::sync::Arc::new(d));
+            }
+            Chunk::Data(_) => {}
         }
         match entry {
             Chunk::Data(d) => std::sync::Arc::make_mut(d),
-            Chunk::Uniform(_) => unreachable!("just materialized"),
+            _ => unreachable!("just materialized"),
         }
     }
 
@@ -1133,6 +1419,7 @@ impl<'a> VoxelReader<'a> {
             None => self.field.band(),
             Some(Chunk::Uniform(v)) => *v,
             Some(Chunk::Data(d)) => d.dist(local_of(i)),
+            Some(Chunk::Lattice(l)) => l.dist(local_of(i)),
         }
     }
 }
@@ -1632,12 +1919,116 @@ impl ChunkField {
         max: Vec3,
         src: std::sync::Arc<S>,
     ) -> Self {
-        let (mut field, frame) = Self::generate_with(voxel, min, max, &*src, true);
+        Self::generate_sourced(voxel, min, max, src, true)
+    }
+
+    /// [`Self::generate`], deferring as [`Self::generate_deferring`] does when
+    /// `defer` is set, and keeping `src` either way: what makes the deferred
+    /// chunks, and what makes any chunk [`Self::evict`] put away again exactly
+    /// as the fill made it.
+    pub fn generate_sourced<S: VoxelSource + Send + Sync + 'static>(
+        voxel: f32,
+        min: Vec3,
+        max: Vec3,
+        src: std::sync::Arc<S>,
+        defer: bool,
+    ) -> Self {
+        let (mut field, frame) = Self::generate_with(voxel, min, max, &*src, defer);
         let (ilo, ihi) = frame;
         let (voxel, band, base) = (field.voxel, field.band(), field.base_color);
-        if !field.pending.is_empty() {
-            field.source = Some(Source(std::sync::Arc::new(Deferred { src, ilo, ihi, voxel, band, base })));
+        field.source = Some(Source(std::sync::Arc::new(Deferred { src, ilo, ihi, voxel, band, base, defer })));
+        field
+    }
+
+    /// [`Self::generate_sourced`], making only the chunks `near` asks for: the
+    /// rest of the surface stands in as coarse lattices sampled straight from
+    /// `src`, pending, and is made exactly as the whole fill would have made it
+    /// when something comes near ([`Self::realize`], or a worker through
+    /// [`Self::pending_source`]). A planet kilometres across is ready in the
+    /// time its stand-ins take, a fiftieth of a voxel each, and the ground
+    /// around the player.
+    pub fn generate_near<S: VoxelSource + Send + Sync + 'static>(
+        voxel: f32,
+        min: Vec3,
+        max: Vec3,
+        src: std::sync::Arc<S>,
+        defer: bool,
+        near: impl Fn([i32; 3]) -> bool + Sync,
+    ) -> Self {
+        let mut field = Self::new(voxel.clamp(0.25, 16.0));
+        let (voxel, band, base) = (field.voxel, field.band(), field.base_color);
+        let lo = (min - Vec3::splat(band + voxel)) / voxel;
+        let hi = (max + Vec3::splat(band + voxel)) / voxel;
+        let ilo = [lo.x.floor() as i32, lo.y.floor() as i32, lo.z.floor() as i32];
+        let ihi = [hi.x.ceil() as i32, hi.y.ceil() as i32, hi.z.ceil() as i32];
+        let maker = Deferred { src: src.clone(), ilo, ihi, voxel, band, base, defer };
+        let (c0, c1) = (chunk_of(ilo), chunk_of(ihi));
+        let mut coords = Vec::new();
+        for cz in c0[2]..=c1[2] {
+            for cy in c0[1]..=c1[1] {
+                for cx in c0[0]..=c1[0] {
+                    coords.push([cx, cy, cz]);
+                }
+            }
         }
+        let at = |i: [i32; 3]| Vec3::new(i[0] as f32, i[1] as f32, i[2] as f32) * voxel;
+        enum Made {
+            Absent,
+            Pending(Chunk),
+            Ready(Option<Chunk>),
+        }
+        let made = par_map(coords.len(), |k| {
+            let c = coords[k];
+            let b = [c[0] * CHUNK, c[1] * CHUNK, c[2] * CHUNK];
+            let e = [b[0] + CHUNK - 1, b[1] + CHUNK - 1, b[2] + CHUNK - 1];
+            if maker.deferred(c) {
+                return Made::Pending(Chunk::Uniform(-band));
+            }
+            let s = [0, 1, 2].map(|k| b[k].max(ilo[k]));
+            let ec = [0, 1, 2].map(|k| e[k].min(ihi[k]));
+            match src.classify(at(s), at(ec), band) {
+                BlockClass::Air => return Made::Absent,
+                BlockClass::Solid if s == b && ec == e => return Made::Ready(Some(Chunk::Uniform(-band))),
+                _ => {}
+            }
+            if near(c) {
+                return Made::Ready(maker.exact(c).0);
+            }
+            // The stand-in, from the generator's own samples.
+            let n = LATTICE_N;
+            let (mut dist, mut color) = (Vec::with_capacity(n * n * n), Vec::with_capacity(n * n * n));
+            let mut scratch = S::Scratch::default();
+            for z in 0..n {
+                for y in 0..n {
+                    for x in 0..n {
+                        let st = LATTICE_STRIDE as i32;
+                        let i = [b[0] + x as i32 * st, b[1] + y as i32 * st, b[2] + z as i32 * st];
+                        let inside = (0..3).all(|k| i[k] >= ilo[k] && i[k] <= ihi[k]);
+                        let (d, col) = match inside.then(|| src.sample(at(i), band, &mut scratch)).flatten() {
+                            Some((d, col)) => (d.clamp(-band, band), col),
+                            None => (band, base),
+                        };
+                        dist.push(d);
+                        color.push(col);
+                    }
+                }
+            }
+            Made::Pending(Chunk::Lattice(std::sync::Arc::new(Lattice { dist, color })))
+        });
+        for (c, m) in coords.into_iter().zip(made) {
+            match m {
+                Made::Absent | Made::Ready(None) => {}
+                Made::Ready(Some(ch)) => {
+                    field.chunks.insert(c, ch);
+                }
+                Made::Pending(ch) => {
+                    field.chunks.insert(c, ch);
+                    field.pending.insert(c);
+                }
+            }
+        }
+        field.generated = true;
+        field.source = Some(Source(std::sync::Arc::new(maker)));
         field
     }
 
@@ -1649,13 +2040,25 @@ impl ChunkField {
         max: Vec3,
         src: std::sync::Arc<S>,
     ) -> std::sync::Arc<dyn PendingSource> {
+        Self::generate_source_for(voxel, min, max, src, true)
+    }
+
+    /// The source [`Self::generate_sourced`] gives a field filled over
+    /// `[min, max]` from `src`, deferring or not.
+    pub fn generate_source_for<S: VoxelSource + Send + Sync + 'static>(
+        voxel: f32,
+        min: Vec3,
+        max: Vec3,
+        src: std::sync::Arc<S>,
+        defer: bool,
+    ) -> std::sync::Arc<dyn PendingSource> {
         let field = Self::new(voxel.clamp(0.25, 16.0));
         let (voxel, band, base) = (field.voxel, field.band(), field.base_color);
         let lo = (min - Vec3::splat(band + voxel)) / voxel;
         let hi = (max + Vec3::splat(band + voxel)) / voxel;
         let ilo = [lo.x.floor() as i32, lo.y.floor() as i32, lo.z.floor() as i32];
         let ihi = [hi.x.ceil() as i32, hi.y.ceil() as i32, hi.z.ceil() as i32];
-        std::sync::Arc::new(Deferred { src, ilo, ihi, voxel, band, base })
+        std::sync::Arc::new(Deferred { src, ilo, ihi, voxel, band, base, defer })
     }
 
     fn generate_with(
@@ -1737,6 +2140,82 @@ impl ChunkField {
     /// knows which chunks are pending but not how to make them.
     pub fn set_pending_source(&mut self, source: std::sync::Arc<dyn PendingSource>) {
         self.source = Some(Source(source));
+    }
+
+    /// May chunk `c` be put away ([`Self::evict`])? A generated field's chunk
+    /// that no edit has touched, holding data, with a source to make it again
+    /// and a recipe its saves carry (a save of the whole field could not say
+    /// what an evicted chunk was).
+    pub fn evictable(&self, c: [i32; 3]) -> bool {
+        self.generated
+            && self.source.is_some()
+            && self.spec.is_some()
+            && !self.edited.contains(&c)
+            && !self.pending.contains(&c)
+            && matches!(self.chunks.get(&c), Some(Chunk::Data(_)))
+    }
+
+    /// Put these chunks away, where [`Self::evictable`]: each is replaced by a
+    /// coarse stand-in of it, a few KB, and listed as pending, so that a write,
+    /// [`Self::realize`] or a worker making it ([`Self::pending_source`],
+    /// [`Self::adopt_generated`]) brings it back exactly as it was. A planet
+    /// kilometres across keeps the ground near the player and stand-ins for
+    /// the rest. Returns what changed, for [`Self::apply_evictions`] on the
+    /// field's copies.
+    pub fn evict(&mut self, coords: &[[i32; 3]]) -> Vec<Eviction> {
+        let mut out = Vec::new();
+        for &c in coords {
+            if !self.evictable(c) {
+                continue;
+            }
+            let b = [c[0] * CHUNK, c[1] * CHUNK, c[2] * CHUNK];
+            let n = LATTICE_N;
+            let (mut dist, mut color) = (Vec::with_capacity(n * n * n), Vec::with_capacity(n * n * n));
+            for z in 0..n {
+                for y in 0..n {
+                    for x in 0..n {
+                        let s = LATTICE_STRIDE as i32;
+                        let i = [b[0] + x as i32 * s, b[1] + y as i32 * s, b[2] + z as i32 * s];
+                        dist.push(self.voxel_at(i));
+                        color.push(self.color_at(i));
+                    }
+                }
+            }
+            let new = Chunk::Lattice(std::sync::Arc::new(Lattice { dist, color }));
+            if let Some(old) = self.chunks.insert(c, new.clone()) {
+                self.pending.insert(c);
+                out.push(Eviction { c, old, new });
+            }
+        }
+        out
+    }
+
+    /// Put away in this copy the chunks another copy of the field put away,
+    /// where this one still holds what that one did: the play session's
+    /// snapshot and the physics sim's copy share the field's chunks, so a
+    /// chunk is freed only once every copy lets go of it. A chunk this copy has
+    /// written since is its own, and stays.
+    pub fn apply_evictions(&mut self, evictions: &[Eviction]) {
+        for ev in evictions {
+            let same = match (self.chunks.get(&ev.c), &ev.old) {
+                (Some(Chunk::Data(a)), Chunk::Data(b)) => std::sync::Arc::ptr_eq(a, b),
+                _ => false,
+            };
+            if same {
+                self.chunks.insert(ev.c, ev.new.clone());
+                self.pending.insert(ev.c);
+            }
+        }
+    }
+
+    /// How many chunks are put away, standing in as lattices.
+    pub fn evicted_count(&self) -> usize {
+        self.chunks.values().filter(|c| matches!(c, Chunk::Lattice(_))).count()
+    }
+
+    /// Is chunk `c` put away ([`Self::evict`])?
+    pub fn is_evicted(&self, c: [i32; 3]) -> bool {
+        matches!(self.chunks.get(&c), Some(Chunk::Lattice(_)))
     }
 
     /// Generate these pending chunks now, on this thread's workers. Returns the
@@ -1875,6 +2354,18 @@ impl ChunkField {
                                     let a = di + (sx - lo[0]) as usize;
                                     let b = di + (ex - lo[0]) as usize;
                                     dist[a..=b].fill(*v);
+                                }
+                            }
+                        }
+                        Some(Chunk::Lattice(l)) => {
+                            for z in sz..=ez {
+                                for y in sy..=ey {
+                                    for x in sx..=ex {
+                                        let di = ((z - lo[2]) as usize * dim + (y - lo[1]) as usize) * dim + (x - lo[0]) as usize;
+                                        let li = local_of([x, y, z]);
+                                        dist[di] = l.dist(li);
+                                        color[di] = l.color(li);
+                                    }
                                 }
                             }
                         }
@@ -2205,7 +2696,7 @@ impl ChunkField {
         let mut hi = [i32::MIN; 3];
         for (c, ch) in &self.chunks {
             let solid = match ch {
-                Chunk::Data(_) => true,
+                Chunk::Data(_) | Chunk::Lattice(_) => true,
                 Chunk::Uniform(v) => *v < 0.0,
             };
             if !solid {
@@ -2276,6 +2767,11 @@ impl ChunkField {
             self.edited.insert(*c);
             match ch {
                 Some(ch) => {
+                    if matches!(ch, Chunk::Lattice(_)) {
+                        self.pending.insert(*c);
+                    } else {
+                        self.pending.remove(c);
+                    }
                     self.chunks.insert(*c, ch.clone());
                 }
                 None => {
@@ -2330,6 +2826,8 @@ impl ChunkField {
                 .filter(|(_, ch)| match ch {
                     Chunk::Data(_) => true,
                     Chunk::Uniform(v) => *v < band - 1e-6,
+                    // Put away, so made again from the source: listed as pending.
+                    Chunk::Lattice(_) => false,
                 })
                 .map(|(c, _)| *c)
                 .collect()
@@ -2357,6 +2855,9 @@ impl ChunkField {
             let air = Chunk::Uniform(band);
             let ch = match self.chunks.get(&c) {
                 Some(Chunk::Uniform(v)) if *v >= band - 1e-6 && !s.delta => continue,
+                // Put away since `begin_save`: made again from the source, so
+                // nothing of it is the save's to keep.
+                Some(Chunk::Lattice(_)) => continue,
                 Some(ch) => ch,
                 None if s.delta => &air,
                 None => continue,
@@ -2365,6 +2866,7 @@ impl ChunkField {
                 s.buf.extend_from_slice(&k.to_le_bytes());
             }
             match ch {
+                Chunk::Lattice(_) => {}
                 Chunk::Uniform(v) => {
                     s.buf.push(0);
                     s.buf.extend_from_slice(&v.to_le_bytes());

@@ -57,6 +57,9 @@ pub(crate) struct TerrainReceipts {
     pub yields: Rc<RefCell<Vec<TerrainYield>>>,
     pub next_op_id: Rc<std::cell::Cell<u64>>,
     pub planet: Rc<RefCell<PlanetQueries>>,
+    /// Edits the engine has taken and not applied yet: it applies a few
+    /// milliseconds of them a frame, in order.
+    pub queued: Rc<std::cell::Cell<usize>>,
 }
 
 /// What a planet question comes back with.
@@ -201,13 +204,12 @@ pub enum LodAnchor {
 }
 
 /// Per-op safety caps: a runaway loop must not freeze the frame. Radius is
-/// clamped; at most [`OPS_PER_FRAME`] ops land in a frame and the rest wait, in
-/// order, for the frames after; past [`MAX_PENDING_OPS`] waiting, an op is
-/// dropped with a warning (once).
+/// clamped; the engine lands a few milliseconds of edits a frame and the rest
+/// wait, in order, for the frames after; past [`MAX_PENDING_OPS`] waiting, an
+/// op is dropped with a warning (once).
 const MAX_RADIUS: f32 = 64.0;
 /// What `terrain.sculpt`'s options table reads.
 pub(crate) const SCULPT_KEYS: &[&str] = &["normal"];
-pub(crate) const OPS_PER_FRAME: usize = 64;
 const MAX_PENDING_OPS: usize = 4096;
 
 /// The streaming-related shared slots (`terrain.saveDir` / `warm` / `flush`) —
@@ -259,7 +261,7 @@ pub(crate) fn install_terrain_api(
     receipts: TerrainReceipts,
 ) {
     let TerrainStreamShared { save_dir, lod_anchor, warm, flush, busy, paths } = stream;
-    let TerrainReceipts { yields, next_op_id, planet } = receipts;
+    let TerrainReceipts { yields, next_op_id, planet, queued } = receipts;
     let Ok(t) = lua.create_table() else { return };
 
     // terrain.deleteSaveDir(path) — delete a save slot's persisted terrain from
@@ -389,6 +391,18 @@ pub(crate) fn install_terrain_api(
         }
     }
 
+    // terrain.pending() — how many of this game's terrain edits (dig, sculpt,
+    // flatten, paint) have not landed yet. Edits are applied a few
+    // milliseconds' worth a frame, in the order they were made, so a batch of
+    // a thousand flattens spreads over frames instead of stopping one; zero
+    // means every edit made so far is in the ground, and a query reads it.
+    {
+        let (ops, queued) = (ops.clone(), queued.clone());
+        if let Ok(f) = lua.create_function(move |_, ()| Ok(ops.borrow().len() + queued.get())) {
+            let _ = t.set("pending", f);
+        }
+    }
+
     // terrain.saveDir(path) / terrain.saveDir() — set (or read) the game's
     // Save-slot directory for player-edited terrain (relative to the project
     // root, e.g. "saves/slot1/terrain"). While set, the streaming system loads
@@ -425,17 +439,18 @@ pub(crate) fn install_terrain_api(
         let ops = ops.clone();
         let logs = logs.clone();
         let ids = next_op_id.clone();
+        let waiting = queued.clone();
         let warned = Rc::new(std::cell::Cell::new(false));
         move |mut op: TerrainOp| -> u64 {
             let mut q = ops.borrow_mut();
-            if q.len() >= MAX_PENDING_OPS {
+            if q.len() + waiting.get() >= MAX_PENDING_OPS {
                 if !warned.replace(true) {
                     logs.borrow_mut().push(crate::ScriptLog {
                         level: crate::LogLevel::Warn,
                         msg: format!(
                             "terrain: {MAX_PENDING_OPS} edits are already waiting to land \
-                             ({OPS_PER_FRAME} land per frame) — this one and any more are dropped \
-                             until they catch up"
+                             (a few milliseconds of them land a frame) — this one and any more \
+                             are dropped until they catch up"
                         ),
                         source: None,
                     });
@@ -824,10 +839,10 @@ pub(crate) const PLANET_KEYS: &[&str] = &[
 ];
 
 /// The relief layers' inner keys.
-const MOUNTAIN_KEYS: &[&str] = &["height", "scale", "sharpness", "coverage", "octaves"];
-const WARP_KEYS: &[&str] = &["strength", "scale"];
-const PLATEAU_KEYS: &[&str] = &["height", "smooth"];
-const TERRACE_KEYS: &[&str] = &["step", "sharpness"];
+const MOUNTAIN_KEYS: &[&str] = &["height", "scale", "sharpness", "coverage", "octaves", "latitude", "latitudeEdge"];
+const WARP_KEYS: &[&str] = &["strength", "scale", "latitude", "latitudeEdge"];
+const PLATEAU_KEYS: &[&str] = &["height", "smooth", "latitude", "latitudeEdge"];
+const TERRACE_KEYS: &[&str] = &["step", "sharpness", "latitude", "latitudeEdge"];
 const OVERHANG_KEYS: &[&str] = &["depth", "scale", "strength"];
 const RAVINE_KEYS: &[&str] = &["count", "depth", "width", "length", "meander"];
 const RIVER_KEYS: &[&str] = &["count", "depth", "width", "seaLevel", "meander"];
@@ -987,18 +1002,35 @@ fn relief_layers_from_table(t: &Table, fill: &mut floptle_field::procgen::Planet
             sharpness: num(&v, "sharpness", d.sharpness),
             coverage: num(&v, "coverage", d.coverage),
             octaves: num(&v, "octaves", d.octaves as f32).max(1.0) as u32,
+            latitude: range(&v, "latitude"),
+            latitude_edge: num(&v, "latitudeEdge", d.latitude_edge),
         });
     }
     if let Some(v) = sub("warp", WARP_KEYS)? {
-        fill.warp = Some(pg::Warp { strength: num(&v, "strength", 0.15), scale: num(&v, "scale", 2.0) });
+        fill.warp = Some(pg::Warp {
+            strength: num(&v, "strength", 0.15),
+            scale: num(&v, "scale", 2.0),
+            latitude: range(&v, "latitude"),
+            latitude_edge: num(&v, "latitudeEdge", 5.0),
+        });
     }
     if let Some(v) = sub("plateau", PLATEAU_KEYS)? {
         let d = pg::Plateau::default();
-        fill.plateau = Some(pg::Plateau { height: num(&v, "height", d.height), smooth: num(&v, "smooth", d.smooth) });
+        fill.plateau = Some(pg::Plateau {
+            height: num(&v, "height", d.height),
+            smooth: num(&v, "smooth", d.smooth),
+            latitude: range(&v, "latitude"),
+            latitude_edge: num(&v, "latitudeEdge", d.latitude_edge),
+        });
     }
     if let Some(v) = sub("terrace", TERRACE_KEYS)? {
         let d = pg::Terrace::default();
-        fill.terrace = Some(pg::Terrace { step: num(&v, "step", d.step), sharpness: num(&v, "sharpness", d.sharpness) });
+        fill.terrace = Some(pg::Terrace {
+            step: num(&v, "step", d.step),
+            sharpness: num(&v, "sharpness", d.sharpness),
+            latitude: range(&v, "latitude"),
+            latitude_edge: num(&v, "latitudeEdge", d.latitude_edge),
+        });
     }
     if let Some(v) = sub("overhangs", OVERHANG_KEYS)? {
         let d = pg::Overhangs::default();

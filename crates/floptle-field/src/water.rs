@@ -342,6 +342,32 @@ impl ShallowWater {
         self.depth.iter().zip(&grid.ground).map(|(d, g)| d + g).collect()
     }
 
+    /// The water's velocity in cell `c` along the grid's two axes, m/s:
+    /// `[toward neighbour 0 (+x), toward neighbour 2 (+y)]`. The flow through
+    /// each pair of opposite faces, out and in, averaged and divided by the
+    /// face the water stands on. Zero in a dry cell.
+    pub fn velocity(&self, grid: &WaterGrid, c: usize) -> [f32; 2] {
+        let h = self.depth[c];
+        if h < 1e-3 {
+            return [0.0; 2];
+        }
+        // What neighbour `o` sends back toward `c`.
+        let back = |o: u32| -> f32 {
+            if o == WALL {
+                return 0.0;
+            }
+            let o = o as usize;
+            grid.nbr[o].iter().position(|&x| x as usize == c).map_or(0.0, |k| self.flux[o][k])
+        };
+        let axis = |plus: usize, minus: usize| {
+            let (po, mo) = (grid.nbr[c][plus], grid.nbr[c][minus]);
+            // Out through the + face, in through the − face, less the reverse.
+            let q = 0.5 * ((self.flux[c][plus] - back(po)) + (back(mo) - self.flux[c][minus]));
+            q / (grid.width[c][plus].max(1e-6) * h)
+        };
+        [axis(0, 1), axis(2, 3)]
+    }
+
     /// A step that stays stable on this grid at its current deepest water.
     ///
     /// Four neighbours pouring into one cell overshoot it, and the overshoot
@@ -453,6 +479,30 @@ impl ShallowWater {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Water flowing down a channel has a velocity, and still water has
+    /// none.** A tilted channel fed from its high end runs toward the low end;
+    /// a settled pool reads zero.
+    #[test]
+    fn flowing_water_has_a_velocity() {
+        let flat = WaterGrid::flat(20, 3, 1.0, |_, _| 0.0);
+        let mut pool = ShallowWater::at_rest(&flat, &vec![1.0; flat.len()]);
+        pool.wake_all();
+        for _ in 0..40 {
+            pool.step(&flat, 0.02);
+        }
+        assert_eq!(pool.velocity(&flat, 30), [0.0, 0.0], "still water is still");
+        // A thin film over a slope, falling toward +x.
+        let grid = WaterGrid::flat(20, 3, 1.0, |x, _| 2.0 - x as f32 * 0.1);
+        let film: Vec<f32> = grid.ground.iter().map(|g| g + 0.2).collect();
+        let mut w = ShallowWater::at_rest(&grid, &film);
+        w.wake_all();
+        for _ in 0..40 {
+            w.step(&grid, 0.02);
+        }
+        let v = w.velocity(&grid, 30);
+        assert!(v[0] > 0.05 && v[1].abs() < 0.05, "water down the channel moves at {v:?}");
+    }
 
     /// A bowl 40 cells across with a rim, inside a wider plain that slopes off
     /// to the edge: one basin whose spill height is the rim's lowest point.

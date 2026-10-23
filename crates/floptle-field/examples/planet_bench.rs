@@ -31,8 +31,8 @@ fn main() {
         use floptle_field::procgen::*;
         PlanetFill {
             mountains: Some(Mountains { height: radius * 0.2, ..Mountains::default() }),
-            warp: Some(Warp { strength: 0.15, scale: 2.5 }),
-            terrace: Some(Terrace { step: 5.0, sharpness: 0.8 }),
+            warp: Some(Warp { strength: 0.15, scale: 2.5, ..Default::default() }),
+            terrace: Some(Terrace { step: 5.0, sharpness: 0.8, ..Default::default() }),
             overhangs: Some(Overhangs::default()),
             ravines: Some(Ravines::default()),
             rivers: Some(Rivers::default()),
