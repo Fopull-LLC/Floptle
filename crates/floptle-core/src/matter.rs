@@ -663,6 +663,12 @@ pub enum BodyKind {
     /// sprite's own silhouette, a slope-sided crate, a round boulder. Its
     /// depth is `half_extents[2]`.
     Polygon,
+    /// The node's own geometry: the convex hull of the mesh it draws for a
+    /// Dynamic or Kinematic body, which tumbles and rests on its faces, and
+    /// the exact triangles for a Static one. Scales and turns with the node.
+    /// `half_extents` holds the mesh's half-size, used if the geometry
+    /// cannot be read.
+    Mesh,
 }
 
 /// How a [`RigidBody`] participates in the simulation — the one dropdown that

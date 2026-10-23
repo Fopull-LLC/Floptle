@@ -26,12 +26,26 @@ the nodes' transforms. Scripts run each frame and can read/modify a body's veloc
 
 ## 2. Rigidbodies
 
-Inspector ▸ **◆ Rigidbody** turns a node into a dynamic body. Properties:
+Inspector ▸ **◆ Rigidbody** turns a node into a dynamic body.
+
+**It starts the shape of the node.** Added to a node that draws geometry, a
+Rigidbody is fitted to it: a cube becomes a Box its drawn size, a sphere a
+Sphere, a capsule a Capsule, and a blockout mesh or an imported model a **Mesh**
+body, its own geometry. It starts Dynamic, turning, and as heavy as its volume
+would be at half water's density. **Fit to mesh** in the Inspector puts the
+shape back after you edit the mesh or rescale the node; the Inspector says
+whether the body still matches. A selected node's body is outlined in the
+Scene view, so a mismatch shows.
+
+**One step:** right-click a mesh in the Hierarchy, or Add Component ▸
+**Physics object**, and the node becomes something that falls, bounces,
+tumbles and lands on its faces. Its body replaces its static Collider.
 
 | Property | Meaning |
 |---|---|
-| **shape** | Sphere, **Capsule** (capsules stand upright; best for characters), Box, or **Polygon** (2D, below). A capsule collides along its whole length, and stands on its **feet**: the ground straight beneath its centre line, so a character's feet meet a slope, a crease or a bump where they are drawn. |
-| **radius / height** | Collision size |
+| **shape** | Sphere, **Capsule** (capsules stand upright; best for characters), Box, **Polygon** (2D, below), or **Mesh**. A capsule collides along its whole length, and stands on its **feet**: the ground straight beneath its centre line, so a character's feet meet a slope, a crease or a bump where they are drawn. |
+| **Mesh** | The node's own geometry, read every Play, so an edit to the mesh is an edit to its collision. A Dynamic or Kinematic Mesh body collides as the mesh's **convex hull** (up to 20 corners; a box hulls to itself), which tumbles and rests on its faces. A Static one collides as the mesh's exact triangles. Scales and turns with the node. |
+| **radius / height** | Collision size, in world units. A Box's half-extents are the node's own, before its scale: scaling the node scales the box. |
 | **bounce** | Restitution (0 = no bounce) |
 | **friction** | 0 = ice, 1 = no sliding |
 | **affected by gravity** | Off = floats (still collides; a script can still move it) |
@@ -47,9 +61,13 @@ physics step (about 21 m/s for a 0.35 m capsule) sweeps its move: it stops where
 it first touches a wall, loses only its speed into that wall, and keeps going
 along it. So a launch, a fling or a long fall never ends up on the far side of a
 mesh wall it ran into. Slower bodies move exactly as they always have. A fast
-box or polygon body, turning or not, marches its move instead, never further
-in one stride than the nearest surface ahead, so a crate fired at a thin wall
-stops at it.
+box, polygon or mesh body, turning or not, marches its move instead, never
+further in one stride than the nearest surface ahead, and a turning one cuts
+its turn finer than the rounding on its corners, so a crate fired at a
+blockout wall at 20 m/s, or dropped 20 m onto a blockout floor, stays out of
+it. A box's and a mesh body's corners are rounded by up to 2 cm: that is
+what lets them touch a triangle mesh, whose surface has no inside to push
+out of.
 
 ### 2D bodies
 
@@ -77,7 +95,23 @@ it is, not half its depth in front of and behind it.
 Tick **rotates** and the physics turns the body. A contact away from its centre
 spins it, so a crate pushed off a ledge tips over the edge, a ball rolls down a
 slope, and a plank see-saws on a rock. The node's rotation follows. A crate
-placed tilted in the editor lands tilted.
+placed tilted in the editor lands tilted, and comes to rest on a face: a body
+balanced on an edge or a corner is not counted as at rest until it has fallen
+onto one.
+
+Turning or not, a box, polygon or mesh body starts at its node's full
+rotation, scale and pivot, so it collides exactly where it is drawn. One that
+does not turn keeps that angle.
+
+### Netcode (rollback)
+
+The Inspector's collapsed **Netcode (rollback)** section holds **script owns
+contacts** (`pushboxOnly` in Lua, `pushbox_only` in scene files). It **turns off gravity,
+floors and walls for this body**: the body moves by its velocity and nothing
+else, and passes through everything unless its script stops it. It is the
+profile rollback netcode needs ([multiplayer.md](./multiplayer.md)), never what
+an ordinary falling object wants, and the Inspector warns when it is on for a
+Dynamic body.
 
 Leave it off for a character. A body that doesn't rotate keeps its orientation
 however it is hit, which is what keeps a player standing up. The **freeze rot**

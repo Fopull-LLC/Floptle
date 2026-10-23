@@ -720,6 +720,30 @@ impl EditorTabViewer<'_> {
                 self.cmd.save_prefab = Some((roots, self.project_root.join("prefabs")));
                 ui.close();
             }
+            // One step from a mesh to something that falls, tumbles and lands.
+            let draws_geometry = matches!(
+                self.world.get::<floptle_core::Matter>(e),
+                Some(
+                    floptle_core::Matter::Primitive { .. }
+                        | floptle_core::Matter::MapMesh { .. }
+                        | floptle_core::Matter::Mesh { .. }
+                        | floptle_core::Matter::Blob { .. }
+                )
+            );
+            if draws_geometry
+                && self.world.get::<floptle_core::RigidBody>(e).is_none()
+                && ui
+                    .button("♦ Make it a physics object")
+                    .on_hover_text(
+                        "adds a Dynamic Rigidbody fitted to this mesh, that turns and \
+                         weighs what its volume would: it falls, bounces, tumbles and \
+                         lands on its faces. Its body replaces its static Collider.",
+                    )
+                    .clicked()
+            {
+                self.cmd.make_physics_object = Some(e);
+                ui.close();
+            }
             ui.separator();
             // The target state is decided from this row and applied to the whole
             // selection, so a mixed selection ends up uniform rather than inverted

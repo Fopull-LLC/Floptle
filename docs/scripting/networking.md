@@ -521,7 +521,7 @@ produce a state that *looks* restored and isn't.
 | Move the body with `node.tickX/tickY/tickZ` or velocity, never `node.x = node.x + d` | Same reason, from the other side: that teleports the body onto its **visual** position — the model slides and the hurtbox doesn't. |
 | Use `net.random()`, never an unseeded `rng()` | An unseeded roll comes from the clock. Two peers draw different numbers and the match quietly forks in two. |
 | Put projectiles in rollback **state**, not in `spawn()` | A spawned prefab isn't part of the rollback state and one-shot spawns are suppressed during a replay. A fireball that must exist on both machines is data in your controller's snapshot, rendered by the controller. |
-| Turn on **pushbox only** on the RigidBody | The contact solver is the part least likely to agree bit-for-bit between two machines. With it on, the body integrates its velocity and nothing else — your script owns gravity, the floor and pushout, which is how the genre works anyway. |
+| Turn on **script owns contacts** (Rigidbody ▸ Netcode (rollback); `pushboxOnly` in Lua) | It turns off gravity, floors and walls for the body. The contact solver is the part least likely to agree bit-for-bit between two machines. With it on, the body integrates its velocity and nothing else — your script owns gravity, the floor and pushout, which is how the genre works anyway. |
 
 ### The API
 

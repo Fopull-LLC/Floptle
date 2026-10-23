@@ -39,12 +39,15 @@ pub(crate) fn spend(d: Vec3, budget: &mut f32) -> Vec3 {
 }
 
 /// One shape in world space, with an exact signed distance.
+#[allow(clippy::large_enum_variant)] // a hull is a value, like its body's shape
 #[derive(Clone, Copy, Debug)]
 enum Solid {
     Sphere { c: Vec3, r: f32 },
     Capsule { a: Vec3, b: Vec3, r: f32 },
     Box { c: Vec3, rot: Quat, half: Vec3 },
     Poly { c: Vec3, rot: Quat, outline: floptle_core::outline::Outline, half_depth: f32 },
+    /// A hull about `c` (its body's origin), turned by `rot`.
+    Hull { c: Vec3, rot: Quat, hull: crate::hull::Hull },
 }
 
 impl Solid {
@@ -64,6 +67,7 @@ impl Solid {
                 let d = rot.conjugate() * (p - c);
                 crate::world::extrude(outline.distance(d.x, d.y), d.z, half_depth)
             }
+            Solid::Hull { c, rot, ref hull } => hull.distance(rot.conjugate() * (p - c)),
         }
     }
 
@@ -111,6 +115,7 @@ impl Solid {
         match *self {
             Solid::Sphere { c, .. } | Solid::Box { c, .. } | Solid::Poly { c, .. } => c,
             Solid::Capsule { a, b, .. } => (a + b) * 0.5,
+            Solid::Hull { c, rot, ref hull } => c + rot * hull.centroid(),
         }
     }
 
@@ -120,6 +125,7 @@ impl Solid {
             Solid::Capsule { a, b, r } => ((a + b) * 0.5, (b - a).length() * 0.5 + r),
             Solid::Box { c, half, .. } => (c, half.length()),
             Solid::Poly { c, outline, half_depth, .. } => (c, outline.reach().hypot(half_depth)),
+            Solid::Hull { c, ref hull, .. } => (c, hull.reach_from(Vec3::ZERO)),
         }
     }
 
@@ -181,6 +187,30 @@ impl Solid {
                 }
                 out[2 * n] = c;
                 (out, 2 * n + 1, 0.0)
+            }
+            // Its corners, its centroid, and where the centroid falls on each
+            // face while the room lasts: corners alone miss two hulls meeting
+            // face to face, like two boxes'.
+            Solid::Hull { c, rot, ref hull } => {
+                let mut n = 0;
+                for v in hull.verts() {
+                    out[n] = c + rot * *v;
+                    n += 1;
+                }
+                let mid = hull.centroid();
+                out[n] = c + rot * mid;
+                n += 1;
+                for (nrm, off) in hull.planes() {
+                    if n == out.len() {
+                        break;
+                    }
+                    let foot = mid - nrm * (nrm.dot(mid) - off);
+                    if hull.planes().all(|(m, o)| m.dot(foot) - o < 1e-4) {
+                        out[n] = c + rot * foot;
+                        n += 1;
+                    }
+                }
+                (out, n, 0.0)
             }
         }
     }
@@ -345,6 +375,7 @@ impl PhysicsWorld {
                     BodyShape::Polygon { outline, half_depth } => {
                         Solid::Poly { c: b.pos, rot: b.orient, outline, half_depth }
                     }
+                    BodyShape::Hull(hull) => Solid::Hull { c: b.pos, rot: b.orient, hull },
                 };
                 out.push((0, solid));
             }

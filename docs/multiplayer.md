@@ -195,7 +195,9 @@ about hitstop, meter and trades because the *simulation* agrees.
    opponent is on the same couch or another continent. Left at 1, fighter #2
    stands still all match. (The engine raises a Console fault at match start if
    these don't match — but read it here first.)
-3. On each fighter's Rigidbody, turn on **pushbox only**. The contact solver is
+3. On each fighter's Rigidbody, open **Netcode (rollback)** and turn on **script
+   owns contacts** (`pushboxOnly` in Lua). It turns off gravity, floors and walls
+   for the body. The contact solver is
    the part least likely to agree bit-for-bit between two machines; with this on,
    the body integrates velocity and nothing else, and your script owns gravity,
    the floor and pushout — which is how the genre works anyway.

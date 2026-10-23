@@ -5,6 +5,11 @@ use floptle_core::math::{Mat3, Quat, Vec3};
 
 
 /// The collision shape of a dynamic body.
+///
+/// A plain value, hull included, so a body stays one the solver and a
+/// rollback snapshot copy freely; boxing the hull would make every body an
+/// allocation to clone.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BodyShape {
     /// A sphere of the body's `radius`.
@@ -12,21 +17,32 @@ pub enum BodyShape {
     /// A capsule: `radius` thick, with `half_height` from the center to each end-sphere
     /// center, aligned to the body's `up` (kept along −gravity, so it stands upright).
     Capsule { half_height: f32 },
-    /// A world-axis-aligned box with the given half-extents. Depenetrated by sampling its
-    /// 8 corners + center as points against the world (so a crate rests flat on a floor).
-    /// Not orientation-tracked in the solver — intended for crates/platforms under level
-    /// gravity, not free-tumbling rotation.
+    /// A box with the given half-extents, in the body's own axes: turned by
+    /// `orient`, which starts at the node's rotation, so a box placed tilted
+    /// collides tilted. A body that `rotates` tumbles it; one that does not
+    /// holds it at the angle it was placed. Depenetrated by sampling its 8
+    /// corners + center as points against the world (so a crate rests flat
+    /// on a floor).
     Box { half: Vec3 },
     /// A convex outline in the XY plane, `half_depth` thick either side of it.
     /// Like a box it keeps its orientation: a 2D body that stands on its art
     /// rather than tumbling. Depenetrated by its corners, its edge midpoints
     /// and its centre, all in its own plane, the way a 2D box is.
     Polygon { outline: floptle_core::outline::Outline, half_depth: f32 },
+    /// A convex solid from a mesh: the hull of the node's own geometry,
+    /// scaled, in the body's axes and about the node's origin (so a mesh
+    /// modelled off-centre collides where it is drawn). It turns with the
+    /// body like a box does and is depenetrated by its corners.
+    Hull(crate::hull::Hull),
 }
 
 /// The most sample points a body tests: a polygon's eight corners, its eight
-/// edge midpoints and its centre.
-pub(crate) const MAX_SAMPLES: usize = 2 * floptle_core::outline::OUTLINE_MAX + 1;
+/// edge midpoints and its centre, or a hull's corners and its centroid.
+pub(crate) const MAX_SAMPLES: usize = {
+    let poly = 2 * floptle_core::outline::OUTLINE_MAX + 1;
+    let hull = crate::hull::HULL_VERTS + 1;
+    if poly > hull { poly } else { hull }
+};
 
 /// A dynamic body — a sphere or capsule integrated + depenetrated each step.
 #[derive(Clone, Copy, Debug)]
@@ -248,12 +264,25 @@ impl Body {
                 let [x, y] = outline.centroid();
                 Vec3::new(x, y, 0.0)
             }
+            BodyShape::Hull(h) => h.centroid(),
             _ => Vec3::ZERO,
         }
     }
 
     pub(crate) fn shape_is_capsule(&self) -> bool {
         matches!(self.shape, BodyShape::Capsule { .. })
+    }
+
+    /// The radius a 3D box's or a hull's corner samples carry, each pulled
+    /// in by as much (see `sample_centers`): two centimetres, or a quarter of
+    /// the shape's thinnest half for a small one.
+    pub(crate) fn corner_skin(&self) -> f32 {
+        let thin = match self.shape {
+            BodyShape::Box { half } => half.min_element(),
+            BodyShape::Hull(h) => h.inner_radius(),
+            _ => return 0.0,
+        };
+        (thin * 0.25).clamp(0.0, 0.02)
     }
 
     /// The centre of mass, in the sim frame.
@@ -278,6 +307,7 @@ impl Body {
                 let b = box_i(Vec3::new(hx, hy, half_depth));
                 Vec3::new(b.x, b.y, m * outline.polar_moment_per_area())
             }
+            BodyShape::Hull(h) => h.inertia(m),
         }
     }
 
@@ -333,6 +363,7 @@ impl Body {
             BodyShape::Capsule { half_height } => half_height + self.radius,
             BodyShape::Box { half } => half.length(),
             BodyShape::Polygon { outline, half_depth } => outline.reach().hypot(half_depth),
+            BodyShape::Hull(h) => h.reach_from(Vec3::ZERO),
         }
     }
 
@@ -359,6 +390,14 @@ impl Body {
         }
     }
 
+    /// A body shaped like `hull`, which is in the body's own axes about `pos`
+    /// (see [`BodyShape::Hull`]). `radius` is the hull's inner radius, for
+    /// the few things that size a body by one number.
+    pub fn hull(pos: Vec3, hull: crate::hull::Hull) -> Self {
+        let r = hull.inner_radius().max(1e-3);
+        Self { shape: BodyShape::Hull(hull), ..Self::sphere(pos, r) }
+    }
+
     /// A box body with the given world-axis half-extents (a crate / falling platform).
     pub fn boxx(pos: Vec3, half: Vec3) -> Self {
         let h = half.abs().max(Vec3::splat(1e-3));
@@ -375,6 +414,10 @@ impl Body {
             BodyShape::Polygon { outline, .. } => {
                 let ys = outline.points().iter().map(|q| q[1]);
                 ys.clone().fold(f32::MIN, f32::max) - ys.fold(f32::MAX, f32::min)
+            }
+            BodyShape::Hull(h) => {
+                let (lo, hi) = h.bounds();
+                hi.y - lo.y
             }
         }
     }
@@ -441,7 +484,15 @@ impl Body {
                 a[8] = self.pos;
                 (a, 9, 0.0)
             }
+            // Corners pulled in by a skin and given it as their radius: the
+            // faces are where they were, the corners round by the skin. A
+            // corner with no radius had no contact with anything whose
+            // distance has no inside (a mesh floor, a blockout wall): only a
+            // point *inside* a surface pushes out, and a mesh cannot say
+            // which side is inside, so a box fell through every mesh it met.
             BodyShape::Box { half } => {
+                let skin = self.corner_skin();
+                let half = half - Vec3::splat(skin);
                 let mut n = 0;
                 for &sx in &[-1.0f32, 1.0] {
                     for &sy in &[-1.0f32, 1.0] {
@@ -452,7 +503,7 @@ impl Body {
                     }
                 }
                 a[8] = self.pos; // center, so a deeply-buried box still resolves
-                (a, 9, 0.0)
+                (a, 9, skin)
             }
             // In its own plane whether or not the body is locked to it: an
             // outline has no corners in depth to sample.
@@ -467,6 +518,18 @@ impl Body {
                 }
                 a[2 * n] = self.com();
                 (a, 2 * n + 1, 0.0)
+            }
+            // Every corner, and the centroid so a body pushed deep into
+            // something still finds its way out.
+            // Pulled in by a skin like a box's corners, for the same reason.
+            BodyShape::Hull(h) => {
+                let skin = self.corner_skin();
+                let n = h.verts().len();
+                for (i, s) in a.iter_mut().enumerate().take(n) {
+                    *s = self.pos + self.orient * h.inset_vert(i, skin);
+                }
+                a[n] = self.com();
+                (a, n + 1, skin)
             }
         }
     }

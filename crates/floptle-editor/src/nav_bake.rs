@@ -315,6 +315,9 @@ fn static_body_shape(world: &World, e: Entity) -> Option<floptle_core::RigidBody
     world
         .get::<floptle_core::RigidBody>(e)
         .filter(|rb| rb.mode == floptle_core::BodyMode::Static)
+        // A Mesh body collides as the node's own triangles, which is what
+        // the geometry path bakes.
+        .filter(|rb| rb.kind != floptle_core::BodyKind::Mesh)
         .copied()
 }
 
@@ -327,7 +330,7 @@ fn push_body(
     scale: Vec3,
 ) {
     match rb.kind {
-        floptle_core::BodyKind::Box => {
+        floptle_core::BodyKind::Box | floptle_core::BodyKind::Mesh => {
             let h = Vec3::from(rb.half_extents) * scale;
             push_box(out, centre, h, rot);
         }

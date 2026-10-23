@@ -88,10 +88,20 @@ floating object that still collides and can be script-driven.
 
 ## 5. Walk on an imported model
 
-1. Drop a `.glb`/`.gltf` into `models/` and add it (it imports automatically).
+1. Drop a model into `models/` and add it — `.glb`, `.gltf`, `.fbx`, `.obj` and more; anything
+   that is not glTF converts on its own ([importing-models.md](importing-models.md)).
 2. Select the mesh node → Inspector ▸ **➕ Add Component → ▦ Collider**.
 3. Play — the character collides with the model's triangles, not just the terrain.
    Toggle **View ▸ Mesh collider wireframes** to see them.
+
+## 6. Make something fall and tumble
+
+Build a box with the ▦ Model tool (or drop in a model, or a cube), then
+right-click it in the Hierarchy ▸ **♦ Make it a physics object**. That adds a
+Rigidbody fitted to the mesh: Dynamic, turning, and as heavy as its size. Press
+Play and it falls, bounces off the walls and lands on a face. There is nothing
+to size by hand; if you reshape the mesh later, **Fit to mesh** on the
+Rigidbody refits it, and the Scene view outlines the shape it collides as.
 
 A model's textures are filtered the way its file says: one exported with nearest
 filtering keeps crisp pixels, one exported with linear filtering draws smooth, with
@@ -99,7 +109,7 @@ mipmaps. Blender writes linear unless an image's interpolation is set to **Close
 A file that names no filter draws crisp. To choose for the whole model, select the
 `.glb` in the Assets panel and set **embedded texture filter** in the Inspector.
 
-## 6. Script some interaction
+## 7. Script some interaction
 
 Scripts are Lua files in `scripts/`, attached to nodes, hot-reloaded on save. A node's
 script drives its transform — and, if the node has a Rigidbody, its velocity. Example: a
