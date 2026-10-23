@@ -620,6 +620,7 @@ impl BodyHull {
             BodyShape::Polygon { outline, half_depth } => {
                 extrude(outline.distance(local.x, local.y), local.z, half_depth)
             }
+            BodyShape::Hull(h) => h.distance(local),
         }
     }
 
@@ -789,8 +790,13 @@ pub fn overlap_sphere_hulls(
 ///
 /// `skip_start`: a sphere that starts against a surface (a body resting on a
 /// floor, casting along it) answers distance 0 at once, which blocks every
-/// move. With it set, the radius shrinks to just inside whatever the sphere
-/// starts touching, so only a surface it moves into counts.
+/// move. With it set, only what the sphere starts touching is let off: a
+/// collider it starts against is met by a sphere shrunk to just inside it
+/// (so a floor it slides along is not a hit, and a rise in that floor
+/// ahead still is), and a body it starts against or inside is passed
+/// through. Everything else is met at the full radius. Shrinking the whole
+/// sweep to clear the nearest thing turned every cast near anything into a
+/// thin one.
 #[allow(clippy::too_many_arguments)]
 pub fn spherecast(
     colliders: &[AnchoredCollider],
@@ -806,8 +812,10 @@ pub fn spherecast(
     // A march stops within 0.02 of a surface, so a box grazed by that much
     // must still be marched.
     const SLACK: f32 = 0.05;
+    // A gap wider than the march's stop distance.
+    const CLEAR: f32 = 0.03;
     let rd = dir.try_normalize()?;
-    let mut r = radius.max(0.0);
+    let r = radius.max(0.0);
     let near: Vec<&AnchoredCollider> = colliders
         .iter()
         .filter(|c| (mask >> c.layer) & 1 == 1 && !c.sensor)
@@ -824,22 +832,20 @@ pub fn spherecast(
             None => true,
         })
         .collect();
-    if skip_start {
-        let d0 = near
-            .iter()
-            .map(|c| c.distance(origin))
-            .chain(
-                hulls
-                    .iter()
-                    .filter(|h| !(exclude.contains(&h.eid) || exclude.contains(&h.owner)) && (mask >> h.layer) & 1 == 1)
-                    .map(|h| h.distance(origin)),
-            )
-            .fold(f32::INFINITY, f32::min);
-        // Leave a gap wider than the march's stop distance.
-        if d0.is_finite() && d0 - r < 0.03 {
-            r = (d0 - 0.03).max(0.0);
-        }
-    }
+    // The radius each collider is met with, and the bodies passed through.
+    let near_r: Vec<f32> = near
+        .iter()
+        .map(|c| {
+            let d0 = if skip_start { c.distance(origin) } else { f32::INFINITY };
+            if d0 - r < CLEAR { (d0 - CLEAR).max(0.0) } else { r }
+        })
+        .collect();
+    let live = |h: &&BodyHull| {
+        !(exclude.contains(&h.eid) || exclude.contains(&h.owner))
+            && (mask >> h.layer) & 1 == 1
+            && !(skip_start && h.distance(origin) - r < CLEAR)
+    };
+    let hulls: Vec<&BodyHull> = hulls.iter().filter(live).collect();
     let mut t = 0.0f32;
     for _ in 0..512 {
         if t > max_dist {
@@ -847,25 +853,22 @@ pub fn spherecast(
         }
         let p = origin + rd * t;
         let mut dmin = f32::MAX;
-        let mut best: Option<Result<&AnchoredCollider, &BodyHull>> = None;
-        for &c in &near {
-            let d = c.distance(p) - r;
+        let mut best: Option<(Result<&AnchoredCollider, &BodyHull>, f32)> = None;
+        for (k, &c) in near.iter().enumerate() {
+            let d = c.distance(p) - near_r[k];
             if d < dmin {
                 dmin = d;
-                best = Some(Ok(c));
+                best = Some((Ok(c), near_r[k]));
             }
         }
-        for h in hulls {
-            if exclude.contains(&h.eid) || exclude.contains(&h.owner) || (mask >> h.layer) & 1 == 0 {
-                continue;
-            }
+        for &h in &hulls {
             let d = h.distance(p) - r;
             if d < dmin {
                 dmin = d;
-                best = Some(Err(h));
+                best = Some((Err(h), r));
             }
         }
-        let best = best?; // nothing testable in range at all
+        let (best, r) = best?; // nothing testable in range at all
         if dmin < 0.02 {
             // A sphere's centre stops a radius off the surface, where the
             // closest point gives a real direction. A zero radius is a ray,
@@ -2265,7 +2268,7 @@ impl PhysicsWorld {
             if left <= 1e-5 {
                 break;
             }
-            let (centres, n_c, _) = self.bodies[bi].sample_centers();
+            let (centres, n_c, r) = self.bodies[bi].sample_centers();
             let mut ahead = f32::MAX;
             for &ci in &cand {
                 let c = &self.colliders[ci as usize];
@@ -2273,7 +2276,7 @@ impl PhysicsWorld {
                     continue;
                 }
                 for &p in &centres[..n_c] {
-                    let d = c.distance(p);
+                    let d = c.distance(p) - r;
                     if d < 0.05 && c.normal(p).dot(dir) > -0.2 {
                         continue;
                     }
@@ -2281,6 +2284,11 @@ impl PhysicsWorld {
                 }
             }
             if ahead < 0.005 {
+                // At the surface: go on until the samples just touch it, so
+                // the contact pass meets it. Stopping short left a falling
+                // body hovering off the floor, out of reach of every contact,
+                // gaining speed it never lost.
+                self.bodies[bi].pos += dir * left.min((ahead + 0.002).max(0.0));
                 break;
             }
             let stride = ahead.min(left);
@@ -2293,17 +2301,18 @@ impl PhysicsWorld {
     fn swept_move(&mut self, bi: usize, delta: Vec3) -> Option<SweptHit> {
         let radius = self.bodies[bi].radius;
         let len0 = delta.length();
-        if matches!(self.bodies[bi].shape, BodyShape::Box { .. } | BodyShape::Polygon { .. })
+        let skin = self.bodies[bi].corner_skin();
+        if matches!(self.bodies[bi].shape, BodyShape::Box { .. } | BodyShape::Polygon { .. } | BodyShape::Hull(_))
             && !self.bodies[bi].sensor
             && len0.is_finite()
-            && len0 > radius * SWEEP_FRACTION
+            && (len0 > radius * SWEEP_FRACTION || (skin > 0.0 && len0 > (skin * 0.5).max(0.002)))
         {
             self.march_flat(bi, delta);
             return None;
         }
         if self.bodies[bi].sensor
             || radius <= 0.0
-            || matches!(self.bodies[bi].shape, BodyShape::Box { .. } | BodyShape::Polygon { .. })
+            || matches!(self.bodies[bi].shape, BodyShape::Box { .. } | BodyShape::Polygon { .. } | BodyShape::Hull(_))
             || !len0.is_finite()
             || len0 <= radius * SWEEP_FRACTION
         {
@@ -2457,20 +2466,31 @@ impl PhysicsWorld {
                     let [hx, hy] = outline.half_extents();
                     hx.min(hy)
                 }
+                BodyShape::Hull(h) => h.inner_radius(),
             }
             .max(0.02)
         };
         let travel = self.bodies[bi].vel.length() * dt
             + self.bodies[bi].ang_vel.length() * dt * self.bodies[bi].bounding_radius();
-        let steps = ((travel / (size * 0.5)).ceil() as usize).clamp(1, 16);
+        // A turn is not marched the way a move is, so a corner swung through
+        // more than its skin in one substep can land past a mesh's face,
+        // where nothing pushes it back; the turn is cut finer than that.
+        let skin = self.bodies[bi].corner_skin();
+        let swing = self.bodies[bi].ang_vel.length() * dt * self.bodies[bi].bounding_radius();
+        let swing_steps = if skin > 0.0 { (swing / (skin * 0.75)).ceil() as usize } else { 1 };
+        let steps = ((travel / (size * 0.5)).ceil() as usize).max(swing_steps).clamp(1, 16);
         let h = dt / steps as f32;
         let row = self.matrix[self.bodies[bi].layer as usize];
         for _ in 0..steps {
             {
                 // Marched past a few centimetres: a substep can still be
-                // longer than the thinnest wall.
+                // longer than the thinnest wall. A shape with corners is
+                // marched past half its skin, because a mesh's distance has
+                // no inside: a corner that steps clean past the skin into a
+                // floor is not touching it, and nothing pushes it out.
                 let mv = self.bodies[bi].vel * h;
-                if mv.length() > 0.05 {
+                let skin = self.bodies[bi].corner_skin();
+                if mv.length() > if skin > 0.0 { (skin * 0.5).max(0.002) } else { 0.05 } {
                     self.march_flat(bi, mv);
                 } else {
                     self.bodies[bi].pos += mv;
@@ -2495,7 +2515,8 @@ impl PhysicsWorld {
         // At rest: below what anyone can see, a resting body's corner
         // micro-impulses would otherwise creep it along forever.
         let slow = b.vel.length() < 0.05 && b.ang_vel.length() < 0.05;
-        if (b.grounded || was_grounded) && slow {
+        if (b.grounded || was_grounded) && slow && self.rests_on_a_face(bi, g) {
+            let b = &mut self.bodies[bi];
             b.vel = Vec3::ZERO;
             b.ang_vel = Vec3::ZERO;
             b.sleep_time += dt;
@@ -2504,8 +2525,30 @@ impl PhysicsWorld {
                 self.resting[bi] = self.find_resting_contacts(bi);
             }
         } else {
-            b.sleep_time = 0.0;
+            self.bodies[bi].sleep_time = 0.0;
         }
+    }
+
+    /// Whether a slow body that turns may be stopped: one with corners,
+    /// turning freely, is stopped only once its centre of mass stands over
+    /// the floor it touches. Balanced on an edge or a corner, each step's
+    /// tip is too slow to count as moving, so stopping it there froze a
+    /// crate on its corner for good. Supported by another body rather than
+    /// the level, it is left to the old test.
+    fn rests_on_a_face(&self, bi: usize, g: Vec3) -> bool {
+        let b = &self.bodies[bi];
+        if !matches!(b.shape, BodyShape::Box { .. } | BodyShape::Polygon { .. } | BodyShape::Hull(_))
+            || b.lock_rot.iter().any(|&l| l)
+            || b.lock_pos.iter().any(|&l| l)
+        {
+            return true;
+        }
+        let touching = self.find_resting_contacts(bi);
+        if touching.is_empty() {
+            return true;
+        }
+        let pts: Vec<Vec3> = touching.iter().map(|t| t.1).collect();
+        crate::hull::over_support(&pts, b.com(), g, 0.002)
     }
 
     /// Two passes of contact against the static world and the kinematic

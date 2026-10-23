@@ -46,6 +46,11 @@ pub struct AssemblyInfo {
     pub gripped: bool,
     /// Part entity indices (the compound's shape ids).
     pub parts: Vec<u32>,
+    /// How the craft is turned this tick, as a quaternion `[x, y, z, w]`.
+    /// The root node's rotation is the one drawn, refreshed once a frame, so
+    /// a `fixedUpdate` in a frame of several ticks read it a tick or more
+    /// behind.
+    pub rot: [f32; 4],
 }
 
 /// One part's contact load over the last physics tick, refreshed by the editor
@@ -406,6 +411,17 @@ pub(crate) fn install_assembly_api(
             out.set("grounded", i.grounded)?;
             out.set("anchored", i.anchored)?;
             out.set("gripped", i.gripped)?;
+            // Its axes this tick, the way node:worldRight/worldUp/worldForward
+            // give a node's.
+            let q = glam::Quat::from_array(i.rot);
+            let q = if q.length_squared() > 1e-12 { q.normalize() } else { glam::Quat::IDENTITY };
+            let axis = |v: glam::Vec3| {
+                let a = q * v;
+                vec3_table(lua, [a.x as f64, a.y as f64, a.z as f64])
+            };
+            out.set("right", axis(glam::Vec3::X)?)?;
+            out.set("up", axis(glam::Vec3::Y)?)?;
+            out.set("forward", axis(glam::Vec3::NEG_Z)?)?;
             let parts = lua.create_table()?;
             for (k, p) in i.parts.iter().enumerate() {
                 parts.set(k + 1, *p)?;

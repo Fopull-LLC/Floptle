@@ -996,3 +996,296 @@ fn rays_casts_and_overlaps_find_an_assemblys_parts() {
     queries_find_each_part(false);
     queries_find_each_part(true);
 }
+
+/// In each `fixedUpdate` of a frame of several ticks, `assembly.info` gives
+/// a spinning craft's axes as they are that tick: from one tick to the next
+/// they turn by the spin over a tick, not stand still until the frame ends.
+#[test]
+fn assembly_info_turns_with_its_craft_tick_by_tick() {
+    let (mut ed, dir) = project(
+        "infopose",
+        r#"
+local n, ship, last = 0, nil, nil
+function fixedUpdate(node, dt)
+  n = n + 1
+  if n == 1 then
+    spawn("Vessel", vec3(0, 0, 0), function(v)
+      spawn("Part", vec3(1, 0, 0), function(p) assembly.rebuild(v, function(s) ship = s end) end, v)
+    end)
+  elseif ship then
+    local r = assembly.info(ship).right
+    if last and n > 6 then
+      local dot = math.max(-1, math.min(1, r.x * last.x + r.y * last.y + r.z * last.z))
+      log(string.format("TURN %.5f %d", math.acos(dot), n))
+    end
+    last = r
+  end
+end
+"#,
+    );
+    ed.toggle_play();
+    // Frames of three ticks.
+    for _ in 0..3 {
+        ed.play_step(3.0 / 60.0, true);
+    }
+    let root = ed.world.query::<Name>().find(|(_, n)| n.0 == "Vessel").map(|(e, _)| e.index()).unwrap();
+    ed.sim.as_mut().unwrap().compound_of_mut(root).unwrap().ang_vel = Vec3::new(0.0, 2.0, 0.0);
+    for _ in 0..6 {
+        ed.play_step(3.0 / 60.0, true);
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+    }
+    let turns = lines(&mut ed, "TURN");
+    assert!(turns.len() >= 9, "{turns:?}");
+    // 2 rad/s over a sixtieth of a second, every tick.
+    for t in turns.iter().skip(3) {
+        let a: f64 = t.split(' ').next().unwrap().parse().unwrap();
+        assert!((a - 2.0 / 60.0).abs() < 0.004, "a tick turned it {a} rad, not {}: {turns:?}", 2.0 / 60.0);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A four-wheeled rover standing on its wheels on a planet moving on its
+/// rails, creeping along at half a metre a second, can time-warp without
+/// being anchored: on its wheels it is on the ground, not in flight, and was
+/// put on an orbit that dropped the warp for being near the surface.
+#[test]
+fn a_rover_parked_on_its_wheels_can_time_warp() {
+    let (mut ed, dir) = project(
+        "roverwarp",
+        r#"
+local n = 0
+function update(node, dt)
+  n = n + 1
+  -- Asked for once, then left alone: whatever drops it, drops it for good.
+  if n == 120 then space.warp(10) end
+  local r, p = find("Rover"), find("Planet")
+  if n > 180 and r and p then
+    local i = assembly.info(r)
+    local dx, dy, dz = i.com.x - p.x, i.com.y - p.y, i.com.z - p.z
+    log(string.format("WARP %.1f %.3f %s %d", space.warp(), math.sqrt(dx * dx + dy * dy + dz * dz), tostring(i.grounded), n))
+  end
+end
+"#,
+    );
+    let star = ed.world.query::<Name>().find(|(_, n)| n.0 == "Star").map(|(e, _)| e).unwrap();
+    ed.world.get_mut::<CelestialBody>(star).unwrap().mu = 1.0e7;
+    let planet = ed.world.spawn();
+    ed.world.insert(planet, Transform::IDENTITY);
+    ed.world.insert(planet, Name("Planet".into()));
+    ed.world.insert(planet, Matter::Empty);
+    ed.world.insert(planet, CelestialBody { mu: 6.5 * 2500.0, body_radius: 50.0, soi: 500.0, parent: "Star".into(), a: 1000.0, ..Default::default() });
+    ed.toggle_play();
+    run(&mut ed, 1);
+    let p = floptle_core::world_transform(&ed.world, planet).translation;
+    ed.toggle_play();
+    ed.world.get_mut::<Transform>(planet).unwrap().translation = p;
+    // Ground on the planet's top: a static slab parented to it.
+    let pad = ed.world.spawn();
+    ed.world.insert(pad, Transform::from_translation(DVec3::new(0.0, 49.0, 0.0)));
+    ed.world.insert(pad, Name("Pad".into()));
+    ed.world.insert(pad, Matter::Empty);
+    ed.world.insert(pad, floptle_core::Parent(planet));
+    ed.world.insert(pad, RigidBody { kind: BodyKind::Box, mode: floptle_core::BodyMode::Static, half_extents: [10.0, 1.0, 10.0], friction: 1.0, ..Default::default() });
+    let at = p + DVec3::new(0.0, 50.9, 0.0);
+    let chassis = vessel_node(&mut ed, "Rover", at, [0.8, 0.15, 0.5], 0.6);
+    for (dx, dz) in [(-0.7, -0.65), (0.7, -0.65), (-0.7, 0.65), (0.7, 0.65)] {
+        let w = ed.world.spawn();
+        ed.world.insert(w, Transform::from_translation(at + DVec3::new(dx, -0.35, dz)));
+        ed.world.insert(w, Name(format!("Wheel{dx}{dz}")));
+        ed.world.insert(w, Matter::Empty);
+        ed.world.insert(w, RigidBody { radius: 0.35, mass: 0.1, friction: 1.0, rotates: true, ..Default::default() });
+        ed.world.insert(
+            w,
+            floptle_core::joint::Joint {
+                kind: floptle_core::joint::JointKind::Wheel,
+                other: "Rover".into(),
+                axis: [0.0, 1.0, 0.0],
+                stiffness: 5.0,
+                damping: 0.8,
+                // Rolling slowly, as a parked rover creeps on its springs.
+                motor: true,
+                motor_speed: 90.0,
+                max_force: 5.0,
+                ..Default::default()
+            },
+        );
+    }
+    let _ = chassis;
+    let cam = ed.world.query::<Name>().find(|(_, n)| n.0 == "Camera").map(|(e, _)| e).unwrap();
+    ed.world.get_mut::<Transform>(cam).unwrap().translation = at + DVec3::new(0.0, 2.0, 15.0);
+    ed.toggle_play();
+    run(&mut ed, 260);
+    let warp = lines(&mut ed, "WARP");
+    assert!(!warp.is_empty(), "{warp:?}");
+    // From a second after it was asked for, every frame: still warping,
+    // still on the ground (the pad's top is 50 m from the centre), and
+    // reading as grounded.
+    for l in &warp {
+        let v: Vec<&str> = l.split(' ').collect();
+        let (w, r): (f64, f64) = (v[0].parse().unwrap(), v[1].parse().unwrap());
+        assert!(w >= 10.0 - 1e-6, "on its wheels, the rover dropped the warp to {w}: {warp:?}");
+        assert!(r > 50.0 && r < 51.5, "the rover left the ground for {r} from the centre: {warp:?}");
+        assert_eq!(v[2], "true", "on its wheels it reads as not grounded: {warp:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A Kinematic or Static capsule spawned under a planet moving on its
+/// rails and moved by script through `node.x` stops a body walking into it
+/// at its surface: a radius and the body's radius from its axis.
+fn post_stops_a_walker(mode: floptle_core::BodyMode) -> f64 {
+    let tag = format!("postwalk{mode:?}");
+    let (mut ed, dir) = project(
+        &tag,
+        r#"
+local n, post = 0, nil
+function update(node, dt)
+  n = n + 1
+  local p, ball = find("Planet"), find("Ball")
+  if not (p and ball) then return end
+  if n == 2 then
+    spawn("Post", vec3(p.x + 8, p.y, p.z), function(q) post = q end, p)
+  end
+  -- Moved by script each frame, in the planet's frame.
+  if post then post.x = 4 + math.min(n, 60) / 60 end
+  if n == 70 then ball.vx = 1.0 end
+  if post and n > 70 then
+    local wx = post.worldX or post.x
+    log(string.format("D %.4f %d", math.sqrt((ball.x - p.x - (post.x)) ^ 2 + (ball.z - p.z) ^ 2), n))
+  end
+end
+"#,
+    );
+    prefab(
+        &dir,
+        "Post",
+        RigidBody { kind: BodyKind::Capsule, mode, radius: 0.5, height: 3.0, gravity: false, ..Default::default() },
+    );
+    let star = ed.world.query::<Name>().find(|(_, n)| n.0 == "Star").map(|(e, _)| e).unwrap();
+    ed.world.get_mut::<CelestialBody>(star).unwrap().mu = 1.0e7;
+    let planet = ed.world.spawn();
+    ed.world.insert(planet, Transform::IDENTITY);
+    ed.world.insert(planet, Name("Planet".into()));
+    ed.world.insert(planet, Matter::Empty);
+    ed.world.insert(planet, CelestialBody { mu: 0.0, body_radius: 5.0, soi: 500.0, parent: "Star".into(), a: 1000.0, ..Default::default() });
+    let ball = ed.world.spawn();
+    ed.world.insert(ball, Transform::IDENTITY);
+    ed.world.insert(ball, Name("Ball".into()));
+    ed.world.insert(ball, Matter::Empty);
+    ed.world.insert(ball, RigidBody { gravity: false, radius: 0.3, ..Default::default() });
+    ed.toggle_play();
+    run(&mut ed, 1);
+    let p = floptle_core::world_transform(&ed.world, planet).translation;
+    ed.toggle_play();
+    ed.world.get_mut::<Transform>(planet).unwrap().translation = p;
+    ed.world.get_mut::<Transform>(ball).unwrap().translation = p;
+    let cam = ed.world.query::<Name>().find(|(_, n)| n.0 == "Camera").map(|(e, _)| e).unwrap();
+    ed.world.get_mut::<Transform>(cam).unwrap().translation = p + DVec3::new(0.0, 5.0, 20.0);
+    ed.toggle_play();
+    run(&mut ed, 400);
+    let d = lines(&mut ed, "D");
+    assert!(d.len() > 100, "{d:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+    d.iter().map(|l| l.split(' ').next().unwrap().parse::<f64>().unwrap()).fold(f64::MAX, f64::min)
+}
+
+#[test]
+fn a_script_moved_post_on_a_moving_planet_stops_a_walker() {
+    for mode in [floptle_core::BodyMode::Kinematic, floptle_core::BodyMode::Static] {
+        let closest = post_stops_a_walker(mode);
+        assert!(closest > 0.75, "{mode:?}: the walker came {closest} m from the post's axis (radii 0.5 + 0.3)");
+    }
+}
+
+/// A body under a parent node that a script moves with `node.x` goes where
+/// its node says, in the parent's frame, not to that number in the world.
+#[test]
+fn a_parented_body_moved_by_script_goes_where_its_node_says() {
+    let (mut ed, dir) = project(
+        "parentedmove",
+        r#"
+local n = 0
+function update(node, dt)
+  n = n + 1
+  local b = find("Ball")
+  if b and n == 3 then b.x = 5 end
+end
+"#,
+    );
+    let holder = ed.world.spawn();
+    ed.world.insert(holder, Transform::from_translation(DVec3::new(100.0, 20.0, 0.0)));
+    ed.world.insert(holder, Name("Holder".into()));
+    ed.world.insert(holder, Matter::Empty);
+    let ball = ed.world.spawn();
+    ed.world.insert(ball, Transform::IDENTITY);
+    ed.world.insert(ball, Name("Ball".into()));
+    ed.world.insert(ball, Matter::Empty);
+    ed.world.insert(ball, floptle_core::Parent(holder));
+    ed.world.insert(ball, RigidBody { gravity: false, radius: 0.3, ..Default::default() });
+    ed.toggle_play();
+    run(&mut ed, 8);
+    let body = ed.sim.as_ref().unwrap().body_states().find(|r| r.entity == ball).unwrap().pos;
+    let node = floptle_core::world_transform(&ed.world, ball).translation;
+    assert!((body - DVec3::new(105.0, 20.0, 0.0)).length() < 1e-3, "the body went to {body:?}");
+    assert!((node - DVec3::new(105.0, 20.0, 0.0)).length() < 1e-3, "the node is at {node:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Debris thrown upward far from the camera, where craft go to their
+/// distant LOD, comes down and lands: slow at the top of its arc is not
+/// resting, and it is not frozen there in mid-air.
+#[test]
+fn far_debris_thrown_up_lands() {
+    let (mut ed, dir) = project(
+        "fardebris",
+        r#"
+local n, ship = 0, nil
+function fixedUpdate(node, dt)
+  n = n + 1
+  local p = find("Planet")
+  if not p then return end
+  if n == 30 then
+    spawn("Debris", vec3(p.x, p.y + 52, p.z), function(v)
+      spawn("Part", vec3(p.x, p.y + 52, p.z), function(q)
+        assembly.rebuild(v, function(s) ship = s; assembly.impulseAt(s, vec3(0, 8 * assembly.info(s).mass, 0), assembly.info(s).com) end)
+      end, v)
+    end)
+  end
+  if ship and n % 10 == 0 then
+    local c = assembly.info(ship).com
+    log(string.format("H %.3f %d", math.sqrt((c.x - p.x) ^ 2 + (c.y - p.y) ^ 2 + (c.z - p.z) ^ 2), n))
+  end
+end
+"#,
+    );
+    // Falls, unlike the helper's floating Vessel.
+    prefab(&dir, "Debris", RigidBody { assembly: true, ..Default::default() });
+    let star = ed.world.query::<Name>().find(|(_, n)| n.0 == "Star").map(|(e, _)| e).unwrap();
+    ed.world.get_mut::<CelestialBody>(star).unwrap().mu = 1.0e7;
+    let planet = ed.world.spawn();
+    ed.world.insert(planet, Transform::IDENTITY);
+    ed.world.insert(planet, Name("Planet".into()));
+    ed.world.insert(planet, Matter::Empty);
+    ed.world.insert(planet, CelestialBody { mu: 9.8 * 2500.0, body_radius: 50.0, soi: 2000.0, parent: "Star".into(), a: 5000.0, ..Default::default() });
+    ed.toggle_play();
+    run(&mut ed, 1);
+    let p = floptle_core::world_transform(&ed.world, planet).translation;
+    ed.toggle_play();
+    ed.world.get_mut::<Transform>(planet).unwrap().translation = p;
+    let pad = ed.world.spawn();
+    ed.world.insert(pad, Transform::from_translation(DVec3::new(0.0, 49.0, 0.0)));
+    ed.world.insert(pad, Name("Pad".into()));
+    ed.world.insert(pad, Matter::Empty);
+    ed.world.insert(pad, floptle_core::Parent(planet));
+    ed.world.insert(pad, RigidBody { kind: BodyKind::Box, mode: floptle_core::BodyMode::Static, half_extents: [10.0, 1.0, 10.0], ..Default::default() });
+    // The camera 900 m off: the debris is in its distant LOD.
+    let cam = ed.world.query::<Name>().find(|(_, n)| n.0 == "Camera").map(|(e, _)| e).unwrap();
+    ed.world.get_mut::<Transform>(cam).unwrap().translation = p + DVec3::new(900.0, 0.0, 0.0);
+    ed.toggle_play();
+    run(&mut ed, 400);
+    let h = lines(&mut ed, "H");
+    let last: f64 = h.last().expect("no heights").split(' ').next().unwrap().parse().unwrap();
+    // The pad's top is 50 from the centre and the part a unit box.
+    assert!((last - 50.5).abs() < 0.3, "the debris is {last} from the planet's centre, not landed on the pad: {h:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

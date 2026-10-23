@@ -684,3 +684,167 @@ fn a_joints_rest_survives_the_joints_being_rebuilt() {
         assert!((*a - *b).length() < 0.01, "wheel {k} is {} m from where it sits with no visitors: {a:?} -> {b:?}", (*a - *b).length());
     }
 }
+
+/// A four-wheeled rover parked on a floor and teleported a kilometre onto
+/// another one arrives whole: the tick after, every tyre is within a
+/// centimetre of where it sat on its mount, and neither a tyre nor the
+/// chassis has been kicked.
+#[test]
+fn a_teleported_rover_takes_its_wheels_with_it() {
+    let mut ecs = World::default();
+    // The same floor here and a kilometre off.
+    for x in [0.0, 1000.0] {
+        let floor = ecs.spawn();
+        ecs.insert(floor, Transform::from_translation(DVec3::new(x, -1.0, 0.0)));
+        ecs.insert(floor, RigidBody { kind: BodyKind::Box, mode: BodyMode::Static, half_extents: [50.0, 1.0, 50.0], friction: 1.0, ..Default::default() });
+    }
+    let chassis = segment(&mut ecs, "Chassis", DVec3::new(0.0, 0.9, 0.0), [1.2, 0.2, 0.7], 40.0);
+    let mut wheels = Vec::new();
+    for (dx, dz) in [(-1.0f64, -0.9f64), (1.0, -0.9), (-1.0, 0.9), (1.0, 0.9)] {
+        let w = ecs.spawn();
+        ecs.insert(w, Transform::from_translation(DVec3::new(dx, 0.45, dz)));
+        ecs.insert(w, RigidBody { radius: 0.45, mass: 5.0, friction: 1.0, rotates: true, ..Default::default() });
+        ecs.insert(
+            w,
+            Joint {
+                kind: JointKind::Wheel,
+                other: "Chassis".into(),
+                axis: [0.0, 1.0, 0.0],
+                stiffness: 3.0,
+                damping: 0.8,
+                motor: true,
+                motor_speed: 0.0,
+                max_force: 400.0,
+                ..Default::default()
+            },
+        );
+        wheels.push(w);
+    }
+    let mut sim = build(&ecs);
+    run(&mut sim, &mut ecs, 2.0);
+    let state = |sim: &Sim| -> (Vec<Vec3>, Vec<Vec3>, Vec3) {
+        let c = sim.compound_of(chassis.index()).unwrap();
+        let (mut at, mut vel) = (Vec::new(), Vec::new());
+        for w in &wheels {
+            let r = sim.body_states().find(|r| r.entity == *w).unwrap();
+            at.push(c.orient.inverse() * (r.pos.as_vec3() - c.pos));
+            vel.push(r.vel);
+        }
+        (at, vel, c.vel)
+    };
+    let (at0, vel0, cv0) = state(&sim);
+    // Set down a kilometre off, standing on the far floor as it stood here.
+    let origin = sim.world.origin;
+    let to = sim.compound_of(chassis.index()).unwrap().origin().as_dvec3() + origin + DVec3::new(1000.0, 0.0, 0.0);
+    let moved = sim.set_compound_origin(chassis.index(), to);
+    assert_eq!(moved.len(), 5, "the chassis and its four wheels should all move: {moved:?}");
+    sim.sync_joints(&mut ecs);
+    sim.step_tick(DT, None);
+    let (at1, vel1, cv1) = state(&sim);
+    // Parked, it should not have moved at all.
+    let fall = 0.05;
+    for k in 0..4 {
+        assert!((at1[k] - at0[k]).length() < 0.01, "wheel {k} is {} m off its mount", (at1[k] - at0[k]).length());
+        assert!((vel1[k] - vel0[k]).length() < fall, "wheel {k} was kicked to {:?}", vel1[k]);
+    }
+    assert!((cv1 - cv0).length() < fall, "the chassis was kicked to {cv1:?}");
+}
+
+/// How far past its goal a servo arm swings, in degrees: a 2 m arm with a
+/// load at its end hinged to an anchored base under gravity, driven from 0°
+/// to `goal` at 45° a second with `force` of torque.
+fn servo_overshoot(goal: f32, force: f32) -> f32 {
+    let mut ecs = World::default();
+    let base = segment(&mut ecs, "Base", DVec3::ZERO, [0.5, 0.5, 0.5], 50.0);
+    let arm = segment(&mut ecs, "Arm", DVec3::new(1.5, 0.0, 0.0), [1.0, 0.08, 0.08], 0.3);
+    ecs.insert(
+        arm,
+        Joint {
+            kind: JointKind::Hinge,
+            other: "Base".into(),
+            anchor: [-1.0, 0.0, 0.0],
+            motor: true,
+            servo: true,
+            goal,
+            motor_speed: 45.0,
+            max_force: force,
+            ..Default::default()
+        },
+    );
+    let mut sim = Sim::build_layered(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -6.5, 0.0)), DVec3::ZERO, floptle_core::Layers::default());
+    sim.set_compound_anchored(base.index(), true);
+    let mut past = 0.0f32;
+    for _ in 0..(6.0 / DT) as usize {
+        sim.sync_joints(&mut ecs);
+        sim.step_tick(DT, None);
+        let p = ecs.get::<Joint>(arm).unwrap().position;
+        past = past.max((p - goal) * goal.signum());
+    }
+    past
+}
+
+/// A servo arm driven to its goal arrives without swinging more than a
+/// degree past it, down with gravity or up against it.
+#[test]
+fn a_servo_reaches_its_goal_without_overshoot() {
+    for (goal, force) in [(-45.0, 5.0), (45.0, 5.0), (-45.0, 50.0), (90.0, 5.0)] {
+        let past = servo_overshoot(goal, force);
+        assert!(past < 1.0, "driven to {goal}° with {force} of torque, it swung {past}° past");
+    }
+}
+
+/// How fast a rover on four driven wheels is going after a second of full
+/// throttle on flat ground: chassis `mass`, wheels of radius 0.4, each
+/// motor's torque capped at `torque`.
+fn drive_speed_after_a_second(mass: f32, torque: f32) -> f32 {
+    let mut ecs = World::default();
+    let floor = ecs.spawn();
+    ecs.insert(floor, Transform::from_translation(DVec3::new(0.0, -1.0, 0.0)));
+    ecs.insert(floor, RigidBody { kind: BodyKind::Box, mode: BodyMode::Static, half_extents: [200.0, 1.0, 50.0], friction: 1.0, ..Default::default() });
+    let chassis = segment(&mut ecs, "Chassis", DVec3::new(0.0, 0.8, 0.0), [1.2, 0.2, 0.7], mass);
+    let mut wheels = Vec::new();
+    for (dx, dz) in [(-1.0f64, -0.9f64), (1.0, -0.9), (-1.0, 0.9), (1.0, 0.9)] {
+        let w = ecs.spawn();
+        ecs.insert(w, Transform::from_translation(DVec3::new(dx, 0.4, dz)));
+        ecs.insert(w, RigidBody { radius: 0.4, mass: 7.5, friction: 1.0, rotates: true, ..Default::default() });
+        ecs.insert(
+            w,
+            Joint {
+                kind: JointKind::Wheel,
+                other: "Chassis".into(),
+                axis: [0.0, 1.0, 0.0],
+                stiffness: 3.0,
+                damping: 0.8,
+                motor: true,
+                motor_speed: 0.0,
+                max_force: torque,
+                ..Default::default()
+            },
+        );
+        wheels.push(w);
+    }
+    let mut sim = build(&ecs);
+    run(&mut sim, &mut ecs, 1.0);
+    // Full throttle: far more rim speed than it can reach in a second.
+    for &w in &wheels {
+        ecs.get_mut::<Joint>(w).unwrap().motor_speed = -3000.0;
+    }
+    run(&mut sim, &mut ecs, 1.0);
+    sim.compound_of(chassis.index()).unwrap().vel.length()
+}
+
+/// A wheel's drive pushes the craft no harder than its motor's torque
+/// allows, through the tyre's grip: after a second, a 0.83-tonne rover on
+/// four wheels of torque F at radius r is going no faster than 4F/(r·m) per
+/// second gives, within 10%, rather than spinning light tyres up and having
+/// the grip haul the chassis to the rim's speed.
+#[test]
+#[ignore = "0490 is not fixed yet: the tyre grip hauls the chassis past the motor's torque"]
+fn a_wheels_drive_is_limited_by_its_motors_torque() {
+    let (mass, torque) = (800.0f32, 100.0f32);
+    let total = mass + 4.0 * 7.5;
+    let most = 4.0 * torque / (0.4 * total);
+    let v = drive_speed_after_a_second(mass, torque);
+    assert!(v <= most * 1.1, "after a second it is going {v} m/s; its motors can give {most}");
+    assert!(v > most * 0.5, "after a second it is going only {v} m/s; its motors should give near {most}");
+}

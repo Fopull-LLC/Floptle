@@ -785,13 +785,13 @@ fn physics_moving_a_body_is_not_mistaken_for_a_stashed_write() {
     assert_eq!(seen, 3.0, "and the stashed handle still reads the live pose");
 }
 
-/// **Terrain edits past a frame's share wait; they are not dropped.**
-/// A game laying 100 small flattens in one frame gets 64 this frame and 36 the
-/// next, in the order it asked, each carrying the normal it named. The drop
-/// that used to happen past 64 also applied its own "warning" op as a 65th
-/// edit.
+/// **Terrain edits reach the engine in order, none dropped.** A game laying
+/// 100 small flattens in one frame hands all 100 over, in the order it asked,
+/// each carrying the normal it named. How many land a frame is the engine's
+/// time budget, not a count here; the drop that used to happen past 64 also
+/// applied its own "warning" op as a 65th edit.
 #[test]
-fn terrain_edits_past_a_frames_share_wait_in_order_with_their_normal() {
+fn terrain_edits_reach_the_engine_in_order_with_their_normal() {
     let dir = std::env::temp_dir().join(format!("floptle-ops-queue-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     write_script(
@@ -815,13 +815,12 @@ fn terrain_edits_past_a_frames_share_wait_in_order_with_their_normal() {
     let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
     assert!(said.iter().any(|m| m.contains("did you mean `normal`")), "an unknown option names the fix: {said:?}");
 
-    let first = host.take_terrain_ops();
-    let second = host.take_terrain_ops();
-    assert_eq!((first.len(), second.len()), (64, 36), "64 land this frame, the rest the next");
+    let ops = host.take_terrain_ops();
+    assert_eq!(ops.len(), 100, "every edit is handed over");
     assert!(host.take_terrain_ops().is_empty());
-    let xs: Vec<f64> = first.iter().chain(&second).map(|o| o.pos[0]).collect();
+    let xs: Vec<f64> = ops.iter().map(|o| o.pos[0]).collect();
     assert_eq!(xs, (1..=100).map(f64::from).collect::<Vec<_>>(), "in the order they were asked");
-    assert!(first.iter().chain(&second).all(|o| o.normal == Some([0.0, 0.0, 1.0])), "each carries its normal, unit length");
+    assert!(ops.iter().all(|o| o.normal == Some([0.0, 0.0, 1.0])), "each carries its normal, unit length");
 }
 
 
@@ -1020,4 +1019,76 @@ fn a_script_joins_two_nodes() {
     assert!(world.get::<floptle_core::joint::Joint>(loose).is_none(), "removed");
     let logs: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
     assert!(logs.iter().any(|l| l.contains("rubberband") && l.contains("hinge")), "the kinds are named: {logs:?}");
+}
+
+/// Every query's `ignore` takes one node or a list of them. Three bodies
+/// in a line: told to pass through the first two, each query meets the
+/// third; told to pass through the first, the second. A list holding
+/// something that is not a node is an error.
+#[test]
+fn every_query_ignores_a_node_or_a_list_of_nodes() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_ignore_list_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "caster",
+        r#"
+local function id(h) return h and h.node and h.node.__id end
+local function ids(list)
+  local s = {}
+  for _, h in ipairs(list) do if h.node then s[h.node.__id] = true end end
+  return s
+end
+function update(node, dt)
+  local a, b, c = find("A"), find("B"), find("C")
+  local o, d = vec3(0, 0, 0), vec3(1, 0, 0)
+  for _, case in ipairs({ { { a, b }, c }, { a, b } }) do
+    local ig, want = case[1], case[2].__id
+    local opts = { ignore = ig }
+    local function check(what, got)
+      if got ~= want then error(what .. " with " .. (#ig > 0 and "a list" or "a node") .. " met " .. tostring(got) .. ", not " .. want) end
+    end
+    check("raycast", id(raycast(0, 0, 0, 1, 0, 0, 50, opts)))
+    check("raycastMany", id(raycastMany({ o }, { d }, 50, opts)[1]))
+    check("spherecast", id(spherecast(o, d, 0.1, 50, opts)))
+    check("capsulecast", id(capsulecast(o, d, 0.1, 0.2, 50, opts)))
+    check("boxcast", id(boxcast(o, d, 0.1, 0.1, 50, opts)))
+    local s = ids(overlapSphere(vec3(6, 0, 0), 4, opts))
+    if s[a.__id] or not s[want] then error("overlapSphere did not honour the ignore") end
+    s = ids(overlapBox(vec3(6, 0, 0), 4, 1, opts))
+    if s[a.__id] or not s[want] then error("overlapBox did not honour the ignore") end
+  end
+  local ok, err = pcall(raycast, 0, 0, 0, 1, 0, 0, 50, { ignore = { a, 7 } })
+  if ok or not tostring(err):find("not a node") then error("a non-node in the list was accepted: " .. tostring(err)) end
+  node.x = 1
+end
+"#,
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::from_translation(glam::DVec3::new(0.0, 0.0, 50.0)));
+    world.insert(
+        e,
+        Scripts(vec![floptle_core::ScriptInst {
+            kind: "caster".into(),
+            enabled: true,
+            params: Vec::new(),
+            refs: Vec::new(),
+            strs: Vec::new(),
+            pinned_bools: None,
+        }]),
+    );
+    let mut hulls = Vec::new();
+    for (name, x) in [("A", 3.0), ("B", 6.0), ("C", 9.0)] {
+        let n = world.spawn();
+        world.insert(n, Transform::from_translation(glam::DVec3::new(x as f64, 0.0, 0.0)));
+        world.insert(n, floptle_core::Name(name.into()));
+        hulls.push(hull(n.index(), x));
+    }
+    let mut host = ScriptHost::new();
+    host.set_hulls(hulls);
+    host.run(&mut world, &dir, 0.01, 0.01);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 1.0, "the script did not finish");
+    let _ = std::fs::remove_dir_all(&dir);
 }

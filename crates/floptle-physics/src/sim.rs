@@ -945,6 +945,7 @@ impl Sim {
                     / root_wt.scale.max(Vec3::splat(1e-6));
                 let rot = (inv_rot * wt.rotation).normalize();
                 let r = prb.radius.max(0.01);
+                let mut mesh_mid = Vec3::ZERO;
                 let geom = match prb.kind {
                     BodyKind::Sphere => ShapeGeom::Sphere { radius: r },
                     BodyKind::Capsule => ShapeGeom::Capsule {
@@ -964,7 +965,20 @@ impl Sim {
                         let [hx, hy] = polygon_outline(ecs, *pe, prb).half_extents();
                         ShapeGeom::Box { half: Vec3::new(hx, hy, prb.half_extents[2] * s.z.abs()) }
                     }
+                    // A mesh part is the box around its mesh: an assembly's
+                    // parts are spheres, capsules and boxes.
+                    BodyKind::Mesh => {
+                        let (lo, hi) = mesh_hull(ecs, *pe)
+                            .map(|h| h.bounds())
+                            .unwrap_or_else(|| {
+                                let h = Vec3::from(prb.half_extents) * wt.scale.abs();
+                                (-h, h)
+                            });
+                        mesh_mid = (lo + hi) * 0.5;
+                        ShapeGeom::Box { half: ((hi - lo) * 0.5).max(Vec3::splat(1e-3)) }
+                    }
                 };
+                let offset = offset + (rot * mesh_mid) / root_wt.scale.max(Vec3::splat(1e-6));
                 CompoundShape {
                     geom,
                     offset,
@@ -1014,7 +1028,22 @@ impl Sim {
                 let s = wt.scale;
                 Body::polygon(pos, polygon_outline(ecs, e, rb), rb.half_extents[2] * s.z)
             }
+            BodyKind::Mesh => match mesh_hull(ecs, e) {
+                Some(h) => Body::hull(pos, h),
+                None => {
+                    let s = wt.scale.abs();
+                    let h = rb.half_extents;
+                    Body::boxx(pos, Vec3::new(h[0] * s.x, h[1] * s.y, h[2] * s.z))
+                }
+            },
         };
+        // A shape with corners starts at the node's rotation, turning or not,
+        // so what collides is what is drawn: a crate placed at 30° rests at
+        // 30° instead of colliding square while it is drawn tilted.
+        if has_corners(&b.shape) {
+            b.orient = wt.rotation;
+            b.prev_orient = wt.rotation;
+        }
         b.restitution = rb.restitution;
         b.friction = rb.friction;
         b.slope_limit = rb.slope_limit.clamp(0.0, 90.0).to_radians();
@@ -1102,6 +1131,33 @@ impl Sim {
                 let half_z = rb.half_extents[2] * wt.scale.z;
                 if let Some(shape) = PolyPrismShape::new(Vec3::ZERO, &pts, half_z, wt.rotation) {
                     world.add_collider_tagged(wt.translation, Box::new(shape), layer, eid, sensor);
+                }
+            }
+            // The exact triangles, turned and scaled with the node; a box
+            // of the mesh's size when there is no geometry to read.
+            BodyKind::Mesh => {
+                let s = wt.scale;
+                match ecs.get::<crate::hull::BodyGeometry>(e).filter(|g| g.indices.len() >= 3) {
+                    Some(g) => {
+                        let verts: Vec<Vec3> = g.verts.iter().map(|v| wt.rotation * (*v * s)).collect();
+                        world.add_collider_tagged(
+                            wt.translation,
+                            Box::new(TriMeshCollider::labelled(&verts, &g.indices, &[], Vec::new())),
+                            layer,
+                            eid,
+                            sensor,
+                        );
+                    }
+                    None => {
+                        let h = rb.half_extents;
+                        world.add_collider_tagged(
+                            wt.translation,
+                            Box::new(BoxShape::new(Vec3::ZERO, Vec3::new(h[0] * s.x, h[1] * s.y, h[2] * s.z).abs(), wt.rotation)),
+                            layer,
+                            eid,
+                            sensor,
+                        );
+                    }
                 }
             }
         }
@@ -1635,7 +1691,7 @@ impl Sim {
                 // answers with the compound's real pose rather than a
                 // convincing zero.
                 let pos = c.pos.as_dvec3() + self.world.origin;
-                (l.entity.index(), c.vel, up, c.grounded || c.anchored, pos, c.asleep)
+                (l.entity.index(), c.vel, up, self.compound_grounded(l.entity.index()) || c.anchored, pos, c.asleep)
             })
             .collect()
     }
@@ -1690,16 +1746,108 @@ impl Sim {
 
     /// Teleport a compound so its assembly origin lands at an absolute world
     /// position, velocity untouched (pinning a clamped vessel to its pad).
-    pub fn set_compound_origin(&mut self, eid: u32, target: DVec3) {
+    ///
+    /// Everything jointed to the assembly goes with it, joint to joint, so a
+    /// rover's tyres arrive on their mounts: left behind, the joints hauled
+    /// them a kilometre in one step and the craft was flung apart. Returns
+    /// the nodes it moved (the root first), for the caller to write back.
+    pub fn set_compound_origin(&mut self, eid: u32, target: DVec3) -> Vec<u32> {
+        use crate::joints::Link;
         let origin = self.world.origin;
-        let Some(cur) = self.compound_of(eid).map(|c| c.origin().as_dvec3() + origin) else {
-            return;
+        let Some(ci) = self.cmap.iter().find(|l| l.entity.index() == eid).map(|l| l.compound) else {
+            return Vec::new();
         };
-        self.shift_compound(eid, target - cur);
-        // Set down somewhere else, it rests on whatever is there, if anything.
-        if let Some(c) = self.compound_of_mut(eid) {
-            c.wake();
+        let cur = self.world.compounds[ci].origin().as_dvec3() + origin;
+        let d = (target - cur).as_vec3();
+        let moving = self.joined(ci);
+        for j in self.world.joints.iter_mut() {
+            if moving.contains(&j.a) {
+                // A parked wheel's spot is on the ground it left.
+                j.park = None;
+            }
         }
+        let mut moved = Vec::new();
+        for l in &moving {
+            match *l {
+                Link::Body(i) => {
+                    let b = &mut self.world.bodies[i];
+                    b.pos += d;
+                    b.prev_pos += d;
+                    b.asleep = false;
+                    b.sleep_time = 0.0;
+                    if let Some(p) = self.tick_prev.get_mut(i) {
+                        *p += d;
+                    }
+                    if let Some(link) = self.map.iter().find(|m| m.body == i) {
+                        moved.push(link.entity.index());
+                    }
+                }
+                Link::Compound(i) => {
+                    let c = &mut self.world.compounds[i];
+                    c.pos += d;
+                    c.prev_pos += d;
+                    // Set down somewhere else, it rests on whatever is there, if anything.
+                    c.wake();
+                    if let Some(p) = self.tick_prev_c.get_mut(i) {
+                        p.0 += d;
+                    }
+                    if let Some(link) = self.cmap.iter().find(|m| m.compound == i) {
+                        moved.push(link.entity.index());
+                    }
+                }
+            }
+        }
+        moved
+    }
+
+    /// Compound `ci` and everything jointed to it, through every unbroken
+    /// joint and on through what that is jointed to: the craft first.
+    fn joined(&self, ci: usize) -> Vec<crate::joints::Link> {
+        use crate::joints::Link;
+        let mut out = vec![Link::Compound(ci)];
+        let mut grew = true;
+        while grew {
+            grew = false;
+            for j in self.world.joints.iter().filter(|j| !j.broken) {
+                let Some(b) = j.b else { continue };
+                for (from, to) in [(j.a, b), (b, j.a)] {
+                    if out.contains(&from) && !out.contains(&to) {
+                        out.push(to);
+                        grew = true;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether the assembly rooted at `eid` is on the ground: touching it
+    /// itself, or through anything jointed to it that is. A rover stands on
+    /// its wheels, not its chassis, and read as airborne, so a parked rover
+    /// could never time-warp.
+    pub fn compound_grounded(&self, eid: u32) -> bool {
+        use crate::joints::Link;
+        let Some(ci) = self.cmap.iter().find(|l| l.entity.index() == eid).map(|l| l.compound) else {
+            return false;
+        };
+        if self.world.compounds[ci].grounded {
+            return true;
+        }
+        self.joined(ci).iter().any(|l| match *l {
+            Link::Body(i) => self.world.bodies[i].grounded,
+            Link::Compound(i) => self.world.compounds[i].grounded,
+        })
+    }
+
+    /// Write the body on node `eid` to its node now, at its pose this tick:
+    /// [`Self::write_compound_node`] for a single body.
+    pub fn write_body_node(&self, eid: u32, ecs: &mut World) {
+        let Some(link) = self.map.iter().find(|l| l.entity.index() == eid) else { return };
+        let b = &self.world.bodies[link.body];
+        if !b.active || b.kinematic {
+            return;
+        }
+        self.write_one_transform(ecs, link, b.pos, 1.0);
     }
 
     /// Shift every baked static collider owned by entity `eid` by a world
@@ -2330,6 +2478,20 @@ impl Sim {
 
     /// Capture a body's full dynamic state by entity index, in absolute world
     /// coordinates — the serializable unit netcode snapshots (`docs/multiplayer.md`).
+    /// Where every dynamic body and every assembly is, in world space, asleep
+    /// or not: the ground under each must be whole for it to land or wake on,
+    /// wherever the camera and the terrain's detail are.
+    pub fn moving_body_positions(&self) -> Vec<DVec3> {
+        let at = |p: Vec3| self.world.origin + p.as_dvec3();
+        self.world
+            .bodies
+            .iter()
+            .filter(|b| !b.off && !b.kinematic && !b.sensor)
+            .map(|b| at(b.pos))
+            .chain(self.world.compounds.iter().map(|c| at(c.pos)))
+            .collect()
+    }
+
     pub fn body_snapshot(&self, eid: u32) -> Option<BodySnapshot> {
         self.map.iter().find(|l| l.entity.index() == eid).map(|l| {
             let b = &self.world.bodies[l.body];
@@ -2828,11 +2990,15 @@ impl Sim {
                 }
                 b.lock_rot = rb.locks_rot();
                 let rotates = turns(rb);
-                if rotates != b.rotates || (rotates && kinematic) {
+                if rotates != b.rotates || (kinematic && (rotates || has_corners(&b.shape))) {
                     // Switched on (or carried by its node while kinematic):
                     // take the node's rotation. Switched off: upright again,
                     // as a body that does not turn always is.
-                    let r = if rotates { world_transform(ecs, ent).rotation } else { Quat::IDENTITY };
+                    let r = if rotates || has_corners(&b.shape) {
+                        world_transform(ecs, ent).rotation
+                    } else {
+                        Quat::IDENTITY
+                    };
                     b.orient = r;
                     b.prev_orient = r;
                     b.ang_vel = Vec3::ZERO;
@@ -2872,7 +3038,23 @@ impl Sim {
                             half_depth: (rb.half_extents[2] * s.z).abs().max(1e-3),
                         }
                     }
+                    // The hull is built once, from the mesh, when the body
+                    // is; rebuilding it every tick would cost a hull a tick.
+                    BodyKind::Mesh => match b.shape {
+                        BodyShape::Hull(h) => BodyShape::Hull(h),
+                        _ => match mesh_hull(ecs, ent) {
+                            Some(h) => BodyShape::Hull(h),
+                            None => {
+                                let s = world_transform(ecs, ent).scale.abs();
+                                let h = rb.half_extents;
+                                BodyShape::Box { half: Vec3::new(h[0] * s.x, h[1] * s.y, h[2] * s.z).max(Vec3::splat(1e-3)) }
+                            }
+                        },
+                    },
                 };
+                if let BodyShape::Hull(h) = b.shape {
+                    b.radius = h.inner_radius().max(1e-3);
+                }
             }
         }
         self.sync_compound_masses(ecs);
@@ -3936,6 +4118,22 @@ pub fn polygon_outline(ecs: &World, e: Entity, rb: &RigidBody) -> floptle_core::
     };
     let s = world_transform(ecs, e).scale;
     o.scaled(s.x, s.y)
+}
+
+/// The convex hull of node `e`'s [`crate::hull::BodyGeometry`], scaled by the
+/// node's world scale, in its own axes about its origin: the shape a Mesh
+/// body collides with. `None` when the node carries no geometry.
+pub fn mesh_hull(ecs: &World, e: Entity) -> Option<crate::hull::Hull> {
+    let g = ecs.get::<crate::hull::BodyGeometry>(e)?;
+    let s = world_transform(ecs, e).scale;
+    let pts: Vec<Vec3> = g.verts.iter().map(|v| *v * s).collect();
+    crate::hull::Hull::from_points(&pts)
+}
+
+/// A shape that has corners, so its orientation is part of where it
+/// collides. Spheres have none, and a capsule is held along −gravity.
+fn has_corners(shape: &BodyShape) -> bool {
+    matches!(shape, BodyShape::Box { .. } | BodyShape::Polygon { .. } | BodyShape::Hull(_))
 }
 
 /// Whether a body is turned by the solver: asked for, and simulated. A

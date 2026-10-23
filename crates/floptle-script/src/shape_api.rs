@@ -64,6 +64,48 @@ fn cast_opts(who: &str, opts: Option<&Value>, shared: &QueryShared) -> mlua::Res
     Ok((exclude, mask, skip))
 }
 
+/// A query's `ignore`: one node, or a list of them, onto `out`. A list
+/// used to be read as one node, found to have no id and dropped, so a cast
+/// told to pass through a craft and its crew hit them both. Anything in the
+/// list that is not a node is an error, not a quiet miss.
+pub(crate) fn ignore_into(who: &str, ignore: Value, out: &mut Vec<u32>) -> mlua::Result<()> {
+    let node = |v: &Value| -> Option<u32> {
+        match v {
+            Value::Table(t) => t.raw_get::<u32>("__id").ok(),
+            _ => None,
+        }
+    };
+    if let Some(eid) = node(&ignore) {
+        out.push(eid);
+        return Ok(());
+    }
+    match &ignore {
+        Value::Nil => Ok(()),
+        Value::Table(list) => {
+            for (k, v) in list.clone().pairs::<Value, Value>().flatten() {
+                match node(&v) {
+                    Some(eid) => out.push(eid),
+                    None => {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "{who}: ignore[{}] is {}, not a node — ignore takes a node or a list of nodes",
+                            match k {
+                                Value::Integer(i) => i.to_string(),
+                                other => format!("{other:?}"),
+                            },
+                            v.type_name()
+                        )));
+                    }
+                }
+            }
+            Ok(())
+        }
+        other => Err(mlua::Error::RuntimeError(format!(
+            "{who}: ignore is {}, not a node — ignore takes a node or a list of nodes",
+            other.type_name()
+        ))),
+    }
+}
+
 fn query_opts_with(
     who: &str,
     opts: Option<&Value>,
@@ -86,11 +128,7 @@ fn query_opts_with(
                 // would have meant "ignore nothing", so the ray hits the caller
                 // and every query returns itself.
                 crate::opts::check_keys(t, keys, who)?;
-                if let Ok(ig) = t.get::<Table>("ignore")
-                    && let Ok(eid) = ig.raw_get::<u32>("__id")
-                {
-                    exclude.push(eid);
-                }
+                ignore_into(who, t.get::<Value>("ignore")?, &mut exclude)?;
                 let names: Vec<String> = match t.get::<Value>("layers") {
                     Ok(Value::String(s)) => vec![s.to_string_lossy().to_string()],
                     Ok(Value::Table(list)) => list.sequence_values::<String>().flatten().collect(),

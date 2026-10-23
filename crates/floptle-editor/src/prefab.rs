@@ -503,6 +503,7 @@ impl Editor {
             if let (Some(cb), Some(root)) = (req.cb, root) {
                 self.script_host.call_spawn_callback(&mut self.world, cb, root.index(), &ents);
             }
+            crate::body_fit::attach_geometry(&mut self.world, &self.maps, &self.project_root, Some(&ents));
             if let Some(sim) = self.sim.as_mut() {
                 for &e in &ents {
                     sim.add_body_for(e, &self.world);
@@ -512,6 +513,10 @@ impl Editor {
                 for &e in &ents {
                     sim.add_compound_for(e, &self.world);
                 }
+            }
+            // A Static body in the prefab follows its node when a script moves it.
+            for &e in &ents {
+                self.track_static_body(e);
             }
             // Static world geometry in the prefab (a Collidable with no
             // RigidBody) gets its collider now. Bodies above cover only
@@ -532,7 +537,7 @@ impl Editor {
             // never set: report the craft, not the stand-in.
             let (anchored, grounded, vel) = self
                 .lod_state(eid)
-                .unwrap_or((c.anchored, c.grounded, [c.vel.x, c.vel.y, c.vel.z]));
+                .unwrap_or((c.anchored, sim.compound_grounded(eid), [c.vel.x, c.vel.y, c.vel.z]));
             map.insert(
                 eid,
                 floptle_script::AssemblyInfo {
@@ -554,6 +559,7 @@ impl Editor {
                     anchored,
                     gripped: sim.gripped(eid),
                     parts: c.shapes.iter().map(|s| s.id as u32).collect(),
+                    rot: [c.orient.x, c.orient.y, c.orient.z, c.orient.w],
                 },
             );
         }
@@ -666,8 +672,10 @@ impl Editor {
                 }
                 floptle_script::AssemblyCmd::Teleport { root, pos } => {
                     if let Some(sim) = self.sim.as_mut() {
-                        sim.set_compound_origin(root, DVec3::new(pos[0], pos[1], pos[2]));
-                        sim.write_compound_node(root, &mut self.world);
+                        for eid in sim.set_compound_origin(root, DVec3::new(pos[0], pos[1], pos[2])) {
+                            sim.write_compound_node(eid, &mut self.world);
+                            sim.write_body_node(eid, &mut self.world);
+                        }
                     }
                 }
                 floptle_script::AssemblyCmd::SyncColliders { root } => {

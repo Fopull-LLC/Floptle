@@ -517,9 +517,18 @@ impl PhysicsWorld {
         let cap = jt.motor_speed.abs();
         let err = jt.goal - pos;
         // The sum never asks for more than the motor's speed on its own, so
-        // a servo held off its goal does not wind up and fling past it.
+        // a servo held off its goal does not wind up and fling past it. And
+        // it only gathers once the goal is near enough that the error alone
+        // asks for less than full speed: summed over the whole swing it
+        // arrived full, kept driving past the goal, and an arm sent to −45°
+        // swung on to −51° before it came back.
         let limit = if SUM_GAIN > 0.0 { cap / SUM_GAIN } else { 0.0 };
-        jt.servo_sum = (jt.servo_sum + err * dt).clamp(-limit, limit);
+        // Past the goal, what was gathered on the way pushes the wrong way.
+        if (err * GAIN).abs() >= cap || jt.servo_sum * err < 0.0 {
+            jt.servo_sum = 0.0;
+        } else {
+            jt.servo_sum = (jt.servo_sum + err * dt).clamp(-limit, limit);
+        }
         (err * GAIN + jt.servo_sum * SUM_GAIN).clamp(-cap, cap)
     }
 

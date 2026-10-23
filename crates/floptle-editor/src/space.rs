@@ -524,6 +524,11 @@ impl Editor {
             for (e, j) in carried {
                 if deltas[j].length_squared() > 1e-18 {
                     sim.shift_statics_of(e.index(), deltas[j]);
+                    // Followed by script moves too: what the rails carried is
+                    // not a move of the script's to carry again.
+                    if let Some(b) = self.static_baked.borrow_mut().get_mut(&e.index()) {
+                        b.pos += deltas[j];
+                    }
                 }
             }
             let dom_of = |p: DVec3| -> Option<usize> {
@@ -551,7 +556,9 @@ impl Editor {
                         continue; // far craft: the LOD's own conic drives it
                     }
                     let Some(c) = sim.compound_of(eid) else { continue };
-                    if c.anchored || c.grounded || c.vel.length_squared() < 0.01 {
+                    // On the ground through its wheels counts: a parked rover
+                    // is not in flight, however its suspension jiggles.
+                    if c.anchored || sim.compound_grounded(eid) || c.vel.length_squared() < 0.01 {
                         self.compound_coast.remove(&eid);
                         continue;
                     }
@@ -655,20 +662,31 @@ impl Editor {
                             if d <= LOD_FAR || self.lod_woken.contains_key(&eid) {
                                 continue;
                             }
-                            let slow = c.grounded || c.anchored || c.vel.length() < 0.5;
+                            let grounded = sim.compound_grounded(eid);
+                            // Only what rests on something, or is pinned, is
+                            // frozen where it stands. Slow alone is not resting:
+                            // debris at the top of its arc froze there in mid-air.
+                            let resting = grounded || c.anchored;
                             let vel = c.vel.as_dvec3();
                             let was_anchored = c.anchored;
-                            let was_grounded = c.grounded;
-                            if !slow
-                                && let Some(i) = dom_of(com)
-                                && cb[i].1.mu > 0.0
-                            {
+                            let was_grounded = grounded;
+                            let falling = (!resting)
+                                .then(|| dom_of(com))
+                                .flatten()
+                                .filter(|&i| cb[i].1.mu > 0.0);
+                            if let Some(i) = falling {
                                 let k = Kepler::from_state(
                                     com - DVec3::from(bodies[i].pos),
                                     vel,
                                     cb[i].1.mu,
                                     t,
                                 );
+                                // A conic that comes down into its world would
+                                // carry the craft through the ground on rails:
+                                // that one stays in physics and lands.
+                                if (k.a * (1.0 - k.e)).abs() < cb[i].1.body_radius + 25.0 {
+                                    continue;
+                                }
                                 sim.set_compound_anchored(eid, true);
                                 self.compound_lod.insert(
                                     eid,
