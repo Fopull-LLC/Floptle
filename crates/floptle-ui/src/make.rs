@@ -505,6 +505,13 @@ pub fn apply_prop(spec: &mut ElementSpec, name: &str, v: &PropVal) -> Applied {
         "frame" => shape!().frame.get_or_insert_with(Default::default).texture = v.text(),
         "frameUV" => shape!().frame.get_or_insert_with(Default::default).uv = v.quad(),
         "frameSlice" => shape!().frame.get_or_insert_with(Default::default).slice = v.quad(),
+        "framePpu" => shape!().frame.get_or_insert_with(Default::default).ppu = v.num().max(0.0),
+        // An image tiled over the fill: `surface` names it, `surfaceTile` is
+        // one tile's size in UI units, `surfaceOffset` where the tiling starts.
+        "surface" => shape!().surface.get_or_insert_with(Default::default).texture = v.text(),
+        "surfaceTile" => shape!().surface.get_or_insert_with(Default::default).tile = v.pair(),
+        "surfaceOffset" => shape!().surface.get_or_insert_with(Default::default).offset = v.pair(),
+        "surfaceTint" => shape!().surface.get_or_insert_with(Default::default).tint = v.color(),
 
         // ---- text ----------------------------------------------------------
         "text" => text!().text = v.text(),
@@ -537,6 +544,7 @@ pub fn apply_prop(spec: &mut ElementSpec, name: &str, v: &PropVal) -> Applied {
         "rows" => image!().rows = (v.num().max(1.0)) as u32,
         "cell" => image!().cell = v.num().max(0.0) as u32,
         "slice" => image!().slice = v.quad(),
+        "slicePpu" => image!().slice_ppu = v.num().max(0.0),
         "tiling" => image!().tiling = v.pair(),
         "imageFit" => image!().fit = image_fit_of(&v.text()).unwrap_or_default(),
 
@@ -707,15 +715,16 @@ fn edits(a: &str, b: &str) -> usize {
 pub const ALL_PROPS: &[&str] = &[
     "align", "border", "borderB", "borderColor", "borderL", "borderR", "borderT", "button",
     "case", "cell", "cols", "count", "dir", "disabled", "draggable", "dropTarget", "field",
-    "fill", "fillA", "fillB", "fillG", "fillR", "flip", "focusable", "font", "frame", "frameSlice",
-    "frameUV", "gap", "group",
+    "fill", "fillA", "fillB", "fillG", "fillR", "flip", "focusable", "font", "frame", "framePpu",
+    "frameSlice", "frameUV", "gap", "group",
     "groupA", "groupB", "groupG", "groupR", "groupTint", "h", "height", "image", "imageFit",
     "inset", "interact", "justify", "lineHeight", "margin", "mask", "max", "maxH", "maxLen",
     "maxLines", "maxW", "min", "minH", "minW", "numeric", "opacity", "order", "overflow", "pad",
     "part", "pin", "pivot", "placeholder", "pos", "posX", "posY", "radius", "radiusBL",
     "radiusBR", "radiusTL", "radiusTR", "rotation", "rows", "scale", "scaleX", "scaleY",
     "scrollDrag", "scrollSpeed", "scrollX", "scrollY", "scrollbarAxis", "scrollbarFor",
-    "selected", "shader", "size", "slice", "sliderDir", "stretch", "style", "template", "text",
+    "selected", "shader", "size", "slice", "slicePpu", "sliderDir", "stretch", "style", "surface",
+    "surfaceOffset", "surfaceTile", "surfaceTint", "template", "text",
     "textA", "textAlign", "textB", "textColor", "textFit", "textG", "textR", "textSize",
     "textValign", "texture", "tiling", "tint", "tintA", "tintB", "tintG", "tintR", "toggle",
     "tooltip", "tooltipBox", "tracking", "upper", "value", "visible", "w", "width", "wrap", "x",

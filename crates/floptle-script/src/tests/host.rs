@@ -1231,6 +1231,50 @@ fn planet_lakes_reports_the_lakes_a_planet_holds() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **`terrain.pending()` counts the edits that have not landed.** Edits made
+/// this frame wait in the script host, then in the engine's queue, which lands
+/// a few milliseconds of them a frame; the count is both, so a game knows when
+/// its whole batch is in the ground.
+#[test]
+fn terrain_pending_counts_the_edits_still_to_land() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_terrain_pending_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "grade",
+        "function start()\n\
+           for i = 1, 3 do terrain.dig(i, 0, 0, 1) end\n\
+           log(tostring(terrain.pending()))\n\
+         end\n\
+         function update() log(tostring(terrain.pending())) end\n",
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(e, Scripts(vec![floptle_core::ScriptInst {
+        kind: "grade".into(),
+        enabled: true,
+        params: Vec::new(),
+        refs: Vec::new(),
+        strs: Vec::new(),
+        pinned_bools: None,
+    }]));
+    let mut host = ScriptHost::new();
+    host.set_playing(true);
+    host.run(&mut world, &dir, 0.016, 0.016);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    // The engine takes them, lands one, and says two are still to come.
+    let taken = host.take_terrain_ops();
+    assert_eq!(taken.len(), 3);
+    host.set_terrain_edits_queued(2);
+    host.run(&mut world, &dir, 0.016, 0.016);
+    let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    assert_eq!(said.first().map(String::as_str), Some("3"), "{said:?}");
+    assert_eq!(said.last().map(String::as_str), Some("2"), "{said:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// **A planet question asked with a callback costs the script thread almost
 /// nothing.** `terrain.planetLakes` on an 800 m world took 7 s on the script
 /// thread, past the watchdog. Given a callback, the call returns at once, the
@@ -1339,4 +1383,85 @@ fn scatter_near_on_a_parented_field_is_right_without_a_draw() {
     let (first, later): (u32, u32) = (env.get("first").unwrap(), env.get("later").unwrap());
     assert!(first > 0, "the creation frame's near found nothing on the planet");
     assert!(later > 0, "a frame that was never drawn found nothing on the planet");
+}
+
+/// **A busy machine does not stop an honest script; an endless loop is still
+/// stopped.** The watchdog's clock was the wall: on a machine loaded on every
+/// core, a pass doing a few tens of milliseconds of work waited its turn for a
+/// core past the budget and the script was stopped for good, mid-build. Here
+/// a script does about a third of its budget in work every pass, with every
+/// core kept busy several times over, and keeps running; a loop that never
+/// ends is stopped with its CPU and wall time in the message.
+#[test]
+#[cfg(any(unix, windows))]
+fn a_loaded_machine_does_not_stop_an_honest_script() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_load_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "worker",
+        "passes = 0\nfunction update(node, dt)\n  local x = 0\n  for i = 1, N do x = x + i % 7 end\n  \
+         passes = passes + 1\nend\n",
+    );
+    write_script(&dir, "spinner", "function update(node, dt) while true do end end\n");
+    let budget = std::time::Duration::from_millis(150);
+    let world_with = |kind: &str| {
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Scripts(vec![floptle_core::ScriptInst::new(kind)]));
+        (world, e)
+    };
+    let (mut world, e) = world_with("worker");
+    let mut host = ScriptHost::new();
+    host.set_script_budget(budget);
+    // Calibrate N to about 50 ms of this thread's CPU, unloaded.
+    host.lua.globals().set("N", 200_000).unwrap();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    let c0 = crate::budget::thread_cpu().expect("this platform has a thread clock");
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    let per = (crate::budget::thread_cpu().unwrap() - c0).as_secs_f64().max(1e-4);
+    let n = (200_000.0 * 0.05 / per) as i64;
+    host.lua.globals().set("N", n).unwrap();
+
+    // Every core busy four times over: a fair share of a core is about a
+    // quarter, so 50 ms of work takes about 200 ms of wall, past the budget.
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let spinners: Vec<_> = (0..cores * 4)
+        .map(|_| {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut x = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    x = std::hint::black_box(x.wrapping_mul(6364136223846793005).wrapping_add(1));
+                }
+            })
+        })
+        .collect();
+    let start = std::time::Instant::now();
+    let mut frames = 0;
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        host.run(&mut world, &dir, 1.0 / 60.0, frames as f32 / 60.0);
+        frames += 1;
+    }
+    stop.store(true, Ordering::Relaxed);
+    for s in spinners {
+        let _ = s.join();
+    }
+    assert!(host.errors().is_empty(), "a loaded machine stopped the worker: {:?}", host.errors());
+    let passes: i64 = host.instance_env(e.index(), "worker").unwrap().get("passes").unwrap();
+    assert_eq!(passes, frames + 2, "the worker stopped running");
+
+    // An endless loop is still stopped, and says what it spent.
+    let (mut world, _) = world_with("spinner");
+    let mut host = ScriptHost::new();
+    host.set_script_budget(budget);
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    let e = host.errors().join("\n");
+    assert!(crate::budget::Budget::is_timeout(&e), "the endless loop ran on: {e}");
+    assert!(e.contains("of CPU") && e.contains("of wall time"), "{e}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

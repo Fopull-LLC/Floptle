@@ -38,7 +38,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Blend, Case, Corners, FrameSpec, GlowSpec, Gradient, GradientKind, GrainSpec, ShadowSpec, Sides,
+    Blend, Case, Corners, FrameSpec, SurfaceSpec, GlowSpec, Gradient, GradientKind, GrainSpec, ShadowSpec, Sides,
     TextShadow, TextStroke,
 };
 
@@ -420,6 +420,10 @@ pub struct StyleBlock {
     /// `border`. Tinted by `border_color`, which is what makes it animate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame: Option<FrameSpec>,
+    /// An image tiled across the element over its fill (image, tile size in UI
+    /// units, offset in tiles, tint).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<SurfaceSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blend: Option<Blend>,
     // --- element ---
@@ -861,6 +865,9 @@ fn apply_discrete(spec: &mut crate::ElementSpec, block: &StyleBlock, tk: &Tokens
     }
     if let Some(f) = &block.frame {
         spec.shape.get_or_insert_with(Default::default).frame = Some(f.clone());
+    }
+    if let Some(sf) = &block.surface {
+        spec.shape.get_or_insert_with(Default::default).surface = Some(sf.clone());
     }
     if let Some(b) = block.blend {
         spec.shape.get_or_insert_with(Default::default).blend = b;
@@ -1576,6 +1583,7 @@ mod tests {
                         texture: "textures/ui/frames.png".into(),
                         uv: [0.0, 0.0, 0.25, 0.5],
                         slice: [0.3, 0.3, 0.3, 0.3],
+                        ppu: 0.0,
                     }),
                     ..Default::default()
                 },

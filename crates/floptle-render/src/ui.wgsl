@@ -122,6 +122,12 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, c <= vec3<f32>(0.04045));
 }
 
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(c, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+    return select(hi, lo, c <= vec3<f32>(0.0031308));
+}
+
 // Signed distance to a rounded rect centered at origin.
 fn sd_round_rect(p: vec2<f32>, half: vec2<f32>, r: f32) -> f32 {
     let q = abs(p) - half + vec2<f32>(r);
@@ -178,6 +184,32 @@ fn gradient_t(p: vec2<f32>, half: vec2<f32>, cfg: vec4<f32>) -> f32 {
 // trick has visible diagonal banding at small cell sizes (it looked like
 // corduroy rather than grain), and its precision varies by driver. This is
 // stable everywhere and costs the same.
+// One layer of value noise: the hash at each lattice corner, blended across
+// the cell.
+fn value_noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = p - i;
+    let w = f * f * (vec2<f32>(3.0) - 2.0 * f);
+    let a = hash21(i);
+    let b = hash21(i + vec2<f32>(1.0, 0.0));
+    let c = hash21(i + vec2<f32>(0.0, 1.0));
+    let d = hash21(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, w.x), mix(c, d, w.x), w.y);
+}
+
+// Coarse grain: two layers of value noise on lattices turned against the
+// screen and against each other, so no cell edge lines up with any other and
+// the grain is soft speckle rather than a grid of squares. (At one cell per
+// pixel the grain is the plain per-pixel hash; see `fs`.)
+fn grain_noise(p: vec2<f32>) -> f32 {
+    let r1 = mat2x2<f32>(0.866, 0.5, -0.5, 0.866);
+    let r2 = mat2x2<f32>(0.342, -0.940, 0.940, 0.342);
+    let v = 0.6 * value_noise(r1 * p) + 0.4 * value_noise(r2 * p * 1.7 + vec2<f32>(7.3, 1.9));
+    // Blending flattens the spread toward the middle; stretch it back so a
+    // grain amount means the same at every scale.
+    return clamp((v - 0.5) * 2.2 + 0.5, 0.0, 1.0);
+}
+
 fn hash21(p: vec2<f32>) -> f32 {
     // Parenthesised on purpose: WGSL forbids mixing `*` and `^` without them,
     // and a browser's compiler refuses the whole module over it. naga lets it
@@ -282,11 +314,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var col = fill * texel;
 
     if in.fx.x > 0.0 {
-        // Quantize to a cell so `scale` above 1 gives chunky noise rather than
-        // per-pixel static that shimmers when the window resizes.
+        // Grain in the space the eye judges brightness in: added to the
+        // sRGB-encoded colour, the same amount reads as the same grain on a
+        // white fill and a black one. Added in linear light it vanished on
+        // light fills and was harsh on dark ones.
+        //
+        // `scale` above 1 is coarser grain, smoothly interpolated between its
+        // cell centres rather than held flat across each cell: held flat, a
+        // strong grain was a grid of visible squares.
         let cell = max(in.fx.y, 1.0);
-        let n = hash21(floor(in.px / cell)) - 0.5;
-        col = vec4<f32>(clamp(col.rgb + vec3<f32>(n * in.fx.x), vec3<f32>(0.0), vec3<f32>(1.0)), col.a);
+        let n = select(grain_noise(in.px / cell), hash21(floor(in.px)), cell <= 1.0) - 0.5;
+        let enc = linear_to_srgb(clamp(col.rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
+        col = vec4<f32>(srgb_to_linear(clamp(enc + vec3<f32>(n * in.fx.x), vec3<f32>(0.0), vec3<f32>(1.0))), col.a);
     }
 
     let bcov = border_coverage(in.local, in.half_size, r, d, in.border);

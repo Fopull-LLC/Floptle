@@ -59,6 +59,11 @@ pub struct FixedTimestep {
     accumulator: f32,
     /// Hard cap on ticks emitted in one frame.
     max_ticks: u32,
+    /// Time banked and then thrown away: by the cap after a hitch, and by
+    /// [`TickLoad`]'s slow motion. The ticks it stood for never run, but the
+    /// clock scripts read on the tick still has to count it, or it falls
+    /// behind the frame clock for good — eleven seconds after one long load.
+    dropped: f64,
 }
 
 impl Default for FixedTimestep {
@@ -72,7 +77,7 @@ impl Default for FixedTimestep {
 impl FixedTimestep {
     /// `hz` is the simulation rate (ticks/second), e.g. `60.0`.
     pub fn new(hz: f32) -> Self {
-        Self { step: 1.0 / hz, accumulator: 0.0, max_ticks: 8 }
+        Self { step: 1.0 / hz, accumulator: 0.0, max_ticks: 8, dropped: 0.0 }
     }
 
     /// Reset banked time (e.g. on Play start, so the first frame doesn't inherit
@@ -81,12 +86,25 @@ impl FixedTimestep {
         self.accumulator = 0.0;
     }
 
+    /// A fresh clock: nothing banked, nothing dropped (Play start).
+    pub fn restart(&mut self) {
+        self.accumulator = 0.0;
+        self.dropped = 0.0;
+    }
+
+    /// Seconds of banked time thrown away rather than ticked: what the tick
+    /// clock adds to `ticks × step` to stay with the frame clock.
+    pub fn dropped(&self) -> f64 {
+        self.dropped
+    }
+
     /// Bank a frame's worth of time. Then call [`Self::tick`] in a `while` loop.
     pub fn accumulate(&mut self, frame_dt: f32) {
         self.accumulator += frame_dt;
         // clamp so a hitch doesn't queue hundreds of steps
         let ceil = self.step * self.max_ticks as f32;
         if self.accumulator > ceil {
+            self.dropped += (self.accumulator - ceil) as f64;
             self.accumulator = ceil;
         }
     }
@@ -224,7 +242,9 @@ impl FixedTimestep {
     /// tick it allows.
     pub fn drop_backlog(&mut self) {
         if self.accumulator >= self.step {
-            self.accumulator %= self.step;
+            let kept = self.accumulator % self.step;
+            self.dropped += (self.accumulator - kept) as f64;
+            self.accumulator = kept;
         }
     }
 }

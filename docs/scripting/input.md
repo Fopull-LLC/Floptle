@@ -142,6 +142,23 @@ it brings a caret, selection, the clipboard and key repeat with it
 ([ui-navigation.md](../ui-navigation.md)). `input.typed()` is empty while a field
 has focus, because the field consumed them.
 
+### Keys the engine keeps
+
+While a game plays in the editor, **F1** stops it, **F2** pauses, **F3** steps
+one tick (Shift+F3 back one), so a game never sees those three there. In an
+exported build F1 opens the multiplayer panel, F11 and Alt+Enter toggle full
+screen, and F2 and F3 are the game's. Bind other keys for anything a player
+must reach in both.
+
+### Simulating input in tests and probes
+
+`input.simulate{ key = "w", down = true }` (or `{ button = 1, down = true }`,
+1 left, 2 right, 3 middle) presses a key as if the player had, from the next
+frame on, for every script: `input.key`, `input.pressed`, `input.released` and
+`input.action` all see it. `down = false` releases it. It is a testing aid for a
+probe or a scripted test run under `floptle run`, not a way for a game to move
+its own character.
+
 ### Moving key reads to actions, so rebinding reaches them
 
 `input.key("space")` asks about one key, and a player's rebind cannot change

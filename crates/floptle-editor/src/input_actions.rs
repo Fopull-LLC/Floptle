@@ -95,6 +95,50 @@ impl Editor {
         }
     }
 
+    /// Feed the presses and releases scripts queued with `input.simulate`
+    /// through the path a real keyboard and mouse take: the raw `input` sets
+    /// (frame and tick) and the action layer, as the window's handlers do.
+    /// Called at the start of a play step, so they land the frame after the
+    /// script asked.
+    pub(crate) fn apply_simulated_input(&mut self) {
+        for ev in self.script_host.take_simulated_input() {
+            match ev {
+                floptle_script::SimulatedInput::Key(name, down) => {
+                    if down {
+                        if self.input_keys.insert(name.clone()) {
+                            self.input_keys_pressed.insert(name.clone());
+                            self.tick_keys_pressed.insert(name.clone());
+                        }
+                    } else if self.input_keys.remove(&name) {
+                        self.input_keys_released.insert(name.clone());
+                        self.tick_keys_released.insert(name.clone());
+                    }
+                    if let Some(key) = floptle_input::Key::from_script_name(&name) {
+                        let src = Source::Key(key);
+                        if down {
+                            if self.raw_input.keys.insert(key) {
+                                self.tick_input_edges.0.insert(src);
+                                self.raw_input.pressed.insert(src);
+                            }
+                        } else if self.raw_input.keys.remove(&key) {
+                            self.tick_input_edges.1.insert(src);
+                            self.raw_input.released.insert(src);
+                        }
+                    }
+                }
+                floptle_script::SimulatedInput::Button(i, down) => {
+                    if self.input_buttons[i] != down {
+                        self.input_buttons[i] = down;
+                        if down {
+                            self.input_buttons_pressed[i] = true;
+                        }
+                    }
+                    self.note_action_button(i, down);
+                }
+            }
+        }
+    }
+
     /// Record a mouse-button event for the action layer.
     pub(crate) fn note_action_button(&mut self, index: usize, pressed: bool) {
         let Some(btn) = MouseButton::ALL.get(index).copied() else { return };
@@ -582,5 +626,64 @@ mod tests {
     fn unmodelled_keys_map_to_none_rather_than_a_wrong_key() {
         assert_eq!(action_key(KeyCode::F20), None);
         assert_eq!(action_key(KeyCode::MediaPlayPause), None);
+    }
+}
+
+#[cfg(test)]
+mod simulate_tests {
+    use floptle_core::{Matter, Name, ScriptInst, Scripts, Transform};
+
+    /// **A script can press a key for the rest of the game.** Probes wrote
+    /// into one script's environment to fake input, which reached that one
+    /// script and broke whenever its internals moved. `input.simulate` goes
+    /// through the real input path: on the next frame every script sees the
+    /// press and the hold, through the raw keys and the action layer alike,
+    /// and then the release.
+    #[test]
+    fn a_simulated_key_reaches_every_script_like_a_real_one() {
+        let dir = std::env::temp_dir().join(format!("floptle_simulate_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(
+            dir.join("scripts/tester.lua"),
+            "f = 0\nfunction update(node, dt)\n  f = f + 1\n  \
+             if f == 1 then input.simulate{ key = 'w', down = true } end\n  \
+             if f == 4 then input.simulate{ key = 'w', down = false } end\nend\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("scripts/player.lua"),
+            "log = ''\nfunction update(node, dt)\n  \
+             log = log .. (input.pressed('w') and 'P' or '') .. (input.key('w') and 'H' or '-') \
+             .. (input.released('w') and 'R' or '') .. (input.action('Fwd') and 'a' or '') .. ' '\nend\n",
+        )
+        .unwrap();
+        let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+        ed.script_host.set_input_map(floptle_input::InputMap {
+            actions: vec![floptle_input::Action {
+                name: "Fwd".into(),
+                bindings: vec![floptle_input::Binding::new(floptle_input::Source::Key(floptle_input::Key::KeyW))],
+            }],
+            ..Default::default()
+        });
+        let mut node = |kind: &str| {
+            let e = ed.world.spawn();
+            ed.world.insert(e, Transform::IDENTITY);
+            ed.world.insert(e, Name(kind.into()));
+            ed.world.insert(e, Matter::Empty);
+            ed.world.insert(e, Scripts(vec![ScriptInst::new(kind)]));
+            e
+        };
+        let _tester = node("tester");
+        let player = node("player");
+        ed.toggle_play();
+        for _ in 0..6 {
+            ed.play_step(1.0 / 60.0, true);
+            ed.finish_input_frame();
+        }
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        let log: String = ed.script_host.instance_env(player.index(), "player").unwrap().get("log").unwrap();
+        assert_eq!(log, "- PHa Ha Ha -R - ", "per frame: pressed, held, released, action");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

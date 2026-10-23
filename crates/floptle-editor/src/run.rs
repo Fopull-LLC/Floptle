@@ -424,6 +424,8 @@ fn ghost_report(ghosts: &[Ghost]) -> Vec<serde_json::Value> {
 /// * `seed` (`--seed`) pins the game's randomness so two runs are the same run.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Options {
+    /// `--script-budget-ms`: the scripts' watchdog for this run.
+    pub(crate) script_budget_ms: Option<u64>,
     pub(crate) json: bool,
     pub(crate) steam: bool,
     pub(crate) timing: bool,
@@ -448,7 +450,7 @@ pub(crate) struct Options {
 
 /// Run `root` for `span`. Returns the process exit code.
 pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -> i32 {
-    let Options { json, steam, timing, alloc, seed, ghosts: want_ghosts, join, pace } = opts;
+    let Options { script_budget_ms, json, steam, timing, alloc, seed, ghosts: want_ghosts, join, pace } = opts;
     if !root.join("project.ron").is_file() {
         floptle_say::say_err!("{} is not a project directory (no project.ron)", root.display());
         return 2;
@@ -499,6 +501,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -
     // they were them. Moving them somewhere Play cannot reach is exact.
     let opened: Vec<crate::console::ConsoleEntry> = std::mem::take(&mut ed.console.entries);
 
+    ed.script_budget_override = script_budget_ms;
     ed.toggle_play();
     if !ed.playing {
         floptle_say::say_err!("the project did not enter play mode");

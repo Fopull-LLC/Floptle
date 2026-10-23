@@ -363,6 +363,29 @@ pub(crate) struct ScrollArm {
     /// How far the view can scroll on each axis.
     max: [f32; 2],
 }
+/// Every font the style sheet and the tokens name, as asset paths, with what
+/// named it (`style "title"`, `token "ui"`), each once.
+pub(crate) fn style_fonts(sheet: &floptle_ui::StyleSheet, tokens: &floptle_ui::Tokens) -> Vec<(String, String)> {
+    use floptle_ui::style::UiState;
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut add = |font: String, who: String| {
+        if !font.is_empty() && !out.iter().any(|(f, _)| *f == font) {
+            out.push((font, who));
+        }
+    };
+    for (name, style) in &sheet.styles {
+        for state in [UiState::Base, UiState::Hover, UiState::Pressed, UiState::Disabled, UiState::Focus, UiState::Selected] {
+            if let Some(f) = style.block(state).and_then(|b| b.font.as_deref()) {
+                add(tokens.font(f), format!("style \"{name}\""));
+            }
+        }
+    }
+    for (name, path) in &tokens.fonts {
+        add(path.clone(), format!("token \"{name}\""));
+    }
+    out
+}
+
 impl Editor {
     /// Register a project font with the UI renderer (reads the file once; the
     /// renderer remembers parse failures and falls back to the embedded font).
@@ -436,6 +459,23 @@ impl Editor {
             .collect();
         for f in fonts {
             self.ensure_ui_font(&f);
+        }
+        // …and every font a style or a token names. Styles are applied to
+        // copies of the elements while the layer draws, after this, so a font
+        // named only in a style was never registered and its text drew in the
+        // project font.
+        for (font, who) in style_fonts(&self.ui_styles, &self.ui_tokens) {
+            if !floptle_vfs::exists(self.resolve_asset_path(&font)) {
+                if self.ui_font_missing.insert(font.clone()) {
+                    self.console.push(
+                        floptle_script::LogLevel::Warn,
+                        format!("font {font}, named by {who}, is not in the project — its text draws in the project font"),
+                        None,
+                    );
+                }
+                continue;
+            }
+            self.ensure_ui_font(&font);
         }
     }
 
@@ -725,7 +765,7 @@ impl Editor {
         let mut out = Vec::new();
         let mut textures: Vec<String> = Vec::new();
         for (_, layer, roots) in &layers {
-            let scale = layer.scale_for(viewport);
+            let scale = layer.scale_for_global(viewport, self.script_host.ui_scale());
             let design_vp = [viewport[0] / scale, viewport[1] / scale];
             let measure = |t: &TextSpec, w: Option<f32>| uir.measure_spec(t, w);
             let mut placed = floptle_ui::solve(roots, design_vp, &measure);
@@ -1374,7 +1414,7 @@ impl Editor {
                         });
                         (dvp, pd, None)
                     } else {
-                        let scale = layer.scale_for(viewport);
+                        let scale = layer.scale_for_global(viewport, self.script_host.ui_scale());
                         (
                             [viewport[0] / scale, viewport[1] / scale],
                             ptr_px.map(|p| [p[0] / scale, p[1] / scale]),
@@ -3962,6 +4002,46 @@ mod bitmap_font_tests {
         let [w, h] = uir.measure_spec(&spec, None);
         assert_eq!(w, (5.0 + 6.0) * 2.0 * 2.0, "its own advances, at twice its drawn size");
         assert_eq!(h, 20.0, "line height 10 at twice its size");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod style_font_tests {
+    /// **A font named only by a style is loaded.** Fonts were registered from
+    /// the elements, and styles are applied later, to copies, while the layer
+    /// draws, so a style's font was never loaded and its text drew in the
+    /// project font. A font a style names that is not there says so, once,
+    /// with the style's name.
+    #[test]
+    fn a_font_named_only_by_a_style_is_loaded() {
+        let sheet = floptle_ui::StyleSheet::parse(
+            r#"{ "title": (base: (font: "heading")), "note": (hover: (font: "fonts/missing.ttf")) }"#,
+        )
+        .unwrap();
+        let tokens = floptle_ui::Tokens::parse(r#"(fonts: { "heading": "fonts/Roboto.ttf" })"#).unwrap();
+        let named = super::style_fonts(&sheet, &tokens);
+        assert!(named.contains(&("fonts/Roboto.ttf".into(), "style \"title\"".into())), "{named:?}");
+        assert!(named.iter().any(|(f, who)| f == "fonts/missing.ttf" && who == "style \"note\""), "{named:?}");
+
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let dir = std::env::temp_dir().join(format!("floptle_style_font_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join("fonts"));
+        std::fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../floptle-render/fonts/Roboto-Regular.ttf"),
+            dir.join("fonts/Roboto.ttf"),
+        )
+        .unwrap();
+        ed.project_root = dir.clone();
+        ed.ui_styles = sheet;
+        ed.ui_tokens = tokens;
+        ed.ensure_ui_fonts();
+        ed.ensure_ui_fonts();
+        assert!(ed.ui_render.as_ref().unwrap().has_font("fonts/Roboto.ttf"), "the style's font was not loaded");
+        let warned: Vec<&String> =
+            ed.console.entries.iter().map(|e| &e.msg).filter(|m| m.contains("fonts/missing.ttf")).collect();
+        assert_eq!(warned.len(), 1, "the missing font is reported once: {warned:?}");
+        assert!(warned[0].contains("style \"note\""), "{}", warned[0]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

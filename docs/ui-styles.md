@@ -216,7 +216,7 @@ is the loop the system exists for; use it.
 
 | Group | Properties |
 |---|---|
-| Shape | `fill`, `gradient`, `radius`, `border`, `border_color`, `frame`, `shadow`, `glow`, `grain`, `blend` |
+| Shape | `fill`, `gradient`, `radius`, `border`, `border_color`, `frame`, `surface`, `shadow`, `glow`, `grain`, `blend` |
 | Element | `opacity`, `tint`, `rotation`, `scale` |
 | Text | `text_color`, `text_size`, `tracking`, `line_height`, `case`, `font`, `text_stroke`, `text_shadow` |
 | Layout | `pad`, `gap` (on a stack) |
@@ -275,7 +275,34 @@ no second asset, and the frame picks up the style's hover/focus transition for
 free. A style that sets `frame` should set `border_color` in the same block —
 the default is opaque black, which is an edge you can see but did not choose.
 
-From Lua the three properties are `frame`, `frameUV` and `frameSlice`.
+- **`ppu`** is texture pixels per UI unit for the corners (0, the default, is
+  one): a high-resolution sheet with `ppu: 4.0` draws a 64 px corner 16 units
+  across, so a fine edge does not need a tiny texture.
+
+From Lua the properties are `frame`, `frameUV`, `frameSlice` and `framePpu`.
+
+### A tiled surface
+
+`surface` lays an image over the fill, repeated at a fixed size however large
+the element is: a brushed-metal plate, woven cloth, a hazard stripe.
+
+```ron
+"plate": (
+    base: (
+        fill: "steel",
+        surface: ( texture: "textures/ui/brushed.png", tile: (64.0, 64.0), offset: (0.0, 0.0), tint: (1.0, 1.0, 1.0, 0.6) ),
+    ),
+),
+```
+
+`tile` is one tile's size in UI units, `offset` where the tiling starts in
+tiles (animate it to scroll), and `tint` multiplies the image, its alpha being
+how strongly it lies over the fill. It is clipped to the element's corners.
+From Lua: `surface`, `surfaceTile`, `surfaceOffset`, `surfaceTint`.
+
+Grain (`grain: (amount, scale)`) is added in the space brightness is judged
+in, so an amount reads the same on a white fill and a black one; a `scale`
+above 1 is coarser, soft speckle.
 
 ### ⚠ The size floor
 

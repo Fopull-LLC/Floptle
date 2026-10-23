@@ -253,6 +253,11 @@ pub struct ShapeSpec {
     /// A 9-sliced sprite drawn as this shape's edge, in place of a drawn border.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame: Option<FrameSpec>,
+    /// An image tiled across the shape, over its fill: a brushed-metal plate,
+    /// a woven cloth, a hazard stripe. The tile keeps its size however large
+    /// the element is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<SurfaceSpec>,
     /// How this shape composites against what is already drawn.
     #[serde(default, skip_serializing_if = "is_normal_blend")]
     pub blend: Blend,
@@ -283,6 +288,11 @@ pub struct FrameSpec {
     /// the sprite like a photograph, so a frame with no insets is a frame with no
     /// corners — set these to the sprite's actual border thickness.
     pub slice: [f32; 4],
+    /// Texture pixels per UI unit for the corners: 4 draws a 64 px corner 16
+    /// units across, so a high-resolution sheet can make a fine edge. 0 (the
+    /// default) is one pixel per unit.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub ppu: f32,
 }
 
 fn full_uv() -> [f32; 4] {
@@ -291,7 +301,48 @@ fn full_uv() -> [f32; 4] {
 
 impl Default for FrameSpec {
     fn default() -> Self {
-        FrameSpec { texture: String::new(), uv: full_uv(), slice: [0.0; 4] }
+        FrameSpec { texture: String::new(), uv: full_uv(), slice: [0.0; 4], ppu: 0.0 }
+    }
+}
+
+/// An image tiled across a shape, over its fill.
+///
+/// The tile is sized in UI units rather than stretched to the element, so a
+/// panel twice as wide shows twice as many tiles, which is what makes a
+/// material read as a material instead of a picture of one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SurfaceSpec {
+    /// Texture asset path.
+    pub texture: String,
+    /// One tile's size in UI units `[w, h]`.
+    #[serde(default = "default_tile")]
+    pub tile: [f32; 2],
+    /// Where the tiling starts, in tiles `[x, y]`; animate it to scroll.
+    #[serde(default, skip_serializing_if = "is_zero2")]
+    pub offset: [f32; 2],
+    /// Multiplies the image: its colour and how strongly it lies over the fill.
+    #[serde(default = "white4")]
+    pub tint: [f32; 4],
+}
+
+fn default_tile() -> [f32; 2] {
+    [64.0, 64.0]
+}
+fn white4() -> [f32; 4] {
+    [1.0; 4]
+}
+
+impl Default for SurfaceSpec {
+    fn default() -> Self {
+        SurfaceSpec { texture: String::new(), tile: default_tile(), offset: [0.0; 2], tint: white4() }
+    }
+}
+
+impl SurfaceSpec {
+    /// The UVs that lay whole tiles of `tile` units over a `w`×`h` rect.
+    pub fn uv(&self, w: f32, h: f32) -> [f32; 4] {
+        let (tw, th) = (self.tile[0].max(1e-3), self.tile[1].max(1e-3));
+        [self.offset[0], self.offset[1], self.offset[0] + w / tw, self.offset[1] + h / th]
     }
 }
 
@@ -311,6 +362,7 @@ impl Default for ShapeSpec {
             glow: None,
             grain: None,
             frame: None,
+            surface: None,
             blend: Blend::Normal,
         }
     }
@@ -491,6 +543,10 @@ pub struct ImageSpec {
     /// their own art.
     #[serde(default, skip_serializing_if = "is_zero4")]
     pub slice: [f32; 4],
+    /// Texture pixels per UI unit for a 9-slice's corners (0 = one per unit):
+    /// 4 draws a 1024 px sheet's 128 px corner 32 units across.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub slice_ppu: f32,
     /// Repeat the image across the rect (1 = once). Patterned fills.
     #[serde(default = "one2", skip_serializing_if = "is_one2")]
     pub tiling: [f32; 2],
@@ -527,6 +583,7 @@ impl Default for ImageSpec {
             rows: 1,
             cell: 0,
             slice: [0.0; 4],
+            slice_ppu: 0.0,
             tiling: [1.0, 1.0],
             offset: [0.0, 0.0],
             fit: ImageFit::Stretch,
@@ -1276,6 +1333,14 @@ impl UiLayer {
     /// number every screen-space consumer needs. Divide the window size by it to
     /// get the design-space viewport handed to [`solve`]. Always finite and > 0.
     pub fn scale_for(&self, viewport_px: [f32; 2]) -> f32 {
+        self.scale_for_global(viewport_px, 1.0)
+    }
+
+    /// [`Self::scale_for`] with the game's whole-interface scale (`ui.setScale`)
+    /// multiplied in: every layer grows by the same factor over its own
+    /// `design_height` scaling, before a pixel-scaled layer rounds to whole
+    /// pixels, so it stays crisp at any interface size.
+    pub fn scale_for_global(&self, viewport_px: [f32; 2], global: f32) -> f32 {
         let w = viewport_px[0].max(1.0);
         let h = viewport_px[1].max(1.0);
         let ref_w = self.reference_width.max(1.0);
@@ -1295,6 +1360,7 @@ impl UiLayer {
             UiScaleMode::Shrink => by_w.max(by_h),
             UiScaleMode::ConstantPixels => 1.0,
         };
+        let s = s * if global.is_finite() && global > 0.0 { global } else { 1.0 };
         let s = if s.is_finite() && s > 0.0 { s } else { 0.01 };
         // Whole pixels per design unit, if the layer asks for them. A layer
         // designed at 240 units in a 486px panel scales by 2.025, which puts
@@ -1773,6 +1839,8 @@ pub struct Quad {
     /// the only place that knows the texture's pixel size — and therefore how
     /// big an unstretched corner should be drawn.
     pub slice: [f32; 4],
+    /// Texture pixels per UI unit for the 9-slice corners; 0 is one per unit.
+    pub slice_ppu: f32,
     /// Aspect handling when the image doesn't match the rect.
     pub fit: ImageFit,
     /// Set when a mask claims this element.
@@ -1806,6 +1874,7 @@ impl Default for Quad {
             texture: String::new(),
             uv: [0.0, 0.0, 1.0, 1.0],
             slice: [0.0; 4],
+            slice_ppu: 0.0,
             fit: ImageFit::Stretch,
             clip: None,
             shader: None,
@@ -2233,6 +2302,22 @@ pub fn draw_list_with(
                 xform,
                 ..Default::default()
             });
+            // The tiled surface lies on the fill, clipped to the same shape.
+            if let Some(sf) = &s.surface
+                && !sf.texture.is_empty()
+            {
+                dl.quads.push(Quad {
+                    rect: p.rect,
+                    color: paint(sf.tint),
+                    radius,
+                    texture: sf.texture.clone(),
+                    uv: sf.uv(p.rect[2], p.rect[3]),
+                    clip,
+                    blend,
+                    xform,
+                    ..Default::default()
+                });
+            }
             // Inset shadow rides on top of the fill (it is a hole in the
             // surface, not something behind it) but under the image and text.
             if let Some(sh) = s.shadow
@@ -2267,6 +2352,7 @@ pub fn draw_list_with(
                     texture: f.texture.clone(),
                     uv: f.uv,
                     slice: f.slice,
+                    slice_ppu: f.ppu,
                     clip,
                     blend,
                     xform,
@@ -2315,6 +2401,7 @@ pub fn draw_list_with(
                 texture: img.texture.clone(),
                 uv: img.tiled_uv(),
                 slice: img.slice,
+                slice_ppu: img.slice_ppu,
                 fit: img.fit,
                 clip,
                 blend,
@@ -3951,5 +4038,30 @@ mod tests {
         // And `order: 0` never reaches a saved scene.
         let text = ron::ser::to_string(&ElementSpec::default()).unwrap();
         assert!(!text.contains("order"), "default order omitted: {text}");
+    }
+}
+
+#[cfg(test)]
+mod global_scale_tests {
+    use super::*;
+
+    /// **One interface scale grows every layer alike.** A game's "interface
+    /// size" setting had only each layer's design height to turn, layer by
+    /// layer. At 1.25 a 100-unit panel is 1.25× as wide on screen as at 1, on a
+    /// layer of every scale mode; a pixel-scaled layer still lands on whole
+    /// pixels.
+    #[test]
+    fn the_interface_scale_multiplies_every_layer() {
+        let vp = [1920.0, 1080.0];
+        for mode in [UiScaleMode::MatchHeight, UiScaleMode::MatchWidth, UiScaleMode::Blend, UiScaleMode::Expand, UiScaleMode::ConstantPixels] {
+            let layer = UiLayer { scale_mode: mode, design_height: 1029.0, ..Default::default() };
+            let (at1, at125) = (layer.scale_for_global(vp, 1.0), layer.scale_for_global(vp, 1.25));
+            assert!((100.0 * at125 / (100.0 * at1) - 1.25).abs() < 1e-5, "{mode:?}: {at1} → {at125}");
+            assert_eq!(layer.scale_for(vp), at1);
+        }
+        let pixel = UiLayer { design_height: 270.0, pixel_scale: true, ..Default::default() };
+        let s = pixel.scale_for_global(vp, 1.25);
+        assert_eq!(s, s.floor(), "a pixel layer at 1.25 is still whole pixels: {s}");
+        assert!(s > pixel.scale_for(vp), "and bigger than at 1");
     }
 }

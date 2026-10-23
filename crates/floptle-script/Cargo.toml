@@ -78,7 +78,14 @@ ureq = { workspace = true }
 # start`: `cmd.exe` reads `&`, `%VAR%` and a closing quote out of the URL as
 # its own syntax, and the browser was never the only thing a link could open.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# **The script watchdog's clock** is the thread's CPU time (`GetThreadTimes`).
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+# **The script watchdog's clock** is the thread's CPU time
+# (`clock_gettime(CLOCK_THREAD_CPUTIME_ID)`): a wall clock stopped honest
+# scripts on a loaded machine.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # **`openUrl`, in the browser.** The one place the page itself is the platform's
 # browser, so this is a real implementation rather than another refusal — see

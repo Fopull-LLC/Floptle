@@ -184,13 +184,16 @@ fn pivot_for(patch: [f32; 4], element: [f32; 4], pivot: [f32; 2]) -> [f32; 2] {
 ///
 /// `slice` is `[L, T, R, B]` as a fraction of the sampled UV region; `tex` is
 /// the source's pixel size. Corner patches are drawn at their source pixel size
-/// times `scale`, so a panel's border art keeps a constant visual weight no
+/// over `ppu` (texture pixels per UI unit; 0 is one) times `scale`, so a
+/// high-resolution sheet can draw fine corners, and a panel's border art keeps a constant visual weight no
 /// matter how large the panel gets — which is the entire point of authored
 /// panel textures.
 ///
 /// Degenerate cases fall back to the single stretched quad: insets that meet or
 /// cross, or an element too small to seat its own corners.
-fn nine_slice(base: &UiInstance, slice: [f32; 4], tex: [f32; 2], scale: f32) -> Vec<UiInstance> {
+fn nine_slice(base: &UiInstance, slice: [f32; 4], tex: [f32; 2], scale: f32, ppu: f32) -> Vec<UiInstance> {
+    // Texture pixels per UI unit: 0 is one, so a corner keeps its pixel size.
+    let scale = if ppu > 0.0 { scale / ppu } else { scale };
     let (u0, v0, u1, v1) = (base.uv[0], base.uv[1], base.uv[2], base.uv[3]);
     let (su, sv) = (u1 - u0, v1 - v0);
     let (l, t, r, b) = (slice[0], slice[1], slice[2], slice[3]);
@@ -477,6 +480,21 @@ pub struct Ui {
     /// The backdrop capture target (texture, view, w, h) — lazily (re)created to
     /// match the viewport, reused across frames.
     backdrop_target: Option<(wgpu::Texture, wgpu::TextureView, u32, u32)>,
+    /// The blit that builds a picture's mip chain, into an sRGB target.
+    mip_pipeline: wgpu::RenderPipeline,
+    /// Every project picture the UI has drawn, with a mip chain of its own:
+    /// keyed by texture id, and remade when the picture changes size or is
+    /// painted. See [`Ui::ensure_mipped`].
+    mipped: HashMap<u32, Mipped>,
+}
+
+/// A UI copy of a project picture with a full mip chain, sampled trilinearly
+/// when the picture is drawn smaller than it is.
+struct Mipped {
+    size: [u32; 2],
+    revision: u32,
+    _texture: wgpu::Texture,
+    bind: wgpu::BindGroup,
 }
 
 const QUAD_VERTS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
@@ -852,7 +870,38 @@ impl Ui {
             cache: None,
         });
 
+        // The same blit, into the sRGB picture format, for building mip chains:
+        // it filters in linear light, so a picture's small levels keep its
+        // brightness.
+        let mip_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ui-mips"),
+            layout: Some(&capture_layout),
+            vertex: wgpu::VertexState {
+                module: &capture_module,
+                entry_point: Some("vs"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &capture_module,
+                entry_point: Some("fs"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         Ui {
+            mip_pipeline,
+            mipped: HashMap::new(),
             pipeline,
             pipeline_world,
             globals_buf,
@@ -893,6 +942,120 @@ impl Ui {
             capture_pipeline,
             backdrop_target: None,
         }
+    }
+
+    /// Give project picture `id` a mip chain for the UI, once and again only
+    /// when it changes, so a 1024 px panel drawn at 200 px samples a level its
+    /// size instead of skipping texels and shimmering as it resizes.
+    ///
+    /// A copy rather than the picture itself: a project texture set to crisp
+    /// has no chain, and giving every one a chain would change how every crisp
+    /// texture in the world draws in the distance. The copy keeps the
+    /// texture's own filter when it is magnified (crisp pixel art stays crisp
+    /// drawn large) and is trilinear when it is minified. Pictures that are
+    /// not 8-bit sRGB (live render targets) and ones that already carry a
+    /// chain draw as they are.
+    fn ensure_mipped(&mut self, gpu: &Gpu, raster: &Raster, id: TexId) {
+        let Some((src, sampling, revision)) = raster.texture_source(id) else { return };
+        let size = src.size();
+        if src.format() != wgpu::TextureFormat::Rgba8UnormSrgb
+            || src.mip_level_count() > 1
+            || (size.width <= 1 && size.height <= 1)
+        {
+            self.mipped.remove(&id.0);
+            return;
+        }
+        let want = [size.width, size.height];
+        if self.mipped.get(&id.0).is_some_and(|m| m.size == want && m.revision == revision) {
+            return;
+        }
+        let levels = 1 + size.width.max(size.height).ilog2();
+        let device = &gpu.device;
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ui-mipped"),
+            size,
+            mip_level_count: levels,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let level_view = |l: u32| {
+            tex.create_view(&wgpu::TextureViewDescriptor {
+                base_mip_level: l,
+                mip_level_count: Some(1),
+                ..Default::default()
+            })
+        };
+        let src_view = src.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ui-mips") });
+        for level in 0..levels {
+            let from = if level == 0 { src_view.clone() } else { level_view(level - 1) };
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ui-mips"),
+                layout: &self.tex_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&from) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.backdrop_sampler) },
+                ],
+            });
+            let to = level_view(level);
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ui-mips"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &to,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rp.set_pipeline(&self.mip_pipeline);
+            rp.set_bind_group(0, &bind, &[]);
+            rp.draw(0..3, 0..1);
+        }
+        gpu.queue.submit([encoder.finish()]);
+        let address = match sampling.wrap {
+            crate::raster::TexWrap::Repeat => wgpu::AddressMode::Repeat,
+            crate::raster::TexWrap::Clamp => wgpu::AddressMode::ClampToEdge,
+            crate::raster::TexWrap::Mirror => wgpu::AddressMode::MirrorRepeat,
+        };
+        let magnified = match sampling.filter {
+            crate::raster::TexFilter::Pixelated => wgpu::FilterMode::Nearest,
+            _ => wgpu::FilterMode::Linear,
+        };
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("ui-mipped"),
+            mag_filter: magnified,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            address_mode_u: address,
+            address_mode_v: address,
+            ..Default::default()
+        });
+        let bind = make_elem_bind(device, &self.elem_layout, &sampler, &tex, "ui-mipped");
+        self.mipped.insert(id.0, Mipped { size: want, revision, _texture: tex, bind });
+    }
+
+    /// The pictures `batches` draw, each given its mip chain.
+    fn ensure_mipped_all(&mut self, gpu: &Gpu, raster: &Raster, batches: &[UiBatch]) {
+        for b in batches {
+            if let UiTex::Tex(id) = b.tex
+                && !b.range.is_empty()
+            {
+                self.ensure_mipped(gpu, raster, id);
+            }
+        }
+    }
+
+    /// How many pictures carry a UI mip chain, and the deepest chain's levels.
+    pub fn mipped_pictures(&self) -> (usize, u32) {
+        (self.mipped.len(), self.mipped.values().map(|m| m._texture.mip_level_count()).max().unwrap_or(0))
     }
 
     /// Capture the composited scene in `src_view` (the color target holding
@@ -1640,7 +1803,7 @@ impl Ui {
             if q.slice.iter().any(|v| *v > 0.0)
                 && let Some(size) = tex_size
             {
-                for patch in nine_slice(&base, q.slice, size, scale) {
+                for patch in nine_slice(&base, q.slice, size, scale, q.slice_ppu) {
                     push(instances, batches, tex, shader, q.blend, patch);
                 }
                 continue;
@@ -1681,19 +1844,13 @@ impl Ui {
             // borrows `self` immutably — has to be finished with by then.
             #[allow(clippy::type_complexity)]
             let (lines, widths, glyph_src): (Vec<String>, Vec<f32>, Vec<Vec<Option<usize>>>) = {
-                // Measured at the size the glyphs will actually be rasterized
-                // at when the layer snaps — a run measured at
-                // `size * scale` and drawn at a snapped `px` would wrap in
-                // places the glyphs do not, and ellipsize a line that fits.
-                // Off, it is `size * scale` to the last bit, so no existing
-                // project's text re-wraps.
+                // Measured at the size the glyphs are rasterized and advanced
+                // at, `px`, snapped or not: a run is drawn at a whole-pixel
+                // size, so one measured at the fractional `size * scale` wraps
+                // for a width it does not have. At a non-integer UI scale a
+                // line ran up to 5% past its box.
                 let advance = |s: &str| {
-                    let w = if list.text_snap >= 1.0 {
-                        self.measure_font(fid, s, px as f32)[0]
-                    } else {
-                        self.measure_font(fid, s, size)[0] * scale
-                    };
-                    w + track_px * s.chars().count() as f32
+                    self.measure_font(fid, s, px as f32)[0] + track_px * s.chars().count() as f32
                 };
                 let mut lines = if t.wrap {
                     floptle_ui::text::wrap_lines(&t.text, rect_px[2], &advance)
@@ -1807,7 +1964,7 @@ impl Ui {
                     line0
                         .chars()
                         .take(chars)
-                        .map(|c| self.fonts[self.source_font(fid, c)].advance(c, size) * scale + track_px)
+                        .map(|c| self.fonts[self.source_font(fid, c)].advance(c, px as f32) + track_px)
                         .sum()
                 };
                 let run_w = widths.first().copied().unwrap_or(0.0);
@@ -1965,6 +2122,7 @@ impl Ui {
             view_proj: [[0.0; 4]; 4],
         };
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&g));
+        self.ensure_mipped_all(gpu, raster, batches);
         self.ensure_instances(gpu, instances.len() as u32);
         gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(instances));
         let mut encoder =
@@ -2021,7 +2179,10 @@ impl Ui {
                 let bind = match b.tex {
                     UiTex::White => &self.white_bind,
                     UiTex::Atlas => &self.atlas_bind,
-                    UiTex::Tex(id) => raster.material_bind(id).unwrap_or(&self.white_bind),
+                    UiTex::Tex(id) => match self.mipped.get(&id.0) {
+                        Some(m) => &m.bind,
+                        None => raster.material_bind(id).unwrap_or(&self.white_bind),
+                    },
                 };
                 rp.set_bind_group(1, bind, &[]);
                 rp.draw_indexed(0..6, 0, b.range.clone());
@@ -2055,6 +2216,7 @@ impl Ui {
             view_proj,
         };
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&g));
+        self.ensure_mipped_all(gpu, raster, batches);
         self.ensure_instances(gpu, instances.len() as u32);
         gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(instances));
         let mut encoder = gpu
@@ -2111,7 +2273,10 @@ impl Ui {
                 let bind = match b.tex {
                     UiTex::White => &self.white_bind,
                     UiTex::Atlas => &self.atlas_bind,
-                    UiTex::Tex(id) => raster.material_bind(id).unwrap_or(&self.white_bind),
+                    UiTex::Tex(id) => match self.mipped.get(&id.0) {
+                        Some(m) => &m.bind,
+                        None => raster.material_bind(id).unwrap_or(&self.white_bind),
+                    },
                 };
                 rp.set_bind_group(1, bind, &[]);
                 rp.draw_indexed(0..6, 0, b.range.clone());
@@ -2288,6 +2453,50 @@ mod tests {
     /// first assertion is the one that matters: spans style and never lay out.
     /// A span boundary that became a break opportunity would reflow text when
     /// a word changed colour, and only at some window widths.
+    /// **Wrapped text stays inside its box at a fractional UI scale.** Lines
+    /// were broken by widths measured at the fractional `size × scale` and
+    /// drawn with glyphs at the rounded pixel size, so at 1080p with a design
+    /// height of 1029 an 11-unit label ran about 15 px past its 580-wide box.
+    #[test]
+    fn wrapped_text_stays_inside_its_box_at_a_fractional_scale() {
+        let gpu = Gpu::headless_hdr(64, 64);
+        let failed = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let sink = failed.clone();
+        gpu.device.on_uncaptured_error(std::sync::Arc::new(move |_| {
+            if let Ok(mut f) = sink.lock() {
+                *f = true;
+            }
+        }));
+        let mut r = Ui::new(&gpu);
+        let scale = 1080.0 / 1029.0;
+        let run = floptle_ui::TextRun {
+            rect: [0.0, 0.0, 580.0, 2000.0],
+            text: "Hold the mining laser on a rock until it cracks, then walk over the pieces to \
+                   collect them. Ore you carry slows you down on low-gravity worlds, and anything \
+                   left in the cargo bay when you launch is sold at the station for the going rate."
+                .repeat(2),
+            size: 11.0,
+            color: [1.0; 4],
+            wrap: true,
+            ..Default::default()
+        };
+        let list = floptle_ui::DrawList { texts: vec![run], ..Default::default() };
+        let (mut inst, mut batches) = (Vec::new(), Vec::new());
+        r.pack(&gpu, &list, [0.0, 0.0], scale, &mut |_| None, &|_| None, &mut |_, _| None, &mut inst, &mut batches);
+        if *failed.lock().unwrap() || inst.is_empty() {
+            return; // no usable device
+        }
+        let right = inst.iter().map(|i| i.rect[0] + i.rect[2]).fold(0.0f32, f32::max);
+        let lines = {
+            let mut ys: Vec<i32> = inst.iter().map(|i| i.rect[1].round() as i32).collect();
+            ys.sort_unstable();
+            ys.dedup_by(|a, b| (*a - *b).abs() < 4);
+            ys.len()
+        };
+        assert!(lines > 3, "the run did not wrap ({lines} lines)");
+        assert!(right <= 580.0 * scale + 1.0, "a line reached {right:.1} px in a {:.1} px box", 580.0 * scale);
+    }
+
     #[test]
     fn a_coloured_word_changes_the_colour_and_nothing_else() {
         let gpu = Gpu::headless_hdr(64, 64);

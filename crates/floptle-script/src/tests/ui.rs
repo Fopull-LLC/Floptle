@@ -1304,3 +1304,40 @@ fn engine_settings_pages_rebind_an_action_and_toggle_captions() {
     assert_eq!((heard.as_str(), rebound.as_str()), ("captions ", "binding "), "onChanged names what changed");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `ui.setScale` reaches the driver, reads back, and refuses a size no
+/// interface has.
+#[test]
+fn ui_set_scale_reaches_the_driver() {
+    let host = ScriptHost::new();
+    host.lua.load("ui.setScale(1.25)").exec().unwrap();
+    assert_eq!(host.ui_scale(), 1.25);
+    assert_eq!(host.lua.load("return ui.scale()").eval::<f64>().unwrap(), 1.25);
+    let err = host.lua.load("ui.setScale(10)").exec().unwrap_err().to_string();
+    assert!(err.contains("between 0.25 and 4"), "{err}");
+    assert_eq!(host.ui_scale(), 1.25, "a refused scale changed nothing");
+}
+
+/// **`draw.box` can sit on a slope.** It took only a yaw, so a box on tilted
+/// ground could not be drawn square to it. A yaw still works as it did; with
+/// `{ up = … }` the box's own up is the surface normal.
+#[test]
+fn draw_box_takes_a_full_turn() {
+    let host = ScriptHost::new();
+    let edges = |src: &str| -> Vec<crate::DrawLine> {
+        host.lua.load(src).exec().unwrap();
+        host.take_draw_lines()
+    };
+    // The yaw form: half-extents (1, 2, 3), turned a quarter about Y.
+    let yawed = edges("draw.box(0,0,0, 1,2,3, math.pi/2, 1,1,1)");
+    assert_eq!(yawed.len(), 12);
+    let reach = |ls: &[crate::DrawLine], axis: usize| {
+        ls.iter().flat_map(|l| [l.a[axis], l.b[axis]]).fold(0.0f64, |m, v| m.max(v.abs()))
+    };
+    assert!((reach(&yawed, 0) - 3.0).abs() < 1e-9 && (reach(&yawed, 2) - 1.0).abs() < 1e-9, "yaw turns z onto x");
+    // Standing on a wall whose normal is +X: the box's 2-unit up lies along x.
+    let on_wall = edges("draw.box(0,0,0, 1,2,3, { up = vec3(1, 0, 0) }, 1,1,1)");
+    assert!((reach(&on_wall, 0) - 2.0).abs() < 1e-9, "up did not tilt the box: {}", reach(&on_wall, 0));
+    assert!((reach(&on_wall, 1) - 1.0).abs() < 1e-9);
+    assert!(host.lua.load("draw.box(0,0,0, 1,1,1, 'x', 1,1,1)").exec().is_err());
+}

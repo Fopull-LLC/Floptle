@@ -102,6 +102,22 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
         })?,
     )?;
 
+    // perf.parts() -> { name = ms, … } for the last finished frame: the named
+    // pieces of work inside the buckets (`scatterSettle`, `terrainEdits`, …),
+    // every frame rather than only in a hitch.
+    let p = profile.clone();
+    t.set(
+        "parts",
+        lua.create_function(move |lua, ()| {
+            require_on(&p.borrow(), "parts")?;
+            let out = lua.create_table()?;
+            for (name, ms) in p.borrow().last_parts() {
+                out.set(*name, *ms as f64)?;
+            }
+            Ok(out)
+        })?,
+    )?;
+
     // perf.worstMs(bucket) -> the worst single frame in the last second.
     //
     // The one to reach for. A spike is what anybody is ever chasing and a mean

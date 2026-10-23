@@ -102,9 +102,13 @@ The same list lives on the tab's **§ Docs** page.
 - **Hot-reload:** just save. The script re-runs in a fresh environment, so avoid
   relying on state surviving a reload mid-Play.
 - **A loop without an exit stops the script, not the editor.** A pass into your
-  scripts may run for **2 seconds** (500 ms on a dedicated server, see
-  `--script-budget-ms`); past that the script that overran is stopped with an
-  error naming the budget, and it is not called again until you edit its file.
+  scripts may use **2 seconds** of its own CPU time (500 ms on a dedicated
+  server); past that the script that overran is stopped with an error saying
+  how long it ran, in CPU and wall time, and it is not called again until you
+  edit its file. The clock is the script thread's CPU time, so a machine busy
+  on every core slows a pass without using up its budget. A game that does
+  long work in one pass sets `script_budget_ms` in `project.ron`, and
+  `floptle run` and `floptle play` take `--script-budget-ms` for one run.
   Everything else keeps running. The scripts share **512 MB** between them —
   a table that only grows hits "not enough memory" in its own call, and the
   rest of the game goes on.

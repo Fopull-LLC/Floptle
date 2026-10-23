@@ -2077,6 +2077,7 @@ dependencies = [
  "floptle-ui",
  "floptle-vfs",
  "glam",
+ "libc",
  "mlua",
  "ron",
  "serde",

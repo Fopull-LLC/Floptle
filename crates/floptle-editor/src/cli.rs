@@ -238,6 +238,14 @@ pub(crate) const VERBS: &[Verb] = &[
                        partner account exists. Without it, Steam activates only for a \
                        project with a Steam App ID in ⚙ Settings ▸ Game",
             },
+            Arg {
+                name: "--script-budget-ms",
+                value: Value::Text,
+                required: false,
+                help: "how many milliseconds of its own CPU time one pass of a script may \
+                       run before it is stopped as a runaway loop (default: the project's \
+                       `script_budget_ms`, else 2000)",
+            },
         ],
         needs_gpu: true,
         writes_project: false,
@@ -879,6 +887,14 @@ pub(crate) const VERBS: &[Verb] = &[
                 help: "how many steps to run (default: 120)",
             },
             Arg {
+                name: "--script-budget-ms",
+                value: Value::Text,
+                required: false,
+                help: "how many milliseconds of its own CPU time one pass of a script may \
+                       run before it is stopped as a runaway loop (default: the project's \
+                       `script_budget_ms`, else 2000)",
+            },
+            Arg {
                 name: "--seconds",
                 value: Value::Text,
                 required: false,
@@ -1331,7 +1347,7 @@ pub(crate) enum Outcome {
     /// A verb ran to completion. Exit with this code.
     Exit(i32),
     /// A verb that needs a window. The editor starts with these.
-    Launch { project: Option<PathBuf>, player: bool, steam: bool },
+    Launch { project: Option<PathBuf>, player: bool, steam: bool, script_budget_ms: Option<u64> },
 }
 
 /// `floptle --help`, the flag form.
@@ -1545,12 +1561,16 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             Outcome::Exit(0)
         }
         Some(("open", a)) => {
-            Outcome::Launch { project: path(a, "PROJECT"), player: false, steam: false }
+            Outcome::Launch { project: path(a, "PROJECT"), player: false, steam: false, script_budget_ms: None }
         }
-        Some(("play", a)) => Outcome::Launch {
-            project: path(a, "PROJECT"),
-            player: true,
-            steam: a.get_flag("steam"),
+        Some(("play", a)) => match script_budget_ms(a) {
+            Ok(script_budget_ms) => Outcome::Launch {
+                project: path(a, "PROJECT"),
+                player: true,
+                steam: a.get_flag("steam"),
+                script_budget_ms,
+            },
+            Err(code) => Outcome::Exit(code),
         },
         Some(("export", a)) => {
             let project = path(a, "PROJECT").expect("required");
@@ -1831,11 +1851,16 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 }
                 None => 0,
             };
+            let script_budget_ms = match script_budget_ms(a) {
+                Ok(b) => b,
+                Err(code) => return Outcome::Exit(code),
+            };
             Outcome::Exit(crate::run::run(
                 &project,
                 text(a, "scene").as_deref(),
                 span,
                 crate::run::Options {
+                    script_budget_ms,
                     json: a.get_flag("json"),
                     steam: a.get_flag("steam"),
                     timing: a.get_flag("timing"),
@@ -1968,6 +1993,21 @@ fn signed_in_or_not(a: &clap::ArgMatches) {
     } else {
         floptle_script::keep_account_signed_out();
         floptle_say::say_err!("signed out (a test never uses your account; --signed-in to)");
+    }
+}
+
+/// `--script-budget-ms`, for `run` and `play`: a whole, non-zero number of
+/// milliseconds, or the usage error that names the flag.
+fn script_budget_ms(a: &clap::ArgMatches) -> Result<Option<u64>, i32> {
+    match a.get_one::<String>("script-budget-ms") {
+        None => Ok(None),
+        Some(v) => match v.parse::<u64>() {
+            Ok(0) | Err(_) => {
+                floptle_say::say_err!("--script-budget-ms wants a whole number of milliseconds above 0, not {v:?}");
+                Err(2)
+            }
+            Ok(ms) => Ok(Some(ms)),
+        },
     }
 }
 
@@ -2249,15 +2289,22 @@ mod tests {
         assert!(matches!(dispatch(&argv(&["open", "assets"])), Outcome::Launch { player: false, .. }));
         assert!(matches!(
             dispatch(&argv(&["play"])),
-            Outcome::Launch { project: None, player: true, steam: false }
+            Outcome::Launch { project: None, player: true, steam: false, script_budget_ms: None }
         ));
         // `--steam` is how a dev tries Steam on a project with no App ID yet;
         // it must reach the launch, or `floptle play --steam` silently plays
         // without Steam — which is exactly what it was typed to prevent.
         assert!(matches!(
             dispatch(&argv(&["play", "--steam"])),
-            Outcome::Launch { project: None, player: true, steam: true }
+            Outcome::Launch { project: None, player: true, steam: true, script_budget_ms: None }
         ));
+        // The watchdog's budget reaches the launch too, and a bad one is a
+        // usage error that names the flag.
+        assert!(matches!(
+            dispatch(&argv(&["play", "--script-budget-ms", "8000"])),
+            Outcome::Launch { script_budget_ms: Some(8000), .. }
+        ));
+        assert!(matches!(dispatch(&argv(&["play", "--script-budget-ms", "0"])), Outcome::Exit(2)));
         // …and `bake gi` is not one of them any more. It renders offscreen and
         // exits, which is what its help always claimed.
         assert!(!matches!(dispatch(&argv(&["bake", "gi", "no-such-project"])), Outcome::Launch { .. }));

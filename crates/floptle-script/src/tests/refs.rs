@@ -1260,3 +1260,43 @@ fn a_call_into_a_script_survives_its_node_being_switched_off_and_on() {
         "the rig's script forgot the call made into it before it was switched off"
     );
 }
+
+/// **A script's function called from another script reads this frame's
+/// `time`.** `time` was written into each script's environment as that
+/// script's own hooks ran, so `peek` on a script that runs after its caller
+/// answered a frame behind, or nil on the frame both first ran. Now every
+/// script reads the pass's `time` from the start of the pass.
+#[test]
+fn another_scripts_function_reads_this_frames_time() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_peek_time_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(&dir, "clock", "function peek() return time end\nfunction update(node, dt) end\n");
+    write_script(
+        &dir,
+        "caller",
+        "function update(node, dt)\n  local c = findScript('clock')\n  \
+         if c then seen, mine = c.peek(), time end\nend\n",
+    );
+    // The caller first, so it runs before the clock in every pass.
+    let (mut world, e) = world_with_script("caller");
+    let clock = world.spawn();
+    world.insert(clock, Transform::IDENTITY);
+    world.insert(clock, floptle_core::Name("Clock".into()));
+    world.insert(clock, floptle_core::Scripts(vec![floptle_core::ScriptInst::new("clock")]));
+    let mut host = ScriptHost::new();
+    for i in 1..4 {
+        let t = i as f32 / 60.0;
+        host.run(&mut world, &dir, 1.0 / 60.0, t);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let env = host.instance_env(e.index(), "caller").expect("the caller ran");
+        let (seen, mine): (Option<f64>, Option<f64>) = (env.get("seen").unwrap(), env.get("mine").unwrap());
+        if mine.is_none() {
+            continue; // the clock was not found yet
+        }
+        assert_eq!(seen, Some(t as f64), "frame {i}: clock.peek() read {seen:?}, the caller {mine:?}");
+    }
+    let env = host.instance_env(e.index(), "caller").unwrap();
+    assert!(env.get::<Option<f64>>("seen").unwrap().is_some(), "the clock was never reached");
+    let _ = std::fs::remove_dir_all(&dir);
+}

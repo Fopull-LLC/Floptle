@@ -255,13 +255,21 @@ On a text element, `wrap` still wraps the text.
 **Shape** — `fill`, `radius`, `border`, `borderColor`, plus the indexed forms
 (`fillR`, `radiusTL`, `borderB`, …). A quad takes a scalar for all four or a
 list: `radius = {8, 8, 0, 0}`.
+A 9-sliced edge sprite is `frame`, `frameUV`, `frameSlice`, `framePpu`; an
+image tiled over the fill is `surface` with `surfaceTile` (one tile's size in UI
+units), `surfaceOffset` and `surfaceTint` (see [ui-styles.md](ui-styles.md)).
 
 **Text** — `text`, `textSize`, `textColor`, `textAlign`, `textValign`,
 `tracking`, `lineHeight`, `font`, `wrap`, `maxLines`, `case`, `overflow`,
 `textFit`.
 
-**Image** — `texture`, `tint`, `cols`, `rows`, `cell`, `slice`, `tiling`,
-`imageFit` (`"stretch"`, `"contain"`, `"cover"`).
+**Image** — `texture`, `tint`, `cols`, `rows`, `cell`, `slice`, `slicePpu`
+(texture pixels per UI unit for a 9-slice's corners: 4 draws a 64 px corner 16
+units across), `tiling`, `imageFit` (`"stretch"`, `"contain"`, `"cover"`).
+
+A picture drawn smaller than it is samples a mip chain the UI builds for it, so
+a large panel texture drawn small does not shimmer as it resizes; drawn larger
+it keeps its own filter (crisp pixel art stays crisp).
 
 **Interaction** — `button`, `toggle`, `group`, `selected`, `disabled`,
 `focusable`, `draggable`, `dropTarget`, `tooltip`, `tooltipBox`, `part`

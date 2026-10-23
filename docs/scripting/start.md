@@ -99,9 +99,9 @@ so code you put in `fixedUpdate` today is already netcode-shaped.
 
 | Global | Meaning |
 |---|---|
-| `params` | This instance's tunables — a table **seeded from `defaults`**, so `params.speed` works out of the box. The Inspector overrides individual values per node. |
-| `time` | Seconds since Play started |
-| `dt` | Seconds since the last frame (also the 2nd arg to `update`) |
+| `params` | This instance's tunables — a table **seeded from `defaults`**, so `params.speed` works out of the box. The Inspector overrides individual values per node. Each script instance has its own: a function of another script called through `findScript` reads *that* script's `params`, which is how to read another script's tunables (`function speed() return params.speed end`, then `findScript("mover").speed()`). |
+| `time` | Seconds since Play started. The same in every script, whichever script's function is running: it is set for all of them before any script runs in a pass. `update` and `lateUpdate` read the frame clock; `fixedUpdate` reads the tick clock, which counts the ticks run plus any time a long frame banked and the catch-up cap dropped, so within a frame the two agree to within one tick (a deadline set in one pass can be checked in the other). There is no separate unscaled clock: pausing stops both, and `app.wallClock()` is the wall. |
+| `dt` | Seconds since the last frame (also the 2nd arg to `update`). Like `time`, the pass's, in every script. |
 | `log("…")` | Print to the engine **Console** |
 | `print(anything, …)` | Console print that understands the whole engine: tables render **deeply** (nested, sorted keys, short arrays inline, cycle-safe), node handles print as `node "Player" (#4) at vec3(…)`, component/script handles by what they point at, vectors via their components. Multi-line output folds into a collapsible block in the Console. |
 

@@ -83,3 +83,44 @@ fn an_overloaded_tick_plays_in_slow_motion_and_says_so_once() {
     assert!(w.contains("16.7 ms slice") && w.contains("slow motion") && w.contains("scripts"), "{w}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **The tick clock keeps up with the frame clock after a long load.** A
+/// 30-second frame banks far more than the catch-up cap allows, and the
+/// ticks it drops used to be time the tick clock never got back: `time` in
+/// `fixedUpdate` trailed `time` in `update` by the dropped seconds for the
+/// rest of the session, so a deadline set in one pass and checked in the
+/// other was never reached. After the load, for 10 s of frames, the two stay
+/// within one tick.
+#[test]
+fn the_tick_clock_keeps_up_after_a_long_load() {
+    let dir = std::env::temp_dir().join(format!("floptle_tick_clock_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("scripts")).unwrap();
+    std::fs::write(
+        dir.join("scripts/clocks.lua"),
+        "function update(node, dt) ut = time end\nfunction fixedUpdate(node, dt) ft = time end\n",
+    )
+    .unwrap();
+    let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+    let e = ed.world.spawn();
+    ed.world.insert(e, Transform::IDENTITY);
+    ed.world.insert(e, Name("Clocks".into()));
+    ed.world.insert(e, Matter::Empty);
+    ed.world.insert(e, Scripts(vec![ScriptInst::new("clocks")]));
+    ed.toggle_play();
+    assert!(ed.playing, "did not enter play");
+    let step = ed.game_tick.step as f64;
+    ed.play_step(1.0 / 60.0, true);
+    // The load: one frame that took 30 s.
+    ed.play_step(30.0, true);
+    let mut worst = 0.0f64;
+    for _ in 0..600 {
+        ed.play_step(1.0 / 60.0, true);
+        let env = ed.script_host.instance_env(e.index(), "clocks").expect("ran");
+        let (ut, ft): (f64, f64) = (env.get("ut").unwrap(), env.get("ft").unwrap());
+        worst = worst.max((ut - ft).abs());
+    }
+    assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+    assert!(worst < step + 1e-3, "update's time and fixedUpdate's drifted {worst:.3} s apart (a tick is {step:.4} s)");
+    let _ = std::fs::remove_dir_all(&dir);
+}

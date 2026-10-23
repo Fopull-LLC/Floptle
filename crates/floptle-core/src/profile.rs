@@ -298,6 +298,8 @@ pub struct FrameProfile {
     hitches: std::collections::VecDeque<Hitch>,
     /// This frame's named parts, folded into a hitch when it is one.
     parts_frame: Vec<(&'static str, f32)>,
+    /// The last finished frame's parts, every frame, for `perf.parts()`.
+    parts_last: Vec<(&'static str, f32)>,
     /// The GPU's own per-pass times for the last frame whose timestamps have
     /// landed, and their total. `None` when nothing measured them: timing off,
     /// or a device without timestamp queries.
@@ -359,6 +361,13 @@ impl FrameProfile {
             return;
         }
         *self.frame.entry(bucket).or_default() += ms;
+    }
+
+    /// The named parts of the last finished frame and what each cost, in ms:
+    /// work inside a bucket a game can watch frame by frame, where a hitch
+    /// only shows it on a slow frame.
+    pub fn last_parts(&self) -> &[(&'static str, f32)] {
+        &self.parts_last
     }
 
     /// Name a piece of work inside a bucket: `ms` of what the bucket already
@@ -557,6 +566,7 @@ impl FrameProfile {
         }
         let total: f32 = spent.iter().map(|(_, ms)| ms).sum();
         let mut parts = std::mem::take(&mut self.parts_frame);
+        self.parts_last.clone_from(&parts);
         if total >= HITCH_MS {
             spent.sort_by(|a, b| b.1.total_cmp(&a.1));
             parts.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -958,5 +968,26 @@ mod tests {
         let sum: f32 = Bucket::ALL.iter().filter_map(|b| p.bucket(*b)).map(|c| c.ms).sum();
         assert!((p.accounted_ms().unwrap() - sum).abs() < 1e-4);
         assert!((p.accounted_ms().unwrap() - 6.0).abs() < 1e-3);
+    }
+}
+
+#[cfg(test)]
+mod last_parts_tests {
+    use super::*;
+
+    /// **A part is readable every frame, not only in a hitch.** A game
+    /// watching how much of scatter was settling got the number only on frames
+    /// slow enough to be hitches.
+    #[test]
+    fn the_last_frames_parts_are_kept() {
+        let mut p = FrameProfile::default();
+        p.enable(true);
+        p.record(Bucket::Scatter, 1.5);
+        p.record_part("scatterSettle", 0.9);
+        p.end_frame();
+        assert_eq!(p.last_parts(), &[("scatterSettle", 0.9)]);
+        assert!(p.take_hitches().is_empty(), "1.5 ms is no hitch, so only last_parts could carry it");
+        p.end_frame();
+        assert!(p.last_parts().is_empty(), "a frame that settled nothing reports nothing");
     }
 }

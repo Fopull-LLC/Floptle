@@ -326,6 +326,13 @@ pub fn platform() -> &'static str {
 }
 
 /// Install the `app` global.
+/// Seconds since the first time anything asked, on a clock that only goes
+/// forward.
+fn wall_clock() -> f64 {
+    static START: std::sync::OnceLock<floptle_core::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(floptle_core::time::Instant::now).elapsed().as_secs_f64()
+}
+
 pub fn install(lua: &Lua, info: &SharedAppInfo, req: &SharedAppRequests) -> mlua::Result<()> {
     let t = lua.create_table()?;
 
@@ -346,6 +353,12 @@ pub fn install(lua: &Lua, info: &SharedAppInfo, req: &SharedAppRequests) -> mlua
     // file system a player can open, so a game hides what a page cannot do
     // instead of showing a button that does nothing.
     t.set("platform", lua.create_function(|_, ()| Ok(platform()))?)?;
+    // app.wallClock() → seconds on a monotonic wall clock, from an arbitrary
+    // start. For timing and time-slicing a script's own work: `os.clock` is
+    // the process's CPU time summed over every thread, which on a busy engine
+    // runs several times faster than the wall, and `time` is the game's clock,
+    // which stands still within a frame.
+    t.set("wallClock", lua.create_function(|_, ()| Ok(wall_clock()))?)?;
     t.set("isWeb", lua.create_function(|_, ()| Ok(cfg!(target_arch = "wasm32")))?)?;
     {
         let i = info.clone();
@@ -742,6 +755,24 @@ mod tests {
     /// is every frame but the one somebody clicks in.
     /// `app.setRenderScale` queues for the driver, reads back at once, and
     /// refuses a scale outside 0.25–1 with the range in the message.
+    /// **`app.wallClock` measures the wall, not the CPU.** Across a 40 ms
+    /// sleep, which spends no CPU at all, it moves about 40 ms and never back.
+    /// `os.clock` was all a script had, and it counts CPU time over every
+    /// thread, so a script slicing its work by it sliced by the wrong clock.
+    #[test]
+    fn the_wall_clock_moves_with_the_wall() {
+        let lua = Lua::new();
+        let info: SharedAppInfo = Rc::default();
+        let req: SharedAppRequests = Rc::default();
+        install(&lua, &info, &req).unwrap();
+        let a: f64 = lua.load("return app.wallClock()").eval().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let b: f64 = lua.load("return app.wallClock()").eval().unwrap();
+        // At least the sleep; the upper bound only has to rule out a CPU or
+        // tick clock, on a runner that may pause this thread.
+        assert!(b - a >= 0.039 && b - a < 2.0, "40 ms of wall read as {:.4} s", b - a);
+    }
+
     #[test]
     fn set_render_scale_queues_reads_back_and_refuses_out_of_range() {
         let lua = Lua::new();

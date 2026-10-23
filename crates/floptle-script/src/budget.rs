@@ -13,6 +13,17 @@
 //! loop interrupts tens of millions of times a second, and `Instant::now()`
 //! at each would be the slowest thing in it.
 //!
+//! **The clock is this thread's CPU time, not the wall.** On a machine loaded
+//! on every core a pass that does milliseconds of work can take seconds of
+//! wall time, waiting its turn for a core, and a wall-clock budget stopped
+//! honest scripts for good at whatever line they were on — a game lost the
+//! base it was building. CPU time only grows while the script's thread runs,
+//! so a loop that never ends still uses it up at full speed, and a busy
+//! machine does not. Where a platform cannot say (the browser), the wall is
+//! the clock, as before. A pass that runs [`WALL_CEILING`] times its budget
+//! in wall time is stopped too, so a script waiting forever on the engine
+//! inside a binding still comes back.
+//!
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -27,6 +38,8 @@ pub const DEFAULT_BUDGET: Duration = Duration::from_secs(2);
 pub const SERVER_BUDGET: Duration = Duration::from_millis(500);
 /// Interrupts between clock reads.
 const CHECK_EVERY: u32 = 1024;
+/// How many budgets of wall time a pass may take, whatever its CPU time.
+const WALL_CEILING: u32 = 30;
 /// The marker every budget error carries, so the host can tell one from an
 /// ordinary runtime error without parsing the sentence around it.
 const MARKER: &str = "ran for more than";
@@ -35,8 +48,41 @@ const MARKER: &str = "ran for more than";
 /// interrupt closure.
 pub struct Budget {
     limit: Cell<Duration>,
-    deadline: Cell<Option<Instant>>,
+    /// When the outermost entry armed: the wall then, and this thread's CPU
+    /// time then where the platform can say.
+    deadline: Cell<Option<(Instant, Option<Duration>)>>,
     ticks: Cell<u32>,
+}
+
+/// CPU time this thread has used so far, where the platform can say.
+#[cfg(unix)]
+pub fn thread_cpu() -> Option<Duration> {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: `ts` is a valid, writable timespec for the duration of the call.
+    let ok = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) } == 0;
+    ok.then(|| Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))
+}
+
+/// CPU time this thread has used so far, where the platform can say.
+#[cfg(windows)]
+pub fn thread_cpu() -> Option<Duration> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+    let z = || FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let (mut c, mut e, mut k, mut u) = (z(), z(), z(), z());
+    // SAFETY: the pseudo-handle is always valid for the calling thread, and
+    // every out-pointer is a live FILETIME.
+    let ok = unsafe { GetThreadTimes(GetCurrentThread(), &mut c, &mut e, &mut k, &mut u) } != 0;
+    let t = |f: FILETIME| (u64::from(f.dwHighDateTime) << 32) | u64::from(f.dwLowDateTime);
+    // 100 ns units, kernel and user both: a script's own work in a binding
+    // counts as its own.
+    ok.then(|| Duration::from_nanos((t(k) + t(u)) * 100))
+}
+
+/// No per-thread CPU clock here (the browser): the wall is the budget.
+#[cfg(not(any(unix, windows)))]
+pub fn thread_cpu() -> Option<Duration> {
+    None
 }
 
 impl Budget {
@@ -63,7 +109,7 @@ impl Budget {
     pub fn arm(self: &Rc<Self>) -> Armed {
         let prev = self.deadline.get();
         if prev.is_none() {
-            self.deadline.set(Some(Instant::now() + self.limit.get()));
+            self.deadline.set(Some((Instant::now(), thread_cpu())));
         }
         Armed { budget: self.clone(), prev }
     }
@@ -82,10 +128,17 @@ impl Budget {
         let t = self.ticks.get().wrapping_add(1);
         self.ticks.set(t);
         if t.is_multiple_of(CHECK_EVERY) {
-            if let Some(d) = self.deadline.get()
-                && Instant::now() > d
-            {
-                return Err(mlua::Error::RuntimeError(self.message()));
+            if let Some((wall0, cpu0)) = self.deadline.get() {
+                let limit = self.limit.get();
+                let wall = wall0.elapsed();
+                let cpu = cpu0.zip(thread_cpu()).map(|(a, b)| b.saturating_sub(a));
+                let over = match cpu {
+                    Some(cpu) => cpu > limit || wall > limit * WALL_CEILING,
+                    None => wall > limit,
+                };
+                if over {
+                    return Err(mlua::Error::RuntimeError(self.message(wall, cpu)));
+                }
             }
             if lua.used_memory() > MEMORY_LIMIT {
                 return Err(mlua::Error::MemoryError(memory_message()));
@@ -94,16 +147,24 @@ impl Budget {
         Ok(mlua::VmState::Continue)
     }
 
-    fn message(&self) -> String {
-        let limit = self.limit.get();
-        let shown = if limit.as_millis() >= 1000 {
-            format!("{} s", limit.as_secs_f64())
-        } else {
-            format!("{} ms", limit.as_millis())
+    fn message(&self, wall: Duration, cpu: Option<Duration>) -> String {
+        let shown = |d: Duration| {
+            if d.as_millis() >= 1000 {
+                format!("{:.1} s", d.as_secs_f64())
+            } else {
+                format!("{} ms", d.as_millis())
+            }
         };
+        let limit = self.limit.get();
+        let (what, spent) = match cpu {
+            Some(cpu) => ("of its own CPU time", format!("{} of CPU, {} of wall time", shown(cpu), shown(wall))),
+            None => ("", format!("{} of wall time", shown(wall))),
+        };
+        let what = if what.is_empty() { String::new() } else { format!(" {what}") };
         format!(
-            "{MARKER} {shown} without returning — a loop without an exit? The script is \
-             stopped until it is edited."
+            "{MARKER} {}{what} without returning ({spent}) — a loop without an exit? The \
+             script is stopped until it is edited.",
+            shown(limit)
         )
     }
 
@@ -123,7 +184,7 @@ impl Budget {
 /// The armed deadline; dropping it restores what was there before.
 pub struct Armed {
     budget: Rc<Budget>,
-    prev: Option<Instant>,
+    prev: Option<(Instant, Option<Duration>)>,
 }
 
 impl Drop for Armed {
@@ -156,12 +217,12 @@ mod tests {
         assert!(b.deadline.get().is_none());
         {
             let _outer = b.arm();
-            let d = b.deadline.get().expect("armed");
+            let d = b.deadline.get().expect("armed").0;
             {
                 let _inner = b.arm();
-                assert_eq!(b.deadline.get(), Some(d), "an inner arm moved the deadline");
+                assert_eq!(b.deadline.get().map(|d| d.0), Some(d), "an inner arm moved the deadline");
             }
-            assert_eq!(b.deadline.get(), Some(d), "dropping the inner arm disarmed the outer");
+            assert_eq!(b.deadline.get().map(|d| d.0), Some(d), "dropping the inner arm disarmed the outer");
         }
         assert!(b.deadline.get().is_none(), "the outer arm did not disarm");
     }
@@ -175,7 +236,9 @@ mod tests {
         }
         b.set_limit(Duration::ZERO);
         let _armed = b.arm();
-        std::thread::sleep(Duration::from_millis(2));
+        // Spent, not slept: the budget is CPU time where the platform has it.
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_millis(2) {}
         let mut tripped = None;
         for _ in 0..(CHECK_EVERY * 2) {
             if let Err(e) = b.check(&lua) {
