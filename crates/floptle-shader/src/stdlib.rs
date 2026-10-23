@@ -577,6 +577,19 @@ fn flsl_tiled_sample(t: texture_2d<f32>, s: sampler, uv: vec2<f32>, ta: vec4<f32
     return textureSample(t, s, uv);
 }
 
+// The same in the vertex stage (`output offset`), which has no derivatives to
+// pick a mip level from: the largest level, always.
+fn flsl_tiled_sample_level(t: texture_2d<f32>, s: sampler, uv: vec2<f32>, ta: vec4<f32>, tb: vec4<f32>) -> vec4<f32> {
+    let mode = u32(tb.x + 0.5);
+    if (mode == 1u) {
+        let c = cos(tb.y);
+        let sn = sin(tb.y);
+        let m = mat2x2<f32>(vec2<f32>(c, sn), vec2<f32>(-sn, c));
+        return textureSampleLevel(t, s, m * ((uv - 0.5) * ta.xy) + 0.5 + ta.zw, 0.0);
+    }
+    return textureSampleLevel(t, s, uv, 0.0);
+}
+
 // Triplanar projection of a slot's texture: three axis samples blended by the
 // normal. scale = tile size in the units of `p`, blend = axis-edge sharpness.
 fn flsl_triplanar(t: texture_2d<f32>, s: sampler, p: vec3<f32>, n: vec3<f32>, scale: f32, blend: f32) -> vec4<f32> {

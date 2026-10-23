@@ -141,6 +141,17 @@ pub(crate) fn world_transform_of(s: &crate::SceneMirror, e: u32) -> floptle_core
 /// The composed world transform of `e`'s parent (identity when it has none) —
 /// the frame a world position has to be brought back through to become a local
 /// one.
+/// Where a node's local position is in the world, through its parent as the
+/// mirror has it: what a body teleport is given. A body's place in the sim
+/// is a world one, and handing it the node-local position put a body under
+/// a planet (a post the crew should walk into) near the world's origin while
+/// its node stood on the planet.
+pub(crate) fn body_world_of(s: &crate::SceneMirror, e: u32, local: glam::DVec3) -> [f64; 3] {
+    let pw = parent_world_of(s, e);
+    let w = pw.translation + pw.rotation.as_dquat() * (local * pw.scale.as_dvec3());
+    [w.x, w.y, w.z]
+}
+
 pub(crate) fn parent_world_of(s: &crate::SceneMirror, e: u32) -> floptle_core::Transform {
     match s.parent.get(&e) {
         Some(&p) => world_transform_of(s, p),
@@ -1323,12 +1334,14 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("pushboxOnly".to_string(), b(rb.pushbox_only)),
                 ("radius".to_string(), rb.radius as f64),
                 ("height".to_string(), rb.height as f64),
-                // Shape kind: 0 = sphere, 1 = capsule, 2 = box, 3 = polygon.
+                // Shape kind: 0 = sphere, 1 = capsule, 2 = box, 3 = polygon,
+                // 4 = mesh (the node's own geometry).
                 ("shape".to_string(), match rb.kind {
                     floptle_core::BodyKind::Sphere => 0.0,
                     floptle_core::BodyKind::Capsule => 1.0,
                     floptle_core::BodyKind::Box => 2.0,
                     floptle_core::BodyKind::Polygon => 3.0,
+                    floptle_core::BodyKind::Mesh => 4.0,
                 }),
                 ("half_x".to_string(), rb.half_extents[0] as f64),
                 ("half_y".to_string(), rb.half_extents[1] as f64),
@@ -2170,6 +2183,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                             0 => floptle_core::BodyKind::Sphere,
                             1 => floptle_core::BodyKind::Capsule,
                             3 => floptle_core::BodyKind::Polygon,
+                            4 => floptle_core::BodyKind::Mesh,
                             _ => floptle_core::BodyKind::Box,
                         }
                     }
@@ -2286,10 +2300,26 @@ pub(crate) fn apply_rich_sets(
                 }
             }
             RichSet::Material(fields) => {
-                if world.get::<floptle_core::Material>(e).is_none() {
+                // A model with no Material of its own is patched, not replaced:
+                // the keys given are laid over each part's own material when it
+                // draws (`MaterialPatch`), so its textures, cut-out leaves and
+                // shader survive a tint. A whole Material on it would supersede
+                // all of that. A node that has a Material is changed in place,
+                // as before.
+                let model = matches!(world.get::<Matter>(e), Some(Matter::Mesh { .. }));
+                let patching = model && world.get::<floptle_core::Material>(e).is_none();
+                let mut patch = patching
+                    .then(|| world.get::<floptle_core::MaterialPatch>(e).cloned().unwrap_or_default());
+                if !patching && world.get::<floptle_core::Material>(e).is_none() {
                     world.insert(e, floptle_core::Material::default());
                 }
-                let Some(m) = world.get_mut::<floptle_core::Material>(e) else { continue };
+                let m = match patch.as_mut() {
+                    Some(p) => &mut p.mat,
+                    None => match world.get_mut::<floptle_core::Material>(e) {
+                        Some(m) => m,
+                        None => continue,
+                    },
+                };
                 for (k, v) in &fields {
                     match k.as_str() {
                         "color" => m.color = v3(v).unwrap_or(m.color),
@@ -2315,6 +2345,12 @@ pub(crate) fn apply_rich_sets(
                         "fog" => m.fog = num(v).map(|n| n != 0.0).unwrap_or(m.fog),
                         "ambient" => m.ambient = num(v).map(|n| n as f32).unwrap_or(m.ambient),
                         "alpha" => m.alpha = num(v).map(|n| n as f32).unwrap_or(m.alpha),
+                        // Where an opaque surface's texture alpha cuts holes
+                        // (0 cuts none), and whether a face is drawn from behind.
+                        "alphaCutoff" => {
+                            m.alpha_cutoff = num(v).map(|n| (n as f32).clamp(0.0, 1.0)).unwrap_or(m.alpha_cutoff)
+                        }
+                        "doubleSided" => m.double_sided = num(v).map(|n| n != 0.0).unwrap_or(m.double_sided),
                         "texture" => {
                             if let CompVal::Str(t) = v {
                                 m.texture = (!t.is_empty()).then(|| t.clone());
@@ -2430,6 +2466,14 @@ pub(crate) fn apply_rich_sets(
                         }
                         _ => {}
                     }
+                }
+                if let Some(mut p) = patch {
+                    for (k, _) in &fields {
+                        if !p.names(k) && MATERIAL_KEYS.contains(&k.as_str()) {
+                            p.keys.push(k.clone());
+                        }
+                    }
+                    world.insert(e, p);
                 }
             }
             RichSet::MatterTerrain(id) => {
@@ -2692,7 +2736,7 @@ pub(crate) fn apply_rich_sets(
                 m.apply(&set);
                 world.insert(e, m.matter());
             }
-            RichSet::NodeTint { color, alpha, rim, rim_strength, ambient, clear } => {
+            RichSet::NodeTint { color, alpha, rim, rim_strength, ambient, emissive, emissive_strength, clear } => {
                 // Merged onto whatever is already there, lane by lane — see the
                 // note on the variant for why a colour write must not cost this
                 // node its ambient lift.
@@ -2703,6 +2747,8 @@ pub(crate) fn apply_rich_sets(
                     rim: rim.unwrap_or(cur.rim),
                     rim_strength: rim_strength.unwrap_or(cur.rim_strength),
                     ambient: ambient.unwrap_or(cur.ambient),
+                    emissive: emissive.unwrap_or(cur.emissive),
+                    emissive_strength: emissive_strength.unwrap_or(cur.emissive_strength),
                 };
                 // Clearing and setting the identity are the same act, and both
                 // mean "no tint" — so neither leaves a component behind.
@@ -3072,7 +3118,7 @@ pub(crate) const MATERIAL_KEYS: &[&str] = &[
     "normalMap", "normalStrength", "roughnessMap", "roughness", "metallicMap", "metallic",
     "occlusionMap", "occlusionStrength", "emissiveMap", "reflectivity", "transmission", "ior", "thickness",
     "sway", "backlight", "shading", "jitter", "affineUv", "vertexLit",
-    "ditherAlpha", "retroExempt",
+    "ditherAlpha", "retroExempt", "alphaCutoff", "doubleSided",
 ];
 
 /// Every key `node:setCelestial{...}` reads.
@@ -4492,7 +4538,8 @@ let node_mt = lua.create_table()?;
                     // A body node: the physics writeback would stomp this —
                     // queue a real teleport for the driver.
                     if bodies.borrow().contains_key(&e) {
-                        crate::env::queue_body_pos(&body_pos, &bodies, e, [v.x, v.y, v.z]);
+                        let w = body_world_of(&s, e, v);
+                        crate::env::queue_body_pos(&body_pos, &bodies, e, w);
                     }
                 }
             }
@@ -4630,7 +4677,8 @@ let node_mt = lua.create_table()?;
                         && bodies.borrow().contains_key(&e)
                     {
                         let t = tr.translation;
-                        crate::env::queue_body_pos(&body_pos, &bodies, e, [t.x, t.y, t.z]);
+                        let w = body_world_of(&s, e, t);
+                        crate::env::queue_body_pos(&body_pos, &bodies, e, w);
                     }
                     s.dirty.insert(e);
                     return Ok(());
@@ -5818,10 +5866,12 @@ fn node_lookup_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
                 rim: None,
                 rim_strength: None,
                 ambient: None,
+                emissive: None,
+                emissive_strength: None,
                 clear: false,
             };
             let crate::RichSet::NodeTint {
-                color, alpha, rim, rim_strength, ambient, clear,
+                color, alpha, rim, rim_strength, ambient, emissive, emissive_strength, clear,
             } = &mut set
             else {
                 unreachable!()
@@ -5845,7 +5895,7 @@ fn node_lookup_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
                     // fade never happens, and nothing is logged. It cannot
                     // collide with a colour, because a `color(...)` table
                     // carries `r/g/b/a` and `[1]..[4]` and never `alpha`.
-                    let opts = ["color", "alpha", "rim", "rimStrength", "ambient"]
+                    let opts = ["color", "alpha", "rim", "rimStrength", "ambient", "emissive", "emissiveStrength"]
                         .iter()
                         .any(|k| t.contains_key(*k).unwrap_or(false));
                     if opts {
@@ -5897,6 +5947,15 @@ fn node_lookup_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
                             *rim_strength = Some(s);
                         }
                         *ambient = number_at("ambient")?;
+                        // A glow over the whole model, like `rim`: a colour
+                        // with no strength named is a glow asked for, at 1.
+                        if let Some(c) = colour_at("emissive")? {
+                            *emissive = Some(c);
+                            *emissive_strength = Some(1.0);
+                        }
+                        if let Some(s) = number_at("emissiveStrength")? {
+                            *emissive_strength = Some(s);
+                        }
                         if let Some(v) = number_at("alpha")? {
                             *alpha = Some(v);
                         }

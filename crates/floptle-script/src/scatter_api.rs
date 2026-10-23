@@ -27,6 +27,18 @@ pub type Sources = Rc<RefCell<Vec<floptle_core::scatter::ScatterSource>>>;
 /// plant on the hillside rather than at the region's nominal surface under it.
 pub type Settled = Rc<RefCell<std::collections::HashMap<(u32, u64), (glam::DVec3, glam::Vec3)>>>;
 
+/// The points bending props away, by the script instance that set them: each
+/// script owns its own list, so the crew's script and a vehicle's do not
+/// overwrite each other.
+pub type Interactors = Rc<RefCell<std::collections::HashMap<(u32, String), Vec<floptle_core::scatter::Interactor>>>>;
+
+/// The most points one script may set. A point is tested against every prop
+/// drawn, so this is a frame cost, not a memory one.
+pub const MAX_INTERACTORS: usize = 32;
+
+/// The keys a `scatter.setInteractors` entry reads.
+pub(crate) const INTERACTOR_KEYS: &[&str] = &["pos", "radius", "strength"];
+
 /// The script instance that created each source, by source id.
 ///
 /// A source outlives the call that made it, so without an owner nothing can
@@ -110,6 +122,7 @@ pub(crate) fn install_scatter_api(
     logs: Rc<RefCell<Vec<crate::ScriptLog>>>,
     scene: Rc<RefCell<crate::SceneMirror>>,
     settled: Settled,
+    interactors: Interactors,
 ) {
     use floptle_core::scatter::{Align, Band, Region, ScatterSource};
     let Ok(t) = lua.create_table() else { return };
@@ -468,6 +481,54 @@ pub(crate) fn install_scatter_api(
         }
     }
 
+    // scatter.setInteractors{ {pos=, radius=, strength=}, ... } — this
+    // script's points that bend props away. Replaces the script's last list;
+    // an empty table clears it. Called each frame with where the walkers are.
+    {
+        let cur = current.clone();
+        let points = interactors.clone();
+        if let Ok(f) = lua.create_function(move |_, list: Table| {
+            const CALL: &str = "scatter.setInteractors";
+            let mut out = Vec::new();
+            for entry in list.sequence_values::<Value>() {
+                let Value::Table(e) = entry? else {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "{CALL}: each entry is a table {{ pos = vec3, radius = number, strength = number }}"
+                    )));
+                };
+                check_keys(&e, INTERACTOR_KEYS, CALL)?;
+                let Some(pos) = crate::math_api::vec3_of(&e.get::<Value>("pos")?) else {
+                    return Err(mlua::Error::RuntimeError(format!("{CALL}: `pos` is a vec3 (or a node)")));
+                };
+                let radius = num(&e, "radius", 1.0);
+                if !(radius > 0.0 && radius.is_finite()) {
+                    return Err(mlua::Error::RuntimeError(format!("{CALL}: `radius` must be above 0, got {radius}")));
+                }
+                let strength = num(&e, "strength", 1.0);
+                if !strength.is_finite() {
+                    return Err(mlua::Error::RuntimeError(format!("{CALL}: `strength` must be a number")));
+                }
+                out.push(floptle_core::scatter::Interactor { pos, radius: radius as f32, strength: strength as f32 });
+            }
+            if out.len() > MAX_INTERACTORS {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "{CALL}: {} points, at most {MAX_INTERACTORS} per script — each is tested against every prop drawn",
+                    out.len()
+                )));
+            }
+            let key = cur.borrow().clone().unwrap_or((0, String::new()));
+            let mut all = points.borrow_mut();
+            if out.is_empty() {
+                all.remove(&key);
+            } else {
+                all.insert(key, out);
+            }
+            Ok(())
+        }) {
+            let _ = t.set("setInteractors", f);
+        }
+    }
+
     let _ = lua.globals().set("scatter", t);
 }
 
@@ -483,9 +544,15 @@ mod tests {
     }
 
     fn host_with_logs() -> (Lua, Sources, Logs) {
+        let (lua, sources, logs, _) = host_with_interactors();
+        (lua, sources, logs)
+    }
+
+    fn host_with_interactors() -> (Lua, Sources, Logs, Interactors) {
         let lua = Lua::new();
         let sources: Sources = Rc::new(RefCell::new(Vec::new()));
         let logs: Logs = Rc::new(RefCell::new(Vec::new()));
+        let points = Interactors::default();
         install_scatter_api(
             &lua,
             sources.clone(),
@@ -495,8 +562,33 @@ mod tests {
             logs.clone(),
             Rc::default(),
             Rc::default(),
+            points.clone(),
         );
-        (lua, sources, logs)
+        (lua, sources, logs, points)
+    }
+
+    /// A script's interactor points replace its last list, and an empty list
+    /// clears it.
+    #[test]
+    fn a_script_sets_and_clears_its_interactor_points() {
+        let (lua, _, _, points) = host_with_interactors();
+        lua.load(r#"scatter.setInteractors{ { pos = { x = 1, y = 0, z = 2 }, radius = 1.5 }, { pos = { x = 4, y = 0, z = 0 }, strength = 0.5 } }"#)
+            .exec()
+            .expect("two points");
+        {
+            let all = points.borrow();
+            let list = all.values().next().expect("the points were kept");
+            assert_eq!(list.len(), 2);
+            assert_eq!(list[0].pos, glam::DVec3::new(1.0, 0.0, 2.0));
+            assert_eq!((list[0].radius, list[0].strength), (1.5, 1.0));
+            assert_eq!((list[1].radius, list[1].strength), (1.0, 0.5));
+        }
+        lua.load("scatter.setInteractors{}").exec().expect("clear");
+        assert!(points.borrow().is_empty(), "an empty list did not clear the script's points");
+        let bad = lua.load("scatter.setInteractors{ { pos = { x = 0, y = 0 }, radius = 0 } }").exec();
+        assert!(bad.is_err_and(|e| e.to_string().contains("radius")), "a zero radius was taken");
+        let bad = lua.load("scatter.setInteractors{ { pos = { x = 0, y = 0 }, raduis = 2 } }").exec();
+        assert!(bad.is_err(), "a misspelt key was taken");
     }
 
     /// A field whose cost is not obvious says so at declare time, while the two

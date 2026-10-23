@@ -378,11 +378,12 @@ planet's frame, from what `terrain.planetLakes` says:
 
 ```lua
 for _, lake in ipairs(terrain.planetLakes(opts)) do
-  water.addVolume{ shape = "lake", parent = "Planet", center = lake.center, reach = lake.reach }
+  water.addVolume{ shape = "lake", parent = "Planet", center = lake.center, reach = lake.reach,
+                    depth = lake.depth }
 end
 ```
 
-It floats crates, lets a crew swim, and turns with the planet. To draw it,
+It floats crates, lets a crew swim, and turns with the planet. `depth` is how far below the surface its bed lies, so a cave under the lake is dry. From inside it looks like a Water Volume node (`tint = {r, g, b}`, `visibility` in metres to change that; `underwater = false` for no look). To draw it,
 `mesh.build(water.surface(id))` on a node at the planet's origin is exactly the
 surface `water.at` answers for, ready for a water material (a surface shader can
 refract the lake bed with `sceneColor` and `sceneDepth`). The mesh keeps to
@@ -392,7 +393,11 @@ toward lower ground is not drawn out over it. A
 `shape = "heightfield"` volume is a grid of surface heights over the parent's
 x–z plane instead: `origin`, `cell`, `columns`, `rows`, and `levels` (one per
 point, `false` for dry ground), with an optional `flow` (x, z per point) for a
-river. `current = vec3(...)` adds a current everywhere in it. Drag acts on a
+river. `current = vec3(...)` adds a current everywhere in it. A `shape = "sim"` volume is water the engine moves: the same grid keys as a
+heightfield and a `level` to fill it to. The engine finds the ground under each
+point, fills it, and from then on the water flows: dig a pit at a pool's edge
+and the pool drains into it, every litre accounted for, while `water.at`,
+`water.flowAt` and anything floating follow where it has gone. Drag acts on a
 body's velocity relative to the water, so a current carries what floats in it.
 
 `water.depthAt` and the solver answer from the **same geometry**, so a swim
@@ -462,8 +467,10 @@ is dropped rather than left hanging in the air over a canyon.
 never remembered in the first place.
 
 LOD bands **cross-dissolve** rather than switching — the pop at a band boundary
-is the thing everyone notices about scatter and nothing else about it. Past the
-last band's distance an instance is culled.
+is the thing everyone notices about scatter and nothing else about it. The last
+band dissolves out the same way over the source's `fade` distance before its
+edge, so the horizon thins instead of stopping at a line. Past that distance an
+instance is culled.
 
 ### On a body that moves, give the field a `parent`
 
@@ -553,6 +560,7 @@ end
 | `scatter.removed(id)` | the ids this source has lost — **this** is what you save |
 | `scatter.cost(id)` | what it asks for per frame: `{chunks, props, far, chunkSize, perChunk}` |
 | `scatter.destroy(id)` | drop the whole source |
+| `scatter.setInteractors{ {pos, radius, strength}, ... }` | this script's points that bend props away; `{}` clears them |
 
 `param` is a stable per-instance 0..1 you can map to a variant or a yield. It
 also rides the albedo, so one species gets a spread of shades without a material
@@ -576,6 +584,30 @@ scatter.create{
 
 A prototype can be a mesh file, a `.prefab.ron` (each of its Mesh nodes drawn at
 its place in the prop), or a mesh a script built with `mesh.build`.
+
+### Parting the grass
+
+`scatter.setInteractors` gives the props something to bend away from: the crew
+walking through a meadow, a rover's wheels, a ship settling onto a landing pad.
+Each prop within `radius` of a point, measured across the ground, leans away
+from it, its foot staying where it is. `strength` is how far a prop right beside
+the point leans (the tangent of the lean, so `1` lays it over at 45 degrees);
+it eases to nothing at the radius.
+
+```lua
+function update(dt)
+  scatter.setInteractors{
+    { pos = crew.pos, radius = 1.2 },                  -- strength defaults to 1
+    { pos = rover.pos, radius = 3, strength = 1.5 },
+  }
+end
+```
+
+Each call replaces this script's own list; other scripts keep theirs, so the
+crew and each vehicle can set their own. Up to 32 points per script. A point
+more than its radius (and at least 2 m) above or below a prop does not touch
+it, so a ship flying over does not flatten the field. The points go when the
+script's node is destroyed, and every point goes when the scene changes.
 
 ### Sources belong to the script that made them
 

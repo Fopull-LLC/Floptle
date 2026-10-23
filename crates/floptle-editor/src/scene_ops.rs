@@ -336,6 +336,7 @@ impl Editor {
                     rim: [r[0], r[1], r[2]],
                     rim_strength: r[3],
                     ambient: node.tint_ambient.unwrap_or(1.0),
+                    ..Default::default()
                 },
             );
         }
@@ -696,10 +697,19 @@ impl Editor {
     /// A Sprite gets a 2D box the size it is drawn: a sphere on a sprite is
     /// never what anybody wanted, and having to pick Box, tick 2D and then
     /// type in a size to make a falling crate was three steps of setup before
-    /// the first Play. Everything else gets the ordinary default.
+    /// the first Play. A node that draws geometry gets a body fitted to it, a
+    /// physics object that falls, tumbles and weighs what it looks like
+    /// (`body_fit::physics_object`); a capsule, which is a character more
+    /// often than a crate, stays upright. Anything else gets the ordinary
+    /// default.
     pub(crate) fn default_body_for(&self, e: floptle_core::Entity) -> floptle_core::RigidBody {
         let Some(&Matter::Sprite { ppu, size, cell, pivot, .. }) = self.world.get::<Matter>(e) else {
-            return floptle_core::RigidBody::default();
+            return crate::body_fit::physics_object(&self.world, &self.maps, &self.project_root, e)
+                .map(|mut rb| {
+                    rb.rotates &= rb.kind != floptle_core::BodyKind::Capsule;
+                    rb
+                })
+                .unwrap_or_default();
         };
         let mat = self.world.get::<floptle_core::Material>(e);
         let tex = mat.and_then(|m| m.texture.as_deref()).and_then(|t| {
@@ -749,6 +759,15 @@ impl Editor {
             let sheet = crate::ase_sync::sheet_path(&src);
             if floptle_vfs::exists(&sheet) || self.import_aseprite_file(&src) {
                 self.drop_asset(&sheet.to_string_lossy());
+            }
+            return;
+        }
+        // A model the engine cannot open drops as the .glb it converts to,
+        // started now if the background converter has not got to it yet.
+        #[cfg(feature = "editor-ui")]
+        if !crate::assets::is_model(path) && crate::assets::is_convertible_model(path) {
+            if let Some(glb) = self.model_for_source(path) {
+                self.drop_asset(&glb);
             }
             return;
         }

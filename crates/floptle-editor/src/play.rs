@@ -335,6 +335,26 @@ impl Editor {
             self.add_static_collider_for(sim, e);
 
         }
+        // Static bodies the sim baked itself are followed the same way.
+        let statics: Vec<Entity> = self.world.query::<floptle_core::RigidBody>().map(|(e, _)| e).collect();
+        for e in statics {
+            self.track_static_body(e);
+        }
+    }
+
+    /// Remember a Static-mode body's pose so its collider follows its node
+    /// when a script moves it, as a Collidable's does. The sim bakes these
+    /// itself, and nothing was watching them: a post a script moved stood
+    /// where it was drawn and blocked nothing there.
+    pub(crate) fn track_static_body(&self, e: Entity) {
+        let is_static = self.world.get::<floptle_core::RigidBody>(e).is_some_and(|rb| rb.mode == floptle_core::BodyMode::Static);
+        if is_static
+            && !matches!(self.world.get::<Matter>(e), Some(Matter::Tilemap { .. }))
+            && !floptle_core::is_disabled(&self.world, e)
+        {
+            let wt = floptle_core::world_transform(&self.world, e);
+            self.static_baked.borrow_mut().insert(e.index(), BakedStatic::of(wt));
+        }
     }
 
     /// The static collider for one node, as [`Self::add_static_colliders`]
@@ -499,7 +519,13 @@ impl Editor {
                 Change::Turned(e) => {
                     self.static_rebuilds += 1;
                     sim.remove_statics_of(eid);
-                    self.add_static_collider_for(&mut sim, e);
+                    if self.world.get::<floptle_core::RigidBody>(e).is_some() {
+                        // A Static body: baked again by the sim, in its new pose.
+                        sim.add_body_for(e, &self.world);
+                        self.track_static_body(e);
+                    } else {
+                        self.add_static_collider_for(&mut sim, e);
+                    }
                 }
             }
         }
@@ -625,6 +651,9 @@ impl Editor {
         }
         let origin = self.sim_origin_hint();
         let gravity = Self::build_gravity_field(&self.world, origin);
+        // A Mesh-shaped body is shaped by what its node draws, read now so an
+        // edit to the mesh is an edit to its collision.
+        crate::body_fit::attach_geometry(&mut self.world, &self.maps, &self.project_root, None);
         let terrain_vols = self.terrain_volumes(&layers);
         let mut sim =
             floptle_physics::Sim::build_layered(&self.world, &terrain_vols, gravity, origin, layers);
@@ -1067,6 +1096,8 @@ impl Editor {
                 }
                 self.maps.meshes = meshes;
             }
+            // Edits a script made that have not landed belong to the session.
+            self.terrain_op_queue.clear();
             if let Some((fields, palette)) = self.play_terrains.take() {
                 for (id, t) in fields {
                     if let Some(e) = self.terrain_entity_of_id(id) {
@@ -1166,7 +1197,7 @@ impl Editor {
             self.script_host.reset_diagnostics();
             // Fresh gameplay-tick clock (the netcode timebase): no banked time, tick 0,
             // and no stale per-tick input edges from before Play.
-            self.game_tick.reset();
+            self.game_tick.restart();
             self.game_tick_no = 0;
             self.tick_load.reset();
             self.tick_overload_said = false;
@@ -1212,6 +1243,15 @@ impl Editor {
             // ⚙ Settings row says "takes effect on the next Play", and this is
             // what makes that sentence true rather than "on the next open".
             self.apply_script_vec3_mode();
+            // The scripts' watchdog: this run's flag, else the project's
+            // setting, else the engine's. A dedicated server sets its own
+            // after this.
+            let budget = self
+                .script_budget_override
+                .or(self.project.script_budget_ms)
+                .map_or(floptle_script::budget::DEFAULT_BUDGET, std::time::Duration::from_millis);
+            self.script_host.set_script_budget(budget);
+            self.script_host.set_ui_scale(1.0);
             self.playing = true;
             // `http.*` and `openUrl` come alive with the session and not before —
             // and where they may go is decided here, by the driver, never by
@@ -1615,6 +1655,7 @@ impl Editor {
         // Physics: the same incremental wiring a spawned prefab gets. Bodies
         // first, then compounds — `add_body_for` refuses an assembly's parts,
         // and `add_compound_for` claims the whole hierarchy at its root.
+        crate::body_fit::attach_geometry(&mut self.world, &self.maps, &self.project_root, Some(&ents));
         if let Some(sim) = self.sim.as_mut() {
             for &e in &ents {
                 sim.add_body_for(e, &self.world);

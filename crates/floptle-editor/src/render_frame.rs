@@ -194,7 +194,13 @@ impl Editor {
         // authority field (Terrain 2.0 / P3). Structural change = full re-mesh; a sculpt
         // dab re-meshes only the chunks it touched (`terrain_chunks_dirty`).
         let terrain_full_rebuild = self.terrain_gpu_dirty;
-        self.sync_terrain_gpu();
+        // In the terrain bucket, named: the shadow proxy's upload after an
+        // edit was a frame's cost no bucket reported.
+        self.timed_into(floptle_core::profile::Bucket::Terrain, |ed| {
+            let t0 = floptle_core::profile::Span::new();
+            ed.sync_terrain_gpu();
+            ed.script_host.profile().borrow_mut().record_part("terrainShadow", t0.ms());
+        });
         // LOD rings center on what the player actually sees: the active game camera
         // during Play, the editor fly-camera otherwise.
         let lod_cam = if self.playing {
@@ -220,11 +226,14 @@ impl Editor {
         self.timed_into(floptle_core::profile::Bucket::Terrain, |ed| {
             ed.drain_terrain_generates();
             ed.update_terrain_residency(lod_cam);
+            ed.stream_far_chunks(lod_cam);
             ed.publish_terrain_busy();
             // Background checkpoints (terrain.flush): a few chunks of encoding
             // per frame + threaded writes — autosaves must never stutter the game.
             ed.step_terrain_checkpoint();
+            let t0 = floptle_core::profile::Span::new();
             ed.sync_terrain_meshes(terrain_full_rebuild, lod_cam);
+            ed.script_host.profile().borrow_mut().record_part("terrainMeshing", t0.ms());
         });
         self.timed_into(floptle_core::profile::Bucket::Assets, |ed| {
             ed.sync_sky_texture();
@@ -1041,7 +1050,12 @@ impl Editor {
                         depth: if lowres { retro.depth_view() } else { gpu.depth_view() },
                         proj: proj.to_cols_array_2d(),
                         inv_proj: proj.inverse().to_cols_array_2d(),
-                        fog: crate::shading::ao_fog(&self.world, cam.world_position),
+                        fog: crate::shading::ao_fog(
+                    &self.world,
+                    &self.script_host.declared_water(),
+                    &crate::shading::roofed_by(self.sim.as_ref()),
+                    cam.world_position,
+                ),
                         inv_view: cam.view_matrix().inverse().to_cols_array_2d(),
                         eye: cam.world_position.as_vec3().to_array(),
                     };

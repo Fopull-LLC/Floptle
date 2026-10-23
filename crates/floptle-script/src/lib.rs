@@ -732,6 +732,8 @@ pub struct ScriptHost {
     /// `terrain.planetLakes` / `planetRivers` asked with a callback, waiting
     /// for the thread working each one out.
     terrain_planet: Rc<RefCell<terrain_api::PlanetQueries>>,
+    /// Edits the engine has taken and not yet applied (`terrain.pending()`).
+    terrain_queued: Rc<std::cell::Cell<usize>>,
     /// `terrain.generatePlanet(id, opts)` requests — heavyweight whole-field
     /// generations the editor runs on a background thread.
     terrain_generates: Rc<RefCell<Vec<(u32, floptle_field::procgen::PlanetFill)>>>,
@@ -834,6 +836,8 @@ pub struct ScriptHost {
     ui_hover: Rc<RefCell<Option<u32>>>,
     /// The element being held down, fed by the engine each frame (`ui.held`).
     ui_active: Rc<RefCell<Option<u32>>>,
+    /// `ui.setScale`: the whole interface's size, over every layer's own.
+    ui_scale: Rc<std::cell::Cell<f32>>,
     /// The material presets the editor lends each frame (name → Material), so a script can
     /// set `node.material = "Gold"` (or an `assets.getFile("materials/Gold.ron")`).
     materials: Rc<RefCell<HashMap<String, Material>>>,
@@ -897,6 +901,8 @@ pub struct ScriptHost {
     /// pressed, and a game with an inventory bound to Tab would hear about it
     /// from a player rather than from a test.
     reserved_keys: ReservedKeys,
+    /// `input.simulate` requests, for the driver.
+    input_sim: Rc<RefCell<Vec<SimulatedInput>>>,
     /// Where this frame's time went, per subsystem and per script.
     /// Written by the driver and by [`ScriptHost::run_pass`],
     /// read by the editor readout and by the Lua `perf` table — one structure, so
@@ -951,6 +957,8 @@ pub struct ScriptHost {
     scatter_owners: scatter_api::Owners,
     /// Where each scattered prop was dropped onto the ground.
     scatter_settled: scatter_api::Settled,
+    /// The points bending props away, by the script that set them.
+    scatter_interactors: scatter_api::Interactors,
     /// The winds scripts declared (`weather.*`) and the clock they blow by.
     weather: weather_api::WeatherShared,
     /// The last source id handed out — where a rebuild's own sources start.
@@ -2130,6 +2138,8 @@ pub enum RichSet {
         rim: Option<[f32; 3]>,
         rim_strength: Option<f32>,
         ambient: Option<f32>,
+        emissive: Option<[f32; 3]>,
+        emissive_strength: Option<f32>,
         clear: bool,
     },
     /// `node:setLighting2D{ mode =, layers =, blocks = }` — the 2D lighting flag,
@@ -2472,6 +2482,14 @@ struct Shared {
     /// The Console feed, shared with the host — a handle read is the one place
     /// in the reference layer that has something to say.
     logs: Rc<RefCell<Vec<ScriptLog>>>,
+}
+
+/// A press or release a script asked `input.simulate` for: a key by its
+/// `input.key` name, or a mouse button (0 left, 1 right, 2 middle).
+#[derive(Clone, Debug, PartialEq)]
+pub enum SimulatedInput {
+    Key(String, bool),
+    Button(usize, bool),
 }
 
 /// One queued two-way `params.X = ...` write: a number or a string.

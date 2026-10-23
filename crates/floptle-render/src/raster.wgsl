@@ -167,6 +167,16 @@ const EXT_NO_FOG: u32 = 16u;
 // With EXT_DITHER_ALPHA: dither on the pattern's complement, so two surfaces
 // cross-fading (a scatter prop's LOD bands) cover each pixel once between them.
 const EXT_DITHER_INVERT: u32 = 32u;
+// Faces seen from behind are not drawn (`Material::double_sided = false`).
+const EXT_SINGLE_SIDED: u32 = 64u;
+// The alpha cutoff, as `1 + cutoff × 254` in flag bits 8..16; zero there is the
+// default cutoff of one half.
+const EXT_CUTOFF_SHIFT: u32 = 8u;
+
+fn ext_cutoff(e: Ext) -> f32 {
+    let q = (e.flags >> EXT_CUTOFF_SHIFT) & 255u;
+    return select(f32(q - 1u) / 254.0, 0.5, q == 0u);
+}
 
 struct Ext {
     rough: f32,
@@ -1433,6 +1443,39 @@ fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32) -> vec4<f32
         }
         if (!found) { slots[n_slots] = s; wts[n_slots] = w; n_slots = n_slots + 1; }
     }
+    // A triangle between two materials: the slot its corners carry runs from
+    // one to the other across it, so the two are weighed by where `av` lies
+    // between them, and the blend follows the triangle (a voxel or so, in
+    // step with the tint) rather than the atlas cell's two or three voxels.
+    // The pair is the two slots of the atlas round here that `av` lies
+    // between, the one holding most of the weight; with none, the atlas.
+    var pa = 0u;
+    var pb = 0u;
+    var most = -1.0;
+    for (var k = 0; k < n_slots; k = k + 1) {
+        for (var j = 0; j < n_slots; j = j + 1) {
+            let a = f32(slots[k]);
+            let b = f32(slots[j]);
+            if (a < b && av >= a - 0.01 && av <= b + 0.01 && wts[k] + wts[j] > most) {
+                most = wts[k] + wts[j];
+                pa = slots[k];
+                pb = slots[j];
+            }
+        }
+    }
+    if (most > 0.0) {
+        let t = clamp((av - f32(pa)) / (f32(pb) - f32(pa)), 0.0, 1.0);
+        // Untextured (slot 0) blends toward the flat tint, as below.
+        var ca = vec3<f32>(1.0);
+        var ga = 0.0;
+        if (pa > 0u) {
+            ca = terrain_triplanar(i32(pa) - 1, in.lpos, in.lnorm, dpx, dpy) * 1.6;
+            ga = f32((g.terrain_bits.y >> (pa - 1u)) & 1u);
+        }
+        let cb = terrain_triplanar(i32(pb) - 1, in.lpos, in.lnorm, dpx, dpy) * 1.6;
+        let gb = f32((g.terrain_bits.y >> (pb - 1u)) & 1u);
+        return vec4<f32>(mix(ca, cb, t) * tint, mix(ga, gb, t));
+    }
     var albedo = vec3<f32>(0.0);
     var glow = 0.0;
     var wsum = 0.0;
@@ -1568,7 +1611,16 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     // `color.a < 1` and route to the blended pass, which must NOT hard-cut — so this only
     // fires for opaque instances. The depth prepass already discards these (`fs_depth`),
     // so depth stays consistent. Terrain never cuts out.
-    if (!terrain && in.color.a >= 0.999 && alpha < 0.5) {
+    // The cutoff is the material's own (0.5 unless a model's MASK cutoff, or
+    // 0 for a model that says OPAQUE, set it). A strict `<` so a cutoff of 0
+    // cuts nothing at all.
+    if (!terrain && in.color.a >= 0.999 && alpha < ext_cutoff(ext)) {
+        discard;
+    }
+    // A single-sided surface is not drawn from behind. Nothing culls in the
+    // pipeline, so the face is dropped here — after every sample above, which
+    // keeps those in uniform control flow.
+    if (ext_has(ext, EXT_SINGLE_SIDED) && !front) {
         discard;
     }
 
@@ -1778,7 +1830,7 @@ fn fs_mask(in: VsOut) -> @location(0) vec4<f32> {
 // primed depth early-z-kills hidden fragments in the color pass (whose shading
 // marches the shadow field — the expensive part) and caps the raymarch per pixel.
 @fragment
-fn fs_depth(in: VsOut) {
+fn fs_depth(in: VsOut, @builtin(front_facing) front: bool) {
     // The texel FIRST, before the terrain test below returns early. Sampling
     // with implicit derivatives is only legal in uniform control flow, and a
     // return taken on per-instance data makes everything after it non-uniform.
@@ -1803,7 +1855,13 @@ fn fs_depth(in: VsOut) {
         return;
     }
     let a = texel_a * in.color.a * in.vcolor.a;
-    if (a < 0.99) {
+    let ext = ext_at(u32(in.imeta.y));
+    // An OPAQUE model (cutoff 0) draws every texel solid, so it primes depth
+    // for every one; otherwise only the certainly-opaque ones, as ever. A face
+    // the color pass will drop from behind must not prime depth either, or it
+    // would hide what is behind it and draw nothing in its place.
+    let solid = a >= 0.99 || (in.color.a >= 0.999 && ext_cutoff(ext) == 0.0);
+    if (!solid || (ext_has(ext, EXT_SINGLE_SIDED) && !front)) {
         discard;
     }
 }

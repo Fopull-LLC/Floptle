@@ -379,3 +379,39 @@ fn a_surface_shader_reads_vertex_colours_and_the_sky() {
     assert!(p[0] > 180 && p[1] < 60 && p[2] < 60, "the panel is {p:?}, not its vertices' red");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// **`output offset` can read a texture.** A height map moving a surface was
+/// impossible: the vertex stage had no texture access, so the shader failed
+/// to build. Now a slot is sampled per vertex at its largest level, so a cube
+/// whose height map is white is pushed out along its normals and draws wider
+/// than the same cube over a black one.
+#[test]
+fn an_offset_reads_a_height_map() {
+    let d = temp("heightmap");
+    scaffold(&d);
+    std::fs::create_dir_all(d.join("shaders")).unwrap();
+    std::fs::create_dir_all(d.join("art")).unwrap();
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 255, 255, 255])).save(d.join("art/white.png")).unwrap();
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 0, 255])).save(d.join("art/black.png")).unwrap();
+    for (name, art) in [("high", "white"), ("flat", "black")] {
+        std::fs::write(
+            d.join(format!("shaders/{name}.flsl")),
+            format!(
+                "shader {name} {{\n  stage fragment\n  texture height = \"art/{art}.png\"\n  \
+                 output offset = normal * sample(height, uv).r * 0.5\n  output color = vec4(0, 1, 0, 1)\n}}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            d.join(format!("scenes/{name}.ron")),
+            camera_scene(name, &[shaded_wall("Cube", -6.0, 1.0, name).replace("0.2)), matter", "1.0)), matter")]),
+        )
+        .unwrap();
+    }
+    let width = |img: &image::RgbaImage| (0..img.width()).filter(|&x| img.get_pixel(x, 45)[1] > 180 && img.get_pixel(x, 45)[0] < 80).count();
+    let (Some(high), Some(flat)) = (shoot(&d, "high"), shoot(&d, "flat")) else { return };
+    let (h, f) = (width(&high), width(&flat));
+    assert!(f > 5, "the flat cube is not drawn: {f} px");
+    assert!(h > f + 5, "the white height map did not push the cube out: {h} px against {f}");
+    let _ = std::fs::remove_dir_all(&d);
+}

@@ -549,7 +549,8 @@ impl Editor {
         if let Some(path) = cmd.convert_model.take() {
             self.start_model_conversion(&path);
         }
-        // Free until one is running: a `try_recv` on nothing is a branch.
+        // Converts models put in the project, in the background: a directory
+        // scan every few seconds, otherwise a `try_recv` on nothing.
         self.poll_model_conversion();
         if let Some(path) = cmd.import_map.take() {
             // The Assets browser's "Add to scene": no drop point, so the group
@@ -713,6 +714,20 @@ impl Editor {
             for e in self.selected_group(e) {
                 let rb = self.default_body_for(e);
                 self.world.insert(e, rb);
+            }
+            self.rebuild_sim();
+        }
+        if let Some(e) = cmd.make_physics_object.take() {
+            self.record();
+            for e in self.selected_group(e) {
+                if let Some(rb) =
+                    crate::body_fit::physics_object(&self.world, &self.maps, &self.project_root, e)
+                {
+                    self.world.insert(e, rb);
+                    // Its body is its collision now; a static Collider left
+                    // beside it would only be ignored.
+                    self.world.remove::<floptle_core::Collidable>(e);
+                }
             }
             self.rebuild_sim();
         }

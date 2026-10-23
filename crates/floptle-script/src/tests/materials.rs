@@ -1351,3 +1351,114 @@ fn set_material_accepts_every_documented_colour_shape() {
         );
     }
 }
+
+/// **`setMaterial` on a model changes only what it names.** A model with no
+/// Material of its own gets a patch over each part's material, not a whole
+/// new one: a whole one supersedes every part's textures, cut-out leaves and
+/// custom shader, so a tinted toadstool drew its caps flat and dark. A node
+/// that has a Material is changed in place, and a primitive gets one, as
+/// before. A tint's glow rides over everything the node draws.
+#[test]
+fn set_material_on_a_model_patches_its_own_look() {
+    use floptle_core::{Material, MaterialPatch, Matter, Tint};
+    let dir = std::env::temp_dir().join(format!("floptle-matpatch-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "paint",
+        "function start(node)\n  node:setMaterial{ color = {1, 0.4, 0.4}, emissive = {0, 1, 0} }\n  \
+         node:setMaterial{ alpha = 0.5 }\n  node:setTint{ emissive = {0.2, 0.4, 1}, emissiveStrength = 3 }\nend\n",
+    );
+    let mut world = World::default();
+    let mut node = |m: Matter, own: Option<Material>| {
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, m);
+        if let Some(own) = own {
+            world.insert(e, own);
+        }
+        world.insert(e, Scripts(vec![floptle_core::ScriptInst::new("paint")]));
+        e
+    };
+    let model = node(Matter::Mesh { asset_path: "models/toadstool.gltf".into() }, None);
+    let owned = node(
+        Matter::Mesh { asset_path: "models/toadstool.gltf".into() },
+        Some(Material { shader: Some("shaders/hull.flsl".into()), ..Default::default() }),
+    );
+    let prim = node(Matter::Primitive { shape: floptle_core::Shape::Cube, color: [1.0; 3] }, None);
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+
+    assert!(world.get::<Material>(model).is_none(), "a model was given a whole Material");
+    let patch = world.get::<MaterialPatch>(model).expect("the model carries a patch");
+    assert_eq!(patch.keys, vec!["color".to_string(), "emissive".to_string(), "alpha".to_string()]);
+    // Laid over a part with a texture, a cut-out alpha map and a shader:
+    // only the three keys change.
+    let part = Material {
+        texture: Some("textures/flora/foliage_l0.png".into()),
+        normal_map: Some("textures/flora/foliage_n.png".into()),
+        shader: Some("shaders/hullPanels.flsl".into()),
+        shader_textures: [("panels".to_string(), "textures/panels.png".to_string())].into(),
+        roughness: 0.9,
+        ..Default::default()
+    };
+    let drawn = patch.over(&part);
+    assert_eq!((drawn.color, drawn.emissive, drawn.alpha), ([1.0, 0.4, 0.4], [0.0, 1.0, 0.0], 0.5));
+    assert_eq!(
+        Material { color: part.color, emissive: part.emissive, alpha: part.alpha, ..drawn },
+        part,
+        "the patch changed something it did not name"
+    );
+
+    let kept = world.get::<Material>(owned).expect("kept");
+    assert_eq!(kept.shader.as_deref(), Some("shaders/hull.flsl"), "an own Material lost its shader");
+    assert_eq!(kept.color, [1.0, 0.4, 0.4]);
+    assert!(world.get::<MaterialPatch>(owned).is_none());
+    assert_eq!(world.get::<Material>(prim).map(|m| m.alpha), Some(0.5));
+
+    let t = world.get::<Tint>(model).expect("the glow is a tint");
+    assert_eq!((t.emissive, t.emissive_strength), ([0.2, 0.4, 1.0], 3.0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every key `setMaterial` accepts is one a patch can carry over, so no key
+/// works on a primitive and silently does nothing on a model.
+#[test]
+fn every_set_material_key_reaches_a_patch() {
+    let src = floptle_core::Material::default();
+    let missing: Vec<&&str> = crate::api::MATERIAL_KEYS
+        .iter()
+        .filter(|k| !floptle_core::Material::default().take_key(&src, k))
+        .collect();
+    assert!(missing.is_empty(), "setMaterial keys a patch drops: {missing:?}");
+}
+
+/// `alphaCutoff` and `doubleSided` reach a material and a model's patch: a
+/// leaf model given a softer cut and single sides keeps everything else.
+#[test]
+fn set_material_sets_the_cut_out_and_the_sides() {
+    use floptle_core::{Material, MaterialPatch, Matter};
+    let dir = std::env::temp_dir().join(format!("floptle-cutout-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(&dir, "cut", "function start(node) node:setMaterial{ alphaCutoff = 0.3, doubleSided = false } end\n");
+    let mut world = World::default();
+    let mut node = |m: Matter| {
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, m);
+        world.insert(e, Scripts(vec![floptle_core::ScriptInst::new("cut")]));
+        e
+    };
+    let model = node(Matter::Mesh { asset_path: "models/fern.gltf".into() });
+    let prim = node(Matter::Primitive { shape: floptle_core::Shape::Cube, color: [1.0; 3] });
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let m = world.get::<Material>(prim).unwrap();
+    assert_eq!((m.alpha_cutoff, m.double_sided), (0.3, false));
+    let leaf = Material { texture: Some("textures/fern.png".into()), ..Default::default() };
+    let drawn = world.get::<MaterialPatch>(model).unwrap().over(&leaf);
+    assert_eq!((drawn.alpha_cutoff, drawn.double_sided, drawn.texture.as_deref()), (0.3, false, Some("textures/fern.png")));
+    let _ = std::fs::remove_dir_all(&dir);
+}

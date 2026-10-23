@@ -750,18 +750,35 @@ pub(crate) fn fog_uniforms(l: &Light) -> FogLanes {
     )
 }
 
-/// The WaterVolume the point `p` is inside, if any: `(tint, visibility)`.
+/// The WaterVolume (or water a script declared, with an underwater look) the
+/// point `p` is inside, if any: `(tint, visibility)`.
 ///
 /// Deliberately computed from the ECS rather than from the physics sim, so it
 /// answers in the editor viewport too — you can see what a sea looks like from
 /// inside without entering Play, which is the only way tuning the tint is not
-/// guesswork. Deepest volume wins, matching the physics rule exactly.
+/// guesswork. Deepest volume wins, matching the physics rule exactly. With
+/// nothing roofed over: the draw always asks [`underwater_at_open`].
+#[cfg(test)]
 pub(crate) fn underwater_at(
     world: &floptle_core::World,
+    declared: &[floptle_core::water::DeclaredWater],
     p: floptle_core::math::DVec3,
 ) -> Option<([f32; 3], f32)> {
+    underwater_at_open(world, declared, p, &|_, _, _| false)
+}
+
+/// [`underwater_at`], answering no where `roofed(p, up, depth)` says solid
+/// ground stands between `p` and the surface straight above it: a sealed
+/// cave below sea level is a cave, not the sea.
+pub(crate) fn underwater_at_open(
+    world: &floptle_core::World,
+    declared: &[floptle_core::water::DeclaredWater],
+    p: floptle_core::math::DVec3,
+    roofed: &dyn Fn(floptle_core::math::DVec3, floptle_core::math::DVec3, f64) -> bool,
+) -> Option<([f32; 3], f32)> {
+    use floptle_core::math::DVec3;
     use floptle_core::{Matter, WaterKind};
-    let mut best: Option<(f64, [f32; 3], f32)> = None;
+    let mut best: Option<(f64, [f32; 3], f32, DVec3)> = None;
     for (e, m) in world.query::<Matter>() {
         let Matter::WaterVolume {
             kind, radius, half_extents, frozen, tint, visibility, ..
@@ -775,10 +792,10 @@ pub(crate) fn underwater_at(
             continue;
         }
         let wt = floptle_core::world_transform(world, e);
-        let depth = match kind {
+        let (depth, up) = match kind {
             WaterKind::Sea => {
                 let r = (*radius * wt.scale.max_element().max(1e-4)) as f64;
-                r - (p - wt.translation).length()
+                (r - (p - wt.translation).length(), (p - wt.translation).normalize_or_zero())
             }
             WaterKind::Pool => {
                 let half = floptle_core::math::Vec3::new(
@@ -792,14 +809,39 @@ pub(crate) fn underwater_at(
                 if local.x.abs() > half.x || local.z.abs() > half.z || local.y < -half.y {
                     continue;
                 }
-                half.y - local.y
+                (half.y - local.y, wt.rotation.as_dquat() * DVec3::Y)
             }
         };
         if depth > 0.0 && best.is_none_or(|(d, ..)| depth > d) {
-            best = Some((depth, *tint, visibility.max(0.5)));
+            best = Some((depth, *tint, visibility.max(0.5), up));
         }
     }
-    best.map(|(_, tint, vis)| (tint, vis))
+    // Water a script declared looks the same from inside, unless it was
+    // declared with no look at all.
+    for w in declared {
+        let Some(look) = w.look else { continue };
+        let at = w.at(p);
+        if at.depth > 0.0 && best.is_none_or(|(d, ..)| at.depth > d) {
+            best = Some((at.depth, look.tint, look.visibility.max(0.5), at.up));
+        }
+    }
+    let (depth, tint, vis, up) = best?;
+    (!roofed(p, up, depth)).then_some((tint, vis))
+}
+
+/// Is there solid, drawn ground between `p` and the water's surface `depth`
+/// metres straight up? What keeps a sealed cave under the sea dry to look at.
+pub(crate) fn roofed_by(
+    sim: Option<&floptle_physics::Sim>,
+) -> impl Fn(floptle_core::math::DVec3, floptle_core::math::DVec3, f64) -> bool + '_ {
+    move |p, up, depth| {
+        let Some(sim) = sim else { return false };
+        if sim.world.colliders.is_empty() || depth <= 0.0 {
+            return false;
+        }
+        let from = (p - sim.world.origin).as_vec3();
+        sim.world.raycast(from, up.as_vec3(), depth as f32).is_some()
+    }
 }
 
 /// Mirror the scene's WaterVolume nodes for scripts, in world coordinates.
@@ -858,9 +900,11 @@ pub(crate) fn water_infos(
 pub(crate) fn fog_uniforms_and_particles_at(
     l: &Light,
     world: &floptle_core::World,
+    declared: &[floptle_core::water::DeclaredWater],
+    roofed: &dyn Fn(floptle_core::math::DVec3, floptle_core::math::DVec3, f64) -> bool,
     cam: floptle_core::math::DVec3,
 ) -> (FogLanes, [f32; 4]) {
-    if let Some((tint, vis)) = underwater_at(world, cam) {
+    if let Some((tint, vis)) = underwater_at_open(world, declared, cam, roofed) {
         let dither = if l.fog_dither { l.fog_dither_strength.clamp(0.0, 1.0) } else { 0.0 };
         // Start close to the eye: water attenuates from the first centimetre,
         // and a start distance would give you a crisp bubble of clear water
@@ -887,9 +931,14 @@ pub(crate) fn fog_uniforms_and_particles_at(
 /// The particle pass's lanes, because they are already the one linear answer
 /// for every fog the scene can have: the flat ramp, the volumetric fog's
 /// equivalent, and the water the camera is under.
-pub(crate) fn ao_fog(world: &floptle_core::World, cam: floptle_core::math::DVec3) -> [f32; 4] {
+pub(crate) fn ao_fog(
+    world: &floptle_core::World,
+    declared: &[floptle_core::water::DeclaredWater],
+    roofed: &dyn Fn(floptle_core::math::DVec3, floptle_core::math::DVec3, f64) -> bool,
+    cam: floptle_core::math::DVec3,
+) -> [f32; 4] {
     let light = world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
-    fog_uniforms_and_particles_at(&light, world, cam).1
+    fog_uniforms_and_particles_at(&light, world, declared, roofed, cam).1
 }
 
 /// Harvest up to 32 proxy shadow occluders from the world's collider shapes —
@@ -969,7 +1018,9 @@ pub(crate) fn collect_shadow_proxies(world: &World, cam_world: DVec3, enabled: b
             // extents by the node's world scale (and a sphere or capsule not
             // at all). Raw, a box under a scaled parent cast a shadow a sixth
             // of its size and the sun lit the inside of the building.
-            floptle_core::BodyKind::Box => {
+            // A mesh body as the box of its mesh (`half_extents` holds the
+            // mesh's half-size once fitted).
+            floptle_core::BodyKind::Box | floptle_core::BodyKind::Mesh => {
                 let h = Vec3::from(rb.half_extents) * wt.scale;
                 ([c.x, c.y, c.z, 0.0], [h.x, h.y, h.z, 2.0], [q.x, q.y, q.z, q.w], h.length())
             }

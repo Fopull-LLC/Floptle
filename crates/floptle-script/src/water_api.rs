@@ -284,8 +284,12 @@ fn push_quads(out: &mut Vec<u32>, index: &[u32], columns: usize, rows: usize) {
 /// Every key `water.addVolume` reads.
 pub(crate) const VOLUME_KEYS: &[&str] = &[
     "shape", "parent", "center", "radius", "reach", "origin", "cell", "columns", "rows", "levels", "flow",
-    "density", "drag", "angularDrag", "current",
+    "density", "drag", "angularDrag", "current", "depth", "tint", "visibility", "underwater", "level",
 ];
+
+/// The most points a simulated volume may have: a few hundred metres of lake
+/// at a couple of metres a point, stepped every frame.
+pub const MAX_SIM_POINTS: usize = 128 * 128;
 
 /// A `water.addVolume` options table as the water it declares.
 fn declared_from(opts: &Table, id: u32) -> mlua::Result<DeclaredWater> {
@@ -294,6 +298,7 @@ fn declared_from(opts: &Table, id: u32) -> mlua::Result<DeclaredWater> {
     let err = |m: &str| mlua::Error::RuntimeError(format!("{CALL}: {m}"));
     let num = |k: &str| opts.get::<Option<f64>>(k).ok().flatten();
     let vec = |k: &str| opts.get::<Value>(k).ok().as_ref().and_then(crate::math_api::vec3_of);
+    let mut sim_level = None;
     let shape: String = opts.get::<Option<String>>("shape")?.unwrap_or_else(|| "lake".into());
     let surface = match shape.as_str() {
         "lake" => {
@@ -306,6 +311,23 @@ fn declared_from(opts: &Table, id: u32) -> mlua::Result<DeclaredWater> {
                 return Err(err("a lake's surface is `radius` metres from its parent's centre, and that must be more than 0"));
             }
             Surface::Lake { radius, axis: center.try_normalize().unwrap_or(glam::DVec3::Y), reach: reach.max(0.0) }
+        }
+        // Water the engine moves: a heightfield whose levels the engine finds
+        // by filling the ground under it to `level`, then flows.
+        "sim" => {
+            let columns = num("columns").ok_or_else(|| err("a sim needs `columns` and `rows`"))? as usize;
+            let rows = num("rows").ok_or_else(|| err("a sim needs `columns` and `rows`"))? as usize;
+            let cell = num("cell").ok_or_else(|| err("a sim needs `cell`, the metres between points"))?;
+            if columns < 2 || rows < 2 || cell <= 0.0 || columns * rows > MAX_SIM_POINTS {
+                return Err(err(&format!(
+                    "a sim is at least 2 × 2 points and at most {MAX_SIM_POINTS}, `cell` more than 0 metres apart"
+                )));
+            }
+            let level = num("level").ok_or_else(|| err("a sim needs `level`, the height it is filled to in its parent's frame"))?;
+            sim_level = Some(level as f32);
+            let origin = vec("origin").unwrap_or(glam::DVec3::ZERO);
+            let levels = vec![level as f32; columns * rows];
+            Surface::Grid(std::sync::Arc::new(HeightGrid { x0: origin.x, z0: origin.z, cell, columns, rows, levels, flow: Vec::new() }))
         }
         "heightfield" => {
             let columns = num("columns").ok_or_else(|| err("a heightfield needs `columns` and `rows`"))? as usize;
@@ -339,7 +361,7 @@ fn declared_from(opts: &Table, id: u32) -> mlua::Result<DeclaredWater> {
             let origin = vec("origin").unwrap_or(glam::DVec3::ZERO);
             Surface::Grid(std::sync::Arc::new(HeightGrid { x0: origin.x, z0: origin.z, cell, columns, rows, levels, flow }))
         }
-        other => return Err(err(&format!("`shape` is \"lake\" or \"heightfield\", not \"{other}\""))),
+        other => return Err(err(&format!("`shape` is \"lake\", \"heightfield\" or \"sim\", not \"{other}\""))),
     };
     let anchor = match opts.get::<Value>("parent")? {
         Value::Nil => None,
@@ -355,7 +377,34 @@ fn declared_from(opts: &Table, id: u32) -> mlua::Result<DeclaredWater> {
         drag: num("drag").unwrap_or(1.0).max(0.0) as f32,
         angular_drag: num("angularDrag").unwrap_or(1.0).max(0.0) as f32,
         current: vec("current").unwrap_or(glam::DVec3::ZERO).as_vec3(),
+        floor: match num("depth") {
+            Some(d) if d > 0.0 => d,
+            Some(_) => return Err(err("`depth` is how far below the surface the bed lies, in metres, more than 0")),
+            None => f64::INFINITY,
+        },
+        look: look_from(opts, CALL)?,
+        simulated: sim_level,
     })
+}
+
+/// The underwater look an `addVolume` options table asks for: on with a Water
+/// Volume node's defaults, `tint = {r, g, b}` and `visibility` (metres) to
+/// change it, `underwater = false` for none.
+fn look_from(opts: &Table, call: &str) -> mlua::Result<Option<floptle_core::water::UnderwaterLook>> {
+    let err = |m: &str| mlua::Error::RuntimeError(format!("{call}: {m}"));
+    if opts.get::<Option<bool>>("underwater").map_err(|_| err("`underwater` is true or false"))? == Some(false) {
+        return Ok(None);
+    }
+    let mut look = floptle_core::water::UnderwaterLook::default();
+    if let Some(t) = opts.get::<Option<Table>>("tint").map_err(|_| err("`tint` is {r, g, b} from 0 to 1"))? {
+        for (i, c) in look.tint.iter_mut().enumerate() {
+            *c = t.raw_get::<f32>(i + 1).map_err(|_| err("`tint` is {r, g, b} from 0 to 1"))?.clamp(0.0, 1.0);
+        }
+    }
+    if let Some(v) = opts.get::<Option<f64>>("visibility")? {
+        look.visibility = (v as f32).max(0.5);
+    }
+    Ok(Some(look))
 }
 
 /// The deepest volume containing `p`, and how deep — the same "innermost wins"
@@ -697,6 +746,30 @@ mod tests {
             .unwrap();
         assert!(under && (depth - 2.0).abs() < 1e-9 && !shore && gone, "{under} {depth} {shore} {gone}");
         assert!(shared.declared.borrow().is_empty());
+    }
+
+    /// **A lake has a bed, and a look from inside.** `depth` (as
+    /// `terrain.planetLakes` gives it) is how far down the water reaches, so a
+    /// cave under the lake is dry; the underwater look is a Water Volume
+    /// node's unless the volume says otherwise, and `underwater = false` is none.
+    #[test]
+    fn a_lake_has_a_bed_and_an_underwater_look() {
+        let (lua, shared) = host();
+        let (lake, cave): (bool, bool) = lua
+            .load(
+                r#"local id = water.addVolume{ shape = "lake", center = vec3(0, 805, 0), reach = 60, depth = 6,
+                                               tint = {0.2, 0.1, 0.05}, visibility = 9 }
+                   water.addVolume{ shape = "lake", center = vec3(0, -905, 0), reach = 60, underwater = false }
+                   return water.isUnderwater(0, 801, 0), water.isUnderwater(0, 790, 0)"#,
+            )
+            .eval()
+            .unwrap();
+        assert!(lake && !cave, "in the lake {lake}, in the cave under it {cave}");
+        let d = shared.declared.borrow();
+        assert_eq!(d[0].look, Some(floptle_core::water::UnderwaterLook { tint: [0.2, 0.1, 0.05], visibility: 9.0 }));
+        assert_eq!(d[1].look, None);
+        let err = lua.load(r#"water.addVolume{ shape = "lake", center = vec3(0, 5, 0), reach = 1, depth = -1 }"#).exec().unwrap_err();
+        assert!(err.to_string().contains("`depth`"), "{err}");
     }
 
     /// A heightfield is wet where its levels are, and a misshapen one is

@@ -456,6 +456,9 @@ mod tests {
             drag: 1.0,
             angular_drag: 1.0,
             current,
+            floor: f64::INFINITY,
+            look: None,
+            simulated: None,
         };
         WaterField {
             volumes: vec![WaterVolume {

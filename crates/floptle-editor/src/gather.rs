@@ -960,11 +960,14 @@ impl Editor {
     fn body_gizmos(&mut self, v: GizmoView) {
         let GizmoView { cam, view_proj, gw, gh, filter, .. } = v;
         // Rigidbody collider outlines, so physics bodies are visible/placeable.
-        let bodies: Vec<(Entity, floptle_core::RigidBody)> = if filter.physics {
-            self.world.query::<floptle_core::RigidBody>().map(|(e, rb)| (e, *rb)).collect()
-        } else {
-            Vec::new()
-        };
+        // A selected node's always, so a body that does not match its mesh is
+        // seen rather than guessed at, whatever the filter says.
+        let bodies: Vec<(Entity, floptle_core::RigidBody)> = self
+            .world
+            .query::<floptle_core::RigidBody>()
+            .filter(|(e, _)| filter.physics || self.selection.contains(e))
+            .map(|(e, rb)| (e, *rb))
+            .collect();
         // During Play the live body, not the authored component: a script
         // that set `node.height` (a controller's stand height, a crouch)
         // changed the capsule and moved its centre to keep the feet
@@ -984,15 +987,11 @@ impl Editor {
             };
             let lines = if rb.kind == floptle_core::BodyKind::Polygon {
                 // The outline the sim collides with, flip and scale included,
-                // turned with the node when it is a static collider (a moving
-                // body keeps its orientation).
+                // turned with the node: a body starts at its node's rotation,
+                // and one that turns writes its turn back to the node.
                 let o = floptle_physics::polygon_outline(&self.world, e, &rb);
                 let pts = o.points();
-                let turn = if rb.mode == floptle_core::BodyMode::Static {
-                    wt.rotation
-                } else {
-                    floptle_core::math::Quat::IDENTITY
-                };
+                let turn = wt.rotation;
                 let at = |q: [f32; 2]| p + (turn * Vec3::new(q[0], q[1], 0.0)).as_dvec3();
                 (0..pts.len())
                     .filter_map(|i| {
@@ -1004,13 +1003,54 @@ impl Editor {
                     })
                     .collect()
             } else if rb.kind == floptle_core::BodyKind::Box {
-                let s = wt.scale;
-                let half = Vec3::new(
-                    rb.half_extents[0] * s.x,
-                    rb.half_extents[1] * s.y,
-                    rb.half_extents[2] * s.z,
-                );
-                box_lines(p, half, cam.world_position, view_proj, gw, gh)
+                // Turned with the node, as the body is.
+                let half = (Vec3::from(rb.half_extents) * wt.scale).abs();
+                let at = |v: Vec3| p + (wt.rotation * v).as_dvec3();
+                let c = |sx: f32, sy: f32, sz: f32| at(Vec3::new(sx, sy, sz) * half);
+                let mut segs = Vec::new();
+                for (a, b) in [
+                    ((-1., -1., -1.), (1., -1., -1.)), ((1., -1., -1.), (1., -1., 1.)),
+                    ((1., -1., 1.), (-1., -1., 1.)), ((-1., -1., 1.), (-1., -1., -1.)),
+                    ((-1., 1., -1.), (1., 1., -1.)), ((1., 1., -1.), (1., 1., 1.)),
+                    ((1., 1., 1.), (-1., 1., 1.)), ((-1., 1., 1.), (-1., 1., -1.)),
+                    ((-1., -1., -1.), (-1., 1., -1.)), ((1., -1., -1.), (1., 1., -1.)),
+                    ((1., -1., 1.), (1., 1., 1.)), ((-1., -1., 1.), (-1., 1., 1.)),
+                ] {
+                    segs.push((c(a.0, a.1, a.2), c(b.0, b.1, b.2)));
+                }
+                segs.into_iter()
+                    .filter_map(|(a, b)| {
+                        Some((
+                            project(a, cam.world_position, view_proj, gw, gh)?,
+                            project(b, cam.world_position, view_proj, gw, gh)?,
+                        ))
+                    })
+                    .collect()
+            } else if rb.kind == floptle_core::BodyKind::Mesh {
+                // The hull a moving body collides as, or a Static one's
+                // triangles; the box it falls back to when there is no mesh.
+                let shape = crate::body_fit::node_shape(&self.world, &self.maps, &self.project_root, e);
+                let segs = match shape.as_deref() {
+                    Some(sh) => crate::body_fit::mesh_body_segments(sh, wt.scale, wt.rotation, rb.mode),
+                    None => {
+                        let half = (Vec3::from(rb.half_extents) * wt.scale).abs();
+                        let h = floptle_physics::Hull::from_points(&[
+                            -half, half, Vec3::new(half.x, -half.y, -half.z), Vec3::new(-half.x, half.y, half.z),
+                            Vec3::new(-half.x, -half.y, half.z), Vec3::new(half.x, half.y, -half.z),
+                            Vec3::new(-half.x, half.y, -half.z), Vec3::new(half.x, -half.y, half.z),
+                        ]);
+                        h.map(|h| h.edges().into_iter().map(|(a, b)| (wt.rotation * h.verts()[a], wt.rotation * h.verts()[b])).collect())
+                            .unwrap_or_default()
+                    }
+                };
+                segs.into_iter()
+                    .filter_map(|(a, b)| {
+                        Some((
+                            project(p + a.as_dvec3(), cam.world_position, view_proj, gw, gh)?,
+                            project(p + b.as_dvec3(), cam.world_position, view_proj, gw, gh)?,
+                        ))
+                    })
+                    .collect()
             } else {
                 rigidbody_lines(
                     p,
@@ -1649,7 +1689,13 @@ impl Editor {
             crate::shading::reflection_clamp(&light_node),
         );
         let ((fog_color, fog_params, fog_extra), particle_fog) =
-            crate::shading::fog_uniforms_and_particles_at(&light_node, &self.world, cam.world_position);
+            crate::shading::fog_uniforms_and_particles_at(
+                &light_node,
+                &self.world,
+                &self.script_host.declared_water(),
+                &crate::shading::roofed_by(self.sim.as_ref()),
+                cam.world_position,
+            );
         let (atmo_meta, atmo_color, atmo_body, atmo_params) =
             crate::shading::atmo_uniforms(&self.world, cam.world_position);
         let (star_meta, star_pos, star_color) =
@@ -2094,7 +2140,7 @@ impl Editor {
                         let obj_mats = self.world.get::<floptle_core::ObjectMaterials>(*e);
                         let pose = self.anim.poses.get(e).map(|v| v.as_slice());
                         let node_paint = paint_bases.get(e).map(|v| v.as_slice());
-                        push_mesh_instances(gpu, raster, asset, pose, model, tex, mp.as_ref(), obj_mats, &self.texture_registry, node_paint, *e, skin_variants, &mut skin_scratch, &mut instances, &mut skin_draws, flsl, &mut flsl_draws, &self.obj_flsl_binds);
+                        push_mesh_instances(gpu, raster, asset, pose, model, tex, mp.as_ref(), obj_mats, mat.is_none().then(|| self.world.get::<floptle_core::MaterialPatch>(*e)).flatten(), &self.texture_registry, node_paint, *e, skin_variants, &mut skin_scratch, &mut instances, &mut skin_draws, flsl, &mut flsl_draws, &self.obj_flsl_binds);
                     }
                 }
                 Matter::MapMesh { id } => {
@@ -2108,7 +2154,7 @@ impl Editor {
                         let mp = mat.as_ref().map(material_params);
                         let obj_mats = self.world.get::<floptle_core::ObjectMaterials>(*e);
                         let node_paint = paint_bases.get(e).map(|v| v.as_slice());
-                        push_mesh_instances(gpu, raster, asset, None, model, tex, mp.as_ref(), obj_mats, &self.texture_registry, node_paint, *e, skin_variants, &mut skin_scratch, &mut instances, &mut skin_draws, flsl, &mut flsl_draws, &self.obj_flsl_binds);
+                        push_mesh_instances(gpu, raster, asset, None, model, tex, mp.as_ref(), obj_mats, mat.is_none().then(|| self.world.get::<floptle_core::MaterialPatch>(*e)).flatten(), &self.texture_registry, node_paint, *e, skin_variants, &mut skin_scratch, &mut instances, &mut skin_draws, flsl, &mut flsl_draws, &self.obj_flsl_binds);
                     }
                 }
                 // group / terrain / camera / light / gravity / skybox / post render
@@ -2214,6 +2260,11 @@ impl Editor {
         // this is what it cost.
         if scatter_props > 0 {
             profile.borrow_mut().record(floptle_core::profile::Bucket::Scatter, scatter_t.ms());
+        }
+        // …of which dropping arriving props onto the ground was this much: a
+        // part of the bucket, named so a slow frame says it was settling.
+        if self.scatter_cache.settle_ms > 0.0 {
+            profile.borrow_mut().record_part("scatterSettle", self.scatter_cache.settle_ms);
         }
 
         // The gather is finished: record what it cost. `instances` is taken here

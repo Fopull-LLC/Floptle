@@ -212,6 +212,9 @@ mod camera_stack;
 mod capture;
 mod user_data;
 mod node_bounds;
+mod body_fit;
+#[cfg(test)]
+mod body_fit_tests;
 mod paint_io;
 mod paint_mesh;
 mod paint_tex;
@@ -454,6 +457,9 @@ struct EditorCmd {
     clear_type: Option<Entity>,
     /// Trace a polygon body's outline from its sprite's art.
     trace_body_outline: Option<Entity>,
+    /// Give a node a Dynamic Rigidbody fitted to its mesh, that turns and
+    /// weighs what its volume would (`body_fit::physics_object`).
+    make_physics_object: Option<Entity>,
     add_celestial: Option<Entity>,
     remove_celestial: Option<Entity>,
     /// Add a Networked (replication) component on this entity.
@@ -1542,11 +1548,13 @@ pub fn run() {
     // `floptle play --steam`: init Steam even with no App ID in the project
     // (Spacewar), same as `run --steam`. Only the verb can set it.
     let mut steam_forced = false;
+    let mut launch_budget: Option<u64> = None;
     match cli::dispatch(&args) {
         cli::Outcome::Exit(code) => std::process::exit(code),
-        cli::Outcome::Launch { project, player, steam } => {
+        cli::Outcome::Launch { project, player, steam, script_budget_ms } => {
             verb_launch = Some((project, player));
             steam_forced = steam;
+            launch_budget = script_budget_ms;
         }
         cli::Outcome::Legacy => {}
     }
@@ -1774,6 +1782,7 @@ pub fn run() {
         show_gizmos: !player_mode,
         player_mode,
         http_allow_local: !player_mode,
+        script_budget_override: launch_budget,
         auto_bake_gi: bake_gi_on_load.then_some(false),
         auto_play: auto_play_on_load,
         game_title,
@@ -2140,6 +2149,8 @@ struct Editor {
     script_quads: Vec<(floptle_render::TexId, floptle_script::DrawQuad)>,
     /// `decals.*`: one GPU mesh per picture, rebuilt when its marks change.
     decal_batches: crate::decals::DecalBatches,
+    /// The water scripts declared for the engine to move (`shape = "sim"`).
+    water_sims: crate::weather::WaterSims,
     /// Screen-space rectangles queued this frame (`draw.rect` / `draw.rectOutline`).
     /// Drawn through the game-UI pipeline over the HUD — see `gather_game_ui`.
     script_rects: Vec<floptle_script::DrawRect>,
@@ -2435,6 +2446,9 @@ struct Editor {
     /// engine ships no styles and no theme.
     ui_styles: floptle_ui::StyleSheet,
     ui_tokens: floptle_ui::Tokens,
+    /// Fonts a style or a token names that are not in the project, each
+    /// reported once.
+    ui_font_missing: std::collections::HashSet<String>,
     /// In-flight style transitions, keyed by element. Deliberately not part of
     /// the scene: a hover that survived into a saved `.ron` would be a bug.
     ui_style_rt: floptle_ui::StyleRuntime,
@@ -2546,6 +2560,17 @@ struct Editor {
     /// In-flight background field loads/generations (entity + body name + start
     /// time + result channel). The shadow proxy derives on the thread too.
     terrain_load_jobs: Vec<crate::terrain_edit::TerrainLoadJob>,
+    /// Script terrain edits taken from the scripts and not yet applied: a few
+    /// milliseconds of them land each frame, in order.
+    terrain_op_queue: std::collections::VecDeque<crate::terrain_edit::QueuedEdit>,
+    /// Milliseconds of script terrain edits applied this frame so far.
+    terrain_edit_ms: f64,
+    /// Chunks of planets put away far from the camera being made again on a
+    /// worker as it comes near ([`Self::stream_far_chunks`]).
+    terrain_promotions: Vec<crate::terrain_edit::PromotionJob>,
+    /// Frames counted for the far-chunk scan, which walks every chunk of a
+    /// planet and so runs every few frames.
+    terrain_far_frame: u64,
     /// Terrains that went resident during Play (cold at Play start): Stop drops
     /// the play-DUG ones back to cold (revert) and keeps clean ones resident.
     play_loaded_terrains: std::collections::HashSet<Entity>,
@@ -3212,6 +3237,9 @@ struct Editor {
     /// and `floptle run` leave it at the default, which refuses; the policy
     /// is `floptle_script::http_policy`, and it is applied at Play start.
     http_allow_local: bool,
+    /// `--script-budget-ms` for this run (`floptle run`, `floptle play`):
+    /// beats the project's `script_budget_ms`. Applied at Play start.
+    script_budget_override: Option<u64>,
     /// The retro target's dimensions as last applied, so any change to them —
     /// Project Settings, a window resize, or a script's `app.setRetroHeight` —
     /// is noticed by one comparison rather than by whichever watcher happened to
@@ -3416,18 +3444,10 @@ struct Editor {
     /// `Some` while a dialog is open (button disabled). Works on Wayland via the
     /// XDG portal, where drag-and-drop from the file manager isn't delivered.
     import_rx: Option<(std::sync::mpsc::Receiver<Vec<PathBuf>>, PathBuf)>,
-    /// A model conversion running on a worker thread, and the file it is about.
-    ///
-    /// **Off the main thread because the input is somebody else's file.** A
-    /// character FBX is tens of megabytes and there is no upper bound on what
-    /// somebody drops into a project; blocking the editor for an unknown
-    /// duration is reported as a freeze, not as a slow conversion.
-    #[allow(clippy::type_complexity)]
+    /// Model conversions: the background search for models the engine
+    /// cannot open, and the one being converted (see `model_convert`).
     #[cfg(feature = "editor-ui")]
-    convert_rx: Option<(
-        std::sync::mpsc::Receiver<Result<(PathBuf, floptle_convert::Report), String>>,
-        String,
-    )>,
+    convert: crate::model_convert::ModelConverts,
     /// Named material presets loaded from assets/materials/.
     materials: Vec<(String, floptle_scene::MaterialDoc)>,
     /// Scratch buffer for the "save material" name field.
@@ -5582,6 +5602,31 @@ mod scene_param_tests {
         let e = world.query::<floptle_core::Name>().find(|(_, n)| n.0 == "World").unwrap().0;
         let seen: String = host.instance_env(e.index(), "seeded").unwrap().get("seen").unwrap();
         assert_eq!(seen, "1911564384");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod script_budget_tests {
+    /// **A game sets its scripts' watchdog for `run` and `play`.** Only a
+    /// dedicated server could; a game whose scripts generate a world in one
+    /// pass had 2 s and no say. The project's setting applies at Play, and a
+    /// run's `--script-budget-ms` beats it.
+    #[test]
+    fn the_project_and_the_run_set_the_script_budget() {
+        let dir = std::env::temp_dir().join(format!("floptle_budget_play_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut ed = super::Editor { project_root: dir.clone(), ..Default::default() };
+        ed.toggle_play();
+        assert_eq!(ed.script_host.script_budget(), floptle_script::budget::DEFAULT_BUDGET);
+        ed.toggle_play();
+        ed.project.script_budget_ms = Some(9000);
+        ed.toggle_play();
+        assert_eq!(ed.script_host.script_budget(), std::time::Duration::from_secs(9));
+        ed.toggle_play();
+        ed.script_budget_override = Some(250);
+        ed.toggle_play();
+        assert_eq!(ed.script_host.script_budget(), std::time::Duration::from_millis(250));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

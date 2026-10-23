@@ -6244,9 +6244,25 @@ impl EditorTabViewer<'_> {
             if remove {
                 cmd.remove_rigidbody = Some(e);
             }
+            // What the node draws, for the fit and for a Mesh body's readout.
+            let drawn = crate::body_fit::node_shape(world, self.maps, self.project_root, e);
+            let scale = floptle_core::world_transform(world, e).scale;
+            rigidbody_context_notes(ui, world, e);
             ui.indent("rb_props", |ui| {
                 if let Some(rb) = world.get_mut::<floptle_core::RigidBody>(e) {
                     use floptle_core::{BodyKind, BodyMode};
+                    if rb.pushbox_only && rb.mode == BodyMode::Dynamic {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(255, 200, 80),
+                            "⚠ script owns contacts (Netcode, below): no gravity, floors or walls for this body",
+                        )
+                        .on_hover_text(
+                            "It moves by its velocity and nothing stops it: it falls through \
+                             nothing, but it walks through walls and floors too. That is the \
+                             rollback-netcode profile, where a script does all of that. For \
+                             an ordinary object that falls and collides, untick it.",
+                        );
+                    }
                     // The one dropdown that replaces hand-freezing axes +
                     // disabling gravity. Structural (a Static body is a
                     // baked collider, not a body) — rebuild the live sim.
@@ -6300,6 +6316,7 @@ impl EditorTabViewer<'_> {
                                 BodyKind::Capsule => "Capsule",
                                 BodyKind::Box => "Box",
                                 BodyKind::Polygon => "Polygon",
+                                BodyKind::Mesh => "Mesh",
                             })
                             .show_ui(ui, |ui| {
                                 cmd.inspector_changed |=
@@ -6308,6 +6325,17 @@ impl EditorTabViewer<'_> {
                                     ui.selectable_value(&mut rb.kind, BodyKind::Capsule, "Capsule").changed();
                                 cmd.inspector_changed |=
                                     ui.selectable_value(&mut rb.kind, BodyKind::Box, "Box").changed();
+                                let mesh = ui
+                                    .selectable_value(&mut rb.kind, BodyKind::Mesh, "Mesh")
+                                    .on_hover_text(
+                                        "this node's own geometry: moving, it collides as the \
+                                         convex hull of its mesh (which tumbles and rests on \
+                                         its faces); Static, as its exact triangles. It \
+                                         follows edits to the mesh, and its scale and turn.",
+                                    )
+                                    .changed();
+                                cmd.inspector_changed |= mesh;
+                                cmd.rebuild_physics |= mesh;
                                 let poly = ui
                                     .selectable_value(&mut rb.kind, BodyKind::Polygon, "Polygon")
                                     .on_hover_text("a 2D outline of up to 8 corners: a sprite's own silhouette, a slope-sided crate, a boulder")
@@ -6320,8 +6348,43 @@ impl EditorTabViewer<'_> {
                                 }
                             });
                     });
+                    // The fit: what the body would be to match the mesh, and
+                    // whether it does. Said either way, so a body that was
+                    // fitted reads as fitted rather than as numbers someone
+                    // typed in.
+                    if let Some(shape) = drawn.as_deref()
+                        && rb.kind != BodyKind::Polygon
+                    {
+                        let fitted = crate::body_fit::fit_to(shape, scale, rb);
+                        let matches = crate::body_fit::matches_fit(rb, &fitted);
+                        ui.horizontal_wrapped(|ui| {
+                            if ui
+                                .add_enabled(!matches, egui::Button::new("Fit to mesh"))
+                                .on_hover_text(
+                                    "set this body's shape and size from what the node \
+                                     draws: a box for a cube, a sphere for a sphere, and \
+                                     the node's own geometry (Mesh) for anything else",
+                                )
+                                .clicked()
+                            {
+                                *rb = fitted;
+                                cmd.inspector_changed = true;
+                                cmd.rebuild_physics = true;
+                            }
+                            if matches {
+                                ui.small("fitted to the mesh");
+                            } else {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(255, 200, 80),
+                                    "differs from the mesh — Fit to mesh refits it",
+                                );
+                            }
+                        });
+                    }
                     if rb.kind == BodyKind::Polygon {
                         polygon_corners_ui(ui, rb, cmd, e);
+                    } else if rb.kind == BodyKind::Mesh {
+                        mesh_body_readout(ui, rb, drawn.as_deref(), scale);
                     } else if rb.kind == BodyKind::Box {
                         ui.label("half-extents");
                         ui.horizontal_wrapped(|ui| {
@@ -6367,9 +6430,11 @@ impl EditorTabViewer<'_> {
                                     .prefix("mass "),
                             )
                             .on_hover_text(
-                                "This shape's mass share inside an assembly compound \
-                                 (composed mass / center of mass / inertia). Plain \
-                                 bodies ignore it.",
+                                "How heavy it is: what decides who moves whom when two \
+                                 bodies meet, how hard it is to spin, and whether it \
+                                 floats (water is 1000 per cubic unit). Inside an \
+                                 assembly, this part's share of the whole. Make it a \
+                                 physics object sets it from the mesh's volume.",
                             )
                             .changed();
                         cmd.inspector_changed |=
@@ -6466,22 +6531,35 @@ impl EditorTabViewer<'_> {
                                  Overrides freeze rot.",
                             )
                             .changed();
-                        cmd.inspector_changed |= crate::responsive::check(ui, &mut rb.pushbox_only, "pushbox only")
+                    });
+                    // Rollback netcode's profile, out of the everyday options:
+                    // it switches collision off, which is never what an
+                    // object that should fall and land wants.
+                    egui::CollapsingHeader::new(crate::responsive::header_text(ui, "Netcode (rollback)"))
+                        .id_salt(("rb_netcode", e.index()))
+                        .default_open(rb.pushbox_only)
+                        .show(ui, |ui| {
+                            cmd.inspector_changed |= crate::responsive::check(
+                                ui,
+                                &mut rb.pushbox_only,
+                                "script owns contacts (rollback netcode)",
+                            )
                             .on_hover_text(
-                                "The solver never resolves this body's contacts — it \
-                                 integrates its velocity and nothing else: no gravity, \
-                                 no depenetration, no ground detection. It stays fully \
-                                 visible to raycasts and overlap queries, so it's a box \
-                                 you can HIT, not a box physics moves.\n\n\
-                                 This is the supported profile for ROLLBACK netcode. \
-                                 The contact solver is the part least likely to agree \
-                                 bit-for-bit between two machines, and a fighting game \
-                                 replaces it with integer frame data anyway. Your script \
-                                 owns gravity, the floor and pushout — and should move \
-                                 the body through node.tickX/tickY/tickZ, not node.x.",
+                                "Turns off gravity, floors and walls for this body. It \
+                                 moves by its velocity and nothing else: nothing pushes \
+                                 it out of what it hits, and nothing holds it up. It \
+                                 stays visible to raycasts and overlap queries, so it is \
+                                 a box you can hit, not one physics moves.\n\n\
+                                 This is the supported profile for rollback netcode, \
+                                 where the contact solver is the part least likely to \
+                                 agree bit for bit between two machines and a fighting \
+                                 game replaces it with integer frame data anyway. Your \
+                                 script owns gravity, the floor and pushout, and should \
+                                 move the body through node.tickX/tickY/tickZ, not \
+                                 node.x. Lua: pushboxOnly.",
                             )
                             .changed();
-                    });
+                        });
                 }
             });
             // Trigger: the body becomes a sensor — it never blocks or gets
@@ -6787,7 +6865,7 @@ impl EditorTabViewer<'_> {
             }
             if has_collidable {
                 let kind = match world.get::<Matter>(e) {
-                    Some(Matter::Mesh { .. }) => "triangle mesh",
+                    Some(Matter::Mesh { .. }) | Some(Matter::MapMesh { .. }) => "triangle mesh",
                     Some(Matter::Primitive { shape, .. }) => match shape {
                         floptle_core::Shape::Cube | floptle_core::Shape::Plane => "box",
                         floptle_core::Shape::Sphere => "sphere",
@@ -7502,7 +7580,7 @@ impl EditorTabViewer<'_> {
             let has_collidable = world.get::<floptle_core::Collidable>(e).is_some()
                 || world.get::<floptle_core::MeshCollider>(e).is_some();
             let collider_kind = match cur {
-                Some(Matter::Mesh { .. }) => Some("triangle mesh"),
+                Some(Matter::Mesh { .. }) | Some(Matter::MapMesh { .. }) => Some("triangle mesh"),
                 Some(Matter::Primitive { shape, .. }) => Some(match shape {
                     floptle_core::Shape::Cube | floptle_core::Shape::Plane => "box",
                     floptle_core::Shape::Sphere => "sphere",
@@ -7515,6 +7593,7 @@ impl EditorTabViewer<'_> {
             // One catalog of (category, label, action) — built from current state.
             enum Add {
                 Rb,
+                PhysObj,
                 Joint,
                 Celestial,
                 Coll,
@@ -7533,6 +7612,12 @@ impl EditorTabViewer<'_> {
             let mut items: Vec<(&str, String, Add)> = Vec::new();
             if !has_rb {
                 items.push(("Physics", "♦  Rigidbody".into(), Add::Rb));
+                if matches!(
+                    cur,
+                    Some(Matter::Primitive { .. } | Matter::MapMesh { .. } | Matter::Mesh { .. } | Matter::Blob { .. })
+                ) {
+                    items.push(("Physics", "♦  Physics object (fitted to the mesh)".into(), Add::PhysObj));
+                }
             }
             if world.get::<floptle_core::joint::Joint>(e).is_none() {
                 items.push(("Physics", "⛓  Joint".into(), Add::Joint));
@@ -7671,6 +7756,7 @@ impl EditorTabViewer<'_> {
                         if ui.button(l).clicked() {
                             match a {
                                 Add::Rb => cmd.add_rigidbody = Some(e),
+                                Add::PhysObj => cmd.make_physics_object = Some(e),
                                 Add::Celestial => cmd.add_celestial = Some(e),
                                 Add::Net => cmd.add_networked = Some(e),
                                 Add::Coll => cmd.set_collidable = Some((e, true)),
@@ -8225,6 +8311,68 @@ fn light_slot_line((live, dropped): (usize, usize)) -> (String, bool) {
     } else {
         (format!("{live} of 16 light slots used"), false)
     }
+}
+
+/// What a Rigidbody does on this node that its fields do not say: on a
+/// tilemap it makes the solid tiles collide, and under an assembly it is
+/// one part of that body.
+fn rigidbody_context_notes(ui: &mut egui::Ui, world: &floptle_core::World, e: floptle_core::Entity) {
+    if matches!(world.get::<Matter>(e), Some(Matter::Tilemap { .. })) {
+        ui.small(
+            "On a tilemap, a Rigidbody makes the tiles its tileset marks solid collide, \
+             as static colliders made on Play. The shape and mode below are not used.",
+        );
+        return;
+    }
+    let mut cur = e;
+    for _ in 0..64 {
+        let Some(floptle_core::Parent(p)) = world.get::<floptle_core::Parent>(cur).copied() else { break };
+        if world
+            .get::<floptle_core::RigidBody>(p)
+            .is_some_and(|rb| rb.assembly && rb.mode == floptle_core::BodyMode::Dynamic)
+        {
+            let name = world.get::<floptle_core::Name>(p).map(|n| n.0.clone()).unwrap_or_default();
+            ui.small(format!(
+                "A part of the assembly “{name}”: this shape and mass are one piece of that \
+                 body, which is what moves. The mode and dynamics below are not used."
+            ));
+            return;
+        }
+        cur = p;
+    }
+}
+
+/// A Mesh body's shape, as values: what it collides as, and how big.
+fn mesh_body_readout(
+    ui: &mut egui::Ui,
+    rb: &floptle_core::RigidBody,
+    drawn: Option<&crate::body_fit::NodeShape>,
+    scale: floptle_core::math::Vec3,
+) {
+    let Some(shape) = drawn else {
+        ui.colored_label(
+            egui::Color32::from_rgb(255, 200, 80),
+            "⚠ this node draws no mesh to read, so it collides as a box of half-size below",
+        );
+        ui.small(format!(
+            "x {:.2}  y {:.2}  z {:.2}",
+            rb.half_extents[0], rb.half_extents[1], rb.half_extents[2]
+        ));
+        return;
+    };
+    let size = (shape.hi - shape.lo) * scale.abs();
+    let what = if rb.mode == floptle_core::BodyMode::Static {
+        format!("its exact triangles ({})", shape.geometry.indices.len() / 3)
+    } else {
+        match shape.hull {
+            Some(h) => format!("its convex hull ({} corners)", h.verts().len()),
+            None => "its bounding box".to_string(),
+        }
+    };
+    ui.small(format!(
+        "collides as {what}, {:.2} × {:.2} × {:.2}, turned and scaled with the node",
+        size.x, size.y, size.z
+    ));
 }
 
 /// A polygon body's corners: trace them from the sprite, or type them in.

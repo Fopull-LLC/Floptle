@@ -556,9 +556,10 @@ impl<'a> Writer<'a> {
                         return Err(TranspileError::new("internal: sample slot", e.span));
                     };
                     let uv = self.emit_resolved(&call.args[1], Some(Ty::Vec2))?;
-                    Ok(format!(
-                        "flsl_tiled_sample(flsl_tex{slot}, flsl_samp{slot}, {uv}, P.t{slot}a, P.t{slot}b)"
-                    ))
+                    // A vertex has no derivatives, so `output offset` reads
+                    // the largest level: a height map displacing a surface.
+                    let f = if matches!(self.ctx, EmitCtx::Vertex) { "flsl_tiled_sample_level" } else { "flsl_tiled_sample" };
+                    Ok(format!("{f}(flsl_tex{slot}, flsl_samp{slot}, {uv}, P.t{slot}a, P.t{slot}b)"))
                 }
                 "sampleTriplanar" => {
                     let ResolvedArg::Texture(slot) = call.args[0] else {

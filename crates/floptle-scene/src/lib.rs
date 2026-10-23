@@ -442,6 +442,11 @@ pub struct RigidBodyDoc {
     /// that predates it loads unchanged.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pushbox_only: bool,
+    /// true = the body is shaped by the node's own mesh (`BodyKind::Mesh`).
+    /// Takes priority over every other shape flag. Omitted when off, so a
+    /// scene written before it loads unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mesh: bool,
 }
 
 fn is_one(v: &f32) -> bool {
@@ -507,7 +512,9 @@ fn is_default_slope(v: &f32) -> bool {
 impl RigidBodyDoc {
     pub fn to_rigidbody(&self) -> RigidBody {
         RigidBody {
-            kind: if self.polygon {
+            kind: if self.mesh {
+                BodyKind::Mesh
+            } else if self.polygon {
                 BodyKind::Polygon
             } else if self.boxed {
                 BodyKind::Box
@@ -557,6 +564,7 @@ impl RigidBodyDoc {
             mass: rb.mass,
             assembly: rb.assembly,
             pushbox_only: rb.pushbox_only,
+            mesh: rb.kind == BodyKind::Mesh,
         }
     }
 }
@@ -887,8 +895,11 @@ pub struct ScriptDoc {
     pub kind: String,
     #[serde(default = "yes")]
     pub enabled: bool,
-    /// f64, so a seed keeps every digit (see `ScriptInst::params`).
-    #[serde(default)]
+    /// f64, so a seed keeps every digit (see `ScriptInst::params`). A value
+    /// may be written as a number or as a string of one (`("seed",
+    /// "1815586866")`), so a tool that writes big integers as text is read
+    /// exactly; it is saved back as a number.
+    #[serde(default, deserialize_with = "num_params")]
     pub params: Vec<(String, f64)>,
     /// Node-reference params: param name → target node name (Inspector-wired).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -900,6 +911,42 @@ pub struct ScriptDoc {
     /// [`floptle_core::ScriptInst::pinned_bools`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_bools: Option<Vec<String>>,
+}
+
+/// `params` as written: each value a float, an integer, or a string holding
+/// a number.
+fn num_params<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<(String, f64)>, D::Error> {
+    struct Num(f64);
+    impl<'de> Deserialize<'de> for Num {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct V;
+            impl serde::de::Visitor<'_> for V {
+                type Value = Num;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("a number, or a string holding one")
+                }
+                fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Num, E> {
+                    Ok(Num(v))
+                }
+                fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Num, E> {
+                    Ok(Num(v as f64))
+                }
+                fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Num, E> {
+                    Ok(Num(v as f64))
+                }
+                fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Num, E> {
+                    v.trim().parse::<f64>().map(Num).map_err(|_| {
+                        E::custom(format!(
+                            "script param \"{v}\" is not a number (a text param goes in `strs`)"
+                        ))
+                    })
+                }
+            }
+            d.deserialize_any(V)
+        }
+    }
+    let raw: Vec<(String, Num)> = Vec::deserialize(d)?;
+    Ok(raw.into_iter().map(|(k, Num(v))| (k, v)).collect())
 }
 
 fn yes() -> bool {
@@ -2864,6 +2911,15 @@ pub struct ProjectConfigDoc {
     #[serde(default = "default_render_scale", skip_serializing_if = "is_default_render_scale")]
     pub render_scale: f32,
 
+    /// How long one pass of the scripts may run, in milliseconds of the
+    /// script thread's own CPU time, before the script is stopped as a runaway
+    /// loop. `None` is the engine's default (2 s). For a game whose scripts
+    /// legitimately do long work in one pass, such as generating a world.
+    /// `floptle run`/`play --script-budget-ms` overrides it for that run; a
+    /// dedicated server keeps its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_budget_ms: Option<u64>,
+
     /// How much detail a reflection probe's capture keeps.
     ///
     /// A probe's picture spans a full turn across its width, so its width is the
@@ -3013,6 +3069,7 @@ impl ProjectConfigDoc {
             tick_overload: TickOverloadDoc::default(),
             shadow_volumes: default_shadow_volumes(),
             render_scale: default_render_scale(),
+            script_budget_ms: None,
             probe_detail: ProbeDetailDoc::default(),
             matter: true,
             title: None,
@@ -3470,6 +3527,22 @@ pub struct MaterialDoc {
     /// so a scene that links nothing keeps its bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Where texture alpha cuts the surface out (see
+    /// [`floptle_core::Material::alpha_cutoff`]). Absent is the half it
+    /// always was.
+    #[serde(default = "default_alpha_cutoff", skip_serializing_if = "is_default_alpha_cutoff")]
+    pub alpha_cutoff: f32,
+    /// Drawn from behind as well (see [`floptle_core::Material::double_sided`]).
+    /// Absent is both sides, as always.
+    #[serde(default = "true_bool", skip_serializing_if = "is_true")]
+    pub double_sided: bool,
+}
+
+fn default_alpha_cutoff() -> f32 {
+    Material::default().alpha_cutoff
+}
+fn is_default_alpha_cutoff(v: &f32) -> bool {
+    *v == Material::default().alpha_cutoff
 }
 
 fn is_zero_u32(v: &u32) -> bool {
@@ -3717,6 +3790,8 @@ impl MaterialDoc {
             shading: self.shading.to_shading(),
             retro: self.retro.to_retro(),
             source: self.source.clone(),
+            alpha_cutoff: self.alpha_cutoff.clamp(0.0, 1.0),
+            double_sided: self.double_sided,
         }
     }
     pub fn from_material(m: &Material) -> Self {
@@ -3765,6 +3840,8 @@ impl MaterialDoc {
             shading: ShadingDoc::from_shading(m.shading),
             retro: RetroDoc::from_retro(m.retro),
             source: m.source.clone(),
+            alpha_cutoff: m.alpha_cutoff,
+            double_sided: m.double_sided,
         }
     }
 }
@@ -4086,6 +4163,9 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
                 rim: [r[0], r[1], r[2]],
                 rim_strength: r[3],
                 ambient: node.tint_ambient.unwrap_or(1.0),
+                // A tint's glow is set by scripts at run time and is not a
+                // field of the scene file.
+                ..Default::default()
             },
         );
     }
@@ -5153,6 +5233,7 @@ mod tests {
                         mass: 3.5,      // exercise the assembly-field round-trips
                         assembly: true,
                         pushbox_only: true, // exercise the rollback-profile round-trip
+                        mesh: false,
                     }),
                     celestial: Some(CelestialBodyDoc {
                         mu: 25000.0,
@@ -5609,6 +5690,7 @@ mod tests {
             rim: [0.11, 0.42, 0.98],
             rim_strength: 1.3,
             ambient: 1.6,
+            ..Default::default()
         };
         world.insert(e, authored);
 
@@ -6255,5 +6337,31 @@ mod tests {
             })
             .unwrap();
         assert!(!floptle_core::is_spot(a), "an old lamp came back aimed: {a}");
+    }
+}
+
+#[cfg(test)]
+mod script_param_tests {
+    use super::*;
+
+    /// **A seed can be written as text, or as a whole number.** A string
+    /// param was a parse error that failed the whole scene ("Expected
+    /// float"), so a tool could not hand a big seed over losslessly. Floats
+    /// load as before; a string that is not a number names itself.
+    #[test]
+    fn a_script_param_may_be_a_float_an_integer_or_a_numeric_string() {
+        let doc: ScriptDoc = ron::from_str(
+            r#"(kind: "gen", params: [("speed", 2.5), ("seed", "1815586866"), ("count", 1911564384)])"#,
+        )
+        .expect("parses");
+        assert_eq!(
+            doc.params,
+            vec![("speed".into(), 2.5), ("seed".into(), 1815586866.0), ("count".into(), 1911564384.0)]
+        );
+        // Saved back, it is numbers, and loads again the same.
+        let text = ron::to_string(&doc).unwrap();
+        assert_eq!(ron::from_str::<ScriptDoc>(&text).unwrap().params, doc.params);
+        let err = ron::from_str::<ScriptDoc>(r#"(kind: "gen", params: [("seed", "abc")])"#).unwrap_err();
+        assert!(err.to_string().contains("\"abc\" is not a number"), "{err}");
     }
 }

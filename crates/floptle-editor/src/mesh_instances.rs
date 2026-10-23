@@ -115,6 +115,10 @@ pub(crate) fn apply_node_tint(
     // `rim[3]` must survive, or a tinted node loses its texture tiling.
     fn tint_instance(t: &floptle_core::Tint, raw: &mut InstanceRaw) {
         t.apply(&mut raw.color);
+        // The tint's glow replaces the surface's own while it is on.
+        if t.emissive_strength > 0.0 {
+            raw.emissive = [t.emissive[0], t.emissive[1], t.emissive[2], t.emissive_strength];
+        }
         let (rim, strength) =
             t.rim_over([raw.rim[0], raw.rim[1], raw.rim[2]], raw.params[1]);
         raw.rim[..3].copy_from_slice(&rim);
@@ -166,6 +170,36 @@ pub(crate) fn count_draw_batches(
         skin_groups.insert((s.mesh.0, s.tex.map(|t| t.0)));
     }
     mesh_tex.len() + flsl_groups.len() + skin_groups.len()
+}
+
+/// A model part's own look with a script's patch laid over it: the imported
+/// material (or the plain base colour × the mesh's texture a part with no
+/// imported surface draws), changed only in the keys the patch names. An
+/// image the patch does not name keeps the one the import bound.
+fn patched_import(
+    raster: &mut floptle_render::Raster,
+    gpu: &floptle_render::Gpu,
+    imported: Option<&crate::ImportedLook>,
+    base: [f32; 3],
+    mesh_tex: Option<TexId>,
+    patch: &floptle_core::MaterialPatch,
+    registry: &HashMap<String, TexId>,
+) -> (Option<TexId>, MaterialParams) {
+    let plain = floptle_core::Material { color: base, ..Default::default() };
+    let own = imported.map_or(&plain, |l| &l.material);
+    let m = patch.over(own);
+    let look = |p: Option<&String>| p.and_then(|p| registry.get(p.as_str()).copied());
+    let tex = if patch.names("texture") { look(m.texture.as_ref()) } else { imported.map_or(mesh_tex, |l| l.base) };
+    const MAP_KEYS: [&str; 5] = ["normalMap", "roughnessMap", "metallicMap", "occlusionMap", "emissiveMap"];
+    let named = m.maps();
+    let mut maps = imported.map(|l| l.maps).unwrap_or_default();
+    for (i, key) in MAP_KEYS.iter().enumerate() {
+        if patch.names(key) {
+            maps[i] = look(named[i]);
+        }
+    }
+    let any = maps.iter().any(Option::is_some);
+    crate::shading::material_draw_with(raster, gpu, &m, tex, any.then_some(maps))
 }
 
 pub(crate) fn part_look_rule<'a>(
@@ -231,6 +265,9 @@ pub(crate) fn push_mesh_instances(
     // Per-sub-object material overrides (the `ObjectMaterials` component) + the
     // texture registry to resolve their texture paths (pre-warmed each frame).
     obj_mats: Option<&floptle_core::ObjectMaterials>,
+    // A script's `setMaterial` keys over each part's own look (the node has no
+    // Material): laid over whatever the part would otherwise draw.
+    patch: Option<&floptle_core::MaterialPatch>,
     texture_registry: &HashMap<String, TexId>,
     // This node's own per-part paint bases (the brush's work). `None` → fall back to
     // whatever the mesh imported with, so Blender paint still shows on unpainted nodes.
@@ -302,6 +339,8 @@ pub(crate) fn push_mesh_instances(
             // included — resolved the same way a node's own Material is, so
             // "give this one object a normal map" works.
             PartLook::Override(key, m) => {
+                let patched = patch.map(|p| p.over(m));
+                let m = patched.as_ref().unwrap_or(m);
                 let (t, p) = crate::shading::material_draw(raster, gpu, m, texture_registry, None);
                 // No shader named: built-in look, same as ever. A shader
                 // named: this part's own binding if it has compiled yet, or
@@ -322,6 +361,12 @@ pub(crate) fn push_mesh_instances(
             PartLook::Node(m) => (Some(tex.unwrap_or_else(|| raster.white_texture(gpu))), *m, None),
             // A part whose file names maps or a glow draws them, through the
             // same function an override with those maps would.
+            PartLook::Imported(base) if patch.is_some() => {
+                let patch = patch.expect("checked");
+                let imported = asset.part_meta.get(part).and_then(|pm| pm.imported.as_ref());
+                let (t, p) = patched_import(raster, gpu, imported, base, tex, patch, texture_registry);
+                (t, p, None)
+            }
             PartLook::Imported(base) => match asset.part_meta.get(part).and_then(|pm| pm.imported.as_ref()) {
                 Some(look) => {
                     let (t, p) = crate::shading::material_draw_with(
@@ -483,6 +528,8 @@ mod tint_tests {
             rim: [1.0, 0.14, 0.16],
             rim_strength: 1.3,
             ambient: 1.6,
+            emissive: [0.2, 0.9, 0.3],
+            emissive_strength: 2.5,
         };
         apply_node_tint(
             Some(&t),
@@ -500,6 +547,7 @@ mod tint_tests {
             assert_eq!(raw.color[0], 0.92, "{what}: and the colour still multiplies");
             // params.z packs unlit + the paint base; params.x is shininess.
             assert_eq!(raw.params[0], 15.0, "{what}: shininess is not a tint's business");
+            assert_eq!(raw.emissive, [0.2, 0.9, 0.3, 2.5], "{what}: the tint's glow");
         }
         assert_eq!(
             inst[0].2.rim[3], tiling_before,

@@ -111,6 +111,8 @@ field_diff!(Material {
     fog,
     ambient,
     alpha,
+    alpha_cutoff,
+    double_sided,
     normal_map,
     normal_strength,
     roughness_map,

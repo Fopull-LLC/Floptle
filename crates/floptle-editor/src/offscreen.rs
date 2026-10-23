@@ -240,12 +240,17 @@ impl Editor {
         // Every part of the frame is in some bucket, so a hitch names where it
         // went rather than leaving it to `untimed`.
         self.timed_into(Bucket::Terrain, |ed| {
+            let t0 = floptle_core::profile::Span::new();
             ed.sync_terrain_gpu();
+            ed.script_host.profile().borrow_mut().record_part("terrainShadow", t0.ms());
             ed.drain_terrain_generates();
             ed.update_terrain_residency(lod_cam);
+            ed.stream_far_chunks(lod_cam);
             ed.publish_terrain_busy();
             ed.step_terrain_checkpoint();
+            let t0 = floptle_core::profile::Span::new();
             ed.sync_terrain_meshes(terrain_full_rebuild, lod_cam);
+            ed.script_host.profile().borrow_mut().record_part("terrainMeshing", t0.ms());
         });
         self.timed_into(Bucket::Assets, |ed| {
             ed.sync_sky_texture();
@@ -476,7 +481,13 @@ impl Editor {
         let (sh_params, sh_tint, sh_extra) = shadow_uniforms(&light_node);
         let contact = crate::shading::contact_uniform(&light_node);
         let ((fog_color, fog_params, fog_extra), particle_fog) =
-            crate::shading::fog_uniforms_and_particles_at(&light_node, &self.world, cam.world_position);
+            crate::shading::fog_uniforms_and_particles_at(
+                &light_node,
+                &self.world,
+                &self.script_host.declared_water(),
+                &crate::shading::roofed_by(self.sim.as_ref()),
+                cam.world_position,
+            );
         let (atmo_meta, atmo_color, atmo_body, atmo_params) =
             crate::shading::atmo_uniforms(&self.world, cam.world_position);
         let (star_meta, star_pos, star_color) =
@@ -707,6 +718,7 @@ impl Editor {
                         let node_paint = paint_bases.get(ent).map(|v| v.as_slice());
                         push_mesh_instances(
                             gpu, raster, asset, pose, model, tex, mp.as_ref(), obj_mats,
+                            mat.is_none().then(|| self.world.get::<floptle_core::MaterialPatch>(*ent)).flatten(),
                             &self.texture_registry, node_paint,
                             *ent, &mut self.skin_variants,
                             &mut skin_scratch, &mut instances, &mut skin_draws, flsl,
@@ -731,6 +743,7 @@ impl Editor {
                         let node_paint = paint_bases.get(ent).map(|v| v.as_slice());
                         push_mesh_instances(
                             gpu, raster, asset, None, model, tex, mp.as_ref(), obj_mats,
+                            mat.is_none().then(|| self.world.get::<floptle_core::MaterialPatch>(*ent)).flatten(),
                             &self.texture_registry, node_paint,
                             *ent, &mut self.skin_variants,
                             &mut skin_scratch, &mut instances, &mut skin_draws, flsl,
@@ -1235,6 +1248,13 @@ impl Editor {
             // It runs when something actually reads it, and needs the depth
             // texture (a view cannot be copied into), so a caller that has none
             // opts out by construction rather than by forgetting.
+            // The sky into the environment map, as the window path does every
+            // frame, so a metal or glossy surface has something to reflect.
+            // Without it a view with no window behind it — `floptle shot`, a
+            // build's first frame — drew every metal black, and a polished
+            // metal model looked like a hole in the picture.
+            raymarch.upload_globals(gpu, rm);
+            raymarch.capture_env(gpu);
             let wants_depth = wants_prepass(
                 raster.flsl_draws_want_depth(&flsl_draws),
                 ssr[0] > 0.5,

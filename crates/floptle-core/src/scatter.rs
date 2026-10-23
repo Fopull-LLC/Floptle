@@ -433,27 +433,83 @@ fn cube_face_dir(f: usize, u: f64, v: f64) -> DVec3 {
     }
 }
 
+/// A point that bends plants away from itself: a walker, a wheel, a landing
+/// ship. Props within `radius` of it, measured across the ground, lean away.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Interactor {
+    /// Where it is, in world space.
+    pub pos: DVec3,
+    /// How far across the ground it reaches, in metres.
+    pub radius: f32,
+    /// How hard a prop right beside it leans: the tangent of the lean, so `1`
+    /// lays it over at 45 degrees.
+    pub strength: f32,
+}
+
+/// The most a prop leans, however many points press on it: about 63 degrees.
+/// Past that a prop sheared about its base stretches too far to read as bent.
+pub const MAX_LEAN: f32 = 2.0;
+
+/// How a prop standing at `base` with its up along `up` leans because of the
+/// points around it: a vector across the ground, away from them, whose length
+/// is the tangent of the lean (`0` = upright).
+///
+/// Distance is measured across the ground, not through the air, so a walker
+/// whose position is at the hip bends the grass under the feet. A point more
+/// than its radius (and at least 2 m) above or below the prop is ignored, so a
+/// ship passing high overhead does not flatten a meadow.
+pub fn lean(points: &[Interactor], base: DVec3, up: Vec3) -> Vec3 {
+    let up_d = up.as_dvec3();
+    let mut total = Vec3::ZERO;
+    for p in points {
+        let r = p.radius.max(0.0) as f64;
+        if r <= 0.0 {
+            continue;
+        }
+        let v = base - p.pos;
+        let along = v.dot(up_d);
+        if along.abs() > r.max(2.0) {
+            continue;
+        }
+        let across = v - up_d * along;
+        let d = across.length();
+        if d >= r {
+            continue;
+        }
+        // Full at the point, nothing at the rim, and smooth at both ends, so a
+        // walker's wake closes without a visible edge. A prop right under the
+        // point has no "away"; it leans along the ground's own x, which is
+        // as good as any.
+        let k = 1.0 - (d / r) as f32;
+        let k = k * k * (3.0 - 2.0 * k);
+        let dir = if d > 1e-6 { (across / d).as_vec3() } else { up.any_orthonormal_vector() };
+        total += dir * (p.strength * k);
+    }
+    let len = total.length();
+    if len > MAX_LEAN { total * (MAX_LEAN / len) } else { total }
+}
+
 /// Which LOD band a distance falls in, and how far it is faded into the next
 /// one (`0` = fully this band, `1` = fully the next).
 ///
 /// Returned as a blend rather than a hard index because the pop at a band
 /// boundary is the thing everyone notices about scatter and nothing else about
-/// it. Past the last band the instance is gone: `None`.
+/// it. In the fade window before the last band's far edge the blend runs
+/// toward a band that is not there, so the prop dissolves out rather than
+/// vanishing at once; past the edge it is gone: `None`.
 pub fn band_at(src: &ScatterSource, dist: f32) -> Option<(usize, f32)> {
     let fade = src.fade.max(0.0);
     for (i, b) in src.bands.iter().enumerate() {
         if dist < b.distance {
-            // Inside a fade window before this band's far edge, and there is
-            // something to fade into.
+            // Inside a fade window before this band's far edge: into the next
+            // band, or out to nothing after the last.
             let into = b.distance - dist;
-            if into < fade && i + 1 < src.bands.len() {
+            if into < fade {
                 return Some((i, 1.0 - into / fade.max(1e-4)));
             }
             return Some((i, 0.0));
         }
     }
-    // Past the last band — but fade out across the final window rather than
-    // vanishing, so the horizon dissolves instead of snapping.
     None
 }
 
@@ -789,6 +845,24 @@ mod tests {
 
     /// LOD bands hand back a blend, not an index, because the pop at a band
     /// boundary is the thing everyone notices about scatter.
+    /// **A prop beside a walker leans away from it; one across the clearing
+    /// stays upright.**
+    #[test]
+    fn a_prop_beside_an_interactor_leans_away_and_a_far_one_does_not() {
+        let walker = Interactor { pos: DVec3::new(0.0, 1.0, 0.0), radius: 1.5, strength: 1.0 };
+        let near = lean(&[walker], DVec3::new(0.5, 0.0, 0.0), Vec3::Y);
+        assert!(near.x > 0.3, "a prop 0.5 m away barely leaned: {near}");
+        assert!(near.y.abs() < 1e-6 && near.z.abs() < 1e-6, "it leaned off the line away from the walker: {near}");
+        let far = lean(&[walker], DVec3::new(5.0, 0.0, 0.0), Vec3::Y);
+        assert_eq!(far, Vec3::ZERO, "a prop 5 m away leaned");
+        // A ship passing well overhead flattens nothing.
+        let high = Interactor { pos: DVec3::new(0.0, 30.0, 0.0), ..walker };
+        assert_eq!(lean(&[high], DVec3::new(0.5, 0.0, 0.0), Vec3::Y), Vec3::ZERO);
+        // Two walkers on top of each other cannot lay a plant flat.
+        let pile = [walker; 8];
+        assert!(lean(&pile, DVec3::new(0.1, 0.0, 0.0), Vec3::Y).length() <= MAX_LEAN + 1e-5);
+    }
+
     #[test]
     fn bands_cross_fade_instead_of_popping() {
         let s = ground(8);
@@ -799,6 +873,15 @@ mod tests {
         let (band, _) = band_at(&s, 60.0).expect("still visible");
         assert_eq!(band, 1, "past the first band");
         assert!(band_at(&s, 200.0).is_none(), "past the last band it is gone");
+        // **The horizon dissolves.** Just inside the last band's far edge a
+        // prop is fading out toward the band after it, which is none, so it
+        // is drawn part-way dissolved rather than cut off at the edge.
+        let last = s.bands.len() - 1;
+        let edge = s.bands[last].distance;
+        let (band, t) = band_at(&s, edge - s.fade * 0.5).expect("still visible inside the edge");
+        assert_eq!(band, last);
+        assert!(t > 0.3 && t < 0.7, "half-way through the last fade is half dissolved, got {t}");
+        assert_eq!(band_at(&s, edge - s.fade * 2.0), Some((last, 0.0)), "well inside it is whole");
     }
 
     /// Chunk selection is generous on purpose. A prop near a chunk's far corner

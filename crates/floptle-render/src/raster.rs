@@ -508,6 +508,12 @@ pub struct SurfaceExtras {
     pub sway: f32,
     /// Key light through the back ([`floptle_core::Material::backlight`]).
     pub backlight: f32,
+    /// Where an opaque surface's texture alpha cuts it out
+    /// ([`floptle_core::Material::alpha_cutoff`]).
+    pub alpha_cutoff: f32,
+    /// Faces seen from behind are drawn too
+    /// ([`floptle_core::Material::double_sided`]).
+    pub double_sided: bool,
 }
 
 impl Default for SurfaceExtras {
@@ -526,6 +532,8 @@ impl Default for SurfaceExtras {
             thickness: 0.5,
             sway: 0.0,
             backlight: 0.0,
+            alpha_cutoff: 0.5,
+            double_sided: true,
         }
     }
 }
@@ -553,6 +561,14 @@ pub(crate) const EXT_NO_FOG: u32 = 16;
 /// With [`EXT_DITHER_ALPHA`]: dither on the complement of the pattern, so
 /// two surfaces fading across each other cover every pixel exactly once.
 pub(crate) const EXT_DITHER_INVERT: u32 = 32;
+/// Set when faces seen from behind are not drawn. Stored as "single-sided" so
+/// the neutral entry, and every surface before there was a choice, still draws
+/// both sides.
+pub(crate) const EXT_SINGLE_SIDED: u32 = 64;
+/// The alpha cutoff rides the flags lane above the flag bits, as `1 + cutoff ×
+/// 254` in bits 8..16, so it costs no lane of its own. Zero there is the
+/// default cutoff of one half, which keeps the neutral entry all-zero.
+pub(crate) const EXT_CUTOFF_SHIFT: u32 = 8;
 
 impl SurfaceExtras {
     /// Read a material's extras. `Classic` still carries the normal and
@@ -572,6 +588,8 @@ impl SurfaceExtras {
             thickness: m.thickness,
             sway: m.sway,
             backlight: m.backlight,
+            alpha_cutoff: m.alpha_cutoff,
+            double_sided: m.double_sided,
         }
     }
 
@@ -604,6 +622,13 @@ impl SurfaceExtras {
         }
         if !self.fog {
             f |= EXT_NO_FOG;
+        }
+        if !self.double_sided {
+            f |= EXT_SINGLE_SIDED;
+        }
+        if self.alpha_cutoff != 0.5 {
+            let q = (self.alpha_cutoff.clamp(0.0, 1.0) * 254.0).round() as u32 + 1;
+            f |= q << EXT_CUTOFF_SHIFT;
         }
         f
     }
@@ -950,6 +975,9 @@ struct TexBind {
     linear_view: wgpu::TextureView,
     sampling: TexSampling,
     _texture: wgpu::Texture,
+    /// Bumped when the pixels are written in place, so a copy made from them
+    /// (the UI's mip chain) knows it is stale.
+    revision: std::cell::Cell<u32>,
 }
 
 /// A handle to a material texture registered with [`Raster::register_texture`].
@@ -1817,10 +1845,17 @@ impl Raster {
             },
             count: None,
         }];
+        // A shader that moves its vertices may read its textures there too (a
+        // height map); the others keep them to the fragment stage.
+        let tex_stages = if chunk.contains("fn vs_flsl(") {
+            wgpu::ShaderStages::VERTEX_FRAGMENT
+        } else {
+            wgpu::ShaderStages::FRAGMENT
+        };
         for i in 0..tex_slots as u32 {
             entries.push(wgpu::BindGroupLayoutEntry {
                 binding: 1 + 2 * i,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: tex_stages,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: true },
                     view_dimension: wgpu::TextureViewDimension::D2,
@@ -1830,7 +1865,7 @@ impl Raster {
             });
             entries.push(wgpu::BindGroupLayoutEntry {
                 binding: 2 + 2 * i,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: tex_stages,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             });
@@ -2175,6 +2210,12 @@ impl Raster {
     /// The bind group of a registered material texture — shared with the particle
     /// pass, whose group(1) layout is structurally identical, so one registry
     /// textures both meshes and billboards.
+    /// A registered texture's pixels, its sampling and how many times they
+    /// have been written in place: what the UI builds its mip chain from.
+    pub(crate) fn texture_source(&self, id: TexId) -> Option<(&wgpu::Texture, TexSampling, u32)> {
+        self.textures.get(id.0 as usize).map(|t| (&t._texture, t.sampling, t.revision.get()))
+    }
+
     pub(crate) fn material_bind(&self, id: TexId) -> Option<&wgpu::BindGroup> {
         self.textures.get(id.0 as usize).map(|t| &t.bind)
     }
@@ -2281,7 +2322,7 @@ impl Raster {
             .map(|t| t.sampling)
             .unwrap_or_default();
         let id = TexId(self.textures.len() as u32);
-        self.textures.push(TexBind { bind, view, linear_view, sampling, _texture: texture });
+        self.textures.push(TexBind { bind, view, linear_view, sampling, _texture: texture, revision: Default::default() });
         self.mat_sets.insert(key, id);
         id
     }
@@ -2548,7 +2589,7 @@ impl Raster {
         let linear_view = linear_view_of(&texture);
         let sampler = self.sampler_for(gpu, sampling);
         let bind = self.plain_surface_bind(gpu, "raster-material-tex", &view, &sampler);
-        TexBind { bind, view, linear_view, sampling, _texture: texture }
+        TexBind { bind, view, linear_view, sampling, _texture: texture, revision: Default::default() }
     }
 
     /// Let go of a texture's pixels: the slot now holds one transparent pixel,
@@ -2617,7 +2658,7 @@ impl Raster {
         let bind = self.plain_surface_bind(gpu, "raster-render-target", &view, &sampler);
         let id = TexId(self.textures.len() as u32);
         let linear_view = linear_view_of(&color);
-        self.textures.push(TexBind { bind, view, linear_view, sampling, _texture: color });
+        self.textures.push(TexBind { bind, view, linear_view, sampling, _texture: color, revision: Default::default() });
         (id, attach, depth_view)
     }
 
@@ -2627,6 +2668,7 @@ impl Raster {
     /// unknown id is ignored. (No mip regen — paint textures use a plain filter.)
     pub fn update_texture(&self, gpu: &Gpu, id: TexId, data: &TextureData) {
         let Some(t) = self.textures.get(id.0 as usize) else { return };
+        t.revision.set(t.revision.get().wrapping_add(1));
         let size = t._texture.size();
         if size.width != data.width || size.height != data.height {
             log::error!("update_texture size mismatch: {}×{} vs {}×{}", size.width, size.height, data.width, data.height);
@@ -2657,6 +2699,7 @@ impl Raster {
     #[allow(clippy::too_many_arguments)]
     pub fn update_texture_region(&self, gpu: &Gpu, id: TexId, x: u32, y: u32, w: u32, h: u32, pixels: &[u8]) {
         let Some(t) = self.textures.get(id.0 as usize) else { return };
+        t.revision.set(t.revision.get().wrapping_add(1));
         let size = t._texture.size();
         if x + w > size.width || y + h > size.height {
             log::error!("update_texture_region out of bounds: {x},{y} {w}×{h} in {}×{}", size.width, size.height);

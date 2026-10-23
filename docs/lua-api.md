@@ -14,29 +14,29 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 201
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 202
 - [node — transform & body fields](#node--transform--body-fields) — 42
 - [node — methods & handles](#node--methods--handles) — 36
 - [vectors, directions & easing](#vectors-directions--easing) — 51
 - [scene lookups & raycast](#scene-lookups--raycast) — 16
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
-- [input — keyboard & mouse](#input--keyboard--mouse) — 48
+- [input — keyboard & mouse](#input--keyboard--mouse) — 49
 - [drawing — draw.*](#drawing--draw) — 18
 - [the web — http.*, json.*](#the-web--http-json) — 15
 - [the player's account — account.*](#the-players-account--account) — 13
-- [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 72
+- [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 74
 - [networking — net.*, synced](#networking--net-synced) — 41
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
-- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 18
+- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 19
 - [pathfinding — nav.*](#pathfinding--nav) — 26
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 10
 - [weather — wind](#weather--wind) — 6
-- [scatter — instanced props](#scatter--instanced-props) — 8
+- [scatter — instanced props](#scatter--instanced-props) — 9
 - [2D — sprites, sorting & the flat camera](#2d--sprites-sorting--the-flat-camera) — 38
 - [vessels — assembly.*](#vessels--assembly) — 16
 - [the camera & the screen](#the-camera--the-screen) — 9
 - [physics controls — pause & step](#physics-controls--pause--step) — 5
-- [frame cost — perf.*](#frame-cost--perf) — 16
+- [frame cost — perf.*](#frame-cost--perf) — 17
 - [accessibility — access.*](#accessibility--access) — 11
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
@@ -270,6 +270,10 @@ app.version() — the engine version this build was made with, e.g. "0.81.0". Fo
 
 app.vsync() → the current frame pacing as a name: "On", "Adaptive" or "Off" — the same names project.ron uses, so a Video tab can show what is set and save it straight back.
 
+### `app.wallClock`
+
+app.wallClock() → seconds on a monotonic wall clock (from an arbitrary start; only differences mean anything). For timing and time-slicing your own work, e.g. stop generating once 2 ms of this frame are spent. os.clock is CPU time summed over every thread of the engine, which runs faster than the wall, and `time` stands still within a frame.
+
 ### `boxcast`
 
 boxcast(origin, dir, halfX, halfY, max [, opts]) → the first hit, or nil — sweep a box held in the XY plane, the shape a 2D body is, along a direction: "will my player fit through there", "is there a ledge a step ahead". The box is swept by its edges, so a low step a ray from its middle would pass over is still met, and a box resting on the floor can sweep along it without hitting it. The hit has the same fields as spherecast's: point, normal, distance, node. opts: ignore = {nodes}, layers = {names}, ignoreStart = true.
@@ -324,7 +328,7 @@ Pictures laid on the world's static surfaces: blood, scorch marks, bullet holes,
 
 ### `decals.add`
 
-decals.add{ texture, pos, normal, size [, height, depth, up, rotation, color = {r,g,b}, alpha, sheetCols, sheetRows, cell, layers, maxAngle, frame] } → id — lay a picture on the static surfaces under a box standing at pos, facing normal (a raycast hit's point and normal). It folds over edges and into corners, follows curves, and is lit, shadowed and fogged like the surface. No node: every decal sharing a picture is one mesh and one draw. nil when nothing under it can take a mark (the sky, or a sphere or capsule collider, which has no faces). maxAngle (default 100°) is how far a face may turn from normal and still take it. A mark rides what it was laid on as that moves: frame = a node (a ship), or by default the planet on rails whose sphere of influence it is in. When the ground under a mark is dug or re-meshed it is laid again on the surface there, and goes if nothing is left to lie on. Cleared by a new Play or a scene switch.
+decals.add{ texture, pos, normal, size [, height, depth, up, rotation, color = {r,g,b}, alpha, sheetCols, sheetRows, cell, layers, maxAngle, frame] } → id — lay a picture on the static surfaces under a box standing at pos, facing normal (a raycast hit's point and normal). It folds over edges and into corners, follows curves, and is lit, shadowed and fogged like the surface. No node: every decal sharing a picture is one mesh and one draw. nil when nothing under it can take a mark (the sky, or a sphere or capsule collider, which has no faces). maxAngle (default 100°) is how far a face may turn from normal and still take it. A mark rides what it was laid on as that moves: frame = a node (a ship), or by default the planet on rails whose sphere of influence it is in. When the ground under a mark is dug or re-meshed it is laid again on the surface there (a few marks a frame, counted in perf's terrain bucket), and goes if nothing is left to lie on. A mark never lies on the collider of a node that draws nothing (an Empty with a box collider), only on surfaces that show. Cleared by a new Play or a scene switch.
 
 ### `decals.clear`
 
@@ -829,7 +833,7 @@ steam.uploadScore(boardId, score, opts, cb) — uploads a score for the local us
 
 ### `time`
 
-Seconds since play started (number).
+Seconds since play started (number). The pass's time in every script, set before any script runs, so a function of another script called through findScript reads the same value. update/lateUpdate see the frame clock and fixedUpdate the tick clock; after a hitch or a long load the two still agree to within one tick.
 
 ### `ui`
 
@@ -1091,11 +1095,11 @@ The steepest surface the body is pressed against, as a vec3 normal — the cliff
 
 ### `node.x`
 
-World X position (number).
+X position relative to the parent node (local; the world X for a node with no parent). node.worldPos for the world position.
 
 ### `node.y`
 
-World Y position (number).
+Y position relative to the parent node (local; the world Y for a node with no parent). node.worldPos for the world position.
 
 ### `node.yaw`
 
@@ -1103,7 +1107,7 @@ Heading about Y, in radians. A node stores a rotation, not three numbers: writin
 
 ### `node.z`
 
-World Z position (number).
+Z position relative to the parent node (local; the world Z for a node with no parent). node.worldPos for the world position.
 
 ## node — methods & handles
 
@@ -1224,9 +1228,11 @@ node:setLighting2D{mode="2d", layers={"Terrain","Characters"}, blocks="on", inne
 
 ### `node:setMaterial`
 
-node:setMaterial{color={r,g,b}, emissive={r,g,b}, emissiveStrength=…, unlit=true, texture="…", alpha=…, …} — set (creating if absent) the node's Material. texture also takes a live render target: "rt:<name>". slice=8 gives a Sprite a 9-slice border of that many texture pixels on every side: it stretches with its node's scale while the corners keep their size (0 = off).
+node:setMaterial{color={r,g,b}, emissive={r,g,b}, emissiveStrength=…, unlit=true, texture="…", alpha=…, …} — set the node's Material, or on a model that has none, change only the keys you give over each part's own material. texture also takes a live render target: "rt:<name>". slice=8 gives a Sprite a 9-slice border of that many texture pixels on every side: it stretches with its node's scale while the corners keep their size (0 = off).
 
-On a MODEL this material SUPERSEDES the ones the model was imported with — every part draws with it, textures included, so a material naming no texture draws untextured. That is what a node Material is for: "this whole thing is made of THIS". To change one part instead, use node:material("<name>") — node:materials() lists what the parts are called.
+On a MODEL with no Material of its own, setMaterial changes only the keys you give and every part keeps the rest of its own look: its textures, cut-out leaves, maps and custom shader. setMaterial{ color = {1, 0.4, 0.4} } on an imported plant gives a red plant, still leafy. A Material authored on the node in the scene is different: it SUPERSEDES the ones the model was imported with, every part drawing with it, textures included. That is what a node Material is for: "this whole thing is made of THIS". To change one part instead, use node:material("<name>") — node:materials() lists what the parts are called.
+
+alphaCutoff = 0.5 is where an opaque surface's texture alpha cuts holes (0 cuts none, so a picture with stray alpha draws solid); doubleSided = false hides a face seen from behind. On a model with no Material both change only the parts' own values, so a leaf model keeps its texture.
 
 Surface maps: normalMap / roughnessMap / metallicMap / occlusionMap / emissiveMap (paths, "" clears; emissiveMap multiplies emissive) with normalStrength / roughness / metallic / occlusionStrength. shading="physical" switches from the hand-set Blinn-Phong highlight to metal-rough; roughness and metallic only mean anything there, while a normal or occlusion map works under either.
 
@@ -1305,7 +1311,7 @@ len is CHARACTERS of the authored string, not bytes, and spans run end to end fr
 
 node:setTint(color [, alpha]) — a colour MULTIPLIED over everything this node draws, keeping its own textures and each part's own colour. The easy "same model, but red": a hit flash, a team colour, a highlighted selection, a building ghosted while it is placed, a body fading out (that is what the alpha is for). node:setTint() with no argument clears it.
 
-node:setTint{ color =, alpha =, rim =, rimStrength =, ambient = } sets the rest. A multiply can only take light AWAY, which is why a team colour on a mid-toned model arrives as a slightly warm grey — so a tint also carries the two knobs that ADD light: `rim` is an additive fresnel edge in its own colour (what actually tells two team-coloured fighters apart in motion), and `ambient` multiplies this node's share of the scene's ambient, lifting a character out of the room's shadow. A table is read as a colour unless it carries one of those names, so setTint{1, 0.5, 0.2} is still a colour.
+node:setTint{ color =, alpha =, rim =, rimStrength =, ambient =, emissive =, emissiveStrength = } sets the rest. emissive is a glow over the whole model in its own colour (strength 1 when not named), replacing each part's own glow while it is on; a part with an emissive map still glows only where its map is bright. emissiveStrength = 0 gives the parts their own glow back. A multiply can only take light AWAY, which is why a team colour on a mid-toned model arrives as a slightly warm grey — so a tint also carries the two knobs that ADD light: `rim` is an additive fresnel edge in its own colour (what actually tells two team-coloured fighters apart in motion), and `ambient` multiplies this node's share of the scene's ambient, lifting a character out of the room's shadow. A table is read as a colour unless it carries one of those names, so setTint{1, 0.5, 0.2} is still a colour.
 
 Every field is optional and the ones you leave out KEEP their value, so a hit flash that rewrites the colour each frame does not cost the model its rim or its ambient lift. node:setTint() with nothing takes the whole tint away.
 
@@ -1688,11 +1694,11 @@ Contact point Z (world).
 
 ### `overlapSphere`
 
-overlapSphere(center, radius [, opts]) — everything inside a sphere, DEEPEST overlap first, as hit tables ({x,y,z, nx,ny,nz, distance, node, material}) — the same fields raycast returns. Reports static geometry AND body hulls. opts takes { ignore = node, layers = {"Enemies"} }. The blast-radius / "what is in this area" query.
+overlapSphere(center, radius [, opts]) — everything inside a sphere, DEEPEST overlap first, as hit tables ({x,y,z, nx,ny,nz, distance, node, material}) — the same fields raycast returns. Reports static geometry AND body hulls. opts takes { ignore = node or {nodes}, layers = {"Enemies"} }. The blast-radius / "what is in this area" query.
 
 ### `raycast`
 
-raycast(origin, dir, max [, ignore]) — or raycast(ox,oy,oz, dx,dy,dz, max [, ignore]). Cast a ray against the terrain + mesh colliders AND every physics body (players, crates). Returns a hit {x,y,z, nx,ny,nz, distance, node, material} or nil. node is the node it hit, whether that is a body or a piece of level. material is WHICH MATERIAL SLOT of it — the name a level author typed on that face — so a footstep can tell the boards from the grass inside one big map mesh; nil for anything with a single surface (terrain, a Collidable cube, an imported model, a body), and it costs nothing until you read it. Your own node's body is excluded; pass a node as `ignore` to skip its body too. The last arg can instead be an options table: raycast(..., { ignore = target, layers = {"Ground"} }) — layers (name or array, Project Settings → Layers) filters what the ray can hit; a misspelled layer is an error. Use for ground checks, line-of-sight, shooting.
+raycast(origin, dir, max [, ignore]) — or raycast(ox,oy,oz, dx,dy,dz, max [, ignore]). Cast a ray against the terrain + mesh colliders AND every physics body (players, crates). Returns a hit {x,y,z, nx,ny,nz, distance, node, material} or nil. node is the node it hit, whether that is a body or a piece of level. material is WHICH MATERIAL SLOT of it — the name a level author typed on that face — so a footstep can tell the boards from the grass inside one big map mesh; nil for anything with a single surface (terrain, a Collidable cube, an imported model, a body), and it costs nothing until you read it. Your own node's body is excluded; pass a node as `ignore` to skip its body too. The last arg can instead be an options table: raycast(..., { ignore = target, layers = {"Ground"} }) — ignore takes a node or a list of nodes (every query's does), and a list holding anything else is an error — layers (name or array, Project Settings → Layers) filters what the ray can hit; a misspelled layer is an error. Use for ground checks, line-of-sight, shooting.
 
 ```lua
 local hit = raycast(node.pos, vec3(0, -1, 0), params.ground_ray)
@@ -1898,6 +1904,10 @@ input.setFacing(-1) — mirror this player's directions after a cross-up, so mot
 ### `input.setMouseLocked`
 
 input.setMouseLocked(true/false) — lock or unlock the mouse from a boolean (e.g. a menu toggle).
+
+### `input.simulate`
+
+input.simulate{ key = "w", down = true } or { button = 1, down = true } — a testing aid: press or release a key or mouse button as if the player had, from the next frame, for every script (input.key, pressed, released and the actions alike). For probes and scripted test runs.
 
 ### `input.startRebind`
 
@@ -2500,6 +2510,14 @@ ui.pressed(element) — LMB went down on it this frame. Pair with ui.held(elemen
 
 ui.released(element) — LMB came back up this frame (on or off the element).
 
+### `ui.scale`
+
+ui.scale() → the interface scale ui.setScale set (1 by default).
+
+### `ui.setScale`
+
+ui.setScale(s) — one size for the whole interface, 0.25 to 4 (1 = as designed): every UI layer's layout and text grow together, multiplied over each layer's own designHeight scaling. access.setTextScale still sizes text alone, on top of this. What an "Interface size" setting sets. Back to 1 when Play starts.
+
 ### `ui.submitted`
 
 ui.submitted(element) — Enter in this focused text field this frame.
@@ -2737,7 +2755,7 @@ terrain.flush() — checkpoint every EDITED resident terrain field to the save s
 
 ### `terrain.generatePlanet`
 
-terrain.generatePlanet(id [, opts]) — REPLACE terrain id's whole field with a generated planet (sphere ± noise relief, caves + chambers, molten core, craters, layered materials). Background-generated (seconds; Console shows progress). opts (all optional): radius, voxel, relief, bumpFreq, caveDepth, coreR, corePaint, craters, craterMin/Max, craterDust, surfaceA/B {slot,color}, patchBias/Thr, subsoil(+Depth), strata(+Depth), deep, pockets {slot,color,threshold,minDepth}, seam {slot,color,minDepth,center,width}, iceCaps {lat,slot,color}, seed. Relief layers (each a table whose keys all default; see docs/planet-generator.md): mountains {height,scale,sharpness,coverage,octaves}, warp {strength,scale}, plateau {height,smooth}, terrace {step,sharpness}, overhangs {depth,scale,strength}, ravines {count,depth,width,length,meander}, rivers {count,depth,width,seaLevel,meander}, biomes = { {slot,color,latitude={min,max},altitude={min,max},slope={min,max},moisture={min,max},nearRiver}, ... } (first match paints the surface), moistureScale. deferCaves = true leaves the buried cave zone ungenerated until a dig reaches it: a quarter less to fill and keep, the same caves when they are made (to a hair at chunk faces).
+terrain.generatePlanet(id [, opts]) — REPLACE terrain id's whole field with a generated planet (sphere ± noise relief, caves + chambers, molten core, craters, layered materials). Background-generated (seconds; Console shows progress). opts (all optional): radius, voxel, relief, bumpFreq, caveDepth, coreR, corePaint, craters, craterMin/Max, craterDust, surfaceA/B {slot,color}, patchBias/Thr, subsoil(+Depth), strata(+Depth), deep, pockets {slot,color,threshold,minDepth}, seam {slot,color,minDepth,center,width}, iceCaps {lat,slot,color}, seed. Relief layers (each a table whose keys all default; see docs/planet-generator.md): mountains {height,scale,sharpness,coverage,octaves}, warp {strength,scale}, plateau {height,smooth}, terrace {step,sharpness} (each of these four also takes latitude={min,max} in degrees from the equator, north or south unless either is negative, and latitudeEdge, the degrees it fades over past them), overhangs {depth,scale,strength}, ravines {count,depth,width,length,meander}, rivers {count,depth,width,seaLevel,meander}, biomes = { {slot,color,latitude={min,max},altitude={min,max},slope={min,max},moisture={min,max},nearRiver}, ... } (first match paints the surface), moistureScale. deferCaves = true leaves the buried cave zone ungenerated until a dig reaches it: a quarter less to fill and keep, the same caves when they are made (to a hair at chunk faces).
 
 ### `terrain.height`
 
@@ -2755,6 +2773,10 @@ terrain.paint(x,y,z, radius, r,g,b [, strength]) — recolor the terrain surface
 
 terrain.paintTexture(x,y,z, radius, slot) — paint a terrain-palette texture slot (1-based, the Terrain tab's palette; 0 clears to flat color).
 
+### `terrain.pending`
+
+terrain.pending() → how many of the game's terrain edits (dig, sculpt, flatten, paint, paintTexture) have not landed yet. Edits are applied a few milliseconds' worth a frame, in the order they were made, so a batch of a thousand flattens spreads over frames instead of stopping one. Every edit is applied whole before the next, so queries read the ground after some number of whole edits; 0 means every edit made so far is in the ground.
+
 ### `terrain.planetLakes`
 
 terrain.planetLakes(opts [, { cell = 3, minDepth = 0.5, seaLevel = ... }] [, callback]) → the lakes the planet's basins hold, without generating anything: { {level=, center=, reach=, area=, depth=}, ... }, largest first. Every basin is filled to the height it spills at. `level` is metres above the radius, `center` a planet-local point on the lake's surface, `reach` how far its farthest shore is from the centre and `depth` its deepest point, all in metres. Ground below `seaLevel` (default: the rivers' seaLevel, or none) is sea and not a lake; with no sea, the planet's lowest point is where it drains, and holds none. Found on a grid of cells `cell` metres across; only water deeper than `minDepth` counts. For placing water at the level it would settle at. A large world's lakes take seconds to find: given a callback, the call returns nothing, the work runs off the script thread, and callback(lakes) runs in a later frame.
@@ -2765,7 +2787,7 @@ terrain.planetRivers(opts [, callback]) → the rivers and ravines terrain.gener
 
 ### `terrain.query`
 
-terrain.query(x,y,z) — signed distance to the nearest terrain surface (negative = inside rock), or nil with no terrain. Cheap: read it every frame (burrow checks, depth meters).
+terrain.query(x,y,z) — signed distance to the nearest terrain surface (negative = inside rock), or nil with no terrain. Exact within four voxels of the surface (the band the field stores) and clamped to ±4 voxels beyond it — ±6 m at a 1.5 m voxel — so read it as "near the surface or not" further out, and raycast for a far distance. Cheap: read it every frame (burrow checks, depth meters).
 
 ### `terrain.saveDir`
 
@@ -2773,7 +2795,7 @@ terrain.saveDir(path) / terrain.saveDir() — set (or read) the game's SAVE-SLOT
 
 ### `terrain.sculpt`
 
-terrain.sculpt(x,y,z, radius [, strength [, mode [, opts]]]) — sculpt the nearest terrain at a world point, landing the SAME tick (collision updates with the surface). mode: "raise" (default), "lower"/"dig", "smooth", "flatten"; strength 0..1. "flatten" levels to the terrain's up, or on a planet to the radial up at the point, over a disc in that plane; opts = { normal = vec3 } names another plane (world space). At most 64 edits land a frame; more wait for the next frames in order. No-op when no terrain surface is near the point. Refuses: an unknown opts key, a zero normal. Multiplayer: run on the server + mirror by RPC (deterministic ops).
+terrain.sculpt(x,y,z, radius [, strength [, mode [, opts]]]) — sculpt the nearest terrain at a world point, landing the same tick while the frame's few milliseconds of edits allow (collision updates with the surface). mode: "raise" (default), "lower"/"dig", "smooth", "flatten"; strength 0..1. "flatten" levels to the terrain's up, or on a planet to the radial up at the point, over a disc in that plane; opts = { normal = vec3 } names another plane (world space). Edits land a few milliseconds' worth a frame, in order, each whole before the next, and each where it was aimed when it was made, on a planet that moves on its rails too; terrain.pending() counts the ones still to land. No-op when no terrain surface is near the point. Refuses: an unknown opts key, a zero normal. Multiplayer: run on the server + mirror by RPC (deterministic ops).
 
 ### `terrain.slotAt`
 
@@ -2901,7 +2923,7 @@ Water volumes: how deep a point is (water.depthAt), what is in the water (water.
 
 ### `water.addVolume`
 
-water.addVolume{ shape = "lake" | "heightfield", parent = "Planet", ... } → an id. Water no node carries, in the frame of the node it lies on, so it turns with its planet. A lake takes `center` (a point on its surface) and `reach` (how far its farthest shore is), exactly as terrain.planetLakes gives them; a heightfield takes `origin`, `cell`, `columns`, `rows` and `levels` (false = dry), with an optional `flow`. It floats things, carries them on its `current`, and water.at answers for it.
+water.addVolume{ shape = "lake" | "heightfield", parent = "Planet", ... } → an id. Water no node carries, in the frame of the node it lies on, so it turns with its planet. A lake takes `center` (a point on its surface) and `reach` (how far its farthest shore is), exactly as terrain.planetLakes gives them; a heightfield takes `origin`, `cell`, `columns`, `rows` and `levels` (false = dry), with an optional `flow`. It floats things, carries them on its `current`, and water.at answers for it. `depth` is how far down its bed lies (planetLakes gives it), so a cave under a lake is dry; from inside it looks like a Water Volume node, with `tint = {r,g,b}` and `visibility` (metres) to change that and `underwater = false` for no look. shape = "sim" is water the engine moves: `origin`, `cell`, `columns`, `rows` as a heightfield and `level` to fill it to; the engine finds the ground under it, then the water flows, drains into holes dug beside it and settles, and water.at, flowAt and floating follow it.
 
 ### `water.at`
 
@@ -2994,6 +3016,10 @@ scatter.removed(sourceId) — the sorted ids this source has lost. A game that w
 ### `scatter.restore`
 
 scatter.restore(sourceId [, instanceId]) — put one prop back, or all of them when the instance is omitted (returns how many). This is what "the forest regrows after fifteen minutes" is, without your game having to remember what it cut.
+
+### `scatter.setInteractors`
+
+scatter.setInteractors{ { pos = vec3, radius = 1, strength = 1 }, ... } — this script's points that bend props away: every prop within `radius` of a point, measured across the ground, leans away from it with its foot planted. `strength` is how far a prop right beside the point leans (the tangent of the lean: 1 = 45 degrees), easing to nothing at the radius. Each call replaces this script's own list, so call it every frame with where the walkers are; `{}` clears it. Other scripts keep their own points. Up to 32 per script; a point more than its radius (and at least 2 m) above or below a prop does not touch it.
 
 ## 2D — sprites, sorting & the flat camera
 
@@ -3177,7 +3203,7 @@ assembly.impulseAt(node, impulse, at) — a one-shot kick at a world point, appl
 
 ### `assembly.info`
 
-assembly.info(node) — { mass, com, origin, vel, angVel, inertia, grounded, anchored, gripped, parts }. com is the world-space centre of mass as a vec3 — the number a flight controller, a CoM gizmo and a landing check all need. inertia is the tensor the solver turns torques with, about the centre of mass in world axes, as three rows: inertia[1].x .. inertia[3].z. A torque of I × (wanted change in angVel) / dt stops a spin in one tick without overshooting.
+assembly.info(node) — { mass, com, origin, vel, angVel, inertia, grounded, anchored, gripped, parts, right, up, forward }. right, up and forward are the craft's axes as they are this tick, the way node:worldRight/worldUp/worldForward give a node's drawn ones: read in fixedUpdate they are that tick's, where the node's are a frame's. com is the world-space centre of mass as a vec3 — the number a flight controller, a CoM gizmo and a landing check all need. inertia is the tensor the solver turns torques with, about the centre of mass in world axes, as three rows: inertia[1].x .. inertia[3].z. A torque of I × (wanted change in angVel) / dt stops a spin in one tick without overshooting.
 
 ### `assembly.keepLive`
 
@@ -3209,7 +3235,7 @@ assembly.syncColliders(node) — re-pose the compound's collision shapes to its 
 
 ### `assembly.teleport`
 
-assembly.teleport(node, pos) — move the assembly origin to a world position, carrying every part with it. A teleport rather than a force: no acceleration, no tumble.
+assembly.teleport(node, pos) — move the assembly origin to a world position, carrying every part with it, and everything jointed to it (a rover's wheels, an arm's segments, and what is jointed to those) at the same offsets and speeds. A teleport rather than a force: no acceleration, no tumble. Its node, and theirs, read the new place from the next script pass.
 
 ### `assembly.torque`
 
@@ -3223,7 +3249,7 @@ The game camera's projection: viewport size and rect, world↔screen conversion,
 
 ### `camera.capture`
 
-camera.capture([cam,] { w = 640, h = 360 [, format = "png"|"jpeg", quality = 90, ui = false, draws = false] }, function(bytes, err) end) — photograph the world through a camera: a level cover, a photo mode, a save-slot thumbnail. `cam` is a camera node, a camera's name, or left out for the active one; a camera that is not the active one is drawn off-screen, so the player's view never changes. The picture is the game's own (post-processing, fog, retro and render scale included). The screen UI is left out unless ui = true, and draw.line / draw.tri shapes unless draws = true, so a HUD or a debug line never lands in a cover; draw.quad trails are part of the world and always in. `bytes` is an encoded PNG (or JPEG, quality 1–100), ready for assets.writeBytes, a Cloud blob or assets.textureFromBytes. It renders on a later frame and answers on the one after without waiting on the GPU: one extra scene render, never a stall. At most 4 captures wait at once; a fifth answers nil and why. Refuses: w or h missing or outside 1–4096; an unknown option; a format other than png/jpeg; quality on a PNG. Answers nil, err: "no renderer" on a host that draws nothing (floptle run, a dedicated server); a camera name that matches none; a node that is not a camera; a size past the GPU's limit.
+camera.capture([cam,] { w = 640, h = 360 [, format = "png"|"jpeg", quality = 90, ui = false, draws = false] }, function(bytes, err) end) — photograph the world through a camera: a level cover, a photo mode, a save-slot thumbnail. `cam` is a camera node, a camera's name, or left out for the active one; a camera that is not the active one is drawn off-screen, so the player's view never changes. The picture is the game's own (post-processing, fog, retro and render scale included). The screen UI is left out unless ui = true, and draw.line / draw.tri shapes unless draws = true, so a HUD or a debug line never lands in a cover; draw.quad trails are part of the world and always in. draws = true adds the world shapes (draw.line, tri, box, sphere); draw.text and draw.rect are screen UI and come with ui = true. `bytes` is an encoded PNG (or JPEG, quality 1–100), ready for assets.writeBytes, a Cloud blob or assets.textureFromBytes. It renders on a later frame and answers on the one after without waiting on the GPU: one extra scene render, never a stall. At most 4 captures wait at once; a fifth answers nil and why. Refuses: w or h missing or outside 1–4096; an unknown option; a format other than png/jpeg; quality on a PNG. Answers nil, err: "no renderer" on a host that draws nothing (floptle run, a dedicated server); a camera name that matches none; a node that is not a camera; a size past the GPU's limit.
 
 ### `camera.captureTexture`
 
@@ -3311,7 +3337,7 @@ perf.gpuMs(pass) → one pass's GPU milliseconds last frame ("opaque + lighting"
 
 ### `perf.hitches`
 
-perf.hitches() → every frame since the last call that took 50 ms or more, oldest first: { {frame=, ms=, top="terrain", buckets={terrain=157.4, scripts=30.1, ...}, parts={collisionRebuild=140.2, ...}}, ... }. perf.worstMs looks back sixty frames, so a probe that reads every few seconds loses the spike it is hunting; this keeps each one (up to 64) until it is read, with the bucket that spent the time on top. Time no bucket measured is named `untimed`, and waiting on the GPU or the display `gpuWait` and `present`, so a hitch the engine's buckets cannot explain still says so. `parts` names work inside the buckets, in milliseconds already counted there: `terrainEdits` (applying terrain.dig and the other edits), `collisionRebuild` (a terrain collider's rebuilt triangles landing, or the frame waiting for them) and `planetLanded` (a generated world arriving). Needs perf.enable(true).
+perf.hitches() → every frame since the last call that took 50 ms or more, oldest first: { {frame=, ms=, top="terrain", buckets={terrain=157.4, scripts=30.1, ...}, parts={collisionRebuild=140.2, ...}}, ... }. perf.worstMs looks back sixty frames, so a probe that reads every few seconds loses the spike it is hunting; this keeps each one (up to 64) until it is read, with the bucket that spent the time on top. Time no bucket measured is named `untimed`, and waiting on the GPU or the display `gpuWait` and `present`, so a hitch the engine's buckets cannot explain still says so. `parts` names work inside the buckets, in milliseconds already counted there: `terrainEdits` (applying terrain.dig and the other edits), `collisionRebuild` (a terrain collider's rebuilt triangles landing, or the frame waiting for them), `planetLanded` (a generated world arriving), `terrainShadow` (the terrain's shadow volume uploaded after a change) and `terrainMeshing` (planning and landing chunk meshes). Needs perf.enable(true).
 
 ### `perf.mirrorCause`
 
@@ -3324,6 +3350,10 @@ perf.ms("scripts") — that bucket's rolling average, in milliseconds. An unknow
 ### `perf.overloaded`
 
 perf.overloaded() → true while the fixed tick costs more than the time it simulates: this machine can't run the game in real time. The game then plays in slow motion (one tick per frame) rather than dropping to a few frames a second — unless project.ron says tick_overload: CatchUp, or it is a networked session, which must keep up. For a loading screen that would otherwise wait forever for calm frames: say the machine is struggling instead. Readable while collection is off.
+
+### `perf.parts`
+
+perf.parts() → { name = ms, … } — the named pieces of work inside the buckets in the last finished frame, every frame (a hitch lists them too, but only on a slow frame). scatterSettle is what the scatter bucket spent dropping arriving props onto the ground (rolling chunks and their ground queries; at most about 1 ms a frame plus one query); terrainEdits and collisionRebuild are inside terrain. Needs perf.enable(true), like every timing.
 
 ### `perf.scriptMs`
 
@@ -4373,7 +4403,7 @@ Meshes a script builds while the game runs: mesh.build and mesh.free. A built me
 
 ### `mesh.build`
 
-mesh.build{ positions =, indices = [, normals =, uvs =, colors = ] } → name — build a mesh from numbers: a procedural plant, a fairing fitted to a part, a rope. positions is x, y, z per vertex (local space); indices is three per triangle, numbering vertices from 1, wound counter-clockwise seen from the front; normals x, y, z per vertex (left out, they are worked out from the faces, smooth); uvs u, v per vertex (0, 0 at the texture's top-left); colors r, g, b, a per vertex, 0–1, multiplied into the material. Answers a name at once: node.model = name draws it from the next frame, with the node's own material (node:setMaterial{ texture = assets.textureFromPixels(...) }). At most 1 048 576 vertices and 3 145 728 indices. A missing or uneven list, an index out of range, or a non-finite number raises, naming the list. Kept until mesh.free(name) or Stop. One material per mesh: a part in two materials is two meshes. A host that draws nothing still answers a name, and nothing draws it. A Mesh collider does not read a built mesh.
+mesh.build{ positions =, indices = [, normals =, uvs =, colors = ] } → name — build a mesh from numbers: a procedural plant, a fairing fitted to a part, a rope. positions is x, y, z per vertex (local space); indices is three per triangle, numbering vertices from 1, wound counter-clockwise seen from the front; normals x, y, z per vertex (left out, they are worked out from the faces, smooth); uvs u, v per vertex (0, 0 at the texture's top-left); colors r, g, b, a per vertex, 0–1, multiplied into the material. Vertex alpha fades the surface only when it blends: give the mesh a material with alpha below 1 (alpha = 0.999 is enough). On an opaque material, vertex alpha below 0.5 cuts a hole instead, as a texture's alpha does. Answers a name at once: node.model = name draws it from the next frame, with the node's own material (node:setMaterial{ texture = assets.textureFromPixels(...) }). At most 1 048 576 vertices and 3 145 728 indices. A missing or uneven list, an index out of range, or a non-finite number raises, naming the list. Kept until mesh.free(name) or Stop. One material per mesh: a part in two materials is two meshes. A host that draws nothing still answers a name, and nothing draws it. A Mesh collider does not read a built mesh.
 
 ### `mesh.free`
 

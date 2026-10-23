@@ -44,7 +44,7 @@ pub mod water;
 
 pub use ecs::{Change, ChangeCursor, ChangeKind, Entity, World};
 pub use layers::Layers;
-pub use material::{Material, ObjectMaterials, Retro, Shading, Tiling, Tint};
+pub use material::{Material, MaterialPatch, ObjectMaterials, Retro, Shading, Tiling, Tint};
 pub use matter::{
     TerrainCollision,
     active_camera, is_disabled, is_drawn, is_hidden, is_persistent, is_spot, world_transform, MIN_SPOT_ANGLE, OMNI_ANGLE, AnimController, AoMode, BodyKind, BodyMode, BoneAttach, Cast2D,

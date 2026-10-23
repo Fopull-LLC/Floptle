@@ -1278,10 +1278,12 @@ impl Editor {
             self.toast = Some((format!("⚠  {msg}"), 8.0));
             return;
         }
+        let companion = crate::model_convert::companion_of(&src);
         if let Err(e) = std::fs::rename(&src, &dst) {
             floptle_say::say_err!("  rename failed: {e}");
             return;
         }
+        self.rename_model_companion(companion, &dst);
         // The scene file has moved; bring its data with it. A sidecar that fails
         // to move is reported rather than swallowed — the user needs to know
         // which file to go and find.
@@ -1339,6 +1341,7 @@ impl Editor {
         if !floptle_vfs::is_dir(dest_dir) {
             return;
         }
+        let sources = &crate::model_convert::with_companions(sources);
         let mut moved: Vec<(String, String)> = Vec::new();
         for src in sources {
             let sp = PathBuf::from(src);
@@ -1439,6 +1442,8 @@ impl Editor {
             return;
         }
         self.asset_tree = build_assets(&self.project_root);
+        // A model the engine converts is converted now, not at the next scan.
+        self.look_for_models_now();
         for r in &model_refs {
             self.import_model(r);
         }
@@ -1475,6 +1480,9 @@ impl Editor {
     /// IDE tabs, the asset selection, the preview. One tree rebuild at the end.
     #[cfg(feature = "editor-ui")]
     pub(crate) fn delete_assets(&mut self, paths: &[String]) {
+        // A converted model and its source are one asset: deleting one alone
+        // would leave the other to be converted straight back.
+        let paths = &crate::model_convert::with_companions(paths);
         for path in paths {
             let p = Path::new(path);
             let res =
@@ -2856,7 +2864,7 @@ pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
                 ),
                 matter: Primitive(shape: Cube, color: (0.85, 0.55, 0.35)),
                 scripts: [],
-                rigidbody: Some((boxed: true, half_extents: (0.5, 0.5, 0.5))),
+                rigidbody: Some((boxed: true, half_extents: (0.7, 0.7, 0.7), rotates: true)),
             ),
             (
                 name: "ball",
@@ -2867,7 +2875,7 @@ pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
                 ),
                 matter: Primitive(shape: Sphere, color: (0.4, 0.7, 0.95)),
                 scripts: [],
-                rigidbody: Some((radius: 0.5, restitution: 0.45)),
+                rigidbody: Some((radius: 0.85, restitution: 0.45, rotates: true)),
             ),
             (
                 name: "capsule",
@@ -3021,7 +3029,9 @@ pub(crate) fn imported_look(
     images: &mut std::collections::HashMap<usize, floptle_render::TexId>,
 ) -> Option<crate::ImportedLook> {
     let (base_image, base_color, maps) = part;
-    if !maps.any() {
+    // A part with no material of its own keeps the plain look it always had;
+    // one with a material draws what the material says, maps or not.
+    if !maps.explicit && !maps.any() {
         return None;
     }
     let mut tex = |i: Option<usize>| -> Option<floptle_render::TexId> {
@@ -3030,16 +3040,7 @@ pub(crate) fn imported_look(
         let sampling = embedded_sampling(chosen, file_filters, Some(i));
         Some(*images.entry(i).or_insert_with(|| raster.register_texture_shared(gpu, data, sampling)))
     };
-    let mut m = floptle_core::Material::tinted(base_color);
-    if maps.metallic_roughness.is_some() {
-        m.shading = floptle_core::Shading::Physical;
-        m.metallic = maps.metallic;
-        m.roughness = maps.roughness;
-    }
-    m.normal_strength = maps.normal_scale;
-    m.occlusion_strength = maps.occlusion_strength;
-    m.emissive = maps.emissive_factor;
-    m.emissive_strength = if maps.emissive_factor.iter().any(|&c| c > 0.0) { 1.0 } else { 0.0 };
+    let m = imported_material(base_color, maps);
     let base = tex(base_image);
     let mr = tex(maps.metallic_roughness);
     let look = crate::ImportedLook {
@@ -3048,6 +3049,69 @@ pub(crate) fn imported_look(
         material: m,
     };
     Some(look)
+}
+
+/// The engine material an imported part's own material describes, before its
+/// pictures are bound.
+pub(crate) fn imported_material(base_color: [f32; 3], maps: &floptle_assets::gltf_import::PartMaps) -> floptle_core::Material {
+    let mut m = floptle_core::Material::tinted(base_color);
+    // **A factor applies with or without a map**, as glTF has it: a metal
+    // ball exported with metallic 1, roughness 0.2 and no pictures is a
+    // polished metal ball. A part with no material at all has nothing to say
+    // about either, and keeps the plain look.
+    if maps.explicit || maps.metallic_roughness.is_some() {
+        m.shading = floptle_core::Shading::Physical;
+        m.metallic = maps.metallic;
+        m.roughness = maps.roughness;
+    }
+    apply_alpha_and_sides(&mut m, maps);
+    m.normal_strength = maps.normal_scale;
+    m.occlusion_strength = maps.occlusion_strength;
+    m.emissive = maps.emissive_factor;
+    m.emissive_strength = if maps.emissive_factor.iter().any(|&c| c > 0.0) { 1.0 } else { 0.0 };
+    m
+}
+
+/// How an imported material's alpha, sidedness and base-map transform reach
+/// the engine's material: MASK cuts at its own cutoff, OPAQUE cuts nothing,
+/// BLEND blends; a single-sided material is not drawn from behind; and the
+/// base map's `KHR_texture_transform` becomes the material's UV tiling, which
+/// the surface maps share.
+pub(crate) fn apply_alpha_and_sides(m: &mut floptle_core::Material, maps: &floptle_assets::gltf_import::PartMaps) {
+    use floptle_assets::glb_write::AlphaMode;
+    if !maps.explicit {
+        return;
+    }
+    match maps.alpha_mode {
+        AlphaMode::Opaque => m.alpha_cutoff = 0.0,
+        AlphaMode::Mask(c) => m.alpha_cutoff = c,
+        // "Below 1 blends" is the engine's rule for a see-through surface; a
+        // BLEND material whose factor is 1 lets its picture's alpha through
+        // that way, a fraction of a percent shy of the factor it named.
+        AlphaMode::Blend => m.alpha = maps.alpha.min(0.995),
+    }
+    if maps.alpha_mode != AlphaMode::Blend && maps.alpha < 1.0 && maps.alpha_mode != AlphaMode::Opaque {
+        m.alpha = maps.alpha;
+    }
+    m.double_sided = maps.double_sided;
+    if let Some(t) = maps.uv_transform {
+        m.tiling = Some(uv_tiling(t));
+    }
+}
+
+/// glTF's `uv' = offset + R·(scale·uv)`, rotating about the origin, as the
+/// engine's tiling, which rotates and scales about the UV centre:
+/// `uv' = R·(count·(uv − ½)) + ½ + offset`. The two agree when the engine's
+/// offset takes up the difference the centre makes.
+pub(crate) fn uv_tiling(t: floptle_assets::gltf_import::UvTransform) -> floptle_core::Tiling {
+    let (s, c) = t.rotation.sin_cos();
+    let h = [0.5 * t.scale[0], 0.5 * t.scale[1]];
+    let rh = [c * h[0] - s * h[1], s * h[0] + c * h[1]];
+    floptle_core::Tiling::Uv {
+        count: t.scale,
+        offset: [t.offset[0] + rh[0] - 0.5, t.offset[1] + rh[1] - 0.5],
+        rotation: t.rotation.to_degrees().rem_euclid(360.0),
+    }
 }
 
 // These exercise the authoring half — the dock, the Inspector, the

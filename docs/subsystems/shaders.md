@@ -371,9 +371,23 @@ shader flesh {
 It runs once per vertex, before the vertex is placed, so it can read only what
 a vertex has: `objectPos`, `normal` (in the same space as the offset), `uv`,
 `time`, `instanceColor`, the shader's uniforms, and math, noise, colour and sdf
-functions. A texture, the screen and the engine's lighting are per pixel; the
-checker refuses them in an offset and says why. `let`s the colour reads are not
-restricted, only the ones the offset reads.
+functions. It can also `sample` a texture slot, which reads the texture's
+largest level (a vertex has no neighbours to choose a smaller one with), so a
+height map can displace a surface:
+
+```
+shader dunes {
+  stage fragment
+  texture height = "art/dunes_height.png"
+  output color = vec4(litSurface(vec3(0.8, 0.7, 0.5)), 1)
+  output offset = normal * sample(height, uv).r * 0.5
+}
+```
+
+The surface moves only at its vertices, so a height map needs a mesh with
+enough of them to show its detail. The other texture ops, the screen and the
+engine's lighting are per pixel; the checker refuses them in an offset and says
+why. `let`s the colour reads are not restricted, only the ones the offset reads.
 
 - **`objectPos` in the colour stays where it was.** The colour half reads the
   position before the move, so a pattern stays stuck to the surface while it

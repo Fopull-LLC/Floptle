@@ -98,6 +98,9 @@ pub struct DecalStore {
     /// switch), so the editor drops every batch it holds.
     epoch: u64,
     warned: HashSet<&'static str>,
+    /// The nodes whose colliders draw nothing (see [`lay_on`]), set by the
+    /// driver.
+    undrawn: HashSet<u32>,
 }
 
 impl Default for DecalStore {
@@ -109,6 +112,7 @@ impl Default for DecalStore {
             dirty: HashSet::new(),
             epoch: next_epoch(),
             warned: HashSet::new(),
+            undrawn: HashSet::new(),
         }
     }
 }
@@ -176,8 +180,10 @@ impl DecalStore {
     /// Empty the store: every decal goes, and the editor drops its batches.
     pub fn clear(&mut self) {
         let max = self.max;
+        let undrawn = std::mem::take(&mut self.undrawn);
         *self = Self::default();
         self.max = max;
+        self.undrawn = undrawn;
     }
 
     fn insert(&mut self, d: Decal) -> u32 {
@@ -187,6 +193,15 @@ impl DecalStore {
         self.decals.insert(id, d);
         self.trim();
         id
+    }
+
+    /// The nodes whose colliders draw nothing, so no mark lies on them.
+    pub fn set_undrawn(&mut self, undrawn: HashSet<u32>) {
+        self.undrawn = undrawn;
+    }
+
+    pub fn undrawn(&self) -> &HashSet<u32> {
+        &self.undrawn
     }
 
     /// Every decal's id, oldest first.
@@ -293,13 +308,31 @@ const FADE_BAND: f32 = 0.08;
 /// plain projection. The border is cut in that unfolded picture, so the mark
 /// ends where its picture ends.
 pub fn lay(cols: &[floptle_physics::AnchoredCollider], spec: &DecalSpec) -> Laid {
+    lay_on(cols, spec, &HashSet::new())
+}
+
+/// [`lay`], on every collider but those of the nodes in `undrawn`: a node
+/// with a collider and nothing drawn (an Empty holding a box) is not a
+/// surface anyone sees, and a mark on it floats in the air as a pane.
+pub fn lay_on(cols: &[floptle_physics::AnchoredCollider], spec: &DecalSpec, undrawn: &HashSet<u32>) -> Laid {
     let (right, up, n) = decal_axes(spec.normal, spec.up);
     let half = Vec3::new(spec.width * 0.5, spec.height * 0.5, spec.depth * 0.5);
     // The box's reach grows by its depth on every side: a face that folds in
     // from beside the box still lands inside the picture.
     let reach = right.abs() * half.x + up.abs() * half.y + n.abs() * half.z + Vec3::splat(half.z);
-    let (tris, faceless) =
-        floptle_physics::triangles_in_box(cols, spec.center - reach, spec.center + reach, spec.mask);
+    let (lo, hi) = (spec.center - reach, spec.center + reach);
+    let (tris, faceless) = if undrawn.is_empty() {
+        floptle_physics::triangles_in_box(cols, lo, hi, spec.mask)
+    } else {
+        let mut tris = Vec::new();
+        let mut faceless = 0;
+        for c in cols.iter().filter(|c| c.eid.is_none_or(|e| !undrawn.contains(&e))) {
+            let (t, f) = floptle_physics::triangles_in_box(std::slice::from_ref(c), lo, hi, spec.mask);
+            tris.extend(t);
+            faceless += f;
+        }
+        (tris, faceless)
+    };
     let mut laid = Laid { faceless, ..Default::default() };
     let mut poly: Vec<Corner> = Vec::new();
     let mut next: Vec<Corner> = Vec::new();
@@ -539,7 +572,7 @@ pub(crate) fn install_decal_api(lua: &Lua, shared: DecalShared) -> mlua::Result<
                 mask,
                 min_facing: max_angle.to_radians().cos(),
             };
-            let laid = lay(&s.colliders.borrow(), &spec);
+            let laid = lay_on(&s.colliders.borrow(), &spec, s.store.borrow().undrawn());
             let mut store = s.store.borrow_mut();
             let keep = spec.clone();
             if laid.capped {

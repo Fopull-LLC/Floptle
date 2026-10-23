@@ -98,6 +98,33 @@ pub struct DeclaredWater {
     /// A current everywhere in it, m/s in the anchor's frame, on top of a
     /// grid's own flow.
     pub current: Vec3,
+    /// Its bed: how far below the surface the water reaches, in metres. A
+    /// point deeper than this is in the rock under the lake (a cave beneath
+    /// it), not in the lake. Infinite reaches down without end.
+    pub floor: f64,
+    /// What the camera sees from inside it, or `None` for no underwater look.
+    pub look: Option<UnderwaterLook>,
+    /// The engine moves this water: its grid is filled to this level over
+    /// the ground the engine finds under it, and from then on flows, drains
+    /// into holes dug beside it and settles, the grid's levels and flow
+    /// following. `None` for water that stands where it was declared.
+    pub simulated: Option<f32>,
+}
+
+/// What being under water looks like: the colour everything fades toward and
+/// how far one can see, as a Water Volume node's `tint` and `visibility`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UnderwaterLook {
+    pub tint: [f32; 3],
+    pub visibility: f32,
+}
+
+impl Default for UnderwaterLook {
+    /// A Water Volume node's own defaults, so declared water and a node's
+    /// water look alike until a game says otherwise.
+    fn default() -> Self {
+        Self { tint: [0.10, 0.32, 0.38], visibility: 28.0 }
+    }
 }
 
 /// Where a point is in a declared body of water.
@@ -136,6 +163,10 @@ impl DeclaredWater {
             },
         };
         let dir = |v: DVec3| self.frame.to_world(v) - self.frame.origin;
+        // Below the bed is rock, or a cave in it: not this water.
+        if -above > self.floor {
+            return WaterAt { above: f64::INFINITY, up: dir(up_local), ..Default::default() };
+        }
         WaterAt { depth: (-above).max(0.0), above, up: dir(up_local), flow: if above <= 0.0 { dir(flow_local) } else { DVec3::ZERO } }
     }
 }
@@ -154,7 +185,23 @@ mod tests {
             drag: 1.0,
             angular_drag: 1.0,
             current: Vec3::ZERO,
+            floor: f64::INFINITY,
+            look: Some(UnderwaterLook::default()),
+            simulated: None,
         }
+    }
+
+    /// **A lake has a bed.** Water reaches down to its deepest point and no
+    /// further: a cave under the lake is dry, where the lake's sphere alone
+    /// would have flooded it to the planet's core.
+    #[test]
+    fn a_cave_under_a_lake_is_dry() {
+        let w = DeclaredWater { floor: 6.0, ..lake() };
+        assert!((w.at(DVec3::new(0.0, 800.0, 0.0)).depth - 5.0).abs() < 1e-9, "in the lake");
+        let cave = w.at(DVec3::new(0.0, 790.0, 0.0));
+        assert_eq!(cave.depth, 0.0, "a cave 15 m down is in the water");
+        assert!(cave.above.is_infinite(), "a cave has no surface of this lake above it");
+        assert!(lake().at(DVec3::new(0.0, 790.0, 0.0)).depth > 0.0, "without a bed it reaches down");
     }
 
     /// **A lake on a round world is round, and only in its basin.** Depth is

@@ -602,7 +602,7 @@ mod offset_tests {
         for (body, says) in [
             ("output offset = viewDir * 0.1", "viewDir"),
             ("let v = lightDir\n  output offset = v * 0.1", "lightDir"),
-            ("texture t\n  output offset = sample(t, uv).rgb", "texture"),
+            ("texture t\n  output offset = sampleTriplanar(t, objectPos, normal).rgb", "sampleTriplanar"),
         ] {
             let src = format!("shader s {{\n  stage fragment\n  output color = vec3(1)\n  {body}\n}}\n");
             let err = crate::compile_fragment(&src).expect_err(body);
@@ -612,5 +612,21 @@ mod offset_tests {
         // inputs are restricted.
         let ok = "shader s {\n  stage fragment\n  let shade = dot(normal, viewDir)\n  output color = vec3(shade)\n  output offset = normal * 0.1\n}\n";
         crate::compile_fragment(ok).expect("a per-pixel let the offset does not read is fine");
+    }
+
+    /// **A height map can move a surface.** `sample` in an offset reads the
+    /// slot's largest level, since a vertex has no derivatives to choose a
+    /// smaller one with, so the vertex entry point carries an explicit-level
+    /// read and the pixel one keeps its ordinary sample.
+    #[test]
+    fn an_offset_samples_a_height_map_at_its_largest_level() {
+        let src = "shader s {\n  stage fragment\n  texture height\n  output color = sample(height, uv)\n  \
+                   output offset = normal * sample(height, uv).r * 0.5\n}\n";
+        let c = crate::compile_fragment(src).expect("an offset may sample a texture");
+        assert!(c.displaced);
+        let at = c.chunk.find("fn flsl_offset(").expect("the offset function");
+        let off = &c.chunk[at..at + c.chunk[at..].find("\n}").expect("its end")];
+        assert!(off.contains("flsl_tiled_sample_level(flsl_tex0"), "the offset does not read the slot:\n{off}");
+        assert!(c.chunk.contains("flsl_tiled_sample(flsl_tex0"), "the pixel stage lost its ordinary sample");
     }
 }

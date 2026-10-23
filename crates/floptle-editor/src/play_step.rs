@@ -348,6 +348,8 @@ impl Editor {
         // half-wired.
         if self.playing {
             self.push_app_info();
+            // Input a script simulated last frame, before anything reads input.
+            self.apply_simulated_input();
         }
         // Play mode: advance the (pausable) script clock and run the Lua scripts
         // attached to nodes. Scripts hot-reload as their files change.
@@ -972,8 +974,13 @@ impl Editor {
                     );
                     self.script_host.set_hulls(sim.body_hulls(&self.world));
                 }
-                // `time` on the fixed pass is the deterministic tick clock.
-                let tick_time = self.game_tick_no as f32 * self.game_tick.step;
+                // `time` on the fixed pass is the tick clock: ticks run, plus
+                // the time the catch-up cap and slow motion threw away, so it
+                // stays within a tick of the frame clock `update` reads. Ticks
+                // alone fell behind for good after a long load, and a deadline
+                // set in `update` and checked in `fixedUpdate` never came.
+                let tick_time = (self.game_tick_no as f64 * self.game_tick.step as f64
+                    + self.game_tick.dropped()) as f32;
                 // Real hosting: each remote player's Predicted node runs
                 // with its owner's replayed input for this tick — the
                 // one-script model (§6), server side. Those nodes are

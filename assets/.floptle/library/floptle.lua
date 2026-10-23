@@ -1710,6 +1710,11 @@ function scatter.removed(id) end
 ---@param id integer
 ---@return boolean
 function scatter.destroy(id) end
+---This script's points that bend props away: each prop within `radius` of a
+---point, across the ground, leans away from it. Replaces this script's last
+---list; `{}` clears it. Up to 32 points.
+---@param points { pos: Vec3, radius?: number, strength?: number }[]
+function scatter.setInteractors(points) end
 
 ---Wind: one field that particles and props are moved by. Declared by the game,
 ---read back with `weather.windAt`. A wind blows in the frame of the body it
@@ -1794,9 +1799,15 @@ function water.flowAt(x, y, z) end
 ---`terrain.planetLakes` gives them), or a grid of surface heights
 ---(`shape = "heightfield"`, `origin`, `cell`, `columns`, `rows`, `levels`, one
 ---per point with `false` for dry ground, and an optional `flow` of x, z per
----point). It floats things, slows them and carries them on its `current`, and
----`water.at` answers for it. Returns an id.
----@param opts { shape?: "lake"|"heightfield", parent?: string, center?: Vec3, radius?: number, reach?: number, origin?: Vec3, cell?: number, columns?: integer, rows?: integer, levels?: (number|boolean)[], flow?: number[], density?: number, drag?: number, angularDrag?: number, current?: Vec3 }
+---point), or water the engine moves (`shape = "sim"`: the same grid keys and
+---`level`, the height it is filled to over the ground found under it; it then
+---flows, drains into holes dug beside it and settles). It floats things, slows
+---them and carries them on its `current`, and
+---`water.at` answers for it. `depth` is how far below the surface its bed lies,
+---so a cave under a lake is dry. From inside it looks like a Water Volume node
+---(`tint`, `visibility` to change that, `underwater = false` for none). Returns
+---an id.
+---@param opts { shape?: "lake"|"heightfield"|"sim", level?: number, parent?: string, center?: Vec3, radius?: number, reach?: number, origin?: Vec3, cell?: number, columns?: integer, rows?: integer, levels?: (number|boolean)[], flow?: number[], density?: number, drag?: number, angularDrag?: number, current?: Vec3, depth?: number, tint?: number[], visibility?: number, underwater?: boolean }
 ---@return integer
 function water.addVolume(opts) end
 ---The surface of water `water.addVolume` declared, as the arrays `mesh.build`
@@ -1902,7 +1913,8 @@ function terrain.paintTexture(x, y, z, radius, slot) end
 ---pockets {slot,color,threshold,minDepth}, seam {slot,color,minDepth,center,width},
 ---iceCaps {lat,slot,color}, seed. Relief layers, each a table of optional
 ---keys: mountains {height,scale,sharpness,coverage,octaves}, warp
----{strength,scale}, plateau {height,smooth}, terrace {step,sharpness},
+---{strength,scale}, plateau {height,smooth}, terrace {step,sharpness} (these
+---four also take latitude={min,max} and latitudeEdge, to keep them to a band),
 ---overhangs {depth,scale,strength}, ravines {count,depth,width,length,meander},
 ---rivers {count,depth,width,seaLevel,meander}; biomes, a list of
 ---{slot,color,latitude,altitude,slope,moisture,nearRiver} rules (ranges are
@@ -1964,6 +1976,14 @@ function terrain.lodAnchor(anchor) end
 ---the next.
 ---@return boolean
 function terrain.busy() end
+---How many of the game's terrain edits (dig, sculpt, flatten, paint,
+---paintTexture) have not landed yet. Edits are applied a few milliseconds'
+---worth a frame, in the order they were made, so a batch of a thousand
+---flattens spreads over frames instead of stopping one. Each lands whole, so
+---a query reads the ground after some number of whole edits; 0 means every
+---edit made so far is in the ground.
+---@return integer
+function terrain.pending() end
 ---Checkpoint every EDITED resident terrain field to the save slot
 ---(`terrain.saveDir` must be set). Runs IN THE BACKGROUND — a few chunks of
 ---encoding per frame plus a threaded write, deferred while a field is being

@@ -182,6 +182,11 @@ pub struct Tint {
     /// lifts the surface out of the room's shadow, which is what a Material
     /// with nothing but `ambient: 1.6` on it was always being used for.
     pub ambient: f32,
+    /// A glow over whatever the node draws, in its own colour, replacing the
+    /// surface's own emissive while `emissive_strength` is above 0. 0 (the
+    /// default) leaves every part's own glow alone.
+    pub emissive: [f32; 3],
+    pub emissive_strength: f32,
 }
 
 impl Default for Tint {
@@ -192,6 +197,8 @@ impl Default for Tint {
             rim: [0.0, 0.0, 0.0],
             rim_strength: 0.0,
             ambient: 1.0,
+            emissive: [0.0, 0.0, 0.0],
+            emissive_strength: 0.0,
         }
     }
 }
@@ -204,6 +211,7 @@ impl Tint {
             && self.alpha >= 1.0
             && self.rim_strength == 0.0
             && self.ambient == 1.0
+            && self.emissive_strength == 0.0
     }
 
     /// Apply it to a colour + alpha, in place.
@@ -243,6 +251,92 @@ impl Tint {
     /// silently discarding the other.
     pub fn ambient_over(&self, ambient: f32) -> f32 {
         ambient * self.ambient
+    }
+}
+
+/// A script's `setMaterial{...}` on a model that has no node Material: the
+/// keys it named and their values, laid over each part's own material when
+/// the part is drawn (a component).
+///
+/// A whole node Material supersedes every part's look, textures, cut-out
+/// alpha and shader included, so `setMaterial{ color = … }` on an imported
+/// plant used to draw it in one flat colour with no leaves, and on a prefab
+/// whose parts wear a custom shader it lost the shader's textures. A patch
+/// changes only what it names; everything else stays the part's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MaterialPatch {
+    /// Holds the values; only the fields `keys` names are read.
+    pub mat: Material,
+    /// The `setMaterial` keys given so far, in the order first given.
+    pub keys: Vec<String>,
+}
+
+impl MaterialPatch {
+    /// `base` with this patch's keys laid over it.
+    pub fn over(&self, base: &Material) -> Material {
+        let mut m = base.clone();
+        for k in &self.keys {
+            m.take_key(&self.mat, k);
+        }
+        m
+    }
+
+    /// Does the patch name `key`?
+    pub fn names(&self, key: &str) -> bool {
+        self.keys.iter().any(|k| k == key)
+    }
+}
+
+impl Material {
+    /// Copy the field(s) `setMaterial` key `key` writes from `src`. An unknown
+    /// key copies nothing. The key list is the scripting API's
+    /// (`MATERIAL_KEYS` in floptle-script), and a test there keeps the two in
+    /// step.
+    pub fn take_key(&mut self, src: &Material, key: &str) -> bool {
+        match key {
+            "color" => self.color = src.color,
+            "emissive" => self.emissive = src.emissive,
+            "emissiveStrength" => self.emissive_strength = src.emissive_strength,
+            "specular" => self.specular = src.specular,
+            "shininess" => self.shininess = src.shininess,
+            "specularStrength" => self.specular_strength = src.specular_strength,
+            "rim" => self.rim = src.rim,
+            "rimStrength" => self.rim_strength = src.rim_strength,
+            "unlit" => self.unlit = src.unlit,
+            "fog" => self.fog = src.fog,
+            "ambient" => self.ambient = src.ambient,
+            "alpha" => self.alpha = src.alpha,
+            "alphaCutoff" => self.alpha_cutoff = src.alpha_cutoff,
+            "doubleSided" => self.double_sided = src.double_sided,
+            "texture" => self.texture = src.texture.clone(),
+            "cell" => self.cell = src.cell,
+            "sheetCols" => self.sheet_cols = src.sheet_cols,
+            "sheetRows" => self.sheet_rows = src.sheet_rows,
+            "slice" => self.slice = src.slice,
+            "normalMap" => self.normal_map = src.normal_map.clone(),
+            "normalStrength" => self.normal_strength = src.normal_strength,
+            "roughnessMap" => self.roughness_map = src.roughness_map.clone(),
+            "roughness" => self.roughness = src.roughness,
+            "metallicMap" => self.metallic_map = src.metallic_map.clone(),
+            "metallic" => self.metallic = src.metallic,
+            "occlusionMap" => self.ao_map = src.ao_map.clone(),
+            "occlusionStrength" => self.occlusion_strength = src.occlusion_strength,
+            "emissiveMap" => self.emissive_map = src.emissive_map.clone(),
+            "reflectivity" => self.reflectivity = src.reflectivity,
+            "transmission" => self.transmission = src.transmission,
+            "ior" => self.ior = src.ior,
+            "thickness" => self.thickness = src.thickness,
+            "sway" => self.sway = src.sway,
+            "backlight" => self.backlight = src.backlight,
+            "shading" => self.shading = src.shading,
+            "jitter" => self.retro.jitter = src.retro.jitter,
+            "affineUv" => self.retro.affine_uv = src.retro.affine_uv,
+            "vertexLit" => self.retro.vertex_lit = src.retro.vertex_lit,
+            "ditherAlpha" => self.retro.dither_alpha = src.retro.dither_alpha,
+            "retroExempt" => self.retro.exempt = src.retro.exempt,
+            _ => return false,
+        }
+        true
     }
 }
 
@@ -288,6 +382,16 @@ pub struct Material {
     /// Opacity (1 = fully opaque, 0 = invisible). Below 1 the surface alpha-blends
     /// over what's behind it; multiplied by any base-color texture's own alpha.
     pub alpha: f32,
+    /// Where an opaque surface's texture alpha cuts it out: texels with less
+    /// alpha than this are holes. `0.5` (the default) is what every surface has
+    /// always done; `0` cuts nothing, so a picture with stray alpha draws solid
+    /// (glTF's OPAQUE); a model's own MASK cutoff goes here as it was authored.
+    /// A surface with `alpha` below 1 blends instead and is not cut.
+    pub alpha_cutoff: f32,
+    /// Draw the back of each face as well as the front. `true` (the default) is
+    /// what every surface has always done: nothing was culled. `false` hides a
+    /// face seen from behind, as a model exported single-sided asks.
+    pub double_sided: bool,
 
     // --- The surface maps (v0.43). ------------------------------------------
     // Every one of these is `None`/neutral by default and its default binding is
@@ -458,6 +562,8 @@ impl Default for Material {
             fog: true,
             ambient: 1.0,
             alpha: 1.0,
+            alpha_cutoff: 0.5,
+            double_sided: true,
             normal_map: None,
             normal_strength: 1.0,
             roughness_map: None,

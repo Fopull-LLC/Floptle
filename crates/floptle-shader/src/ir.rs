@@ -561,9 +561,13 @@ pub fn check(ir: &ShaderIr) -> Result<Checked, Vec<IrError>> {
 pub const OFFSET_INPUTS: &[Input] = &[Input::ObjectPos, Input::Normal, Input::Uv, Input::Time, Input::InstanceColor];
 
 /// Stdlib categories `output offset` can call: pure functions of their
-/// arguments. Textures, the screen and the engine's lighting are not there
-/// for a vertex.
+/// arguments. The screen and the engine's lighting are not there for a vertex.
 pub const OFFSET_CATEGORIES: &[&str] = &["math", "noise", "color", "sdf"];
+
+/// Texture ops `output offset` can call on top of those: `sample` reads a
+/// slot's largest level, since a vertex has no derivatives to choose a smaller
+/// one with. That is what a height map displacing a surface needs.
+pub const OFFSET_TEXTURE_OPS: &[&str] = &["sample"];
 
 /// `output offset` runs in the vertex shader, once per vertex, so it may only
 /// reach what a vertex has: see [`OFFSET_INPUTS`] and [`OFFSET_CATEGORIES`].
@@ -587,10 +591,9 @@ fn check_per_vertex(ir: &ShaderIr, root: ExprId, errors: &mut Vec<IrError>) {
                     ));
                 }
             }
-            ExprKind::Texture(_) => errors.push(IrError::new(
-                "`output offset` cannot read a texture: it runs per vertex, before there is a pixel to sample for",
-                e.span,
-            )),
+            // A slot handle on its own reads nothing; the op it is handed to
+            // is what is checked below.
+            ExprKind::Texture(_) => {}
             ExprKind::Let(l) => {
                 if seen_lets.insert(*l) {
                     stack.push(ir.lets[*l].1);
@@ -599,12 +602,14 @@ fn check_per_vertex(ir: &ShaderIr, root: ExprId, errors: &mut Vec<IrError>) {
             ExprKind::Call { op, args } => {
                 if let Some(spec) = crate::stdlib::op(op)
                     && !OFFSET_CATEGORIES.contains(&spec.category)
+                    && !OFFSET_TEXTURE_OPS.contains(&op.as_str())
                     && !matches!(op.as_str(), "vec2" | "vec3" | "vec4")
                 {
                     errors.push(IrError::new(
                         format!(
                             "`output offset` cannot call `{op}` ({} ops run per pixel). Math, noise, \
-                             colour and sdf functions work per vertex",
+                             colour and sdf functions work per vertex, and `sample` reads a texture's \
+                             largest level",
                             spec.category
                         ),
                         e.span,

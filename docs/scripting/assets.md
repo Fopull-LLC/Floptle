@@ -186,6 +186,12 @@ function update(node, dt)
 end
 ```
 
+**An imported static model is centred on its own bounds.** The engine moves a
+`.glb`/`.gltf`'s geometry so the middle of its bounding box sits at the node's
+origin, whatever origin the file was authored with: a tree whose origin was at
+its roots is placed by its middle. Place it accordingly (or parent it under a
+node you offset); there is no import option yet to keep the authored origin.
+
 ### `node.material` — apply a material
 
 Assign a **material preset** (by name, or an `assets.getFile("materials/…ron")`) and the
@@ -278,6 +284,14 @@ An untextured material means untextured — a Material with no `texture` draws i
 parts with no picture, rather than keeping the one it is replacing. Half-applying
 a material is what made this confusing before: a new material would take effect
 in its emissive and its numbers while the model kept the old picture on it.
+
+**`node:setMaterial{...}` on a model with no Material changes only what it
+names.** The keys you give are laid over each part's own material when it
+draws, and the rest stays the part's: its textures, its cut-out leaves, its
+maps and its custom shader. `setMaterial{ color = {1, 0.4, 0.4} }` on an imported
+plant gives a red plant with its leaves. To make the whole model one material,
+author a Material on the node (in the scene, or give it one first), and
+`setMaterial` then changes that.
 
 ### A tint — the same model, but red
 
@@ -433,7 +447,7 @@ every step, so a change takes effect immediately with no reset or teleport.
 | `slopeLimit` | The steepest surface this body can stand on, in degrees (60 by default). Past it there is no ground under it and no grip holds it. |
 | `restitution` | Bounciness 0..1 (0 = no bounce). |
 | `gravity` | Gravity pull on this body (assign `true`/`false`; reads back 1/0). |
-| `shape` | Body shape: 0 = sphere, 1 = capsule, 2 = box, 3 = polygon. |
+| `shape` | Body shape: 0 = sphere, 1 = capsule, 2 = box, 3 = polygon, 4 = mesh (the node's own geometry: its convex hull for a Dynamic or Kinematic body, its exact triangles for a Static one). |
 | `radius` | Sphere/capsule radius. |
 | `height` | Capsule total height. |
 | `half_x` `half_y` `half_z` | Box half-extents. |

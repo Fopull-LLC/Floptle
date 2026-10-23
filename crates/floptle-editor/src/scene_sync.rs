@@ -364,6 +364,13 @@ impl Editor {
             .filter(|p| !self.texture_registry.contains_key(p))
             .collect();
         tex_paths.extend(map_paths);
+        // A script's patch over a model's own materials names images too.
+        tex_paths.extend(
+            self.world
+                .query::<floptle_core::MaterialPatch>()
+                .flat_map(|(_, p)| p.mat.texture.iter().cloned().chain(maps(&p.mat)).collect::<Vec<_>>())
+                .filter(|p| !self.texture_registry.contains_key(p)),
+        );
         // …and every sheet of every tileset a tilemap in this scene uses.
         //
         // Nothing else warms these. A tileset sheet reached the GPU only if some

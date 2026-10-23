@@ -351,6 +351,7 @@ struct InputCells {
     input_domain: crate::input_api::SharedDomain,
     mouse_lock: Rc<RefCell<Option<bool>>>,
     reserved_keys: crate::ReservedKeys,
+    input_sim: Rc<RefCell<Vec<crate::SimulatedInput>>>,
 }
 
 /// The `input` global and the action layer behind it.
@@ -374,6 +375,7 @@ fn install_input(lua: &Lua, logs: &Rc<RefCell<Vec<ScriptLog>>>) -> InputCells {
     // indistinguishable from a key the player did not press: that is exactly
     // how a game shipped a bag on Tab and heard about it from a player.
     let reserved_keys: crate::ReservedKeys = Rc::new(RefCell::new(Vec::new()));
+    let input_sim: Rc<RefCell<Vec<crate::SimulatedInput>>> = Rc::default();
     let reserved_warned: Rc<RefCell<std::collections::HashSet<String>>> =
         Rc::new(RefCell::new(std::collections::HashSet::new()));
     if let Ok(t) = lua.create_table() {
@@ -587,6 +589,46 @@ fn install_input(lua: &Lua, logs: &Rc<RefCell<Vec<ScriptLog>>>) -> InputCells {
         // one call at a time: `input.key("w")` and `input.action("Jump")`
         // coexist for as long as a game wants them to.
         crate::input_api::install(lua, &t, &input_sys, &input_domain);
+        // input.simulate{ key = "w", down = true } / { button = 1, down = … } —
+        // a testing aid: queues the press or release for the driver, which
+        // feeds it through the same path a real keyboard and mouse take, from
+        // the next frame on. Every script sees it, through `input.key`,
+        // `input.pressed`, `input.action` and the rest alike.
+        let q = input_sim.clone();
+        let _ = t.set(
+            "simulate",
+            lua.create_function(move |_, opts: mlua::Table| {
+                crate::opts::check_keys(&opts, &["key", "button", "down"], "input.simulate")?;
+                let down: bool = opts.get::<Option<bool>>("down")?.unwrap_or(true);
+                let key: Option<String> = opts.get("key")?;
+                let button: Option<u32> = opts.get("button")?;
+                let ev = match (key, button) {
+                    (Some(k), None) => {
+                        let k = k.to_lowercase();
+                        if floptle_input::Key::from_script_name(&k).is_none() {
+                            return Err(mlua::Error::runtime(format!(
+                                "input.simulate: no key called \"{k}\" (the names input.key takes)"
+                            )));
+                        }
+                        crate::SimulatedInput::Key(k, down)
+                    }
+                    (None, Some(b @ 1..=3)) => crate::SimulatedInput::Button(b as usize - 1, down),
+                    (None, Some(b)) => {
+                        return Err(mlua::Error::runtime(format!(
+                            "input.simulate: button {b} — buttons are 1 (left), 2 (right) and 3 (middle)"
+                        )));
+                    }
+                    _ => {
+                        return Err(mlua::Error::runtime(
+                            "input.simulate{ key = \"w\", down = true } or { button = 1, down = true }: one of key or button",
+                        ));
+                    }
+                };
+                q.borrow_mut().push(ev);
+                Ok(())
+            })
+            .ok(),
+        );
         let _ = lua.globals().set("input", t);
     }
     InputCells {
@@ -595,6 +637,7 @@ fn install_input(lua: &Lua, logs: &Rc<RefCell<Vec<ScriptLog>>>) -> InputCells {
         input_domain,
         mouse_lock,
         reserved_keys,
+        input_sim,
     }
 }
 
@@ -638,11 +681,7 @@ fn ray_filter(
                 // that parsing and the two lists drifting is how `layers` ends
                 // up honoured by one and ignored by the other.
                 crate::opts::check_keys(t, crate::shape_api::QUERY_KEYS, call)?;
-                if let Ok(ig) = t.get::<Table>("ignore")
-                    && let Ok(eid) = ig.raw_get::<u32>("__id")
-                {
-                    exclude.push(eid);
-                }
+                crate::shape_api::ignore_into(call, t.get::<Value>("ignore")?, &mut exclude)?;
                 let names: Vec<String> = match t.get::<Value>("layers") {
                     Ok(Value::String(s)) => vec![s.to_string_lossy().to_string()],
                     Ok(Value::Table(list)) => list.sequence_values::<String>().flatten().collect(),
@@ -1424,6 +1463,7 @@ struct UiCells {
     ui_frame_events: crate::UiFrameEvents,
     ui_hover: Rc<RefCell<Option<u32>>>,
     ui_active: Rc<RefCell<Option<u32>>>,
+    ui_scale: Rc<std::cell::Cell<f32>>,
 }
 
 /// `ui.*`: the game-UI runtime surface.
@@ -1445,7 +1485,28 @@ fn install_ui(lua: &Lua, net: &crate::net_api::SharedNet) -> UiCells {
     let ui_frame_events: crate::UiFrameEvents = Rc::new(RefCell::new(Vec::new()));
     let ui_hover: Rc<RefCell<Option<u32>>> = Rc::new(RefCell::new(None));
     let ui_active: Rc<RefCell<Option<u32>>> = Rc::new(RefCell::new(None));
+    let ui_scale: Rc<std::cell::Cell<f32>> = Rc::new(std::cell::Cell::new(1.0));
     if let Ok(t) = lua.create_table() {
+        // ui.setScale(s) / ui.scale() — one size for the whole interface: every
+        // layer's layout and text, multiplied over each layer's own
+        // designHeight scaling (and under access.setTextScale, which still
+        // sizes text alone). What an "Interface size" setting is.
+        let sc = ui_scale.clone();
+        let _ = t.set(
+            "setScale",
+            lua.create_function(move |_, s: f64| {
+                if !(s.is_finite() && (0.25..=4.0).contains(&s)) {
+                    return Err(mlua::Error::runtime(format!(
+                        "ui.setScale({s}): the interface scale is between 0.25 and 4 (1 = as designed)"
+                    )));
+                }
+                sc.set(s as f32);
+                Ok(())
+            })
+            .ok(),
+        );
+        let sc = ui_scale.clone();
+        let _ = t.set("scale", lua.create_function(move |_, ()| Ok(sc.get() as f64)).ok());
         let req = ui_focus_request.clone();
         let cur = ui_focus.clone();
         let _ = t.set(
@@ -1743,6 +1804,7 @@ fn install_ui(lua: &Lua, net: &crate::net_api::SharedNet) -> UiCells {
         ui_frame_events,
         ui_hover,
         ui_active,
+        ui_scale,
     }
 }
 
@@ -2113,14 +2175,34 @@ fn install_draw(lua: &Lua) -> DrawCells {
             {
                 let q = draw_lines.clone();
                 let ld = line_depth.clone();
-                type BoxArgs = (f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, Option<f32>);
+                type BoxArgs = (f64, f64, f64, f64, f64, f64, mlua::Value, f32, f32, f32, Option<f32>);
                 if let Ok(f) = lua.create_function(
-                    move |_, (cx, cy, cz, hx, hy, hz, yaw, r, g, b, a): BoxArgs| {
+                    move |_, (cx, cy, cz, hx, hy, hz, turn, r, g, b, a): BoxArgs| {
                         let c = glam::DVec3::new(cx, cy, cz);
-                        let (cy_, sy_) = (yaw.cos(), yaw.sin());
-                        let rot = |p: glam::DVec3| {
-                            glam::DVec3::new(p.x * cy_ + p.z * sy_, p.y, -p.x * sy_ + p.z * cy_)
+                        // The box's turn: a yaw in radians, as it always was; or
+                        // `{ yaw =, pitch =, roll = }`, a node's own angles; or
+                        // `{ up = vec3 [, yaw =] }`, standing on a surface whose
+                        // normal is `up` and spun about it — a box on a slope.
+                        let spin_q = match &turn {
+                            mlua::Value::Table(t) => {
+                                let num = |k: &str| t.get::<Option<f64>>(k).ok().flatten().unwrap_or(0.0);
+                                let spin = glam::DQuat::from_rotation_y(num("yaw"));
+                                match t.get::<mlua::Value>("up").ok().as_ref().and_then(crate::math_api::vec3_of) {
+                                    Some(up) => glam::DQuat::from_rotation_arc(glam::DVec3::Y, up.normalize_or(glam::DVec3::Y)) * spin,
+                                    None => glam::DQuat::from_euler(glam::EulerRot::YXZ, num("yaw"), num("pitch"), num("roll")),
+                                }
+                            }
+                            v => match crate::math_api::num_of(v) {
+                                Some(yaw) => glam::DQuat::from_rotation_y(yaw),
+                                None => {
+                                    return Err(mlua::Error::runtime(
+                                        "draw.box(cx,cy,cz, hx,hy,hz, turn, r,g,b[,a]): turn is a yaw in radians, \
+                                         { yaw =, pitch =, roll = }, or { up = vec3 [, yaw =] }",
+                                    ));
+                                }
+                            },
                         };
+                        let rot = |p: glam::DVec3| spin_q * p;
                         let col = [r, g, b, a.unwrap_or(1.0)];
                         let corner = |i: usize| {
                             let sx = if i & 1 == 0 { -hx } else { hx };
@@ -2612,6 +2694,7 @@ impl ScriptHost {
             input_domain,
             mouse_lock,
             reserved_keys,
+            input_sim,
         } = install_input(&lua, &logs);
         let profile: crate::SharedProfile = Rc::new(RefCell::new(Default::default()));
         let WorldQueryCells {
@@ -2646,6 +2729,7 @@ impl ScriptHost {
         let scatter_next_id: Rc<std::cell::Cell<u32>> = Rc::new(std::cell::Cell::new(0));
         let scatter_owners = crate::scatter_api::Owners::default();
         let scatter_settled = crate::scatter_api::Settled::default();
+        let scatter_interactors = crate::scatter_api::Interactors::default();
         // The scripts' copy of the scene, made here rather than with the rest
         // of the handle layer below: a source that rides a node reads where
         // that node stands the moment it is created.
@@ -2659,6 +2743,7 @@ impl ScriptHost {
             logs.clone(),
             scene_mirror.clone(),
             scatter_settled.clone(),
+            scatter_interactors.clone(),
         );
 
         // `weather.*` — the wind every system is moved by.
@@ -2686,6 +2771,7 @@ impl ScriptHost {
             ui_frame_events,
             ui_hover,
             ui_active,
+            ui_scale,
         } = install_ui(&lua, &net);
         let spawn_effects = install_spawn_effect(&lua);
         let DrawCells {
@@ -2904,6 +2990,7 @@ impl ScriptHost {
             Rc::new(RefCell::new(Vec::new()));
         let terrain_op_id: Rc<std::cell::Cell<u64>> = Rc::new(std::cell::Cell::new(0));
         let terrain_planet: Rc<RefCell<crate::terrain_api::PlanetQueries>> = Rc::default();
+        let terrain_queued: Rc<std::cell::Cell<usize>> = Rc::default();
         crate::terrain_api::install_terrain_api(
             &lua,
             terrain_ops.clone(),
@@ -2922,6 +3009,7 @@ impl ScriptHost {
                 yields: terrain_yields.clone(),
                 next_op_id: terrain_op_id.clone(),
                 planet: terrain_planet.clone(),
+                queued: terrain_queued.clone(),
             },
         );
         // `decals.*`: marks laid on the static colliders lent for the pass.
@@ -3093,6 +3181,7 @@ impl ScriptHost {
             terrain_ops,
             terrain_yields,
             terrain_planet,
+            terrain_queued,
             terrain_generates,
             terrain_save_dir,
             terrain_warm,
@@ -3143,6 +3232,7 @@ impl ScriptHost {
             physics_paused,
             mouse_lock,
             reserved_keys,
+            input_sim,
             profile,
             access,
             app_info,
@@ -3157,6 +3247,7 @@ impl ScriptHost {
             scatter_sources,
             scatter_owners,
             scatter_settled,
+            scatter_interactors,
             scatter_next_id,
             weather,
             scene_name,
@@ -3171,6 +3262,7 @@ impl ScriptHost {
             ui_frame_events,
             ui_hover,
             ui_active,
+            ui_scale,
             anim_info: shared.anim_info.clone(),
             bone_poses: shared.bone_poses.clone(),
             anim_commands: shared.anim_commands.clone(),
@@ -3560,10 +3652,33 @@ impl ScriptHost {
         self.scene.try_borrow().ok()?.by_name.get(name).copied()
     }
 
+    /// The presses and releases scripts asked `input.simulate` for since the
+    /// last call, for the driver to feed through the real input path.
+    pub fn take_simulated_input(&self) -> Vec<crate::SimulatedInput> {
+        std::mem::take(&mut *self.input_sim.borrow_mut())
+    }
+
+    /// The interface scale a script set with `ui.setScale` (1 = as designed),
+    /// for the driver to multiply into every UI layer's scale.
+    pub fn ui_scale(&self) -> f32 {
+        self.ui_scale.get()
+    }
+
+    /// Set the interface scale from the driver: back to 1 when Play starts,
+    /// so a scale a game set does not outlive its session.
+    pub fn set_ui_scale(&self, s: f32) {
+        self.ui_scale.set(s);
+    }
+
     /// Where the driver records each prop it drops onto the ground, for
     /// `scatter.near` to answer with. See [`crate::scatter_api::Settled`].
     pub fn scatter_settled(&self) -> crate::scatter_api::Settled {
         self.scatter_settled.clone()
+    }
+
+    /// Every point bending props away this frame, from every script.
+    pub fn scatter_interactors(&self) -> Vec<floptle_core::scatter::Interactor> {
+        self.scatter_interactors.borrow().values().flatten().copied().collect()
     }
 
     /// Every source that rides a node, as `(id, node name)`.
@@ -3581,6 +3696,7 @@ impl ScriptHost {
         self.scatter_sources.borrow_mut().clear();
         self.scatter_owners.borrow_mut().clear();
         self.scatter_settled.borrow_mut().clear();
+        self.scatter_interactors.borrow_mut().clear();
     }
 
     /// Every wind scripts have declared — what particles and props read.
@@ -3615,6 +3731,11 @@ impl ScriptHost {
     /// `upto` — a destroyed node's, or the old generation's on a hot reload.
     fn drop_scatter_of(&self, key: &(u32, String), upto: u32) {
         crate::scatter_api::drop_owned(&self.scatter_sources, &self.scatter_owners, key, upto);
+        // A destroyed node's points go with it; a reloaded script keeps its
+        // last ones until it sets new ones.
+        if upto == u32::MAX {
+            self.scatter_interactors.borrow_mut().remove(key);
+        }
     }
 
     /// Publish the scene's bodies of water, before scripts run — what
@@ -3639,6 +3760,14 @@ impl ScriptHost {
     pub fn set_water_frame(&self, id: u32, frame: floptle_core::scatter::Frame) {
         if let Some(w) = self.water_declared.borrow_mut().iter_mut().find(|w| w.id == id) {
             w.frame = frame;
+        }
+    }
+
+    /// Replace declared water `id`'s surface: what the engine's simulation of
+    /// it has reached this frame.
+    pub fn set_water_surface(&self, id: u32, surface: floptle_core::water::Surface) {
+        if let Some(w) = self.water_declared.borrow_mut().iter_mut().find(|w| w.id == id) {
+            w.surface = surface;
         }
     }
 
@@ -4177,12 +4306,8 @@ impl ScriptHost {
             // through the same teleport channel a cross-node `node.pos` write
             // does.
             if self.bodies.borrow().contains_key(&e) {
-                crate::env::queue_body_pos(
-                    &self.body_pos_changes,
-                    &self.bodies,
-                    e,
-                    [local.x, local.y, local.z],
-                );
+                // The body is told the world place the agent is at.
+                crate::env::queue_body_pos(&self.body_pos_changes, &self.bodies, e, world);
             }
         }
     }
@@ -4251,6 +4376,12 @@ impl ScriptHost {
     }
 
     /// Mirror the background terrain worker's state into `terrain.busy()`.
+    /// How many terrain edits the engine has taken from scripts and not yet
+    /// applied: what `terrain.pending()` adds to the ones still queued here.
+    pub fn set_terrain_edits_queued(&self, n: usize) {
+        self.terrain_queued.set(n);
+    }
+
     pub fn set_terrain_busy(&self, on: bool) {
         self.terrain_busy.set(on);
     }
@@ -5260,6 +5391,13 @@ impl ScriptHost {
         *self.sim_origin.borrow_mut() = origin;
     }
 
+    /// The colliders lent via [`set_colliders`](Self::set_colliders), while
+    /// they are here: what the driver asks the level when it needs to between
+    /// lending and reclaiming them.
+    pub fn lent_colliders(&self) -> std::cell::Ref<'_, Vec<floptle_physics::AnchoredCollider>> {
+        self.colliders.borrow()
+    }
+
     /// Reclaim the colliders lent via [`set_colliders`](Self::set_colliders). Call after
     /// [`run`](Self::run), before stepping the sim.
     pub fn take_colliders(&self) -> Vec<floptle_physics::AnchoredCollider> {
@@ -5294,12 +5432,12 @@ impl ScriptHost {
         }
     }
 
-    /// This frame's terrain edits: the oldest [`crate::terrain_api::OPS_PER_FRAME`]
-    /// waiting. The rest stay queued, in order, for the next frame.
+    /// Every terrain edit made since the last call, oldest first. All of them,
+    /// the frame they were made: the engine places each on its terrain then,
+    /// and lands them a few milliseconds' worth a frame. Left here with their
+    /// world points, edits on a planet moving on its rails landed metres off.
     pub fn take_terrain_ops(&self) -> Vec<crate::TerrainOp> {
-        let mut q = self.terrain_ops.borrow_mut();
-        let n = q.len().min(crate::terrain_api::OPS_PER_FRAME);
-        q.drain(..n).collect()
+        self.terrain_ops.borrow_mut().drain(..).collect()
     }
 
     /// Feed this frame's dynamic-body hulls ([`Sim::body_hulls`] copies) so
@@ -5683,6 +5821,15 @@ impl ScriptHost {
     /// Drain cross-node position writes on body entities — the driver teleports
     /// each body there (the transform alone would be stomped by the physics
     /// writeback next frame).
+    /// A body node's local position as the world one its body is sent to
+    /// (see `api::body_world_of`).
+    fn body_world(&self, eid: u32, local: glam::DVec3) -> [f64; 3] {
+        match self.scene.try_borrow() {
+            Ok(s) => crate::api::body_world_of(&s, eid, local),
+            Err(_) => [local.x, local.y, local.z],
+        }
+    }
+
     pub fn take_body_pos_changes(&self) -> HashMap<u32, [f64; 3]> {
         std::mem::take(&mut *self.body_pos_changes.borrow_mut())
     }
@@ -6164,6 +6311,15 @@ impl ScriptHost {
         // `http.*` warns when it is called from the tick pass — a reply arrives
         // when it arrives, which no replay can reproduce.
         self.http_in_fixed.set(pass == Pass::Fixed);
+        // `time` and `dt` are the pass's, for every script, before any runs.
+        // Written into each script's own environment as its hooks ran, a
+        // function of one script called from another read its own last value:
+        // a frame behind, or nil before its first hook in the scene. A script's
+        // environment falls through to these (`build_env`), so one write here
+        // is every script's.
+        let g = self.lua.globals();
+        let _ = g.raw_set("time", time as f64);
+        let _ = g.raw_set("dt", dt as f64);
         for e in work {
             if self.script_skip.contains(&e.index()) {
                 continue; // networked: this node's state arrives in snapshots
@@ -8110,7 +8266,7 @@ impl ScriptHost {
             let drained = crate::env::drain_node_writes(&node, stamp, tr)?;
             let mut sent = None;
             if drained.moved && body.is_some() {
-                sent = Some([tr.translation.x, tr.translation.y, tr.translation.z]);
+                sent = Some(self.body_world(eid, tr.translation));
             }
             if let Some(v) = drained.vel {
                 self.body_changes.borrow_mut().insert(eid, v);
@@ -8293,11 +8449,9 @@ impl ScriptHost {
             #[cfg(test)]
             PARAMS_REBUILDS.with(|c| c.set(c.get() + 1));
         }
-        // Raw: the env's metatable is `__index` only (`build_env`), so this is
-        // the same write — and an mlua `set` through a metatable allocates on
-        // Luau, twice per pass per scripted node. See `apply_node`.
-        env.raw_set("time", time as f64)?;
-        env.raw_set("dt", dt as f64)?;
+        // `time` and `dt` are not written here: `run_pass` sets them for every
+        // script at once, before any runs.
+        let _ = (time, dt);
 
         let node = self.refresh_node(eid, tr, body, slot)?;
 
@@ -8395,7 +8549,8 @@ impl ScriptHost {
             // `node.x = spawn_x` (respawns!) silently does nothing.
             let (x, y, z) = (num("x", pre.x), num("y", pre.y), num("z", pre.z));
             if x != pre.x || y != pre.y || z != pre.z {
-                crate::env::queue_body_pos(&self.body_pos_changes, &self.bodies, eid, [x, y, z]);
+                let w = self.body_world(eid, glam::DVec3::new(x, y, z));
+                crate::env::queue_body_pos(&self.body_pos_changes, &self.bodies, eid, w);
             }
             // A write to the tick channel is a body teleport that never touches
             // the render transform — which is the whole point of having it
