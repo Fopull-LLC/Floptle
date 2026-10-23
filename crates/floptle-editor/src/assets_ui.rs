@@ -219,6 +219,9 @@ impl<'a> EditorTabViewer<'a> {
                             }
                         }
                         AssetEntry::File { name, path } => {
+                            if crate::model_convert::converted_model_of(path).is_some() {
+                                continue;
+                            }
                             self.asset_file_tile(ui, name.as_str(), path.as_str(), &order);
                         }
                     }
@@ -371,7 +374,10 @@ impl<'a> EditorTabViewer<'a> {
         let selected = self.asset_is_selected(path);
         let kind = crate::assets::asset_kind(path);
         let picture = self.tile_picture(ui, path);
-        let resp = self.tile_frame(ui, kind, picture, name, selected);
+        let mut resp = self.tile_frame(ui, kind, picture, name, selected);
+        if let Some(from) = converted_from_label(path) {
+            resp = resp.on_hover_text(from);
+        }
         // Every asset is a drag source — drop a model/script/prefab on the scene,
         // or any asset (texture, audio, clip…) onto a matching Inspector picker.
         resp.dnd_set_drag_payload(AssetPayload { path: path.to_string() });
@@ -557,17 +563,35 @@ impl<'a> EditorTabViewer<'a> {
         // The alternative is a person double-clicking an .fbx, getting nothing,
         // and concluding the engine cannot read their asset pack — which is
         // true, and fixable in one click they had no way to find.
+        // Models convert on their own when they arrive and when their source
+        // changes; this is for doing it now, and for a model whose pictures
+        // were missing and have since been put in place.
         if crate::assets::is_convertible_model(path)
             && ui
-                .button("⇄ Convert to .glb")
+                .button("⇄ Convert to .glb now")
                 .on_hover_text(
                     "write a .glb beside this file — one self-contained model the engine \
-                     can open, with its textures inside it",
+                     can open, with its textures inside it. It happens by itself in a moment; \
+                     this does it first",
                 )
                 .clicked()
         {
             self.cmd.convert_model = Some(path.to_string());
             ui.close();
+        }
+        if let Some(src) = crate::model_convert::source_of_model(path) {
+            let src_name = src.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            if ui
+                .button(format!("⇄ Re-convert from {src_name}"))
+                .on_hover_text(
+                    "convert the source again — after putting a missing texture in place, say. \
+                     It also happens by itself whenever the source changes",
+                )
+                .clicked()
+            {
+                self.cmd.convert_model = Some(src.to_string_lossy().into_owned());
+                ui.close();
+            }
         }
         if crate::assets::is_shader(path) && ui.button("◈ Open in Shader Graph").clicked() {
             self.cmd.open_shader_graph = Some(path.to_string());
@@ -695,6 +719,11 @@ impl<'a> EditorTabViewer<'a> {
                     hr.context_menu(|ui| self.folder_menu(ui, &child_dir));
                 }
                 AssetEntry::File { name, path } => {
+                    // A source whose converted model is in place is shown as
+                    // that model, below — the pair is one thing.
+                    if crate::model_convert::converted_model_of(path).is_some() {
+                        continue;
+                    }
                     // Every asset drags (scene spawn for models/scripts/prefabs;
                     // picker-fill for textures/audio/clips/…).
                     let selected = self.asset_is_selected(path);
@@ -718,6 +747,9 @@ impl<'a> EditorTabViewer<'a> {
                     text.append(&format!("{grip} "), 0.0, fmt(ui.visuals().weak_text_color()));
                     text.append(&format!("{icon} "), 0.0, fmt(color));
                     text.append(name, 0.0, fmt(name_color));
+                    if let Some(from) = converted_from_label(path) {
+                        text.append(&format!("  {from}"), 0.0, fmt(ui.visuals().weak_text_color()));
+                    }
                     let resp = ui.add(
                         egui::Label::new(text)
                             .selectable(false)
@@ -1100,4 +1132,11 @@ pub(crate) fn asset_tile(
         );
     }
     resp.on_hover_text(name)
+}
+
+/// "⇄ from crate.fbx" for a model converted from a source beside it, which
+/// the Assets panel shows in the source's place.
+fn converted_from_label(path: &str) -> Option<String> {
+    let src = crate::model_convert::source_of_model(path)?;
+    Some(format!("⇄ from {}", src.file_name()?.to_string_lossy()))
 }

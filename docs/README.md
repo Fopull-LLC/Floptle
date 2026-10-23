@@ -24,6 +24,7 @@ linked here, it isn't finished — a test enforces that.
 | Make your game playable by more people | [accessibility.md](accessibility.md) |
 | Sculpt terrain / build a planet | [subsystems/deformable-matter.md](subsystems/deformable-matter.md) |
 | Generate a planet: mountains, rivers, lakes, biomes | [planet-generator.md](planet-generator.md) |
+| Bring in a model from Blender, Maya, Max or an asset pack (FBX, OBJ, .blend…) | [importing-models.md](importing-models.md) |
 | Draw a texture | [image-editor.md](image-editor.md) |
 | Build a menu or a HUD | [ui-tab.md](ui-tab.md) → [ui-styles.md](ui-styles.md) → [ui-make.md](ui-make.md) |
 | Animate a character | [animation.md](animation.md) |
@@ -80,6 +81,9 @@ The build-something guides. Each one is a path from nothing to a working result.
   `.anim.ron` files, glTF import, and driving it all from Lua.
 - [map-tools.md](map-tools.md) — the **▦ Map** tool: draw, cut, texture and
   **paint** blockout levels in the editor, without a round trip to Blender.
+- [importing-models.md](importing-models.md) — **bring in any model**: FBX, OBJ, STL,
+  PLY, loose glTF, and `.blend`/`.dae`/`.usd` through Blender, converted on arrival with
+  every material map in the slot it was authored in, skins and animation included.
 - [image-editor.md](image-editor.md) — the **🖼 Image** tab: draw a texture in the
   engine and watch it change on the mesh (pixels, paint and vectors, one document).
 - [2d.md](2d.md) — **tilemaps and sprite batches**: a level as one seamless mesh, and

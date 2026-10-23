@@ -101,6 +101,7 @@ pub fn add_flow_rig(
             parent,
             mesh: None,
             skin: None,
+            material: None,
         });
     }
     // The skinned target mesh (a root node bound to the chain).

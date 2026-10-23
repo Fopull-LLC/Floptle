@@ -537,9 +537,9 @@ fn a_loose_gltf_packs_into_one_file_without_changing_the_model() {
 /// A negative scale on a node — which is how anyone makes a left boot from a
 /// right one — reverses triangle winding. Left alone, every face of that node
 /// points inward: invisible from outside, solid from within, and identical to a
-/// correct model in every vertex dump. The FBX path guards this by the same
-/// rule; this is the one a test can construct, because no exporter fixture
-/// happens to mirror.
+/// correct model in every vertex dump. A packed glTF keeps its nodes as they
+/// were, so the engine's importer is what has to turn the triangles round, and
+/// this reads the packed model back through it.
 #[test]
 fn a_mirrored_node_is_not_wound_inside_out() {
     let dir = std::env::temp_dir().join(format!("floptle-conv-mirror-{}", std::process::id()));
@@ -573,14 +573,23 @@ fn a_mirrored_node_is_not_wound_inside_out() {
     std::fs::write(dir.join("m.gltf"), serde_json::to_vec(&doc).unwrap()).unwrap();
 
     let (packed, _) = floptle_convert::convert(&dir.join("m.gltf")).expect("packs");
-    let s = inspect(&packed);
-    assert_eq!(s.tris, 12, "the mirror should not lose triangles");
+    std::fs::write(dir.join("m.glb"), &packed).unwrap();
+    let model = floptle_assets::import(&dir.join("m.glb")).expect("the engine reads the pack");
+    let (mut tris, mut volume) = (0usize, 0f64);
+    for p in &model.parts {
+        for t in p.mesh.indices.as_chunks::<3>().0 {
+            let [a, b, c] = t.map(|i| p.mesh.vertices[i as usize].pos.map(f64::from));
+            volume += (a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+                + a[2] * (b[0] * c[1] - b[1] * c[0]))
+                / 6.0;
+            tris += 1;
+        }
+    }
+    assert_eq!(tris, 12, "the mirror should not lose triangles");
     assert!(
-        s.volume > 0.0,
-        "a mirrored node came out inside out (volume {}) — winding was not corrected",
-        s.volume
+        volume > 0.0,
+        "a mirrored node came out inside out (volume {volume}) — winding was not corrected"
     );
-    assert_eq!(s.normals_agree, 1.0, "normals were not turned with the mirror");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -605,12 +614,12 @@ fn split_glb(glb: &[u8]) -> (Vec<u8>, Vec<u8>) {
 /// The file-picking rules, which decide what the editor offers.
 #[test]
 fn only_the_formats_we_read_are_offered() {
-    for good in ["a.fbx", "a.FBX", "a.obj", "a.stl", "a.ply", "a.gltf"] {
+    for good in ["a.fbx", "a.FBX", "a.obj", "a.stl", "a.ply", "a.gltf", "a.blend", "a.dae", "a.usdz"] {
         assert!(floptle_convert::is_convertible(Path::new(good)), "{good}");
     }
     // Already the output format — converting one to itself is an action whose
-    // best case is doing nothing.
-    for bad in ["a.glb", "a.png", "a.blend", "a", "a.ron"] {
+    // best case is doing nothing. And a Blender backup is not a scene.
+    for bad in ["a.glb", "a.png", "a.blend1", "a.3ds", "a", "a.ron"] {
         assert!(!floptle_convert::is_convertible(Path::new(bad)), "{bad}");
     }
 }

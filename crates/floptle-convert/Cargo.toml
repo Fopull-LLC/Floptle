@@ -1,6 +1,6 @@
 [package]
 name = "floptle-convert"
-description = "Model conversion: FBX / OBJ / STL / PLY / loose glTF into a single self-contained .glb."
+description = "Model conversion: FBX / OBJ / STL / PLY / loose glTF (and .blend / .dae / .usd through Blender) into a single self-contained .glb."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -26,7 +26,9 @@ stl_io = "0.11.0" # STL: CAD and 3D-print exports, binary and ASCII
 # Markdown-based doc-test harness as a BUILD dependency, which is nine extra
 # crates on every clean build of every platform we ship.
 gltf = { workspace = true } # to re-pack a loose .gltf + .bin + textures into one file
-image = { workspace = true } # decode referenced/embedded textures so they can be embedded
-
-[dev-dependencies]
-serde_json = "1" # to split a .glb back into a loose .gltf pair in the tests
+# Decode referenced/embedded textures so they can be embedded. DDS on top of the
+# workspace's formats: game asset packs ship it, and it is pure Rust with no
+# dependencies of its own. Only the editor links this crate, so the player and
+# the browser build never carry it.
+image = { workspace = true, features = ["dds"] }
+serde_json = "1" # the stamp in a converted model, and the verbatim .gltf pack

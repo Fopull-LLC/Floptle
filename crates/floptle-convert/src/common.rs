@@ -5,8 +5,10 @@
 //! five subtly different opinions about whether normals are optional and which
 //! way a triangle winds.
 
-use floptle_assets::glb_write::{WriteMesh, WriteNode, write_glb};
-use floptle_render::TextureData;
+use floptle_assets::glb_write::{
+    write_glb_animated, WriteAnimation, WriteMaterial, WriteMesh, WriteNode, WriteSkin,
+};
+use floptle_render::{TexFilter, TextureData};
 
 use crate::{ConvertError, Report};
 
@@ -25,6 +27,28 @@ pub struct SubMesh {
     pub base_color: [f32; 4],
     /// Index into [`Scene::textures`].
     pub texture: Option<usize>,
+    /// The full material, when the source had more to say than a colour and
+    /// one picture. Its texture indices are into [`Scene::textures`] too.
+    pub material: Option<WriteMaterial>,
+    /// The [`Scene::nodes`] entry this mesh hangs from, so it moves with an
+    /// animated node. `None`: a root, with its vertices already in place.
+    pub parent: Option<usize>,
+    /// Index into [`Scene::skins`], for a mesh that bends with a skeleton,
+    /// with its per-vertex joint slots and weights.
+    pub skin: Option<usize>,
+    pub joints: Option<Vec<[u16; 4]>>,
+    pub weights: Option<Vec<[f32; 4]>>,
+}
+
+/// A node of the converted model's tree: a bone, or the transform an animated
+/// part hangs from. Only a model with a skeleton or animation has any.
+#[derive(Clone, Debug)]
+pub struct SceneNode {
+    pub name: String,
+    pub parent: Option<usize>,
+    pub translation: [f32; 3],
+    pub rotation: [f32; 4],
+    pub scale: [f32; 3],
 }
 
 impl SubMesh {
@@ -103,6 +127,13 @@ impl SubMesh {
 pub struct Scene {
     pub meshes: Vec<SubMesh>,
     pub textures: Vec<TextureData>,
+    /// How each of [`Self::textures`] is filtered, where the source said.
+    pub filters: Vec<Option<TexFilter>>,
+    pub nodes: Vec<SceneNode>,
+    /// Joint indices are into [`Self::nodes`].
+    pub skins: Vec<WriteSkin>,
+    /// Channel node indices are into [`Self::nodes`].
+    pub animations: Vec<WriteAnimation>,
     pub report: Report,
 }
 
@@ -114,7 +145,23 @@ impl Scene {
     /// the output format's requirements, and answering them per reader is how
     /// one format ships broken while the other four are fine.
     pub fn into_glb(mut self) -> Result<(Vec<u8>, Report), ConvertError> {
-        let mut nodes: Vec<WriteNode> = Vec::new();
+        // The tree first, so node indices in skins and animations stay what
+        // the reader wrote; meshes are appended after it.
+        let mut nodes: Vec<WriteNode> = self
+            .nodes
+            .iter()
+            .map(|n| WriteNode {
+                name: n.name.clone(),
+                translation: n.translation,
+                rotation: n.rotation,
+                scale: n.scale,
+                parent: n.parent,
+                mesh: None,
+                skin: None,
+                material: None,
+            })
+            .collect();
+        let tree = nodes.len();
         let mut dropped_tris = 0usize;
 
         for mut m in std::mem::take(&mut self.meshes) {
@@ -124,20 +171,27 @@ impl Scene {
             }
             m.ensure_normals();
             self.report.triangles += m.triangles();
-            nodes.push(WriteNode::mesh_node(
+            let skinned = m.skin.is_some()
+                && m.joints.as_ref().is_some_and(|j| j.len() == m.positions.len())
+                && m.weights.as_ref().is_some_and(|w| w.len() == m.positions.len());
+            let mut node = WriteNode::mesh_node(
                 m.name.clone(),
                 WriteMesh {
                     positions: m.positions,
                     normals: m.normals,
                     uvs: m.uvs,
                     colors: m.colors,
-                    joints: None,
-                    weights: None,
+                    joints: if skinned { m.joints } else { None },
+                    weights: if skinned { m.weights } else { None },
                     indices: m.indices,
                     base_color: m.base_color,
                     texture: m.texture,
                 },
-            ));
+            );
+            node.parent = m.parent.filter(|&p| p < tree);
+            node.skin = if skinned { m.skin } else { None };
+            node.material = m.material;
+            nodes.push(node);
         }
 
         if dropped_tris > 0 {
@@ -150,15 +204,16 @@ impl Scene {
         // **An empty result is a failure, not a small file.** A .glb with no
         // meshes opens fine and shows nothing, which reads as a broken engine
         // rather than as a file that never had geometry in it.
-        if nodes.is_empty() {
+        if nodes.len() == tree {
             return Err(ConvertError::NoGeometry);
         }
 
-        self.report.meshes = nodes.len();
+        self.report.meshes = nodes.len() - tree;
         self.report.textures = self.textures.len();
-        // An FBX names no filter, so the bake names none and the engine's
-        // default applies, as it did to the source.
-        let bytes = write_glb(&nodes, &[], &self.textures, &[]);
+        self.report.skins = self.skins.len();
+        // A source that names no filter gets none, and the engine's default
+        // applies, as it did to the source.
+        let bytes = write_glb_animated(&nodes, &self.skins, &self.textures, &self.filters, &self.animations);
         Ok((bytes, self.report))
     }
 }

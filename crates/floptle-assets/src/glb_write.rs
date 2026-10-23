@@ -7,8 +7,12 @@
 //!
 //! Scope is narrow: triangle meshes with position/normal, optional
 //! TEXCOORD_0 / COLOR_0 / JOINTS_0+WEIGHTS_0, a node tree with TRS + optional skin,
-//! PBR base-color (factor + optional embedded texture), and skins with
-//! inverse-bind matrices. That's the exact surface our importer round-trips.
+//! skins with inverse-bind matrices, and animation clips of node translation,
+//! rotation and scale. A node's material is either the plain one its mesh
+//! names (base-colour factor and texture), or a full [`WriteMaterial`]: every
+//! glTF metallic-roughness map with its factor, alpha mode and sidedness. That
+//! is what a model converted from another format has to carry for its
+//! materials to come out the way they were authored.
 
 use floptle_render::{TexFilter, TextureData};
 use serde_json::{json, Value};
@@ -43,6 +47,96 @@ pub struct WriteNode {
     pub parent: Option<usize>,
     pub mesh: Option<WriteMesh>,
     pub skin: Option<usize>,
+    /// The mesh's full material. When `None` the mesh's own `base_color` and
+    /// `texture` are the whole of it, which is what every bake of a model the
+    /// engine already drew (mirror, auto-rig) wants.
+    pub material: Option<WriteMaterial>,
+}
+
+/// How a material's alpha is read: ignored, a cut-out at a threshold, or
+/// blended.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum AlphaMode {
+    #[default]
+    Opaque,
+    Mask(f32),
+    Blend,
+}
+
+/// A glTF metallic-roughness material. Texture fields index the `textures`
+/// slice handed to the writer, and are written only for a mesh that has UVs:
+/// a map with no coordinates to sample it by is a reference to nothing.
+///
+/// The packing is glTF's: roughness in green and metallic in blue of
+/// `metallic_roughness`, occlusion in red of `occlusion` (which may be the
+/// same picture).
+#[derive(Clone, Debug, PartialEq)]
+pub struct WriteMaterial {
+    pub name: String,
+    pub base_color: [f32; 4],
+    pub base_texture: Option<usize>,
+    pub metallic: f32,
+    pub roughness: f32,
+    pub metallic_roughness: Option<usize>,
+    pub normal: Option<usize>,
+    pub normal_scale: f32,
+    pub occlusion: Option<usize>,
+    pub occlusion_strength: f32,
+    pub emissive: [f32; 3],
+    pub emissive_texture: Option<usize>,
+    pub alpha: AlphaMode,
+    pub double_sided: bool,
+}
+
+impl Default for WriteMaterial {
+    /// glTF's own defaults, except metallic: a material that says nothing
+    /// about metal is not metal, where glTF would make it fully metallic.
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            base_color: [1.0; 4],
+            base_texture: None,
+            metallic: 0.0,
+            roughness: 1.0,
+            metallic_roughness: None,
+            normal: None,
+            normal_scale: 1.0,
+            occlusion: None,
+            occlusion_strength: 1.0,
+            emissive: [0.0; 3],
+            emissive_texture: None,
+            alpha: AlphaMode::Opaque,
+            double_sided: false,
+        }
+    }
+}
+
+/// Which property of a node an animation channel drives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnimTarget {
+    Translation,
+    /// Values are quaternions, `xyzw`.
+    Rotation,
+    Scale,
+}
+
+/// One animated property of one node: key times in seconds and a value per
+/// key (translation and scale use the first three components).
+#[derive(Clone, Debug)]
+pub struct WriteChannel {
+    pub node: usize,
+    pub target: AnimTarget,
+    pub times: Vec<f32>,
+    pub values: Vec<[f32; 4]>,
+    /// Hold each key until the next rather than blending between them.
+    pub step: bool,
+}
+
+/// A named animation clip.
+#[derive(Clone, Debug)]
+pub struct WriteAnimation {
+    pub name: String,
+    pub channels: Vec<WriteChannel>,
 }
 
 impl WriteNode {
@@ -56,6 +150,7 @@ impl WriteNode {
             parent: None,
             mesh: Some(mesh),
             skin: None,
+            material: None,
         }
     }
 }
@@ -158,6 +253,19 @@ pub fn write_glb(
     textures: &[TextureData],
     filters: &[Option<TexFilter>],
 ) -> Vec<u8> {
+    write_glb_animated(nodes, skins, textures, filters, &[])
+}
+
+/// [`write_glb`] with animation clips. A channel naming a node that is not in
+/// `nodes`, or whose keys and values disagree in number, is left out rather
+/// than written as a file a reader would refuse.
+pub fn write_glb_animated(
+    nodes: &[WriteNode],
+    skins: &[WriteSkin],
+    textures: &[TextureData],
+    filters: &[Option<TexFilter>],
+    animations: &[WriteAnimation],
+) -> Vec<u8> {
     let mut bin = BinBuf::default();
     let mut accessors: Vec<Value> = Vec::new();
     let mut meshes: Vec<Value> = Vec::new();
@@ -245,23 +353,33 @@ pub fn write_glb(
         let iacc = accessor(&mut accessors, iv, U32, m.indices.len(), "SCALAR", false);
 
         // material
-        let mut pbr = json!({
-            "baseColorFactor": m.base_color,
-            "metallicFactor": 0.0,
-            "roughnessFactor": 1.0,
+        let material = match &node.material {
+            Some(wm) => material_json(wm, has_uv, gltf_textures.len()),
+            None => {
+                let mut pbr = json!({
+                    "baseColorFactor": m.base_color,
+                    "metallicFactor": 0.0,
+                    "roughnessFactor": 1.0,
+                });
+                if let Some(t) = m.texture
+                    && has_uv
+                    && t < gltf_textures.len()
+                {
+                    pbr["baseColorTexture"] = json!({ "index": t });
+                }
+                json!({
+                    "name": format!("{}_mat", node.name),
+                    "pbrMetallicRoughness": pbr,
+                    "doubleSided": true,
+                })
+            }
+        };
+        // One material shared by forty parts is written once, so it reads
+        // back as one material rather than forty copies of it.
+        let mat = materials.iter().position(|v| *v == material).unwrap_or_else(|| {
+            materials.push(material);
+            materials.len() - 1
         });
-        if let Some(t) = m.texture
-            && has_uv
-            && t < gltf_textures.len()
-        {
-            pbr["baseColorTexture"] = json!({ "index": t });
-        }
-        let mat = materials.len();
-        materials.push(json!({
-            "name": format!("{}_mat", node.name),
-            "pbrMetallicRoughness": pbr,
-            "doubleSided": true,
-        }));
 
         let mesh_idx = meshes.len();
         meshes.push(json!({
@@ -342,7 +460,100 @@ pub fn write_glb(
         root["skins"] = json!(gltf_skins);
     }
 
+    // ---- animations: one sampler per channel ----
+    let mut gltf_anims: Vec<Value> = Vec::new();
+    for a in animations {
+        let mut samplers: Vec<Value> = Vec::new();
+        let mut channels: Vec<Value> = Vec::new();
+        for c in a.channels.iter() {
+            if c.node >= nodes.len() || c.times.is_empty() || c.times.len() != c.values.len() {
+                continue;
+            }
+            let (lo, hi) = c.times.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(l, h), &t| (l.min(t), h.max(t)));
+            let tv = bin.view(&f32_bytes(&c.times.iter().map(|&t| [t]).collect::<Vec<_>>()), None);
+            let input = accessor(&mut accessors, tv, F32, c.times.len(), "SCALAR", false);
+            accessors[input]["min"] = json!([lo]);
+            accessors[input]["max"] = json!([hi]);
+            let (output, path) = match c.target {
+                AnimTarget::Rotation => {
+                    let ov = bin.view(&f32_bytes(&c.values), None);
+                    (accessor(&mut accessors, ov, F32, c.values.len(), "VEC4", false), "rotation")
+                }
+                AnimTarget::Translation | AnimTarget::Scale => {
+                    let rows: Vec<[f32; 3]> = c.values.iter().map(|v| [v[0], v[1], v[2]]).collect();
+                    let ov = bin.view(&f32_bytes(&rows), None);
+                    let path = if c.target == AnimTarget::Scale { "scale" } else { "translation" };
+                    (accessor(&mut accessors, ov, F32, rows.len(), "VEC3", false), path)
+                }
+            };
+            samplers.push(json!({
+                "input": input,
+                "output": output,
+                "interpolation": if c.step { "STEP" } else { "LINEAR" },
+            }));
+            channels.push(json!({ "sampler": samplers.len() - 1, "target": { "node": c.node, "path": path } }));
+        }
+        if !channels.is_empty() {
+            gltf_anims.push(json!({ "name": a.name, "samplers": samplers, "channels": channels }));
+        }
+    }
+    if !gltf_anims.is_empty() {
+        // Accessors and views were added after the root was built.
+        root["accessors"] = json!(accessors);
+        root["bufferViews"] = json!(bin.views);
+        root["buffers"] = json!([{ "byteLength": bin.data.len() }]);
+        root["animations"] = json!(gltf_anims);
+    }
+
     container(&root, &bin.data)
+}
+
+/// A [`WriteMaterial`] as glTF JSON. `textures` is how many textures the file
+/// holds, so a stale index is dropped instead of written.
+fn material_json(m: &WriteMaterial, has_uv: bool, textures: usize) -> Value {
+    let tex = |t: Option<usize>| t.filter(|&i| has_uv && i < textures);
+    let mut pbr = json!({
+        "baseColorFactor": m.base_color,
+        "metallicFactor": m.metallic,
+        "roughnessFactor": m.roughness,
+    });
+    if let Some(t) = tex(m.base_texture) {
+        pbr["baseColorTexture"] = json!({ "index": t });
+    }
+    if let Some(t) = tex(m.metallic_roughness) {
+        pbr["metallicRoughnessTexture"] = json!({ "index": t });
+    }
+    let mut v = json!({ "pbrMetallicRoughness": pbr, "doubleSided": m.double_sided });
+    if !m.name.is_empty() {
+        v["name"] = json!(m.name);
+    }
+    if let Some(t) = tex(m.normal) {
+        v["normalTexture"] = json!({ "index": t, "scale": m.normal_scale });
+    }
+    if let Some(t) = tex(m.occlusion) {
+        v["occlusionTexture"] = json!({ "index": t, "strength": m.occlusion_strength });
+    }
+    // glTF's emissive factor stops at 1. A brighter glow is written at full
+    // strength rather than refused by every reader.
+    let e = m.emissive.map(|c| c.clamp(0.0, 1.0));
+    if e.iter().any(|&c| c > 0.0) {
+        v["emissiveFactor"] = json!(e);
+    }
+    if let Some(t) = tex(m.emissive_texture) {
+        v["emissiveTexture"] = json!({ "index": t });
+        if e.iter().all(|&c| c == 0.0) {
+            v["emissiveFactor"] = json!([1.0, 1.0, 1.0]);
+        }
+    }
+    match m.alpha {
+        AlphaMode::Opaque => {}
+        AlphaMode::Mask(cutoff) => {
+            v["alphaMode"] = json!("MASK");
+            v["alphaCutoff"] = json!(cutoff);
+        }
+        AlphaMode::Blend => v["alphaMode"] = json!("BLEND"),
+    }
+    v
 }
 
 /// Wrap the JSON + BIN into the GLB binary container.

@@ -146,7 +146,8 @@ pub(crate) struct AssetKind {
 #[cfg(feature = "editor-ui")]
 pub(crate) fn asset_kind(path: &str) -> AssetKind {
     let k = |glyph, (r, g, b), label| AssetKind { glyph, color: egui::Color32::from_rgb(r, g, b), label };
-    if is_model(path) {
+    // A source that converts to a model is one, a moment early.
+    if is_model(path) || is_convertible_model(path) {
         k("⬣", (80, 200, 210), "model")
     } else if is_script(path) {
         k("¶", (170, 195, 235), "script")

@@ -1,4 +1,4 @@
-//! **A loose `.gltf` into one `.glb`.**
+//! **A loose `.gltf` into one `.glb`, verbatim.**
 //!
 //! Not a format conversion — it is already glTF — but it is the thing people
 //! most often need and least expect to. A `.gltf` is JSON that *points at* its
@@ -11,244 +11,287 @@
 //! of `.glb`, and it is why this sits beside the real converters rather than
 //! being treated as a no-op.
 //!
-//! **Faithful, not normalised.** Unlike the FBX path there is nothing to fix:
-//! the source is already right-handed Y-up in metres with triangles. The
-//! engine's own `gltf_import` is not reused here because it
-//! *recenters* what it loads — right for placing a prop in a scene, wrong for a
-//! conversion, which must give back the model that went in.
+//! **Verbatim, not rebuilt.** The JSON is kept as written and only its
+//! references change: every buffer is folded into the one binary chunk (each
+//! buffer view moved by where its buffer landed) and every image file is
+//! copied in beside them. Nodes, skins, animations, materials with all their
+//! maps and texture transforms, samplers and their filters, and extensions
+//! all come through untouched, because nothing here reads them in order to
+//! write them out again.
 
 use std::path::Path;
 
-use crate::common::{Scene, SubMesh};
-use crate::ConvertError;
+use serde_json::{json, Value};
 
-pub fn read(src: &Path) -> Result<Scene, ConvertError> {
-    let (doc, buffers, images) =
-        gltf::import(src).map_err(|e| ConvertError::Malformed(e.to_string()))?;
+use crate::textures::{self, Finder};
+use crate::{ConvertError, MapSlot, MapUse, MissingMap, Report};
 
-    let mut out = Scene::default();
-
-    // Every image the file references, decoded once. glTF already de-duplicates
-    // them, so the indices line up with the document's.
-    for img in &images {
-        if let Some(t) = to_texture(img) {
-            out.textures.push(t);
-        } else {
-            out.report
-                .warnings
-                .push("A texture could not be decoded and was left out.".into());
-            // A placeholder keeps every later index correct — dropping it would
-            // silently shift every material's texture to its neighbour's.
-            out.textures.push(floptle_render::TextureData {
-                pixels: vec![255, 255, 255, 255],
-                width: 1,
-                height: 1,
-            });
-        }
+/// Pack `src` and its files into one `.glb`.
+pub fn pack(src: &Path) -> Result<(Vec<u8>, Report), ConvertError> {
+    let text = std::fs::read(src).map_err(|e| ConvertError::Io(e.to_string()))?;
+    let mut root: Value = serde_json::from_slice(&text)
+        .map_err(|e| ConvertError::Malformed(format!("it is not glTF JSON ({e})")))?;
+    if !root["asset"].is_object() {
+        return Err(ConvertError::Malformed("it has no glTF `asset` block".into()));
     }
+    let mut report = Report::default();
+    let mut finder = Finder::new(src);
+    let dir = src.parent().unwrap_or(Path::new("."));
 
-    // **Walk the scene's node tree, not the mesh list.** A glTF mesh can be
-    // instanced by several nodes at different transforms; iterating meshes
-    // would place every instance at the origin, collapsing a row of pillars
-    // into one.
-    for scene in doc.scenes() {
-        for node in scene.nodes() {
-            walk(&node, [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ], &buffers, &mut out);
-        }
-    }
-
-    if doc.animations().count() > 0 {
-        out.report.dropped.push(format!("{} animation(s)", doc.animations().count()));
-    }
-    if doc.skins().count() > 0 {
-        out.report.dropped.push("skinning (converted in its bind pose)".into());
-    }
-    out.report.materials = doc.materials().count();
-    Ok(out)
-}
-
-fn to_texture(img: &gltf::image::Data) -> Option<floptle_render::TextureData> {
-    use gltf::image::Format;
-    let (w, h) = (img.width, img.height);
-    let px = match img.format {
-        Format::R8G8B8A8 => img.pixels.clone(),
-        Format::R8G8B8 => img
-            .pixels
-            .as_chunks::<3>().0
-            .iter()
-            .flat_map(|c| [c[0], c[1], c[2], 255])
-            .collect(),
-        Format::R8 => img.pixels.iter().flat_map(|&v| [v, v, v, 255]).collect(),
-        Format::R8G8 => img
-            .pixels
-            .as_chunks::<2>().0
-            .iter()
-            .flat_map(|c| [c[0], c[0], c[0], c[1]])
-            .collect(),
-        // 16-bit and float images are legal and rare. Rather than guess at a
-        // tone mapping, say it was dropped.
-        _ => return None,
-    };
-    Some(floptle_render::TextureData { pixels: px, width: w, height: h })
-}
-
-fn mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
-    let mut m = [[0.0f32; 4]; 4];
-    for (i, row) in m.iter_mut().enumerate() {
-        for (j, cell) in row.iter_mut().enumerate() {
-            for k in 0..4 {
-                *cell += a[k][j] * b[i][k];
+    // ---- every buffer into one ----
+    let mut bin: Vec<u8> = Vec::new();
+    let mut moved: Vec<usize> = Vec::new();
+    for (i, b) in root["buffers"].as_array().cloned().unwrap_or_default().iter().enumerate() {
+        let bytes = match b["uri"].as_str() {
+            Some(uri) => read_uri(dir, uri).ok_or_else(|| {
+                ConvertError::Malformed(format!(
+                    "its geometry, `{}`, is not beside it — a .gltf has to travel with its .bin",
+                    textures::short_name(uri)
+                ))
+            })?,
+            None => {
+                return Err(ConvertError::Malformed(format!("buffer {i} names no file")));
             }
+        };
+        while !bin.len().is_multiple_of(8) {
+            bin.push(0);
+        }
+        moved.push(bin.len());
+        bin.extend_from_slice(&bytes);
+    }
+    if let Some(views) = root["bufferViews"].as_array_mut() {
+        for v in views {
+            let b = v["buffer"].as_u64().unwrap_or(0) as usize;
+            let off = v["byteOffset"].as_u64().unwrap_or(0) as usize + moved.get(b).copied().unwrap_or(0);
+            v["buffer"] = json!(0);
+            v["byteOffset"] = json!(off);
         }
     }
-    m
-}
 
-fn point(m: &[[f32; 4]; 4], p: [f32; 3]) -> [f32; 3] {
-    [
-        m[0][0] * p[0] + m[1][0] * p[1] + m[2][0] * p[2] + m[3][0],
-        m[0][1] * p[0] + m[1][1] * p[1] + m[2][1] * p[2] + m[3][1],
-        m[0][2] * p[0] + m[1][2] * p[1] + m[2][2] * p[2] + m[3][2],
-    ]
-}
-
-/// The matrix a normal is transformed by: the inverse transpose of the upper
-/// 3×3.
-///
-/// Not the matrix positions use. Under non-uniform scale the two differ — a
-/// node squashed on one axis tilts its normals the wrong way if the position
-/// matrix is reused, and the model lights as though its surfaces face somewhere
-/// they do not. For a rigid or mirroring transform the two happen to coincide,
-/// which is exactly why this is easy to get wrong and hard to notice.
-fn normal_matrix(m: &[[f32; 4]; 4]) -> [[f32; 3]; 3] {
-    let a = [
-        [m[0][0], m[0][1], m[0][2]],
-        [m[1][0], m[1][1], m[1][2]],
-        [m[2][0], m[2][1], m[2][2]],
-    ];
-    let det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1])
-        - a[1][0] * (a[0][1] * a[2][2] - a[0][2] * a[2][1])
-        + a[2][0] * (a[0][1] * a[1][2] - a[0][2] * a[1][1]);
-    if det.abs() < 1e-20 {
-        // Degenerate (a node scaled flat to nothing). The plain matrix is the
-        // best available and cannot be worse than dividing by zero.
-        return a;
+    // ---- every image file in beside them ----
+    let image_count = root["images"].as_array().map_or(0, Vec::len);
+    let mut missing_images: Vec<(usize, String)> = Vec::new();
+    let mut image_names: Vec<String> = vec![String::new(); image_count];
+    for i in 0..image_count {
+        let Some(uri) = root["images"][i]["uri"].as_str().map(str::to_string) else {
+            image_names[i] = "embedded".into();
+            continue;
+        };
+        let name = if uri.starts_with("data:") { "embedded".to_string() } else { textures::short_name(&percent_decode(&uri)) };
+        image_names[i] = name.clone();
+        let found = if uri.starts_with("data:") {
+            read_uri(dir, &uri)
+        } else {
+            let plain = percent_decode(&uri);
+            finder.find(&[&plain]).and_then(|p| std::fs::read(p).ok())
+        };
+        let Some(mut bytes) = found else {
+            missing_images.push((i, name));
+            continue;
+        };
+        let mut mime = mime_of(&bytes);
+        // glTF readers take PNG and JPEG; anything else that decodes is
+        // turned into PNG rather than written as an image nothing can open.
+        if mime.is_none()
+            && let Some(px) = textures::decode(&bytes, &name)
+            && let Some(png) = floptle_assets::encode_png(&px)
+        {
+            bytes = png;
+            mime = Some("image/png");
+        }
+        let Some(mime) = mime else {
+            report.warnings.push(format!("The texture `{name}` is in a format Floptle cannot read and was left out."));
+            missing_images.push((i, name));
+            continue;
+        };
+        while !bin.len().is_multiple_of(8) {
+            bin.push(0);
+        }
+        let view = root["bufferViews"].as_array().map_or(0, Vec::len);
+        if !root["bufferViews"].is_array() {
+            root["bufferViews"] = json!([]);
+        }
+        if let Some(views) = root["bufferViews"].as_array_mut() {
+            views.push(json!({ "buffer": 0, "byteOffset": bin.len(), "byteLength": bytes.len() }));
+        }
+        bin.extend_from_slice(&bytes);
+        let img = &mut root["images"][i];
+        if let Some(o) = img.as_object_mut() {
+            o.remove("uri");
+        }
+        img["bufferView"] = json!(view);
+        img["mimeType"] = json!(mime);
     }
-    let inv = 1.0 / det;
-    // cofactor(a)/det == transpose(inverse(a)), which is the matrix wanted.
-    [
-        [
-            (a[1][1] * a[2][2] - a[1][2] * a[2][1]) * inv,
-            (a[1][2] * a[2][0] - a[1][0] * a[2][2]) * inv,
-            (a[1][0] * a[2][1] - a[1][1] * a[2][0]) * inv,
-        ],
-        [
-            (a[0][2] * a[2][1] - a[0][1] * a[2][2]) * inv,
-            (a[0][0] * a[2][2] - a[0][2] * a[2][0]) * inv,
-            (a[0][1] * a[2][0] - a[0][0] * a[2][1]) * inv,
-        ],
-        [
-            (a[0][1] * a[1][2] - a[0][2] * a[1][1]) * inv,
-            (a[0][2] * a[1][0] - a[0][0] * a[1][2]) * inv,
-            (a[0][0] * a[1][1] - a[0][1] * a[1][0]) * inv,
-        ],
-    ]
+    // An image that could not be found is replaced by one white pixel so every
+    // index after it still points where it did, and no material samples it:
+    // its references are taken out, so the slot falls back to the factor.
+    for (i, _) in &missing_images {
+        while !bin.len().is_multiple_of(8) {
+            bin.push(0);
+        }
+        let px = floptle_render::TextureData { pixels: vec![255; 4], width: 1, height: 1 };
+        let png = floptle_assets::encode_png(&px).unwrap_or_default();
+        let view = root["bufferViews"].as_array().map_or(0, Vec::len);
+        if let Some(views) = root["bufferViews"].as_array_mut() {
+            views.push(json!({ "buffer": 0, "byteOffset": bin.len(), "byteLength": png.len() }));
+        }
+        bin.extend_from_slice(&png);
+        let img = &mut root["images"][*i];
+        if let Some(o) = img.as_object_mut() {
+            o.remove("uri");
+        }
+        img["bufferView"] = json!(view);
+        img["mimeType"] = json!("image/png");
+    }
+    while !bin.len().is_multiple_of(4) {
+        bin.push(0);
+    }
+    root["buffers"] = json!([{ "byteLength": bin.len() }]);
+
+    describe(&mut root, &image_names, &missing_images, &mut report);
+    let glb = crate::stamp::join(&root, &bin);
+    // The result has to be glTF a reader accepts, or this has only moved the
+    // problem; and a pack with nothing to draw is no model.
+    let gltf = gltf::Gltf::from_slice(&glb).map_err(|e| ConvertError::Malformed(e.to_string()))?;
+    if gltf.document.meshes().len() == 0 {
+        return Err(ConvertError::NoGeometry);
+    }
+    Ok((glb, report))
 }
 
-fn dir(n: &[[f32; 3]; 3], p: [f32; 3]) -> [f32; 3] {
-    let v = [
-        n[0][0] * p[0] + n[1][0] * p[1] + n[2][0] * p[2],
-        n[0][1] * p[0] + n[1][1] * p[1] + n[2][1] * p[2],
-        n[0][2] * p[0] + n[1][2] * p[1] + n[2][2] * p[2],
+/// Fill `report` from a glTF document: its counts, the picture in each
+/// material slot, its clips and skins. Material references to `missing`
+/// images are taken out of `root`, and reported as missing.
+pub(crate) fn describe(root: &mut Value, image_names: &[String], missing: &[(usize, String)], report: &mut Report) {
+    let texture_image = |root: &Value, t: u64| root["textures"][t as usize]["source"].as_u64();
+    let slots: [(&[&str], MapSlot); 5] = [
+        (&["pbrMetallicRoughness", "baseColorTexture"], MapSlot::BaseColor),
+        (&["pbrMetallicRoughness", "metallicRoughnessTexture"], MapSlot::Roughness),
+        (&["normalTexture"], MapSlot::Normal),
+        (&["occlusionTexture"], MapSlot::Occlusion),
+        (&["emissiveTexture"], MapSlot::Emissive),
     ];
-    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    if len > 1e-12 { [v[0] / len, v[1] / len, v[2] / len] } else { [0.0, 1.0, 0.0] }
-}
-
-fn det3(m: &[[f32; 4]; 4]) -> f32 {
-    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
-        - m[1][0] * (m[0][1] * m[2][2] - m[0][2] * m[2][1])
-        + m[2][0] * (m[0][1] * m[1][2] - m[0][2] * m[1][1])
-}
-
-fn walk(
-    node: &gltf::Node,
-    parent: [[f32; 4]; 4],
-    buffers: &[gltf::buffer::Data],
-    out: &mut Scene,
-) {
-    let world = mul(parent, node.transform().matrix());
-
-    if let Some(mesh) = node.mesh() {
-        // A negative determinant means this node mirrors, which reverses
-        // winding — the same trap as in the FBX path, and just as invisible.
-        let flipped = det3(&world) < 0.0;
-        for (i, prim) in mesh.primitives().enumerate() {
-            if prim.mode() != gltf::mesh::Mode::Triangles {
-                out.report.warnings.push(
-                    "A primitive that was not triangles (points or lines) was left out.".into(),
-                );
+    let count = root["materials"].as_array().map_or(0, Vec::len);
+    for mi in 0..count {
+        let name = root["materials"][mi]["name"].as_str().unwrap_or("").to_string();
+        for (path, slot) in slots {
+            let info = path.iter().fold(&root["materials"][mi], |v, k| &v[*k]);
+            let Some(t) = info["index"].as_u64() else { continue };
+            let Some(img) = texture_image(root, t) else { continue };
+            if let Some((_, n)) = missing.iter().find(|(i, _)| *i as u64 == img) {
+                report.missing.push(MissingMap { material: name.clone(), slot, name: n.clone() });
+                let (last, parent) = path.split_last().unwrap_or((&"", &[]));
+                let holder = parent.iter().fold(&mut root["materials"][mi], |v, k| &mut v[*k]);
+                if let Some(o) = holder.as_object_mut() {
+                    o.remove(*last);
+                }
                 continue;
             }
-            let reader = prim.reader(|b| buffers.get(b.index()).map(|d| &d.0[..]));
-            let Some(positions) = reader.read_positions() else { continue };
-
-            let mut sm = SubMesh {
-                name: if i > 0 {
-                    format!("{}_{i}", mesh.name().unwrap_or("mesh"))
-                } else {
-                    mesh.name().unwrap_or("mesh").to_string()
-                },
-                base_color: [1.0, 1.0, 1.0, 1.0],
-                ..Default::default()
-            };
-            for p in positions {
-                sm.positions.push(point(&world, p));
+            let texture = image_names.get(img as usize).cloned().unwrap_or_default();
+            report.maps.push(MapUse { material: name.clone(), slot, texture: texture.clone(), note: None });
+            if slot == MapSlot::Roughness {
+                report.maps.push(MapUse { material: name.clone(), slot: MapSlot::Metallic, texture, note: Some("one picture, glTF's packing") });
             }
-            if let Some(ns) = reader.read_normals() {
-                // **Transformed, never negated.** Reflecting a surface reflects
-                // its outward normal too, so the transformed normal is already
-                // right; it is the winding that a mirror inverts, and swapping
-                // two corners below is the whole of the correction. Negating as
-                // well undoes it, and leaves the normals disagreeing with the
-                // faces they belong to.
-                let nm = normal_matrix(&world);
-                for n in ns {
-                    sm.normals.push(dir(&nm, n));
-                }
-            }
-            if let Some(uv) = reader.read_tex_coords(0) {
-                // Already in glTF's convention — this is a repack, so it must
-                // not get the flip the FBX path applies.
-                sm.uvs = Some(uv.into_f32().collect());
-            }
-            if let Some(c) = reader.read_colors(0) {
-                sm.colors = Some(c.into_rgba_u8().collect());
-            }
-            match reader.read_indices() {
-                Some(idx) => sm.indices = idx.into_u32().collect(),
-                None => sm.indices = (0..sm.positions.len() as u32).collect(),
-            }
-            if flipped {
-                for t in sm.indices.as_chunks_mut::<3>().0 {
-                    t.swap(1, 2);
-                }
-            }
-
-            let mat = prim.material();
-            let pbr = mat.pbr_metallic_roughness();
-            sm.base_color = pbr.base_color_factor();
-            sm.texture = pbr.base_color_texture().map(|t| t.texture().source().index());
-            out.meshes.push(sm);
         }
     }
+    report.materials = count;
+    report.meshes = root["meshes"].as_array().map_or(0, |m| m.iter().map(|m| m["primitives"].as_array().map_or(0, Vec::len)).sum());
+    report.textures = image_names.len() - missing.len();
+    report.skins = root["skins"].as_array().map_or(0, Vec::len);
+    for (i, a) in root["animations"].as_array().cloned().unwrap_or_default().iter().enumerate() {
+        report.animations.push(a["name"].as_str().map(str::to_string).unwrap_or_else(|| format!("Clip{i}")));
+    }
+    // Triangles, from each primitive's index (or vertex) count.
+    let acc = |i: &Value| i.as_u64().and_then(|i| root["accessors"][i as usize]["count"].as_u64());
+    let mut tris = 0u64;
+    for m in root["meshes"].as_array().cloned().unwrap_or_default() {
+        for p in m["primitives"].as_array().cloned().unwrap_or_default() {
+            let mode = p["mode"].as_u64().unwrap_or(4);
+            if mode != 4 {
+                continue;
+            }
+            tris += acc(&p["indices"]).or_else(|| acc(&p["attributes"]["POSITION"])).unwrap_or(0) / 3;
+        }
+    }
+    report.triangles = tris as usize;
+    for ext in root["extensionsRequired"].as_array().cloned().unwrap_or_default() {
+        if let Some(e) = ext.as_str()
+            && (e == "KHR_draco_mesh_compression" || e == "EXT_meshopt_compression")
+        {
+            report.warnings.push(format!(
+                "The model is compressed with {e}, which Floptle cannot decode; re-export it without mesh compression."
+            ));
+        }
+    }
+}
 
-    for child in node.children() {
-        walk(&child, world, buffers, out);
+/// The bytes a glTF URI names: a base64 data URI decoded, or a file beside
+/// the model.
+fn read_uri(dir: &Path, uri: &str) -> Option<Vec<u8>> {
+    if let Some(rest) = uri.strip_prefix("data:") {
+        let payload = rest.split_once(";base64,").map(|(_, b)| b)?;
+        return base64_decode(payload);
+    }
+    std::fs::read(dir.join(percent_decode(uri))).ok()
+}
+
+/// A relative glTF URI is percent-encoded; file names with spaces and
+/// non-ASCII letters arrive as `%20` and `%C3%A9`.
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let Ok(v) = u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("zz"), 16)
+        {
+            out.push(v);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let val = |c: u8| -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return None,
+        } as u32)
+    };
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for &c in s.as_bytes() {
+        if c == b'=' || c.is_ascii_whitespace() {
+            continue;
+        }
+        acc = (acc << 6) | val(c)?;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+
+/// The glTF image type of encoded bytes, by their signature: the two every
+/// reader takes.
+fn mime_of(b: &[u8]) -> Option<&'static str> {
+    if b.starts_with(&[0x89, b'P', b'N', b'G']) {
+        Some("image/png")
+    } else if b.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else {
+        None
     }
 }

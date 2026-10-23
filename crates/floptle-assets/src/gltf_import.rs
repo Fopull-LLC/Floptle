@@ -59,9 +59,20 @@ pub struct ImportedPart {
 /// A glTF material's maps beyond base colour, as indices into the model's
 /// decoded images, and the factors that scale them. glTF's packing is the
 /// engine's: roughness in green and metallic in blue of one image, occlusion
-/// in red.
+/// in red. Also how the material's alpha is read, whether it is drawn from
+/// behind, and its base map's texture transform.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PartMaps {
+    /// The primitive names a material of its own. One that names none gets
+    /// glTF's default material, which says nothing anybody authored.
+    pub explicit: bool,
+    pub alpha_mode: crate::glb_write::AlphaMode,
+    /// The base-colour factor's alpha.
+    pub alpha: f32,
+    pub double_sided: bool,
+    /// The base-colour map's `KHR_texture_transform`: offset, scale and
+    /// rotation (radians), as glTF spells them.
+    pub uv_transform: Option<UvTransform>,
     pub metallic_roughness: Option<usize>,
     pub metallic: f32,
     pub roughness: f32,
@@ -71,6 +82,14 @@ pub struct PartMaps {
     pub occlusion_strength: f32,
     pub emissive: Option<usize>,
     pub emissive_factor: [f32; 3],
+}
+
+/// A `KHR_texture_transform`: `uv' = offset + rotate(rotation) · (scale · uv)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UvTransform {
+    pub offset: [f32; 2],
+    pub scale: [f32; 2],
+    pub rotation: f32,
 }
 
 impl PartMaps {
@@ -90,7 +109,23 @@ impl PartMaps {
 pub(crate) fn part_maps(m: &gltf::Material) -> PartMaps {
     let pbr = m.pbr_metallic_roughness();
     let first_uv = |set: u32, idx: usize| (set == 0).then_some(idx);
+    use gltf::material::AlphaMode as G;
+    let alpha_mode = match m.alpha_mode() {
+        G::Opaque => crate::glb_write::AlphaMode::Opaque,
+        G::Mask => crate::glb_write::AlphaMode::Mask(m.alpha_cutoff().unwrap_or(0.5)),
+        G::Blend => crate::glb_write::AlphaMode::Blend,
+    };
+    let uv_transform = pbr.base_color_texture().and_then(|t| t.texture_transform()).map(|x| UvTransform {
+        offset: x.offset(),
+        scale: x.scale(),
+        rotation: x.rotation(),
+    });
     PartMaps {
+        explicit: m.index().is_some(),
+        alpha_mode,
+        alpha: pbr.base_color_factor()[3],
+        double_sided: m.double_sided(),
+        uv_transform,
         metallic_roughness: pbr
             .metallic_roughness_texture()
             .and_then(|t| first_uv(t.tex_coord(), t.texture().source().index())),
@@ -498,8 +533,18 @@ fn add_primitives(m: &gltf::Mesh, world: Mat4, buffers: &[gltf::buffer::Data], p
             let uv = uvs.as_ref().map(|u| u[i]).unwrap_or([0.0, 0.0]);
             part.mesh.vertices.push(Vertex { pos: p.to_array(), normal: n.to_array(), uv });
         }
-        for idx in indices {
-            part.mesh.indices.push(base + idx);
+        // **A mirroring node reverses winding.** glTF asks the reader to turn
+        // a primitive's triangles round when its node's world transform has a
+        // negative determinant; baking the transform into the vertices without
+        // doing so leaves every face of a mirrored part pointing inward.
+        if m3.determinant() < 0.0 {
+            for t in indices.as_chunks::<3>().0 {
+                part.mesh.indices.extend_from_slice(&[base + t[0], base + t[2], base + t[1]]);
+            }
+        } else {
+            for idx in indices {
+                part.mesh.indices.push(base + idx);
+            }
         }
 
         // Parts accumulate many primitives, and COLOR_0 is per-primitive — so a part can
@@ -895,5 +940,33 @@ mod geometry_tests {
              streams bakes again every few seconds. The third row is what a\n  \
              second bake of an unchanged level now costs.\n"
         );
+    }
+}
+
+#[cfg(test)]
+mod material_tests {
+    /// **The alpha mode, cutoff, sidedness and base-map transform a file
+    /// names are read**, and a primitive with no material says so.
+    #[test]
+    fn a_material_s_alpha_sides_and_texture_transform_are_read() {
+        use crate::glb_write::AlphaMode;
+        let doc = r#"{"asset":{"version":"2.0"},"extensionsUsed":["KHR_texture_transform"],
+            "textures":[{"source":0}],"images":[{"uri":"a.png"}],
+            "materials":[
+              {"alphaMode":"MASK","alphaCutoff":0.3,"doubleSided":true,
+               "pbrMetallicRoughness":{"baseColorFactor":[1,1,1,0.8],"baseColorTexture":{"index":0,
+                 "extensions":{"KHR_texture_transform":{"offset":[0.5,0.25],"scale":[2,3],"rotation":0.5}}}}},
+              {"alphaMode":"BLEND"},
+              {}
+            ]}"#;
+        let g = gltf::Gltf::from_slice(doc.as_bytes()).unwrap();
+        let m: Vec<_> = g.document.materials().map(|m| super::part_maps(&m)).collect();
+        assert_eq!(m[0].alpha_mode, AlphaMode::Mask(0.3));
+        assert!(m[0].double_sided && m[0].explicit);
+        assert_eq!(m[0].alpha, 0.8);
+        let t = m[0].uv_transform.expect("the transform is read");
+        assert_eq!((t.offset, t.scale, t.rotation), ([0.5, 0.25], [2.0, 3.0], 0.5));
+        assert_eq!(m[1].alpha_mode, AlphaMode::Blend);
+        assert!(!m[2].double_sided && m[2].alpha_mode == AlphaMode::Opaque, "glTF's defaults");
     }
 }

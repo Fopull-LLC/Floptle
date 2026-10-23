@@ -217,20 +217,33 @@ A panel ([`./editor.md`](./editor.md) §2) listing project assets by folder/kind
 ## 7. Converting a model the engine cannot open
 
 Asset packs are FBX. Scans are PLY. Anything from CAD is STL. Telling somebody
-their model is the wrong kind of file is true and useless, so the Assets browser
-converts it: right-click ⏵ **⇄ Convert to .glb**, or just double-click it.
+their model is the wrong kind of file is true and useless, so the editor
+converts it **on arrival**: a supported model anywhere in the project is
+converted in the background, and again whenever its source changes. The how-to
+is [`../importing-models.md`](../importing-models.md); this is the design.
 
 The result is written beside the source and is **one self-contained `.glb`** —
 geometry, materials and embedded textures — with the source left untouched.
-Nothing is overwritten: if the `.glb` already exists, it says so instead.
+Beside rather than in a cache, because the `.glb` is what a scene names and a
+build ships: next to its source it is an ordinary asset that a clone, an export
+and the web build all already handle. The Assets panel folds the pair into one
+row, and delete, move and rename carry both.
+
+**Only its own output is written over.** Every converted `.glb` carries a stamp
+in `asset.extras.floptleConverted`: the source's format, a hash of its bytes and
+the converter's version. A `.glb` without one is somebody's own and is never
+replaced. A source newer than its output is hashed before it is called changed,
+so a fresh clone does not convert the project again; an output from an older
+converter is converted again.
 
 | From | Notes |
 |---|---|
-| `.fbx` | Binary and ASCII, every version. Read with [ufbx](https://github.com/ufbx/ufbx). |
+| `.fbx` | Binary and ASCII, every version. Read with [ufbx](https://github.com/ufbx/ufbx). Skins and animation takes come across (below). |
 | `.obj` | With its `.mtl`, through the same reader, so the two cannot disagree. |
 | `.stl` | Binary and ASCII. Normals are recomputed — most STL files have wrong or zeroed ones. |
 | `.ply` | Per-vertex colour kept, which is a scan's whole value. A point cloud with no faces is refused with an explanation rather than converted to an empty model. |
-| `.gltf` | Not a format change — a **repack**. A loose `.gltf` is three to thirty files that have to travel together, and packing them into one is what stops half of them going missing. |
+| `.gltf` | Not a format change — a **verbatim repack**: the JSON is kept and only its buffer and image references move into the one file. Not done automatically, since the engine opens a loose `.gltf` as it is. |
+| `.blend`, `.dae`, `.usd*` | Through the installed Blender, run in the background with its own glTF exporter. No Rust reader keeps per-face materials, the up axis and transformed normals for these; Blender's importers do. |
 
 **It normalises, it does not just re-encode.** Every one of these formats
 disagrees with glTF about something, and a converter that only re-encodes hands
@@ -241,13 +254,28 @@ back a model that loads and is wrong:
   metres, and a hundredfold error reads as a broken importer.
 - **Winding** — correcting handedness, or any mirrored node, inverts triangle
   winding. A model with every face backwards is invisible from outside and solid
-  from within.
+  from within. (The glTF importer also turns a mirrored node's triangles round,
+  as the glTF spec asks.)
 - **N-gons** — FBX and OBJ have quads; glTF has triangles.
+- **Materials** — every map goes to the glTF slot it means: separate roughness
+  and metallic pictures are packed into one (with occlusion in red when it
+  fits), glossiness and shininess maps are inverted into roughness, a height map
+  in a bump slot becomes a normal map, and an opacity map becomes the base
+  colour's alpha with a cut-out or blend mode chosen from what is in it.
+- **Pictures** — found as written, then by name in the texture folders packs
+  use, case blind and with the other picture extensions tried. A picture that
+  is not found anywhere is reported with its material and slot.
 
-**What is dropped is named, never silent.** Animation, skinning, cameras and
-lights do not come across; the Console says which, with counts. So does anything
-that went wrong but did not stop the conversion — a texture that could not be
-found, a scale that had to be assumed.
+**Rigs and clips.** A model with a skin or an animation that moves a mesh or a
+bone keeps its node tree. Skinned meshes are written in their bind pose with
+each bone's inverse bind matrix; a rigid part keeps its node; each animation
+take is resampled by ufbx into translation, rotation and scale keys, so FBX's
+rotation orders, pivots and inherit modes arrive resolved. A model with neither
+is baked flat into world-space meshes, which sidesteps all of that.
+
+**What is dropped is named, never silent.** Cameras, lights, blend shapes,
+animation that moves only cameras or lights, and maps with no glTF slot
+(displacement, reflection) do not come across; the Console report says which.
 
 ## 8. Out of scope
 
@@ -257,7 +285,7 @@ We are lightweight — **not a content-management platform.**
   (ADR-0006). That has not changed
   and should not: one well-specified load path is worth more than four
   half-supported ones. **Converting at authoring time is a different question,
-  and is now answered** — see §7. USD remains out of scope.
+  and is now answered** — see §7, including USD through Blender.
 - **A networked asset server** — assets are local files in a project dir; no
   remote/team asset service.
 - **Full asset-bundle / streaming system** at launch — export packs the whole

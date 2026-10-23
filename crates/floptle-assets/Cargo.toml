@@ -17,7 +17,9 @@ floptle-core = { path = "../floptle-core" }
 # of anything that selects the other one.
 floptle-render = { path = "../floptle-render", default-features = false }
 
-gltf = { workspace = true } # Blender/glTF 2.0 import (ADR-0006)
+# Blender/glTF 2.0 import (ADR-0006). KHR_texture_transform: a material's
+# tiling and offset, which exporters write as that extension.
+gltf = { workspace = true, features = ["KHR_texture_transform"] }
 # Files go through the engine's filesystem: std::fs on the desktop, the game's
 # bundle in a browser. `gltf::import` reads the disk itself, so the model reader
 # here does its own I/O — `base64` is for the data-URI buffers a .gltf may embed.

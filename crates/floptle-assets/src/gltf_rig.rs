@@ -385,6 +385,20 @@ pub(crate) fn build_rigged(
     let skeleton = Skeleton::new(nodes);
     let mut world = Vec::new();
     skeleton.world_matrices(&skeleton.rest_pose(), &mut world);
+    // **A mirroring node reverses winding**, here as in the static import:
+    // glTF asks the reader to turn a primitive's triangles round when its
+    // node's world transform has a negative determinant, and a part drawn
+    // through that node without it has every face pointing inward. Decided at
+    // rest; a skinned part is placed by its joints, not its node, and is left
+    // as written.
+    for part in parts.iter_mut().filter(|p| p.skin.is_none()) {
+        let m = world.get(part.node).copied().unwrap_or(Mat4::IDENTITY);
+        if floptle_core::math::Mat3::from_mat4(m).determinant() < 0.0 {
+            for t in part.mesh.indices.as_chunks_mut::<3>().0 {
+                t.swap(1, 2);
+            }
+        }
+    }
     let mut min = Vec3::splat(f32::INFINITY);
     let mut max = Vec3::splat(f32::NEG_INFINITY);
     for part in &parts {
@@ -447,4 +461,50 @@ pub fn probe_animations(path: &Path) -> Vec<String> {
         out.push(name);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::glb_write::{write_glb, WriteMesh, WriteNode};
+
+    /// A unit cube wound counter-clockwise seen from outside.
+    fn cube() -> WriteMesh {
+        let p = [
+            [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 1.0], [0.0, 1.0, 1.0],
+        ];
+        let quads = [[0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4], [2, 3, 7, 6], [1, 2, 6, 5], [0, 4, 7, 3]];
+        let mut indices = Vec::new();
+        for q in quads {
+            indices.extend_from_slice(&[q[0], q[1], q[2], q[0], q[2], q[3]]);
+        }
+        WriteMesh { positions: p.to_vec(), normals: vec![[0.0, 1.0, 0.0]; 8], indices, base_color: [1.0; 4], ..Default::default() }
+    }
+
+    /// **A mirrored part of a kept tree is not drawn inside out.** Two mesh
+    /// objects keep the tree, one of them scaled −1 on X; drawn through its
+    /// node, its cube must still enclose a positive volume.
+    #[test]
+    fn a_mirrored_part_of_a_rigged_model_is_turned_round() {
+        let mut left = WriteNode::mesh_node("left", cube());
+        left.scale = [-1.0, 1.0, 1.0];
+        let right = WriteNode::mesh_node("right", cube());
+        let dir = std::env::temp_dir().join(format!("floptle-rig-mirror-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pair.glb");
+        std::fs::write(&path, write_glb(&[left, right], &[], &[], &[])).unwrap();
+        let rig = crate::import_rigged(&path).unwrap().expect("two objects keep their tree");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut world = Vec::new();
+        rig.skeleton.world_matrices(&rig.skeleton.rest_pose(), &mut world);
+        for part in &rig.parts {
+            let m = world[part.node];
+            let mut volume = 0.0f32;
+            for t in part.mesh.indices.as_chunks::<3>().0 {
+                let [a, b, c] = t.map(|i| m.transform_point3(part.mesh.vertices[i as usize].pos.into()));
+                volume += a.dot(b.cross(c)) / 6.0;
+            }
+            assert!((volume - 1.0).abs() < 1e-4, "{}: volume {volume} — inside out", rig.skeleton.nodes[part.node].name);
+        }
+    }
 }

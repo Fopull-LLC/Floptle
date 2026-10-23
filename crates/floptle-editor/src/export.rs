@@ -554,7 +554,7 @@ pub(crate) const RUNTIME_DIRS: &[&str] = &["save", "replays"];
 #[cfg(feature = "editor-ui")]
 pub(crate) const NEVER_SHIPS: &[&str] = &[
     // Model sources — imported to `.glb`, never loaded at runtime.
-    "fbx", "obj", "mtl", "dae", "stl", "ply", "3ds", "max", "ma", "mb",
+    "fbx", "obj", "mtl", "dae", "stl", "ply", "3ds", "max", "ma", "mb", "usd", "usda", "usdc", "usdz",
     // Digital-content-creation project files.
     "blend", "blend1", "blend2", "c4d", "psd", "xcf",
     // Other engines' artifacts, which routinely ride along in asset packs.

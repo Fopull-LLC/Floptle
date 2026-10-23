@@ -11,6 +11,9 @@ fn main() {
             };
             std::fs::write(&out, &bytes).expect("write");
             println!("ok {} -> {} ({} bytes) — {}", src.display(), out.display(), bytes.len(), report.summary());
+            for l in report.detail_lines().iter().chain(&report.missing_lines()).chain(&report.warnings).chain(&report.dropped) {
+                println!("  {l}");
+            }
         }
         Err(e) => {
             eprintln!("FAILED {}: {e}", src.display());
