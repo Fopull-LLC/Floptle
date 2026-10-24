@@ -1,6 +1,6 @@
 ## Just shipped
 
-**v0.117.0-rc13 — "Whole Worlds"** (beta). A profiler that names what a slow
+**v0.117.0-rc14 — "Whole Worlds"** (beta). A profiler that names what a slow
 frame did, terrain shadows that update without stalling, terrain answers a
 game can trust, cheaper vectors, and spawns a game can spread over frames.
 
