@@ -1,6 +1,6 @@
 ## Just shipped
 
-**v0.117.0-rc15 — "Whole Worlds"** (beta). Big craft fall asleep where they lie, a profiler that names what a slow
+**v0.117.0-rc16 — "Whole Worlds"** (beta). Big craft fall asleep where they lie, a profiler that names what a slow
 frame did, terrain shadows that update without stalling, terrain answers a
 game can trust, cheaper vectors, and spawns a game can spread over frames.
 
