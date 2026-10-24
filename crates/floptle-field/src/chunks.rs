@@ -144,6 +144,92 @@ impl Lattice {
 }
 
 
+/// One chunk's record in a field file, found before any is decoded.
+enum Record {
+    Uniform(f32),
+    /// The byte range of its runs.
+    Data(usize, usize),
+}
+
+/// One data chunk's runs (`bytes`, as written: distance runs, then colour
+/// runs) decoded. `None` when the runs do not fill the chunk exactly.
+fn decode_data_chunk(bytes: &[u8], band: f32) -> Option<crate::chunk_data::ChunkData> {
+    let u32_at = |s: &[u8]| u32::from_le_bytes(s.try_into().ok().unwrap_or([0; 4]));
+    let mut at = 0usize;
+    let mut take = |n: usize| -> Option<&[u8]> {
+        let s = bytes.get(at..at + n)?;
+        at += n;
+        Some(s)
+    };
+    let mut dist = Vec::with_capacity(CHUNK_VOXELS);
+    let nruns = u32_at(take(4)?) as usize;
+    for _ in 0..nruns {
+        let r = take(3)?;
+        let n = u16::from_le_bytes([r[0], r[1]]) as usize;
+        let d = r[2] as i8 as f32 / 127.0 * band;
+        if dist.len() + n > CHUNK_VOXELS {
+            return None;
+        }
+        dist.resize(dist.len() + n, d);
+    }
+    if dist.len() != CHUNK_VOXELS {
+        return None;
+    }
+    let mut color = Vec::with_capacity(CHUNK_VOXELS);
+    let ncruns = u32_at(take(4)?) as usize;
+    for _ in 0..ncruns {
+        let r = take(6)?;
+        let n = u16::from_le_bytes([r[0], r[1]]) as usize;
+        let v: [u8; 4] = r[2..6].try_into().ok()?;
+        if color.len() + n > CHUNK_VOXELS {
+            return None;
+        }
+        color.resize(color.len() + n, v);
+    }
+    if color.len() != CHUNK_VOXELS {
+        return None;
+    }
+    Some(crate::chunk_data::ChunkData::from_flat(&dist, &color))
+}
+
+/// Data chunks a thread decodes at the least: below this, one thread does them all.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+const DECODE_PER_THREAD: usize = 64;
+
+/// Decode every data record of `records` from `data`, in order, `None` for the
+/// uniform ones; `None` overall when any data record is malformed. Several
+/// threads share the work where there are threads and enough of it.
+fn decode_records(data: &[u8], records: &[([i32; 3], Record)], band: f32) -> Option<Vec<Option<crate::chunk_data::ChunkData>>> {
+    let one = |r: &Record| -> Option<Option<crate::chunk_data::ChunkData>> {
+        match *r {
+            Record::Uniform(_) => Some(None),
+            Record::Data(a, b) => decode_data_chunk(&data[a..b], band).map(Some),
+        }
+    };
+    let datas = records.iter().filter(|(_, r)| matches!(r, Record::Data(..))).count();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8).min(datas / DECODE_PER_THREAD).max(1);
+        if threads > 1 {
+            let per = records.len().div_ceil(threads);
+            let parts: Vec<Option<Vec<Option<crate::chunk_data::ChunkData>>>> = std::thread::scope(|s| {
+                let handles: Vec<_> = records
+                    .chunks(per)
+                    .map(|part| s.spawn(move || part.iter().map(|(_, r)| one(r)).collect::<Option<Vec<_>>>()))
+                    .collect();
+                handles.into_iter().map(|h| h.join().ok().flatten()).collect()
+            });
+            let mut out = Vec::with_capacity(records.len());
+            for p in parts {
+                out.extend(p?);
+            }
+            return Some(out);
+        }
+    }
+    let _ = datas;
+    records.iter().map(|(_, r)| one(r)).collect()
+}
+
 /// A box of a dense proxy's cells sampled from a field, to be written into the
 /// proxy later: the costly half of a proxy refresh, which can run where the
 /// field is, off the frame. See [`ChunkField::sample_dense_region`].
@@ -3103,6 +3189,11 @@ impl ChunkField {
         if count > 4_000_000 {
             return None; // corrupt count guard: nobody has 4M chunks
         }
+        // Every record is found first, then the data chunks are decoded, on
+        // several threads where there are any: a 15 MB field read on the frame
+        // because something stood on its ground was half a second of decoding
+        // (debug), one chunk after another.
+        let mut records: Vec<([i32; 3], Record)> = Vec::with_capacity(count);
         for _ in 0..count {
             let mut c = [0i32; 3];
             for k in &mut c {
@@ -3114,40 +3205,27 @@ impl ChunkField {
                     if !v.is_finite() {
                         return None;
                     }
-                    f.chunks.insert(c, Chunk::Uniform(v.clamp(-band, band)));
+                    records.push((c, Record::Uniform(v.clamp(-band, band))));
                 }
                 1 => {
-                    let mut dist = Vec::with_capacity(CHUNK_VOXELS);
+                    let begin = at;
                     let nruns = u32_at(take(&mut at, 4)?) as usize;
-                    for _ in 0..nruns {
-                        let n = u16::from_le_bytes(take(&mut at, 2)?.try_into().ok()?) as usize;
-                        let v = take(&mut at, 1)?[0] as i8;
-                        let d = v as f32 / 127.0 * band;
-                        if dist.len() + n > CHUNK_VOXELS {
-                            return None;
-                        }
-                        dist.resize(dist.len() + n, d);
-                    }
-                    if dist.len() != CHUNK_VOXELS {
-                        return None;
-                    }
-                    let mut color = Vec::with_capacity(CHUNK_VOXELS);
+                    take(&mut at, nruns.checked_mul(3)?)?;
                     let ncruns = u32_at(take(&mut at, 4)?) as usize;
-                    for _ in 0..ncruns {
-                        let n = u16::from_le_bytes(take(&mut at, 2)?.try_into().ok()?) as usize;
-                        let v: [u8; 4] = take(&mut at, 4)?.try_into().ok()?;
-                        if color.len() + n > CHUNK_VOXELS {
-                            return None;
-                        }
-                        color.resize(color.len() + n, v);
-                    }
-                    if color.len() != CHUNK_VOXELS {
-                        return None;
-                    }
-                    f.chunks.insert(c, Chunk::Data(std::sync::Arc::new(ChunkData::from_flat(&dist, &color))));
+                    take(&mut at, ncruns.checked_mul(6)?)?;
+                    records.push((c, Record::Data(begin, at)));
                 }
                 _ => return None,
             }
+        }
+        let decoded = decode_records(data, &records, band)?;
+        for ((c, r), d) in records.into_iter().zip(decoded) {
+            let chunk = match (r, d) {
+                (Record::Uniform(v), _) => Chunk::Uniform(v),
+                (Record::Data(..), Some(d)) => Chunk::Data(std::sync::Arc::new(d)),
+                (Record::Data(..), None) => return None,
+            };
+            f.chunks.insert(c, chunk);
             if f.delta {
                 f.edited.insert(c);
             }
@@ -4044,6 +4122,30 @@ mod tests {
             .raycast(Vec3::new(18.0, 20.0, 18.0), Vec3::NEG_Y, 100.0)
             .expect("far ground still hit");
         assert!(far.y.abs() < 1.0, "far ground should stay flat at y=0, got {:.2}", far.y);
+    }
+
+    /// **A big field reads back the same on several threads as it was saved.**
+    /// Its data chunks are decoded in parts on several threads (a 15 MB field
+    /// read on the frame was half a second of decoding, one chunk after
+    /// another): read back and saved again, it is the same bytes, so every
+    /// chunk came back where it was and as it was; and a file torn part way
+    /// through one is still refused.
+    #[test]
+    fn a_big_field_decodes_on_several_threads_to_what_it_saved() {
+        let f = crate::procgen::generate_planet(&crate::procgen::PlanetFill {
+            seed: 5,
+            radius: 120.0,
+            voxel: 1.5,
+            relief: 8.0,
+            cave_depth: 20.0,
+            ..Default::default()
+        });
+        assert!(f.data_chunks() >= 2 * DECODE_PER_THREAD, "{} data chunks: one thread would do them all", f.data_chunks());
+        let bytes = f.to_bytes();
+        let back = ChunkField::from_bytes(&bytes).expect("the field reads back");
+        assert_eq!(back.data_chunks(), f.data_chunks());
+        assert!(back.to_bytes() == bytes, "the field read back is not the field saved");
+        assert!(ChunkField::from_bytes(&bytes[..bytes.len() / 2]).is_none(), "a torn file was read");
     }
 
     /// Save/load round-trip: distances within one i8 quantization step, colours exact,
