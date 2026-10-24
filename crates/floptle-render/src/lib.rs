@@ -77,7 +77,7 @@ pub use raster::{
     SkinDraw, SurfaceExtras, TexFilter, TexId, TexSampling, TexWrap, sun_shadow_matrix, FLSL_ENGINE_SAMPLERS, FLSL_ENGINE_TEXTURES, SUN_MAP_SIZE, flsl_fits_within, flsl_slots_within,
 };
 pub use raymarch::{
-    AtlasRefused, Raymarch, RaymarchGlobals, MAX_FIELD_SHAPES, MAX_SHADOW_PROXIES, MAX_VOLUMES, TERRAIN_SLOTS,
+    AtlasRefused, AtlasVolume, Raymarch, RaymarchGlobals, MAX_FIELD_SHAPES, MAX_SHADOW_PROXIES, MAX_VOLUMES, TERRAIN_SLOTS,
 };
 pub use retro::Retro;
 

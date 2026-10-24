@@ -413,6 +413,70 @@ struct VolSlot {
     dims: [u32; 3],
     tight_min: [f32; 3],
     tight_max: [f32; 3],
+    /// What the caller said this slot holds (see [`AtlasVolume::key`]); 0 is
+    /// "unnamed", which matches nothing.
+    key: u64,
+}
+
+/// One volume for [`Raymarch::set_volumes_keyed`]: its bake, and a key that
+/// names that bake's content. The same key promises the same voxels, so a
+/// volume whose key is already in the atlas is copied on the GPU, never
+/// converted and uploaded again. A key is never 0.
+#[derive(Clone, Copy)]
+pub struct AtlasVolume<'a> {
+    pub baked: &'a BakedSdf,
+    pub key: u64,
+}
+
+/// A slot of an atlas being built: where it goes, what it holds, and how many
+/// of its Z layers are written.
+struct BuildSlot {
+    origin: [u32; 3],
+    dims: [u32; 3],
+    key: u64,
+    done_z: u32,
+    /// The content box of the layers written so far.
+    tight: Option<([f32; 3], [f32; 3])>,
+}
+
+/// A slot table made over frames, drawn in place of the current one once
+/// every slot is written. Until then the current one is drawn as it was.
+///
+/// Its new volumes go where nothing drawn reads: free Z ranges of the drawn
+/// atlas when they fit (`textures` is `None`), else a new, larger atlas that
+/// replaces the drawn one when whole.
+struct AtlasBuild {
+    textures: Option<(wgpu::Texture, wgpu::Texture)>,
+    slots: Vec<BuildSlot>,
+    refused: Option<AtlasRefused>,
+}
+
+/// An atlas's distance and colour textures.
+type AtlasTextures = (wgpu::Texture, wgpu::Texture);
+
+/// What [`Raymarch::grown`] has for a build that needs a larger atlas. (A
+/// browser makes it on the frame, so there it is only ever `Failed`.)
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+enum Grown {
+    Made(AtlasTextures),
+    Waiting,
+    Failed,
+}
+
+impl AtlasBuild {
+    fn plan_matches(&self, plan: &[([u32; 3], u64)]) -> bool {
+        self.slots.len() == plan.len() && self.slots.iter().zip(plan).all(|(s, &(d, k))| s.dims == d && s.key == k)
+    }
+}
+
+fn merge_box(a: Option<([f32; 3], [f32; 3])>, b: Option<([f32; 3], [f32; 3])>) -> Option<([f32; 3], [f32; 3])> {
+    match (a, b) {
+        (Some((al, ah)), Some((bl, bh))) => Some((
+            [al[0].min(bl[0]), al[1].min(bl[1]), al[2].min(bl[2])],
+            [ah[0].max(bh[0]), ah[1].max(bh[1]), ah[2].max(bh[2])],
+        )),
+        (x, None) | (None, x) => x,
+    }
 }
 
 /// The voxel-space AABB of the content inside `baked`'s sub-box `[min, max)`
@@ -487,6 +551,17 @@ pub struct Raymarch {
     /// The atlas size the GPU last refused for lack of memory, in bytes, and
     /// how many volumes were dropped to fit. `None` once one fits again.
     atlas_refused: Option<AtlasRefused>,
+    /// The atlas [`set_volumes_keyed`](Self::set_volumes_keyed) is making
+    /// over frames, drawn in place of this one once it is whole.
+    building: Option<AtlasBuild>,
+    /// A larger atlas the driver is making on a worker: handing over one of
+    /// hundreds of megabytes takes it milliseconds, which the frame must not
+    /// wait for. Its size, and where it arrives.
+    growing: Option<([u32; 3], std::sync::mpsc::Receiver<Option<AtlasTextures>>)>,
+    /// Volume cells written from the CPU since the renderer was made (each
+    /// one 6 bytes: an f16 distance and an RGBA8 colour). GPU-side copies are
+    /// not counted.
+    uploaded_cells: u64,
     terrain_tex: wgpu::Texture,
     /// Equirectangular sky texture (1×1 white until a skybox texture is set).
     sky_tex: wgpu::Texture,
@@ -702,7 +777,7 @@ impl Raymarch {
             distance: vec![1.0e9],
             color: vec![[255, 255, 255, 255]],
         };
-        let (dist_tex, color_tex) = alloc_volume_textures(gpu, [1, 1, 1]);
+        let (dist_tex, color_tex) = alloc_volume_textures(&gpu.device, [1, 1, 1]);
         write_volume_data(gpu, &dist_tex, &color_tex, &empty, [0, 0, 0]);
         let terrain_tex = make_terrain_array(gpu, &[]);
         let sky_tex = make_sky_texture(gpu, None);
@@ -735,6 +810,9 @@ impl Raymarch {
             _color_tex: color_tex,
             slots: Vec::new(),
             atlas_refused: None,
+            building: None,
+            growing: None,
+            uploaded_cells: 0,
             terrain_tex,
             sky_tex,
             bind,
@@ -1198,6 +1276,8 @@ impl Raymarch {
     /// Fast path: a single volume with unchanged dims rewrites the existing texture
     /// data in place (no allocation / bind-group rebuild — keeps sculpting smooth).
     pub fn set_volumes(&mut self, gpu: &Gpu, volumes: &[&BakedSdf]) -> usize {
+        self.building = None;
+        self.growing = None;
         let limit = gpu.device.limits().max_texture_dimension_3d;
         // Accept volumes until the Z stack or the XY footprint would exceed the limit.
         let mut accepted = Vec::new();
@@ -1223,9 +1303,11 @@ impl Raymarch {
                 && cur.depth_or_array_layers == b.dims[2]
             {
                 write_volume_data(gpu, &self._dist_tex, &self._color_tex, b, [0, 0, 0]);
+                self.uploaded_cells += b.distance.len() as u64;
                 let (tight_min, tight_max) = full_content_bounds(b);
                 self.slots[0].tight_min = tight_min;
                 self.slots[0].tight_max = tight_max;
+                self.slots[0].key = 0;
                 return 1;
             }
         }
@@ -1239,7 +1321,7 @@ impl Raymarch {
         let mut refused = None;
         let (dist_tex, color_tex) = loop {
             let dims = atlas_dims(&accepted);
-            if let Some(t) = try_alloc_volume_textures(gpu, dims) {
+            if let Some(t) = try_alloc_volume_textures(&gpu.device, dims) {
                 break t;
             }
             refused.get_or_insert(wanted);
@@ -1258,8 +1340,9 @@ impl Raymarch {
         self.slots.clear();
         for (b, origin) in &accepted {
             write_volume_data(gpu, &dist_tex, &color_tex, b, *origin);
+            self.uploaded_cells += b.distance.len() as u64;
             let (tight_min, tight_max) = full_content_bounds(b);
-            self.slots.push(VolSlot { origin: *origin, dims: b.dims, tight_min, tight_max });
+            self.slots.push(VolSlot { origin: *origin, dims: b.dims, tight_min, tight_max, key: 0 });
         }
         self._dist_tex = dist_tex;
         self._color_tex = color_tex;
@@ -1311,43 +1394,432 @@ impl Raymarch {
                 s.tight_max[a] = s.tight_max[a].max(hi[a]);
             }
         }
-        // Pack the sub-box tightly (x-fastest), converting distance to f16.
-        let mut dist = Vec::with_capacity((rw * rh * rd) as usize);
-        let mut col = Vec::with_capacity((rw * rh * rd) as usize);
-        for z in z0..z1 {
-            for y in y0..y1 {
-                let row = ((z * h + y) * w) as usize;
-                for x in x0..x1 {
-                    let i = row + x as usize;
-                    dist.push(f32_to_f16(baked.distance[i]));
-                    col.push(baked.color[i]);
+        self.uploaded_cells += write_sub_box(gpu, &self._dist_tex, &self._color_tex, off, baked, [x0, y0, z0], [x1, y1, z1]);
+    }
+
+    /// Make the atlas hold exactly `volumes`, spending at most about
+    /// `budget_cells` cells of CPU upload on this call (each cell is 6
+    /// bytes), and say how many were accepted once it does.
+    ///
+    /// A volume whose key the drawn atlas already holds stays where it is,
+    /// so a terrain arriving, leaving or being re-laid uploads only what is
+    /// new. What is new is written over as many calls as the budget asks,
+    /// into Z ranges of the atlas that nothing drawn reads (or, when they do
+    /// not fit, into a larger atlas made beside it, the volumes it keeps
+    /// copied on the GPU), while the slots drawn stay as they were: `None`
+    /// means "still building, keep drawing with the slots you had", and the
+    /// caller passes the same list each call until it says `Some`. A
+    /// different list starts again from what is already written.
+    ///
+    /// Slot `i` is `volumes[i]`, as in [`set_volumes`](Self::set_volumes),
+    /// whose limits this keeps.
+    pub fn set_volumes_keyed(&mut self, gpu: &Gpu, volumes: &[AtlasVolume], budget_cells: u64) -> Option<usize> {
+        let limit = gpu.device.limits().max_texture_dimension_3d;
+        let mut plan: Vec<([u32; 3], u64)> = Vec::new();
+        let (mut aw, mut ah, mut ad) = (1u32, 1u32, 0u32);
+        for v in volumes.iter().take(MAX_ATLAS_VOLUMES) {
+            let [w, h, d] = v.baked.dims;
+            if w.max(aw) > limit || h.max(ah) > limit || ad + d > limit {
+                break;
+            }
+            aw = aw.max(w);
+            ah = ah.max(h);
+            plan.push((v.baked.dims, v.key));
+            ad += d;
+        }
+        // Already there (and anything being built for another list is moot).
+        if self.slots.len() == plan.len()
+            && self.slots.iter().zip(&plan).all(|(s, &(d, k))| s.dims == d && s.key == k && k != 0)
+            && self.atlas_refused.is_none()
+        {
+            // A larger atlas still on its way is not needed any more.
+            self.building = None;
+            self.growing = None;
+            return Some(plan.len());
+        }
+        // The same shapes, and what changed fits now: rewritten in place.
+        if self.building.is_none()
+            && self.atlas_refused.is_none()
+            && self.slots.len() == plan.len()
+            && self.slots.iter().zip(&plan).all(|(s, &(d, _))| s.dims == d)
+        {
+            let changed: u64 = self
+                .slots
+                .iter()
+                .zip(&plan)
+                .filter(|(s, (_, k))| s.key != *k || *k == 0)
+                .map(|(_, (d, _))| d.iter().map(|&n| n as u64).product::<u64>())
+                .sum();
+            if changed <= budget_cells {
+                for (i, v) in volumes.iter().take(plan.len()).enumerate() {
+                    if self.slots[i].key == v.key && v.key != 0 {
+                        continue;
+                    }
+                    write_volume_data(gpu, &self._dist_tex, &self._color_tex, v.baked, self.slots[i].origin);
+                    self.uploaded_cells += v.baked.distance.len() as u64;
+                    let (lo, hi) = full_content_bounds(v.baked);
+                    let s = &mut self.slots[i];
+                    s.tight_min = lo;
+                    s.tight_max = hi;
+                    s.key = v.key;
+                }
+                return Some(plan.len());
+            }
+        }
+        if !self.building.as_ref().is_some_and(|b| b.plan_matches(&plan)) {
+            if self.plan_build(gpu, plan, [aw, ah, ad.max(1)], volumes.len()) {
+                // Waiting for a larger atlas: nothing to write into yet.
+                return None;
+            }
+            if self.building.is_none() {
+                // Refused outright: what there is cannot be trusted to match.
+                self.slots.clear();
+                self.rebuild_binds(&gpu.device);
+                return Some(0);
+            }
+        }
+        // Write what is left, layer by layer, while the budget lasts: at least
+        // one layer a call, so a budget smaller than a layer still finishes.
+        let mut left = budget_cells.min(i64::MAX as u64) as i64;
+        let mut wrote = 0u64;
+        let b = self.building.as_mut()?;
+        let (dist, color) = b.textures.as_ref().map_or((&self._dist_tex, &self._color_tex), |(d, c)| (d, c));
+        for (s, v) in b.slots.iter_mut().zip(volumes) {
+            let [w, h, d] = s.dims;
+            while s.done_z < d && (left > 0 || wrote == 0) {
+                let layer = (w * h) as i64;
+                let n = ((left.max(layer) / layer) as u32).clamp(1, d - s.done_z);
+                let (z0, z1) = (s.done_z, s.done_z + n);
+                write_slab(gpu, dist, color, s.origin, v.baked, z0, z1);
+                s.tight = merge_box(s.tight, content_bounds(v.baked, [0, 0, z0], [w, h, z1]));
+                s.done_z = z1;
+                let cells = layer as u64 * n as u64;
+                wrote += cells;
+                left -= cells as i64;
+            }
+        }
+        self.uploaded_cells += wrote;
+        if b.slots.iter().any(|s| s.done_z < s.dims[2]) {
+            return None;
+        }
+        let b = self.building.take()?;
+        self.slots = b
+            .slots
+            .iter()
+            .map(|s| {
+                let c = [s.dims[0] as f32 * 0.5, s.dims[1] as f32 * 0.5, s.dims[2] as f32 * 0.5];
+                let (tight_min, tight_max) = s.tight.unwrap_or((c, c));
+                VolSlot { origin: s.origin, dims: s.dims, tight_min, tight_max, key: s.key }
+            })
+            .collect();
+        self.atlas_refused = b.refused;
+        if let Some((d, c)) = b.textures {
+            self._dist_tex = d;
+            self._color_tex = c;
+            self.rebuild_binds(&gpu.device);
+        }
+        Some(self.slots.len())
+    }
+
+    /// Plan the slots for `plan`. Each key the drawn atlas holds stays where
+    /// it is, and the rest take Z ranges of it that nothing drawn reads. When
+    /// they do not fit, a build already under way into an atlas of its own
+    /// is reused if it can hold them; failing that a new atlas is made, with
+    /// room for as much again, so arrivals after this one fit beside it.
+    /// Whatever is already written somewhere (drawn, or written by the build
+    /// this replaces) is copied on the GPU, never uploaded again.
+    ///
+    /// True while the larger atlas is still being made: nothing is planned
+    /// and the build this replaces is kept as it was, for what it wrote.
+    fn plan_build(&mut self, gpu: &Gpu, plan: Vec<([u32; 3], u64)>, need: [u32; 3], asked: usize) -> bool {
+        let old = self.building.take();
+        // A browser's WebGL cannot copy between these 3D textures; there
+        // only the drawn atlas's own free space avoids uploading again.
+        let can_copy = gpu.adapter.get_info().backend != wgpu::Backend::Gl;
+        let size_of = |t: &wgpu::Texture| {
+            let e = t.size();
+            [e.width, e.height, e.depth_or_array_layers]
+        };
+        let old_slots: &[BuildSlot] = old.as_ref().map_or(&[], |b| &b.slots);
+        // 1. The drawn atlas: keys it holds stay, a build into it keeps what it wrote.
+        if self.atlas_refused.is_none() {
+            let into_drawn = old.as_ref().is_some_and(|b| b.textures.is_none());
+            let taken: Vec<(u32, u32)> = self.slots.iter().map(|s| (s.origin[2], s.origin[2] + s.dims[2])).collect();
+            let keep = |dims: [u32; 3], key: u64| {
+                if let Some(l) = self.slots.iter().find(|l| l.key == key && l.dims == dims) {
+                    return Some(BuildSlot { origin: l.origin, dims, key, done_z: dims[2], tight: Some((l.tight_min, l.tight_max)) });
+                }
+                let p = old_slots.iter().find(|p| into_drawn && p.key == key && p.dims == dims)?;
+                Some(BuildSlot { origin: p.origin, dims, key, done_z: p.done_z, tight: p.tight })
+            };
+            if let Some(slots) = fit_slots(&plan, size_of(&self._dist_tex), &taken, keep, |_, _| None) {
+                self.building = Some(AtlasBuild { textures: None, slots: slots.into_iter().map(|(s, _)| s).collect(), refused: None });
+                return false;
+            }
+        }
+        // 2. The atlas a build already made: it keeps what it wrote, and what
+        // is drawn is copied in.
+        if let Some(b) = old.as_ref().filter(|b| b.refused.is_none())
+            && let Some((dist, _)) = &b.textures
+        {
+            let live_src = |dims: [u32; 3], key: u64| {
+                let l = self.slots.iter().find(|l| can_copy && l.key == key && l.dims == dims)?;
+                Some((l.origin, dims[2], Some((l.tight_min, l.tight_max))))
+            };
+            let keep = |dims: [u32; 3], key: u64| {
+                let p = b.slots.iter().find(|p| p.key == key && p.dims == dims)?;
+                Some(BuildSlot { origin: p.origin, dims, key, done_z: p.done_z, tight: p.tight })
+            };
+            if let Some(slots) = fit_slots(&plan, size_of(dist), &[], keep, live_src) {
+                let Some(b) = old else { return false };
+                let Some((dist, color)) = b.textures else { return false };
+                let slots = self.copy_in(gpu, &dist, &color, None, slots);
+                self.building = Some(AtlasBuild { textures: Some((dist, color)), slots, refused: None });
+                return false;
+            }
+        }
+        // 3. A new atlas, with room for half as much again (or the largest
+        // volume, if more), so the next arrivals fit beside what it holds.
+        // Short of memory for that, exactly what is needed.
+        let limit = gpu.device.limits().max_texture_dimension_3d;
+        let largest = plan.iter().map(|(d, _)| d[2]).max().unwrap_or(1);
+        let roomy = [need[0], need[1], need[2].saturating_add((need[2] / 2).max(largest)).min(limit)];
+        let wanted = volume_bytes(need);
+        let mut plan = plan;
+        let mut refused = None;
+        let made = match self.grown(gpu, roomy, need) {
+            Grown::Waiting => {
+                self.building = old;
+                return true;
+            }
+            Grown::Made(t) => Some(t),
+            Grown::Failed => try_alloc_volume_textures(&gpu.device, roomy),
+        };
+        let (dist, color) = match made {
+            Some(t) => t,
+            None => loop {
+                let mut dims = [1u32, 1, 0];
+                for (d, _) in &plan {
+                    dims = [dims[0].max(d[0]), dims[1].max(d[1]), dims[2] + d[2]];
+                }
+                dims[2] = dims[2].max(1);
+                if let Some(t) = try_alloc_volume_textures(&gpu.device, dims) {
+                    if dims != need {
+                        refused.get_or_insert(wanted);
+                    }
+                    break t;
+                }
+                refused.get_or_insert(wanted);
+                if plan.is_empty() {
+                    // Not even one voxel: keep drawing what there is.
+                    self.building = None;
+                    self.atlas_refused = Some(AtlasRefused { bytes: wanted, dropped: asked });
+                    return false;
+                }
+                let keep = plan.len() / 2;
+                plan.truncate(keep);
+            },
+        };
+        let old_slots: &[BuildSlot] = old.as_ref().map_or(&[], |b| &b.slots);
+        let live_src = |dims: [u32; 3], key: u64| {
+            let l = self.slots.iter().find(|l| can_copy && l.key == key && l.dims == dims)?;
+            Some((l.origin, dims[2], Some((l.tight_min, l.tight_max))))
+        };
+        let begun = |dims: [u32; 3], key: u64| {
+            let p = old_slots.iter().find(|p| can_copy && p.key == key && p.dims == dims && p.done_z > 0)?;
+            Some((p.origin, p.done_z, p.tight))
+        };
+        let slots = fit_slots(&plan, size_of(&dist), &[], |_, _| None, |d, k| live_src(d, k).or_else(|| begun(d, k)))
+            .unwrap_or_default();
+        // What came from the old build is read from its atlas (or the drawn
+        // one, when it was building into that).
+        let old_tex = old.as_ref().and_then(|b| b.textures.as_ref());
+        let slots = self.copy_in(gpu, &dist, &color, old_tex, slots);
+        let refused = refused.map(|bytes| AtlasRefused { bytes, dropped: asked - plan.len() });
+        self.building = Some(AtlasBuild { textures: Some((dist, color)), slots, refused });
+        false
+    }
+
+    /// An atlas of at least `need` from the worker making one of `roomy`,
+    /// started here when none is under way. Native only: a browser hands a
+    /// texture over at once, so there it is made on the frame.
+    #[cfg(target_arch = "wasm32")]
+    fn grown(&mut self, _gpu: &Gpu, _roomy: [u32; 3], _need: [u32; 3]) -> Grown {
+        Grown::Failed
+    }
+
+    /// See the browser's [`grown`](Self::grown) above: natively the driver's
+    /// work is a worker's.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn grown(&mut self, gpu: &Gpu, roomy: [u32; 3], need: [u32; 3]) -> Grown {
+        let fits = |d: [u32; 3]| d[0] >= need[0] && d[1] >= need[1] && d[2] >= need[2];
+        if let Some((dims, rx)) = self.growing.take() {
+            match rx.try_recv() {
+                Ok(Some(t)) if fits(dims) => return Grown::Made(t),
+                // Too small for what is asked now: another is made below.
+                Ok(Some(_)) => {}
+                // Refused: the frame's own attempt says how short it is.
+                Ok(None) | Err(std::sync::mpsc::TryRecvError::Disconnected) => return Grown::Failed,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.growing = Some((dims, rx));
+                    return Grown::Waiting;
                 }
             }
         }
-        let origin = wgpu::Origin3d { x: off[0] + x0, y: off[1] + y0, z: off[2] + z0 };
-        let extent = wgpu::Extent3d { width: rw, height: rh, depth_or_array_layers: rd };
-        gpu.queue.write_texture(
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (device, queue) = (gpu.device.clone(), gpu.queue.clone());
+        let made = std::thread::Builder::new().name("sdf-atlas".into()).spawn(move || {
+            let made = try_alloc_volume_textures(&device, roomy);
+            if let Some((d, c)) = &made {
+                // A new texture is zeroed by wgpu on the first submit that
+                // writes part of it, which is otherwise the frame's: one
+                // texel each, submitted here, has it zeroed on this thread.
+                for (t, texel) in [(d, &[0u8; 2][..]), (c, &[0u8; 4][..])] {
+                    queue.write_texture(
+                        wgpu::TexelCopyTextureInfo { texture: t, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                        texel,
+                        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: None, rows_per_image: None },
+                        wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                    );
+                }
+                queue.submit(None);
+            }
+            let _ = tx.send(made);
+        });
+        if made.is_err() {
+            return Grown::Failed;
+        }
+        self.growing = Some((roomy, rx));
+        Grown::Waiting
+    }
+
+    /// Encode the GPU copies `fit_slots` asked for into `(dist, color)`: from
+    /// the drawn atlas when the key is drawn there, else from `old` (the
+    /// atlas of the build being replaced, or the drawn one when it built
+    /// into that).
+    fn copy_in(
+        &self,
+        gpu: &Gpu,
+        dist: &wgpu::Texture,
+        color: &wgpu::Texture,
+        old: Option<&(wgpu::Texture, wgpu::Texture)>,
+        slots: Vec<(BuildSlot, Option<[u32; 3]>)>,
+    ) -> Vec<BuildSlot> {
+        let mut enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sdf-atlas-keep") });
+        let mut copied = false;
+        for (s, from) in &slots {
+            let Some(from) = from else { continue };
+            let drawn = self.slots.iter().any(|l| l.key == s.key && l.origin == *from && l.dims == s.dims);
+            let (sd, sc) = if drawn { (&self._dist_tex, &self._color_tex) } else { old.map_or((&self._dist_tex, &self._color_tex), |(d, c)| (d, c)) };
+            for (a, b) in [(sd, dist), (sc, color)] {
+                enc.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo { texture: a, mip_level: 0, origin: wgpu::Origin3d { x: from[0], y: from[1], z: from[2] }, aspect: wgpu::TextureAspect::All },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: b,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d { x: s.origin[0], y: s.origin[1], z: s.origin[2] },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::Extent3d { width: s.dims[0], height: s.dims[1], depth_or_array_layers: s.done_z },
+                );
+            }
+            copied = true;
+        }
+        if copied {
+            gpu.queue.submit(Some(enc.finish()));
+        }
+        slots.into_iter().map(|(s, _)| s).collect()
+    }
+
+    /// Upload the sub-box `[min, max)` of the volume keyed `key`, wherever the
+    /// atlas holds it: the drawn atlas, and the one being built. `baked` is
+    /// that volume's bake, already holding the change. Returns the cells
+    /// written.
+    pub fn set_volume_region_keyed(&mut self, gpu: &Gpu, key: u64, baked: &BakedSdf, min: [u32; 3], max: [u32; 3]) -> u64 {
+        let before = self.uploaded_cells;
+        if key == 0 {
+            return 0;
+        }
+        if let Some(i) = self.slots.iter().position(|s| s.key == key) {
+            self.set_volume_region(gpu, i, baked, min, max);
+        }
+        let drawn_at = self.slots.iter().find(|s| s.key == key).map(|s| s.origin);
+        if let Some(b) = self.building.as_mut()
+            && let Some(s) = b.slots.iter_mut().find(|s| s.key == key && s.dims == baked.dims)
+            // The same texels as the drawn slot's, written just above.
+            && !(b.textures.is_none() && drawn_at == Some(s.origin))
+        {
+            // Only the layers already written: the rest are written from
+            // `baked` when their turn comes, and it holds the change already.
+            let [w, h, _] = baked.dims;
+            let (x0, y0, z0) = (min[0].min(w), min[1].min(h), min[2].min(s.done_z));
+            let (x1, y1, z1) = (max[0].clamp(x0, w), max[1].clamp(y0, h), max[2].clamp(z0, s.done_z));
+            if x1 > x0 && y1 > y0 && z1 > z0 {
+                s.tight = merge_box(s.tight, content_bounds(baked, [x0, y0, z0], [x1, y1, z1]));
+                let (dist, color) = b.textures.as_ref().map_or((&self._dist_tex, &self._color_tex), |(d, c)| (d, c));
+                self.uploaded_cells += write_sub_box(gpu, dist, color, s.origin, baked, [x0, y0, z0], [x1, y1, z1]);
+            }
+        }
+        self.uploaded_cells - before
+    }
+
+    /// Does drawn slot `slot` hold `baked`'s distances, as the GPU has them?
+    /// Reads the atlas back, waiting for the GPU: for tests.
+    #[doc(hidden)]
+    pub fn slot_holds(&self, gpu: &Gpu, slot: usize, baked: &BakedSdf) -> bool {
+        let Some(s) = self.slots.get(slot) else { return false };
+        if s.dims != baked.dims {
+            return false;
+        }
+        let [w, h, d] = s.dims;
+        let row = (w * 2).div_ceil(256) * 256;
+        let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: (row * h * d) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        enc.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &self._dist_tex,
                 mip_level: 0,
-                origin,
+                origin: wgpu::Origin3d { x: s.origin[0], y: s.origin[1], z: s.origin[2] },
                 aspect: wgpu::TextureAspect::All,
             },
-            bytemuck::cast_slice(&dist),
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(rw * 2), rows_per_image: Some(rh) },
-            extent,
-        );
-        gpu.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self._color_tex,
-                mip_level: 0,
-                origin,
-                aspect: wgpu::TextureAspect::All,
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buf,
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) },
             },
-            bytemuck::cast_slice(&col),
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(rw * 4), rows_per_image: Some(rh) },
-            extent,
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: d },
         );
+        gpu.queue.submit(Some(enc.finish()));
+        buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        let data = buf.slice(..).get_mapped_range();
+        (0..d).all(|z| {
+            (0..h).all(|y| {
+                let at = ((z * h + y) * row) as usize;
+                let cells = &baked.distance[((z * h + y) * w) as usize..][..w as usize];
+                data[at..at + (w * 2) as usize]
+                    .chunks(2)
+                    .zip(cells)
+                    .all(|(b, &v)| u16::from_le_bytes([b[0], b[1]]) == f32_to_f16(v))
+            })
+        })
+    }
+
+    /// Is an atlas being built over frames, or a larger one being made for
+    /// it ([`set_volumes_keyed`](Self::set_volumes_keyed))? Its caller goes
+    /// on calling while this holds.
+    pub fn atlas_building(&self) -> bool {
+        self.building.is_some() || self.growing.is_some()
+    }
+
+    /// Volume cells written from the CPU so far, for counting what a frame
+    /// uploads. Each cell is 6 bytes.
+    pub fn uploaded_cells(&self) -> u64 {
+        self.uploaded_cells
     }
 
     /// Fill the renderer-owned globals fields: each slot's atlas offset + dims,
@@ -1888,10 +2360,10 @@ fn atlas_dims(accepted: &[(&BakedSdf, [u32; 3])]) -> [u32; 3] {
 /// Asked through an error scope, which native wgpu answers at once. A browser
 /// answers later; there the first poll comes back empty, the textures are
 /// taken as made, and a failure arrives as the reported error it always was.
-fn try_alloc_volume_textures(gpu: &Gpu, dims: [u32; 3]) -> Option<(wgpu::Texture, wgpu::Texture)> {
+fn try_alloc_volume_textures(device: &wgpu::Device, dims: [u32; 3]) -> Option<(wgpu::Texture, wgpu::Texture)> {
     use std::task::{Context, Poll, Waker};
-    let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-    let made = alloc_volume_textures(gpu, dims);
+    let scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+    let made = alloc_volume_textures(device, dims);
     let mut pop = std::pin::pin!(scope.pop());
     match pop.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
         Poll::Ready(Some(_)) => None,
@@ -1908,26 +2380,26 @@ pub struct AtlasRefused {
     pub dropped: usize,
 }
 
-fn alloc_volume_textures(gpu: &Gpu, dims: [u32; 3]) -> (wgpu::Texture, wgpu::Texture) {
+fn alloc_volume_textures(device: &wgpu::Device, dims: [u32; 3]) -> (wgpu::Texture, wgpu::Texture) {
     let size = wgpu::Extent3d { width: dims[0], height: dims[1], depth_or_array_layers: dims[2] };
-    let dist = gpu.device.create_texture(&wgpu::TextureDescriptor {
+    let dist = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("sdf-distance"),
         size,
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D3,
         format: wgpu::TextureFormat::R16Float,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
-    let color = gpu.device.create_texture(&wgpu::TextureDescriptor {
+    let color = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("sdf-color"),
         size,
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D3,
         format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     (dist, color)
@@ -1970,6 +2442,114 @@ fn write_volume_data(
     );
 }
 
+/// Lay `plan` out in an atlas of `size`: a slot `keep` names stays where it
+/// is; a slot `copy` finds written elsewhere (at `from`, `done_z` layers, with
+/// its content box) takes a free Z range and is copied there; the rest take a
+/// free range, first fit, and are uploaded. `taken` are Z ranges nothing may
+/// take (what is drawn there). `None` when something does not fit.
+#[allow(clippy::type_complexity)]
+fn fit_slots(
+    plan: &[([u32; 3], u64)],
+    size: [u32; 3],
+    taken: &[(u32, u32)],
+    keep: impl Fn([u32; 3], u64) -> Option<BuildSlot>,
+    copy: impl Fn([u32; 3], u64) -> Option<([u32; 3], u32, Option<([f32; 3], [f32; 3])>)>,
+) -> Option<Vec<(BuildSlot, Option<[u32; 3]>)>> {
+    let mut taken = taken.to_vec();
+    let mut out: Vec<Option<(BuildSlot, Option<[u32; 3]>)>> =
+        plan.iter().map(|&(d, k)| if k == 0 { None } else { keep(d, k).map(|s| (s, None)) }).collect();
+    for (s, _) in out.iter().flatten() {
+        taken.push((s.origin[2], s.origin[2] + s.dims[2]));
+    }
+    for (slot, &(dims, key)) in out.iter_mut().zip(plan) {
+        if slot.is_some() {
+            continue;
+        }
+        if dims[0] > size[0] || dims[1] > size[1] {
+            return None;
+        }
+        taken.sort_unstable();
+        let mut z = 0u32;
+        for &(a, b) in &taken {
+            if a >= z + dims[2] {
+                break;
+            }
+            z = z.max(b);
+        }
+        if z + dims[2] > size[2] {
+            return None;
+        }
+        taken.push((z, z + dims[2]));
+        let mut s = BuildSlot { origin: [0, 0, z], dims, key, done_z: 0, tight: None };
+        let from = if key == 0 { None } else { copy(dims, key) };
+        let from = from.map(|(at, done, tight)| {
+            s.done_z = done;
+            s.tight = tight;
+            at
+        });
+        *slot = Some((s, from));
+    }
+    out.into_iter().collect()
+}
+
+/// Write Z layers `[z0, z1)` of `baked` into the atlas at `origin`. The
+/// layers are contiguous in the bake, so nothing is gathered.
+fn write_slab(gpu: &Gpu, dist: &wgpu::Texture, color: &wgpu::Texture, origin: [u32; 3], baked: &BakedSdf, z0: u32, z1: u32) {
+    let [w, h, _] = baked.dims;
+    let (a, b) = ((z0 * w * h) as usize, (z1 * w * h) as usize);
+    let dist_f16: Vec<u16> = baked.distance[a..b].iter().map(|&v| f32_to_f16(v)).collect();
+    let at = wgpu::Origin3d { x: origin[0], y: origin[1], z: origin[2] + z0 };
+    let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: z1 - z0 };
+    gpu.queue.write_texture(
+        wgpu::TexelCopyTextureInfo { texture: dist, mip_level: 0, origin: at, aspect: wgpu::TextureAspect::All },
+        bytemuck::cast_slice(&dist_f16),
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 2), rows_per_image: Some(h) },
+        size,
+    );
+    gpu.queue.write_texture(
+        wgpu::TexelCopyTextureInfo { texture: color, mip_level: 0, origin: at, aspect: wgpu::TextureAspect::All },
+        bytemuck::cast_slice(&baked.color[a..b]),
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+        size,
+    );
+}
+
+/// Write the sub-box `[lo, hi)` (voxel coords, already clamped) of `baked`
+/// into the atlas slot at `off`. Returns the cells written.
+fn write_sub_box(gpu: &Gpu, dist_tex: &wgpu::Texture, color_tex: &wgpu::Texture, off: [u32; 3], baked: &BakedSdf, lo: [u32; 3], hi: [u32; 3]) -> u64 {
+    let [w, h, _] = baked.dims;
+    let ([x0, y0, z0], [x1, y1, z1]) = (lo, hi);
+    let (rw, rh, rd) = (x1 - x0, y1 - y0, z1 - z0);
+    // Pack the sub-box tightly (x-fastest), converting distance to f16.
+    let mut dist = Vec::with_capacity((rw * rh * rd) as usize);
+    let mut col = Vec::with_capacity((rw * rh * rd) as usize);
+    for z in z0..z1 {
+        for y in y0..y1 {
+            let row = ((z * h + y) * w) as usize;
+            for x in x0..x1 {
+                let i = row + x as usize;
+                dist.push(f32_to_f16(baked.distance[i]));
+                col.push(baked.color[i]);
+            }
+        }
+    }
+    let origin = wgpu::Origin3d { x: off[0] + x0, y: off[1] + y0, z: off[2] + z0 };
+    let extent = wgpu::Extent3d { width: rw, height: rh, depth_or_array_layers: rd };
+    gpu.queue.write_texture(
+        wgpu::TexelCopyTextureInfo { texture: dist_tex, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
+        bytemuck::cast_slice(&dist),
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(rw * 2), rows_per_image: Some(rh) },
+        extent,
+    );
+    gpu.queue.write_texture(
+        wgpu::TexelCopyTextureInfo { texture: color_tex, mip_level: 0, origin, aspect: wgpu::TextureAspect::All },
+        bytemuck::cast_slice(&col),
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(rw * 4), rows_per_image: Some(rh) },
+        extent,
+    );
+    rw as u64 * rh as u64 * rd as u64
+}
+
 /// Minimal `f32` → IEEE-754 half (`f16` bits). Flushes denormals to ±0 and clamps
 /// overflow to ±inf — fine for distance volumes (small magnitudes).
 fn f32_to_f16(v: f32) -> u16 {
@@ -2006,9 +2586,163 @@ mod oom_tests {
     fn an_atlas_bigger_than_video_memory_is_refused() {
         let gpu = crate::Gpu::headless(4, 4);
         assert!(
-            super::try_alloc_volume_textures(&gpu, [2048, 2048, 2048]).is_none(),
+            super::try_alloc_volume_textures(&gpu.device, [2048, 2048, 2048]).is_none(),
             "a 48 GB atlas came back as made"
         );
-        assert!(super::try_alloc_volume_textures(&gpu, [64, 64, 64]).is_some(), "a small one must still be made");
+        assert!(super::try_alloc_volume_textures(&gpu.device, [64, 64, 64]).is_some(), "a small one must still be made");
+    }
+}
+
+#[cfg(test)]
+mod atlas_tests {
+    use super::{AtlasVolume, Raymarch};
+    use floptle_field::BakedSdf;
+
+    /// A bake whose every cell says which bake and which cell it is.
+    fn bake(seed: u32, dims: [u32; 3]) -> BakedSdf {
+        let n = (dims[0] * dims[1] * dims[2]) as usize;
+        BakedSdf {
+            dims,
+            center: [0.0; 3],
+            half_extent: [dims[0] as f32 * 0.5, dims[1] as f32 * 0.5, dims[2] as f32 * 0.5],
+            distance: (0..n).map(|i| ((i as u32 * 7 + seed * 131) % 997) as f32 * 0.01 - 2.0).collect(),
+            color: (0..n).map(|i| [(i % 251) as u8, seed as u8, (i / 251 % 256) as u8, 255]).collect(),
+        }
+    }
+
+    fn holds(gpu: &crate::Gpu, rm: &Raymarch, i: usize, b: &BakedSdf) -> bool {
+        rm.slot_holds(gpu, i, b)
+    }
+
+    /// Calls of `set_volumes_keyed` until it says the atlas holds `vols`,
+    /// each frame's upload at most the budget and a layer: the frames taken
+    /// and the cells written in all.
+    fn land(gpu: &crate::Gpu, rm: &mut Raymarch, vols: &[AtlasVolume], budget: u64, mut each: impl FnMut(&Raymarch)) -> (usize, u64) {
+        let start = rm.uploaded_cells();
+        for frame in 1..10_000 {
+            let before = rm.uploaded_cells();
+            let done = rm.set_volumes_keyed(gpu, vols, budget);
+            let layer = vols.iter().map(|v| (v.baked.dims[0] * v.baked.dims[1]) as u64).max().unwrap_or(0);
+            let wrote = rm.uploaded_cells() - before;
+            assert!(wrote <= budget.saturating_add(layer), "a frame uploaded {wrote} cells against a budget of {budget}");
+            gpu.queue.submit(None);
+            if done.is_some() {
+                assert_eq!(done, Some(vols.len()), "not every volume was accepted");
+                return (frame, rm.uploaded_cells() - start);
+            }
+            each(rm);
+        }
+        panic!("the atlas never finished");
+    }
+
+    /// Calls until the atlas `vols` needs has been made and the build into
+    /// it has begun: the larger atlas is made on a worker, the frames before
+    /// it arrives write nothing.
+    fn grow(gpu: &crate::Gpu, rm: &mut Raymarch, vols: &[AtlasVolume], budget: u64) {
+        for _ in 0..10_000 {
+            let before = rm.uploaded_cells();
+            assert!(rm.set_volumes_keyed(gpu, vols, budget).is_none(), "it finished without growing");
+            if rm.building.as_ref().is_some_and(|b| b.textures.is_some()) {
+                return;
+            }
+            assert_eq!(rm.uploaded_cells(), before, "a frame waiting for the atlas uploaded");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("the larger atlas never came");
+    }
+
+    fn cells(b: &BakedSdf) -> u64 {
+        b.distance.len() as u64
+    }
+
+    /// **A volume that arrives uploads itself and nothing else, over frames,
+    /// and the old slots are drawn until it is in.** Every terrain landing
+    /// re-uploaded the whole atlas in its frame: Solar's belt rocks, one
+    /// after another, were 100 to 490 ms of `terrainShadow` a frame. A body
+    /// arriving between two others (the slots are in id order) moves neither
+    /// of them: their keys are drawn, so they stay. Counted in cells: the
+    /// frames upload the new volume's cells exactly, a budget's worth at a
+    /// time, while the drawn table stays the old one; after, every slot
+    /// holds its own bake, bit for bit.
+    #[test]
+    fn a_volume_that_arrives_uploads_itself_and_nothing_else() {
+        let gpu = crate::Gpu::headless(4, 4);
+        let mut rm = Raymarch::new(&gpu);
+        let (a, b, c) = (bake(1, [48, 40, 64]), bake(2, [64, 64, 48]), bake(3, [64, 56, 64]));
+        let ab = [AtlasVolume { baked: &a, key: 11 }, AtlasVolume { baked: &b, key: 12 }];
+        let (_, first) = land(&gpu, &mut rm, &ab, u64::MAX, |_| {});
+        assert_eq!(first, cells(&a) + cells(&b));
+        let acb = [ab[0], AtlasVolume { baked: &c, key: 13 }, ab[1]];
+        let budget = 64 * 56 * 6;
+        let (frames, wrote) = land(&gpu, &mut rm, &acb, budget, |rm| {
+            let keys: Vec<u64> = rm.slots.iter().map(|s| s.key).collect();
+            assert_eq!(keys, [11, 12], "the drawn slots changed before the new volume was whole");
+        });
+        assert_eq!(wrote, cells(&c), "the volumes already in the atlas were uploaded again");
+        assert!(frames >= 10, "the arrival landed in {frames} frames: no budget");
+        for (i, v) in acb.iter().enumerate() {
+            assert!(holds(&gpu, &rm, i, v.baked), "slot {i} does not hold its bake");
+        }
+        // And one leaving costs nothing.
+        let (frames, wrote) = land(&gpu, &mut rm, &[acb[1], acb[2]], budget, |_| {});
+        assert_eq!((frames, wrote), (1, 0));
+        assert!(holds(&gpu, &rm, 0, &c) && holds(&gpu, &rm, 1, &b));
+    }
+
+    /// **An atlas too small for what arrives grows, and keeps what it held
+    /// without uploading it.** The bigger atlas is written beside the drawn
+    /// one; what the drawn one holds is copied across on the GPU, so the
+    /// frames upload only the newcomer. A second arrival while that is under
+    /// way joins the same build, keeping what it wrote.
+    #[test]
+    fn a_growing_atlas_copies_what_it_holds() {
+        let gpu = crate::Gpu::headless(4, 4);
+        let mut rm = Raymarch::new(&gpu);
+        let (a, b, c) = (bake(4, [32, 32, 32]), bake(5, [32, 32, 300]), bake(6, [32, 24, 40]));
+        let va = AtlasVolume { baked: &a, key: 21 };
+        land(&gpu, &mut rm, &[va], u64::MAX, |_| {});
+        let room = rm._dist_tex.size().depth_or_array_layers;
+        assert!(room < 32 + 300, "the fixture fits without growing");
+        let vb = AtlasVolume { baked: &b, key: 22 };
+        let vc = AtlasVolume { baked: &c, key: 23 };
+        // B starts (once the larger atlas is made, off the frame); C
+        // arrives two frames into it.
+        let start = rm.uploaded_cells();
+        grow(&gpu, &mut rm, &[va, vb], 32 * 32 * 10);
+        assert!(rm.set_volumes_keyed(&gpu, &[va, vb], 32 * 32 * 10).is_none());
+        land(&gpu, &mut rm, &[va, vb, vc], 32 * 32 * 10, |rm| assert_eq!(rm.slots.len(), 1));
+        assert_eq!(rm.uploaded_cells() - start, cells(&b) + cells(&c), "something was uploaded twice");
+        for (i, v) in [&a, &b, &c].into_iter().enumerate() {
+            assert!(holds(&gpu, &rm, i, v), "slot {i} does not hold its bake");
+        }
+    }
+
+    /// **An edit's box reaches the volume being built as well as the one
+    /// drawn, and uploads only the box.** A dig landing while its terrain's
+    /// atlas is re-laid is not lost when the new atlas takes over.
+    #[test]
+    fn an_edit_box_reaches_both_atlases() {
+        let gpu = crate::Gpu::headless(4, 4);
+        let mut rm = Raymarch::new(&gpu);
+        let mut a = bake(7, [40, 40, 40]);
+        let b = bake(8, [40, 40, 600]);
+        land(&gpu, &mut rm, &[AtlasVolume { baked: &a, key: 31 }], u64::MAX, |_| {});
+        // Growing, so `a` is copied into a second atlas.
+        let budget = 40 * 40 * 20;
+        grow(&gpu, &mut rm, &[AtlasVolume { baked: &a, key: 31 }, AtlasVolume { baked: &b, key: 32 }], budget);
+        for i in 0..a.distance.len() {
+            let (x, y, z) = (i % 40, i / 40 % 40, i / 1600);
+            if (5..9).contains(&x) && (10..20).contains(&y) && (30..33).contains(&z) {
+                a.distance[i] = -1.5;
+            }
+        }
+        let before = rm.uploaded_cells();
+        rm.set_volume_region_keyed(&gpu, 31, &a, [5, 10, 30], [9, 20, 33]);
+        assert_eq!(rm.uploaded_cells() - before, 2 * 4 * 10 * 3, "the box went to each atlas once");
+        assert!(holds(&gpu, &rm, 0, &a), "the drawn atlas lacks the edit");
+        let vols = [AtlasVolume { baked: &a, key: 31 }, AtlasVolume { baked: &b, key: 32 }];
+        land(&gpu, &mut rm, &vols, budget, |_| {});
+        assert!(holds(&gpu, &rm, 0, &a), "the new atlas lost the edit");
+        assert!(holds(&gpu, &rm, 1, &b));
     }
 }
