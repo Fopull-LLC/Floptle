@@ -400,6 +400,30 @@ and the pool drains into it, every litre accounted for, while `water.at`,
 `water.flowAt` and anything floating follow where it has gone. Drag acts on a
 body's velocity relative to the water, so a current carries what floats in it.
 
+A sim can be a river. `springs = { { pos = vec3(...), rate = 2 } }` puts a
+spring at the point nearest each `pos`, giving `rate` cubic metres a second.
+`roughness` is the bed's Manning roughness: 0 (the default) is still water's
+frictionless model, and about 0.035 is a natural river bed, which holds a river
+at the depth and speed a real one runs at. `holdEdges = true` holds every edge
+point whose ground is below `level` at `level`: the sea or a larger lake beyond
+the patch, so a trench dug inland from its shore fills from it and stays full.
+Water pouring off the edge of a drop passes no more than a weir would, which is
+what keeps a river stable over a cliff.
+
+```lua
+local river = water.addVolume{ shape = "sim", origin = vec3(-60, 0, -10), cell = 2, columns = 60, rows = 10,
+  level = -1, roughness = 0.035, springs = { { pos = vec3(-58, 20, 0), rate = 3 } } }
+
+for _, f in ipairs(water.falls(river)) do
+  -- f.pos: the top of the fall, at the surface; f.dir: which way it pours;
+  -- f.width, f.discharge (m³/s) and f.drop (m): size a fall sheet and its mist.
+end
+```
+
+`water.falls([id])` lists every place simulated water pours off a drop of more
+than 1.5 m, in the world, refreshed as the water flows: where a game puts its
+waterfall sheets and mist, and takes them away when a fall runs dry.
+
 `water.depthAt` and the solver answer from the **same geometry**, so a swim
 state can't disagree with the physics floating it — which is exactly what
 happened when a game carried its own `seaDepth()` against a sea radius it had
@@ -581,6 +605,14 @@ scatter.create{
   emissive = { 0.2, 1, 0.6 }, emissiveStrength = 1.5,   -- a glow, over the model's
 }
 ```
+
+`emissiveStrength` without an `emissive` colour lights the props in their own
+colours: each takes its model's own glow colour, or glows through its model's
+emissive map where it has one, and a model with no glow of its own glows in the
+source's `tint`. So `tint = { 0.3, 1, 0.5 }, emissiveStrength = 2` is a field of
+green glowing mushrooms, and the same call on a model with glowing caps lights
+the caps in the colours they were painted. `emissiveStrength = 0` (the default)
+leaves every model's own glow as it was.
 
 A prototype can be a mesh file, a `.prefab.ron` (each of its Mesh nodes drawn at
 its place in the prop), or a mesh a script built with `mesh.build`.

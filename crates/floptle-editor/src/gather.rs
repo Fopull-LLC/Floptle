@@ -809,6 +809,9 @@ impl Editor {
                     }
                 }
                 Giz::Gravity(radial, radius) => {
+                    // At the reach the field is built with: scaled by the
+                    // node's largest axis.
+                    let radius = radius * wt.scale.abs().max_element();
                     let lines = gravity_volume_lines(
                         wt.translation, radial, radius, cam.world_position, view_proj, gw, gh,
                     );
@@ -983,7 +986,7 @@ impl Editor {
             let wt = floptle_core::world_transform(&self.world, e);
             let (p, height) = match live.get(&e) {
                 Some(&(pos, h)) => (pos, h),
-                None => (wt.translation, rb.height),
+                None => (wt.translation, rb.world_height(wt.scale)),
             };
             let lines = if rb.kind == floptle_core::BodyKind::Polygon {
                 // The outline the sim collides with, flip and scale included,
@@ -1055,7 +1058,7 @@ impl Editor {
                 rigidbody_lines(
                     p,
                     rb.kind == floptle_core::BodyKind::Capsule,
-                    rb.radius,
+                    rb.world_radius(wt.scale),
                     height,
                     cam.world_position,
                     view_proj,
@@ -1077,7 +1080,8 @@ impl Editor {
                 .collect();
             for (e, j) in joints {
                 let wt = floptle_core::world_transform(&self.world, e);
-                let at = wt.translation + (wt.rotation * Vec3::from(j.anchor)).as_dvec3();
+                // In the node's space, scale included, as the physics reads it.
+                let at = wt.translation + (wt.rotation * (Vec3::from(j.anchor) * wt.scale)).as_dvec3();
                 let other = self
                     .world
                     .query::<floptle_core::Name>()
@@ -1086,7 +1090,7 @@ impl Editor {
                 let far = match other {
                     Some(o) => {
                         let ot = floptle_core::world_transform(&self.world, o);
-                        ot.translation + (ot.rotation * Vec3::from(j.other_anchor)).as_dvec3()
+                        ot.translation + (ot.rotation * (Vec3::from(j.other_anchor) * ot.scale)).as_dvec3()
                     }
                     None => at,
                 };

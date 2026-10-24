@@ -95,12 +95,15 @@ impl Editor {
                     GravityMode::Down => field
                         .sources
                         .push(floptle_physics::GravitySource::Uniform(Vec3::new(0.0, -*strength, 0.0))),
+                    // Its reach scales with the node, by its largest axis
+                    // (a ball has one radius), like every other size a
+                    // node's transform carries.
                     GravityMode::Radial => {
-                        let p = floptle_core::world_transform(world, e).translation;
+                        let wt = floptle_core::world_transform(world, e);
                         field.sources.push(floptle_physics::GravitySource::Point {
-                            center: (p - origin).as_vec3(),
+                            center: (wt.translation - origin).as_vec3(),
                             strength: *strength,
-                            radius: *radius,
+                            radius: *radius * wt.scale.abs().max_element(),
                         });
                     }
                 }
@@ -129,7 +132,7 @@ impl Editor {
             } else if let Some((_, pb, _)) =
                 cb.iter().find(|(pe, ..)| name_of(*pe) == b.parent)
             {
-                floptle_core::frames::System::auto_soi(b.a.abs(), b.mu, pb.mu, b.body_radius)
+                floptle_core::frames::System::auto_soi(b.a.abs(), b.mu, pb.mu, b.body_radius, b.reach)
             } else {
                 0.0
             };
@@ -1096,8 +1099,10 @@ impl Editor {
                 }
                 self.maps.meshes = meshes;
             }
-            // Edits a script made that have not landed belong to the session.
+            // Edits a script made that have not landed belong to the session,
+            // and so do the impostor rules it set.
             self.terrain_op_queue.clear();
+            self.terrain_impostor_rules.clear();
             if let Some((fields, palette)) = self.play_terrains.take() {
                 for (id, t) in fields {
                     if let Some(e) = self.terrain_entity_of_id(id) {

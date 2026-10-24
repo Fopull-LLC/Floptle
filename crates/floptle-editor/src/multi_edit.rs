@@ -111,6 +111,7 @@ field_diff!(Material {
     fog,
     ambient,
     alpha,
+    blend,
     alpha_cutoff,
     double_sided,
     normal_map,
@@ -202,6 +203,7 @@ field_diff!(CelestialBody {
     luminosity,
     star_color,
     occluder_radius,
+    reach,
 });
 
 field_diff!(floptle_audio::PlayParams {

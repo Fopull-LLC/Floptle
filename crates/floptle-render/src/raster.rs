@@ -311,7 +311,10 @@ impl MaterialParams {
             rim_strength: m.rim_strength,
             unlit: m.unlit,
             ambient: m.ambient,
-            alpha: m.alpha,
+            // A solid surface is solid: its opacity reaches the picture only
+            // when it blends (the one thing that decides the pass), or when a
+            // retro screen door turns it into a pattern of solid pixels.
+            alpha: if m.blend == floptle_core::BlendMode::Blend || m.retro.dither_alpha { m.alpha } else { 1.0 },
             tile_mode,
             tile,
             tile_rotation,
@@ -514,6 +517,8 @@ pub struct SurfaceExtras {
     /// Faces seen from behind are drawn too
     /// ([`floptle_core::Material::double_sided`]).
     pub double_sided: bool,
+    /// Drawn in the blended pass ([`floptle_core::BlendMode::Blend`]).
+    pub blend: bool,
 }
 
 impl Default for SurfaceExtras {
@@ -534,6 +539,7 @@ impl Default for SurfaceExtras {
             backlight: 0.0,
             alpha_cutoff: 0.5,
             double_sided: true,
+            blend: false,
         }
     }
 }
@@ -569,6 +575,9 @@ pub(crate) const EXT_SINGLE_SIDED: u32 = 64;
 /// 254` in bits 8..16, so it costs no lane of its own. Zero there is the
 /// default cutoff of one half, which keeps the neutral entry all-zero.
 pub(crate) const EXT_CUTOFF_SHIFT: u32 = 8;
+/// Set when the surface blends ([`floptle_core::BlendMode::Blend`]): it is
+/// drawn in the blended pass whatever its opacity, and is never cut out.
+pub(crate) const EXT_BLEND: u32 = 128;
 
 impl SurfaceExtras {
     /// Read a material's extras. `Classic` still carries the normal and
@@ -588,8 +597,17 @@ impl SurfaceExtras {
             thickness: m.thickness,
             sway: m.sway,
             backlight: m.backlight,
-            alpha_cutoff: m.alpha_cutoff,
+            // Opaque cuts nothing, which is a cutoff of zero. A cutout's
+            // opacity multiplies its picture's alpha before the test, as
+            // glTF's MASK has it; dividing the cutoff by it is the same test
+            // and keeps the surface in the solid pass.
+            alpha_cutoff: match m.blend {
+                floptle_core::BlendMode::Opaque => 0.0,
+                floptle_core::BlendMode::Cutout if m.alpha < 1.0 => (m.alpha_cutoff / m.alpha.max(1e-4)).min(1.0),
+                _ => m.alpha_cutoff,
+            },
             double_sided: m.double_sided,
+            blend: m.blend == floptle_core::BlendMode::Blend,
         }
     }
 
@@ -625,6 +643,9 @@ impl SurfaceExtras {
         }
         if !self.double_sided {
             f |= EXT_SINGLE_SIDED;
+        }
+        if self.blend {
+            f |= EXT_BLEND;
         }
         if self.alpha_cutoff != 0.5 {
             let q = (self.alpha_cutoff.clamp(0.0, 1.0) * 254.0).round() as u32 + 1;
@@ -2216,6 +2237,11 @@ impl Raster {
         self.textures.get(id.0 as usize).map(|t| (&t._texture, t.sampling, t.revision.get()))
     }
 
+    /// Which surface-extras entries blend ([`EXT_BLEND`]), by index.
+    fn ext_blends(&self) -> Vec<bool> {
+        self.mat_ext_cpu.as_chunks::<EXT_LANES>().0.iter().map(|c| (c[1][0] as u32) & EXT_BLEND != 0).collect()
+    }
+
     pub(crate) fn material_bind(&self, id: TexId) -> Option<&wgpu::BindGroup> {
         self.textures.get(id.0 as usize).map(|t| &t.bind)
     }
@@ -3663,10 +3689,14 @@ impl Raster {
             .iter()
             .map(|c| (c[1][0] as u32) & EXT_DITHER_ALPHA != 0)
             .collect();
+        // The pass comes from the material's blend mode; a solid material
+        // whose instance is faded (a node's Tint, a cross-fade) still blends,
+        // since that fade is the node's, not the material's.
+        let blends = self.ext_blends();
         let is_opaque = |raw: &InstanceRaw| {
             is_terrain(raw)
-                || raw.color[3] >= OPAQUE_CUTOFF
                 || dithers.get(ext_index_of(raw) as usize).copied().unwrap_or(false)
+                || (raw.color[3] >= OPAQUE_CUTOFF && !blends.get(ext_index_of(raw) as usize).copied().unwrap_or(false))
         };
         // Glass belongs to neither phase here. It is drawn by
         // `draw_transmissive` once the scene behind it has been captured, and
@@ -4285,6 +4315,9 @@ impl Raster {
         // `draw_scene` (the texture is bound for the per-texel alpha discard).
         // Opaque-SHADER flsl draws join in — their phase comes from the shader,
         // not the instance alpha. Hash-grouped O(N) — see `group_by_key`.
+        // A blended material never primes depth, whatever its opacity.
+        let blend_flags = self.ext_blends();
+        let blended = |raw: &InstanceRaw| blend_flags.get(ext_index_of(raw) as usize).copied().unwrap_or(false);
         const OPAQUE_CUTOFF: f32 = 0.999;
         // A shader that moves its vertices draws depth through its own
         // pipelines (`displaced` below); the built-in ones would put it where
@@ -4307,7 +4340,7 @@ impl Raster {
             instances
                 .iter()
                 .filter(|(_, _, raw)| {
-                    solid(raw) && (is_terrain(raw) || raw.color[3] >= OPAQUE_CUTOFF)
+                    solid(raw) && (is_terrain(raw) || (raw.color[3] >= OPAQUE_CUTOFF && !blended(raw)))
                 })
                 .map(|(id, tex, raw)| ((id.0 as usize, tex.map(|t| t.0)), *raw))
                 .chain(
@@ -4328,7 +4361,7 @@ impl Raster {
         // agree bit for bit. Priming from the bind pose instead would depth-reject
         // the pose, and a character would vanish behind its own T-stance.
         let skin_buckets = self.bucket_skins_where(skins, &mut raws, |d| match &d.flsl {
-            None => is_terrain(&d.instance) || d.instance.color[3] >= OPAQUE_CUTOFF,
+            None => is_terrain(&d.instance) || (d.instance.color[3] >= OPAQUE_CUTOFF && !blended(&d.instance)),
             Some(bind) => flsl_opaque(bind),
         });
         let displaced =

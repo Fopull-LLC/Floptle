@@ -44,7 +44,7 @@ pub mod water;
 
 pub use ecs::{Change, ChangeCursor, ChangeKind, Entity, World};
 pub use layers::Layers;
-pub use material::{Material, MaterialPatch, ObjectMaterials, Retro, Shading, Tiling, Tint};
+pub use material::{BlendMode, Material, MaterialPatch, ObjectMaterials, Retro, Shading, Tiling, Tint};
 pub use matter::{
     TerrainCollision,
     active_camera, is_disabled, is_drawn, is_hidden, is_persistent, is_spot, world_transform, MIN_SPOT_ANGLE, OMNI_ANGLE, AnimController, AoMode, BodyKind, BodyMode, BoneAttach, Cast2D,
@@ -54,7 +54,7 @@ pub use matter::{
     Parent,
     Parallax, ParticleSystem, Persistent, RepeatIndex, RigidBody, SceneTag, ScreenShader, Shadow2D, Shape, SortMode, Sorting, Spin, Sprite, Sprites,
     Tags,
-    TerrainGen, TexturePaint, Trigger, VertexPaint, WaterKind,
+    TerrainGen, TexturePaint, Trigger, VertexPaint, WaterKind, TERRAIN_GENERATOR,
     Visible, DEFAULT_SORTING_LAYER, EMPTY_TILE, SORT_LAYER_STEP, SORT_ORDER_STEP,
     SORT_Y_BANDS, infers_2d, rank_offset, resolve_2d, resolve_shadow_2d, sorting_offset,
 };

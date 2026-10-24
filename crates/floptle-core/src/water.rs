@@ -104,11 +104,46 @@ pub struct DeclaredWater {
     pub floor: f64,
     /// What the camera sees from inside it, or `None` for no underwater look.
     pub look: Option<UnderwaterLook>,
-    /// The engine moves this water: its grid is filled to this level over
-    /// the ground the engine finds under it, and from then on flows, drains
-    /// into holes dug beside it and settles, the grid's levels and flow
-    /// following. `None` for water that stands where it was declared.
-    pub simulated: Option<f32>,
+    /// The engine moves this water: its grid is filled to a level over the
+    /// ground the engine finds under it, and from then on flows, drains into
+    /// holes dug beside it and settles, the grid's levels and flow following.
+    /// `None` for water that stands where it was declared.
+    pub simulated: Option<SimSpec>,
+}
+
+/// How a script asked the engine to move a body of water, and what the
+/// engine reports back about it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SimSpec {
+    /// The height it is filled to, in its parent's frame.
+    pub level: f32,
+    /// The bed's Manning roughness: 0 for still water's frictionless model,
+    /// about 0.035 for a natural river bed.
+    pub roughness: f32,
+    /// Springs, as `(point index, m³/s)`: a river's head.
+    pub springs: Vec<(usize, f32)>,
+    /// Hold every point on the grid's edge whose ground is below `level` at
+    /// `level`: the sea or a larger lake beyond the patch, which fills a
+    /// trench dug from its shore and stays full.
+    pub hold_edges: bool,
+    /// Where its water pours over a drop of more than 1.5 m, refreshed by
+    /// the engine as it flows.
+    pub falls: Vec<WaterFall>,
+}
+
+/// Water pouring off a drop: where a waterfall goes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WaterFall {
+    /// The top of the fall, at the water's surface, in world space.
+    pub pos: DVec3,
+    /// Which way it pours, across the ground, in world space.
+    pub dir: Vec3,
+    /// The edge it pours over, metres wide.
+    pub width: f32,
+    /// m³/s over the edge.
+    pub discharge: f32,
+    /// From the surface at the top to the surface at the foot, metres.
+    pub drop: f32,
 }
 
 /// What being under water looks like: the colour everything fades toward and

@@ -285,6 +285,7 @@ fn push_quads(out: &mut Vec<u32>, index: &[u32], columns: usize, rows: usize) {
 pub(crate) const VOLUME_KEYS: &[&str] = &[
     "shape", "parent", "center", "radius", "reach", "origin", "cell", "columns", "rows", "levels", "flow",
     "density", "drag", "angularDrag", "current", "depth", "tint", "visibility", "underwater", "level",
+    "roughness", "springs", "holdEdges",
 ];
 
 /// The most points a simulated volume may have: a few hundred metres of lake
@@ -324,8 +325,35 @@ fn declared_from(opts: &Table, id: u32) -> mlua::Result<DeclaredWater> {
                 )));
             }
             let level = num("level").ok_or_else(|| err("a sim needs `level`, the height it is filled to in its parent's frame"))?;
-            sim_level = Some(level as f32);
             let origin = vec("origin").unwrap_or(glam::DVec3::ZERO);
+            let roughness = num("roughness").unwrap_or(0.0);
+            if !(0.0..=1.0).contains(&roughness) {
+                return Err(err("`roughness` is the bed's Manning roughness, 0 to 1 (0.035 is a natural river bed)"));
+            }
+            // Springs: a river's head, at the point nearest where each is put.
+            let mut springs = Vec::new();
+            if let Some(list) = opts.get::<Option<Table>>("springs").map_err(|_| err("`springs` is a list of { pos = vec3, rate = m³/s }"))? {
+                for entry in list.sequence_values::<Table>() {
+                    let e = entry.map_err(|_| err("`springs` is a list of { pos = vec3, rate = m³/s }"))?;
+                    crate::opts::check_keys(&e, &["pos", "rate"], "water.addVolume springs")?;
+                    let p = crate::math_api::vec3_of(&e.get::<Value>("pos")?)
+                        .ok_or_else(|| err("a spring's `pos` is a vec3 in the parent's frame"))?;
+                    let rate: f64 = e.get::<Option<f64>>("rate")?.ok_or_else(|| err("a spring needs `rate`, m³/s"))?;
+                    let (i, j) = (((p.x - origin.x) / cell).round(), ((p.z - origin.z) / cell).round());
+                    if i < 0.0 || j < 0.0 || i >= columns as f64 || j >= rows as f64 || rate.is_nan() || rate < 0.0 {
+                        return Err(err("a spring is a `pos` inside the sim's grid with a `rate` of 0 or more m³/s"));
+                    }
+                    springs.push((j as usize * columns + i as usize, rate as f32));
+                }
+            }
+            let hold_edges = opts.get::<Option<bool>>("holdEdges").map_err(|_| err("`holdEdges` is true or false"))?.unwrap_or(false);
+            sim_level = Some(floptle_core::water::SimSpec {
+                level: level as f32,
+                roughness: roughness as f32,
+                springs,
+                hold_edges,
+                falls: Vec::new(),
+            });
             let levels = vec![level as f32; columns * rows];
             Surface::Grid(std::sync::Arc::new(HeightGrid { x0: origin.x, z0: origin.z, cell, columns, rows, levels, flow: Vec::new() }))
         }
@@ -627,6 +655,34 @@ pub(crate) fn install_water_api(lua: &Lua, shared: WaterShared) {
         }
     }
 
+    // water.falls([id]) → every place simulated water pours off a drop of
+    // more than 1.5 m: { pos, dir, width, discharge, drop, volume }, in the
+    // world. Where a game puts a fall sheet and its mist.
+    {
+        let s = shared.clone();
+        if let Ok(f) = lua.create_function(move |lua, id: Option<u32>| {
+            let out = lua.create_table()?;
+            let mut n = 0;
+            for w in s.declared.borrow().iter().filter(|w| id.is_none_or(|i| i == w.id)) {
+                let Some(sim) = &w.simulated else { continue };
+                for fall in &sim.falls {
+                    let row = lua.create_table()?;
+                    row.set("pos", crate::math_api::LuaVec3(fall.pos))?;
+                    row.set("dir", crate::math_api::LuaVec3(fall.dir.as_dvec3()))?;
+                    row.set("width", fall.width)?;
+                    row.set("discharge", fall.discharge)?;
+                    row.set("drop", fall.drop)?;
+                    row.set("volume", w.id)?;
+                    n += 1;
+                    out.raw_set(n, row)?;
+                }
+            }
+            Ok(out)
+        }) {
+            let _ = t.set("falls", f);
+        }
+    }
+
     // water.removeVolume(id) → true if there was one.
     {
         let s = shared.clone();
@@ -770,6 +826,39 @@ mod tests {
         assert_eq!(d[1].look, None);
         let err = lua.load(r#"water.addVolume{ shape = "lake", center = vec3(0, 5, 0), reach = 1, depth = -1 }"#).exec().unwrap_err();
         assert!(err.to_string().contains("`depth`"), "{err}");
+    }
+
+    /// A sim takes a river bed's roughness, springs at the points nearest
+    /// where they are put, and a held edge; a spring off the grid is refused.
+    /// `water.falls` hands back what the engine reported, in the world.
+    #[test]
+    fn a_sim_takes_springs_and_reports_its_falls() {
+        let (lua, shared) = host();
+        let id: u32 = lua
+            .load(
+                r#"return water.addVolume{ shape = "sim", origin = vec3(-4, 0, -2), cell = 2, columns = 5, rows = 3, level = 0,
+                                          roughness = 0.035, holdEdges = true, springs = { { pos = vec3(-4.4, 1, 1.8), rate = 2 } } }"#,
+            )
+            .eval()
+            .unwrap();
+        {
+            let d = shared.declared.borrow();
+            let sim = d[0].simulated.as_ref().expect("a sim");
+            assert_eq!((sim.roughness, sim.hold_edges), (0.035, true));
+            // (-4.4, 1.8) is nearest the point at column 0, row 2.
+            assert_eq!(sim.springs, vec![(2 * 5, 2.0)]);
+        }
+        let off = lua.load(r#"water.addVolume{ shape = "sim", cell = 1, columns = 2, rows = 2, level = 0, springs = { { pos = vec3(9, 0, 9), rate = 1 } } }"#).exec();
+        assert!(off.is_err_and(|e| e.to_string().contains("spring")), "a spring off the grid was taken");
+        let fall = floptle_core::water::WaterFall { pos: glam::DVec3::new(1.0, 2.0, 3.0), dir: glam::Vec3::X, width: 2.0, discharge: 1.5, drop: 4.0 };
+        shared.declared.borrow_mut()[0].simulated.as_mut().unwrap().falls = vec![fall];
+        let (n, drop, x, vol): (usize, f64, f64, u32) = lua
+            .load("local f = water.falls() return #f, f[1].drop, f[1].pos.x, f[1].volume")
+            .eval()
+            .unwrap();
+        assert_eq!((n, drop, x, vol), (1, 4.0, 1.0, id));
+        let none: usize = lua.load(format!("return #water.falls({})", id + 7)).eval().unwrap();
+        assert_eq!(none, 0, "another volume's falls were handed back");
     }
 
     /// A heightfield is wet where its levels are, and a misshapen one is

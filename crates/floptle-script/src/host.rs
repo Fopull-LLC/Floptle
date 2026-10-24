@@ -2801,6 +2801,7 @@ impl ScriptHost {
             body_drop_changes: Rc::new(RefCell::new(HashMap::new())),
             body_spin_changes: Rc::new(RefCell::new(HashMap::new())),
             body_pos_changes: Rc::new(RefCell::new(HashMap::new())),
+            carry: Rc::new(RefCell::new(HashMap::new())),
             sprite_draws: Rc::new(RefCell::new(HashMap::new())),
             shader_param_sets: Rc::new(RefCell::new(Vec::new())),
             shader_texture_sets: Rc::new(RefCell::new(Vec::new())),
@@ -2991,6 +2992,8 @@ impl ScriptHost {
         let terrain_op_id: Rc<std::cell::Cell<u64>> = Rc::new(std::cell::Cell::new(0));
         let terrain_planet: Rc<RefCell<crate::terrain_api::PlanetQueries>> = Rc::default();
         let terrain_queued: Rc<std::cell::Cell<usize>> = Rc::default();
+        let terrain_generator = Rc::new(std::cell::Cell::new(floptle_field::procgen::GENERATOR_VERSION));
+        let terrain_impostors: crate::terrain_api::ImpostorCalls = Rc::default();
         crate::terrain_api::install_terrain_api(
             &lua,
             terrain_ops.clone(),
@@ -3010,6 +3013,8 @@ impl ScriptHost {
                 next_op_id: terrain_op_id.clone(),
                 planet: terrain_planet.clone(),
                 queued: terrain_queued.clone(),
+                generator: terrain_generator.clone(),
+                impostors: terrain_impostors.clone(),
             },
         );
         // `decals.*`: marks laid on the static colliders lent for the pass.
@@ -3051,6 +3056,10 @@ impl ScriptHost {
             Rc::new(RefCell::new(crate::space_api::SpaceInfo::default()));
         let warp_request: Rc<RefCell<Option<f64>>> = Rc::new(RefCell::new(None));
         crate::space_api::install_space_api(&lua, space_info.clone(), warp_request.clone());
+        // `space.belt`: rocks on `space.beltOrbits` rows (see the file).
+        if let Err(e) = lua.load(include_str!("belt_sugar.lua")).set_name("=space.belt").exec() {
+            floptle_say::say_err!("[lua] failed to install space.belt: {e}");
+        }
         // The `nav.*` pathfinding surface, reading whatever navmesh the open
         // scene baked. Empty until one is loaded, which is the ordinary state
         // of a project that has not made one.
@@ -3170,6 +3179,7 @@ impl ScriptHost {
             body_drop_changes: shared.body_drop_changes.clone(),
             body_spin_changes: shared.body_spin_changes.clone(),
             body_pos_changes: shared.body_pos_changes.clone(),
+            carry: shared.carry.clone(),
             sprite_draws: shared.sprite_draws.clone(),
             sprites_written: None,
             shader_param_sets: shared.shader_param_sets.clone(),
@@ -3182,6 +3192,8 @@ impl ScriptHost {
             terrain_yields,
             terrain_planet,
             terrain_queued,
+            terrain_generator,
+            terrain_impostors,
             terrain_generates,
             terrain_save_dir,
             terrain_warm,
@@ -3652,6 +3664,17 @@ impl ScriptHost {
         self.scene.try_borrow().ok()?.by_name.get(name).copied()
     }
 
+    /// Every global a game script can reach, with whether it is a table (a
+    /// library such as `scatter`) — for an editor deciding what exists.
+    pub fn global_names(&self) -> Vec<(String, bool)> {
+        self.lua
+            .globals()
+            .pairs::<String, mlua::Value>()
+            .flatten()
+            .map(|(k, v)| (k, v.is_table()))
+            .collect()
+    }
+
     /// The presses and releases scripts asked `input.simulate` for since the
     /// last call, for the driver to feed through the real input path.
     pub fn take_simulated_input(&self) -> Vec<crate::SimulatedInput> {
@@ -3768,6 +3791,14 @@ impl ScriptHost {
     pub fn set_water_surface(&self, id: u32, surface: floptle_core::water::Surface) {
         if let Some(w) = self.water_declared.borrow_mut().iter_mut().find(|w| w.id == id) {
             w.surface = surface;
+        }
+    }
+
+    /// Where a simulated volume's water pours off drops now, for
+    /// `water.falls`.
+    pub fn set_water_falls(&self, id: u32, falls: Vec<floptle_core::water::WaterFall>) {
+        if let Some(sim) = self.water_declared.borrow_mut().iter_mut().find(|w| w.id == id).and_then(|w| w.simulated.as_mut()) {
+            sim.falls = falls;
         }
     }
 
@@ -4375,13 +4406,27 @@ impl ScriptHost {
         self.frame_step_request.replace(0)
     }
 
-    /// Mirror the background terrain worker's state into `terrain.busy()`.
     /// How many terrain edits the engine has taken from scripts and not yet
     /// applied: what `terrain.pending()` adds to the ones still queued here.
     pub fn set_terrain_edits_queued(&self, n: usize) {
         self.terrain_queued.set(n);
     }
 
+    /// The planet generator version a script's planet is made by when its
+    /// options name none: the project's, so an upgraded project's worlds and
+    /// its questions about their rivers and lakes stay as they were. A new
+    /// host has the current one.
+    pub fn set_terrain_generator(&self, v: u32) {
+        self.terrain_generator.set(v);
+    }
+
+    /// The `terrain.impostorAt` calls made since the last take, in order: a
+    /// terrain id and its rule, `None` for the default.
+    pub fn take_terrain_impostors(&self) -> Vec<(u32, Option<crate::terrain_api::ImpostorRule>)> {
+        std::mem::take(&mut *self.terrain_impostors.borrow_mut())
+    }
+
+    /// Mirror the background terrain worker's state into `terrain.busy()`.
     pub fn set_terrain_busy(&self, on: bool) {
         self.terrain_busy.set(on);
     }
@@ -5828,6 +5873,12 @@ impl ScriptHost {
             Ok(s) => crate::api::body_world_of(&s, eid, local),
             Err(_) => [local.x, local.y, local.z],
         }
+    }
+
+    /// What `node.carry` answers until the next call: how far the world
+    /// under each body was carried (entity index → world displacement).
+    pub fn set_carry(&self, map: HashMap<u32, [f64; 3]>) {
+        *self.carry.borrow_mut() = map;
     }
 
     pub fn take_body_pos_changes(&self) -> HashMap<u32, [f64; 3]> {

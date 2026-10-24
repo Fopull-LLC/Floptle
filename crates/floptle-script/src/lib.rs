@@ -378,8 +378,8 @@ pub use net_api::{
     RewindScope, RollbackInfo,
 };
 pub use assembly_api::{AssemblyCmd, AssemblyImpact, AssemblyInfo};
-pub use space_api::{SpaceBodyInfo, SpaceInfo};
-pub use terrain_api::{LodAnchor, TerrainOp, TerrainOpMode, TerrainYield};
+pub use space_api::{belt_orbits, SpaceBodyInfo, SpaceInfo};
+pub use terrain_api::{ImpostorRule, LodAnchor, TerrainOp, TerrainOpMode, TerrainYield};
 pub use rollback_api::{ScriptState, MAX_STATE_DEPTH};
 pub use view_api::ViewInfo;
 
@@ -697,6 +697,8 @@ pub struct ScriptHost {
     /// Cross-node position writes on body entities → the driver teleports the
     /// body (see `Shared::body_pos_changes`).
     body_pos_changes: Rc<RefCell<HashMap<u32, [f64; 3]>>>,
+    /// `node.carry` (see `Shared::carry`).
+    carry: Rc<RefCell<HashMap<u32, [f64; 3]>>>,
     /// This frame's sprite-batch draws (see `Shared::sprite_draws`).
     sprite_draws: Rc<RefCell<HashMap<u32, Vec<floptle_core::Sprite>>>>,
     /// How many sprites the last flush wrote into the ECS, so a pass that drew
@@ -734,6 +736,10 @@ pub struct ScriptHost {
     terrain_planet: Rc<RefCell<terrain_api::PlanetQueries>>,
     /// Edits the engine has taken and not yet applied (`terrain.pending()`).
     terrain_queued: Rc<std::cell::Cell<usize>>,
+    /// The generator version a planet asked for without one is made by.
+    terrain_generator: Rc<std::cell::Cell<u32>>,
+    /// `terrain.impostorAt` calls the engine has not taken yet.
+    terrain_impostors: terrain_api::ImpostorCalls,
     /// `terrain.generatePlanet(id, opts)` requests — heavyweight whole-field
     /// generations the editor runs on a background thread.
     terrain_generates: Rc<RefCell<Vec<(u32, floptle_field::procgen::PlanetFill)>>>,
@@ -2374,6 +2380,10 @@ struct Shared {
     /// the driver teleports the body there (otherwise the physics writeback
     /// stomps the transform next frame and the write silently vanishes).
     body_pos_changes: Rc<RefCell<HashMap<u32, [f64; 3]>>>,
+    /// How far the world under each body was carried (entity index → world
+    /// displacement): over this tick in `fixedUpdate`, over the last frame's
+    /// ticks in `update`. `node.carry` reads it; absent is zero.
+    carry: Rc<RefCell<HashMap<u32, [f64; 3]>>>,
     /// This frame's `b:draw(...)` calls per sprite-batch entity.
     ///
     /// Immediate mode, like `draw.*` and `gizmo.*`: the list is taken every
@@ -2482,6 +2492,37 @@ struct Shared {
     /// The Console feed, shared with the host — a handle read is the one place
     /// in the reference layer that has something to say.
     logs: Rc<RefCell<Vec<ScriptLog>>>,
+}
+
+/// The keys an options table passed to `call` may hold — what an editor
+/// offers inside `scatter.create{ … }`. The same lists the calls check their
+/// tables against, so a key offered is a key accepted. `None` for a call
+/// that takes no options table, or one not listed yet.
+pub fn option_keys(call: &str) -> Option<&'static [&'static str]> {
+    Some(match call {
+        "scatter.create" => scatter_api::CREATE_KEYS,
+        "scatter.setInteractors" => scatter_api::INTERACTOR_KEYS,
+        "node:setMaterial" => api::MATERIAL_KEYS,
+        "node:setCelestial" => api::CELESTIAL_KEYS,
+        "node:setTilemap" => api::TILEMAP_KEYS,
+        "node:setSorting" => api::SORTING_KEYS,
+        "node:setSprite" => api::SPRITE_KEYS,
+        "node:setParallax" => api::PARALLAX_KEYS,
+        "node:setCamera2D" => api::CAMERA_2D_KEYS,
+        "node:setLighting2D" => api::LIGHTING_2D_KEYS,
+        "node:setPointLight" => api::POINT_LIGHT_KEYS,
+        "node:setJoint" => api::JOINT_KEYS,
+        "node:setCamera" => api::CAMERA_KEYS,
+        "input.pushContext" => input_api::CONTEXT_KEYS,
+        "input.simulate" => &["key", "button", "down"],
+        "spawnEffect" => host::SPAWN_EFFECT_KEYS,
+        "app.setDisplayMode" => app_api::DISPLAY_MODE_KEYS,
+        "app.setDynamicResolution" => app_api::DYNRES_KEYS,
+        "net.host" => net_api::HOST_KEYS,
+        "net.rpc" => net_api::RPC_KEYS,
+        "net.send" => net_api::SEND_KEYS,
+        _ => return None,
+    })
 }
 
 /// A press or release a script asked `input.simulate` for: a key by its

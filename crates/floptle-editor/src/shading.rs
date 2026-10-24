@@ -1007,16 +1007,19 @@ pub(crate) fn collect_shadow_proxies(world: &World, cam_world: DVec3, enabled: b
         let c = (wt.translation - cam_world).as_vec3();
         let q = wt.rotation;
         let (pa, pb, rot, reach) = match rb.kind {
-            floptle_core::BodyKind::Sphere => ([c.x, c.y, c.z, rb.radius], [0.0; 4], no_rot, rb.radius),
+            floptle_core::BodyKind::Sphere => {
+                let r = rb.world_radius(wt.scale);
+                ([c.x, c.y, c.z, r], [0.0; 4], no_rot, r)
+            }
             floptle_core::BodyKind::Capsule => {
                 let up = wt.rotation * Vec3::Y;
-                let half = (0.5 * rb.height - rb.radius).max(0.0);
+                let r = rb.world_radius(wt.scale);
+                let half = (0.5 * rb.world_height(wt.scale) - r).max(0.0);
                 let (p0, p1) = (c - up * half, c + up * half);
-                ([p0.x, p0.y, p0.z, rb.radius], [p1.x, p1.y, p1.z, 1.0], no_rot, half + rb.radius)
+                ([p0.x, p0.y, p0.z, r], [p1.x, p1.y, p1.z, 1.0], no_rot, half + r)
             }
-            // At the size the body collides at: physics scales a box's half
-            // extents by the node's world scale (and a sphere or capsule not
-            // at all). Raw, a box under a scaled parent cast a shadow a sixth
+            // At the size the body collides at: physics scales every body's
+            // size by the node's world scale. Raw, a box under a scaled parent cast a shadow a sixth
             // of its size and the sun lit the inside of the building.
             // A mesh body as the box of its mesh (`half_extents` holds the
             // mesh's half-size once fitted).

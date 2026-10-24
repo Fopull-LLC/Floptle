@@ -54,6 +54,11 @@ use floptle_core::World;
 /// is. That is also the whole premise of measuring a ratio: runner speed is
 /// supposed to cancel, and it only cancels if both sides see the same runner.
 fn growth(n: usize, mut f: impl FnMut(usize)) -> f64 {
+    // One measurement at a time: the test harness runs this file's tests in
+    // parallel, so each would otherwise be timed while the others compete for
+    // the same cores, which is load no ratio cancels.
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     // Takes the work as a parameter rather than capturing it, so this binding
     // needs no `mut` of its own — the caller's `f` is what gets borrowed.
     let time = |size: usize, f: &mut dyn FnMut(usize)| {
@@ -66,7 +71,9 @@ fn growth(n: usize, mut f: impl FnMut(usize)) -> f64 {
     f(n);
     f(n * 4);
     let (mut small, mut large) = (Duration::MAX, Duration::MAX);
-    for _ in 0..5 {
+    // Nine of each: the smaller fixtures run in tens of microseconds, and a
+    // full suite's load once read 8.8x where five were taken.
+    for _ in 0..9 {
         small = small.min(time(n, &mut f));
         large = large.min(time(n * 4, &mut f));
     }

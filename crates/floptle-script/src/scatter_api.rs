@@ -270,7 +270,7 @@ pub(crate) fn install_scatter_api(
                 frame,
                 look: floptle_core::scatter::ScatterLook {
                     tint: color_opt(&opts, "tint").unwrap_or([1.0; 3]),
-                    emissive: color_opt(&opts, "emissive").unwrap_or([1.0; 3]),
+                    emissive: color_opt(&opts, "emissive"),
                     emissive_strength: num(&opts, "emissiveStrength", 0.0) as f32,
                 },
             };

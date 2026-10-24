@@ -234,10 +234,26 @@ pub(crate) fn resolve_parts(
             // Imported COLOR_0 is a plain multiply (white is identity), as on
             // a Mesh node.
             mp.paint_base = raster.mesh_paint_base(b.mesh);
+            let emissive_map = match (&b.node_look, &b.imported) {
+                (Some(n), _) => n.maps.is_some_and(|m| m[4].is_some()),
+                (None, Some(look)) => look.maps[4].is_some(),
+                (None, None) => false,
+            };
+            glow_under_map(&mut mp, emissive_map);
             let fade = fade_extras(raster, mp.ext_index);
             (b.mesh, tex, b.local, mp, fade)
         })
         .collect()
+}
+
+/// An emissive map with no colour behind it still says where a model glows:
+/// white under it, at no strength, so the part stays dark until a source
+/// turns the glow up and then glows in the map's own colours (see `push` in
+/// [`build_instances`]).
+fn glow_under_map(mp: &mut MaterialParams, emissive_map: bool) {
+    if emissive_map && mp.emissive == [0.0; 3] {
+        mp.emissive = [1.0; 3];
+    }
 }
 
 /// The two surface-extras entries a part wears while its LOD bands cross:
@@ -610,10 +626,18 @@ pub(crate) fn build_instances(
                         // The source's tint multiplies the model's own colour,
                         // so a texture's palette is shaded rather than replaced.
                         mp.color = [mp.color[0] * t[0] * tintf, mp.color[1] * t[1] * tintf, mp.color[2] * t[2] * tintf];
-                        // A source's glow supersedes the model's; a source with
-                        // none leaves the model's own glow alone.
+                        // A source's glow strength supersedes the model's; a
+                        // source with none leaves the model's own glow alone.
+                        // Its colour is the source's `emissive` if it names
+                        // one, else the model's own glow colour (and map), else
+                        // the source's tint: a field told to glow and nothing
+                        // else glows in its own colours, never white.
                         if src.look.emissive_strength > 0.0 {
-                            mp.emissive = src.look.emissive;
+                            mp.emissive = match src.look.emissive {
+                                Some(c) => c,
+                                None if mp.emissive != [0.0; 3] => mp.emissive,
+                                None => t,
+                            };
                             mp.emissive_strength = src.look.emissive_strength;
                         }
                         out.push((*mesh, *tex, instance_of_mat(model * *local, &mp)));
@@ -908,7 +932,7 @@ mod tests {
     #[test]
     fn a_sources_tint_and_glow_reach_its_props() {
         let s = ScatterSource {
-            look: scatter::ScatterLook { tint: [1.0, 0.0, 0.0], emissive: [0.0, 1.0, 0.0], emissive_strength: 2.0 },
+            look: scatter::ScatterLook { tint: [1.0, 0.0, 0.0], emissive: Some([0.0, 1.0, 0.0]), emissive_strength: 2.0 },
             ..src()
         };
         let mut cache = ScatterCache::default();
@@ -972,6 +996,47 @@ mod tests {
             assert!((raw.color[2] - 0.8 * k).abs() < 1e-4, "{:?}", raw.color);
             assert_eq!(&raw.emissive, &[1.0, 0.5, 0.0, 3.0], "the model's glow was dropped");
         }
+    }
+
+    /// **A field told to glow, and not what colour, glows in its own
+    /// colours.** It glowed white. Now a prop takes its model's own glow
+    /// colour (or emissive map), and a model with none glows in the source's
+    /// tint.
+    #[test]
+    fn a_glow_with_no_colour_takes_the_models_own_or_the_tint() {
+        let glow = |part: MaterialParams| {
+            let s = ScatterSource {
+                look: scatter::ScatterLook { tint: [1.0, 0.5, 0.2], emissive: None, emissive_strength: 2.0 },
+                ..src()
+            };
+            let mut cache = ScatterCache { settle_all: true, ..Default::default() };
+            let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, part, [0, 0])]);
+            let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
+            let mut out = Vec::new();
+            build_instances(
+                &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground,
+                &floptle_render::Frustum::everything(), 20_000, &mut out,
+            );
+            assert!(!out.is_empty(), "nothing drew");
+            out.iter().map(|(_, _, r)| r.emissive).collect::<Vec<_>>()
+        };
+        // A model with a glow colour of its own, at no strength: the source's
+        // strength lights it in that colour.
+        let mut own = MaterialParams::flat([1.0; 3]);
+        own.emissive = [0.0, 0.8, 1.0];
+        assert!(glow(own).iter().all(|e| *e == [0.0, 0.8, 1.0, 2.0]), "the model's own glow colour was replaced");
+        // A model with none glows in the tint, not in white.
+        let plain = glow(MaterialParams::flat([1.0; 3]));
+        assert!(plain.iter().all(|e| *e == [1.0, 0.5, 0.2, 2.0]), "a model with no glow did not take the tint: {:?}", plain[0]);
+        // A model with only an emissive map glows through it: white under the
+        // map, and still dark until something turns it up.
+        let mut mapped = MaterialParams::flat([1.0; 3]);
+        glow_under_map(&mut mapped, true);
+        assert_eq!((mapped.emissive, mapped.emissive_strength), ([1.0; 3], 0.0));
+        assert!(glow(mapped).iter().all(|e| *e == [1.0, 1.0, 1.0, 2.0]), "the emissive map was given the tint");
+        let mut unmapped = MaterialParams::flat([1.0; 3]);
+        glow_under_map(&mut unmapped, false);
+        assert_eq!(unmapped.emissive, [0.0; 3], "a part with no map was given a glow colour");
     }
 
     /// A prototype of several parts draws one instance per part, each at its

@@ -219,14 +219,17 @@ pub struct ScatterSource {
 pub struct ScatterLook {
     /// Multiplies the albedo: one model, a field of reds or of blues.
     pub tint: [f32; 3],
-    /// Light the props give off, as a colour, and how strongly.
-    pub emissive: [f32; 3],
+    /// The colour of the light the props give off. `None` keeps each
+    /// model's own glow colour (and emissive map), and a model with none glows
+    /// in the source's `tint`.
+    pub emissive: Option<[f32; 3]>,
+    /// How strongly the props glow; `0` leaves each model's own glow alone.
     pub emissive_strength: f32,
 }
 
 impl Default for ScatterLook {
     fn default() -> Self {
-        ScatterLook { tint: [1.0; 3], emissive: [0.0; 3], emissive_strength: 0.0 }
+        ScatterLook { tint: [1.0; 3], emissive: None, emissive_strength: 0.0 }
     }
 }
 

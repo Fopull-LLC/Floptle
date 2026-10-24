@@ -1956,11 +1956,45 @@ fn shadow_post(vis_in: f32, pix: vec2<u32>) -> vec3<f32> {
 // draws the shadow map toward it when the scene asks for one; it reads the map
 // as the sun does, and marches only where the map has no answer. The others
 // always march. A branch, not `select`, for the reason `sun_shadow` gives.
-fn star_shadow(i: u32, p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
-    if (G.shadow_params.x < 0.5) {
-        return vec3<f32>(1.0);
+// How much of a light's beam along `l` the cloud decks let through to
+// camera-relative `p`, 0..1: the deck's own drifting noise where the beam
+// leaves its sphere, so the shadows on the ground are the clouds overhead and
+// move with them. A dark deck lets less through. Nothing above the deck is
+// shaded by it.
+fn cloud_shade(p: vec3<f32>, l: vec3<f32>) -> f32 {
+    let count = min(u32(G.atmo_meta.x), 4u);
+    var through = 1.0;
+    for (var i = 0u; i < count; i++) {
+        let cov = G.atmo_params[i].y;
+        if (cov <= 0.01) {
+            continue;
+        }
+        let o = p - G.atmo_body[i].xyz;
+        let rc = G.atmo_body[i].w + G.atmo_params[i].x * select(G.atmo_params[i].w, 0.35, G.atmo_params[i].w <= 0.0);
+        let d2 = dot(o, o);
+        if (d2 >= rc * rc) {
+            continue;
+        }
+        // Inside the deck's sphere, so the beam always leaves it.
+        let b = dot(o, l);
+        let tc = -b + sqrt(max(b * b - (d2 - rc * rc), 0.0));
+        let cp = normalize(o + l * tc);
+        let drift = G.params.x * 0.004;
+        let nse = cloud_fbm(cp * 14.0 + vec3<f32>(drift, 0.0, drift * 0.7));
+        let edge = 1.0 - cov * 0.9;
+        let cl = smoothstep(edge, edge + 0.22, nse);
+        through *= 1.0 - cl * mix(0.55, 0.95, clamp(G.atmo_cloud[i].w, 0.0, 1.0));
     }
+    return through;
+}
+
+fn star_shadow(i: u32, p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
     let l = star_dir_at(i, p);
+    // The clouds shade whether or not the scene casts shadows.
+    let clouds = cloud_shade(p, l);
+    if (G.shadow_params.x < 0.5) {
+        return vec3<f32>(clouds);
+    }
     var far = -1.0;
     if (i == 0u) {
         far = sun_map_vis(p, n);
@@ -1968,7 +2002,7 @@ fn star_shadow(i: u32, p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> 
     if (far < 0.0) {
         far = light_vis(p, n, l);
     }
-    return shadow_post(min(far, contact_vis(p, n, l, pix)), pix);
+    return shadow_post(min(far, contact_vis(p, n, l, pix)), pix) * clouds;
 }
 
 // The full key-light response at a point: Σ over stars (or the one legacy
@@ -2271,10 +2305,12 @@ fn flsl_surface_gap(p: vec3<f32>) -> f32 {
 }
 
 fn sun_shadow(p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
-    if (G.shadow_params.x < 0.5) {
-        return vec3<f32>(1.0);
-    }
     let l = sun_dir_at(p);
+    // The clouds shade whether or not the scene casts shadows.
+    let clouds = cloud_shade(p, l);
+    if (G.shadow_params.x < 0.5) {
+        return vec3<f32>(clouds);
+    }
     // `min`, and BEFORE the styling: a contact shadow is the same shadow seen
     // from closer up, so it takes the same tint, strength and posterize the
     // marched one does. Two shadow terms with two different looks would read as
@@ -2301,5 +2337,5 @@ fn sun_shadow(p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
     }
     // Full shadow multiplies the sun toward `tint` (black = plain darkness, a
     // color = tinted "transparent" shadows), scaled by how dark shadows may get.
-    return mix(vec3<f32>(1.0), G.shadow_tint.rgb, G.shadow_params.z * (1.0 - vis));
+    return mix(vec3<f32>(1.0), G.shadow_tint.rgb, G.shadow_params.z * (1.0 - vis)) * clouds;
 }

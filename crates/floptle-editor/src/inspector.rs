@@ -1391,9 +1391,46 @@ fn mat_rim_ui(ui: &mut egui::Ui, m: &mut Material, r: &mut MatEditResult) {
             ui.label("ambient");
             r.changed |= crate::responsive::slider(ui, egui::Slider::new(&mut m.ambient, 0.0..=4.0), "").changed();
             ui.end_row();
+            ui.label("blend");
+            let before = m.blend;
+            egui::ComboBox::from_id_salt("mat_blend")
+                .width(crate::responsive::fit_here(ui, 160.0))
+                .selected_text(m.blend.name())
+                .show_ui(ui, |ui| {
+                    use floptle_core::BlendMode as B;
+                    ui.selectable_value(&mut m.blend, B::Opaque, "opaque")
+                        .on_hover_text("solid: the picture's alpha and the opacity are ignored");
+                    ui.selectable_value(&mut m.blend, B::Cutout, "cutout").on_hover_text(
+                        "solid with holes: texels whose alpha is under the cutoff are not drawn \
+                         (leaves, fences, decals)",
+                    );
+                    ui.selectable_value(&mut m.blend, B::Blend, "blend")
+                        .on_hover_text("see-through: alpha blends it over what is behind (drawn after solid objects)");
+                });
+            r.changed |= m.blend != before;
+            ui.end_row();
+            if m.blend == floptle_core::BlendMode::Cutout {
+                ui.label("alpha cutoff");
+                r.changed |= crate::responsive::slider(ui, egui::Slider::new(&mut m.alpha_cutoff, 0.0..=1.0), "")
+                    .on_hover_text("texels with less alpha than this are holes")
+                    .changed();
+                ui.end_row();
+            }
             ui.label("opacity");
-            r.changed |= crate::responsive::slider(ui, egui::Slider::new(&mut m.alpha, 0.0..=1.0), "")
-                .on_hover_text("1 = opaque; below 1 alpha-blends over the scene (drawn after opaque objects)")
+            let faded = crate::responsive::slider(ui, egui::Slider::new(&mut m.alpha, 0.0..=1.0), "")
+                .on_hover_text("1 = opaque; below 1 blends over the scene, and turns blend on")
+                .changed();
+            // Fading a solid surface means wanting to see through it, so it
+            // blends — what dragging this slider has always done.
+            if faded && m.alpha < 1.0 && m.blend != floptle_core::BlendMode::Blend && !m.retro.dither_alpha {
+                m.blend = floptle_core::BlendMode::Blend;
+            }
+            r.changed |= faded;
+            ui.end_row();
+            ui.label("two-sided");
+            r.changed |= ui
+                .checkbox(&mut m.double_sided, "")
+                .on_hover_text("draw the back of each face too; off hides a face seen from behind")
                 .changed();
             ui.end_row();
         });
@@ -4366,7 +4403,7 @@ impl EditorTabViewer<'_> {
         if asset.part_meta.iter().any(|m| m.textured) {
             let cur = asset.tex_filter;
             let label = |f: Option<crate::assets::FilterMode>| match f {
-                None => "as the model file says",
+                None => "as Project Settings says",
                 Some(crate::assets::FilterMode::Pixelated) => "crisp (pixelated)",
                 Some(crate::assets::FilterMode::Smooth) => "smooth",
                 Some(crate::assets::FilterMode::SmoothMipmaps) => "smooth + mipmaps",
@@ -4376,7 +4413,10 @@ impl EditorTabViewer<'_> {
                     "Each texture in a model file says how it is filtered: nearest keeps \
                      crisp pixels, linear draws smooth. Blender writes linear unless an \
                      image's interpolation is set to Closest. Choose here to filter every \
-                     texture in this model one way.",
+                     texture in this model one way; left as Project Settings says, the \
+                     project's Model textures setting decides, and its \"as each file \
+                     says\" follows the file. A project made before 0.117 is set to \
+                     always crisp there, as every model drew then.",
                 );
                 egui::ComboBox::from_id_salt(("model_tex_filter", path))
                     .width(crate::responsive::fit_here(ui, 220.0))
@@ -5577,6 +5617,7 @@ impl EditorTabViewer<'_> {
                             crate::responsive::slider(ui, egui::Slider::new(strength, 0.0..=60.0), "strength").changed();
                         if *mode == GravityMode::Radial {
                             cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(radius, 0.5..=500.0), "well radius")
+                                .on_hover_text("how far the pull reaches, in the node's space: scaling the node by its largest axis scales the reach")
                                 .changed();
                         }
                     }
@@ -6321,8 +6362,14 @@ impl EditorTabViewer<'_> {
                             .show_ui(ui, |ui| {
                                 cmd.inspector_changed |=
                                     ui.selectable_value(&mut rb.kind, BodyKind::Sphere, "Sphere").changed();
-                                cmd.inspector_changed |=
-                                    ui.selectable_value(&mut rb.kind, BodyKind::Capsule, "Capsule").changed();
+                                if ui.selectable_value(&mut rb.kind, BodyKind::Capsule, "Capsule").changed() {
+                                    cmd.inspector_changed = true;
+                                    // A capsule is a character: one still at the
+                                    // untouched default mass weighs a person.
+                                    if rb.mass == 1.0 {
+                                        rb.mass = crate::scene_ops::CHARACTER_MASS;
+                                    }
+                                }
                                 cmd.inspector_changed |=
                                     ui.selectable_value(&mut rb.kind, BodyKind::Box, "Box").changed();
                                 let mesh = ui
@@ -6395,11 +6442,33 @@ impl EditorTabViewer<'_> {
                             }
                         });
                     } else {
+                        let scale_hint = "In the node's space, like a box's half-extents: the \
+                             body is this times the node's scale. Under an uneven scale a \
+                             sphere takes its largest axis, and a capsule its larger of X \
+                             and Z for the radius and Y for the height, so it covers what \
+                             is drawn.";
                         cmd.inspector_changed |=
-                            crate::responsive::slider(ui, egui::Slider::new(&mut rb.radius, 0.05..=10.0), "radius").changed();
+                            crate::responsive::slider(ui, egui::Slider::new(&mut rb.radius, 0.05..=10.0), "radius")
+                                .on_hover_text(scale_hint)
+                                .changed();
                         if rb.kind == BodyKind::Capsule {
                             cmd.inspector_changed |=
-                                crate::responsive::slider(ui, egui::Slider::new(&mut rb.height, 0.2..=20.0), "height").changed();
+                                crate::responsive::slider(ui, egui::Slider::new(&mut rb.height, 0.2..=20.0), "height")
+                                    .on_hover_text(scale_hint)
+                                    .changed();
+                        }
+                        // What it collides at, when the node is scaled.
+                        if (scale.abs() - floptle_core::math::Vec3::ONE).abs().max_element() > 1e-4 {
+                            let text = if rb.kind == BodyKind::Capsule {
+                                format!(
+                                    "collides at radius {:.2}, height {:.2} (× the node's scale)",
+                                    rb.world_radius(scale),
+                                    rb.world_height(scale)
+                                )
+                            } else {
+                                format!("collides at radius {:.2} (× the node's scale)", rb.world_radius(scale))
+                            };
+                            ui.small(text).on_hover_text(scale_hint);
                         }
                     }
                     // Bounce/friction/gravity/locks only matter on a
@@ -6422,21 +6491,48 @@ impl EditorTabViewer<'_> {
                         if rb.assembly {
                             ui.small("children with RigidBody = this vessel's parts");
                         }
-                        cmd.inspector_changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut rb.mass)
-                                    .speed(0.05)
-                                    .range(0.001..=100000.0)
-                                    .prefix("mass "),
-                            )
-                            .on_hover_text(
-                                "How heavy it is: what decides who moves whom when two \
-                                 bodies meet, how hard it is to spin, and whether it \
-                                 floats (water is 1000 per cubic unit). Inside an \
-                                 assembly, this part's share of the whole. Make it a \
-                                 physics object sets it from the mesh's volume.",
-                            )
-                            .changed();
+                        // Mass and density side by side: one is the other times
+                        // the body's volume, so either can be typed in.
+                        let volume = crate::body_fit::body_volume(rb, scale, drawn.as_deref());
+                        ui.horizontal_wrapped(|ui| {
+                            cmd.inspector_changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut rb.mass)
+                                        .speed(0.05)
+                                        .range(0.001..=100000.0)
+                                        .prefix("mass "),
+                                )
+                                .on_hover_text(
+                                    "How heavy it is, in kg: what decides who moves whom \
+                                     when two bodies meet, how hard it is to spin, and \
+                                     whether it floats (water is 1000 kg per cubic metre). \
+                                     Inside an assembly, this part's share of the whole. \
+                                     A physics object starts at its volume times 500, a \
+                                     character at 70.",
+                                )
+                                .changed();
+                            if volume > 1e-6 {
+                                let mut density = rb.mass / volume;
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut density)
+                                            .speed(1.0)
+                                            .range(0.01..=100000.0)
+                                            .prefix("density "),
+                                    )
+                                    .on_hover_text(format!(
+                                        "kg per cubic metre: the mass is this times the body's \
+                                         volume, {volume:.3} m³ as it collides. Water is 1000, \
+                                         wood about 500, stone about 2500. Changing it sets \
+                                         the mass."
+                                    ))
+                                    .changed()
+                                {
+                                    rb.mass = (density * volume).clamp(0.001, 100000.0);
+                                    cmd.inspector_changed = true;
+                                }
+                            }
+                        });
                         cmd.inspector_changed |=
                             crate::responsive::slider(ui, egui::Slider::new(&mut rb.restitution, 0.0..=1.0), "bounce").changed();
                         cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut rb.friction, 0.0..=2.0), "friction")
@@ -6625,6 +6721,7 @@ impl EditorTabViewer<'_> {
                     ch |= drag(ui, "µ (GM)", &mut cb.mu, 1000.0, "gravitational parameter — surface gravity = µ / radius²");
                     ch |= drag(ui, "radius", &mut cb.body_radius, 1.0, "physical surface radius (altitude readouts, impostors)");
                     ch |= drag(ui, "SOI", &mut cb.soi, 10.0, "sphere-of-influence radius; 0 = auto (Laplace) from the parent");
+                    ch |= drag(ui, "reach", &mut cb.reach, 0.5, "with SOI on auto, the least it reaches, in its own radii: what stands that close rides it as it orbits (a small rock's Laplace sphere lies inside its ground)");
                     ch |= drag(ui, "occluder", &mut cb.occluder_radius, 1.0, "occlusion culling: radius of the solid core geometry never pierces — terrain chunks fully behind it skip their draws. Keep BELOW the deepest cave/dig; 0 = off");
                     ui.horizontal_wrapped(|ui| {
                         ui.label("parent");
@@ -7020,7 +7117,7 @@ impl EditorTabViewer<'_> {
                 });
                 c
             };
-            changed |= v3(ui, "anchor", &mut j.anchor, "where on this node, in its own space");
+            changed |= v3(ui, "anchor", &mut j.anchor, "where on this node, in its own space: it scales and turns with the node");
             if !j.other.is_empty() && j.kind != JointKind::Target {
                 changed |= v3(
                     ui,

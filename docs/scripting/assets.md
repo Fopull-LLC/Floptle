@@ -448,8 +448,10 @@ every step, so a change takes effect immediately with no reset or teleport.
 | `restitution` | Bounciness 0..1 (0 = no bounce). |
 | `gravity` | Gravity pull on this body (assign `true`/`false`; reads back 1/0). |
 | `shape` | Body shape: 0 = sphere, 1 = capsule, 2 = box, 3 = polygon, 4 = mesh (the node's own geometry: its convex hull for a Dynamic or Kinematic body, its exact triangles for a Static one). |
-| `radius` | Sphere/capsule radius. |
-| `height` | Capsule total height. |
+| `radius` | Sphere/capsule radius, in the node's space: the body is this times the node's scale. |
+| `height` | Capsule total height, in the node's space along its Y. |
+| `worldRadius` | Read-only: the radius the physics builds, `radius` times the node's world scale (the largest axis for a sphere, the larger of X and Z for a capsule). |
+| `worldHeight` | Read-only: the capsule height the physics builds, `height` times the node's world Y scale. |
 | `half_x` `half_y` `half_z` | Box half-extents. |
 | `lock_x` `lock_y` `lock_z` | Freeze world-axis translation (e.g. lock Z for 2.5D). A lock engaging mid-play freezes the body **where it is right then**. |
 | `lock_rot_x` `lock_rot_y` `lock_rot_z` | Freeze rotation about an axis (keep a body upright). Holds the rotation the node has when the lock engages. |

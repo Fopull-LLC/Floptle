@@ -1465,3 +1465,109 @@ fn a_loaded_machine_does_not_stop_an_honest_script() {
     assert!(e.contains("of CPU") && e.contains("of wall time"), "{e}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **A planet a script asks for without naming a generator is made by the
+/// project's.** The host's version reaches `generatePlanet` (which carries it
+/// to the engine), and `planetRivers` answers with the rivers of the world
+/// that version makes: the old march at version 0, the drainage after. A
+/// named version is kept, and one past this engine's is refused.
+#[test]
+fn a_planet_asked_for_without_a_generator_is_made_by_the_projects() {
+    use floptle_field::procgen::GENERATOR_VERSION;
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_planet_gen_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "make",
+        "local opts = { seed = 31, radius = 60, voxel = 1.5, relief = 5, caveDepth = 0, rivers = { count = 3 } }\n\
+         function start()\n\
+           terrain.generatePlanet(1, opts)\n\
+           terrain.generatePlanet(2, { radius = 40, generator = 1 })\n\
+           local ok, err = pcall(terrain.generatePlanet, 3, { generator = 99 })\n\
+           log(tostring(err))\n\
+           local r = terrain.planetRivers(opts)[1].points\n\
+           log(string.format(\"%d %.4f %.4f %.4f\", #r, r[4], r[5], r[6]))\n\
+         end\n",
+    );
+    let run = |generator: Option<u32>| {
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Scripts(vec![floptle_core::ScriptInst {
+            kind: "make".into(),
+            enabled: true,
+            params: Vec::new(),
+            refs: Vec::new(),
+            strs: Vec::new(),
+            pinned_bools: None,
+        }]));
+        let host = ScriptHost::new();
+        if let Some(v) = generator {
+            host.set_terrain_generator(v);
+        }
+        let mut host = host;
+        host.set_playing(true);
+        host.run(&mut world, &dir, 0.016, 0.016);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        let made: Vec<Option<u32>> = host.take_terrain_generates().into_iter().map(|(_, f)| f.generator).collect();
+        (said, made)
+    };
+    let (old_said, old_made) = run(Some(0));
+    assert_eq!(old_made, [Some(0), Some(1)], "the project's version, then the named one");
+    assert!(old_said[0].contains("version"), "a version past this engine's was taken: {old_said:?}");
+    let (new_said, new_made) = run(None);
+    assert_eq!(new_made, [Some(GENERATOR_VERSION), Some(1)], "a new host is not the current generator");
+    assert_ne!(old_said[1], new_said[1], "the rivers asked about are not the world's: {old_said:?} {new_said:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **`terrain.impostorAt` hands the engine a body's rule, in order, and
+/// refuses one it cannot use.** Radii or pixels, not both; no rule is the
+/// default again.
+#[test]
+fn impostor_rules_reach_the_engine_in_order() {
+    use crate::ImpostorRule;
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_impostor_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "far",
+        "function start()\n\
+           terrain.impostorAt(3, { radii = 20 })\n\
+           terrain.impostorAt(4, { pixels = 48 })\n\
+           terrain.impostorAt(3)\n\
+           local a = select(2, pcall(terrain.impostorAt, 5, { radii = 2, pixels = 3 }))\n\
+           local b = select(2, pcall(terrain.impostorAt, 5, { pixels = 0 }))\n\
+           local c = select(2, pcall(terrain.impostorAt, 5, { radius = 4 }))\n\
+           log(tostring(a)) log(tostring(b)) log(tostring(c))\n\
+         end\n",
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(e, Scripts(vec![floptle_core::ScriptInst {
+        kind: "far".into(),
+        enabled: true,
+        params: Vec::new(),
+        refs: Vec::new(),
+        strs: Vec::new(),
+        pinned_bools: None,
+    }]));
+    let mut host = ScriptHost::new();
+    host.set_playing(true);
+    host.run(&mut world, &dir, 0.016, 0.016);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    assert_eq!(
+        host.take_terrain_impostors(),
+        [(3, Some(ImpostorRule::Radii(20.0))), (4, Some(ImpostorRule::Pixels(48.0))), (3, None)]
+    );
+    assert!(host.take_terrain_impostors().is_empty());
+    let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    assert!(said[0].contains("not both"), "{said:?}");
+    assert!(said[1].contains("more than 0"), "{said:?}");
+    assert!(said[2].contains("radius"), "an unknown key is not named: {said:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

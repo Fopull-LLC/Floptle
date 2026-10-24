@@ -41,6 +41,56 @@ impl Tiling {
 /// the surface, not the shading model. Only roughness and metallic are
 /// [`Physical`](Shading::Physical)-only, because only there do they mean
 /// anything.
+/// How a surface's alpha is drawn.
+///
+/// The pass a surface is drawn in comes from this and nothing else: a
+/// material's `alpha` below 1 fades it only when it blends. A node's Tint can
+/// still fade anything, which is a fade of the node, not the material.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BlendMode {
+    /// Solid: alpha, the material's and its picture's, is ignored.
+    Opaque,
+    /// Solid with holes: texels whose alpha is below
+    /// [`Material::alpha_cutoff`] are not drawn. What every surface did before
+    /// there was a choice, so it is the default.
+    #[default]
+    Cutout,
+    /// See-through: alpha blends the surface over what is behind it.
+    Blend,
+}
+
+impl BlendMode {
+    /// The setting a material made before there was one meant: below full
+    /// opacity it blended, otherwise its cutoff decided whether it had holes.
+    pub fn implied_by(alpha: f32, alpha_cutoff: f32) -> Self {
+        if alpha < 1.0 {
+            BlendMode::Blend
+        } else if alpha_cutoff <= 0.0 {
+            BlendMode::Opaque
+        } else {
+            BlendMode::Cutout
+        }
+    }
+
+    /// The name `setMaterial{ blend = … }` and the scene format use.
+    pub fn name(self) -> &'static str {
+        match self {
+            BlendMode::Opaque => "opaque",
+            BlendMode::Cutout => "cutout",
+            BlendMode::Blend => "blend",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "opaque" => Some(BlendMode::Opaque),
+            "cutout" | "mask" | "clip" => Some(BlendMode::Cutout),
+            "blend" | "transparent" => Some(BlendMode::Blend),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Shading {
     /// Blinn-Phong: `specular` colour, a `shininess` exponent and a strength,
@@ -307,6 +357,7 @@ impl Material {
             "ambient" => self.ambient = src.ambient,
             "alpha" => self.alpha = src.alpha,
             "alphaCutoff" => self.alpha_cutoff = src.alpha_cutoff,
+            "blend" => self.blend = src.blend,
             "doubleSided" => self.double_sided = src.double_sided,
             "texture" => self.texture = src.texture.clone(),
             "cell" => self.cell = src.cell,
@@ -379,14 +430,17 @@ pub struct Material {
     pub fog: bool,
     /// Multiplier on the scene ambient term (0 = pure black shadows).
     pub ambient: f32,
-    /// Opacity (1 = fully opaque, 0 = invisible). Below 1 the surface alpha-blends
-    /// over what's behind it; multiplied by any base-color texture's own alpha.
+    /// Opacity (1 = fully opaque, 0 = invisible), multiplied by any
+    /// base-color texture's own alpha. Read when [`blend`](Self::blend) is
+    /// [`BlendMode::Blend`]; a solid surface is solid whatever it says.
     pub alpha: f32,
-    /// Where an opaque surface's texture alpha cuts it out: texels with less
-    /// alpha than this are holes. `0.5` (the default) is what every surface has
-    /// always done; `0` cuts nothing, so a picture with stray alpha draws solid
-    /// (glTF's OPAQUE); a model's own MASK cutoff goes here as it was authored.
-    /// A surface with `alpha` below 1 blends instead and is not cut.
+    /// How alpha is drawn: solid, solid with cut-out holes, or blended. Decides
+    /// the pass the surface is drawn in.
+    pub blend: BlendMode,
+    /// Where a [`BlendMode::Cutout`] surface's texture alpha cuts it out:
+    /// texels with less alpha than this are holes. `0.5` (the default) is what
+    /// every surface has always done; a model's own MASK cutoff goes here as
+    /// it was authored.
     pub alpha_cutoff: f32,
     /// Draw the back of each face as well as the front. `true` (the default) is
     /// what every surface has always done: nothing was culled. `false` hides a
@@ -562,6 +616,7 @@ impl Default for Material {
             fog: true,
             ambient: 1.0,
             alpha: 1.0,
+            blend: BlendMode::Cutout,
             alpha_cutoff: 0.5,
             double_sided: true,
             normal_map: None,

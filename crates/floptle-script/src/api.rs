@@ -1242,6 +1242,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("starColorG".to_string(), c.star_color[1] as f64),
                 ("starColorB".to_string(), c.star_color[2] as f64),
                 ("occluderRadius".to_string(), c.occluder_radius),
+                ("reach".to_string(), c.reach),
             ]),
         );
     }
@@ -1350,6 +1351,8 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("worldHalfX".to_string(), (rb.half_extents[0] * scale.x) as f64),
                 ("worldHalfY".to_string(), (rb.half_extents[1] * scale.y) as f64),
                 ("worldHalfZ".to_string(), (rb.half_extents[2] * scale.z) as f64),
+                ("worldRadius".to_string(), rb.world_radius(scale) as f64),
+                ("worldHeight".to_string(), rb.world_height(scale) as f64),
                 ("lock_x".to_string(), b(rb.lock_pos[0])),
                 ("lock_y".to_string(), b(rb.lock_pos[1])),
                 ("lock_z".to_string(), b(rb.lock_pos[2])),
@@ -1632,6 +1635,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "starColorG" => c.star_color[1] = v.max(0.0),
                     "starColorB" => c.star_color[2] = v.max(0.0),
                     "occluderRadius" => c.occluder_radius = val.max(0.0),
+                    "reach" => c.reach = val.max(0.0),
                     _ => {}
                 }
             }
@@ -1815,7 +1819,13 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     // rather than a translation layer sitting between the
                     // animation system and the ECS, which is a thing to get
                     // wrong at every call site instead of once.
-                    "alpha" | "opacity" => m.alpha = (val as f32).clamp(0.0, 1.0),
+                    "alpha" | "opacity" => {
+                        m.alpha = (val as f32).clamp(0.0, 1.0);
+                        // A fade is a blend, as from setMaterial.
+                        if m.alpha < 1.0 && !m.retro.dither_alpha {
+                            m.blend = floptle_core::BlendMode::Blend;
+                        }
+                    }
                     "ambient" => m.ambient = val as f32,
                     "r" => m.color[0] = val as f32,
                     "g" => m.color[1] = val as f32,
@@ -2295,6 +2305,7 @@ pub(crate) fn apply_rich_sets(
                         "occluderRadius" => {
                             c.occluder_radius = num(v).unwrap_or(c.occluder_radius)
                         }
+                        "reach" => c.reach = num(v).map(|n| n.max(0.0)).unwrap_or(c.reach),
                         _ => {}
                     }
                 }
@@ -2351,6 +2362,14 @@ pub(crate) fn apply_rich_sets(
                             m.alpha_cutoff = num(v).map(|n| (n as f32).clamp(0.0, 1.0)).unwrap_or(m.alpha_cutoff)
                         }
                         "doubleSided" => m.double_sided = num(v).map(|n| n != 0.0).unwrap_or(m.double_sided),
+                        // "opaque", "cutout" or "blend": how alpha is drawn.
+                        "blend" => {
+                            if let CompVal::Str(b) = v
+                                && let Some(b) = floptle_core::BlendMode::from_name(b)
+                            {
+                                m.blend = b;
+                            }
+                        }
                         "texture" => {
                             if let CompVal::Str(t) = v {
                                 m.texture = (!t.is_empty()).then(|| t.clone());
@@ -2467,11 +2486,26 @@ pub(crate) fn apply_rich_sets(
                         _ => {}
                     }
                 }
+                // Fading a solid surface is asking to see through it: an alpha
+                // below 1 with no blend named turns blend on, which is what
+                // `setMaterial{ alpha = … }` has always done.
+                let names_blend = fields.iter().any(|(k, _)| k == "blend");
+                let fades = !names_blend
+                    && fields.iter().any(|(k, _)| k == "alpha")
+                    && m.alpha < 1.0
+                    && m.blend != floptle_core::BlendMode::Blend
+                    && !m.retro.dither_alpha;
+                if fades {
+                    m.blend = floptle_core::BlendMode::Blend;
+                }
                 if let Some(mut p) = patch {
                     for (k, _) in &fields {
                         if !p.names(k) && MATERIAL_KEYS.contains(&k.as_str()) {
                             p.keys.push(k.clone());
                         }
+                    }
+                    if fades && !p.names("blend") {
+                        p.keys.push("blend".into());
                     }
                     world.insert(e, p);
                 }
@@ -3118,13 +3152,13 @@ pub(crate) const MATERIAL_KEYS: &[&str] = &[
     "normalMap", "normalStrength", "roughnessMap", "roughness", "metallicMap", "metallic",
     "occlusionMap", "occlusionStrength", "emissiveMap", "reflectivity", "transmission", "ior", "thickness",
     "sway", "backlight", "shading", "jitter", "affineUv", "vertexLit",
-    "ditherAlpha", "retroExempt", "alphaCutoff", "doubleSided",
+    "ditherAlpha", "retroExempt", "alphaCutoff", "doubleSided", "blend",
 ];
 
 /// Every key `node:setCelestial{...}` reads.
 pub(crate) const CELESTIAL_KEYS: &[&str] = &[
     "mu", "bodyRadius", "soi", "parent", "a", "e", "i", "lan", "argPe", "m0", "atmoColor",
-    "atmoHeight", "atmoDensity", "clouds", "luminosity", "starColor", "occluderRadius", "cloudColor",
+    "atmoHeight", "atmoDensity", "clouds", "luminosity", "starColor", "occluderRadius", "reach", "cloudColor",
     "cloudDarkness", "cloudHeight", "aureoleSize", "aureole",
 ];
 
@@ -4065,6 +4099,7 @@ fn install_node_metatable(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
 let node_mt = lua.create_table()?;
 {
     let scene = shared.scene.clone();
+    let carry = shared.carry.clone();
     let bodies = shared.bodies.clone();
     let body_changes = shared.body_changes.clone();
     let ui_text_changes = shared.ui_text_changes.clone();
@@ -4106,6 +4141,12 @@ let node_mt = lua.create_table()?;
         // carries live raw tick fields (possibly written earlier this
         // hook), so prefer those; a cross-node handle reads the body
         // bridge. Neither answers on a node with no body.
+        // `node.carry` — how far the world under this node was carried
+        // since the last pass (see `Shared::carry`); zero when nothing moved.
+        if key == "carry" {
+            let c = carry.borrow().get(&e).copied().unwrap_or([0.0; 3]);
+            return crate::math_api::LuaVec3(glam::DVec3::from_array(c)).into_lua(lua);
+        }
         if matches!(key.as_str(), "tickPos" | "tickX" | "tickY" | "tickZ") {
             let own = (
                 this.raw_get::<f64>("tickX"),

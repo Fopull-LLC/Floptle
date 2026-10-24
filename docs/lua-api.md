@@ -15,10 +15,10 @@ each group, and meant to be searched.
 ## Contents
 
 - [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 202
-- [node — transform & body fields](#node--transform--body-fields) — 42
+- [node — transform & body fields](#node--transform--body-fields) — 43
 - [node — methods & handles](#node--methods--handles) — 36
 - [vectors, directions & easing](#vectors-directions--easing) — 51
-- [scene lookups & raycast](#scene-lookups--raycast) — 16
+- [scene lookups & raycast](#scene-lookups--raycast) — 18
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
 - [input — keyboard & mouse](#input--keyboard--mouse) — 49
 - [drawing — draw.*](#drawing--draw) — 18
@@ -27,9 +27,9 @@ each group, and meant to be searched.
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 74
 - [networking — net.*, synced](#networking--net-synced) — 41
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
-- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 19
+- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 20
 - [pathfinding — nav.*](#pathfinding--nav) — 26
-- [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 10
+- [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 11
 - [weather — wind](#weather--wind) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 9
 - [2D — sprites, sorting & the flat camera](#2d--sprites-sorting--the-flat-camera) — 38
@@ -40,8 +40,8 @@ each group, and meant to be searched.
 - [accessibility — access.*](#accessibility--access) — 11
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
-- [space — orbits & time-warp](#space--orbits--time-warp) — 20
-- [components — getcomponent](#components--getcomponent) — 111
+- [space — orbits & time-warp](#space--orbits--time-warp) — 21
+- [components — getcomponent](#components--getcomponent) — 113
 - [animation — node:animator](#animation--nodeanimator) — 29
 - [particles — effects from script](#particles--effects-from-script) — 11
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 36
@@ -923,6 +923,10 @@ voice.transmitting() — is the microphone open right now?
 
 True while the physics solver is skipping this rigidbody. Set it true to put the body to sleep now: it stops where it is and costs nothing until something wakes it (a node.vel write, a moving platform, or its ground going away — a body slept in mid-air wakes and falls at the next check). Set false to wake it. Better than switching it kinematic, which changes how it behaves rather than whether it is simulated. For far-away NPCs, pair it with script.sleep. On an assembly root it is the whole craft's: a parked vessel falls asleep on its own once it has been still on the ground for half a second, and a held force, an impulse, a teleport, a push from something moving or its ground changing wakes it.
 
+### `node.carry`
+
+How far the world under this node was carried since the last pass, as a vec3 in world units (read-only): over this tick in fixedUpdate, over the ticks since the last frame pass in update and lateUpdate. On a planet moving on its rails it is how far that planet's frame moved (the frame the body's sphere of influence puts it in); zero when nothing moves. Dynamic bodies and assemblies are carried for you; a body a script positions itself (a kinematic tyre set on its mount) is not, so add node.carry to the position you give it, the way you use dt. Recentring the floating origin is not a carry. Rails bodies do not turn yet; a turning frame would add a rotation.
+
 ### `node.castShadow`
 
 Whether the node casts sun shadows (read/write, default true) — the Inspector's casts-shadows checkbox. A body or collider's stand-in in the shadow march, or a mesh's baked shadow volume. Turn it off for bodies that are dormant or far away: the march takes the 32 casters nearest the camera, so a crowd of idle ones spends nothing once they are out of it.
@@ -1198,7 +1202,7 @@ node:setCamera{fovY=1.0, active=true, target="minimap", width=256, height=256, h
 
 ### `node:setCelestial`
 
-node:setCelestial{mu=…, bodyRadius=…, soi=0, parent="Sun", a=…, e=…, i=…, m0=…, atmoColor={r,g,b}, atmoHeight=…, atmoDensity=…, clouds=…, cloudColor={r,g,b}, cloudDarkness=…, cloudHeight=…, aureole=…, aureoleSize=…, luminosity=…, starColor={r,g,b}, occluderRadius=…} — set (creating if absent) the node's CelestialBody. The cloud deck's look: cloudColor its daylight colour (white = as before), cloudDarkness 0..1 (1 = a storm with almost no light through it), cloudHeight its height as a share of atmoHeight (0.35 = as before). aureole / aureoleSize = the glow around the star in this sky: strength and spread, 1 = natural. Every field reads back through node:getcomponent("CelestialBody"), colours as R/G/B lanes (cloudColorR, atmoColorG, starColorB…), and writes there too. camelCase fields; colors take {r,g,b}. occluderRadius = occlusion culling: the solid-core radius geometry never pierces — terrain chunks fully behind it skip their draw calls (keep it below the deepest cave/dig; 0 = off). The atmosphere (atmoColor, atmoHeight, atmoDensity) is the whole sky from inside it: the air's colour overhead, brighter toward the horizon, a glow around the star, thinning with height until it is space at atmoHeight with the stars showing through — no sky shader needed. From outside it is the halo around the planet's edge.
+node:setCelestial{mu=…, bodyRadius=…, soi=0, parent="Sun", a=…, e=…, i=…, m0=…, atmoColor={r,g,b}, atmoHeight=…, atmoDensity=…, clouds=…, cloudColor={r,g,b}, cloudDarkness=…, cloudHeight=…, aureole=…, aureoleSize=…, luminosity=…, starColor={r,g,b}, occluderRadius=…, reach=4} — set (creating if absent) the node's CelestialBody. The cloud deck's look: cloudColor its daylight colour (white = as before), cloudDarkness 0..1 (1 = a storm with almost no light through it), cloudHeight its height as a share of atmoHeight (0.35 = as before). The deck shades the ground under it: the sun is dimmed where its beam crosses a cloud, so broken cloud casts drifting shadows and a full deck dims the day, more the darker it is. aureole / aureoleSize = the glow around the star in this sky: strength and spread, 1 = natural. Every field reads back through node:getcomponent("CelestialBody"), colours as R/G/B lanes (cloudColorR, atmoColorG, starColorB…), and writes there too. camelCase fields; colors take {r,g,b}. occluderRadius = occlusion culling: the solid-core radius geometry never pierces — terrain chunks fully behind it skip their draw calls (keep it below the deepest cave/dig; 0 = off). reach = with soi left at 0, the least the sphere of influence reaches, in the body's own radii (4 by default): what stands that close rides the body as it orbits, which is what lets a craft land on a small rock whose own pull would not hold it. The atmosphere (atmoColor, atmoHeight, atmoDensity) is the whole sky from inside it: the air's colour overhead, brighter toward the horizon, a glow around the star, thinning with height until it is space at atmoHeight with the stars showing through — no sky shader needed. From outside it is the halo around the planet's edge.
 
 ### `node:setGlyphOffsets`
 
@@ -1232,7 +1236,7 @@ node:setMaterial{color={r,g,b}, emissive={r,g,b}, emissiveStrength=…, unlit=tr
 
 On a MODEL with no Material of its own, setMaterial changes only the keys you give and every part keeps the rest of its own look: its textures, cut-out leaves, maps and custom shader. setMaterial{ color = {1, 0.4, 0.4} } on an imported plant gives a red plant, still leafy. A Material authored on the node in the scene is different: it SUPERSEDES the ones the model was imported with, every part drawing with it, textures included. That is what a node Material is for: "this whole thing is made of THIS". To change one part instead, use node:material("<name>") — node:materials() lists what the parts are called.
 
-alphaCutoff = 0.5 is where an opaque surface's texture alpha cuts holes (0 cuts none, so a picture with stray alpha draws solid); doubleSided = false hides a face seen from behind. On a model with no Material both change only the parts' own values, so a leaf model keeps its texture.
+blend = "opaque", "cutout" or "blend" is how alpha is drawn: opaque ignores it, cutout cuts holes where the texture's alpha is under alphaCutoff, blend blends; it alone decides whether a surface is drawn see-through, and setting alpha below 1 without naming blend turns blend on. alphaCutoff = 0.5 is where a cutout surface's texture alpha cuts holes; doubleSided = false hides a face seen from behind. On a model with no Material both change only the parts' own values, so a leaf model keeps its texture.
 
 Surface maps: normalMap / roughnessMap / metallicMap / occlusionMap / emissiveMap (paths, "" clears; emissiveMap multiplies emissive) with normalStrength / roughness / metallic / occlusionStrength. shading="physical" switches from the hand-set Blinn-Phong highlight to metal-rough; roughness and metallic only mean anything there, while a normal or occlusion map works under either.
 
@@ -1667,6 +1671,14 @@ for _, e in ipairs(findTagged("enemy")) do
   if distance(node, e) < 10 then e:destroy() end
 end
 ```
+
+### `hit.distance`
+
+How far along the ray the hit is, in world units.
+
+### `hit.node`
+
+The node whose collider was hit (a node handle), or nil for terrain or a collider with no node.
 
 ### `hit.nx`
 
@@ -2755,11 +2767,15 @@ terrain.flush() — checkpoint every EDITED resident terrain field to the save s
 
 ### `terrain.generatePlanet`
 
-terrain.generatePlanet(id [, opts]) — REPLACE terrain id's whole field with a generated planet (sphere ± noise relief, caves + chambers, molten core, craters, layered materials). Background-generated (seconds; Console shows progress). opts (all optional): radius, voxel, relief, bumpFreq, caveDepth, coreR, corePaint, craters, craterMin/Max, craterDust, surfaceA/B {slot,color}, patchBias/Thr, subsoil(+Depth), strata(+Depth), deep, pockets {slot,color,threshold,minDepth}, seam {slot,color,minDepth,center,width}, iceCaps {lat,slot,color}, seed. Relief layers (each a table whose keys all default; see docs/planet-generator.md): mountains {height,scale,sharpness,coverage,octaves}, warp {strength,scale}, plateau {height,smooth}, terrace {step,sharpness} (each of these four also takes latitude={min,max} in degrees from the equator, north or south unless either is negative, and latitudeEdge, the degrees it fades over past them), overhangs {depth,scale,strength}, ravines {count,depth,width,length,meander}, rivers {count,depth,width,seaLevel,meander}, biomes = { {slot,color,latitude={min,max},altitude={min,max},slope={min,max},moisture={min,max},nearRiver}, ... } (first match paints the surface), moistureScale. deferCaves = true leaves the buried cave zone ungenerated until a dig reaches it: a quarter less to fill and keep, the same caves when they are made (to a hair at chunk faces).
+terrain.generatePlanet(id [, opts]) — REPLACE terrain id's whole field with a generated planet (sphere ± noise relief, caves + chambers, molten core, craters, layered materials). Background-generated (seconds; Console shows progress). opts (all optional): radius, voxel, relief, bumpFreq, caveDepth, coreR, corePaint, craters, craterMin/Max, craterDust, surfaceA/B {slot,color}, patchBias/Thr, subsoil(+Depth), strata(+Depth), deep, pockets {slot,color,threshold,minDepth}, seam {slot,color,minDepth,center,width}, iceCaps {lat,slot,color}, seed. Relief layers (each a table whose keys all default; see docs/planet-generator.md): mountains {height,scale,sharpness,coverage,octaves}, warp {strength,scale}, plateau {height,smooth}, terrace {step,sharpness} (each of these four also takes latitude={min,max} in degrees from the equator, north or south unless either is negative, and latitudeEdge, the degrees it fades over past them), overhangs {depth,scale,strength}, ravines {count,depth,width,length,meander}, rivers {count,depth,width,seaLevel,meander}, biomes = { {slot,color,latitude={min,max},altitude={min,max},slope={min,max},moisture={min,max},nearRiver}, ... } (first match paints the surface), moistureScale. deferCaves = true leaves the buried cave zone ungenerated until a dig reaches it: a quarter less to fill and keep, the same caves when they are made (to a hair at chunk faces). generator = N makes the world by version N of the generator's rules (0 up to this engine's); left out, by the project's, which an upgraded project keeps at the version it was made by, so its saved digs stay where they were. smallBody = { shape = "potato" | "binary" | "rubble", elongation = 1.5, lumpiness = 0.35, neck = 0.35, lumps = 8 } makes an irregular small body of size radius instead of a ball: one stretched lump, two lobes joined at a neck along X, or a pile of lumps; it has no cave zone or craters, and relief roughens it.
 
 ### `terrain.height`
 
 terrain.height(x, z) — world Y of the highest terrain surface under (x,z), or nil when nothing is hit. Spawning, footstep audio by ground, drop-to-floor.
+
+### `terrain.impostorAt`
+
+terrain.impostorAt(id [, { radii = n } | { pixels = n }]) — when the planet with terrain id `id` stops drawing its ground and draws as one shaded ball, one draw in the colour its ground draws: past `radii` of its own radii from the camera, or once its disc is smaller than `pixels` across on screen. Its ground loads in as much farther out as the rule keeps it drawn. With no rule it goes back to the default, sixty radii. Rules last until Play stops.
 
 ### `terrain.lodAnchor`
 
@@ -2923,7 +2939,7 @@ Water volumes: how deep a point is (water.depthAt), what is in the water (water.
 
 ### `water.addVolume`
 
-water.addVolume{ shape = "lake" | "heightfield", parent = "Planet", ... } → an id. Water no node carries, in the frame of the node it lies on, so it turns with its planet. A lake takes `center` (a point on its surface) and `reach` (how far its farthest shore is), exactly as terrain.planetLakes gives them; a heightfield takes `origin`, `cell`, `columns`, `rows` and `levels` (false = dry), with an optional `flow`. It floats things, carries them on its `current`, and water.at answers for it. `depth` is how far down its bed lies (planetLakes gives it), so a cave under a lake is dry; from inside it looks like a Water Volume node, with `tint = {r,g,b}` and `visibility` (metres) to change that and `underwater = false` for no look. shape = "sim" is water the engine moves: `origin`, `cell`, `columns`, `rows` as a heightfield and `level` to fill it to; the engine finds the ground under it, then the water flows, drains into holes dug beside it and settles, and water.at, flowAt and floating follow it.
+water.addVolume{ shape = "lake" | "heightfield", parent = "Planet", ... } → an id. Water no node carries, in the frame of the node it lies on, so it turns with its planet. A lake takes `center` (a point on its surface) and `reach` (how far its farthest shore is), exactly as terrain.planetLakes gives them; a heightfield takes `origin`, `cell`, `columns`, `rows` and `levels` (false = dry), with an optional `flow`. It floats things, carries them on its `current`, and water.at answers for it. `depth` is how far down its bed lies (planetLakes gives it), so a cave under a lake is dry; from inside it looks like a Water Volume node, with `tint = {r,g,b}` and `visibility` (metres) to change that and `underwater = false` for no look. shape = "sim" is water the engine moves: `origin`, `cell`, `columns`, `rows` as a heightfield and `level` to fill it to; the engine finds the ground under it, then the water flows, drains into holes dug beside it and settles, and water.at, flowAt and floating follow it. A sim is a river with `springs = { { pos = vec3, rate = m³/s }, ... }` (each at the point nearest its pos), `roughness` (the bed's Manning roughness: 0 = still water's frictionless model, the default; 0.035 = a natural river bed, which runs the water at a real river's depth and speed) and `holdEdges = true` (edge points below `level` held at it: the sea beyond the patch, which fills a trench dug from its shore). Water off a drop passes what a weir does, so a river over a cliff is stable; water.falls says where it pours.
 
 ### `water.at`
 
@@ -2932,6 +2948,10 @@ water.at(point) — nil in air, else { depth, density, frozen, node, up }. `up` 
 ### `water.depthAt`
 
 water.depthAt(x, y, z) — or a vec3, or a node. Metres BELOW the surface at that point; 0 in air. The one number everything else is derived from, and it is the same rule the solver uses, so a swim state can never disagree with the physics that floats you. A frozen volume reads 0 everywhere.
+
+### `water.falls`
+
+water.falls([id]) — every place simulated water (a `shape = "sim"` volume) pours off a drop of more than 1.5 m, in the world: { pos, dir, width, discharge, drop, volume }. `pos` is the top of the fall at the water's surface, `dir` the way it pours across the ground, `discharge` m³/s over the edge and `drop` metres from the surface above to the surface below. Refreshed as the water flows, so a fall that runs dry leaves the list: where a game puts a fall sheet and its mist, and takes them away. With an id, only that volume's.
 
 ### `water.flowAt`
 
@@ -2995,7 +3015,7 @@ scatter.cost(id) — what this source asks for every frame: { chunks, props, far
 
 ### `scatter.create`
 
-scatter.create{ asset = "tree.glb", seed = 7, perChunk = 24, chunk = 16 } — declare a source, get its id. `tint = {r,g,b}` multiplies every prop's colour, and `emissive = {r,g,b}` with `emissiveStrength` makes them glow, so one model serves a field of any shade. Region: center + radius for a sphere (a planet), or center + halfX/halfZ for ground. `parent = "Umunquo"` anchors the region to a NODE (and then `center` is in that node's frame: the planet's own centre is (0,0,0), not where it is in the world), so a planet that orbits carries its props instead of sliding out from under them — every prop keeps its id, its place on the surface and the ground height it settled at, because none of those were ever expressed in world space. Without a parent the region is pinned to the world, which is right for a landscape that never moves and wrong for every celestial body. Also scaleMin/scaleMax, align = "surface" (default) or "world", fade, and lod = { {asset=, distance=}, ... } nearest-first. Placement is a pure function of the seed, so every machine and every session grows the SAME forest without storing one. `density` is how a world gets biomes: pass a function(x, y, z) -> 0..1 and it is sampled ONCE, at declare time, into a densityRows grid (rows x 2*rows for a sphere's longitude) — 0 means no instance is generated at all, not a hidden one. An option this doesn't list is an error, not a shrug. `asset` may be a mesh file OR a .prefab.ron — a prefab is baked once into one instanced draw per Mesh node it holds, each at its authored place in the prop and wearing that node's Material (its colour, sway and backlight, so a field of grass moves in the wind), which is how a prop your own script assembled gets scattered.
+scatter.create{ asset = "tree.glb", seed = 7, perChunk = 24, chunk = 16 } — declare a source, get its id. `tint = {r,g,b}` multiplies every prop's colour, and `emissive = {r,g,b}` with `emissiveStrength` makes them glow, so one model serves a field of any shade. `emissiveStrength` with no `emissive` glows in each model's own glow colour (or through its emissive map), and a model with none glows in the source's `tint`. Region: center + radius for a sphere (a planet), or center + halfX/halfZ for ground. `parent = "Umunquo"` anchors the region to a NODE (and then `center` is in that node's frame: the planet's own centre is (0,0,0), not where it is in the world), so a planet that orbits carries its props instead of sliding out from under them — every prop keeps its id, its place on the surface and the ground height it settled at, because none of those were ever expressed in world space. Without a parent the region is pinned to the world, which is right for a landscape that never moves and wrong for every celestial body. Also scaleMin/scaleMax, align = "surface" (default) or "world", fade, and lod = { {asset=, distance=}, ... } nearest-first. Placement is a pure function of the seed, so every machine and every session grows the SAME forest without storing one. `density` is how a world gets biomes: pass a function(x, y, z) -> 0..1 and it is sampled ONCE, at declare time, into a densityRows grid (rows x 2*rows for a sphere's longitude) — 0 means no instance is generated at all, not a hidden one. An option this doesn't list is an error, not a shrug. `asset` may be a mesh file OR a .prefab.ron — a prefab is baked once into one instanced draw per Mesh node it holds, each at its authored place in the prop and wearing that node's Material (its colour, sway and backlight, so a field of grass moves in the wind), which is how a prop your own script assembled gets scattered.
 
 ### `scatter.destroy`
 
@@ -3203,7 +3223,7 @@ assembly.impulseAt(node, impulse, at) — a one-shot kick at a world point, appl
 
 ### `assembly.info`
 
-assembly.info(node) — { mass, com, origin, vel, angVel, inertia, grounded, anchored, gripped, parts, right, up, forward }. right, up and forward are the craft's axes as they are this tick, the way node:worldRight/worldUp/worldForward give a node's drawn ones: read in fixedUpdate they are that tick's, where the node's are a frame's. com is the world-space centre of mass as a vec3 — the number a flight controller, a CoM gizmo and a landing check all need. inertia is the tensor the solver turns torques with, about the centre of mass in world axes, as three rows: inertia[1].x .. inertia[3].z. A torque of I × (wanted change in angVel) / dt stops a spin in one tick without overshooting.
+assembly.info(node) — { mass, com, origin, vel, angVel, inertia, grounded, anchored, gripped, parts, right, up, forward, carry }. carry is node.carry for the craft: how far the frame it rides in moved this tick. right, up and forward are the craft's axes as they are this tick, the way node:worldRight/worldUp/worldForward give a node's drawn ones: read in fixedUpdate they are that tick's, where the node's are a frame's. com is the world-space centre of mass as a vec3 — the number a flight controller, a CoM gizmo and a landing check all need. inertia is the tensor the solver turns torques with, about the centre of mass in world axes, as three rows: inertia[1].x .. inertia[3].z. A torque of I × (wanted change in angVel) / dt stops a spin in one tick without overshooting.
 
 ### `assembly.keepLive`
 
@@ -3533,6 +3553,10 @@ World Z of the body's centre.
 ### `space`
 
 On-rails celestial mechanics: where the bodies are, which one's gravity owns a point, the orbit a craft is on, and time-warp.
+
+### `space.belt`
+
+space.belt{ parent, count, seed, aMin, aMax, eMax, iMax, radiusMin, radiusMax [, mu = 0] [, reach] [, name = "Rock"] [, prefab] [, made = function(rock, i, row) end] } → how many rocks it asked for. Makes a belt of small bodies on space.beltOrbits rows: each rock a node named name .. " " .. i (or an instance of prefab, renamed so), given a CelestialBody on its row's orbit about parent (mu 0 unless given, reach if given), on the rails from the next tick. The rocks are runtime nodes: made while the game plays and gone when it stops, so a belt is never saved; from the same seed it is the same belt on every machine. made runs for each rock once it exists, to give it terrain, a look or a script. shape gives each rock ground of its own, an irregular small body made from the seed when something comes near: "potato", "binary", "rubble", "mixed" (the three dealt out from the seed), a smallBody table as terrain.generatePlanet takes, or a function(i, row) returning one; rock i is terrain id terrainId + i - 1 (10000 by default), at voxel (its radius / 24 by default). Refuses: any option it does not list, a missing parent, and what space.beltOrbits refuses.
 
 ### `space.beltOrbits`
 
@@ -3955,7 +3979,7 @@ Box half-extent Z.
 
 ### `rb.height`
 
-Capsule total height.
+Capsule total height, in the node's space: the body is this times the node's Y scale (rb.worldHeight).
 
 ### `rb.kinematic`
 
@@ -3991,7 +4015,7 @@ Mass (read and write, live). On an assembly part it is that part's share of the 
 
 ### `rb.radius`
 
-Sphere/capsule radius.
+Sphere/capsule radius, in the node's space: the body is this times the node's scale (rb.worldRadius).
 
 ### `rb.restitution`
 
@@ -4011,7 +4035,7 @@ Steepest standable surface, in degrees (default 60). Past it nothing grounds the
 
 ### `rb.worldHalfX`
 
-Read-only: the box's half-extent X as the physics builds it, half_x times the node's world scale. half_* are the authored, unscaled numbers; radius and height are used as written, unscaled.
+Read-only: the box's half-extent X as the physics builds it, half_x times the node's world scale. half_* are the authored, unscaled numbers, as are radius and height; rb.worldRadius and rb.worldHeight are those as the physics builds them.
 
 ### `rb.worldHalfY`
 
@@ -4020,6 +4044,14 @@ Read-only: the box's half-extent Y as the physics builds it (half_y times the wo
 ### `rb.worldHalfZ`
 
 Read-only: the box's half-extent Z as the physics builds it (half_z times the world scale).
+
+### `rb.worldHeight`
+
+Read-only: the capsule's total height as the physics builds it, height times the node's world Y scale (never less than twice rb.worldRadius).
+
+### `rb.worldRadius`
+
+Read-only: the sphere's or capsule's radius as the physics builds it, radius times the node's world scale. Under an uneven scale a sphere takes the largest axis and a capsule the larger of X and Z.
 
 ## animation — node:animator
 

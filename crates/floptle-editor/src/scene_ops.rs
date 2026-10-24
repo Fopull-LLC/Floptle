@@ -20,6 +20,10 @@ use crate::inspector::{ComponentClip};
 use crate::matter_catalog::{matter_doc_name};
 use crate::{Editor, snap_dvec3};
 
+/// A character's mass, kg: what a fresh capsule body and the templates'
+/// players weigh, so one pushes a fitted crate the way a person would.
+pub(crate) const CHARACTER_MASS: f32 = 70.0;
+
 impl Editor {
     /// Paste the component clipboard onto `e` (the held clip decides the kind). Adds
     /// the component if missing, else overwrites its values; scripts add-or-update by
@@ -706,7 +710,12 @@ impl Editor {
         let Some(&Matter::Sprite { ppu, size, cell, pivot, .. }) = self.world.get::<Matter>(e) else {
             return crate::body_fit::physics_object(&self.world, &self.maps, &self.project_root, e)
                 .map(|mut rb| {
-                    rb.rotates &= rb.kind != floptle_core::BodyKind::Capsule;
+                    // A capsule is a character: upright, and as heavy as a
+                    // person rather than as a capsule of wood.
+                    if rb.kind == floptle_core::BodyKind::Capsule {
+                        rb.rotates = false;
+                        rb.mass = CHARACTER_MASS;
+                    }
                     rb
                 })
                 .unwrap_or_default();

@@ -172,6 +172,8 @@ const EXT_SINGLE_SIDED: u32 = 64u;
 // The alpha cutoff, as `1 + cutoff × 254` in flag bits 8..16; zero there is the
 // default cutoff of one half.
 const EXT_CUTOFF_SHIFT: u32 = 8u;
+// The surface blends (`BlendMode::Blend`): never cut out, whatever its opacity.
+const EXT_BLEND: u32 = 128u;
 
 fn ext_cutoff(e: Ext) -> f32 {
     let q = (e.flags >> EXT_CUTOFF_SHIFT) & 255u;
@@ -1614,7 +1616,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     // The cutoff is the material's own (0.5 unless a model's MASK cutoff, or
     // 0 for a model that says OPAQUE, set it). A strict `<` so a cutoff of 0
     // cuts nothing at all.
-    if (!terrain && in.color.a >= 0.999 && alpha < ext_cutoff(ext)) {
+    if (!terrain && !ext_has(ext, EXT_BLEND) && in.color.a >= 0.999 && alpha < ext_cutoff(ext)) {
         discard;
     }
     // A single-sided surface is not drawn from behind. Nothing culls in the
@@ -1860,7 +1862,7 @@ fn fs_depth(in: VsOut, @builtin(front_facing) front: bool) {
     // for every one; otherwise only the certainly-opaque ones, as ever. A face
     // the color pass will drop from behind must not prime depth either, or it
     // would hide what is behind it and draw nothing in its place.
-    let solid = a >= 0.99 || (in.color.a >= 0.999 && ext_cutoff(ext) == 0.0);
+    let solid = a >= 0.99 || (in.color.a >= 0.999 && ext_cutoff(ext) == 0.0 && !ext_has(ext, EXT_BLEND));
     if (!solid || (ext_has(ext, EXT_SINGLE_SIDED) && !front)) {
         discard;
     }

@@ -808,6 +808,17 @@ pub struct CelestialBodyDoc {
     /// Occlusion culling: solid-core radius geometry never pierces (0 = off).
     #[serde(default)]
     pub occluder_radius: f64,
+    /// The least an automatic SOI reaches, in body radii.
+    #[serde(default = "default_reach", skip_serializing_if = "is_default_reach")]
+    pub reach: f64,
+}
+
+fn default_reach() -> f64 {
+    floptle_core::frames::SMALL_BODY_REACH
+}
+
+fn is_default_reach(v: &f64) -> bool {
+    *v == floptle_core::frames::SMALL_BODY_REACH
 }
 
 fn default_cloud_height() -> f32 {
@@ -858,6 +869,7 @@ impl CelestialBodyDoc {
             luminosity: self.luminosity,
             star_color: self.star_color,
             occluder_radius: self.occluder_radius,
+            reach: self.reach.max(0.0),
         }
     }
     pub fn from_body(b: &floptle_core::CelestialBody) -> Self {
@@ -884,6 +896,7 @@ impl CelestialBodyDoc {
             luminosity: b.luminosity,
             star_color: b.star_color,
             occluder_radius: b.occluder_radius,
+            reach: b.reach,
         }
     }
 }
@@ -1444,6 +1457,36 @@ pub enum MatterDoc {
         #[serde(default = "default_probe_fade")]
         fade: f32,
     },
+}
+
+/// How every model's embedded textures are filtered, project-wide, unless a
+/// model's own Inspector choice says otherwise.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ModelTextureFilterDoc {
+    /// Each texture the way its file's sampler says, crisp where it says
+    /// nothing. New projects start here.
+    #[default]
+    AsFile,
+    /// Every texture crisp, nearest-neighbour: how every model drew before
+    /// 0.117, which is what a project from then keeps.
+    Crisp,
+    /// Every texture smooth, with mipmaps.
+    Smooth,
+}
+
+/// How an imported model's own materials are drawn.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ImportedMaterialsDoc {
+    /// As each file describes them: metallic and roughness with or without a
+    /// map, alpha mode and cutoff, sidedness, the texture transform. New
+    /// projects start here.
+    #[default]
+    AsFile,
+    /// The rules of 0.116, kept for a project made then so its models look
+    /// as they did: physical shading only for a part with a
+    /// metallic-roughness map, every picture cut out at half alpha, every
+    /// face drawn from both sides, and no texture transform.
+    Classic,
 }
 
 /// Serializable reflection-probe detail — mirrors `floptle_render::ProbeDetail`.
@@ -2999,6 +3042,14 @@ pub struct ProjectConfigDoc {
     /// text. Named once here, it reaches the code nobody is going to edit.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub ui_font: String,
+    /// The planet generator version this project's worlds are made by when a
+    /// spec names none (`floptle_core::TERRAIN_GENERATOR` is the current one).
+    /// A file without it is from before versions and reads as the oldest,
+    /// so ground saved as edits comes back over the ground it was dug into;
+    /// the upgrade pass writes the version its last engine made. Read it
+    /// through [`ProjectConfigDoc::terrain_generator_resolved`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terrain_generator: Option<u32>,
     /// Which `vec3` this project's scripts get; see [`ScriptVec3Doc`].
     ///
     /// `None` means the file predates the setting, a third state rather than
@@ -3009,6 +3060,17 @@ pub struct ProjectConfigDoc {
     /// `unwrap_or_default`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_vec3: Option<ScriptVec3Doc>,
+    /// How models' embedded textures are filtered; see
+    /// [`ModelTextureFilterDoc`]. `None` means the file predates the setting:
+    /// such a project drew every model crisp, and
+    /// [`ProjectConfigDoc::model_texture_filter_resolved`] keeps it so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_texture_filter: Option<ModelTextureFilterDoc>,
+    /// How imported models' materials are drawn; see [`ImportedMaterialsDoc`].
+    /// `None` means the file predates the setting and resolves to
+    /// [`Classic`](ImportedMaterialsDoc::Classic).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_materials: Option<ImportedMaterialsDoc>,
     /// Whether opening the project seeds the engine's example scripts into
     /// `scripts/`. Off leaves only the scripts a new scene needs to run (the
     /// starter camera's `freelook.lua`), and a deleted example stays deleted.
@@ -3083,7 +3145,13 @@ impl ProjectConfigDoc {
             no_collide: Vec::new(),
             sorting_layers: Vec::new(),
             ui_font: String::new(),
+            // A new project's worlds take the generator as it is now.
+            terrain_generator: Some(floptle_core::TERRAIN_GENERATOR),
             script_vec3: None,
+            // A config made in code is a new project's; a file without these
+            // fields is an old one's, and reads `None` (field-level defaults).
+            model_texture_filter: Some(ModelTextureFilterDoc::AsFile),
+            imported_materials: Some(ImportedMaterialsDoc::AsFile),
             example_scripts: true,
             mixer: floptle_audio::MixerDesc::default(),
             bloom: false,
@@ -3111,6 +3179,24 @@ impl ProjectConfigDoc {
     /// here, so they cannot drift apart.
     pub fn for_new_project() -> Self {
         Self { script_vec3: Some(ScriptVec3Doc::Fast), ..Self::ps1() }
+    }
+
+    /// How this project filters models' textures. A project file from before
+    /// the setting drew every model crisp, and still does.
+    pub fn model_texture_filter_resolved(&self) -> ModelTextureFilterDoc {
+        self.model_texture_filter.unwrap_or(ModelTextureFilterDoc::Crisp)
+    }
+
+    /// How this project draws imported materials. A project file from before
+    /// the setting drew them by the 0.116 rules, and still does.
+    pub fn imported_materials_resolved(&self) -> ImportedMaterialsDoc {
+        self.imported_materials.unwrap_or(ImportedMaterialsDoc::Classic)
+    }
+
+    /// The planet generator version this project's unversioned specs are
+    /// made by: the oldest for a file from before the setting.
+    pub fn terrain_generator_resolved(&self) -> u32 {
+        self.terrain_generator.unwrap_or(0)
     }
 
     /// Which `vec3` this project's scripts actually get.
@@ -3536,6 +3622,37 @@ pub struct MaterialDoc {
     /// Absent is both sides, as always.
     #[serde(default = "true_bool", skip_serializing_if = "is_true")]
     pub double_sided: bool,
+    /// Opaque, cutout or blended (see [`floptle_core::BlendMode`]). Always
+    /// written. Absent in a scene from before the setting, where it reads as
+    /// what the material meant then: blended below full opacity, otherwise
+    /// cutout, or opaque with a cutoff of 0.
+    #[serde(default)]
+    pub blend: Option<BlendDoc>,
+}
+
+/// RON mirror of [`floptle_core::BlendMode`].
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlendDoc {
+    Opaque,
+    Cutout,
+    Blend,
+}
+
+impl BlendDoc {
+    pub fn to_mode(self) -> floptle_core::BlendMode {
+        match self {
+            BlendDoc::Opaque => floptle_core::BlendMode::Opaque,
+            BlendDoc::Cutout => floptle_core::BlendMode::Cutout,
+            BlendDoc::Blend => floptle_core::BlendMode::Blend,
+        }
+    }
+    pub fn from_mode(m: floptle_core::BlendMode) -> Self {
+        match m {
+            floptle_core::BlendMode::Opaque => BlendDoc::Opaque,
+            floptle_core::BlendMode::Cutout => BlendDoc::Cutout,
+            floptle_core::BlendMode::Blend => BlendDoc::Blend,
+        }
+    }
 }
 
 fn default_alpha_cutoff() -> f32 {
@@ -3742,6 +3859,14 @@ impl Default for MaterialDoc {
 }
 
 impl MaterialDoc {
+    /// The blend mode, written or implied: see [`MaterialDoc::blend`].
+    pub fn blend_resolved(&self) -> floptle_core::BlendMode {
+        match self.blend {
+            Some(b) => b.to_mode(),
+            None => floptle_core::BlendMode::implied_by(self.alpha, self.alpha_cutoff),
+        }
+    }
+
     pub fn to_material(&self) -> Material {
         Material {
             texture: self.texture.clone(),
@@ -3792,6 +3917,7 @@ impl MaterialDoc {
             source: self.source.clone(),
             alpha_cutoff: self.alpha_cutoff.clamp(0.0, 1.0),
             double_sided: self.double_sided,
+            blend: self.blend_resolved(),
         }
     }
     pub fn from_material(m: &Material) -> Self {
@@ -3842,6 +3968,7 @@ impl MaterialDoc {
             source: m.source.clone(),
             alpha_cutoff: m.alpha_cutoff,
             double_sided: m.double_sided,
+            blend: Some(BlendDoc::from_mode(m.blend)),
         }
     }
 }
@@ -5258,6 +5385,7 @@ mod tests {
                         luminosity: 12.0, // exercise the star round-trip
                         star_color: [1.0, 0.9, 0.8],
                         occluder_radius: 48.0, // exercise the occluder round-trip
+                        reach: 6.5,            // …and a small body's reach
                     }),
                     mesh_collider: true, // exercise the mesh-collider round-trip
                     disabled: true,      // …and the disabled one
@@ -6363,5 +6491,34 @@ mod script_param_tests {
         assert_eq!(ron::from_str::<ScriptDoc>(&text).unwrap().params, doc.params);
         let err = ron::from_str::<ScriptDoc>(r#"(kind: "gen", params: [("seed", "abc")])"#).unwrap_err();
         assert!(err.to_string().contains("\"abc\" is not a number"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod celestial_reach_tests {
+    use super::*;
+
+    /// A celestial's reach goes into a scene and comes back out of it, and a
+    /// scene written before there was one loads with the default.
+    #[test]
+    fn a_celestials_reach_round_trips_and_defaults() {
+        let mut w = World::default();
+        let e = w.spawn();
+        w.insert(e, floptle_core::Transform::IDENTITY);
+        w.insert(e, floptle_core::Name("Rock".into()));
+        w.insert(e, floptle_core::Matter::Empty);
+        w.insert(e, floptle_core::CelestialBody { reach: 6.5, ..Default::default() });
+        let text = to_ron(&to_doc("t", &w)).unwrap();
+        let mut back = World::default();
+        spawn_nodes(&from_ron(&text).unwrap().nodes, &mut back);
+        let reach = back.query::<floptle_core::CelestialBody>().next().map(|(_, c)| c.reach);
+        assert_eq!(reach, Some(6.5), "the reach did not survive the scene: {text}");
+        // Written without one, as every scene before it was.
+        let old = text.replace("reach: 6.5,", "");
+        assert!(!old.contains("reach"), "{old}");
+        let mut back = World::default();
+        spawn_nodes(&from_ron(&old).unwrap().nodes, &mut back);
+        let reach = back.query::<floptle_core::CelestialBody>().next().map(|(_, c)| c.reach);
+        assert_eq!(reach, Some(floptle_core::frames::SMALL_BODY_REACH));
     }
 }

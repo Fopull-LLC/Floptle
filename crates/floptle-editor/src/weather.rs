@@ -61,6 +61,8 @@ struct WaterSim {
 const SIM_SUBSTEPS: usize = 8;
 /// Depth below which a point is dry ground, not water.
 const SIM_DRY: f32 = 1e-3;
+/// A drop of ground, metres, that a river pours off as a waterfall.
+const FALL_DROP: f32 = 1.5;
 /// Frames a simulated volume waits for ground under every point before it is
 /// filled anyway.
 const SEED_WAIT_FRAMES: u32 = 60;
@@ -90,7 +92,8 @@ impl crate::Editor {
         let dt = self.water_sims.last_t.map_or(0.0, |t| (now - t).max(0.0));
         self.water_sims.last_t = Some(now);
         for w in &declared {
-            let (Some(level), Surface::Grid(g)) = (w.simulated, &w.surface) else { continue };
+            let (Some(spec), Surface::Grid(g)) = (&w.simulated, &w.surface) else { continue };
+            let level = spec.level;
             // The ground under point (i, j): a ray down the parent's up from
             // well above the water, in the sim's frame.
             let ground_hit = |i: usize, j: usize| -> Option<f32> {
@@ -118,7 +121,24 @@ impl crate::Editor {
                 }
                 self.water_sims.waiting.remove(&w.id);
                 let grid = floptle_field::water::WaterGrid::flat(g.columns, g.rows, g.cell as f32, ground_at);
-                let water = floptle_field::water::ShallowWater::at_rest(&grid, &vec![level; grid.len()]);
+                let mut water = floptle_field::water::ShallowWater::at_rest(&grid, &vec![level; grid.len()]);
+                water.roughness = spec.roughness;
+                for &(c, q) in &spec.springs {
+                    water.add_spring(c, q);
+                }
+                // The sea or the lake beyond the patch: its level held along
+                // the edge, wherever the ground there is under it.
+                if spec.hold_edges {
+                    for j in 0..g.rows {
+                        for i in 0..g.columns {
+                            let c = j * g.columns + i;
+                            let edge = i == 0 || j == 0 || i + 1 == g.columns || j + 1 == g.rows;
+                            if edge && grid.ground[c] < level {
+                                water.hold_level(c, level);
+                            }
+                        }
+                    }
+                }
                 self.water_sims.sims.insert(w.id, WaterSim { grid, water, seen_edits: edits });
             }
             let Some(s) = self.water_sims.sims.get_mut(&w.id) else { continue };
@@ -165,6 +185,34 @@ impl crate::Editor {
             let surface = s.water.surface(&s.grid);
             let levels = surface.iter().zip(&s.water.depth).map(|(l, d)| if *d > SIM_DRY { *l } else { f32::NAN }).collect();
             let flow = (0..s.grid.len()).map(|c| s.water.velocity(&s.grid, c)).collect();
+            // Where it pours off a drop, in the world: the lip's middle at the
+            // surface, pouring across the ground through that face.
+            let falls: Vec<floptle_core::water::WaterFall> = s
+                .water
+                .falls(&s.grid, FALL_DROP)
+                .iter()
+                .map(|f| {
+                    let c = f.cell as usize;
+                    let (i, j) = ((c % g.columns) as f64, (c / g.columns) as f64);
+                    let step = [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)][f.face as usize];
+                    let local = floptle_core::math::DVec3::new(
+                        g.x0 + (i + 0.5 * step.0) * g.cell,
+                        surface[c] as f64,
+                        g.z0 + (j + 0.5 * step.1) * g.cell,
+                    );
+                    let dir = floptle_core::math::DVec3::new(step.0, 0.0, step.1);
+                    floptle_core::water::WaterFall {
+                        pos: w.frame.to_world(local),
+                        dir: w.frame.dir_to_world(dir.as_vec3()),
+                        width: f.width,
+                        discharge: f.discharge,
+                        drop: f.drop,
+                    }
+                })
+                .collect();
+            if falls != spec.falls {
+                self.script_host.set_water_falls(w.id, falls);
+            }
             self.script_host.set_water_surface(
                 w.id,
                 Surface::Grid(std::sync::Arc::new(HeightGrid { levels, flow, ..(**g).clone() })),
@@ -505,6 +553,61 @@ mod tests {
         assert!(pit > pool + 1.0, "the pit holds {pit} m of water against the pool's {pool}");
         let lost = (volume(&ed) - before).abs() / before;
         assert!(lost < 0.01, "{:.2}% of the water was made or lost", lost * 100.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A spring on a terrace runs off its edge as a waterfall.** A sim
+    /// with a spring on a ledge 4 m above the ground below: the water runs to
+    /// the edge and pours off, and `water.falls` says where, which way, and
+    /// how much.
+    #[test]
+    fn a_spring_on_a_ledge_pours_off_it_as_a_fall() {
+        let dir = std::env::temp_dir().join(format!("floptle-water-fall-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        floptle_vfs::write(
+            dir.join("scripts/river.lua"),
+            "water.addVolume{ shape = \"sim\", origin = vec3(-8, 0, -2), cell = 1, columns = 17, rows = 5, level = -1, \
+             roughness = 0.035, springs = { { pos = vec3(-7, 4, 0), rate = 0.5 } } }\n",
+        )
+        .unwrap();
+        let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+        let mut field = floptle_field::ChunkField::new(0.5);
+        // A ledge 4 m high over x < 0, and the ground below it beyond.
+        field.fill_slab(Vec3::new(-12.0, -6.0, -6.0), Vec3::new(0.0, 4.0, 6.0), 4.0, [0.5, 0.5, 0.5]);
+        field.fill_slab(Vec3::new(0.0, -6.0, -6.0), Vec3::new(12.0, 0.0, 6.0), 0.0, [0.5, 0.5, 0.5]);
+        let e = ed.world.spawn();
+        ed.world.insert(e, Transform::IDENTITY);
+        ed.terrains.insert(e, crate::terrain_edit::EditorTerrain::new(field));
+        let host = ed.world.spawn();
+        ed.world.insert(host, Transform::IDENTITY);
+        ed.world.insert(
+            host,
+            floptle_core::Scripts(vec![floptle_core::ScriptInst {
+                kind: "river".into(),
+                enabled: true,
+                params: Vec::new(),
+                refs: Vec::new(),
+                strs: Vec::new(),
+                pinned_bools: None,
+            }]),
+        );
+        ed.toggle_play();
+        // A minute: the ledge fills to its running depth, and then pours off
+        // what the spring gives.
+        for _ in 0..3600 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        let falls = ed.script_host.declared_water()[0].simulated.as_ref().unwrap().falls.clone();
+        assert!(!falls.is_empty(), "the water poured off the ledge without a fall");
+        let total: f32 = falls.iter().map(|f| f.discharge).sum();
+        for f in &falls {
+            assert!(f.dir.x > 0.99, "a fall pours {:?}, not off the ledge toward +x", f.dir);
+            assert!((f.pos.x - 0.0).abs() < 0.6, "a fall's lip is at x = {:.2}, not the ledge's edge", f.pos.x);
+            assert!(f.drop > 3.0 && f.drop < 4.5, "a fall drops {:.2} m off a 4 m ledge", f.drop);
+        }
+        assert!((total - 0.5).abs() < 0.1, "{total} m³/s pours off the ledge from a 0.5 m³/s spring");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

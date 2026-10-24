@@ -621,8 +621,8 @@ const COMPONENT_FIELDS: &[(&str, &str, &str)] = &[
     ("RigidBody", "restitution", "Bounciness 0..1 (0 = no bounce)."),
     ("RigidBody", "gravity", "Gravity pull on this body — assign true/false (reads back 1/0)."),
     ("RigidBody", "shape", "Body shape — 0 sphere, 1 capsule, 2 box, 3 polygon, 4 mesh (the node's own geometry: its convex hull when it moves, its exact triangles when Static)."),
-    ("RigidBody", "radius", "Sphere/capsule radius."),
-    ("RigidBody", "height", "Capsule total height."),
+    ("RigidBody", "radius", "Sphere/capsule radius, in the node's space (the body is this times its scale)."),
+    ("RigidBody", "height", "Capsule total height, in the node's space (the body is this times its Y scale)."),
     ("RigidBody", "half_x", "Box half-extent X."),
     ("RigidBody", "half_y", "Box half-extent Y."),
     ("RigidBody", "half_z", "Box half-extent Z."),
@@ -630,6 +630,8 @@ const COMPONENT_FIELDS: &[(&str, &str, &str)] = &[
     ("RigidBody", "worldHalfX", "Box half-extent X times the node's world scale: the box the physics builds. Read-only."),
     ("RigidBody", "worldHalfY", "Box half-extent Y times the node's world scale. Read-only."),
     ("RigidBody", "worldHalfZ", "Box half-extent Z times the node's world scale. Read-only."),
+    ("RigidBody", "worldRadius", "Sphere/capsule radius times the node's world scale (largest axis for a sphere, larger of X and Z for a capsule): the radius the physics builds. Read-only."),
+    ("RigidBody", "worldHeight", "Capsule height times the node's world Y scale: the height the physics builds. Read-only."),
     ("RigidBody", "lock_x", "Freeze world X translation (assign true/false)."),
     ("RigidBody", "lock_y", "Freeze world Y translation."),
     ("RigidBody", "lock_z", "Freeze world Z translation (e.g. for 2.5D)."),
@@ -765,6 +767,9 @@ enum VarType {
     Animator,
     Particles,
     Component(String),
+    /// A value the API documents under a stand-in name: a `raycast` hit is
+    /// `hit.*`, a model material handle `mat.*`.
+    Like(&'static str),
 }
 
 /// Extract the first double-quoted string in `s`, if any.
@@ -772,6 +777,347 @@ fn first_quoted(s: &str) -> Option<&str> {
     let a = s.find('"')? + 1;
     let b = a + s[a..].find('"')?;
     Some(&s[a..b])
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Completion as it was before it knew the context, for measuring the
+    /// difference on real scripts (`completion_measured_on_real_scripts`).
+    static LEGACY_AC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn legacy_ac() -> bool {
+    #[cfg(test)]
+    {
+        LEGACY_AC.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+/// Does this file declare `name` itself: `local name`, a parameter, a
+/// `for` variable, or a plain `name = ` assignment at the start of a line?
+fn declares_local(text: &str, name: &str) -> bool {
+    let word = |s: &str| s.trim() == name;
+    text.lines().any(|line| {
+        let line = line.split("--").next().unwrap_or(line).trim();
+        if let Some(rest) = line.strip_prefix("local ") {
+            let rest = rest.trim_start_matches("function ").trim();
+            let names = rest.split('=').next().unwrap_or(rest);
+            if names.split([',', '(']).any(word) {
+                return true;
+            }
+        }
+        if let Some(rest) = line.strip_prefix("for ") {
+            let names = rest.split([' ', '=']).collect::<Vec<_>>();
+            if names.iter().take_while(|w| **w != "in" && **w != "=").any(|w| w.trim_end_matches(',') == name) {
+                return true;
+            }
+        }
+        if line.contains("function")
+            && let (Some(a), Some(b)) = (line.find('('), line.find(')'))
+            && a < b
+            && line[a + 1..b].split(',').any(word)
+        {
+            return true;
+        }
+        line.strip_prefix(name).is_some_and(|r| r.trim_start().starts_with('=') && !r.trim_start().starts_with("=="))
+    })
+}
+
+/// The fields this file uses on `base` (`base.x`, `base:y`), and the keys of
+/// a table it builds for it (`base = { speed = 1 }`), each once.
+fn file_fields(text: &str, base: &str, sep: char) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let pat = format!("{base}{sep}");
+    let b = text.as_bytes();
+    let mut from = 0;
+    while let Some(i) = text[from..].find(&pat) {
+        let at = from + i;
+        from = at + pat.len();
+        if at > 0 && (is_ident_byte(b[at - 1]) || b[at - 1] == b'.' || b[at - 1] == b':') {
+            continue;
+        }
+        let end = text[from..].find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).map_or(text.len(), |e| from + e);
+        let f = &text[from..end];
+        if !f.is_empty() && !out.iter().any(|o| o == f) {
+            out.push(f.to_string());
+        }
+    }
+    if sep == '.' {
+        for open in [format!("{base} = {{"), format!("{base}={{")] {
+            if let Some(i) = text.find(&open) {
+                let body = &text[i + open.len()..];
+                let mut depth = 0;
+                let mut field = String::new();
+                for c in body.chars() {
+                    match c {
+                        '{' => depth += 1,
+                        '}' if depth == 0 => break,
+                        '}' => depth -= 1,
+                        '=' if depth == 0 => {
+                            let k = field.trim().trim_start_matches(',').trim().to_string();
+                            if !k.is_empty() && k.bytes().all(is_ident_byte) && !out.contains(&k) {
+                                out.push(k);
+                            }
+                            field.clear();
+                        }
+                        ',' | '\n' if depth == 0 => field.clear(),
+                        _ if depth == 0 => field.push(c),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// When a call or field means anything, where its own doc says it is limited:
+/// shown on the completion row, and used to leave it out where the caret's
+/// hook rules it out. Kept beside [`LUA_API`] rather than as a field of every
+/// entry, because only a few have a limit; each one here repeats what that
+/// entry's doc line already says.
+const WHEN: &[(&str, &str)] = &[
+    ("input.buffered", "fixedUpdate only"),
+    ("input.motion", "fixedUpdate only"),
+    ("node.tickPos", "reads the tick: for fixedUpdate"),
+    ("node.tickYaw", "reads the tick: for fixedUpdate"),
+    ("ui.make", "during Play"),
+    ("openUrl", "during Play"),
+    ("http.get", "during Play"),
+    ("http.post", "during Play"),
+    ("http.put", "during Play"),
+    ("http.delete", "during Play"),
+    ("account.signIn", "during Play"),
+    ("cloud.get", "during Play"),
+    ("assets.textureFromUrl", "during Play, on a host that draws"),
+    ("assets.textureFromPixels", "on a host that draws (not floptle run or a server)"),
+    ("camera.capture", "on a host that draws (not floptle run or a server)"),
+    ("node:uiRect", "after the UI has been laid out on screen"),
+    ("anim:duration", "any time, start() included"),
+];
+
+/// The `when` note for an entry, if it has one.
+fn when_of(label: &str) -> Option<&'static str> {
+    WHEN.iter().find(|(l, _)| *l == label).map(|(_, w)| *w)
+}
+
+/// An entry's tooltip: its doc line, led by when it is valid.
+fn entry_doc(e: &ApiEntry) -> String {
+    match when_of(e.label) {
+        Some(w) => format!("[{w}] {}", e.doc),
+        None => e.doc.to_string(),
+    }
+}
+
+/// The hook the caret is inside, if any: the nearest `function name(` above
+/// it whose block is still open.
+fn enclosing_hook(before: &str) -> Option<String> {
+    let mut depth = 0i32;
+    for line in before.lines().rev() {
+        let code = line.split("--").next().unwrap_or(line);
+        let opens = block_balance(code);
+        if let Some((name, _)) = hook_signature(code) {
+            if depth + opens > 0 {
+                return Some(name.to_string());
+            }
+        } else if code.trim_start().starts_with("function ") && depth + opens > 0 {
+            return None; // inside some other function
+        }
+        depth += opens;
+    }
+    None
+}
+
+/// Calls that return a handle the API documents under a stand-in name: a
+/// variable assigned from one completes that handle's members.
+const HANDLE_RETURNS: &[(&str, &str)] = &[
+    ("nav.agent(", "agent"),
+    ("nav.obstacle(", "obstacle"),
+    (":tilemap()", "tm"),
+    (":sprite()", "sp"),
+    ("space.body(", "body"),
+    ("audio.play(", "sound"),
+    ("voice.source(", "sound"),
+    ("rng(", "rng"),
+    ("after(", "timer"),
+    ("every(", "timer"),
+    ("tween(", "timer"),
+];
+
+/// The hooks whose parameters the engine passes as nodes.
+const NODE_HOOKS: &[&str] = &[
+    "start", "update", "fixedUpdate", "lateUpdate", "onDestroy", "onCollisionEnter", "onCollisionStay",
+    "onCollisionExit", "onTriggerEnter", "onTriggerStay", "onTriggerExit", "clicked", "pressed", "released",
+    "hoverStart", "hoverEnd", "focused", "unfocused", "dropped", "onEnable", "onDisable",
+];
+
+/// `function update(node, dt)` → `("update", ["node", "dt"])`, for a hook.
+fn hook_signature(line: &str) -> Option<(&str, Vec<&str>)> {
+    let rest = line.trim_start().strip_prefix("function ")?;
+    let open = rest.find('(')?;
+    let name = rest[..open].trim();
+    if !NODE_HOOKS.contains(&name) {
+        return None;
+    }
+    let close = rest[open..].find(')')? + open;
+    let params = rest[open + 1..close].split(',').map(str::trim).filter(|p| !p.is_empty()).collect();
+    Some((name, params))
+}
+
+/// The globals a game script has, and which of them are libraries (tables),
+/// read off a real script host once. A completion that offers `scatter.` must
+/// be offering a table that exists, and one that offers `rb.friction` as a
+/// whole word is offering a variable nobody declared.
+fn game_globals() -> &'static [(String, bool)] {
+    static NAMES: std::sync::OnceLock<Vec<(String, bool)>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| floptle_script::ScriptHost::new().global_names())
+}
+
+fn is_game_library(base: &str) -> bool {
+    game_globals().iter().any(|(n, table)| *table && n == base)
+}
+
+/// Which API a script file is written against: a game's, or a package's
+/// editor extension (`<package>/editor/*.lua`, beside a `package.ron`), which
+/// has none of the game's globals and its own instead.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum ScriptKind {
+    Game,
+    Package,
+}
+
+pub(crate) fn script_kind(path: &str) -> ScriptKind {
+    let p = std::path::Path::new(path);
+    if p.components().any(|c| c.as_os_str() == "editor") {
+        let mut d = p.parent();
+        while let Some(dir) = d {
+            if dir.join("package.ron").exists() {
+                return ScriptKind::Package;
+            }
+            d = dir.parent();
+        }
+    }
+    ScriptKind::Game
+}
+
+/// The call whose options table the caret sits in, at a key position:
+/// `scatter.create{ asset = "a", ` → `"scatter.create"`. A method on any
+/// variable is named by its node form (`n:setMaterial{` → `node:setMaterial`).
+fn options_call(before: &str) -> Option<String> {
+    options_call_at(before).map(|(name, _)| name)
+}
+
+/// [`options_call`], with where its table opens in `before`.
+fn options_call_at(before: &str) -> Option<(String, usize)> {
+    let b = before.as_bytes();
+    let mut depth = 0i32;
+    let mut i = b.len();
+    // The last significant character before the token must start a key.
+    let tail = before.trim_end();
+    if !(tail.ends_with('{') || tail.ends_with(',')) {
+        return None;
+    }
+    while i > 0 {
+        i -= 1;
+        match b[i] {
+            b'}' => depth += 1,
+            b'{' if depth == 0 => {
+                let head = before[..i].trim_end().trim_end_matches('(').trim_end();
+                let start = head
+                    .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == ':'))
+                    .map_or(0, |k| k + 1);
+                let name = &head[start..];
+                if name.is_empty() {
+                    return None;
+                }
+                return Some((
+                    match name.split_once(':') {
+                        Some((_, m)) => format!("node:{m}"),
+                        None => name.to_string(),
+                    },
+                    i,
+                ));
+            }
+            b'{' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Completion at the caret of `text`, for a file of `kind`: the token being
+/// typed starts at the returned index. Options-table keys inside a known
+/// call's table, the package API in a package's editor script, and
+/// [`ac_matches`] everywhere else.
+fn ac_complete(text: &str, cursor: usize, kind: ScriptKind) -> (usize, String, Vec<AcItem>) {
+    let (start, token) = current_token(text, cursor);
+    if kind == ScriptKind::Package {
+        let items = package_matches(&token);
+        return (start, token, items);
+    }
+    if !token.contains(['.', ':']) {
+        let before: String = text.chars().take(start).collect();
+        if let Some((call, open)) = options_call_at(&before)
+            && let Some(keys) = floptle_script::option_keys(&call)
+        {
+            // The table so far, so a key already given is not offered again.
+            let given = &before[open..];
+            let mut items: Vec<AcItem> = keys
+                .iter()
+                .filter(|k| k.to_ascii_lowercase().starts_with(&token.to_ascii_lowercase()))
+                .filter(|k| !given.contains(&format!("{k} =")) && !given.contains(&format!("{k}=")))
+                .map(|k| AcItem {
+                    label: (*k).to_string(),
+                    insert: format!("{k} = "),
+                    keep: 0,
+                    doc: Some(format!("A key of {call}'s options table.")),
+                    score: 0,
+                })
+                .collect();
+            items.sort_by(|a, b| a.label.cmp(&b.label));
+            return (start, token, items);
+        }
+    }
+    let mut items = ac_matches(&token, text);
+    // A tick-only reading offered inside `update` would answer with nothing
+    // useful: leave it out where the hook is known not to be fixedUpdate.
+    let before: String = text.chars().take(start).collect();
+    if let Some(hook) = enclosing_hook(&before)
+        && hook != "fixedUpdate"
+    {
+        items.retain(|it| when_of(&it.label) != Some("fixedUpdate only"));
+    }
+    (start, token, items)
+}
+
+/// Completion in a package's editor script: its own API, nothing of the game's.
+fn package_matches(token: &str) -> Vec<AcItem> {
+    let lower = token.to_ascii_lowercase();
+    let sep = token.rfind('.');
+    let mut items: Vec<AcItem> = crate::ext::surface_names()
+        .iter()
+        .filter(|n| match sep {
+            Some(s) => n.to_ascii_lowercase().starts_with(&lower) && n.len() > s + 1,
+            None => !n.contains('.') && n.to_ascii_lowercase().starts_with(&lower),
+        })
+        .filter(|n| n.to_ascii_lowercase() != lower)
+        .map(|n| AcItem {
+            label: n.clone(),
+            insert: match sep {
+                Some(s) => n[s + 1..].to_string(),
+                None => n.clone(),
+            },
+            keep: sep.map_or(0, |s| s + 1),
+            doc: Some("Editor extension API (docs/editor-scripting.md).".into()),
+            score: 0,
+        })
+        .collect();
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items
 }
 
 /// Infer variable types from this file's assignments (`local rb =
@@ -790,6 +1136,19 @@ fn infer_var_types(text: &str) -> Vec<(String, VarType)> {
     };
     for line in text.lines() {
         let line = line.split("--").next().unwrap_or(line);
+        // A lifecycle or pointer hook's parameters are known: its first is the
+        // script's own node, and a collision or trigger hook's second is the
+        // other node. So `function update(self_, dt)` completes `self_.` with
+        // node members, whatever the parameter is called.
+        if let Some((name, params)) = hook_signature(line).filter(|_| !legacy_ac()) {
+            let other = name.starts_with("onCollision") || name.starts_with("onTrigger");
+            for (i, p) in params.iter().enumerate() {
+                if i == 0 || (i == 1 && other) {
+                    set(&mut out, (*p).to_string(), VarType::Node);
+                }
+            }
+            continue;
+        }
         let Some(eq) = line.find('=') else { continue };
         // Skip ==, <=, >=, ~= comparisons.
         if line.as_bytes().get(eq + 1) == Some(&b'=')
@@ -806,6 +1165,12 @@ fn infer_var_types(text: &str) -> Vec<(String, VarType)> {
             first_quoted(rhs).map(|c| VarType::Component(c.to_string()))
         } else if rhs.contains("componentref(") {
             first_quoted(rhs).map(|c| VarType::Component(c.to_string()))
+        } else if rhs.contains("raycast(") && !rhs.contains("raycastMany(") {
+            Some(VarType::Like("hit"))
+        } else if rhs.contains(":material(") {
+            Some(VarType::Like("mat"))
+        } else if let Some(like) = HANDLE_RETURNS.iter().find(|(call, _)| rhs.contains(call)).map(|(_, b)| *b) {
+            Some(VarType::Like(like))
         } else if rhs.contains(":animator()") {
             Some(VarType::Animator)
         } else if rhs.contains(":particles()") {
@@ -817,6 +1182,11 @@ fn infer_var_types(text: &str) -> Vec<(String, VarType)> {
             Some(VarType::Script)
         } else if rhs.contains("noderef(")
             || rhs.contains("find(")
+            || rhs.contains("createNode(")
+            || rhs.contains("spawn(")
+            || rhs.contains(":getChild(")
+            || rhs.contains(":getParent()")
+            || rhs.trim() == "node"
             || rhs.contains(":getchild(")
             || rhs.contains(":find(")
             || rhs.contains(".parent")
@@ -897,14 +1267,25 @@ fn ac_matches(token: &str, file_text: &str) -> Vec<AcItem> {
     // (Separator tokens use only member matching below — a full-label insert
     // would duplicate the row, and `anim:*` inserts are member-shaped.)
     if sep.is_none() {
+        let declared = infer_var_types(file_text);
         for e in LUA_API {
+            // `rb.friction` as a whole word inserts a variable that does not
+            // exist: only a label on a real library (or a name this file
+            // declares) completes from a bare word.
+            if let Some(es) = e.label.find(['.', ':']).filter(|_| !legacy_ac()) {
+                let b = &e.label[..es];
+                // `node` is every hook's own node, so its members always apply.
+                if b != "node" && !is_game_library(b) && !declared.iter().any(|(k, _)| k == b) && !file_text.contains(&format!("{b} =")) {
+                    continue;
+                }
+            }
             let l = e.label.to_ascii_lowercase();
             if l.starts_with(&lower) && l != lower {
                 push(&mut items, AcItem {
                     label: e.label.into(),
                     insert: e.insert.into(),
                     keep: 0,
-                    doc: Some(e.doc.into()),
+                    doc: Some(entry_doc(e)),
                     score: 0,
                 });
             } else if lower.len() >= 3 && l.contains(&lower) {
@@ -912,7 +1293,7 @@ fn ac_matches(token: &str, file_text: &str) -> Vec<AcItem> {
                     label: e.label.into(),
                     insert: e.insert.into(),
                     keep: 0,
-                    doc: Some(e.doc.into()),
+                    doc: Some(entry_doc(e)),
                     score: 2,
                 });
             }
@@ -930,7 +1311,15 @@ fn ac_matches(token: &str, file_text: &str) -> Vec<AcItem> {
         // generic guesses — misnamed fields never make the list.
         let raw_base = &token[..s];
         let types = infer_var_types(file_text);
-        let typed = types.iter().find(|(k, _)| k == raw_base).map(|(_, t)| t.clone());
+        // The script's own node is a node, wherever it is read.
+        let typed = types
+            .iter()
+            .find(|(k, _)| k == raw_base)
+            .map(|(_, t)| t.clone())
+            .or_else(|| (raw_base == "node" && !legacy_ac()).then_some(VarType::Node));
+        // A library's members, and only its: `scatter.` offers what `scatter`
+        // has, never `steam.create` or a component field.
+        let library = typed.is_none() && !legacy_ac() && is_game_library(raw_base);
         match &typed {
             Some(VarType::Component(comp)) if sepc == '.' => {
                 for (c, fld, d) in COMPONENT_FIELDS {
@@ -968,14 +1357,41 @@ fn ac_matches(token: &str, file_text: &str) -> Vec<AcItem> {
         // For typed bases, restrict the generic API-member matching to entries
         // of the matching kind (node fields for Node vars, anim methods for
         // animators, …) — nothing that wouldn't run.
+        let lib_prefix = [format!("{raw_base}{sepc}")];
+        let lib_refs: Vec<&str> = lib_prefix.iter().map(String::as_str).collect();
+        let like_prefix: Vec<String> = match &typed {
+            Some(VarType::Like(b)) => vec![format!("{b}."), format!("{b}:")],
+            _ => Vec::new(),
+        };
+        let lib_refs_like: Vec<&str> = like_prefix.iter().map(String::as_str).collect();
+        // A local of this file the API knows nothing about — a table of the
+        // game's own, a number — has the fields this file gives it, and no
+        // others: offering every API member under a game's `state.` was the
+        // noise people turned completion off for.
+        let own_local = typed.is_none() && !library && !legacy_ac() && declares_local(file_text, raw_base);
+        if own_local {
+            for f in file_fields(file_text, raw_base, sepc) {
+                if f.to_ascii_lowercase().starts_with(member) && f.to_ascii_lowercase() != member {
+                    push(&mut items, AcItem {
+                        label: format!("{raw_base}{sepc}{f}"),
+                        insert: f.clone(),
+                        keep: s + 1,
+                        doc: Some(format!("A field this file gives `{raw_base}`.")),
+                        score: 0,
+                    });
+                }
+            }
+        }
         let api_prefix: Option<&[&str]> = match &typed {
             Some(VarType::Node) => Some(&["node.", "node:"]),
             Some(VarType::Animator) => Some(&["anim:"]),
             Some(VarType::Particles) => Some(&["particles:"]),
             Some(VarType::Component(_)) | Some(VarType::Script) => Some(&[]),
+            Some(VarType::Like(_)) => Some(&lib_refs_like),
+            None if library => Some(&lib_refs),
             None => None,
         };
-        for e in LUA_API {
+        for e in LUA_API.iter().filter(|_| !own_local) {
             let Some(es) = e.label.find(['.', ':']) else { continue };
             if e.label.as_bytes()[es] as char != sepc {
                 continue;
@@ -994,7 +1410,7 @@ fn ac_matches(token: &str, file_text: &str) -> Vec<AcItem> {
                     label: e.label.into(),
                     insert: insert.into(),
                     keep: s + 1,
-                    doc: Some(e.doc.into()),
+                    doc: Some(entry_doc(e)),
                     score: if ebase.eq_ignore_ascii_case(base) { 0 } else { 1 },
                 });
             }
@@ -1014,7 +1430,7 @@ fn ac_matches(token: &str, file_text: &str) -> Vec<AcItem> {
                     }
                 }
             }
-            if typed.is_none() {
+            if typed.is_none() && !library && !own_local {
                 // Untyped variable: offer every component-handle field (rb.fri
                 // → friction). Typed variables got exact fields above instead.
                 for (comp, f, d) in COMPONENT_FIELDS {
@@ -1043,9 +1459,32 @@ fn ac_matches(token: &str, file_text: &str) -> Vec<AcItem> {
         }
     }
 
-    items.sort_by(|a, b| (a.score, a.label.as_str()).cmp(&(b.score, b.label.as_str())));
-    items.truncate(10);
+    // Every match is offered (the list scrolls): a prefix match before a
+    // substring one, and among equals the name this file uses most first.
+    let uses = word_counts(file_text);
+    let used = |it: &AcItem| uses.get(it.label.rsplit(['.', ':']).next().unwrap_or("")).copied().unwrap_or(0);
+    items.sort_by(|a, b| (a.score, std::cmp::Reverse(used(a)), a.label.as_str()).cmp(&(b.score, std::cmp::Reverse(used(b)), b.label.as_str())));
     items
+}
+
+/// How many times each identifier appears in `text`, for ranking completions
+/// by what the file already uses.
+fn word_counts(text: &str) -> std::collections::HashMap<&str, usize> {
+    let mut out = std::collections::HashMap::new();
+    let b = text.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if is_ident_byte(b[i]) && (i == 0 || !is_ident_byte(b[i - 1])) {
+            let s = i;
+            while i < b.len() && is_ident_byte(b[i]) {
+                i += 1;
+            }
+            *out.entry(&text[s..i]).or_insert(0) += 1;
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 fn current_token(text: &str, cursor_char: usize) -> (usize, String) {
@@ -2852,20 +3291,25 @@ impl EditorTabViewer<'_> {
             return false; // a selection, not a caret
         }
         let cursor = range.primary.index.0;
-        let (start, token) = current_token(&self.ide.open[i].text, cursor);
+        let kind = script_kind(&self.ide.open[i].path);
+        let (start, token, items) = ac_complete(&self.ide.open[i].text, cursor, kind);
+        // Inside an options table the popup opens by itself, as after a `.`.
+        let in_options = !token.contains(['.', ':'])
+            && options_call(&self.ide.open[i].text.chars().take(start).collect::<String>()).is_some();
         // when the popup opens on its own: only for member access — after a `.`
         // or `:`, which is exactly the moment you're asking what fields a thing
         // has, and where the answer is short-lived. A plain identifier does not
         // summon it (that was the intrusive case: a popup over your code every
         // time you typed two letters of a local's name); Ctrl+Space asks for it.
-        let member = token.contains(['.', ':']);
+        let member = token.contains(['.', ':']) || in_options;
         if !member && !self.ide.ac_manual {
             return false;
         }
         if token.is_empty() && !self.ide.ac_manual {
             return false;
         }
-        if token != self.ide.ac_token {
+        let fresh = token != self.ide.ac_token;
+        if fresh {
             self.ide.ac_token = token.clone();
             self.ide.ac_sel = 0;
             self.ide.ac_dismissed = false;
@@ -2882,7 +3326,6 @@ impl EditorTabViewer<'_> {
         if self.ide.ac_dismissed {
             return false;
         }
-        let items = ac_matches(&token, &self.ide.open[i].text);
         if items.is_empty() {
             return false;
         }
@@ -2900,15 +3343,10 @@ impl EditorTabViewer<'_> {
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(360.0);
-                    for (n, it) in items.iter().enumerate() {
-                        let rich = if n == sel {
-                            egui::RichText::new(&it.label).monospace().strong()
-                        } else {
-                            egui::RichText::new(&it.label).monospace()
-                        };
-                        if ui.selectable_label(n == sel, rich).clicked() {
-                            chosen = Some((it.keep, it.insert.clone()));
-                        }
+                    // The list follows the selection only when the keys moved
+                    // it, so the wheel can scroll it freely in between.
+                    if let Some(n) = ac_rows(ui, &items, sel, nav != 0 || fresh).clicked {
+                        chosen = Some((items[n].keep, items[n].insert.clone()));
                     }
                     ui.separator();
                     // The selected entry's doc, right in the popup (no hover needed).
@@ -2942,6 +3380,51 @@ impl EditorTabViewer<'_> {
         }
         true
     }
+}
+
+/// Rows the completion list shows before it scrolls.
+const AC_VISIBLE_ROWS: usize = 10;
+
+/// What one frame of the completion rows did.
+struct AcRows {
+    /// The row clicked, if any.
+    clicked: Option<usize>,
+    /// Whether the selected row lies inside the visible part of the list.
+    sel_visible: bool,
+}
+
+/// The completion rows: every match, in a list ten rows tall that scrolls with
+/// the wheel. `follow` scrolls the selected row into view, for when the arrow
+/// keys moved it.
+fn ac_rows(ui: &mut egui::Ui, items: &[AcItem], sel: usize, follow: bool) -> AcRows {
+    let rows = AC_VISIBLE_ROWS as f32;
+    // A row is as tall as a selectable label: the text plus its padding.
+    let pad = ui.spacing().button_padding.y * 2.0;
+    let row = ui.spacing().interact_size.y.max(ui.text_style_height(&egui::TextStyle::Monospace) + pad);
+    let mut out = AcRows { clicked: None, sel_visible: false };
+    egui::ScrollArea::vertical()
+        .id_salt("ide_ac_rows")
+        .max_height(row * rows + ui.spacing().item_spacing.y * (rows - 1.0))
+        .show(ui, |ui| {
+            for (n, it) in items.iter().enumerate() {
+                let rich = if n == sel {
+                    egui::RichText::new(&it.label).monospace().strong()
+                } else {
+                    egui::RichText::new(&it.label).monospace()
+                };
+                let r = ui.selectable_label(n == sel, rich);
+                if n == sel {
+                    if follow {
+                        r.scroll_to_me(None);
+                    }
+                    out.sel_visible = ui.clip_rect().contains_rect(r.rect);
+                }
+                if r.clicked() {
+                    out.clicked = Some(n);
+                }
+            }
+        });
+    out
 }
 
 // ---- templates, snippets & docs ---------------------------------------------
@@ -4271,12 +4754,13 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "terrain.dig", insert: "terrain.dig(", doc: "terrain.dig(x,y,z, radius [, strength]) — carve a hole: sugar for terrain.sculpt(..., \"lower\"). Pair with raycast(...) to dig where the player aims." },
     ApiEntry { label: "terrain.paint", insert: "terrain.paint(", doc: "terrain.paint(x,y,z, radius, r,g,b [, strength]) — recolor the terrain surface inside the brush ball (0..1 colors)." },
     ApiEntry { label: "terrain.paintTexture", insert: "terrain.paintTexture(", doc: "terrain.paintTexture(x,y,z, radius, slot) — paint a terrain-palette texture slot (1-based, the Terrain tab's palette; 0 clears to flat color)." },
-    ApiEntry { label: "terrain.generatePlanet", insert: "terrain.generatePlanet(", doc: "terrain.generatePlanet(id [, opts]) — REPLACE terrain id's whole field with a generated planet (sphere ± noise relief, caves + chambers, molten core, craters, layered materials). Background-generated (seconds; Console shows progress). opts (all optional): radius, voxel, relief, bumpFreq, caveDepth, coreR, corePaint, craters, craterMin/Max, craterDust, surfaceA/B {slot,color}, patchBias/Thr, subsoil(+Depth), strata(+Depth), deep, pockets {slot,color,threshold,minDepth}, seam {slot,color,minDepth,center,width}, iceCaps {lat,slot,color}, seed. Relief layers (each a table whose keys all default; see docs/planet-generator.md): mountains {height,scale,sharpness,coverage,octaves}, warp {strength,scale}, plateau {height,smooth}, terrace {step,sharpness} (each of these four also takes latitude={min,max} in degrees from the equator, north or south unless either is negative, and latitudeEdge, the degrees it fades over past them), overhangs {depth,scale,strength}, ravines {count,depth,width,length,meander}, rivers {count,depth,width,seaLevel,meander}, biomes = { {slot,color,latitude={min,max},altitude={min,max},slope={min,max},moisture={min,max},nearRiver}, ... } (first match paints the surface), moistureScale. deferCaves = true leaves the buried cave zone ungenerated until a dig reaches it: a quarter less to fill and keep, the same caves when they are made (to a hair at chunk faces)." },
+    ApiEntry { label: "terrain.generatePlanet", insert: "terrain.generatePlanet(", doc: "terrain.generatePlanet(id [, opts]) — REPLACE terrain id's whole field with a generated planet (sphere ± noise relief, caves + chambers, molten core, craters, layered materials). Background-generated (seconds; Console shows progress). opts (all optional): radius, voxel, relief, bumpFreq, caveDepth, coreR, corePaint, craters, craterMin/Max, craterDust, surfaceA/B {slot,color}, patchBias/Thr, subsoil(+Depth), strata(+Depth), deep, pockets {slot,color,threshold,minDepth}, seam {slot,color,minDepth,center,width}, iceCaps {lat,slot,color}, seed. Relief layers (each a table whose keys all default; see docs/planet-generator.md): mountains {height,scale,sharpness,coverage,octaves}, warp {strength,scale}, plateau {height,smooth}, terrace {step,sharpness} (each of these four also takes latitude={min,max} in degrees from the equator, north or south unless either is negative, and latitudeEdge, the degrees it fades over past them), overhangs {depth,scale,strength}, ravines {count,depth,width,length,meander}, rivers {count,depth,width,seaLevel,meander}, biomes = { {slot,color,latitude={min,max},altitude={min,max},slope={min,max},moisture={min,max},nearRiver}, ... } (first match paints the surface), moistureScale. deferCaves = true leaves the buried cave zone ungenerated until a dig reaches it: a quarter less to fill and keep, the same caves when they are made (to a hair at chunk faces). generator = N makes the world by version N of the generator's rules (0 up to this engine's); left out, by the project's, which an upgraded project keeps at the version it was made by, so its saved digs stay where they were. smallBody = { shape = \"potato\" | \"binary\" | \"rubble\", elongation = 1.5, lumpiness = 0.35, neck = 0.35, lumps = 8 } makes an irregular small body of size radius instead of a ball: one stretched lump, two lobes joined at a neck along X, or a pile of lumps; it has no cave zone or craters, and relief roughens it." },
     ApiEntry { label: "terrain.planetLakes", insert: "terrain.planetLakes(", doc: "terrain.planetLakes(opts [, { cell = 3, minDepth = 0.5, seaLevel = ... }] [, callback]) → the lakes the planet's basins hold, without generating anything: { {level=, center=, reach=, area=, depth=}, ... }, largest first. Every basin is filled to the height it spills at. `level` is metres above the radius, `center` a planet-local point on the lake's surface, `reach` how far its farthest shore is from the centre and `depth` its deepest point, all in metres. Ground below `seaLevel` (default: the rivers' seaLevel, or none) is sea and not a lake; with no sea, the planet's lowest point is where it drains, and holds none. Found on a grid of cells `cell` metres across; only water deeper than `minDepth` counts. For placing water at the level it would settle at. A large world's lakes take seconds to find: given a callback, the call returns nothing, the work runs off the script thread, and callback(lakes) runs in a later frame." },
     ApiEntry { label: "terrain.planetRivers", insert: "terrain.planetRivers(", doc: "terrain.planetRivers(opts [, callback]) → the rivers and ravines terrain.generatePlanet carves with the same opts, without generating anything: { {river=true|false, depth=, points={x1,y1,z1, x2,y2,z2, ...}, widths={...}}, ... }, river ones source first. Points are planet-local, on the sphere of the planet's radius (the carved bed is below the ground there); widths are per point in world units. A river runs from its spring the way water drains, across any basin on its way, to the sea or into another river. For laying water, bridges or missions along them. Given a callback, the call returns nothing, the work runs off the script thread, and callback(channels) runs in a later frame." },
     ApiEntry { label: "terrain.saveDir", insert: "terrain.saveDir(", doc: "terrain.saveDir(path) / terrain.saveDir() — set (or read) the game's SAVE-SLOT directory for player-edited terrain, relative to the project root (e.g. \"saves/slot1/terrain\"). While set, streaming loads fields from here first (before the project file or the genspec) and writes edited fields back on stream-out — per-slot terrain persistence. \"\" clears; auto-cleared when Play stops." },
     ApiEntry { label: "terrain.lodAnchor", insert: "terrain.lodAnchor(", doc: "terrain.lodAnchor(node | vec3 | nil) — what terrain detail, the far-planet impostor switch and far-craft freezing follow during Play, in place of the render camera. For a map view: anchor on the ship while the map moves the camera thousands of units away, and the ground under the ship stays meshed exactly as it was; nil hands it back to the camera. Returns the anchor it replaced. A scene swap clears it. Refuses: anything that is not a node, a vec3 or nil." },
     ApiEntry { label: "terrain.warm", insert: "terrain.warm(", doc: "terrain.warm(bodyName) — keep that body's terrain RESIDENT this frame regardless of where the ship/player physically is: it streams in if cold and never streams out. Immediate mode — call every frame while you care (the map warms its focused planet). Streaming is otherwise anchored to dynamic bodies' physical positions, never the camera." },
+    ApiEntry { label: "terrain.impostorAt", insert: "terrain.impostorAt(", doc: "terrain.impostorAt(id [, { radii = n } | { pixels = n }]) — when the planet with terrain id `id` stops drawing its ground and draws as one shaded ball, one draw in the colour its ground draws: past `radii` of its own radii from the camera, or once its disc is smaller than `pixels` across on screen. Its ground loads in as much farther out as the rule keeps it drawn. With no rule it goes back to the default, sixty radii. Rules last until Play stops." },
     ApiEntry { label: "terrain.pending", insert: "terrain.pending()", doc: "terrain.pending() → how many of the game's terrain edits (dig, sculpt, flatten, paint, paintTexture) have not landed yet. Edits are applied a few milliseconds' worth a frame, in the order they were made, so a batch of a thousand flattens spreads over frames instead of stopping one. Every edit is applied whole before the next, so queries read the ground after some number of whole edits; 0 means every edit made so far is in the ground." },
     ApiEntry { label: "terrain.busy", insert: "terrain.busy()", doc: "terrain.busy() — is the background terrain worker already occupied? True while any field is generating or streaming in. Whole-body fills and residency streaming share one background budget, so a game that BUILDS ITS WORLD AS THE PLAYER TRAVELS should ask before queueing the next one — otherwise the new world goes in behind the ground somebody is standing on. The pattern: build one thing, wait for this to go quiet, build the next." },
     ApiEntry { label: "terrain.flush", insert: "terrain.flush()", doc: "terrain.flush() — checkpoint every EDITED resident terrain field to the save slot (terrain.saveDir must be set). Runs IN THE BACKGROUND (amortized encode + threaded write, deferred while a field is actively being dug) so autosaves never stutter; exit paths (Stop / scene.load) finish the writes synchronously so a checkpoint is never lost." },
@@ -4334,6 +4818,7 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "space.gravity", insert: "space.gravity(", doc: "space.gravity(x, y, z) — gx, gy, gz: the µ/r² pull of the dominant body at a world position (patched conics: exactly one body pulls)." },
     ApiEntry { label: "space.elements", insert: "space.elements(", doc: "space.elements(x,y,z, vx,vy,vz) — the orbit a craft is ON around its dominant body: { body, a, e, periapsis, apoapsis, period } (apoapsis/period absent on an escape). Distances from the body CENTER. The map/HUD readout." },
     ApiEntry { label: "space.propagate", insert: "space.propagate(", doc: "space.propagate(px,py,pz, vx,vy,vz, mu, dt) — the state (px,py,pz, vx,vy,vz) advanced dt seconds on the two-body conic about a point mass mu (elliptic OR hyperbolic, drift-free). The map's maneuver nodes + SOI-encounter walk are built from it. State is in whatever frame you pass — compose parent frames yourself." },
+    ApiEntry { label: "space.belt", insert: "space.belt{ parent = \"Sun\", count = 200, seed = 1, aMin = 5000, aMax = 8000 }", doc: "space.belt{ parent, count, seed, aMin, aMax, eMax, iMax, radiusMin, radiusMax [, mu = 0] [, reach] [, name = \"Rock\"] [, prefab] [, made = function(rock, i, row) end] } → how many rocks it asked for. Makes a belt of small bodies on space.beltOrbits rows: each rock a node named name .. \" \" .. i (or an instance of prefab, renamed so), given a CelestialBody on its row's orbit about parent (mu 0 unless given, reach if given), on the rails from the next tick. The rocks are runtime nodes: made while the game plays and gone when it stops, so a belt is never saved; from the same seed it is the same belt on every machine. made runs for each rock once it exists, to give it terrain, a look or a script. shape gives each rock ground of its own, an irregular small body made from the seed when something comes near: \"potato\", \"binary\", \"rubble\", \"mixed\" (the three dealt out from the seed), a smallBody table as terrain.generatePlanet takes, or a function(i, row) returning one; rock i is terrain id terrainId + i - 1 (10000 by default), at voxel (its radius / 24 by default). Refuses: any option it does not list, a missing parent, and what space.beltOrbits refuses." },
     ApiEntry { label: "space.beltOrbits", insert: "space.beltOrbits{ count = 200, seed = 1, aMin = 5000, aMax = 8000 }", doc: "space.beltOrbits{ count, seed, aMin, aMax, eMax = 0.05, iMax = 0.05, radiusMin = 1, radiusMax = 1 } → a list of orbits for a belt of small bodies, each a table of a, e, i, lan, argPe, m0 and bodyRadius that node:setCelestial takes as it is (add the parent). Angles are radians, like setCelestial's. The belt is a function of its seed: the same seed gives the same rocks on every machine, so a game rebuilds it rather than saving it. Most orbits come out near circular and near the plane, up to eMax and iMax. Refuses: an aMin not above 0, an aMax below aMin, a count outside 0 to 100000, and any option it does not list." },
     ApiEntry { label: "assets", insert: "assets", doc: "Reference files under Assets/ in code: assets.getFile(path), assets.getContents(dir), assets.preload(models, cb). Read and write your own data files: assets.readText / writeText, assets.readJson / writeJson." },
     ApiEntry { label: "assets.getFile", insert: "assets.getFile(", doc: "assets.getFile(\"models/armor.glb\") — the asset's path (or nil), to hand to node.model / node.material. Path is relative to Assets/ and stays inside it: an absolute path or `..` is nil and one Console line." },
@@ -4365,6 +4850,7 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "node:addTag", insert: "node:addTag(", doc: "node:addTag(\"burning\") — add a tag at runtime (duplicates are ignored). findTagged sees it next frame." },
     ApiEntry { label: "node:removeTag", insert: "node:removeTag(", doc: "node:removeTag(\"burning\") — remove a tag (no-op when absent)." },
     ApiEntry { label: "node.pos", insert: "node.pos", doc: "The node's position as a vec3 (read/write): node.pos = node.pos + dir * dt. Accepts anything with x/y/z." },
+    ApiEntry { label: "node.carry", insert: "node.carry", doc: "How far the world under this node was carried since the last pass, as a vec3 in world units (read-only): over this tick in fixedUpdate, over the ticks since the last frame pass in update and lateUpdate. On a planet moving on its rails it is how far that planet's frame moved (the frame the body's sphere of influence puts it in); zero when nothing moves. Dynamic bodies and assemblies are carried for you; a body a script positions itself (a kinematic tyre set on its mount) is not, so add node.carry to the position you give it, the way you use dt. Recentring the floating origin is not a carry. Rails bodies do not turn yet; a turning frame would add a rotation." },
     ApiEntry { label: "node.tickPos", insert: "node.tickPos", doc: "The body's TICK pose as a vec3 (read/write) — where the simulation says it is, as opposed to node.pos, which is the interpolated pose the camera renders. Inside fixedUpdate use this one: move with node.tickPos = node.tickPos + vec3(d, 0, 0) and build hurtboxes from it. `node.x = node.x + d` in fixedUpdate teleports the body onto its VISUAL position, so the model slides and the hitbox doesn't follow. In a rollback match this is the difference between a hit registering and not. Writing either one teleports a body: tickPos is the exact one, node.pos goes through the transform. From the write on, every read answers the new position (this node's next hook, and another node's handle), even while physics.pause is on." },
     ApiEntry { label: "node.tickYaw", insert: "node.tickYaw", doc: "The body's tick-domain yaw (read/write) — node.yaw's simulation-truth counterpart, for facing a fighter inside fixedUpdate." },
     ApiEntry { label: "vec3", insert: "vec3(", doc: "vec3(x, y, z) — a 3-vector VALUE with real operators: a + b, a - b, v * 2, -v, a == b. Methods: :length() (:magnitude()), :lengthSquared(), :normalized(), :dot(o), :cross(o), :lerp(o, t), :distance(o), :flatten(up), :withX/:withY/:withZ(n), :rotatedY(rad), :rotatedAround(axis, rad), :towards(o, maxDelta), :angleTo(o). vec3() = zero, vec3(s) = splat, vec3(other) = copy. Anything that takes a vector also takes a {x=,y=,z=} table or a node handle. A project chooses which vec3 this is — `exact` (64-bit, mutable; every project made before the setting) or `fast` (32-bit, immutable, no allocation; new projects) — in Project Settings → Scripting → Script vec3. The surface above is identical in both; the two differences are that `fast` cannot be assigned into (use :withX/:withY/:withZ) and `type(v)` answers \"vector\" there rather than \"userdata\". `floptle lint --vec3` lists what a project would change to switch." },
@@ -4491,8 +4977,8 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "spawnEffect", insert: "spawnEffect(", doc: "spawnEffect(key, pos [, opts]) or spawnEffect(key, x, y, z [, vx, vy, vz]) — fire a one-shot particle effect at a world point, no node needed. It plays once and despawns itself. opts: normal (vec3: the effect's +Y, so a ring lies across it and a cone fires along it; default world up, or against gravity on a round world), up (vec3: which way Vertical and Horizontal billboards stand; default normal), scale, intensity, tint (a color), vel (vec3: the emitter's velocity, which inherit-velocity tracks keep a share of), frame (a node the effect rides: its emit point and its World-track particles move with it). With no frame it rides the planet on rails whose sphere of influence it is in, so dust on a moving world stays over its spot; vel is then relative to that. The point is placed against the world as it was when you asked, so a point worked out in update lands where you meant on a moving planet. Local to this machine: in a session, spawn it from state that replicates (a synced counter every peer watches), or the server's sparks stay on the server. e.g. local h = raycast(...); if h then spawnEffect(\"vfx/Impact\", vec3(h.x, h.y, h.z), { normal = vec3(h.nx, h.ny, h.nz) }) end." },
     ApiEntry { label: "spawn", insert: "spawn(", doc: "spawn(prefab [, pos [, fn]]) — spawn a PREFAB instance (make one by dragging a node into the Assets panel). \"bullet\" finds prefabs/bullet.prefab.ron. pos = a vec3/node for the root; fn(root) runs with the new node's handle the same frame. It does NOT return the node — the spawn is queued and the node is made after this pass, so the handle only ever arrives through the callback; `local b = spawn(\"bullet\")` then tells you so if you touch it — spawn(\"bullet\", node.pos + dir, function(b) b.vx = dir.x * 40 end). Local-only in multiplayer: the server uses net.spawn for replicated objects." },
     ApiEntry { label: "createNode", insert: "createNode(", doc: "createNode(name [, parent] [, fn]) — create a PLAIN node (Empty matter). It does NOT return the node: the create is queued and the node is made after this pass, so the handle arrives ONLY through the callback — `local n = createNode(\"Stain\")` gives you something that says so the moment you touch it, rather than a nil that fails a line later. fn(n) gets its handle: combine with n:setTerrain(id) / n:setCelestial{...} / n:setPrimitive(shape, color) / n:setMaterial{...} + transform writes to build content from script (procgen, editor actions). Nested creates inside callbacks are fine." },
-    ApiEntry { label: "node:setCelestial", insert: ":setCelestial{", doc: "node:setCelestial{mu=…, bodyRadius=…, soi=0, parent=\"Sun\", a=…, e=…, i=…, m0=…, atmoColor={r,g,b}, atmoHeight=…, atmoDensity=…, clouds=…, cloudColor={r,g,b}, cloudDarkness=…, cloudHeight=…, aureole=…, aureoleSize=…, luminosity=…, starColor={r,g,b}, occluderRadius=…} — set (creating if absent) the node's CelestialBody. The cloud deck's look: cloudColor its daylight colour (white = as before), cloudDarkness 0..1 (1 = a storm with almost no light through it), cloudHeight its height as a share of atmoHeight (0.35 = as before). aureole / aureoleSize = the glow around the star in this sky: strength and spread, 1 = natural. Every field reads back through node:getcomponent(\"CelestialBody\"), colours as R/G/B lanes (cloudColorR, atmoColorG, starColorB…), and writes there too. camelCase fields; colors take {r,g,b}. occluderRadius = occlusion culling: the solid-core radius geometry never pierces — terrain chunks fully behind it skip their draw calls (keep it below the deepest cave/dig; 0 = off). The atmosphere (atmoColor, atmoHeight, atmoDensity) is the whole sky from inside it: the air's colour overhead, brighter toward the horizon, a glow around the star, thinning with height until it is space at atmoHeight with the stars showing through — no sky shader needed. From outside it is the halo around the planet's edge." },
-    ApiEntry { label: "node:setMaterial", insert: ":setMaterial{", doc: "node:setMaterial{color={r,g,b}, emissive={r,g,b}, emissiveStrength=…, unlit=true, texture=\"…\", alpha=…, …} — set the node's Material, or on a model that has none, change only the keys you give over each part's own material. texture also takes a live render target: \"rt:<name>\". slice=8 gives a Sprite a 9-slice border of that many texture pixels on every side: it stretches with its node's scale while the corners keep their size (0 = off).\n\nOn a MODEL with no Material of its own, setMaterial changes only the keys you give and every part keeps the rest of its own look: its textures, cut-out leaves, maps and custom shader. setMaterial{ color = {1, 0.4, 0.4} } on an imported plant gives a red plant, still leafy. A Material authored on the node in the scene is different: it SUPERSEDES the ones the model was imported with, every part drawing with it, textures included. That is what a node Material is for: \"this whole thing is made of THIS\". To change one part instead, use node:material(\"<name>\") — node:materials() lists what the parts are called.\n\nalphaCutoff = 0.5 is where an opaque surface's texture alpha cuts holes (0 cuts none, so a picture with stray alpha draws solid); doubleSided = false hides a face seen from behind. On a model with no Material both change only the parts' own values, so a leaf model keeps its texture.\n\nSurface maps: normalMap / roughnessMap / metallicMap / occlusionMap / emissiveMap (paths, \"\" clears; emissiveMap multiplies emissive) with normalStrength / roughness / metallic / occlusionStrength. shading=\"physical\" switches from the hand-set Blinn-Phong highlight to metal-rough; roughness and metallic only mean anything there, while a normal or occlusion map works under either.\n\nUnder physical shading a surface also REFLECTS the sky. A mirror is metallic=1 with roughness=0; raise the roughness and the same reflection blurs. reflectivity scales it (1 = the real amount and the default, 0 = none, above 1 = a deliberate cheat).\n\nfog=false exempts the surface from the scene's fog — both the distance ramp and the volumetric layer — so it draws at its own colour however far away it is. For the things that are not really in the world at that distance: a first-person weapon, a backdrop card, a marker that has to stay readable through the weather. A planet's atmosphere is a separate effect and still applies.\n\nsway=0.3 bends the surface in the game's wind (weather.addWind): the metres a point one metre above the node's origin moves in a 10 m/s wind, growing with the square of the height, so a stem stays rooted and its tip swings. So size it to the prop: a 0.5 m grass blade wants about 1 (its tip moves 0.25 m), a 12 m tree about 0.01 to 0.02 (its crown moves 1.4 to 2.9 m); at 3 a 12 m tree lies flat. Grass, leaves, flags, a scatter field of plants. backlight=0.6 lets the key light on the back of a thin surface through to the front, shadowed as the back face is: a leaf against the sun.\n\nRetro artefacts: jitter (screen-grid vertex snapping, 0 = follow the project), affineUv, vertexLit, ditherAlpha. The project can ask for all four at once (Project Settings ⏵ Rendering); retroExempt=true takes none of them, which is how you hold a viewmodel steady in a world that wobbles." },
+    ApiEntry { label: "node:setCelestial", insert: ":setCelestial{", doc: "node:setCelestial{mu=…, bodyRadius=…, soi=0, parent=\"Sun\", a=…, e=…, i=…, m0=…, atmoColor={r,g,b}, atmoHeight=…, atmoDensity=…, clouds=…, cloudColor={r,g,b}, cloudDarkness=…, cloudHeight=…, aureole=…, aureoleSize=…, luminosity=…, starColor={r,g,b}, occluderRadius=…, reach=4} — set (creating if absent) the node's CelestialBody. The cloud deck's look: cloudColor its daylight colour (white = as before), cloudDarkness 0..1 (1 = a storm with almost no light through it), cloudHeight its height as a share of atmoHeight (0.35 = as before). The deck shades the ground under it: the sun is dimmed where its beam crosses a cloud, so broken cloud casts drifting shadows and a full deck dims the day, more the darker it is. aureole / aureoleSize = the glow around the star in this sky: strength and spread, 1 = natural. Every field reads back through node:getcomponent(\"CelestialBody\"), colours as R/G/B lanes (cloudColorR, atmoColorG, starColorB…), and writes there too. camelCase fields; colors take {r,g,b}. occluderRadius = occlusion culling: the solid-core radius geometry never pierces — terrain chunks fully behind it skip their draw calls (keep it below the deepest cave/dig; 0 = off). reach = with soi left at 0, the least the sphere of influence reaches, in the body's own radii (4 by default): what stands that close rides the body as it orbits, which is what lets a craft land on a small rock whose own pull would not hold it. The atmosphere (atmoColor, atmoHeight, atmoDensity) is the whole sky from inside it: the air's colour overhead, brighter toward the horizon, a glow around the star, thinning with height until it is space at atmoHeight with the stars showing through — no sky shader needed. From outside it is the halo around the planet's edge." },
+    ApiEntry { label: "node:setMaterial", insert: ":setMaterial{", doc: "node:setMaterial{color={r,g,b}, emissive={r,g,b}, emissiveStrength=…, unlit=true, texture=\"…\", alpha=…, …} — set the node's Material, or on a model that has none, change only the keys you give over each part's own material. texture also takes a live render target: \"rt:<name>\". slice=8 gives a Sprite a 9-slice border of that many texture pixels on every side: it stretches with its node's scale while the corners keep their size (0 = off).\n\nOn a MODEL with no Material of its own, setMaterial changes only the keys you give and every part keeps the rest of its own look: its textures, cut-out leaves, maps and custom shader. setMaterial{ color = {1, 0.4, 0.4} } on an imported plant gives a red plant, still leafy. A Material authored on the node in the scene is different: it SUPERSEDES the ones the model was imported with, every part drawing with it, textures included. That is what a node Material is for: \"this whole thing is made of THIS\". To change one part instead, use node:material(\"<name>\") — node:materials() lists what the parts are called.\n\nblend = \"opaque\", \"cutout\" or \"blend\" is how alpha is drawn: opaque ignores it, cutout cuts holes where the texture's alpha is under alphaCutoff, blend blends; it alone decides whether a surface is drawn see-through, and setting alpha below 1 without naming blend turns blend on. alphaCutoff = 0.5 is where a cutout surface's texture alpha cuts holes; doubleSided = false hides a face seen from behind. On a model with no Material both change only the parts' own values, so a leaf model keeps its texture.\n\nSurface maps: normalMap / roughnessMap / metallicMap / occlusionMap / emissiveMap (paths, \"\" clears; emissiveMap multiplies emissive) with normalStrength / roughness / metallic / occlusionStrength. shading=\"physical\" switches from the hand-set Blinn-Phong highlight to metal-rough; roughness and metallic only mean anything there, while a normal or occlusion map works under either.\n\nUnder physical shading a surface also REFLECTS the sky. A mirror is metallic=1 with roughness=0; raise the roughness and the same reflection blurs. reflectivity scales it (1 = the real amount and the default, 0 = none, above 1 = a deliberate cheat).\n\nfog=false exempts the surface from the scene's fog — both the distance ramp and the volumetric layer — so it draws at its own colour however far away it is. For the things that are not really in the world at that distance: a first-person weapon, a backdrop card, a marker that has to stay readable through the weather. A planet's atmosphere is a separate effect and still applies.\n\nsway=0.3 bends the surface in the game's wind (weather.addWind): the metres a point one metre above the node's origin moves in a 10 m/s wind, growing with the square of the height, so a stem stays rooted and its tip swings. So size it to the prop: a 0.5 m grass blade wants about 1 (its tip moves 0.25 m), a 12 m tree about 0.01 to 0.02 (its crown moves 1.4 to 2.9 m); at 3 a 12 m tree lies flat. Grass, leaves, flags, a scatter field of plants. backlight=0.6 lets the key light on the back of a thin surface through to the front, shadowed as the back face is: a leaf against the sun.\n\nRetro artefacts: jitter (screen-grid vertex snapping, 0 = follow the project), affineUv, vertexLit, ditherAlpha. The project can ask for all four at once (Project Settings ⏵ Rendering); retroExempt=true takes none of them, which is how you hold a viewmodel steady in a world that wobbles." },
     ApiEntry { label: "node:setTerrain", insert: ":setTerrain(", doc: "node:setTerrain(id) — make the node a Terrain volume with that id; fill it with terrain.generatePlanet(id, opts)." },
     ApiEntry { label: "node:setTerrainGen", insert: ":setTerrainGen(", doc: "node:setTerrainGen(opts) — attach an ON-DEMAND generation spec (the same opts table terrain.generatePlanet takes): the body's field generates in the background when something first approaches, so no field file is needed at all — a rolled galaxy is playable instantly and unvisited worlds cost one scene node. Player edits saved under terrain.saveDir take priority over regeneration. nil clears." },
     ApiEntry { label: "node:setPrimitive", insert: ":setPrimitive(", doc: "node:setPrimitive(\"Sphere\" [, {r,g,b}]) — make the node a primitive (Cube/Sphere/Capsule/Plane)." },
@@ -4715,7 +5201,7 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "assembly.release", insert: "assembly.release(", doc: "assembly.release(node) — let go of every grip the vessel holds (assembly.grip)." },
     ApiEntry { label: "assembly.impacts", insert: "assembly.impacts(", doc: "assembly.impacts(node) — the LAST tick's per-part contact loads: { part, impulse, speed, speedAbs, x, y, z }. What a damage model reads: how hard each part was hit and where." },
     ApiEntry { label: "assembly.impulseAt", insert: "assembly.impulseAt(", doc: "assembly.impulseAt(node, impulse, at) — a one-shot kick at a world point, applied once rather than held. Explosions, collisions you resolve yourself, a docking clamp letting go." },
-    ApiEntry { label: "assembly.info", insert: "assembly.info(", doc: "assembly.info(node) — { mass, com, origin, vel, angVel, inertia, grounded, anchored, gripped, parts, right, up, forward }. right, up and forward are the craft's axes as they are this tick, the way node:worldRight/worldUp/worldForward give a node's drawn ones: read in fixedUpdate they are that tick's, where the node's are a frame's. com is the world-space centre of mass as a vec3 — the number a flight controller, a CoM gizmo and a landing check all need. inertia is the tensor the solver turns torques with, about the centre of mass in world axes, as three rows: inertia[1].x .. inertia[3].z. A torque of I × (wanted change in angVel) / dt stops a spin in one tick without overshooting." },
+    ApiEntry { label: "assembly.info", insert: "assembly.info(", doc: "assembly.info(node) — { mass, com, origin, vel, angVel, inertia, grounded, anchored, gripped, parts, right, up, forward, carry }. carry is node.carry for the craft: how far the frame it rides in moved this tick. right, up and forward are the craft's axes as they are this tick, the way node:worldRight/worldUp/worldForward give a node's drawn ones: read in fixedUpdate they are that tick's, where the node's are a frame's. com is the world-space centre of mass as a vec3 — the number a flight controller, a CoM gizmo and a landing check all need. inertia is the tensor the solver turns torques with, about the centre of mass in world axes, as three rows: inertia[1].x .. inertia[3].z. A torque of I × (wanted change in angVel) / dt stops a spin in one tick without overshooting." },
     ApiEntry { label: "assembly.keepLive", insert: "assembly.keepLive(", doc: "assembly.keepLive(node, true) — exempt this compound from distant-craft LOD, so it keeps simulating in full even when nothing is near it. For the craft the player will come back to and expects to find where physics would have put it." },
     ApiEntry { label: "assembly.merge", insert: "assembly.merge(", doc: "assembly.merge(node, other) — latch another assembly onto this one: docking, grabbing, a part snapping into place. The two become one physics body with one mass and one centre of mass." },
     ApiEntry { label: "assembly.rebuild", insert: "assembly.rebuild(", doc: "assembly.rebuild(node [, fn]) — re-gather the compound from the root's CURRENT children. Call it after you have added or removed part nodes yourself, so the physics body matches the scene again. A moving vessel keeps its velocity and spin through it, and an anchored one stays anchored. The rebuild lands after the script pass, so assembly.info read straight after it still describes the old compound; fn(node) is called once the new one exists and assembly.info describes it — read its mass there to size a push: assembly.rebuild(ship, function(s) local i = assembly.info(s); assembly.impulseAt(s, vel * i.mass, i.com) end)." },
@@ -4837,7 +5323,7 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "perf.accountedMs", insert: "perf.accountedMs()", doc: "perf.accountedMs() — the buckets added up. Called 'accounted' and not 'total' on purpose: vsync, the OS and the GPU finishing are outside every bucket, so this is what the engine can see, not the frame time." },
     ApiEntry { label: "save", insert: "save", doc: "The persistent store: save.set / save.get, named slots, and flushing to disk. Values are capped at about a kilobyte each — store the small fact, not the whole world." },
     ApiEntry { label: "scatter", insert: "scatter", doc: "Thousands of props from a seed — GPU-instanced, with no scene node anywhere in it. Your generator still decides WHAT grows where; the engine decides where each instance stands and draws them. scatter.create declares a source, scatter.remove harvests one." },
-    ApiEntry { label: "scatter.create", insert: "scatter.create{", doc: "scatter.create{ asset = \"tree.glb\", seed = 7, perChunk = 24, chunk = 16 } — declare a source, get its id. `tint = {r,g,b}` multiplies every prop's colour, and `emissive = {r,g,b}` with `emissiveStrength` makes them glow, so one model serves a field of any shade. Region: center + radius for a sphere (a planet), or center + halfX/halfZ for ground. `parent = \"Umunquo\"` anchors the region to a NODE (and then `center` is in that node's frame: the planet's own centre is (0,0,0), not where it is in the world), so a planet that orbits carries its props instead of sliding out from under them — every prop keeps its id, its place on the surface and the ground height it settled at, because none of those were ever expressed in world space. Without a parent the region is pinned to the world, which is right for a landscape that never moves and wrong for every celestial body. Also scaleMin/scaleMax, align = \"surface\" (default) or \"world\", fade, and lod = { {asset=, distance=}, ... } nearest-first. Placement is a pure function of the seed, so every machine and every session grows the SAME forest without storing one. `density` is how a world gets biomes: pass a function(x, y, z) -> 0..1 and it is sampled ONCE, at declare time, into a densityRows grid (rows x 2*rows for a sphere\'s longitude) — 0 means no instance is generated at all, not a hidden one. An option this doesn\'t list is an error, not a shrug. `asset` may be a mesh file OR a .prefab.ron — a prefab is baked once into one instanced draw per Mesh node it holds, each at its authored place in the prop and wearing that node's Material (its colour, sway and backlight, so a field of grass moves in the wind), which is how a prop your own script assembled gets scattered." },
+    ApiEntry { label: "scatter.create", insert: "scatter.create{", doc: "scatter.create{ asset = \"tree.glb\", seed = 7, perChunk = 24, chunk = 16 } — declare a source, get its id. `tint = {r,g,b}` multiplies every prop's colour, and `emissive = {r,g,b}` with `emissiveStrength` makes them glow, so one model serves a field of any shade. `emissiveStrength` with no `emissive` glows in each model's own glow colour (or through its emissive map), and a model with none glows in the source's `tint`. Region: center + radius for a sphere (a planet), or center + halfX/halfZ for ground. `parent = \"Umunquo\"` anchors the region to a NODE (and then `center` is in that node's frame: the planet's own centre is (0,0,0), not where it is in the world), so a planet that orbits carries its props instead of sliding out from under them — every prop keeps its id, its place on the surface and the ground height it settled at, because none of those were ever expressed in world space. Without a parent the region is pinned to the world, which is right for a landscape that never moves and wrong for every celestial body. Also scaleMin/scaleMax, align = \"surface\" (default) or \"world\", fade, and lod = { {asset=, distance=}, ... } nearest-first. Placement is a pure function of the seed, so every machine and every session grows the SAME forest without storing one. `density` is how a world gets biomes: pass a function(x, y, z) -> 0..1 and it is sampled ONCE, at declare time, into a densityRows grid (rows x 2*rows for a sphere\'s longitude) — 0 means no instance is generated at all, not a hidden one. An option this doesn\'t list is an error, not a shrug. `asset` may be a mesh file OR a .prefab.ron — a prefab is baked once into one instanced draw per Mesh node it holds, each at its authored place in the prop and wearing that node's Material (its colour, sway and backlight, so a field of grass moves in the wind), which is how a prop your own script assembled gets scattered." },
     ApiEntry { label: "scatter.cost", insert: "scatter.cost(", doc: "scatter.cost(id) — what this source asks for every frame: { chunks, props, far, chunkSize, perChunk }. Read it BEFORE you ship the field. The knobs look like a look, but the outermost `lod` distance is really the budget: it sets how many chunks stay resident, as a sweep whose side grows with it, walked every frame. Cost is about (far/chunk)^2 per source — halving the distance, or doubling the chunk, quarters it. A field big enough to matter also says so in the Console when you declare it. On a body smaller than your view distance the count saturates at the body, so a planet never costs more than a planet." },
     ApiEntry { label: "scatter.destroy", insert: "scatter.destroy(", doc: "scatter.destroy(id) — remove a whole source and everything it was drawing. Returns true if there was one. A source also goes when the node whose script created it is destroyed, or when that script is hot-reloaded (the reload makes its own)." },
     ApiEntry { label: "scatter.near", insert: "scatter.near(", doc: "scatter.near(sourceId, point, radius) — the instances around a point, nearest first: { id, pos, distance, scale, param, up, yaw, settled } — `up` is the way it stands (the ground's normal when it aligns to the surface) and `yaw` its spin about that up, in radians. `pos` and `up` are where the prop stands on the ground once the field has dropped it there (`settled = true`); a prop that has not been near a camera yet is not settled, and answers with the region's own surface. `id` is exact: hand it to scatter.remove. What a harvest verb aims with, and what a \"is there room to build here\" check reads." },
@@ -4869,7 +5355,8 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "water.setFrozen", insert: "water.setFrozen(", doc: "water.setFrozen(node, true) — freeze a water volume. Freezing is a STATE, not a second system: the same node with a flag flipped, and both the physics (no buoyancy, no drag) and the look follow from it. A world that thaws is one call back." },
     ApiEntry { label: "water.volumes", insert: "water.volumes()", doc: "water.volumes() — every body of water in the scene, as node handles. What a climate or weather system iterates when it wants to know where the seas are." },
     ApiEntry { label: "water.flowAt", insert: "water.flowAt(", doc: "water.flowAt(point) → vec3, the water's velocity there in m/s: a river's current, zero in still water and in air. The same current the physics carries a floating crate or a swimmer in." },
-    ApiEntry { label: "water.addVolume", insert: "water.addVolume{ shape = \"lake\", parent = ", doc: "water.addVolume{ shape = \"lake\" | \"heightfield\", parent = \"Planet\", ... } → an id. Water no node carries, in the frame of the node it lies on, so it turns with its planet. A lake takes `center` (a point on its surface) and `reach` (how far its farthest shore is), exactly as terrain.planetLakes gives them; a heightfield takes `origin`, `cell`, `columns`, `rows` and `levels` (false = dry), with an optional `flow`. It floats things, carries them on its `current`, and water.at answers for it. `depth` is how far down its bed lies (planetLakes gives it), so a cave under a lake is dry; from inside it looks like a Water Volume node, with `tint = {r,g,b}` and `visibility` (metres) to change that and `underwater = false` for no look. shape = \"sim\" is water the engine moves: `origin`, `cell`, `columns`, `rows` as a heightfield and `level` to fill it to; the engine finds the ground under it, then the water flows, drains into holes dug beside it and settles, and water.at, flowAt and floating follow it." },
+    ApiEntry { label: "water.addVolume", insert: "water.addVolume{ shape = \"lake\", parent = ", doc: "water.addVolume{ shape = \"lake\" | \"heightfield\", parent = \"Planet\", ... } → an id. Water no node carries, in the frame of the node it lies on, so it turns with its planet. A lake takes `center` (a point on its surface) and `reach` (how far its farthest shore is), exactly as terrain.planetLakes gives them; a heightfield takes `origin`, `cell`, `columns`, `rows` and `levels` (false = dry), with an optional `flow`. It floats things, carries them on its `current`, and water.at answers for it. `depth` is how far down its bed lies (planetLakes gives it), so a cave under a lake is dry; from inside it looks like a Water Volume node, with `tint = {r,g,b}` and `visibility` (metres) to change that and `underwater = false` for no look. shape = \"sim\" is water the engine moves: `origin`, `cell`, `columns`, `rows` as a heightfield and `level` to fill it to; the engine finds the ground under it, then the water flows, drains into holes dug beside it and settles, and water.at, flowAt and floating follow it. A sim is a river with `springs = { { pos = vec3, rate = m³/s }, ... }` (each at the point nearest its pos), `roughness` (the bed's Manning roughness: 0 = still water's frictionless model, the default; 0.035 = a natural river bed, which runs the water at a real river's depth and speed) and `holdEdges = true` (edge points below `level` held at it: the sea beyond the patch, which fills a trench dug from its shore). Water off a drop passes what a weir does, so a river over a cliff is stable; water.falls says where it pours." },
+    ApiEntry { label: "water.falls", insert: "water.falls(", doc: "water.falls([id]) — every place simulated water (a `shape = \"sim\"` volume) pours off a drop of more than 1.5 m, in the world: { pos, dir, width, discharge, drop, volume }. `pos` is the top of the fall at the water's surface, `dir` the way it pours across the ground, `discharge` m³/s over the edge and `drop` metres from the surface above to the surface below. Refreshed as the water flows, so a fall that runs dry leaves the list: where a game puts a fall sheet and its mist, and takes them away. With an id, only that volume's." },
     ApiEntry { label: "water.surface", insert: "water.surface(", doc: "water.surface(id [, { cells = 48 }]) → the arrays mesh.build takes for that declared water's surface, in its parent's frame: mesh.build(water.surface(id)) on a node at the parent's origin draws exactly the surface water.at answers for. A lake is the part of its sphere in its basin: what its centre reaches without crossing the ground, out to a ring under the shore (with no physics running, the whole disc out past its farthest shore); uvs are metres. nil for no such water." },
     ApiEntry { label: "water.removeVolume", insert: "water.removeVolume(", doc: "water.removeVolume(id) → true if there was such water. Takes away what water.addVolume declared." },
 
@@ -4967,6 +5454,8 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "env.fogSteps", insert: "env.fogSteps", doc: "Volumetric: samples along each pixel's fog ray (2..64). The quality/cost dial — drop it on a weak machine." },
     ApiEntry { label: "env.fogShafts", insert: "env.fogShafts", doc: "Volumetric (1/0): march the sun shadow at every fog step, so beams appear through windows and branches. The entire cost of lit fog lives here." },
     ApiEntry { label: "hit.nz", insert: "hit.nz", doc: "Contact normal Z." },
+    ApiEntry { label: "hit.distance", insert: "hit.distance", doc: "How far along the ray the hit is, in world units." },
+    ApiEntry { label: "hit.node", insert: "hit.node", doc: "The node whose collider was hit (a node handle), or nil for terrain or a collider with no node." },
     ApiEntry { label: "hit.x", insert: "hit.x", doc: "Contact point X (world)." },
     ApiEntry { label: "hit.y", insert: "hit.y", doc: "Contact point Y (world)." },
     ApiEntry { label: "hit.z", insert: "hit.z", doc: "Contact point Z (world)." },
@@ -4997,10 +5486,12 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "rb.half_y", insert: "rb.half_y", doc: "Box half-extent Y." },
     ApiEntry { label: "rb.half_z", insert: "rb.half_z", doc: "Box half-extent Z." },
     ApiEntry { label: "rb.mass", insert: "rb.mass", doc: "Mass (read and write, live). On an assembly part it is that part's share of the vessel: the compound's mass, centre of mass and inertia follow on the next tick, with no rebuild and no kick — a tank burning off or a hold filling is one write a tick." },
-    ApiEntry { label: "rb.worldHalfX", insert: "rb.worldHalfX", doc: "Read-only: the box's half-extent X as the physics builds it, half_x times the node's world scale. half_* are the authored, unscaled numbers; radius and height are used as written, unscaled." },
+    ApiEntry { label: "rb.worldHalfX", insert: "rb.worldHalfX", doc: "Read-only: the box's half-extent X as the physics builds it, half_x times the node's world scale. half_* are the authored, unscaled numbers, as are radius and height; rb.worldRadius and rb.worldHeight are those as the physics builds them." },
+    ApiEntry { label: "rb.worldRadius", insert: "rb.worldRadius", doc: "Read-only: the sphere's or capsule's radius as the physics builds it, radius times the node's world scale. Under an uneven scale a sphere takes the largest axis and a capsule the larger of X and Z." },
+    ApiEntry { label: "rb.worldHeight", insert: "rb.worldHeight", doc: "Read-only: the capsule's total height as the physics builds it, height times the node's world Y scale (never less than twice rb.worldRadius)." },
     ApiEntry { label: "rb.worldHalfY", insert: "rb.worldHalfY", doc: "Read-only: the box's half-extent Y as the physics builds it (half_y times the world scale)." },
     ApiEntry { label: "rb.worldHalfZ", insert: "rb.worldHalfZ", doc: "Read-only: the box's half-extent Z as the physics builds it (half_z times the world scale)." },
-    ApiEntry { label: "rb.height", insert: "rb.height", doc: "Capsule total height." },
+    ApiEntry { label: "rb.height", insert: "rb.height", doc: "Capsule total height, in the node's space: the body is this times the node's Y scale (rb.worldHeight)." },
     ApiEntry { label: "rb.kinematic", insert: "rb.kinematic", doc: "Transform-driven mode (1/0; assign true/false, live): never falls or gets pushed, but PUSHES dynamic bodies — platforms, elevators, grabbed objects. (Static mode is the Inspector dropdown — a baked collider, nothing to toggle here.)" },
     ApiEntry { label: "rb.lock_rot_x", insert: "rb.lock_rot_x", doc: "Freeze rotation about X (1/0)." },
     ApiEntry { label: "rb.lock_rot_y", insert: "rb.lock_rot_y", doc: "Freeze rotation about Y (1/0)." },
@@ -5009,7 +5500,7 @@ ApiEntry { label: "net.notice", insert: "net.notice()", doc: "net.notice() — w
     ApiEntry { label: "rb.lock_x", insert: "rb.lock_x", doc: "Freeze world X translation (1/0)." },
     ApiEntry { label: "rb.lock_y", insert: "rb.lock_y", doc: "Freeze world Y translation (1/0)." },
     ApiEntry { label: "rb.lock_z", insert: "rb.lock_z", doc: "Freeze world Z translation (1/0)." },
-    ApiEntry { label: "rb.radius", insert: "rb.radius", doc: "Sphere/capsule radius." },
+    ApiEntry { label: "rb.radius", insert: "rb.radius", doc: "Sphere/capsule radius, in the node's space: the body is this times the node's scale (rb.worldRadius)." },
     ApiEntry { label: "rb.restitution", insert: "rb.restitution", doc: "Bounciness 0..1 (0 = no bounce)." },
     ApiEntry { label: "rb.shape", insert: "rb.shape", doc: "Body shape: 0 = sphere, 1 = capsule, 2 = box." },
     ApiEntry { label: "rng:int", insert: "rng:int(", doc: "Uniform integer in [a, b] inclusive." },
@@ -6604,6 +7095,256 @@ Prose with `inline code` in it.
         let end = t.chars().count();
         auto_indent_newline(&mut t, end, end);
         assert_eq!(t, "x = avocado\n");
+    }
+
+    /// Every `base.member` / `base:member` in `text`, asked for as the user
+    /// would type it (`base.m`), scored: how often the member they used is
+    /// offered, and how many offers belong to some other thing entirely.
+    /// Per file: accesses, the member offered at all, offered in the first
+    /// ten rows (visible without scrolling), and foreign offers.
+    fn measure(text: &str) -> (usize, usize, usize, usize) {
+        let (mut total, mut hits, mut shown, mut noise) = (0, 0, 0, 0);
+        let types = infer_var_types(text);
+        let b = text.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            let c = b[i];
+            let starts = (c.is_ascii_alphabetic() || c == b'_') && (i == 0 || !(is_ident_byte(b[i - 1]) || b[i - 1] == b'.' || b[i - 1] == b':'));
+            if !starts {
+                i += 1;
+                continue;
+            }
+            let mut j = i;
+            while j < b.len() && is_ident_byte(b[j]) {
+                j += 1;
+            }
+            if j + 1 < b.len() && (b[j] == b'.' || b[j] == b':') && (b[j + 1].is_ascii_alphabetic()) {
+                let base = &text[i..j];
+                let mut k = j + 1;
+                while k < b.len() && is_ident_byte(b[k]) {
+                    k += 1;
+                }
+                let member = &text[j + 1..k];
+                if !matches!(base, "math" | "string" | "table" | "os" | "params" | "self") && member.len() > 1 {
+                    let token = format!("{base}{}{}", b[j] as char, &member[..1]);
+                    // As it is being typed, the access is not in the file yet:
+                    // asked without it, so a field used once is not offered
+                    // just because it is the one being measured.
+                    let without = format!("{}{token}{}", &text[..i], &text[k..]);
+                    let items = ac_matches(&token, &without);
+                    total += 1;
+                    // Offered for this base: the label's own member is the one used.
+                    let offered = |it: &AcItem| it.label.rsplit(['.', ':']).next() == Some(member);
+                    if let Some(at) = items.iter().position(offered) {
+                        hits += 1;
+                        shown += usize::from(at < AC_VISIBLE_ROWS);
+                    } else if std::env::var("FLOPTLE_AC_MISSES").is_ok() {
+                        MISSES.with(|m| m.borrow_mut().push(format!("{}{base}{}{member}", if legacy_ac() { "L:" } else { "N:" }, b[j] as char)));
+                    }
+                    let expected = match types.iter().find(|(n, _)| n == base).map(|(_, t)| t) {
+                        Some(VarType::Node) => "node",
+                        Some(VarType::Animator) => "anim",
+                        Some(VarType::Particles) => "particles",
+                        _ if base == "node" => "node",
+                        _ => base,
+                    };
+                    noise += items
+                        .iter()
+                        .filter(|it| it.label.find(['.', ':']).is_some_and(|e| &it.label[..e] != expected))
+                        .count();
+                }
+                i = k;
+                continue;
+            }
+            i = j;
+        }
+        (total, hits, shown, noise)
+    }
+
+    thread_local! { static MISSES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) }; }
+
+    fn measure_all(texts: &[&str], legacy: bool) -> (usize, usize, usize, usize) {
+        LEGACY_AC.with(|l| l.set(legacy));
+        let r = texts.iter().map(|t| measure(t)).fold((0, 0, 0, 0), |a, m| (a.0 + m.0, a.1 + m.1, a.2 + m.2, a.3 + m.3));
+        LEGACY_AC.with(|l| l.set(false));
+        r
+    }
+
+    /// **Completion on the engine's own shipped scripts offers what the code
+    /// uses, and far less that does not apply.** Each member access in the
+    /// default scripts and the template script is asked for as typed; the
+    /// member used must be offered somewhere in the list, and in its first ten
+    /// rows, at least as often as before, and the offers
+    /// that belong to some other thing (`steam.create` after `scatter.`, a
+    /// RigidBody field after `input.`) must fall. `FLOPTLE_AC_DIR=<scripts dir>`
+    /// measures another project's scripts the same way.
+    #[test]
+    fn completion_measured_on_real_scripts() {
+        let mut owned: Vec<String> = crate::lua_support::DEFAULT_SCRIPTS.iter().map(|(_, b)| b.to_string()).collect();
+        owned.push(include_str!("../templates/village2d/talk.lua").to_string());
+        if let Ok(dir) = std::env::var("FLOPTLE_AC_DIR") {
+            for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                if e.path().extension().is_some_and(|x| x == "lua") {
+                    owned.push(std::fs::read_to_string(e.path()).unwrap_or_default());
+                }
+            }
+        }
+        let texts: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let (n, old_hits, old_shown, old_noise) = measure_all(&texts, true);
+        let (n2, new_hits, new_shown, new_noise) = measure_all(&texts, false);
+        assert_eq!(n, n2);
+        let report = format!(
+            "{n} member accesses: offered the member used {old_hits} -> {new_hits} ({old_shown} -> {new_shown} in the first {AC_VISIBLE_ROWS} rows); foreign offers {old_noise} -> {new_noise}"
+        );
+        if std::env::var("FLOPTLE_AC_REPORT").is_ok() {
+            panic!("{report}\nmissed: {:?}", MISSES.with(|m| m.borrow().clone()));
+        }
+        assert!(n > 20, "too little to measure: {report}");
+        assert!(new_hits >= old_hits, "fewer right answers: {report}");
+        assert!(new_shown >= old_shown, "fewer right answers in view: {report}");
+        assert!(new_noise * 2 < old_noise, "not much less noise: {report}");
+    }
+
+    /// **Every match is offered, the best first.** `input.a` used to stop at
+    /// ten rows and cut `aimYaw`; nothing is cut now. Among prefix matches the
+    /// name this file uses most comes first.
+    #[test]
+    fn completion_shows_every_match_best_first() {
+        let labels = |items: &[AcItem]| items.iter().map(|i| i.label.clone()).collect::<Vec<_>>();
+        let items = ac_matches("input.a", "");
+        assert!(items.iter().any(|i| i.label == "input.aimYaw"), "{:?}", labels(&items));
+        // A bare word with many matches is not cut at ten either.
+        let all = ac_matches("node", "");
+        assert!(all.len() > 10, "{}", all.len());
+        // The file reads `input.axis` three times: it leads, ahead of the
+        // alphabetical `input.action`.
+        let src = "local x = input.axis(\"x\")\nlocal y = input.axis(\"y\")\nlocal z = input.axis(\"z\")\n";
+        let items = ac_matches("input.a", src);
+        assert_eq!(items[0].label, "input.axis", "{:?}", labels(&items));
+        // Usage never lifts a substring match over a prefix one.
+        let src = "spawnAt spawnAt spawnAt";
+        let items = ac_matches("pawn", src);
+        if let (Some(p), Some(q)) = (items.iter().position(|i| i.score == 0), items.iter().rposition(|i| i.score == 0)) {
+            assert!(items[..p].iter().all(|i| i.score == 0) && items[q + 1..].iter().all(|i| i.score > 0), "{:?}", labels(&items));
+        }
+    }
+
+    /// **Arrowing past row ten keeps the selection in view.** The list shows
+    /// ten rows and scrolls; each arrow press scrolls the selected row in.
+    #[test]
+    fn arrowing_past_row_ten_keeps_the_selection_visible() {
+        let items: Vec<AcItem> = (0..30)
+            .map(|n| AcItem { label: format!("input.item{n:02}"), insert: String::new(), keep: 0, doc: None, score: 0 })
+            .collect();
+        let state = std::rc::Rc::new(std::cell::Cell::new((0usize, true, false)));
+        let s = state.clone();
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(400.0, 600.0)).build_ui(move |ui| {
+            let (sel, follow, _) = s.get();
+            let r = ac_rows(ui, &items, sel, follow);
+            s.set((sel, follow, r.sel_visible));
+        });
+        h.run();
+        assert!(state.get().2, "row 0 starts out of view");
+        // One press at a time, down past the tenth row and on to the last.
+        for sel in 1..30 {
+            state.set((sel, true, false));
+            h.run();
+            assert!(state.get().2, "row {sel} scrolled out of view");
+        }
+        // The list is ten rows tall, so the first row is out of view by now:
+        // it really scrolled rather than growing to fit.
+        state.set((0, false, false));
+        h.run();
+        assert!(!state.get().2, "the list grew instead of scrolling");
+    }
+
+    /// A picture of the completion list arrowed down to row fifteen. Needs a
+    /// GPU: `cargo test -p floptle-editor --lib snapshot_completion_list -- --ignored`
+    /// writes `target/ui-snapshots/completion-list.png`.
+    #[test]
+    #[ignore]
+    fn snapshot_completion_list() {
+        let items = ac_matches("node", "");
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(400.0, 320.0)).build_ui(move |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(360.0);
+                ac_rows(ui, &items, 14, true);
+                ui.separator();
+                ui.small(items[14].doc.as_deref().unwrap_or(""));
+            });
+        });
+        h.ctx.set_fonts(crate::fonts::definitions(&floptle_theme::default_theme(), &[]));
+        h.ctx.set_visuals(egui::Visuals::dark());
+        h.run();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-snapshots");
+        std::fs::create_dir_all(&dir).unwrap();
+        h.render().expect("no GPU?").save(dir.join("completion-list.png")).unwrap();
+    }
+
+    /// **Completion fits where the caret is.** Concrete cases from writing a
+    /// game: a library offers only its own members; a hook's parameter is a
+    /// node; a bare word does not offer a variable nobody declared; inside an
+    /// options table the keys are offered, and a key already given is not.
+    #[test]
+    fn completion_offers_what_exists_here() {
+        // `scatter.` is the scatter library, nothing else.
+        let items = ac_matches("scatter.c", "");
+        assert!(items.iter().any(|i| i.label == "scatter.create"), "{:?}", items.iter().map(|i| &i.label).collect::<Vec<_>>());
+        assert!(items.iter().all(|i| i.label.starts_with("scatter.")), "{:?}", items.iter().map(|i| &i.label).collect::<Vec<_>>());
+        // No component fields after a library.
+        assert!(ac_matches("input.fri", "").iter().all(|i| i.label != "friction"));
+        // A hook's first parameter is a node, whatever its name.
+        let src = "function update(me, dt)\n  me.\nend\n";
+        let items = ac_matches("me.vi", src);
+        assert!(items.iter().any(|i| i.label == "node.visible"), "{:?}", items.iter().map(|i| &i.label).collect::<Vec<_>>());
+        assert!(items.iter().all(|i| i.label.starts_with("node")));
+        // …and a collision's second is the other node.
+        let src = "function onCollisionEnter(node, other)\nend\n";
+        assert!(ac_matches("other:getC", src).iter().all(|i| i.label.starts_with("node:")));
+        // `node.` is the node even with nothing inferred.
+        assert!(ac_matches("node.vi", "").iter().all(|i| i.label.starts_with("node")));
+        // A bare word does not offer `rb.friction`: there is no `rb`.
+        assert!(ac_matches("rb", "").iter().all(|i| !i.label.starts_with("rb.")));
+        // Options-table keys, once each.
+        let text = "scatter.create{ asset = \"tree.glb\", ra";
+        let (_, token, items) = ac_complete(text, text.chars().count(), ScriptKind::Game);
+        assert_eq!(token, "ra");
+        assert!(items.iter().any(|i| i.label == "radius" && i.insert == "radius = "));
+        assert!(items.iter().any(|i| i.label == "range"));
+        let text = "n:setMaterial({ color = {1,0,0}, ";
+        let (_, _, items) = ac_complete(text, text.chars().count(), ScriptKind::Game);
+        assert!(items.iter().any(|i| i.label == "emissive"));
+        assert!(items.iter().all(|i| i.label != "color"), "a key already given was offered again");
+        // A value position is not a key position.
+        let text = "scatter.create{ asset = ";
+        assert!(options_call(text).is_none());
+        // In a package's editor script, the package API and none of the game's.
+        let items = package_matches("ed.me");
+        assert!(items.iter().any(|i| i.label == "ed.menu"), "{:?}", items.iter().map(|i| &i.label).collect::<Vec<_>>());
+        assert!(package_matches("fin").iter().all(|i| i.label != "find"));
+    }
+
+    /// **A row says when it is valid, and a tick-only reading is not offered
+    /// where it means nothing.** `input.buffered` answers in fixedUpdate;
+    /// inside `update` it is left out, inside `fixedUpdate` it is offered with
+    /// its note, and every note names an entry that exists.
+    #[test]
+    fn completion_knows_when_an_entry_is_valid() {
+        for (label, _) in WHEN {
+            assert!(LUA_API.iter().any(|e| e.label == *label), "WHEN names {label}, which has no entry");
+        }
+        let in_update = "function update(node, dt)\n  if input.buf";
+        let (_, _, items) = ac_complete(in_update, in_update.chars().count(), ScriptKind::Game);
+        assert!(items.iter().all(|i| i.label != "input.buffered"), "a fixedUpdate-only call was offered in update");
+        let in_tick = "function fixedUpdate(node, dt)\n  if input.buf";
+        let (_, _, items) = ac_complete(in_tick, in_tick.chars().count(), ScriptKind::Game);
+        let row = items.iter().find(|i| i.label == "input.buffered").expect("offered in fixedUpdate");
+        assert!(row.doc.as_deref().is_some_and(|d| d.starts_with("[fixedUpdate only]")), "{:?}", row.doc);
+        // A handle a constructor returns completes as that handle.
+        let src = "local a = nav.agent(node)\n";
+        assert!(ac_matches("a:sto", src).iter().any(|i| i.label == "agent:stop"));
+        let src = "local t = after(1, f)\n";
+        assert!(ac_matches("t:ca", src).iter().any(|i| i.label == "timer:cancel"));
     }
 
     #[test]

@@ -412,6 +412,46 @@ pub(crate) struct PkgState {
     pub(crate) failed: Option<String>,
 }
 
+/// Every name a package's editor script can reach, as `table.member` and
+/// bare globals, read off a real package environment (every permission
+/// granted) so it cannot fall behind it. What the IDE offers in a package's
+/// `editor/*.lua`, where none of the game's API exists. `gui.*` is not here:
+/// it exists only inside a panel's draw callback.
+pub(crate) fn surface_names() -> &'static [String] {
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let lua = mlua::Lua::new();
+        let shared = Rc::new(Shared::default());
+        let state = PkgState {
+            id: "ide.completion".into(),
+            name: "ide".into(),
+            version: "0.0.0".into(),
+            root: PathBuf::new(),
+            permissions: vec![Permission::Network, Permission::Browser, Permission::Files],
+            withheld: Vec::new(),
+            failed: None,
+        };
+        let Ok(env) = api::build_env(&lua, &shared, 0, &state, None) else { return Vec::new() };
+        let mut out = Vec::new();
+        for (k, v) in env.pairs::<String, mlua::Value>().flatten() {
+            if matches!(k.as_str(), "_G" | "_ENV" | "_VERSION") {
+                continue;
+            }
+            match v {
+                mlua::Value::Table(t) => {
+                    out.push(k.clone());
+                    for (m, _) in t.pairs::<String, mlua::Value>().flatten() {
+                        out.push(format!("{k}.{m}"));
+                    }
+                }
+                _ => out.push(k),
+            }
+        }
+        out.sort();
+        out
+    })
+}
+
 /// A dockable panel a package registered.
 pub(crate) struct WindowReg {
     pub(crate) pkg: usize,

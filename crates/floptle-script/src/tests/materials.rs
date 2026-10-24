@@ -1392,7 +1392,8 @@ fn set_material_on_a_model_patches_its_own_look() {
 
     assert!(world.get::<Material>(model).is_none(), "a model was given a whole Material");
     let patch = world.get::<MaterialPatch>(model).expect("the model carries a patch");
-    assert_eq!(patch.keys, vec!["color".to_string(), "emissive".to_string(), "alpha".to_string()]);
+    // Fading it below full opacity turns blend on, as `alpha` always did.
+    assert_eq!(patch.keys, vec!["color".to_string(), "emissive".to_string(), "alpha".to_string(), "blend".to_string()]);
     // Laid over a part with a texture, a cut-out alpha map and a shader:
     // only the three keys change.
     let part = Material {
@@ -1405,8 +1406,9 @@ fn set_material_on_a_model_patches_its_own_look() {
     };
     let drawn = patch.over(&part);
     assert_eq!((drawn.color, drawn.emissive, drawn.alpha), ([1.0, 0.4, 0.4], [0.0, 1.0, 0.0], 0.5));
+    assert_eq!(drawn.blend, floptle_core::BlendMode::Blend);
     assert_eq!(
-        Material { color: part.color, emissive: part.emissive, alpha: part.alpha, ..drawn },
+        Material { color: part.color, emissive: part.emissive, alpha: part.alpha, blend: part.blend, ..drawn },
         part,
         "the patch changed something it did not name"
     );
@@ -1415,7 +1417,7 @@ fn set_material_on_a_model_patches_its_own_look() {
     assert_eq!(kept.shader.as_deref(), Some("shaders/hull.flsl"), "an own Material lost its shader");
     assert_eq!(kept.color, [1.0, 0.4, 0.4]);
     assert!(world.get::<MaterialPatch>(owned).is_none());
-    assert_eq!(world.get::<Material>(prim).map(|m| m.alpha), Some(0.5));
+    assert_eq!(world.get::<Material>(prim).map(|m| (m.alpha, m.blend)), Some((0.5, floptle_core::BlendMode::Blend)));
 
     let t = world.get::<Tint>(model).expect("the glow is a tint");
     assert_eq!((t.emissive, t.emissive_strength), ([0.2, 0.4, 1.0], 3.0));
@@ -1460,5 +1462,40 @@ fn set_material_sets_the_cut_out_and_the_sides() {
     let leaf = Material { texture: Some("textures/fern.png".into()), ..Default::default() };
     let drawn = world.get::<MaterialPatch>(model).unwrap().over(&leaf);
     assert_eq!((drawn.alpha_cutoff, drawn.double_sided, drawn.texture.as_deref()), (0.3, false, Some("textures/fern.png")));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **`blend` names how alpha is drawn**, and a fade with no blend named turns
+/// blend on — a solid surface faded with `alpha` has always gone see-through.
+#[test]
+fn set_material_blend_is_named_or_follows_a_fade() {
+    use floptle_core::{BlendMode, Material, Matter};
+    let dir = std::env::temp_dir().join(format!("floptle-matblend-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "solid",
+        "function start(node)\n  node:setMaterial{ alpha = 0.3, blend = \"opaque\" }\nend\n",
+    );
+    write_script(&dir, "fade", "function start(node)\n  node:setMaterial{ alpha = 0.3 }\nend\n");
+    write_script(&dir, "cut", "function start(node)\n  node:setMaterial{ blend = \"Cutout\", alphaCutoff = 0.2 }\nend\n");
+    let mut world = World::default();
+    let mut node = |script: &str| {
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [1.0; 3] });
+        world.insert(e, Material { blend: BlendMode::Opaque, ..Default::default() });
+        world.insert(e, Scripts(vec![floptle_core::ScriptInst::new(script)]));
+        e
+    };
+    let (solid, fade, cut) = (node("solid"), node("fade"), node("cut"));
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let blend = |e| world.get::<Material>(e).map(|m| m.blend);
+    assert_eq!(blend(solid), Some(BlendMode::Opaque), "a named blend wins over the fade");
+    assert_eq!(blend(fade), Some(BlendMode::Blend), "a fade blends");
+    assert_eq!(blend(cut), Some(BlendMode::Cutout));
+    assert_eq!(world.get::<Material>(cut).map(|m| m.alpha_cutoff), Some(0.2));
     let _ = std::fs::remove_dir_all(&dir);
 }

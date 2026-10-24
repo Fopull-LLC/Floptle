@@ -96,7 +96,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field getComponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|LightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|MaterialHandle|nil Live component handle (RigidBody / PointLight / Light / Camera / ParticleSystem / AudioSource / UiElement / UiSlider / UiLayer / Material), nil if the node lacks it.
 ---@field particles fun(self: Node): ParticleSystemHandle The particle handle for this node's Particle System: play / stop / restart the effect and read its live state.
 ---@field setShaderParam fun(self: Node, name: string, x: number, y?: number, z?: number, w?: number) Drive a `.flsl` uniform on this node every tick (a GPU uniform write, never a recompile): the node's Material shader, or its UI element's `stage ui` shader (instruments like the navball). Unset lanes are 0.
----@field setCelestial fun(self: Node, t: table) Construction API: set (and create if absent) the node's CelestialBody. Fields (camelCase): mu, bodyRadius, soi, parent (name string), a, e, i, lan, argPe, m0, atmoColor {r,g,b}, atmoHeight, atmoDensity, clouds, cloudColor {r,g,b}, cloudDarkness (0..1, 1 = storm), cloudHeight (share of atmoHeight), aureole, aureoleSize (the star's glow: strength, spread; 1 = natural), luminosity, starColor, occluderRadius (occlusion culling: radius of the solid core geometry never pierces — chunks fully behind it skip their draws; keep it BELOW the deepest cave/dig; 0 = off).
+---@field setCelestial fun(self: Node, t: table) Construction API: set (and create if absent) the node's CelestialBody. Fields (camelCase): mu, bodyRadius, soi, parent (name string), a, e, i, lan, argPe, m0, atmoColor {r,g,b}, atmoHeight, atmoDensity, clouds, cloudColor {r,g,b}, cloudDarkness (0..1, 1 = storm), cloudHeight (share of atmoHeight), aureole, aureoleSize (the star's glow: strength, spread; 1 = natural), luminosity, starColor, occluderRadius (occlusion culling: radius of the solid core geometry never pierces — chunks fully behind it skip their draws; keep it BELOW the deepest cave/dig; 0 = off), reach (with soi 0, the least the SOI reaches, in its own radii; 4 by default).
 ---@field setShaderTexture fun(self: Node, slot: string, ref: string) Point one of this node's `.flsl` shader texture SLOTS somewhere else, at runtime. `slot` is the name the shader declares (`texture ramp` gives \"ramp\"); `ref` is a project-relative image path, an `rt:<name>` render target (what another camera sees, live), or \"\" to clear the slot. A shader can declare up to 8 slots.
 ---@field setMaterial fun(self: Node, t: table) Construction API — SETUP-TIME, not per-frame: set (and create if absent) the node's Material. It inserts the component and queues a deferred write, so call it on transitions and use `setShaderParam` for values that change every tick. Fields: color/emissive/specular/rim (a colour takes {r,g,b}, {x,y,z}, {1,0.5,0.2} or vec3), emissiveStrength, shininess, specularStrength, rimStrength, unlit (bool), ambient, alpha, texture (path or \"rt:<name>\"), sheetCols/sheetRows/cell (spritesheet grid + which cell draws — `cell` is also a live mirror field, see MaterialHandle).
 ---@field setTerrain fun(self: Node, id: number) Construction API: make this node a Terrain volume with the given id (generate its field with `terrain.generatePlanet`).
@@ -561,6 +561,7 @@ function draw.quad(texture, x0, y0, z0, x1, y1, z1, x2, y2, z2, x3, y3, z3, r, g
 ---@param prefab string Prefab name or path.
 ---@param pos? Vec3 World position for the first root.
 ---@param fn? fun(root: Node) Configure the freshly spawned root.
+---@return Node root The new root, usable at once (it lands after the pass).
 function spawn(prefab, pos, fn) end
 
 ---Remove a node AND its whole subtree (physics body included). Queued —
@@ -578,6 +579,7 @@ function destroy(target) end
 ---@param name string
 ---@param parent? Node Parent node (nested creates inside callbacks are fine).
 ---@param fn? fun(n: Node) Configure the freshly created node.
+---@return Node node The new node, usable at once (it lands after the pass).
 function createNode(name, parent, fn) end
 
 ---Runs once when play begins (optional).
@@ -1425,6 +1427,25 @@ function raycast(ox, oy, oz, dx, dy, dz, max, ignore) end
 ---@return (table|false)[]
 function raycastMany(origins, dirs, maxes, opts) end
 
+---The first node in the scene with that name, or nil.
+---@param name string
+---@return Node|nil
+function find(name) end
+---Every node with that name.
+---@param name string
+---@return Node[]
+function findAll(name) end
+---A script handle for the first node anywhere running script `kind` (the
+---manager pattern), or nil: call its functions, read its state, `.node` is
+---its node and `.params` its tunables.
+---@param kind string
+---@return table|nil
+function findScript(kind) end
+---Alias of findScript(kind).
+---@param kind string
+---@return table|nil
+function findScriptInScene(kind) end
+
 ---EVERY node carrying script `kind`, as script handles in scene order — for
 ---picking among several instances (a camera finding the one third_person
 ---that is `net.isMine`, out of many player avatars).
@@ -1847,15 +1868,21 @@ function water.flowAt(x, y, z) end
 ---per point with `false` for dry ground, and an optional `flow` of x, z per
 ---point), or water the engine moves (`shape = \"sim\"`: the same grid keys and
 ---`level`, the height it is filled to over the ground found under it; it then
----flows, drains into holes dug beside it and settles). It floats things, slows
+---flows, drains into holes dug beside it and settles; `springs`, `roughness`
+---and `holdEdges` make it a river). It floats things, slows
 ---them and carries them on its `current`, and
 ---`water.at` answers for it. `depth` is how far below the surface its bed lies,
 ---so a cave under a lake is dry. From inside it looks like a Water Volume node
 ---(`tint`, `visibility` to change that, `underwater = false` for none). Returns
 ---an id.
----@param opts { shape?: \"lake\"|\"heightfield\"|\"sim\", level?: number, parent?: string, center?: Vec3, radius?: number, reach?: number, origin?: Vec3, cell?: number, columns?: integer, rows?: integer, levels?: (number|boolean)[], flow?: number[], density?: number, drag?: number, angularDrag?: number, current?: Vec3, depth?: number, tint?: number[], visibility?: number, underwater?: boolean }
+---@param opts { shape?: \"lake\"|\"heightfield\"|\"sim\", level?: number, parent?: string, center?: Vec3, radius?: number, reach?: number, origin?: Vec3, cell?: number, columns?: integer, rows?: integer, levels?: (number|boolean)[], flow?: number[], density?: number, drag?: number, angularDrag?: number, current?: Vec3, depth?: number, tint?: number[], visibility?: number, underwater?: boolean, roughness?: number, springs?: { pos: Vec3, rate: number }[], holdEdges?: boolean }
 ---@return integer
 function water.addVolume(opts) end
+---Every place simulated water pours off a drop of more than 1.5 m, in the
+---world: where to put a waterfall. All volumes, or only `id`'s.
+---@param id? integer
+---@return { pos: Vec3, dir: Vec3, width: number, discharge: number, drop: number, volume: integer }[]
+function water.falls(id) end
 ---The surface of water `water.addVolume` declared, as the arrays `mesh.build`
 ---takes, in the parent's frame: `mesh.build(water.surface(id))` on a node at the
 ---parent's origin draws exactly the surface `water.at` answers for. A lake is a
@@ -1965,7 +1992,10 @@ function terrain.paintTexture(x, y, z, radius, slot) end
 ---rivers {count,depth,width,seaLevel,meander}; biomes, a list of
 ---{slot,color,latitude,altitude,slope,moisture,nearRiver} rules (ranges are
 ---{min,max}; the first match paints the surface); moistureScale;
----deferCaves (leave the buried cave zone ungenerated until a dig reaches it).
+---deferCaves (leave the buried cave zone ungenerated until a dig reaches it);
+---generator (which version of the generator's rules; the project's by default);
+---smallBody {shape = 'potato'|'binary'|'rubble', elongation, lumpiness, neck,
+---lumps} (an irregular rock of `radius` instead of a ball).
 ---@param id number The terrain id (a node with that Terrain id shows the result).
 ---@param opts? table
 function terrain.generatePlanet(id, opts) end
@@ -2030,6 +2060,13 @@ function terrain.busy() end
 ---edit made so far is in the ground.
 ---@return integer
 function terrain.pending() end
+---When the planet with terrain id `id` stops drawing its ground and draws as
+---one shaded ball: past `radii` of its own radii from the camera, or once its
+---disc is smaller than `pixels` across on screen. No rule is the default,
+---sixty radii. Rules last until Play stops.
+---@param id integer
+---@param rule? { radii: number?, pixels: number? }
+function terrain.impostorAt(id, rule) end
 ---Checkpoint every EDITED resident terrain field to the save slot
 ---(`terrain.saveDir` must be set). Runs IN THE BACKGROUND — a few chunks of
 ---encoding per frame plus a threaded write, deferred while a field is being
@@ -2345,6 +2382,16 @@ function space.propagate(px, py, pz, vx, vy, vz, mu, dt) end
 ---@param opts { count: integer, seed?: integer, aMin: number, aMax: number, eMax?: number, iMax?: number, radiusMin?: number, radiusMax?: number }
 ---@return table[]
 function space.beltOrbits(opts) end
+---A belt of small bodies on space.beltOrbits rows: runtime nodes named
+---name .. ' ' .. i (or prefab instances), each a celestial on its row's orbit
+---about parent. Returns how many it asked for. With shape ('potato',
+---'binary', 'rubble', 'mixed', a smallBody table or a function(i, row)
+---returning one) each rock is also ground: terrain id terrainId + i - 1 (10000
+---by default), made from the seed when something comes near, at voxel (its
+---radius / 24 by default).
+---@param opts { parent: string, count: integer, seed?: integer, aMin: number, aMax: number, eMax?: number, iMax?: number, radiusMin?: number, radiusMax?: number, mu?: number, reach?: number, name?: string, prefab?: string, made?: fun(rock: Node, i: integer, row: table), shape?: string|table|fun(i: integer, row: table): table, terrainId?: integer, voxel?: number }
+---@return integer
+function space.belt(opts) end
 ";
 
 /// `.luarc.json` pointing the Lua language server at the annotation library and
@@ -2408,7 +2455,7 @@ mod stub_tests {
     /// **The projects in this repo carry the annotations the engine ships.**
     ///
     /// `.floptle/library/floptle.lua` is generated — the editor rewrites it when
-    /// it opens a project — but the two in this repository are also committed,
+    /// it opens a project — but the one in this repository is also committed,
     /// and a generated file that is committed goes stale the moment the thing it
     /// is generated from moves. Both had drifted, differently from each other:
     /// neither knew about `node:material`, and the demo project's copy was
@@ -2426,7 +2473,11 @@ mod stub_tests {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let update = std::env::var("UPDATE_STUBS").is_ok();
         let mut stale = Vec::new();
-        for project in ["assets", "solar"] {
+        // The engine's own sample project only. A game's copy is written by
+        // the editor from the engine that opens it, and is the game's to
+        // ignore (`floptle new` and the upgrade pass put it in .gitignore);
+        // the engine repository has no business writing into a game's.
+        for project in ["assets"] {
             let p = repo.join(project).join(".floptle/library/floptle.lua");
             if !p.exists() {
                 continue;
