@@ -1985,6 +1985,15 @@ impl PhysicsWorld {
     /// between the ends. Sample 0 stays the bottom sphere, the feet's; see
     /// [`Self::foot_probe`].
     fn contact_samples(&self, bi: usize, ci: usize) -> ([Vec3; crate::body::MAX_SAMPLES], usize, f32) {
+        let c = &self.colliders[ci];
+        self.samples_against(bi, |p| c.distance(p))
+    }
+
+    /// [`Self::contact_samples`] against any surface given by its distance:
+    /// a kinematic body's hull as well as a collider. Without the middle
+    /// sample a post narrower than the gap between a capsule's end spheres
+    /// went through the capsule's middle.
+    fn samples_against(&self, bi: usize, distance: impl Fn(Vec3) -> f32) -> ([Vec3; crate::body::MAX_SAMPLES], usize, f32) {
         let b = &self.bodies[bi];
         let BodyShape::Capsule { half_height } = b.shape else { return b.sample_centers() };
         let (mut centers, n_c, radius) = b.sample_centers();
@@ -1992,8 +2001,7 @@ impl PhysicsWorld {
             return (centers, n_c, radius);
         }
         let (lo, hi) = (centers[0], centers[1]);
-        let c = &self.colliders[ci];
-        let d_at = |s: f32| c.distance(lo.lerp(hi, s));
+        let d_at = |s: f32| distance(lo.lerp(hi, s));
         // Coarse: the interior quarter points; refine by golden-section
         // between the neighbours of the best. Five samples put the answer
         // within a few percent of the axis, which is well under the radius.
@@ -2018,7 +2026,7 @@ impl PhysicsWorld {
         let d = d_at(s);
         // Only worth a contact when it beats both ends — otherwise the end
         // sphere already covers it and a duplicate push would double-count.
-        if d < c.distance(lo) && d < c.distance(hi) && s > 1e-3 && s < 1.0 - 1e-3 {
+        if d < distance(lo) && d < distance(hi) && s > 1e-3 && s < 1.0 - 1e-3 {
             centers[2] = lo.lerp(hi, s);
             return (centers, 3, radius);
         }
@@ -2576,7 +2584,7 @@ impl PhysicsWorld {
                 // their middle by the deepest of them. One impulse per point,
                 // one after another, gave the first corner of a face all of
                 // the push, and a crate hitting a wall square on spun.
-                let (centres, n_c, radius) = self.bodies[bi].sample_centers();
+                let (centres, n_c, radius) = self.contact_samples(bi, ci);
                 let mut hits: Vec<(Vec3, Vec3, f32)> = Vec::new();
                 for &p in &centres[..n_c] {
                     let pen = radius - self.colliders[ci].distance(p);
@@ -2613,9 +2621,12 @@ impl PhysicsWorld {
                 if (row >> hull.layer) & 1 == 0 {
                     continue;
                 }
-                let (_, n_c, _) = self.bodies[bi].sample_centers();
+                let (_, n_c, _) = self.samples_against(bi, |p| hull.distance(p));
                 for k in 0..n_c {
-                    let (centres, _, radius) = self.bodies[bi].sample_centers();
+                    let (centres, n_now, radius) = self.samples_against(bi, |p| hull.distance(p));
+                    if k >= n_now {
+                        continue;
+                    }
                     let p = centres[k];
                     let pen = radius - hull.distance(p);
                     #[allow(clippy::neg_cmp_op_on_partial_ord)]
@@ -3072,7 +3083,7 @@ impl PhysicsWorld {
                     if (row >> hull.layer) & 1 == 0 {
                         continue;
                     }
-                    let (centers, n_c, radius) = self.bodies[bi].sample_centers();
+                    let (centers, n_c, radius) = self.samples_against(bi, |p| hull.distance(p));
                     for &c in &centers[..n_c] {
                         let pen = radius - hull.distance(c);
                         #[allow(clippy::neg_cmp_op_on_partial_ord)]

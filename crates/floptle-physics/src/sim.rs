@@ -2002,17 +2002,41 @@ impl Sim {
         // 3. Body-vs-body contact. The pair pass has already pushed solid
         // bodies apart, so two at rest are touching, not overlapping: within
         // a skin of it counts.
+        //
+        // Swept along X by bounding sphere, as the pair pass is, and two
+        // kinematic bodies are never a pair: neither pushes the other, and a
+        // builder's thousand touching parts tested every one against every
+        // other each tick, 58 ms of physics for parts that never move.
         const BODY_SKIN: f32 = 0.02;
-        for i in 0..self.world.bodies.len() {
+        let mut live: Vec<(usize, Vec3, f32)> = (0..self.world.bodies.len())
+            .filter(|&i| self.world.bodies[i].live() && matches!(body_eid.get(i), Some(Some(_))))
+            .map(|i| {
+                let (c, r) = self.world.bodies[i].bound_sphere();
+                (i, c, r + BODY_SKIN)
+            })
+            .collect();
+        live.sort_by(|p, q| (p.1.x - p.2).total_cmp(&(q.1.x - q.2)).then(p.0.cmp(&q.0)));
+        let mut candidates: Vec<(usize, usize)> = Vec::new();
+        for (k, &(i, ci, ri)) in live.iter().enumerate() {
+            for &(j, cj, rj) in &live[k + 1..] {
+                if cj.x - rj > ci.x + ri {
+                    break;
+                }
+                let (a, b) = (&self.world.bodies[i], &self.world.bodies[j]);
+                if (a.kinematic && b.kinematic) || (ci - cj).length_squared() > (ri + rj) * (ri + rj) {
+                    continue;
+                }
+                candidates.push((i.min(j), i.max(j)));
+            }
+        }
+        candidates.sort_unstable();
+        for (i, j) in candidates {
             let Some(Some(a_eid)) = body_eid.get(i).copied() else { continue };
             let a = &self.world.bodies[i];
-            if !a.live() {
-                continue;
-            }
-            for j in (i + 1)..self.world.bodies.len() {
+            {
                 let Some(Some(b_eid)) = body_eid.get(j).copied() else { continue };
                 let b = &self.world.bodies[j];
-                if !b.live() || (self.world.matrix[a.layer as usize] >> b.layer) & 1 == 0 {
+                if (self.world.matrix[a.layer as usize] >> b.layer) & 1 == 0 {
                     continue;
                 }
                 let hull = crate::world::BodyHull {
@@ -3076,6 +3100,14 @@ impl Sim {
         // Refresh the kinematic hulls dynamic bodies collide against (poses
         // were just synced above). Cheap: kinematic bodies are few. A sensor
         // (trigger) kinematic never pushes anything, so it stays out.
+        // Each body's entity through one walk of the links: looked up per
+        // body, a thousand kinematic parts cost a million comparisons a frame.
+        let mut eid_of: Vec<Option<u32>> = vec![None; self.world.bodies.len()];
+        for l in &self.map {
+            if let Some(slot) = eid_of.get_mut(l.body) {
+                *slot = Some(l.entity.index());
+            }
+        }
         self.world.kin_hulls = self
             .world
             .bodies
@@ -3083,7 +3115,7 @@ impl Sim {
             .enumerate()
             .filter(|(_, b)| b.kinematic && !b.sensor && !b.off)
             .filter_map(|(bi, b)| {
-                let eid = self.map.iter().find(|l| l.body == bi)?.entity.index();
+                let eid = eid_of[bi]?;
                 Some(BodyHull {
                     eid,
                     owner: eid,

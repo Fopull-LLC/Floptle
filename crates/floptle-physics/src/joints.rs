@@ -801,6 +801,9 @@ impl PhysicsWorld {
         let patch = self.bodies[i].pos + r;
         let mount = self.joint_end(jt.b, jt.anchor_b, Vec3::ZERO);
         let mount = End { r: patch - (mount.p - mount.r), ..mount };
+        if !braked {
+            return self.rolling_grip(jt, &wheel, &mount, r, n, slide, budget);
+        }
         let (wa, wb) = (wheel.w(t), mount.w(t));
         if !wa.is_finite() || wa <= 1e-9 {
             return 0.0;
@@ -830,6 +833,42 @@ impl PhysicsWorld {
             self.joints[j].park = None;
         }
         imp
+    }
+
+    /// The grip of a wheel that is free to turn (not braked): along its
+    /// rolling direction the ground turns the wheel, and the wheel alone
+    /// takes that, as a tyre does; only across it does the grip hold the
+    /// wheel and what it hangs from together. Stopping the craft along the
+    /// roll as well treated a free wheel as a locked one: a plane's ground
+    /// roll dragged at a skid's friction, and a driven wheel hauled its craft
+    /// to the rim's speed past what its motor could give. The two share the
+    /// one friction budget. Returns the impulse spent.
+    #[allow(clippy::too_many_arguments)]
+    fn rolling_grip(&mut self, jt: &JointRt, wheel: &End, mount: &End, r: Vec3, n: Vec3, slide: Vec3, budget: f32) -> f32 {
+        let fwd = self.wheel_axle(jt).cross(n).normalize_or_zero();
+        let roll = fwd * slide.dot(fwd);
+        let side = slide - roll;
+        let mut on_wheel = Vec3::ZERO;
+        if let Some(d) = roll.try_normalize() {
+            let w = wheel.w(d);
+            if w.is_finite() && w > 1e-9 {
+                on_wheel = -roll / w;
+            }
+        }
+        let (mut across, mut share) = (Vec3::ZERO, 1.0);
+        if let Some(d) = side.try_normalize() {
+            let (wa, wb) = (wheel.w(d), mount.w(d));
+            if wa.is_finite() && wa > 1e-9 {
+                let (ma, mb) = (1.0 / wa, if wb.is_finite() && wb > 1e-9 { 1.0 / wb } else { 0.0 });
+                across = -side * (ma + mb);
+                share = ma / (ma + mb);
+            }
+        }
+        let total = (on_wheel + across).length();
+        let k = if total > budget { budget / total } else { 1.0 };
+        self.joint_impulse(Some(jt.a), r, (on_wheel + across * share) * k);
+        self.joint_impulse(jt.b, mount.r, across * ((1.0 - share) * k));
+        total * k
     }
 
     /// Hold joint `j`'s wheel (body `i`) on the spot it parked on, along the

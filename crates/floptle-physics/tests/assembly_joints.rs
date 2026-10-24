@@ -813,7 +813,9 @@ fn drive_speed_after_a_second(mass: f32, torque: f32) -> f32 {
                 kind: JointKind::Wheel,
                 other: "Chassis".into(),
                 axis: [0.0, 1.0, 0.0],
-                stiffness: 3.0,
+                // Stiff enough on a 7.5 kg tyre to hold its quarter of 800 kg
+                // up with 2 cm of sag, not let the chassis sit on its belly.
+                stiffness: 18.0,
                 damping: 0.8,
                 motor: true,
                 motor_speed: 0.0,
@@ -839,7 +841,6 @@ fn drive_speed_after_a_second(mass: f32, torque: f32) -> f32 {
 /// second gives, within 10%, rather than spinning light tyres up and having
 /// the grip haul the chassis to the rim's speed.
 #[test]
-#[ignore = "0490 is not fixed yet: the tyre grip hauls the chassis past the motor's torque"]
 fn a_wheels_drive_is_limited_by_its_motors_torque() {
     let (mass, torque) = (800.0f32, 100.0f32);
     let total = mass + 4.0 * 7.5;
@@ -847,4 +848,54 @@ fn a_wheels_drive_is_limited_by_its_motors_torque() {
     let v = drive_speed_after_a_second(mass, torque);
     assert!(v <= most * 1.1, "after a second it is going {v} m/s; its motors can give {most}");
     assert!(v > most * 0.5, "after a second it is going only {v} m/s; its motors should give near {most}");
+}
+
+/// How fast a 1.8 t craft on three free (undriven, unbraked) wheels is going
+/// after `secs` of a constant 14.7 kN push along a long flat runway,
+/// starting `x0` along it. (A tyre much lighter than 0.05 against this hull
+/// needs a stiffer spring than 4 Hz, or the hull sits down on its belly.)
+fn ground_roll_speed(x0: f64, tyre_mass: f32, secs: f32) -> f32 {
+    let mut ecs = World::default();
+    let floor = ecs.spawn();
+    ecs.insert(floor, Transform::from_translation(DVec3::new(200.0, -1.0, 0.0)));
+    ecs.insert(floor, RigidBody { kind: BodyKind::Box, mode: BodyMode::Static, half_extents: [400.0, 1.0, 20.0], friction: 1.0, ..Default::default() });
+    let hull = segment(&mut ecs, "Hull", DVec3::new(x0, 0.9, 0.0), [2.0, 0.3, 0.6], 1.8);
+    for (dx, dz) in [(1.5f64, 0.0f64), (-0.8, -1.0), (-0.8, 1.0)] {
+        let w = ecs.spawn();
+        ecs.insert(w, Transform::from_translation(DVec3::new(x0 + dx, 0.25, dz)));
+        ecs.insert(w, RigidBody { radius: 0.25, mass: tyre_mass, friction: 1.0, rotates: true, ..Default::default() });
+        ecs.insert(
+            w,
+            Joint {
+                kind: JointKind::Wheel,
+                other: "Hull".into(),
+                axis: [0.0, 1.0, 0.0],
+                stiffness: 4.0,
+                damping: 0.8,
+                ..Default::default()
+            },
+        );
+    }
+    let mut sim = build(&ecs);
+    run(&mut sim, &mut ecs, 1.0);
+    for _ in 0..(secs / DT) as usize {
+        sim.hold_compound_force(hull.index(), Vec3::new(14.7, 0.0, 0.0), None, Vec3::ZERO);
+        sim.sync_joints(&mut ecs);
+        sim.step_tick(DT, None);
+    }
+    sim.compound_of(hull.index()).unwrap().vel.x
+}
+
+/// A plane's ground roll: a 1.8 t craft on three free wheels, neither
+/// driven nor braked, pushed by a constant 14.7 kN, is within 5% of the
+/// speed it would make with no friction at all after 5 s (the wheels' spin
+/// takes a little), from ten places along the runway. Its free wheels used
+/// to be gripped as if locked to it, and it crawled at a skid's pace.
+#[test]
+fn a_craft_on_free_wheels_rolls() {
+    let free = 14.7 / (1.8 + 3.0 * 0.05) * 5.0;
+    for k in 0..10 {
+        let v = ground_roll_speed(k as f64 * 0.73, 0.05, 5.0);
+        assert!(v > free * 0.95 && v <= free * 1.001, "run {k}: {v} m/s after 5 s; with no friction it would be {free}");
+    }
 }

@@ -1045,6 +1045,15 @@ impl CollisionShape for ChunkTerrain {
             let (mut t, end) = (near * scale, (near * scale + 6.0 * voxel).min(tmax));
             while t <= end {
                 let p = o + rd * t;
+                // Every point the march asks has to be on triangles already
+                // cached. The march runs a few voxels past where it started,
+                // and a point whose reach crossed into a chunk not meshed yet
+                // meshed that chunk here, whole, on a scatter prop's account:
+                // tens of milliseconds while flying low over the edge of the
+                // drawn ground. Past the cached ground, the field answers.
+                if !self.meshed_near(self.to_local(p)) {
+                    break;
+                }
                 let d = self.distance(p);
                 if d < 0.02 {
                     return RayAnswer::Hit(t, self.ray_normal(p, rd));

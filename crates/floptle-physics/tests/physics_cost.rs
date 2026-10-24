@@ -95,3 +95,77 @@ fn a_flying_craft_does_not_pay_for_colliders_far_from_it() {
     let (near, many) = (craft_cost(0), craft_cost(400));
     assert!(many < near * 8.0, "400 far colliders made the craft cost {:.2}x as much ({near:.5} s, {many:.5} s)", many / near);
 }
+
+/// A cube of `n` touching kinematic boxes (a builder's parts), and, with
+/// `drop`, a dynamic box let fall onto it. Returns the scene, the sim and the
+/// dropped box.
+fn kinematic_stack(n: usize, drop: bool) -> (World, Sim, Option<floptle_core::Entity>) {
+    let mut ecs = World::default();
+    let side = (n as f64).cbrt().ceil() as usize;
+    let mut k = 0;
+    'outer: for x in 0..side {
+        for y in 0..side {
+            for z in 0..side {
+                if k == n {
+                    break 'outer;
+                }
+                let e = ecs.spawn();
+                ecs.insert(e, Transform::from_translation(DVec3::new(x as f64, y as f64 + 0.5, z as f64)));
+                ecs.insert(e, RigidBody { kind: BodyKind::Box, mode: BodyMode::Kinematic, half_extents: [0.5, 0.5, 0.5], ..Default::default() });
+                k += 1;
+            }
+        }
+    }
+    let dropped = drop.then(|| {
+        let e = ecs.spawn();
+        ecs.insert(e, Transform::from_translation(DVec3::new(0.0, side as f64 + 2.0, 0.0)));
+        ecs.insert(e, RigidBody { kind: BodyKind::Box, half_extents: [0.4, 0.4, 0.4], ..Default::default() });
+        e
+    });
+    let sim = Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO);
+    (ecs, sim, dropped)
+}
+
+/// The mean cost of a tick as the editor runs one: the per-frame sync (which
+/// refreshes the kinematic hulls), then the step.
+fn kinematic_tick(ecs: &World, sim: &mut Sim) -> f64 {
+    let t = std::time::Instant::now();
+    for _ in 0..5 {
+        sim.sync_dynamic_params(ecs);
+        sim.step_tick(1.0 / 60.0, None);
+    }
+    t.elapsed().as_secs_f64() / 5.0
+}
+
+/// A thousand touching kinematic parts that never move cost a tick in
+/// proportion to ten of them, not to the square: two kinematic bodies are
+/// never tested against each other. Each was tested against every other
+/// every tick, 58 ms for a builder's craft. Timed in alternating windows,
+/// each side's fastest kept, so a busy machine slows both alike; the bound
+/// sits between the growth measured now (about 140x) and the old square
+/// growth (about 7,500x).
+#[test]
+fn touching_kinematic_parts_cost_in_proportion() {
+    let (small_ecs, mut small, _) = kinematic_stack(10, false);
+    let (big_ecs, mut big, _) = kinematic_stack(1000, false);
+    let (mut s, mut b) = (f64::MAX, f64::MAX);
+    for _ in 0..8 {
+        s = s.min(kinematic_tick(&small_ecs, &mut small));
+        b = b.min(kinematic_tick(&big_ecs, &mut big));
+    }
+    assert!(b < s * 1000.0, "1000 parts cost {:.1}x what 10 do ({:.3} ms against {:.3} ms)", b / s, b * 1e3, s * 1e3);
+}
+
+/// A dynamic box dropped on a stack of kinematic parts still lands on it.
+#[test]
+fn a_box_dropped_on_kinematic_parts_lands_on_them() {
+    let (ecs, mut sim, dropped) = kinematic_stack(1000, true);
+    let e = dropped.unwrap();
+    for _ in 0..180 {
+        sim.sync_dynamic_params(&ecs);
+        sim.step_tick(1.0 / 60.0, None);
+    }
+    let y = sim.body_states().find(|r| r.entity == e).unwrap().pos.y;
+    // The stack's top is at y = 10; the box is 0.4 half-high.
+    assert!((y - 10.4).abs() < 0.1, "the box came to rest at y = {y}, not on the stack");
+}
