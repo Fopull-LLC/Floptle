@@ -2251,9 +2251,13 @@ end
     }
     let moved = lines(&mut ed, "V");
     assert_eq!(lines(&mut ed, "A").first().map(String::as_str), Some("false"), "the site was ready before it was asked for, or never asked: {moved:?}");
-    let a: Vec<f64> = moved.first().unwrap().split(' ').map(|v| v.parse().unwrap()).collect();
-    let b: Vec<f64> = moved.last().unwrap().split(' ').map(|v| v.parse().unwrap()).collect();
-    let per_frame = ((a[0] - b[0]).powi(2) + (a[2] - b[2]).powi(2)).sqrt() / (30.0 * (moved.len() - 1).max(1) as f64);
+    // Measured across one logged span of 30 frames: across the whole run the
+    // orbit curves back on itself, and a slow machine that takes a few hundred
+    // frames to finish read the chord as 2.6 m a frame.
+    assert!(moved.len() >= 2, "the run ended before the world's motion was logged twice: {moved:?}");
+    let a: Vec<f64> = moved[0].split(' ').map(|v| v.parse().unwrap()).collect();
+    let b: Vec<f64> = moved[1].split(' ').map(|v| v.parse().unwrap()).collect();
+    let per_frame = ((a[0] - b[0]).powi(2) + (a[2] - b[2]).powi(2)).sqrt() / 30.0;
     assert!(per_frame > 30.0, "the world moved {per_frame:.2} m a frame: the fixture is not moving it");
     assert!(!lines(&mut ed, "R").is_empty(), "one ask on a world moving {per_frame:.1} m a frame never made the box it asked for ready");
     let _ = std::fs::remove_dir_all(&dir);
