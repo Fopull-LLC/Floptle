@@ -984,6 +984,28 @@ mod tests {
         (lua, state, logs)
     }
 
+    /// **A number written at full precision reads back as the same double.**
+    /// Without serde_json's exact float parser, about one in six random
+    /// doubles written at 17 significant digits came back one ULP off, so a
+    /// game keeping player data as JSON drifted a little at every load.
+    #[test]
+    fn a_seventeen_digit_double_decodes_to_the_same_double() {
+        let (lua, _, _) = lua_with_http();
+        let off: f64 = lua
+            .load(
+                "math.randomseed(17)\n\
+                 local off = 0\n\
+                 for i = 1, 200000 do\n\
+                   local x = (math.random() - 0.5) * 10 ^ math.random(-300, 300)\n\
+                   if json.decode(string.format('%.17g', x)) ~= x then off = off + 1 end\n\
+                 end\n\
+                 return off",
+            )
+            .call(())
+            .unwrap();
+        assert_eq!(off, 0.0, "{off} of 200,000 doubles decoded to a different double");
+    }
+
     /// `json.encode` / `json.decode` round-trip the shapes a web API actually
     /// sends, and `decode` reports bad input as a value rather than raising —
     /// someone else's server having a bad day is data, not a bug in your script.

@@ -88,7 +88,7 @@ image = { version = "0.25", default-features = false, features = [
 ] } # loose texture decode — the formats VFX/game texture packs actually ship
 naga = { version = "29", features = ["wgsl-in"] }        # .flsl → WGSL validation — ADR-0007
 gilrs = "0.11.2"                                         # gamepads: buttons/sticks/hot-plug — ADR-0024
-serde_json = "1"                                         # JSON for the Lua http/json API + the Hub
+serde_json = { version = "1", features = ["float_roundtrip"] } # JSON for the Lua http/json API + the Hub; exact float parsing so a written double reads back the same
 ureq = { version = "2", features = ["json", "tls"] }     # blocking HTTP on worker threads — floptle-script's http.*
 # The command line — ADR-0027. BUILDER api only, never the derive: the verb table
 # in `cli.rs` is the source of truth and carries what a derive has nowhere to put
