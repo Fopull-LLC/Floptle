@@ -6,8 +6,8 @@
 //! * **Model textures** follow each file's sampler. In 0.116 every model
 //!   texture drew crisp; an old project is set to "always crisp".
 //! * **Imported materials** honour factor-only metallic and roughness, the
-//!   alpha mode, backface culling and the texture transform. An old project is
-//!   set to "Classic (0.116)", which draws by the old rules.
+//!   alpha mode, backface culling and the texture transform (from rc7). An
+//!   older project is set to "Classic (0.116)", which draws by the old rules.
 //! * **Blend mode** is a setting of its own instead of something opacity
 //!   implied. A material from before it reads as the mode it meant: blended
 //!   below full opacity, otherwise cutout, or opaque at a cutoff of 0.
@@ -21,9 +21,9 @@
 
 use std::path::{Path, PathBuf};
 
-/// Write an old project's model look into its config: crisp textures and the
-/// 0.116 material rules, where the file says nothing. Returns whether it
-/// changed anything. A setting already there is never touched.
+/// Write an old project's model look into its config, where the file says
+/// nothing: the texture filter and the material rules it drew with. Returns
+/// whether it changed anything. A setting already there is never touched.
 pub(crate) fn pin_model_look(cfg: &mut floptle_scene::ProjectConfigDoc, from: Option<&str>) -> bool {
     let mut changed = false;
     if cfg.model_texture_filter.is_none() {
@@ -31,7 +31,7 @@ pub(crate) fn pin_model_look(cfg: &mut floptle_scene::ProjectConfigDoc, from: Op
         changed = true;
     }
     if cfg.imported_materials.is_none() {
-        cfg.imported_materials = Some(floptle_scene::ImportedMaterialsDoc::Classic);
+        cfg.imported_materials = Some(old_rules(from));
         changed = true;
     }
     changed
@@ -58,6 +58,14 @@ pub(crate) fn keep_model_look(root: &Path, from: Option<&str>) -> Result<Vec<Pat
 fn old_filter(from: Option<&str>) -> floptle_scene::ModelTextureFilterDoc {
     let rc = from.is_some_and(|v| floptle_dist::version_key(v) >= floptle_dist::version_key("0.117.0-rc1"));
     if rc { floptle_scene::ModelTextureFilterDoc::AsFile } else { floptle_scene::ModelTextureFilterDoc::Crisp }
+}
+
+/// The imported-material rules an old project drew with. 0.117.0-rc7 already
+/// drew imported materials as their files describe; anything older drew them
+/// by the 0.116 rules.
+fn old_rules(from: Option<&str>) -> floptle_scene::ImportedMaterialsDoc {
+    let rc = from.is_some_and(|v| floptle_dist::version_key(v) >= floptle_dist::version_key("0.117.0-rc7"));
+    if rc { floptle_scene::ImportedMaterialsDoc::AsFile } else { floptle_scene::ImportedMaterialsDoc::Classic }
 }
 
 /// Run the step over the project at `root`: write the old model look into
@@ -158,10 +166,15 @@ mod tests {
         let again = crate::upgrade::run(&root, None);
         assert!(again.iter().all(|d| d.result.as_ref().is_ok_and(Vec::is_empty)), "{:?}", crate::upgrade::report(&root, &again));
         assert_eq!(std::fs::read(root.join("project.ron")).unwrap(), before, "the second pass changed the config");
-        // A 0.117 pre-release already drew models as their files say.
+        // A 0.117 pre-release already filtered textures as their files say,
+        // and from rc7 drew imported materials as their files describe.
         let mut rc: floptle_scene::ProjectConfigDoc = ron::from_str("()").unwrap();
         pin_model_look(&mut rc, Some("0.117.0-rc6"));
         assert_eq!(rc.model_texture_filter, Some(floptle_scene::ModelTextureFilterDoc::AsFile));
+        assert_eq!(rc.imported_materials, Some(floptle_scene::ImportedMaterialsDoc::Classic));
+        let mut rc7: floptle_scene::ProjectConfigDoc = ron::from_str("()").unwrap();
+        pin_model_look(&mut rc7, Some("0.117.0-rc7"));
+        assert_eq!(rc7.imported_materials, Some(floptle_scene::ImportedMaterialsDoc::AsFile));
         let _ = std::fs::remove_dir_all(&root);
     }
 }
