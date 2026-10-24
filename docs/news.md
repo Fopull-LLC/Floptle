@@ -1,5 +1,9 @@
 ## Just shipped
 
+**v0.117.0-rc17 — "Whole Worlds"** (beta). Saves that never stall a frame or
+lose a player's data, a warm-up that prepares a level without crowding it,
+and terrain answers that stay true once they say they are final.
+
 **v0.117.0-rc16 — "Whole Worlds"** (beta). Big craft fall asleep where they lie, a profiler that names what a slow
 frame did, terrain shadows that update without stalling, terrain answers a
 game can trust, cheaper vectors, and spawns a game can spread over frames.
