@@ -596,8 +596,22 @@ pub fn eye_chunk(src: &ScatterSource, eye: DVec3) -> ChunkKey {
 /// stands over, at the bottom of its height band, so the list is cacheable until
 /// the eye crosses a chunk boundary or a band.
 pub fn chunks_near(src: &ScatterSource, eye: DVec3, range: f64) -> Vec<ChunkKey> {
+    chunks_reaching(src, eye, range, (eye_height_band(src, eye) as f64 * src.chunk).max(0.0))
+}
+
+/// The chunks whose props could stand within `radius` of `p`, wherever they
+/// have landed: for a question about the props (`scatter.near`, a dig), not
+/// about drawing them. A prop settles onto the real ground, which can lie tens
+/// of metres off the region's own surface, so the height of `p` above that
+/// surface says nothing about which chunks hold what is around it. Only where
+/// over the region `p` is decides it.
+pub fn chunks_under(src: &ScatterSource, p: DVec3, radius: f64) -> Vec<ChunkKey> {
+    chunks_reaching(src, p, radius, 0.0)
+}
+
+/// [`chunks_near`]'s sweep, for an eye `h` above the region's surface.
+fn chunks_reaching(src: &ScatterSource, eye: DVec3, range: f64, h: f64) -> Vec<ChunkKey> {
     let mut keys: Vec<(f64, ChunkKey)> = Vec::new();
-    let h = (eye_height_band(src, eye) as f64 * src.chunk).max(0.0);
     let full = range + src.chunk;
     if h > full {
         return Vec::new();
@@ -1104,6 +1118,28 @@ mod tests {
             chunks_near(&s, DVec3::new(20.0, 0.0, 1.0), 40.0),
             "…but crossing a boundary does change it"
         );
+    }
+
+    /// **A question about the props finds them wherever they landed.** A
+    /// prop settles onto the real ground, which on a fresh save sat 35 to 44 m
+    /// off its patch's surface, and `scatter.near` swept chunks as the draw
+    /// does, from the asker's height above that surface: 40 m up, with a
+    /// radius of a few metres, it found no chunk at all, so no prop could be
+    /// harvested. The height says nothing about which chunks hold the props
+    /// round a point; only where over the region the point is does.
+    #[test]
+    fn a_query_well_off_the_surface_still_finds_the_chunks_under_it() {
+        let ground = ground(32);
+        let planet = ScatterSource { region: Region::Sphere { center: DVec3::ZERO, radius: 600.0 }, chunk: 40.0, ..ground.clone() };
+        for (s, at) in [(&ground, DVec3::new(5.0, 0.0, 5.0)), (&planet, DVec3::new(0.0, 600.0, 0.0))] {
+            let up = if matches!(s.region, Region::Ground { .. }) { DVec3::Y } else { at.normalize() };
+            for off in [-40.0, 40.0] {
+                let p = at + up * off;
+                let keys = chunks_under(s, p, 2.0);
+                assert!(keys.contains(&eye_chunk(s, p)), "{off} m off the surface, the query found {keys:?}");
+                assert_eq!(keys, chunks_under(s, at, 2.0), "the height changed which chunks a query reads");
+            }
+        }
     }
 
     /// A planet's props sit on the sphere — every one of them, at the radius

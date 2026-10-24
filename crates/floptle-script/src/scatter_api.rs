@@ -442,7 +442,7 @@ pub(crate) fn install_scatter_api(
             let pl = src.frame.to_local(p);
             let on_ground = settled.borrow();
             let mut found: Vec<(f64, floptle_core::scatter::Instance, bool)> = Vec::new();
-            for key in floptle_core::scatter::chunks_near(src, pl, r) {
+            for key in floptle_core::scatter::chunks_under(src, pl, r) {
                 for mut i in floptle_core::scatter::chunk_instances(src, key) {
                     // Where it stands, once the driver has dropped it onto
                     // the ground; the region's nominal surface until then.

@@ -129,7 +129,7 @@ impl ScatterCache {
             // `p` is where the ground changed, in the world. The chunks are
             // keyed in the source's own frame.
             let pl = src.frame.to_local(p);
-            for key in scatter::chunks_near(src, pl, radius) {
+            for key in scatter::chunks_under(src, pl, radius) {
                 // What `scatter.near` was told stood here is no longer known:
                 // the ground may be gone from under it.
                 if let Some(old) = self.chunks.remove(&(src.id, key))
