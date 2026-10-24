@@ -2132,7 +2132,14 @@ end
     ed.toggle_play();
     assert!(!ed.terrains.contains_key(&w), "the world should start cold for this test to mean anything");
     let mut after = None;
-    for frame in 0..3000 {
+    // Bounded by time, not frames: the ground is made on workers, and a
+    // runner sharing its cores with the rest of the suite made too little of
+    // it in 3,000 frames.
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    for frame in 0.. {
+        if std::time::Instant::now() > until {
+            break;
+        }
         ed.pump_world_streaming();
         ed.play_step(1.0 / 60.0, true);
         assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
@@ -2240,7 +2247,11 @@ end
     ed.world.insert(w, CelestialBody { mu: 0.0, body_radius: 300.0, parent: "Star".into(), a: 5000.0, ..Default::default() });
     ed.world.insert(w, floptle_core::TerrainGen(ron::to_string(&fill).unwrap()));
     ed.toggle_play();
-    for _ in 0..1200 {
+    // Bounded by time, not frames, as above: on a starved runner the world
+    // went round its star one and a half times in 1,200 frames before its
+    // ground was made.
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    while std::time::Instant::now() < until {
         ed.pump_world_streaming();
         ed.play_step(1.0 / 60.0, true);
         assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
