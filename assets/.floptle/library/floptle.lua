@@ -1999,7 +1999,9 @@ function terrain.saveDir(path) end
 ---ship/player physically is: it streams in if cold and never streams out.
 ---Immediate mode — call it every frame while you care (the map calls it for
 ---its focused planet). Streaming is otherwise anchored to the PHYSICAL
----positions of dynamic bodies, never the camera.
+---positions of dynamic bodies and to the camera (or `terrain.lodAnchor`,
+---while one is set): a body loads as any of them nears it, and is put away
+---only once all have left it far behind.
 ---@param bodyName string The body's node name (as in `space.bodies()`).
 function terrain.warm(bodyName) end
 ---What terrain detail, the far-planet impostor switch and far-craft freezing
@@ -2022,11 +2024,19 @@ function terrain.busy() end
 ---paintTexture) have not landed yet. Edits are applied a few milliseconds'
 ---worth a frame, in the order they were made, so a batch of a thousand
 ---flattens spreads over frames instead of stopping one. An edit four voxels
----across its radius or more is made off the frame and lands a frame or two
----later, the rest waiting behind it. Each lands whole, so a query reads the ground after some number of whole edits; 0 means every
+---across its radius or more, or one over ground not made yet, is made off the
+---frame and lands a frame or more later, the rest waiting behind it. Each lands whole, so a query reads the ground after some number of whole edits; 0 means every
 ---edit made so far is in the ground.
 ---@return integer
 function terrain.pending() end
+---The milliseconds of each frame the engine spends landing the game's terrain
+---edits (4 by default); the rest wait, in order, for the frames after. Raise
+---it while a loading screen covers the view, and set it back (or pass nil)
+---when the view is shown. Clamped to 0.5..1000. Returns the budget it
+---replaced; with no argument it only reads it.
+---@param ms? number
+---@return number
+function terrain.editBudget(ms) end
 ---When the planet with terrain id `id` stops drawing its ground and draws as
 ---one shaded ball: past `radii` of its own radii from the camera, or once its
 ---disc is smaller than `pixels` across on screen. No rule is the default,

@@ -673,6 +673,8 @@ impl Editor {
         sim.world.water = Self::build_water_field(&self.world, origin);
         // Each Play says a density mismatch again: the warnings are per run.
         self.water_ratio_warned.clear();
+        self.kin_between_ticks_warned.clear();
+        self.kin_tick_poses.clear();
         self.script_host.set_layers(sim.layers().clone());
         // …and the tilesets this scene's tilemaps reference, so `tm:solid` /
         // `tm:tags` / `tm:autotile` can answer. Lent rather than loaded by the

@@ -3106,6 +3106,12 @@ struct Editor {
     /// ticks for the next frame pass (see space.rs, play_step.rs).
     tick_carry: std::collections::HashMap<u32, [f64; 3]>,
     frame_carry: std::collections::HashMap<u32, [f64; 3]>,
+    /// Kinematic bodies on a moving world as the last tick left their nodes,
+    /// with that tick's carry: a node found elsewhere when the next tick
+    /// starts was moved outside `fixedUpdate`. See `warn_kinematic_moved_between_ticks`.
+    kin_tick_poses: Vec<(Entity, DVec3, f64)>,
+    /// Kinematic bodies told so this Play, by entity index.
+    kin_between_ticks_warned: std::collections::HashSet<u32>,
     /// Compounds exempt from distant-craft LOD (`assembly.keepLive`): they stay
     /// in full physics however far the camera roams — the piloted vessel sets
     /// this while the map view is open so it remains controllable (see space.rs).

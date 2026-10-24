@@ -1193,9 +1193,17 @@ end
 /// place written each tick as the planet's plus an offset. A sphere post at
 /// the crew's middle went between the capsule's end spheres when it was
 /// kinematic: those were all a capsule tested against a kinematic body.
-/// Returns the closest the crew's axis came to the post's centre.
+/// Returns the closest the crew's axis came to the post's centre, and the
+/// Console lines saying a kinematic body was moved outside `fixedUpdate`.
 fn post_stops_a_walker(mode: floptle_core::BodyMode, kind: BodyKind, parented: bool) -> f64 {
-    let tag = format!("postwalk{mode:?}{kind:?}{parented}");
+    post_walk(mode, kind, parented, "fixedUpdate").0
+}
+
+fn post_walk(mode: floptle_core::BodyMode, kind: BodyKind, parented: bool, pass: &str) -> (f64, Vec<String>) {
+    // Tests run in parallel and two can ask for the same post: one project each.
+    static RUN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let run_no = RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tag = format!("postwalk{mode:?}{kind:?}{parented}{pass}{run_no}");
     let place = if parented {
         // Moved by script each tick, in the planet's frame.
         "post.x = 4 + math.min(n, 60) / 60"
@@ -1205,7 +1213,7 @@ fn post_stops_a_walker(mode: floptle_core::BodyMode, kind: BodyKind, parented: b
     let script = format!(
         r#"
 local n, post = 0, nil
-function fixedUpdate(node, dt)
+function {pass}(node, dt)
   n = n + 1
   local p, ball = find("Planet"), find("Ball")
   if not (p and ball) then return end
@@ -1252,7 +1260,14 @@ end
     let d = lines(&mut ed, "D");
     assert!(d.len() > 100, "{d:?}");
     let _ = std::fs::remove_dir_all(&dir);
-    d.iter().map(|l| l.split(' ').next().unwrap().parse::<f64>().unwrap()).fold(f64::MAX, f64::min)
+    let warned = ed
+        .console
+        .entries
+        .iter()
+        .filter(|e| e.msg.contains("was moved outside fixedUpdate"))
+        .map(|e| format!("{} x{}", e.msg, e.count))
+        .collect();
+    (d.iter().map(|l| l.split(' ').next().unwrap().parse::<f64>().unwrap()).fold(f64::MAX, f64::min), warned)
 }
 
 #[test]
@@ -1273,6 +1288,26 @@ fn a_script_moved_post_on_a_moving_planet_stops_a_walker() {
         }
     }
     assert!(missed.is_empty(), "the walker came closer to the post's axis than its radius and the post's: {missed:?}");
+}
+
+/// The same root post placed from `update` stands one carry behind where it
+/// was put for the whole tick, because its world moves at the start of the
+/// tick and a kinematic body follows its node. Where the script meant it is
+/// the game's call, so the engine leaves it there and says so once, naming
+/// the post and the carry (100 m/s over a 60 Hz tick). Placed from
+/// `fixedUpdate`, or riding its planet as a child, nothing is said.
+#[test]
+fn a_kinematic_placed_from_update_on_a_moving_planet_is_reported_once() {
+    use floptle_core::BodyMode::Kinematic;
+    let (_, warned) = post_walk(Kinematic, BodyKind::Sphere, false, "update");
+    assert_eq!(warned.len(), 1, "{warned:?}");
+    assert!(warned[0].contains("\"Post\"") && warned[0].contains("1.67 m") && warned[0].ends_with(" x1"), "{warned:?}");
+    for parented in [false, true] {
+        let (_, warned) = post_walk(Kinematic, BodyKind::Sphere, parented, "fixedUpdate");
+        assert!(warned.is_empty(), "parented {parented}, placed from fixedUpdate: {warned:?}");
+    }
+    let (_, warned) = post_walk(Kinematic, BodyKind::Sphere, true, "update");
+    assert!(warned.is_empty(), "a child of the planet rides it: {warned:?}");
 }
 
 /// A thousand Kinematic-box parts laid as a floor by `spawn`, and a crate
@@ -1662,4 +1697,129 @@ end
     }
     assert!(rocks.iter().all(|r| (4.0..=8.0).contains(&r.2)), "a rock is not its row's size: {rocks:?}");
     assert_eq!(rocks, dealt(), "the same seed dealt the shapes another way");
+}
+
+/// **A belt rock the camera comes up to gets its ground, with no script
+/// call.** During Play only dynamic bodies anchored which terrain streamed
+/// in, so a rock the camera flew up to with no body beside it never loaded:
+/// it drew as a plain ball and `terrain.query` at its centre read empty
+/// space, until a game called `terrain.warm`. The camera counts now. A rock
+/// with the camera three radii off it, and no body anywhere, has ground at
+/// its centre within a few seconds.
+#[test]
+fn a_belt_rock_the_camera_comes_up_to_gets_its_ground() {
+    let script = r#"
+local n = 0
+function update(node, dt)
+  n = n + 1
+  if n == 2 then
+    space.belt{ parent = "Star", count = 1, seed = 4, aMin = 1000, aMax = 1000, radiusMin = 8, radiusMax = 8,
+      shape = "potato", terrainId = 500 }
+  end
+end
+"#;
+    let (mut ed, dir) = project("beltground", script);
+    ed.toggle_play();
+    run(&mut ed, 3);
+    let rock = ed
+        .world
+        .query::<Matter>()
+        .find_map(|(e, m)| matches!(m, Matter::Terrain { id: 500, .. }).then_some(e))
+        .expect("the belt spawned no rock");
+    assert!(ed.world.query::<RigidBody>().next().is_none(), "a body in the scene would anchor the rock's ground");
+    assert!(!ed.terrains.contains_key(&rock), "the rock should start with no ground for this test to mean anything");
+    let cam = ed.world.query::<Name>().find_map(|(e, n)| (n.0 == "Camera").then_some(e)).unwrap();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let solid = |ed: &crate::Editor| {
+        let c = floptle_core::world_transform(&ed.world, rock).translation;
+        ed.terrains.get(&rock).is_some_and(|t| t.field.d(ed.terrain_world_to_local(rock, c)) < 0.0)
+    };
+    while !solid(&ed) {
+        // Three radii off the rock, following it round its orbit.
+        let c = floptle_core::world_transform(&ed.world, rock).translation;
+        ed.world.get_mut::<Transform>(cam).unwrap().translation = c + DVec3::new(0.0, 0.0, 24.0);
+        ed.play_step(1.0 / 60.0, true);
+        ed.pump_world_streaming();
+        assert!(std::time::Instant::now() < until, "the rock never got its ground (resident: {})", ed.terrains.contains_key(&rock));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `destroy` on the root `assembly.split` made takes it and the parts under
+/// it. The bare root the engine builds carried a body and a name but no
+/// Matter, and the destroy lookup asked for Matter, so it was skipped with
+/// nothing in the log. A second destroy of the same, now stale, handle says so.
+#[test]
+fn a_root_made_by_split_is_destroyed_with_its_parts() {
+    let (mut ed, dir) = project(
+        "split_destroy",
+        r#"
+local ship, parts, frame, stage = nil, {}, 0, nil
+function update(node, dt)
+  frame = frame + 1
+  if frame == 1 then
+    spawn("Vessel", vec3(0, 0, 0), function(v)
+      ship = v
+      for i = 1, 4 do
+        spawn("Part", vec3(i - 2.5, 0, 0), function(p)
+          parts[#parts + 1] = p
+          if #parts == 4 then
+            assembly.rebuild(v, function(s) log("BUILT ok") end)
+          end
+        end, v)
+      end
+    end)
+  end
+  if frame == 10 then
+    assembly.split(ship, { parts[3], parts[4] }, function(r)
+      stage = r
+      log(string.format("SPLIT %d %d %d", r.__id, parts[3].__id, parts[4].__id))
+      destroy(r)
+      -- Already under the root this pass takes: gone as asked, not stale.
+      destroy(parts[4])
+    end)
+  end
+  if frame == 15 and stage then destroy(stage) end
+end
+"#,
+    );
+    ed.toggle_play();
+    run(&mut ed, 6);
+    assert_eq!(lines(&mut ed, "BUILT").len(), 1, "the four-part vessel was built");
+    let before = ed.world.query::<Transform>().count();
+    run(&mut ed, 8);
+    let split = lines(&mut ed, "SPLIT");
+    assert_eq!(split.len(), 1, "the split ran its callback: {split:?}");
+    let ids: Vec<u32> = split[0].split(' ').map(|v| v.parse().unwrap()).collect();
+    for id in &ids {
+        assert!(ed.world.entity_at(*id).is_none(), "node #{id} outlived destroy (ids {ids:?})");
+    }
+    assert_eq!(
+        ed.world.query::<Transform>().count(),
+        before - 2,
+        "the split root came and went, and took its two parts with it"
+    );
+    assert!(
+        !ed.console.entries.iter().any(|e| e.msg.starts_with("destroy:")),
+        "a destroy that worked is quiet"
+    );
+    run(&mut ed, 4);
+    let stale = format!("destroy: node #{} no longer exists", ids[0]);
+    assert!(
+        ed.console.entries.iter().any(|e| e.msg.starts_with(&stale)),
+        "a destroy of a stale handle says so: {:?}",
+        ed.console.entries.iter().map(|e| &e.msg).collect::<Vec<_>>()
+    );
+    // Any node goes, whatever it carries: one with no Matter at all, and the
+    // child under it.
+    let bare = ed.world.spawn();
+    ed.world.insert(bare, Transform::IDENTITY);
+    ed.world.insert(bare, Name("Bare".into()));
+    let kid = ed.world.spawn();
+    ed.world.insert(kid, Transform::IDENTITY);
+    ed.world.insert(kid, floptle_core::Parent(bare));
+    ed.apply_destroys(vec![bare.index()]);
+    assert!(!ed.world.is_alive(bare) && !ed.world.is_alive(kid), "a node with no Matter outlived destroy");
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -27,7 +27,7 @@ each group, and meant to be searched.
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 74
 - [networking — net.*, synced](#networking--net-synced) — 41
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
-- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 20
+- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 21
 - [pathfinding — nav.*](#pathfinding--nav) — 26
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 11
 - [weather — wind](#weather--wind) — 6
@@ -376,7 +376,7 @@ defaults = {
 
 ### `destroy`
 
-destroy(node) — remove a node AND its whole subtree (physics body included). Queued: applied after the pass, so the handle stays readable through the current call. Method form: node:destroy(). On a client, replicated nodes refuse (server authority — net.despawn).
+destroy(node) — remove a node AND its whole subtree (physics body included). Queued: applied after the pass, so the handle stays readable through the current call. Method form: node:destroy(). On a client, replicated nodes refuse (server authority — net.despawn). Any node can be destroyed, including an empty root such as one assembly.split makes; a handle to a node already gone logs a warning and removes nothing.
 
 ### `dt`
 
@@ -2769,6 +2769,10 @@ if input.clicked("left") then
 end
 ```
 
+### `terrain.editBudget`
+
+terrain.editBudget([ms]) → the milliseconds of each frame the engine spends landing the game's terrain edits (4 by default); the rest wait, in order, for the frames after. Raise it while a loading screen covers the view, so a big batch (a base site graded in a thousand flattens) lands sooner, and set it back, or pass nil for the default, when the view is shown. Clamped to 0.5..1000. Returns the budget it replaced; with no argument it only reads it. A scene swap resets it. Refuses: anything that is not a number or nil.
+
 ### `terrain.flush`
 
 terrain.flush() — checkpoint every EDITED resident terrain field to the save slot (terrain.saveDir must be set). Runs IN THE BACKGROUND (amortized encode + threaded write, deferred while a field is actively being dug) so autosaves never stutter; exit paths (Stop / scene.load) finish the writes synchronously so a checkpoint is never lost.
@@ -2799,7 +2803,7 @@ terrain.paintTexture(x,y,z, radius, slot) — paint a terrain-palette texture sl
 
 ### `terrain.pending`
 
-terrain.pending() → how many of the game's terrain edits (dig, sculpt, flatten, paint, paintTexture) have not landed yet. Edits are applied a few milliseconds' worth a frame, in the order they were made, so a batch of a thousand flattens spreads over frames instead of stopping one. An edit too big for a frame (four voxels across its radius or more) is made off the frame and lands whole a frame or two later, the edits after it waiting their turn. Every edit is applied whole before the next, so queries read the ground after some number of whole edits; 0 means every edit made so far is in the ground.
+terrain.pending() → how many of the game's terrain edits (dig, sculpt, flatten, paint, paintTexture) have not landed yet. Edits are applied a few milliseconds' worth a frame, in the order they were made, so a batch of a thousand flattens spreads over frames instead of stopping one. An edit too big for a frame (four voxels across its radius or more), or one over ground the world has not made yet, is made off the frame and lands whole a frame or more later, the edits after it waiting their turn; a run of them is made one after another while the frames go on, and each frame lands what is ready. terrain.editBudget sets how much of a frame landing takes. Every edit is applied whole before the next, so queries read the ground after some number of whole edits; 0 means every edit made so far is in the ground.
 
 ### `terrain.planetLakes`
 
@@ -2827,7 +2831,7 @@ terrain.slotAt(x, y, z) — the texture-palette slot at a world point, or nil wh
 
 ### `terrain.warm`
 
-terrain.warm(bodyName) — keep that body's terrain RESIDENT this frame regardless of where the ship/player physically is: it streams in if cold and never streams out. Immediate mode — call every frame while you care (the map warms its focused planet). Streaming is otherwise anchored to dynamic bodies' physical positions, never the camera.
+terrain.warm(bodyName) — keep that body's terrain RESIDENT this frame regardless of where the ship/player physically is: it streams in if cold and never streams out. Immediate mode — call every frame while you care (the map warms its focused planet). Streaming is otherwise anchored to dynamic bodies' physical positions and to the camera (or terrain.lodAnchor, while one is set): a body loads as any of them nears it, and is put away only once all have left it far behind.
 
 ### `terrain.yields`
 

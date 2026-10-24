@@ -766,6 +766,9 @@ impl Editor {
             None => {
                 let e = self.world.spawn();
                 self.world.insert(e, Transform::IDENTITY);
+                // A node like any other: the hierarchy, a save and every
+                // node-shaped lookup see it.
+                self.world.insert(e, floptle_core::Matter::Empty);
                 if let Some(rb) = self.world.get::<RigidBody>(root_ent).copied() {
                     self.world.insert(e, rb);
                 }
@@ -936,17 +939,27 @@ impl Editor {
         // Every entity that actually goes away, roots and descendants — see
         // the handler prune at the end.
         let mut gone: Vec<u32> = Vec::new();
+        let mut gone_set: std::collections::HashSet<u32> = std::collections::HashSet::new();
         let mut kids: std::collections::HashMap<Entity, Vec<Entity>> =
             std::collections::HashMap::new();
         for (e, p) in self.world.query::<floptle_core::Parent>() {
             kids.entry(p.0).or_default().push(e);
         }
         for eid in destroys {
-            let Some(target) = self
-                .world
-                .entity_with::<floptle_core::Matter>(eid)
-            else {
-                continue; // already gone (double destroy is harmless)
+            // Any live node can go, whatever it carries: a root the engine
+            // made (an `assembly.split` stage) has a body and a name but no
+            // Matter, and a lookup that asked for Matter skipped it in silence.
+            let Some(target) = self.world.entity_at(eid) else {
+                // Named twice in one pass, or under a root this pass already
+                // took: the node is gone as asked.
+                if !gone_set.contains(&eid) {
+                    self.console.push(
+                        floptle_script::LogLevel::Warn,
+                        format!("destroy: node #{eid} no longer exists (a stale handle) — nothing was removed"),
+                        None,
+                    );
+                }
+                continue;
             };
             // A replicated node on a client is server-authoritative — destroying
             // it locally would desync (the next snapshot resurrects it anyway).
@@ -957,10 +970,15 @@ impl Editor {
                         .as_ref()
                         .is_some_and(|s| s.net_id_of(target).is_some()));
             if client_owned {
+                let name = self
+                    .world
+                    .get::<floptle_core::Name>(target)
+                    .map_or_else(|| format!("#{eid}"), |n| format!("\"{}\"", n.0));
                 self.console.push(
                     floptle_script::LogLevel::Warn,
-                    "destroy: that node is server-authoritative — only the server can destroy it"
-                        .into(),
+                    format!(
+                        "destroy: node {name} is server-authoritative — only the server can destroy it"
+                    ),
                     None,
                 );
                 continue;
@@ -978,6 +996,7 @@ impl Editor {
             for e in doomed {
                 let idx = e.index();
                 gone.push(idx);
+                gone_set.insert(idx);
                 // On a server session, tracked nodes despawn through the session
                 // (broadcasts to every client); everything else is local.
                 let tracked =

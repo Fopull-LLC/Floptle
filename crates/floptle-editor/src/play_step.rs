@@ -912,6 +912,9 @@ impl Editor {
                 } else if !self.game_tick.tick() {
                     break;
                 }
+                if ticks_run == 0 {
+                    self.warn_kinematic_moved_between_ticks();
+                }
                 ticks_run += 1;
                 self.game_tick_no += 1;
                 // Celestial rails first (solar demo S2): body nodes + their
@@ -1174,6 +1177,9 @@ impl Editor {
                 // dispatch — all after physics, all on the deterministic clock.
                 self.net_tick(self.game_tick_no);
             }
+            if ticks_run > 0 {
+                self.note_kinematic_tick_poses();
+            }
             if !stepping {
                 let spent = ticks_began.elapsed().as_secs_f32() * 1000.0;
                 self.note_tick_load(ticks_run, spent, sdt);
@@ -1191,6 +1197,73 @@ impl Editor {
                 tr.translation +=
                     floptle_core::math::DVec3::from_array(pred.error_offset);
             }
+        }
+    }
+
+    /// Remember where the last tick left each kinematic body carried by a
+    /// moving world, for [`Self::warn_kinematic_moved_between_ticks`]. Only a
+    /// body whose node no other body or world moves: one under a celestial
+    /// rides it through the hierarchy, and one under a body follows that
+    /// body's writeback, which lands between ticks by design.
+    fn note_kinematic_tick_poses(&mut self) {
+        self.kin_tick_poses.clear();
+        for (&eid, d) in &self.tick_carry {
+            let carry = floptle_core::math::DVec3::from_array(*d).length();
+            if carry <= 1e-9 {
+                continue;
+            }
+            let Some(e) = self.world.entity_with::<floptle_core::RigidBody>(eid) else { continue };
+            if self.world.get::<floptle_core::RigidBody>(e).is_none_or(|rb| rb.mode != floptle_core::BodyMode::Kinematic) {
+                continue;
+            }
+            let mut cur = e;
+            let mut free = true;
+            for _ in 0..64 {
+                let Some(floptle_core::Parent(p)) = self.world.get::<floptle_core::Parent>(cur).copied() else { break };
+                if self.world.get::<floptle_core::CelestialBody>(p).is_some()
+                    || self.world.get::<floptle_core::RigidBody>(p).is_some()
+                {
+                    free = false;
+                    break;
+                }
+                cur = p;
+            }
+            if free {
+                self.kin_tick_poses.push((e, floptle_core::world_transform(&self.world, e).translation, carry));
+            }
+        }
+    }
+
+    /// A kinematic body follows its node, and the world it stands on moves at
+    /// the start of each tick. A script that places the node in `update` or
+    /// `lateUpdate` places it in the world as it was before that move, so for
+    /// the whole tick the body stands one carry behind where the script meant
+    /// it: it blocks nothing there and raycasts at the node miss it. Which
+    /// place the script meant is the game's business, so the engine does not
+    /// move it; it says so, once a Play per body.
+    fn warn_kinematic_moved_between_ticks(&mut self) {
+        for (e, at, carry) in std::mem::take(&mut self.kin_tick_poses) {
+            if !self.world.is_alive(e)
+                || self.kin_between_ticks_warned.contains(&e.index())
+                || (floptle_core::world_transform(&self.world, e).translation - at).length_squared() <= 1e-12
+            {
+                continue;
+            }
+            self.kin_between_ticks_warned.insert(e.index());
+            let name = self
+                .world
+                .get::<floptle_core::Name>(e)
+                .map_or_else(|| format!("#{}", e.index()), |n| format!("\"{}\"", n.0));
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!(
+                    "Kinematic body {name} is on a moving world and was moved outside fixedUpdate. The world \
+                     moves at the start of each tick, so the body stands {carry:.2} m (one carry) behind where it was \
+                     placed: it blocks nothing there and raycasts at its node miss it. Move it in fixedUpdate, or \
+                     parent it to the world it stands on."
+                ),
+                None,
+            );
         }
     }
 
