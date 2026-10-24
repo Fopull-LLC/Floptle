@@ -124,6 +124,9 @@ impl Editor {
 
     /// Advance rails one gameplay tick. No-op unless Playing with celestial bodies.
     pub(crate) fn update_space_rails(&mut self, tick_dt: f64) {
+        // Filled below for whatever this tick carries; nothing moved, nothing
+        // carried.
+        self.tick_carry.clear();
         let cb: Vec<(Entity, CelestialBody)> = self
             .world
             .query::<CelestialBody>()
@@ -161,7 +164,7 @@ impl Editor {
             let soi = if b.soi > 0.0 {
                 b.soi
             } else if let Some(p) = parent {
-                System::auto_soi(b.a.abs(), b.mu, cb[p].1.mu, b.body_radius)
+                System::auto_soi(b.a.abs(), b.mu, cb[p].1.mu, b.body_radius, b.reach)
             } else {
                 f64::INFINITY
             };
@@ -282,6 +285,8 @@ impl Editor {
                     }
                 }
                 let Some((i, _)) = dom else { continue };
+                // `node.carry`: how far this tick moved the frame it rides in.
+                self.tick_carry.insert(eid, deltas[i].to_array());
                 let (mut vel, grounded) = states.get(&eid).copied().unwrap_or_default();
                 // frame convention: a dynamic body's sim velocity is measured
                 // in its dominant celestial's carried frame — the carry moves
@@ -476,6 +481,8 @@ impl Editor {
                     }
                 }
                 let Some((i, _)) = dom else { continue };
+                // `node.carry`: how far this tick moved the frame it rides in.
+                self.tick_carry.insert(eid, deltas[i].to_array());
                 let dom_key = cb[i].0;
                 let prev = self.space_frame.insert(eid, dom_key);
                 if let Some(p) = prev

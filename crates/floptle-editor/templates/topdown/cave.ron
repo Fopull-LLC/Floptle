@@ -77,7 +77,7 @@
             name: "Player",
             transform: (translation: (0.0, 1.2, 9.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
             matter: Primitive(shape: Capsule, color: (0.45, 0.72, 0.95)),
-            rigidbody: Some((capsule: true, radius: 0.5, height: 2.0, friction: 0.0, lock_rot: (true, true, true))),
+            rigidbody: Some((capsule: true, radius: 0.5, height: 2.0, friction: 0.0, lock_rot: (true, true, true), mass: 70.0)),
             tags: ["player"],
             scripts: [(kind: "topdownPlayer", params: [("speed", 5.0), ("faceTravel", 1.0)])],
         ),

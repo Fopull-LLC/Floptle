@@ -45,7 +45,8 @@ tumbles and lands on its faces. Its body replaces its static Collider.
 |---|---|
 | **shape** | Sphere, **Capsule** (capsules stand upright; best for characters), Box, **Polygon** (2D, below), or **Mesh**. A capsule collides along its whole length, and stands on its **feet**: the ground straight beneath its centre line, so a character's feet meet a slope, a crease or a bump where they are drawn. |
 | **Mesh** | The node's own geometry, read every Play, so an edit to the mesh is an edit to its collision. A Dynamic or Kinematic Mesh body collides as the mesh's **convex hull** (up to 20 corners; a box hulls to itself), which tumbles and rests on its faces. A Static one collides as the mesh's exact triangles. Scales and turns with the node. |
-| **radius / height** | Collision size, in world units. A Box's half-extents are the node's own, before its scale: scaling the node scales the box. |
+| **radius / height** | Collision size, in the node's own space like a Box's half-extents: scaling the node scales the body. A sphere under an uneven scale takes its largest axis; a capsule takes the larger of X and Z for its radius and Y for its height, so it covers what is drawn. The Inspector shows the size it collides at when the node is scaled; Lua reads it as `rb.worldRadius` / `rb.worldHeight`. **Fit to mesh** fits a sphere or capsule scaled unevenly as a Mesh instead. |
+| **mass / density** | How heavy it is, in kg, and the same thing per cubic metre: the mass is the density times the body's volume as it collides, and editing either sets the other. A fitted physics object starts at 500 kg/m³ (it floats half sunk; water is 1000), a fresh capsule, which is a character, at 70 kg. Mass decides who moves whom when two bodies meet, how hard a body is to spin, and whether it floats. |
 | **bounce** | Restitution (0 = no bounce) |
 | **friction** | 0 = ice, 1 = no sliding |
 | **affected by gravity** | Off = floats (still collides; a script can still move it) |
@@ -103,6 +104,19 @@ Turning or not, a box, polygon or mesh body starts at its node's full
 rotation, scale and pivot, so it collides exactly where it is drawn. One that
 does not turn keeps that angle.
 
+### Sizes that do not scale with the node
+
+Every body, collider, joint and gravity-volume size is in its node's space
+and scales with it. Three numbers are deliberately not, because they describe
+a physical or an agent's size rather than the node's geometry:
+
+- A **Celestial Body**'s `body_radius` and `soi` are the planet's real size
+  and reach, in world units, whatever the node that carries them is scaled to.
+- A **NavMesh**'s `agent_radius` is the size of the characters that walk it,
+  in world units, not a size of the navmesh node.
+- Lua `node.height` (a crouch or a stand height) is the live body's height in
+  world units, as the physics has it, not the authored `rb.height`.
+
 ### Netcode (rollback)
 
 The Inspector's collapsed **Netcode (rollback)** section holds **script owns
@@ -144,8 +158,9 @@ it is when play starts: a sign's hook, a pendulum's pivot.
 | **wheel** | A wheel on the other: free to turn, held at its mount along **axis** by a suspension. A **motor** drives it round. |
 | **target** | Pulled toward a point a script sets, for picking things up and carrying them. |
 
-- **anchor** is where on this node, in its own space. **other anchor** is where
-  on the other. Leave it at zero and the joint takes the point under this
+- **anchor** is where on this node, in its own space: it moves, turns and
+  scales with the node. **other anchor** is where on the other, the same way,
+  and **axis** is in the other node's space, so it turns with that node. Leave it at zero and the joint takes the point under this
   anchor when play starts, so a hinge or weld joins the two exactly where you
   placed them.
 - **stiffness** is in cycles a second: 1 is soft, 5 firm, 20 nearly rigid.
@@ -234,7 +249,7 @@ gravity volume is zero-g** — bodies float until you add one.
 | Mode | Effect |
 |---|---|
 | **Down** | Uniform gravity everywhere — a normal game world. `strength` = m/s². |
-| **Radial** | Pulls toward the node's center within `radius` — a spherical planet. The character re-orients its "up" to the surface and can run all the way around it. |
+| **Radial** | Pulls toward the node's center within `radius` (in the node's space: it reaches `radius` times the node's largest scale axis) — a spherical planet. The character re-orients its "up" to the surface and can run all the way around it. |
 
 Stack volumes for mixed worlds (a planet inside a region of down-gravity, etc.).
 Per-body, **affected by gravity** opts a single body out.

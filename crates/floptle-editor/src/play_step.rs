@@ -410,6 +410,9 @@ impl Editor {
         // Pausing freezes the clock and the frame delta scripts see, so
         // dt-driven motion stops too (not just `time`-driven motion).
         let sdt = if self.paused { 0.0 } else { dt };
+        // `node.carry` in `update`: the ticks run since the last one.
+        let carried = std::mem::take(&mut self.frame_carry);
+        self.script_host.set_carry(carried);
         self.play_t += sdt;
         // Direct field access (not the `scripts_dir()` method) so we don't take
         // a whole-`self` borrow while gpu/egui are mutably borrowed here.
@@ -778,6 +781,18 @@ impl Editor {
         self.drain_script_terrain_ops();
     }
 
+    /// Hand this tick's carry to `fixedUpdate` (`node.carry`), and add it to
+    /// what the frame passes will read.
+    fn publish_tick_carry(&mut self) {
+        for (eid, d) in &self.tick_carry {
+            let f = self.frame_carry.entry(*eid).or_insert([0.0; 3]);
+            for (a, b) in f.iter_mut().zip(d) {
+                *a += b;
+            }
+        }
+        self.script_host.set_carry(self.tick_carry.clone());
+    }
+
     /// Water on a world moving on its rails, rebuilt where this tick's rails
     /// put it, as gravity is. Built once a frame before the ticks, a lake
     /// stayed where its planet had been while the planet moved on a tick at
@@ -903,6 +918,7 @@ impl Editor {
                 // terrain collider anchors + gravity centers + the space.*
                 // snapshot all reflect this tick before scripts and physics.
                 self.update_space_rails(self.game_tick.step as f64);
+                self.publish_tick_carry();
                 self.water_rides_its_rails();
                 // Per-tick input: consume the tick accumulators (edges bank between
                 // ticks so a between-tick press is never lost). Neutral when the
@@ -1239,6 +1255,8 @@ impl Editor {
     /// `lateUpdate`: the camera pass after physics, then the immediate-mode
     /// draw and gizmo queues.
     fn late_pass(&mut self, sdt: f32, frame_input: floptle_script::InputSnapshot) {
+        // `node.carry` in `lateUpdate`: this frame's ticks.
+        self.script_host.set_carry(self.frame_carry.clone());
         // `lateUpdate` — the camera pass: after physics and the interpolated
         // writeback, so followers sample this frame's final poses. (A camera
         // positioned in `update` reads last frame's pose — a follow error of

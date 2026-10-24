@@ -147,10 +147,10 @@ fn a_cube_given_a_rigidbody_is_a_crate_its_size() {
     assert!((wt.translation.y as f32 - 0.35).abs() < 0.03, "resting at {}", wt.translation.y);
 }
 
-/// Fit to mesh is what Add gave, and an edit to the mesh shows as a body
-/// that no longer matches.
+/// A sphere's fit is in the node's space: rescaled evenly it still fits,
+/// because the sim scales it; squashed, it is no sphere and no longer does.
 #[test]
-fn a_rescaled_sphere_no_longer_matches_its_fit() {
+fn a_sphere_fit_follows_an_even_rescale_and_not_a_squash() {
     let ed = crate::Editor::default();
     let mut w = floptle_core::World::default();
     let e = w.spawn();
@@ -158,6 +158,68 @@ fn a_rescaled_sphere_no_longer_matches_its_fit() {
     w.insert(e, Matter::Primitive { shape: floptle_core::Shape::Sphere, color: [1.0; 3] });
     let shape = crate::body_fit::node_shape(&w, &ed.maps, &ed.project_root, e).unwrap();
     let rb = crate::body_fit::fit_to(&shape, Vec3::splat(2.0), &RigidBody::default());
-    assert!(crate::body_fit::matches_fit(&rb, &crate::body_fit::fit_to(&shape, Vec3::splat(2.0), &rb)));
-    assert!(!crate::body_fit::matches_fit(&rb, &crate::body_fit::fit_to(&shape, Vec3::splat(3.0), &rb)));
+    assert!(crate::body_fit::matches_fit(&rb, &crate::body_fit::fit_to(&shape, Vec3::splat(3.0), &rb)));
+    assert!(!crate::body_fit::matches_fit(&rb, &crate::body_fit::fit_to(&shape, Vec3::new(3.0, 1.0, 3.0), &rb)));
+}
+
+/// A scaled sphere and a scaled capsule given a Rigidbody come to rest the
+/// size they are drawn: the ball's centre a scaled radius up, the capsule's
+/// a scaled half-height up.
+#[test]
+fn scaled_round_bodies_rest_the_size_they_are_drawn() {
+    for (shape, scale, rest) in [
+        (floptle_core::Shape::Sphere, Vec3::splat(2.0), 0.85 * 2.0),
+        (floptle_core::Shape::Capsule, Vec3::new(0.5, 1.5, 0.5), 1.5),
+    ] {
+        let mut ed = level(6.0, false);
+        let e = ed.world.spawn();
+        ed.world.insert(e, Transform { translation: DVec3::new(0.0, 4.0, 0.0), rotation: Quat::IDENTITY, scale });
+        ed.world.insert(e, Matter::Primitive { shape, color: [1.0; 3] });
+        let mut rb = ed.default_body_for(e);
+        rb.rotates = false;
+        ed.world.insert(e, rb);
+        ed.toggle_play();
+        for _ in 0..240 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        let y = floptle_core::world_transform(&ed.world, e).translation.y as f32;
+        assert!((y - rest).abs() < 0.04, "{shape:?} at {scale:?}: resting at {y:.3}, drawn bottom wants {rest:.3}");
+    }
+}
+
+/// A radial gravity volume's reach scales with its node, by its largest
+/// axis: radius 10 at scale 2 pulls a body 15 out and not one 25 out.
+#[test]
+fn a_gravity_volume_reaches_as_far_as_it_is_scaled() {
+    let mut w = floptle_core::World::default();
+    let e = w.spawn();
+    w.insert(e, Transform { translation: DVec3::ZERO, rotation: Quat::IDENTITY, scale: Vec3::new(1.0, 2.0, 1.0) });
+    w.insert(e, Matter::GravityVolume { mode: floptle_core::GravityMode::Radial, strength: 9.81, radius: 10.0 });
+    let field = crate::Editor::build_gravity_field(&w, DVec3::ZERO);
+    let pull = |x: f32| field.accel_at(Vec3::new(x, 0.0, 0.0), &[]).length();
+    assert!(pull(15.0) > 9.0, "inside the scaled reach: {}", pull(15.0));
+    assert_eq!(pull(25.0), 0.0, "past the scaled reach");
+}
+
+/// A fitted object weighs its volume at 500 kg a cubic metre, so the
+/// Inspector's density reads 500 for it; a fresh capsule, a character,
+/// weighs 70 kg whatever its size.
+#[test]
+fn fitted_objects_weigh_their_volume_and_characters_a_person() {
+    let mut ed = level(6.0, false);
+    let cube = ed.world.spawn();
+    ed.world.insert(cube, Transform { translation: DVec3::ZERO, rotation: Quat::IDENTITY, scale: Vec3::new(1.0, 2.0, 0.5) });
+    ed.world.insert(cube, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [1.0; 3] });
+    let rb = ed.default_body_for(cube);
+    let scale = Vec3::new(1.0, 2.0, 0.5);
+    let volume = crate::body_fit::body_volume(&rb, scale, None);
+    assert!((volume - 1.4f32.powi(3)).abs() < 1e-3, "volume {volume}");
+    assert!((rb.mass / volume - crate::body_fit::FIT_DENSITY).abs() < 1e-2, "density {}", rb.mass / volume);
+    let pill = ed.world.spawn();
+    ed.world.insert(pill, Transform { translation: DVec3::ZERO, rotation: Quat::IDENTITY, scale: Vec3::splat(3.0) });
+    ed.world.insert(pill, Matter::Primitive { shape: floptle_core::Shape::Capsule, color: [1.0; 3] });
+    let rb = ed.default_body_for(pill);
+    assert_eq!(rb.kind, BodyKind::Capsule);
+    assert_eq!(rb.mass, crate::scene_ops::CHARACTER_MASS);
+    assert!(!rb.rotates);
 }

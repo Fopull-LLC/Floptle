@@ -292,9 +292,11 @@ impl System {
     /// landed on it was ever in its frame: the rock sailed on along its orbit
     /// and left the drone standing on it behind. Inside the floor, what is on
     /// it rides it, the way a moon carries what stands on a moon.
-    pub fn auto_soi(a: f64, mu: f64, parent_mu: f64, body_radius: f64) -> f64 {
+    /// `reach` is the body's own setting (`CelestialBody::reach`, defaulting
+    /// to [`SMALL_BODY_REACH`]).
+    pub fn auto_soi(a: f64, mu: f64, parent_mu: f64, body_radius: f64, reach: f64) -> f64 {
         let laplace = if mu > 0.0 && parent_mu > 0.0 { Self::soi_radius(a, mu, parent_mu) } else { 0.0 };
-        laplace.max(body_radius.max(0.0) * SMALL_BODY_REACH)
+        laplace.max(body_radius.max(0.0) * reach.max(0.0))
     }
 }
 

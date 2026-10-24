@@ -60,7 +60,7 @@
             matter: Primitive(shape: Sphere, color: (0.98, 0.82, 0.25)),
             // Rotation frozen: the script sets the pitch for looks, and a
             // tumbling ball would fight it every tick.
-            rigidbody: Some((radius: 0.45, restitution: 0.0, friction: 0.0, lock_rot: (true, true, true))),
+            rigidbody: Some((radius: 0.9, restitution: 0.0, friction: 0.0, lock_rot: (true, true, true))),
             scripts: [(kind: "flappyBird", params: [("flap", 6.0), ("tilt", 1.0)])],
         ),
         (

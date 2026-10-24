@@ -753,6 +753,11 @@ pub struct CelestialBody {
     /// behind it — the far side of a planet stops costing draw calls. 0 = off.
     /// Conservative by contract: set it below anything diggable/carvable.
     pub occluder_radius: f64,
+    /// The least its sphere of influence reaches when `soi` is left at 0, in
+    /// its own radii (see [`crate::frames::System::auto_soi`]). What stands
+    /// within it rides it as it orbits: a small rock's Laplace sphere lies
+    /// inside its own ground, so this is what lets anything land on one.
+    pub reach: f64,
 }
 
 impl Default for CelestialBody {
@@ -780,6 +785,7 @@ impl Default for CelestialBody {
             luminosity: 0.0,
             star_color: [1.0, 0.97, 0.9],
             occluder_radius: 0.0,
+            reach: crate::frames::SMALL_BODY_REACH,
         }
     }
 }
@@ -792,8 +798,11 @@ pub struct RigidBody {
     pub kind: BodyKind,
     /// Dynamic (simulated) / Kinematic (transform-driven) / Static (baked).
     pub mode: BodyMode,
+    /// Sphere / capsule radius, in the node's space: the body is this times
+    /// the node's scale (see [`Self::world_radius`]).
     pub radius: f32,
-    /// Total capsule height (ignored for a sphere).
+    /// Total capsule height (ignored for a sphere), in the node's space along
+    /// its Y (see [`Self::world_height`]).
     pub height: f32,
     /// Half-extents for a `Box` body (ignored for sphere/capsule).
     pub half_extents: [f32; 3],
@@ -902,6 +911,30 @@ impl Default for RigidBody {
 }
 
 impl RigidBody {
+    /// The sphere's or capsule's radius the sim collides with, for a node of
+    /// world scale `scale`: `radius` is in the node's space, like a box's
+    /// half-extents, so scaling the node scales the body.
+    ///
+    /// A round shape under an uneven scale is an ellipsoid, which no sphere
+    /// matches, so it takes the largest axis that bears on it: all three for
+    /// a sphere, the two across a capsule (X and Z) for a capsule, whose
+    /// length takes Y. Covering the drawn shape rather than cutting into it.
+    pub fn world_radius(&self, scale: crate::math::Vec3) -> f32 {
+        let s = scale.abs();
+        let k = match self.kind {
+            BodyKind::Capsule => s.x.max(s.z),
+            _ => s.max_element(),
+        };
+        (self.radius * k).max(0.01)
+    }
+
+    /// The capsule's total height the sim collides with, for a node of world
+    /// scale `scale`: `height` along the node's Y, never less than the
+    /// capsule's own width (see [`Self::world_radius`]).
+    pub fn world_height(&self, scale: crate::math::Vec3) -> f32 {
+        (self.height * scale.y.abs()).max(2.0 * self.world_radius(scale))
+    }
+
     /// The translation freezes the solver actually runs with.
     ///
     /// A derived answer rather than a field the editor writes, because the two
@@ -1001,6 +1034,14 @@ pub struct NavMeshExclude;
 /// the payload stays an opaque string here (core doesn't know `PlanetFill`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TerrainGen(pub String);
+
+/// The planet generator's current version: what a spec made today is stamped
+/// with, so ground generated from it stays as it is when a later engine
+/// changes how a planet is made. Each change to the generator's output takes
+/// the next number and is keyed on it (`floptle_field::procgen`), and an older
+/// spec keeps the rules it was made under. It lives here, not with the
+/// generator, because a project's own setting names it too.
+pub const TERRAIN_GENERATOR: u32 = 3;
 
 /// Makes a [`Collidable`] node's static collider a **trigger**: bodies pass
 /// straight through it (no blocking, no push-out), but overlap still fires the

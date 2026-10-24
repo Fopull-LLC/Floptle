@@ -82,6 +82,7 @@ pub const TABLES: &[OptTable] = &[
     OptTable { call: "steam.findLobbies", keys: crate::steam_api::LOBBY_FIND_KEYS },
     OptTable { call: "steam.timelineEvent", keys: crate::steam_api::TIMELINE_EVENT_KEYS },
     OptTable { call: "space.beltOrbits", keys: crate::space_api::BELT_KEYS },
+    OptTable { call: "space.belt", keys: crate::space_api::BELT_SPAWN_KEYS },
 ];
 
 /// Refuse an options table containing anything the engine does not read.
@@ -368,6 +369,7 @@ mod tests {
         match call {
             "scatter.create" => "scatter.create{ asset = 'a.glb', nonesuch = 1 }",
             "space.beltOrbits" => "space.beltOrbits{ count = 1, aMin = 10, aMax = 20, nonesuch = 1 }",
+            "space.belt" => "space.belt{ parent = 'Sun', count = 1, aMin = 10, aMax = 20, nonesuch = 1 }",
             "node:setCamera" => "node:setCamera{ nonesuch = 1 }",
             "node:setParent" => "node:setParent(nil, { nonesuch = 1 })",
             "node:setMaterial" => "node:setMaterial{ nonesuch = 1 }",

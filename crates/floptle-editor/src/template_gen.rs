@@ -280,7 +280,7 @@ fn regenerate_platformer2d() {
     );
     w.insert(
         p,
-        RigidBody { kind: BodyKind::Box, two_d: true, half_extents: [0.4, 0.5, 0.5], friction: 0.0, ..Default::default() },
+        RigidBody { kind: BodyKind::Box, two_d: true, half_extents: [0.4, 0.5, 0.5], friction: 0.0, mass: crate::scene_ops::CHARACTER_MASS, ..Default::default() },
     );
     w.insert(
         p,

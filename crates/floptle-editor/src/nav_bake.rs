@@ -335,13 +335,13 @@ fn push_body(
             push_box(out, centre, h, rot);
         }
         floptle_core::BodyKind::Sphere => {
-            push_sphere(out, centre, rb.radius * scale.max_element());
+            push_sphere(out, centre, rb.world_radius(scale));
         }
         // As the box it stands in, for the reason the capsule primitive below
         // gives: round ends are not walkable at any slope worth walking.
         floptle_core::BodyKind::Capsule => {
-            let r = rb.radius * scale.x.max(scale.z);
-            push_box(out, centre, Vec3::new(r, 0.5 * rb.height * scale.y + r, r), rot);
+            let r = rb.world_radius(scale);
+            push_box(out, centre, Vec3::new(r, 0.5 * rb.world_height(scale), r), rot);
         }
         // As the box around its outline: a 2D body's navmesh is a floor plan,
         // and the outline has no top to walk on that the box lacks.

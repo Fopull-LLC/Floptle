@@ -51,6 +51,8 @@ pub struct AssemblyInfo {
     /// a `fixedUpdate` in a frame of several ticks read it a tick or more
     /// behind.
     pub rot: [f32; 4],
+    /// How far the frame the craft rides in moved this tick (`node.carry`).
+    pub carry: [f64; 3],
 }
 
 /// One part's contact load over the last physics tick, refreshed by the editor
@@ -422,6 +424,7 @@ pub(crate) fn install_assembly_api(
             out.set("right", axis(glam::Vec3::X)?)?;
             out.set("up", axis(glam::Vec3::Y)?)?;
             out.set("forward", axis(glam::Vec3::NEG_Z)?)?;
+            out.set("carry", vec3_table(lua, i.carry)?)?;
             let parts = lua.create_table()?;
             for (k, p) in i.parts.iter().enumerate() {
                 parts.set(k + 1, *p)?;

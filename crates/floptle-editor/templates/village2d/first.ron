@@ -574,6 +574,7 @@
                 unlit: true,
                 ambient: 1.0,
                 alpha: 1.0,
+                blend: Some(Cutout),
             )),
             collidable: true,
             id: Some(3),
@@ -606,6 +607,7 @@
                 alpha: 1.0,
                 sheet_cols: 1,
                 sheet_rows: 1,
+                blend: Some(Cutout),
             )),
             id: Some(4),
             tags: [
@@ -641,6 +643,7 @@
                 alpha: 1.0,
                 sheet_cols: 2,
                 sheet_rows: 1,
+                blend: Some(Cutout),
             )),
             id: Some(5),
             tags: [
@@ -686,6 +689,7 @@
                 alpha: 1.0,
                 sheet_cols: 6,
                 sheet_rows: 1,
+                blend: Some(Cutout),
             )),
             rigidbody: Some((
                 capsule: false,
@@ -699,6 +703,7 @@
                 lock_pos: (false, false, false),
                 two_d: true,
                 lock_rot: (false, false, false),
+                mass: 70.0,
             )),
             id: Some(6),
         ),

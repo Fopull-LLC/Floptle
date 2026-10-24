@@ -830,6 +830,62 @@ end
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The rock's reach is its own: at 2 radii the ball 15 m off a 10 m rock
+/// rides it, at 1 radius (its ground) it is left behind.
+fn ball_left_behind_by_a_rock(reach: f64) -> f64 {
+    let (mut ed, dir) = project(
+        &format!("rockreach{reach}"),
+        r#"
+local step = 0
+function update(node, dt)
+  step = step + 1
+  local ball, rock = find("Ball"), find("Rock")
+  if not (ball and rock) then return end
+  if step == 10 or step == 70 then
+    log(string.format("REL %.3f %.3f %.3f %.2f %.2f %.2f", ball.x - rock.x, ball.y - rock.y, ball.z - rock.z, rock.x, rock.y, rock.z))
+  end
+end
+"#,
+    );
+    let star = ed.world.query::<Name>().find(|(_, n)| n.0 == "Star").map(|(e, _)| e).unwrap();
+    ed.world.get_mut::<CelestialBody>(star).unwrap().mu = 1.0e7;
+    let rock = ed.world.spawn();
+    ed.world.insert(rock, Transform::IDENTITY);
+    ed.world.insert(rock, Name("Rock".into()));
+    ed.world.insert(rock, Matter::Empty);
+    ed.world.insert(rock, CelestialBody { mu: 0.0, body_radius: 10.0, parent: "Star".into(), a: 1000.0, reach, ..Default::default() });
+    let ball = ed.world.spawn();
+    ed.world.insert(ball, Transform::IDENTITY);
+    ed.world.insert(ball, Name("Ball".into()));
+    ed.world.insert(ball, Matter::Empty);
+    ed.world.insert(ball, RigidBody { gravity: false, radius: 0.5, ..Default::default() });
+    ed.toggle_play();
+    run(&mut ed, 1);
+    let p = floptle_core::world_transform(&ed.world, rock).translation;
+    ed.toggle_play();
+    ed.world.get_mut::<Transform>(rock).unwrap().translation = p;
+    ed.world.get_mut::<Transform>(ball).unwrap().translation = p + DVec3::new(0.0, 15.0, 0.0);
+    let cam = ed.world.query::<Name>().find(|(_, n)| n.0 == "Camera").map(|(e, _)| e).unwrap();
+    ed.world.get_mut::<Transform>(cam).unwrap().translation = p + DVec3::new(0.0, 0.0, 40.0);
+    ed.toggle_play();
+    run(&mut ed, 80);
+    let rel = lines(&mut ed, "REL");
+    assert_eq!(rel.len(), 2, "{rel:?}");
+    let num = |l: &str| -> Vec<f64> { l.split(' ').map(|v| v.parse().unwrap()).collect() };
+    let (a, b) = (num(&rel[0]), num(&rel[1]));
+    let moved = ((a[3] - b[3]).powi(2) + (a[4] - b[4]).powi(2) + (a[5] - b[5]).powi(2)).sqrt();
+    let d = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+    assert!(moved > 50.0, "the rock should have moved on its orbit: {rel:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+    d
+}
+
+#[test]
+fn a_rocks_reach_is_set_per_body() {
+    assert!(ball_left_behind_by_a_rock(2.0) < 0.5, "a reach of 2 radii should carry a ball 1.5 radii out");
+    assert!(ball_left_behind_by_a_rock(1.0) > 50.0, "a reach of 1 radius should leave a ball 1.5 radii out behind");
+}
+
 /// A craft a script teleports is where it was sent from the next tick on,
 /// as its node reads it: within one frame of several ticks, a tick after
 /// the teleport reads the new place, not the old one. A landing claw that
@@ -1288,4 +1344,247 @@ end
     // The pad's top is 50 from the centre and the part a unit box.
     assert!((last - 50.5).abs() < 0.3, "the debris is {last} from the planet's centre, not landed on the pad: {h:?}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A kinematic tyre a script keeps on its mount on a planet moving at
+/// 280 m/s, across floating-origin recentres. With `node.carry` added to the
+/// place it keeps, the tyre stays on the mount; without it, it falls behind
+/// by exactly the carry.
+fn tyre_offset_after(use_carry: bool) -> (f64, f64) {
+    let script = format!(
+        r#"
+local n, pos, carried, off = 0, nil, vec3(0, 0, 0), vec3(0, 0, 0)
+function fixedUpdate(node, dt)
+  n = n + 1
+  local tyre, mount, p = find("Tyre"), find("Mount"), find("Planet")
+  if not (tyre and mount and p) then return end
+  -- The mount's place this tick is after this tick's carry.
+  if n == 5 then pos = mount.tickPos + vec3(2, 0, 0) return end
+  if pos then
+    local c = tyre.carry
+    -- What the frame they share carried, as the mount reads it.
+    carried = carried + mount.carry
+    if {use} then pos = pos + c end
+    tyre.pos = pos
+    if n % 30 == 0 then
+      local d = tyre.tickPos - mount.tickPos - vec3(2, 0, 0)
+      log(string.format("OFF %.4f %.4f %d", d:length(), carried:length(), n))
+    end
+  end
+end
+"#,
+        use = use_carry
+    );
+    let (mut ed, dir) = project(if use_carry { "carryon" } else { "carryoff" }, &script);
+    let star = ed.world.query::<Name>().find(|(_, n)| n.0 == "Star").map(|(e, _)| e).unwrap();
+    // 280 m/s on its rails: v = sqrt(mu / a).
+    ed.world.get_mut::<CelestialBody>(star).unwrap().mu = 280.0f64 * 280.0 * 1000.0;
+    let planet = ed.world.spawn();
+    ed.world.insert(planet, Transform::IDENTITY);
+    ed.world.insert(planet, Name("Planet".into()));
+    ed.world.insert(planet, Matter::Empty);
+    ed.world.insert(planet, CelestialBody { mu: 0.0, body_radius: 5.0, soi: 500.0, parent: "Star".into(), a: 1000.0, ..Default::default() });
+    for (name, kinematic) in [("Mount", false), ("Tyre", true)] {
+        let e = ed.world.spawn();
+        ed.world.insert(e, Transform::IDENTITY);
+        ed.world.insert(e, Name(name.into()));
+        ed.world.insert(e, Matter::Empty);
+        let mode = if kinematic { floptle_core::BodyMode::Kinematic } else { floptle_core::BodyMode::Dynamic };
+        ed.world.insert(e, RigidBody { mode, gravity: false, radius: 0.3, ..Default::default() });
+    }
+    ed.toggle_play();
+    run(&mut ed, 1);
+    let p = floptle_core::world_transform(&ed.world, planet).translation;
+    ed.toggle_play();
+    ed.world.get_mut::<Transform>(planet).unwrap().translation = p;
+    for (name, off) in [("Mount", 20.0), ("Tyre", 22.0)] {
+        let e = ed.world.query::<Name>().find(|(_, n)| n.0 == name).map(|(e, _)| e).unwrap();
+        ed.world.get_mut::<Transform>(e).unwrap().translation = p + DVec3::new(off, 0.0, 0.0);
+    }
+    // The camera rides the planet, so the sim keeps recentring on it.
+    let cam = ed.world.query::<Name>().find(|(_, n)| n.0 == "Camera").map(|(e, _)| e).unwrap();
+    ed.world.insert(cam, floptle_core::Parent(planet));
+    ed.world.get_mut::<Transform>(cam).unwrap().translation = DVec3::new(20.0, 2.0, 10.0);
+    ed.toggle_play();
+    // Recentring every half kilometre: several over the run.
+    ed.sim.as_mut().unwrap().set_origin_threshold(500.0);
+    let origin0 = ed.sim.as_ref().unwrap().world.origin;
+    run(&mut ed, 600);
+    let recentred = ed.sim.as_ref().unwrap().world.origin != origin0;
+    assert!(recentred, "the sim never recentred, so this test says nothing about recentres");
+    let off = lines(&mut ed, "OFF");
+    let last: Vec<f64> = off.last().unwrap().split(' ').take(2).map(|v| v.parse().unwrap()).collect();
+    let _ = std::fs::remove_dir_all(&dir);
+    (last[0], last[1])
+}
+
+#[test]
+fn node_carry_keeps_a_script_positioned_tyre_on_its_mount() {
+    let (with, carried) = tyre_offset_after(true);
+    assert!(carried > 100.0, "the planet should have carried the pair a long way: {carried} m");
+    assert!(with < 0.01, "adding node.carry, the tyre is {with} m off its mount");
+    let (without, carried) = tyre_offset_after(false);
+    assert!((without - carried).abs() < 0.01, "without it the tyre should fall behind by the carry, {carried} m; it is {without} m off");
+}
+
+/// `node.carry` in `update` is what the ticks since the last `update`
+/// carried, and `assembly.info(id).carry` is a craft's for this tick.
+#[test]
+fn node_carry_in_update_sums_the_frames_ticks() {
+    let (mut ed, dir) = project(
+        "carryframe",
+        r#"
+local ticks, n, ship = vec3(0, 0, 0), 0, nil
+function fixedUpdate(node, dt)
+  n = n + 1
+  local b = find("Ball")
+  if b then ticks = ticks + b.carry end
+  local p = find("Planet")
+  if n == 2 and p then
+    spawn("Vessel", vec3(p.x, p.y + 10, p.z), function(v)
+      spawn("Part", vec3(p.x, p.y + 10, p.z), function(q) assembly.rebuild(v, function(s) ship = s end) end, v)
+    end)
+  end
+  if ship and n % 7 == 0 then
+    local i = assembly.info(ship)
+    log(string.format("SHIP %.4f %.4f %d", i.carry.x - b.carry.x, math.sqrt(i.carry.x ^ 2 + i.carry.y ^ 2 + i.carry.z ^ 2), n))
+  end
+end
+function update(node, dt)
+  local b = find("Ball")
+  if b and n > 10 then
+    log(string.format("FRAME %.4f %.4f %d", (b.carry - ticks):length(), b.carry:length(), n))
+  end
+  ticks = vec3(0, 0, 0)
+end
+"#,
+    );
+    let star = ed.world.query::<Name>().find(|(_, n)| n.0 == "Star").map(|(e, _)| e).unwrap();
+    ed.world.get_mut::<CelestialBody>(star).unwrap().mu = 1.0e7;
+    let planet = ed.world.spawn();
+    ed.world.insert(planet, Transform::IDENTITY);
+    ed.world.insert(planet, Name("Planet".into()));
+    ed.world.insert(planet, Matter::Empty);
+    ed.world.insert(planet, CelestialBody { mu: 0.0, body_radius: 5.0, soi: 500.0, parent: "Star".into(), a: 1000.0, ..Default::default() });
+    let ball = ed.world.spawn();
+    ed.world.insert(ball, Transform::IDENTITY);
+    ed.world.insert(ball, Name("Ball".into()));
+    ed.world.insert(ball, Matter::Empty);
+    ed.world.insert(ball, RigidBody { gravity: false, radius: 0.3, ..Default::default() });
+    ed.toggle_play();
+    run(&mut ed, 1);
+    let p = floptle_core::world_transform(&ed.world, planet).translation;
+    ed.toggle_play();
+    ed.world.get_mut::<Transform>(planet).unwrap().translation = p;
+    ed.world.get_mut::<Transform>(ball).unwrap().translation = p + DVec3::new(0.0, 20.0, 0.0);
+    let cam = ed.world.query::<Name>().find(|(_, n)| n.0 == "Camera").map(|(e, _)| e).unwrap();
+    ed.world.get_mut::<Transform>(cam).unwrap().translation = p + DVec3::new(0.0, 0.0, 30.0);
+    ed.toggle_play();
+    for _ in 0..20 {
+        ed.play_step(3.0 / 60.0, true);
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+    }
+    let frames = lines(&mut ed, "FRAME");
+    assert!(frames.len() > 10, "{frames:?}");
+    for l in &frames {
+        let v: Vec<f64> = l.split(' ').take(2).map(|x| x.parse().unwrap()).collect();
+        assert!(v[0] < 1e-6 && v[1] > 1.0, "update's carry is not the frame's ticks: {frames:?}");
+    }
+    let ship = lines(&mut ed, "SHIP");
+    assert!(!ship.is_empty(), "{ship:?}");
+    for l in &ship {
+        let v: Vec<f64> = l.split(' ').take(2).map(|x| x.parse().unwrap()).collect();
+        assert!(v[0].abs() < 1e-6 && v[1] > 0.1, "the craft's carry is not its frame's: {ship:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `space.belt` makes its rocks: named, each a celestial on its row's orbit
+/// about the parent, on the rails from the next tick, and the same rocks
+/// from the same seed.
+#[test]
+fn a_belt_makes_named_rocks_on_their_orbits() {
+    let (mut ed, dir) = project(
+        "belt",
+        r#"
+local n, made = 0, 0
+function update(node, dt)
+  n = n + 1
+  if n == 2 then
+    space.belt{ parent = "Star", count = 20, seed = 3, aMin = 900, aMax = 1100, radiusMin = 2, radiusMax = 6,
+      made = function(rock, i, row) made = made + 1 end }
+  end
+  if n == 30 then
+    local s = find("Star")
+    for i = 1, 20 do
+      local r = find("Rock " .. i)
+      if not r then log("MISSING " .. i) else
+        local c = r:getcomponent("CelestialBody")
+        local d = math.sqrt((r.x - s.x) ^ 2 + (r.y - s.y) ^ 2 + (r.z - s.z) ^ 2)
+        log(string.format("ROCK %d %.3f %.3f %.3f", i, c.a, c.bodyRadius, d))
+      end
+    end
+    log("MADE " .. made)
+  end
+end
+"#,
+    );
+    ed.toggle_play();
+    run(&mut ed, 32);
+    assert!(lines(&mut ed, "MISSING").is_empty(), "rocks went missing");
+    assert_eq!(lines(&mut ed, "MADE"), vec!["20".to_string()]);
+    let rocks = lines(&mut ed, "ROCK");
+    assert_eq!(rocks.len(), 20, "{rocks:?}");
+    let rows = floptle_script::belt_orbits(20, 3, (900.0, 1100.0), 0.05, 0.05, (2.0, 6.0));
+    for (k, l) in rocks.iter().enumerate() {
+        let v: Vec<f64> = l.split(' ').skip(1).map(|x| x.parse().unwrap()).collect();
+        assert!((v[0] - rows[k][0]).abs() < 1e-3 && (v[1] - rows[k][6]).abs() < 1e-3, "rock {k} is not its seed's row: {l}");
+        // On its orbit about the star: within the orbit's eccentricity of a.
+        assert!(v[2] > v[0] * 0.94 && v[2] < v[0] * 1.06, "rock {k} is {} from the star on an orbit of {}", v[2], v[0]);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A belt with a `shape` gives every rock ground of its own: an irregular
+/// small body, made from the belt's seed when something comes near.** Each
+/// rock is a terrain with its own id and a recipe naming its shape; "mixed"
+/// deals all three shapes out across the belt; and the same seed deals them
+/// the same way.
+#[test]
+fn a_belt_with_a_shape_gives_each_rock_its_ground() {
+    use floptle_field::procgen::{PlanetFill, SmallBodyShape};
+    let script = r#"
+local n = 0
+function update(node, dt)
+  n = n + 1
+  if n == 2 then
+    space.belt{ parent = "Star", count = 12, seed = 4, aMin = 900, aMax = 1100, radiusMin = 4, radiusMax = 8,
+      shape = "mixed", terrainId = 500 }
+  end
+end
+"#;
+    let dealt = || {
+        let (mut ed, dir) = project("beltshape", script);
+        ed.toggle_play();
+        run(&mut ed, 6);
+        let mut rocks: Vec<(u32, SmallBodyShape, f32)> = ed
+            .world
+            .query::<floptle_core::TerrainGen>()
+            .filter_map(|(e, g)| {
+                let Some(floptle_core::Matter::Terrain { id, .. }) = ed.world.get::<floptle_core::Matter>(e) else { return None };
+                let fill: PlanetFill = ron::from_str(&g.0).ok()?;
+                Some((*id, fill.small_body?.shape, fill.radius))
+            })
+            .collect();
+        rocks.sort_by_key(|r| r.0);
+        let _ = std::fs::remove_dir_all(&dir);
+        rocks
+    };
+    let rocks = dealt();
+    assert_eq!(rocks.iter().map(|r| r.0).collect::<Vec<_>>(), (500..512).collect::<Vec<u32>>(), "{rocks:?}");
+    for shape in [SmallBodyShape::Potato, SmallBodyShape::ContactBinary, SmallBodyShape::Rubble] {
+        assert!(rocks.iter().any(|r| r.1 == shape), "no {shape:?} in a mixed belt: {rocks:?}");
+    }
+    assert!(rocks.iter().all(|r| (4.0..=8.0).contains(&r.2)), "a rock is not its row's size: {rocks:?}");
+    assert_eq!(rocks, dealt(), "the same seed dealt the shapes another way");
 }

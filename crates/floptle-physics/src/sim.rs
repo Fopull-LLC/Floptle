@@ -383,7 +383,6 @@ impl Sim {
     /// body. Called once the bodies exist, and again when a body is added at
     /// runtime; a joint that has already broken stays broken.
     pub fn build_joints(&mut self, ecs: &World) {
-        use crate::joints::Link;
         use floptle_core::joint::JointKind;
         let broken: Vec<u32> = self.world.joints.iter().filter(|j| j.broken).map(|j| j.owner).collect();
         let joined: Vec<(u32, u32)> = self
@@ -466,7 +465,7 @@ impl Sim {
                 (Some(_), _) => Vec3::ZERO,
                 (None, Some(o)) => {
                     let t = world_transform(ecs, o);
-                    (t.translation - origin).as_vec3() + t.rotation * anchor_b
+                    (t.translation - origin).as_vec3() + t.rotation * (anchor_b * t.scale)
                 }
                 (None, None) => pa,
             };
@@ -478,10 +477,11 @@ impl Sim {
                 None => world,
             };
             let qb = b.map_or(Quat::IDENTITY, |bl| self.link_pose(bl).1);
-            // The axis is in the other node's space; a compound end needs it
-            // in the compound's frame.
+            // The axis is in the other node's space, so it turns with that
+            // node, and then into the other end's own frame: a compound's,
+            // or a body's that does not turn the way its node is turned.
             let mut axis = Vec3::from(jc.axis).normalize_or(Vec3::Z);
-            if let (Some(Link::Compound(_)), Some(o)) = (b, other) {
+            if let Some(o) = other {
                 axis = (qb.inverse() * (world_transform(ecs, o).rotation * axis)).normalize_or(Vec3::Z);
             }
             let angular = jc.kind.turns();
@@ -709,9 +709,10 @@ impl Sim {
         }
     }
 
-    /// An anchor given in node `e`'s own space, in link `l`'s frame. A body's
-    /// frame is its node's; a compound's is its centre of mass and turn, so
-    /// the point goes through the node's pose (its scale included).
+    /// An anchor given in node `e`'s own space, in link `l`'s frame. Either
+    /// way the point goes through the node's scale and turn first: a body's
+    /// frame is its own turn, which is not its node's for one that does not
+    /// turn, and a compound's is its centre of mass and turn.
     ///
     /// For a compound the point is taken against the assembly's root node,
     /// both read from the nodes, and only then into the compound's frame:
@@ -722,7 +723,13 @@ impl Sim {
     /// its chassis half a metre from where the script asked for it.
     fn anchor_in(&self, l: crate::joints::Link, ecs: &World, e: Entity, local: Vec3) -> Vec3 {
         match l {
-            crate::joints::Link::Body(_) => local,
+            // In the node's space, so scaled and turned with the node, and
+            // then into the body's frame: a body that does not turn, or one
+            // whose shape has no corners, need not be turned like its node.
+            crate::joints::Link::Body(i) => {
+                let wt = world_transform(ecs, e);
+                self.world.bodies[i].orient.inverse() * (wt.rotation * (local * wt.scale))
+            }
             crate::joints::Link::Compound(i) => {
                 let c = &self.world.compounds[i];
                 let wt = world_transform(ecs, e);
@@ -944,13 +951,14 @@ impl Sim {
                 let offset = (inv_rot * (wt.translation - root_wt.translation).as_vec3())
                     / root_wt.scale.max(Vec3::splat(1e-6));
                 let rot = (inv_rot * wt.rotation).normalize();
-                let r = prb.radius.max(0.01);
+                // In the part's space, scaled with it, like its box.
+                let r = prb.world_radius(wt.scale);
                 let mut mesh_mid = Vec3::ZERO;
                 let geom = match prb.kind {
                     BodyKind::Sphere => ShapeGeom::Sphere { radius: r },
                     BodyKind::Capsule => ShapeGeom::Capsule {
                         radius: r,
-                        half_height: (prb.height.max(2.0 * r) * 0.5 - r).max(0.0),
+                        half_height: (prb.world_height(wt.scale) * 0.5 - r).max(0.0),
                     },
                     BodyKind::Box => {
                         let h = prb.half_extents;
@@ -1015,10 +1023,12 @@ impl Sim {
         // Sim frame: subtract the origin in f64 first, then narrow — the residual
         // is small and exact no matter how far out the node sits.
         let pos = (wt.translation - origin).as_vec3();
-        let r = rb.radius.max(0.01);
+        // A sphere's and a capsule's size are the node's, scaled with it, as
+        // a box's half-extents are.
+        let r = rb.world_radius(wt.scale);
         let mut b = match rb.kind {
             BodyKind::Sphere => Body::sphere(pos, r),
-            BodyKind::Capsule => Body::capsule(pos, r, rb.height),
+            BodyKind::Capsule => Body::capsule(pos, r, rb.world_height(wt.scale)),
             BodyKind::Box => {
                 let s = wt.scale;
                 let h = rb.half_extents;
@@ -1085,7 +1095,7 @@ impl Sim {
         // A Trigger alongside a Static-mode rigidbody = a baked sensor in the
         // body's shape: never blocks, overlap fires the trigger hooks.
         let sensor = ecs.get::<floptle_core::Trigger>(e).is_some();
-        let r = rb.radius.max(0.01);
+        let r = rb.world_radius(wt.scale);
         match rb.kind {
             BodyKind::Sphere => {
                 world.add_collider_tagged(
@@ -1098,7 +1108,7 @@ impl Sim {
             }
             BodyKind::Capsule => {
                 let u = (wt.rotation * Vec3::Y).try_normalize().unwrap_or(Vec3::Y);
-                let half = (rb.height.max(2.0 * r) * 0.5 - r).max(0.0);
+                let half = (rb.world_height(wt.scale) * 0.5 - r).max(0.0);
                 world.add_collider_tagged(
                     wt.translation,
                     Box::new(CapsuleShape { a: -u * half, b: u * half, radius: r }),
@@ -3015,14 +3025,19 @@ impl Sim {
                 b.use_gravity = rb.gravity;
                 b.mass = rb.mass.max(1e-4);
                 b.lock_pos = rb.locks_pos();
-                b.radius = rb.radius.max(0.01);
+                let scale = world_transform(ecs, ent).scale;
+                b.radius = match rb.kind {
+                    BodyKind::Sphere | BodyKind::Capsule => rb.world_radius(scale),
+                    _ => rb.radius.max(0.01),
+                };
                 b.shape = match rb.kind {
                     BodyKind::Sphere => BodyShape::Sphere,
                     BodyKind::Capsule => {
                         // A script-set height (crouch, or simply a controller
                         // with its own stand height) outranks the authored one
-                        // — otherwise this rebuild undid it every step.
-                        let h = height_set.unwrap_or(rb.height);
+                        // — otherwise this rebuild undid it every step. It is
+                        // the body's own height, in world units, already.
+                        let h = height_set.unwrap_or(rb.world_height(scale));
                         let half = (h.max(2.0 * b.radius) * 0.5 - b.radius).max(0.0);
                         BodyShape::Capsule { half_height: half }
                     }

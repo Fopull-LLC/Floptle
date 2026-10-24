@@ -76,7 +76,7 @@
             matter: Primitive(shape: Capsule, color: (0.45, 0.72, 0.95)),
             // Rotation frozen on every axis, or the capsule tips over the first
             // time it touches anything.
-            rigidbody: Some((capsule: true, radius: 0.5, height: 2.0, friction: 0.0, lock_rot: (true, true, true))),
+            rigidbody: Some((capsule: true, radius: 0.5, height: 2.0, friction: 0.0, lock_rot: (true, true, true), mass: 70.0)),
             tags: ["player"],
             scripts: [(kind: "platformerPlayer", params: [("speed", 6.0), ("jump", 8.5), ("groundRay", 1.2)])],
         ),
@@ -103,7 +103,7 @@
             matter: Primitive(shape: Sphere, color: (1.0, 0.83, 0.3)),
             // Kinematic + trigger: it stays exactly where it was put, and
             // reports what walks through instead of blocking it.
-            rigidbody: Some((radius: 0.45, mode: Kinematic, gravity: false)),
+            rigidbody: Some((radius: 1.125, mode: Kinematic, gravity: false)),
             trigger: true,
             scripts: [(kind: "coin")],
         ),
@@ -112,7 +112,7 @@
             name: "Coin",
             transform: (translation: (-7.0, 2.6, -6.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (0.4, 0.4, 0.4)),
             matter: Primitive(shape: Sphere, color: (1.0, 0.83, 0.3)),
-            rigidbody: Some((radius: 0.45, mode: Kinematic, gravity: false)),
+            rigidbody: Some((radius: 1.125, mode: Kinematic, gravity: false)),
             trigger: true,
             scripts: [(kind: "coin")],
         ),
@@ -121,7 +121,7 @@
             name: "Coin",
             transform: (translation: (2.0, 3.4, -8.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (0.4, 0.4, 0.4)),
             matter: Primitive(shape: Sphere, color: (1.0, 0.83, 0.3)),
-            rigidbody: Some((radius: 0.45, mode: Kinematic, gravity: false)),
+            rigidbody: Some((radius: 1.125, mode: Kinematic, gravity: false)),
             trigger: true,
             scripts: [(kind: "coin")],
         ),
@@ -130,7 +130,7 @@
             name: "Coin",
             transform: (translation: (-14.0, 5.2, -12.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (0.4, 0.4, 0.4)),
             matter: Primitive(shape: Sphere, color: (1.0, 0.83, 0.3)),
-            rigidbody: Some((radius: 0.45, mode: Kinematic, gravity: false)),
+            rigidbody: Some((radius: 1.125, mode: Kinematic, gravity: false)),
             trigger: true,
             scripts: [(kind: "coin")],
         ),
@@ -139,7 +139,7 @@
             name: "Coin",
             transform: (translation: (-14.0, 6.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (0.4, 0.4, 0.4)),
             matter: Primitive(shape: Sphere, color: (1.0, 0.83, 0.3)),
-            rigidbody: Some((radius: 0.45, mode: Kinematic, gravity: false)),
+            rigidbody: Some((radius: 1.125, mode: Kinematic, gravity: false)),
             trigger: true,
             scripts: [(kind: "coin")],
         ),

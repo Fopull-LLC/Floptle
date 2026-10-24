@@ -61,6 +61,12 @@ fn body_table(lua: &Lua, b: &SpaceBodyInfo) -> mlua::Result<mlua::Table> {
     Ok(t)
 }
 
+/// Every key `space.belt{...}` reads (`belt_sugar.lua`, which refuses any other).
+pub(crate) const BELT_SPAWN_KEYS: &[&str] = &[
+    "parent", "count", "seed", "aMin", "aMax", "eMax", "iMax", "radiusMin", "radiusMax", "mu", "reach", "name", "prefab",
+    "made", "shape", "terrainId", "voxel",
+];
+
 /// Every key `space.beltOrbits{...}` reads.
 pub(crate) const BELT_KEYS: &[&str] = &["count", "seed", "aMin", "aMax", "eMax", "iMax", "radiusMin", "radiusMax"];
 

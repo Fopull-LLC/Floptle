@@ -7,11 +7,10 @@
 //! shape and size, **Fit to mesh** puts it back after an edit, and a Mesh
 //! body reads the geometry itself every Play.
 //!
-//! Sizes are the node's own, before its scale, where the sim scales them (a
-//! box, a mesh): scaling the node scales the body. A sphere's radius and a
-//! capsule's are world units in the sim, so those are fitted at the node's
-//! scale as it is now, and the Inspector says when a rescale has left them
-//! behind.
+//! Sizes are the node's own, before its scale, and the sim scales them for
+//! every shape: scaling the node scales the body. A sphere or a capsule under
+//! an uneven scale is an ellipsoid no sphere matches, so it is fitted as a
+//! Mesh instead (`RigidBody::world_radius` says what one set by hand does).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -152,12 +151,14 @@ pub(crate) fn fit_to(shape: &NodeShape, scale: Vec3, base: &RigidBody) -> RigidB
         }
         Some(Shape::Sphere) if even(s.x, s.y) && even(s.y, s.z) => {
             rb.kind = BodyKind::Sphere;
-            rb.radius = half.max_element() * s.x;
+            rb.radius = half.max_element();
         }
+        // Stretched along its length a capsule is still a capsule; squashed
+        // across it, it is not.
         Some(Shape::Capsule) if even(s.x, s.z) => {
             rb.kind = BodyKind::Capsule;
-            rb.radius = half.x * s.x;
-            rb.height = (shape.hi.y - shape.lo.y) * s.y;
+            rb.radius = half.x;
+            rb.height = shape.hi.y - shape.lo.y;
         }
         _ => {
             rb.kind = BodyKind::Mesh;
@@ -187,10 +188,10 @@ pub(crate) fn body_volume(rb: &RigidBody, scale: Vec3, shape: Option<&NodeShape>
     let s = scale.abs();
     let pi = std::f32::consts::PI;
     match rb.kind {
-        BodyKind::Sphere => 4.0 / 3.0 * pi * rb.radius.powi(3),
+        BodyKind::Sphere => 4.0 / 3.0 * pi * rb.world_radius(scale).powi(3),
         BodyKind::Capsule => {
-            let r = rb.radius;
-            let cyl = (rb.height - 2.0 * r).max(0.0);
+            let r = rb.world_radius(scale);
+            let cyl = (rb.world_height(scale) - 2.0 * r).max(0.0);
             pi * r * r * cyl + 4.0 / 3.0 * pi * r.powi(3)
         }
         BodyKind::Box => 8.0 * rb.half_extents.iter().product::<f32>() * s.x * s.y * s.z,
@@ -327,7 +328,9 @@ mod tests {
         let e = node(&mut w, Matter::Primitive { shape: Shape::Sphere, color: [1.0; 3] }, Vec3::splat(2.0));
         let rb = fit(&w, &maps, Path::new("."), e, &RigidBody::default()).unwrap();
         assert_eq!(rb.kind, BodyKind::Sphere);
-        assert!((rb.radius - 0.85 * 2.0).abs() < 1e-3, "radius {}", rb.radius);
+        // In the node's space: the sim scales it.
+        assert!((rb.radius - 0.85).abs() < 1e-3, "radius {}", rb.radius);
+        assert!((rb.world_radius(Vec3::splat(2.0)) - 1.7).abs() < 1e-3);
         let squashed = node(&mut w, Matter::Primitive { shape: Shape::Sphere, color: [1.0; 3] }, Vec3::new(2.0, 1.0, 2.0));
         let rb = fit(&w, &maps, Path::new("."), squashed, &RigidBody::default()).unwrap();
         assert_eq!(rb.kind, BodyKind::Mesh);
