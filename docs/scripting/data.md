@@ -26,6 +26,7 @@ it is `save/` inside the player's own data folder, which outlives the build (see
 save.set("gold", save.get("gold", 0) + 10)
 save.set("checkpoint", { scene = scene.current(), x = node.x, y = node.y, z = node.z })
 save.flush()                       -- checkpoint NOW (else: auto on Stop + ~5 s)
+save.flush({ wait = true })        -- …and return only once it is on disk
 
 local cp = save.get("checkpoint")
 if cp then scene.load(cp.scene) end
@@ -33,10 +34,35 @@ if cp then scene.load(cp.scene) end
 save.slot("slot2")                 -- separate profile; save.slot() reads the name
 ```
 
-Values follow the `synced`-var guardrails: numbers, strings, booleans, tables up
-to depth 4 and ≤ 1 KB each — no functions/userdata. A violation is a script
-error, not silent data loss. A slot holds at most **10 000 keys** and **4 MB**
-in all; a `save.set` past either is the same kind of error.
+Values are plain data: numbers, strings, booleans, and tables nested up to 16
+deep — no functions/userdata. A violation is a script error, not silent data
+loss. A slot holds at most **10 000 keys** and **4 MB** in all; a `save.set`
+past either is the same kind of error.
+
+**Saving does not cost a frame.** A flush (yours, or the automatic one) hands the
+keys that changed to a writer thread and returns; the writer encodes only those
+keys and reuses the rest from the last write. The slot file is replaced whole
+or not at all, so a crash or a kill mid-write leaves the previous save. A
+failed write is shown in the Console, the next `save.flush()` returns false, and
+the slot is tried again. In a browser the write happens on the frame — a page
+has no threads.
+
+**Large player data goes in a file, not a slot.** A slot is read whole the first
+time it is touched and held in memory, and in a browser all of a game's
+storage is a few megabytes, so the 4 MB cap stays. A blueprint library, a level
+the player built or a recording goes in the player's own folder, with no cap of
+its own:
+
+```lua
+local ok, err = assets.writeJson("user://crafts/" .. name .. ".json", craft)
+if not ok then print("Could not save the craft: " .. err) end
+local craft = assets.readJson("user://crafts/" .. name .. ".json")
+```
+
+`assets.writeBytes` does the same for bytes (a `data.deflate` blob, a replay).
+A `user://` write replaces the file whole or not at all, like a slot. It runs on
+the frame, so write it when the player saves, not every few seconds. Reads stop
+at 64 MB.
 
 **Multiplayer**: this is *local* storage. For server-authoritative progress,
 call `save.*` inside server-side paths (`net.isServer()`) and hand results to

@@ -55,7 +55,7 @@ impl NetValue {
         if self.depth() > MAX_VALUE_DEPTH {
             return Err(ValueError::TooDeep);
         }
-        let n = postcard::to_allocvec(self).map(|v| v.len()).unwrap_or(usize::MAX);
+        let n = self.encoded_len();
         if n > MAX_VALUE_BYTES {
             return Err(ValueError::TooBig(n));
         }
@@ -65,9 +65,10 @@ impl NetValue {
     /// How many bytes this value takes on the wire — and in a save file, which
     /// is bounded the same way. `usize::MAX` for a value that cannot be
     /// encoded at all, so a cap compared against it refuses rather than
-    /// admits.
+    /// admits. Counted, not encoded: nothing is allocated, so asking costs a
+    /// walk of the value and no copy of it.
     pub fn encoded_len(&self) -> usize {
-        postcard::to_allocvec(self).map(|v| v.len()).unwrap_or(usize::MAX)
+        postcard::experimental::serialized_size(self).unwrap_or(usize::MAX)
     }
 
     /// Nesting depth: scalars are 0, a table is 1 + its deepest child.
@@ -197,6 +198,24 @@ mod tests {
             v = NetValue::Table(vec![(NetValue::Str("k".into()), v)]);
         }
         v
+    }
+
+    /// The counted size is the encoded size, byte for byte: the save slot's
+    /// cap and the wire's are both charged by it, and a count that drifted
+    /// low would admit a value the reader on the other side refuses.
+    #[test]
+    fn the_counted_size_is_the_encoded_size() {
+        let long = "x".repeat(300);
+        for v in [
+            NetValue::Nil,
+            NetValue::Bool(true),
+            NetValue::Num(-0.5),
+            NetValue::Str(long),
+            nest(6),
+            NetValue::Table((0..200).map(|i| (NetValue::Num(f64::from(i)), nest(2))).collect()),
+        ] {
+            assert_eq!(v.encoded_len(), postcard::to_allocvec(&v).unwrap().len(), "{v:?}");
+        }
     }
 
     #[test]

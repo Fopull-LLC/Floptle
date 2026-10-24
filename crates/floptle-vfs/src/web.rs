@@ -124,6 +124,12 @@ pub fn write<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, contents: C) -> io::Result
     Ok(())
 }
 
+/// [`write`]: one `localStorage` item is replaced whole or not at all, and a
+/// refused one keeps the value it had.
+pub fn write_atomic<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, contents: C) -> io::Result<()> {
+    write(path, contents)
+}
+
 pub fn exists<P: AsRef<Path>>(path: P) -> bool {
     lock().as_ref().is_some_and(|w| w.fs.exists(path.as_ref()))
 }

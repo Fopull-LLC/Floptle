@@ -221,6 +221,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **A replacing write that fails leaves the old file whole.** A save is
+    /// the player's; `write` truncates before it writes, so a kill or a full
+    /// disk partway through left a slot with nothing in it. Here the hidden
+    /// sibling the bytes go to first cannot be made (a folder holds its
+    /// name), which is the same failure arriving before the rename.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_failed_atomic_write_leaves_the_old_file_whole() {
+        let dir = std::env::temp_dir().join(format!("floptle-vfs-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("main.ron");
+        write_atomic(&file, "first").unwrap();
+        write_atomic(&file, "second").unwrap();
+        assert_eq!(read_to_string(&file).unwrap(), "second");
+        assert!(!dir.join(".main.ron.tmp").exists(), "the sibling outlived a good write");
+
+        std::fs::create_dir_all(dir.join(".main.ron.tmp")).unwrap();
+        assert!(write_atomic(&file, "third, cut off").is_err(), "the write had nowhere to go and said it went");
+        assert_eq!(read_to_string(&file).unwrap(), "second", "a failed write touched the old file");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn the_desktop_reads_the_real_disk() {
         let dir = std::env::temp_dir().join(format!("floptle-vfs-{}", std::process::id()));

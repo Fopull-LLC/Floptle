@@ -350,7 +350,7 @@ impl crate::Editor {
         // The save store, first and in every host. A player quitting from a
         // settings menu expects the setting they just changed to have been
         // kept, and the ordinary flush is on Stop, which a build never reaches.
-        self.script_host.flush_save();
+        self.script_host.flush_save_and_wait();
         if self.player_mode {
             // `about_to_wait` is the one place every exit path passes through:
             // it writes package prefs and then leaves. Setting the flag rather

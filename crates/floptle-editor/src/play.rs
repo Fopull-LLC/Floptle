@@ -1079,7 +1079,7 @@ impl Editor {
             // the played scene's.
             // Persistent `save.*` data flushes on Stop — the one guarantee scripts
             // rely on (periodic flushes during Play only bound crash loss).
-            self.script_host.flush_save();
+            self.script_host.flush_save_and_wait();
             // …and the project settings go back to what the project says, so a
             // video setting a script changed for the run cannot end up in
             // `project.ron`.

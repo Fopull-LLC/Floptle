@@ -456,16 +456,32 @@ pub(crate) fn lua_to_netvalue_max(
         Value::Boolean(b) => Ok(NetValue::Bool(*b)),
         Value::Integer(n) => Ok(NetValue::Num(*n as f64)),
         Value::Number(n) => Ok(NetValue::Num(*n)),
-        Value::String(s) => Ok(NetValue::Str(s.to_string_lossy().to_string())),
+        Value::String(s) => Ok(NetValue::Str(s.to_string_lossy())),
         Value::Table(t) => {
+            // `for_each` walks the table in place; `pairs` builds an iterator
+            // that re-locks and re-checks the stack for every entry, and a
+            // 1,000-part save is fifty thousand entries.
             let mut pairs = Vec::new();
-            for pair in t.clone().pairs::<Value, Value>() {
-                let (k, val) = pair.map_err(|e| e.to_string())?;
-                pairs.push((
-                    lua_to_netvalue_max(&k, depth + 1, max_depth)?,
-                    lua_to_netvalue_max(&val, depth + 1, max_depth)?,
-                ));
+            let mut refused: Option<String> = None;
+            let walked = t.for_each::<Value, Value>(|k, val| {
+                let converted = lua_to_netvalue_max(&k, depth + 1, max_depth)
+                    .and_then(|k| Ok((k, lua_to_netvalue_max(&val, depth + 1, max_depth)?)));
+                match converted {
+                    Ok(pair) => {
+                        pairs.push(pair);
+                        Ok(())
+                    }
+                    // Stop the walk; the reason is the converter's, not Lua's.
+                    Err(e) => {
+                        refused = Some(e);
+                        Err(mlua::Error::runtime(""))
+                    }
+                }
+            });
+            if let Some(e) = refused {
+                return Err(e);
             }
+            walked.map_err(|e| e.to_string())?;
             Ok(NetValue::Table(pairs))
         }
         Value::Function(_) => Err("functions can't replicate".into()),
