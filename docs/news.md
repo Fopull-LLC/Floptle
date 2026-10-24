@@ -1,5 +1,9 @@
 ## Just shipped
 
+**v0.117.0-rc8 — "Whole Worlds"** (beta). Projects upgrade themselves to
+keep their look, script suggestions fit what you are typing, every body size
+follows its node, and rivers, rock belts and irregular rocks arrive.
+
 **v0.117.0-rc7 — "Whole Worlds"** (beta). Models in any common format
 convert themselves with every map in place, a mesh becomes a tumbling physics
 object in one step, big planets hold only the ground near you, and scripts
