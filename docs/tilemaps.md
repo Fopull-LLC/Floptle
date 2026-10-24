@@ -459,6 +459,19 @@ From Lua:
 find('Cam'):setCamera{ projection = 'orthographic', orthoHeight = 12 }
 ```
 
+It switches at runtime, either way, as often as a game likes: a builder's front,
+side and top views are one camera flipped to orthographic and back. The Camera
+component reads and writes the same names, so a script can ask which it is:
+
+```lua
+local cam = find('Cam'):getComponent('Camera')
+if cam.projection == 'perspective' then
+  cam.projection = 'orthographic'   -- or 'ortho' / '2d'; reads back 'orthographic'
+  cam.orthoHeight = 12
+end
+cam.active = true                   -- the view is this camera's; every other one turns off
+```
+
 **In the editor:** ⌖ Scene ⏵ ▦ View ⏵ **Orthographic**. Picking a plane lock
 (Front / Side / Top) turns it on as well, since squaring the view to a plane is
 almost always the 2D intent — and it is still a separate checkbox, because an

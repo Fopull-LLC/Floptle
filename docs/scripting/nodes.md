@@ -428,6 +428,24 @@ the world behind it, or keep a hub scene resident while a mission loads.
 - Additive loads and unloads are **local**, so a client may do them in a
   session. Only a full swap is the server's alone.
 
+#### `{ offset = vec3 }` and `{ parent = node }` — where the layer goes
+
+```lua
+scene.load("levels/cave", { additive = true, offset = vec3(2500, 0, 0) })
+scene.load("rooms/builder", { additive = true, parent = find("Base"), offset = vec3(0, 61, 0) })
+```
+
+`offset` moves the layer's root nodes by that much. On its own it is a world
+position, fixed at the moment the layer lands. `parent` puts the roots **under
+a node** instead, with `offset` in that node's space, so the layer rides it: a
+room loaded under a base on a planet on rails stays in the base as the planet
+moves, where a world offset would be wrong the next tick. `scene.unload` takes
+the layer's nodes out and leaves the parent where it was.
+
+A layer under a `parent` stays on this machine, even on a hosting server: a
+node here is not one a client can name. Passing `replicate = true` with it is
+refused.
+
 #### `{ environment = true }` — letting the layer own the look
 
 ```lua
@@ -619,6 +637,7 @@ node:destroy()      -- same thing, method form (self-destruct a pickup)
 | `spawn(prefab, pos)` | ...with its first root placed at `pos` (a vec3/table/node — sibling roots keep their relative offsets) |
 | `spawn(prefab, pos, fn)` | ...then call `fn(root)` with the new node's handle, same frame — velocities, params, tags, whatever |
 | `spawn(prefab, pos, fn, parentNode)` | ...spawned as a CHILD of `parentNode`, still landing at the world `pos` (converted into the parent's frame). How a blueprint spawner assembles parts under a vessel's assembly root — follow with `assembly.rebuild(parentNode)` |
+| `spawn(prefab, pos, fn, { parent = node, body = false })` | ...with options. `body = false` spawns the prefab's nodes, meshes and scripts with no RigidBody and no collider (its joints, collidable and trigger switches go too): a display copy, such as a part shown in a builder, that costs physics nothing. `parent` is the parent node, as above |
 | `destroy(node)` / `node:destroy()` | queue the node + its whole subtree for removal (applied after the pass, so the handle stays readable through the current call) |
 
 The spawned node is complete immediately: rigidbodies simulate (all three

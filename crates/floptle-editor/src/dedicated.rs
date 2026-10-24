@@ -2222,6 +2222,63 @@ mod server_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **A layer loaded under a node rides it.** `scene.load(name, {
+    /// additive = true, parent = node })` puts the layer's roots under the
+    /// node with `offset` in its space. Here the parent is a planet on rails,
+    /// which moves every tick: for 60 ticks the layer's root stays at its
+    /// local offset within a centimetre while the planet travels, and the
+    /// unload takes it back out. A world offset (the only option before) is
+    /// wrong the tick after it lands.
+    #[test]
+    fn an_additive_layer_under_a_node_rides_it() {
+        let root = temp("layer-parent");
+        write(&root, "project.ron", "(title: Some(\"rails\"), entry_scene: Some(\"scenes/hub.ron\"))");
+        write(&root, "scenes/room.ron", "(name: \"room\", nodes: [(name: \"Room\", transform: (translation: (1.0, 0.0, 0.0)))])");
+        write(
+            &root,
+            "scripts/loader.lua",
+            "local frames = 0\n\
+             function update(node, dt)\n\
+             \x20 frames = frames + 1\n\
+             \x20 if frames == 1 then scene.load('scenes/room.ron', { additive = true, parent = find('Planet'), offset = vec3(0, 61, 0) }) end\n\
+             end\n",
+        );
+        write(
+            &root,
+            "scenes/hub.ron",
+            "(name: \"hub\", nodes: [\
+             (name: \"Sun\", celestial: Some((mu: 1000000.0, body_radius: 20.0))),\
+             (name: \"Planet\", celestial: Some((mu: 100.0, body_radius: 60.0, parent: \"Sun\", a: 200.0))),\
+             (name: \"Loader\", scripts: [(kind: \"loader\")])])",
+        );
+        let mut ed = super::open(&root, &root.join("scenes/hub.ron"), 1.0 / STEP);
+        ed.toggle_play();
+        for _ in 0..3 {
+            ed.play_step(STEP, false);
+        }
+        let console = || ed.console.entries.iter().map(|e| e.msg.clone()).collect::<Vec<_>>().join("\n");
+        let room = find(&ed.world, "Room").unwrap_or_else(|| panic!("the layer did not load:\n{}", console()));
+        let planet = find(&ed.world, "Planet").unwrap();
+        assert_eq!(ed.world.get::<floptle_core::Parent>(room).map(|p| p.0), Some(planet), "the layer is not under the planet");
+        let local = floptle_core::math::DVec3::new(1.0, 61.0, 0.0);
+        let start = floptle_core::world_transform(&ed.world, planet).translation;
+        for tick in 0..60 {
+            ed.play_step(STEP, false);
+            let p = floptle_core::world_transform(&ed.world, planet);
+            let want = p.mul_transform(&floptle_core::transform::Transform { translation: local, ..floptle_core::transform::Transform::IDENTITY });
+            let got = floptle_core::world_transform(&ed.world, room).translation;
+            let off = (got - want.translation).length();
+            assert!(off < 0.01, "tick {tick}: the room is {off} m from its place on the planet");
+        }
+        let travelled = (floptle_core::world_transform(&ed.world, planet).translation - start).length();
+        assert!(travelled > 1.0, "the planet did not move ({travelled} m), so nothing was tested");
+
+        ed.perform_scene_unload("scenes/room.ron");
+        assert!(find(&ed.world, "Room").is_none(), "the unload left the room behind");
+        assert!(find(&ed.world, "Planet").is_some(), "the unload took the parent too");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// **An additive layer brings its own map geometry.** Map sidecars were
     /// keyed by the base scene, so a layer's map nodes arrived with no
     /// geometry (a placeholder box each) — or, sharing an id with the base

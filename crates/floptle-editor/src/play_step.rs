@@ -1317,7 +1317,10 @@ impl Editor {
         // while `self` is ours to borrow mutably (the render pass only reads), and
         // the list is grouped by texture. A path that will not load is dropped,
         // not drawn white.
-        let quads = self.script_host.take_draw_quads();
+        let mut quads = self.script_host.take_draw_quads();
+        // Shapes drawn in a node's frame go where that node is now, after
+        // every tick and the late pass have moved it: where it is drawn.
+        place_framed_draws(&self.world, &mut self.script_lines, &mut self.script_tris, &mut quads);
         self.script_quads.clear();
         for q in quads {
             if let Some(id) = self.ensure_texture(&q.texture) {
@@ -1792,5 +1795,118 @@ mod scene_fade_tests {
         ed.play_step(0.25, true);
         assert!(ed.scene_fade_cover().is_none(), "the fade is over");
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// Move the shapes a script drew in a node's frame (`draw.setFrame`) out to
+/// where that node stands now, and mark them world space. A shape whose node
+/// is gone is dropped rather than drawn at the world's origin.
+pub(crate) fn place_framed_draws(
+    world: &floptle_core::World,
+    lines: &mut Vec<floptle_script::DrawLine>,
+    tris: &mut Vec<floptle_script::DrawTri>,
+    quads: &mut Vec<floptle_script::DrawQuad>,
+) {
+    use floptle_core::math::{DQuat, DVec3};
+    if lines.iter().all(|l| l.frame.is_none()) && tris.iter().all(|t| t.frame.is_none()) && quads.iter().all(|q| q.frame.is_none()) {
+        return;
+    }
+    let mut poses: HashMap<u32, Option<(DVec3, DQuat, DVec3)>> = HashMap::new();
+    let mut pose = |id: u32| {
+        *poses.entry(id).or_insert_with(|| {
+            world.entity_at(id).map(|e| {
+                let t = floptle_core::world_transform(world, e);
+                (t.translation, t.rotation.as_dquat(), t.scale.as_dvec3())
+            })
+        })
+    };
+    let to_world = |(o, r, sc): (DVec3, DQuat, DVec3), p: [f64; 3]| -> [f64; 3] { (o + r * (DVec3::from(p) * sc)).into() };
+    lines.retain_mut(|l| {
+        let Some(id) = l.frame.take() else { return true };
+        let Some(at) = pose(id) else { return false };
+        (l.a, l.b) = (to_world(at, l.a), to_world(at, l.b));
+        true
+    });
+    tris.retain_mut(|t| {
+        let Some(id) = t.frame.take() else { return true };
+        let Some(at) = pose(id) else { return false };
+        (t.a, t.b, t.c) = (to_world(at, t.a), to_world(at, t.b), to_world(at, t.c));
+        true
+    });
+    quads.retain_mut(|q| {
+        let Some(id) = q.frame.take() else { return true };
+        let Some(at) = pose(id) else { return false };
+        for p in &mut q.p {
+            *p = to_world(at, *p);
+        }
+        true
+    });
+}
+
+#[cfg(test)]
+mod framed_draw_tests {
+    use floptle_core::math::DVec3;
+    use floptle_core::transform::Transform;
+
+    fn script(ed: &mut crate::Editor, e: floptle_core::Entity, kind: &str) {
+        ed.world.insert(
+            e,
+            floptle_core::Scripts(vec![floptle_core::ScriptInst {
+                kind: kind.into(),
+                enabled: true,
+                params: Vec::new(),
+                refs: Vec::new(),
+                strs: Vec::new(),
+                pinned_bools: None,
+            }]),
+        );
+    }
+
+    /// **An overlay drawn in a node's frame stays on the node.** A pad rides
+    /// a parent moving at 190 m/s, which moves in its ticks after `update`
+    /// has drawn. A line drawn at the pad's own origin through
+    /// `draw.setFrame` is drawn where the pad is drawn; the same line worked
+    /// out in world space in `update` is left metres behind.
+    #[test]
+    fn a_line_in_a_nodes_frame_stays_on_a_fast_moving_node() {
+        let dir = std::env::temp_dir().join(format!("floptle-draw-frame-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        floptle_vfs::write(dir.join("scripts/rails.lua"), "function fixedUpdate(node, dt)\n  node.x = node.x + 190 * dt\nend\n")
+            .unwrap();
+        floptle_vfs::write(
+            dir.join("scripts/overlay.lua"),
+            "function update(node, dt)\n\
+             \x20 draw.setFrame(node)\n\
+             \x20 draw.line(0, 0, 0, 0, 1, 0, 0, 1, 0)\n\
+             \x20 draw.setFrame(nil)\n\
+             \x20 local p = node.pos\n\
+             \x20 draw.line(p.x, p.y, p.z, p.x, p.y + 1, p.z, 1, 0, 0)\n\
+             end\n",
+        )
+        .unwrap();
+        let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+        let rail = ed.world.spawn();
+        ed.world.insert(rail, Transform::IDENTITY);
+        script(&mut ed, rail, "rails");
+        let pad = ed.world.spawn();
+        ed.world.insert(pad, Transform { translation: DVec3::new(5.0, 2.0, 0.0), ..Transform::IDENTITY });
+        ed.world.insert(pad, floptle_core::Parent(rail));
+        script(&mut ed, pad, "overlay");
+        ed.toggle_play();
+        for _ in 0..30 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        let at = floptle_core::world_transform(&ed.world, pad).translation;
+        assert!(at.x > 50.0, "the pad's parent did not move: the pad is at {at}");
+        let framed = ed.script_lines.iter().find(|l| l.color[1] == 1.0).expect("the framed line");
+        let worked = ed.script_lines.iter().find(|l| l.color[0] == 1.0).expect("the world line");
+        let off = (DVec3::from(framed.a) - at).length();
+        assert!(off < 0.01, "the line in the pad's frame is drawn {off:.3} m from the pad");
+        assert!((DVec3::from(framed.b) - (at + DVec3::Y)).length() < 0.01, "the line's far end left the pad's frame");
+        let lag = (DVec3::from(worked.a) - at).length();
+        assert!(lag > 1.0, "a line placed in update was only {lag:.3} m behind: this does not test the lag");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

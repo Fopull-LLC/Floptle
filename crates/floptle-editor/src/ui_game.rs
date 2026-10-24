@@ -783,30 +783,44 @@ impl Editor {
         // says where the anchor is and which edge it is. A run laid out in a rect
         // exactly its own size can't wrap or clip, whatever the string turns out
         // to be. Measured while the font stack is still borrowed, drawn below.
+        // `draw.*` positions are the game view's pixels. A picture of another
+        // size (`camera.capture{ w, h, ui = true }`) scales them into its own,
+        // so text centred in the window is centred in a half-size capture
+        // rather than drawn at window size off its corner.
+        let o = self.game_view_origin;
+        // The game view's own target is the view rounded to whole pixels, and
+        // is drawn unscaled.
+        let ratio = |target: f32, view: f32| if (target - view).abs() <= 1.0 { 1.0 } else { target / view };
+        let [sx, sy] = match self.script_host.view_size() {
+            Some([vw, vh]) => [ratio(viewport[0], vw), ratio(viewport[1], vh)],
+            None => [1.0, 1.0],
+        };
         let script_text_runs: Vec<floptle_ui::TextRun> = self
             .script_texts
             .iter()
             .map(|t| {
+                let size = t.size * sy;
+                let pos = [(t.pos[0] - o[0]) * sx, (t.pos[1] - o[1]) * sy];
                 // The font the script named, or the project's
                 // — measured with the very same one it is drawn in, or a
                 // centred run would be centred against Roboto's widths and land
                 // somewhere else entirely.
                 let spec = floptle_ui::TextSpec {
                     text: t.text.clone(),
-                    size: t.size,
+                    size,
                     font: t.font.clone(),
                     ..Default::default()
                 };
                 let [w, h] = uir.measure_spec(&spec, None);
                 let x = match t.align {
-                    1 => t.pos[0] - w * 0.5,
-                    2 => t.pos[0] - w,
-                    _ => t.pos[0],
+                    1 => pos[0] - w * 0.5,
+                    2 => pos[0] - w,
+                    _ => pos[0],
                 };
                 floptle_ui::TextRun {
-                    rect: [x, t.pos[1], w, h],
+                    rect: [x, pos[1], w, h],
                     text: t.text.clone(),
-                    size: t.size,
+                    size,
                     color: t.color,
                     font: t.font.clone(),
                     ..Default::default()
@@ -821,12 +835,11 @@ impl Editor {
         // everything, by definition. Their pixels are `input.mouse()`'s (window
         // space); the UI pass works in the viewport's own, hence the offset.
         if !self.script_rects.is_empty() || !self.script_texts.is_empty() {
-            let o = self.game_view_origin;
             let mut dl = floptle_ui::DrawList::default();
             for r in &self.script_rects {
                 let outline = r.outline;
                 dl.quads.push(floptle_ui::Quad {
-                    rect: [r.rect[0] - o[0], r.rect[1] - o[1], r.rect[2], r.rect[3]],
+                    rect: [(r.rect[0] - o[0]) * sx, (r.rect[1] - o[1]) * sy, r.rect[2] * sx, r.rect[3] * sy],
                     color: if outline > 0.0 { [0.0; 4] } else { r.color },
                     border: [outline; 4],
                     border_color: r.color,
@@ -834,11 +847,7 @@ impl Editor {
                     ..Default::default()
                 });
             }
-            for mut r in script_text_runs {
-                r.rect[0] -= o[0];
-                r.rect[1] -= o[1];
-                dl.texts.push(r);
-            }
+            dl.texts.extend(script_text_runs);
             out.push((dl, 1.0));
         }
         // A scene fade covers everything the game draws, HUD included.
@@ -3664,6 +3673,66 @@ mod tests {
         assert!(!ed.input_buttons[0], "the game's finger held the mouse button");
     }
 
+    /// **A simulated click clicks the game's UI, and simulated text types
+    /// into it.** A probe drives a menu the way a player does: the pointer
+    /// to a button's centre, the left button down and up, and the button's
+    /// `clicked` fires; a click into a text field focuses it and `text` lands
+    /// in it.
+    #[test]
+    fn a_simulated_click_and_text_work_the_games_ui() {
+        use floptle_script::SimulatedInput as Sim;
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        ed.player_mode = true;
+        ed.playing = true;
+        let layer = ed.world.spawn();
+        ed.world.insert(layer, Transform::IDENTITY);
+        ed.world.insert(layer, UiLayer::default());
+        let b = ed.world.spawn();
+        ed.world.insert(b, Transform::IDENTITY);
+        ed.world.insert(b, Parent(layer));
+        // The left half of the screen.
+        ed.world.insert(b, ElementSpec { button: true, size: [Size::Pct(0.5), Size::Pct(1.0)], ..Default::default() });
+        let (w, h) = ed.game_surface_px().expect("a player has a surface").1.into();
+        let frame = |ed: &mut crate::Editor, evs: Vec<Sim>| {
+            for ev in evs {
+                ed.script_host.simulate_input(ev);
+            }
+            ed.apply_simulated_input();
+            ed.ui_interact();
+            ed.ui_edit_text(1.0 / 60.0);
+            std::mem::take(&mut ed.ui_events)
+        };
+        let ev = frame(&mut ed, vec![Sim::Mouse(w * 0.25, h * 0.5), Sim::Button(0, true)]);
+        assert!(ev.contains(&(b.index(), "pressed")), "the simulated press missed the button: {ev:?}");
+        let ev = frame(&mut ed, vec![Sim::Button(0, false)]);
+        assert!(ev.contains(&(b.index(), "clicked")), "the simulated release did not click it: {ev:?}");
+        // Down and up inside one frame, as a probe that clicks in one call
+        // does: still a click, as a quick real one is.
+        let ev = frame(&mut ed, vec![Sim::Button(0, true), Sim::Button(0, false)]);
+        let ev = [ev, frame(&mut ed, vec![])].concat();
+        assert!(ev.contains(&(b.index(), "clicked")), "a press and release in one frame did not click: {ev:?}");
+
+        // Then a text field in its place.
+        ed.world.despawn(b);
+        let f = ed.world.spawn();
+        ed.world.insert(f, Transform::IDENTITY);
+        ed.world.insert(f, Parent(layer));
+        ed.world.insert(
+            f,
+            ElementSpec {
+                field: Some(floptle_ui::FieldSpec::default()),
+                text: Some(TextSpec::default()),
+                size: [Size::Pct(0.5), Size::Pct(1.0)],
+                ..Default::default()
+            },
+        );
+        frame(&mut ed, vec![Sim::Mouse(w * 0.25, h * 0.5), Sim::Button(0, true)]);
+        frame(&mut ed, vec![Sim::Button(0, false)]);
+        frame(&mut ed, vec![Sim::Text("hello".into())]);
+        let typed = ed.world.get::<ElementSpec>(f).and_then(|s| s.text.as_ref()).map(|t| t.text.clone());
+        assert_eq!(typed.as_deref(), Some("hello"), "the simulated text did not reach the focused field");
+    }
+
     /// **A finger scrolls a list full of buttons.** Put a finger on a row's
     /// button and drag up: the list follows, and the button is let go without
     /// a click. A tap still clicks, and a slider in the list still slides
@@ -4043,5 +4112,72 @@ mod style_font_tests {
         assert_eq!(warned.len(), 1, "the missing font is reported once: {warned:?}");
         assert!(warned[0].contains("style \"note\""), "{}", warned[0]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod script_draw_scale_tests {
+    /// **`draw.text` in a smaller picture lands where it does in the window.**
+    /// Its position is the game view's pixels; a `camera.capture{ w, h,
+    /// ui = true }` of half the size drew it at window size from window
+    /// coordinates, off-centre and too big. Text centred in an 800×600 view
+    /// is centred in a 400×300 picture, at half the size, and a `draw.rect`
+    /// covering the view covers the picture.
+    #[test]
+    fn script_draws_scale_into_a_picture_of_another_size() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        ed.script_host.set_view(floptle_script::ViewInfo { vp_w: 800.0, vp_h: 600.0, valid: true, ..Default::default() });
+        ed.game_view_origin = [0.0, 0.0];
+        ed.script_texts.push(floptle_script::DrawText {
+            pos: [400.0, 300.0],
+            text: "Centred".into(),
+            size: 32.0,
+            color: [1.0; 4],
+            align: 1,
+            font: String::new(),
+        });
+        let layer = |ed: &mut crate::Editor, vp: [f32; 2]| {
+            let layers = ed.gather_game_ui(vp);
+            let (dl, _) = layers.into_iter().find(|(dl, _)| !dl.texts.is_empty()).expect("the draw.text layer");
+            dl.texts[0].clone()
+        };
+        let full = layer(&mut ed, [800.0, 600.0]);
+        let half = layer(&mut ed, [400.0, 300.0]);
+        let centre = |r: &floptle_ui::TextRun| r.rect[0] + r.rect[2] * 0.5;
+        assert!((centre(&full) - 400.0).abs() < 0.5, "the fixture is wrong: {:?}", full.rect);
+        assert!((centre(&half) - 200.0).abs() < 0.5, "not centred in the half-size picture: {:?}", half.rect);
+        assert!((half.rect[1] - 150.0).abs() < 0.5, "{:?}", half.rect);
+        assert!((half.size - 16.0).abs() < 1e-3, "drawn at window size: {}", half.size);
+    }
+
+    /// The same, as pictures: `capture-text-full.png` and
+    /// `capture-text-half.png` in the system temp folder. Needs a GPU:
+    /// `cargo test -p floptle-editor --lib snapshot_script_text_in_a_small_capture -- --ignored`.
+    #[test]
+    #[ignore]
+    fn snapshot_script_text_in_a_small_capture() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        ed.script_host.set_view(floptle_script::ViewInfo { vp_w: 800.0, vp_h: 600.0, valid: true, ..Default::default() });
+        ed.game_view_origin = [0.0, 0.0];
+        ed.script_texts.push(floptle_script::DrawText {
+            pos: [400.0, 280.0],
+            text: "Centred".into(),
+            size: 48.0,
+            color: [1.0; 4],
+            align: 1,
+            font: String::new(),
+        });
+        ed.script_rects.push(floptle_script::DrawRect { rect: [380.0, 360.0, 40.0, 40.0], color: [1.0, 0.3, 0.2, 1.0], outline: 0.0, radius: 0.0 });
+        let cam = floptle_render::RenderCamera::new(
+            floptle_core::math::DVec3::ZERO,
+            floptle_core::math::Quat::IDENTITY,
+            floptle_render::Projection::Perspective { fov_y: 1.0, near: 0.05, far: 1000.0 },
+        );
+        for (name, w, h) in [("full", 800u32, 600u32), ("half", 400, 300)] {
+            let tex = crate::capture::render_frame_texture(&mut ed, &cam, None, w, h, u32::MAX, true, false).expect("a frame");
+            let px = crate::offscreen::read_back_frame(ed.gpu.as_ref().unwrap(), &tex).expect("the frame reads back");
+            let out = std::env::temp_dir().join(format!("capture-text-{name}.png"));
+            floptle_image::io::save_png(&out, &px, w, h).unwrap();
+        }
     }
 }

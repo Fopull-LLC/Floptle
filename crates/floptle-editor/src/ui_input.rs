@@ -451,6 +451,7 @@ impl Editor {
                     pos: None,
                     cb: None,
                     parent: Some(container.index()),
+                    bodies: true,
                 });
             }
         }

@@ -2552,11 +2552,17 @@ struct Editor {
     /// Script terrain edits taken from the scripts and not yet applied: a few
     /// milliseconds of them land each frame, in order.
     terrain_op_queue: std::collections::VecDeque<crate::terrain_edit::QueuedEdit>,
+    /// A big script terrain op being made off the frame, the queue behind it.
+    terrain_op_job: Option<crate::terrain_edit::OpJob>,
     /// Milliseconds of script terrain edits applied this frame so far.
     terrain_edit_ms: f64,
     /// When a game's planets draw as their impostors (`terrain.impostorAt`),
     /// by terrain id; a body not here switches at the default distance.
     terrain_impostor_rules: std::collections::HashMap<u32, floptle_script::ImpostorRule>,
+    /// Ground was let go of (a world landed, far chunks were put away), and
+    /// the memory it held is to go back to the system; and when it last did.
+    terrain_trim_due: bool,
+    terrain_trimmed: Option<floptle_core::time::Instant>,
     /// Each terrain palette layer's mean colour, linear: what a planet's
     /// impostor is drawn in, with the paint's tint.
     terrain_slot_means: Vec<[f32; 3]>,

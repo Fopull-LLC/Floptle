@@ -126,14 +126,22 @@ impl Editor {
                         }
                     }
                 }
+                // The window's own handler, so the press banks for the frame,
+                // the tick and the game's UI alike, and its release clicks.
                 floptle_script::SimulatedInput::Button(i, down) => {
-                    if self.input_buttons[i] != down {
-                        self.input_buttons[i] = down;
-                        if down {
-                            self.input_buttons_pressed[i] = true;
-                        }
-                    }
-                    self.note_action_button(i, down);
+                    self.track_mouse_button(i, down);
+                }
+                floptle_script::SimulatedInput::Mouse(x, y) => {
+                    self.cursor = Some(floptle_core::math::Vec2::new(x, y));
+                }
+                floptle_script::SimulatedInput::Scroll(d) => {
+                    self.input_scroll += d;
+                    self.tick_scroll += d;
+                }
+                floptle_script::SimulatedInput::Text(t) => {
+                    let t: String = t.chars().filter(|c| !c.is_control()).collect();
+                    self.input_typed.push_str(&t);
+                    self.tick_typed.push_str(&t);
                 }
             }
         }
@@ -684,6 +692,42 @@ mod simulate_tests {
         assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
         let log: String = ed.script_host.instance_env(player.index(), "player").unwrap().get("log").unwrap();
         assert_eq!(log, "- PHa Ha Ha -R - ", "per frame: pressed, held, released, action");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The mouse, the wheel and typing simulate too, numbered as they are
+    /// read.** `simulate{ button = 0 }` is the button `input.button(0)`
+    /// reads (it was the right one, numbered from 1); the pointer lands where
+    /// `input.mouse()` reports, the wheel turns `input.scroll()`, and text
+    /// arrives in `input.typed()`.
+    #[test]
+    fn simulated_mouse_wheel_and_text_read_back_as_real_ones() {
+        let dir = std::env::temp_dir().join(format!("floptle_simulate_mouse_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(
+            dir.join("scripts/tester.lua"),
+            "f = 0\nlog = ''\nfunction update(node, dt)\n  f = f + 1\n  \
+             if f == 2 then\n    local x, y = input.mouse()\n    \
+             log = string.format('%s %s %s %d,%d %g %s', tostring(input.button(0)), tostring(input.button(1)), \
+             tostring(input.clicked(0)), x, y, input.scroll(), input.typed())\n  end\n  \
+             if f == 1 then input.simulate{ mouse = {120, 80}, button = 0, scroll = 2, text = 'hi' } end\nend\n",
+        )
+        .unwrap();
+        let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+        let e = ed.world.spawn();
+        ed.world.insert(e, Transform::IDENTITY);
+        ed.world.insert(e, Name("tester".into()));
+        ed.world.insert(e, Matter::Empty);
+        ed.world.insert(e, Scripts(vec![ScriptInst::new("tester")]));
+        ed.toggle_play();
+        for _ in 0..2 {
+            ed.play_step(1.0 / 60.0, true);
+            ed.finish_input_frame();
+        }
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        let log: String = ed.script_host.instance_env(e.index(), "tester").unwrap().get("log").unwrap();
+        assert_eq!(log, "true false true 120,80 2 hi", "left held and clicked, right not; pointer, wheel, text");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

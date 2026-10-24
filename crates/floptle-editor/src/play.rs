@@ -1102,6 +1102,7 @@ impl Editor {
             // Edits a script made that have not landed belong to the session,
             // and so do the impostor rules it set.
             self.terrain_op_queue.clear();
+            self.terrain_op_job = None;
             self.terrain_impostor_rules.clear();
             if let Some((fields, palette)) = self.play_terrains.take() {
                 for (id, t) in fields {
@@ -1602,6 +1603,19 @@ impl Editor {
         environment: bool,
         offset: Option<[f64; 3]>,
     ) -> Vec<floptle_core::Entity> {
+        self.perform_scene_additive_under(req, environment, offset, None)
+    }
+
+    /// [`Self::perform_scene_additive`] with `{ parent = node }`: the layer's
+    /// roots become children of `parent`, so the layer rides it, and `offset`
+    /// is in the parent's space.
+    pub(crate) fn perform_scene_additive_under(
+        &mut self,
+        req: &str,
+        environment: bool,
+        offset: Option<[f64; 3]>,
+        parent: Option<floptle_core::Entity>,
+    ) -> Vec<floptle_core::Entity> {
         let Some(path) = self.resolve_scene_request(req) else {
             self.console.push(
                 floptle_script::LogLevel::Error,
@@ -1641,15 +1655,21 @@ impl Editor {
             return Vec::new();
         }
         // `{ offset = vec3 }`: the layer's roots move, and everything under
-        // them rides along.
+        // them rides along. `{ parent = node }`: the roots go under the node,
+        // their transforms (and the offset) now in its space.
+        let roots: Vec<floptle_core::Entity> =
+            ents.iter().copied().filter(|&e| self.world.get::<floptle_core::Parent>(e).is_none()).collect();
         if let Some(o) = offset {
             let o = floptle_core::math::DVec3::from(o);
-            for &e in &ents {
-                if self.world.get::<floptle_core::Parent>(e).is_none()
-                    && let Some(t) = self.world.get_mut::<floptle_core::transform::Transform>(e)
-                {
+            for &e in &roots {
+                if let Some(t) = self.world.get_mut::<floptle_core::transform::Transform>(e) {
                     t.translation += o;
                 }
+            }
+        }
+        if let Some(p) = parent {
+            for &e in &roots {
+                self.world.insert(e, floptle_core::Parent(p));
             }
         }
         self.adopt_layer_maps(&path, &tag, &ents);

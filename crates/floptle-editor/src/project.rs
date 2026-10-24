@@ -403,6 +403,29 @@ impl Editor {
         self.profile_record(floptle_core::profile::Bucket::Models, t.ms());
     }
 
+    /// Wait, up to `limit`, until every model a worker is decoding is on the
+    /// GPU. False if some were still decoding when it ran out.
+    ///
+    /// For a verb that draws once with no frame loop after it (`shot`): a
+    /// prefab spawned in the last frames of `--after` asked for its model on
+    /// a worker, and the picture was taken before the worker finished, so
+    /// whole prefabs were missing from it. The frame loop never waits; it
+    /// draws them on whichever frame they land.
+    #[cfg(feature = "editor-ui")]
+    pub(crate) fn settle_model_imports(&mut self, limit: std::time::Duration) -> bool {
+        let deadline = floptle_core::time::Instant::now() + limit;
+        loop {
+            self.pump_model_imports();
+            if self.model_jobs.is_empty() {
+                return true;
+            }
+            if floptle_core::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
     /// The browser's half of the pump: import queued models until this frame
     /// has written [`WEB_UPLOAD_BUDGET`] bytes to the GPU, and at least one.
     /// "This frame" runs from [`Editor::begin_draw_frame`], however many
@@ -3856,6 +3879,27 @@ mod model_import_tests {
         // is told rather than left waiting.
         ed.request_model("models/_test/NotThere.glb");
         assert_eq!(ed.model_status("models/_test/NotThere.glb"), Some(false));
+    }
+
+    /// **A picture waits for the models still importing.** `shot --after`
+    /// draws once, with no frame after it, so a model requested in the last
+    /// frames of play was missing from the picture when its worker had not
+    /// finished. The settle installs every model in flight before it returns.
+    #[test]
+    #[cfg(feature = "editor-ui")]
+    fn settling_model_imports_installs_every_model_in_flight() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        ed.project_root = std::path::PathBuf::from("../floptle-assets/tests/fixtures");
+        let paths = ["Sae.glb", "SaesRapier.glb", "Sae.mirrored.rigged.glb"];
+        for path in paths {
+            ed.request_model(path);
+        }
+        assert!(!ed.model_jobs.is_empty(), "the fixture is wrong: nothing went to a worker");
+        assert!(ed.settle_model_imports(std::time::Duration::from_secs(60)), "the imports never finished");
+        for path in paths {
+            assert!(ed.mesh_registry.contains_key(path), "{path} was not on the GPU when the settle returned");
+        }
+        assert!(ed.model_jobs.is_empty());
     }
 
     /// **A browser frame puts one budget of models on the GPU, however often

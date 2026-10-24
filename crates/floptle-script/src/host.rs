@@ -73,7 +73,7 @@ use crate::{
 };
 
 /// Every key a `scene.load` options table reads.
-pub(crate) const SCENE_LOAD_KEYS: &[&str] = &["additive", "environment", "offset", "replicate", "fade", "color"];
+pub(crate) const SCENE_LOAD_KEYS: &[&str] = &["additive", "environment", "offset", "parent", "replicate", "fade", "color"];
 
 /// Render any Lua value as readable Console text: primitives plainly, engine
 /// handles by identity (`node "Player" (#4)`, `component "RigidBody" of …`),
@@ -589,42 +589,69 @@ fn install_input(lua: &Lua, logs: &Rc<RefCell<Vec<ScriptLog>>>) -> InputCells {
         // one call at a time: `input.key("w")` and `input.action("Jump")`
         // coexist for as long as a game wants them to.
         crate::input_api::install(lua, &t, &input_sys, &input_domain);
-        // input.simulate{ key = "w", down = true } / { button = 1, down = … } —
-        // a testing aid: queues the press or release for the driver, which
-        // feeds it through the same path a real keyboard and mouse take, from
-        // the next frame on. Every script sees it, through `input.key`,
-        // `input.pressed`, `input.action` and the rest alike.
+        // input.simulate{ key = "w", down = true } / { button = 0, down = … } /
+        // { mouse = {x, y} } / { scroll = n } / { text = "…" } — a testing
+        // aid: queues the input for the driver, which feeds it through the
+        // same path a real keyboard and mouse take, from the next frame on.
+        // Every script sees it, through `input.key`, `input.pressed`,
+        // `input.action`, `input.mouse`, `input.typed` and the rest alike, and
+        // so does the game's UI: a click at a button's centre clicks it, and
+        // text lands in a focused field. Buttons are numbered as
+        // `input.button` numbers them. In one call the pointer moves first,
+        // then the wheel, the text, the key and the button, so `{ mouse =
+        // {x, y}, button = 0 }` presses where it points.
         let q = input_sim.clone();
         let _ = t.set(
             "simulate",
             lua.create_function(move |_, opts: mlua::Table| {
-                crate::opts::check_keys(&opts, &["key", "button", "down"], "input.simulate")?;
+                const CALL: &str = "input.simulate";
+                crate::opts::check_keys(&opts, &["key", "button", "down", "mouse", "scroll", "text"], CALL)?;
                 let down: bool = opts.get::<Option<bool>>("down")?.unwrap_or(true);
-                let key: Option<String> = opts.get("key")?;
-                let button: Option<u32> = opts.get("button")?;
-                let ev = match (key, button) {
-                    (Some(k), None) => {
-                        let k = k.to_lowercase();
-                        if floptle_input::Key::from_script_name(&k).is_none() {
-                            return Err(mlua::Error::runtime(format!(
-                                "input.simulate: no key called \"{k}\" (the names input.key takes)"
-                            )));
-                        }
-                        crate::SimulatedInput::Key(k, down)
+                let mut evs = Vec::new();
+                match opts.get::<Value>("mouse")? {
+                    Value::Nil => {}
+                    v => {
+                        // `{x, y}`, or anything with `x` and `y` (a vec2, a vec3).
+                        let listed = match &v {
+                            Value::Table(t) => t.get::<Option<f64>>(1)?.zip(t.get::<Option<f64>>(2)?),
+                            _ => None,
+                        };
+                        let p = listed.or_else(|| crate::math_api::vec3_of(&v).map(|p| (p.x, p.y))).map(|(x, y)| [x as f32, y as f32]).ok_or_else(|| {
+                            mlua::Error::runtime(format!("{CALL}: `mouse` is a point, {{x, y}} or vec2(x, y), in the pixels input.mouse() reports"))
+                        })?;
+                        evs.push(crate::SimulatedInput::Mouse(p[0], p[1]));
                     }
-                    (None, Some(b @ 1..=3)) => crate::SimulatedInput::Button(b as usize - 1, down),
-                    (None, Some(b)) => {
+                }
+                if let Some(n) = crate::opts::opt_num(&opts, CALL, "scroll", -1000.0, 1000.0)? {
+                    evs.push(crate::SimulatedInput::Scroll(n as f32));
+                }
+                if let Some(text) = opts.get::<Option<String>>("text")? {
+                    evs.push(crate::SimulatedInput::Text(text));
+                }
+                if let Some(k) = opts.get::<Option<String>>("key")? {
+                    let k = k.to_lowercase();
+                    if floptle_input::Key::from_script_name(&k).is_none() {
                         return Err(mlua::Error::runtime(format!(
-                            "input.simulate: button {b} — buttons are 1 (left), 2 (right) and 3 (middle)"
+                            "{CALL}: no key called \"{k}\" (the names input.key takes)"
                         )));
                     }
-                    _ => {
-                        return Err(mlua::Error::runtime(
-                            "input.simulate{ key = \"w\", down = true } or { button = 1, down = true }: one of key or button",
-                        ));
+                    evs.push(crate::SimulatedInput::Key(k, down));
+                }
+                match opts.get::<Option<i64>>("button")? {
+                    None => {}
+                    Some(b @ 0..=4) => evs.push(crate::SimulatedInput::Button(b as usize, down)),
+                    Some(b) => {
+                        return Err(mlua::Error::runtime(format!(
+                            "{CALL}: button {b} — buttons are numbered as input.button numbers them: 0 left, 1 right, 2 middle, 3 and 4 the side buttons"
+                        )));
                     }
-                };
-                q.borrow_mut().push(ev);
+                }
+                if evs.is_empty() {
+                    return Err(mlua::Error::runtime(format!(
+                        "{CALL}{{ key = \"w\" }}, {{ button = 0 }}, {{ mouse = {{x, y}} }}, {{ scroll = n }} or {{ text = \"...\" }}: say what to simulate"
+                    )));
+                }
+                q.borrow_mut().extend(evs);
                 Ok(())
             })
             .ok(),
@@ -1322,9 +1349,17 @@ fn install_scene(lua: &Lua, net: &crate::net_api::SharedNet, project_root: &Rc<R
                 } else if opts.as_ref().is_some_and(|o| o.contains_key("color").unwrap_or(false)) {
                     return Err(mlua::Error::runtime("scene.load: `color` is the colour of a fade; add `fade = seconds`"));
                 }
-                let (additive, environment, offset, replicate) = match &opts {
+                let (additive, environment, offset, replicate, parent) = match &opts {
                     Some(o) => {
                         crate::opts::check_keys(o, SCENE_LOAD_KEYS, "scene.load")?;
+                        let parent = match o.get::<Value>("parent")? {
+                            Value::Nil => None,
+                            Value::Table(t) => match t.raw_get::<Option<u32>>("__id")? {
+                                Some(id) => Some(id),
+                                None => return Err(mlua::Error::runtime("scene.load: `parent` is a node, the one the layer goes under")),
+                            },
+                            _ => return Err(mlua::Error::runtime("scene.load: `parent` is a node, the one the layer goes under")),
+                        };
                         let offset = match o.get::<Value>("offset")? {
                             Value::Nil => None,
                             v => {
@@ -1341,9 +1376,10 @@ fn install_scene(lua: &Lua, net: &crate::net_api::SharedNet, project_root: &Rc<R
                                 .unwrap_or(false),
                             offset,
                             crate::opts::opt_bool(o, "scene.load", "replicate")?,
+                            parent,
                         )
                     }
-                    None => (false, false, None, None),
+                    None => (false, false, None, None, None),
                 };
                 // Both only mean something for a layer. Read as a full swap,
                 // `offset` would be dropped in silence and the level would
@@ -1353,13 +1389,26 @@ fn install_scene(lua: &Lua, net: &crate::net_api::SharedNet, project_root: &Rc<R
                         "scene.load: `fade` is for a full swap; a layer arrives over the running scene",
                     ));
                 }
-                if !additive && (offset.is_some() || replicate.is_some()) {
+                if !additive && (offset.is_some() || replicate.is_some() || parent.is_some()) {
                     return Err(mlua::Error::runtime(
-                        "scene.load: `offset` and `replicate` are for a layer; add `additive = true`",
+                        "scene.load: `offset`, `parent` and `replicate` are for a layer; add `additive = true`",
+                    ));
+                }
+                // A node on this machine is not one a client can name, so a
+                // layer under one is this machine's alone.
+                if parent.is_some() && replicate == Some(true) {
+                    return Err(mlua::Error::runtime(
+                        "scene.load: a layer under a `parent` stays on this machine; leave out `replicate`",
                     ));
                 }
                 let req = if additive {
-                    crate::SceneRequest::Additive { name, environment, offset, replicate: replicate.unwrap_or(true) }
+                    crate::SceneRequest::Additive {
+                        name,
+                        environment,
+                        offset,
+                        replicate: replicate.unwrap_or(parent.is_none()),
+                        parent,
+                    }
                 } else {
                     crate::SceneRequest::Load { name, fade }
                 };
@@ -1963,12 +2012,19 @@ fn conic_points(
     (pts, closed)
 }
 
-fn push_polyline(q: &mut Vec<crate::DrawLine>, pts: &[glam::DVec3], closed: bool, color: [f32; 4], depth: bool) {
+fn push_polyline(
+    q: &mut Vec<crate::DrawLine>,
+    pts: &[glam::DVec3],
+    closed: bool,
+    color: [f32; 4],
+    depth: bool,
+    frame: Option<u32>,
+) {
     for w in pts.windows(2) {
-        q.push(crate::DrawLine { a: w[0].into(), b: w[1].into(), color, depth });
+        q.push(crate::DrawLine { a: w[0].into(), b: w[1].into(), color, depth, frame });
     }
     if closed && pts.len() > 2 {
-        q.push(crate::DrawLine { a: pts[pts.len() - 1].into(), b: pts[0].into(), color, depth });
+        q.push(crate::DrawLine { a: pts[pts.len() - 1].into(), b: pts[0].into(), color, depth, frame });
     }
 }
 
@@ -1982,8 +2038,25 @@ struct DrawCells {
     draw_texts: Rc<RefCell<Vec<crate::DrawText>>>,
 }
 
+/// The frame each script draws in (`draw.setFrame`), by the script that set
+/// it: one script's frame never moves another script's shapes.
+#[derive(Clone)]
+struct DrawFrames {
+    set: Rc<RefCell<HashMap<(u32, String), u32>>>,
+    current: Rc<RefCell<Option<(u32, String)>>>,
+}
+
+impl DrawFrames {
+    /// The frame the calling script's shapes are in now.
+    fn now(&self) -> Option<u32> {
+        let cur = self.current.borrow();
+        cur.as_ref().and_then(|k| self.set.borrow().get(k).copied())
+    }
+}
+
 /// `draw.*`: world-space and screen-space debug drawing that lasts one frame.
-fn install_draw(lua: &Lua) -> DrawCells {
+fn install_draw(lua: &Lua, current: Rc<RefCell<Option<(u32, String)>>>) -> DrawCells {
+    let frames = DrawFrames { set: Rc::default(), current };
     // `draw.line(x1,y1,z1, x2,y2,z2, r,g,b [, a])` — queue one world-space
     // 3D line segment for this tick. Immediate mode: segments live for one
     // tick and are re-drawn every fixedUpdate while wanted (the S6 v2 map
@@ -2000,6 +2073,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
     let draw_texts: Rc<RefCell<Vec<crate::DrawText>>> = Rc::new(RefCell::new(Vec::new()));
     {
         let q = draw_lines.clone();
+        let fr = frames.clone();
         let ld = line_depth.clone();
         if let (Ok(f), Ok(t)) = (
             lua.create_function(
@@ -2021,6 +2095,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
                         b: [x2, y2, z2],
                         color: [r, g, b, a.unwrap_or(1.0)],
                         depth: ld.get(),
+                        frame: fr.now(),
                     });
                     Ok(())
                 },
@@ -2041,7 +2116,8 @@ fn install_draw(lua: &Lua) -> DrawCells {
                              n: glam::DVec3,
                              radius: f64,
                              color: [f32; 4],
-                             depth: bool| {
+                             depth: bool,
+                             frame: Option<u32>| {
                 let n = n.try_normalize().unwrap_or(glam::DVec3::Y);
                 let u = if n.x.abs() < 0.9 { glam::DVec3::X } else { glam::DVec3::Z };
                 let u = (u - n * u.dot(n)).normalize();
@@ -2051,12 +2127,13 @@ fn install_draw(lua: &Lua) -> DrawCells {
                 for k in 1..=N {
                     let t = k as f64 / N as f64 * std::f64::consts::TAU;
                     let p = c + u * (radius * t.cos()) + v * (radius * t.sin());
-                    q.push(crate::DrawLine { a: prev.into(), b: p.into(), color, depth });
+                    q.push(crate::DrawLine { a: prev.into(), b: p.into(), color, depth, frame });
                     prev = p;
                 }
             };
             {
                 let q = draw_lines.clone();
+                let fr = frames.clone();
                 let ld = line_depth.clone();
                 type RingArgs = (f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, Option<f32>);
                 if let Ok(f) = lua.create_function(
@@ -2068,6 +2145,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
                             radius.max(1e-4),
                             [r, g, b, a.unwrap_or(1.0)],
                             ld.get(),
+                            fr.now(),
                         );
                         Ok(())
                     },
@@ -2090,6 +2168,38 @@ fn install_draw(lua: &Lua) -> DrawCells {
                     let _ = t.set("nativeLines", f);
                 }
             }
+            // `draw.setFrame(node)` — the 3D shapes this script queues after it
+            // are in that node's own space, and are drawn where the node is
+            // when the frame is drawn: an overlay on a planet on rails stays on
+            // it, however far the planet moves after the script drew.
+            // `draw.setFrame(nil)` is world space again. Holds for this script
+            // until changed; another script's shapes are never in it. Returns
+            // the frame it replaced.
+            {
+                let fr = frames.clone();
+                if let Ok(f) = lua.create_function(move |lua, node: Value| {
+                    let Some(key) = fr.current.borrow().clone() else {
+                        return Err(mlua::Error::runtime("draw.setFrame is called from a script"));
+                    };
+                    let id = match &node {
+                        Value::Nil => None,
+                        v => Some(crate::env::node_id_of(v).ok_or_else(|| {
+                            mlua::Error::runtime("draw.setFrame(node): a node, or nil for world space")
+                        })?),
+                    };
+                    let mut set = fr.set.borrow_mut();
+                    let was = match id {
+                        Some(id) => set.insert(key, id),
+                        None => set.remove(&key),
+                    };
+                    match was {
+                        Some(e) => Ok(Value::Table(crate::env::new_node_handle(lua, e)?)),
+                        None => Ok(Value::Nil),
+                    }
+                }) {
+                    let _ = t.set("setFrame", f);
+                }
+            }
             // `draw.depthTest([on])` — whether the lines, rings, boxes, polylines
             // and conics queued after it hide behind the surfaces in front of
             // them. Off by default: an orbit line reads through its planet.
@@ -2109,11 +2219,12 @@ fn install_draw(lua: &Lua) -> DrawCells {
             // rather than one per segment.
             {
                 let q = draw_lines.clone();
+                let fr = frames.clone();
                 let ld = line_depth.clone();
                 type PolyArgs = (Table, f32, f32, f32, Option<f32>, Option<bool>);
                 if let Ok(f) = lua.create_function(move |_, (points, r, g, b, a, closed): PolyArgs| {
                     let pts = polyline_points(&points)?;
-                    push_polyline(&mut q.borrow_mut(), &pts, closed.unwrap_or(false), [r, g, b, a.unwrap_or(1.0)], ld.get());
+                    push_polyline(&mut q.borrow_mut(), &pts, closed.unwrap_or(false), [r, g, b, a.unwrap_or(1.0)], ld.get(), fr.now());
                     Ok(())
                 }) {
                     let _ = t.set("polyline", f);
@@ -2123,6 +2234,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
             // a Kepler orbit around a focus.
             {
                 let q = draw_lines.clone();
+                let fr = frames.clone();
                 let ld = line_depth.clone();
                 type ConicArgs =
                     (Value, Value, Value, f64, f64, usize, f32, f32, f32, Option<f32>, Option<f64>);
@@ -2147,7 +2259,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
                             segs,
                             max_r.unwrap_or(p * 10.0),
                         );
-                        push_polyline(&mut q.borrow_mut(), &pts, closed, [r, g, b, a.unwrap_or(1.0)], ld.get());
+                        push_polyline(&mut q.borrow_mut(), &pts, closed, [r, g, b, a.unwrap_or(1.0)], ld.get(), fr.now());
                         Ok(())
                     },
                 ) {
@@ -2156,6 +2268,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
             }
             {
                 let q = draw_lines.clone();
+                let fr = frames.clone();
                 let ld = line_depth.clone();
                 type BallArgs = (f64, f64, f64, f64, f32, f32, f32, Option<f32>);
                 if let Ok(f) = lua.create_function(
@@ -2164,7 +2277,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
                         let col = [r, g, b, a.unwrap_or(1.0)];
                         let mut q = q.borrow_mut();
                         for n in [glam::DVec3::X, glam::DVec3::Y, glam::DVec3::Z] {
-                            ring_segs(&mut q, c, n, radius.max(1e-4), col, ld.get());
+                            ring_segs(&mut q, c, n, radius.max(1e-4), col, ld.get(), fr.now());
                         }
                         Ok(())
                     },
@@ -2174,6 +2287,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
             }
             {
                 let q = draw_lines.clone();
+                let fr = frames.clone();
                 let ld = line_depth.clone();
                 type BoxArgs = (f64, f64, f64, f64, f64, f64, mlua::Value, f32, f32, f32, Option<f32>);
                 if let Ok(f) = lua.create_function(
@@ -2216,7 +2330,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
                             (0, 2), (1, 3), (4, 6), (5, 7), // y edges
                             (0, 4), (1, 5), (2, 6), (3, 7), // z edges
                         ] {
-                            q.push(crate::DrawLine { a: corner(i).into(), b: corner(j).into(), color: col, depth: ld.get() });
+                            q.push(crate::DrawLine { a: corner(i).into(), b: corner(j).into(), color: col, depth: ld.get(), frame: fr.now() });
                         }
                         Ok(())
                     },
@@ -2228,6 +2342,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
             // `draw.tri(x1..z3, r,g,b[,a])` — one raw triangle.
             {
                 let q = draw_tris.clone();
+                let fr = frames.clone();
                 type TriArgs =
                     (f64, f64, f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, Option<f32>);
                 if let Ok(f) = lua.create_function(
@@ -2238,6 +2353,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
                             b: [x2, y2, z2],
                             c: [x3, y3, z3],
                             color: [r, g, b, a.unwrap_or(1.0)],
+                            frame: fr.now(),
                         });
                         Ok(())
                     },
@@ -2253,6 +2369,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
             // per segment with `u` walking along it.
             {
                 let q = draw_quads.clone();
+                let fr = frames.clone();
                 type QuadArgs = (
                     String,
                     [f64; 12],
@@ -2278,6 +2395,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
                             uv: [u0.unwrap_or(0.0), v0.unwrap_or(0.0), u1.unwrap_or(1.0), v1.unwrap_or(1.0)],
                             color: [r, g, b, a.unwrap_or(1.0)],
                             texture,
+                            frame: fr.now(),
                         });
                         Ok(())
                     },
@@ -2297,6 +2415,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
             // unit dir. Gizmo arrowheads, thruster nozzles, markers.
             {
                 let q = draw_tris.clone();
+                let fr = frames.clone();
                 type ConeArgs =
                     (f64, f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, Option<f32>);
                 if let Ok(f) = lua.create_function(
@@ -2308,6 +2427,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
                         let col = [r, g, b, a.unwrap_or(1.0)];
                         const N: usize = 20;
                         let mut q = q.borrow_mut();
+                        let frame = fr.now();
                         let rim = |k: usize| {
                             let t = k as f64 / N as f64 * std::f64::consts::TAU;
                             base + u * (radius * t.cos()) + v * (radius * t.sin())
@@ -2321,6 +2441,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
                                 b: p1.into(),
                                 c: apex.into(),
                                 color: col,
+                                frame,
                             });
                             // base cap
                             q.push(crate::DrawTri {
@@ -2328,6 +2449,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
                                 b: p0.into(),
                                 c: base.into(),
                                 color: col,
+                                frame,
                             });
                         }
                         Ok(())
@@ -2341,6 +2463,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
             // gizmo bands, ring markers. r0=0 gives a full disc.
             {
                 let q = draw_tris.clone();
+                let fr = frames.clone();
                 type DiscArgs =
                     (f64, f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, Option<f32>);
                 if let Ok(f) = lua.create_function(
@@ -2351,6 +2474,7 @@ fn install_draw(lua: &Lua) -> DrawCells {
                         let col = [r, g, b, a.unwrap_or(1.0)];
                         const N: usize = 36;
                         let mut q = q.borrow_mut();
+                        let frame = fr.now();
                         let at = |rad: f64, k: usize| {
                             let t = k as f64 / N as f64 * std::f64::consts::TAU;
                             c + u * (rad * t.cos()) + v * (rad * t.sin())
@@ -2365,12 +2489,14 @@ fn install_draw(lua: &Lua) -> DrawCells {
                                 b: o0.into(),
                                 c: o1.into(),
                                 color: col,
+                                frame,
                             });
                             q.push(crate::DrawTri {
                                 a: i0.into(),
                                 b: o1.into(),
                                 c: i1.into(),
                                 color: col,
+                                frame,
                             });
                         }
                         Ok(())
@@ -2584,13 +2710,33 @@ fn install_node_queues(lua: &Lua) -> NodeQueueCells {
                     }
                 }
                 // Optional 4th arg: a parent node — the spawned subtree
-                // lands under it (still at the world `pos`).
-                let parent = match &c {
-                    Value::Table(t) => t.raw_get::<u32>("__id").ok(),
-                    _ => None,
-                };
+                // lands under it (still at the world `pos`) — or an options
+                // table, `{ parent = node, body = false }`. `body = false`
+                // leaves the prefab's bodies and colliders out: a display
+                // copy of a part, which costs physics nothing.
+                let (mut parent, mut bodies) = (None, true);
+                if let Value::Table(t) = &c {
+                    match t.raw_get::<u32>("__id") {
+                        Ok(id) => parent = Some(id),
+                        Err(_) => {
+                            parent = match t.raw_get::<Value>("parent")? {
+                                Value::Table(p) => p.raw_get::<u32>("__id").ok(),
+                                _ => None,
+                            };
+                            match t.raw_get::<Value>("body")? {
+                                Value::Nil => {}
+                                Value::Boolean(b) => bodies = b,
+                                _ => {
+                                    return Err(mlua::Error::runtime(
+                                        "spawn(prefab, pos, fn, { body = false }): body must be true or false",
+                                    ))
+                                }
+                            }
+                        }
+                    }
+                }
                 let handle = crate::api::deferred_handle(lua, "spawn", &name)?;
-                q.borrow_mut().push(crate::SpawnRequest { prefab: name, pos, cb, parent });
+                q.borrow_mut().push(crate::SpawnRequest { prefab: name, pos, cb, parent, bodies });
                 Ok(handle)
             },
         ) {
@@ -2781,7 +2927,7 @@ impl ScriptHost {
             draw_quads,
             draw_rects,
             draw_texts,
-        } = install_draw(&lua);
+        } = install_draw(&lua, net.current.clone());
         let NodeQueueCells {
             spawn_requests,
             create_requests,
@@ -3315,6 +3461,7 @@ impl ScriptHost {
             http,
             budget,
             stopped: std::collections::HashSet::new(),
+            budget_strikes: std::collections::HashMap::new(),
             dropped_lines,
             account,
             preloads,
@@ -3677,6 +3824,12 @@ impl ScriptHost {
 
     /// The presses and releases scripts asked `input.simulate` for since the
     /// last call, for the driver to feed through the real input path.
+    /// Queue input as `input.simulate` does, for a driver's own tests and
+    /// probes: it lands through the real input path on the next frame.
+    pub fn simulate_input(&self, ev: crate::SimulatedInput) {
+        self.input_sim.borrow_mut().push(ev);
+    }
+
     pub fn take_simulated_input(&self) -> Vec<crate::SimulatedInput> {
         std::mem::take(&mut *self.input_sim.borrow_mut())
     }
@@ -4026,6 +4179,7 @@ impl ScriptHost {
         // Pending timers belong to the old session — a scene switch drops them.
         // (Including a persistent node's: a timer is a promise about a world.)
         self.sched.borrow_mut().clear();
+        self.budget_strikes.clear();
         // Terrain edits still waiting to land were aimed at the old world, and
         // an anchor names a node in it.
         self.terrain_ops.borrow_mut().clear();
@@ -4362,6 +4516,14 @@ impl ScriptHost {
     /// reads it). Fed every frame regardless of focus, so the map can pick.
     pub fn set_view(&self, info: crate::view_api::ViewInfo) {
         *self.view_info.borrow_mut() = info;
+    }
+
+    /// The game viewport's size in pixels, as the renderer last reported it
+    /// — the space `draw.*` and `input.mouse()` positions are in. `None`
+    /// before anything has drawn.
+    pub fn view_size(&self) -> Option<[f32; 2]> {
+        let v = self.view_info.borrow();
+        (v.valid && v.vp_h > 0.0 && v.vp_w > 0.0).then_some([v.vp_w, v.vp_h])
     }
 
     /// The game viewport's width over height, as the renderer last reported
@@ -6064,6 +6226,9 @@ impl ScriptHost {
         let _budget = self.budget.arm();
         self.weather.time.set(time as f64);
         self.errors.clear();
+        // A script that went a whole frame without overrunning starts its
+        // count again: only overruns in a row stop it.
+        self.budget_strikes.retain(|_, s| std::mem::take(&mut s.1));
         // Gizmos are immediate mode — a fresh frame starts empty even if the last
         // frame's batch was never drained. Sprite-batch draws are the same
         // contract and so are cleared in the same place: every pass of the
@@ -8689,17 +8854,30 @@ impl ScriptHost {
         if msg.contains("not enough memory") {
             self.lua.gc_collect().ok();
         }
-        let msg = self.explain_runtime(name, msg);
+        let mut msg = self.explain_runtime(name, msg);
+        // Past the budget: the pass is abandoned and the script runs again
+        // next frame, so one slow pass does not end it for the session. Past
+        // it `STRIKES` passes in a row, it is not called again until its file
+        // changes: calling it on would freeze every frame for the whole
+        // budget, which is the freeze the budget exists to end — and `broken`
+        // so a handle reading it says why it is silent.
+        if crate::budget::Budget::is_timeout(&msg) {
+            let strikes = crate::budget::STRIKES;
+            let s = self.budget_strikes.entry(name.to_string()).or_insert((0, false));
+            s.0 += 1;
+            s.1 = true;
+            if s.0 >= strikes {
+                msg.push_str(&format!(" It overran {strikes} passes in a row and is stopped until it is edited."));
+                self.stopped.insert(name.to_string());
+                self.broken.borrow_mut().insert(name.to_string());
+            } else {
+                msg.push_str(&format!(
+                    " This pass was abandoned and the script runs again next frame; {strikes} in a row stop it."
+                ));
+            }
+        }
         if let Some(src) = self.sources.get_mut(name) {
             src.error = Some(msg.clone());
-        }
-        // Past the budget: the script is not called again until its file
-        // changes. Calling it next frame would freeze the frame for the whole
-        // budget again, every frame, which is the freeze the budget exists to
-        // end — and `broken` so a handle reading it says why it is silent.
-        if crate::budget::Budget::is_timeout(&msg) {
-            self.stopped.insert(name.to_string());
-            self.broken.borrow_mut().insert(name.to_string());
         }
         self.record_error(name, msg);
     }
@@ -9072,6 +9250,50 @@ mod host_tests {
             }]),
         );
         world
+    }
+
+    /// **A script's frame is its own.** `draw.setFrame(node)` marks the
+    /// shapes the setting script queues after it, until it sets nil; another
+    /// script's shapes in the same frame stay in world space.
+    #[test]
+    fn a_draw_frame_is_the_setting_scripts_alone() {
+        let dir = std::env::temp_dir().join(format!("floptle-draw-frame-host-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("framed.lua"),
+            "function update(node, dt)\n  draw.setFrame(node)\n  draw.line(0,0,0, 1,0,0, 0,1,0)\n  draw.tri(0,0,0, 1,0,0, 0,1,0, 0,1,0)\nend\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("plain.lua"), "function update(node, dt)\n  draw.line(0,0,0, 1,0,0, 1,0,0)\nend\n").unwrap();
+        let mut world = world_with_script("framed");
+        let other = world.spawn();
+        world.insert(other, floptle_core::transform::Transform::IDENTITY);
+        world.insert(
+            other,
+            floptle_core::Scripts(vec![floptle_core::ScriptInst {
+                kind: "plain".into(),
+                enabled: true,
+                params: Vec::new(),
+                refs: Vec::new(),
+                strs: Vec::new(),
+                pinned_bools: None,
+            }]),
+        );
+        let framed_node = world.query::<floptle_core::Name>().find(|(_, n)| n.0 == "framed").unwrap().0.index();
+        let mut host = ScriptHost::new();
+        host.set_playing(true);
+        for _ in 0..2 {
+            host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        }
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let lines = host.take_draw_lines();
+        let green: Vec<_> = lines.iter().filter(|l| l.color[1] == 1.0).collect();
+        let red: Vec<_> = lines.iter().filter(|l| l.color[0] == 1.0).collect();
+        assert!(!green.is_empty() && green.iter().all(|l| l.frame == Some(framed_node)), "the framed script's line: {green:?}");
+        assert!(!red.is_empty() && red.iter().all(|l| l.frame.is_none()), "another script's line took its frame: {red:?}");
+        assert!(host.take_draw_tris().iter().all(|t| t.frame == Some(framed_node)), "a triangle left the frame");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **`node:uiRect()` is `nil` until something has laid the element out**
@@ -9466,9 +9688,10 @@ mod host_tests {
     }
 
     /// **A loop without an exit stops the script, not the editor.** With a
-    /// 50 ms budget, `while true do end` in `update` returns the frame, the
-    /// error names the budget, the script is `broken`, and the next frame does
-    /// not call it. Luau only: LuaJIT has no interrupt.
+    /// 50 ms budget, `while true do end` in `update` returns the frame and the
+    /// error names the budget. The pass is abandoned and the script runs
+    /// again next frame; after `STRIKES` overruns in a row it is `broken` and
+    /// the next frame does not call it. Luau only: LuaJIT has no interrupt.
     #[test]
     fn a_script_that_runs_past_its_budget_is_stopped_and_not_called_again() {
         let dir = std::env::temp_dir().join(format!("floptle-budget-{}", std::process::id()));
@@ -9503,22 +9726,75 @@ mod host_tests {
         let mut host = ScriptHost::new();
         host.set_script_budget(std::time::Duration::from_millis(50));
         host.set_playing(true);
-        let t0 = std::time::Instant::now();
-        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 0.0);
-        let took = t0.elapsed();
-        assert!(took < std::time::Duration::from_secs(1), "the frame did not come back: {took:?}");
+        let strikes = crate::budget::STRIKES;
+        for n in 1..=strikes {
+            let t0 = std::time::Instant::now();
+            host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, n as f32 / 60.0);
+            let took = t0.elapsed();
+            assert!(took < std::time::Duration::from_secs(1), "the frame did not come back: {took:?}");
+            let errors = host.errors().join("\n");
+            assert!(errors.contains("ran for more than 50 ms"), "the budget is not named:\n{errors}");
+            let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+            assert!(said.iter().any(|m| *m == format!("called {n}")), "overrun {n} was not called: {said:?}");
+            if n < strikes {
+                assert!(errors.contains("runs again next frame"), "{errors}");
+                assert!(!host.broken.borrow().contains("spinner"), "stopped after {n} overruns");
+            }
+        }
         let errors = host.errors().join("\n");
-        assert!(errors.contains("ran for more than 50 ms"), "the budget is not named:\n{errors}");
         assert!(errors.contains("stopped until it is edited"), "{errors}");
         assert!(host.broken.borrow().contains("spinner"), "the script did not join `broken`");
-        let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
-        assert!(said.iter().any(|m| m == "called 1"), "{said:?}");
 
-        // The second frame: the spinner is not called; everything else is.
-        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 1.0 / 60.0);
+        // The next frame: the spinner is not called; everything else is.
+        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 1.0);
         let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
         assert!(!said.iter().any(|m| m.starts_with("called")), "the stopped script ran again: {said:?}");
         assert!(said.iter().any(|m| m == "fine"), "a healthy script was stopped too: {said:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **One slow pass does not end a script.** A script that overruns its
+    /// budget once and then returns quickly is still running ten frames
+    /// later, and one that overruns every other frame is never stopped: only
+    /// overruns in a row count.
+    #[test]
+    fn a_script_that_overran_once_keeps_running() {
+        let dir = std::env::temp_dir().join(format!("floptle-budget-once-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        // Overruns on frames 1, 3, 5, … up to 2 × STRIKES, never twice in a row.
+        floptle_vfs::write(
+            dir.join("scripts/spinner.lua"),
+            format!(
+                "calls = 0\n\
+                 function update(node, dt)\n\
+                 \x20 calls = calls + 1\n\
+                 \x20 print('called ' .. calls)\n\
+                 \x20 if calls % 2 == 1 and calls < {} then while true do end end\n\
+                 end\n",
+                2 * crate::budget::STRIKES
+            ),
+        )
+        .unwrap();
+        let mut world = world_with_script("spinner");
+        let mut host = ScriptHost::new();
+        host.set_script_budget(std::time::Duration::from_millis(30));
+        host.set_playing(true);
+        let frames = 2 * crate::budget::STRIKES + 10;
+        let mut last = String::new();
+        let mut overruns = 0;
+        for n in 1..=frames {
+            host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, n as f32 / 60.0);
+            overruns += host.errors().iter().filter(|e| e.contains("ran for more than")).count();
+            for l in host.drain_logs() {
+                if l.msg.starts_with("called") {
+                    last = l.msg;
+                }
+            }
+        }
+        assert_eq!(overruns as u32, crate::budget::STRIKES, "the overruns did not happen");
+        assert_eq!(last, format!("called {frames}"), "the script stopped running");
+        assert!(!host.broken.borrow().contains("spinner"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -9915,6 +10191,7 @@ function update() synced.hx = synced.hx + 1 end
                 uv: [0.1, 0.0, 0.6, 1.0],
                 color: [0.5, 0.25, 1.0, 0.75],
                 texture: "textures/VFX/SlashTrail.png".into(),
+                frame: None,
             }
         );
         assert_eq!(quads[1].color, [1.0, 1.0, 1.0, 1.0], "alpha defaults to 1");

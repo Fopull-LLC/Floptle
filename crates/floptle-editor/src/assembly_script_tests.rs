@@ -1186,37 +1186,47 @@ end
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A Kinematic or Static capsule spawned under a planet moving on its
-/// rails and moved by script through `node.x` stops a body walking into it
-/// at its surface: a radius and the body's radius from its axis.
-fn post_stops_a_walker(mode: floptle_core::BodyMode) -> f64 {
-    let tag = format!("postwalk{mode:?}");
-    let (mut ed, dir) = project(
-        &tag,
+/// A Kinematic or Static post spawned on a planet moving on its rails at
+/// 100 m/s stops a crew capsule (r 0.3, 2 m tall) walking into it at its
+/// surface: the post's radius and the crew's from its axis. Parented to the
+/// planet and moved by script through `node.x`, or at the root with its
+/// place written each tick as the planet's plus an offset. A sphere post at
+/// the crew's middle went between the capsule's end spheres when it was
+/// kinematic: those were all a capsule tested against a kinematic body.
+/// Returns the closest the crew's axis came to the post's centre.
+fn post_stops_a_walker(mode: floptle_core::BodyMode, kind: BodyKind, parented: bool) -> f64 {
+    let tag = format!("postwalk{mode:?}{kind:?}{parented}");
+    let place = if parented {
+        // Moved by script each tick, in the planet's frame.
+        "post.x = 4 + math.min(n, 60) / 60"
+    } else {
+        "post.pos = p.pos + vec3(4 + math.min(n, 60) / 60, 0, 0)"
+    };
+    let script = format!(
         r#"
 local n, post = 0, nil
-function update(node, dt)
+function fixedUpdate(node, dt)
   n = n + 1
   local p, ball = find("Planet"), find("Ball")
   if not (p and ball) then return end
   if n == 2 then
-    spawn("Post", vec3(p.x + 8, p.y, p.z), function(q) post = q end, p)
+    spawn("Post", vec3(p.x + 8, p.y, p.z), function(q) post = q end, {parent})
   end
-  -- Moved by script each frame, in the planet's frame.
-  if post then post.x = 4 + math.min(n, 60) / 60 end
-  if n == 70 then ball.vx = 1.0 end
+  if post then {place} end
+  -- Steered into it, as a walker is.
+  if n >= 70 then ball.vx = 1.0 end
   if post and n > 70 then
-    local wx = post.worldX or post.x
-    log(string.format("D %.4f %d", math.sqrt((ball.x - p.x - (post.x)) ^ 2 + (ball.z - p.z) ^ 2), n))
+    -- The ball's own place this tick, not its render pose, which trails the
+    -- planet's by up to a tick of its 100 m/s.
+    local w, b = post:toWorld(vec3(0, 0, 0)), ball.tickPos
+    log(string.format("D %.4f %d", math.sqrt((b.x - w.x) ^ 2 + (b.z - w.z) ^ 2), n))
   end
 end
 "#,
+        parent = if parented { "p" } else { "nil" },
     );
-    prefab(
-        &dir,
-        "Post",
-        RigidBody { kind: BodyKind::Capsule, mode, radius: 0.5, height: 3.0, gravity: false, ..Default::default() },
-    );
+    let (mut ed, dir) = project(&tag, &script);
+    prefab(&dir, "Post", RigidBody { kind, mode, radius: 0.5, height: 3.0, gravity: false, ..Default::default() });
     let star = ed.world.query::<Name>().find(|(_, n)| n.0 == "Star").map(|(e, _)| e).unwrap();
     ed.world.get_mut::<CelestialBody>(star).unwrap().mu = 1.0e7;
     let planet = ed.world.spawn();
@@ -1228,7 +1238,7 @@ end
     ed.world.insert(ball, Transform::IDENTITY);
     ed.world.insert(ball, Name("Ball".into()));
     ed.world.insert(ball, Matter::Empty);
-    ed.world.insert(ball, RigidBody { gravity: false, radius: 0.3, ..Default::default() });
+    ed.world.insert(ball, RigidBody { kind: BodyKind::Capsule, gravity: false, radius: 0.3, height: 2.0, ..Default::default() });
     ed.toggle_play();
     run(&mut ed, 1);
     let p = floptle_core::world_transform(&ed.world, planet).translation;
@@ -1238,7 +1248,7 @@ end
     let cam = ed.world.query::<Name>().find(|(_, n)| n.0 == "Camera").map(|(e, _)| e).unwrap();
     ed.world.get_mut::<Transform>(cam).unwrap().translation = p + DVec3::new(0.0, 5.0, 20.0);
     ed.toggle_play();
-    run(&mut ed, 400);
+    run(&mut ed, 500);
     let d = lines(&mut ed, "D");
     assert!(d.len() > 100, "{d:?}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1247,10 +1257,75 @@ end
 
 #[test]
 fn a_script_moved_post_on_a_moving_planet_stops_a_walker() {
-    for mode in [floptle_core::BodyMode::Kinematic, floptle_core::BodyMode::Static] {
-        let closest = post_stops_a_walker(mode);
-        assert!(closest > 0.75, "{mode:?}: the walker came {closest} m from the post's axis (radii 0.5 + 0.3)");
+    use floptle_core::BodyMode::{Kinematic, Static};
+    let mut missed = Vec::new();
+    for (mode, kind, parented) in [
+        (Kinematic, BodyKind::Capsule, true),
+        (Kinematic, BodyKind::Sphere, true),
+        (Kinematic, BodyKind::Sphere, false),
+        (Static, BodyKind::Capsule, true),
+        (Static, BodyKind::Sphere, true),
+    ] {
+        let closest = post_stops_a_walker(mode, kind, parented);
+        // Radii 0.5 + 0.3.
+        if closest < 0.75 {
+            missed.push(format!("{mode:?} {kind:?} parented {parented}: {closest:.3} m"));
+        }
     }
+    assert!(missed.is_empty(), "the walker came closer to the post's axis than its radius and the post's: {missed:?}");
+}
+
+/// A thousand Kinematic-box parts laid as a floor by `spawn`, and a crate
+/// thrown down onto them. With `{ body = false }` the parts arrive as nodes and no
+/// more: the crate is the scene's only body, and it falls through. Returns
+/// the crate's height, how many bodies the scene has and how many parts
+/// arrived.
+fn display_floor(bodies: bool) -> (f64, usize, usize) {
+    let script = format!(
+        r#"
+local n, crate = 0, nil
+function fixedUpdate(node, dt)
+  n = n + 1
+  if n == 2 then
+    for i = 0, 999 do
+      spawn("Beam", vec3(i % 32 - 16, 0, math.floor(i / 32) - 16), nil, {{ body = {bodies} }})
+    end
+  end
+  -- Thrown down: the scene's only gravity is its near-massless star's.
+  if n == 5 then spawn("Crate", vec3(0.2, 3, 0.2), function(c) crate = c; c.vy = -3 end) end
+  if crate and n % 10 == 0 then log(string.format("Y %.4f", crate.tickPos.y)) end
+end
+"#
+    );
+    let (mut ed, dir) = project(&format!("displayfloor{bodies}"), &script);
+    prefab(
+        &dir,
+        "Beam",
+        RigidBody { kind: BodyKind::Box, mode: floptle_core::BodyMode::Kinematic, half_extents: [0.5, 0.5, 0.5], ..Default::default() },
+    );
+    prefab(&dir, "Crate", RigidBody { kind: BodyKind::Box, half_extents: [0.4, 0.4, 0.4], ..Default::default() });
+    ed.toggle_play();
+    run(&mut ed, 120);
+    let y: f64 = lines(&mut ed, "Y").last().expect("the crate never logged").parse().unwrap();
+    let count = ed.sim.as_ref().unwrap().body_states().count();
+    let parts = ed.world.query::<Name>().filter(|(_, n)| n.0 == "Beam").count();
+    let _ = std::fs::remove_dir_all(&dir);
+    (y, count, parts)
+}
+
+/// `spawn(prefab, pos, fn, { body = false })` spawns a display copy: the
+/// prefab's nodes without its body, so a thousand parts cost physics
+/// nothing. Spawned as usual, the same parts are a floor the crate lands on.
+#[test]
+fn a_prefab_spawned_without_its_body_costs_physics_nothing() {
+    let (y, count, parts) = display_floor(false);
+    assert_eq!(parts, 1000, "the parts did not all arrive");
+    assert_eq!(count, 1, "{count} bodies: the display copies brought theirs");
+    assert!(y < -1.0, "the crate rests at {y} on parts with no body");
+    let (y, count, parts) = display_floor(true);
+    assert_eq!((parts, count), (1000, 1001));
+    // The floor's top is at 0.5; the crate is 0.4 half-high.
+    assert!((y - 0.9).abs() < 0.05, "the crate came to rest at {y}, not on the parts");
 }
 
 /// A body under a parent node that a script moves with `node.x` goes where

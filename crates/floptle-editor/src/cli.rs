@@ -1253,8 +1253,8 @@ pub(crate) const VERBS: &[Verb] = &[
                 name: "--script-budget-ms",
                 value: Value::Text,
                 required: false,
-                help: "how long one tick's scripts may run before the script that overran is \
-                       stopped, in milliseconds. Default 500. The editor and a player build \
+                help: "how long one tick's scripts may run before the pass is abandoned, in \
+                       milliseconds; 3 overruns in a row stop the script. Default 500. The editor and a player build \
                        allow 2000; a server has nobody at the keyboard to press Stop",
             },
         ],

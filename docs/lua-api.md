@@ -14,14 +14,14 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 202
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 203
 - [node — transform & body fields](#node--transform--body-fields) — 43
 - [node — methods & handles](#node--methods--handles) — 36
 - [vectors, directions & easing](#vectors-directions--easing) — 51
 - [scene lookups & raycast](#scene-lookups--raycast) — 18
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
 - [input — keyboard & mouse](#input--keyboard--mouse) — 49
-- [drawing — draw.*](#drawing--draw) — 18
+- [drawing — draw.*](#drawing--draw) — 19
 - [the web — http.*, json.*](#the-web--http-json) — 15
 - [the player's account — account.*](#the-players-account--account) — 13
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 74
@@ -328,7 +328,7 @@ Pictures laid on the world's static surfaces: blood, scorch marks, bullet holes,
 
 ### `decals.add`
 
-decals.add{ texture, pos, normal, size [, height, depth, up, rotation, color = {r,g,b}, alpha, sheetCols, sheetRows, cell, layers, maxAngle, frame] } → id — lay a picture on the static surfaces under a box standing at pos, facing normal (a raycast hit's point and normal). It folds over edges and into corners, follows curves, and is lit, shadowed and fogged like the surface. No node: every decal sharing a picture is one mesh and one draw. nil when nothing under it can take a mark (the sky, or a sphere or capsule collider, which has no faces). maxAngle (default 100°) is how far a face may turn from normal and still take it. A mark rides what it was laid on as that moves: frame = a node (a ship), or by default the planet on rails whose sphere of influence it is in. When the ground under a mark is dug or re-meshed it is laid again on the surface there (a few marks a frame, counted in perf's terrain bucket), and goes if nothing is left to lie on. A mark never lies on the collider of a node that draws nothing (an Empty with a box collider), only on surfaces that show. Cleared by a new Play or a scene switch.
+decals.add{ texture, pos, normal, size [, height, depth, up, rotation, color = {r,g,b}, alpha, sheetCols, sheetRows, cell, layers, maxAngle, frame] } → id — lay a picture on the static surfaces under a box standing at pos, facing normal (a raycast hit's point and normal). It folds over edges and into corners, follows curves, and is lit, shadowed and fogged like the surface. No node: the decals sharing a picture are drawn in pages of 16, one mesh and one draw a page, and a change rebuilds only its own page. A mark is laid a piece (8 m) at a time while the frame's budget of about 2 ms lasts, and the rest is carried over to later frames, so a big mark gets its id at once and lands a few frames later (decals.landed(id) says when). nil when nothing under it can take a mark (the sky, or a sphere or capsule collider, which has no faces). maxAngle (default 100°) is how far a face may turn from normal and still take it. A mark rides what it was laid on as that moves: frame = a node (a ship), or by default the planet on rails whose sphere of influence it is in. When the ground under a mark is dug or re-meshed it is laid again on the surface there (a few marks a frame, counted in perf's terrain bucket), and goes if nothing is left to lie on. A mark never lies on the collider of a node that draws nothing (an Empty with a box collider), only on surfaces that show. Cleared by a new Play or a scene switch.
 
 ### `decals.clear`
 
@@ -337,6 +337,10 @@ decals.clear() — take every decal off the world.
 ### `decals.count`
 
 decals.count() — how many decals are in the world.
+
+### `decals.landed`
+
+decals.landed(id) — true once the mark is laid, false while it is still being laid, nil when there is no such mark (removed, trimmed, or it found nothing to lie on). A mark is laid a piece of its box at a time while the frame's budget of about 2 ms lasts, the rest carried over to later frames, so a 29 m crater over finely meshed terrain (tens of milliseconds of work) lands over a few frames instead of stalling one.
 
 ### `decals.max`
 
@@ -503,7 +507,7 @@ script.wake(node, kind) — wake that script on that node; script.wake(node) wak
 
 ### `spawn`
 
-spawn(prefab [, pos [, fn]]) — spawn a PREFAB instance (make one by dragging a node into the Assets panel). "bullet" finds prefabs/bullet.prefab.ron. pos = a vec3/node for the root; fn(root) runs with the new node's handle the same frame. It does NOT return the node — the spawn is queued and the node is made after this pass, so the handle only ever arrives through the callback; `local b = spawn("bullet")` then tells you so if you touch it — spawn("bullet", node.pos + dir, function(b) b.vx = dir.x * 40 end). Local-only in multiplayer: the server uses net.spawn for replicated objects.
+spawn(prefab [, pos [, fn]]) — spawn a PREFAB instance (make one by dragging a node into the Assets panel). "bullet" finds prefabs/bullet.prefab.ron. pos = a vec3/node for the root; fn(root) runs with the new node's handle the same frame. It does NOT return the node — the spawn is queued and the node is made after this pass, so the handle only ever arrives through the callback; `local b = spawn("bullet")` then tells you so if you touch it — spawn("bullet", node.pos + dir, function(b) b.vx = dir.x * 40 end). A 4th argument is a parent node, or an options table { parent = node, body = false }: body = false spawns the prefab's nodes, meshes and scripts without its bodies and colliders, a display copy that costs physics nothing. Local-only in multiplayer: the server uses net.spawn for replicated objects.
 
 ```lua
 local b = spawn("Bullet", node.pos + node.forward * 1.5, function(n)
@@ -1196,7 +1200,7 @@ The outline mirrors when the sprite is flipped, and scales with the node.
 
 ### `node:setCamera`
 
-node:setCamera{fovY=1.0, active=true, target="minimap", width=256, height=256, hz=10, cullMask=…} — aim a camera, hand it play-mode authority, and point it at a RENDER TARGET. With a `target` the camera draws the world into a live texture any material or UI image wears as "rt:<name>" — minimaps, mirrors, security monitors, scopes, split-screen. `width`/`height` are the texture's pixels (8–4096) and `hz` how often it redraws (0 = every frame), so a 10 Hz minimap costs a sixth of a 60 Hz one. `active=true` clears every other camera's authority, because two active cameras is not a choice anyone made. fovY is RADIANS. Every value is checked at the call: an unknown key, a `width=0` or an `hz="10"` raises naming the property, the value and the range.
+node:setCamera{fovY=1.0, active=true, target="minimap", width=256, height=256, hz=10, cullMask=…} — aim a camera, hand it play-mode authority, and point it at a RENDER TARGET. With a `target` the camera draws the world into a live texture any material or UI image wears as "rt:<name>" — minimaps, mirrors, security monitors, scopes, split-screen. `width`/`height` are the texture's pixels (8–4096) and `hz` how often it redraws (0 = every frame), so a 10 Hz minimap costs a sixth of a 60 Hz one. `active=true` clears every other camera's authority, because two active cameras is not a choice anyone made; `getComponent("Camera").active = true` does the same. `projection="orthographic"` (or `"perspective"`) switches the camera at runtime, with `orthoHeight` the world height it shows, and the Camera component reads and writes `projection` by the same names. fovY is RADIANS. Every value is checked at the call: an unknown key, a `width=0` or an `hz="10"` raises naming the property, the value and the range.
 
 `stack={"Arms", "Hud"}` names cameras drawn ON TOP of this one's picture, bottom first, and replaces the whole list (`stack={}` clears it). Each stacked camera draws only its own layers (its `cullMask`) over an empty depth buffer, so first-person arms on their own layer never push into a wall: put the arms on a layer, give a second camera a cullMask of just that layer, take the layer out of the main camera's, and stack the second camera on the main one. A stacked camera draws no sky, terrain or particles, needs no `active`, and keeps its own fovY — a narrower viewmodel FOV is the usual choice. Its own stack is not drawn.
 
@@ -1244,7 +1248,7 @@ Under physical shading a surface also REFLECTS the sky. A mirror is metallic=1 w
 
 fog=false exempts the surface from the scene's fog — both the distance ramp and the volumetric layer — so it draws at its own colour however far away it is. For the things that are not really in the world at that distance: a first-person weapon, a backdrop card, a marker that has to stay readable through the weather. A planet's atmosphere is a separate effect and still applies.
 
-sway=0.3 bends the surface in the game's wind (weather.addWind): the metres a point one metre above the node's origin moves in a 10 m/s wind, growing with the square of the height, so a stem stays rooted and its tip swings. So size it to the prop: a 0.5 m grass blade wants about 1 (its tip moves 0.25 m), a 12 m tree about 0.01 to 0.02 (its crown moves 1.4 to 2.9 m); at 3 a 12 m tree lies flat. Grass, leaves, flags, a scatter field of plants. backlight=0.6 lets the key light on the back of a thin surface through to the front, shadowed as the back face is: a leaf against the sun.
+sway=0.3 bends the surface in the game's wind (weather.addWind): the metres a point one metre above the node's origin moves in a 10 m/s wind, growing with the square of the height, so a stem stays rooted and its tip swings. So size it to the prop: a 0.5 m grass blade wants about 1 (its tip moves 0.25 m), a 12 m tree about 0.01 to 0.02 (its crown moves 1.4 to 2.9 m); at 3 a 12 m tree lies flat. Grass, leaves, flags, a scatter field of plants. backlight=0.6 lets the key light on the back of a thin surface through to the front, shadowed as the back face is: a leaf against the sun. nearFadeStart=1, nearFadeEnd=5 dissolves the surface toward the camera: none of it is drawn nearer than 1 m, all of it beyond 5 m, and between them a share of its pixels that follows the distance, so a wall between the camera and the player thins out of the way. It stays solid (no sorting, depth written for what is left) and keeps casting its sun shadow. 0 and 0 is off; in a scene file, near_fade: (1.0, 5.0). ditherAlpha surfaces keep their sun shadow too.
 
 Retro artefacts: jitter (screen-grid vertex snapping, 0 = follow the project), affineUv, vertexLit, ditherAlpha. The project can ask for all four at once (Project Settings ⏵ Rendering); retroExempt=true takes none of them, which is how you hold a viewmodel steady in a world that wobbles.
 
@@ -1919,7 +1923,7 @@ input.setMouseLocked(true/false) — lock or unlock the mouse from a boolean (e.
 
 ### `input.simulate`
 
-input.simulate{ key = "w", down = true } or { button = 1, down = true } — a testing aid: press or release a key or mouse button as if the player had, from the next frame, for every script (input.key, pressed, released and the actions alike). For probes and scripted test runs.
+input.simulate{ key = "w", down = true }, { button = 0, down = true } (0 left, 1 right, 2 middle, as input.button numbers them), { mouse = {x, y} }, { scroll = 1 } or { text = "hello" } — a testing aid: input as if the player gave it, from the next frame, for every script (input.key, pressed, released, mouse, scroll, typed and the actions alike) and for the game's UI, so a simulated click clicks a button and text types into a focused field. Several in one call apply pointer, wheel, text, key, button in that order. For probes and scripted test runs.
 
 ### `input.startRebind`
 
@@ -2034,6 +2038,10 @@ draw.rectOutline(x, y, w, h, r,g,b [,a] [,thickness]) — the hollow twin of dra
 ### `draw.ring`
 
 draw.ring(cx,cy,cz, nx,ny,nz, radius, r,g,b [,a]) — a circle around normal n at c. Range rings, selection circles, an area-of-effect telegraph.
+
+### `draw.setFrame`
+
+draw.setFrame(node) — the 3D shapes this script queues after it (lines, rings, spheres, boxes, polylines, conics, triangles, cones, discs, quads) are in that node's own space: its position, rotation and scale. The engine places them after every tick and lateUpdate have moved things, so they are drawn exactly where the node is drawn: an overlay on a planet on rails stays on it even when drawn from update. draw.setFrame(nil) is world space again. Holds for this script until changed, and never applies to another script's shapes. Returns the frame it replaced (a node, or nil).
 
 ### `draw.sphere`
 
@@ -2726,7 +2734,7 @@ scene.list() — every scene in the project as names scene.load accepts (sorted;
 
 ### `scene.load`
 
-scene.load("arena") — switch to another scene at the next frame boundary: the world swaps, physics/animators/particles/audio rebuild, every start re-fires (like the scene booting fresh). scene.load("arena", { fade = 0.6, color = {0, 0, 0} }) fades the screen to that colour over half the time, swaps while it is covered, and fades the new scene in over the other half. Accepts a name, a scenes-relative path ("arenas/desert"), "scenes/arena.ron", or a scene in the player's own files ("user://stages/arena"), whose map is user://maps/arena.map.ron. Multiplayer: only the SERVER may call it — every client follows automatically; a client's call is refused (send the server an RPC instead). scene.load("cave", { additive = true }) layers a scene over this one instead of replacing it; add offset = vec3(...) to place it, and on a hosting server every client (and every late joiner) loads the same layer, its Networked nodes replicating — replicate = false keeps it on the server. A client's own additive loads stay its own.
+scene.load("arena") — switch to another scene at the next frame boundary: the world swaps, physics/animators/particles/audio rebuild, every start re-fires (like the scene booting fresh). scene.load("arena", { fade = 0.6, color = {0, 0, 0} }) fades the screen to that colour over half the time, swaps while it is covered, and fades the new scene in over the other half. Accepts a name, a scenes-relative path ("arenas/desert"), "scenes/arena.ron", or a scene in the player's own files ("user://stages/arena"), whose map is user://maps/arena.map.ron. Multiplayer: only the SERVER may call it — every client follows automatically; a client's call is refused (send the server an RPC instead). scene.load("cave", { additive = true }) layers a scene over this one instead of replacing it; add offset = vec3(...) to place it, or parent = node to put its roots under that node so it rides it (offset is then in the node's space; a parented layer stays on this machine), and on a hosting server every client (and every late joiner) loads the same layer, its Networked nodes replicating — replicate = false keeps it on the server. A client's own additive loads stay its own.
 
 ### `scene.onLoaded`
 
@@ -2791,7 +2799,7 @@ terrain.paintTexture(x,y,z, radius, slot) — paint a terrain-palette texture sl
 
 ### `terrain.pending`
 
-terrain.pending() → how many of the game's terrain edits (dig, sculpt, flatten, paint, paintTexture) have not landed yet. Edits are applied a few milliseconds' worth a frame, in the order they were made, so a batch of a thousand flattens spreads over frames instead of stopping one. Every edit is applied whole before the next, so queries read the ground after some number of whole edits; 0 means every edit made so far is in the ground.
+terrain.pending() → how many of the game's terrain edits (dig, sculpt, flatten, paint, paintTexture) have not landed yet. Edits are applied a few milliseconds' worth a frame, in the order they were made, so a batch of a thousand flattens spreads over frames instead of stopping one. An edit too big for a frame (four voxels across its radius or more) is made off the frame and lands whole a frame or two later, the edits after it waiting their turn. Every edit is applied whole before the next, so queries read the ground after some number of whole edits; 0 means every edit made so far is in the ground.
 
 ### `terrain.planetLakes`
 
@@ -3015,7 +3023,7 @@ scatter.cost(id) — what this source asks for every frame: { chunks, props, far
 
 ### `scatter.create`
 
-scatter.create{ asset = "tree.glb", seed = 7, perChunk = 24, chunk = 16 } — declare a source, get its id. `tint = {r,g,b}` multiplies every prop's colour, and `emissive = {r,g,b}` with `emissiveStrength` makes them glow, so one model serves a field of any shade. `emissiveStrength` with no `emissive` glows in each model's own glow colour (or through its emissive map), and a model with none glows in the source's `tint`. Region: center + radius for a sphere (a planet), or center + halfX/halfZ for ground. `parent = "Umunquo"` anchors the region to a NODE (and then `center` is in that node's frame: the planet's own centre is (0,0,0), not where it is in the world), so a planet that orbits carries its props instead of sliding out from under them — every prop keeps its id, its place on the surface and the ground height it settled at, because none of those were ever expressed in world space. Without a parent the region is pinned to the world, which is right for a landscape that never moves and wrong for every celestial body. Also scaleMin/scaleMax, align = "surface" (default) or "world", fade, and lod = { {asset=, distance=}, ... } nearest-first. Placement is a pure function of the seed, so every machine and every session grows the SAME forest without storing one. `density` is how a world gets biomes: pass a function(x, y, z) -> 0..1 and it is sampled ONCE, at declare time, into a densityRows grid (rows x 2*rows for a sphere's longitude) — 0 means no instance is generated at all, not a hidden one. An option this doesn't list is an error, not a shrug. `asset` may be a mesh file OR a .prefab.ron — a prefab is baked once into one instanced draw per Mesh node it holds, each at its authored place in the prop and wearing that node's Material (its colour, sway and backlight, so a field of grass moves in the wind), which is how a prop your own script assembled gets scattered.
+scatter.create{ asset = "tree.glb", seed = 7, perChunk = 24, chunk = 16 } — declare a source, get its id. `tint = {r,g,b}` multiplies every prop's colour, and `emissive = {r,g,b}` with `emissiveStrength` makes them glow, so one model serves a field of any shade. `bend` (0 to 1, default 0) is how far its props give way to scatter.setInteractors points: 1 for grass, 0 for rocks and trunks. `emissiveStrength` with no `emissive` glows in each model's own glow colour (or through its emissive map), and a model with none glows in the source's `tint`. Region: center + radius for a sphere (a planet), or center + halfX/halfZ for ground. `parent = "Umunquo"` anchors the region to a NODE (and then `center` is in that node's frame: the planet's own centre is (0,0,0), not where it is in the world), so a planet that orbits carries its props instead of sliding out from under them — every prop keeps its id, its place on the surface and the ground height it settled at, because none of those were ever expressed in world space. Without a parent the region is pinned to the world, which is right for a landscape that never moves and wrong for every celestial body. Also scaleMin/scaleMax, align = "surface" (default) or "world", fade, and lod = { {asset=, distance=}, ... } nearest-first. Placement is a pure function of the seed, so every machine and every session grows the SAME forest without storing one. `density` is how a world gets biomes: pass a function(x, y, z) -> 0..1 and it is sampled ONCE, at declare time, into a densityRows grid (rows x 2*rows for a sphere's longitude) — 0 means no instance is generated at all, not a hidden one. An option this doesn't list is an error, not a shrug. `asset` may be a mesh file OR a .prefab.ron — a prefab is baked once into one instanced draw per Mesh node it holds, each at its authored place in the prop and wearing that node's Material (its colour, sway and backlight, so a field of grass moves in the wind), which is how a prop your own script assembled gets scattered.
 
 ### `scatter.destroy`
 
@@ -3039,7 +3047,7 @@ scatter.restore(sourceId [, instanceId]) — put one prop back, or all of them w
 
 ### `scatter.setInteractors`
 
-scatter.setInteractors{ { pos = vec3, radius = 1, strength = 1 }, ... } — this script's points that bend props away: every prop within `radius` of a point, measured across the ground, leans away from it with its foot planted. `strength` is how far a prop right beside the point leans (the tangent of the lean: 1 = 45 degrees), easing to nothing at the radius. Each call replaces this script's own list, so call it every frame with where the walkers are; `{}` clears it. Other scripts keep their own points. Up to 32 per script; a point more than its radius (and at least 2 m) above or below a prop does not touch it.
+scatter.setInteractors{ { pos = vec3, radius = 1, strength = 1 }, ... } — this script's points that bend props away: every prop within `radius` of a point, measured across the ground, leans away from it with its foot planted. Only props of a source created with `bend` (0 to 1: 1 for grass, 0 the default for rocks and trunks) give way, and a pushed prop straightens over about a second once the point moves on. `strength` is how far a prop right beside the point leans (the tangent of the lean: 1 = 45 degrees), easing to nothing at the radius. Each call replaces this script's own list, so call it every frame with where the walkers are; `{}` clears it. Other scripts keep their own points. Up to 32 per script; a point more than its radius (and at least 2 m) above or below a prop does not touch it.
 
 ## 2D — sprites, sorting & the flat camera
 
@@ -3357,7 +3365,7 @@ perf.gpuMs(pass) → one pass's GPU milliseconds last frame ("opaque + lighting"
 
 ### `perf.hitches`
 
-perf.hitches() → every frame since the last call that took 50 ms or more, oldest first: { {frame=, ms=, top="terrain", buckets={terrain=157.4, scripts=30.1, ...}, parts={collisionRebuild=140.2, ...}}, ... }. perf.worstMs looks back sixty frames, so a probe that reads every few seconds loses the spike it is hunting; this keeps each one (up to 64) until it is read, with the bucket that spent the time on top. Time no bucket measured is named `untimed`, and waiting on the GPU or the display `gpuWait` and `present`, so a hitch the engine's buckets cannot explain still says so. `parts` names work inside the buckets, in milliseconds already counted there: `terrainEdits` (applying terrain.dig and the other edits), `collisionRebuild` (a terrain collider's rebuilt triangles landing, or the frame waiting for them), `planetLanded` (a generated world arriving), `terrainShadow` (the terrain's shadow volume uploaded after a change) and `terrainMeshing` (planning and landing chunk meshes). Needs perf.enable(true).
+perf.hitches() → every frame since the last call that took 50 ms or more, oldest first: { {frame=, ms=, top="terrain", buckets={terrain=157.4, scripts=30.1, ...}, parts={collisionRebuild=140.2, ...}}, ... }. perf.worstMs looks back sixty frames, so a probe that reads every few seconds loses the spike it is hunting; this keeps each one (up to 64) until it is read, with the bucket that spent the time on top. Time no bucket measured is named `untimed`, and waiting on the GPU or the display `gpuWait` and `present`, so a hitch the engine's buckets cannot explain still says so. `parts` names work inside the buckets, in milliseconds already counted there: `terrainEdits` (applying terrain.dig and the other edits), `collisionRebuild` (a terrain collider's rebuilt triangles landing, or the frame waiting for them), `planetLanded` (a generated world arriving), `terrainShadow` (the terrain's shadow volume uploaded after a change), `terrainMeshing` (planning and landing chunk meshes) and `terrainStreaming` (putting far ground away and taking back what was made again). Needs perf.enable(true).
 
 ### `perf.mirrorCause`
 
@@ -3373,7 +3381,7 @@ perf.overloaded() → true while the fixed tick costs more than the time it simu
 
 ### `perf.parts`
 
-perf.parts() → { name = ms, … } — the named pieces of work inside the buckets in the last finished frame, every frame (a hitch lists them too, but only on a slow frame). scatterSettle is what the scatter bucket spent dropping arriving props onto the ground (rolling chunks and their ground queries; at most about 1 ms a frame plus one query); terrainEdits and collisionRebuild are inside terrain. Needs perf.enable(true), like every timing.
+perf.parts() → { name = ms, … } — the named pieces of work inside the buckets in the last finished frame, every frame (a hitch lists them too, but only on a slow frame). scatterSettle is what the scatter bucket spent dropping arriving props onto the ground (rolling chunks and their ground queries; at most about 1 ms a frame plus one query); terrainEdits, collisionRebuild, decalRelay (checking and laying again the marks a dig reached) and decalBatches (packing the decal pages that changed) are inside terrain. Needs perf.enable(true), like every timing.
 
 ### `perf.scriptMs`
 

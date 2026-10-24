@@ -1572,8 +1572,23 @@ impl Editor {
         // announced scene, its NetIds, its slot order) is untouched. A client
         // may do them; a swap is still the server's alone.
         match req {
-            SceneRequest::Additive { name, environment, offset, replicate } => {
-                let ents = self.perform_scene_additive(name, *environment, *offset);
+            SceneRequest::Additive { name, environment, offset, replicate, parent } => {
+                // The parent is named by index: it must still be that node.
+                let under = match parent {
+                    Some(id) => match self.world.entity_at(*id) {
+                        Some(p) => Some(p),
+                        None => {
+                            self.console.push(
+                                floptle_script::LogLevel::Error,
+                                format!("scene.load(\"{name}\", {{additive = true}}): the `parent` node is gone"),
+                                None,
+                            );
+                            return;
+                        }
+                    },
+                    None => None,
+                };
+                let ents = self.perform_scene_additive_under(name, *environment, *offset, under);
                 // A hosting server's layer is the session's: every client loads
                 // it, late joiners too, and its Networked nodes replicate.
                 if *replicate

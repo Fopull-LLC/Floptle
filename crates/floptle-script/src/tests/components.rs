@@ -1168,3 +1168,93 @@ fn a_script_reads_and_styles_a_celestial_bodys_sky() {
     assert_eq!(c.cloud_color, [0.4, 0.45, 0.5]);
     assert!((c.cloud_height - 0.6).abs() < 1e-6);
 }
+
+/// **Turning a camera on through its component makes it the only one on**, as
+/// `setCamera{ active = true }` and the Inspector do. Two cameras, the first
+/// active; the second's component is set `active = true`. The first reads
+/// false at once, the world agrees after the frame, and the view is the
+/// second's. The component's `projection` reads and writes by the names
+/// `setCamera` takes.
+#[test]
+fn a_camera_turned_on_from_its_component_is_the_only_one_on() {
+    let dir = std::env::temp_dir().join(format!("floptle_cam_active_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "rig",
+        "\
+frame = 0
+function update(node, dt)
+  frame = frame + 1
+  local a = find('CamA'):getComponent('Camera')
+  local b = find('CamB'):getComponent('Camera')
+  if frame == 1 then
+    b.active = true
+    print('same ' .. tostring(a.active) .. ' ' .. tostring(b.active))
+  elseif frame == 2 then
+    print('next ' .. tostring(a.active) .. ' ' .. tostring(b.active))
+    b.projection = 'ortho'
+    print('wrote ' .. b.projection)
+  elseif frame == 3 then
+    print('projection ' .. a.projection .. ' ' .. b.projection)
+    local ok, err = pcall(function() b.projection = 'fisheye' end)
+    print('refused ' .. tostring(not ok) .. ' ' .. tostring(err))
+  end
+end
+",
+    );
+    let (mut world, _) = world_with_script("rig");
+    let cam = |world: &mut World, name: &str, active: bool| {
+        let c = world.spawn();
+        world.insert(c, Transform::IDENTITY);
+        world.insert(c, floptle_core::Name(name.into()));
+        world.insert(
+            c,
+            floptle_core::Matter::Camera {
+                fov_y: 1.0,
+                active,
+                target: String::new(),
+                cull_mask: u32::MAX,
+                target_w: floptle_core::Matter::TARGET_W,
+                target_h: floptle_core::Matter::TARGET_H,
+                target_hz: 0.0,
+                ortho: false,
+                ortho_height: floptle_core::Matter::ORTHO_HEIGHT,
+                stack: Vec::new(),
+            },
+        );
+        c
+    };
+    let a = cam(&mut world, "CamA", true);
+    let b = cam(&mut world, "CamB", false);
+    assert_eq!(floptle_core::active_camera(&world), Some(a));
+    let mut host = ScriptHost::new();
+    let mut said = Vec::new();
+    for n in 0..3 {
+        host.run(&mut world, &dir, 1.0 / 60.0, n as f32 / 60.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        said.extend(host.drain_logs().into_iter().map(|l| l.msg));
+        if n == 0 {
+            let on = |e| matches!(world.get::<floptle_core::Matter>(e), Some(floptle_core::Matter::Camera { active: true, .. }));
+            assert!(!on(a), "the first camera is still active");
+            assert!(on(b), "the second camera did not turn on");
+            assert_eq!(floptle_core::active_camera(&world), Some(b), "the view is not the second camera's");
+        }
+    }
+    assert!(said.iter().any(|m| m == "same false true"), "{said:?}");
+    assert!(said.iter().any(|m| m == "next false true"), "{said:?}");
+    assert!(said.iter().any(|m| m == "wrote orthographic"), "{said:?}");
+    assert!(said.iter().any(|m| m == "projection perspective orthographic"), "{said:?}");
+    assert!(said.iter().any(|m| m.starts_with("refused true") && m.contains("perspective")), "{said:?}");
+    assert!(matches!(world.get::<floptle_core::Matter>(b), Some(floptle_core::Matter::Camera { ortho: true, .. })));
+
+    // The same rule where no script queued it: an animation lane keying a
+    // camera on writes through `apply_component_field` alone.
+    crate::apply_component_field(&mut world, a, "Camera", "active", 1.0);
+    assert_eq!(floptle_core::active_camera(&world), Some(a));
+    assert!(
+        matches!(world.get::<floptle_core::Matter>(b), Some(floptle_core::Matter::Camera { active: false, .. })),
+        "a lane turned a camera on and left the other on"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

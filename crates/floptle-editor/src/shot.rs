@@ -185,6 +185,10 @@ fn play_for(
         // `camera.capture` asked for in a shot is answered like in a game.
         ed.pump_captures();
         ed.drain_script_logs();
+        // Fold the step into the profiler's history, as `run` does: without
+        // it every `perf` reading in a shot was "no frame has completed yet",
+        // so `perf.scriptMs` read 0 for every script however long it played.
+        ed.end_profile_frame();
         // A script that asked to quit has said the session is over, and stepping
         // past it would photograph a world nobody is in.
         if !ed.playing {
@@ -341,6 +345,14 @@ pub(crate) fn run(args: Args) -> i32 {
         // with them about how much of the span actually ran.
         if !json {
             floptle_say::say_err!("played {played:.2}s before drawing");
+        }
+        // A prefab spawned late in the span asked for its model on a worker;
+        // the picture waits for it rather than leaving the prefab out.
+        if !ed.settle_model_imports(std::time::Duration::from_secs(45)) {
+            floptle_say::say_err!(
+                "warning: models were still importing after 45s — some spawned nodes are \
+                 missing from this shot"
+            );
         }
     }
 
@@ -948,6 +960,46 @@ mod tests {
             parse_after("soon").unwrap_err().contains("30s"),
             "and the refusal has to show what a span looks like"
         );
+    }
+
+    /// **`perf` reads what the played span cost.** `run` folds each step into
+    /// the profiler's history; `shot --after` did not, so every reading was
+    /// "no frame has completed yet" and `perf.scriptMs` answered 0 for every
+    /// script after seconds of play. No GPU, for the reason the test below
+    /// gives.
+    #[test]
+    fn a_played_shot_measures_its_scripts() {
+        let d = std::env::temp_dir().join(format!(
+            "flshot-perf-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("scenes")).unwrap();
+        std::fs::create_dir_all(d.join("scripts")).unwrap();
+        std::fs::write(d.join("project.ron"), "(title: Some(\"t\"), entry_scene: Some(\"scenes/first.ron\"))").unwrap();
+        std::fs::write(
+            d.join("scripts/busy.lua"),
+            "function start() perf.enable(true) end\n\
+             function update(node, dt)\n\
+             \x20 local s = 0\n\
+             \x20 for i = 1, 20000 do s = s + math.sin(i) end\n\
+             \x20 total = s\n\
+             end\n",
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("scenes/first.ron"),
+            "(name: \"s\", nodes: [(name: \"Cam\", matter: Camera(active: true)), (name: \"Busy\", scripts: [(kind: \"busy\")])])",
+        )
+        .unwrap();
+        let mut ed = crate::Editor::default();
+        ed.open_project(d.clone());
+        ed.open_scene_file(&d.join("scenes/first.ron").to_string_lossy());
+        play_for(&mut ed, 0.25, (None, 160, 90), crate::run::Pace::default()).expect("the project must enter play mode");
+        let cost = ed.script_host.profile().borrow().script("busy");
+        assert!(cost.is_some_and(|c| c.ms > 0.0), "perf saw nothing of a script that ran every step: {cost:?}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// `run` had the played world and wrote no picture; `shot`

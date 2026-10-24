@@ -430,6 +430,17 @@ impl Editor {
             if docs.is_empty() {
                 continue;
             }
+            if !req.bodies {
+                // `{ body = false }`: everything that would put the copy in
+                // the physics world goes, and a joint has nothing to join.
+                for d in &mut docs {
+                    d.rigidbody = None;
+                    d.joint = None;
+                    d.mesh_collider = false;
+                    d.collidable = false;
+                    d.trigger = false;
+                }
+            }
             if let Some(p) = req.pos {
                 let base = docs
                     .iter()

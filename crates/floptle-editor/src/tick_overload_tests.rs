@@ -124,3 +124,53 @@ fn the_tick_clock_keeps_up_after_a_long_load() {
     assert!(worst < step + 1e-3, "update's time and fixedUpdate's drifted {worst:.3} s apart (a tick is {step:.4} s)");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **Each frame's ticks read that frame's clock.** At 20 fps a frame runs
+/// three ticks; they read the clock one frame behind `update` (6.004–6.038
+/// against `update`'s 6.100), and across a 0.9 s hitch a whole hitch behind,
+/// so a deadline `update` set was seen up to a hitch late. Every tick of a
+/// frame now falls after the previous frame's `update` time and at or before
+/// this one's, the last within a tick of it, through a hitch as well.
+#[test]
+fn every_tick_reads_its_own_frames_clock() {
+    let dir = std::env::temp_dir().join(format!("floptle_tick_frame_clock_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("scripts")).unwrap();
+    std::fs::write(
+        dir.join("scripts/clocks.lua"),
+        "ticks = {}\nfunction update(node, dt) ut = time; ticks = {} end\n\
+         function fixedUpdate(node, dt) ticks[#ticks + 1] = time end\n",
+    )
+    .unwrap();
+    let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+    let e = ed.world.spawn();
+    ed.world.insert(e, Transform::IDENTITY);
+    ed.world.insert(e, Name("Clocks".into()));
+    ed.world.insert(e, Matter::Empty);
+    ed.world.insert(e, Scripts(vec![ScriptInst::new("clocks")]));
+    ed.toggle_play();
+    assert!(ed.playing, "did not enter play");
+    let step = ed.game_tick.step as f64;
+    ed.play_step(1.0 / 20.0, true);
+    let mut prev: f64 = ed.script_host.instance_env(e.index(), "clocks").expect("ran").get("ut").unwrap();
+    // 20 fps, a 0.9 s hitch, 20 fps again.
+    let frames: Vec<f32> = (0..20).map(|_| 0.05).chain([0.9]).chain((0..20).map(|_| 0.05)).collect();
+    let mut checked = 0;
+    for (n, dt) in frames.into_iter().enumerate() {
+        ed.play_step(dt, true);
+        let env = ed.script_host.instance_env(e.index(), "clocks").expect("ran");
+        let ut: f64 = env.get("ut").unwrap();
+        let ticks: Vec<f64> = env.get::<mlua::Table>("ticks").unwrap().sequence_values::<f64>().map(Result::unwrap).collect();
+        for t in &ticks {
+            assert!(*t > prev - 1e-4 && *t <= ut + 1e-4, "frame {n}: a tick read {t:.4}, outside this frame ({prev:.4}, {ut:.4}]: {ticks:?}");
+            checked += 1;
+        }
+        if let Some(last) = ticks.last() {
+            assert!(ut - last < step + 1e-4, "frame {n}: the last tick read {last:.4}, {:.4} s behind update's {ut:.4}", ut - last);
+        }
+        prev = ut;
+    }
+    assert!(checked > 40, "too few ticks ran to say anything: {checked}");
+    assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+    let _ = std::fs::remove_dir_all(&dir);
+}

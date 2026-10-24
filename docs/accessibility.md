@@ -45,6 +45,28 @@ Out-of-range values **raise**. A settings slider hands over a number it already
 bounded, so anything outside 0.5–3 means the caller computed it wrong, and a
 silently clamped `0.1` is a slider that appears to stop working.
 
+### How it combines with the interface scale and `designHeight`
+
+Three numbers size a UI layer's text on screen, and they multiply:
+
+1. **The layer's own scale**, from its `designHeight` (and its scale mode): a
+   layer designed at 720 units tall on a 1440-pixel-tall view scales by 2.
+2. **The interface scale**, `ui.setScale(s)` (0.25–4, 1 by default): one size
+   for the whole interface — every layer's layout *and* text, multiplied into
+   each layer's own scale. A layer that asks for whole pixels per unit rounds
+   down *after* this multiply, so `ui.setScale(1.25)` on a pixel-art HUD lands
+   on the nearest whole scale at or below it.
+3. **The text scale**, `access.setTextScale(t)` (0.5–3): text sizes alone, in
+   design units, before the layout is solved — boxes holding text grow to fit,
+   while images, padding and fixed sizes stay put.
+
+So a 20-unit label on that 720-unit layer, at 1440 pixels tall, with
+`ui.setScale(1.25)` and `access.setTextScale(1.5)`, is drawn
+20 × 1.5 × 2 × 1.25 = 75 pixels tall. An "Interface size" setting is
+`ui.setScale`; a "Text size" setting is `access.setTextScale`. The interface
+scale goes back to 1 when Play starts, so a game that offers it sets it again
+from its save.
+
 ## Colour vision
 
 ```lua

@@ -339,6 +339,24 @@ draw.depthTest(false)
 draw.polyline(orbit, 0.6, 0.8, 1)                               -- reads through the planet
 ```
 
+Points are in world space unless the script set a frame. `draw.setFrame(node)`
+puts the 3D shapes the script queues after it (lines, rings, spheres, boxes,
+polylines, conics, triangles, cones, discs and quads) in that node's own space:
+its position, rotation and scale. The engine places them when it takes the
+frame's shapes, after every tick and `lateUpdate` have moved things, so they are
+drawn exactly where the node is drawn. An overlay on a planet on rails stays on
+the planet even when it is drawn from `update` and the planet moves on after it.
+`draw.setFrame(nil)` goes back to world space. The frame holds for that script
+until it changes it, and never applies to another script's shapes:
+
+```lua
+function update(node, dt)
+  draw.setFrame(planet)
+  draw.ring(0, radius, 0, 0, 1, 0, 3, 0.4, 1, 0.6)   -- the pad's ring, in the planet's space
+  draw.setFrame(nil)
+end
+```
+
 ### What `app.quit()` does depends on where the game is running
 
 There is one honest answer per host, and they are different things:

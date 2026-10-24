@@ -80,7 +80,10 @@ pub struct DrawLine {
     pub color: [f32; 4],
     /// Hidden behind the surfaces in front of it (`draw.depthTest(true)`);
     /// otherwise it draws through them, as an orbit through a planet.
-    pub depth: bool,
+    pub depth: bool,    /// The node whose frame the points are in (`draw.setFrame`), by entity
+    /// index; `None` for world space. The host moves them to where that node
+    /// is drawn when it takes the frame's shapes.
+    pub frame: Option<u32>,
 }
 
 /// One screen-space rectangle a script queued via `draw.rect` /
@@ -136,7 +139,10 @@ pub struct DrawTri {
     pub a: [f64; 3],
     pub b: [f64; 3],
     pub c: [f64; 3],
-    pub color: [f32; 4],
+    pub color: [f32; 4],    /// The node whose frame the points are in (`draw.setFrame`), by entity
+    /// index; `None` for world space. The host moves them to where that node
+    /// is drawn when it takes the frame's shapes.
+    pub frame: Option<u32>,
 }
 
 /// One world-space textured quad a script queued via `draw.quad` this tick
@@ -151,7 +157,10 @@ pub struct DrawQuad {
     pub p: [[f64; 3]; 4],
     pub uv: [f32; 4],
     pub color: [f32; 4],
-    pub texture: String,
+    pub texture: String,    /// The node whose frame the points are in (`draw.setFrame`), by entity
+    /// index; `None` for world space. The host moves them to where that node
+    /// is drawn when it takes the frame's shapes.
+    pub frame: Option<u32>,
 }
 
 /// Queued `node:getcomponent(name).field = value` writes: (entity index,
@@ -215,7 +224,13 @@ pub enum SceneRequest {
     /// placed anywhere (`{ offset = vec3(2500, 0, 0) }`). `replicate` (true
     /// unless a script says false) has a hosting server tell every client to
     /// load the same layer; a client's own layers stay its own.
-    Additive { name: String, environment: bool, offset: Option<[f64; 3]>, replicate: bool },
+    ///
+    /// `parent` (a node's index) puts the layer's root nodes under that node,
+    /// so the layer rides it — a room on a planet on rails stays where it was
+    /// put while the planet moves. `offset` is then in the parent's space. A
+    /// parented layer stays on this machine: a node here is not a node a
+    /// client can name.
+    Additive { name: String, environment: bool, offset: Option<[f64; 3]>, replicate: bool, parent: Option<u32> },
     /// `scene.unload(name)` — take an additive layer away again.
     Unload { name: String },
 }
@@ -1041,10 +1056,13 @@ pub struct ScriptHost {
     cloud: cloud_api::CloudState,
     /// How long one pass into Lua may run — see [`budget`].
     budget: Rc<budget::Budget>,
-    /// Scripts that ran past the budget. Not called again until their file
-    /// changes: a loop without an exit would otherwise freeze every frame for
-    /// the whole budget, forever.
+    /// Scripts that ran past the budget [`budget::STRIKES`] passes in a row.
+    /// Not called again until their file changes: a loop without an exit
+    /// would otherwise freeze every frame for the whole budget, forever.
     stopped: std::collections::HashSet<String>,
+    /// Overruns in a row per script, and whether one landed since the last
+    /// frame began. A frame without one clears the count.
+    budget_strikes: std::collections::HashMap<String, (u32, bool)>,
     /// `print`/`log` lines refused this frame past the per-frame cap — see
     /// `host::MAX_CONSOLE_LINES_PER_FRAME`.
     dropped_lines: Rc<std::cell::Cell<usize>>,
@@ -2000,6 +2018,10 @@ pub struct SpawnRequest {
     /// world `pos` — the driver converts to the parent's local frame). How a
     /// vessel prefab's parts land under an assembly root.
     pub parent: Option<u32>,
+    /// `false` (`spawn(..., { body = false })`): the prefab's nodes, meshes
+    /// and scripts without its bodies and colliders, a display-only copy
+    /// that costs physics nothing.
+    pub bodies: bool,
 }
 
 /// A `createNode(name [, parent] [, fn])` request: a plain node (Empty matter)
@@ -2514,7 +2536,7 @@ pub fn option_keys(call: &str) -> Option<&'static [&'static str]> {
         "node:setJoint" => api::JOINT_KEYS,
         "node:setCamera" => api::CAMERA_KEYS,
         "input.pushContext" => input_api::CONTEXT_KEYS,
-        "input.simulate" => &["key", "button", "down"],
+        "input.simulate" => &["key", "button", "down", "mouse", "scroll", "text"],
         "spawnEffect" => host::SPAWN_EFFECT_KEYS,
         "app.setDisplayMode" => app_api::DISPLAY_MODE_KEYS,
         "app.setDynamicResolution" => app_api::DYNRES_KEYS,
@@ -2525,12 +2547,17 @@ pub fn option_keys(call: &str) -> Option<&'static [&'static str]> {
     })
 }
 
-/// A press or release a script asked `input.simulate` for: a key by its
-/// `input.key` name, or a mouse button (0 left, 1 right, 2 middle).
+/// Input a script asked `input.simulate` for: a key by its `input.key` name,
+/// a mouse button numbered as `input.button` numbers them (0 left, 1 right,
+/// 2 middle, 3 and 4 the side buttons), the pointer moved to a point in the
+/// pixels `input.mouse()` reports, the wheel turned, or text typed.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SimulatedInput {
     Key(String, bool),
     Button(usize, bool),
+    Mouse(f32, f32),
+    Scroll(f32),
+    Text(String),
 }
 
 /// One queued two-way `params.X = ...` write: a number or a string.

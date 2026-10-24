@@ -633,7 +633,8 @@ pub const OBJECT_MATERIAL_PREFIX: &str = "Material:";
 /// each other by a test.
 pub(crate) const MATERIAL_NUM_FIELDS: &[&str] = &[
     "cell", "sheetCols", "sheetRows", "roughness", "metallic", "normalStrength",
-    "occlusionStrength", "reflectivity", "transmission", "ior", "thickness", "sway", "backlight", "jitter",
+    "occlusionStrength", "reflectivity", "transmission", "ior", "thickness", "sway", "backlight", "nearFadeStart",
+    "nearFadeEnd", "jitter",
     "alpha", "opacity", "ambient", "r", "g", "b", "emissiveR", "emissiveG", "emissiveB",
     "emissiveStrength", "specularR", "specularG", "specularB", "specularStrength",
     "shininess", "rimR", "rimG", "rimB", "rimStrength", "unlit", "fog",
@@ -728,6 +729,8 @@ fn material_fields(m: &floptle_core::Material, cell: u32) -> HashMap<String, f64
         ("thickness".to_string(), m.thickness as f64),
         ("sway".to_string(), m.sway as f64),
         ("backlight".to_string(), m.backlight as f64),
+        ("nearFadeStart".to_string(), m.near_fade[0] as f64),
+        ("nearFadeEnd".to_string(), m.near_fade[1] as f64),
         ("jitter".to_string(), m.retro.jitter as f64),
     ])
 }
@@ -1473,6 +1476,22 @@ fn rgba_index(field: &str) -> usize {
 
 /// Apply a `node:getcomponent(name).field = value` write back to the ECS (mirror of
 /// [`mirror_components`]). Unknown component/field names are ignored.
+/// Make `ent` the one active camera: every other camera's `active` goes off.
+/// Authority is exclusive: with two `active` cameras the game view renders
+/// from whichever the query reaches first, which is not a decision anybody
+/// made. `ent` itself is left for the caller to set.
+pub(crate) fn make_only_active_camera(world: &mut World, ent: Entity) {
+    let others: Vec<Entity> = world
+        .query::<Matter>()
+        .filter_map(|(c, m)| (c != ent && matches!(m, Matter::Camera { active: true, .. })).then_some(c))
+        .collect();
+    for c in others {
+        if let Some(Matter::Camera { active, .. }) = world.get_mut::<Matter>(c) {
+            *active = false;
+        }
+    }
+}
+
 pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: &str, val: f64) {
     // `Material:<object>` addresses ONE part of a model's materials. Matching on
     // the head lets the same arm serve a whole node and one of its parts, which
@@ -1641,6 +1660,11 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
             }
         }
         "Camera" => {
+            // Turning one camera on turns every other one off, as
+            // `setCamera{ active = true }` and the Inspector do.
+            if field == "active" && val != 0.0 && matches!(world.get::<Matter>(ent), Some(Matter::Camera { .. })) {
+                make_only_active_camera(world, ent);
+            }
             if let Some(Matter::Camera {
                 fov_y,
                 active,
@@ -1808,6 +1832,8 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "thickness" => m.thickness = (val as f32).clamp(0.0, 100.0),
                     "sway" => m.sway = (val as f32).clamp(0.0, 100.0),
                     "backlight" => m.backlight = (val as f32).clamp(0.0, 1.0),
+                    "nearFadeStart" => m.near_fade[0] = (val as f32).max(0.0),
+                    "nearFadeEnd" => m.near_fade[1] = (val as f32).max(0.0),
                     "jitter" => m.retro.jitter = val as f32,
                     // The look. These were reachable from `setMaterial` and
                     // from nowhere else, which quietly meant **not animatable**
@@ -1819,13 +1845,8 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     // rather than a translation layer sitting between the
                     // animation system and the ECS, which is a thing to get
                     // wrong at every call site instead of once.
-                    "alpha" | "opacity" => {
-                        m.alpha = (val as f32).clamp(0.0, 1.0);
-                        // A fade is a blend, as from setMaterial.
-                        if m.alpha < 1.0 && !m.retro.dither_alpha {
-                            m.blend = floptle_core::BlendMode::Blend;
-                        }
-                    }
+                    // A fade is a blend, as from setMaterial.
+                    "alpha" | "opacity" => m.fade_to(val as f32),
                     "ambient" => m.ambient = val as f32,
                     "r" => m.color[0] = val as f32,
                     "g" => m.color[1] = val as f32,
@@ -2452,6 +2473,8 @@ pub(crate) fn apply_rich_sets(
                         "backlight" => {
                             m.backlight = num(v).map(|n| (n as f32).clamp(0.0, 1.0)).unwrap_or(m.backlight)
                         }
+                        "nearFadeStart" => m.near_fade[0] = num(v).map(|n| (n as f32).max(0.0)).unwrap_or(m.near_fade[0]),
+                        "nearFadeEnd" => m.near_fade[1] = num(v).map(|n| (n as f32).max(0.0)).unwrap_or(m.near_fade[1]),
                         // A bad name here would silently pick a lighting model,
                         // so an unparseable one leaves the material alone and the
                         // key check (`MATERIAL_KEYS`) is what reports the typo.
@@ -2488,16 +2511,16 @@ pub(crate) fn apply_rich_sets(
                 }
                 // Fading a solid surface is asking to see through it: an alpha
                 // below 1 with no blend named turns blend on, which is what
-                // `setMaterial{ alpha = … }` has always done.
+                // `setMaterial{ alpha = … }` has always done, and back at 1 it
+                // draws as it did before. A blend named is the script's own.
                 let names_blend = fields.iter().any(|(k, _)| k == "blend");
-                let fades = !names_blend
-                    && fields.iter().any(|(k, _)| k == "alpha")
-                    && m.alpha < 1.0
-                    && m.blend != floptle_core::BlendMode::Blend
-                    && !m.retro.dither_alpha;
-                if fades {
-                    m.blend = floptle_core::BlendMode::Blend;
+                let was = m.blend;
+                if names_blend {
+                    m.faded_from = None;
+                } else if fields.iter().any(|(k, _)| k == "alpha") {
+                    m.fade_to(m.alpha);
                 }
+                let fades = m.blend != was && !names_blend;
                 if let Some(mut p) = patch {
                     for (k, _) in &fields {
                         if !p.names(k) && MATERIAL_KEYS.contains(&k.as_str()) {
@@ -2581,18 +2604,7 @@ pub(crate) fn apply_rich_sets(
                 // renders from whichever the query reaches first, which is not a
                 // decision anybody made.
                 if active == Some(true) {
-                    let others: Vec<Entity> = world
-                        .query::<Matter>()
-                        .filter_map(|(c, m)| {
-                            (c != e && matches!(m, Matter::Camera { active: true, .. }))
-                                .then_some(c)
-                        })
-                        .collect();
-                    for c in others {
-                        if let Some(Matter::Camera { active: a, .. }) = world.get_mut::<Matter>(c) {
-                            *a = false;
-                        }
-                    }
+                    make_only_active_camera(world, e);
                 }
                 let Some(Matter::Camera {
                     fov_y: f,
@@ -3151,7 +3163,7 @@ pub(crate) const MATERIAL_KEYS: &[&str] = &[
     "rimStrength", "unlit", "fog", "ambient", "alpha", "texture", "cell", "sheetCols", "sheetRows", "slice",
     "normalMap", "normalStrength", "roughnessMap", "roughness", "metallicMap", "metallic",
     "occlusionMap", "occlusionStrength", "emissiveMap", "reflectivity", "transmission", "ior", "thickness",
-    "sway", "backlight", "shading", "jitter", "affineUv", "vertexLit",
+    "sway", "backlight", "nearFadeStart", "nearFadeEnd", "shading", "jitter", "affineUv", "vertexLit",
     "ditherAlpha", "retroExempt", "alphaCutoff", "doubleSided", "blend",
 ];
 
@@ -3864,6 +3876,16 @@ pub fn apply_component_field_str(world: &mut World, ent: Entity, comp: &str, fie
                 }
             }
         }
+        // `cam.projection = "orthographic"`: the switch `setCamera{
+        // projection = ... }` makes, from the component.
+        "Camera" => {
+            if field == "projection"
+                && let Some(o) = Matter::parse_projection(val)
+                && let Some(Matter::Camera { ortho, .. }) = world.get_mut::<Matter>(ent)
+            {
+                *ortho = o;
+            }
+        }
         _ => {}
     }
 }
@@ -3939,6 +3961,11 @@ pub fn mirror_component_strings(
             fields.insert("text".to_string(), t.text.clone());
         }
         out.insert("UiElement".to_string(), fields);
+    }
+    // Which projection a camera draws with, in the names `setCamera` takes.
+    if let Some(Matter::Camera { ortho, .. }) = world.get::<Matter>(e) {
+        let p = if *ortho { "orthographic" } else { "perspective" };
+        out.insert("Camera".to_string(), HashMap::from([("projection".to_string(), p.to_string())]));
     }
     out
 }
@@ -5220,6 +5247,7 @@ fn install_component_metatable(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
         let changes = shared.component_changes.clone();
         let colors = shared.component_colors.clone();
         let strs = shared.component_strs.clone();
+        let scene = shared.scene.clone();
         let newidx = lua.create_function(move |_, (this, key, val): (Table, String, Value)| {
             let e: u32 = this.raw_get("__id")?;
             let comp: String = this.raw_get("__comp")?;
@@ -5251,7 +5279,22 @@ fn install_component_metatable(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
             // raise "must be a number, a boolean or a color", which was the
             // one path that failed loudly and it pointed nowhere useful.
             if let Value::String(s) = &val {
-                strs.borrow_mut().insert((e, comp, key), s.to_string_lossy().to_string());
+                let mut s = s.to_string_lossy().to_string();
+                // A projection is checked here, at the write, and stored by
+                // its full name so it reads back the way the mirror spells it.
+                if comp == "Camera" && key == "projection" {
+                    s = match Matter::parse_projection(&s) {
+                        Some(true) => "orthographic".into(),
+                        Some(false) => "perspective".into(),
+                        None => {
+                            return Err(mlua::Error::RuntimeError(format!(
+                                "Camera.projection = \"{s}\": expected one of {}",
+                                Matter::PROJECTION_ACCEPTS.join(", ")
+                            )));
+                        }
+                    };
+                }
+                strs.borrow_mut().insert((e, comp, key), s);
                 return Ok(());
             }
             let n = match val {
@@ -5265,6 +5308,27 @@ fn install_component_metatable(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
                     )));
                 }
             };
+            // One active camera: turning this one on turns the others off,
+            // and they read so straight away, not only from next frame.
+            if comp == "Camera" && key == "active" && n != 0.0 {
+                let mut ch = changes.borrow_mut();
+                let on = |v: Option<&f64>| v.is_some_and(|v| *v != 0.0);
+                let mut off: Vec<u32> = scene
+                    .borrow()
+                    .components
+                    .iter()
+                    .filter(|(id, c)| **id != e && on(c.get("Camera").and_then(|m| m.get("active"))))
+                    .map(|(id, _)| *id)
+                    .collect();
+                off.extend(
+                    ch.iter()
+                        .filter(|((id, c, k), v)| *id != e && c == "Camera" && k == "active" && **v != 0.0)
+                        .map(|((id, _, _), _)| *id),
+                );
+                for id in off {
+                    ch.insert((id, "Camera".to_string(), "active".to_string()), 0.0);
+                }
+            }
             changes.borrow_mut().insert((e, comp, key), n);
             Ok(())
         })?;

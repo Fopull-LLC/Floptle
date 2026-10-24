@@ -6,8 +6,17 @@
 //! deadline on it. The driver arms the deadline when it enters Lua for a
 //! pass — every hook, timer and callback in that pass shares it — and the
 //! interrupt raises a Lua error once the clock is past it. The error names the
-//! budget, the script joins [`ScriptHost`](crate::ScriptHost)'s stopped set,
-//! and it is not called again until its file is edited.
+//! budget and the pass is abandoned; the script runs again next frame. Only a
+//! script that overruns [`STRIKES`] passes in a row joins
+//! [`ScriptHost`](crate::ScriptHost)'s stopped set, and is not called again
+//! until its file is edited.
+//!
+//! **One slow pass does not end a script.** In Play or a shipped game there
+//! is no edit to bring a stopped script back, so stopping on the first
+//! overrun lost it for the session: a builder holding 500 parts overran once
+//! and its game was gone. A pass that overran once and then returns quickly
+//! keeps running; a loop without an exit trips every pass and is stopped
+//! after [`STRIKES`], at the cost of that many budgets of frozen frames.
 //!
 //! The clock is read every [`CHECK_EVERY`] interrupts, not every one: a tight
 //! loop interrupts tens of millions of times a second, and `Instant::now()`
@@ -36,6 +45,9 @@ pub const DEFAULT_BUDGET: Duration = Duration::from_secs(2);
 /// A dedicated server's: a tick that takes half a second is already a server
 /// nobody can play on.
 pub const SERVER_BUDGET: Duration = Duration::from_millis(500);
+/// Passes in a row a script may overrun before it is stopped for good. A
+/// pass that finishes in time starts the count again.
+pub const STRIKES: u32 = 3;
 /// Interrupts between clock reads.
 const CHECK_EVERY: u32 = 1024;
 /// How many budgets of wall time a pass may take, whatever its CPU time.
@@ -162,8 +174,7 @@ impl Budget {
         };
         let what = if what.is_empty() { String::new() } else { format!(" {what}") };
         format!(
-            "{MARKER} {}{what} without returning ({spent}) — a loop without an exit? The \
-             script is stopped until it is edited.",
+            "{MARKER} {}{what} without returning ({spent}) — a loop without an exit?",
             shown(limit)
         )
     }
@@ -248,7 +259,7 @@ mod tests {
         }
         let e = tripped.expect("an expired deadline never tripped");
         assert!(Budget::is_timeout(&e), "{e}");
-        assert!(e.contains("0 ms") && e.contains("stopped until it is edited"), "{e}");
+        assert!(e.contains("0 ms") && e.contains("without an exit"), "{e}");
         assert!(!Budget::is_timeout("attempt to index nil"));
     }
 }

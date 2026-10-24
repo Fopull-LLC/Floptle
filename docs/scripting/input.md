@@ -152,12 +152,27 @@ must reach in both.
 
 ### Simulating input in tests and probes
 
-`input.simulate{ key = "w", down = true }` (or `{ button = 1, down = true }`,
-1 left, 2 right, 3 middle) presses a key as if the player had, from the next
-frame on, for every script: `input.key`, `input.pressed`, `input.released` and
-`input.action` all see it. `down = false` releases it. It is a testing aid for a
-probe or a scripted test run under `floptle run`, not a way for a game to move
-its own character.
+`input.simulate{ key = "w", down = true }` presses a key as if the player had,
+from the next frame on, for every script: `input.key`, `input.pressed`,
+`input.released` and `input.action` all see it. `down = false` releases it. It
+is a testing aid for a probe or a scripted test run under `floptle run`, not a
+way for a game to move its own character.
+
+The mouse, the wheel and the keyboard's text simulate the same way, and the
+game's UI sees them as it sees a player's:
+
+| Call | Does |
+|---|---|
+| `input.simulate{ button = 0, down = true }` | a mouse button, numbered as `input.button` numbers them: 0 left, 1 right, 2 middle, 3 and 4 the side buttons |
+| `input.simulate{ mouse = {x, y} }` | moves the pointer, in the pixels `input.mouse()` reports (a `vec2` works too) |
+| `input.simulate{ scroll = 1 }` | turns the wheel; `input.scroll()` reads it |
+| `input.simulate{ text = "hello" }` | types, into `input.typed()` or the focused text field |
+
+One call can carry several, applied in that order — pointer, wheel, text, key,
+button — so a probe clicks a menu button with
+`input.simulate{ mouse = {x, y}, button = 0, down = true }` and then
+`input.simulate{ button = 0, down = false }`. A press and its release in the
+same frame still click, as a quick real click does.
 
 ### Moving key reads to actions, so rebinding reaches them
 

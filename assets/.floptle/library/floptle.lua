@@ -478,6 +478,12 @@ function draw.polyline(points, r, g, b, a, closed) end
 ---@param on? boolean
 ---@return boolean
 function draw.nativeLines(on) end
+---Put the 3D shapes this script queues after it in `node`'s own space, placed
+---where the node is drawn this frame; nil is world space again. Holds for this
+---script until changed. Returns the frame it replaced.
+---@param node Node|nil
+---@return Node|nil
+function draw.setFrame(node) end
 
 ---A Kepler orbit around the focus `center`, in the plane of `e1` (toward
 ---periapsis) and `e2`: r(θ) = p / (1 + ecc·cos θ). Closed for ecc < 1; an
@@ -515,8 +521,9 @@ function draw.quad(texture, x0, y0, z0, x1, y1, z1, x2, y2, z2, x3, y3, z3, r, g
 ---@param prefab string Prefab name or path.
 ---@param pos? Vec3 World position for the first root.
 ---@param fn? fun(root: Node) Configure the freshly spawned root.
+---@param opts? Node|{parent?: Node, body?: boolean} A parent node, or options: `body = false` leaves the prefab's bodies and colliders out (a display copy).
 ---@return Node root The new root, usable at once (it lands after the pass).
-function spawn(prefab, pos, fn) end
+function spawn(prefab, pos, fn, opts) end
 
 ---Remove a node AND its whole subtree (physics body included). Queued —
 ---applied after the pass, so the handle stays readable through this call.
@@ -1701,7 +1708,7 @@ scatter = {}
 ---per instance and never while chunks build — placement has to stay a pure
 ---function of the seed, or walking away and back would regrow a different
 ---world. Density 0 generates no instance at all.
----@param opts { tint?: number[], emissive?: number[], emissiveStrength?: number, asset?: string, lod?: { asset: string, distance: number }[], seed?: number, center?: Vec3, radius?: number, halfX?: number, halfZ?: number, perChunk?: number, chunk?: number, align?: string, scaleMin?: number, scaleMax?: number, range?: number, fade?: number, density?: fun(x: number, y: number, z: number): number | number[], densityRows?: number }
+---@param opts { tint?: number[], emissive?: number[], emissiveStrength?: number, bend?: number, asset?: string, lod?: { asset: string, distance: number }[], seed?: number, center?: Vec3, radius?: number, halfX?: number, halfZ?: number, perChunk?: number, chunk?: number, align?: string, scaleMin?: number, scaleMax?: number, range?: number, fade?: number, density?: fun(x: number, y: number, z: number): number | number[], densityRows?: number }
 ---@return integer
 function scatter.create(opts) end
 ---Instances within `radius` of a point, nearest first. What a harvest verb aims
@@ -1876,6 +1883,11 @@ function decals.clear() end
 ---How many decals are in the world.
 ---@return number
 function decals.count() end
+---true once the mark is laid, false while it is still being laid (a big mark
+---is laid a piece at a time over a few frames), nil when there is no such mark.
+---@param id integer
+---@return boolean|nil
+function decals.landed(id) end
 ---The budget: past `n` decals the oldest goes (1024 until set, at most 65536).
 ---@param n number
 function decals.setMax(n) end
@@ -2009,8 +2021,9 @@ function terrain.busy() end
 ---How many of the game's terrain edits (dig, sculpt, flatten, paint,
 ---paintTexture) have not landed yet. Edits are applied a few milliseconds'
 ---worth a frame, in the order they were made, so a batch of a thousand
----flattens spreads over frames instead of stopping one. Each lands whole, so
----a query reads the ground after some number of whole edits; 0 means every
+---flattens spreads over frames instead of stopping one. An edit four voxels
+---across its radius or more is made off the frame and lands a frame or two
+---later, the rest waiting behind it. Each lands whole, so a query reads the ground after some number of whole edits; 0 means every
 ---edit made so far is in the ground.
 ---@return integer
 function terrain.pending() end
