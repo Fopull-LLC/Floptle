@@ -889,8 +889,11 @@ fn streaming_nodes_into_a_big_scene_patches_the_mirror() {
     floptle_say::say_err!("mirror per frame in 2,000 nodes: streaming 30 {streaming_ms:.4} ms, streaming none {still_ms:.4} ms");
     assert_eq!(rebuilds, 0, "streaming nodes in rebuilt the mirror");
     assert!(refreshed <= 31, "a frame read {refreshed} nodes for 30 new and one retagged");
+    // The counts above are the guard on a rebuild; this bounds what is left.
+    // It reads 1.7x here and 2.3x on a CI runner's debug build, since passes
+    // with nothing new became cheaper, so it sits well above both.
     assert!(
-        streaming_ms < still_ms * 2.0,
+        streaming_ms < still_ms * 4.0,
         "streaming 30 nodes a frame cost {:.1}x a frame with none",
         streaming_ms / still_ms
     );
