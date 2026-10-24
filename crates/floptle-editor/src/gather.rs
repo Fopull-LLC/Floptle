@@ -2303,16 +2303,17 @@ impl Editor {
             // already no-ops while off; this keeps the SUM ahead of it off too
             // ("off means off", applied to the one count here
             // pricier than a `.sum()` over an existing small collection).
-            let draws = if prof.enabled() {
-                count_draw_batches(&instances, &flsl_draws, &skin_draws)
+            let (draws, unbatched) = if prof.enabled() {
+                count_draw_batches(&instances, &flsl_draws, &skin_draws, &|b| raster.flsl_binding_shader(b))
             } else {
-                0
+                Default::default()
             };
             prof.set_counts(floptle_core::profile::Counts {
                 nodes: ents.len(),
                 culled: culled_nodes,
                 instances: instances.len(),
                 draws,
+                unbatched,
                 chunks,
                 props: scatter_props,
                 particles,

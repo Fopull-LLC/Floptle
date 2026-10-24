@@ -1571,3 +1571,64 @@ fn impostor_rules_reach_the_engine_in_order() {
     assert!(said[2].contains("radius"), "an unknown key is not named: {said:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **`assets.warm` sends each path to the side that prepares it, by its
+/// extension, and one callback waits for every kind.** An answer for one kind
+/// does not erase another kind's answer given a frame earlier.
+#[test]
+fn a_warm_sends_each_kind_to_its_side_and_waits_for_all_of_them() {
+    use crate::PreloadKind::{Material, Model, Shader, Sound, Texture};
+    let dir = std::env::temp_dir().join("floptle_script_test_warm");
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "warm",
+        "calls = 0\n\
+         function start(node)\n\
+           assets.warm({ \"textures/hull.PNG\", \"shaders/ocean.flsl\", \"materials/steel.ron\", \"models/arm.glb\", \"audio/hit.wav\" }, function(failed)\n\
+             calls = calls + 1; failedCount = #failed; firstFailed = failed[1]\n\
+           end)\n\
+         end\n",
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(
+        e,
+        Scripts(vec![floptle_core::ScriptInst {
+            kind: "warm".into(),
+            enabled: true,
+            params: vec![],
+            refs: Vec::new(),
+            strs: Vec::new(),
+            pinned_bools: None,
+        }]),
+    );
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    assert_eq!(host.take_preload_requests(Texture), vec!["textures/hull.PNG".to_string()]);
+    assert_eq!(host.take_preload_requests(Shader), vec!["shaders/ocean.flsl".to_string()]);
+    assert_eq!(host.take_preload_requests(Material), vec!["materials/steel.ron".to_string()]);
+    assert_eq!(host.take_preload_requests(Model), vec!["models/arm.glb".to_string()]);
+    assert_eq!(host.take_preload_requests(Sound), vec!["audio/hit.wav".to_string()]);
+    let calls = |host: &ScriptHost| -> i64 { host.instance_env(e.index(), "warm").unwrap().get("calls").unwrap() };
+
+    // Four of five answered over three frames: still waiting, and the early
+    // answers still stand.
+    host.set_preload_status(Texture, HashMap::from([("textures/hull.PNG".to_string(), true)]));
+    host.set_preload_status(Model, HashMap::from([("models/arm.glb".to_string(), true)]));
+    host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+    host.set_preload_status(Sound, HashMap::from([("audio/hit.wav".to_string(), true)]));
+    host.set_preload_status(Material, HashMap::from([("materials/steel.ron".to_string(), true)]));
+    host.run(&mut world, &dir, 1.0 / 60.0, 2.0 / 60.0);
+    assert_eq!(calls(&host), 0, "called back before the shader had answered");
+
+    host.set_preload_status(Shader, HashMap::from([("shaders/ocean.flsl".to_string(), false)]));
+    host.run(&mut world, &dir, 1.0 / 60.0, 3.0 / 60.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    let env = host.instance_env(e.index(), "warm").unwrap();
+    assert_eq!(calls(&host), 1, "every kind had answered");
+    assert_eq!(env.get::<i64>("failedCount").unwrap(), 1);
+    assert_eq!(env.get::<String>("firstFailed").unwrap(), "shaders/ocean.flsl");
+}

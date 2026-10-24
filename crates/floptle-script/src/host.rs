@@ -957,6 +957,7 @@ fn install_world_queries(
             sim_origin: sim_origin.clone(),
             current: net.current.clone(),
             layers: layer_table.clone(),
+            profile: profile.clone(),
         },
     );
 
@@ -9233,6 +9234,30 @@ fn resolve_script_path(scripts_dir: &Path, extra: &[PathBuf], name: &str) -> Pat
 #[cfg(test)]
 mod host_tests {
     use super::*;
+
+    /// A script's sweeps are counted and timed the way its rays are, each
+    /// call once: a chase camera's dozen casts a frame showed up only as
+    /// the calling script's time, with nothing pointing at the casts.
+    #[test]
+    fn sweeps_are_counted_and_timed_beside_rays() {
+        let host = ScriptHost::new();
+        host.set_playing(true);
+        host.profile().borrow_mut().enable(true);
+        host.lua
+            .load(
+                "for i = 1, 3 do spherecast(vec3(0, 5, 0), vec3(0, -1, 0), 0.5, 10) end
+                 capsulecast(vec3(0, 5, 0), vec3(0, -1, 0), 0.4, 0.9, 10)
+                 boxcast(vec3(0, 5, 0), vec3(0, -1, 0), 0.5, 0.5, 10)
+                 raycast(0, 5, 0, 0, -1, 0, 10)",
+            )
+            .exec()
+            .unwrap();
+        host.profile().borrow_mut().end_frame();
+        let (sweeps, ms, rays): (i64, f64, i64) =
+            host.lua.load("local c = perf.counts() return c.sweeps, c.sweepMs, c.rays").eval().unwrap();
+        assert_eq!((sweeps, rays), (5, 1), "three spherecasts, a capsulecast and a boxcast are five sweeps");
+        assert!(ms >= 0.0 && ms.is_finite(), "sweepMs reads {ms}");
+    }
 
     #[test]
     fn resolve_script_path_supports_nested_script_folders() {

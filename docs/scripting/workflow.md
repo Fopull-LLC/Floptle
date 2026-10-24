@@ -171,6 +171,40 @@ a pass and subtracted out of `scripts` so the two do not count it twice. Until
 0.84.2 `scripts` was the hook time alone, which on one shipped game accounted
 5.3 ms of a 12.9 ms step and hid an optimisation pass for a release.
 
+`assets` is first-use work: an image decoded and put on the GPU the first
+time something draws it, a material shader compiled and its pipeline built the
+first time a node wears it. A slow frame says which file it waited on:
+
+```lua
+for _, h in ipairs(perf.hitches()) do
+  for _, a in ipairs(h.assets) do
+    log(string.format("%s waited %.0f ms on %s", a.part, a.ms, a.path))
+  end
+end
+```
+
+The parts are `assetDecode` (reading and decoding an image), `assetUpload`
+(putting it on the GPU), `shaderCompile` (a `.flsl` compiled and checked) and
+`pipelineCompile` (the GPU driver building the pipeline it draws with, usually
+the largest: a large material shader can take over a second the first time).
+`h.assets` lists the slowest five of the frame, slowest first.
+
+A game moves that work off the frame that needs it by warming the assets
+behind a loading screen:
+
+```lua
+assets.warm({ "textures/hull.png", "shaders/ocean.flsl", "materials/steel.ron" }, function(failed)
+  loadingDone = true  -- `failed` lists any path that could not be prepared
+end)
+```
+
+Images are decoded and shaders compiled on worker threads while the game keeps
+drawing; uploads happen a few milliseconds a frame. Once it calls back, the
+first frame that uses them does none of that work. Models and sounds in the
+list load as `assets.preload` loads them. The pipelines the driver builds are
+also kept on disk between runs where the driver supports it (Vulkan), so a
+shader seen before builds faster even unwarmed.
+
 ### Per script, by name
 
 `perf.ms("scripts")` tells you the pass is expensive. It does not tell you which
@@ -226,6 +260,11 @@ assert(c.props < 20000, "the forest is asking for too much")
 ```
 
 Counts are free to keep, so `perf.counts()` works even while collection is off.
+The draw counts are the exception and need it on: `draws` is the draw calls the
+meshes cost, `unbatched` how many of those carried one instance, and
+`unbatchedBy` why each did not share (`uniqueMesh`, `texture`, `shader`,
+`shaderParams`, `skinned`). What batches and what does not is in
+[materials and textures](../subsystems/materials-and-textures.md).
 
 ### The rest of the frame
 
@@ -293,6 +332,10 @@ print(perf.mirrorCause())   -- "first sync", or what forced the last rebuild
 they took, inside `scripts`. A frame that spends milliseconds there is casting
 more rays than it needs, or casting them one at a time where `raycastMany`
 would do.
+`sweeps` and `sweepMs` are the same for `spherecast`, `capsulecast` and
+`boxcast`, each call counted once. A chase camera that keeps itself out of a
+craft with a dozen sweeps a frame shows up here rather than only as its
+script's time.
 
 `mirrorRebuilds` above zero on every frame means something replaces the scene,
 or a node's id, every frame, and `perf.mirrorCause()` names what.

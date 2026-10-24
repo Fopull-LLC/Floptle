@@ -11,6 +11,17 @@
 //! `assets.preload` tells a sound from a model by its extension; `audio.preload`
 //! takes the extensionless names `audio.play` accepts.
 //!
+//! `assets.warm` is the same book for everything a frame can wait on the
+//! first time it is used: models and sounds as above, and textures, material
+//! shaders and project materials too, prepared behind a loading screen so the
+//! first frame that draws them does not stop to.
+//!
+//! ```lua
+//! assets.warm({ "textures/hull.png", "shaders/ocean.flsl", "materials/steel.ron" }, function(failed)
+//!   ready = true
+//! end)
+//! ```
+//!
 //! A model a node is given mid-game loads in the background and draws once it
 //! is in, so nothing freezes; but it is not there on the frame it was asked
 //! for. A game that needs it on that frame (a ragdoll whose parts must appear
@@ -34,10 +45,39 @@ use crate::{LogLevel, ScriptLog};
 pub enum PreloadKind {
     Model,
     Sound,
+    /// An image, decoded on a worker and uploaded a little at a time.
+    Texture,
+    /// A `.flsl` material shader, compiled and its pipeline built on a worker.
+    Shader,
+    /// A project material (`materials/<name>.ron`): its images and shader.
+    Material,
+}
+
+impl PreloadKind {
+    /// Every kind, for the answers that keep the other kinds' statuses.
+    pub const ALL: [PreloadKind; 5] =
+        [PreloadKind::Model, PreloadKind::Sound, PreloadKind::Texture, PreloadKind::Shader, PreloadKind::Material];
+
+    /// What `assets.warm` takes a path for, by its extension and folder.
+    pub fn of_path(p: &str) -> PreloadKind {
+        let path = std::path::Path::new(p);
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        if floptle_audio::is_audio_path(path) {
+            PreloadKind::Sound
+        } else if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "bmp" | "tga" | "webp" | "gif" | "hdr" | "exr") {
+            PreloadKind::Texture
+        } else if ext == "flsl" {
+            PreloadKind::Shader
+        } else if ext == "ron" {
+            PreloadKind::Material
+        } else {
+            PreloadKind::Model
+        }
+    }
 }
 
 /// One preload call: the paths it named, each with its kind, and its callback.
-type Wait = (Vec<(String, PreloadKind)>, Option<RegistryKey>);
+type Wait = (Vec<(String, PreloadKind)>, Option<RegistryKey>, &'static str);
 
 /// What scripts asked to preload, and who is waiting.
 #[derive(Default)]
@@ -62,22 +102,19 @@ impl Preloads {
         let mut v: Vec<String> = self
             .waiting
             .iter()
-            .flat_map(|(p, _)| p.iter().filter(|(_, k)| *k == kind).map(|(p, _)| p.clone()))
+            .flat_map(|(p, _, _)| p.iter().filter(|(_, k)| *k == kind).map(|(p, _)| p.clone()))
             .collect();
         v.sort();
         v.dedup();
         v
     }
 
-    /// The editor's answers for one kind. The other kind's answers stand for
+    /// The editor's answers for one kind. The other kinds' answers stand for
     /// as long as something still waits on them; nothing else is kept, so an
     /// old answer cannot settle a later preload of the same path.
     pub(crate) fn set_status(&mut self, kind: PreloadKind, status: HashMap<String, bool>) {
-        let other = match kind {
-            PreloadKind::Model => PreloadKind::Sound,
-            PreloadKind::Sound => PreloadKind::Model,
-        };
-        let keep = self.waiting_on(other);
+        let keep: Vec<String> =
+            PreloadKind::ALL.iter().filter(|k| **k != kind).flat_map(|k| self.waiting_on(*k)).collect();
         self.status.retain(|p, _| keep.contains(p));
         self.status.extend(status);
     }
@@ -90,11 +127,13 @@ impl Preloads {
     }
 }
 
-/// `assets.preload(paths, cb)`: models, and sounds by their extension.
+/// `assets.preload(paths, cb)`: models, and sounds by their extension. And
+/// `assets.warm(paths, cb)`: anything a first use waits on, by its extension.
 pub(crate) fn install(lua: &Lua, assets: &mlua::Table, state: Rc<RefCell<Preloads>>) -> mlua::Result<()> {
-    assets.set("preload", preload_fn(lua, state, "assets.preload", "asset", |p| {
+    assets.set("preload", preload_fn(lua, state.clone(), "assets.preload", "asset", |p| {
         if floptle_audio::is_audio_path(std::path::Path::new(p)) { PreloadKind::Sound } else { PreloadKind::Model }
-    })?)
+    })?)?;
+    assets.set("warm", preload_fn(lua, state, "assets.warm", "asset", PreloadKind::of_path)?)
 }
 
 /// `audio.preload(clips, cb)`: every name is a sound, spelled as `audio.play`
@@ -131,7 +170,7 @@ fn preload_fn(
         let key = cb.map(|f| lua.create_registry_value(f)).transpose()?;
         let mut s = state.borrow_mut();
         s.requested.extend(paths.iter().cloned());
-        s.waiting.push((paths, key));
+        s.waiting.push((paths, key, call));
         Ok(())
     })
 }
@@ -140,36 +179,36 @@ fn preload_fn(
 pub(crate) fn drain(lua: &Lua, state: &Rc<RefCell<Preloads>>, logs: &Rc<RefCell<Vec<ScriptLog>>>) {
     // Collect with the borrow held, call with it released: a callback that
     // preloads again re-borrows the state.
-    let ready: Vec<(Vec<String>, Option<RegistryKey>)> = {
+    let ready: Vec<(Vec<String>, Option<RegistryKey>, &'static str)> = {
         let Ok(mut s) = state.try_borrow_mut() else { return };
         let status = std::mem::take(&mut s.status);
         let (done, still): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut s.waiting).into_iter().partition(|(paths, _)| {
+            std::mem::take(&mut s.waiting).into_iter().partition(|(paths, _, _)| {
                 paths.iter().all(|(p, _)| status.contains_key(p))
             });
         s.waiting = still;
         s.status = status.clone();
         done.into_iter()
-            .map(|(paths, key)| {
-                (paths.into_iter().map(|(p, _)| p).filter(|p| status.get(p) == Some(&false)).collect(), key)
+            .map(|(paths, key, call)| {
+                (paths.into_iter().map(|(p, _)| p).filter(|p| status.get(p) == Some(&false)).collect(), key, call)
             })
             .collect()
     };
-    for (failed, key) in ready {
+    for (failed, key, call) in ready {
         let Some(key) = key else { continue };
         let Ok(cb) = lua.registry_value::<Function>(&key) else { continue };
         let _ = lua.remove_registry_value(key);
         let list = match lua.create_sequence_from(failed) {
             Ok(t) => t,
             Err(e) => {
-                logs.borrow_mut().push(ScriptLog { level: LogLevel::Error, msg: format!("assets.preload: {e}"), source: None });
+                logs.borrow_mut().push(ScriptLog { level: LogLevel::Error, msg: format!("{call}: {e}"), source: None });
                 continue;
             }
         };
         if let Err(e) = cb.call::<()>(list) {
             logs.borrow_mut().push(ScriptLog {
                 level: LogLevel::Error,
-                msg: format!("assets.preload callback: {e}"),
+                msg: format!("{call} callback: {e}"),
                 source: None,
             });
         }

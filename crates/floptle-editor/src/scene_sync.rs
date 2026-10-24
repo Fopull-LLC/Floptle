@@ -233,14 +233,20 @@ impl Editor {
             );
             return;
         };
-        match floptle_shader::compile_sky(&src) {
+        let compile = floptle_core::profile::Span::new();
+        let compiled = floptle_shader::compile_sky(&src);
+        self.note_asset(&path, "shaderCompile", compile.ms());
+        match compiled {
             Ok(compiled) => {
+                let build = floptle_core::profile::Span::new();
                 if let (Some(gpu), Some(raymarch)) = (self.gpu.as_ref(), self.raymarch.as_mut()) {
                     raymarch.set_sky_shader(
                         gpu,
                         Some((&compiled.sky_fn, floptle_shader::stdlib::SUPPORT_WGSL)),
                     );
                 }
+                self.note_asset(&path, "pipelineCompile", build.ms());
+                self.flsl_gate.pipelines_unsaved = true;
                 self.sky_shader = Some((path.clone(), mtime, compiled.uniforms.clone()));
                 self.console.push(
                     floptle_script::LogLevel::Debug,
@@ -334,44 +340,43 @@ impl Editor {
         }
         self.textures_warmed_frame = self.frame_no;
         // Node Materials and per-object override materials — an override's
-        // texture is as much a texture as the node's.
-        let mut tex_paths: Vec<String> = self
-            .world
-            .query::<Material>()
-            .filter_map(|(_, m)| m.texture.clone())
-            .filter(|p| !self.texture_registry.contains_key(p))
-            .collect();
-        tex_paths.extend(
-            self.world
-                .query::<floptle_core::ObjectMaterials>()
-                .flat_map(|(_, om)| om.0.values().filter_map(|m| m.texture.clone()))
-                .filter(|p| !self.texture_registry.contains_key(p)),
-        );
-        // The surface maps too — normal, roughness, metallic, occlusion. They go
-        // through the same registry lookup as the base texture and had the same
-        // silence on a miss: a material with a normal map it could not resolve
-        // drew flat, and the only sign was that it looked like every other flat
-        // surface.
-        let maps = |m: &Material| m.maps().into_iter().flatten().cloned().collect::<Vec<_>>();
-        let map_paths: Vec<String> = self
-            .world
-            .query::<Material>()
-            .flat_map(|(_, m)| maps(m))
-            .chain(
-                self.world
-                    .query::<floptle_core::ObjectMaterials>()
-                    .flat_map(|(_, om)| om.0.values().flat_map(maps).collect::<Vec<_>>()),
-            )
-            .filter(|p| !self.texture_registry.contains_key(p))
-            .collect();
-        tex_paths.extend(map_paths);
-        // A script's patch over a model's own materials names images too.
-        tex_paths.extend(
-            self.world
-                .query::<floptle_core::MaterialPatch>()
-                .flat_map(|(_, p)| p.mat.texture.iter().cloned().chain(maps(&p.mat)).collect::<Vec<_>>())
-                .filter(|p| !self.texture_registry.contains_key(p)),
-        );
+        // texture is as much a texture as the node's. The surface maps too —
+        // normal, roughness, metallic, occlusion. They go through the same
+        // registry lookup as the base texture and had the same silence on a
+        // miss: a material with a normal map it could not resolve drew flat,
+        // and the only sign was that it looked like every other flat surface.
+        // And a script's patch over a model's own materials names images too.
+        //
+        // Every path is looked up by reference and only a miss is copied: this
+        // runs every frame over every material in the scene, and copying each
+        // path to ask whether it is already loaded was most of what it cost.
+        let mut tex_paths: Vec<String> = Vec::new();
+        {
+            let reg = &self.texture_registry;
+            let mut want = |p: Option<&String>| {
+                if let Some(p) = p
+                    && !reg.contains_key(p)
+                    && !tex_paths.contains(p)
+                {
+                    tex_paths.push(p.clone());
+                }
+            };
+            let mut images = |m: &Material| {
+                want(m.texture.as_ref());
+                for p in m.maps() {
+                    want(p);
+                }
+            };
+            for (_, m) in self.world.query::<Material>() {
+                images(m);
+            }
+            for (_, om) in self.world.query::<floptle_core::ObjectMaterials>() {
+                om.0.values().for_each(&mut images);
+            }
+            for (_, p) in self.world.query::<floptle_core::MaterialPatch>() {
+                images(&p.mat);
+            }
+        }
         // …and every sheet of every tileset a tilemap in this scene uses.
         //
         // Nothing else warms these. A tileset sheet reached the GPU only if some

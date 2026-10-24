@@ -191,6 +191,10 @@ mod template_village;
 mod vfx_frame_tests;
 #[cfg(all(test, feature = "editor-ui"))]
 mod imported_maps_tests;
+#[cfg(all(test, feature = "editor-ui"))]
+mod batching_tests;
+#[cfg(all(test, feature = "editor-ui"))]
+mod warm_tests;
 #[cfg(feature = "editor-ui")]
 mod lua_format;
 #[cfg(feature = "editor-ui")]
@@ -228,6 +232,7 @@ mod paint_ui;
 mod pkg_thumbs;
 mod place;
 mod material_bank;
+mod warm;
 mod vertex_snap;
 mod play;
 mod prefab;
@@ -3519,15 +3524,18 @@ struct Editor {
     flsl_cache: shaders::FlslCache,
     /// Live group(3) material bindings per shader-material entity.
     flsl_binds: shaders::FlslBinds,
-    /// Retired binding slots, reused before growing the raster's registry.
-    flsl_free: Vec<floptle_render::FlslBindingId>,
+    /// The live group(3) bindings themselves, one per distinct content
+    /// (shader, params, textures), shared by every material made of the same —
+    /// so a thousand parts with one look keep one batch — plus retired slots.
+    flsl_pool: shaders::FlslPool,
+    /// When the per-frame material walk last ran, and what it saw: a frame
+    /// that changed no material, shader or texture skips the walk.
+    flsl_gate: shaders::FlslGate,
     /// Live group(3) material bindings per (entity, part) — an `ObjectMaterials`
     /// override that names its own shader, distinct from the node's `flsl_binds`
     /// entry because a part's override is a whole material that can pick a
     /// different shader than the rest of the model, or none at all.
     obj_flsl_binds: shaders::ObjFlslBinds,
-    /// Retired per-part binding slots, reused before growing the raster's registry.
-    obj_flsl_free: Vec<floptle_render::FlslBindingId>,
     /// Compiled `stage ui` `.flsl` shaders by path (mtime hot reload).
     ui_flsl_cache: shaders::UiFlslCache,
     /// Live UI-shader param bindings per element (keyed by entity index —
@@ -3535,6 +3543,9 @@ struct Editor {
     ui_flsl_binds: shaders::UiFlslBinds,
     /// Retired UI binding slots, reused before growing the registry.
     ui_flsl_free: Vec<floptle_render::UiBindingId>,
+    /// `assets.warm`: images and material shaders being prepared ahead of
+    /// their first use.
+    warm: warm::Warm,
     /// Compiled `stage post` `.flsl` screen shaders by path (mtime hot reload).
     post_flsl_cache: shaders::PostFlslCache,
     /// The pipelines behind them, and this frame's ordered pass list. one
@@ -4209,7 +4220,10 @@ impl Editor {
     /// because it has an egui pass to interleave; both go through
     /// [`init_gpu_side`](Self::init_gpu_side) for the part that would be a bug
     /// to copy.
-    pub(crate) fn attach_gpu(&mut self, gpu: Gpu) {
+    pub(crate) fn attach_gpu(&mut self, mut gpu: Gpu) {
+        if let Some(dir) = prefs::pipeline_cache_dir() {
+            gpu.use_pipeline_cache(&dir);
+        }
         let mut raster = Raster::new(&gpu);
         self.init_gpu_side(&gpu, &mut raster);
         self.gpu = Some(gpu);
@@ -4305,7 +4319,10 @@ impl ApplicationHandler for Editor {
             attrs = attrs.with_position(winit::dpi::LogicalPosition::new(x, y));
         }
         let window = Arc::new(event_loop.create_window(attrs).expect("window"));
-        let gpu = Gpu::new(window.clone());
+        let mut gpu = Gpu::new(window.clone());
+        if let Some(dir) = prefs::pipeline_cache_dir() {
+            gpu.use_pipeline_cache(&dir);
+        }
         let mut raster = Raster::new(&gpu);
         // Registration order defines the Shape→MeshId mapping (Shape as usize):
         // Cube=0, Sphere=1, Capsule=2, Plane=3.

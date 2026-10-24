@@ -57,6 +57,34 @@ pub(crate) fn auto_detect_editor() -> String {
     "code".to_string()
 }
 
+/// Where the GPU driver's compiled pipelines are kept between runs: the
+/// per-user cache directory (`~/.cache/floptle/pipelines` on Linux), or what
+/// `FLOPTLE_PIPELINE_CACHE` names, or nowhere when that is `off`. Tests keep
+/// none unless the variable asks: a test run is not the user's.
+pub(crate) fn pipeline_cache_dir() -> Option<PathBuf> {
+    if let Some(v) = std::env::var_os("FLOPTLE_PIPELINE_CACHE") {
+        return (v != "off").then(|| PathBuf::from(v));
+    }
+    if cfg!(test) {
+        return None;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("LOCALAPPDATA").map(|a| PathBuf::from(a).join("floptle").join("pipelines"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Caches/floptle/pipelines"))
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+            .map(|c| c.join("floptle").join("pipelines"))
+    }
+}
+
 /// The per-user config directory for Floptle (platform-appropriate).
 pub(crate) fn floptle_config_dir() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]

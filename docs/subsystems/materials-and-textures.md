@@ -214,6 +214,33 @@ The shader's `sample(slot, uv)` node reads the binding's tiling uniforms; param
 changes are uniform writes (no recompile); swapping a *texture* re-points a bind
 group. Material edits hot-reload live ([`./asset-pipeline.md`](./asset-pipeline.md) §2).
 
+### What batches, and what breaks it
+
+Meshes draw instanced: every node that draws the same mesh with the same
+images, the same shader and the same shader binding is one draw call, however
+many nodes there are and however each got its material (a `material.ron`, a
+prefab's `object_materials`, or `node:setMaterial{...}`).
+
+- **Never splits a batch:** colour, emissive, roughness, metallic, specular,
+  rim, tint, opacity, vertex paint, the retro flags and every other number on
+  the built-in material. They ride in the instance (or the shared extras table
+  the instance indexes), so a thousand parts in a thousand colours are still
+  one draw.
+- **Splits a batch:** a different texture or surface map (the images bound
+  with the mesh); a different `.flsl` shader, or a shader on some nodes and
+  none on others; skinned against unskinned.
+- **`.flsl` parameters:** a shader's parameters and shader textures live in its
+  binding. Materials whose shader, parameters and shader textures are all equal
+  share one binding, so they batch; a node whose parameters differ gets its
+  own binding, and its own draw. Changing one node's parameters moves that node
+  alone to a binding of its own, and the others keep theirs.
+
+`perf.counts().unbatched` is how many draws carried a single instance, and
+`perf.counts().unbatchedBy` says why: `uniqueMesh` (nothing else draws that
+mesh), `texture`, `shader`, `shaderParams` or `skinned` (how it differs from
+the biggest batch of the same mesh). Terrain chunks are each their own mesh by
+design and are not counted there.
+
 ## 6. Editor UX — the Material Editor
 
 A focused panel ([`./editor.md`](./editor.md) §2), live-previewed:

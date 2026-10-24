@@ -11,7 +11,7 @@ use floptle_render::{Projection, RenderCamera};
 
 /// Five 16×16 images — base colour, metal-rough, normal, occlusion, emissive —
 /// each with a pattern that shows if it is dropped or swapped.
-fn write_maps(dir: &std::path::Path) {
+pub(crate) fn write_maps(dir: &std::path::Path) {
     std::fs::create_dir_all(dir.join("textures")).unwrap();
     let img = |name: &str, f: &dyn Fn(u32, u32) -> [u8; 4]| {
         let mut im = image::RgbaImage::new(16, 16);
@@ -31,7 +31,7 @@ fn write_maps(dir: &std::path::Path) {
 }
 
 /// A 2×2 quad facing +Z, its one material naming all five maps.
-fn write_gltf(dir: &std::path::Path) {
+pub(crate) fn write_gltf(dir: &std::path::Path) {
     std::fs::create_dir_all(dir.join("models")).unwrap();
     let mut bin: Vec<u8> = Vec::new();
     for p in [[-1.0f32, -1.0, 0.0], [1.0, -1.0, 0.0], [1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]] {

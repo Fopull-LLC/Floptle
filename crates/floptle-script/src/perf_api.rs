@@ -185,8 +185,8 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
         })?,
     )?;
 
-    // perf.counts() -> { nodes=, culled=, instances=, draws=, chunks=, props=,
-    // particles= }
+    // perf.counts() -> { nodes=, culled=, instances=, draws=, unbatched=,
+    // unbatchedBy=, chunks=, props=, particles= }
     //
     // Free to keep, and three of the four misdiagnosed tickets were answerable
     // from one of these alone — `0071` was a report of 117,000 props with no way
@@ -201,6 +201,15 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
             out.set("culled", c.culled)?;
             out.set("instances", c.instances)?;
             out.set("draws", c.draws)?;
+            // Draws that carried one instance, and why each did not join a
+            // batch: a `draws` far above the meshes on screen is the symptom,
+            // and this table names the cause.
+            out.set("unbatched", c.unbatched.total())?;
+            let by = lua.create_table()?;
+            for (why, n) in c.unbatched.reasons() {
+                by.set(why, n)?;
+            }
+            out.set("unbatchedBy", by)?;
             out.set("chunks", c.chunks)?;
             out.set("props", c.props)?;
             out.set("particles", c.particles)?;
@@ -242,6 +251,11 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
             let (rays, ray_ms) = p.borrow().rays();
             out.set("rays", rays)?;
             out.set("rayMs", ray_ms)?;
+            // Sweeps the same way (spherecast, capsulecast, boxcast): a chase
+            // camera keeping clear of a craft casts a dozen a frame.
+            let (sweeps, sweep_ms) = p.borrow().sweeps();
+            out.set("sweeps", sweeps)?;
+            out.set("sweepMs", sweep_ms)?;
             // Decals in the world (`decals.add`) and the triangles they were
             // laid as: one batch per picture, so this is geometry, not draws.
             let (decals, decal_tris) = p.borrow().decal_counts();
@@ -278,6 +292,17 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
                     parts.set(*name, *ms)?;
                 }
                 row.set("parts", parts)?;
+                // The files the frame was waiting on, slowest first:
+                // { {path=, part=, ms=}, … }.
+                let assets = lua.create_table()?;
+                for (j, (path, part, ms)) in h.assets.iter().enumerate() {
+                    let a = lua.create_table()?;
+                    a.set("path", path.as_str())?;
+                    a.set("part", *part)?;
+                    a.set("ms", *ms)?;
+                    assets.raw_set(j + 1, a)?;
+                }
+                row.set("assets", assets)?;
                 list.raw_set(i + 1, row)?;
             }
             Ok(list)

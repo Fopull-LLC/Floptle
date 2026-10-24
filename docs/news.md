@@ -1,5 +1,9 @@
 ## Just shipped
 
+**v0.117.0-rc12 — "Whole Worlds"** (beta). Physics costs a fraction of what
+it did for big craft and vehicles on the ground, shader materials draw
+together, and `assets.warm` prepares a level before its first frame.
+
 **v0.117.0-rc11 — "Whole Worlds"** (beta). Big batches of terrain edits land
 many a frame and under a budget a game can raise, ground streams in wherever
 the camera goes, and any node can be destroyed.

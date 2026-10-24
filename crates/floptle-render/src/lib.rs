@@ -72,8 +72,8 @@ pub use particles::{ParticleBatch, ParticleBlend, ParticleGlobals, ParticleInsta
 pub use post::{PostSettings, PostShaderId, PostShaders, PostStack, SsaoFrame, Tonemap};
 pub use ui::{Ui, UiBatch, UiBindingId, UiInstance, UiPlane, UiShaderId, UiTex};
 pub use raster::{
-    ext_index_of, instance_of, instance_of_mat, pass_prelude, raster_custom_source, set_ext_index,
-    FlslBindingId, FlslBlend, FlslDraw, FlslShaderId, Globals, InstanceRaw, MaterialParams, Raster,
+    ext_index_of, instance_of, is_terrain, instance_of_mat, pass_prelude, raster_custom_source, set_ext_index,
+    BuiltFlsl, FlslBindingId, FlslBlend, FlslBuilder, FlslDraw, FlslShaderId, Globals, InstanceRaw, MaterialParams, Raster,
     SkinDraw, SurfaceExtras, TexFilter, TexId, TexSampling, TexWrap, sun_shadow_matrix, FLSL_ENGINE_SAMPLERS, FLSL_ENGINE_TEXTURES, SUN_MAP_SIZE, flsl_fits_within, flsl_slots_within,
 };
 pub use raymarch::{

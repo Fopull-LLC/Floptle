@@ -845,7 +845,7 @@ impl Raymarch {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: gpu.pipeline_cache.as_ref(),
         })
     }
 
@@ -889,7 +889,7 @@ impl Raymarch {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: gpu.pipeline_cache.as_ref(),
         });
 
         // Silhouette-mask pipeline: same march, but writes 1.0 (no depth) into a
@@ -917,7 +917,7 @@ impl Raymarch {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: gpu.pipeline_cache.as_ref(),
         });
         (pipeline, mask_pipeline)
     }

@@ -21,20 +21,123 @@ use crate::Editor;
 
 /// One `.flsl` file's compile state, keyed by project-relative path.
 pub(crate) struct FlslEntry {
-    mtime: Option<SystemTime>,
+    pub(crate) mtime: Option<SystemTime>,
     /// The last good compile — kept while `error` reports a newer failure.
     pub(crate) compiled: Option<(CompiledFragment, FlslShaderId)>,
     /// The newest failure (compile or naga), already line-mapped for humans.
     pub(crate) error: Option<String>,
 }
 
-/// One entity's live material binding (group(3) UBO + textures), plus what it
-/// was built from — so a frame with no changes does zero GPU work.
+/// What one live binding is made of: the shader, its packed params and the
+/// image in each texture slot. Two materials that agree on all three draw the
+/// same pixels, so they share one binding, and a draw is batched by its
+/// binding.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct BindContent {
+    shader: u32,
+    params: Vec<u8>,
+    textures: Vec<Option<u32>>,
+}
+
+/// One material's place in the binding pool: which shared binding it draws
+/// with, and the content that binding was chosen for — so a frame with no
+/// changes does zero GPU work.
 pub(crate) struct FlslMatBind {
     pub(crate) binding: FlslBindingId,
     shader: FlslShaderId,
-    params: Vec<u8>,
-    textures: Vec<Option<TexId>>,
+    content: BindContent,
+}
+
+/// The live group(3) bindings, one per distinct [`BindContent`], each with
+/// the number of materials drawing through it, plus the retired slots.
+///
+/// One binding per *content*, not per node, because the binding is part of a
+/// draw's batch key. A binding per node made three thousand parts given one
+/// look three thousand draws, where the same parts with no shader were a
+/// handful.
+#[derive(Default)]
+pub(crate) struct FlslPool {
+    live: HashMap<BindContent, (FlslBindingId, u32)>,
+    free: Vec<FlslBindingId>,
+}
+
+impl FlslPool {
+    /// How many distinct bindings are live.
+    #[cfg(test)]
+    pub(crate) fn live(&self) -> usize {
+        self.live.len()
+    }
+
+    /// One material stopped drawing with `content`; the last one out retires
+    /// the slot.
+    fn release(&mut self, content: &BindContent) {
+        if let Some((id, users)) = self.live.get_mut(content) {
+            *users -= 1;
+            if *users == 0 {
+                let id = *id;
+                self.live.remove(content);
+                self.free.push(id);
+            }
+        }
+    }
+
+    /// The binding made of `content`: the one already live, or a new one.
+    fn acquire(
+        &mut self,
+        gpu: &floptle_render::Gpu,
+        raster: &mut floptle_render::Raster,
+        content: &BindContent,
+        shader: FlslShaderId,
+        textures: &[Option<TexId>],
+    ) -> FlslBindingId {
+        if let Some((id, users)) = self.live.get_mut(content) {
+            *users += 1;
+            return *id;
+        }
+        let reuse = self.free.pop();
+        let id = raster.set_flsl_binding(gpu, reuse, shader, &content.params, textures);
+        self.live.insert(content.clone(), (id, 1));
+        id
+    }
+}
+
+/// When [`Editor::ensure_flsl_materials`] last walked the scene, and what it
+/// depended on. The walk visits every material in the world, and in a scene
+/// of thousands of parts that was milliseconds every frame for an answer that
+/// had not changed.
+#[derive(Default)]
+pub(crate) struct FlslGate {
+    /// The world's change log as of the last walk. `None`: walk next frame.
+    cursor: Option<floptle_core::ChangeCursor>,
+    /// Shader compiles so far, and the texture registry's fingerprint, as of
+    /// the last walk.
+    seen: (u64, u64),
+    /// Every shader the last walk found in use, re-checked for edits each
+    /// frame whether or not the walk runs.
+    paths: Vec<String>,
+    /// Bumped whenever a `.flsl` compiles: the param layout may have moved.
+    compiles: u64,
+    /// Walks run so far, whole or partial, and the materials they planned:
+    /// what a test reads to see a quiet frame skip the walk and a one-node
+    /// change plan one node.
+    pub(crate) walks: u64,
+    pub(crate) planned: u64,
+    /// Pipelines were built since the pipeline cache was last written (and
+    /// `false` before the first write, which keeps the passes' own).
+    pub(crate) pipelines_unsaved: bool,
+    pipelines_saved_once: bool,
+}
+
+/// A number that changes whenever any path in the texture registry moves to
+/// a different image. Order-free, because the registry is a hash map.
+fn registry_fingerprint(registry: &HashMap<String, TexId>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    registry.iter().fold(registry.len() as u64, |acc, (k, v)| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        k.hash(&mut h);
+        v.0.hash(&mut h);
+        acc.wrapping_add(h.finish())
+    })
 }
 
 /// A plan for one live `.flsl` material binding — shared by whole-node
@@ -49,13 +152,15 @@ struct FlslPlan<K> {
 }
 
 /// Apply one resolved [`FlslPlan`] (textures already looked up) to a binding
-/// map: reuse the live binding if the shader and textures didn't change
-/// (params-only writes are the common case — a knob dragged every frame),
-/// rebuild it in place if they did, or create a fresh one. `K` is generic so
-/// this serves both `FlslBinds` (whole-node) and `ObjFlslBinds` (per-part).
+/// map: keep the binding when nothing changed, move to the binding already
+/// made of the new content when there is one, and otherwise rewrite this
+/// material's binding in place when it is the only one drawing with it (a
+/// knob dragged every frame stays a uniform write) or take a new one when it
+/// is not (copy on write: the others keep their look). `K` is generic so this
+/// serves both `FlslBinds` (whole-node) and `ObjFlslBinds` (per-part).
 fn apply_flsl_bind<K: Eq + std::hash::Hash>(
     binds: &mut HashMap<K, FlslMatBind>,
-    free: &mut Vec<FlslBindingId>,
+    pool: &mut FlslPool,
     gpu: &floptle_render::Gpu,
     raster: &mut floptle_render::Raster,
     // (key, shader, params, resolved textures) — bundled to stay under the
@@ -63,26 +168,47 @@ fn apply_flsl_bind<K: Eq + std::hash::Hash>(
     resolved: (K, FlslShaderId, Vec<u8>, Vec<Option<TexId>>),
 ) {
     let (key, shader, params, textures) = resolved;
-    match binds.get_mut(&key) {
-        Some(b) if b.shader == shader && b.textures == textures => {
-            if b.params != params {
-                raster.write_flsl_params(gpu, b.binding, &params);
-                b.params = params;
-            }
-        }
-        Some(b) => {
-            // Shader or texture set changed: rebuild the bind group in place.
-            b.binding = raster.set_flsl_binding(gpu, Some(b.binding), shader, &params, &textures);
-            b.shader = shader;
-            b.params = params;
-            b.textures = textures;
-        }
-        None => {
-            let reuse = free.pop();
-            let binding = raster.set_flsl_binding(gpu, reuse, shader, &params, &textures);
-            binds.insert(key, FlslMatBind { binding, shader, params, textures });
-        }
+    let content =
+        BindContent { shader: shader.0, params, textures: textures.iter().map(|t| t.map(|t| t.0)).collect() };
+    let Some(b) = binds.get_mut(&key) else {
+        let binding = pool.acquire(gpu, raster, &content, shader, &textures);
+        binds.insert(key, FlslMatBind { binding, shader, content });
+        return;
+    };
+    if b.content == content {
+        return;
     }
+    let alone = pool.live.get(&b.content).is_some_and(|&(_, users)| users == 1);
+    if alone && !pool.live.contains_key(&content) {
+        pool.live.remove(&b.content);
+        if b.content.shader == content.shader && b.content.textures == content.textures {
+            raster.write_flsl_params(gpu, b.binding, &content.params);
+        } else {
+            b.binding = raster.set_flsl_binding(gpu, Some(b.binding), shader, &content.params, &textures);
+        }
+        pool.live.insert(content.clone(), (b.binding, 1));
+    } else {
+        pool.release(&b.content);
+        b.binding = pool.acquire(gpu, raster, &content, shader, &textures);
+    }
+    b.shader = shader;
+    b.content = content;
+}
+
+/// Drop every binding in `binds` that `keep` refuses, handing its share back
+/// to the pool.
+fn retire_binds<K: Eq + std::hash::Hash>(
+    binds: &mut HashMap<K, FlslMatBind>,
+    pool: &mut FlslPool,
+    mut keep: impl FnMut(&K, &FlslMatBind) -> bool,
+) {
+    binds.retain(|k, b| {
+        let stays = keep(k, b);
+        if !stays {
+            pool.release(&b.content);
+        }
+        stays
+    });
 }
 
 impl Editor {
@@ -95,58 +221,103 @@ impl Editor {
     /// each part of an `ObjectMaterials` override that names a shader of its
     /// own (`obj_flsl_binds`, keyed by entity + the part's override key). A
     /// part's override is a whole material superseding the node's — its
-    /// shader-or-not is part of that whole — so it gets its own binding
-    /// rather than inheriting whatever the node happens to have.
+    /// shader-or-not is part of that whole — so it gets its own entry rather
+    /// than inheriting whatever the node happens to have. Entries made of the
+    /// same content share one binding ([`FlslPool`]).
+    ///
+    /// Only what may have changed is walked. A frame where no material, model
+    /// override or matter changed and no node was made or destroyed walks
+    /// nothing; one where a few nodes did walks those nodes; a recompiled
+    /// shader, a changed texture registry, or a change log that cannot say
+    /// what happened walks every material.
     pub(crate) fn ensure_flsl_materials(&mut self) {
         if self.gpu.is_none() || self.raster.is_none() {
             return;
         }
+        // Pipelines built last frame go to the cache on disk now, once the
+        // frame that needed them has been drawn.
+        if self.flsl_gate.pipelines_unsaved || !self.flsl_gate.pipelines_saved_once {
+            if let Some(gpu) = self.gpu.as_ref() {
+                gpu.save_pipeline_cache();
+            }
+            self.flsl_gate.pipelines_unsaved = false;
+            self.flsl_gate.pipelines_saved_once = true;
+        }
+        // Edits to a shader already in use land whether or not the walk runs.
+        for p in self.flsl_gate.paths.clone() {
+            self.ensure_flsl_shader(&p);
+        }
+        let seen = (self.flsl_gate.compiles, registry_fingerprint(&self.texture_registry));
+        // `None`: walk everything. `Some`: the entity indices that may have
+        // changed since the last walk.
+        let only: Option<HashSet<u32>> = match self.flsl_gate.cursor {
+            Some(cursor) if self.flsl_gate.seen == seen => self.world.changes_since(cursor).map(|changes| {
+                use std::any::TypeId;
+                let read = [TypeId::of::<Material>(), TypeId::of::<ObjectMaterials>(), TypeId::of::<floptle_core::Matter>()];
+                changes
+                    .iter()
+                    .filter(|c| match c.kind {
+                        floptle_core::ChangeKind::Lifetime => true,
+                        floptle_core::ChangeKind::Component(t) => read.contains(&t),
+                    })
+                    .map(|c| c.index)
+                    .collect()
+            }),
+            _ => None,
+        };
+        if only.as_ref().is_some_and(HashSet::is_empty) {
+            self.flsl_gate.cursor = Some(self.world.change_cursor());
+            return;
+        }
+        let wanted = |e: &Entity| only.as_ref().is_none_or(|o| o.contains(&e.index()));
+        self.flsl_gate.walks += 1;
         // Field Shape nodes carry SDF-stage shaders — those go through
         // `sync_field_shapes`, not the fragment-material path.
-        let field_shape: Vec<Entity> = self
+        let field_shape: HashSet<Entity> = self
             .world
             .query::<floptle_core::Matter>()
-            .filter(|(_, m)| matches!(m, floptle_core::Matter::FieldShape { .. }))
+            .filter(|(e, m)| wanted(e) && matches!(m, floptle_core::Matter::FieldShape { .. }))
             .map(|(e, _)| e)
             .collect();
-        let mats: Vec<(Entity, Material)> = self
-            .world
-            .query::<Material>()
-            .filter(|(e, m)| m.shader.is_some() && !field_shape.contains(e))
-            .map(|(e, m)| (e, m.clone()))
-            .collect();
-        let obj_mats: Vec<(Entity, String, Material)> = self
-            .world
-            .query::<ObjectMaterials>()
-            .filter(|(e, _)| !field_shape.contains(e))
-            .flat_map(|(e, om)| {
-                om.0.iter()
-                    .filter(|(_, m)| m.shader.is_some())
-                    .map(|(k, m)| (e, k.clone(), m.clone()))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
 
-        let mut paths: Vec<String> = mats
-            .iter()
-            .map(|(_, m)| m)
-            .chain(obj_mats.iter().map(|(_, _, m)| m))
-            .filter_map(|m| m.shader.clone())
-            .collect();
+        let mut paths: Vec<String> = {
+            let mut set: HashSet<&str> = HashSet::new();
+            for (e, m) in self.world.query::<Material>() {
+                if let Some(s) = m.shader.as_deref()
+                    && wanted(&e)
+                    && !field_shape.contains(&e)
+                {
+                    set.insert(s);
+                }
+            }
+            for (e, om) in self.world.query::<ObjectMaterials>() {
+                if !wanted(&e) || field_shape.contains(&e) {
+                    continue;
+                }
+                set.extend(om.0.values().filter_map(|m| m.shader.as_deref()));
+            }
+            // A partial walk adds to the shaders in use; only a whole one can
+            // say which are no longer.
+            if only.is_some() {
+                set.extend(self.flsl_gate.paths.iter().map(String::as_str));
+            }
+            set.into_iter().map(str::to_string).collect()
+        };
         paths.sort();
-        paths.dedup();
         for p in &paths {
-            self.ensure_flsl_shader(p);
+            if !self.flsl_gate.paths.contains(p) {
+                self.ensure_flsl_shader(p);
+            }
         }
+        self.flsl_gate.paths = paths;
 
         // Plan each binding from the compile cache (immutable pass), then
         // resolve textures + touch the GPU (mutable pass) — one round for the
-        // node-level materials, one for the per-part overrides.
-        let plan_of = |cache: &FlslCache,
-                        shader_path: Option<&str>,
-                        m: &Material|
-         -> Option<(FlslShaderId, Vec<u8>, Vec<Option<String>>)> {
-            let rel = shader_path.unwrap_or_default();
+        // node-level materials, one for the per-part overrides. The plans
+        // borrow the world's materials rather than cloning them: in a scene of
+        // thousands of parts the clones were most of the cost.
+        let plan_of = |cache: &FlslCache, m: &Material| -> Option<(FlslShaderId, Vec<u8>, Vec<Option<String>>)> {
+            let rel = m.shader.as_deref().unwrap_or_default();
             let (compiled, shader) = cache.get(rel).and_then(|en| en.compiled.as_ref())?;
             let params = compiled.pack_params(
                 &|name| m.shader_params.get(name).copied(),
@@ -163,79 +334,82 @@ impl Editor {
                 .collect();
             Some((*shader, params, slot_paths))
         };
-        let plans: Vec<FlslPlan<Entity>> = mats
-            .iter()
+        let plans: Vec<FlslPlan<Entity>> = self
+            .world
+            .query::<Material>()
+            .filter(|(e, m)| m.shader.is_some() && wanted(e) && !field_shape.contains(e))
             .filter_map(|(e, m)| {
-                let (shader, params, slot_paths) = plan_of(&self.flsl_cache, m.shader.as_deref(), m)?;
-                Some(FlslPlan { key: *e, shader, params, slot_paths })
+                let (shader, params, slot_paths) = plan_of(&self.flsl_cache, m)?;
+                Some(FlslPlan { key: e, shader, params, slot_paths })
             })
             .collect();
-        let obj_plans: Vec<FlslPlan<(Entity, String)>> = obj_mats
-            .iter()
+        let obj_plans: Vec<FlslPlan<(Entity, String)>> = self
+            .world
+            .query::<ObjectMaterials>()
+            .filter(|(e, _)| wanted(e) && !field_shape.contains(e))
+            .flat_map(|(e, om)| {
+                om.0.iter().filter(|(_, m)| m.shader.is_some()).map(move |(k, m)| (e, k, m))
+            })
             .filter_map(|(e, key, m)| {
-                let (shader, params, slot_paths) = plan_of(&self.flsl_cache, m.shader.as_deref(), m)?;
-                Some(FlslPlan { key: (*e, key.clone()), shader, params, slot_paths })
+                let (shader, params, slot_paths) = plan_of(&self.flsl_cache, m)?;
+                Some(FlslPlan { key: (e, key.clone()), shader, params, slot_paths })
             })
             .collect();
 
+        // A slot naming an image that is not there yet keeps the walk running
+        // every frame, as it always did, so the image is picked up when it
+        // appears.
+        let mut missing = false;
+        let mut resolve = |ed: &mut Editor, slot_paths: &[Option<String>]| -> Vec<Option<TexId>> {
+            slot_paths
+                .iter()
+                .map(|p| {
+                    let t = p.as_deref().and_then(|p| ed.ensure_texture(p));
+                    missing |= p.is_some() && t.is_none();
+                    t
+                })
+                .collect()
+        };
         let mut seen: HashSet<Entity> = HashSet::new();
         for plan in plans {
             seen.insert(plan.key);
-            let textures: Vec<Option<TexId>> = plan
-                .slot_paths
-                .iter()
-                .map(|p| p.as_deref().and_then(|p| self.ensure_texture(p)))
-                .collect();
+            let textures = resolve(self, &plan.slot_paths);
             let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
                 return;
             };
             apply_flsl_bind(
-                &mut self.flsl_binds, &mut self.flsl_free, gpu, raster,
+                &mut self.flsl_binds, &mut self.flsl_pool, gpu, raster,
                 (plan.key, plan.shader, plan.params, textures),
             );
         }
-        // Entities that lost their shader material free their binding slot.
-        let stale: Vec<Entity> =
-            self.flsl_binds.keys().copied().filter(|e| !seen.contains(e)).collect();
-        for e in stale {
-            if let Some(b) = self.flsl_binds.remove(&e) {
-                self.flsl_free.push(b.binding);
-            }
-        }
+        self.flsl_gate.planned += (seen.len()) as u64;
+        // Entities that lost their shader material give their share back —
+        // of those walked: one not walked has not changed.
+        retire_binds(&mut self.flsl_binds, &mut self.flsl_pool, |e, _| !wanted(e) || seen.contains(e));
 
         let mut obj_seen: HashSet<(Entity, String)> = HashSet::new();
         for plan in obj_plans {
             obj_seen.insert(plan.key.clone());
-            let textures: Vec<Option<TexId>> = plan
-                .slot_paths
-                .iter()
-                .map(|p| p.as_deref().and_then(|p| self.ensure_texture(p)))
-                .collect();
+            let textures = resolve(self, &plan.slot_paths);
             let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
                 return;
             };
             apply_flsl_bind(
-                &mut self.obj_flsl_binds, &mut self.obj_flsl_free, gpu, raster,
+                &mut self.obj_flsl_binds, &mut self.flsl_pool, gpu, raster,
                 (plan.key, plan.shader, plan.params, textures),
             );
         }
-        let obj_stale: Vec<(Entity, String)> = self
-            .obj_flsl_binds
-            .keys()
-            .filter(|k| !obj_seen.contains(*k))
-            .cloned()
-            .collect();
-        for k in obj_stale {
-            if let Some(b) = self.obj_flsl_binds.remove(&k) {
-                self.obj_flsl_free.push(b.binding);
-            }
-        }
+        self.flsl_gate.planned += obj_seen.len() as u64;
+        retire_binds(&mut self.obj_flsl_binds, &mut self.flsl_pool, |k, _| !wanted(&k.0) || obj_seen.contains(k));
+
+        self.flsl_gate.seen = (self.flsl_gate.compiles, registry_fingerprint(&self.texture_registry));
+        self.flsl_gate.cursor = (!missing).then(|| self.world.change_cursor());
     }
 
     /// Compile (or hot-reload) one `.flsl` by its Material path (asset-tree or
     /// project-relative). Keeps the last good pipeline on failure;
     /// Console-reports each new error once.
-    fn ensure_flsl_shader(&mut self, rel: &str) {
+    pub(crate) fn ensure_flsl_shader(&mut self, rel: &str) {
         let full = self.resolve_asset_path(rel);
         let mtime = floptle_vfs::modified(&full);
         if let Some(entry) = self.flsl_cache.get(rel)
@@ -274,19 +448,12 @@ impl Editor {
             }
         };
 
+        let compile = floptle_core::profile::Span::new();
         let outcome = compile_fragment_validated(&src);
+        self.note_asset(rel, "shaderCompile", compile.ms());
 
         match outcome {
             Ok(compiled) => {
-                let replace =
-                    self.flsl_cache.get(rel).and_then(|e| e.compiled.as_ref()).map(|(_, id)| *id);
-                let chunk_full =
-                    format!("{}\n{}", floptle_shader::stdlib::SUPPORT_WGSL, compiled.chunk);
-                let blend = match compiled.blend {
-                    floptle_shader::Blend::Opaque => FlslBlend::Opaque,
-                    floptle_shader::Blend::Alpha => FlslBlend::Alpha,
-                    floptle_shader::Blend::Additive => FlslBlend::Additive,
-                };
                 // A shader this GPU cannot bind is said by name here, and
                 // keeps the last build that worked: pipeline validation would
                 // only say a count was over a limit.
@@ -301,37 +468,7 @@ impl Editor {
                     );
                     return;
                 }
-                let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
-                    return;
-                };
-                let id = raster.register_flsl_shader(
-                    gpu,
-                    &chunk_full,
-                    compiled.textures.len(),
-                    blend,
-                    replace,
-                );
-                self.console.push(
-                    floptle_script::LogLevel::Debug,
-                    format!("◈ compiled {rel}"),
-                    None,
-                );
-                // The pipeline (and possibly its group(3) layout) changed:
-                // retire every live binding of this shader so the next
-                // ensure pass rebuilds them against the fresh layout.
-                let stale: Vec<Entity> = self
-                    .flsl_binds
-                    .iter()
-                    .filter(|(_, b)| b.shader == id)
-                    .map(|(e, _)| *e)
-                    .collect();
-                for e in stale {
-                    if let Some(b) = self.flsl_binds.remove(&e) {
-                        self.flsl_free.push(b.binding);
-                    }
-                }
-                self.flsl_cache
-                    .insert(rel.to_string(), FlslEntry { mtime, compiled: Some((compiled, id)), error: None });
+                self.install_flsl(rel, mtime, compiled, None);
             }
             Err(msg) => {
                 let msg = report(self, msg);
@@ -344,6 +481,54 @@ impl Editor {
         }
     }
 
+    /// Put a compiled material shader in use under `rel`: its pipeline built
+    /// here, or the one `built` on a worker installed, the bindings of the
+    /// shader it replaces retired, and the compile recorded.
+    pub(crate) fn install_flsl(
+        &mut self,
+        rel: &str,
+        mtime: Option<SystemTime>,
+        compiled: CompiledFragment,
+        built: Option<floptle_render::BuiltFlsl>,
+    ) {
+        let replace = self.flsl_cache.get(rel).and_then(|e| e.compiled.as_ref()).map(|(_, id)| *id);
+        let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
+            return;
+        };
+        let build = floptle_core::profile::Span::new();
+        let here = |raster: &mut floptle_render::Raster| {
+            raster.register_flsl_shader(gpu, &flsl_chunk(&compiled), compiled.textures.len(), flsl_blend(compiled.blend), replace)
+        };
+        // A worker's build is installed as it is; one that raced a Field
+        // Shape change is built again here.
+        let (id, built_here) = match built {
+            Some(b) => match raster.install_flsl_shader(b, replace) {
+                Ok(id) => (id, false),
+                Err(_) => (here(raster), true),
+            },
+            None => (here(raster), true),
+        };
+        if built_here {
+            self.note_asset(rel, "pipelineCompile", build.ms());
+        }
+        self.flsl_gate.pipelines_unsaved = true;
+        self.console.push(
+            floptle_script::LogLevel::Debug,
+            format!("◈ compiled {rel}"),
+            None,
+        );
+        // The pipeline (and possibly its group(3) layout) changed:
+        // retire every live binding of this shader so the next
+        // ensure pass rebuilds them against the fresh layout.
+        // Per-part overrides too: they bind the same shader through the
+        // same layout.
+        retire_binds(&mut self.flsl_binds, &mut self.flsl_pool, |_, b| b.shader != id);
+        retire_binds(&mut self.obj_flsl_binds, &mut self.flsl_pool, |_, b| b.shader != id);
+        self.flsl_gate.compiles += 1;
+        self.flsl_cache
+            .insert(rel.to_string(), FlslEntry { mtime, compiled: Some((compiled, id)), error: None });
+    }
+
     /// Drop every flsl cache (project switch — the raster pass was rebuilt).
     pub(crate) fn clear_flsl_state(&mut self) {
         #[cfg(feature = "editor-ui")]
@@ -352,9 +537,9 @@ impl Editor {
         }
         self.flsl_cache.clear();
         self.flsl_binds.clear();
-        self.flsl_free.clear();
         self.obj_flsl_binds.clear();
-        self.obj_flsl_free.clear();
+        self.flsl_pool = Default::default();
+        self.flsl_gate = Default::default();
         self.ui_flsl_cache.clear();
         self.ui_flsl_binds.clear();
         self.ui_flsl_free.clear();
@@ -821,7 +1006,9 @@ impl Editor {
                 return;
             }
         };
+        let compile = floptle_core::profile::Span::new();
         let outcome = compile_ui_validated(&src);
+        self.note_asset(rel, "shaderCompile", compile.ms());
         match outcome {
             Ok(compiled) => {
                 let replace =
@@ -835,7 +1022,9 @@ impl Editor {
                 let (Some(gpu), Some(uir)) = (self.gpu.as_ref(), self.ui_render.as_mut()) else {
                     return;
                 };
+                let build = floptle_core::profile::Span::new();
                 let id = uir.register_ui_shader(gpu, &chunk_full, replace);
+                self.note_asset(rel, "pipelineCompile", build.ms());
                 self.console.push(
                     floptle_script::LogLevel::Debug,
                     format!("◈ compiled {rel} (ui)"),
@@ -982,7 +1171,9 @@ impl Editor {
                 return;
             }
         };
+        let compile = floptle_core::profile::Span::new();
         let outcome = compile_post_validated(&src);
+        self.note_asset(rel, "shaderCompile", compile.ms());
         match outcome {
             Ok(compiled) => {
                 let replace = self
@@ -994,7 +1185,9 @@ impl Editor {
                 let (Some(gpu), Some(reg)) = (self.gpu.as_ref(), self.post_shaders.as_mut()) else {
                     return;
                 };
+                let build = floptle_core::profile::Span::new();
                 let id = reg.register(gpu, &module_src, replace);
+                self.note_asset(rel, "pipelineCompile", build.ms());
                 self.console.push(
                     floptle_script::LogLevel::Debug,
                     format!("◈ compiled {rel} (screen)"),
@@ -1033,6 +1226,21 @@ fn at_flsl_line(
 /// A mesh material's shader, compiled and then validated by naga against the
 /// real raster + field sources: passing here means the pipeline build cannot
 /// fail on the shader. The editor's loader and `floptle check` both call this.
+/// The WGSL a compiled material shader is built from: its chunk after the
+/// stdlib support it calls.
+pub(crate) fn flsl_chunk(compiled: &CompiledFragment) -> String {
+    format!("{}\n{}", floptle_shader::stdlib::SUPPORT_WGSL, compiled.chunk)
+}
+
+/// The raster pass's name for a shader's blend.
+pub(crate) fn flsl_blend(b: floptle_shader::Blend) -> FlslBlend {
+    match b {
+        floptle_shader::Blend::Opaque => FlslBlend::Opaque,
+        floptle_shader::Blend::Alpha => FlslBlend::Alpha,
+        floptle_shader::Blend::Additive => FlslBlend::Additive,
+    }
+}
+
 pub(crate) fn compile_fragment_validated(src: &str) -> Result<floptle_shader::CompiledFragment, String> {
     let compiled = floptle_shader::compile_fragment(src)?;
     floptle_shader::validate(floptle_render::pass_prelude(), &compiled.chunk)

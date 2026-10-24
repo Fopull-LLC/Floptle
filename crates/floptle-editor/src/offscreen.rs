@@ -993,16 +993,19 @@ impl Editor {
             let voices = 0;
             let profile = self.script_host.profile().clone();
             // Same "off means off" guard as the main gather — see there.
-            let draws = if profile.borrow().enabled() {
-                count_draw_batches(&instances, &flsl_draws, &skin_draws)
+            let (draws, unbatched) = if profile.borrow().enabled() {
+                count_draw_batches(&instances, &flsl_draws, &skin_draws, &|b| {
+                    self.raster.as_ref().and_then(|r| r.flsl_binding_shader(b))
+                })
             } else {
-                0
+                Default::default()
             };
             profile.borrow_mut().set_counts(floptle_core::profile::Counts {
                 nodes: ents.len(),
                 culled: culled_nodes,
                 instances: instances.len(),
                 draws,
+                unbatched,
                 chunks,
                 props: scatter_props,
                 particles,

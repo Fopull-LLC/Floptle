@@ -162,6 +162,16 @@ pub struct Gpu {
     /// engine's linear output reaches the glass unencoded and every colour
     /// reads dark.
     frame_format: wgpu::TextureFormat,
+    /// The driver's compiled pipelines, kept on disk between runs (Vulkan,
+    /// where the driver offers it). `None` until
+    /// [`Gpu::use_pipeline_cache`], and on a backend without one. Every
+    /// pipeline the raster and raymarch passes build is made through it, so a
+    /// material shader compiled once compiles from the cache on every run
+    /// after: the first frame that draws it waited over a second for the
+    /// driver otherwise, on every run.
+    pub pipeline_cache: Option<wgpu::PipelineCache>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pipeline_cache_file: Option<std::path::PathBuf>,
 }
 
 /// How finished frames are handed to the display.
@@ -228,7 +238,12 @@ impl Frame {
 /// profiler would be trading the product for the tool. `GpuTimer::new` asks the
 /// DEVICE afterwards, so the two can never drift apart.
 fn timing_features(adapter: &wgpu::Adapter) -> wgpu::Features {
-    let want = wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+    // A pipeline cache rides along where the adapter has one: it changes
+    // nothing that is drawn, only how long the driver takes to build a
+    // pipeline it has built before.
+    let want = wgpu::Features::TIMESTAMP_QUERY
+        | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
+        | wgpu::Features::PIPELINE_CACHE;
     adapter.features() & want
 }
 
@@ -281,6 +296,75 @@ pub fn adapter_stage_limits() -> Option<(u32, u32)> {
 }
 
 impl Gpu {
+    /// Keep the driver's compiled pipelines in `dir` between runs: read what
+    /// an earlier run left, and build every later pipeline through it. A
+    /// no-op where the device has no pipeline cache (anything but Vulkan, or
+    /// a driver without one). Call before the passes are made, so their own
+    /// pipelines come from it too.
+    pub fn use_pipeline_cache(&mut self, dir: &std::path::Path) {
+        // A browser has neither a disk nor a pipeline cache to keep.
+        if cfg!(target_arch = "wasm32") || !self.device.features().contains(wgpu::Features::PIPELINE_CACHE) {
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.open_pipeline_cache(dir);
+        #[cfg(target_arch = "wasm32")]
+        let _ = dir;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn open_pipeline_cache(&mut self, dir: &std::path::Path) {
+        let Some(key) = wgpu::util::pipeline_cache_key(&self.adapter.get_info()) else { return };
+        let file = dir.join(key);
+        // A driver's cache keeps every pipeline it was ever handed, so one
+        // grows with each shader edit; past this it starts again empty.
+        const MAX_BYTES: u64 = 256 << 20;
+        let fits = std::fs::metadata(&file).is_ok_and(|m| m.len() <= MAX_BYTES);
+        let data = if fits { std::fs::read(&file).ok() } else { None };
+        // SAFETY: the data is only ever what `save_pipeline_cache` wrote from
+        // `PipelineCache::get_data` for this adapter's key, and with
+        // `fallback` a cache the driver will not take (another driver
+        // version, a damaged file) is replaced by an empty one rather than
+        // failing.
+        let cache = unsafe {
+            self.device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+                label: Some("floptle-pipelines"),
+                data: data.as_deref(),
+                fallback: true,
+            })
+        };
+        self.pipeline_cache = Some(cache);
+        self.pipeline_cache_file = Some(file);
+    }
+
+    /// Write the pipeline cache back to its file, on a worker thread, through
+    /// a temporary file so a run killed mid-write leaves the old one. Call
+    /// after new pipelines were built; it copies the whole cache, so not every
+    /// frame.
+    pub fn save_pipeline_cache(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.write_pipeline_cache();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn write_pipeline_cache(&self) {
+        let (Some(cache), Some(file)) = (&self.pipeline_cache, &self.pipeline_cache_file) else { return };
+        let Some(data) = cache.get_data() else { return };
+        let file = file.clone();
+        let write = move || {
+            if let Some(dir) = file.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let tmp = file.with_extension("tmp");
+            if std::fs::write(&tmp, &data).is_ok() {
+                let _ = std::fs::rename(&tmp, &file);
+            }
+        };
+        if std::thread::Builder::new().name("floptle-pipeline-cache".into()).spawn(write.clone()).is_err() {
+            write();
+        }
+    }
+
     /// Create the GPU connection for `window` and configure its surface. Picks a
     /// high-performance adapter, an sRGB surface format when available, and Mailbox
     /// present mode (low-latency) falling back to Fifo (vsync). Lifted from the
@@ -391,6 +475,8 @@ impl Gpu {
             depth_view,
             scene_format: Self::HDR_FORMAT,
             frame_format,
+            pipeline_cache: None,
+            pipeline_cache_file: None,
             present_modes,
             vsync,
         }
@@ -514,6 +600,8 @@ impl Gpu {
             depth_view,
             scene_format,
             frame_format: config.format,
+            pipeline_cache: None,
+            pipeline_cache_file: None,
             config,
             // Headless has no surface, so no presentation to configure.
             present_modes: Vec::new(),

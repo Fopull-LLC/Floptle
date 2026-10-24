@@ -151,25 +151,86 @@ pub(crate) fn apply_node_tint(
 /// beats the `0` it replaces. Terrain chunks, particle batches and 2D/UI
 /// batches are their own passes with their own counts already (`chunks`,
 /// `particles`) and are not included here.
+///
+/// Also says which of those draws carried one instance and why it did not
+/// share: the batch key is mesh, images, then shader and its binding, so a
+/// lone draw differs from the biggest batch of its mesh in exactly one of
+/// those (or its mesh is drawn by nothing else). Terrain chunks are each their
+/// own mesh by design and are left out of that half.
 pub(crate) fn count_draw_batches(
     instances: &[(MeshId, Option<TexId>, InstanceRaw)],
     flsl: &[floptle_render::FlslDraw],
     skins: &[floptle_render::SkinDraw],
-) -> usize {
-    let mut mesh_tex: std::collections::HashSet<(u32, Option<u32>)> = std::collections::HashSet::new();
-    for (mesh, tex, _) in instances {
-        mesh_tex.insert((mesh.0, tex.map(|t| t.0)));
+    shader_of: &dyn Fn(floptle_render::FlslBindingId) -> Option<floptle_render::FlslShaderId>,
+) -> (usize, floptle_core::profile::Unbatched) {
+    /// Which pipeline family a draw goes through: the built-in shading, a
+    /// `.flsl` binding, or the skinned path.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    enum Family {
+        Built,
+        Flsl(u32),
+        Skin,
     }
-    let mut flsl_groups: std::collections::HashSet<(u32, Option<u32>, u32)> =
-        std::collections::HashSet::new();
+    type Key = (u32, Option<u32>, Family);
+    // Draw key -> (instances, is terrain).
+    let mut groups: HashMap<Key, (usize, bool)> = HashMap::new();
+    for (mesh, tex, raw) in instances {
+        let g = groups.entry((mesh.0, tex.map(|t| t.0), Family::Built)).or_default();
+        g.0 += 1;
+        g.1 |= floptle_render::is_terrain(raw);
+    }
     for (mesh, tex, bind, _) in flsl {
-        flsl_groups.insert((mesh.0, tex.map(|t| t.0), bind.0));
+        groups.entry((mesh.0, tex.map(|t| t.0), Family::Flsl(bind.0))).or_default().0 += 1;
     }
-    let mut skin_groups: std::collections::HashSet<(u32, Option<u32>)> = std::collections::HashSet::new();
     for s in skins {
-        skin_groups.insert((s.mesh.0, s.tex.map(|t| t.0)));
+        groups.entry((s.mesh.0, s.tex.map(|t| t.0), Family::Skin)).or_default().0 += 1;
     }
-    mesh_tex.len() + flsl_groups.len() + skin_groups.len()
+    let mut by_mesh: HashMap<u32, Vec<(Key, usize)>> = HashMap::new();
+    for (k, (n, terrain)) in &groups {
+        if !terrain {
+            by_mesh.entry(k.0).or_default().push((*k, *n));
+        }
+    }
+    let mut why = floptle_core::profile::Unbatched::default();
+    for mut v in by_mesh.into_values() {
+        // The biggest batch of this mesh is the one a lone draw would have
+        // joined; ties broken by key so the answer does not flicker.
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| key_order(&a.0).cmp(&key_order(&b.0))));
+        for (i, &(k, n)) in v.iter().enumerate() {
+            if n != 1 {
+                continue;
+            }
+            let Some(&(other, _)) = v.get(if i == 0 { 1 } else { 0 }) else {
+                why.unique_mesh += 1;
+                continue;
+            };
+            match (k.2, other.2) {
+                (Family::Skin, Family::Skin) => why.texture += 1,
+                (Family::Skin, _) | (_, Family::Skin) => why.skinned += 1,
+                (Family::Flsl(a), Family::Flsl(b)) => {
+                    let differs = shader_of(floptle_render::FlslBindingId(a)) != shader_of(floptle_render::FlslBindingId(b));
+                    if differs {
+                        why.shader += 1;
+                    } else if k.1 != other.1 {
+                        why.texture += 1;
+                    } else {
+                        why.shader_params += 1;
+                    }
+                }
+                (Family::Flsl(_), Family::Built) | (Family::Built, Family::Flsl(_)) => why.shader += 1,
+                (Family::Built, Family::Built) => why.texture += 1,
+            }
+        }
+    }
+    fn key_order(k: &Key) -> (u32, Option<u32>, u64) {
+        let f = match k.2 {
+            Family::Built => 0,
+            Family::Flsl(b) => b as u64 + 2,
+            Family::Skin => 1,
+        };
+        (k.0, k.1, f)
+    }
+    (groups.len(), why)
 }
 
 /// A model part's own look with a script's patch laid over it: the imported

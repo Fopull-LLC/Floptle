@@ -1658,6 +1658,7 @@ impl Editor {
             self.script_host.set_preload_status(PreloadKind::Model, status);
         }
         self.preload_sounds();
+        self.pump_warm();
         self.pump_runtime_textures();
     }
 

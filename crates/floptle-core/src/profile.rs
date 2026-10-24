@@ -147,7 +147,15 @@ pub struct Hitch {
     /// Named pieces of work inside the buckets ([`FrameProfile::record_part`]),
     /// most expensive first: what in `terrain` the time went to.
     pub parts: Vec<(&'static str, f32)>,
+    /// The slowest assets prepared on this frame ([`FrameProfile::record_asset`]),
+    /// slowest first and at most [`HITCH_ASSETS`]: the file, which part of
+    /// the work it was (`assetDecode`, `assetUpload`, `shaderCompile`,
+    /// `pipelineCompile`), and its milliseconds.
+    pub assets: Vec<(String, &'static str, f32)>,
 }
+
+/// How many assets a hitch names.
+pub const HITCH_ASSETS: usize = 5;
 
 /// How many frames the "worst recently" window covers.
 ///
@@ -249,6 +257,54 @@ pub struct Counts {
     pub shadow_proxies_dropped: usize,
     /// Baked volumes the shadow march reads: terrain and mesh occluder bakes.
     pub shadow_volumes: usize,
+    /// Draw calls that carried a single instance, and why each did not share
+    /// a draw with another. `draws` far above the number of distinct meshes
+    /// is the symptom; this is the cause.
+    pub unbatched: Unbatched,
+}
+
+/// Single-instance draws by the reason they did not join a batch.
+///
+/// Meshes batch by mesh, then by the images bound with it, then by shader and
+/// that shader's binding. Colour, roughness, emissive, tint, vertex paint and
+/// every other per-material number ride in the instance and never split a
+/// batch; two materials that name the same images and the same shader with the
+/// same parameters share one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Unbatched {
+    /// Nothing else this frame draws the same mesh, so there was no batch to
+    /// join. Normal for one-off scenery; terrain chunks are counted apart.
+    pub unique_mesh: usize,
+    /// Other draws of the same mesh bind different images: a texture or
+    /// surface map that differs.
+    pub texture: usize,
+    /// Other draws of the same mesh use another `.flsl` shader, or the
+    /// built-in shading where this one names a shader (or the reverse).
+    pub shader: usize,
+    /// Other draws of the same mesh use the same shader with different
+    /// shader parameters or shader textures.
+    pub shader_params: usize,
+    /// Other draws of the same mesh are skinned where this one is not, or the
+    /// reverse.
+    pub skinned: usize,
+}
+
+impl Unbatched {
+    /// All of them.
+    pub fn total(&self) -> usize {
+        self.unique_mesh + self.texture + self.shader + self.shader_params + self.skinned
+    }
+
+    /// Each reason by the name `perf.counts().unbatchedBy` gives it.
+    pub fn reasons(&self) -> [(&'static str, usize); 5] {
+        [
+            ("uniqueMesh", self.unique_mesh),
+            ("texture", self.texture),
+            ("shader", self.shader),
+            ("shaderParams", self.shader_params),
+            ("skinned", self.skinned),
+        ]
+    }
 }
 
 /// A frame's cost, per bucket and per script.
@@ -289,6 +345,10 @@ pub struct FrameProfile {
     /// frame's once folded. Inside the `scripts` bucket, not beside it.
     rays_frame: (u64, f32),
     rays_last: (u64, f32),
+    /// Sweeps scripts cast this frame (`spherecast`, `capsulecast`,
+    /// `boxcast`) and their milliseconds, the same way as the rays.
+    sweeps_frame: (u64, f32),
+    sweeps_last: (u64, f32),
     /// Frames whose buckets added up to [`HITCH_MS`] or more, kept until a
     /// script takes them: the one reading a probe polling every few seconds
     /// can still see, after the spike has rolled out of the window.
@@ -300,6 +360,8 @@ pub struct FrameProfile {
     parts_frame: Vec<(&'static str, f32)>,
     /// The last finished frame's parts, every frame, for `perf.parts()`.
     parts_last: Vec<(&'static str, f32)>,
+    /// This frame's slowest assets, kept to [`HITCH_ASSETS`] as they come.
+    assets_frame: Vec<(String, &'static str, f32)>,
     /// The GPU's own per-pass times for the last frame whose timestamps have
     /// landed, and their total. `None` when nothing measured them: timing off,
     /// or a device without timestamp queries.
@@ -384,6 +446,26 @@ impl FrameProfile {
         }
     }
 
+    /// One asset prepared this frame: `ms` spent on `what` (a part name, as
+    /// [`Self::record_part`] takes) for the file at `path`. Counted into that
+    /// part, and the slowest few of a frame are kept, so a hitch names the
+    /// file it was waiting on rather than only the bucket.
+    pub fn record_asset(&mut self, path: &str, what: &'static str, ms: f32) {
+        if !self.on {
+            return;
+        }
+        self.record_part(what, ms);
+        let full = self.assets_frame.len() >= HITCH_ASSETS;
+        if full && self.assets_frame.last().is_some_and(|l| l.2 >= ms) {
+            return;
+        }
+        if full {
+            self.assets_frame.pop();
+        }
+        let at = self.assets_frame.iter().position(|a| a.2 < ms).unwrap_or(self.assets_frame.len());
+        self.assets_frame.insert(at, (path.to_string(), what, ms));
+    }
+
     /// Add `ms` to one script kind's total.
     ///
     /// Not to `Bucket::Scripts`. Adding to both would make the per-script
@@ -444,6 +526,14 @@ impl FrameProfile {
         }
     }
 
+    /// Count `n` script sweeps that took `ms` between them. Nothing while off.
+    pub fn record_sweeps(&mut self, n: u64, ms: f32) {
+        if self.on {
+            self.sweeps_frame.0 += n;
+            self.sweeps_frame.1 += ms;
+        }
+    }
+
     /// Publish the GPU's per-pass times, `(label, ms)` in pass order, and the
     /// frame's total.
     pub fn set_gpu(&mut self, passes: Vec<(String, f32)>, total_ms: f32) {
@@ -458,6 +548,11 @@ impl FrameProfile {
     /// `(rays, ms)` scripts cast last frame.
     pub fn rays(&self) -> (u64, f32) {
         self.rays_last
+    }
+
+    /// `(sweeps, ms)` scripts cast last frame.
+    pub fn sweeps(&self) -> (u64, f32) {
+        self.sweeps_last
     }
 
     /// `(animators, culled)` as of the last animation pass.
@@ -540,6 +635,7 @@ impl FrameProfile {
         if !self.on {
             self.mirror_frame = MirrorWork::default();
             self.rays_frame = (0, 0.0);
+            self.sweeps_frame = (0, 0.0);
             return;
         }
         // The frame's time no bucket measured. Recorded by whoever ended the
@@ -553,6 +649,7 @@ impl FrameProfile {
         }
         self.mirror_last = std::mem::take(&mut self.mirror_frame);
         self.rays_last = std::mem::take(&mut self.rays_frame);
+        self.sweeps_last = std::mem::take(&mut self.sweeps_frame);
         // Every bucket is pushed, including the ones that reported nothing —
         // otherwise a subsystem that went idle keeps its old mean forever and
         // reads as still costing what it used to.
@@ -566,6 +663,7 @@ impl FrameProfile {
         }
         let total: f32 = spent.iter().map(|(_, ms)| ms).sum();
         let mut parts = std::mem::take(&mut self.parts_frame);
+        let assets = std::mem::take(&mut self.assets_frame);
         self.parts_last.clone_from(&parts);
         if total >= HITCH_MS {
             spent.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -573,7 +671,7 @@ impl FrameProfile {
             if self.hitches.len() >= MAX_HITCHES {
                 self.hitches.pop_front();
             }
-            self.hitches.push_back(Hitch { frame: self.frames, ms: total, buckets: spent, parts });
+            self.hitches.push_back(Hitch { frame: self.frames, ms: total, buckets: spent, parts, assets });
         }
         // A script that stopped running this frame gets a zero for the same
         // reason, and a script that has been destroyed stops being listed at all.

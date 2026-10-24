@@ -94,6 +94,12 @@ impl Editor {
         }
     }
 
+    /// `ms` of first-use work on the asset at `path`, under the part `what`:
+    /// what a hitch names when a frame waited on a file.
+    pub(crate) fn note_asset(&self, path: &str, what: &'static str, ms: f32) {
+        self.script_host.profile().borrow_mut().record_asset(path, what, ms);
+    }
+
     /// Load + register a material texture (cached by path + its sampling settings),
     /// returning its handle. Re-registers if the texture's filter/wrap was changed.
     pub(crate) fn ensure_texture(&mut self, path: &str) -> Option<TexId> {
@@ -111,25 +117,28 @@ impl Editor {
             && *prev == want {
                 return Some(*id);
             }
-        // A texture bigger than the GPU's max 2D dimension would panic
-        // `create_texture` — common with spritesheets. Downscale to fit and warn
-        // rather than crash (UVs are normalized, so it still samples correctly).
         let max = self.gpu.as_ref()?.device.limits().max_texture_dimension_2d;
         // The registry stays keyed by the ref as written; only the fs read resolves.
         let file = self.resolve_asset_path(path);
-        let mut data = floptle_assets::load_texture(&file)?;
-        if data.width > max || data.height > max {
-            let s = max as f32 / data.width.max(data.height) as f32;
-            let w = ((data.width as f32 * s).floor() as u32).max(1);
-            let h = ((data.height as f32 * s).floor() as u32).max(1);
-            log::warn!(
-                "texture {path} is {}×{} — larger than the GPU limit {max}; downscaled to {w}×{h}",
-                data.width, data.height
-            );
-            data = floptle_assets::load_texture_sized(&file, w, h)?;
-        }
+        let decode = floptle_core::profile::Span::new();
+        let data = decode_texture_file(&file, max, path)?;
+        self.note_asset(path, "assetDecode", decode.ms());
+        self.register_decoded_texture(path, &data, want)
+    }
+
+    /// Put a decoded image on the GPU under `path`, with the import settings
+    /// `want`, as [`ensure_texture`](Self::ensure_texture) does once it has
+    /// read the file. `assets.warm` decodes on a worker and comes here.
+    pub(crate) fn register_decoded_texture(
+        &mut self,
+        path: &str,
+        data: &floptle_render::TextureData,
+        want: crate::assets::TexSetting,
+    ) -> Option<TexId> {
+        let upload = floptle_core::profile::Span::new();
         let (gpu, raster) = (self.gpu.as_ref()?, self.raster.as_mut()?);
-        let id = raster.register_texture(gpu, &data, want.to_sampling());
+        let id = raster.register_texture(gpu, data, want.to_sampling());
+        self.note_asset(path, "assetUpload", upload.ms());
         self.texture_registry.insert(path.to_string(), id);
         self.texture_registry_setting.insert(path.to_string(), want);
         Some(id)
@@ -3985,4 +3994,24 @@ mod model_import_tests {
         assert!(said[0].contains("KHR_draco_mesh_compression"), "{}", said[0]);
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// Read and decode the image at `file`, scaled down to fit `max` on its
+/// longer side if it is larger. A texture bigger than the GPU's max 2D
+/// dimension would panic `create_texture` — common with spritesheets — so it is
+/// downscaled and warned about rather than crashing (UVs are normalized, so it
+/// still samples correctly). No GPU needed: a worker thread can run it.
+pub(crate) fn decode_texture_file(file: &Path, max: u32, path: &str) -> Option<floptle_render::TextureData> {
+    let mut data = floptle_assets::load_texture(file)?;
+    if data.width > max || data.height > max {
+        let s = max as f32 / data.width.max(data.height) as f32;
+        let w = ((data.width as f32 * s).floor() as u32).max(1);
+        let h = ((data.height as f32 * s).floor() as u32).max(1);
+        log::warn!(
+            "texture {path} is {}×{} — larger than the GPU limit {max}; downscaled to {w}×{h}",
+            data.width, data.height
+        );
+        data = floptle_assets::load_texture_sized(file, w, h)?;
+    }
+    Some(data)
 }

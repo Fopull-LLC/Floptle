@@ -949,6 +949,11 @@ pub struct Raster {
     /// The scene's spliced Field Shape code `(field functions, support)` —
     /// every module built here includes it so meshes receive shape shadows/AO.
     custom_field: Option<(String, String)>,
+    /// Bumped whenever `custom_field` changes, so a shader built on another
+    /// thread against the old field is not installed.
+    field_rev: u64,
+    /// Material-shader pipelines built so far, on any thread.
+    flsl_built: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// The WGSL every raster-pass module starts from: the pass shader + the shared
@@ -1050,14 +1055,14 @@ struct FlslShader {
     pipeline: wgpu::RenderPipeline,
     /// The same shader on GPU-skinned parts: `vs_skin` (or `vs_flsl_skin`)
     /// in front of the same fragment stage.
-    skin_pipeline: wgpu::RenderPipeline,
+    skin_pipeline: std::sync::OnceLock<wgpu::RenderPipeline>,
     /// Depth-only pipelines (plain, skinned) for a shader with `output
     /// offset`. The depth prepass and the sun shadow map draw its surfaces
     /// where they have MOVED to; the built-in depth pipelines would draw them
     /// where they were, and the colour pass would then be depth-rejected
     /// behind its own unmoved silhouette. `None` for a shader that moves
     /// nothing, which the built-in ones draw correctly.
-    displaced_depth: Option<(wgpu::RenderPipeline, wgpu::RenderPipeline)>,
+    displaced_depth: Option<(wgpu::RenderPipeline, std::sync::OnceLock<Option<wgpu::RenderPipeline>>)>,
     group3_layout: wgpu::BindGroupLayout,
     tex_slots: usize,
     /// Opaque-phase shaders draw with the opaque bucket (depth write on);
@@ -1074,6 +1079,282 @@ struct FlslShader {
     /// The chunk calls `flsl_frag_scene_color`: it shows the scene behind it,
     /// so it is drawn after that scene is captured, as glass is.
     reads_scene_color: bool,
+    /// How to build the variants that wait for first use.
+    recipe: FlslRecipe,
+}
+
+/// Everything building a material shader needs from the raster pass, owned,
+/// so the build — the slow part of a material's first use, over a second of
+/// driver time for a large shader — can run on a worker thread while the pass
+/// keeps drawing. Made by [`Raster::flsl_builder`]; its result goes back
+/// through [`Raster::install_flsl_shader`].
+#[derive(Clone)]
+pub struct FlslBuilder {
+    device: wgpu::Device,
+    cache: Option<wgpu::PipelineCache>,
+    scene_format: wgpu::TextureFormat,
+    globals_layout: wgpu::BindGroupLayout,
+    tex_layout: wgpu::BindGroupLayout,
+    field_layout: wgpu::BindGroupLayout,
+    custom_field: Option<(String, String)>,
+    field_rev: u64,
+    built: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// A material shader built by [`FlslBuilder::build`], waiting to be installed.
+pub struct BuiltFlsl {
+    shader: FlslShader,
+    field_rev: u64,
+}
+
+/// How a shader's pipelines are made, kept with the shader so a variant
+/// nothing has drawn with yet is built the first time something does. Most
+/// material shaders never touch a skinned mesh, and the skinned variant cost
+/// as much to build as the one that draws.
+struct FlslRecipe {
+    device: wgpu::Device,
+    cache: Option<wgpu::PipelineCache>,
+    module: wgpu::ShaderModule,
+    layout: wgpu::PipelineLayout,
+    depth_layout: Option<wgpu::PipelineLayout>,
+    scene_format: wgpu::TextureFormat,
+    blend: FlslBlend,
+    opaque: bool,
+    vs_skinned: &'static str,
+    built: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl FlslRecipe {
+    fn color(&self, vs_entry: &str) -> wgpu::RenderPipeline {
+        self.built.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let opaque = self.opaque;
+        self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("raster-flsl"),
+            layout: Some(&self.layout),
+            vertex: wgpu::VertexState {
+                module: &self.module,
+                entry_point: Some(vs_entry),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Gpu::DEPTH_FORMAT,
+                depth_write_enabled: Some(opaque),
+                depth_compare: Some(if opaque {
+                    wgpu::CompareFunction::LessEqual
+                } else {
+                    wgpu::CompareFunction::Less
+                }),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &self.module,
+                entry_point: Some("fs_flsl"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: self.scene_format,
+                    blend: match self.blend {
+                        FlslBlend::Opaque => None,
+                        FlslBlend::Alpha => Some(wgpu::BlendState::ALPHA_BLENDING),
+                        FlslBlend::Additive => Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
+                    },
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: self.cache.as_ref(),
+        })
+    }
+
+    /// The depth-only pipeline for a shader that moves its vertices. Only
+    /// called on a recipe that has a depth layout.
+    fn depth(&self, vs_entry: &str) -> Option<wgpu::RenderPipeline> {
+        let layout = self.depth_layout.as_ref()?;
+        self.built.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("raster-flsl-depth"),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: &self.module,
+                entry_point: Some(vs_entry),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Gpu::DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &self.module,
+                entry_point: Some("fs_depth"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[],
+            }),
+            multiview_mask: None,
+            cache: self.cache.as_ref(),
+        }))
+    }
+}
+
+impl FlslShader {
+    /// The shader on GPU-skinned parts, built the first time one draws.
+    fn skin_pipeline(&self) -> &wgpu::RenderPipeline {
+        self.skin_pipeline.get_or_init(|| self.recipe.color(self.recipe.vs_skinned))
+    }
+
+    /// The depth-only pipelines (plain, skinned) of a shader that moves its
+    /// vertices; the skinned one built the first time a skinned part needs it.
+    fn displaced_depth(&self, skinned: bool) -> Option<&wgpu::RenderPipeline> {
+        let (plain, skin) = self.displaced_depth.as_ref()?;
+        if !skinned {
+            return Some(plain);
+        }
+        skin.get_or_init(|| self.recipe.depth(self.recipe.vs_skinned)).as_ref()
+    }
+}
+
+impl FlslBuilder {
+    /// Build a shader's module and the pipeline it draws with. Variants for
+    /// skinned parts wait until one draws. Safe to call on any thread.
+    pub fn build(&self, chunk: &str, tex_slots: usize, blend: FlslBlend) -> BuiltFlsl {
+        let device = &self.device;
+        // The base includes any spliced Field Shape code (support arrives once,
+        // inside `chunk`), so custom-material meshes see shape shadows/AO too.
+        let base = match &self.custom_field {
+            Some((field, _)) => splice_block(
+                pass_prelude(),
+                "//[flsl-field-custom-begin]",
+                "//[flsl-field-custom-end]",
+                field,
+            ),
+            None => pass_prelude().to_string(),
+        };
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("raster-flsl"),
+            source: wgpu::ShaderSource::Wgsl(format!("{base}\n{chunk}").into()),
+        });
+
+        // Group 3: the shader's param UBO + its declared texture slots. The
+        // params are vertex-visible too: `output offset` reads its uniforms
+        // per vertex.
+        let mut entries = vec![wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }];
+        // A shader that moves its vertices may read its textures there too (a
+        // height map); the others keep them to the fragment stage.
+        let tex_stages = if chunk.contains("fn vs_flsl(") {
+            wgpu::ShaderStages::VERTEX_FRAGMENT
+        } else {
+            wgpu::ShaderStages::FRAGMENT
+        };
+        for i in 0..tex_slots as u32 {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: 1 + 2 * i,
+                visibility: tex_stages,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            });
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: 2 + 2 * i,
+                visibility: tex_stages,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            });
+        }
+        let group3_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("raster-flsl-material"),
+            entries: &entries,
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("raster-flsl"),
+            bind_group_layouts: &[
+                Some(&self.globals_layout),
+                Some(&self.tex_layout),
+                Some(&self.field_layout),
+                Some(&group3_layout),
+            ],
+            immediate_size: 0,
+        });
+
+        let opaque = matches!(blend, FlslBlend::Opaque);
+        // The transpiler emits these entry points for `output offset` and
+        // nothing else defines them, so their presence is the question.
+        let displaced = chunk.contains("fn vs_flsl(");
+        let (vs_plain, vs_skinned) = if displaced { ("vs_flsl", "vs_flsl_skin") } else { ("vs", "vs_skin") };
+        // Groups 0, 1 and 3 for the depth pipelines: the prepass's own two,
+        // and the params the offset reads. Group 2 (the field) is
+        // fragment-only and unused.
+        let depth_layout = displaced.then(|| {
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("raster-flsl-depth"),
+                bind_group_layouts: &[Some(&self.globals_layout), Some(&self.tex_layout), None, Some(&group3_layout)],
+                immediate_size: 0,
+            })
+        });
+        let recipe = FlslRecipe {
+            device: device.clone(),
+            cache: self.cache.clone(),
+            module,
+            layout,
+            depth_layout,
+            scene_format: self.scene_format,
+            blend,
+            opaque,
+            vs_skinned,
+            built: self.built.clone(),
+        };
+        let pipeline = recipe.color(vs_plain);
+        // Depth-only pipelines (plain, skinned) for a shader with `output
+        // offset`: see `FlslShader::displaced_depth`.
+        let displaced_depth = recipe.depth(vs_plain).map(|plain| (plain, std::sync::OnceLock::new()));
+
+        let shader = FlslShader {
+            pipeline,
+            skin_pipeline: std::sync::OnceLock::new(),
+            displaced_depth,
+            group3_layout,
+            tex_slots,
+            opaque,
+            // The transpiler emits this identifier and nothing else does, so
+            // its presence in the generated chunk is the question being asked.
+            reads_scene_depth: chunk.contains("flsl_surface_gap") || chunk.contains("flsl_frag_scene_depth("),
+            reads_scene_color: chunk.contains("flsl_frag_scene_color("),
+            chunk: chunk.to_string(),
+            blend,
+            recipe,
+        };
+        BuiltFlsl { shader, field_rev: self.field_rev }
+    }
 }
 
 struct FlslBinding {
@@ -1616,6 +1897,8 @@ impl Raster {
             globals_layout,
             field_layout,
             custom_field: None,
+            field_rev: 0,
+            flsl_built: Default::default(),
         }
     }
 
@@ -1676,7 +1959,7 @@ impl Raster {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: gpu.pipeline_cache.as_ref(),
         });
 
         // Depth-only prepass (opaque instances, conservative alpha discard): primes
@@ -1713,7 +1996,7 @@ impl Raster {
                 targets: &[],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: gpu.pipeline_cache.as_ref(),
         });
 
         // Transparent variant: identical vertex/fragment, but alpha-blends and does not
@@ -1754,7 +2037,7 @@ impl Raster {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: gpu.pipeline_cache.as_ref(),
         });
 
         // Silhouette-mask pipeline: rasterizes a selected mesh as solid 1.0 into a
@@ -1788,7 +2071,7 @@ impl Raster {
                 })],
             }),
             multiview_mask: None,
-            cache: None,
+            cache: gpu.pipeline_cache.as_ref(),
         });
             (pipeline, transparent_pipeline, mask_pipeline, prepass_pipeline)
         };
@@ -1807,13 +2090,6 @@ impl Raster {
         }
     }
 
-    /// Register (or hot-swap) a compiled `.flsl` fragment shader: `chunk` is the
-    /// transpiler's generated WGSL **including its stdlib support**, concatenated
-    /// onto [`pass_prelude`] here. The caller must have naga-validated the
-    /// assembled source first (`floptle_shader::validate` with this prelude) —
-    /// this builds the pipeline unconditionally. `replace` swaps an existing
-    /// shader in place (hot reload): live bindings stay valid when the slot
-    /// count is unchanged; the editor rebuilds them right after anyway.
     /// How many texture slots a material shader can use on this device.
     ///
     /// The engine binds [`FLSL_ENGINE_TEXTURES`] sampled textures to every
@@ -1835,6 +2111,16 @@ impl Raster {
         flsl_fits_within(tex_slots, l.max_sampled_textures_per_shader_stage, l.max_samplers_per_shader_stage)
     }
 
+    /// Register (or hot-swap) a compiled `.flsl` fragment shader: `chunk` is the
+    /// transpiler's generated WGSL **including its stdlib support**, concatenated
+    /// onto [`pass_prelude`] here. The caller must have naga-validated the
+    /// assembled source first (`floptle_shader::validate` with this prelude) —
+    /// this builds the pipeline unconditionally. `replace` swaps an existing
+    /// shader in place (hot reload): live bindings stay valid when the slot
+    /// count is unchanged; the editor rebuilds them right after anyway.
+    ///
+    /// [`Self::flsl_builder`] and [`Self::install_flsl_shader`] are the same
+    /// work in two halves, for building on another thread.
     pub fn register_flsl_shader(
         &mut self,
         gpu: &Gpu,
@@ -1843,188 +2129,42 @@ impl Raster {
         blend: FlslBlend,
         replace: Option<FlslShaderId>,
     ) -> FlslShaderId {
-        let device = &gpu.device;
-        // The base includes any spliced Field Shape code (support arrives once,
-        // inside `chunk`), so custom-material meshes see shape shadows/AO too.
-        let base = match &self.custom_field {
-            Some((field, _)) => splice_block(
-                pass_prelude(),
-                "//[flsl-field-custom-begin]",
-                "//[flsl-field-custom-end]",
-                field,
-            ),
-            None => pass_prelude().to_string(),
-        };
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("raster-flsl"),
-            source: wgpu::ShaderSource::Wgsl(format!("{base}\n{chunk}").into()),
-        });
+        let built = self.flsl_builder(gpu).build(chunk, tex_slots, blend);
+        self.install_flsl_shader(built, replace).unwrap_or_else(|built| self.install_stale(gpu, &built, replace))
+    }
 
-        // Group 3: the shader's param UBO + its declared texture slots. The
-        // params are vertex-visible too: `output offset` reads its uniforms
-        // per vertex.
-        let mut entries = vec![wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        }];
-        // A shader that moves its vertices may read its textures there too (a
-        // height map); the others keep them to the fragment stage.
-        let tex_stages = if chunk.contains("fn vs_flsl(") {
-            wgpu::ShaderStages::VERTEX_FRAGMENT
-        } else {
-            wgpu::ShaderStages::FRAGMENT
-        };
-        for i in 0..tex_slots as u32 {
-            entries.push(wgpu::BindGroupLayoutEntry {
-                binding: 1 + 2 * i,
-                visibility: tex_stages,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            });
-            entries.push(wgpu::BindGroupLayoutEntry {
-                binding: 2 + 2 * i,
-                visibility: tex_stages,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            });
+    /// Everything building a material shader needs from this pass, owned, so
+    /// the build can run on a worker thread while the pass keeps drawing.
+    pub fn flsl_builder(&self, gpu: &Gpu) -> FlslBuilder {
+        FlslBuilder {
+            device: gpu.device.clone(),
+            cache: gpu.pipeline_cache.clone(),
+            scene_format: gpu.scene_format(),
+            globals_layout: self.globals_layout.clone(),
+            tex_layout: self.tex_layout.clone(),
+            field_layout: self.field_layout.clone(),
+            custom_field: self.custom_field.clone(),
+            field_rev: self.field_rev,
+            built: self.flsl_built.clone(),
         }
-        let group3_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("raster-flsl-material"),
-            entries: &entries,
-        });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("raster-flsl"),
-            bind_group_layouts: &[
-                Some(&self.globals_layout),
-                Some(&self.tex_layout),
-                Some(&self.field_layout),
-                Some(&group3_layout),
-            ],
-            immediate_size: 0,
-        });
+    }
 
-        let opaque = matches!(blend, FlslBlend::Opaque);
-        // The transpiler emits these entry points for `output offset` and
-        // nothing else defines them, so their presence is the question.
-        let displaced = chunk.contains("fn vs_flsl(");
-        let (vs_plain, vs_skinned) = if displaced { ("vs_flsl", "vs_flsl_skin") } else { ("vs", "vs_skin") };
-        let color_pipeline = |vs_entry: &str| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("raster-flsl"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some(vs_entry),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: Gpu::DEPTH_FORMAT,
-                depth_write_enabled: Some(opaque),
-                depth_compare: Some(if opaque {
-                    wgpu::CompareFunction::LessEqual
-                } else {
-                    wgpu::CompareFunction::Less
-                }),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_flsl"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.scene_format(),
-                    blend: match blend {
-                        FlslBlend::Opaque => None,
-                        FlslBlend::Alpha => Some(wgpu::BlendState::ALPHA_BLENDING),
-                        FlslBlend::Additive => Some(wgpu::BlendState {
-                            color: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::One,
-                                dst_factor: wgpu::BlendFactor::One,
-                                operation: wgpu::BlendOperation::Add,
-                            },
-                            alpha: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::One,
-                                dst_factor: wgpu::BlendFactor::One,
-                                operation: wgpu::BlendOperation::Add,
-                            },
-                        }),
-                    },
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-        let pipeline = color_pipeline(vs_plain);
-        let skin_pipeline = color_pipeline(vs_skinned);
-        let displaced_depth = displaced.then(|| {
-            // Groups 0, 1 and 3: the prepass's own two, and the params the
-            // offset reads. Group 2 (the field) is fragment-only and unused.
-            let depth_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("raster-flsl-depth"),
-                bind_group_layouts: &[Some(&self.globals_layout), Some(&self.tex_layout), None, Some(&group3_layout)],
-                immediate_size: 0,
-            });
-            let depth_pipeline = |vs_entry: &str| {
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("raster-flsl-depth"),
-                    layout: Some(&depth_layout),
-                    vertex: wgpu::VertexState {
-                        module: &module,
-                        entry_point: Some(vs_entry),
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                        buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
-                    },
-                    primitive: wgpu::PrimitiveState::default(),
-                    depth_stencil: Some(wgpu::DepthStencilState {
-                        format: Gpu::DEPTH_FORMAT,
-                        depth_write_enabled: Some(true),
-                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                        stencil: wgpu::StencilState::default(),
-                        bias: wgpu::DepthBiasState::default(),
-                    }),
-                    multisample: wgpu::MultisampleState::default(),
-                    fragment: Some(wgpu::FragmentState {
-                        module: &module,
-                        entry_point: Some("fs_depth"),
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                        targets: &[],
-                    }),
-                    multiview_mask: None,
-                    cache: None,
-                })
-            };
-            (depth_pipeline(vs_plain), depth_pipeline(vs_skinned))
-        });
+    /// Material-shader pipelines built so far, on any thread: what a test
+    /// counts to see a variant wait for its first use.
+    pub fn flsl_pipelines_built(&self) -> u64 {
+        self.flsl_built.load(std::sync::atomic::Ordering::Relaxed)
+    }
 
-        let shader = FlslShader {
-            pipeline,
-            skin_pipeline,
-            displaced_depth,
-            group3_layout,
-            tex_slots,
-            opaque,
-            // The transpiler emits this identifier and nothing else does, so
-            // its presence in the generated chunk is the question being asked.
-            reads_scene_depth: chunk.contains("flsl_surface_gap") || chunk.contains("flsl_frag_scene_depth("),
-            reads_scene_color: chunk.contains("flsl_frag_scene_color("),
-            chunk: chunk.to_string(),
-            blend,
-        };
-        match replace {
+    /// Put a shader built by [`FlslBuilder::build`] into this pass, as a new
+    /// shader or in place of `replace`. Handed back unchanged when the scene's
+    /// Field Shape code changed after the build began: it was built against a
+    /// field the pass no longer has, and must be built again.
+    pub fn install_flsl_shader(&mut self, built: BuiltFlsl, replace: Option<FlslShaderId>) -> Result<FlslShaderId, Box<BuiltFlsl>> {
+        if built.field_rev != self.field_rev {
+            return Err(Box::new(built));
+        }
+        let shader = built.shader;
+        Ok(match replace {
             Some(id) if (id.0 as usize) < self.flsl_shaders.len() => {
                 self.flsl_shaders[id.0 as usize] = shader;
                 id
@@ -2033,6 +2173,17 @@ impl Raster {
                 self.flsl_shaders.push(shader);
                 FlslShaderId(self.flsl_shaders.len() as u32 - 1)
             }
+        })
+    }
+
+    /// A build that raced a Field Shape change, built again against the field
+    /// the pass has now.
+    fn install_stale(&mut self, gpu: &Gpu, built: &BuiltFlsl, replace: Option<FlslShaderId>) -> FlslShaderId {
+        let s = &built.shader;
+        let again = self.flsl_builder(gpu).build(&s.chunk, s.tex_slots, s.blend);
+        match self.install_flsl_shader(again, replace) {
+            Ok(id) => id,
+            Err(_) => unreachable!("the field cannot change between two lines"),
         }
     }
 
@@ -2043,6 +2194,7 @@ impl Raster {
     /// the caller must have naga-validated [`raster_custom_source`] first.
     pub fn set_custom_field(&mut self, gpu: &Gpu, code: Option<(&str, &str)>) {
         self.custom_field = code.map(|(f, s)| (f.to_string(), s.to_string()));
+        self.field_rev += 1;
         let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("raster"),
             source: wgpu::ShaderSource::Wgsl(raster_custom_source(code).into()),
@@ -2184,6 +2336,12 @@ impl Raster {
                 FlslBindingId(self.flsl_bindings.len() as u32 - 1)
             }
         }
+    }
+
+    /// The shader a live binding was made for, or `None` for an id nobody
+    /// handed out.
+    pub fn flsl_binding_shader(&self, id: FlslBindingId) -> Option<FlslShaderId> {
+        self.flsl_bindings.get(id.0 as usize).map(|b| b.shader)
     }
 
     /// Update a binding's param block in place — the "param edits are uniform
@@ -3798,7 +3956,7 @@ impl Raster {
                             Some(t) => &self.textures[t as usize].bind,
                             None => &mesh.tex_bind,
                         };
-                        rp.set_pipeline(if skinned { &shader.skin_pipeline } else { &shader.pipeline });
+                        rp.set_pipeline(if skinned { shader.skin_pipeline() } else { &shader.pipeline });
                         rp.set_bind_group(1, bind, &[]);
                         rp.set_bind_group(3, &binding.bind, &[]);
                         rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
@@ -3883,7 +4041,7 @@ impl Raster {
                     Some(t) => &self.textures[t as usize].bind,
                     None => &mesh.tex_bind,
                 };
-                rp.set_pipeline(if skinned { &shader.skin_pipeline } else { &shader.pipeline });
+                rp.set_pipeline(if skinned { shader.skin_pipeline() } else { &shader.pipeline });
                 rp.set_bind_group(1, bind, &[]);
                 rp.set_bind_group(3, &binding.bind, &[]);
                 rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
@@ -4396,7 +4554,7 @@ impl Raster {
     fn draw_displaced_depth(&self, rp: &mut wgpu::RenderPass<'_>, buckets: &[FlslBucket]) {
         for &(mesh_idx, tex_key, bind_id, skinned, start, count) in buckets {
             let binding = &self.flsl_bindings[bind_id as usize];
-            let Some((plain, skin)) = &self.flsl_shaders[binding.shader.0 as usize].displaced_depth else {
+            let Some(pipeline) = self.flsl_shaders[binding.shader.0 as usize].displaced_depth(skinned) else {
                 continue;
             };
             let mesh = &self.meshes[mesh_idx];
@@ -4404,7 +4562,7 @@ impl Raster {
                 Some(t) => &self.textures[t as usize].bind,
                 None => &mesh.tex_bind,
             };
-            rp.set_pipeline(if skinned { skin } else { plain });
+            rp.set_pipeline(pipeline);
             rp.set_bind_group(1, bind, &[]);
             rp.set_bind_group(3, &binding.bind, &[]);
             rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
