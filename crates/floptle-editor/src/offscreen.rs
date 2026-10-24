@@ -246,7 +246,11 @@ impl Editor {
             let t0 = floptle_core::profile::Span::new();
             ed.sync_terrain_gpu();
             ed.script_host.profile().borrow_mut().record_part("terrainShadow", t0.ms());
+            let t0 = floptle_core::profile::Span::new();
+            ed.sync_terrain_palette(false);
+            ed.script_host.profile().borrow_mut().record_part("terrainPalette", t0.ms());
             ed.drain_terrain_generates();
+            ed.poll_terrain_generates();
             ed.update_terrain_residency(lod_cam);
             ed.stream_far_chunks(lod_cam);
             ed.publish_terrain_busy();

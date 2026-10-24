@@ -81,6 +81,17 @@ impl Editor {
     /// Start a batch of planet fills on a background thread: the work of
     /// [`Self::drain_terrain_generates`], for fills from anywhere.
     pub(crate) fn start_terrain_generates(&mut self, gens: Vec<(u32, floptle_field::procgen::PlanetFill)>) {
+        // Where the player is on each body now, for the meshes made with it.
+        let views: Vec<Option<crate::terrain_edit::LandingView>> = gens
+            .iter()
+            .map(|(id, _)| {
+                let e = self.world.query::<floptle_core::Matter>().find_map(|(e, m)| match m {
+                    floptle_core::Matter::Terrain { id: tid, .. } if tid == id => Some(e),
+                    _ => None,
+                });
+                e.map(|e| self.landing_view(e))
+            })
+            .collect();
         if gens.is_empty() {
             return;
         }
@@ -103,7 +114,7 @@ impl Editor {
         let (tx, rx) = std::sync::mpsc::channel();
         self.planet_gen_job = Some(rx);
         crate::worker::spawn("planet-gen", move || {
-            for (id, fill) in gens {
+            for ((id, fill), view) in gens.into_iter().zip(views) {
                 let t0 = floptle_core::time::Instant::now();
                 let mut field = floptle_field::procgen::generate_planet(&fill);
                 // The recipe goes with the field, so its saves hold only edits.
@@ -112,7 +123,11 @@ impl Editor {
                 }
                 // The shadow proxy is derived here, with the field: on the main
                 // thread it was the 6 to 26 s frame a big world landed in.
-                let terrain = crate::terrain_edit::EditorTerrain::new(field);
+                let mut terrain = crate::terrain_edit::EditorTerrain::new(field);
+                // …and the meshes its landing frame would make round the player.
+                if let Some(v) = view {
+                    terrain.premesh(&v);
+                }
                 if tx.send((id, terrain, t0.elapsed().as_millis() as u64)).is_err() {
                     return;
                 }
@@ -170,17 +185,18 @@ impl Editor {
             // A generated field exists only in RAM until the scene is saved — an
             // eviction (G1 residency) must write it to disk before dropping it.
             self.touch_terrain_edit(e);
-            // Restream every terrain's render chunks (cheap, brief) + rebuild
-            // the SDF shadow atlas around the new field. The old field's
-            // volume keeps casting from its slot until the new one is in.
-            self.terrain_gpu_dirty = true;
+            // Lay the SDF shadow atlas again around the new field (its meshes
+            // plan from scratch: their entry is gone). The old field's volume
+            // keeps casting from its slot until the new one is in. Every other
+            // terrain's meshes stay as they are.
+            self.terrain_atlas_dirty = true;
+            self.terrain_replan.insert(e);
             // Generation may finish during Play (▶ Generate then Play before the
-            // fill lands, or a runtime regeneration): rebuild the sim so the new
-            // surface is solid immediately — a body standing there must never
-            // fall through a planet whose field just arrived. This is also what
-            // releases the Play-start streaming hold for mid-generation bodies.
+            // fill lands, or a runtime regeneration): its collider goes into the
+            // sim now, so the new surface is solid immediately — a body standing
+            // there must never fall through a planet whose field just arrived.
             if self.sim.is_some() {
-                self.rebuild_sim();
+                self.land_terrain_in_sim(e);
                 self.console.push(
                     floptle_script::LogLevel::Debug,
                     format!("Δ terrain id {id} generated during Play — collision live"),

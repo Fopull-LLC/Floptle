@@ -445,7 +445,7 @@ pub(crate) fn run(args: Args<'_>) -> i32 {
     if scene.is_some() {
         ed.sync_map_meshes();
         ed.sync_map_paint();
-        ed.sync_terrain_gpu();
+        ed.settle_terrain_gpu();
     }
 
     // A scene render looks through the scene's camera, and a scene without one

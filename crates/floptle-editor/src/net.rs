@@ -1628,8 +1628,11 @@ impl Editor {
         // terrain edits must be on disk before the world unloads — the flush a
         // script queued this same frame hasn't run yet, and the background
         // pipeline may be mid-encode. Synchronous, settles the in-flight job.
+        let t0 = floptle_core::profile::Span::new();
         self.flush_slot_terrains_sync();
+        self.script_host.profile().borrow_mut().record_part("sceneSave", t0.ms());
         let Some(rel) = self.switch_scene_during_play(req) else { return };
+        let t0 = floptle_core::profile::Span::new();
         // The new scene's input model is its own business — release any cursor
         // grab the old scene earned (game trap / script mouse lock), or a
         // cursor-driven scene (a main menu) arrives with the mouse frozen.
@@ -1684,8 +1687,11 @@ impl Editor {
         // Tell whatever survived the swap that the new world is whole. Last:
         // a loading screen's job is to go away once the thing it
         // was covering exists, so being told any earlier would be a lie.
+        self.script_host.profile().borrow_mut().record_part("sceneSession", t0.ms());
+        let t0 = floptle_core::profile::Span::new();
         let name = self.scene_name.clone();
         self.script_host.fire_scene_loaded(&mut self.world, &name, false);
+        self.script_host.profile().borrow_mut().record_part("sceneScripts", t0.ms());
     }
 
     /// **Already in a session — and say which, rather than doing nothing.**

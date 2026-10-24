@@ -768,27 +768,47 @@ impl Editor {
         &self,
         layers: &floptle_core::Layers,
     ) -> Vec<floptle_physics::TerrainVolume<'_>> {
-        self.terrains
-            .iter()
-            .map(|(&e, t)| {
-                let (anchor, rot, scale) = self.terrain_world_frame_of(e);
-                let drawn = match self.world.get::<floptle_core::Matter>(e) {
-                    Some(floptle_core::Matter::Terrain { collision, .. }) => {
-                        *collision == floptle_core::TerrainCollision::Drawn
-                    }
-                    _ => true,
-                };
-                floptle_physics::TerrainVolume {
-                    anchor,
-                    field: &t.field,
-                    layer: layers.index_for(&self.world, e),
-                    eid: Some(e.index()),
-                    rot,
-                    scale,
-                    drawn,
-                }
-            })
-            .collect()
+        self.terrains.keys().filter_map(|&e| self.terrain_volume_of(e, layers)).collect()
+    }
+
+    /// Terrain `e`'s volume, as [`Self::terrain_volumes`] gives it.
+    fn terrain_volume_of(&self, e: Entity, layers: &floptle_core::Layers) -> Option<floptle_physics::TerrainVolume<'_>> {
+        let t = self.terrains.get(&e)?;
+        let (anchor, rot, scale) = self.terrain_world_frame_of(e);
+        let drawn = match self.world.get::<floptle_core::Matter>(e) {
+            Some(floptle_core::Matter::Terrain { collision, .. }) => *collision == floptle_core::TerrainCollision::Drawn,
+            _ => true,
+        };
+        Some(floptle_physics::TerrainVolume {
+            anchor,
+            field: &t.field,
+            layer: layers.index_for(&self.world, e),
+            eid: Some(e.index()),
+            rot,
+            scale,
+            drawn,
+        })
+    }
+
+    /// A terrain that arrived while the game runs gets its collider in the
+    /// sim, in place of the one its node had, and nothing else in the sim is
+    /// remade (see `Sim::set_terrain`). The collision meshes made with the
+    /// field off the frame go in with it, so the first cast at the ground
+    /// near the player does not mesh it on the frame.
+    pub(crate) fn land_terrain_in_sim(&mut self, e: Entity) {
+        if !self.playing {
+            return;
+        }
+        let Some(mut sim) = self.sim.take() else { return };
+        let made = self.terrains.get_mut(&e).map(|t| std::mem::take(&mut t.collision)).unwrap_or_default();
+        let layers = sim.layers().clone();
+        if let Some(tv) = self.terrain_volume_of(e, &layers) {
+            let collider = sim.set_terrain(&tv);
+            for (c, chunk) in made {
+                collider.adopt(c, chunk);
+            }
+        }
+        self.sim = Some(sim);
     }
 
     /// The unready terrains the game cannot start without: any celestial
@@ -1409,6 +1429,12 @@ impl Editor {
     /// Session roles (filters, prediction, NetId rebinds) are the caller's job
     /// — see [`Self::perform_scene_request`].
     pub(crate) fn switch_scene_during_play(&mut self, req: &str) -> Option<String> {
+        // Each step named inside `sceneLoad`, so a slow load says which.
+        let mut t0 = floptle_core::profile::Span::new();
+        let mut part = |ed: &Self, name: &'static str| {
+            ed.script_host.profile().borrow_mut().record_part(name, t0.ms());
+            t0 = floptle_core::profile::Span::new();
+        };
         let Some(path) = self.resolve_scene_request(req) else {
             self.console.push(
                 floptle_script::LogLevel::Error,
@@ -1428,6 +1454,7 @@ impl Editor {
                 return None;
             }
         };
+        part(self, "sceneParse");
         // what survives. `node.persistent` marks a subtree as outliving the
         // swap — a HUD, a party, a save-game manager, the music. Collected
         // before anything is torn down, because the answer is about the world
@@ -1497,6 +1524,7 @@ impl Editor {
             self.world.remove::<floptle_core::Parent>(e);
             self.world.insert(e, world_pose);
         }
+        part(self, "sceneTeardown");
         floptle_scene::spawn_into(&doc, &mut self.world);
         // The incoming scene brings its own Lighting/Skybox/PostProcess. If a
         // survivor carried one too, the world now has two and query order picks
@@ -1510,7 +1538,9 @@ impl Editor {
         // scene just loaded owns its environment outright.
         self.env_layer = None;
         self.set_scene_file(&path);
+        part(self, "sceneSpawn");
         self.adopt_terrain();
+        part(self, "sceneTerrain");
         // the out-of-document stores, which a scene switch has to reload exactly as
         // opening a scene does.
         //
@@ -1538,19 +1568,23 @@ impl Editor {
         // standing still on ground that is — which is a bug with no visible
         // cause at all.
         self.adopt_scene_bakes();
+        part(self, "sceneMaps");
         // `adopt_maps` frees its own GPU parts, but these two caches are keyed by mesh id
         // and would hand the new scene the old one's CPU geometry to paint and to wire.
         self.paint_meshes.clear();
         self.mesh_wire_cache.clear();
         self.register_scene_meshes();
+        part(self, "sceneModels");
         self.selection.clear();
         self.grabbed = None;
         self.drag = None;
         // …and rebuild the play session against it (the same steps as Play).
         let sim = self.build_play_sim();
         self.sim = Some(sim);
+        part(self, "scenePhysics");
         self.vfx.start_play(&self.world);
         self.audio_start_play();
+        part(self, "sceneAudio");
         self.console.push(
             floptle_script::LogLevel::Debug,
             format!("⏵ scene → {}", self.scene_name),

@@ -420,9 +420,11 @@ impl Editor {
     /// project-relative). Keeps the last good pipeline on failure;
     /// Console-reports each new error once.
     pub(crate) fn ensure_flsl_shader(&mut self, rel: &str) {
-        // A warm already building it is waited on (or, not started, run
-        // here), never built a second time beside it.
-        self.adopt_warm_shader(rel);
+        // A warm already building it is never built a second time beside
+        // it: the frame draws without it until it lands.
+        if self.adopt_warm_shader(rel) {
+            return;
+        }
         let full = self.resolve_asset_path(rel);
         let mtime = floptle_vfs::modified(&full);
         if let Some(entry) = self.flsl_cache.get(rel)
@@ -988,9 +990,11 @@ impl Editor {
     /// Compile (or hot-reload) one `stage ui` `.flsl`. Keeps the last good
     /// pipeline on failure; Console-reports each new error once.
     fn ensure_ui_shader(&mut self, rel: &str) {
-        // A warm already building it is waited on (or, not started, run
-        // here), never built a second time beside it.
-        self.adopt_warm_shader(rel);
+        // A warm already building it is never built a second time beside
+        // it: the frame draws without it until it lands.
+        if self.adopt_warm_shader(rel) {
+            return;
+        }
         let full = self.resolve_asset_path(rel);
         let mtime = floptle_vfs::modified(&full);
         if let Some(entry) = self.ui_flsl_cache.get(rel)
@@ -1010,6 +1014,13 @@ impl Editor {
             }
             msg
         };
+        // In the game, built on the warm's workers: a scene's HUD shaders
+        // were built on the frame it loaded (Solar's navball 30 ms, its
+        // tape 18), the element drawn without its shader until it lands.
+        // One that fails there is compiled here, which says why.
+        if self.playing && self.warm_shader_instead(rel) {
+            return;
+        }
         let src = match floptle_vfs::read_to_string(&full) {
             Ok(s) => s,
             Err(e) => {
@@ -1172,9 +1183,11 @@ impl Editor {
     /// Compile (or hot-reload) one `stage post` `.flsl`. Keeps the last good
     /// pipeline on failure; Console-reports each new error once.
     fn ensure_post_shader(&mut self, rel: &str) {
-        // A warm already building it is waited on (or, not started, run
-        // here), never built a second time beside it.
-        self.adopt_warm_shader(rel);
+        // A warm already building it is never built a second time beside
+        // it: the frame draws without it until it lands.
+        if self.adopt_warm_shader(rel) {
+            return;
+        }
         let full = self.resolve_asset_path(rel);
         let mtime = floptle_vfs::modified(&full);
         if let Some(entry) = self.post_flsl_cache.get(rel)

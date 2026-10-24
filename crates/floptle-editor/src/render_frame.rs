@@ -203,6 +203,9 @@ impl Editor {
             let t0 = floptle_core::profile::Span::new();
             ed.sync_terrain_gpu();
             ed.script_host.profile().borrow_mut().record_part("terrainShadow", t0.ms());
+            let t0 = floptle_core::profile::Span::new();
+            ed.sync_terrain_palette(false);
+            ed.script_host.profile().borrow_mut().record_part("terrainPalette", t0.ms());
         });
         // LOD rings center on what the player actually sees: the active game camera
         // during Play, the editor fly-camera otherwise.

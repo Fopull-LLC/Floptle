@@ -209,13 +209,14 @@ fn finish_warm(ed: &mut crate::Editor, cam: &RenderCamera) {
     panic!("the warm never finished");
 }
 
-/// **The warm runs on a few workers, not a thread per asset, and builds one
-/// shader at a time.** A loading screen warming a hundred and fifty pictures
-/// and four shaders started a hundred and fifty-four threads and stalled its
-/// own frame a third of a second; and with several pipeline builds running at
-/// once, the game's frame waited on the driver for every one.
+/// **The warm runs on a few workers, not a thread per asset, and builds at
+/// most two shaders at a time.** A loading screen warming a hundred and fifty
+/// pictures and four shaders started a hundred and fifty-four threads and
+/// stalled its own frame a third of a second; with four pipeline builds
+/// running at once the game's frame waited on the driver for every one, and
+/// with one at a time Solar's four took twice as long.
 #[test]
-fn warming_runs_on_a_few_workers_and_builds_one_shader_at_a_time() {
+fn warming_runs_on_a_few_workers_and_builds_two_shaders_at_a_time() {
     let cam = camera();
     let Some((mut ed, loader, dir)) = project("pool", true) else { return };
     load(&mut ed, loader, &cam);
@@ -227,7 +228,7 @@ fn warming_runs_on_a_few_workers_and_builds_one_shader_at_a_time() {
         images.started(),
         images.peak()
     );
-    assert_eq!(shaders.peak(), 1, "{} shaders built at once", shaders.peak());
+    assert_eq!(shaders.peak(), 2, "{} shaders built at once, of the two warmed together", shaders.peak());
     assert_eq!(ed.warm.installed as usize, TEXTURES + SHADERS.len(), "warming put every image and shader in use");
 }
 
@@ -354,3 +355,71 @@ fn a_full_path_warms_the_file_the_scene_names() {
     assert_eq!(ed.warm.decodes.load(std::sync::atomic::Ordering::Relaxed), 1, "the picture was decoded twice");
 }
 
+
+/// **A frame that needs a shader still warming is not made to build it.**
+/// Waited for, or built on the frame when no worker had begun it, a game that
+/// drew before its warm finished built its ocean shader there: an 880 ms
+/// frame. The frame now goes on, the material drawn without its shader, and
+/// the shader, moved to the front of the warm, lands on a later frame.
+#[test]
+fn a_first_use_of_a_shader_still_warming_is_not_built_on_the_frame() {
+    let Some((mut ed, _loader, dir)) = project("hurry", false) else { return };
+    for s in SHADERS {
+        ed.request_warm(&format!("shaders/{s}.flsl"), floptle_script::PreloadKind::Shader);
+    }
+    let rel = format!("shaders/{}.flsl", SHADERS[1]);
+    let t = std::time::Instant::now();
+    ed.ensure_flsl_shader(&rel);
+    let first_use_ms = t.elapsed().as_secs_f64() * 1e3;
+    let built_here = ed.flsl_cache.get(&rel).is_some_and(|e| e.compiled.is_some());
+    let still_warming = ed.warm.shaders_pending();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while ed.warm.shaders_pending() {
+        assert!(std::time::Instant::now() < until, "the shaders never landed");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        ed.pump_warm();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    floptle_say::say_err!("first use of a shader still warming: {first_use_ms:.2} ms");
+    assert!(still_warming && !built_here, "the frame built the shader it needed instead of leaving it to the warm");
+    assert!(ed.flsl_cache.get(&rel).is_some_and(|e| e.compiled.is_some()), "the shader never landed from the warm");
+}
+
+/// **A HUD shader a scene puts on screen is built off the frame.** Built on
+/// the frame the scene loaded (Solar's navball 30 ms, its tape 18 ms), it
+/// could only be kept off it by warming it from a scene before. In the game
+/// the frame hands it to the warm's workers and draws the element without it;
+/// it lands a frame or two later, and the element wears it.
+#[test]
+fn a_hud_shader_a_scene_puts_on_screen_is_built_off_the_frame() {
+    let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+    let dir = std::env::temp_dir().join(format!("floptle-warm-hud-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("shaders")).unwrap();
+    let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/shaders/examples");
+    std::fs::copy(examples.join("ui/ui_glow.flsl"), dir.join("shaders/glow.flsl")).unwrap();
+    ed.project_root = dir.clone();
+    let ui = "shaders/glow.flsl";
+    let e = ed.world.spawn();
+    ed.world.insert(e, floptle_ui::ElementSpec { shader: ui.into(), ..Default::default() });
+    ed.toggle_play();
+    let profile = ed.script_host.profile().clone();
+    profile.borrow_mut().enable(true);
+    profile.borrow_mut().end_frame();
+    ed.ensure_ui_shaders();
+    profile.borrow_mut().end_frame();
+    let work: Vec<_> = profile.borrow().last_parts().iter().filter(|(p, _)| FIRST_USE.contains(p)).copied().collect();
+    let in_use_at_once = ed.ui_flsl_cache.get(ui).is_some_and(|c| c.compiled.is_some());
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while ed.warm.shaders_pending() {
+        assert!(std::time::Instant::now() < until, "the shader never landed");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        ed.pump_warm();
+    }
+    ed.ensure_ui_shaders();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(work.is_empty() && !in_use_at_once, "the HUD shader was built on the frame its scene drew it: {work:?}");
+    assert!(ed.warm.failed().is_empty(), "{:?}", ed.warm.failed());
+    assert!(ed.ui_flsl_cache.get(ui).is_some_and(|c| c.compiled.is_some()), "the HUD shader never came into use");
+    assert!(ed.ui_flsl_binds.contains_key(&e.index()), "the element does not wear it");
+}

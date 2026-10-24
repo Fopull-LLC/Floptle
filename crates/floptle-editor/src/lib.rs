@@ -180,6 +180,8 @@ mod spawn_scaling;
 #[cfg(test)]
 mod assembly_script_tests;
 #[cfg(test)]
+mod arrival_tests;
+#[cfg(test)]
 mod tick_overload_tests;
 #[cfg(test)]
 mod tile_physics_tests;
@@ -2531,6 +2533,22 @@ struct Editor {
     terrain_slots: Vec<crate::terrain_edit::TerrainSlot>,
     /// The GPU volume set needs re-uploading (a terrain was added/edited/deleted/resized).
     terrain_gpu_dirty: bool,
+    /// The shadow atlas alone needs laying again, and no chunk mesh does: a
+    /// world arrived whose meshes plan themselves, a proxy made off the frame
+    /// landed, a body went to or from its impostor. [`Self::terrain_gpu_dirty`]
+    /// also re-plans every terrain's meshes, and on the frame after a world
+    /// arrived that meshed again every chunk round the player known to be empty.
+    terrain_atlas_dirty: bool,
+    /// Terrains whose meshes re-plan whole on their next pass, the others
+    /// left as they are: a world that has just arrived.
+    terrain_replan: std::collections::HashSet<Entity>,
+    /// Shadow proxies being made off the frame, for terrains that landed with
+    /// a stand-in ([`crate::terrain_edit::EditorTerrain::proxy_later`]).
+    terrain_proxy_jobs: Vec<crate::terrain_edit::ProxyJob>,
+    /// The terrain texture palette being read and sized off the frame; the
+    /// palette drawn stays until it lands.
+    /// The palette's layers come with their mean colours, the impostors' paint.
+    terrain_palette_job: Option<std::sync::mpsc::Receiver<crate::terrain_edit::PaletteRead>>,
     /// Each terrain's primary-ray rendering is a set of
     /// extracted chunk meshes drawn through the raster pass, instead of sphere-tracing a
     /// voxel field. Meshes extract straight from the authoritative `ChunkField`; the
@@ -2677,6 +2695,12 @@ struct Editor {
     occluder_settling: HashMap<Entity, (OccKey, u32)>,
     /// Shadow-occluder bakes since the editor started, for `--timing`.
     occluder_bakes: u32,
+    /// Occluder bakes being made off the frame, by shape: the model read and
+    /// voxelised on a worker, a hundred milliseconds of the frame a new shape
+    /// appeared in. `None` comes back for a model that would not load.
+    occluder_bake_jobs: HashMap<OccKey, std::sync::mpsc::Receiver<Option<crate::terrain_edit::OccluderBake>>>,
+    /// Shapes whose model would not load, not asked for again while wanted.
+    occluder_failed: std::collections::HashSet<OccKey>,
     /// Static colliders rebuilt because their node turned or resized, for
     /// `--timing`. A move is a shift and is not counted.
     static_rebuilds: u32,

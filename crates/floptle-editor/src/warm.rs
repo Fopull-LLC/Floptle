@@ -42,11 +42,12 @@ pub(crate) fn image_workers() -> usize {
     std::thread::available_parallelism().map_or(2, |n| n.get() / 2).saturating_sub(1).clamp(1, 3)
 }
 
-/// Shaders build one at a time. Each build is a long driver call that keeps
+/// Shaders build two at a time. Each build is a long driver call that keeps
 /// threads of its own busy inside the driver, and four at once made the
-/// frames drawn beside them slower than one did. A loading screen takes a
-/// little longer; the game it shows stays smooth.
-pub(crate) const SHADER_WORKERS: usize = 1;
+/// frames drawn beside them slower than one did; one at a time took Solar's
+/// four material shaders from 1.7 s to 3.4 s cold, so the shader a frame was
+/// about to draw waited behind the others for longer.
+pub(crate) const SHADER_WORKERS: usize = 2;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod pool {
@@ -75,6 +76,8 @@ mod pool {
     pub(super) struct Slot<T> {
         state: Mutex<State<T>>,
         done: Condvar,
+        /// Its place in its pool's queue, for [`Pool::hurry`].
+        id: usize,
     }
 
     fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -134,7 +137,7 @@ mod pool {
     }
 
     struct Queue {
-        tasks: VecDeque<Box<dyn FnOnce() + Send>>,
+        tasks: VecDeque<(usize, Box<dyn FnOnce() + Send>)>,
         /// Worker threads alive now.
         workers: usize,
     }
@@ -145,6 +148,7 @@ mod pool {
         running: AtomicUsize,
         peak: AtomicUsize,
         started: AtomicUsize,
+        next_id: AtomicUsize,
     }
 
     /// A bounded set of worker threads and the work waiting for them.
@@ -158,16 +162,29 @@ mod pool {
                 running: AtomicUsize::new(0),
                 peak: AtomicUsize::new(0),
                 started: AtomicUsize::new(0),
+                next_id: AtomicUsize::new(0),
             }))
+        }
+
+        /// Move `slot`'s work to the front of the queue, if it is still
+        /// waiting there: the next worker free takes it.
+        pub(super) fn hurry<T>(&self, slot: &Slot<T>) {
+            let mut q = lock(&self.0.queue);
+            if let Some(i) = q.tasks.iter().position(|(id, _)| *id == slot.id)
+                && let Some(t) = q.tasks.remove(i)
+            {
+                q.tasks.push_front(t);
+            }
         }
 
         /// Queue `work`. `None` when there is no worker and none could be
         /// started: the caller does the work itself.
         pub(super) fn submit<T: Send + 'static>(&self, work: impl FnOnce() -> T + Send + 'static) -> Option<Arc<Slot<T>>> {
-            let slot = Arc::new(Slot { state: Mutex::new(State::Queued(Box::new(work))), done: Condvar::new() });
+            let id = self.0.next_id.fetch_add(1, Ordering::Relaxed);
+            let slot = Arc::new(Slot { state: Mutex::new(State::Queued(Box::new(work))), done: Condvar::new(), id });
             let run = slot.clone();
             let mut q = lock(&self.0.queue);
-            q.tasks.push_back(Box::new(move || run.run()));
+            q.tasks.push_back((id, Box::new(move || run.run())));
             if q.workers < self.0.limit {
                 let inner = self.0.clone();
                 let spawned = std::thread::Builder::new().name("floptle-warm".into()).spawn(move || work_loop(&inner));
@@ -211,7 +228,7 @@ mod pool {
             let task = {
                 let mut q = lock(&inner.queue);
                 match q.tasks.pop_front() {
-                    Some(t) => {
+                    Some((_, t)) => {
                         // Counted under the lock, so work is never in neither
                         // the queue nor the count.
                         let now = inner.running.fetch_add(1, Ordering::Relaxed) + 1;
@@ -254,6 +271,42 @@ mod pool {
             assert_eq!(sum, (0..40).sum::<usize>());
             assert!(pool.peak() <= 3, "{} jobs ran at once on a pool of 3", pool.peak());
             assert!(pool.started() < 40, "a thread a job: {} threads for 40 jobs", pool.started());
+        }
+
+        /// **Work hurried runs next.** A frame about to draw with a shader
+        /// still queued behind others moves it to the front, and the next
+        /// worker free takes it before the ones queued ahead of it.
+        #[test]
+        fn hurried_work_runs_next() {
+            let pool = Pool::new(1);
+            let (go, wait) = mpsc::channel::<()>();
+            let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let blocker = pool.submit(move || {
+                let _ = wait.recv_timeout(Duration::from_secs(60));
+                0
+            });
+            let jobs: Vec<_> = (1..=4)
+                .map(|i| {
+                    let order = order.clone();
+                    pool.submit(move || {
+                        order.lock().unwrap().push(i);
+                        i
+                    })
+                    .expect("a worker")
+                })
+                .collect();
+            pool.hurry(&jobs[3]);
+            go.send(()).unwrap();
+            // Polled, not waited on: waiting on queued work runs it here.
+            let until = std::time::Instant::now() + Duration::from_secs(60);
+            let mut left: Vec<_> = jobs.iter().collect();
+            while !left.is_empty() {
+                assert!(std::time::Instant::now() < until, "the work never ran");
+                left.retain(|j| j.try_take().is_none());
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            drop(blocker);
+            assert_eq!(*order.lock().unwrap(), vec![4, 1, 2, 3], "the hurried work did not run next");
         }
 
         /// **Waiting on work no worker has begun runs it here, once.** The
@@ -352,6 +405,18 @@ impl<T> Job<T> {
                 *inline -= 1;
                 Some(work.take().map(|w| w()))
             }
+        }
+    }
+
+    /// Have the work done next, if it has not started: what a frame about to
+    /// need it asks.
+    fn hurry(&self, pool: &pool::Pool) {
+        let _ = pool;
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Job::Pool(slot) => pool.hurry(slot),
+            #[cfg(target_arch = "wasm32")]
+            Job::Later(_) => {}
         }
     }
 
@@ -744,12 +809,53 @@ impl Editor {
     /// A first use of a shader a warm is still building: wait for that build
     /// (or run it here if no worker has begun it) and put it in use, so the
     /// frame does not build it a second time beside the warm.
-    pub(crate) fn adopt_warm_shader(&mut self, rel: &str) {
-        let Some(job) = self.warm.compiling.remove(rel) else { return };
-        let wait = floptle_core::profile::Span::new();
-        let done = job.wait();
-        self.note_asset(rel, "pipelineCompile", wait.ms());
-        self.land_warm_shader(rel, done);
+    ///
+    /// Not waited for: a shader still queued goes to the front, so a worker
+    /// builds it next, and the frame goes on with the rest of its work, the
+    /// thing wearing it drawn as it is without one until it lands. Waited for
+    /// (or built here when no worker had begun it), a game that drew before
+    /// its warm finished built its ocean shader on the frame: 880 ms. `true`
+    /// while it is still on its way. In a browser, with no workers, it is
+    /// built here.
+    pub(crate) fn adopt_warm_shader(&mut self, rel: &str) -> bool {
+        let Some(mut job) = self.warm.compiling.remove(rel) else { return false };
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = &mut job;
+            let wait = floptle_core::profile::Span::new();
+            let done = job.wait();
+            self.note_asset(rel, "pipelineCompile", wait.ms());
+            self.land_warm_shader(rel, done);
+            false
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut inline = 0usize;
+            match job.poll(&mut inline) {
+                Some(done) => {
+                    self.land_warm_shader(rel, done);
+                    false
+                }
+                None => {
+                    job.hurry(&self.warm.shaders);
+                    self.warm.compiling.insert(rel.to_string(), job);
+                    true
+                }
+            }
+        }
+    }
+
+    /// Hand the build of `rel` (a `stage ui` shader a scene just put on
+    /// screen) to the warm's workers rather than build it on this frame.
+    /// `true` when it is on its way there.
+    pub(crate) fn warm_shader_instead(&mut self, rel: &str) -> bool {
+        // One that failed there is compiled on the frame once, which says
+        // why; a later change of the file is warmed again.
+        if self.warm.failed.remove(rel) {
+            return false;
+        }
+        self.warm_shader(rel);
+        self.warm.compiling.contains_key(rel)
     }
 
     /// `Some(true)` ready, `Some(false)` failed, `None` still on its way.

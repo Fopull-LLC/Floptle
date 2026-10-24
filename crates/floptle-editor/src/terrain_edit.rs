@@ -40,6 +40,45 @@ pub(crate) struct EditorTerrain {
     /// as boxes). An atlas re-laid around a key it holds copies the volume
     /// on the GPU instead of uploading it again.
     pub shadow_key: u64,
+    /// Drawn meshes of the full-detail chunks round where the player was when
+    /// the world was asked for, made with the field off the frame: the frame
+    /// it lands draws them instead of meshing them (see [`Self::premesh`]).
+    pub premeshed: HashMap<[i32; 3], floptle_field::ChunkMesh>,
+    /// Collision meshes of the chunks nearest that place, made the same way,
+    /// for the sim's collider when the world lands while the game runs.
+    pub collision: Vec<([i32; 3], floptle_physics::CollisionChunk)>,
+}
+
+/// Where the player was when a world was asked for, in the world's own frame:
+/// what the meshes made with its field are made round.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LandingView {
+    /// The place, in field units (the node's rotation and scale undone).
+    pub near: Vec3,
+    /// The body's radius times the node's scale, for a celestial body.
+    pub body_radius: Option<f64>,
+    /// The node's uniform scale.
+    pub scale: f32,
+}
+
+/// Chunks within this many of the landing view get collision meshes made with
+/// the world: the ground a cast from the player can reach on the frame the
+/// world lands, which otherwise meshed it there.
+const LANDING_COLLISION_CHUNKS: i32 = 2;
+
+/// Chunks with no mesh at all that a frame of the game meshes at full detail
+/// itself; the rest of them go to the workers ahead of everything else, and
+/// draw a few frames later. A world landing, or the camera put down on ground
+/// never drawn, meshed every chunk round it on one frame: 280 ms on Solar's
+/// home world (debug). The editor, which is not playing, meshes them all.
+pub(crate) const NEAR_MESHES_A_FRAME: usize = 4;
+
+/// How far chunk `c` is from `cl` (in chunk units, in the field's frame), in
+/// quarter chunks, rounded up: zero inside it. What the LOD rings are measured in.
+fn chunk_ring_dist(c: [i32; 3], cl: Vec3) -> i32 {
+    let lo = Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32);
+    let gap = (lo - cl).max(cl - (lo + Vec3::ONE)).max(Vec3::ZERO);
+    (gap.length() * RING_STEPS as f32).ceil() as i32
 }
 
 /// A fresh [`EditorTerrain::shadow_key`]: unique in the process, never 0, and
@@ -149,7 +188,38 @@ impl EditorTerrain {
     /// Wrap a field, deriving its shadow proxy.
     pub(crate) fn new(field: floptle_field::ChunkField) -> Self {
         let shadow = shadow_proxy_of(&field);
-        Self { field, shadow, shadow_key: next_shadow_key() }
+        Self { field, shadow, shadow_key: next_shadow_key(), premeshed: HashMap::new(), collision: Vec::new() }
+    }
+
+    /// Wrap a field whose shadow proxy is made off the frame: a stand-in
+    /// casts nothing until [`Editor::kick_terrain_proxy`]'s lands. Deriving it
+    /// here sampled the whole field into a 192³ grid on the frame, half a
+    /// second of the frame a world loaded from its file arrived in.
+    pub(crate) fn proxy_later(field: floptle_field::ChunkField) -> Self {
+        Self { field, shadow: empty_proxy(), shadow_key: next_shadow_key(), premeshed: HashMap::new(), collision: Vec::new() }
+    }
+
+    /// Make the meshes the frame this world lands on would make round `v`,
+    /// here, where the field was made: the full-detail chunks' drawn meshes,
+    /// and the nearest chunks' collision meshes. Each is what that frame makes
+    /// from the same field, so what is drawn and what collides are unchanged.
+    pub(crate) fn premesh(&mut self, v: &LandingView) {
+        let chunk_units = floptle_field::CHUNK as f32 * self.field.voxel();
+        let rings = rings_for_body(v.body_radius, (chunk_units * v.scale) as f64);
+        let cl = v.near / chunk_units;
+        for c in self.field.chunk_coords() {
+            let d = chunk_ring_dist(c, cl);
+            if raw_lod(d, rings) != 0 || self.field.is_evicted(c) {
+                continue;
+            }
+            let m = floptle_field::mesh_chunk(&self.field, c, 1, true);
+            if d <= LANDING_COLLISION_CHUNKS * RING_STEPS {
+                // The collider's mesh is the drawn one without its skirt,
+                // which `from_mesh` leaves out.
+                self.collision.push((c, floptle_physics::CollisionChunk::from_mesh(&m, self.field.voxel().max(1e-3))));
+            }
+            self.premeshed.insert(c, m);
+        }
     }
 
     /// Re-derive the shadow proxy from the current field (structural change / undo /
@@ -160,14 +230,69 @@ impl EditorTerrain {
     }
 }
 
+/// Which thread did each piece of landing work, for the guards that it is
+/// done off the frame: `(what, thread)`.
+#[cfg(test)]
+pub(crate) static MADE_ON: std::sync::Mutex<Vec<(&'static str, std::thread::ThreadId)>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) fn made_on(what: &'static str) {
+    if let Ok(mut v) = MADE_ON.lock() {
+        v.push((what, std::thread::current().id()));
+    }
+}
+
+/// Did this thread do any `what`?
+#[cfg(test)]
+pub(crate) fn made_here(what: &str) -> usize {
+    let me = std::thread::current().id();
+    MADE_ON.lock().map_or(0, |v| v.iter().filter(|(w, t)| *w == what && *t == me).count())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Full-detail chunks with no mesh drawn on this thread's frames:
+    /// `[meshed on the frame, drawn from what landed with the field, sent to
+    /// the workers past the frame's share]`.
+    pub(crate) static NEAR_MESHES: std::cell::Cell<[usize; 3]> = const { std::cell::Cell::new([0; 3]) };
+}
+
 fn shadow_proxy_of(field: &floptle_field::ChunkField) -> floptle_field::BakedSdf {
-    field.to_dense(TERRAIN_SHADOW_MAX_DIM).unwrap_or(floptle_field::BakedSdf {
+    #[cfg(test)]
+    made_on("proxy");
+    field.to_dense(TERRAIN_SHADOW_MAX_DIM).unwrap_or_else(empty_proxy)
+}
+
+/// The proxy of an empty field: a tiny box of open air, casting nothing.
+fn empty_proxy() -> floptle_field::BakedSdf {
+    floptle_field::BakedSdf {
         dims: [2, 2, 2],
         center: [0.0; 3],
         half_extent: [0.5; 3],
         distance: vec![1.0; 8],
         color: vec![[128, 128, 128, 255]; 8],
-    })
+    }
+}
+
+/// A terrain palette read off the frame: each slot's 256² layer, and its
+/// mean colour (what an impostor is painted with).
+pub(crate) type PaletteRead = (Vec<floptle_render::TextureData>, Vec<[f32; 3]>);
+
+/// An occluder bake made off the frame: the bake, its model's triangles, and
+/// the milliseconds it took.
+pub(crate) type OccluderBake = (std::sync::Arc<floptle_field::BakedSdf>, u64, f64);
+
+/// A terrain's shadow proxy being made off the frame, from a copy of its
+/// field (see [`EditorTerrain::proxy_later`]).
+pub(crate) struct ProxyJob {
+    pub e: Entity,
+    /// The stand-in's key: a proxy made whole since (an undo, a field replaced)
+    /// supersedes this one.
+    pub key: u64,
+    /// The terrain's edit stamp when its field was copied: an edit since and
+    /// the proxy is of ground that is not there any more, so it is made again.
+    pub stamp: u64,
+    pub rx: std::sync::mpsc::Receiver<floptle_field::BakedSdf>,
 }
 
 /// The GPU residency of one terrain's chunk meshes. Chunk vertices are field-space, so
@@ -644,7 +769,16 @@ const CHECKPOINT_FORCE_SECS: f64 = 20.0;
 ///
 /// `generator` is the project's planet generator version, what a recipe that
 /// names none is made by ([`resolve_spec`]).
-fn load_terrain_from(sources: Vec<TerrainSource>, genspec: Option<String>, near: Option<Vec3>, generator: u32) -> Option<EditorTerrain> {
+///
+/// `view` is where the meshes the landing frame would make are made round,
+/// here, with the field ([`EditorTerrain::premesh`]).
+fn load_terrain_from(
+    sources: Vec<TerrainSource>,
+    genspec: Option<String>,
+    near: Option<Vec3>,
+    generator: u32,
+    view: Option<LandingView>,
+) -> Option<EditorTerrain> {
     let make = |fill: &floptle_field::procgen::PlanetFill| match near {
         Some(p) => floptle_field::procgen::generate_planet_near(fill, p, NEAR_ON_LOAD_CHUNKS * floptle_field::CHUNK as f32 * fill.voxel),
         None => floptle_field::procgen::generate_planet(fill),
@@ -693,7 +827,11 @@ fn load_terrain_from(sources: Vec<TerrainSource>, genspec: Option<String>, near:
             }),
         };
         if let Some(field) = field {
-            return Some(EditorTerrain::new(field));
+            let mut t = EditorTerrain::new(field);
+            if let Some(v) = view {
+                t.premesh(&v);
+            }
+            return Some(t);
         }
     }
     None
@@ -1174,13 +1312,26 @@ impl Editor {
         // Candidates gather into (priority = chunk distance, entity, coord, lod);
         // sync work happens immediately, async work is topped up at the end.
         let mut queue: Vec<(i32, Entity, [i32; 3], u8)> = Vec::new();
+        // Meshes made with a field that has just landed, taken for this
+        // pass: drawn instead of meshed here. What a terrain's scan does not
+        // use is dropped once its scan has run (the ground round the player
+        // is drawn by then); a terrain whose scan waits keeps its own.
+        let mut premeshed: HashMap<Entity, HashMap<[i32; 3], floptle_field::ChunkMesh>> = self
+            .terrains
+            .iter_mut()
+            .filter(|(_, t)| !t.premeshed.is_empty())
+            .map(|(&e, t)| (e, std::mem::take(&mut t.premeshed)))
+            .collect();
+        let mut scanned: Vec<Entity> = Vec::new();
+        // Chunks with no mesh that this frame meshes at full detail itself.
+        let mut near_left = if self.playing { NEAR_MESHES_A_FRAME } else { usize::MAX };
         for (&e, terrain) in &self.terrains {
             // Hidden: nothing drawn, so nothing to plan. Its meshes stay for
             // when it is shown again.
             if floptle_core::is_hidden(&self.world, e) || floptle_core::is_disabled(&self.world, e) {
                 continue;
             }
-            let structural = full_rebuild || !self.terrain_render.contains_key(&e);
+            let structural = full_rebuild || !self.terrain_render.contains_key(&e) || self.terrain_replan.remove(&e);
             let dirty = self.terrain_chunks_dirty.remove(&e);
             let render = self.terrain_render.entry(e).or_default();
             let wt = floptle_core::world_transform(&self.world, e);
@@ -1202,8 +1353,10 @@ impl Editor {
                 };
                 render.impostor = impostor_next(was, cam_dist, cb.body_radius, impostor_enter_radii(rule, px_per_radian));
                 if render.impostor != was {
-                    // The SDF shadow/AO atlas excludes impostor bodies — re-lay it out.
-                    self.terrain_gpu_dirty = true;
+                    // The SDF shadow/AO atlas excludes impostor bodies — re-lay it
+                    // out. Only the atlas: re-planning every terrain's meshes
+                    // dropped the jobs in flight for all of them.
+                    self.terrain_atlas_dirty = true;
                 }
                 // The body's surface colour is wanted whether it is far enough to
                 // BE an impostor or close enough to be streaming — a streaming
@@ -1218,6 +1371,7 @@ impl Editor {
                     render.empty.clear();
                     render.free_all(raster);
                     render.born.clear();
+                    scanned.push(e);
                     continue;
                 }
             } else {
@@ -1240,11 +1394,7 @@ impl Editor {
             // How far the camera is from the nearest point of the chunk, rounded
             // up: zero inside it. The chunk ahead is as near as its near face,
             // not as near as its index.
-            let dist_of = |c: [i32; 3]| {
-                let lo = Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32);
-                let gap = (lo - cl).max(cl - (lo + Vec3::ONE)).max(Vec3::ZERO);
-                (gap.length() * RING_STEPS as f32).ceil() as i32
-            };
+            let dist_of = |c: [i32; 3]| chunk_ring_dist(c, cl);
             // Queue position, in metres, so chunks from different terrains can
             // be compared at all.
             //
@@ -1316,6 +1466,10 @@ impl Editor {
                 d.dedup();
                 for coord in d {
                     render.empty.remove(&coord);
+                    // Made before this edit: not the chunk any more.
+                    if let Some(p) = premeshed.get_mut(&e) {
+                        p.remove(&coord);
+                    }
                     let dist = dist_of(coord);
                     let cur = render.slots.get(&coord).map(|&(_, l)| l);
                     // A dug chunk is remeshed at full detail whatever it was
@@ -1366,6 +1520,7 @@ impl Editor {
             {
                 continue;
             }
+            scanned.push(e);
             for coord in terrain.field.chunk_coords() {
                 match render.slots.get(&coord) {
                     None => {
@@ -1379,10 +1534,29 @@ impl Editor {
                             continue; // made again first (`stream_far_chunks`)
                         }
                         if raw_lod(d, rings) == 0 {
-                            // The ground around the player never streams: a fresh
-                            // load (or a dig that created a chunk) meshes it now.
-                            let cm =
-                                floptle_field::mesh_chunk(&terrain.field, coord, 1, true);
+                            // The ground around the player is drawn this frame: a
+                            // fresh load (or a dig that created a chunk) draws the
+                            // mesh made with its field, or meshes it now, a few
+                            // a frame in the game. The rest go to the workers
+                            // first of everything.
+                            let made = premeshed.get_mut(&e).and_then(|p| p.remove(&coord));
+                            #[cfg(test)]
+                            NEAR_MESHES.with(|n| {
+                                let mut v = n.get();
+                                v[if made.is_some() { 1 } else if near_left > 0 { 0 } else { 2 }] += 1;
+                                n.set(v);
+                            });
+                            let cm = match made {
+                                Some(m) => m,
+                                None if near_left > 0 => {
+                                    near_left -= 1;
+                                    floptle_field::mesh_chunk(&terrain.field, coord, 1, true)
+                                }
+                                None => {
+                                    queue.push((prio_of(coord) - DIRTY_PRIORITY_BOOST, e, coord, 0));
+                                    continue;
+                                }
+                            };
                             if cm.is_empty() {
                                 render.empty.insert(coord);
                             } else {
@@ -1408,6 +1582,14 @@ impl Editor {
                         }
                     }
                 }
+            }
+        }
+
+        for (e, p) in premeshed {
+            if !scanned.contains(&e)
+                && let Some(t) = self.terrains.get_mut(&e)
+            {
+                t.premeshed = p;
             }
         }
 
@@ -1794,6 +1976,88 @@ impl Editor {
         }
     }
 
+    /// Bake shape `key`'s shadow occluder on a worker: the model read, its
+    /// vertices turned and scaled, voxelised at 128 along its longest axis.
+    fn kick_occluder_bake(&mut self, key: &OccKey) {
+        // Project-resolved: read raw, every mesh shadow occluder in an
+        // exported build failed to load and the scene lost its shadows.
+        let file = crate::project::resolve_asset_path(&self.project_root, &key.0);
+        let k = key.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        crate::worker::spawn("occluder-bake", move || {
+            #[cfg(test)]
+            made_on("occluder");
+            let started = Instant::now();
+            let Ok(model) = floptle_assets::gltf_import::geometry(&file) else {
+                let _ = tx.send(None);
+                return;
+            };
+            let rot = Quat::from_xyzw(k.1[0] as f32 / 1000.0, k.1[1] as f32 / 1000.0, k.1[2] as f32 / 1000.0, k.1[3] as f32 / 1000.0)
+                .normalize();
+            let s = Vec3::new(k.2[0] as f32 / 1000.0, k.2[1] as f32 / 1000.0, k.2[2] as f32 / 1000.0);
+            // Rotation + scale applied to the vertices (like the physics
+            // colliders); translation stays in the per-frame f64 anchor.
+            let m = Mat4::from_scale_rotation_translation(s, rot, Vec3::ZERO);
+            let mut verts: Vec<[f32; 3]> = Vec::new();
+            let mut indices: Vec<u32> = Vec::new();
+            for part in &model.parts {
+                let base = verts.len() as u32;
+                verts.extend(part.mesh.vertices.iter().map(|v| m.transform_point3(Vec3::from(v.pos)).to_array()));
+                indices.extend(part.mesh.indices.iter().map(|i| i + base));
+            }
+            // 128 voxels along the longest axis: a whole-map bake lands well
+            // under a second and keeps doorways/rooms resolvable (the user's
+            // ~80-unit map → ~0.6-unit voxels).
+            let baked = std::sync::Arc::new(floptle_field::bake_occluder(&verts, &indices, 128));
+            let _ = tx.send(Some((baked, (indices.len() / 3) as u64, started.elapsed().as_secs_f64() * 1e3)));
+        });
+        self.occluder_bake_jobs.insert(key.clone(), rx);
+    }
+
+    /// Put the occluder bakes made off the frame into the cache, where the
+    /// next refresh finds them.
+    fn land_occluder_bakes(&mut self) {
+        if self.occluder_bake_jobs.is_empty() {
+            return;
+        }
+        let mut landed = Vec::new();
+        self.occluder_bake_jobs.retain(|k, rx| match rx.try_recv() {
+            Ok(r) => {
+                landed.push((k.clone(), r));
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                landed.push((k.clone(), None));
+                false
+            }
+        });
+        for (key, r) in landed {
+            match r {
+                Some((baked, tris, ms)) => {
+                    self.console.push(
+                        floptle_script::LogLevel::Debug,
+                        format!(
+                            "baked shadow occluder for {} ({tris} tris → {}×{}×{} voxels, {ms:.0} ms, off the frame)",
+                            key.0, baked.dims[0], baked.dims[1], baked.dims[2]
+                        ),
+                        None,
+                    );
+                    self.occluder_bakes += 1;
+                    self.occluder_cache.insert(key, baked);
+                }
+                None => {
+                    self.console.push(
+                        floptle_script::LogLevel::Warn,
+                        format!("shadow occluder: failed to load {}", key.0),
+                        None,
+                    );
+                    self.occluder_failed.insert(key);
+                }
+            }
+        }
+    }
+
     /// Keep the shadow-occluder bakes in sync with the scene's static collider
     /// meshes (Collidable / MeshCollider on a `Matter::Mesh` node, no RigidBody —
     /// dynamic bodies cast via their shape proxies instead). Each eligible mesh
@@ -1809,6 +2073,7 @@ impl Editor {
     /// bake, and is baked once it has held still for [`OCCLUDER_SETTLE_FRAMES`].
     /// A shape that is already baked (back to its old scale) is taken at once.
     pub(crate) fn refresh_mesh_occluders(&mut self) -> bool {
+        self.land_occluder_bakes();
         // The desired (entity → key) set this frame.
         let mut desired: Vec<(Entity, OccKey)> = Vec::new();
         let ents: Vec<(Entity, String)> = self
@@ -1877,72 +2142,28 @@ impl Editor {
 
         let mut next: HashMap<Entity, (OccKey, std::sync::Arc<floptle_field::BakedSdf>)> =
             HashMap::new();
+        let mut bake: Vec<OccKey> = Vec::new();
         for (e, key) in desired {
-            let baked = if let Some(b) = self.occluder_cache.get(&key) {
-                b.clone()
-            } else {
-                // Bake: rotation + scale applied to the vertices (like the physics
-                // colliders); translation stays in the per-frame f64 anchor.
-                let started = Instant::now();
-                // Project-resolved: read raw, every mesh shadow occluder in an
-                // exported build failed to load and the scene lost its shadows.
-                let file = crate::project::resolve_asset_path(&self.project_root, &key.0);
-                let Ok(model) = floptle_assets::gltf_import::geometry(&file) else {
-                    self.console.push(
-                        floptle_script::LogLevel::Warn,
-                        format!("shadow occluder: failed to load {}", key.0),
-                        None,
-                    );
-                    continue;
-                };
-                let rot = Quat::from_xyzw(
-                    key.1[0] as f32 / 1000.0,
-                    key.1[1] as f32 / 1000.0,
-                    key.1[2] as f32 / 1000.0,
-                    key.1[3] as f32 / 1000.0,
-                )
-                .normalize();
-                let s = Vec3::new(
-                    key.2[0] as f32 / 1000.0,
-                    key.2[1] as f32 / 1000.0,
-                    key.2[2] as f32 / 1000.0,
-                );
-                let m = Mat4::from_scale_rotation_translation(s, rot, Vec3::ZERO);
-                let mut verts: Vec<[f32; 3]> = Vec::new();
-                let mut indices: Vec<u32> = Vec::new();
-                for part in &model.parts {
-                    let base = verts.len() as u32;
-                    verts.extend(
-                        part.mesh
-                            .vertices
-                            .iter()
-                            .map(|v| m.transform_point3(Vec3::from(v.pos)).to_array()),
-                    );
-                    indices.extend(part.mesh.indices.iter().map(|i| i + base));
-                }
-                // 128 voxels along the longest axis: a whole-map bake lands well
-                // under a second and keeps doorways/rooms resolvable (the user's
-                // ~80-unit map → ~0.6-unit voxels).
-                let baked =
-                    std::sync::Arc::new(floptle_field::bake_occluder(&verts, &indices, 128));
-                self.console.push(
-                    floptle_script::LogLevel::Debug,
-                    format!(
-                        "baked shadow occluder for {} ({} tris → {}×{}×{} voxels, {} ms)",
-                        key.0,
-                        indices.len() / 3,
-                        baked.dims[0],
-                        baked.dims[1],
-                        baked.dims[2],
-                        started.elapsed().as_millis()
-                    ),
-                    None,
-                );
-                self.occluder_bakes += 1;
-                self.occluder_cache.insert(key.clone(), baked.clone());
-                baked
-            };
-            next.insert(e, (key, baked));
+            if let Some(b) = self.occluder_cache.get(&key) {
+                next.insert(e, (key, b.clone()));
+                continue;
+            }
+            // Baked on a worker: the node keeps casting with the bake it had
+            // (none, for a shape new to it) until this one is in.
+            if let Some(old) = latest.get(&e) {
+                next.insert(e, old.clone());
+            }
+            if !self.occluder_bake_jobs.contains_key(&key) && !self.occluder_failed.contains(&key) && !bake.contains(&key) {
+                bake.push(key);
+            }
+        }
+        for key in &bake {
+            self.kick_occluder_bake(key);
+        }
+        let latest = self.occluders_wanted.as_ref().unwrap_or(&self.mesh_occluders);
+        if next.len() == latest.len() && next.iter().all(|(e, (k, _))| latest.get(e).is_some_and(|(lk, _)| lk == k)) {
+            // Only bakes on their way: the set asked for is the one there.
+            return false;
         }
         // Drop cache entries nothing references anymore (a resized/removed map).
         self.occluder_cache.retain(|k, _| next.values().any(|(nk, _)| nk == k));
@@ -2898,8 +3119,7 @@ impl Editor {
     /// every planet's impostor in the colours its ground now draws. A resident
     /// body samples its field again; a cold one made from a genspec with no
     /// colour saved takes its recipe's again.
-    pub(crate) fn set_terrain_slot_means(&mut self, layers: &[floptle_render::TextureData]) {
-        let means: Vec<[f32; 3]> = layers.iter().map(layer_mean).collect();
+    pub(crate) fn set_terrain_slot_means(&mut self, means: Vec<[f32; 3]>) {
         if means == self.terrain_slot_means {
             return;
         }
@@ -3700,6 +3920,11 @@ impl Editor {
                 .collect()
         };
         let near = |p: DVec3, reach: f64| anchors.iter().any(|a| (*a - p).length() < reach);
+        // What could fall through ground not there yet: in Play the bodies,
+        // which come first among the anchors, and not the camera, which only
+        // has to wait to draw it. In edit mode the camera is all there is.
+        let bodies = if self.playing { anchors.len() - 1 } else { anchors.len() };
+        let body_near = |p: DVec3, reach: f64| anchors[..bodies].iter().any(|a| (*a - p).length() < reach);
         // A body a game keeps meshed farther out than the default loads and is
         // put away as much farther out, so its ground is in before it draws.
         let px_per_radian = self.view_px_per_radian();
@@ -3813,7 +4038,10 @@ impl Editor {
             // The blocking emergency load is for mid-play surprises (teleports,
             // summons) — during the Play-start hold the same bodies stream in
             // the background instead (the run is paused; nothing can fall).
-            if !self.play_stream_hold && near(p, r * RESIDENT_SYNC_RADII) {
+            // A camera alone near a cold body streams it in the background: a
+            // scene loaded with the view beside an authored planet read and
+            // parsed its 15 MB field on the frame, with nothing there to fall.
+            if !self.play_stream_hold && body_near(p, r * RESIDENT_SYNC_RADII) {
                 to_sync.push((e, cold.id));
             } else if warm.contains(&e) || near(p, r * RESIDENT_LOAD_RADII * reach(cold.id)) {
                 to_load.push((e, cold.id));
@@ -3930,11 +4158,8 @@ impl Editor {
         let mut sources = self.resolve_terrain_source(e, id);
         let genspec = self.world.get::<floptle_core::TerrainGen>(e).map(|g| g.0.clone());
         // Where the player is, in the body's frame: what is made first.
-        let near = {
-            let wt = floptle_core::world_transform(&self.world, e);
-            let cam = self.lod_center(self.streaming_anchor());
-            Some((wt.rotation.normalize().inverse() * (cam - wt.translation).as_vec3()) / wt.scale.x.max(1e-6))
-        };
+        let view = self.landing_view(e);
+        let near = Some(view.near);
         // A running `terrain.generatePlanet` batch owns generation: while the
         // game's spawn planet (or any explicit fill) is being built, residency
         // must not start more generations behind it — the player is standing
@@ -3975,7 +4200,7 @@ impl Editor {
         let (tx, rx) = std::sync::mpsc::channel();
         let generator = self.project.terrain_generator_resolved();
         crate::worker::spawn("terrain-load", move || {
-            let _ = tx.send(load_terrain_from(sources, genspec, near, generator));
+            let _ = tx.send(load_terrain_from(sources, genspec, near, generator, Some(view)));
         });
         self.terrain_load_jobs.push(TerrainLoadJob {
             e,
@@ -3983,6 +4208,95 @@ impl Editor {
             started: floptle_core::time::Instant::now(),
             rx,
         });
+    }
+
+    /// Make terrain `e`'s shadow proxy on a worker, from a copy of its field
+    /// (the chunks are shared, so the copy is a table, not the voxels). It
+    /// lands in [`Self::land_terrain_proxies`]; until then the stand-in
+    /// casts nothing.
+    pub(crate) fn kick_terrain_proxy(&mut self, e: Entity) {
+        let Some(t) = self.terrains.get(&e) else { return };
+        let field = t.field.clone();
+        let key = t.shadow_key;
+        let stamp = self.terrain_edit_stamps.get(&e).map_or(0, |s| s.0);
+        self.terrain_proxy_jobs.retain(|j| j.e != e);
+        let (tx, rx) = std::sync::mpsc::channel();
+        crate::worker::spawn("terrain-proxy", move || {
+            let _ = tx.send(shadow_proxy_of(&field));
+        });
+        self.terrain_proxy_jobs.push(ProxyJob { e, key, stamp, rx });
+    }
+
+    /// Put the proxies made off the frame in place, each under a new key, and
+    /// have the atlas laid again around them (within its budget, the old
+    /// slots drawn until the new atlas is whole). One made from a field
+    /// edited since is made again from the field as it is now.
+    pub(crate) fn land_terrain_proxies(&mut self) {
+        let mut landed = Vec::new();
+        self.terrain_proxy_jobs.retain(|j| match j.rx.try_recv() {
+            Ok(baked) => {
+                landed.push((j.e, j.key, j.stamp, baked));
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
+        });
+        for (e, key, stamp, baked) in landed {
+            let now = self.terrain_edit_stamps.get(&e).map_or(0, |s| s.0);
+            let Some(t) = self.terrains.get_mut(&e) else { continue };
+            if t.shadow_key != key {
+                continue;
+            }
+            if now != stamp {
+                self.kick_terrain_proxy(e);
+                continue;
+            }
+            t.shadow = baked;
+            t.shadow_key = next_shadow_key();
+            self.terrain_atlas_dirty = true;
+        }
+    }
+
+    /// Land everything the frame loop lands over frames for the shadow atlas
+    /// and the terrain palette, and lay the atlas whole: for a verb that draws
+    /// one picture with no frames before it. Bounded, so a GPU that never
+    /// finishes ends in a picture rather than a hang.
+    #[cfg(feature = "editor-ui")]
+    pub(crate) fn settle_terrain_gpu(&mut self) {
+        let until = floptle_core::time::Instant::now() + std::time::Duration::from_secs(30);
+        self.sync_terrain_palette(true);
+        loop {
+            // Lands the proxies and the occluder bakes that are in, and lays
+            // the atlas a budget further.
+            self.sync_terrain_gpu();
+            if let Some(g) = self.gpu.as_ref() {
+                g.queue.submit(None);
+                let _ = g.device.poll(wgpu::PollType::wait_indefinitely());
+            }
+            let jobs = !self.terrain_proxy_jobs.is_empty() || !self.occluder_bake_jobs.is_empty();
+            let building = self.raymarch.as_ref().is_some_and(|r| r.atlas_building());
+            let waiting = self.terrain_gpu_dirty || self.terrain_atlas_dirty || !self.terrain_region_dirty.is_empty();
+            if self.gpu.is_none() || !(jobs || building || waiting) || floptle_core::time::Instant::now() >= until {
+                break;
+            }
+            if jobs {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+    }
+
+    /// Where the player is in terrain `e`'s frame, for what is made with a
+    /// field on its way to `e`: the ground nearest first, and the meshes
+    /// round it ([`EditorTerrain::premesh`]).
+    pub(crate) fn landing_view(&self, e: Entity) -> LandingView {
+        let wt = floptle_core::world_transform(&self.world, e);
+        let ts = wt.scale.x.max(1e-6);
+        let cam = self.lod_center(self.streaming_anchor());
+        LandingView {
+            near: (wt.rotation.normalize().inverse() * (cam - wt.translation).as_vec3()) / ts,
+            body_radius: self.world.get::<floptle_core::CelestialBody>(e).map(|cb| cb.body_radius * ts as f64),
+            scale: ts,
+        }
     }
 
     /// Blocking load — the mid-play emergency inside `RESIDENT_SYNC_RADII`
@@ -4021,14 +4335,20 @@ impl Editor {
                 // genspec), never to an in-frame generation.
                 // A file of edits is laid over a generation, so it goes to the
                 // background too.
+                // Named: the one terrain load a frame still waits for, because
+                // something stands on the ground it holds.
+                let t0 = floptle_core::profile::Span::new();
                 let field = sources.iter().find_map(|s| match s {
                     TerrainSource::File(p) => floptle_vfs::read(p).ok().and_then(|b| floptle_field::ChunkField::from_bytes(&b)),
                     TerrainSource::Generate(_) => None,
                 });
+                self.script_host.profile().borrow_mut().record_part("terrainLoad", t0.ms());
                 match field {
                     Some(f) if !f.is_delta() => {
                         self.terrain_load_jobs.retain(|j| j.e != e); // job now stale
-                        self.finish_terrain_load(e, EditorTerrain::new(f));
+                        // Its collider is needed now; its shadow is not.
+                        self.finish_terrain_load(e, EditorTerrain::proxy_later(f));
+                        self.kick_terrain_proxy(e);
                         true
                     }
                     _ => {
@@ -4043,6 +4363,8 @@ impl Editor {
     /// A field arrived (background or blocking): make it resident. During Play the
     /// sim rebuilds so the body's collider exists — the established mid-Play path.
     fn finish_terrain_load(&mut self, e: Entity, t: EditorTerrain) {
+        // What a world arriving costs the frame, named as a generated one's is.
+        let t0 = floptle_core::profile::Span::new();
         // Making it let go of a great deal: see `give_memory_back`.
         self.terrain_trim_due = true;
         // A whole-field save that found its edits on loading is written again
@@ -4054,7 +4376,10 @@ impl Editor {
         if converted {
             self.touch_terrain_edit(e);
         }
-        self.terrain_gpu_dirty = true;
+        // Its shadow volume joins the atlas, and its meshes plan from scratch;
+        // every other terrain's stay as they are.
+        self.terrain_atlas_dirty = true;
+        self.terrain_replan.insert(e);
         // Its colour is taken from the ground itself now it is here: a colour
         // saved by an older engine was the paint's tint alone.
         if let Some(r) = self.terrain_render.get_mut(&e) {
@@ -4064,13 +4389,14 @@ impl Editor {
         // distance (still beyond 60 r at load time, so nothing pops).
         if self.playing {
             self.play_loaded_terrains.insert(e);
-            self.rebuild_sim();
+            self.land_terrain_in_sim(e);
             self.console.push(
                 floptle_script::LogLevel::Debug,
                 "Δ terrain streamed in — collision live".into(),
                 None,
             );
         }
+        self.script_host.profile().borrow_mut().record_part("planetLanded", t0.ms());
     }
 
     /// Drop a far resident to cold: save the field first if it changed (edit
@@ -4170,6 +4496,7 @@ impl Editor {
         self.terrain_cold.clear();
         self.terrain_disk_dirty.clear();
         self.terrain_load_jobs.clear();
+        self.terrain_proxy_jobs.clear();
         self.terrain_prepare_asks.clear();
         self.terrain_prepare_wanted.clear();
         self.terrain_prepared.clear();
@@ -4281,7 +4608,10 @@ impl Editor {
                 let hash = self.terrain_spec_hash_of(e);
                 self.write_terrain_meta(id, color, hash);
             }
-            self.terrains.insert(e, EditorTerrain::new(field));
+            // The shadow proxy is made off the frame: a scene with a big
+            // terrain spent half a second of its opening on it.
+            self.terrains.insert(e, EditorTerrain::proxy_later(field));
+            self.kick_terrain_proxy(e);
         }
         self.next_terrain_id = max_id + 1;
         for (id, name) in missing {
@@ -4628,8 +4958,24 @@ mod occluder_tests {
         ed.world.insert(e, Transform::from_translation(DVec3::ZERO));
         ed.world.insert(e, floptle_core::Matter::Mesh { asset_path: "models/mound.glb".into() });
         ed.world.insert(e, floptle_core::Collidable);
-        assert!(ed.refresh_mesh_occluders());
+        // Bakes are made off the frame: frames until none is on its way, and
+        // how many of them changed the set. Bounded by time, not frames.
+        let land = |ed: &mut crate::Editor| -> u32 {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            let mut changed = 0;
+            loop {
+                changed += ed.refresh_mesh_occluders() as u32;
+                if ed.occluder_bake_jobs.is_empty() {
+                    return changed;
+                }
+                assert!(std::time::Instant::now() < until, "a bake never landed");
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        };
+        assert_eq!(land(&mut ed), 1, "the first bake changes the set once, when it lands");
         assert_eq!(ed.occluder_bakes, 1, "the first bake");
+        // A model read and voxelised on the frame was about 100 ms of it.
+        assert_eq!(super::made_here("occluder"), 0, "the bake was made on the frame");
 
         // Flinch: a different size every frame for a second and a half,
         // decaying back to where it started.
@@ -4651,6 +4997,7 @@ mod occluder_tests {
         for _ in 0..(super::OCCLUDER_SETTLE_FRAMES + 10) {
             changed += ed.refresh_mesh_occluders() as u32;
         }
+        changed += land(&mut ed);
         assert_eq!(ed.occluder_bakes, 2, "the settled size was not baked, or baked more than once");
         assert_eq!(changed, 1, "the atlas should be re-uploaded once, when the new bake lands");
         let (key, _) = &ed.mesh_occluders[&e];
@@ -5739,7 +6086,7 @@ mod residency_tests {
         // The surface paint as it draws: its tint, over a blank (white) layer.
         let [r, g, b] = fill.surface_a.color.map(|c| (c * 255.0).round() as u8);
         assert_eq!(color, drawn_color([r, g, b, fill.surface_a.slot], &[]));
-        let t = load_terrain_from(vec![TerrainSource::Generate(spec.clone())], None, None, 0)
+        let t = load_terrain_from(vec![TerrainSource::Generate(spec.clone())], None, None, 0, None)
             .expect("genspec generates a terrain");
         assert!(t.field.data_chunks() > 0, "generated field is empty");
         // The surface is really there: a ray from outside hits near the radius.
@@ -5754,7 +6101,7 @@ mod residency_tests {
             fill.radius
         );
         // A garbled genspec fails cleanly (None → the loud-failure path), never panics.
-        assert!(load_terrain_from(vec![TerrainSource::Generate("(not ron".into())], None, None, 0).is_none());
+        assert!(load_terrain_from(vec![TerrainSource::Generate("(not ron".into())], None, None, 0, None).is_none());
         assert!(genspec_impostor_color("(not ron", &[]).is_none());
         // A corrupt file falls back to the genspec instead of failing the stream —
         // the exact failure seen in practice (LFS pointer stubs where fields should be).
@@ -5765,7 +6112,7 @@ mod residency_tests {
         let t2 = load_terrain_from(vec![
             TerrainSource::File(bad),
             TerrainSource::Generate(spec),
-        ], None, None, 0)
+        ], None, None, 0, None)
         .expect("corrupt file falls back to genspec generation");
         assert!(t2.field.data_chunks() > 0);
         let _ = std::fs::remove_dir_all(&dir);
@@ -5793,7 +6140,7 @@ mod residency_tests {
         assert_eq!(made.generator, Some(DEEP_ROCK_NEEDS_CAVES));
         assert_eq!(resolve_spec(&kept, 0).unwrap().1, kept, "a named version was not kept");
 
-        let t = load_terrain_from(vec![TerrainSource::Generate(text.clone())], None, None, DEEP_ROCK_NEEDS_CAVES).unwrap();
+        let t = load_terrain_from(vec![TerrainSource::Generate(text.clone())], None, None, DEEP_ROCK_NEEDS_CAVES, None).unwrap();
         assert_eq!(read(&t.field), Some(DEEP_ROCK_NEEDS_CAVES), "the field forgot the version that made it");
 
         // An edits-only save whose recipe names none, in a project that names
@@ -5845,7 +6192,7 @@ mod residency_tests {
         let e = ed.world.spawn();
         ed.terrains.insert(e, EditorTerrain::new(field));
         ed.terrain_render.entry(e).or_default().impostor_color = Some([0.8; 3]);
-        ed.set_terrain_slot_means(&[grey]);
+        ed.set_terrain_slot_means(vec![layer_mean(&grey)]);
         assert_eq!(ed.terrain_render[&e].impostor_color, None, "a palette change left the old colour");
     }
 

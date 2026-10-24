@@ -33,6 +33,7 @@ impl Editor {
         // when the globals are built. Only structural changes (add/edit/delete/resize)
         // re-lay the volume set in the shared 3D atlas. Static collider meshes
         // join the same atlas as shadow-only occluder volumes (they cast, never draw).
+        self.land_terrain_proxies();
         let occluders_changed = self.refresh_mesh_occluders();
         let mut budget = crate::terrain_edit::TERRAIN_SHADOW_UPLOAD_CELLS;
         if let (Some(gpu), Some(raymarch)) = (self.gpu.as_ref(), self.raymarch.as_mut()) {
@@ -78,7 +79,7 @@ impl Editor {
             self.terrain_region_dirty.clear();
         }
         let laying = self.raymarch.as_ref().is_some_and(|r| r.atlas_building());
-        if (self.terrain_gpu_dirty || occluders_changed || laying)
+        if (self.terrain_gpu_dirty || self.terrain_atlas_dirty || occluders_changed || laying)
             && let (Some(gpu), Some(raymarch)) = (self.gpu.as_ref(), self.raymarch.as_mut())
         {
             // Deterministic slot order (by Matter::Terrain id) so the globals'
@@ -122,8 +123,9 @@ impl Editor {
             // Consumed: what is left is the build's, which goes on while
             // `atlas_building` says so (and the frame's full re-mesh,
             // which reads this flag, happens once).
-            if self.terrain_gpu_dirty {
+            if self.terrain_gpu_dirty || self.terrain_atlas_dirty {
                 self.terrain_gpu_dirty = false;
+                self.terrain_atlas_dirty = false;
                 self.terrain_wire_world.clear(); // terrain changed → rebuild the wireframe
             }
             if let Some(accepted) = done {
@@ -204,46 +206,77 @@ impl Editor {
                 }
             }
         }
-        // (see terrain_nearest_mask for the per-slot filter bits)
-        // Re-upload the terrain texture palette when it changes. Each slot resolves
-        // to a 256² layer (empty / unreadable slots become white so indices align).
-        if self.terrain_textures_dirty {
+    }
+
+    /// The terrain texture palette, put on the GPU when it changes.
+    ///
+    /// Each slot is read from its file and resampled to the palette's 256² on
+    /// a worker, and the palette drawn stays until all of them are in. Read on
+    /// the frame, it was most of the frame a world's terrain arrived in, and
+    /// of every scene load after a launch in Solar: 66 to 320 ms named as the
+    /// shadow upload it sat beside. `wait` takes it on this call, for a verb
+    /// that draws one picture with no frames before it.
+    pub(crate) fn sync_terrain_palette(&mut self, wait: bool) {
+        if std::mem::take(&mut self.terrain_textures_dirty) {
             // Every slot is resampled to the palette's 256². Honour the texture's own
             // filter setting while doing it — a bilinear resize of pixel art destroys
             // it here, before any sampler runs (this was half the "terrain textures are
             // always blurry" bug; the other half was the hardcoded Linear sampler).
+            // Empty / unreadable slots become white so indices align. A list
+            // changed again before it landed starts again: the one in flight is dropped.
             let settings = &self.texture_settings;
             let root = &self.project_root;
-            let layers: Vec<floptle_render::TextureData> = self
+            let slots: Vec<Option<(std::path::PathBuf, bool)>> = self
                 .terrain_textures
                 .iter()
                 .map(|p| {
                     let nearest = crate::assets::tex_setting(settings, root, p).filter
                         == crate::assets::FilterMode::Pixelated;
-                    let file = crate::project::resolve_asset_path(root, p);
-                    if !p.is_empty()
-                        && let Some(t) =
-                            floptle_assets::load_texture_sized_filtered(&file, 256, 256, nearest)
-                    {
-                        return t;
-                    }
-                    floptle_render::TextureData { pixels: vec![255; 256 * 256 * 4], width: 256, height: 256 }
+                    (!p.is_empty()).then(|| (crate::project::resolve_asset_path(root, p), nearest))
                 })
                 .collect();
-            let mask =
-                crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings, &self.project_root);
-            self.set_terrain_slot_means(&layers);
-            if let Some(gpu) = self.gpu.as_ref() {
-                if let Some(raymarch) = self.raymarch.as_mut() {
-                    raymarch.set_terrain_textures(gpu, &layers);
-                }
-                // Meshed terrain (P2/P6) draws in the raster pass, so it needs its own copy
-                // of the palette + the same per-slot nearest mask.
-                if let Some(raster) = self.raster.as_mut() {
-                    raster.set_terrain_palette(gpu, &layers, mask);
-                }
+            let (tx, rx) = std::sync::mpsc::channel();
+            crate::worker::spawn("terrain-palette", move || {
+                #[cfg(test)]
+                crate::terrain_edit::made_on("palette");
+                let layers: Vec<floptle_render::TextureData> = slots
+                    .into_iter()
+                    .map(|slot| {
+                        slot.and_then(|(file, nearest)| floptle_assets::load_texture_sized_filtered(&file, 256, 256, nearest))
+                            .unwrap_or_else(|| floptle_render::TextureData { pixels: vec![255; 256 * 256 * 4], width: 256, height: 256 })
+                    })
+                    .collect();
+                let means = layers.iter().map(crate::terrain_edit::layer_mean).collect();
+                let _ = tx.send((layers, means));
+            });
+            self.terrain_palette_job = Some(rx);
+        }
+        let Some(rx) = self.terrain_palette_job.as_ref() else { return };
+        let layers = if wait {
+            rx.recv().ok()
+        } else {
+            match rx.try_recv() {
+                Ok(layers) => Some(layers),
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
             }
-            self.terrain_textures_dirty = false;
+        };
+        self.terrain_palette_job = None;
+        let Some((layers, means)) = layers else { return };
+        // The list the layers were read from: a change since would have
+        // started another job above.
+        let mask =
+            crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings, &self.project_root);
+        self.set_terrain_slot_means(means);
+        if let Some(gpu) = self.gpu.as_ref() {
+            if let Some(raymarch) = self.raymarch.as_mut() {
+                raymarch.set_terrain_textures(gpu, &layers);
+            }
+            // Meshed terrain (P2/P6) draws in the raster pass, so it needs its own copy
+            // of the palette + the same per-slot nearest mask.
+            if let Some(raster) = self.raster.as_mut() {
+                raster.set_terrain_palette(gpu, &layers, mask);
+            }
         }
     }
 
@@ -559,7 +592,8 @@ mod shadow_atlas_tests {
         for _ in 0..20_000 {
             cells.push(frame(ed));
             let r = ed.raymarch.as_ref().unwrap();
-            if !r.atlas_building() && !ed.terrain_gpu_dirty && ed.terrain_region_dirty.is_empty() {
+            // Occluder bakes are made off the frame, and land when they land.
+            if !r.atlas_building() && !ed.terrain_gpu_dirty && ed.terrain_region_dirty.is_empty() && ed.occluder_bake_jobs.is_empty() {
                 return cells;
             }
             std::thread::sleep(std::time::Duration::from_micros(200));

@@ -123,6 +123,7 @@ pub(crate) fn feed_view(ed: &mut crate::Editor, named: Option<&str>, w: u32, h: 
 fn pump_terrain_meshes(ed: &mut crate::Editor) {
     let full = ed.terrain_gpu_dirty;
     ed.sync_terrain_gpu();
+    ed.sync_terrain_palette(false);
     let at = floptle_core::active_camera(&ed.world)
         .map(|e| floptle_core::world_transform(&ed.world, e).translation)
         .unwrap_or(ed.camera.position);
@@ -392,7 +393,7 @@ pub(crate) fn run(args: Args) -> i32 {
              shot is drawn as its impostor sphere rather than its surface"
         );
     }
-    ed.sync_terrain_gpu();
+    ed.settle_terrain_gpu();
     // **The fields are resident; now the triangles.** Chunk meshes reach the
     // GPU through the pump the frame loop runs before every draw, and this verb
     // has no frame loop: the collider was live, the character stood on the
@@ -501,7 +502,7 @@ pub(crate) fn run(args: Args) -> i32 {
                 sequence_rotation(live.rotation, turn, f),
                 Projection::of_camera(fov_y, ortho, ortho_height, 0.05, 300_000.0),
             );
-            ed.sync_terrain_gpu();
+            ed.settle_terrain_gpu();
             // Centred where the frame loop centres terrain detail, as the first
             // picture is: the game's `terrain.lodAnchor` when it names one.
             ed.settle_terrain_meshes(ed.lod_center(pos), std::time::Duration::from_secs(5));
