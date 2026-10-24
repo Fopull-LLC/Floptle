@@ -133,6 +133,7 @@ mod harness;
 mod nav_bake;
 #[cfg(feature = "editor-ui")]
 mod model_convert;
+mod upgrade_models;
 #[cfg(feature = "editor-ui")]
 mod native_dialog;
 mod reflect_capture;
@@ -213,6 +214,7 @@ mod capture;
 mod user_data;
 mod node_bounds;
 mod body_fit;
+mod body_upgrade;
 #[cfg(test)]
 mod body_fit_tests;
 mod paint_io;
@@ -293,6 +295,8 @@ mod ui_design;
 #[cfg(feature = "editor-ui")]
 mod ui_design_ui;
 mod ui_game;
+mod upgrade;
+mod terrain_upgrade;
 mod ui_input;
 mod ui_nav;
 mod ui_shader_lib;
@@ -1891,6 +1895,8 @@ fn new_project(path: &Path, stamp: &str, template: &str, examples: bool) -> i32 
     // A note for whoever — or whatever — opens this folder next. Scaffold-time
     // only: it belongs to the project from here on.
     agents_guide::write(path);
+    // The engine's generated scripting stubs stay out of the game's history.
+    let _ = upgrade::ignore_generated_library(path, None);
     match chosen {
         Some(t) => floptle_say::say!("created the {} project at {}", t.name, path.display()),
         None => floptle_say::say!("created project at {}", path.display()),
@@ -1911,38 +1917,18 @@ fn migrate_project(path: &Path, stamp: &str) -> i32 {
         floptle_say::say_err!("{} is not a directory", path.display());
         return 1;
     }
-    // Recursively bring effects up to the current format, skipping
-    // hidden/target. Only an effect whose format changed is written, and each
-    // one written is named, so whoever upgraded can review it.
-    let mut stack = vec![path.to_path_buf()];
-    let mut migrated = 0usize;
-    let mut current = 0usize;
-    while let Some(dir) = stack.pop() {
-        let Ok(rd) = floptle_vfs::read_dir(&dir) else { continue };
-        for entry in rd {
-            let p = entry.path();
-            if entry.is_dir() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if !name.starts_with('.') && name != "target" {
-                    stack.push(p);
-                }
-            } else if p.to_string_lossy().ends_with(floptle_scene::VFX_EXT) {
-                match floptle_scene::migrate_vfx_effect_file(&p) {
-                    Ok(true) => {
-                        migrated += 1;
-                        let shown = p.strip_prefix(path).unwrap_or(&p);
-                        floptle_say::say!("rewrote {} (its format changed)", shown.display());
-                    }
-                    Ok(false) => current += 1,
-                    Err(e) => floptle_say::say_err!("left {} untouched (won't parse: {e})", p.display()),
-                }
-            }
-        }
+    // The upgrade pass: every step that arrived after the version the project
+    // was stamped with, in order. Each file a step changed is named, so
+    // whoever upgraded can review it (the Hub's summary reads these lines).
+    let cfg_path = path.join("project.ron");
+    let from = floptle_scene::try_load_project(&cfg_path).ok().flatten().and_then(|c| c.engine_version);
+    let done = upgrade::run(path, from.as_deref());
+    let lines = upgrade::report(path, &done);
+    for l in &lines {
+        floptle_say::say!("{l}");
     }
     // Stamp the project's engine version — but only if project.ron exists and parses. Never
     // fabricate a missing one or overwrite an unparseable one (that would lose data).
-    let cfg_path = path.join("project.ron");
     match floptle_scene::try_load_project(&cfg_path) {
         Ok(Some(mut cfg)) => {
             cfg.engine_version = Some(stamp.to_string());
@@ -1968,8 +1954,11 @@ fn migrate_project(path: &Path, stamp: &str) -> i32 {
     let ed = Editor { project_root: path.to_path_buf(), ..Default::default() };
     ed.seed_input_map();
     floptle_say::say!(
-        "migrated {migrated} effect(s) in {}; {current} already current, left as they were",
-        path.display()
+        "upgraded {} from {} to {stamp}: {} step(s) run, {} file(s) changed",
+        path.display(),
+        from.as_deref().unwrap_or("an unstamped project"),
+        done.len(),
+        lines.iter().filter(|l| l.starts_with("rewrote ")).count()
     );
     0
 }
@@ -2565,6 +2554,12 @@ struct Editor {
     terrain_op_queue: std::collections::VecDeque<crate::terrain_edit::QueuedEdit>,
     /// Milliseconds of script terrain edits applied this frame so far.
     terrain_edit_ms: f64,
+    /// When a game's planets draw as their impostors (`terrain.impostorAt`),
+    /// by terrain id; a body not here switches at the default distance.
+    terrain_impostor_rules: std::collections::HashMap<u32, floptle_script::ImpostorRule>,
+    /// Each terrain palette layer's mean colour, linear: what a planet's
+    /// impostor is drawn in, with the paint's tint.
+    terrain_slot_means: Vec<[f32; 3]>,
     /// Chunks of planets put away far from the camera being made again on a
     /// worker as it comes near ([`Self::stream_far_chunks`]).
     terrain_promotions: Vec<crate::terrain_edit::PromotionJob>,
@@ -3100,6 +3095,11 @@ struct Editor {
     /// camera, landed craft freeze in the carried frame and in-flight craft
     /// coast on analytic Kepler rails; both wake on approach (see space.rs).
     compound_lod: std::collections::HashMap<u32, crate::space::CompoundLod>,
+    /// `node.carry` for this tick (body or assembly root eid → the world
+    /// displacement of the frame it rides in), and summed over the frame's
+    /// ticks for the next frame pass (see space.rs, play_step.rs).
+    tick_carry: std::collections::HashMap<u32, [f64; 3]>,
+    frame_carry: std::collections::HashMap<u32, [f64; 3]>,
     /// Compounds exempt from distant-craft LOD (`assembly.keepLive`): they stay
     /// in full physics however far the camera roams — the piloted vessel sets
     /// this while the map view is open so it remains controllable (see space.rs).
@@ -3240,6 +3240,10 @@ struct Editor {
     /// `--script-budget-ms` for this run (`floptle run`, `floptle play`):
     /// beats the project's `script_budget_ms`. Applied at Play start.
     script_budget_override: Option<u64>,
+    /// The engine version an older project is upgraded to when it opens, for
+    /// tests: an in-workspace build reports 0.0.0 and upgrades nothing.
+    #[cfg(test)]
+    upgrade_to_for_test: Option<String>,
     /// The retro target's dimensions as last applied, so any change to them —
     /// Project Settings, a window resize, or a script's `app.setRetroHeight` —
     /// is noticed by one comparison rather than by whichever watcher happened to
@@ -5528,6 +5532,20 @@ mod cli_tests {
 
 #[cfg(test)]
 mod migrate_tests {
+    /// **A new project keeps the engine's generated stubs out of git.**
+    /// `.floptle/library/` is written by the editor from the engine that opens
+    /// the project; a game committing it commits the engine's copy.
+    #[cfg(feature = "editor-ui")]
+    #[test]
+    fn a_new_project_ignores_the_generated_library() {
+        let dir = std::env::temp_dir().join(format!("floptle_new_ignore_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(super::new_project(&dir, "0.118.0", "", false), 0);
+        let ignore = std::fs::read_to_string(dir.join(".gitignore")).expect("a .gitignore");
+        assert!(ignore.lines().any(|l| l == crate::upgrade::LIBRARY_IGNORE), "{ignore}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// **Upgrading a project leaves its current effects alone.** The upgrade
     /// re-saved every `.vfx.ron` it found, so a project with nothing to
     /// migrate lost its effects' comments and layout to an engine version

@@ -592,8 +592,10 @@ impl Editor {
         };
         let overrides = crate::rig_overrides::RigOverrides::load(file);
         // The embedded textures' filter, applied as the parts register: "smooth
-        // + mipmaps" needs its mip chain built from the pixels at upload.
-        let chosen = overrides.texture_filter;
+        // + mipmaps" needs its mip chain built from the pixels at upload. The
+        // model's own choice first, then the project's, then each file's.
+        let chosen = model_filter_choice(overrides.texture_filter, &self.project);
+        let rules = self.project.imported_materials_resolved();
         match decoded {
             // Rigged: any glTF with animations keeps its node tree + clips
             // (parts stay node-local and get posed each frame).
@@ -621,6 +623,7 @@ impl Editor {
                             (p.texture, p.base_color, &p.maps),
                             chosen,
                             &mut images,
+                            rules,
                         ),
                     })
                     .collect();
@@ -678,6 +681,7 @@ impl Editor {
                             (p.texture, p.base_color, &p.maps),
                             chosen,
                             &mut images,
+                            rules,
                         ),
                     })
                     .collect();
@@ -981,6 +985,9 @@ impl Editor {
     /// Console says so, because a project
     /// whose stated setting is being ignored should never have to be guessed at.
     pub(crate) fn apply_script_vec3_mode(&mut self) {
+        // The planet generator a script's planets are made by rides the same
+        // two moments: this project's, so its worlds stay the worlds they were.
+        self.script_host.set_terrain_generator(self.project.terrain_generator_resolved());
         let mode = match self.project.script_vec3_resolved() {
             floptle_scene::ScriptVec3Doc::Exact => floptle_script::Vec3Mode::Exact,
             floptle_scene::ScriptVec3Doc::Fast => floptle_script::Vec3Mode::Fast,
@@ -1848,6 +1855,12 @@ impl Editor {
         self.project_root = root;
         reset_refused_refs();
         self.seed_project_dirs();
+        // The project's settings, and an older project brought up to this
+        // engine, before anything in it is loaded: an upgrade rewrites scenes
+        // and the project's own settings, and a scene already in memory would
+        // save its old values back over the upgraded file.
+        self.project = self.read_project_config();
+        self.upgrade_older_project();
         let (path, doc) = self.load_active_scene();
         self.set_scene_file(&path);
         self.world = World::new();
@@ -1872,7 +1885,6 @@ impl Editor {
         // The reasonable conclusion is that baking does not stick, and the
         // reasonable response is to bake again, every single session.
         self.adopt_scene_bakes();
-        self.project = self.read_project_config();
         self.apply_script_vec3_mode();
         // The action map belongs to the project, so it reloads with it —
         // otherwise the new project's scripts would resolve against the old
@@ -1980,7 +1992,11 @@ impl Editor {
             // the one field rather than replacing everything.
             self.project.script_vec3 = floptle_scene::ProjectConfigDoc::for_new_project().script_vec3;
             self.apply_script_vec3_mode();
+            // Stamped with the engine that made it, so the upgrade pass knows
+            // it needs nothing yet, and its generated stubs stay out of git.
+            self.project.engine_version = Some(crate::distribution_version());
             let _ = floptle_scene::save_project(&self.project, &self.project_cfg_path());
+            let _ = crate::upgrade::ignore_generated_library(&self.project_root, None);
             #[cfg(feature = "editor-ui")]
             self.create_terrain(&crate::terrain_ui::NewTerrainCfg {
                 size_xz: 48.0,
@@ -2179,6 +2195,7 @@ impl Editor {
                         crate::terrain_edit::impostor_surface_color(
                             &t.field,
                             cb.body_radius as f32,
+                            &self.terrain_slot_means,
                         )
                     });
                 Some((id, color, self.terrain_spec_hash_of(e)))
@@ -2974,6 +2991,26 @@ pub(crate) fn scenes_shadowed_by_a_root_copy(root: &Path) -> Vec<String> {
 /// texture, else crisp. A file made in a pixel-art tool says nearest and one
 /// from Blender's default material says linear, so each keeps the look it
 /// was made with.
+/// The filter a model's textures take before their file has a say: the
+/// model's own Inspector choice, then the project's setting. `None` leaves it
+/// to each texture's file, and then crisp ([`embedded_sampling`]).
+pub(crate) fn model_filter_choice(
+    model: Option<crate::assets::FilterMode>,
+    cfg: &floptle_scene::ProjectConfigDoc,
+) -> Option<crate::assets::FilterMode> {
+    model.or_else(|| project_texture_filter(cfg))
+}
+
+/// The filter the project setting puts on every model's textures, or `None`
+/// for "as each file says".
+pub(crate) fn project_texture_filter(cfg: &floptle_scene::ProjectConfigDoc) -> Option<crate::assets::FilterMode> {
+    match cfg.model_texture_filter_resolved() {
+        floptle_scene::ModelTextureFilterDoc::AsFile => None,
+        floptle_scene::ModelTextureFilterDoc::Crisp => Some(crate::assets::FilterMode::Pixelated),
+        floptle_scene::ModelTextureFilterDoc::Smooth => Some(crate::assets::FilterMode::SmoothMipmaps),
+    }
+}
+
 pub(crate) fn embedded_sampling(
     chosen: Option<crate::assets::FilterMode>,
     file_filters: &[Option<floptle_render::TexFilter>],
@@ -3027,11 +3064,14 @@ pub(crate) fn imported_look(
     part: (Option<usize>, [f32; 3], &floptle_assets::gltf_import::PartMaps),
     chosen: Option<crate::assets::FilterMode>,
     images: &mut std::collections::HashMap<usize, floptle_render::TexId>,
+    rules: floptle_scene::ImportedMaterialsDoc,
 ) -> Option<crate::ImportedLook> {
     let (base_image, base_color, maps) = part;
     // A part with no material of its own keeps the plain look it always had;
-    // one with a material draws what the material says, maps or not.
-    if !maps.explicit && !maps.any() {
+    // one with a material draws what the material says, maps or not. Under
+    // the 0.116 rules only a part with a map or a glow had a look of its own.
+    let classic = rules == floptle_scene::ImportedMaterialsDoc::Classic;
+    if (!maps.explicit || classic) && !maps.any() {
         return None;
     }
     let mut tex = |i: Option<usize>| -> Option<floptle_render::TexId> {
@@ -3040,7 +3080,7 @@ pub(crate) fn imported_look(
         let sampling = embedded_sampling(chosen, file_filters, Some(i));
         Some(*images.entry(i).or_insert_with(|| raster.register_texture_shared(gpu, data, sampling)))
     };
-    let m = imported_material(base_color, maps);
+    let m = imported_material(base_color, maps, rules);
     let base = tex(base_image);
     let mr = tex(maps.metallic_roughness);
     let look = crate::ImportedLook {
@@ -3053,18 +3093,26 @@ pub(crate) fn imported_look(
 
 /// The engine material an imported part's own material describes, before its
 /// pictures are bound.
-pub(crate) fn imported_material(base_color: [f32; 3], maps: &floptle_assets::gltf_import::PartMaps) -> floptle_core::Material {
+pub(crate) fn imported_material(
+    base_color: [f32; 3],
+    maps: &floptle_assets::gltf_import::PartMaps,
+    rules: floptle_scene::ImportedMaterialsDoc,
+) -> floptle_core::Material {
+    let classic = rules == floptle_scene::ImportedMaterialsDoc::Classic;
     let mut m = floptle_core::Material::tinted(base_color);
     // **A factor applies with or without a map**, as glTF has it: a metal
     // ball exported with metallic 1, roughness 0.2 and no pictures is a
     // polished metal ball. A part with no material at all has nothing to say
-    // about either, and keeps the plain look.
-    if maps.explicit || maps.metallic_roughness.is_some() {
+    // about either, and keeps the plain look. The 0.116 rules shaded a part
+    // physically only when it had a metallic-roughness map.
+    if (maps.explicit && !classic) || maps.metallic_roughness.is_some() {
         m.shading = floptle_core::Shading::Physical;
         m.metallic = maps.metallic;
         m.roughness = maps.roughness;
     }
-    apply_alpha_and_sides(&mut m, maps);
+    if !classic {
+        apply_alpha_and_sides(&mut m, maps);
+    }
     m.normal_strength = maps.normal_scale;
     m.occlusion_strength = maps.occlusion_strength;
     m.emissive = maps.emissive_factor;
@@ -3073,25 +3121,28 @@ pub(crate) fn imported_material(base_color: [f32; 3], maps: &floptle_assets::glt
 }
 
 /// How an imported material's alpha, sidedness and base-map transform reach
-/// the engine's material: MASK cuts at its own cutoff, OPAQUE cuts nothing,
-/// BLEND blends; a single-sided material is not drawn from behind; and the
-/// base map's `KHR_texture_transform` becomes the material's UV tiling, which
-/// the surface maps share.
+/// the engine's material: glTF's OPAQUE, MASK and BLEND are the engine's
+/// opaque, cutout and blend, MASK at its own cutoff; a single-sided material
+/// is not drawn from behind; and the base map's `KHR_texture_transform`
+/// becomes the material's UV tiling, which the surface maps share.
 pub(crate) fn apply_alpha_and_sides(m: &mut floptle_core::Material, maps: &floptle_assets::gltf_import::PartMaps) {
     use floptle_assets::glb_write::AlphaMode;
+    use floptle_core::BlendMode;
     if !maps.explicit {
         return;
     }
     match maps.alpha_mode {
-        AlphaMode::Opaque => m.alpha_cutoff = 0.0,
-        AlphaMode::Mask(c) => m.alpha_cutoff = c,
-        // "Below 1 blends" is the engine's rule for a see-through surface; a
-        // BLEND material whose factor is 1 lets its picture's alpha through
-        // that way, a fraction of a percent shy of the factor it named.
-        AlphaMode::Blend => m.alpha = maps.alpha.min(0.995),
-    }
-    if maps.alpha_mode != AlphaMode::Blend && maps.alpha < 1.0 && maps.alpha_mode != AlphaMode::Opaque {
-        m.alpha = maps.alpha;
+        AlphaMode::Opaque => m.blend = BlendMode::Opaque,
+        AlphaMode::Mask(c) => {
+            m.blend = BlendMode::Cutout;
+            m.alpha_cutoff = c;
+            // The base factor's alpha multiplies the picture's before the cut.
+            m.alpha = maps.alpha;
+        }
+        AlphaMode::Blend => {
+            m.blend = BlendMode::Blend;
+            m.alpha = maps.alpha;
+        }
     }
     m.double_sided = maps.double_sided;
     if let Some(t) = maps.uv_transform {
