@@ -611,11 +611,56 @@ impl PostShaders {
         module_src: &str,
         replace: Option<PostShaderId>,
     ) -> PostShaderId {
-        let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let built = self.builder(gpu).build(module_src);
+        self.install(built, replace)
+    }
+
+    /// Everything building a screen shader needs from this registry, owned, so
+    /// the build can run on a worker thread while the frame keeps drawing.
+    /// [`Self::register`] is this and [`Self::install`] in one call.
+    pub fn builder(&self, gpu: &Gpu) -> PostShaderBuilder {
+        PostShaderBuilder { device: gpu.device.clone(), pipeline_layout: self.pipeline_layout.clone(), format: self.format }
+    }
+
+    /// Put a pass built by [`PostShaderBuilder::build`] into the registry, as
+    /// a new shader or in place of `replace`.
+    pub fn install(&mut self, built: BuiltPostShader, replace: Option<PostShaderId>) -> PostShaderId {
+        let entry = built.0;
+        match replace {
+            Some(id) if id.0 < self.shaders.len() => {
+                self.shaders[id.0] = entry;
+                id
+            }
+            _ => {
+                self.shaders.push(entry);
+                PostShaderId(self.shaders.len() - 1)
+            }
+        }
+    }
+}
+
+/// What building a screen shader needs from [`PostShaders`], owned. Made by
+/// [`PostShaders::builder`].
+#[derive(Clone)]
+pub struct PostShaderBuilder {
+    device: wgpu::Device,
+    pipeline_layout: wgpu::PipelineLayout,
+    format: wgpu::TextureFormat,
+}
+
+/// A screen shader built by [`PostShaderBuilder::build`], waiting to be
+/// installed with [`PostShaders::install`].
+pub struct BuiltPostShader(CustomPost);
+
+impl PostShaderBuilder {
+    /// Build one authored pass's pipeline from its complete module source, as
+    /// [`PostShaders::register`] takes it.
+    pub fn build(&self, module_src: &str) -> BuiltPostShader {
+        let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("post-flsl"),
             source: wgpu::ShaderSource::Wgsl(module_src.into()),
         });
-        let pipeline = gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("post-flsl"),
             layout: Some(&self.pipeline_layout),
             vertex: wgpu::VertexState {
@@ -640,18 +685,11 @@ impl PostShaders {
             multiview_mask: None,
             cache: None,
         });
-        let entry = CustomPost { pipeline };
-        match replace {
-            Some(id) if id.0 < self.shaders.len() => {
-                self.shaders[id.0] = entry;
-                id
-            }
-            _ => {
-                self.shaders.push(entry);
-                PostShaderId(self.shaders.len() - 1)
-            }
-        }
+        BuiltPostShader(CustomPost { pipeline })
     }
+}
+
+impl PostShaders {
 
     /// Set the ordered pass list every chain will run this frame: which shaders,
     /// in which order, with which knob values.

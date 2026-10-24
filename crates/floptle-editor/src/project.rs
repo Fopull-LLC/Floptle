@@ -118,9 +118,14 @@ impl Editor {
                 return Some(*id);
             }
         let max = self.gpu.as_ref()?.device.limits().max_texture_dimension_2d;
+        // A warm already decoding it is waited on, never decoded again beside.
+        if let Some(data) = self.adopt_warm_texture(path) {
+            return self.register_decoded_texture(path, &data?, want);
+        }
         // The registry stays keyed by the ref as written; only the fs read resolves.
         let file = self.resolve_asset_path(path);
         let decode = floptle_core::profile::Span::new();
+        self.warm.decodes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let data = decode_texture_file(&file, max, path)?;
         self.note_asset(path, "assetDecode", decode.ms());
         self.register_decoded_texture(path, &data, want)

@@ -26,8 +26,8 @@ empty list) and one Console line naming the rule. `getContents` walks at most
 
 | Call | Returns |
 |---|---|
-| `assets.getFile("models/armor.glb")` | the asset's path (a string you hand to `node.model` / `node.material`), or `nil` if it doesn't exist |
-| `assets.getContents("models")` | an array of **every file** under that directory (recursive) — great for building tables |
+| `assets.getFile("models/armor.glb")` | the asset's path relative to `Assets/` (a string you hand to `node.model` / `node.material`), or `nil` if it doesn't exist |
+| `assets.getContents("models")` | an array of **every file** under that directory (recursive), each relative to `Assets/` (`"models/armor/iron.glb"`) — great for building tables |
 | `assets.readText("data/intro.txt")` | the file's text, or `nil, why` |
 | `assets.readJson("charts/neon.json")` | the file decoded as JSON (`json.decode` rules), or `nil, why` |
 | `assets.writeText(path, text)` | write a text file under `Assets/` (folders created) — `ok, why` |

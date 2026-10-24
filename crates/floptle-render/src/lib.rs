@@ -69,8 +69,8 @@ pub use reflect::{MAX_PROBES, PROBE_FACE, PROBE_H, PROBE_W, ProbeDetail, Reflect
 pub use ssr::SceneHistory;
 pub use palette::{Palette, PaletteQuantize};
 pub use particles::{ParticleBatch, ParticleBlend, ParticleGlobals, ParticleInstance, Particles};
-pub use post::{PostSettings, PostShaderId, PostShaders, PostStack, SsaoFrame, Tonemap};
-pub use ui::{Ui, UiBatch, UiBindingId, UiInstance, UiPlane, UiShaderId, UiTex};
+pub use post::{BuiltPostShader, PostSettings, PostShaderBuilder, PostShaderId, PostShaders, PostStack, SsaoFrame, Tonemap};
+pub use ui::{BuiltUiShader, Ui, UiBatch, UiBindingId, UiInstance, UiPlane, UiShaderBuilder, UiShaderId, UiTex};
 pub use raster::{
     ext_index_of, instance_of, is_terrain, instance_of_mat, pass_prelude, raster_custom_source, set_ext_index,
     BuiltFlsl, FlslBindingId, FlslBlend, FlslBuilder, FlslDraw, FlslShaderId, Globals, InstanceRaw, MaterialParams, Raster,

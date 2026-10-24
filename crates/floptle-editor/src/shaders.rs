@@ -370,6 +370,9 @@ impl Editor {
                 })
                 .collect()
         };
+        // The binding work, apart from the textures it waited for (those
+        // name themselves): what `materialBind` reports.
+        let mut bind_ms = 0.0f32;
         let mut seen: HashSet<Entity> = HashSet::new();
         for plan in plans {
             seen.insert(plan.key);
@@ -377,10 +380,12 @@ impl Editor {
             let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
                 return;
             };
+            let bind = floptle_core::profile::Span::new();
             apply_flsl_bind(
                 &mut self.flsl_binds, &mut self.flsl_pool, gpu, raster,
                 (plan.key, plan.shader, plan.params, textures),
             );
+            bind_ms += bind.ms();
         }
         self.flsl_gate.planned += (seen.len()) as u64;
         // Entities that lost their shader material give their share back —
@@ -394,10 +399,15 @@ impl Editor {
             let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
                 return;
             };
+            let bind = floptle_core::profile::Span::new();
             apply_flsl_bind(
                 &mut self.obj_flsl_binds, &mut self.flsl_pool, gpu, raster,
                 (plan.key, plan.shader, plan.params, textures),
             );
+            bind_ms += bind.ms();
+        }
+        if bind_ms > 0.0 {
+            self.script_host.profile().borrow_mut().record_part("materialBind", bind_ms);
         }
         self.flsl_gate.planned += obj_seen.len() as u64;
         retire_binds(&mut self.obj_flsl_binds, &mut self.flsl_pool, |k, _| !wanted(&k.0) || obj_seen.contains(k));
@@ -410,6 +420,9 @@ impl Editor {
     /// project-relative). Keeps the last good pipeline on failure;
     /// Console-reports each new error once.
     pub(crate) fn ensure_flsl_shader(&mut self, rel: &str) {
+        // A warm already building it is waited on (or, not started, run
+        // here), never built a second time beside it.
+        self.adopt_warm_shader(rel);
         let full = self.resolve_asset_path(rel);
         let mtime = floptle_vfs::modified(&full);
         if let Some(entry) = self.flsl_cache.get(rel)
@@ -891,7 +904,7 @@ pub(crate) type ObjFlslBinds = HashMap<(Entity, String), FlslMatBind>;
 
 /// One `stage ui` `.flsl` file's compile state, keyed by element shader path.
 pub(crate) struct UiFlslEntry {
-    mtime: Option<SystemTime>,
+    pub(crate) mtime: Option<SystemTime>,
     /// The last good compile — kept while `error` reports a newer failure.
     pub(crate) compiled: Option<(floptle_shader::CompiledUi, floptle_render::UiShaderId)>,
     pub(crate) error: Option<String>,
@@ -975,6 +988,9 @@ impl Editor {
     /// Compile (or hot-reload) one `stage ui` `.flsl`. Keeps the last good
     /// pipeline on failure; Console-reports each new error once.
     fn ensure_ui_shader(&mut self, rel: &str) {
+        // A warm already building it is waited on (or, not started, run
+        // here), never built a second time beside it.
+        self.adopt_warm_shader(rel);
         let full = self.resolve_asset_path(rel);
         let mtime = floptle_vfs::modified(&full);
         if let Some(entry) = self.ui_flsl_cache.get(rel)
@@ -1011,42 +1027,14 @@ impl Editor {
         self.note_asset(rel, "shaderCompile", compile.ms());
         match outcome {
             Ok(compiled) => {
-                let replace =
-                    self.ui_flsl_cache.get(rel).and_then(|e| e.compiled.as_ref()).map(|(_, id)| *id);
-                let chunk_full = format!(
-                    "{}\n{}\n{}",
-                    floptle_shader::transpile::UI_FIELD_SHIM,
-                    floptle_shader::stdlib::SUPPORT_WGSL,
-                    compiled.chunk
-                );
-                let (Some(gpu), Some(uir)) = (self.gpu.as_ref(), self.ui_render.as_mut()) else {
+                let Some(builder) = self.gpu.as_ref().zip(self.ui_render.as_ref()).map(|(g, u)| u.ui_shader_builder(g))
+                else {
                     return;
                 };
                 let build = floptle_core::profile::Span::new();
-                let id = uir.register_ui_shader(gpu, &chunk_full, replace);
+                let built = builder.build(&ui_chunk(&compiled));
                 self.note_asset(rel, "pipelineCompile", build.ms());
-                self.console.push(
-                    floptle_script::LogLevel::Debug,
-                    format!("◈ compiled {rel} (ui)"),
-                    None,
-                );
-                // Param layout may have changed shape: retire live bindings of
-                // this shader so the next ensure pass rebuilds them.
-                let stale: Vec<u32> = self
-                    .ui_flsl_binds
-                    .iter()
-                    .filter(|(_, b)| b.shader == id)
-                    .map(|(e, _)| *e)
-                    .collect();
-                for e in stale {
-                    if let Some(b) = self.ui_flsl_binds.remove(&e) {
-                        self.ui_flsl_free.push(b.binding);
-                    }
-                }
-                self.ui_flsl_cache.insert(
-                    rel.to_string(),
-                    UiFlslEntry { mtime, compiled: Some((compiled, id)), error: None },
-                );
+                self.install_ui_flsl(rel, mtime, compiled, built);
             }
             Err(msg) => {
                 let msg = report(self, msg);
@@ -1059,12 +1047,56 @@ impl Editor {
         }
     }
 }
+
+impl Editor {
+    /// Put a compiled `stage ui` shader in use under `rel`: its pipelines,
+    /// built here or on a warm's worker, installed, and the bindings of the
+    /// shader it replaces retired.
+    pub(crate) fn install_ui_flsl(
+        &mut self,
+        rel: &str,
+        mtime: Option<SystemTime>,
+        compiled: floptle_shader::CompiledUi,
+        built: floptle_render::BuiltUiShader,
+    ) {
+        let replace = self.ui_flsl_cache.get(rel).and_then(|e| e.compiled.as_ref()).map(|(_, id)| *id);
+        let Some(uir) = self.ui_render.as_mut() else { return };
+        let id = uir.install_ui_shader(built, replace);
+        self.console.push(floptle_script::LogLevel::Debug, format!("◈ compiled {rel} (ui)"), None);
+        // Param layout may have changed shape: retire live bindings of
+        // this shader so the next ensure pass rebuilds them.
+        let stale: Vec<u32> = self.ui_flsl_binds.iter().filter(|(_, b)| b.shader == id).map(|(e, _)| *e).collect();
+        for e in stale {
+            if let Some(b) = self.ui_flsl_binds.remove(&e) {
+                self.ui_flsl_free.push(b.binding);
+            }
+        }
+        self.ui_flsl_cache.insert(rel.to_string(), UiFlslEntry { mtime, compiled: Some((compiled, id)), error: None });
+    }
+
+    /// Put a compiled screen shader in use under `rel`: its pipeline, built
+    /// here or on a warm's worker, installed in the scene's registry.
+    pub(crate) fn install_post_flsl(
+        &mut self,
+        rel: &str,
+        mtime: Option<SystemTime>,
+        compiled: floptle_shader::CompiledPost,
+        built: floptle_render::BuiltPostShader,
+    ) {
+        let replace = self.post_flsl_cache.get(rel).and_then(|e| e.compiled.as_ref()).map(|(_, id)| *id);
+        let Some(reg) = self.post_shaders.as_mut() else { return };
+        let id = reg.install(built, replace);
+        self.console.push(floptle_script::LogLevel::Debug, format!("◈ compiled {rel} (screen)"), None);
+        self.post_flsl_cache.insert(rel.to_string(), PostFlslEntry { mtime, compiled: Some((compiled, id)), error: None });
+    }
+}
+
 pub(crate) type SdfCache = HashMap<String, SdfEntry>;
 
 /// One `stage post` `.flsl` file's compile state, keyed by its path on the
 /// PostProcess node.
 pub(crate) struct PostFlslEntry {
-    mtime: Option<SystemTime>,
+    pub(crate) mtime: Option<SystemTime>,
     /// The last good compile — kept while `error` reports a newer failure, so a
     /// broken save leaves the effect running instead of dropping the frame back
     /// to un-processed mid-edit.
@@ -1140,6 +1172,9 @@ impl Editor {
     /// Compile (or hot-reload) one `stage post` `.flsl`. Keeps the last good
     /// pipeline on failure; Console-reports each new error once.
     fn ensure_post_shader(&mut self, rel: &str) {
+        // A warm already building it is waited on (or, not started, run
+        // here), never built a second time beside it.
+        self.adopt_warm_shader(rel);
         let full = self.resolve_asset_path(rel);
         let mtime = floptle_vfs::modified(&full);
         if let Some(entry) = self.post_flsl_cache.get(rel)
@@ -1176,25 +1211,13 @@ impl Editor {
         self.note_asset(rel, "shaderCompile", compile.ms());
         match outcome {
             Ok(compiled) => {
-                let replace = self
-                    .post_flsl_cache
-                    .get(rel)
-                    .and_then(|e| e.compiled.as_ref())
-                    .map(|(_, id)| *id);
-                let module_src = post_module_source(&compiled.chunk);
-                let (Some(gpu), Some(reg)) = (self.gpu.as_ref(), self.post_shaders.as_mut()) else {
+                let Some(builder) = self.gpu.as_ref().zip(self.post_shaders.as_ref()).map(|(g, r)| r.builder(g)) else {
                     return;
                 };
                 let build = floptle_core::profile::Span::new();
-                let id = reg.register(gpu, &module_src, replace);
+                let built = builder.build(&post_module_source(&compiled.chunk));
                 self.note_asset(rel, "pipelineCompile", build.ms());
-                self.console.push(
-                    floptle_script::LogLevel::Debug,
-                    format!("◈ compiled {rel} (screen)"),
-                    None,
-                );
-                self.post_flsl_cache
-                    .insert(rel.to_string(), PostFlslEntry { mtime, compiled: Some((compiled, id)), error: None });
+                self.install_post_flsl(rel, mtime, compiled, built);
             }
             Err(msg) => {
                 let msg = report(self, msg);
@@ -1292,9 +1315,15 @@ fn post_prelude() -> String {
     )
 }
 
+/// A `stage ui` shader's chunk as the UI pass builds it: the field shim and
+/// the stdlib support ahead of the transpiled code.
+pub(crate) fn ui_chunk(compiled: &floptle_shader::CompiledUi) -> String {
+    format!("{}\n{}\n{}", floptle_shader::transpile::UI_FIELD_SHIM, floptle_shader::stdlib::SUPPORT_WGSL, compiled.chunk)
+}
+
 /// The complete WGSL module for one screen shader — the same text `validate`
 /// saw, in the same order, which is the point: the thing that was checked is the
 /// thing that gets built.
-fn post_module_source(chunk: &str) -> String {
+pub(crate) fn post_module_source(chunk: &str) -> String {
     format!("{}\n{}\n{}", post_prelude(), floptle_shader::stdlib::SUPPORT_WGSL, chunk)
 }

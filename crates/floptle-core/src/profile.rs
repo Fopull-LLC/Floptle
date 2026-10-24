@@ -309,7 +309,7 @@ pub struct Hitch {
     /// The slowest assets prepared on this frame ([`FrameProfile::record_asset`]),
     /// slowest first and at most [`HITCH_ASSETS`]: the file, which part of
     /// the work it was (`assetDecode`, `assetUpload`, `shaderCompile`,
-    /// `pipelineCompile`), and its milliseconds.
+    /// `pipelineCompile`, `shaderInstall`), and its milliseconds.
     pub assets: Vec<(String, &'static str, f32)>,
     /// Each script's hook time, costliest first.
     pub scripts: Vec<(String, f32)>,

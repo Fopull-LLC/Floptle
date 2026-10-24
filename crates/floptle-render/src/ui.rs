@@ -1185,8 +1185,67 @@ impl Ui {
         chunk: &str,
         replace: Option<UiShaderId>,
     ) -> UiShaderId {
+        let built = self.ui_shader_builder(gpu).build(chunk);
+        self.install_ui_shader(built, replace)
+    }
+
+    /// Everything building a `stage ui` shader needs from this pass, owned, so
+    /// the build can run on a worker thread while the pass keeps drawing.
+    /// [`Self::register_ui_shader`] is this and [`Self::install_ui_shader`] in
+    /// one call.
+    pub fn ui_shader_builder(&self, gpu: &Gpu) -> UiShaderBuilder {
+        UiShaderBuilder {
+            device: gpu.device.clone(),
+            layouts: [
+                self.globals_layout.clone(),
+                self.elem_layout.clone(),
+                self.params_layout.clone(),
+                self.tex_layout.clone(),
+            ],
+            screen_format: gpu.surface_format(),
+            world_format: gpu.scene_format(),
+        }
+    }
+
+    /// Put a shader built by [`UiShaderBuilder::build`] into this pass, as a
+    /// new shader or in place of `replace`.
+    pub fn install_ui_shader(&mut self, built: BuiltUiShader, replace: Option<UiShaderId>) -> UiShaderId {
+        let shader = built.0;
+        match replace {
+            Some(id) => {
+                self.shaders[id.0 as usize] = shader;
+                id
+            }
+            None => {
+                self.shaders.push(shader);
+                UiShaderId(self.shaders.len() as u32 - 1)
+            }
+        }
+    }
+}
+
+/// What building a `stage ui` shader needs from the UI pass, owned. Made by
+/// [`Ui::ui_shader_builder`].
+#[derive(Clone)]
+pub struct UiShaderBuilder {
+    device: wgpu::Device,
+    /// Groups 0–3: the pass globals, the element, the shader's params, and the
+    /// backdrop.
+    layouts: [wgpu::BindGroupLayout; 4],
+    screen_format: wgpu::TextureFormat,
+    world_format: wgpu::TextureFormat,
+}
+
+/// A `stage ui` shader built by [`UiShaderBuilder::build`], waiting to be
+/// installed with [`Ui::install_ui_shader`].
+pub struct BuiltUiShader(UiShader);
+
+impl UiShaderBuilder {
+    /// Build the shader's two pipelines (screen and world) from its WGSL
+    /// chunk, assembled as [`Ui::register_ui_shader`] takes it.
+    pub fn build(&self, chunk: &str) -> BuiltUiShader {
         let src = format!("{}\n{}", include_str!("ui.wgsl"), chunk);
-        let device = &gpu.device;
+        let device = &self.device;
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ui-flsl"),
             source: wgpu::ShaderSource::Wgsl(src.into()),
@@ -1194,13 +1253,13 @@ impl Ui {
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ui-flsl"),
             bind_group_layouts: &[
-                Some(&self.globals_layout),
-                Some(&self.elem_layout),
-                Some(&self.params_layout),
+                Some(&self.layouts[0]),
+                Some(&self.layouts[1]),
+                Some(&self.layouts[2]),
                 // group(3) = the backdrop (scene behind the UI). Reuses the
                 // texture+sampler layout; always bound (a 1×1 default when no
                 // capture is active), so every UI shader shares this layout.
-                Some(&self.tex_layout),
+                Some(&self.layouts[3]),
             ],
             immediate_size: 0,
         });
@@ -1217,8 +1276,8 @@ impl Ui {
                 write_mask: wgpu::ColorWrites::ALL,
             })]
         };
-        let screen_targets = target(gpu.surface_format());
-        let world_targets = target(gpu.scene_format());
+        let screen_targets = target(self.screen_format);
+        let world_targets = target(self.world_format);
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("ui-flsl"),
             layout: Some(&layout),
@@ -1267,19 +1326,11 @@ impl Ui {
             multiview_mask: None,
             cache: None,
         });
-        let shader = UiShader { pipeline, pipeline_world };
-        match replace {
-            Some(id) => {
-                self.shaders[id.0 as usize] = shader;
-                id
-            }
-            None => {
-                self.shaders.push(shader);
-                UiShaderId(self.shaders.len() as u32 - 1)
-            }
-        }
+        BuiltUiShader(UiShader { pipeline, pipeline_world })
     }
+}
 
+impl Ui {
     /// Create (or replace) a per-element params UBO + bind group for a UI
     /// shader. `params` are the packed vec4 lanes (`CompiledUi::pack_params`).
     pub fn set_ui_shader_binding(

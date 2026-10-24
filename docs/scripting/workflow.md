@@ -184,9 +184,11 @@ end
 ```
 
 The parts are `assetDecode` (reading and decoding an image), `assetUpload`
-(putting it on the GPU), `shaderCompile` (a `.flsl` compiled and checked) and
+(putting it on the GPU), `shaderCompile` (a `.flsl` compiled and checked),
 `pipelineCompile` (the GPU driver building the pipeline it draws with, usually
-the largest: a large material shader can take over a second the first time).
+the largest: a large material shader can take over a second the first time),
+`shaderInstall` (a shader `assets.warm` built put in use) and `materialBind`
+(binding the materials that wear a shader, after one compiles).
 `h.assets` lists the slowest five of the frame, slowest first.
 
 A game moves that work off the frame that needs it by warming the assets
@@ -198,9 +200,13 @@ assets.warm({ "textures/hull.png", "shaders/ocean.flsl", "materials/steel.ron" }
 end)
 ```
 
-Images are decoded and shaders compiled on worker threads while the game keeps
-drawing; uploads happen a few milliseconds a frame. Once it calls back, the
-first frame that uses them does none of that work. Models and sounds in the
+Images are decoded on a few worker threads and shaders compiled and built on
+one more, one at a time, while the game keeps drawing; uploads happen a few
+milliseconds a frame, and a warmed shader is put in use one a frame. Mesh
+material, UI and screen shaders all warm; a sky or sdf shader is built into
+its pass when something wears it, so it is listed in `failed`. Once it calls
+back, the first frame that uses them does none of that work, and a frame that
+draws something still warming waits for that work instead of doing it again. Models and sounds in the
 list load as `assets.preload` loads them. The pipelines the driver builds are
 also kept on disk between runs where the driver supports it (Vulkan), so a
 shader seen before builds faster even unwarmed.
