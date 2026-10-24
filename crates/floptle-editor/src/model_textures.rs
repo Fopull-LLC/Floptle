@@ -96,7 +96,13 @@ pub(crate) fn extract_model_textures(
     project_root: &Path,
 ) -> Result<Vec<Extracted>, String> {
     let model = floptle_assets::import(model_abs).map_err(|e| e.to_string())?;
-    let chosen = crate::rig_overrides::RigOverrides::load(model_abs).texture_filter;
+    // Filtered as the model draws: its own choice, then the project's, then
+    // each texture's file.
+    let cfg = floptle_scene::load_project(&project_root.join("project.ron"));
+    let chosen = crate::project::model_filter_choice(
+        crate::rig_overrides::RigOverrides::load(model_abs).texture_filter,
+        &cfg,
+    );
     let dir_rel = extract_dir(model_rel);
     let dir_abs = project_root.join(&dir_rel);
     let mut out: Vec<Extracted> = Vec::new();
@@ -208,6 +214,44 @@ mod tests {
             Some("models/avatar_textures/Clothing.png")
         );
         assert_eq!(extracted_file(&out, "models/avatar.glb", "Nonesuch"), None);
+    }
+
+    /// **An extracted texture is filtered as the model draws it**: the
+    /// project setting before the file's sampler, so a texture taken out of a
+    /// model in a project set to "always crisp" stays crisp.
+    #[test]
+    fn an_extracted_texture_follows_the_project_filter() {
+        use floptle_render::{TexFilter, TextureData};
+        let root = std::env::temp_dir().join(format!("floptle-extract-filter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        floptle_vfs::create_dir_all(root.join("models")).unwrap();
+        let mesh = floptle_assets::WriteMesh {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            uvs: Some(vec![[0.0, 0.0]; 3]),
+            indices: vec![0, 1, 2],
+            base_color: [1.0; 4],
+            texture: Some(0),
+            ..Default::default()
+        };
+        let tex = TextureData { pixels: vec![255; 16], width: 2, height: 2 };
+        let glb = floptle_assets::write_glb(
+            &[floptle_assets::WriteNode::mesh_node("m", mesh)],
+            &[],
+            &[tex],
+            &[Some(TexFilter::SmoothMipmaps)],
+        );
+        let model = root.join("models/thing.glb");
+        std::fs::write(&model, glb).unwrap();
+        let filter = |cfg: &floptle_scene::ProjectConfigDoc| {
+            floptle_scene::save_project(cfg, &root.join("project.ron")).unwrap();
+            extract_model_textures(&model, "models/thing.glb", &root).unwrap()[0].filter
+        };
+        let old: floptle_scene::ProjectConfigDoc = ron::from_str("()").unwrap();
+        assert_eq!(filter(&old), crate::assets::FilterMode::Pixelated, "an old project's textures stay crisp");
+        let new = floptle_scene::ProjectConfigDoc::for_new_project();
+        assert_eq!(filter(&new), crate::assets::FilterMode::SmoothMipmaps, "as each file says");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A material name is an arbitrary string from a `.glb` and lands in a file

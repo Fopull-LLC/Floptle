@@ -50,9 +50,30 @@ pub fn stamp_glb(glb: &[u8], stamp: &Stamp) -> Vec<u8> {
     join(&root, bin)
 }
 
+/// The generator the converter signed `.glb` files with before they carried
+/// a stamp. Its files beside their source are ours from before there was a
+/// way to say so, and are converted again (see [`crate::Output::Unstamped`]).
+pub const OLD_GENERATOR: &str = "Floptle glb_write";
+
 /// The stamp in a `.glb` on disk, reading only its header and JSON chunk.
 /// `None` for a file this converter did not write.
 pub fn read_stamp(path: &Path) -> Option<Stamp> {
+    let root = read_json(path)?;
+    let s = &root["asset"]["extras"][KEY];
+    Some(Stamp {
+        from: s["from"].as_str()?.to_string(),
+        converter: s["converter"].as_u64()? as u32,
+        source_hash: s["sourceHash"].as_str()?.to_string(),
+    })
+}
+
+/// The `asset.generator` a `.glb` on disk names.
+pub fn read_generator(path: &Path) -> Option<String> {
+    read_json(path)?["asset"]["generator"].as_str().map(str::to_string)
+}
+
+/// A `.glb`'s JSON chunk, read without its binary one.
+fn read_json(path: &Path) -> Option<serde_json::Value> {
     let mut f = std::fs::File::open(path).ok()?;
     let mut head = [0u8; 20];
     f.read_exact(&mut head).ok()?;
@@ -67,13 +88,7 @@ pub fn read_stamp(path: &Path) -> Option<Stamp> {
     }
     let mut json = vec![0u8; len];
     f.read_exact(&mut json).ok()?;
-    let root: serde_json::Value = serde_json::from_slice(&json).ok()?;
-    let s = &root["asset"]["extras"][KEY];
-    Some(Stamp {
-        from: s["from"].as_str()?.to_string(),
-        converter: s["converter"].as_u64()? as u32,
-        source_hash: s["sourceHash"].as_str()?.to_string(),
-    })
+    serde_json::from_slice(&json).ok()
 }
 
 /// A hash of what a conversion reads: the source file, and for an OBJ its

@@ -137,8 +137,10 @@ fn at(img: &image::RgbaImage, x: f32, dx: f32) -> [u8; 4] {
     img.get_pixel(px as u32, 80).0
 }
 
+/// Solidly red: lit or not, red well above the other two.
 fn red(p: [u8; 4]) -> bool {
-    p[0] > 120 && p[1] < 60 && p[2] < 60
+    let (r, g, b) = (p[0] as i32, p[1] as i32, p[2] as i32);
+    r > 120 && r > g + 80 && r > b + 80
 }
 
 #[test]
@@ -236,5 +238,63 @@ fn an_imported_material_draws_its_alpha_sides_transform_and_factors() {
     let (pr, pb) = upper(1.5);
     assert!(mb > mr, "the metal ball does not reflect the sky (red {mr}, blue {mb})");
     assert!(pr > pb, "the plastic one is not its own warm colour (red {pr}, blue {pb})");
+
+    // **The pass comes from the blend mode.** A BLEND model whose factor is 1
+    // blends its picture's alpha; a node material set opaque at opacity 0.3
+    // draws solid; an old scene's material at opacity 0.3, with no blend
+    // written, blends as it always did.
+    model(&m.join("blended.glb"), quad(), mat(AlphaMode::Blend, true), std::slice::from_ref(&faint_red()), None);
+    let cube = |name: &str, x: f32, material: &str| {
+        format!(
+            "(name: \"{name}\", matter: Primitive(shape: Cube, color: (1.0, 1.0, 1.0)), material: Some({material}), \
+             transform: (translation: ({x}, 0.0, -6.0), scale: (1.2, 1.2, 0.1))),\n"
+        )
+    };
+    let body = node("blended", "models/blended.glb", -3.0, false)
+        + &cube("solid", 0.0, "(color: (0.9, 0.1, 0.1), alpha: 0.3, blend: Some(Opaque))")
+        + &cube("old", 3.0, "(color: (0.9, 0.1, 0.1), alpha: 0.3)");
+    let img = shoot(&d, "blends", &body).expect("it rendered once");
+    let _ = img.save(d.join("..").join("floptle-imported-materials-blends.png"));
+    let bg = img.get_pixel(160, 10).0;
+    let see_through = |p: [u8; 4]| p[1] > 60 && !red(p) && p[0] as i32 > p[1] as i32 + 10;
+    let b = at(&img, -3.0, 0.0);
+    assert!(see_through(b), "a BLEND model blends its picture's alpha: {b:?} over {bg:?}");
+    let solid = at(&img, 0.0, 0.0);
+    assert!(red(solid), "an opaque material at opacity 0.3 draws solid: {solid:?}");
+    let old = at(&img, 3.0, 0.0);
+    assert!(see_through(old), "an old scene's faded material still blends: {old:?} over {bg:?}");
+
+    // **Classic (0.116) draws a factor-only metal as non-metal**, as that
+    // release did: the same metal ball, in a project set to the old rules.
+    let cfg_path = d.join("project.ron");
+    let cfg = std::fs::read_to_string(&cfg_path).unwrap();
+    let cfg = if cfg.contains("imported_materials: Some(AsFile)") {
+        cfg.replace("imported_materials: Some(AsFile)", "imported_materials: Some(Classic)")
+    } else {
+        let end = cfg.rfind(')').unwrap();
+        format!("{}    imported_materials: Some(Classic),\n)", &cfg[..end])
+    };
+    std::fs::write(&cfg_path, cfg).unwrap();
+    let body = "(name: \"Sky\", matter: Skybox(texture: Some(\"textures/sky.png\"))),\n".to_string()
+        + &node("metal", "models/metal.glb", -1.5, false)
+        + &node("plastic", "models/plastic.glb", 1.5, false);
+    let img = shoot(&d, "classic", &body).expect("it rendered once");
+    let _ = img.save(d.join("..").join("floptle-imported-materials-classic.png"));
+    let half_h = 6.0 * 0.5f32.tan();
+    let c = (160.0 - 1.5 / half_h * 80.0) as i32;
+    let (mut r, mut bl) = (0u64, 0u64);
+    for dy in -24i32..=-8 {
+        for dx in -10i32..=10 {
+            let p = img.get_pixel((c + dx) as u32, (80 + dy) as u32).0;
+            r += p[0] as u64;
+            bl += p[2] as u64;
+        }
+    }
+    assert!(r > bl, "under Classic the factor-only metal is not metal (red {r}, blue {bl})");
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Red at alpha 0.35.
+fn faint_red() -> TextureData {
+    TextureData { pixels: [230, 20, 20, 89].repeat(16), width: 4, height: 4 }
 }

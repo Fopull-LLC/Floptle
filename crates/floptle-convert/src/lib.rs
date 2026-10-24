@@ -322,6 +322,10 @@ pub enum Output {
     /// A model this converter wrote from this source. `current` is false when
     /// the source has changed since, or the converter has learned something.
     Converted { current: bool },
+    /// A `.glb` the converter wrote before it stamped its output: signed
+    /// with the old generator, beside this source. Converted again, and
+    /// stamped, so it stops being a file nothing will ever update.
+    Unstamped,
     /// A `.glb` somebody made. Never written over.
     TheirOwn,
 }
@@ -337,7 +341,9 @@ pub fn output_state(src: &Path) -> Output {
     if !out.is_file() {
         return Output::Missing;
     }
-    let Some(stamp) = stamp::read_stamp(&out) else { return Output::TheirOwn };
+    let Some(stamp) = stamp::read_stamp(&out) else {
+        return if is_old_conversion_of(src, &out) { Output::Unstamped } else { Output::TheirOwn };
+    };
     if stamp.from != ext_of(src) {
         // Converted from a different source with the same name (`crate.obj`
         // beside `crate.fbx`): that one owns it.
@@ -359,9 +365,33 @@ pub fn output_state(src: &Path) -> Output {
     Output::Converted { current: same }
 }
 
-/// Does `src` need converting — no output yet, or a stale one of ours?
+/// Does `src` need converting — no output yet, a stale one of ours, or one
+/// from before outputs were stamped?
 pub fn needs_conversion(src: &Path) -> bool {
-    matches!(output_state(src), Output::Missing | Output::Converted { current: false })
+    matches!(output_state(src), Output::Missing | Output::Converted { current: false } | Output::Unstamped)
+}
+
+/// Did the old Convert button write `out` from `src`? It signed with
+/// [`stamp::OLD_GENERATOR`] and wrote beside the source under its stem, and
+/// nothing else did both: the engine's other bakes with that generator are
+/// named `.mirrored.glb` and `.rigged.glb`, which no source shares a stem
+/// with. When two sources share the stem (`crate.fbx` and `crate.obj`), the
+/// one first in [`SUPPORTED`] is taken for the one that was converted.
+fn is_old_conversion_of(src: &Path, out: &Path) -> bool {
+    if stamp::read_generator(out).as_deref() != Some(stamp::OLD_GENERATOR) || !src.is_file() {
+        return false;
+    }
+    let Some(dir) = out.parent() else { return false };
+    let stem = out.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let first = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.file_stem().is_some_and(|s| s.to_string_lossy() == stem))
+        .filter(|p| is_convertible(p))
+        .min_by_key(|p| SUPPORTED.iter().position(|e| *e == ext_of(p)).unwrap_or(usize::MAX));
+    first.as_deref() == Some(src)
 }
 
 /// The source a `.glb` was converted from, when it is one of ours and that

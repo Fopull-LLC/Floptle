@@ -51,13 +51,20 @@ except Exception as e:
 "#;
 
 /// Where Blender is, or `None`. `FLOPTLE_BLENDER` names it outright; then the
-/// `PATH`; then where each platform's installer puts it.
+/// `PATH`; then where each platform's installer puts it; then every Steam
+/// library on the machine, since Blender is on Steam and a Steam library can
+/// be on any disk.
 pub fn find() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("FLOPTLE_BLENDER") {
         let p = PathBuf::from(p);
         return p.is_file().then_some(p);
     }
     candidates().into_iter().find(|p| p.is_file())
+}
+
+/// The user's home folder.
+fn home() -> Option<PathBuf> {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
 }
 
 /// Every place [`find`] looks, in order. Said in the message when nothing is
@@ -67,7 +74,7 @@ fn candidates() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).map(|d| d.join(exe)).collect())
         .unwrap_or_default();
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = home();
     if cfg!(target_os = "macos") {
         out.push(PathBuf::from("/Applications/Blender.app/Contents/MacOS/Blender"));
         if let Some(h) = &home {
@@ -83,15 +90,131 @@ fn candidates() -> Vec<PathBuf> {
             out.extend(versions.into_iter().rev());
         }
     } else {
-        for p in ["/usr/bin/blender", "/usr/local/bin/blender", "/snap/bin/blender", "/var/lib/flatpak/exports/bin/org.blender.Blender"] {
+        for p in ["/usr/bin/blender", "/usr/local/bin/blender", "/snap/bin/blender"] {
             out.push(PathBuf::from(p));
         }
         if let Some(h) = &home {
             out.push(h.join(".local/bin/blender"));
+        }
+    }
+    out.extend(steam_blenders(&steam_roots(home.as_deref())));
+    // A Flatpak Blender last: it runs in a sandbox that sees only what its
+    // permissions grant, so a native one, from Steam or anywhere else, is the
+    // better choice whenever there is one.
+    if !cfg!(windows) && !cfg!(target_os = "macos") {
+        out.push(PathBuf::from("/var/lib/flatpak/exports/bin/org.blender.Blender"));
+        if let Some(h) = &home {
             out.push(h.join(".local/share/flatpak/exports/bin/org.blender.Blender"));
         }
     }
     out
+}
+
+/// Where Steam itself is installed, on this platform.
+fn steam_roots(home: Option<&Path>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if cfg!(windows) {
+        // Steam records where it is in the registry; `reg` is on every
+        // Windows, which spares a registry crate for one value.
+        if let Ok(o) = Command::new("reg").args(["query", "HKCU\\Software\\Valve\\Steam", "/v", "SteamPath"]).output() {
+            let text = String::from_utf8_lossy(&o.stdout);
+            if let Some(v) = text.lines().find_map(|l| l.split_once("REG_SZ").map(|(_, v)| v.trim().to_string())) {
+                out.push(PathBuf::from(v));
+            }
+        }
+        out.push(PathBuf::from("C:\\Program Files (x86)\\Steam"));
+        out.push(PathBuf::from("C:\\Program Files\\Steam"));
+    } else if let Some(h) = home {
+        if cfg!(target_os = "macos") {
+            out.push(h.join("Library/Application Support/Steam"));
+        } else {
+            out.push(h.join(".local/share/Steam"));
+            out.push(h.join(".steam/steam"));
+            out.push(h.join(".steam/root"));
+            // Steam as a Flatpak keeps its own home under ~/.var.
+            out.push(h.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"));
+            out.push(h.join(".var/app/com.valvesoftware.Steam/data/Steam"));
+        }
+    }
+    out
+}
+
+/// Blender in every Steam library the Steam installs at `roots` know of: each
+/// root itself, and every library its `libraryfolders.vdf` lists, which is
+/// how a library on a second disk is found.
+fn steam_blenders(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut libraries: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        libraries.push(root.clone());
+        for vdf in [root.join("steamapps/libraryfolders.vdf"), root.join("config/libraryfolders.vdf")] {
+            if let Ok(text) = std::fs::read_to_string(&vdf) {
+                libraries.extend(vdf_paths(&text).into_iter().map(PathBuf::from));
+            }
+        }
+    }
+    let mut out: Vec<PathBuf> = Vec::new();
+    for lib in libraries {
+        let app = lib.join("steamapps/common/Blender");
+        let exe = if cfg!(target_os = "macos") {
+            app.join("Blender.app/Contents/MacOS/Blender")
+        } else if cfg!(windows) {
+            app.join("blender.exe")
+        } else {
+            app.join("blender")
+        };
+        if !out.contains(&exe) {
+            out.push(exe);
+        }
+    }
+    out
+}
+
+/// Every `"path"` value in a Steam `.vdf` (Valve's KeyValues text), at any
+/// depth. Tolerant on purpose: quoted strings with `\\` escapes are read,
+/// braces, comments and anything unexpected are stepped over, and a file cut
+/// short gives the paths up to the cut rather than none.
+fn vdf_paths(text: &str) -> Vec<String> {
+    let mut strings: Vec<String> = Vec::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                let mut s = String::new();
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' => {
+                            if let Some(e) = chars.next() {
+                                s.push(match e {
+                                    'n' => '\n',
+                                    't' => '\t',
+                                    other => other,
+                                });
+                            }
+                        }
+                        '"' => break,
+                        other => s.push(other),
+                    }
+                }
+                strings.push(s);
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        break;
+                    }
+                }
+            }
+            // A brace ends a key with no value; it must not pair the key
+            // before it with the string after it.
+            '{' | '}' => strings.push(String::from("\u{0}")),
+            _ => {}
+        }
+    }
+    strings
+        .windows(2)
+        .filter(|w| w[0].eq_ignore_ascii_case("path") && w[1] != "\u{0}")
+        .map(|w| w[1].clone())
+        .collect()
 }
 
 /// Convert `src` by running `blender` on it. The bytes of the `.glb` it
@@ -112,10 +235,14 @@ pub fn convert(src: &Path) -> Result<(Vec<u8>, Report), ConvertError> {
 
 /// [`convert`] with Blender at `blender`.
 pub(crate) fn convert_with(src: &Path, blender: &Path) -> Result<(Vec<u8>, Report), ConvertError> {
-    let tmp = std::env::temp_dir().join(format!(
-        "floptle-blender-{}-{}.glb",
-        std::process::id(),
-        src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+    // Written beside the source, not in the temp folder: a sandboxed Blender
+    // (Flatpak, Snap) has a private temp folder of its own, and a file it
+    // writes there never arrives. The source's folder it can read, so it can
+    // write there too.
+    let tmp = src.with_file_name(format!(
+        ".{}.floptle-blender-{}.glb",
+        src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+        std::process::id()
     ));
     let _ = std::fs::remove_file(&tmp);
     let src_abs = std::fs::canonicalize(src).unwrap_or_else(|_| src.to_path_buf());
@@ -159,11 +286,11 @@ pub(crate) fn convert_with(src: &Path, blender: &Path) -> Result<(Vec<u8>, Repor
     let stderr = err_t.join().unwrap_or_default();
 
     if stdout.contains("FLOPTLE_NO_IMPORTER") {
-        return Err(ConvertError::Unsupported(
-            "dae — the Blender installed here no longer imports Collada (Blender 5 removed it). \
-             Export the model as .fbx, .obj or .glb instead"
-                .into(),
-        ));
+        return Err(ConvertError::NeedsBlender(format!(
+            "The Blender found ({}) no longer imports Collada — Blender 5 removed it. Export the \
+             model as .fbx, .obj or .glb instead, or point FLOPTLE_BLENDER at a Blender 4.",
+            blender.display()
+        )));
     }
     let bytes = std::fs::read(&tmp).ok();
     let _ = std::fs::remove_file(&tmp);
@@ -192,6 +319,72 @@ pub(crate) fn convert_with(src: &Path, blender: &Path) -> Result<(Vec<u8>, Repor
     }
     report.warnings.push(format!("Converted by Blender ({}).", blender.display()));
     Ok((crate::stamp::join(&root, bin), report))
+}
+
+#[cfg(test)]
+mod vdf_tests {
+    use super::*;
+
+    /// Steam's own file, a second library on another disk, a Windows path
+    /// with its escaped backslashes, and a file cut off mid-way.
+    #[test]
+    fn steam_library_paths_are_read_from_libraryfolders() {
+        let text = r#""libraryfolders"
+{
+	"0"
+	{
+		"path"		"/home/me/.local/share/Steam"
+		"label"		""
+		"apps"
+		{
+			"365670"		"1234"
+		}
+	}
+	// a comment
+	"1"
+	{
+		"path"		"/mnt/games/SteamLibrary"
+	}
+	"2"
+	{
+		"PATH"		"D:\\Games\\Steam"
+	}
+	"3"
+	{
+		"path"		"/cut/off"#;
+        // The value the cut fell in is kept as far as it got: it is only ever
+        // a place to look, and a wrong one is simply not there.
+        assert_eq!(vdf_paths(text), ["/home/me/.local/share/Steam", "/mnt/games/SteamLibrary", "D:\\Games\\Steam", "/cut/off"]);
+        assert!(vdf_paths("not a vdf at all {{{").is_empty());
+    }
+
+    /// **Blender in a second Steam library is found** through the first
+    /// library's `libraryfolders.vdf`.
+    #[test]
+    fn blender_in_a_second_steam_library_is_found() {
+        let dir = std::env::temp_dir().join(format!("floptle-steam-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (steam, games) = (dir.join("Steam"), dir.join("Games"));
+        std::fs::create_dir_all(steam.join("steamapps")).unwrap();
+        std::fs::write(
+            steam.join("steamapps/libraryfolders.vdf"),
+            format!("\"libraryfolders\" {{ \"0\" {{ \"path\" \"{}\" }} \"1\" {{ \"path\" \"{}\" }} }}",
+                steam.display(), games.display()).replace('\\', "\\\\"),
+        )
+        .unwrap();
+        let exe = if cfg!(target_os = "macos") {
+            "steamapps/common/Blender/Blender.app/Contents/MacOS/Blender"
+        } else if cfg!(windows) {
+            "steamapps/common/Blender/blender.exe"
+        } else {
+            "steamapps/common/Blender/blender"
+        };
+        std::fs::create_dir_all(games.join(exe).parent().unwrap()).unwrap();
+        std::fs::write(games.join(exe), b"").unwrap();
+        let found: Vec<PathBuf> = steam_blenders(&[steam]).into_iter().filter(|p| p.is_file()).collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(found, [games.join(exe)]);
+    }
 }
 
 #[cfg(all(test, unix))]

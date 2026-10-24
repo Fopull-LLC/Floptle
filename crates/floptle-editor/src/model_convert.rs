@@ -53,12 +53,18 @@ pub(crate) struct ModelConverts {
     /// search on: a headless verb (`floptle shot`, `floptle check`) must not
     /// start writing files into the project it was asked to look at.
     pub(crate) search_headless: bool,
+    /// The project's model texture filter and imported-material rules as the
+    /// loaded models were drawn with, so a change to either in Project
+    /// Settings draws every model again.
+    look_seen: Option<(floptle_scene::ModelTextureFilterDoc, floptle_scene::ImportedMaterialsDoc)>,
 }
 
 struct Job {
     rx: Receiver<Result<(PathBuf, Report), String>>,
     src: PathBuf,
     manual: bool,
+    /// The output was the old button's, unstamped: said so when it is done.
+    migrating: bool,
 }
 
 /// What a scan found: sources that need converting, and every source whose
@@ -145,6 +151,9 @@ fn scan(root: &Path) -> Scan {
                         out.pending.push(p);
                     }
                 }
+                // Converted before outputs were stamped: done again, so it
+                // is stamped and follows its source from now on.
+                floptle_convert::Output::Unstamped => out.pending.push(p),
                 floptle_convert::Output::TheirOwn => {}
             }
         }
@@ -203,7 +212,7 @@ impl crate::Editor {
     pub(crate) fn model_for_source(&mut self, path: &str) -> Option<String> {
         let src = Path::new(path);
         match floptle_convert::output_state(src) {
-            floptle_convert::Output::Converted { .. } => {
+            floptle_convert::Output::Converted { .. } | floptle_convert::Output::Unstamped => {
                 Some(floptle_convert::output_path(src).to_string_lossy().into_owned())
             }
             floptle_convert::Output::Missing => {
@@ -223,6 +232,7 @@ impl crate::Editor {
     /// Find, start and finish conversions. Called once a frame; free when
     /// there is nothing to do.
     pub(crate) fn poll_model_conversion(&mut self) {
+        self.redraw_models_if_look_changed();
         // ---- a finished scan queues what it found ----
         if let Some(rx) = &self.convert.scan {
             match rx.try_recv() {
@@ -278,6 +288,7 @@ impl crate::Editor {
             if !floptle_vfs::is_file(&src) {
                 return;
             }
+            let migrating = floptle_convert::output_state(&src) == floptle_convert::Output::Unstamped;
             let (tx, rx) = std::sync::mpsc::channel();
             let worker_src = src.clone();
             std::thread::spawn(move || {
@@ -288,7 +299,24 @@ impl crate::Editor {
             if manual {
                 self.toast = Some((format!("⏳  Converting {name}…"), 30.0));
             }
-            self.convert.job = Some(Job { rx, src, manual });
+            self.convert.job = Some(Job { rx, src, manual, migrating });
+        }
+    }
+
+    /// Drop every loaded model when the project's model look changes, so the
+    /// next frame imports each one again under the new setting.
+    fn redraw_models_if_look_changed(&mut self) {
+        let now = (self.project.model_texture_filter_resolved(), self.project.imported_materials_resolved());
+        let before = self.convert.look_seen.replace(now);
+        if before.is_none_or(|b| b == now) {
+            return;
+        }
+        let models: Vec<String> = self.mesh_registry.keys().filter(|k| crate::assets::is_model(k)).cloned().collect();
+        for k in &models {
+            self.mesh_registry.remove(k);
+        }
+        if !models.is_empty() {
+            self.anim.revision += 1;
         }
     }
 
@@ -298,6 +326,16 @@ impl crate::Editor {
             Ok((out, report)) => {
                 self.convert.failed.remove(&job.src);
                 let file = out.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                if job.migrating {
+                    self.console.push(
+                        LogLevel::Debug,
+                        format!(
+                            "Updated {file}: it was converted from {name} by an earlier Floptle, and has been \
+                             converted again with every map and stamped, so it now follows {name} when it changes."
+                        ),
+                        None,
+                    );
+                }
                 let (level, text) = import_report(&name, &file, &report);
                 self.console.push(level, text, None);
                 if let Ok(mut p) = pairs().write() {
@@ -434,6 +472,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A `.glb` written by the engine's own writer, signed `generator`
+    /// instead: the name is written over the current one and padded with
+    /// spaces after its closing quote, so the JSON stays valid and the chunk
+    /// keeps its length.
+    fn glb_signed(generator: &str) -> Vec<u8> {
+        let mesh = floptle_assets::WriteMesh {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            indices: vec![0, 1, 2],
+            base_color: [1.0; 4],
+            ..Default::default()
+        };
+        let mut glb = floptle_assets::write_glb(&[floptle_assets::WriteNode::mesh_node("t", mesh)], &[], &[], &[]);
+        let from = format!("\"{}\"", floptle_assets::gltf_import::GENERATOR);
+        let at = glb.windows(from.len()).position(|w| w == from.as_bytes()).expect("the generator is in the JSON");
+        let mut to = format!("\"{generator}\"").into_bytes();
+        assert!(to.len() <= from.len());
+        to.resize(from.len(), b' ');
+        glb[at..at + from.len()].copy_from_slice(&to);
+        glb
+    }
+
+    /// **A model the old Convert button made is converted again and
+    /// stamped**, recognised by that button's generator and its source
+    /// beside it. A file with the old generator and no source, or a source
+    /// and a `.glb` from anything else, is somebody's own and is not touched.
+    #[test]
+    fn an_unstamped_conversion_beside_its_source_is_updated_and_nothing_else_is() {
+        let root = std::env::temp_dir().join(format!("floptle-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let cube = models().join("blender_272_cube_7400_binary.fbx");
+        let old = glb_signed("Floptle glb_write");
+        let blender = glb_signed("Khronos Blender I/O");
+        std::fs::copy(&cube, root.join("crate.fbx")).unwrap();
+        std::fs::write(root.join("crate.glb"), &old).unwrap();
+        std::fs::write(root.join("lonely.glb"), &old).unwrap();
+        std::fs::copy(&cube, root.join("theirs.fbx")).unwrap();
+        std::fs::write(root.join("theirs.glb"), &blender).unwrap();
+        assert_eq!(floptle_convert::stamp::read_generator(&root.join("crate.glb")).as_deref(), Some("Floptle glb_write"));
+
+        let mut ed = crate::Editor { project_root: root.clone(), ..Default::default() };
+        ed.convert.search_headless = true;
+        wait(&mut ed);
+        assert!(floptle_convert::stamp::read_stamp(&root.join("crate.glb")).is_some(), "the old conversion was redone and stamped");
+        assert!(
+            ed.console.entries.iter().any(|e| e.msg.starts_with("Updated crate.glb") && e.msg.contains("crate.fbx")),
+            "one line says so"
+        );
+        assert_eq!(std::fs::read(root.join("lonely.glb")).unwrap(), old, "no source: left byte for byte");
+        assert_eq!(std::fs::read(root.join("theirs.glb")).unwrap(), blender, "another generator: left byte for byte");
+        assert_eq!(ed.console.entries.iter().filter(|e| e.msg.starts_with("Updated")).count(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn the_report_says_what_went_where_and_what_is_missing() {
         let mut r = Report { meshes: 2, triangles: 10, materials: 1, ..Default::default() };
@@ -475,12 +568,64 @@ mod tests {
     /// A part with no material at all keeps the plain look.
     #[test]
     fn an_imported_material_honours_its_factors_with_no_maps() {
-        let m = crate::project::imported_material([0.9, 0.8, 0.5], &maps());
+        let m = crate::project::imported_material([0.9, 0.8, 0.5], &maps(), AS_FILE);
         assert_eq!(m.shading, floptle_core::Shading::Physical);
         assert_eq!((m.metallic, m.roughness), (1.0, 0.2));
         let none = floptle_assets::gltf_import::PartMaps::default();
-        let m = crate::project::imported_material([0.9, 0.8, 0.5], &none);
+        let m = crate::project::imported_material([0.9, 0.8, 0.5], &none, AS_FILE);
         assert_eq!(m.shading, floptle_core::Shading::Classic, "no material, no say");
+    }
+
+    const AS_FILE: floptle_scene::ImportedMaterialsDoc = floptle_scene::ImportedMaterialsDoc::AsFile;
+
+    /// **Which filter a model's textures take, most specific first**: the
+    /// model's own choice, then the project's, then (with neither) each file's
+    /// sampler and crisp where it says nothing. An old project's setting is
+    /// "always crisp", as every model drew before 0.117.
+    #[test]
+    fn a_model_s_choice_beats_the_project_s_which_beats_the_file_s() {
+        use crate::assets::FilterMode as F;
+        use floptle_render::TexFilter as T;
+        let project = |f| floptle_scene::ProjectConfigDoc { model_texture_filter: Some(f), ..floptle_scene::ProjectConfigDoc::for_new_project() };
+        let new = floptle_scene::ProjectConfigDoc::for_new_project();
+        let old: floptle_scene::ProjectConfigDoc = ron::from_str("()").unwrap();
+        let file = [Some(T::SmoothMipmaps), None];
+        let filter = |model, cfg: &floptle_scene::ProjectConfigDoc, i| {
+            crate::project::embedded_sampling(crate::project::model_filter_choice(model, cfg), &file, Some(i)).filter
+        };
+        assert_eq!(filter(None, &new, 0), T::SmoothMipmaps, "as each file says");
+        assert_eq!(filter(None, &new, 1), T::Pixelated, "crisp where the file says nothing");
+        assert_eq!(filter(None, &old, 0), T::Pixelated, "an old project draws crisp, as in 0.116");
+        assert_eq!(filter(None, &project(floptle_scene::ModelTextureFilterDoc::Smooth), 1), T::SmoothMipmaps);
+        assert_eq!(filter(Some(F::Pixelated), &project(floptle_scene::ModelTextureFilterDoc::Smooth), 0), T::Pixelated, "the model's own choice wins");
+    }
+
+    /// **The 0.116 rules, kept for an old project**: a factor-only metal is
+    /// not metal, every picture cuts at half alpha, every face is drawn from
+    /// both sides and the texture transform is not applied — exactly what
+    /// that project's models looked like.
+    #[test]
+    fn classic_imported_materials_draw_as_0116_did() {
+        use floptle_assets::glb_write::AlphaMode;
+        let classic = floptle_scene::ImportedMaterialsDoc::Classic;
+        let maps = floptle_assets::gltf_import::PartMaps {
+            alpha_mode: AlphaMode::Opaque,
+            double_sided: false,
+            uv_transform: Some(floptle_assets::gltf_import::UvTransform { offset: [0.5, 0.0], scale: [2.0, 2.0], rotation: 0.0 }),
+            ..maps()
+        };
+        let m = crate::project::imported_material([0.9, 0.8, 0.5], &maps, classic);
+        assert_eq!(m.shading, floptle_core::Shading::Classic, "a factor-only metal draws as non-metal");
+        assert_eq!((m.blend, m.alpha_cutoff), (floptle_core::BlendMode::Cutout, 0.5));
+        assert!(m.double_sided);
+        assert_eq!(m.tiling, None);
+        // A metallic-roughness map was physical in 0.116 too.
+        let mapped = floptle_assets::gltf_import::PartMaps { metallic_roughness: Some(0), ..maps };
+        assert_eq!(crate::project::imported_material([1.0; 3], &mapped, classic).shading, floptle_core::Shading::Physical);
+        // New projects draw what the file says; an old file reads as Classic.
+        assert_eq!(floptle_scene::ProjectConfigDoc::for_new_project().imported_materials_resolved(), AS_FILE);
+        let old: floptle_scene::ProjectConfigDoc = ron::from_str("()").unwrap();
+        assert_eq!(old.imported_materials_resolved(), classic);
     }
 
     /// Alpha mode, cutoff and sidedness reach the engine's material.
@@ -488,11 +633,20 @@ mod tests {
     fn an_imported_material_keeps_its_alpha_mode_and_sides() {
         use floptle_assets::glb_write::AlphaMode;
         let with = |alpha_mode, double_sided| {
-            crate::project::imported_material([1.0; 3], &floptle_assets::gltf_import::PartMaps { alpha_mode, double_sided, ..maps() })
+            crate::project::imported_material([1.0; 3], &floptle_assets::gltf_import::PartMaps { alpha_mode, double_sided, ..maps() }, AS_FILE)
         };
-        assert_eq!(with(AlphaMode::Mask(0.3), true).alpha_cutoff, 0.3, "MASK cuts at its own cutoff");
-        assert_eq!(with(AlphaMode::Opaque, true).alpha_cutoff, 0.0, "OPAQUE cuts nothing");
-        assert!(with(AlphaMode::Blend, true).alpha < 1.0, "BLEND goes to the blended pass");
+        use floptle_core::BlendMode;
+        let mask = with(AlphaMode::Mask(0.3), true);
+        assert_eq!((mask.blend, mask.alpha_cutoff), (BlendMode::Cutout, 0.3), "MASK cuts at its own cutoff");
+        let faded = crate::project::imported_material(
+            [1.0; 3],
+            &floptle_assets::gltf_import::PartMaps { alpha_mode: AlphaMode::Mask(0.5), alpha: 0.5, ..maps() },
+            AS_FILE,
+        );
+        assert_eq!((faded.blend, faded.alpha), (BlendMode::Cutout, 0.5), "a MASK's factor alpha multiplies into the cut");
+        assert_eq!(with(AlphaMode::Opaque, true).blend, BlendMode::Opaque, "OPAQUE cuts nothing");
+        let blend = with(AlphaMode::Blend, true);
+        assert_eq!((blend.blend, blend.alpha), (BlendMode::Blend, 1.0), "BLEND blends at the factor it names");
         assert!(!with(AlphaMode::Opaque, false).double_sided);
         assert!(with(AlphaMode::Opaque, true).double_sided);
     }

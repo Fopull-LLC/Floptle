@@ -26,9 +26,13 @@ convert. Export them from their program as `.fbx`, `.obj` or `.glb`.
 ### Blender formats
 
 `.blend`, `.dae` and `.usd` files are converted by running the Blender you
-already have, in the background. Floptle finds it on your `PATH` or where its
-installer puts it; set `FLOPTLE_BLENDER` to the program to point at one
-somewhere else. Without Blender the Console says so and names the alternatives.
+already have, in the background. Floptle finds it on your `PATH`, where its
+installer puts it, and in every Steam library on the machine (Blender is on
+Steam, and a Steam library can be on any disk); a Flatpak Blender is used only
+when there is no other, since its sandbox may not see your project. Set
+`FLOPTLE_BLENDER` to the program to use a particular one. Without Blender the
+Console says so and names the alternatives. Blender 5 has no Collada importer,
+so a `.dae` needs Blender 4 or older.
 Keeping your `.blend` in the project works well: save it in Blender and the
 model in your scene updates a moment later.
 
@@ -43,6 +47,11 @@ out of builds.
 Dragging the source into the scene places its converted model. Deleting,
 moving or renaming the model in the Assets panel does the same to its source,
 so the two never drift apart.
+
+A `.glb` made by the **Convert to .glb** button of an earlier Floptle, sitting
+beside the model it came from, is converted again the first time the project
+opens, so it picks up every map and follows its source from then on. The
+Console says which files were updated.
 
 **Your own `.glb` is never replaced.** Every converted model records which
 source it came from. If a `crate.glb` you made yourself is already next to
@@ -90,6 +99,24 @@ pictures unpack to. Names are matched without regard to case, and a picture
 recorded as `.tga` that was re-saved as `.png` is still found. Pictures
 embedded in an FBX are used directly. PNG, JPEG, TGA, BMP, TIFF, WebP, GIF,
 QOI and DDS all read.
+
+## Project settings for models
+
+Two settings in **Project Settings** decide how every model draws:
+
+- **Model textures**: *as each file says* (each texture filtered the way its
+  file's sampler says, crisp where it says nothing), *always crisp*, or
+  *always smooth*. A model's own **embedded texture filter** in the Inspector
+  wins over it.
+- **Imported materials**: *as each file says*, or *Classic (0.116)*, which
+  draws by the earlier rules: physical shading only with a metallic-roughness
+  map, every picture cut out at half alpha, both sides of every face, and no
+  texture transform.
+
+New projects start on *as each file says* for both. A project made before
+0.117 is set to *always crisp* and *Classic (0.116)*, so its models look as
+they did; switch either to *as each file says* to draw models the way their
+files describe.
 
 ## The import report
 

@@ -881,6 +881,70 @@ impl<'a> SettingsCtx<'a> {
                 }
             },
         );
+        row(
+            ui,
+            "Model textures",
+            Some(
+                "how the textures inside every imported model are filtered. \"As each file says\" \
+                 follows each texture's own sampler — Blender writes smooth unless an image is set \
+                 to Closest — and draws crisp where the file says nothing. A model's own choice in \
+                 its Inspector wins over this. A project made before 0.117 starts on \"always \
+                 crisp\", which is how every model drew then",
+            ),
+            |ui| {
+                use floptle_scene::ModelTextureFilterDoc as F;
+                let mut f = project.model_texture_filter_resolved();
+                egui::ComboBox::from_id_salt("project-model-filter")
+                    .width(fit_here(ui, 220.0))
+                    .selected_text(match f {
+                        F::AsFile => "as each file says",
+                        F::Crisp => "always crisp",
+                        F::Smooth => "always smooth",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut f, F::AsFile, "as each file says")
+                            .on_hover_text("each texture as its model file filters it");
+                        ui.selectable_value(&mut f, F::Crisp, "always crisp")
+                            .on_hover_text("nearest-neighbour everywhere: pixel art, and every model before 0.117");
+                        ui.selectable_value(&mut f, F::Smooth, "always smooth")
+                            .on_hover_text("smooth, with mipmaps, everywhere");
+                    });
+                if f != project.model_texture_filter_resolved() {
+                    project.model_texture_filter = Some(f);
+                    out.save_project = true;
+                }
+            },
+        );
+        row(
+            ui,
+            "Imported materials",
+            Some(
+                "how imported models' own materials are drawn. \"As each file says\" draws \
+                 metallic and roughness with or without a map, the alpha mode (opaque, alpha clip \
+                 at its own threshold, blend), backface culling and the texture's tiling and \
+                 offset. \"Classic (0.116)\" keeps the rules a project made before 0.117 was \
+                 drawn by: physical shading only with a metallic-roughness map, every picture \
+                 cut out at half alpha, both sides of every face, no texture transform",
+            ),
+            |ui| {
+                use floptle_scene::ImportedMaterialsDoc as M;
+                let mut m = project.imported_materials_resolved();
+                egui::ComboBox::from_id_salt("project-imported-materials")
+                    .width(fit_here(ui, 220.0))
+                    .selected_text(match m {
+                        M::AsFile => "as each file says",
+                        M::Classic => "classic (0.116)",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut m, M::AsFile, "as each file says");
+                        ui.selectable_value(&mut m, M::Classic, "classic (0.116)");
+                    });
+                if m != project.imported_materials_resolved() {
+                    project.imported_materials = Some(m);
+                    out.save_project = true;
+                }
+            },
+        );
         ui.add_enabled_ui(!project.retro, |ui| {
             row(
                 ui,
