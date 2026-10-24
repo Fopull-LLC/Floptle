@@ -2835,7 +2835,7 @@ terrain.planetRivers(opts [, callback]) → the rivers and ravines terrain.gener
 
 ### `terrain.prepare`
 
-terrain.prepare(x, y, z, r) — make the stand-in ground within r of the point (capped at 256) exactly, on background workers: a streamed world's far ground and deep rock not generated yet. For a game about to plan from queries somewhere nobody is standing; terrain.ready turns true there once it has landed, and ground made this way is kept as long as its world is loaded. Does nothing for a body that is not loaded (terrain.warm brings one in).
+terrain.prepare(x, y, z, r) — make the stand-in ground within r of the point (capped at 256) exactly, on background workers: a streamed world's far ground and deep rock not generated yet. For a game about to plan from queries somewhere nobody is standing; terrain.ready turns true there once it has landed, and ground made this way is kept as long as its world is loaded. An ask over a world still generating or streaming in waits for it and lands when it does; one over a world not loaded at all (terrain.warm brings one in) waits as long as that world is there to come in. On a moving world the ask is the ground where the script read it, wherever the world has gone since.
 
 ### `terrain.query`
 
@@ -2843,7 +2843,7 @@ terrain.query(x,y,z) — signed distance to the nearest terrain surface (negativ
 
 ### `terrain.raycast`
 
-terrain.raycast(origin, dir [, maxDist]) → { pos =, normal =, distance =, exact = } for the first terrain surface along the ray, read from the ground's own field, not from collision meshes that may not be built yet; maxDist defaults to 1000. A miss answers nil and why: nil, "air" when the ray reached maxDist through open space, or nil, "unknown", distance when it reached ground the world has not made yet first (a body generating, streaming in or put away) — the distance along the ray where it did. exact is false where the ground hit is a stand-in (see terrain.ready) and may move when it is made.
+terrain.raycast(origin, dir [, maxDist]) → { pos =, normal =, distance =, exact = } for the first terrain surface along the ray, read from the ground's own field, not from collision meshes that may not be built yet; maxDist defaults to 1000. A miss answers nil and why: nil, "air" when the ray reached maxDist through open space, or nil, "unknown", distance when it reached ground the world has not made yet first (a body generating, streaming in or put away, or stand-in ground it passed over) — the distance along the ray where it did. exact is false where the ray met stand-in ground anywhere on its way to the hit (see terrain.ready): the hit may move, or come sooner, when that ground is made. A hit with exact true and an "air" miss are final until the ground is edited.
 
 ### `terrain.ready`
 
@@ -3413,7 +3413,7 @@ perf.hitchThreshold([ms]) → the frame time at which a frame is kept as a hitch
 
 ### `perf.hitches`
 
-perf.hitches() → every frame since the last call that took the hitch threshold or more (50 ms, or what perf.hitchThreshold set), oldest first: { {frame=, ms=, top="terrain", buckets={terrain=157.4, scripts=30.1, ...}, parts={collisionRebuild=140.2, ...}, assets={ {path="shaders/ocean.flsl", part="pipelineCompile", ms=827.4}, ... }, scripts={ {name=, ms=}, ... }, calls={ {script=, call=, n=, ms=}, ... }, samples={ {script=, fn=, line=, n=, ms=}, ... }, bodies={ {name=, ms=}, ... }}, ... }. perf.worstMs looks back sixty frames, so a probe that reads every few seconds loses the spike it is hunting; this keeps each one (up to 64) until it is read, with the bucket that spent the time on top. Time no bucket measured is named `untimed`, and waiting on the GPU or the display `gpuWait` and `present`, so a hitch the engine's buckets cannot explain still says so. `parts` names work inside the buckets, in milliseconds already counted there: `terrainEdits` (applying terrain.dig and the other edits), `collisionRebuild` (a terrain collider's rebuilt triangles landing, or the frame waiting for them), `planetLanded` (a generated world arriving), `terrainShadow` (the terrain's shadow volume uploaded after a change), `terrainMeshing` (planning and landing chunk meshes) and `terrainStreaming` (putting far ground away and taking back what was made again); in `assets`, first-use work: `assetDecode` (an image read and decoded), `assetUpload` (put on the GPU), `shaderCompile` (a .flsl compiled and checked) and `pipelineCompile` (the GPU driver building a shader's pipeline). `assets` lists the slowest five files the frame prepared, slowest first, each with its part and milliseconds: the file a load hitch was waiting on, which assets.warm can prepare ahead. Needs perf.enable(true).
+perf.hitches() → every frame since the last call that took the hitch threshold or more (50 ms, or what perf.hitchThreshold set), oldest first: { {frame=, ms=, top="terrain", buckets={terrain=157.4, scripts=30.1, ...}, parts={collisionRebuild=140.2, ...}, assets={ {path="shaders/ocean.flsl", part="pipelineCompile", ms=827.4}, ... }, scripts={ {name=, ms=}, ... }, calls={ {script=, call=, n=, ms=}, ... }, samples={ {script=, fn=, line=, n=, ms=}, ... }, bodies={ {name=, ms=}, ... }}, ... }. perf.worstMs looks back sixty frames, so a probe that reads every few seconds loses the spike it is hunting; this keeps each one (up to 64) until it is read, with the bucket that spent the time on top. Time no bucket measured is named `untimed`, and waiting on the GPU or the display `gpuWait` and `present`, so a hitch the engine's buckets cannot explain still says so. `parts` names work inside the buckets, in milliseconds already counted there: `terrainEdits` (applying terrain.dig and the other edits), `collisionRebuild` (a terrain collider's rebuilt triangles landing, or the frame waiting for them), `planetLanded` (a generated world arriving), `terrainShadow` (the terrain's shadow volume uploaded after a change), `terrainMeshing` (planning and landing chunk meshes) and `terrainStreaming` (putting far ground away and taking back what was made again); in `assets`, first-use work: `assetDecode` (an image read and decoded), `assetUpload` (put on the GPU), `shaderCompile` (a .flsl compiled and checked), `pipelineCompile` (the GPU driver building a shader's pipeline, or a frame waiting on assets.warm's build), `shaderInstall` (a warmed shader put in use) and `materialBind` (binding the materials that wear a shader). `assets` lists the slowest five files the frame prepared, slowest first, each with its part and milliseconds: the file a load hitch was waiting on, which assets.warm can prepare ahead. Needs perf.enable(true).
 
 ### `perf.mirrorCause`
 
@@ -3433,7 +3433,7 @@ perf.pacing() → { presentMode="fifo", vsync=true, refreshHz=60, frameCap=0, fr
 
 ### `perf.parts`
 
-perf.parts() → { name = ms, … } — the named pieces of work inside the buckets in the last finished frame, every frame (a hitch lists them too, but only on a slow frame). scatterSettle is what the scatter bucket spent dropping arriving props onto the ground (rolling chunks and their ground queries; at most about 1 ms a frame plus one query); terrainEdits, collisionRebuild, decalRelay (checking and laying again the marks a dig reached) and decalBatches (packing the decal pages that changed) are inside terrain; assetDecode, assetUpload, shaderCompile and pipelineCompile are first-use work inside assets (see perf.hitches). Inside physics: physicsBroadphase (indexing the colliders), physicsStatic (bodies and assemblies moving against the static world), physicsSweeps (fast movers swept so they stop at first touch), physicsJoints, physicsPairs (movers against each other) and physicsSleep (re-checking what sleepers rest on); perf.bodies names who. Inside render: renderCull (the on-screen test), renderInstancing (walking the scene into instances, terrain and decals included) and renderPasses (the GPU passes encoded and submitted, uploads included). Inside untimed: outsideFrame (the window system and the OS between two frames), frameCap (holding to app.setFrameCap), sceneLoad (a scene swap) and physicsRebuild; the rest of untimed is unnamed. Needs perf.enable(true), like every timing.
+perf.parts() → { name = ms, … } — the named pieces of work inside the buckets in the last finished frame, every frame (a hitch lists them too, but only on a slow frame). scatterSettle is what the scatter bucket spent dropping arriving props onto the ground (rolling chunks and their ground queries; at most about 1 ms a frame plus one query); terrainEdits, collisionRebuild, decalRelay (checking and laying again the marks a dig reached) and decalBatches (packing the decal pages that changed) are inside terrain; assetDecode, assetUpload, shaderCompile, pipelineCompile, shaderInstall and materialBind are first-use work inside assets (see perf.hitches). Inside physics: physicsBroadphase (indexing the colliders), physicsStatic (bodies and assemblies moving against the static world), physicsSweeps (fast movers swept so they stop at first touch), physicsJoints, physicsPairs (movers against each other) and physicsSleep (re-checking what sleepers rest on); perf.bodies names who. Inside render: renderCull (the on-screen test), renderInstancing (walking the scene into instances, terrain and decals included) and renderPasses (the GPU passes encoded and submitted, uploads included). Inside untimed: outsideFrame (the window system and the OS between two frames), frameCap (holding to app.setFrameCap), sceneLoad (a scene swap) and physicsRebuild; the rest of untimed is unnamed. Needs perf.enable(true), like every timing.
 
 ### `perf.sampleScripts`
 
@@ -3513,7 +3513,7 @@ caption("a door unlocks somewhere" [, seconds]) → true if it was shown. Says a
 
 ### `save`
 
-The persistent store: save.set / save.get, named slots, and flushing to disk. Values are capped at about a kilobyte each — store the small fact, not the whole world.
+The persistent store: save.set / save.get, named slots, and flushing to disk. A slot holds at most 10 000 keys and 4 MB — store the player's progress and settings; something the player made (a blueprint library, a level, a recording) goes in a user:// file with assets.writeJson / assets.writeBytes.
 
 ### `save.delete`
 
@@ -3525,7 +3525,7 @@ save.deleteSlot("slot2") — delete a slot's store file from disk ("delete this 
 
 ### `save.flush`
 
-save.flush() — write the store to disk NOW (checkpoints, before risky sections). Returns false on an IO error (also shown in the Console).
+save.flush([{ wait = true }]) — hand the store to the writer NOW (checkpoints, before risky sections) and return; the write finishes on its own thread. wait = true returns only once it is on disk. The file is replaced whole or not at all, so a crash mid-write keeps the previous save. Returns false when a write failed — this one, with wait, or an earlier one (the Console says why); the slot stays dirty and is tried again.
 
 ### `save.get`
 
@@ -3533,7 +3533,7 @@ save.get("gold" [, default]) — the stored value, else the default, else nil. s
 
 ### `save.set`
 
-save.set("gold", 42) — store persistent game data: survives Play sessions, editor restarts, and ships with exported builds. Values are plain data (numbers/strings/bools/tables, no functions or userdata), tables nested up to 16 deep (a cycle or a 17th level raises); a slot holds at most 10 000 keys / 4 MB in all. Not the wire's depth-4 rule: a save stays on this machine. Flushed on Stop + every few seconds during Play.
+save.set("gold", 42) — store persistent game data: survives Play sessions, editor restarts, and ships with exported builds. Values are plain data (numbers/strings/bools/tables, no functions or userdata), tables nested up to 16 deep (a cycle or a 17th level raises); a slot holds at most 10 000 keys / 4 MB in all — past that it raises, and large player data (a blueprint library, a level, a recording) belongs in a user:// file: assets.writeJson("user://crafts/a.json", t). Not the wire's depth-4 rule: a save stays on this machine. Flushed on Stop + every few seconds during Play, on a writer thread: the frame pays for the list of changed keys, and only those are encoded again.
 
 ```lua
 save.set("hp", hp)                 -- survives scene loads and quits
@@ -4443,11 +4443,11 @@ Reference files under Assets/ in code: assets.getFile(path), assets.getContents(
 
 ### `assets.getContents`
 
-assets.getContents("models") — an array of every file under that folder (recursive). Build tables of assets with it. Relative to Assets/ and inside it; at most 20 000 files, and it says when it stopped.
+assets.getContents("models") — an array of every file under that folder (recursive), each relative to Assets/ ("models/armor/iron.glb") as the other assets calls take it; a user:// folder lists user:// paths. Build tables of assets with it. Relative to Assets/ and inside it; at most 20 000 files, and it says when it stopped.
 
 ### `assets.getFile`
 
-assets.getFile("models/armor.glb") — the asset's path (or nil), to hand to node.model / node.material. Path is relative to Assets/ and stays inside it: an absolute path or `..` is nil and one Console line.
+assets.getFile("models/armor.glb") — the asset's path relative to Assets/ (or nil), to hand to node.model / node.material. Path is relative to Assets/ and stays inside it: an absolute path or `..` is nil and one Console line.
 
 ### `assets.preload`
 
@@ -4487,11 +4487,11 @@ assets.textureFromUrl(url [, opts], function(tex, err) end) — download a pictu
 
 ### `assets.warm`
 
-assets.warm({ "textures/hull.png", "shaders/ocean.flsl", "materials/steel.ron", "models/arm.glb" } [, function(failed) end]) — prepare assets ahead of the frame that first uses them, and call back once every one is ready: behind a loading screen, so the level's first frame does not stop to decode images or build shaders. Images (.png, .jpg, …) are decoded on a worker thread and uploaded a few milliseconds a frame; a material shader (.flsl) is compiled and its pipeline built on a worker; a project material (materials/<name>.ron) warms its images and its shader; models and sounds load as assets.preload loads them. `failed` lists any path that could not be prepared (a missing file, a shader that does not compile); a single path works too. Without a GPU (floptle run, a dedicated server) there is nothing to prepare and it calls back straight away. Stop and scene.load drop a waiting callback; what was prepared stays.
+assets.warm({ "textures/hull.png", "shaders/ocean.flsl", "materials/steel.ron", "models/arm.glb" } [, function(failed) end]) — prepare assets ahead of the frame that first uses them, and call back once every one is ready: behind a loading screen, so the level's first frame does not stop to decode images or build shaders. Images (.png, .jpg, …) are decoded on a few worker threads and uploaded a few milliseconds a frame; a shader (.flsl) of a mesh material, a UI element or a screen pass is compiled and its pipeline built on a worker, one shader at a time, and installed one a frame (a sky or sdf shader is built into its pass when worn, and is reported in `failed`); something the game draws while it is still warming waits for that work rather than doing it again; a project material (materials/<name>.ron) warms its images and its shader; models and sounds load as assets.preload loads them. `failed` lists any path that could not be prepared (a missing file, a shader that does not compile); a single path works too. Without a GPU (floptle run, a dedicated server) there is nothing to prepare and it calls back straight away. Stop and scene.load drop a waiting callback; what was prepared stays.
 
 ### `assets.writeBytes`
 
-assets.writeBytes("user://covers/intro.png", bytes) -> ok, err — write a Lua string's bytes exactly, creating the folders on the way. The pair to readBytes: a camera.capture PNG, a data.deflate blob. Same paths as assets.writeText. Refuses: the path leaves its folder (absolute, or containing `..`); the path is an existing FOLDER; the folder could not be created; the write itself failed (permissions, a full disk).
+assets.writeBytes("user://covers/intro.png", bytes) -> ok, err — write a Lua string's bytes exactly, creating the folders on the way. The pair to readBytes: a camera.capture PNG, a data.deflate blob, a player's blueprint library (no size cap; a save slot stops at 4 MB). Same paths as assets.writeText; a `user://` file is replaced whole or not at all, so a crash mid-write keeps the one the player had. Refuses: the path leaves its folder (absolute, or containing `..`); the path is an existing FOLDER; the folder could not be created; the write itself failed (permissions, a full disk).
 
 ### `assets.writeJson`
 

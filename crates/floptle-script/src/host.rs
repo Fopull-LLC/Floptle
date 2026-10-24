@@ -1083,9 +1083,15 @@ fn install_assets(
 ) -> crate::paths::Paths {
     // `assets.getFile(path)` / `assets.getContents(dir)`: resolve files in the project's
     // `Assets/` folder by a path the dev writes relative to it (e.g. "models/armor.glb").
-    // getFile returns the full asset path (or nil if missing); getContents returns an
+    // getFile returns the asset's path (or nil if missing); getContents returns an
     // array of every file's path under a directory (recursive), for building tables of
     // assets. The returned strings are exactly what `node.model` / `node.material` accept.
+    //
+    // **What they answer is project-relative**, spelled the way a scene names the
+    // file, so it is what every other `assets.*` call takes. Both once answered the
+    // full path on disk: `readText` refuses an absolute path, so a listed file could
+    // not be read; a texture or shader warmed by that name was prepared a second time
+    // under it; and a headless run, whose root is `.`, answered `./models/…` instead.
     //
     // **Both stay inside the project.** The path is relative to the project
     // root or it is nothing: an absolute path or a `..` answers `nil` / an
@@ -1103,13 +1109,14 @@ fn install_assets(
         let _ = t.set(
             "getFile",
             lua.create_function(move |lua, path: String| {
-                let (root, rel, _) = pp.split(&path);
+                let (root, rel, user) = pp.split(&path);
                 let Some(full) = floptle_vfs::contain(&root, rel) else {
                     refuse_outside(&sink, "assets.getFile", &path);
                     return Ok(Value::Nil);
                 };
                 Ok(if floptle_vfs::is_file(&full) {
-                    Value::String(lua.create_string(full.to_string_lossy().as_bytes())?)
+                    let shown = if user { full.to_string_lossy().to_string() } else { project_relative(&full, &root) };
+                    Value::String(lua.create_string(shown.as_bytes())?)
                 } else {
                     Value::Nil
                 })
@@ -1138,12 +1145,14 @@ fn install_assets(
                         source: None,
                     });
                 }
-                // The player's files come back as `user://` paths, so what
-                // the list names is what the reads take.
+                // The player's files come back as `user://` paths and the
+                // project's relative to it, so what the list names is what
+                // the reads take.
                 for (i, f) in files.iter().enumerate() {
                     let shown = match user.then(|| Path::new(f).strip_prefix(&root).ok()).flatten() {
                         Some(r) => format!("{}{}", crate::paths::USER_PREFIX, r.to_string_lossy().replace('\\', "/")),
-                        None => f.clone(),
+                        None if user => f.clone(),
+                        None => project_relative(Path::new(f), &root),
                     };
                     arr.set(i + 1, lua.create_string(shown.as_bytes())?)?;
                 }
@@ -4706,8 +4715,9 @@ impl ScriptHost {
     }
 
     /// The `terrain.prepare` asks since the last take: world-space spheres
-    /// whose stand-in ground a game wants made exactly.
-    pub fn take_terrain_prepares(&self) -> Vec<([f64; 3], f64)> {
+    /// whose stand-in ground a game wants made exactly, each with where every
+    /// terrain was when the script asked.
+    pub fn take_terrain_prepares(&self) -> Vec<crate::terrain_api::PrepareAsk> {
         std::mem::take(&mut *self.terrain_prepare.borrow_mut())
     }
 
@@ -5777,12 +5787,24 @@ impl ScriptHost {
         std::mem::take(&mut self.colliders.borrow_mut())
     }
 
-    /// Flush the `save.*` store to disk if dirty (editor calls this on Stop and
-    /// every few seconds during Play, so a crash loses little). Errors surface in
-    /// the Console via the script log channel.
+    /// Hand the `save.*` store to its writer thread if dirty (the editor calls
+    /// this every few seconds during Play, so a crash loses little). Returns
+    /// at once: the frame pays for a list of the changed keys, and the
+    /// encoding and the write happen on the writer. Errors — this write's or
+    /// an earlier one's — surface in the Console via the script log channel.
     pub fn flush_save(&self) {
+        self.flush_save_with(false);
+    }
+
+    /// [`flush_save`](Self::flush_save), returning only once the store is on
+    /// disk: Stop, quit, and anything that reads the slot file next.
+    pub fn flush_save_and_wait(&self) {
+        self.flush_save_with(true);
+    }
+
+    fn flush_save_with(&self, wait: bool) {
         let mut s = self.save_state.borrow_mut();
-        if let Err(e) = crate::save_api::flush(&mut s, &self.paths.runtime_base()) {
+        if let Err(e) = crate::save_api::flush(&mut s, &self.paths.runtime_base(), wait) {
             self.logs.borrow_mut().push(crate::ScriptLog {
                 level: crate::LogLevel::Error,
                 msg: e,
@@ -9189,6 +9211,16 @@ const MAX_LIST_DEPTH: usize = 32;
 /// descended: `read_dir` reports what an entry is rather than what it points
 /// at, so a link to a directory is listed as one entry and its contents —
 /// wherever they are — are not.
+/// A file under the project root as a scene names it: relative to the root,
+/// with forward slashes. One outside it (which `contain` never hands back)
+/// keeps its full path.
+fn project_relative(file: &Path, root: &Path) -> String {
+    match file.strip_prefix(root) {
+        Ok(r) => r.to_string_lossy().replace('\\', "/"),
+        Err(_) => file.to_string_lossy().to_string(),
+    }
+}
+
 fn list_files_under(base: &Path) -> (Vec<String>, bool) {
     let mut files: Vec<String> = Vec::new();
     // The base is asked the same question as every directory under it:
@@ -9310,7 +9342,12 @@ fn write_project_bytes(
     {
         return Err(format!("{call}(\"{path}\"): could not create its folder — {e}"));
     }
-    floptle_vfs::write(&full, bytes).map_err(|e| format!("{call}(\"{path}\"): {e}"))?;
+    // A player's file is replaced whole or not at all: a kill mid-write
+    // leaves the one they had. The game's own files keep the plain write —
+    // a hidden sibling appearing in `assets/` is something the Asset Browser
+    // and hot reload would see.
+    let wrote = if user { floptle_vfs::write_atomic(&full, bytes) } else { floptle_vfs::write(&full, bytes) };
+    wrote.map_err(|e| format!("{call}(\"{path}\"): {e}"))?;
     // An exported build that writes into its own install folder has written
     // somewhere the next build will not look, and that may not be writable
     // on a player's machine at all. It still works, so a game made before
@@ -9647,6 +9684,65 @@ mod host_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **Large player data has a home with no slot cap.** A save slot stops
+    /// at 4 MB and says where big data goes; a 20 MB `user://` file stores and
+    /// reads back byte for byte, and a write that cannot finish leaves the
+    /// file the player had.
+    #[test]
+    fn a_twenty_megabyte_player_file_stores_and_reads_back_and_a_failed_write_keeps_the_old_one() {
+        let dir = std::env::temp_dir().join(format!("floptle-user-blob-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        floptle_vfs::write(
+            dir.join("scripts/player.lua"),
+            "function start()\n\
+             \x20 local blob = string.rep('\\0\\1\\2\\255', 5 * 1024 * 1024)\n\
+             \x20 print('w=' .. tostring(assets.writeBytes('user://crafts/big.bin', blob)))\n\
+             \x20 local back = assets.readBytes('user://crafts/big.bin')\n\
+             \x20 print('same=' .. tostring(back == blob) .. ' len=' .. #back)\n\
+             \x20 local ok, err = pcall(save.set, 'craft', blob)\n\
+             \x20 print('slot=' .. tostring(ok) .. ' ' .. tostring(err))\n\
+             end\n",
+        )
+        .unwrap();
+        let mut world = world_with_script("player");
+        let mut host = ScriptHost::new();
+        host.set_project_root(dir.clone());
+        host.set_playing(true);
+        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        let joined = said.join("\n");
+        assert!(said.iter().any(|m| m == "w=true"), "{joined}");
+        assert!(said.iter().any(|m| m == &format!("same=true len={}", 20 * 1024 * 1024)), "{joined}");
+        assert!(
+            said.iter().any(|m| m.starts_with("slot=false") && m.contains("user://")),
+            "the slot cap did not name where big data goes: {joined}"
+        );
+
+        // The next write cannot finish (its hidden sibling's name is taken, as
+        // a full disk would refuse it): it answers false and the file stays.
+        let file = dir.join("save/user/crafts/big.bin");
+        std::fs::create_dir_all(dir.join("save/user/crafts/.big.bin.tmp")).unwrap();
+        floptle_vfs::write(
+            dir.join("scripts/player.lua"),
+            "function start()\n\
+             \x20 local ok, err = assets.writeBytes('user://crafts/big.bin', 'cut off')\n\
+             \x20 print('again=' .. tostring(ok))\n\
+             end\n",
+        )
+        .unwrap();
+        let mut world = world_with_script("player");
+        let mut host = ScriptHost::new();
+        host.set_project_root(dir.clone());
+        host.set_playing(true);
+        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 0.0);
+        let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        assert!(said.iter().any(|m| m == "again=false"), "{}", said.join("\n"));
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), 20 * 1024 * 1024, "a failed write cut the player's file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// **A player's files live under `user://`, apart from the game's.** In
     /// development that is the project's `save/user/` (which an export leaves
     /// out); with a data root it is `<data>/user/`, and `save.*` slots move to
@@ -9689,7 +9785,7 @@ mod host_tests {
             host.set_playing(true);
             host.run(&mut world, &root.join("scripts"), 1.0 / 60.0, 0.0);
             assert!(host.errors().is_empty(), "{:?}", host.errors());
-            host.flush_save();
+            host.flush_save_and_wait();
             host.drain_logs().into_iter().map(|l| l.msg).collect()
         };
         let want = [
@@ -9821,6 +9917,51 @@ mod host_tests {
             said.iter().any(|m| m.contains("stopped at") && m.contains("narrow the folder")),
             "the cap was silent:\n{joined}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **`getContents` and `getFile` answer the path a scene names the file
+    /// by**, relative to the project, so a listed file is one `readText` reads
+    /// and one a warm keeps under the name a scene draws it with. Run from a
+    /// full root and from `.`, the two spellings a project root has.
+    #[test]
+    fn get_contents_and_get_file_answer_project_relative_paths() {
+        let dir = std::env::temp_dir().join(format!("floptle-assets-rel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        floptle_vfs::create_dir_all(dir.join("levels/deep")).unwrap();
+        floptle_vfs::write(dir.join("levels/deep/one.json"), "{\"n\": 1}").unwrap();
+        floptle_vfs::write(
+            dir.join("scripts/lister.lua"),
+            "function start()\n\
+             \x20 local list = assets.getContents('levels')\n\
+             \x20 print('listed=' .. tostring(list[1]))\n\
+             \x20 print('file=' .. tostring(assets.getFile('levels/deep/one.json')))\n\
+             \x20 print('read=' .. tostring(assets.readJson(list[1]) and assets.readJson(list[1]).n))\n\
+             end\n",
+        )
+        .unwrap();
+        // The same folder named from the working directory, as a headless
+        // run started in the project names its root.
+        let cwd = std::env::current_dir().unwrap();
+        let up = cwd.components().count().saturating_sub(1);
+        let relative: std::path::PathBuf =
+            std::iter::repeat_n(std::path::Component::ParentDir.as_os_str(), up).collect::<std::path::PathBuf>().join(
+                dir.strip_prefix("/").unwrap_or(&dir),
+            );
+        for root in [dir.clone(), relative] {
+            let mut world = world_with_script("lister");
+            let mut host = ScriptHost::new();
+            host.set_project_root(root.clone());
+            host.set_playing(true);
+            host.run(&mut world, &root.join("scripts"), 1.0 / 60.0, 0.0);
+            assert!(host.errors().is_empty(), "{:?}", host.errors());
+            let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+            let joined = said.join("\n");
+            assert!(said.iter().any(|m| m == "listed=levels/deep/one.json"), "root {root:?}:\n{joined}");
+            assert!(said.iter().any(|m| m == "file=levels/deep/one.json"), "root {root:?}:\n{joined}");
+            assert!(said.iter().any(|m| m == "read=1"), "a listed file did not read, root {root:?}:\n{joined}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

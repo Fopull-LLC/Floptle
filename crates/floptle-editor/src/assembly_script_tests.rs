@@ -2006,3 +2006,255 @@ end
     assert_eq!(said.last().map(String::as_str), Some("true true true"), "the prepared ground never became ready: {:?}", &said[said.len().saturating_sub(4)..]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **What reads as final on a world streaming in is final.** A world that
+/// streams in makes the ground round the player and stands the rest in
+/// coarse, then makes more of it as the player comes near and as a game asks
+/// (`terrain.prepare`). A script reads that world every frame from the first
+/// one on: rays straight down over a site, rays grazing in to it across
+/// stand-in ground, and queries at the surface. The first answer each one
+/// gives that says it is final (a hit with `exact`, an "air" miss, or a query
+/// where `terrain.ready` is true) is kept, and every one is compared with the
+/// same ray or query against that world's ground once every chunk of it near
+/// the site is made. They must agree, to a centimetre. A grazing ray hit made
+/// ground past stand-in ground, said `exact`, and met the real ground sooner
+/// once the stand-in was made; one that passed over stand-in ground said
+/// "air" where the real ground stood.
+///
+/// The prepare is asked on the first frame, while the world is still being
+/// generated: it waits for the world to land and is not lost (an ask taken
+/// while the world was not resident was dropped, and the site stayed not
+/// ready until the game asked again). A second ask, at the 256 m cap, over
+/// the stand-in ground the grazing rays start from, makes `terrain.ready`
+/// true over all of it.
+#[test]
+fn what_reads_as_final_on_a_streamed_world_stays_so() {
+    let (mut ed, dir) = project(
+        "final",
+        r#"
+local S = { 0.8660254, 0.5, 0.0 }      -- the site, 60 degrees from the player
+local T1 = { 0.5, -0.8660254, 0.0 }    -- toward the equator, over stand-in ground
+local T2 = { 0.0, 0.0, 1.0 }
+local function dirOf(base, u, v)
+  local x, y, z = base[1] + T1[1] * u + T2[1] * v, base[2] + T1[2] * u + T2[2] * v, base[3] + T1[3] * u + T2[3] * v
+  local l = math.sqrt(x * x + y * y + z * z)
+  return { x / l, y / l, z / l }
+end
+-- Where the grazing rays start, over ground still a stand-in once the site
+-- is made: the second ask makes it.
+local S2 = dirOf(S, 0.45, 0)
+local rays, pts, first, firstq = nil, nil, {}, {}
+local frame, ready1, asked2, ready2 = 0, false, false, false
+local function f6(v) return string.format("%.6f %.6f %.6f", v[1], v[2], v[3]) end
+function update(node, dt)
+  frame = frame + 1
+  local w = find("World")
+  if not w then return end
+  local c = w.worldPos
+  if not rays then
+    rays, pts = {}, {}
+    for i = -4, 4 do
+      for j = -4, 4 do
+        local d = dirOf(S, i * 0.04, j * 0.04)
+        rays[#rays + 1] = { o = { d[1] * 330, d[2] * 330, d[3] * 330 }, d = { -d[1], -d[2], -d[3] }, max = 60 }
+        pts[#pts + 1] = { d[1] * 300, d[2] * 300, d[3] * 300 }
+      end
+    end
+    for j = -20, 20 do
+      local a, b = dirOf(S, 0.45, j * 0.015), dirOf(S, -0.05, j * 0.015)
+      local o, t = { a[1] * 307, a[2] * 307, a[3] * 307 }, { b[1] * 297, b[2] * 297, b[3] * 297 }
+      local dd = { t[1] - o[1], t[2] - o[2], t[3] - o[3] }
+      local l = math.sqrt(dd[1] ^ 2 + dd[2] ^ 2 + dd[3] ^ 2)
+      rays[#rays + 1] = { o = o, d = { dd[1] / l, dd[2] / l, dd[3] / l }, max = 250 }
+    end
+  end
+  local site = { c.x + S[1] * 300, c.y + S[2] * 300, c.z + S[3] * 300 }
+  if frame == 1 then
+    log(string.format("P %s %s", tostring(terrain.busy()), tostring(terrain.ready(site[1], site[2], site[3], 80))))
+    terrain.prepare(site[1], site[2], site[3], 80)
+  end
+  for k, r in ipairs(rays) do
+    if first[k] == nil then
+      local hit, why = terrain.raycast(vec3(c.x + r.o[1], c.y + r.o[2], c.z + r.o[3]), vec3(r.d[1], r.d[2], r.d[3]), r.max)
+      if hit and hit.exact then
+        first[k] = true
+        log(string.format("C %s %s %d hit %.6f", f6(r.o), f6(r.d), r.max, hit.distance))
+      elseif not hit and why == "air" then
+        first[k] = true
+        log(string.format("C %s %s %d air", f6(r.o), f6(r.d), r.max))
+      end
+    end
+  end
+  for k, p in ipairs(pts) do
+    if firstq[k] == nil and terrain.ready(c.x + p[1], c.y + p[2], c.z + p[3], 0) then
+      firstq[k] = true
+      log(string.format("Q %s %.6f", f6(p), terrain.query(c.x + p[1], c.y + p[2], c.z + p[3])))
+    end
+  end
+  if not ready1 and terrain.ready(site[1], site[2], site[3], 80) then
+    ready1 = true
+    log("R1 " .. frame)
+  end
+  local far = { c.x + S2[1] * 300, c.y + S2[2] * 300, c.z + S2[3] * 300 }
+  if ready1 and not asked2 then
+    asked2 = true
+    log(string.format("P2 %s", tostring(terrain.ready(far[1], far[2], far[3], 256))))
+    terrain.prepare(far[1], far[2], far[3], 256)
+  end
+  if asked2 and not ready2 and terrain.ready(far[1], far[2], far[3], 256) then
+    ready2 = true
+    log("R2 " .. frame)
+  end
+end
+"#,
+    );
+    let fill = floptle_field::procgen::PlanetFill {
+        seed: 8,
+        radius: 300.0,
+        voxel: 1.5,
+        relief: 6.0,
+        cave_depth: 20.0,
+        defer_caves: true,
+        ..Default::default()
+    };
+    // The rails' star would carry the world off: this world is the only
+    // celestial, and stays where it is put.
+    let star = ed.world.query::<Name>().find(|(_, n)| n.0 == "Star").map(|(e, _)| e).unwrap();
+    ed.world.remove::<CelestialBody>(star);
+    let w = ed.world.spawn();
+    ed.world.insert(w, Transform::IDENTITY);
+    ed.world.insert(w, Name("World".into()));
+    ed.world.insert(w, Matter::Terrain { id: 9, collision: Default::default() });
+    ed.world.insert(w, CelestialBody { body_radius: 300.0, ..Default::default() });
+    ed.world.insert(w, floptle_core::TerrainGen(ron::to_string(&fill).unwrap()));
+    let cam = ed.world.query::<Name>().find(|(_, n)| n.0 == "Camera").map(|(e, _)| e).unwrap();
+    ed.world.insert(cam, Transform::from_translation(DVec3::new(0.0, 312.0, 0.0)));
+    ed.toggle_play();
+    assert!(!ed.terrains.contains_key(&w), "the world should start cold for this test to mean anything");
+    let mut after = None;
+    for frame in 0..3000 {
+        ed.pump_world_streaming();
+        ed.play_step(1.0 / 60.0, true);
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        if after.is_none() && !lines(&mut ed, "R2").is_empty() {
+            after = Some(frame);
+        }
+        if after.is_some_and(|a| frame > a + 30) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let asked = lines(&mut ed, "P");
+    assert_eq!(asked.first().map(String::as_str), Some("true false"), "the first prepare was not asked while the world was still being made");
+    assert!(!lines(&mut ed, "R1").is_empty(), "the site asked for while the world streamed in never became ready");
+    assert_eq!(lines(&mut ed, "P2").first().map(String::as_str), Some("false"), "the second site was ready before it was asked for");
+    assert!(after.is_some(), "the second site, asked for at the 256 m cap, never became ready");
+
+    // The ground every answer is held to: the world's own field, every chunk
+    // near the site made.
+    let mut truth = ed.terrains[&w].field.clone();
+    let site = Vec3::new(0.8660254, 0.5, 0.0) * 300.0;
+    let reach = Vec3::splat(400.0);
+    let pending = truth.pending_in_box(site - reach, site + reach);
+    truth.realize(&pending);
+    assert!(truth.pending_in_box(site - reach, site + reach).is_empty(), "the truth still has stand-in ground");
+    let num = |s: &str| -> f32 { s.parse().unwrap() };
+    let (mut casts, mut hits, mut wrong) = (0, 0, Vec::new());
+    for l in lines(&mut ed, "C") {
+        let f: Vec<&str> = l.split(' ').collect();
+        let o = Vec3::new(num(f[0]), num(f[1]), num(f[2]));
+        let d = Vec3::new(num(f[3]), num(f[4]), num(f[5]));
+        let max = num(f[6]);
+        let real = truth.raycast(o, d, max).map(|h| (h - o).length());
+        let said = (f[7] == "hit").then(|| num(f[8]));
+        casts += 1;
+        hits += usize::from(said.is_some());
+        let agree = match (said, real) {
+            (Some(a), Some(b)) => (a - b).abs() < 0.01,
+            (None, None) => true,
+            _ => false,
+        };
+        if !agree {
+            wrong.push(format!("{l} -> {real:?}"));
+        }
+    }
+    let (mut queries, mut qwrong) = (0, Vec::new());
+    for l in lines(&mut ed, "Q") {
+        let f: Vec<&str> = l.split(' ').collect();
+        let p = Vec3::new(num(f[0]), num(f[1]), num(f[2]));
+        let real = truth.d(p);
+        queries += 1;
+        if (real - num(f[3])).abs() > 0.01 {
+            qwrong.push(format!("{l} -> {real}"));
+        }
+    }
+    floptle_say::say!("FINAL {casts} final casts ({hits} hits), {} moved; {queries} final queries, {} moved", wrong.len(), qwrong.len());
+    assert!(casts >= 100 && hits >= 80, "only {casts} casts ({hits} hits) of 122 read as final: the fixture says little");
+    assert!(queries >= 70, "only {queries} queries of 81 read as final");
+    assert!(wrong.is_empty(), "{} casts read as final changed once the ground was made: {:?}", wrong.len(), &wrong[..wrong.len().min(6)]);
+    assert!(qwrong.is_empty(), "{} queries read as final changed once the ground was made: {:?}", qwrong.len(), &qwrong[..qwrong.len().min(6)]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A prepare on a moving world lands on the ground the script asked
+/// about.** An orbiting world moves between the script's ask and the engine
+/// taking it; read in the world's new frame, the ask's box slid off the edge
+/// of the one `terrain.ready` checks, and `ready` stayed false over the edge
+/// chunks however often the game asked again. The world here covers forty
+/// metres a frame; one ask, and `ready` turns true over the whole box.
+#[test]
+fn a_prepare_on_a_moving_world_lands_where_it_was_asked() {
+    let (mut ed, dir) = project(
+        "moving",
+        r#"
+local S = { 0.0, 0.8660254, 0.5 }
+local asked, done, frame = false, false, 0
+function update(node, dt)
+  frame = frame + 1
+  terrain.warm("World")
+  local w = find("World")
+  if not w then return end
+  local c = w.worldPos
+  local p = { c.x + S[1] * 300, c.y + S[2] * 300, c.z + S[3] * 300 }
+  if not asked and terrain.query(p[1], p[2], p[3]) and not terrain.busy() then
+    asked = true
+    log(string.format("A %s", tostring(terrain.ready(p[1], p[2], p[3], 120))))
+    terrain.prepare(p[1], p[2], p[3], 120)
+  end
+  if asked and not done and terrain.ready(p[1], p[2], p[3], 120) then
+    done = true
+    log("R " .. frame)
+  end
+  if frame % 30 == 0 then log(string.format("V %.1f %.1f %.1f", c.x, c.y, c.z)) end
+end
+"#,
+    );
+    let fill = floptle_field::procgen::PlanetFill { seed: 3, radius: 300.0, voxel: 1.5, relief: 6.0, cave_depth: 0.0, ..Default::default() };
+    // Forty metres a frame round a star 5 km off: v = sqrt(mu / a).
+    let star = ed.world.query::<Name>().find(|(_, n)| n.0 == "Star").map(|(e, _)| e).unwrap();
+    ed.world.insert(star, CelestialBody { mu: 2400.0 * 2400.0 * 5000.0, body_radius: 10.0, ..Default::default() });
+    let w = ed.world.spawn();
+    ed.world.insert(w, Transform::from_translation(DVec3::new(5000.0, -100_000.0, 0.0)));
+    ed.world.insert(w, Name("World".into()));
+    ed.world.insert(w, Matter::Terrain { id: 4, collision: Default::default() });
+    ed.world.insert(w, CelestialBody { mu: 0.0, body_radius: 300.0, parent: "Star".into(), a: 5000.0, ..Default::default() });
+    ed.world.insert(w, floptle_core::TerrainGen(ron::to_string(&fill).unwrap()));
+    ed.toggle_play();
+    for _ in 0..1200 {
+        ed.pump_world_streaming();
+        ed.play_step(1.0 / 60.0, true);
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        if !lines(&mut ed, "R").is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let moved = lines(&mut ed, "V");
+    assert_eq!(lines(&mut ed, "A").first().map(String::as_str), Some("false"), "the site was ready before it was asked for, or never asked: {moved:?}");
+    let a: Vec<f64> = moved.first().unwrap().split(' ').map(|v| v.parse().unwrap()).collect();
+    let b: Vec<f64> = moved.last().unwrap().split(' ').map(|v| v.parse().unwrap()).collect();
+    let per_frame = ((a[0] - b[0]).powi(2) + (a[2] - b[2]).powi(2)).sqrt() / (30.0 * (moved.len() - 1).max(1) as f64);
+    assert!(per_frame > 30.0, "the world moved {per_frame:.2} m a frame: the fixture is not moving it");
+    assert!(!lines(&mut ed, "R").is_empty(), "one ask on a world moving {per_frame:.1} m a frame never made the box it asked for ready");
+    let _ = std::fs::remove_dir_all(&dir);
+}

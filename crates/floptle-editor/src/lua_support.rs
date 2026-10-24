@@ -2109,7 +2109,8 @@ function terrain.capacity() end
 ---@return boolean
 function terrain.ready(x, y, z, r) end
 ---Make the stand-in ground within `r` (at most 256) of the point exactly, on
----background workers; `terrain.ready` turns true there once it lands.
+---background workers; `terrain.ready` turns true there once it lands. An ask
+---over a world still streaming in waits for it.
 ---@param x number
 ---@param y number
 ---@param z number
@@ -2117,7 +2118,9 @@ function terrain.ready(x, y, z, r) end
 function terrain.prepare(x, y, z, r) end
 ---The first terrain surface along a ray, from the ground's own field. A miss
 ---answers nil and \"air\" (reached maxDist, default 1000, through open space) or
----nil, \"unknown\" and the distance at which it reached ground not made yet.
+---nil, \"unknown\" and the distance at which it reached ground not made yet
+---(stand-in ground included). `exact` is false when the ray passed stand-in
+---ground on its way to the hit.
 ---@param origin vec3
 ---@param dir vec3
 ---@param maxDist? number
@@ -2310,8 +2313,9 @@ function mesh.free(name) end
 
 ---Persistent game data: a per-slot key→value store that survives Play
 ---sessions, editor restarts, and ships with exported builds. Values are plain
----data (numbers/strings/bools/tables nested up to 16 deep), within the slot cap.
----Flushes on Stop + every few seconds during Play; `save.flush()` forces it.
+---data (numbers/strings/bools/tables nested up to 16 deep), within the slot cap
+---(10 000 keys, 4 MB). Large player data goes in a `user://` file instead
+---(`assets.writeJson`). Flushes on Stop + every few seconds during Play; `save.flush()` forces it.
 ---Multiplayer: LOCAL storage — for server-authoritative progress call save.*
 ---on the server and hand results to clients via synced/RPC.
 ---@class Save
@@ -2341,10 +2345,12 @@ function save.slot(name) end
 ---@param name string
 ---@return boolean
 function save.deleteSlot(name) end
----Write the store to disk now (checkpoints). Returns false on an IO error
----(also surfaced in the Console).
+---Hand the store to the writer now (checkpoints) and return; the write
+---finishes on its own thread. `{ wait = true }` returns only once it is on
+---disk. False when a write failed (also surfaced in the Console).
+---@param opts? { wait?: boolean }
 ---@return boolean
-function save.flush() end
+function save.flush(opts) end
 
 ---A scheduled timer. `cancel()` aborts it (safe to call after it fired).
 ---@class TimerHandle

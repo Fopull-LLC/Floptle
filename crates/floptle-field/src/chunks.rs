@@ -2266,6 +2266,36 @@ impl ChunkField {
         self.chunks_in_world_box(lo, hi).into_iter().filter(|c| self.pending.contains(c)).collect()
     }
 
+    /// How far along a ray from `ro` (along unit `rd`) it first comes within
+    /// `margin` of a chunk not generated yet, if it does within `max_t`.
+    ///
+    /// A ray read off this field reads only the voxels along it, so where
+    /// this is `None` what [`Self::raycast`] answers over that stretch is
+    /// final. Where it is `Some`, the ray crossed stand-in ground, and the
+    /// ground made there later can stand where the stand-in had air.
+    pub fn pending_along(&self, ro: Vec3, rd: Vec3, max_t: f32, margin: f32) -> Option<f32> {
+        if self.pending.is_empty() || max_t.is_nan() || max_t < 0.0 {
+            return None;
+        }
+        let rd = rd.normalize_or_zero();
+        // A box round each stretch of the ray, a quarter of a chunk long,
+        // holds that stretch and everything within `margin` of it.
+        let step = CHUNK as f32 * self.voxel * 0.25;
+        let half = Vec3::splat(step * 0.5 + margin.max(0.0));
+        let mut t = 0.0f32;
+        loop {
+            let mid = (t + step * 0.5).min(max_t);
+            let p = ro + rd * mid;
+            if self.chunks_in_world_box(p - half, p + half).iter().any(|c| self.pending.contains(c)) {
+                return Some(t);
+            }
+            t += step;
+            if t > max_t {
+                return None;
+            }
+        }
+    }
+
     /// What makes this field's pending chunks, for running it off this thread:
     /// hand its answers to [`Self::adopt_generated`].
     pub fn pending_source(&self) -> Option<std::sync::Arc<dyn PendingSource>> {

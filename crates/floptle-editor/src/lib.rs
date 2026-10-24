@@ -2580,6 +2580,10 @@ struct Editor {
     /// be handed to a worker, and the ones made that way: those are not put
     /// away again however far they are.
     terrain_prepare_wanted: Vec<(Entity, [i32; 3])>,
+    /// `terrain.prepare` asks still to land on a world: each waits while a
+    /// world not made yet reaches it, so an ask made as its world streams in
+    /// lands when that world does. With the worlds each has landed on.
+    terrain_prepare_asks: Vec<(floptle_script::PrepareAsk, std::collections::HashSet<Entity>)>,
     /// Spawns held for later frames by the game's `spawnBudget`, in the order
     /// they were asked for.
     spawn_backlog: std::collections::VecDeque<floptle_script::SpawnRequest>,

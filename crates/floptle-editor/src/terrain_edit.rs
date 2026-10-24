@@ -2393,6 +2393,9 @@ impl Editor {
         }
         let Some((mn, mx)) = proxy else { return };
         let mut b = one.remove(&e).unwrap_or_default();
+        // Ground the edits made is new geometry, whatever the edits were (a
+        // paint over stand-in ground): the sim's copy takes it too.
+        b.geom |= !realized.is_empty();
         b.touched.extend(realized);
         b.touched.sort_unstable();
         b.touched.dedup();
@@ -2509,6 +2512,12 @@ impl Editor {
             }
         }
         self.landed_op(op, at, touched, measured, batch);
+        // Ground the edit made is new geometry, whatever the edit was: a
+        // paint over stand-in ground made it exactly in the field and left
+        // the sim's copy a stand-in, read as not ready for good.
+        if made > 0 {
+            batch.entry(at.e).or_default().geom = true;
+        }
     }
 
     /// What follows an op made, inline or on a worker: its report to the
@@ -3373,26 +3382,58 @@ impl Editor {
 
     /// `terrain.prepare`: find the stand-in chunks each ask reaches, and hand
     /// them to workers a few at a time, beside the ones made on approach. A
-    /// chunk made this way is kept: put away again it would be a stand-in, and
-    /// `terrain.ready` would go back to false under the game that asked.
+    /// chunk made this way is kept, and so is every chunk round the ask: put
+    /// away again it would be a stand-in, and `terrain.ready` would go back to
+    /// false under the game that asked. (Only the chunks still to make were
+    /// kept, and ground made on approach before the ask was put away again
+    /// after it.)
+    ///
+    /// An ask over a world still being made waits for it: one taken while
+    /// the world was streaming in reached no field, and was dropped.
     fn prepare_asked_ground(&mut self) {
-        for (p, r) in self.script_host.take_terrain_prepares() {
-            let p = DVec3::from(p);
-            for (&e, t) in &self.terrains {
-                if t.field.pending_count() == 0 || t.field.pending_source().is_none() {
-                    continue;
-                }
-                let (anchor, rot, ts) = self.terrain_world_frame_of(e);
-                let ts = ts.max(1e-6);
-                let local = (rot.inverse() * (p - anchor).as_vec3()) / ts;
-                let reach = Vec3::splat(r as f32 / ts + t.field.voxel() * 2.0);
-                let kept = self.terrain_prepared.entry(e).or_default();
-                for c in t.field.pending_in_box(local - reach, local + reach) {
-                    if kept.insert(c) {
-                        self.terrain_prepare_wanted.push((e, c));
+        for ask in self.script_host.take_terrain_prepares() {
+            if self.terrain_prepare_asks.len() < 256 {
+                self.terrain_prepare_asks.push((ask, std::collections::HashSet::new()));
+            }
+        }
+        if !self.terrain_prepare_asks.is_empty() {
+            let unmade = self.terrain_unmade_regions();
+            let mut asks = std::mem::take(&mut self.terrain_prepare_asks);
+            for (ask, landed) in &mut asks {
+                let p = DVec3::from(ask.center);
+                for (&e, t) in &self.terrains {
+                    // A world being made again answers with the field about
+                    // to be replaced: the ask waits for the new one.
+                    let generating = matches!(self.world.get::<Matter>(e), Some(Matter::Terrain { id, .. }) if self.planet_gen_pending.contains(id));
+                    if generating || !landed.insert(e) || t.field.pending_source().is_none() {
+                        continue;
+                    }
+                    // In the frame the script read this world in, when it did:
+                    // an orbiting world has moved since.
+                    let (anchor, rot, ts) = match ask.frames.iter().find(|f| f.0 == e.index()) {
+                        Some(&(_, a, q)) => (DVec3::from(a), Quat::from_array(q).normalize(), self.terrain_world_frame_of(e).2),
+                        None => self.terrain_world_frame_of(e),
+                    };
+                    let ts = ts.max(1e-6);
+                    let local = (rot.inverse() * (p - anchor).as_vec3()) / ts;
+                    // The box `terrain.ready` checks, and two voxels more.
+                    let reach = Vec3::splat(ask.radius as f32 / ts + t.field.voxel() * 4.0);
+                    let kept = self.terrain_prepared.entry(e).or_default();
+                    let pending = t.field.pending_in_box(local - reach, local + reach);
+                    for c in t.field.chunks_in_world_box(local - reach, local + reach) {
+                        kept.insert(c);
+                    }
+                    for c in pending {
+                        if !self.terrain_prepare_wanted.contains(&(e, c)) {
+                            self.terrain_prepare_wanted.push((e, c));
+                        }
                     }
                 }
             }
+            // Kept while ground not made yet reaches it; landed on every world
+            // that is, it is done.
+            asks.retain(|(ask, _)| unmade.iter().any(|u| u.touches(ask.center, ask.radius)));
+            self.terrain_prepare_asks = asks;
         }
         if self.terrain_prepare_wanted.is_empty() {
             return;
@@ -4129,6 +4170,9 @@ impl Editor {
         self.terrain_cold.clear();
         self.terrain_disk_dirty.clear();
         self.terrain_load_jobs.clear();
+        self.terrain_prepare_asks.clear();
+        self.terrain_prepare_wanted.clear();
+        self.terrain_prepared.clear();
         self.play_loaded_terrains.clear();
         self.active_terrain = None;
         self.terrain_slots.clear();
@@ -6112,6 +6156,43 @@ mod residency_tests {
         assert_same_chunks(&once.terrains[&eo].field, &ed.terrains[&e].field, "making the edit on the frame");
     }
 
+    /// **Ground a paint made reaches the sim's copy.** An edit over stand-in
+    /// ground makes that ground first. A paint changes no shape, so its
+    /// chunks were not copied to the physics sim, and the sim's copy, the one
+    /// scripts read, kept the stand-in there: `terrain.ready` said false over
+    /// it for good (the field said it was made, so `prepare` had nothing to
+    /// make) and bodies stood on the coarse copy. Counted: after the paint,
+    /// the sim's copy has the same chunks still to make as the field.
+    #[test]
+    fn ground_a_paint_made_reaches_the_sims_copy() {
+        let fill = floptle_field::procgen::PlanetFill { seed: 8, radius: 150.0, voxel: 1.5, relief: 6.0, cave_depth: 0.0, ..Default::default() };
+        let whole = floptle_field::procgen::generate_planet(&fill);
+        let top = whole.raycast(Vec3::new(0.0, 250.0, 0.0), Vec3::NEG_Y, 250.0).unwrap();
+        let side = whole.raycast(Vec3::new(250.0, 0.0, 0.0), Vec3::NEG_X, 250.0).unwrap();
+        let mut field = floptle_field::procgen::generate_planet_near(&fill, top, floptle_field::CHUNK as f32 * fill.voxel);
+        field.set_spec("test".into());
+        let (mut ed, e) = editor_on(&field);
+        ed.world.insert(e, floptle_core::CelestialBody { body_radius: 150.0, ..Default::default() });
+        ed.world.insert(e, floptle_core::Matter::Terrain { id: 1, collision: Default::default() });
+        ed.toggle_play();
+        let reach = Vec3::splat(12.0);
+        let before = ed.terrains[&e].field.pending_in_box(side - reach, side + reach).len();
+        assert!(before > 0, "the fixture's paint is over ground already made");
+        let paint = floptle_script::TerrainOp {
+            pos: [side.x as f64, side.y as f64, side.z as f64],
+            radius: 3.0,
+            strength: 1.0,
+            mode: floptle_script::TerrainOpMode::Paint([0.9, 0.1, 0.1]),
+            id: 0,
+            normal: None,
+        };
+        frames_to_land(&mut ed, vec![paint]);
+        let made = ed.terrains[&e].field.pending_in_box(side - reach, side + reach);
+        assert!(made.len() < before, "the paint made no ground");
+        let sim = ed.sim.as_mut().unwrap().terrain_collider_mut(e.index()).unwrap().field.pending_in_box(side - reach, side + reach);
+        assert_eq!(sim, made, "the sim's copy kept {} stand-in chunks the paint made", sim.len().saturating_sub(made.len()));
+    }
+
     /// **A grade sent the moment a big world lands makes no ground on any
     /// frame.** A fresh world has made only the ground round the player, and a
     /// write over the rest makes it first, tens of milliseconds a chunk; an op
@@ -6201,6 +6282,41 @@ mod residency_tests {
         let t = &ed.terrains[&e].field;
         let left = t.chunk_coords().into_iter().filter(|c| t.evictable(*c)).count();
         assert!(left < t.chunk_coords().len() / 2, "{left} chunks were never put away");
+    }
+
+    /// **Ground a game asked for stays made, even what was made already.**
+    /// `terrain.prepare` kept the chunks it had to make, so `terrain.ready`
+    /// would not go back to false under the game; ground already made when it
+    /// asked was not kept, and was put away with the rest of the far side,
+    /// and the box read not ready again. Counted: a whole world, a prepare
+    /// far from the camera while every chunk is still made, and every far
+    /// scan after it; not one chunk in the box is put away, while hundreds
+    /// beside it are.
+    #[test]
+    fn ground_asked_for_is_kept_even_where_it_was_made_already() {
+        let fill = floptle_field::procgen::PlanetFill { seed: 5, radius: 300.0, voxel: 1.5, relief: 6.0, cave_depth: 0.0, ..Default::default() };
+        let mut field = floptle_field::procgen::generate_planet(&fill);
+        field.set_spec("test".into());
+        let mut ed = crate::Editor::default();
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        ed.world.insert(e, floptle_core::CelestialBody { body_radius: 300.0, ..Default::default() });
+        ed.terrains.insert(e, EditorTerrain::new(field));
+        let site = Vec3::new(0.0, -300.0, 0.0);
+        let reach = Vec3::splat(60.0 + 1.5 * 2.0);
+        assert!(ed.terrains[&e].field.pending_in_box(site - reach, site + reach).is_empty(), "the fixture's site is not all made");
+        ed.terrain_prepare_asks.push((
+            floptle_script::PrepareAsk { center: site.as_dvec3().to_array(), radius: 60.0, frames: Vec::new() },
+            std::collections::HashSet::new(),
+        ));
+        let cam = DVec3::new(0.0, 310.0, 0.0);
+        for _ in 0..FAR_SCAN_FRAMES * 200 {
+            ed.stream_far_chunks(cam);
+        }
+        let t = &ed.terrains[&e].field;
+        assert!(t.evicted_count() > 200, "only {} chunks were put away: the fixture is not far enough", t.evicted_count());
+        let gone = t.pending_in_box(site - reach, site + reach).len();
+        assert_eq!(gone, 0, "{gone} chunks of the ground asked for were put away");
     }
 
     /// **A world's chunks are gathered for meshing off the frame.** A coarse

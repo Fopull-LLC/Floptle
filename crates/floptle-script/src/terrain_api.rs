@@ -84,7 +84,7 @@ pub struct UnmadeRegion {
 
 impl UnmadeRegion {
     /// Does the sphere `p`, `r` reach into this region?
-    fn touches(&self, p: [f64; 3], r: f64) -> bool {
+    pub fn touches(&self, p: [f64; 3], r: f64) -> bool {
         let d = (0..3).map(|k| (p[k] - self.center[k]).powi(2)).sum::<f64>().sqrt();
         d <= self.radius + r.max(0.0)
     }
@@ -348,9 +348,43 @@ fn stand_in_near(cols: &[floptle_physics::AnchoredCollider], p: glam::DVec3, r: 
     })
 }
 
-/// `terrain.prepare` asks, waiting for the engine: world-space spheres whose
-/// stand-in ground should be made exactly.
-pub(crate) type PrepareCalls = Rc<RefCell<Vec<([f64; 3], f64)>>>;
+/// How far along a world-space ray from `o` (unit `dir`) it first comes near
+/// stand-in ground, within `max`, on any terrain: what a ray reads past that
+/// point may change when the ground there is made.
+fn stand_in_along(cols: &[floptle_physics::AnchoredCollider], o: glam::DVec3, dir: glam::DVec3, max: f64) -> Option<f64> {
+    cols.iter()
+        .filter_map(|c| {
+            let t = c.shape.chunk_terrain()?;
+            if t.field.pending_count() == 0 {
+                return None;
+            }
+            let s = t.scale.max(1e-6);
+            let inv = t.rot.inverse();
+            let start = (inv * (o - c.anchor).as_vec3()) / s;
+            // A read samples a voxel either side of the point, as `ready`'s.
+            let at = t.field.pending_along(start, inv * dir.as_vec3(), (max / s as f64) as f32, t.field.voxel() * 2.0)?;
+            Some(at as f64 * s as f64)
+        })
+        .fold(None, |a: Option<f64>, t| Some(a.map_or(t, |a| a.min(t))))
+}
+
+/// A `terrain.prepare` ask, waiting for the engine: a world-space sphere
+/// whose stand-in ground should be made exactly, and where each terrain was
+/// when the script asked, so the ask lands on the ground the script read
+/// even when its world has moved on (an orbiting planet moves before the
+/// engine takes the ask; read in its new frame, the box missed the edge of
+/// the one `terrain.ready` checks).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PrepareAsk {
+    pub center: [f64; 3],
+    pub radius: f64,
+    /// Each terrain collider's node index, anchor and rotation (x, y, z, w)
+    /// at the time of the ask.
+    pub frames: Vec<(u32, [f64; 3], [f32; 4])>,
+}
+
+/// `terrain.prepare` asks since the engine last took them.
+pub(crate) type PrepareCalls = Rc<RefCell<Vec<PrepareAsk>>>;
 
 pub(crate) fn install_terrain_api(
     lua: &Lua,
@@ -570,13 +604,25 @@ pub(crate) fn install_terrain_api(
     // the point exactly, off the frame: the far ground of a streamed world and
     // deep rock not generated yet. For a game about to plan from queries
     // somewhere nobody is standing; `terrain.ready` turns true once it has
-    // landed. r is capped at 256.
+    // landed. r is capped at 256. Where each terrain is goes with the ask, so
+    // it lands on the ground the script read even if the world has moved by
+    // the time the engine takes it; an ask over a world still streaming in
+    // waits for it.
     {
         let prepare = prepare.clone();
+        let cols = colliders.clone();
         if let Ok(f) = lua.create_function(move |_, (x, y, z, r): (f64, f64, f64, f64)| {
             let mut q = prepare.borrow_mut();
             if q.len() < 256 && r.is_finite() && r >= 0.0 {
-                q.push(([x, y, z], r.min(256.0)));
+                let frames = cols
+                    .borrow()
+                    .iter()
+                    .filter_map(|c| {
+                        let t = c.shape.chunk_terrain()?;
+                        Some((c.eid?, c.anchor.to_array(), t.rot.to_array()))
+                    })
+                    .collect();
+                q.push(PrepareAsk { center: [x, y, z], radius: r.min(256.0), frames });
             }
             Ok(())
         }) {
@@ -1015,8 +1061,10 @@ pub(crate) fn install_terrain_api(
     // collision meshes that may not be built yet: { pos =, normal =,
     // distance = }. A miss answers nil and why: nil, "air" when the ray
     // reached maxDist (default 1000) through open space, and nil, "unknown",
-    // distance when it reached ground the world has not made yet first — the
-    // distance along the ray where it did.
+    // distance when it reached ground the world has not made yet first (a
+    // body not resident, or stand-in ground it passed over) — the distance
+    // along the ray where it did. `exact` is false when the ray passed
+    // stand-in ground on the way to its hit.
     {
         let cols = colliders.clone();
         let unmade = unmade.clone();
@@ -1051,16 +1099,29 @@ pub(crate) fn install_terrain_api(
                 if let Some(at) = entry {
                     return (Value::Nil, "unknown", at).into_lua_multi(lua);
                 }
+                // Stand-in ground anywhere along the ray, up to what it hit:
+                // the ground made there later can stand where the stand-in
+                // has air, and stop the ray sooner. Not only at the hit, where
+                // it was asked before: a ray grazing in over stand-in ground
+                // to made ground said `exact`, and met the real ground sooner
+                // once that was made.
+                let stand_in = stand_in_along(&cols.borrow(), o, dir, reach);
                 match best {
-                    None => (Value::Nil, "air").into_lua_multi(lua),
+                    // A miss past stand-in ground is not open air: that
+                    // ground is not made yet.
+                    None => match stand_in {
+                        Some(at) => (Value::Nil, "unknown", at).into_lua_multi(lua),
+                        None => (Value::Nil, "air").into_lua_multi(lua),
+                    },
                     Some((dist, pos, n)) => {
                         let hit = lua.create_table()?;
                         hit.set("pos", crate::math_api::LuaVec3(pos))?;
                         hit.set("normal", crate::math_api::LuaVec3(n))?;
                         hit.set("distance", dist)?;
-                        // False where the ground hit is a stand-in: the hit
-                        // may move when it is made exactly (`terrain.ready`).
-                        hit.set("exact", !stand_in_near(&cols.borrow(), pos, 0.0))?;
+                        // False where the ray met stand-in ground on its way:
+                        // the hit may move when it is made exactly
+                        // (`terrain.ready`, `terrain.prepare`).
+                        hit.set("exact", stand_in.is_none())?;
                         hit.into_lua_multi(lua)
                     }
                 }

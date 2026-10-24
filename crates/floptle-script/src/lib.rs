@@ -395,7 +395,7 @@ pub use net_api::{
 };
 pub use assembly_api::{AssemblyCmd, AssemblyImpact, AssemblyInfo};
 pub use space_api::{belt_orbits, SpaceBodyInfo, SpaceInfo};
-pub use terrain_api::{ImpostorRule, LodAnchor, MAX_PENDING_OPS, TERRAIN_EDIT_BUDGET_MS, TerrainOp, TerrainOpMode, TerrainYield, UnmadeRegion};
+pub use terrain_api::{ImpostorRule, LodAnchor, MAX_PENDING_OPS, PrepareAsk, TERRAIN_EDIT_BUDGET_MS, TerrainOp, TerrainOpMode, TerrainYield, UnmadeRegion};
 pub use rollback_api::{ScriptState, MAX_STATE_DEPTH};
 pub use view_api::ViewInfo;
 
