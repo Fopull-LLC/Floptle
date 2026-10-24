@@ -1,5 +1,9 @@
 ## Just shipped
 
+**v0.117.0-rc11 — "Whole Worlds"** (beta). Big batches of terrain edits land
+many a frame and under a budget a game can raise, ground streams in wherever
+the camera goes, and any node can be destroyed.
+
 **v0.117.0-rc10 — "Whole Worlds"** (beta). Big digs and marks land without
 stalling the frame, planets give back the memory they no longer need, wheels
 roll freely, and a walker can no longer slip through a narrow post.
