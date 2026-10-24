@@ -441,13 +441,22 @@ pub(crate) fn node_id_of(v: &mlua::Value) -> Option<u32> {
 }
 
 pub(crate) fn new_node_handle(lua: &Lua, e: u32) -> mlua::Result<Table> {
-    let t = lua.create_table()?;
+    let t = lua.create_table_with_capacity(0, 1)?;
     t.raw_set("__id", e)?;
-    if let Ok(mt) = lua.named_registry_value::<Table>("floptle_node_mt") {
+    // Held beside the state rather than looked up by name: `children()` on a
+    // thousand-part craft makes a thousand of these, and the named lookup was
+    // a registry string hash each.
+    if let Some(mt) = lua.app_data_ref::<NodeMeta>() {
+        t.set_metatable(Some(mt.0.clone()));
+    } else if let Ok(mt) = lua.named_registry_value::<Table>("floptle_node_mt") {
         t.set_metatable(Some(mt));
     }
     Ok(t)
 }
+
+/// The node handle's metatable, kept as app data so making a handle is not a
+/// registry lookup by name.
+pub(crate) struct NodeMeta(pub(crate) Table);
 
 /// Create a Lua **component handle** for component `comp` on entity index `e`: a table
 /// `{__id, __comp}` with the shared component metatable, so `h.field` reads and

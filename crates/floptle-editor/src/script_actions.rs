@@ -65,7 +65,7 @@ impl Editor {
         let before = self.terrains.len();
         self.terrains.retain(|t, _| live.contains(t));
         if self.terrains.len() != before {
-            self.terrain_slots.clear();
+            // Their slots stay drawn-as-absent until the atlas is re-laid.
             self.terrain_gpu_dirty = true;
         }
     }
@@ -99,6 +99,7 @@ impl Editor {
             None,
         );
         self.planet_gen_pending.extend(gens.iter().map(|(id, _)| *id));
+        self.planet_gen_radius.extend(gens.iter().map(|(id, fill)| (*id, fill.radius)));
         let (tx, rx) = std::sync::mpsc::channel();
         self.planet_gen_job = Some(rx);
         crate::worker::spawn("planet-gen", move || {
@@ -139,6 +140,7 @@ impl Editor {
         let landed = !arrived.is_empty();
         for (id, terrain, ms) in arrived {
             self.planet_gen_pending.remove(&id);
+            self.planet_gen_radius.remove(&id);
             let target = self
                 .world
                 .query::<floptle_core::Matter>()
@@ -169,8 +171,8 @@ impl Editor {
             // eviction (G1 residency) must write it to disk before dropping it.
             self.touch_terrain_edit(e);
             // Restream every terrain's render chunks (cheap, brief) + rebuild
-            // the SDF shadow atlas around the new field.
-            self.terrain_slots.clear();
+            // the SDF shadow atlas around the new field. The old field's
+            // volume keeps casting from its slot until the new one is in.
             self.terrain_gpu_dirty = true;
             // Generation may finish during Play (▶ Generate then Play before the
             // fill lands, or a runtime regeneration): rebuild the sim so the new

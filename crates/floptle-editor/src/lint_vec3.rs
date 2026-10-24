@@ -11,7 +11,7 @@
 //! 1. A vector stops being mutable. `v.x = 1` raises. The fix is
 //!    `v = v:withX(1)`, which exists in both modes so a project can be moved
 //!    over before the setting changes.
-//! 2. `type(v)` stops saying `"userdata"` and says `"vector"`. A script
+//! 2. `type(v)` stops saying `"table"` (`"userdata"` before 0.117) and says `"vector"`. A script
 //!    branching on that answer silently takes the other branch.
 //!
 //! Everything else (the methods, the operators, the constructor forms, what a
@@ -50,7 +50,7 @@ impl Kind {
         match self {
             Kind::Mutation => "use `v = v:withX(n)` (or withY/withZ) — it works in both modes",
             Kind::TypeCheck => {
-                "`fast` answers \"vector\" where `exact` answers \"userdata\"; test what you \
+                "`fast` answers \"vector\" where `exact` answers \"table\" (\"userdata\" before 0.117); test what you \
                  mean instead (e.g. `v.x ~= nil`)"
             }
         }

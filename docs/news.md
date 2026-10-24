@@ -1,5 +1,9 @@
 ## Just shipped
 
+**v0.117.0-rc13 — "Whole Worlds"** (beta). A profiler that names what a slow
+frame did, terrain shadows that update without stalling, terrain answers a
+game can trust, cheaper vectors, and spawns a game can spread over frames.
+
 **v0.117.0-rc12 — "Whole Worlds"** (beta). Physics costs a fraction of what
 it did for big craft and vehicles on the ground, shader materials draw
 together, and `assets.warm` prepares a level before its first frame.

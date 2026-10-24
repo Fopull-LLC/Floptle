@@ -2526,7 +2526,9 @@ struct Editor {
     /// terrain id). Each volume renders at its native resolution from its own slot;
     /// placement comes from the node's f64 translation, read fresh every frame — so
     /// moving a terrain needs zero GPU work and there is no combined field at all.
-    terrain_slots: Vec<Entity>,
+    /// Each slot keeps the box of the proxy it holds, drawn until a newer one is
+    /// uploaded whole.
+    terrain_slots: Vec<crate::terrain_edit::TerrainSlot>,
     /// The GPU volume set needs re-uploading (a terrain was added/edited/deleted/resized).
     terrain_gpu_dirty: bool,
     /// Each terrain's primary-ray rendering is a set of
@@ -2574,6 +2576,24 @@ struct Editor {
     /// Chunks of planets put away far from the camera being made again on a
     /// worker as it comes near ([`Self::stream_far_chunks`]).
     terrain_promotions: Vec<crate::terrain_edit::PromotionJob>,
+    /// Stand-in chunks a game asked for exactly (`terrain.prepare`), still to
+    /// be handed to a worker, and the ones made that way: those are not put
+    /// away again however far they are.
+    terrain_prepare_wanted: Vec<(Entity, [i32; 3])>,
+    /// Spawns held for later frames by the game's `spawnBudget`, in the order
+    /// they were asked for.
+    spawn_backlog: std::collections::VecDeque<floptle_script::SpawnRequest>,
+    /// This frame's spawning under a budget so far: milliseconds and spawns.
+    spawn_frame: (f64, usize),
+    /// Chunks of ground script terrain edits made on the frame rather than on
+    /// the op worker, and whether that has been said.
+    terrain_inline_made: usize,
+    terrain_inline_warned: bool,
+    /// Prefab requests resolved to their files, for the spawn drain in
+    /// progress: a build of a thousand parts looked the same file up a
+    /// thousand times.
+    spawn_resolved: HashMap<String, Option<(PathBuf, Vec<floptle_scene::NodeDoc>)>>,
+    terrain_prepared: HashMap<Entity, std::collections::HashSet<[i32; 3]>>,
     /// Frames counted for the far-chunk scan, which walks every chunk of a
     /// planet and so runs every few frames.
     terrain_far_frame: u64,
@@ -2589,6 +2609,9 @@ struct Editor {
     /// the residency driver must not also stream those bodies (the generation
     /// queue owns them until each fill lands).
     planet_gen_pending: std::collections::HashSet<u32>,
+    /// The radius each queued `generatePlanet` fill makes its world to, by
+    /// terrain id: how far `terrain.ready` reports its ground as not made yet.
+    planet_gen_radius: HashMap<u32, f32>,
     /// Background checkpoints (`terrain.flush()`): dirty resident fields queue
     /// here (entity + when queued) and drain one at a time through
     /// `step_terrain_checkpoint` — a few chunks of encoding per frame, the file
@@ -2633,6 +2656,10 @@ struct Editor {
     /// Bakes by (asset path, quantized world rotation + scale) — translation is
     /// free (the anchor is read per frame), so moving a map never rebakes.
     occluder_cache: HashMap<OccKey, std::sync::Arc<floptle_field::BakedSdf>>,
+    /// The occluder set asked for and not yet drawn: `mesh_occluders` is what
+    /// the drawn atlas holds, and becomes this once the atlas holding it is
+    /// whole.
+    occluders_wanted: Option<HashMap<Entity, (OccKey, std::sync::Arc<floptle_field::BakedSdf>)>>,
     /// Where each distinct occluder bake landed in the volume atlas (after the
     /// terrains). Every node wearing that bake draws from the one region.
     occluder_regions: HashMap<OccKey, usize>,
@@ -2649,12 +2676,11 @@ struct Editor {
     /// Static colliders rebuilt because their node turned or resized, for
     /// `--timing`. A move is a shift and is not counted.
     static_rebuilds: u32,
-    /// A paint/sculpt dab on a single terrain only dirties a small voxel box — uploaded
-    /// to the GPU directly (no full re-clone + re-upload), so editing a big terrain stays
-    /// smooth. `(entity, min inclusive, max exclusive, geometry-changed)`; `geometry` is
-    /// true for sculpt (so the wireframe + combined re-sync) and false for paint (color).
-    /// Merged across dabs in a frame.
-    terrain_region_dirty: Option<(Entity, [u32; 3], [u32; 3], bool)>,
+    /// A paint/sculpt dab or a script edit only dirties small voxel boxes of a
+    /// terrain's proxy — uploaded to the GPU as those boxes (no full re-upload),
+    /// within the frame's shadow upload budget, so editing a big terrain stays
+    /// smooth. Per terrain; boxes that nearly overlap are merged.
+    terrain_region_dirty: HashMap<Entity, crate::terrain_edit::ShadowDirty>,
     /// Monotonic id assigned to each new terrain node (stable across save/load).
     next_terrain_id: u32,
     /// LMB held with the Sculpt tool — keep brushing on mouse motion.

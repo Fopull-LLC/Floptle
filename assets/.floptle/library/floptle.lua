@@ -67,9 +67,11 @@
 ---@field parent Node|nil The parent node handle, or nil at the root.
 ---@field getparent fun(self: Node): Node|nil The parent node handle, or nil (same as node.parent).
 ---@field getParent fun(self: Node): Node|nil The parent node handle, or nil (same as node.parent).
----@field children fun(self: Node): Node[] An array of this node's child handles.
----@field getchild fun(self: Node, name: string): Node|nil The first CHILD with that name, or nil.
----@field getChild fun(self: Node, name: string): Node|nil The first CHILD with that name, or nil.
+---@field children fun(self: Node): Node[] An array of this node's child handles, built fresh each call.
+---@field childrenGeneration fun(self: Node): integer Changes whenever this node's child list does, and only then: keep `children()` and rebuild it when this moves.
+---@field child fun(self: Node, nameOrId: string|integer): Node|nil The first CHILD with that name, or the direct child with that node id; nil if none.
+---@field getchild fun(self: Node, nameOrId: string|integer): Node|nil The first CHILD with that name, or the direct child with that node id; nil if none.
+---@field getChild fun(self: Node, nameOrId: string|integer): Node|nil The first CHILD with that name, or the direct child with that node id; nil if none.
 ---@field bonePos fun(self: Node, bone: string): Vec3|nil An animated model's bone, in world space this frame; nil with no posed skeleton.
 ---@field boneRot fun(self: Node, bone: string): number|nil, number|nil, number|nil The bone's world yaw, pitch, roll this frame.
 ---@field bones fun(self: Node): string[]|nil The animated model's skeleton node names.
@@ -524,6 +526,18 @@ function draw.quad(texture, x0, y0, z0, x1, y1, z1, x2, y2, z2, x3, y3, z3, r, g
 ---@param opts? Node|{parent?: Node, body?: boolean} A parent node, or options: `body = false` leaves the prefab's bodies and colliders out (a display copy).
 ---@return Node root The new root, usable at once (it lands after the pass).
 function spawn(prefab, pos, fn, opts) end
+---The milliseconds of each frame spent making spawned prefabs; past it the
+---rest wait, in order, for the frames after (at least one a frame). nil, the
+---default, makes every spawn at once. Returns the budget it replaced.
+---@param ms? number|nil
+---@return number|nil
+function spawnBudget(ms) end
+---How many spawns asked for have not been made yet.
+---@return integer
+function spawnPending() end
+---Call `fn` once every spawn asked for so far has been made.
+---@param fn fun()
+function spawnDone(fn) end
 
 ---Remove a node AND its whole subtree (physics body included). Queued —
 ---applied after the pass, so the handle stays readable through this call.
@@ -1931,6 +1945,7 @@ function terrain.dig(x, y, z, radius, strength) end
 ---@param g number
 ---@param b number
 ---@param strength? number
+---@return integer receipt The edit's id, or 0 when the queue was full and it was refused.
 function terrain.paint(x, y, z, radius, r, g, b, strength) end
 ---Paint a terrain-palette texture slot (1-based, the Terrain tab's palette;
 ---0 clears back to the flat color).
@@ -1939,6 +1954,7 @@ function terrain.paint(x, y, z, radius, r, g, b, strength) end
 ---@param z number
 ---@param radius number
 ---@param slot number
+---@return integer receipt The edit's id, or 0 when the queue was full and it was refused.
 function terrain.paintTexture(x, y, z, radius, slot) end
 
 ---REPLACE terrain volume `id`'s whole field with a generated planet — the
@@ -2029,6 +2045,40 @@ function terrain.busy() end
 ---edit made so far is in the ground.
 ---@return integer
 function terrain.pending() end
+---How many more terrain edits the queue takes right now before it refuses
+---them (it holds 4,096 waiting). Send at most this many a frame and the rest on
+---the frames after, and no edit is ever refused. A refused edit answers 0 and
+---is counted in `perf.counts().terrainDropped`.
+---@return integer
+function terrain.capacity() end
+---Is the ground within `r` of the point made, exactly and for good? False where
+---a terrain body that reaches it is generating, streaming in or put away (a
+---query reads open air there), and where the ground is a stand-in (a streamed
+---world's far ground, deep rock not generated yet) that `terrain.prepare` or
+---coming near makes exactly. Answers read where this is true are final.
+---@param x number
+---@param y number
+---@param z number
+---@param r? number
+---@return boolean
+function terrain.ready(x, y, z, r) end
+---Make the stand-in ground within `r` (at most 256) of the point exactly, on
+---background workers; `terrain.ready` turns true there once it lands.
+---@param x number
+---@param y number
+---@param z number
+---@param r number
+function terrain.prepare(x, y, z, r) end
+---The first terrain surface along a ray, from the ground's own field. A miss
+---answers nil and "air" (reached maxDist, default 1000, through open space) or
+---nil, "unknown" and the distance at which it reached ground not made yet.
+---@param origin vec3
+---@param dir vec3
+---@param maxDist? number
+---@return { pos: vec3, normal: vec3, distance: number, exact: boolean }|nil hit
+---@return string|nil why "air" or "unknown"
+---@return number|nil at How far along the ray the unmade ground starts.
+function terrain.raycast(origin, dir, maxDist) end
 ---The milliseconds of each frame the engine spends landing the game's terrain
 ---edits (4 by default); the rest wait, in order, for the frames after. Raise
 ---it while a loading screen covers the view, and set it back (or pass nil)

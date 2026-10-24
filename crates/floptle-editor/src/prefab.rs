@@ -348,6 +348,7 @@ impl Editor {
     /// subtree + physics). Runs inside the play loop only — edit-time placement
     /// goes through [`Self::instantiate_prefab`].
     pub(crate) fn apply_script_spawns(&mut self) {
+        let t0 = floptle_core::profile::Span::new();
         // Bounded cascade: a spawn/create callback may itself create more
         // nodes (a generator building a hierarchy) — keep draining until the
         // queues go quiet so nested requests land the same drain.
@@ -359,6 +360,16 @@ impl Editor {
             }
             self.apply_spawn_batch(spawns, creates);
         }
+        // What a budget held back, made while this frame's budget lasts.
+        if !self.spawn_backlog.is_empty() {
+            self.spawn_from_backlog();
+        }
+        self.spawn_frame = (0.0, 0);
+        self.spawn_resolved.clear();
+        let waiting = self.spawn_backlog.len();
+        self.script_host.set_spawns_waiting(&mut self.world, waiting);
+        // Named, so a big build reads as what it is in `perf.hitches()`.
+        self.script_host.profile().borrow_mut().record_part("spawns", t0.ms());
         // `ui.make(...)`: reconcile each described tree against the world. It
         // runs here, with the other node-creating queues, so a screen built in
         // `start` is on screen for the first frame's layout and hit test.
@@ -392,11 +403,44 @@ impl Editor {
         }
     }
 
+    /// Make what `spawnBudget` held back, in order, while the frame's budget
+    /// lasts — at least one a frame, so a budget below one spawn's cost still
+    /// gets there. With the budget taken away, all of it.
+    fn spawn_from_backlog(&mut self) {
+        let budget = self.script_host.spawn_budget_ms();
+        while !self.spawn_backlog.is_empty() {
+            if let Some(ms) = budget
+                && self.spawn_frame.1 > 0
+                && self.spawn_frame.0 >= ms
+            {
+                break;
+            }
+            let Some(req) = self.spawn_backlog.pop_front() else { break };
+            let t0 = floptle_core::time::Instant::now();
+            self.make_spawns(vec![req]);
+            self.spawn_frame.0 += t0.elapsed().as_secs_f64() * 1e3;
+            self.spawn_frame.1 += 1;
+        }
+    }
+
     pub(crate) fn apply_spawn_batch(
         &mut self,
         spawns: Vec<floptle_script::SpawnRequest>,
         creates: Vec<floptle_script::CreateRequest>,
     ) {
+        self.make_creates(creates);
+        // Under a `spawnBudget`, or behind spawns one held back: in order,
+        // while the frame's budget lasts, and the rest on the frames after.
+        if self.script_host.spawn_budget_ms().is_some() || !self.spawn_backlog.is_empty() {
+            self.spawn_backlog.extend(spawns);
+            self.spawn_from_backlog();
+        } else {
+            self.make_spawns(spawns);
+        }
+    }
+
+    /// `createNode` requests, made now.
+    fn make_creates(&mut self, creates: Vec<floptle_script::CreateRequest>) {
         // `createNode(name [, parent] [, fn])` — a plain Empty node; the
         // callback configures it (setTerrain/setCelestial/setPrimitive/
         // setMaterial + transform writes) right after it exists.
@@ -417,16 +461,30 @@ impl Editor {
                 self.script_host.call_create_callback(&mut self.world, cb, e);
             }
         }
+    }
+
+    /// Spawn requests, made now, whatever the budget.
+    pub(crate) fn make_spawns(&mut self, spawns: Vec<floptle_script::SpawnRequest>) {
         for req in spawns {
-            let Some(path) = self.resolve_prefab_request(&req.prefab) else {
-                self.console.push(
-                    floptle_script::LogLevel::Error,
-                    format!("spawn(\"{}\"): no such prefab (looked in prefabs/)", req.prefab),
-                    None,
-                );
-                continue;
-            };
-            let Some(mut docs) = self.cached_prefab_docs(&path) else { continue };
+            // Looked up once a drain per prefab: the file's place and its
+            // parsed nodes (each a stat of the disk) do not change mid-drain.
+            if !self.spawn_resolved.contains_key(&req.prefab) {
+                let path = self.resolve_prefab_request(&req.prefab);
+                if path.is_none() {
+                    self.console.push(
+                        floptle_script::LogLevel::Error,
+                        format!("spawn(\"{}\"): no such prefab (looked in prefabs/)", req.prefab),
+                        None,
+                    );
+                }
+                let found = path.and_then(|p| {
+                    let docs = self.cached_prefab_docs(&p)?;
+                    Some((p, docs))
+                });
+                self.spawn_resolved.insert(req.prefab.clone(), found);
+            }
+            let Some(Some((_, docs))) = self.spawn_resolved.get(&req.prefab) else { continue };
+            let mut docs = docs.clone();
             if docs.is_empty() {
                 continue;
             }

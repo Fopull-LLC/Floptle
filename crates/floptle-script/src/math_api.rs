@@ -48,10 +48,16 @@ pub(crate) fn set_mode_checked(lua: &Lua, m: Vec3Mode) -> mlua::Result<()> {
     match m {
         Vec3Mode::Exact => {
             lua.set_app_data(Vec3Mode::Exact);
+            if let Some(m) = lua.app_data_ref::<ExactMeta>() {
+                m.mode.set("exact", true)?;
+            }
             Ok(())
         }
         Vec3Mode::Fast => {
             lua.set_app_data(Vec3Mode::Fast);
+            if let Some(m) = lua.app_data_ref::<ExactMeta>() {
+                m.mode.set("exact", false)?;
+            }
             // The editor keeps one host across project opens, so this can be
             // called more than once on the same state. Installing twice would
             // wrap the wrapper — every field read paying for another Rust
@@ -94,7 +100,15 @@ pub(crate) struct PrecisionWatch {
 #[cold]
 fn warn_precision(lua: &Lua, v: glam::DVec3) {
     let Some(watch) = lua.app_data_ref::<PrecisionWatch>() else { return };
-    let (name, line) = match lua.inspect_stack(1) {
+    // The script that asked, past the Lua-side `vec3` constructor if the
+    // vector was made through it.
+    let level = (1..8)
+        .find(|&l| {
+            lua.inspect_stack(l)
+                .is_none_or(|d| d.source().source.as_deref() != Some("=vec3"))
+        })
+        .unwrap_or(1);
+    let (name, line) = match lua.inspect_stack(level) {
         Some(d) => (
             d.source()
                 .source
@@ -214,84 +228,93 @@ fn install_fast_vec3(lua: &Lua) -> mlua::Result<()> {
 /// either backing, a `vec2`, a node handle or an `{x=, y=, z=}` table, exactly
 /// as `exact` does.
 fn fast_methods(lua: &Lua) -> mlua::Result<Table> {
-    fn d(v: mlua::Vector) -> glam::DVec3 {
-        glam::DVec3::new(v.x().into(), v.y().into(), v.z().into())
+    // `self` arrives as whichever backing the state hands out — Luau's native
+    // vector in `fast`, the component table in `exact` — and is read the one
+    // way every vector is read, so the two modes share one method surface.
+    type V = Value;
+    fn d(v: &Value) -> mlua::Result<glam::DVec3> {
+        vec3_of(v).ok_or_else(|| {
+            mlua::Error::runtime(format!(
+                "a vec3 method was called on {} — call it with a colon, v:length(), not v.length()",
+                v.type_name()
+            ))
+        })
     }
     fn arg(name: &'static str, v: &Value) -> mlua::Result<glam::DVec3> {
         vec3_of(v).ok_or_else(|| mlua::Error::runtime(format!("{name} takes a vector")))
     }
     let t = lua.create_table()?;
-    t.set("length", lua.create_function(|_, v: mlua::Vector| Ok(d(v).length()))?)?;
-    t.set("magnitude", lua.create_function(|_, v: mlua::Vector| Ok(d(v).length()))?)?;
-    t.set("lengthSquared", lua.create_function(|_, v: mlua::Vector| Ok(d(v).length_squared()))?)?;
+    t.set("length", lua.create_function(|_, v: V| Ok(d(&v)?.length()))?)?;
+    t.set("magnitude", lua.create_function(|_, v: V| Ok(d(&v)?.length()))?)?;
+    t.set("lengthSquared", lua.create_function(|_, v: V| Ok(d(&v)?.length_squared()))?)?;
     t.set(
         "normalized",
-        lua.create_function(|_, v: mlua::Vector| {
-            Ok(LuaVec3(d(v).try_normalize().unwrap_or(glam::DVec3::ZERO)))
+        lua.create_function(|_, v: V| {
+            Ok(LuaVec3(d(&v)?.try_normalize().unwrap_or(glam::DVec3::ZERO)))
         })?,
     )?;
     t.set(
         "dot",
-        lua.create_function(|_, (v, o): (mlua::Vector, Value)| Ok(d(v).dot(arg("dot", &o)?)))?,
+        lua.create_function(|_, (v, o): (V, Value)| Ok(d(&v)?.dot(arg("dot", &o)?)))?,
     )?;
     t.set(
         "cross",
-        lua.create_function(|_, (v, o): (mlua::Vector, Value)| {
-            Ok(LuaVec3(d(v).cross(arg("cross", &o)?)))
+        lua.create_function(|_, (v, o): (V, Value)| {
+            Ok(LuaVec3(d(&v)?.cross(arg("cross", &o)?)))
         })?,
     )?;
     t.set(
         "lerp",
-        lua.create_function(|_, (v, o, s): (mlua::Vector, Value, f64)| {
-            Ok(LuaVec3(d(v).lerp(arg("lerp", &o)?, s)))
+        lua.create_function(|_, (v, o, s): (V, Value, f64)| {
+            Ok(LuaVec3(d(&v)?.lerp(arg("lerp", &o)?, s)))
         })?,
     )?;
     t.set(
         "distance",
-        lua.create_function(|_, (v, o): (mlua::Vector, Value)| {
-            Ok(d(v).distance(arg("distance", &o)?))
+        lua.create_function(|_, (v, o): (V, Value)| {
+            Ok(d(&v)?.distance(arg("distance", &o)?))
         })?,
     )?;
     t.set(
         "flatten",
-        lua.create_function(|_, (v, up): (mlua::Vector, Option<Value>)| {
+        lua.create_function(|_, (v, up): (V, Option<Value>)| {
             let up = match up {
                 Some(u) => arg("flatten", &u)?,
                 None => glam::DVec3::Y,
             };
-            Ok(LuaVec3(flatten(d(v), up)))
+            Ok(LuaVec3(flatten(d(&v)?, up)))
         })?,
     )?;
     t.set(
         "withX",
-        lua.create_function(|_, (v, n): (mlua::Vector, f64)| {
-            Ok(LuaVec3(glam::DVec3::new(n, d(v).y, d(v).z)))
+        lua.create_function(|_, (v, n): (V, f64)| {
+            Ok(LuaVec3(glam::DVec3::new(n, d(&v)?.y, d(&v)?.z)))
         })?,
     )?;
     t.set(
         "withY",
-        lua.create_function(|_, (v, n): (mlua::Vector, f64)| {
-            Ok(LuaVec3(glam::DVec3::new(d(v).x, n, d(v).z)))
+        lua.create_function(|_, (v, n): (V, f64)| {
+            Ok(LuaVec3(glam::DVec3::new(d(&v)?.x, n, d(&v)?.z)))
         })?,
     )?;
     t.set(
         "withZ",
-        lua.create_function(|_, (v, n): (mlua::Vector, f64)| {
-            Ok(LuaVec3(glam::DVec3::new(d(v).x, d(v).y, n)))
+        lua.create_function(|_, (v, n): (V, f64)| {
+            Ok(LuaVec3(glam::DVec3::new(d(&v)?.x, d(&v)?.y, n)))
         })?,
     )?;
     t.set(
         "rotatedY",
-        lua.create_function(|_, (v, rad): (mlua::Vector, f64)| {
-            let v = d(v);
+        lua.create_function(|_, (v, rad): (V, f64)| {
+            let v = d(&v)?;
             let (s, c) = rad.sin_cos();
             Ok(LuaVec3(glam::DVec3::new(v.x * c + v.z * s, v.y, -v.x * s + v.z * c)))
         })?,
     )?;
     t.set(
         "rotatedAround",
-        lua.create_function(|_, (v, axis, rad): (mlua::Vector, Value, f64)| {
-            let v = d(v);
+        lua.create_function(|_, (v, axis, rad): (V, Value, f64)| {
+            let v = d(&v)?;
             let a = arg("rotatedAround", &axis)?;
             let Some(a) = a.try_normalize() else { return Ok(LuaVec3(v)) };
             let (s, c) = rad.sin_cos();
@@ -300,14 +323,14 @@ fn fast_methods(lua: &Lua) -> mlua::Result<Table> {
     )?;
     t.set(
         "towards",
-        lua.create_function(|_, (v, o, md): (mlua::Vector, Value, f64)| {
-            Ok(LuaVec3(towards(d(v), arg("towards", &o)?, md)))
+        lua.create_function(|_, (v, o, md): (V, Value, f64)| {
+            Ok(LuaVec3(towards(d(&v)?, arg("towards", &o)?, md)))
         })?,
     )?;
     t.set(
         "angleTo",
-        lua.create_function(|_, (v, o): (mlua::Vector, Value)| {
-            match (d(v).try_normalize(), arg("angleTo", &o)?.try_normalize()) {
+        lua.create_function(|_, (v, o): (V, Value)| {
+            match (d(&v)?.try_normalize(), arg("angleTo", &o)?.try_normalize()) {
                 (Some(a), Some(b)) => Ok(a.dot(b).clamp(-1.0, 1.0).acos()),
                 _ => Ok(0.0),
             }
@@ -339,7 +362,7 @@ pub struct ExactVec3(pub glam::DVec3);
 impl mlua::IntoLua for LuaVec3 {
     fn into_lua(self, lua: &Lua) -> mlua::Result<Value> {
         match mode(lua) {
-            Vec3Mode::Exact => Ok(Value::UserData(lua.create_userdata(ExactVec3(self.0))?)),
+            Vec3Mode::Exact => exact_table(lua, self.0),
             Vec3Mode::Fast => {
                 // Three compares on the way past, and nothing else unless one
                 // trips. This is the most-travelled conversion in the engine —
@@ -369,6 +392,191 @@ impl mlua::FromLua for LuaVec3 {
             ))
         })
     }
+}
+
+/// The `exact` vec3 as a script holds it: a plain table of three f64
+/// components with the vector metatable.
+///
+/// A table and not a userdata so that `v.x` is the VM reading a field rather
+/// than a call into the host. A loop over a thousand parts reads three of
+/// these a part, and as a userdata each read was a Rust callback; as a table
+/// it is what reading any other table's field costs. The components are the
+/// table's own fields, so `v.x = 1` still assigns in place, and everything
+/// else (methods, operators, `tostring`, `==`) comes from the shared metatable.
+///
+/// Made by a Lua constructor rather than field by field from Rust: one call
+/// across instead of five, which is what keeps making one no dearer than the
+/// userdata it replaced.
+fn exact_table(lua: &Lua, v: glam::DVec3) -> mlua::Result<Value> {
+    match lua.app_data_ref::<ExactMeta>() {
+        Some(m) => m.make.call((v.x, v.y, v.z)),
+        // A state `install` never ran on: a bare table still reads as a vector
+        // everywhere one is accepted.
+        None => {
+            let t = lua.create_table_with_capacity(0, 3)?;
+            t.raw_set("x", v.x)?;
+            t.raw_set("y", v.y)?;
+            t.raw_set("z", v.z)?;
+            Ok(Value::Table(t))
+        }
+    }
+}
+
+/// The `exact` vec3's shared pieces, held beside the state.
+struct ExactMeta {
+    /// `(x, y, z) -> vec3`, in Lua.
+    make: mlua::Function,
+    /// `{ exact = bool }`: which vec3 the Lua-side `vec3(x, y, z)` makes,
+    /// kept in step with [`Vec3Mode`] by [`set_mode_checked`].
+    mode: Table,
+}
+
+/// Is this table an `exact` vec3 (rather than some table that happens to
+/// have x, y and z)? Its components, if so.
+pub(crate) fn exact_components(t: &Table) -> Option<glam::DVec3> {
+    let mt = t.metatable()?;
+    if !mt.raw_get::<bool>("__vec3").unwrap_or(false) {
+        return None;
+    }
+    Some(glam::DVec3::new(t.raw_get("x").ok()?, t.raw_get("y").ok()?, t.raw_get("z").ok()?))
+}
+
+/// The arithmetic and the constructor, in Lua. Two `exact` vectors (or one and
+/// a number) never leave the VM; anything else — a node handle, a `vec2`, an
+/// `{x=, y=, z=}` table, a wrong type — goes to the Rust fallback, which is
+/// what every operation went through before and says the same things.
+const EXACT_VEC3_LUA: &str = r##"
+-- The builtins are read as globals of a sealed environment on purpose: that
+-- is what lets Luau run `type`, `select` and the metatable functions as inline
+-- builtins rather than as calls, and a call is the dearest thing in here.
+local mt, slow, rustVec3, mode = ...
+local function new(x, y, z) return setmetatable({ x = x, y = y, z = z }, mt) end
+mt.__add = function(a, b)
+  if getmetatable(a) == mt and getmetatable(b) == mt then return new(a.x + b.x, a.y + b.y, a.z + b.z) end
+  return slow.add(a, b)
+end
+mt.__sub = function(a, b)
+  if getmetatable(a) == mt and getmetatable(b) == mt then return new(a.x - b.x, a.y - b.y, a.z - b.z) end
+  return slow.sub(a, b)
+end
+mt.__mul = function(a, b)
+  if type(b) == "number" then
+    if getmetatable(a) == mt then return new(a.x * b, a.y * b, a.z * b) end
+  elseif type(a) == "number" then
+    if getmetatable(b) == mt then return new(b.x * a, b.y * a, b.z * a) end
+  elseif getmetatable(a) == mt and getmetatable(b) == mt then
+    return new(a.x * b.x, a.y * b.y, a.z * b.z)
+  end
+  return slow.mul(a, b)
+end
+mt.__div = function(a, b)
+  if type(b) == "number" and getmetatable(a) == mt then return new(a.x / b, a.y / b, a.z / b) end
+  return slow.div(a, b)
+end
+mt.__unm = function(a) return new(-a.x, -a.y, -a.z) end
+mt.__eq = function(a, b)
+  if getmetatable(a) == mt and getmetatable(b) == mt then return a.x == b.x and a.y == b.y and a.z == b.z end
+  return slow.eq(a, b)
+end
+local function vec3(...)
+  if mode.exact and select("#", ...) == 3 then
+    local x, y, z = ...
+    if type(x) == "number" and type(y) == "number" and type(z) == "number" then return new(x, y, z) end
+  end
+  return rustVec3(...)
+end
+return new, vec3
+"##;
+
+/// Build the `exact` vec3 metatable: the methods `fast` has, the operators,
+/// `tostring`, and a refusal for any field but the three components — the same
+/// surface the userdata it replaces had, field for field. Answers the global
+/// `vec3` to install, which builds an `exact` one without leaving the VM.
+fn install_exact_vec3(lua: &Lua, rust_vec3: mlua::Function) -> mlua::Result<mlua::Function> {
+    let mt = lua.create_table()?;
+    let methods = fast_methods(lua)?;
+    methods.set_readonly(true);
+    mt.set("__index", methods)?;
+    mt.set(
+        "__newindex",
+        lua.create_function(|_, (t, key, val): (Table, Value, Value)| {
+            match &key {
+                // Only reachable for a component a script set to nil first.
+                Value::String(k) if matches!(k.as_bytes().as_ref(), b"x" | b"y" | b"z") => {
+                    if num_of(&val).is_none() {
+                        return Err(mlua::Error::runtime(format!(
+                            "a vec3's `{}` is a number, not {}",
+                            k.to_string_lossy(),
+                            val.type_name()
+                        )));
+                    }
+                    t.raw_set(key, val)
+                }
+                other => Err(mlua::Error::runtime(format!(
+                    "a vec3 has no field `{}` to set",
+                    other.to_string().unwrap_or_default()
+                ))),
+            }
+        })?,
+    )?;
+    mt.set(
+        "__tostring",
+        lua.create_function(|_, v: Value| {
+            let v = vec3_of(&v).unwrap_or_default();
+            Ok(format!("vec3({}, {}, {})", v.x, v.y, v.z))
+        })?,
+    )?;
+    // What tells an `exact` vec3 from any other table with x, y and z in it,
+    // for the places that print or describe a value.
+    mt.raw_set("__vec3", true)?;
+
+    let slow = lua.create_table()?;
+    let bin = |name: &'static str, f: fn(glam::DVec3, glam::DVec3) -> glam::DVec3| {
+        lua.create_function(move |_, (a, b): (Value, Value)| match (vec3_of(&a), vec3_of(&b)) {
+            (Some(a), Some(b)) => Ok(LuaVec3(f(a, b))),
+            _ => Err(mlua::Error::RuntimeError(format!("vec3 {name} vec3 only"))),
+        })
+    };
+    slow.set("add", bin("+", |a, b| a + b)?)?;
+    slow.set("sub", bin("-", |a, b| a - b)?)?;
+    slow.set(
+        "mul",
+        lua.create_function(|_, (a, b): (Value, Value)| match (vec3_of(&a), num_of(&a), vec3_of(&b), num_of(&b)) {
+            (Some(v), _, _, Some(s)) | (_, Some(s), Some(v), _) => Ok(LuaVec3(v * s)),
+            (Some(a), _, Some(b), _) => Ok(LuaVec3(a * b)),
+            _ => Err(mlua::Error::RuntimeError("vec3 * number or vec3 * vec3".into())),
+        })?,
+    )?;
+    slow.set(
+        "div",
+        lua.create_function(|_, (a, b): (Value, Value)| match (vec3_of(&a), num_of(&b)) {
+            (Some(v), Some(s)) => Ok(LuaVec3(v / s)),
+            _ => Err(mlua::Error::RuntimeError("vec3 / number only".into())),
+        })?,
+    )?;
+    slow.set(
+        "eq",
+        lua.create_function(|_, (a, b): (Value, Value)| Ok(matches!((vec3_of(&a), vec3_of(&b)), (Some(a), Some(b)) if a == b)))?,
+    )?;
+    let mode_flag = lua.create_table()?;
+    mode_flag.set("exact", mode(lua) == Vec3Mode::Exact)?;
+    // A sealed environment holding only the builtins the chunk uses, marked
+    // safe: Luau then runs them inline, where the scripts' own environment
+    // (writable, so not safe) makes each one a full call.
+    let env = lua.create_table()?;
+    for name in ["type", "select", "setmetatable", "getmetatable"] {
+        env.raw_set(name, lua.globals().raw_get::<Value>(name)?)?;
+    }
+    env.set_readonly(true);
+    env.set_safeenv(true);
+    let (make, vec3): (mlua::Function, mlua::Function) = lua
+        .load(EXACT_VEC3_LUA)
+        .set_name("=vec3")
+        .set_environment(env)
+        .call((mt.clone(), slow, rust_vec3, mode_flag.clone()))?;
+    mt.set_readonly(true);
+    lua.set_app_data(ExactMeta { make, mode: mode_flag });
+    Ok(vec3)
 }
 
 /// A 2-component vector (UI/screen math).
@@ -632,8 +840,7 @@ impl UserData for LuaVec2 {
 /// Install `vec3(...)`, `vec2(...)` and `distance(...)` into the globals.
 pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     // vec3() = zero; vec3(s) = splat; vec3(x, y, z); vec3(other) = copy.
-    lua.globals().set(
-        "vec3",
+    let rust_vec3 =
         // **The three-number form does not collect its arguments.** This is the
         // most-called function in the whole script API — a game builds thousands
         // of vectors a frame — and `MultiValue::into_iter().collect::<Vec<_>>()`
@@ -675,8 +882,11 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     "vec3 takes 0, 1 (splat/copy) or 3 (x, y, z) arguments".into(),
                 )),
             }
-        })?,
-    )?;
+        })?;
+    // The three-number form of an `exact` vec3 is made in Lua; every other
+    // form, and every `fast` one, by the function above.
+    let vec3 = install_exact_vec3(lua, rust_vec3)?;
+    lua.globals().set("vec3", vec3)?;
     lua.globals().set(
         "vec2",
         lua.create_function(|_, args: mlua::MultiValue| {
@@ -1566,7 +1776,7 @@ mod helper_tests {
 
         let exact = lua_in(super::Vec3Mode::Exact);
         let t: String = exact.load("return type(vec3(1,2,3))").eval().unwrap();
-        assert_eq!(t, "userdata", "exact mode must keep the f64 userdata");
+        assert_eq!(t, "table", "exact mode hands out its f64 component table");
     }
 
     /// **`fast` says so when a project outgrows f32**, once per script.
@@ -1674,7 +1884,7 @@ mod helper_tests {
         let exact = bytes_per_op(super::Vec3Mode::Exact);
         assert!(
             exact > 8.0,
-            "`exact` allocates a userdata per op and should show it: {exact:.1} bytes per op"
+            "`exact` allocates a table per op and should show it: {exact:.1} bytes per op"
         );
     }
 

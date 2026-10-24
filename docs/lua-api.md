@@ -14,9 +14,9 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 203
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 206
 - [node — transform & body fields](#node--transform--body-fields) — 43
-- [node — methods & handles](#node--methods--handles) — 36
+- [node — methods & handles](#node--methods--handles) — 37
 - [vectors, directions & easing](#vectors-directions--easing) — 51
 - [scene lookups & raycast](#scene-lookups--raycast) — 18
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
@@ -27,7 +27,7 @@ each group, and meant to be searched.
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 74
 - [networking — net.*, synced](#networking--net-synced) — 41
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
-- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 21
+- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 25
 - [pathfinding — nav.*](#pathfinding--nav) — 26
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 11
 - [weather — wind](#weather--wind) — 6
@@ -36,7 +36,7 @@ each group, and meant to be searched.
 - [vessels — assembly.*](#vessels--assembly) — 16
 - [the camera & the screen](#the-camera--the-screen) — 9
 - [physics controls — pause & step](#physics-controls--pause--step) — 5
-- [frame cost — perf.*](#frame-cost--perf) — 17
+- [frame cost — perf.*](#frame-cost--perf) — 23
 - [accessibility — access.*](#accessibility--access) — 11
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
@@ -514,6 +514,18 @@ local b = spawn("Bullet", node.pos + node.forward * 1.5, function(n)
   n.vel = node.forward * 40
 end)
 ```
+
+### `spawnBudget`
+
+spawnBudget([ms]) → the budget it replaced (nil for none) — the milliseconds of each frame the engine spends making spawned prefabs; past it, the rest wait in order for the frames after, and each one's callback runs as it is made. At least one is made a frame. nil (the default) makes every spawn the frame it was asked for. A thousand-part craft or a city block spread over frames instead of stopping one. Clamped to 0.5..1000; with no argument it only reads it. Reset when Play stops or the scene changes.
+
+### `spawnDone`
+
+spawnDone(fn) — call fn once every spawn asked for so far has been made and its callback run: the end of a build spread over frames by spawnBudget (or the same frame, without one). Each fn is called once; 256 can wait at a time.
+
+### `spawnPending`
+
+spawnPending() → how many spawns asked for have not been made yet: queued this pass, or held back by spawnBudget. 0 means every spawn so far exists.
 
 ### `start`
 
@@ -1146,7 +1158,11 @@ node:bones() → the names of the animated model's skeleton nodes, in skeleton o
 
 ### `node:children`
 
-An array of this node's child handles.
+An array of this node's child handles, built fresh on every call. A script that keeps the list asks node:childrenGeneration() instead of rebuilding it.
+
+### `node:childrenGeneration`
+
+node:childrenGeneration() → a number that changes whenever this node's child list does — a child added, removed, reparented or reordered — and only then. Keep the list node:children() built, and rebuild it when this number is not the one you built it at.
 
 ### `node:destroy`
 
@@ -1158,7 +1174,7 @@ node:find("Muzzle") — the first descendant (any depth) with that name, or nil.
 
 ### `node:getChild`
 
-node:getChild("Gun") — the first child with that name (a node handle), or nil.
+node:getChild("Gun") — the first child with that name (a node handle), or nil. node:getChild(id) (also node:child(id)) — the direct child with that node id, one lookup however many children there are; a number that is no child's id is still tried as a name.
 
 ### `node:getParent`
 
@@ -1544,7 +1560,7 @@ vec2:normalized() — a unit-length copy, pointing the same way. Zero stays zero
 
 ### `vec3`
 
-vec3(x, y, z) — a 3-vector VALUE with real operators: a + b, a - b, v * 2, -v, a == b. Methods: :length() (:magnitude()), :lengthSquared(), :normalized(), :dot(o), :cross(o), :lerp(o, t), :distance(o), :flatten(up), :withX/:withY/:withZ(n), :rotatedY(rad), :rotatedAround(axis, rad), :towards(o, maxDelta), :angleTo(o). vec3() = zero, vec3(s) = splat, vec3(other) = copy. Anything that takes a vector also takes a {x=,y=,z=} table or a node handle. A project chooses which vec3 this is — `exact` (64-bit, mutable; every project made before the setting) or `fast` (32-bit, immutable, no allocation; new projects) — in Project Settings → Scripting → Script vec3. The surface above is identical in both; the two differences are that `fast` cannot be assigned into (use :withX/:withY/:withZ) and `type(v)` answers "vector" there rather than "userdata". `floptle lint --vec3` lists what a project would change to switch.
+vec3(x, y, z) — a 3-vector VALUE with real operators: a + b, a - b, v * 2, -v, a == b. Methods: :length() (:magnitude()), :lengthSquared(), :normalized(), :dot(o), :cross(o), :lerp(o, t), :distance(o), :flatten(up), :withX/:withY/:withZ(n), :rotatedY(rad), :rotatedAround(axis, rad), :towards(o, maxDelta), :angleTo(o). vec3() = zero, vec3(s) = splat, vec3(other) = copy. Anything that takes a vector also takes a {x=,y=,z=} table or a node handle. A project chooses which vec3 this is — `exact` (64-bit, mutable; every project made before the setting) or `fast` (32-bit, immutable, no allocation; new projects) — in Project Settings → Scripting → Script vec3. The surface above is identical in both; the two differences are that `fast` cannot be assigned into (use :withX/:withY/:withZ) and `type(v)` answers "vector" there rather than "table". An `exact` vec3 is a table holding x, y and z as its own fields, so reading one is as cheap as reading any table's field (before 0.117 it was a userdata, and `type(v)` answered "userdata"). `floptle lint --vec3` lists what a project would change to switch.
 
 ```lua
 local v = vec3(1, 0, 0) * 5 + vec3(0, 2, 0)   -- real operators
@@ -2754,6 +2770,10 @@ Runtime sculpting and queries against the SDF terrain: dig, sculpt, paint, ask w
 
 terrain.busy() — is the background terrain worker already occupied? True while any field is generating or streaming in. Whole-body fills and residency streaming share one background budget, so a game that BUILDS ITS WORLD AS THE PLAYER TRAVELS should ask before queueing the next one — otherwise the new world goes in behind the ground somebody is standing on. The pattern: build one thing, wait for this to go quiet, build the next.
 
+### `terrain.capacity`
+
+terrain.capacity() → how many more terrain edits the queue takes right now before it refuses them (it holds 4,096 waiting). A game sending a big batch sends at most this many a frame and the rest on the frames after, and none of them is ever refused. A refused edit answers the receipt 0 and is counted in perf.counts().terrainDropped.
+
 ### `terrain.deleteSaveDir`
 
 terrain.deleteSaveDir("saves/slot2/terrain") — delete a save slot's persisted terrain from disk (pair with save.deleteSlot in a "delete this save" UI). Narrow by design: relative path, no "..", must not be the ACTIVE saveDir, and only .cfield/.tfield/.meta files in that one directory are removed (emptied dirs are tidied). Returns the number of files removed.
@@ -2795,11 +2815,11 @@ terrain.lodAnchor(node | vec3 | nil) — what terrain detail, the far-planet imp
 
 ### `terrain.paint`
 
-terrain.paint(x,y,z, radius, r,g,b [, strength]) — recolor the terrain surface inside the brush ball (0..1 colors).
+terrain.paint(x,y,z, radius, r,g,b [, strength]) → receipt — recolor the terrain surface inside the brush ball (0..1 colors). Answers the edit's id, as sculpt does, or 0 when the queue was full and the edit was refused (see terrain.capacity).
 
 ### `terrain.paintTexture`
 
-terrain.paintTexture(x,y,z, radius, slot) — paint a terrain-palette texture slot (1-based, the Terrain tab's palette; 0 clears to flat color).
+terrain.paintTexture(x,y,z, radius, slot) → receipt — paint a terrain-palette texture slot (1-based, the Terrain tab's palette; 0 clears to flat color). Answers the edit's id, or 0 when the queue was full and the edit was refused (see terrain.capacity).
 
 ### `terrain.pending`
 
@@ -2813,9 +2833,21 @@ terrain.planetLakes(opts [, { cell = 3, minDepth = 0.5, seaLevel = ... }] [, cal
 
 terrain.planetRivers(opts [, callback]) → the rivers and ravines terrain.generatePlanet carves with the same opts, without generating anything: { {river=true|false, depth=, points={x1,y1,z1, x2,y2,z2, ...}, widths={...}}, ... }, river ones source first. Points are planet-local, on the sphere of the planet's radius (the carved bed is below the ground there); widths are per point in world units. A river runs from its spring the way water drains, across any basin on its way, to the sea or into another river. For laying water, bridges or missions along them. Given a callback, the call returns nothing, the work runs off the script thread, and callback(channels) runs in a later frame.
 
+### `terrain.prepare`
+
+terrain.prepare(x, y, z, r) — make the stand-in ground within r of the point (capped at 256) exactly, on background workers: a streamed world's far ground and deep rock not generated yet. For a game about to plan from queries somewhere nobody is standing; terrain.ready turns true there once it has landed, and ground made this way is kept as long as its world is loaded. Does nothing for a body that is not loaded (terrain.warm brings one in).
+
 ### `terrain.query`
 
-terrain.query(x,y,z) — signed distance to the nearest terrain surface (negative = inside rock), or nil with no terrain. Exact within four voxels of the surface (the band the field stores) and clamped to ±4 voxels beyond it — ±6 m at a 1.5 m voxel — so read it as "near the surface or not" further out, and raycast for a far distance. Cheap: read it every frame (burrow checks, depth meters).
+terrain.query(x,y,z) — signed distance to the nearest terrain surface (negative = inside rock), or nil with no terrain. Where the ground is not made yet, or is a stand-in, the number is not final: terrain.ready says which. Exact within four voxels of the surface (the band the field stores) and clamped to ±4 voxels beyond it — ±6 m at a 1.5 m voxel — so read it as "near the surface or not" further out, and raycast for a far distance. Cheap: read it every frame (burrow checks, depth meters).
+
+### `terrain.raycast`
+
+terrain.raycast(origin, dir [, maxDist]) → { pos =, normal =, distance =, exact = } for the first terrain surface along the ray, read from the ground's own field, not from collision meshes that may not be built yet; maxDist defaults to 1000. A miss answers nil and why: nil, "air" when the ray reached maxDist through open space, or nil, "unknown", distance when it reached ground the world has not made yet first (a body generating, streaming in or put away) — the distance along the ray where it did. exact is false where the ground hit is a stand-in (see terrain.ready) and may move when it is made.
+
+### `terrain.ready`
+
+terrain.ready(x, y, z [, r]) → whether the ground within r of the point (default 0) is made, exactly and for good. False where a terrain body that reaches it is still generating, streaming in or put away — terrain.query, height and raycast read it as open air there — and false where the ground is a stand-in: a streamed world's far ground, held as a coarse copy, and deep rock not generated yet, both made exactly when something comes near or terrain.prepare asks. What query and raycast answer where this is true does not change until the ground is edited. True over open space no terrain reaches. A body that starts streaming this frame is reported from the next.
 
 ### `terrain.saveDir`
 
@@ -3343,13 +3375,17 @@ physics.step([n]) — advance the frozen tick n times (default 1, max 600) — t
 
 perf.accountedMs() — the buckets added up. Called 'accounted' and not 'total' on purpose: vsync, the OS and the GPU finishing are outside every bucket, so this is what the engine can see, not the frame time.
 
+### `perf.bodies`
+
+perf.bodies([n]) → the n costliest physics bodies and assemblies last frame, by node name, costliest first: { {name="Plane", ms=11.4}, ... } — each one's own move against the world, sweeps included (the pairs and joints passes are perf.parts' physicsPairs and physicsJoints). Needs perf.enable(true).
+
 ### `perf.buckets`
 
 perf.buckets() → the bucket names, in frame order: scripts, mirror, physics, terrain, scatter, particles, audio, animation, models, ui, render, assets, gpuWait, present, untimed. Iterate this rather than keeping your own list, which could go stale. `scripts` is the WHOLE of every script pass — setup, reference params, write flush and hooks; `mirror` is the ECS-to-Lua sync each pass runs first, nested inside a pass and subtracted out of `scripts` so nothing is counted twice. `assets` is textures, shaders and materials used for the first time. `gpuWait` is waiting for a swapchain image (the GPU still drawing an earlier frame, or with vsync on the display not yet wanting one) and for readbacks; `present` is handing the image to the compositor. `untimed` is the rest of the frame, the time between two frames that no other bucket measured: work nothing times yet, or the game not being run at all. It was called `other`, and perf.ms("other") still answers it.
 
 ### `perf.counts`
 
-perf.counts() → { nodes=, culled=, instances=, draws=, unbatched=, unbatchedBy=, chunks=, props=, particles=, effects=, effectsDropped=, lights=, lightsDropped=, voices=, mirrorRebuilds=, mirrorRefreshed=, animators=, animatorsCulled=, rays=, rayMs=, sweeps=, sweepMs=, decals=, decalTris=, shadowProxies=, shadowProxiesDropped=, shadowVolumes= }. Readable even while collection is off, because counts are free to keep — and three of the four 'the engine is slow' reports this API exists for were answerable from one count alone (a scatter field asking for 117,000 props was one of them). The *Dropped pair is what a ceiling refused this frame: nonzero means the engine is cutting your look, which you should hear from a number rather than from a screenshot. mirrorRebuilds is how many times last frame the scripts' copy of the scene was rebuilt from scratch (each costs time in proportion to the whole scene, in the mirror bucket); mirrorRefreshed is how many single nodes were re-read because a component of theirs changed, which costs only those nodes. animators and animatorsCulled are last frame's animated models and how many culling skipped (see anim:setCulling). rays and rayMs are the raycasts scripts made last frame (raycast and raycastMany) and the milliseconds they took, a part of the scripts bucket (counted with collection on). sweeps and sweepMs are the same for the sweeps scripts made (spherecast, capsulecast and boxcast), each call counted once. decals and decalTris are the decals in the world (decals.add) and the triangles they were laid as. shadowProxies is how many collider boxes, spheres and capsules the shadow march was given (the 32 nearest the camera), shadowProxiesDropped how many more qualified and were left out, and shadowVolumes the baked terrain and mesh volumes it reads: a building made of many box colliders costs lighting time near it, and these are the numbers that show it. unbatched is how many draws carried a single instance, and unbatchedBy says why each did not share a draw: { uniqueMesh=, texture=, shader=, shaderParams=, skinned= } — nothing else draws its mesh, or the other draws of that mesh bind different images, use another shader (or none), use the same shader with different parameters, or differ in being skinned. Colour, roughness, emissive, tint and the other per-material numbers never split a draw; nodes that share a mesh, the same images and the same shader with the same parameters draw as one, however each got its material (counted with collection on).
+perf.counts() → { nodes=, culled=, instances=, draws=, unbatched=, unbatchedBy=, chunks=, props=, particles=, effects=, effectsDropped=, lights=, lightsDropped=, voices=, mirrorRebuilds=, mirrorRefreshed=, animators=, animatorsCulled=, rays=, rayMs=, sweeps=, sweepMs=, decals=, decalTris=, shadowProxies=, shadowProxiesDropped=, shadowVolumes=, terrainDropped= }. Readable even while collection is off, because counts are free to keep — and three of the four 'the engine is slow' reports this API exists for were answerable from one count alone (a scatter field asking for 117,000 props was one of them). The *Dropped pair is what a ceiling refused this frame: nonzero means the engine is cutting your look, which you should hear from a number rather than from a screenshot. mirrorRebuilds is how many times last frame the scripts' copy of the scene was rebuilt from scratch (each costs time in proportion to the whole scene, in the mirror bucket); mirrorRefreshed is how many single nodes were re-read because a component of theirs changed, which costs only those nodes. animators and animatorsCulled are last frame's animated models and how many culling skipped (see anim:setCulling). rays and rayMs are the raycasts scripts made last frame (raycast and raycastMany) and the milliseconds they took, a part of the scripts bucket (counted with collection on). sweeps and sweepMs are the same for the sweeps scripts made (spherecast, capsulecast and boxcast), each call counted once. decals and decalTris are the decals in the world (decals.add) and the triangles they were laid as. shadowProxies is how many collider boxes, spheres and capsules the shadow march was given (the 32 nearest the camera), shadowProxiesDropped how many more qualified and were left out, and shadowVolumes the baked terrain and mesh volumes it reads: a building made of many box colliders costs lighting time near it, and these are the numbers that show it. terrainDropped is how many terrain edits have been refused since the game started because 4,096 were already waiting; zero for a game that paces with terrain.capacity(). unbatched is how many draws carried a single instance, and unbatchedBy says why each did not share a draw: { uniqueMesh=, texture=, shader=, shaderParams=, skinned= } — nothing else draws its mesh, or the other draws of that mesh bind different images, use another shader (or none), use the same shader with different parameters, or differ in being skinned. Colour, roughness, emissive, tint and the other per-material numbers never split a draw; nodes that share a mesh, the same images and the same shader with the same parameters draw as one, however each got its material (counted with collection on).
 
 ### `perf.enable`
 
@@ -3359,6 +3395,10 @@ perf.enable(true) — start collecting; perf.enable(false) stops and CLEARS the 
 
 perf.enabled() — is anything being measured? Safe to call while off, so a script can ask before reading.
 
+### `perf.frames`
+
+perf.frames([n]) → the last n frames (all that are kept, 300, when n is left out), OLDEST FIRST, each exactly as it was: { {frame=, ms=, buckets={physics=26.1, ...}, parts={physicsStatic=19.0, ...}, scripts={ {name=, ms=}, ... }, calls={ {script=, call=, n=, ms=}, ... }, samples={ {script=, fn=, line=, n=, ms=}, ... }, bodies={ {name=, ms=}, ... }, counts={nodes=, draws=, props=, ...}, paced="compositor"}, ... }. No smoothing, so a benchmark reads each frame's own numbers rather than inverting perf.ms's rolling average, and a frame that passed with no update of the probe's (a scene swap, a load) is still there. ms is the whole frame end to end, `untimed` included. scripts are hook time costliest first; samples only while perf.sampleScripts is on; paced is set when something other than the engine's own work held the frame (see perf.pacing). Needs perf.enable(true).
+
 ### `perf.gpu`
 
 perf.gpu() → { total = ms, passes = { {name=, ms=}, … } } — the GPU's own time for each render pass of the last frame it finished timing, in the order they ran ("depth prepass", "opaque + lighting", "glass", "particles", "post", …). nil when nothing has been timed yet: the first frames after perf.enable(true), or a GPU whose driver cannot time passes. For a game's own quality governor on the player's machine, which the CPU-side buckets cannot see. Raises while collection is off, like perf.ms.
@@ -3367,9 +3407,13 @@ perf.gpu() → { total = ms, passes = { {name=, ms=}, … } } — the GPU's own 
 
 perf.gpuMs(pass) → one pass's GPU milliseconds last frame ("opaque + lighting" is where sun shadows are paid for), or "total"; nil when the pass did not run or nothing was timed. See perf.gpu.
 
+### `perf.hitchThreshold`
+
+perf.hitchThreshold([ms]) → the frame time at which a frame is kept as a hitch for perf.hitches, after setting it when ms is given. 50 by default; 33 catches every frame that makes a 30 fps game miss, 20 one aiming at 60. At least 1. Readable while collection is off; it is a setting, not a measurement.
+
 ### `perf.hitches`
 
-perf.hitches() → every frame since the last call that took 50 ms or more, oldest first: { {frame=, ms=, top="terrain", buckets={terrain=157.4, scripts=30.1, ...}, parts={collisionRebuild=140.2, ...}, assets={ {path="shaders/ocean.flsl", part="pipelineCompile", ms=827.4}, ... }}, ... }. perf.worstMs looks back sixty frames, so a probe that reads every few seconds loses the spike it is hunting; this keeps each one (up to 64) until it is read, with the bucket that spent the time on top. Time no bucket measured is named `untimed`, and waiting on the GPU or the display `gpuWait` and `present`, so a hitch the engine's buckets cannot explain still says so. `parts` names work inside the buckets, in milliseconds already counted there: `terrainEdits` (applying terrain.dig and the other edits), `collisionRebuild` (a terrain collider's rebuilt triangles landing, or the frame waiting for them), `planetLanded` (a generated world arriving), `terrainShadow` (the terrain's shadow volume uploaded after a change), `terrainMeshing` (planning and landing chunk meshes) and `terrainStreaming` (putting far ground away and taking back what was made again); in `assets`, first-use work: `assetDecode` (an image read and decoded), `assetUpload` (put on the GPU), `shaderCompile` (a .flsl compiled and checked) and `pipelineCompile` (the GPU driver building a shader's pipeline). `assets` lists the slowest five files the frame prepared, slowest first, each with its part and milliseconds: the file a load hitch was waiting on, which assets.warm can prepare ahead. Needs perf.enable(true).
+perf.hitches() → every frame since the last call that took the hitch threshold or more (50 ms, or what perf.hitchThreshold set), oldest first: { {frame=, ms=, top="terrain", buckets={terrain=157.4, scripts=30.1, ...}, parts={collisionRebuild=140.2, ...}, assets={ {path="shaders/ocean.flsl", part="pipelineCompile", ms=827.4}, ... }, scripts={ {name=, ms=}, ... }, calls={ {script=, call=, n=, ms=}, ... }, samples={ {script=, fn=, line=, n=, ms=}, ... }, bodies={ {name=, ms=}, ... }}, ... }. perf.worstMs looks back sixty frames, so a probe that reads every few seconds loses the spike it is hunting; this keeps each one (up to 64) until it is read, with the bucket that spent the time on top. Time no bucket measured is named `untimed`, and waiting on the GPU or the display `gpuWait` and `present`, so a hitch the engine's buckets cannot explain still says so. `parts` names work inside the buckets, in milliseconds already counted there: `terrainEdits` (applying terrain.dig and the other edits), `collisionRebuild` (a terrain collider's rebuilt triangles landing, or the frame waiting for them), `planetLanded` (a generated world arriving), `terrainShadow` (the terrain's shadow volume uploaded after a change), `terrainMeshing` (planning and landing chunk meshes) and `terrainStreaming` (putting far ground away and taking back what was made again); in `assets`, first-use work: `assetDecode` (an image read and decoded), `assetUpload` (put on the GPU), `shaderCompile` (a .flsl compiled and checked) and `pipelineCompile` (the GPU driver building a shader's pipeline). `assets` lists the slowest five files the frame prepared, slowest first, each with its part and milliseconds: the file a load hitch was waiting on, which assets.warm can prepare ahead. Needs perf.enable(true).
 
 ### `perf.mirrorCause`
 
@@ -3383,9 +3427,21 @@ perf.ms("scripts") — that bucket's rolling average, in milliseconds. An unknow
 
 perf.overloaded() → true while the fixed tick costs more than the time it simulates: this machine can't run the game in real time. The game then plays in slow motion (one tick per frame) rather than dropping to a few frames a second — unless project.ron says tick_overload: CatchUp, or it is a networked session, which must keep up. For a loading screen that would otherwise wait forever for calm frames: say the machine is struggling instead. Readable while collection is off.
 
+### `perf.pacing`
+
+perf.pacing() → { presentMode="fifo", vsync=true, refreshHz=60, frameCap=0, frameMs=, waitMs=, gpuMs=, limitedBy="compositor", pacedFrames=58, frames=60 } — how frames reach the display, and what held the last one when the engine's own work did not: "display" (vsync, about one refresh), "compositor" (a window system handing out fewer frames than the display shows, as a hidden window or a locked session does), "frameCap" (app.setFrameCap) or "gpu". nil limitedBy is a frame the engine's work filled. pacedFrames is how many of the last `frames` something other than the engine held. A probe that measures frames should check this first: 50 ms frames that are all gpuWait at limitedBy="compositor" are not the game being slow. presentMode is "none" with no window. Needs perf.enable(true).
+
 ### `perf.parts`
 
-perf.parts() → { name = ms, … } — the named pieces of work inside the buckets in the last finished frame, every frame (a hitch lists them too, but only on a slow frame). scatterSettle is what the scatter bucket spent dropping arriving props onto the ground (rolling chunks and their ground queries; at most about 1 ms a frame plus one query); terrainEdits, collisionRebuild, decalRelay (checking and laying again the marks a dig reached) and decalBatches (packing the decal pages that changed) are inside terrain; assetDecode, assetUpload, shaderCompile and pipelineCompile are first-use work inside assets (see perf.hitches). Needs perf.enable(true), like every timing.
+perf.parts() → { name = ms, … } — the named pieces of work inside the buckets in the last finished frame, every frame (a hitch lists them too, but only on a slow frame). scatterSettle is what the scatter bucket spent dropping arriving props onto the ground (rolling chunks and their ground queries; at most about 1 ms a frame plus one query); terrainEdits, collisionRebuild, decalRelay (checking and laying again the marks a dig reached) and decalBatches (packing the decal pages that changed) are inside terrain; assetDecode, assetUpload, shaderCompile and pipelineCompile are first-use work inside assets (see perf.hitches). Inside physics: physicsBroadphase (indexing the colliders), physicsStatic (bodies and assemblies moving against the static world), physicsSweeps (fast movers swept so they stop at first touch), physicsJoints, physicsPairs (movers against each other) and physicsSleep (re-checking what sleepers rest on); perf.bodies names who. Inside render: renderCull (the on-screen test), renderInstancing (walking the scene into instances, terrain and decals included) and renderPasses (the GPU passes encoded and submitted, uploads included). Inside untimed: outsideFrame (the window system and the OS between two frames), frameCap (holding to app.setFrameCap), sceneLoad (a scene swap) and physicsRebuild; the rest of untimed is unnamed. Needs perf.enable(true), like every timing.
+
+### `perf.sampleScripts`
+
+perf.sampleScripts(on [, intervalMs]) → whether it is on. The script sampler: every intervalMs (0.25 by default) of a script's run time it notes the function and line running, charged with the wall time since the sample before, so an engine call that ran long is charged to the line that made it. Each frame keeps its hottest ten lines (perf.frames, perf.hitches); perf.samples() has every line since it was last asked. A tight loop runs slower while it samples, so it is opt-in. Needs perf.enable(true); perf.enable(false) stops it.
+
+### `perf.samples`
+
+perf.samples() → every line the script sampler landed on since the last call, HOTTEST FIRST: { {script="vessel_controller", fn="solveWheels", line=212, n=1840, ms=459.8}, ... }. fn is `?` for a chunk's main body or an anonymous function. Empty unless perf.sampleScripts is on. Needs perf.enable(true).
 
 ### `perf.scriptMs`
 
@@ -3397,7 +3453,7 @@ perf.scriptWorstMs("planet_walker") — that script's worst frame in the last se
 
 ### `perf.scripts`
 
-perf.scripts() → { {name=, ms=, worstMs=}, ... }, MOST EXPENSIVE FIRST — which is the order the question is asked in. A total for 'scripts' never answered 'which of my scripts is doing this'.
+perf.scripts() → { {name=, ms=, worstMs=, engineMs=, calls={ {script=, call="spherecast", n=12, ms=25.1}, ... }}, ... }, MOST EXPENSIVE FIRST — which is the order the question is asked in. A total for 'scripts' never answered 'which of my scripts is doing this'. engineMs and calls are LAST FRAME's engine calls made from that script (raycast, raycastMany, spherecast, capsulecast, boxcast), costliest first: the part of its time that was the engine working on its behalf, so 'planet_camera 27 ms, 25 of it in spherecast' is one read.
 
 ### `perf.slowestScript`
 

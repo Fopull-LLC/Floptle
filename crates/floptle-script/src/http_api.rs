@@ -272,6 +272,13 @@ fn lua_to_json_at(v: &Value, depth: usize) -> mlua::Result<serde_json::Value> {
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
         Value::String(s) => serde_json::Value::String(s.to_string_lossy().to_string()),
+        // A vec3 was refused when it was a userdata, and is still: say what to
+        // send instead.
+        Value::Table(t) if crate::math_api::exact_components(t).is_some() => {
+            return Err(mlua::Error::RuntimeError(
+                "json.encode cannot encode a vec3 — send { x = v.x, y = v.y, z = v.z }".into(),
+            ));
+        }
         Value::Table(t) => {
             // The shape says array when it can; `json.array` says so when it
             // cannot. An empty table is both an empty list and an empty object,

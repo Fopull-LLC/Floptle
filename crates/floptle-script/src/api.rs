@@ -24,7 +24,7 @@ fn list_table(
     ids: &[u32],
     mut make: impl FnMut(&Lua, u32) -> mlua::Result<Table>,
 ) -> mlua::Result<Table> {
-    let arr = lua.create_table()?;
+    let arr = lua.create_table_with_capacity(ids.len(), 0)?;
     for (i, e) in ids.iter().enumerate() {
         arr.raw_set(i + 1, make(lua, *e)?)?;
     }
@@ -311,36 +311,60 @@ pub(crate) fn new_color(lua: &Lua, c: [f32; 4]) -> mlua::Result<Table> {
 /// came back nil would be the quieter half. The same mechanism as the `synced`
 /// diagnostic.
 pub(crate) fn deferred_handle(lua: &Lua, call: &str, name: &str) -> mlua::Result<Table> {
-    let proxy = lua.create_table()?;
-    let mt = lua.create_table()?;
-    fn explain(call: &str, name: &str, k: &Value) -> String {
-        let field = match k {
-            Value::String(s) => s.to_string_lossy().to_string(),
-            other => format!("{other:?}"),
-        };
-        format!(
-            "{call}(\"{name}\") does not return a node — the node does not exist yet (it is \
-             made after this pass), so `.{field}` has nothing to read. The handle arrives in \
-             the callback: {call}(\"{name}\", function(n) n.{field} = ... end). See scripting.md."
-        )
-    }
-    for key in ["__index", "__newindex"] {
-        let (call, name) = (call.to_string(), name.to_string());
-        // One closure shape for both, so the two can never drift into saying
-        // different things about the same mistake.
-        let f = lua.create_function(move |_, args: mlua::MultiValue| -> mlua::Result<Value> {
-            let k = args.get(1).cloned().unwrap_or(Value::Nil);
-            Err(mlua::Error::runtime(explain(&call, &name, &k)))
-        })?;
-        mt.set(key, f)?;
-    }
+    // One metatable for every handle, the call and the name riding in the
+    // handle itself: a build of a thousand spawns made two closures and two
+    // tables for each, to say something only a mistaken script ever hears.
+    let mt = match lua.app_data_ref::<DeferredMeta>() {
+        Some(m) => m.0.clone(),
+        None => {
+            let mt = lua.create_table()?;
+            fn explain(this: &Table, k: &Value) -> String {
+                let call: String = this.raw_get("__deferredCall").unwrap_or_default();
+                let name: String = this.raw_get("__deferredName").unwrap_or_default();
+                let field = match k {
+                    Value::String(s) => s.to_string_lossy().to_string(),
+                    other => format!("{other:?}"),
+                };
+                format!(
+                    "{call}(\"{name}\") does not return a node — the node does not exist yet (it is \
+                     made after this pass), so `.{field}` has nothing to read. The handle arrives in \
+                     the callback: {call}(\"{name}\", function(n) n.{field} = ... end). See scripting.md."
+                )
+            }
+            for key in ["__index", "__newindex"] {
+                // One closure shape for both, so the two can never drift into
+                // saying different things about the same mistake.
+                let f = lua.create_function(move |_, args: mlua::MultiValue| -> mlua::Result<Value> {
+                    let this = match args.front() {
+                        Some(Value::Table(t)) => t.clone(),
+                        _ => return Err(mlua::Error::runtime("a spawned node does not exist yet")),
+                    };
+                    let k = args.get(1).cloned().unwrap_or(Value::Nil);
+                    Err(mlua::Error::runtime(explain(&this, &k)))
+                })?;
+                mt.set(key, f)?;
+            }
+            lua.set_app_data(DeferredMeta(mt.clone()));
+            mt
+        }
+    };
+    let proxy = lua.create_table_with_capacity(0, 2)?;
+    proxy.raw_set("__deferredCall", call)?;
+    proxy.raw_set("__deferredName", name)?;
     proxy.set_metatable(Some(mt));
     Ok(proxy)
 }
 
+/// The metatable every [`deferred_handle`] shares.
+struct DeferredMeta(Table);
+
 /// Read a colour out of a Lua table: named `r/g/b/a` first, then `[1]`..`[4]`.
 /// A missing alpha is 1: `color(1, 0, 0)` is opaque red, not invisible red.
 pub(crate) fn read_color(t: &Table) -> mlua::Result<[f32; 4]> {
+    // A vec3 is a colour wherever one is: x, y, z as r, g, b.
+    if let Some(v) = crate::math_api::exact_components(t) {
+        return Ok([v.x as f32, v.y as f32, v.z as f32, 1.0]);
+    }
     let get = |named: &str, i: usize| -> f64 {
         t.raw_get::<Option<f64>>(named)
             .ok()
@@ -5007,6 +5031,7 @@ let node_mt = lua.create_table()?;
     })?;
     node_mt.set("__newindex", newidx)?;
 }
+lua.set_app_data(crate::env::NodeMeta(node_mt.clone()));
 lua.set_named_registry_value("floptle_node_mt", node_mt)?;
     Ok(())
 }
@@ -5809,10 +5834,50 @@ fn node_lookup_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Res
         })?,
     )?;
 }
+// node:childrenGeneration() — a number that changes whenever this node's
+// child list does (a child added, removed, reparented or reordered), and only
+// then. A script that keeps the list `node:children()` built asks this
+// instead of rebuilding it: the same number means the list is still right.
 {
     let scene = shared.scene.clone();
-    let f = lua.create_function(move |lua, (this, name): (Table, String)| {
+    methods.set(
+        "childrenGeneration",
+        lua.create_function(move |_, this: Table| {
+            let e: u32 = this.raw_get("__id")?;
+            Ok(scene.borrow().children_generation(e))
+        })?,
+    )?;
+}
+// node:child(name | id) — the direct child with that name (the first, in
+// scene order), or the direct child with that node id; nil when there is
+// none. By id it is one lookup however many children there are. A number that
+// is no child's id is still tried as a name, which is what a number meant
+// before ids were accepted.
+{
+    let scene = shared.scene.clone();
+    let f = lua.create_function(move |lua, (this, key): (Table, Value)| {
         let e: u32 = this.raw_get("__id")?;
+        let name = match key {
+            Value::String(s) => s.to_str()?.to_owned(),
+            Value::Integer(_) | Value::Number(_) => {
+                let n = crate::env::as_num(&key).unwrap_or(f64::NAN);
+                if n.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&n) {
+                    let id = n as u32;
+                    if scene.borrow().parent.get(&id) == Some(&e) {
+                        return Ok(Value::Table(new_node_handle(lua, id)?));
+                    }
+                    format!("{}", n as i64)
+                } else {
+                    format!("{n}")
+                }
+            }
+            other => {
+                return Err(mlua::Error::runtime(format!(
+                    "node:child takes a child's name or its node id, got {}",
+                    other.type_name()
+                )));
+            }
+        };
         let found = {
             let s = scene.borrow();
             s.children

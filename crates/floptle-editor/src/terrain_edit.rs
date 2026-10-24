@@ -35,6 +35,84 @@ use crate::{Editor};
 pub(crate) struct EditorTerrain {
     pub field: floptle_field::ChunkField,
     pub shadow: floptle_field::BakedSdf,
+    /// Names this `shadow` in the GPU atlas: a new one for every proxy made
+    /// whole, kept through the boxes an edit refreshes (those are uploaded
+    /// as boxes). An atlas re-laid around a key it holds copies the volume
+    /// on the GPU instead of uploading it again.
+    pub shadow_key: u64,
+}
+
+/// A fresh [`EditorTerrain::shadow_key`]: unique in the process, never 0, and
+/// clear of the high bit that occluder keys carry.
+fn next_shadow_key() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Longest-axis cells of shadow-proxy upload a frame may spend (6 bytes a
+/// cell): about two milliseconds. A new terrain's whole proxy, up to 192³ =
+/// 7 M cells, is written over frames into an atlas beside the drawn one, and
+/// edits' boxes queue behind the budget, so no frame pays for a volume at once.
+pub(crate) const TERRAIN_SHADOW_UPLOAD_CELLS: u64 = 384 * 1024;
+
+/// The proxy boxes of one terrain waiting to be uploaded, as voxel boxes
+/// `[min, max)` of the proxy named `key`. Boxes that overlap or nearly touch
+/// are merged as they arrive, so a frame's cluster of edits is one upload and
+/// edits far apart stay separate instead of becoming one box spanning both.
+#[derive(Default)]
+pub(crate) struct ShadowDirty {
+    pub key: u64,
+    pub boxes: Vec<([u32; 3], [u32; 3])>,
+    /// A sculpt (not a paint) moved the surface: the wireframe is rebuilt.
+    pub geom: bool,
+}
+
+/// Boxes a terrain keeps apart before the new one is merged into the box it
+/// grows least.
+const SHADOW_DIRTY_BOXES: usize = 64;
+
+fn box_cells(b: &([u32; 3], [u32; 3])) -> u64 {
+    (0..3).map(|a| b.1[a].saturating_sub(b.0[a]) as u64).product()
+}
+
+fn box_union(a: &([u32; 3], [u32; 3]), b: &([u32; 3], [u32; 3])) -> ([u32; 3], [u32; 3]) {
+    (
+        [a.0[0].min(b.0[0]), a.0[1].min(b.0[1]), a.0[2].min(b.0[2])],
+        [a.1[0].max(b.1[0]), a.1[1].max(b.1[1]), a.1[2].max(b.1[2])],
+    )
+}
+
+impl ShadowDirty {
+    /// Add a box, merging it with any box their union barely exceeds (a
+    /// quarter more than the two apart), until none is left to merge.
+    pub fn add(&mut self, mn: [u32; 3], mx: [u32; 3]) {
+        let mut b = (mn, mx);
+        if box_cells(&b) == 0 {
+            return;
+        }
+        while let Some(i) = self.boxes.iter().position(|o| box_cells(&box_union(o, &b)) * 4 <= (box_cells(o) + box_cells(&b)) * 5) {
+            let o = self.boxes.swap_remove(i);
+            b = box_union(&o, &b);
+        }
+        if self.boxes.len() >= SHADOW_DIRTY_BOXES {
+            let grow = |o: &([u32; 3], [u32; 3])| box_cells(&box_union(o, &b)) - box_cells(o);
+            if let Some(i) = (0..self.boxes.len()).min_by_key(|&i| grow(&self.boxes[i])) {
+                let o = self.boxes.swap_remove(i);
+                return self.add(box_union(&o, &b).0, box_union(&o, &b).1);
+            }
+        }
+        self.boxes.push(b);
+    }
+}
+
+/// Where a terrain's shadow volume sits in the drawn atlas: its slot holds
+/// the proxy the box was taken from, which stays drawn there until a new
+/// atlas holding the next one is whole.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TerrainSlot {
+    pub e: Entity,
+    pub center: [f32; 3],
+    pub half: [f32; 3],
 }
 
 /// Longest-axis cell cap for the shadow proxy. Soft sun shadows are forgiving of a
@@ -71,13 +149,14 @@ impl EditorTerrain {
     /// Wrap a field, deriving its shadow proxy.
     pub(crate) fn new(field: floptle_field::ChunkField) -> Self {
         let shadow = shadow_proxy_of(&field);
-        Self { field, shadow }
+        Self { field, shadow, shadow_key: next_shadow_key() }
     }
 
     /// Re-derive the shadow proxy from the current field (structural change / undo /
     /// bounds outgrown). The empty-field proxy is a tiny inert box.
     pub(crate) fn rebuild_shadow(&mut self) {
         self.shadow = shadow_proxy_of(&self.field);
+        self.shadow_key = next_shadow_key();
     }
 }
 
@@ -336,6 +415,10 @@ pub(crate) struct TerrainLoadJob {
     pub started: floptle_core::time::Instant,
     pub rx: std::sync::mpsc::Receiver<Option<EditorTerrain>>,
 }
+
+/// How far out, in its radii, a body's ground can reach: what
+/// `terrain.ready` reports as not made while the body is not resident.
+const UNMADE_REACH: f64 = 1.5;
 
 /// How far round the player, in chunks, a planet streamed in is made before it
 /// is ready; the rest is made on approach, nearest first.
@@ -1755,7 +1838,9 @@ impl Editor {
                 [q(wt.rotation.x), q(wt.rotation.y), q(wt.rotation.z), q(wt.rotation.w)],
                 [q(wt.scale.x), q(wt.scale.y), q(wt.scale.z)],
             );
-            let key = match self.mesh_occluders.get(&e) {
+            // Against the newest set asked for, which may not be drawn yet.
+            let latest = self.occluders_wanted.as_ref().unwrap_or(&self.mesh_occluders);
+            let key = match latest.get(&e) {
                 Some((old, _)) if *old != key && !self.occluder_cache.contains_key(&key) => {
                     let held = match self.occluder_settling.get_mut(&e) {
                         Some((k, n)) if *k == key => {
@@ -1781,10 +1866,11 @@ impl Editor {
             };
             desired.push((e, key));
         }
-        let unchanged = desired.len() == self.mesh_occluders.len()
+        let latest = self.occluders_wanted.as_ref().unwrap_or(&self.mesh_occluders);
+        let unchanged = desired.len() == latest.len()
             && desired
                 .iter()
-                .all(|(e, key)| self.mesh_occluders.get(e).is_some_and(|(k, _)| k == key));
+                .all(|(e, key)| latest.get(e).is_some_and(|(k, _)| k == key));
         if unchanged {
             return false;
         }
@@ -1861,7 +1947,13 @@ impl Editor {
         // Drop cache entries nothing references anymore (a resized/removed map).
         self.occluder_cache.retain(|k, _| next.values().any(|(nk, _)| nk == k));
         self.occluder_settling.retain(|e, _| next.contains_key(e));
-        self.mesh_occluders = next;
+        // With an atlas to fill, the set drawn changes when the atlas holding
+        // it is whole (`sync_terrain_gpu`); until then the old bakes cast.
+        if self.raymarch.is_some() {
+            self.occluders_wanted = Some(next);
+        } else {
+            self.mesh_occluders = next;
+        }
         true
     }
 
@@ -2067,7 +2159,10 @@ impl Editor {
         let budget = self.script_host.terrain_edit_budget_ms();
         let proxy_cap = (TERRAIN_EDIT_PROXY_CELLS as f64 * (budget / TERRAIN_EDIT_BUDGET_MS).max(1.0)) as usize;
         // The big ops made on a worker land first: everything behind them waited.
+        let part = floptle_core::profile::Span::new();
         self.land_op_job(&mut dirty, scatter, started, budget);
+        let landing_ms = part.ms();
+        let part = floptle_core::profile::Span::new();
         while let Some(front) = self.terrain_op_queue.front() {
             // An edit waits for its terrain to land: a field streaming in or
             // being generated replaces the one there now, and would take the
@@ -2112,6 +2207,8 @@ impl Editor {
         }
         // The budget is the frame's: the frame pass and every tick share it.
         self.terrain_edit_ms += started.elapsed().as_secs_f64() * 1e3;
+        let applying_ms = part.ms();
+        let part = floptle_core::profile::Span::new();
         for (e, mut b) in batch {
             b.touched.sort_unstable();
             b.touched.dedup();
@@ -2127,7 +2224,14 @@ impl Editor {
         }
         let ms = t0.ms();
         self.profile_record(floptle_core::profile::Bucket::Terrain, ms);
-        self.script_host.profile().borrow_mut().record_part("terrainEdits", ms);
+        {
+            // Inside `terrainEdits`, which of its three steps a long one was.
+            let mut p = self.script_host.profile().borrow_mut();
+            p.record_part("terrainEdits", ms);
+            p.record_part("terrainEditsLanding", landing_ms);
+            p.record_part("terrainEditsApplying", applying_ms);
+            p.record_part("terrainEditsAfter", part.ms());
+        }
         if !dirty.is_empty() {
             let sources: Vec<floptle_core::scatter::ScatterSource> =
                 self.script_host.scatter_sources().clone();
@@ -2300,17 +2404,18 @@ impl Editor {
         self.touch_terrain_edit(e);
     }
 
-    /// Merge a rewritten proxy box into the atlas's partial upload.
+    /// Queue a rewritten proxy box for upload. Each terrain keeps its own
+    /// boxes, merged only with boxes they nearly overlap: one box spanning
+    /// every edit of a frame uploaded all the air between them.
     fn note_region_dirty(&mut self, e: Entity, mn: [u32; 3], mx: [u32; 3], geom: bool) {
-        self.terrain_region_dirty = Some(match self.terrain_region_dirty {
-            Some((se, omn, omx, og)) if se == e => (
-                e,
-                [omn[0].min(mn[0]), omn[1].min(mn[1]), omn[2].min(mn[2])],
-                [omx[0].max(mx[0]), omx[1].max(mx[1]), omx[2].max(mx[2])],
-                og || geom,
-            ),
-            _ => (e, mn, mx, geom),
-        });
+        let Some(key) = self.terrains.get(&e).map(|t| t.shadow_key) else { return };
+        let d = self.terrain_region_dirty.entry(e).or_default();
+        if d.key != key {
+            // Boxes of a proxy since replaced: the new one uploads whole.
+            *d = ShadowDirty { key, ..Default::default() };
+        }
+        d.add(mn, mx);
+        d.geom |= geom;
     }
 
     /// Is a field for terrain `e` on its way, to replace the one there now: a
@@ -2383,7 +2488,22 @@ impl Editor {
     /// found for it.
     fn apply_resolved_op(&mut self, op: &floptle_script::TerrainOp, at: &OpTarget, batch: &mut HashMap<Entity, TerrainBatch>) {
         let Some(t) = self.terrains.get_mut(&at.e) else { return };
+        let unmade = t.field.pending_count();
         let (touched, measured) = make_op(&mut t.field, op, at);
+        // Ground made on the frame by an edit that should have gone to the
+        // worker ([`Self::op_goes_off_frame`]): tens of milliseconds a chunk.
+        // Counted, and said once, so a frame it costs names its cause.
+        let made = unmade.saturating_sub(t.field.pending_count());
+        if made > 0 {
+            self.terrain_inline_made += made;
+            if !std::mem::replace(&mut self.terrain_inline_warned, true) {
+                self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    format!("terrain: an edit made {made} chunk(s) of ground on the frame instead of off it"),
+                    None,
+                );
+            }
+        }
         self.landed_op(op, at, touched, measured, batch);
     }
 
@@ -3147,6 +3267,7 @@ impl Editor {
             self.terrain_chunks_dirty.entry(e).or_default().extend(region);
         }
 
+        self.prepare_asked_ground();
         self.terrain_far_frame = self.terrain_far_frame.wrapping_add(1);
         if !self.terrain_far_frame.is_multiple_of(FAR_SCAN_FRAMES) {
             return;
@@ -3194,7 +3315,10 @@ impl Editor {
                     if d <= rings[FAR_RING] + PROMOTE_PAST_RING && !in_flight.contains(&c) {
                         near.push((d, c));
                     }
-                } else if d > rings[FAR_RING] + EVICT_PAST_RING && t.field.evictable(c) {
+                } else if d > rings[FAR_RING] + EVICT_PAST_RING
+                    && t.field.evictable(c)
+                    && !self.terrain_prepared.get(&e).is_some_and(|k| k.contains(&c))
+                {
                     far.push((d, c));
                 }
             }
@@ -3243,6 +3367,50 @@ impl Editor {
         }
     }
 
+    /// `terrain.prepare`: find the stand-in chunks each ask reaches, and hand
+    /// them to workers a few at a time, beside the ones made on approach. A
+    /// chunk made this way is kept: put away again it would be a stand-in, and
+    /// `terrain.ready` would go back to false under the game that asked.
+    fn prepare_asked_ground(&mut self) {
+        for (p, r) in self.script_host.take_terrain_prepares() {
+            let p = DVec3::from(p);
+            for (&e, t) in &self.terrains {
+                if t.field.pending_count() == 0 || t.field.pending_source().is_none() {
+                    continue;
+                }
+                let (anchor, rot, ts) = self.terrain_world_frame_of(e);
+                let ts = ts.max(1e-6);
+                let local = (rot.inverse() * (p - anchor).as_vec3()) / ts;
+                let reach = Vec3::splat(r as f32 / ts + t.field.voxel() * 2.0);
+                let kept = self.terrain_prepared.entry(e).or_default();
+                for c in t.field.pending_in_box(local - reach, local + reach) {
+                    if kept.insert(c) {
+                        self.terrain_prepare_wanted.push((e, c));
+                    }
+                }
+            }
+        }
+        if self.terrain_prepare_wanted.is_empty() {
+            return;
+        }
+        let most = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).max(1));
+        while self.terrain_promotions.len() < most && !self.terrain_prepare_wanted.is_empty() {
+            let e = self.terrain_prepare_wanted[0].0;
+            let Some(source) = self.terrains.get(&e).and_then(|t| t.field.pending_source()) else {
+                self.terrain_prepare_wanted.retain(|(x, _)| *x != e);
+                continue;
+            };
+            let take = self.terrain_prepare_wanted.iter().take(PROMOTE_PER_JOB).take_while(|(x, _)| *x == e).count();
+            let coords: Vec<[i32; 3]> = self.terrain_prepare_wanted.drain(..take).map(|(_, c)| c).collect();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let work = coords.clone();
+            crate::worker::spawn("terrain-prepare", move || {
+                let _ = tx.send(work.into_iter().map(|c| (c, source.generate(c))).collect());
+            });
+            self.terrain_promotions.push(PromotionJob { e, coords, rx });
+        }
+    }
+
     /// Answer `terrain.busy()` for the coming tick: true while the background
     /// terrain worker has a whole-body fill running or a field streaming in.
     ///
@@ -3253,6 +3421,41 @@ impl Editor {
     pub(crate) fn publish_terrain_busy(&mut self) {
         let busy = self.terrain_worker_busy();
         self.script_host.set_terrain_busy(busy);
+        let unmade = self.terrain_unmade_regions();
+        self.script_host.set_terrain_unmade(unmade);
+    }
+
+    /// The ground the world has not made yet, for `terrain.ready` and
+    /// `terrain.raycast`: every terrain body put away cold, streaming in, or
+    /// waiting for a `generatePlanet` fill, as a sphere holding all of it.
+    ///
+    /// Until its field lands, such a body is either missing from the colliders
+    /// a query reads or is answered by the field it is about to replace, and
+    /// both read as open air down to its core. A terrain with no field that is
+    /// not a celestial body has no extent to report, and is left out.
+    pub(crate) fn terrain_unmade_regions(&self) -> Vec<floptle_script::UnmadeRegion> {
+        let mut out = Vec::new();
+        for (e, m) in self.world.query::<Matter>() {
+            let Matter::Terrain { id, .. } = m else { continue };
+            let generating = self.planet_gen_pending.contains(id);
+            // Not resident: put away, streaming in, or not yet picked up by
+            // the residency driver at all (a body made this frame, or Play's
+            // first pass before the streamer has run).
+            if !generating && self.terrains.contains_key(&e) {
+                continue;
+            }
+            let radius = match (generating.then(|| self.planet_gen_radius.get(id)).flatten(), self.world.get::<floptle_core::CelestialBody>(e)) {
+                (Some(r), _) => f64::from(*r),
+                (None, Some(cb)) => cb.body_radius,
+                (None, None) => continue,
+            };
+            let wt = floptle_core::world_transform(&self.world, e);
+            // Relief rises above the nominal radius: half as much again holds
+            // every mountain a generated world is given.
+            let r = radius.max(1.0) * f64::from(wt.scale.x.abs().max(1e-6)) * UNMADE_REACH;
+            out.push(floptle_script::UnmadeRegion { center: wt.translation.to_array(), radius: r });
+        }
+        out
     }
 
     /// Does the background terrain worker have anything to do — a whole-body
@@ -3887,6 +4090,8 @@ impl Editor {
             self.write_terrain_meta(id, color, hash);
         }
         self.terrains.remove(&e);
+        self.terrain_prepared.remove(&e);
+        self.terrain_prepare_wanted.retain(|(x, _)| *x != e);
         self.play_loaded_terrains.remove(&e);
         let render = self.terrain_render.entry(e).or_default();
         render.impostor = true;
@@ -4170,7 +4375,7 @@ impl Editor {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn fill_terrain_volumes(
         terrains: &HashMap<Entity, EditorTerrain>,
-        slots: &[Entity],
+        slots: &[TerrainSlot],
         occluders: &HashMap<Entity, (OccKey, std::sync::Arc<floptle_field::BakedSdf>)>,
         occ_regions: &HashMap<OccKey, usize>,
         budget: u32,
@@ -4179,10 +4384,13 @@ impl Editor {
         cam_world: DVec3,
     ) {
         g.params[2] = 0.1; // blob↔terrain blend k (the old single-field look)
-        for (i, &e) in slots.iter().take(floptle_render::MAX_VOLUMES).enumerate() {
-            // A just-deleted terrain leaves a stale slot for one frame — leave it
-            // absent (w = 0); the dirty flag re-uploads the set next frame.
-            let Some(t) = terrains.get(&e) else { continue };
+        for (i, slot) in slots.iter().take(floptle_render::MAX_VOLUMES).enumerate() {
+            let e = slot.e;
+            // A just-deleted terrain leaves a stale slot until the atlas is
+            // re-laid without it — leave it absent (w = 0).
+            if !terrains.contains_key(&e) {
+                continue;
+            }
             let wt = floptle_core::world_transform(world, e);
             // The shadow/AO volume shader samples an axis-aligned, unit-scale box:
             // a rotated or scaled terrain would cast its unrotated shadow, which
@@ -4202,8 +4410,9 @@ impl Editor {
                 continue;
             }
             let anchor = wt.translation;
-            let bc = t.shadow.center;
-            let hf = t.shadow.half_extent;
+            // The box of the proxy the slot holds, which is the terrain's
+            // own until a newer one has been uploaded whole.
+            let (bc, hf) = (slot.center, slot.half);
             let cr = anchor + DVec3::new(bc[0] as f64, bc[1] as f64, bc[2] as f64) - cam_world;
             // w = 3: shadow + AO, not drawn. Terrain 2.0 draws the extracted chunk meshes
             // through the raster pass (`push_terrain_instances`); the raymarch stops
@@ -5904,6 +6113,61 @@ mod residency_tests {
         frames_to_land(&mut ed, Vec::new());
         assert!(ed.terrains[&e].field.pending_in_box(side - reach, side + reach).len() < before, "the ground the worker made did not land");
         assert_same_chunks(&once.terrains[&eo].field, &ed.terrains[&e].field, "making the edit on the frame");
+    }
+
+    /// **A grade sent the moment a big world lands makes no ground on any
+    /// frame.** A fresh world has made only the ground round the player, and a
+    /// write over the rest makes it first, tens of milliseconds a chunk; an op
+    /// that should have gone to the worker and did not was one 625 ms frame
+    /// of Solar's. Counted, on a world Solar's size during Play: 1,200 small
+    /// sculpts and flattens over made and stand-in ground, sent at once, make
+    /// no chunk on the frame that takes them or on any frame after, and all
+    /// land.
+    #[test]
+    fn a_grade_on_a_fresh_world_makes_no_ground_on_the_frame() {
+        let fill = floptle_field::procgen::PlanetFill { seed: 8, radius: 922.0, voxel: 1.5, relief: 6.0, cave_depth: 20.0, defer_caves: true, ..Default::default() };
+        let t = std::time::Instant::now();
+        let top = Vec3::new(0.0, 928.0, 0.0);
+        let mut field = floptle_field::procgen::generate_planet_near(&fill, top, NEAR_ON_LOAD_CHUNKS * floptle_field::CHUNK as f32 * fill.voxel);
+        field.set_spec("test".into());
+        let gen_ms = t.elapsed().as_secs_f64() * 1e3;
+        let ground = field.raycast(Vec3::new(0.0, 1000.0, 0.0), Vec3::NEG_Y, 400.0).unwrap();
+        let ops: Vec<floptle_script::TerrainOp> = (0..1200)
+            .map(|i| {
+                let (a, r) = (i as f32 * 2.399, (i % 40) as f32 * 5.0);
+                let p = ground + Vec3::new(a.cos() * r, 0.5, a.sin() * r);
+                let mode = match i % 3 { 0 => floptle_script::TerrainOpMode::Flatten, 1 => floptle_script::TerrainOpMode::Lower, _ => floptle_script::TerrainOpMode::Raise };
+                floptle_script::TerrainOp { pos: [p.x as f64, p.y as f64, p.z as f64], radius: 1.5, strength: 0.6, mode, id: i as u64 + 1, normal: None }
+            })
+            .collect();
+        let (mut ed, e) = editor_on(&field);
+        ed.world.insert(e, floptle_core::CelestialBody { body_radius: 922.0, ..Default::default() });
+        ed.world.insert(e, floptle_core::Matter::Terrain { id: 1, collision: Default::default() });
+        ed.toggle_play();
+        assert!(ed.sim.is_some(), "the fixture is not in Play");
+        let t = std::time::Instant::now();
+        let c = field.clone();
+        let clone_ms = t.elapsed().as_secs_f64() * 1e3;
+        drop(c);
+        let pending0 = ed.terrains[&e].field.pending_count();
+        let t = std::time::Instant::now();
+        ed.pump_collision_meshes();
+        ed.apply_script_terrain_ops(ops);
+        let first = t.elapsed().as_secs_f64() * 1e3;
+        let made_first = pending0 - ed.terrains[&e].field.pending_count();
+        let (mut worst, mut frames) = (0.0f64, 1);
+        while !(ed.terrain_op_queue.is_empty() && ed.terrain_op_job.is_none()) && frames < 5000 {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            let t = std::time::Instant::now();
+            ed.pump_collision_meshes();
+            ed.apply_script_terrain_ops(Vec::new());
+            worst = worst.max(t.elapsed().as_secs_f64() * 1e3);
+            frames += 1;
+        }
+        floptle_say::say!("GRADE gen {gen_ms:.0} ms, clone {clone_ms:.1} ms, chunks {} pending {pending0}; submit frame {first:.1} ms making {made_first} chunks; worst later {worst:.1} ms over {frames} frames", ed.terrains[&e].field.chunk_coords().len());
+        assert_eq!(made_first, 0, "the frame that took the grade made {made_first} chunks of ground");
+        assert_eq!(ed.terrain_inline_made, 0, "the grade made {} chunks of ground on frames", ed.terrain_inline_made);
+        assert!(ed.terrain_op_queue.is_empty() && ed.terrain_op_job.is_none(), "the grade never landed in {frames} frames");
     }
 
     /// **A world that has just landed puts its far ground away a little at a

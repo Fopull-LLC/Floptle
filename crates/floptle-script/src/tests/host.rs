@@ -1632,3 +1632,288 @@ fn a_warm_sends_each_kind_to_its_side_and_waits_for_all_of_them() {
     assert_eq!(env.get::<i64>("failedCount").unwrap(), 1);
     assert_eq!(env.get::<String>("firstFailed").unwrap(), "shaders/ocean.flsl");
 }
+
+/// One frame of the engine's side of the terrain queue: take what scripts
+/// queued, land up to `per_frame` of everything waiting, and report the rest.
+fn land_terrain_edits(host: &ScriptHost, waiting: &mut Vec<crate::TerrainOp>, per_frame: usize) -> Vec<crate::TerrainOp> {
+    waiting.extend(host.take_terrain_ops());
+    let n = per_frame.min(waiting.len());
+    let landed: Vec<crate::TerrainOp> = waiting.drain(..n).collect();
+    host.set_terrain_edits_queued(waiting.len());
+    landed
+}
+
+fn terrain_host(dir: &Path, name: &str, body: &str) -> (ScriptHost, World) {
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).unwrap();
+    write_script(dir, name, body);
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(e, Scripts(vec![floptle_core::ScriptInst {
+        kind: name.into(),
+        enabled: true,
+        params: Vec::new(),
+        refs: Vec::new(),
+        strs: Vec::new(),
+        pinned_bools: None,
+    }]));
+    let host = ScriptHost::new();
+    host.set_playing(true);
+    (host, world)
+}
+
+/// **A big batch sent at `terrain.capacity()` a frame all lands.** Solar's
+/// base grade sent 24,192 edits in one frame and about 20,000 were dropped
+/// with a single warning. Paced by the room the queue says it has, every edit
+/// gets a real receipt (paint and paintTexture included), nothing is
+/// refused, and every one reaches the engine.
+#[test]
+fn a_batch_paced_by_capacity_never_loses_an_edit() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_terrain_capacity_{}", std::process::id()));
+    let (mut host, mut world) = terrain_host(
+        &dir,
+        "grade",
+        "local total, sent, zero = 24192, 0, 0\n\
+         function update()\n\
+           local n = math.min(terrain.capacity(), total - sent)\n\
+           for i = 1, n do\n\
+             sent = sent + 1\n\
+             local k, id = sent % 3\n\
+             if k == 0 then id = terrain.dig(sent, 0, 0, 1)\n\
+             elseif k == 1 then id = terrain.paint(sent, 0, 0, 1, 1, 0, 0)\n\
+             else id = terrain.paintTexture(sent, 0, 0, 1, 2) end\n\
+             if id == 0 then zero = zero + 1 end\n\
+           end\n\
+           log(string.format('%d %d %d', sent, zero, perf.counts().terrainDropped))\n\
+         end\n",
+    );
+    let mut waiting = Vec::new();
+    let mut landed = Vec::new();
+    for _ in 0..200 {
+        host.run(&mut world, &dir, 0.016, 0.016);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        // The engine lands about a quarter of the cap a frame: slower than the
+        // game sends, so the queue fills and pacing is what keeps it whole.
+        landed.extend(land_terrain_edits(&host, &mut waiting, 1000));
+        if landed.len() == 24192 {
+            break;
+        }
+    }
+    let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    assert_eq!(landed.len(), 24192, "{} of 24192 edits landed: {:?}", landed.len(), said.last());
+    assert_eq!(said.last().map(String::as_str), Some("24192 0 0"), "{said:?}");
+    let ids: std::collections::HashSet<u64> = landed.iter().map(|o| o.id).collect();
+    assert_eq!(ids.len(), 24192, "receipts must be distinct");
+    assert!(!ids.contains(&0), "a landed edit carried the no-receipt id");
+    assert_eq!(host.terrain_edits_dropped(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **An edit past the cap is refused where a script can see it.** Paint used
+/// to answer nothing at all, so a dropped paint was invisible; now every verb
+/// answers 0 for a refused edit and each one is counted, not just the first
+/// warned about.
+#[test]
+fn an_edit_past_the_cap_answers_zero_and_is_counted() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_terrain_cap_{}", std::process::id()));
+    let (mut host, mut world) = terrain_host(
+        &dir,
+        "flood",
+        "function start()\n\
+           local zero = 0\n\
+           for i = 1, 5000 do\n\
+             if terrain.paint(i, 0, 0, 1, 1, 1, 1) == 0 then zero = zero + 1 end\n\
+           end\n\
+           log(string.format('%d %d %d', zero, terrain.capacity(), perf.counts().terrainDropped))\n\
+         end\n",
+    );
+    host.run(&mut world, &dir, 0.016, 0.016);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    let refused = 5000 - crate::MAX_PENDING_OPS;
+    assert!(said.iter().any(|l| *l == format!("{refused} 0 {refused}")), "{said:?}");
+    assert_eq!(host.terrain_edits_dropped(), refused as u64);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A driver node running `name` with `n` children named part1..partN.
+fn craft(n: usize, name: &str) -> (World, Entity) {
+    let mut world = World::default();
+    let root = world.spawn();
+    world.insert(root, Transform::IDENTITY);
+    world.insert(root, floptle_core::Name("Craft".into()));
+    world.insert(root, Scripts(vec![floptle_core::ScriptInst {
+        kind: name.into(),
+        enabled: true,
+        params: Vec::new(),
+        refs: Vec::new(),
+        strs: Vec::new(),
+        pinned_bools: None,
+    }]));
+    for i in 0..n {
+        let e = world.spawn();
+        world.insert(e, Transform::from_translation(floptle_core::math::DVec3::new(i as f64, 2.0, 3.0)));
+        world.insert(e, floptle_core::Name(format!("part{}", i + 1)));
+        world.insert(e, floptle_core::Parent(root));
+    }
+    (world, root)
+}
+
+/// **Reading a vec3's component is reading a table field.** As a userdata,
+/// each `.x` was a call into the host, and a loop reading three a part over
+/// a thousand parts went quadratic in calls. An `exact` vec3 holds its
+/// components as its own fields, so the VM reads them without leaving Lua:
+/// `rawget` finds them, and a read costs what any table read costs (a
+/// ratio, not a duration: it was 15 to 30 times one).
+#[test]
+fn a_vec3_component_is_a_field_the_vm_reads() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_vec3_field_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "reader",
+        "function update(node)\n\
+           local v, t = vec3(1, 2, 3), { x = 1, y = 2, z = 3 }\n\
+           local p = node:children()[1].pos\n\
+           log(string.format('RAW %s %s %s', type(v), tostring(rawget(v, 'x')), tostring(rawget(v, 'z'))))\n\
+           log(string.format('POS %s %s %s', type(p), tostring(type(p) == 'table' and rawget(p, 'y')), tostring(type(p) == 'table' and rawget(p, 'z'))))\n\
+           local best = math.huge\n\
+           for k = 1, 5 do\n\
+             local s, t0 = 0, os.clock()\n\
+             for i = 1, 100000 do s = s + p.x + p.y + p.z end\n\
+             local tv = os.clock() - t0\n\
+             s, t0 = 0, os.clock()\n\
+             for i = 1, 100000 do s = s + t.x + t.y + t.z end\n\
+             local tt = os.clock() - t0\n\
+             best = math.min(best, tv / math.max(tt, 1e-9))\n\
+           end\n\
+           log(string.format('RATIO %.2f', best))\n\
+         end\n",
+    );
+    let (mut world, _) = craft(1, "reader");
+    let mut host = ScriptHost::new();
+    host.set_playing(true);
+    host.run(&mut world, &dir, 0.016, 0.016);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    assert!(said.iter().any(|l| l == "RAW table 1 3"), "vec3()'s components are not its own fields: {said:?}");
+    assert!(said.iter().any(|l| l == "POS table 2 3"), "an engine-made vec3's components are not its own fields: {said:?}");
+    let ratio: f64 = said.iter().find_map(|l| l.strip_prefix("RATIO ")).and_then(|r| r.parse().ok()).unwrap();
+    assert!(ratio < 3.0, "a vec3 component read costs {ratio:.1} times a table field read: {said:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A child is found by id in one lookup, and a kept child list knows when
+/// it is stale.** `node:children()` builds a handle per child on every call,
+/// so a lookup inside a per-part loop was quadratic. `node:child(id)` answers
+/// the direct child with that id however many there are (counted: a thousand
+/// children cost what ten do, within noise), a number that is no child's id
+/// is still a name, and `node:childrenGeneration()` stays put across frames
+/// until the list changes, then moves.
+#[test]
+fn a_child_by_id_is_one_lookup_and_the_children_generation_marks_changes() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_child_id_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "kids",
+        "function update(node)\n\
+           local kids = node:children()\n\
+           local found = 0\n\
+           for i = 1, #kids do if node:child(kids[i].id) and node:child(kids[i].id).id == kids[i].id then found = found + 1 end end\n\
+           local t0 = os.clock()\n\
+           for r = 1, 20 do for i = 1, 10 do node:child(kids[i].id) end end\n\
+           local per = (os.clock() - t0) / 200\n\
+           log(string.format('KIDS %d %d %s %s %d %.9f', #kids, found, tostring(node:child(kids[1].id + 100000)), tostring(node:child('part2') and node:child('part2').name), node:childrenGeneration(), per))\n\
+         end\n",
+    );
+    let per_lookup = |n: usize| -> (Vec<String>, World, Entity, ScriptHost) {
+        let (mut world, root) = craft(n, "kids");
+        let mut host = ScriptHost::new();
+        host.set_playing(true);
+        host.run(&mut world, &dir, 0.016, 0.016);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        (said, world, root, host)
+    };
+    let field = |l: &str, k: usize| l.split(' ').nth(k).unwrap().to_string();
+    let (small, _, _, _) = per_lookup(10);
+    let (big, mut world, root, mut host) = per_lookup(1000);
+    let line = big.iter().find(|l| l.starts_with("KIDS ")).unwrap().clone();
+    assert_eq!(field(&line, 1), "1000");
+    assert_eq!(field(&line, 2), "1000", "a child by its id was not found: {line}");
+    assert_eq!(field(&line, 3), "nil", "an id that is no child's answered a node: {line}");
+    assert_eq!(field(&line, 4), "part2", "a name still finds its child: {line}");
+    let t_small: f64 = field(small.iter().find(|l| l.starts_with("KIDS ")).unwrap(), 6).parse().unwrap();
+    let t_big: f64 = field(&line, 6).parse().unwrap();
+    assert!(t_big < t_small * 4.0 + 2e-6, "a lookup among 1000 children cost {t_big:e} s against {t_small:e} among 10");
+
+    // Unchanged across a frame with nothing moved; moved by a child added.
+    let generation = |host: &mut ScriptHost, world: &mut World| -> String {
+        host.run(world, &dir, 0.016, 0.016);
+        let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        field(said.iter().find(|l| l.starts_with("KIDS ")).unwrap(), 5)
+    };
+    let g0 = field(&line, 5);
+    assert_eq!(generation(&mut host, &mut world), g0, "nothing changed and the generation moved");
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(e, floptle_core::Parent(root));
+    let g1 = generation(&mut host, &mut world);
+    assert_ne!(g1, g0, "a child was added and the generation did not move");
+    // An unrelated node elsewhere leaves it alone; a child going moves it.
+    let other = world.spawn();
+    world.insert(other, Transform::IDENTITY);
+    assert_eq!(generation(&mut host, &mut world), g1, "a node outside the list moved its generation");
+    world.despawn(e);
+    assert_ne!(generation(&mut host, &mut world), g1, "a child went and the generation did not move");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A burst of spawn callbacks writes each node back once.** The engine
+/// runs a spawn's callback, then flushes what it wrote; the set of written
+/// nodes was kept until the next pass, so each of a thousand callbacks wrote
+/// every node moved so far again: half a million transform writes for a
+/// thousand parts, each logged as a change. Counted: a thousand callbacks
+/// that each move their own node write a thousand transforms, and the next
+/// pass patches the mirror rather than rebuilding it.
+#[test]
+fn a_burst_of_spawn_callbacks_writes_each_node_back_once() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_spawn_burst_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "builder",
+        "local done = false\n\
+         function update(node)\n\
+           if done then return end\n\
+           done = true\n\
+           for i = 1, 1000 do spawn('part', vec3(i, 0, 0), function(p) p.y = 1 end) end\n\
+         end\n",
+    );
+    let (mut world, _) = craft(0, "builder");
+    let mut host = ScriptHost::new();
+    host.set_playing(true);
+    host.run(&mut world, &dir, 0.016, 0.016);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let reqs = host.take_spawn_requests();
+    assert_eq!(reqs.len(), 1000);
+    let before = crate::host::FLUSHED_TRANSFORMS.with(|c| c.get());
+    for r in reqs {
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        host.call_spawn_callback(&mut world, r.cb.unwrap(), e.index(), &[e]);
+    }
+    let flushed = crate::host::FLUSHED_TRANSFORMS.with(|c| c.get()) - before;
+    assert!(flushed <= 1000, "a thousand callbacks wrote {flushed} transforms back");
+    let moved = world.query::<Transform>().filter(|(_, t)| t.translation.y == 1.0).count();
+    assert_eq!(moved, 1000, "a callback's write did not land");
+    let full = crate::host::FULL_SYNCS.with(|c| c.get());
+    host.run(&mut world, &dir, 0.016, 0.016);
+    assert_eq!(crate::host::FULL_SYNCS.with(|c| c.get()), full, "the pass after the burst rebuilt the whole mirror");
+    let _ = std::fs::remove_dir_all(&dir);
+}

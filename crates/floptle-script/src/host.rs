@@ -109,6 +109,10 @@ fn pretty_value(v: &Value, depth: usize, seen: &mut Vec<*const std::ffi::c_void>
         ),
         Value::Error(e) => format!("<error: {e}>"),
         Value::Table(t) => {
+            // An `exact` vec3 is a table now, and prints as the vector it is.
+            if let Some(v) = crate::math_api::exact_components(t) {
+                return format!("vec3({}, {}, {})", v.x, v.y, v.z);
+            }
             if depth >= MAX_DEPTH {
                 return "{…}".into();
             }
@@ -243,6 +247,9 @@ thread_local! {
     /// How many times a `params` table was scanned for writes — the guard on
     /// the source flag. Test-only.
     pub(crate) static PARAMS_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Node transforms written back to the world by `flush_scene` — the
+    /// guard on flushing each write once. Test-only.
+    pub(crate) static FLUSHED_TRANSFORMS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// `node:setShaderParam` on a model that has per-part overrides and no node
@@ -877,7 +884,12 @@ fn install_world_queries(
             let timer = prof.borrow().enabled().then(floptle_core::profile::Span::new);
             let hit = cast_ray(&cols.borrow(), &hus.borrow(), o, dir, max as f32, &exclude, mask);
             if let Some(t) = timer {
-                prof.borrow_mut().record_rays(1, t.ms());
+                let ms = t.ms();
+                let mut p = prof.borrow_mut();
+                p.record_rays(1, ms);
+                if let Some((_, kind)) = cur.borrow().as_ref() {
+                    p.record_call(kind, "raycast", 1, ms);
+                }
             }
             // `hit.node` is answered for both static geometry and body hulls,
             // so a ray down at the floor of a level names the map mesh the way
@@ -938,7 +950,12 @@ fn install_world_queries(
                 out.raw_set(i + 1, v)?;
             }
             if let Some(t) = timer {
-                prof.borrow_mut().record_rays(os.len() as u64, t.ms());
+                let ms = t.ms();
+                let mut p = prof.borrow_mut();
+                p.record_rays(os.len() as u64, ms);
+                if let Some((_, kind)) = cur.borrow().as_ref() {
+                    p.record_call(kind, "raycastMany", os.len() as u64, ms);
+                }
             }
             Ok(out)
         }) {
@@ -2806,10 +2823,73 @@ fn install_node_queues(lua: &Lua) -> NodeQueueCells {
         }
     }
 
+    install_spawn_pacing(lua, &spawn_requests);
     NodeQueueCells {
         spawn_requests,
         create_requests,
         destroy_queue,
+    }
+}
+
+/// How spawns are paced across frames: `spawnBudget`, `spawnPending` and
+/// `spawnDone`. Held as state app data, shared by the globals and the host.
+#[derive(Default)]
+pub(crate) struct SpawnPacing {
+    /// Milliseconds of spawning a frame, when a game set a budget.
+    budget: std::cell::Cell<Option<f64>>,
+    /// Spawns the engine has taken and not made yet.
+    waiting: std::cell::Cell<usize>,
+    /// `spawnDone` callbacks, called once nothing is left to spawn.
+    done: RefCell<Vec<mlua::RegistryKey>>,
+}
+
+fn install_spawn_pacing(lua: &Lua, spawn_requests: &Rc<RefCell<Vec<crate::SpawnRequest>>>) {
+    let pacing = Rc::new(SpawnPacing::default());
+    lua.set_app_data(pacing.clone());
+    // spawnBudget([ms]) — the milliseconds of a frame the engine spends making
+    // spawned prefabs; the rest wait, in order, for the frames after, and
+    // their callbacks run as they are made. nil (the default) makes every
+    // spawn the frame it was asked for, as always. Clamped to 0.5..1000;
+    // returns the budget it replaced (nil for none). With no argument it only
+    // reads it.
+    {
+        let p = pacing.clone();
+        if let Ok(f) = lua.create_function(move |_, v: mlua::MultiValue| {
+            let prev = p.budget.get();
+            if let Some(v) = v.into_iter().next() {
+                match v {
+                    Value::Nil => p.budget.set(None),
+                    Value::Integer(n) => p.budget.set(Some((n as f64).clamp(0.5, 1000.0))),
+                    Value::Number(n) if n.is_finite() => p.budget.set(Some(n.clamp(0.5, 1000.0))),
+                    _ => return Err(mlua::Error::runtime("spawnBudget takes milliseconds or nil")),
+                }
+            }
+            Ok(prev)
+        }) {
+            let _ = lua.globals().set("spawnBudget", f);
+        }
+    }
+    // spawnPending() — how many spawns asked for have not been made yet.
+    {
+        let (p, q) = (pacing.clone(), spawn_requests.clone());
+        if let Ok(f) = lua.create_function(move |_, ()| Ok(q.borrow().len() + p.waiting.get())) {
+            let _ = lua.globals().set("spawnPending", f);
+        }
+    }
+    // spawnDone(fn) — call fn once every spawn asked for so far has been made
+    // and its callback run: the end of a big build spread over frames.
+    {
+        let p = pacing.clone();
+        if let Ok(f) = lua.create_function(move |lua, f: mlua::Function| {
+            let mut done = p.done.borrow_mut();
+            if done.len() >= 256 {
+                return Err(mlua::Error::runtime("spawnDone: 256 callbacks are already waiting"));
+            }
+            done.push(lua.create_registry_value(f)?);
+            Ok(())
+        }) {
+            let _ = lua.globals().set("spawnDone", f);
+        }
     }
 }
 
@@ -2991,7 +3071,10 @@ impl ScriptHost {
         }
         // `perf.*` — a game reading its own frame cost. Off by
         // default and free while off, so this costs nothing but the table.
-        if let Err(e) = crate::perf_api::install(&lua, &profile) {
+        // The script sampler shares the interrupt with the pass budget.
+        let sampler = crate::sampler::Sampler::new(profile.clone());
+        crate::sampler::install(&lua, &budget, &sampler);
+        if let Err(e) = crate::perf_api::install(&lua, &profile, &sampler) {
             floptle_say::say_err!("[lua] failed to install the perf API: {e}");
         }
         // `access.*` + `caption(...)` — the accessibility surface a game offers
@@ -3142,6 +3225,9 @@ impl ScriptHost {
         let terrain_queued: Rc<std::cell::Cell<usize>> = Rc::default();
         let terrain_generator = Rc::new(std::cell::Cell::new(floptle_field::procgen::GENERATOR_VERSION));
         let terrain_impostors: crate::terrain_api::ImpostorCalls = Rc::default();
+        let terrain_unmade: Rc<RefCell<Vec<crate::terrain_api::UnmadeRegion>>> = Rc::default();
+        let terrain_dropped: Rc<std::cell::Cell<u64>> = Rc::default();
+        let terrain_prepare: crate::terrain_api::PrepareCalls = Rc::default();
         crate::terrain_api::install_terrain_api(
             &lua,
             terrain_ops.clone(),
@@ -3155,6 +3241,8 @@ impl ScriptHost {
                 warm: terrain_warm.clone(),
                 flush: terrain_flush.clone(),
                 busy: terrain_busy.clone(),
+                unmade: terrain_unmade.clone(),
+                prepare: terrain_prepare.clone(),
                 paths: paths.clone(),
             },
             crate::terrain_api::TerrainReceipts {
@@ -3164,6 +3252,7 @@ impl ScriptHost {
                 queued: terrain_queued.clone(),
                 generator: terrain_generator.clone(),
                 impostors: terrain_impostors.clone(),
+                dropped: terrain_dropped.clone(),
             },
         );
         // `decals.*`: marks laid on the static colliders lent for the pass.
@@ -3350,6 +3439,9 @@ impl ScriptHost {
             terrain_edit_budget,
             terrain_flush,
             terrain_busy,
+            terrain_unmade,
+            terrain_dropped,
+            terrain_prepare,
             create_requests,
             rich_sets: shared.rich_sets.clone(),
             scene: shared.scene.clone(),
@@ -4301,6 +4393,13 @@ impl ScriptHost {
             }
         }
         self.destroy_queue.borrow_mut().clear();
+        if let Some(p) = self.lua.app_data_ref::<Rc<SpawnPacing>>() {
+            p.budget.set(None);
+            p.waiting.set(0);
+            for cb in p.done.borrow_mut().drain(..) {
+                let _ = self.lua.remove_registry_value(cb);
+            }
+        }
         self.assembly_info.borrow_mut().clear();
         self.assembly_impacts.borrow_mut().clear();
         for cmd in self.assembly_cmds.borrow_mut().drain(..) {
@@ -4598,6 +4697,26 @@ impl ScriptHost {
         self.terrain_busy.set(on);
     }
 
+    /// The ground not made yet, for `terrain.ready` and `terrain.raycast`:
+    /// every terrain body generating, streaming in or put away, as a sphere
+    /// holding all of its ground. Published each frame beside
+    /// [`Self::set_terrain_busy`].
+    pub fn set_terrain_unmade(&self, regions: Vec<crate::terrain_api::UnmadeRegion>) {
+        *self.terrain_unmade.borrow_mut() = regions;
+    }
+
+    /// The `terrain.prepare` asks since the last take: world-space spheres
+    /// whose stand-in ground a game wants made exactly.
+    pub fn take_terrain_prepares(&self) -> Vec<([f64; 3], f64)> {
+        std::mem::take(&mut *self.terrain_prepare.borrow_mut())
+    }
+
+    /// Terrain edits refused for a full queue since this host was made — what
+    /// `perf.counts().terrainDropped` reports.
+    pub fn terrain_edits_dropped(&self) -> u64 {
+        self.terrain_dropped.get()
+    }
+
     /// Mirror the editor's physics-paused state into `physics.isPaused()`.
     pub fn set_physics_paused(&self, on: bool) {
         self.physics_paused.set(on);
@@ -4670,6 +4789,36 @@ impl ScriptHost {
 
     pub fn take_spawn_requests(&self) -> Vec<crate::SpawnRequest> {
         std::mem::take(&mut *self.spawn_requests.borrow_mut())
+    }
+
+    /// The game's per-frame spawn budget in ms (`spawnBudget`), or `None` to
+    /// make every spawn the frame it was asked for.
+    pub fn spawn_budget_ms(&self) -> Option<f64> {
+        self.lua.app_data_ref::<Rc<SpawnPacing>>().and_then(|p| p.budget.get())
+    }
+
+    /// How many spawns the engine holds for later frames, for `spawnPending`.
+    /// At zero, with nothing queued here either, the `spawnDone` callbacks
+    /// waiting run, once each.
+    pub fn set_spawns_waiting(&mut self, world: &mut World, n: usize) {
+        let ready = {
+            let Some(p) = self.lua.app_data_ref::<Rc<SpawnPacing>>() else { return };
+            p.waiting.set(n);
+            if n > 0 || !self.spawn_requests.borrow().is_empty() || p.done.borrow().is_empty() {
+                return;
+            }
+            std::mem::take(&mut *p.done.borrow_mut())
+        };
+        let _budget = self.budget.arm();
+        for cb in ready {
+            if let Ok(f) = self.lua.registry_value::<mlua::Function>(&cb)
+                && let Err(err) = f.call::<()>(())
+            {
+                self.record_error("spawn", format!("spawnDone callback: {err}"));
+            }
+            let _ = self.lua.remove_registry_value(cb);
+        }
+        self.flush_writes(world);
     }
 
     /// Drain queued `createNode(...)` requests (see the spawn drain).
@@ -7216,7 +7365,7 @@ impl ScriptHost {
         s.names.clear();
         s.by_name.clear();
         s.parent.clear();
-        s.children.clear();
+        let old_children = std::mem::take(&mut s.children);
         s.scripts.clear();
         s.transforms.clear();
         s.ents.clear();
@@ -7250,6 +7399,7 @@ impl ScriptHost {
         for (e, tr) in world.query::<Transform>() {
             Self::mirror_entity(&mut s, world, e, tr, Some(&mut live_tilemaps));
         }
+        s.settle_children(&old_children);
         // A node that was despawned, or whose Matter became something else, must
         // not leave a grid behind for a later node to be handed by id reuse.
         s.tilemaps.retain(|id, _| live_tilemaps.contains(id));
@@ -7411,7 +7561,7 @@ impl ScriptHost {
         s.by_name.clear();
         s.by_kind.clear();
         s.by_tag.clear();
-        s.children.clear();
+        let old_children = std::mem::take(&mut s.children);
         for (e, _) in world.query::<Transform>() {
             let id = e.index();
             s.order.push(id);
@@ -7444,6 +7594,7 @@ impl ScriptHost {
                 s.children.entry(p).or_default().push(id);
             }
         }
+        s.settle_children(&old_children);
     }
 
     /// `'Enemy 3' (node 812)`, or `node 812` for a node with no name.
@@ -7558,10 +7709,12 @@ impl ScriptHost {
                 if v.is_empty() {
                     s.children.remove(&old);
                 }
+                s.bump_children(old);
             }
             if let Some(p) = parent {
                 s.parent.insert(id, p);
                 insert(s.children.entry(p).or_default(), &s.ents);
+                s.bump_children(p);
             }
         }
 
@@ -7624,6 +7777,7 @@ impl ScriptHost {
             s.order.push(id);
             s.ents.insert(id, e);
             s.transforms.insert(id, *tr);
+            let rebuilding = live.is_some();
             Self::mirror_values(s, world, e, live);
             if let Some(t) = world.get::<floptle_core::Tags>(e) {
                 for tag in &t.0 {
@@ -7639,6 +7793,10 @@ impl ScriptHost {
                 let pid = p.0.index();
                 s.parent.insert(id, pid);
                 s.children.entry(pid).or_default().push(id);
+                // A whole rebuild stamps by comparing lists once at the end.
+                if !rebuilding {
+                    s.bump_children(pid);
+                }
             }
             if let Some(sc) = world.get::<Scripts>(e) {
                 for inst in &sc.0 {
@@ -7817,14 +7975,24 @@ impl ScriptHost {
     }
 
     /// Write transforms that a node handle modified on other nodes back to the ECS.
+    ///
+    /// Each write is flushed once: what is flushed leaves the dirty set, and a
+    /// node written again is marked again. A burst of spawn callbacks flushes
+    /// after every callback, and keeping the set until the next sync wrote
+    /// every node moved so far again on each one — quadratic in the burst,
+    /// and a change logged per write, which tipped the next sync into
+    /// rebuilding the whole mirror.
     fn flush_scene(&self, world: &mut World) {
-        let s = self.scene.borrow();
-        for &id in &s.dirty {
+        let mut s = self.scene.borrow_mut();
+        let dirty = std::mem::take(&mut s.dirty);
+        for &id in &dirty {
             if let (Some(&ent), Some(tr)) = (s.ents.get(&id), s.transforms.get(&id))
                 && let Some(slot) = world.get_mut::<Transform>(ent) {
                     *slot = *tr;
                 }
         }
+        #[cfg(test)]
+        FLUSHED_TRANSFORMS.with(|c| c.set(c.get() + dirty.len()));
     }
 
     /// The tunables a script declares via its top-level `defaults` table, used to

@@ -1198,6 +1198,7 @@ impl Editor {
             // script state can't leak across sessions (a ship still thought
             // he was piloting after Stop → Play). `start()` re-fires for all.
             self.script_host.reset_instances();
+            self.spawn_backlog.clear();
             // …and every diagnostic they already said once. Play clears the
             // Console two dozen lines below, and a warning suppressed by the
             // previous run would never refill it — a project replayed without
@@ -1279,6 +1280,9 @@ impl Editor {
             // Predicted nodes (multiplayer slots) idle instead of mirroring
             // the keyboard into every copy of the controller.
             self.net_apply_offline_slots();
+            // The first `start` asks `terrain.ready` before any frame has
+            // pumped the streamer: it must already know which ground is cold.
+            self.publish_terrain_busy();
         }
     }
 
@@ -1445,6 +1449,7 @@ impl Editor {
         // leaving, before that world goes.
         self.script_host.call_on_destroy_all_except(&mut self.world, &keep_ids);
         self.script_host.reset_instances_keeping(&keep_ids);
+        self.spawn_backlog.clear();
         // A scatter source names a region of the world that is about to stop
         // existing, and its resolved chunks were dropped onto ground that is
         // about to be replaced.

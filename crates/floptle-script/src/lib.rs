@@ -301,6 +301,7 @@ type UiFrameEvents = Rc<RefCell<Vec<(u32, String)>>>;
 pub mod app_api;
 mod account_api;
 pub mod budget;
+pub mod sampler;
 mod api;
 mod audio_api;
 mod env;
@@ -394,7 +395,7 @@ pub use net_api::{
 };
 pub use assembly_api::{AssemblyCmd, AssemblyImpact, AssemblyInfo};
 pub use space_api::{belt_orbits, SpaceBodyInfo, SpaceInfo};
-pub use terrain_api::{ImpostorRule, LodAnchor, TERRAIN_EDIT_BUDGET_MS, TerrainOp, TerrainOpMode, TerrainYield};
+pub use terrain_api::{ImpostorRule, LodAnchor, MAX_PENDING_OPS, TERRAIN_EDIT_BUDGET_MS, TerrainOp, TerrainOpMode, TerrainYield, UnmadeRegion};
 pub use rollback_api::{ScriptState, MAX_STATE_DEPTH};
 pub use view_api::ViewInfo;
 
@@ -778,6 +779,13 @@ pub struct ScriptHost {
     /// frame so a game that builds its world on demand can wait its turn
     /// instead of queueing new worlds behind the ground someone stands on.
     terrain_busy: Rc<std::cell::Cell<bool>>,
+    /// The ground not made yet, published by the engine each frame for
+    /// `terrain.ready` and `terrain.raycast`.
+    terrain_unmade: Rc<RefCell<Vec<terrain_api::UnmadeRegion>>>,
+    /// Terrain edits refused for a full queue since the host was made.
+    terrain_dropped: Rc<std::cell::Cell<u64>>,
+    /// `terrain.prepare` asks waiting for the engine.
+    terrain_prepare: terrain_api::PrepareCalls,
     /// `terrain.flush()` — write every dirty resident field to the save slot
     /// now (checkpoints, exit-to-menu). One-shot flag drained per frame.
     terrain_flush: Rc<RefCell<bool>>,
@@ -1856,6 +1864,41 @@ pub(crate) struct SceneMirror {
     structure_rev: u64,
     /// Entities the sync in progress refreshed one by one, for the profiler.
     refreshed_now: u32,
+    /// Per parent, the stamp its child list last changed under — what
+    /// `node:childrenGeneration()` answers, so a script can keep the list
+    /// `node:children()` built and know when it is stale.
+    child_gen: HashMap<u32, u64>,
+    /// The last stamp handed out: stamps never repeat, so a list that changed
+    /// and changed back still reads as changed.
+    child_clock: u64,
+}
+
+impl SceneMirror {
+    /// `p`'s child list changed.
+    pub(crate) fn bump_children(&mut self, p: u32) {
+        self.child_clock += 1;
+        self.child_gen.insert(p, self.child_clock);
+    }
+
+    /// After the child lists were re-derived from scratch: stamp every parent
+    /// whose list differs from what it was, in members or in order.
+    pub(crate) fn settle_children(&mut self, old: &HashMap<u32, Vec<u32>>) {
+        let moved: Vec<u32> = self
+            .children
+            .iter()
+            .filter(|(p, v)| old.get(p) != Some(v))
+            .map(|(p, _)| *p)
+            .chain(old.keys().filter(|p| !self.children.contains_key(p)).copied())
+            .collect();
+        for p in moved {
+            self.bump_children(p);
+        }
+    }
+
+    /// The stamp `e`'s child list last changed under; 0 if it never had one.
+    pub(crate) fn children_generation(&self, e: u32) -> u64 {
+        self.child_gen.get(&e).copied().unwrap_or(0)
+    }
 }
 
 /// Whether a `find*` call may return switched-off nodes.

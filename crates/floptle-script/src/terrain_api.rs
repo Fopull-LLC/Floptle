@@ -16,7 +16,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use floptle_core::math::Vec3;
-use mlua::{Lua, Table, Value};
+use mlua::{IntoLuaMulti, Lua, Table, Value};
 
 /// One queued terrain write, in world coordinates (scripts speak world; the editor
 /// converts into each terrain's local frame when applying).
@@ -66,7 +66,56 @@ pub(crate) struct TerrainReceipts {
     /// `terrain.impostorAt` calls since the engine last took them: a body's
     /// terrain id and its rule, `None` to go back to the default.
     pub impostors: ImpostorCalls,
+    /// Edits refused because the queue was full, since the host was made:
+    /// what `terrain.capacity()` exists to keep at zero, and what
+    /// `perf.counts().terrainDropped` reports.
+    pub dropped: Rc<std::cell::Cell<u64>>,
 }
+
+/// Ground the world has not made yet: a terrain body that is generating,
+/// streaming in, or put away cold, as a world-space sphere that holds all of
+/// its ground. Published by the engine each frame; `terrain.ready`,
+/// `terrain.raycast` and `terrain.query`'s second answer read it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UnmadeRegion {
+    pub center: [f64; 3],
+    pub radius: f64,
+}
+
+impl UnmadeRegion {
+    /// Does the sphere `p`, `r` reach into this region?
+    fn touches(&self, p: [f64; 3], r: f64) -> bool {
+        let d = (0..3).map(|k| (p[k] - self.center[k]).powi(2)).sum::<f64>().sqrt();
+        d <= self.radius + r.max(0.0)
+    }
+
+    /// Where a ray from `o` along the unit `d` first enters this region, if it
+    /// does within `max`: 0 from inside.
+    fn entry(&self, o: [f64; 3], d: [f64; 3], max: f64) -> Option<f64> {
+        let oc = [o[0] - self.center[0], o[1] - self.center[1], o[2] - self.center[2]];
+        let c = oc.iter().map(|v| v * v).sum::<f64>() - self.radius * self.radius;
+        if c <= 0.0 {
+            return Some(0.0);
+        }
+        let b = oc[0] * d[0] + oc[1] * d[1] + oc[2] * d[2];
+        let disc = b * b - c;
+        if b >= 0.0 || disc < 0.0 {
+            return None;
+        }
+        let t = -b - disc.sqrt();
+        (t <= max).then_some(t.max(0.0))
+    }
+}
+
+/// Edits refused for a full queue since the host was made — the number
+/// `perf.counts().terrainDropped` reads. Zero in a state with no terrain API.
+pub(crate) fn dropped_count(lua: &Lua) -> u64 {
+    lua.app_data_ref::<TerrainDrops>().map_or(0, |d| d.0.get())
+}
+
+/// The drop counter, lent to the state so `perf.counts` can read it without
+/// the terrain API and the profiler having to know about each other.
+struct TerrainDrops(Rc<std::cell::Cell<u64>>);
 
 /// `terrain.impostorAt` calls waiting for the engine: a terrain id and its
 /// rule, `None` for the default.
@@ -225,11 +274,13 @@ pub enum LodAnchor {
 /// Per-op safety caps: a runaway loop must not freeze the frame. Radius is
 /// clamped; the engine lands a few milliseconds of edits a frame and the rest
 /// wait, in order, for the frames after; past [`MAX_PENDING_OPS`] waiting, an
-/// op is dropped with a warning (once).
+/// op is refused: its verb answers the receipt 0, the refusal is counted in
+/// `perf.counts().terrainDropped`, and the first one is warned about.
+/// `terrain.capacity()` is the room left, for a game pacing a big batch.
 const MAX_RADIUS: f32 = 64.0;
 /// What `terrain.sculpt`'s options table reads.
 pub(crate) const SCULPT_KEYS: &[&str] = &["normal"];
-const MAX_PENDING_OPS: usize = 4096;
+pub const MAX_PENDING_OPS: usize = 4096;
 /// The milliseconds of script terrain edits landed a frame unless a game sets
 /// another with `terrain.editBudget`.
 pub const TERRAIN_EDIT_BUDGET_MS: f64 = 4.0;
@@ -250,6 +301,10 @@ pub(crate) struct TerrainStreamShared {
     /// being generated, or one streaming in. Published so a game that creates
     /// worlds on demand can wait its turn.
     pub busy: Rc<std::cell::Cell<bool>>,
+    /// The ground not made yet, as the engine last published it.
+    pub unmade: Rc<RefCell<Vec<UnmadeRegion>>>,
+    /// `terrain.prepare` asks since the engine last took them.
+    pub prepare: PrepareCalls,
     /// What `terrain.deleteSaveDir` resolves its (validated, relative) path
     /// against — see [`save_dir_path`].
     pub(crate) paths: crate::paths::Paths,
@@ -276,6 +331,27 @@ fn valid_save_dir(p: &str) -> bool {
         && floptle_vfs::contain(std::path::Path::new(""), rel).is_some()
 }
 
+/// Does any terrain hold stand-in ground (a coarse copy, or rock not generated
+/// yet) within `r` of world point `p`? Its chunks there are pending: what a
+/// query reads from them is provisional.
+fn stand_in_near(cols: &[floptle_physics::AnchoredCollider], p: glam::DVec3, r: f64) -> bool {
+    cols.iter().any(|c| {
+        let Some(t) = c.shape.chunk_terrain() else { return false };
+        if t.field.pending_count() == 0 {
+            return false;
+        }
+        let s = t.scale.max(1e-6);
+        let local = (t.rot.inverse() * (p - c.anchor).as_vec3()) / s;
+        // A read samples a voxel either side of the point.
+        let reach = Vec3::splat(r as f32 / s + t.field.voxel() * 2.0);
+        !t.field.pending_in_box(local - reach, local + reach).is_empty()
+    })
+}
+
+/// `terrain.prepare` asks, waiting for the engine: world-space spheres whose
+/// stand-in ground should be made exactly.
+pub(crate) type PrepareCalls = Rc<RefCell<Vec<([f64; 3], f64)>>>;
+
 pub(crate) fn install_terrain_api(
     lua: &Lua,
     ops: Rc<RefCell<Vec<TerrainOp>>>,
@@ -285,8 +361,9 @@ pub(crate) fn install_terrain_api(
     stream: TerrainStreamShared,
     receipts: TerrainReceipts,
 ) {
-    let TerrainStreamShared { save_dir, lod_anchor, edit_budget, warm, flush, busy, paths } = stream;
-    let TerrainReceipts { yields, next_op_id, planet, queued, generator, impostors } = receipts;
+    let TerrainStreamShared { save_dir, lod_anchor, edit_budget, warm, flush, busy, unmade, prepare, paths } = stream;
+    let TerrainReceipts { yields, next_op_id, planet, queued, generator, impostors, dropped } = receipts;
+    lua.set_app_data(TerrainDrops(dropped.clone()));
     let Ok(t) = lua.create_table() else { return };
 
     // terrain.deleteSaveDir(path) — delete a save slot's persisted terrain from
@@ -452,6 +529,61 @@ pub(crate) fn install_terrain_api(
         }
     }
 
+    // terrain.capacity() — how many more edits the queue takes right now
+    // before it refuses them. A game sending a big batch sends at most this
+    // many a frame and the rest on the frames after; nothing it sends that
+    // way is ever refused.
+    {
+        let (ops, queued) = (ops.clone(), queued.clone());
+        if let Ok(f) = lua.create_function(move |_, ()| {
+            Ok(MAX_PENDING_OPS.saturating_sub(ops.borrow().len() + queued.get()))
+        }) {
+            let _ = t.set("capacity", f);
+        }
+    }
+
+    // terrain.ready(x, y, z [, r]) — is the ground within `r` of the point
+    // made, exactly and for good? False where a terrain body that reaches it
+    // is still generating, streaming in, or put away (what `query`, `height`
+    // and `raycast` read there is not that body's ground at all), and false
+    // where the ground there is still a stand-in: far ground a streamed world
+    // holds as a coarse copy, and deep rock not generated yet, both made
+    // exactly only when something comes near or `terrain.prepare` asks. An
+    // answer read where this is true does not change until the ground is
+    // edited; one read where it is false may. True over open space no terrain
+    // reaches.
+    {
+        let unmade = unmade.clone();
+        let cols = colliders.clone();
+        if let Ok(f) = lua.create_function(move |_, (x, y, z, r): (f64, f64, f64, Option<f64>)| {
+            let r = r.unwrap_or(0.0).max(0.0);
+            if unmade.borrow().iter().any(|u| u.touches([x, y, z], r)) {
+                return Ok(false);
+            }
+            Ok(!stand_in_near(&cols.borrow(), glam::DVec3::new(x, y, z), r))
+        }) {
+            let _ = t.set("ready", f);
+        }
+    }
+
+    // terrain.prepare(x, y, z, r) — make the stand-in ground within `r` of
+    // the point exactly, off the frame: the far ground of a streamed world and
+    // deep rock not generated yet. For a game about to plan from queries
+    // somewhere nobody is standing; `terrain.ready` turns true once it has
+    // landed. r is capped at 256.
+    {
+        let prepare = prepare.clone();
+        if let Ok(f) = lua.create_function(move |_, (x, y, z, r): (f64, f64, f64, f64)| {
+            let mut q = prepare.borrow_mut();
+            if q.len() < 256 && r.is_finite() && r >= 0.0 {
+                q.push(([x, y, z], r.min(256.0)));
+            }
+            Ok(())
+        }) {
+            let _ = t.set("prepare", f);
+        }
+    }
+
     // terrain.impostorAt(id, { radii = n } | { pixels = n }) — when the planet
     // with terrain id `id` stops drawing its ground and draws as one shaded
     // ball: past `radii` of its radii from the camera, or once it is smaller
@@ -527,16 +659,20 @@ pub(crate) fn install_terrain_api(
         let ids = next_op_id.clone();
         let waiting = queued.clone();
         let warned = Rc::new(std::cell::Cell::new(false));
+        let dropped = dropped.clone();
         move |mut op: TerrainOp| -> u64 {
             let mut q = ops.borrow_mut();
             if q.len() + waiting.get() >= MAX_PENDING_OPS {
+                dropped.set(dropped.get() + 1);
                 if !warned.replace(true) {
                     logs.borrow_mut().push(crate::ScriptLog {
                         level: crate::LogLevel::Warn,
                         msg: format!(
                             "terrain: {MAX_PENDING_OPS} edits are already waiting to land \
                              (a few milliseconds of them land a frame) — this one and any more \
-                             are dropped until they catch up"
+                             are refused until they catch up. Each refused edit answers 0 and is \
+                             counted in perf.counts().terrainDropped; send at most \
+                             terrain.capacity() a frame to never lose one"
                         ),
                         source: None,
                     });
@@ -617,20 +753,21 @@ pub(crate) fn install_terrain_api(
     }
 
     // terrain.paint(x,y,z, radius, r,g,b, strength?) — recolor the surface.
+    // Answers the edit's receipt, as sculpt does: 0 when the queue was full and
+    // the edit was refused.
     {
         let push = push.clone();
         type Args = (f64, f64, f64, f64, f64, f64, f64, Option<f64>);
         if let Ok(f) =
             lua.create_function(move |_, (x, y, z, radius, r, g, b, strength): Args| {
-                push(TerrainOp {
+                Ok(push(TerrainOp {
                     pos: [x, y, z],
                     radius: (radius as f32).clamp(0.05, MAX_RADIUS),
                     strength: strength.unwrap_or(1.0).clamp(0.0, 1.0) as f32,
                     mode: TerrainOpMode::Paint([r as f32, g as f32, b as f32]),
                     id: 0,
                     normal: None,
-                });
-                Ok(())
+                }))
             })
         {
             let _ = t.set("paint", f);
@@ -643,15 +780,14 @@ pub(crate) fn install_terrain_api(
         let push = push.clone();
         type Args = (f64, f64, f64, f64, f64);
         if let Ok(f) = lua.create_function(move |_, (x, y, z, radius, slot): Args| {
-            push(TerrainOp {
+            Ok(push(TerrainOp {
                 pos: [x, y, z],
                 radius: (radius as f32).clamp(0.05, MAX_RADIUS),
                 strength: 1.0,
                 mode: TerrainOpMode::PaintTexture((slot.max(0.0) as u8).min(32)),
                 id: 0,
                 normal: None,
-            });
-            Ok(())
+            }))
         }) {
             let _ = t.set("paintTexture", f);
         }
@@ -843,6 +979,9 @@ pub(crate) fn install_terrain_api(
 
     // terrain.query(x,y,z) → signed distance to the nearest terrain surface
     // (negative = inside rock), or nil when the scene has no terrain. World coords.
+    // The number is all it answers, as it always has: whether the ground there
+    // is made yet is `terrain.ready`'s question, kept out of this one so a
+    // `math.min(a, terrain.query(...))` never grows an argument.
     {
         let cols = colliders.clone();
         if let Ok(f) = lua.create_function(move |_, (x, y, z): (f64, f64, f64)| {
@@ -868,6 +1007,66 @@ pub(crate) fn install_terrain_api(
             Ok(best.map(|d| d as f64))
         }) {
             let _ = t.set("query", f);
+        }
+    }
+
+    // terrain.raycast(origin, dir [, maxDist]) → the first terrain surface
+    // along the ray, read from the ground's own field rather than from
+    // collision meshes that may not be built yet: { pos =, normal =,
+    // distance = }. A miss answers nil and why: nil, "air" when the ray
+    // reached maxDist (default 1000) through open space, and nil, "unknown",
+    // distance when it reached ground the world has not made yet first — the
+    // distance along the ray where it did.
+    {
+        let cols = colliders.clone();
+        let unmade = unmade.clone();
+        if let Ok(f) = lua.create_function(
+            move |lua, (o, d, max): (crate::math_api::LuaVec3, crate::math_api::LuaVec3, Option<f64>)| {
+                let max = max.unwrap_or(1000.0).clamp(0.0, 1.0e6);
+                let Some(dir) = d.0.try_normalize() else {
+                    return Err(mlua::Error::runtime("terrain.raycast: dir must be a non-zero vector"));
+                };
+                let o = o.0;
+                let mut best: Option<(f64, glam::DVec3, glam::DVec3)> = None;
+                for c in cols.borrow().iter() {
+                    let Some(t) = c.shape.chunk_terrain() else { continue };
+                    let s = t.scale.max(1e-6);
+                    let inv = t.rot.inverse();
+                    let start = (inv * (o - c.anchor).as_vec3()) / s;
+                    let ld = inv * dir.as_vec3();
+                    let Some(hit) = t.field.raycast(start, ld, (max / s as f64) as f32) else { continue };
+                    let world = c.anchor + (t.rot * (hit * s)).as_dvec3();
+                    let dist = (world - o).length();
+                    if best.as_ref().is_none_or(|b| dist < b.0) {
+                        let n = (t.rot * t.field.grad(hit)).as_dvec3();
+                        best = Some((dist, world, n));
+                    }
+                }
+                let reach = best.as_ref().map_or(max, |b| b.0);
+                let entry = unmade
+                    .borrow()
+                    .iter()
+                    .filter_map(|u| u.entry([o.x, o.y, o.z], [dir.x, dir.y, dir.z], reach))
+                    .fold(None, |a: Option<f64>, t| Some(a.map_or(t, |a| a.min(t))));
+                if let Some(at) = entry {
+                    return (Value::Nil, "unknown", at).into_lua_multi(lua);
+                }
+                match best {
+                    None => (Value::Nil, "air").into_lua_multi(lua),
+                    Some((dist, pos, n)) => {
+                        let hit = lua.create_table()?;
+                        hit.set("pos", crate::math_api::LuaVec3(pos))?;
+                        hit.set("normal", crate::math_api::LuaVec3(n))?;
+                        hit.set("distance", dist)?;
+                        // False where the ground hit is a stand-in: the hit
+                        // may move when it is made exactly (`terrain.ready`).
+                        hit.set("exact", !stand_in_near(&cols.borrow(), pos, 0.0))?;
+                        hit.into_lua_multi(lua)
+                    }
+                }
+            },
+        ) {
+            let _ = t.set("raycast", f);
         }
     }
 

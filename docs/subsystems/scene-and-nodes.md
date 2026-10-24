@@ -245,7 +245,10 @@ static colliders bake their bit at sim build (layer edits rebuild the sim).
 - **String params**: a plain string default (`destination = "hub"`) is a
   per-instance text tunable — `ScriptInst.strs` / `ScriptDoc.strs`, Inspector
   text field, seeded/synced like numerics, two-way (`ParamWrite::Str`).
-- **Vectors**: `floptle-script/src/math_api.rs` — `vec3`/`vec2` userdata with
+- **Vectors**: `floptle-script/src/math_api.rs` — `vec3` (an `exact` one is a
+  table holding x/y/z as its own fields, so a component read never leaves the
+  VM; its constructor and arithmetic run in Lua, falling back to Rust for
+  mixed operands; `fast` is Luau's native vector) and `vec2` userdata, with
   operators + methods, `distance(a, b)` (vectors/tables/node handles),
   `node.pos` read/write as vec3. Anything vector-shaped (numeric x/y/z)
   is accepted anywhere a vector is.

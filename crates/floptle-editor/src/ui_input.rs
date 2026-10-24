@@ -459,7 +459,9 @@ impl Editor {
             self.apply_destroys(destroys);
         }
         if !spawns.is_empty() {
-            self.apply_spawn_batch(spawns, Vec::new());
+            // A repeater's rows are made now, whatever the game's spawn
+            // budget: the renumbering below reads them.
+            self.make_spawns(spawns);
         }
         // Re-number every surviving row in flow order, so `node.index` is
         // right the frame a row is added or removed rather than the frame

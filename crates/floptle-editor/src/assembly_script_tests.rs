@@ -1823,3 +1823,186 @@ end
     assert!(!ed.world.is_alive(bare) && !ed.world.is_alive(kid), "a node with no Matter outlived destroy");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A thousand parts under one vessel, asked for in one frame, with or
+/// without a spawn budget: the frame each frame took, the frames it took, and
+/// what the script heard.
+fn build_a_thousand(budget: Option<f64>) -> (Vec<f64>, Vec<String>) {
+    let set = budget.map_or(String::new(), |ms| format!("spawnBudget({ms})"));
+    let (mut ed, dir) = project(
+        &format!("spawnk{}", budget.is_some()),
+        &format!(
+            r#"
+local asked, frame = false, 0
+function update(node, dt)
+  frame = frame + 1
+  -- The first frames pay for starting Play; the build starts after them.
+  if frame < 3 then return end
+  if asked then log("P " .. spawnPending()) return end
+  asked = true
+  {set}
+  spawn("Vessel", vec3(0, 0, 0), function(v)
+    for i = 1, 1000 do
+      spawn("Part", vec3(i % 10, math.floor(i / 10) % 10, math.floor(i / 100)), function(p) p.y = p.y + 0.5 end, v)
+    end
+  end)
+  spawnDone(function() log("DONE " .. frame .. " " .. spawnPending()) end)
+end
+"#
+        ),
+    );
+    ed.toggle_play();
+    let mut ms = Vec::new();
+    run(&mut ed, 2);
+    for _ in 0..2000 {
+        let t0 = floptle_core::time::Instant::now();
+        ed.play_step(1.0 / 60.0, true);
+        ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        if lines(&mut ed, "DONE").len() == 1 {
+            break;
+        }
+    }
+    let parts = ed.world.query::<Name>().filter(|(_, n)| n.0 == "Part").count();
+    assert_eq!(parts, 1000, "the parts did not all spawn");
+    ed.drain_script_logs();
+    let said: Vec<String> = ed.console.entries.iter().map(|e| e.msg.clone()).filter(|m| m.starts_with("DONE") || m.starts_with("P ")).collect();
+    let _ = std::fs::remove_dir_all(&dir);
+    (ms, said)
+}
+
+/// **A spawn budget spreads a big build over frames, and says when it is
+/// done.** A thousand parts asked for in one frame were one frame of every
+/// spawn (145 to 320 ms in a real game). With `spawnBudget(2)` the frames
+/// each spend about two milliseconds making parts, `spawnPending()` counts
+/// down, and `spawnDone` hears once, with nothing pending, after the last.
+/// A ratio, not a duration: the worst budgeted frame against the one frame
+/// the same build takes without a budget.
+#[test]
+fn a_spawn_budget_spreads_a_big_build_and_says_when_it_is_done() {
+    let (whole, _) = build_a_thousand(None);
+    let one = whole.iter().copied().fold(0.0, f64::max);
+    let (paced, said) = build_a_thousand(Some(2.0));
+    let worst = paced.iter().copied().fold(0.0, f64::max);
+    floptle_say::say!("SPAWN1000 one frame {one:.1} ms; budgeted worst {worst:.1} ms over {} frames {paced:.1?}", paced.len());
+    let done: Vec<&String> = said.iter().filter(|l| l.starts_with("DONE")).collect();
+    assert_eq!(done.len(), 1, "spawnDone heard {} times: {said:?}", done.len());
+    assert!(done[0].ends_with(" 0"), "spawnDone heard with spawns still pending: {}", done[0]);
+    assert!(paced.len() >= 4, "the budgeted build took {} frames", paced.len());
+    let counts: Vec<usize> = said.iter().filter_map(|l| l.strip_prefix("P ")).filter_map(|n| n.parse().ok()).collect();
+    assert!(counts.windows(2).all(|w| w[1] <= w[0]) && counts.first() > counts.last(), "spawnPending did not count down: {counts:?}");
+    assert!(worst * 3.0 < one, "the worst budgeted frame took {worst:.1} ms against {one:.1} ms for the whole build in one");
+}
+
+/// **Ground that is not made yet does not read as open air.** A cold planet
+/// has no collider at all, so `terrain.query` over it answers whatever else
+/// is near and a ray straight down through it finds nothing. `terrain.ready`
+/// says false there, and `terrain.raycast` answers "unknown" where it reaches
+/// the body, until the field lands; then both read the real ground.
+#[test]
+fn ground_that_is_not_made_yet_reads_as_unknown_until_it_lands() {
+    let (mut ed, dir) = project(
+        "unmade",
+        r#"
+function update(node, dt)
+  local rock, b = find("Rock"), find("Ball")
+  if not (rock and b) then return end
+  b.x, b.y, b.z = rock.x, rock.y + 30, rock.z
+  local hit, why, at = terrain.raycast(vec3(rock.x, rock.y + 40, rock.z), vec3(0, -1, 0), 80)
+  log(string.format("T %s %s %s", tostring(terrain.ready(rock.x, rock.y + 10, rock.z)),
+    hit and string.format("hit %.2f", hit.distance) or why, tostring(at)))
+end
+"#,
+    );
+    let field = floptle_field::procgen::generate_planet(&floptle_field::procgen::PlanetFill {
+        radius: 20.0,
+        voxel: 1.5,
+        relief: 2.0,
+        cave_depth: 6.0,
+        core_r: 3.0,
+        seed: 1234,
+        ..Default::default()
+    });
+    let path = ed.terrain_field_path_id(7);
+    floptle_vfs::create_dir_all(path.parent().unwrap()).unwrap();
+    floptle_vfs::write(&path, field.to_bytes()).unwrap();
+    let rock = ed.world.spawn();
+    ed.world.insert(rock, Transform::from_translation(DVec3::new(5000.0, -100_000.0, 0.0)));
+    ed.world.insert(rock, Name("Rock".into()));
+    ed.world.insert(rock, Matter::Terrain { id: 7, collision: Default::default() });
+    ed.world.insert(rock, CelestialBody { mu: 0.0, body_radius: 20.0, parent: "Star".into(), a: 5000.0, ..Default::default() });
+    let ball = ed.world.spawn();
+    ed.world.insert(ball, Transform::IDENTITY);
+    ed.world.insert(ball, Name("Ball".into()));
+    ed.world.insert(ball, Matter::Empty);
+    ed.world.insert(ball, RigidBody { gravity: false, radius: 0.5, ..Default::default() });
+    ed.toggle_play();
+    assert!(!ed.terrains.contains_key(&rock), "the planet should start cold for this test to mean anything");
+    ed.play_step(1.0 / 60.0, true);
+    for _ in 0..200 {
+        ed.pump_world_streaming();
+        ed.play_step(1.0 / 60.0, true);
+        if ed.terrains.contains_key(&rock) && lines(&mut ed, "T").last().is_some_and(|l| l.starts_with("true")) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let said = lines(&mut ed, "T");
+    assert!(ed.terrains.contains_key(&rock), "the planet never streamed in: {said:?}");
+    let first = said.first().expect("the script never ran");
+    assert!(first.starts_with("false unknown"), "before its field landed the planet read as {first:?}, not unknown");
+    let last = said.last().unwrap();
+    let d: f64 = last.strip_prefix("true hit ").and_then(|r| r.split(' ').next()).and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| panic!("after landing the ground should be ready and hit: {last:?}"));
+    // Forty metres above the centre of a 20 m world with 2 m of relief.
+    assert!((15.0..=25.0).contains(&d), "the ray met the ground {d} m down: {said:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **Stand-in ground says so, and `terrain.prepare` makes it real.** A world
+/// that streams in makes the ground round the player exactly and holds the
+/// rest as a coarse copy, so a query far from the player was off by up to
+/// 0.75 m until that ground was made, with nothing to tell the game. Over the
+/// made ground `terrain.ready` is true; over the stand-in it is false and a
+/// raycast hit says `exact = false`; after `terrain.prepare` there, the
+/// stand-in is made and both turn true.
+#[test]
+fn stand_in_ground_is_not_ready_until_it_is_prepared() {
+    let (mut ed, dir) = project(
+        "standin",
+        r#"
+local asked = false
+function update(node, dt)
+  local w = find("World")
+  if not w then return end
+  local top, side = vec3(w.x, w.y + 152, w.z), vec3(w.x + 152, w.y, w.z)
+  if not asked then asked = true terrain.prepare(side.x, side.y, side.z, 4) end
+  local hit = terrain.raycast(vec3(w.x + 200, w.y, w.z), vec3(-1, 0, 0), 100)
+  log(string.format("S %s %s %s", tostring(terrain.ready(top.x, top.y, top.z)), tostring(terrain.ready(side.x, side.y, side.z)), tostring(hit and hit.exact)))
+end
+"#,
+    );
+    let fill = floptle_field::procgen::PlanetFill { seed: 8, radius: 150.0, voxel: 1.5, relief: 2.0, cave_depth: 0.0, ..Default::default() };
+    let field = floptle_field::procgen::generate_planet_near(&fill, Vec3::new(0.0, 152.0, 0.0), floptle_field::CHUNK as f32 * fill.voxel);
+    let at = DVec3::new(0.0, 0.0, -4000.0);
+    let w = ed.world.spawn();
+    ed.world.insert(w, Transform::from_translation(at));
+    ed.world.insert(w, Name("World".into()));
+    ed.world.insert(w, Matter::Terrain { id: 9, collision: Default::default() });
+    ed.terrains.insert(w, crate::terrain_edit::EditorTerrain::new(field));
+    ed.toggle_play();
+    run(&mut ed, 2);
+    let first = lines(&mut ed, "S");
+    assert_eq!(first.first().map(String::as_str), Some("true false false"), "{first:?}");
+    for _ in 0..300 {
+        ed.pump_world_streaming();
+        ed.play_step(1.0 / 60.0, true);
+        if lines(&mut ed, "S").last().is_some_and(|l| l == "true true true") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let said = lines(&mut ed, "S");
+    assert_eq!(said.last().map(String::as_str), Some("true true true"), "the prepared ground never became ready: {:?}", &said[said.len().saturating_sub(4)..]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
