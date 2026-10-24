@@ -156,6 +156,10 @@ impl Editor {
             };
             let chunks = terrain.field.data_chunks();
             self.terrains.insert(e, terrain);
+            // Its impostor was the colour of whatever stood there before.
+            if let Some(r) = self.terrain_render.get_mut(&e) {
+                r.impostor_color = None;
+            }
             // A generated field exists only in RAM until the scene is saved — an
             // eviction (G1 residency) must write it to disk before dropping it.
             self.touch_terrain_edit(e);

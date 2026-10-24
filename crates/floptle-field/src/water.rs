@@ -261,6 +261,37 @@ const LEVEL: f32 = 1e-4;
 const STILL: f32 = 1e-4;
 /// Steps a cell must be still for before it sleeps.
 const SLEEP_STEPS: u8 = 30;
+/// A depth change below this in a step is steady, metres: a cell flowing at
+/// a steady rate for [`SLEEP_STEPS`] freezes with its flow kept.
+const STEADY: f32 = 2e-6;
+/// How far a frozen cell's depth may drift from where it froze before it is
+/// solved again, metres.
+const DRIFT: f32 = 1e-3;
+/// The broad-crested weir coefficient: the most a face passes where water
+/// pours off an edge is `C·w·√(2g)·h^{3/2}`.
+const WEIR: f32 = 0.385;
+
+/// The depth a river runs at in steady flow: Manning's equation for a wide
+/// channel, `h = (Q·n / (w·√S))^{3/5}`. `q` is the discharge in m³/s, `width`
+/// the bed's width in metres, `slope` its fall per metre and `n` the bed's
+/// roughness (0.035 is a natural river). The speed is then `Q / (w·h)`.
+pub fn manning_depth(q: f32, width: f32, slope: f32, n: f32) -> f32 {
+    (q.max(0.0) * n / (width.max(1e-6) * slope.max(1e-9).sqrt())).powf(0.6)
+}
+
+/// Where flowing water pours off a drop: see [`ShallowWater::falls`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fall {
+    /// The cell the water leaves, and which of its faces it pours through.
+    pub cell: u32,
+    pub face: u8,
+    /// The flow over the edge, m³/s.
+    pub discharge: f32,
+    /// From the water surface at the top to the surface at the foot, metres.
+    pub drop: f32,
+    /// The width of the edge it pours over, metres.
+    pub width: f32,
+}
 
 /// Water moving over a [`WaterGrid`].
 ///
@@ -288,6 +319,28 @@ pub struct ShallowWater {
     /// Per-cell volume change in a step, and the cells it touched.
     dv: Vec<f64>,
     touched: Vec<u32>,
+    /// The bed's Manning roughness. Above 0 the bed holds the water back
+    /// as a river bed does, and a river settles at [`manning_depth`]; it then
+    /// does [`Self::damping`]'s job, which is skipped. 0 (the default) is the
+    /// frictionless lake model.
+    pub roughness: f32,
+    /// Springs: a cell and what it gives, m³/s.
+    springs: Vec<(u32, f32)>,
+    /// A fixed surface level per cell (NaN = none): the sea at a coast, a
+    /// river's mouth. What flows in or out there is the boundary's.
+    hold: Vec<f32>,
+    /// Volume the springs and held levels have added (less what they took),
+    /// cubic metres: the volume now is the volume at the start plus this.
+    exchanged: f64,
+    /// Cells flowing at a steady rate, frozen: they pass their flow on each
+    /// step but are not solved. Their depth where they froze.
+    frozen: Vec<bool>,
+    rails: Vec<u32>,
+    froze_at: Vec<f32>,
+    /// Cells whose depth moved more than [`STEADY`] this step.
+    moved: Vec<bool>,
+    /// Cells solved in the last step: what it cost.
+    solved: usize,
 }
 
 impl ShallowWater {
@@ -306,10 +359,20 @@ impl ShallowWater {
             list: Vec::new(),
             dv: vec![0.0; n],
             touched: Vec::new(),
+            roughness: 0.0,
+            springs: Vec::new(),
+            hold: vec![f32::NAN; n],
+            exchanged: 0.0,
+            frozen: vec![false; n],
+            rails: Vec::new(),
+            froze_at: vec![0.0; n],
+            moved: vec![false; n],
+            solved: 0,
         }
     }
 
     /// Wake cell `c`: something changed there (a dig, a spring, a splash).
+    /// A frozen cell is solved again, its flow kept.
     pub fn wake(&mut self, c: usize) {
         if let Some(a) = self.awake.get_mut(c) {
             self.calm[c] = 0;
@@ -317,7 +380,82 @@ impl ShallowWater {
                 *a = true;
                 self.list.push(c as u32);
             }
+            if self.frozen[c] {
+                self.frozen[c] = false;
+                if let Some(i) = self.rails.iter().position(|&r| r as usize == c) {
+                    self.rails.swap_remove(i);
+                }
+            }
         }
+    }
+
+    /// A spring in cell `c` giving `q` cubic metres a second: a river's head.
+    pub fn add_spring(&mut self, c: usize, q: f32) {
+        if c < self.depth.len() {
+            self.springs.push((c as u32, q));
+            self.wake(c);
+        }
+    }
+
+    /// Hold cell `c`'s surface at `level`, whatever flows in or out: the sea
+    /// along a coast, so a trench dug inland from the beach fills from it and
+    /// stays full, or a river's mouth. `NaN` lets it go again.
+    pub fn hold_level(&mut self, c: usize, level: f32) {
+        if c < self.depth.len() {
+            self.hold[c] = level;
+            self.wake(c);
+        }
+    }
+
+    /// Seed the flow out of cell `c` through face `k`, m³/s: a river started
+    /// at its steady state rather than from still water.
+    pub fn set_flow(&mut self, c: usize, k: usize, q: f32) {
+        if c < self.flux.len() && k < 4 {
+            self.flux[c][k] = q.max(0.0);
+            self.wake(c);
+        }
+    }
+
+    /// Volume the springs and held levels have added, less what they took,
+    /// cubic metres.
+    pub fn exchanged(&self) -> f64 {
+        self.exchanged
+    }
+
+    /// How many cells the last step solved. Frozen cells pass their flow on
+    /// without being solved and are not counted.
+    pub fn solved_count(&self) -> usize {
+        self.solved
+    }
+
+    /// How many cells are frozen: flowing steadily, not solved.
+    pub fn frozen_count(&self) -> usize {
+        self.rails.len()
+    }
+
+    /// Every place flowing water pours off a drop of more than `min_drop`
+    /// metres of ground from one cell to the next: where a waterfall goes.
+    pub fn falls(&self, grid: &WaterGrid, min_drop: f32) -> Vec<Fall> {
+        let mut out = Vec::new();
+        for &c in self.list.iter().chain(&self.rails) {
+            let c = c as usize;
+            for k in 0..4 {
+                let o = grid.nbr[c][k];
+                let q = self.flux[c][k];
+                if o == WALL || q < STILL || grid.ground[c] - grid.ground[o as usize] <= min_drop {
+                    continue;
+                }
+                let o = o as usize;
+                out.push(Fall {
+                    cell: c as u32,
+                    face: k as u8,
+                    discharge: q,
+                    drop: (self.depth[c] + grid.ground[c]) - (self.depth[o] + grid.ground[o]),
+                    width: grid.width[c][k],
+                });
+            }
+        }
+        out
     }
 
     /// Wake every cell.
@@ -392,7 +530,13 @@ impl ShallowWater {
         for i in 0..self.list.len() {
             let c = self.list[i] as usize;
             for &o in &grid.nbr[c] {
-                if o != WALL && !self.awake[o as usize] && self.depth[o as usize] > 0.0 && surf(self, o as usize) > surf(self, c) + LEVEL {
+                // A frozen cell already passes its water on.
+                if o != WALL
+                    && !self.awake[o as usize]
+                    && !self.frozen[o as usize]
+                    && self.depth[o as usize] > 0.0
+                    && surf(self, o as usize) > surf(self, c) + LEVEL
+                {
                     self.wake(o as usize);
                 }
             }
@@ -407,8 +551,27 @@ impl ShallowWater {
                 } else {
                     let o = o as usize;
                     let dh = (self.depth[c] + grid.ground[c]) - (self.depth[o] + grid.ground[o]);
-                    let cross = grid.width[c][k] * self.depth[c].max(self.depth[o]).min(1e3);
-                    (self.flux[c][k] * self.damping + dt * self.gravity * cross * dh / grid.dist[c][k]).max(0.0)
+                    let h = self.depth[c].max(self.depth[o]).min(1e3);
+                    let cross = grid.width[c][k] * h;
+                    let n = self.roughness;
+                    let damp = if n > 0.0 { 1.0 } else { self.damping };
+                    let mut f = self.flux[c][k] * damp + dt * self.gravity * cross * dh / grid.dist[c][k];
+                    // The bed's drag, taken implicitly so it is stable at
+                    // any depth: in steady flow it balances the surface's
+                    // fall, which is Manning's equation.
+                    if n > 0.0 && h > 1e-4 {
+                        let u = self.flux[c][k].abs() / cross.max(1e-6);
+                        f /= 1.0 + dt * self.gravity * n * n * u / h.powf(4.0 / 3.0);
+                    }
+                    // Water pouring off an edge passes no more than a weir
+                    // does, however far below the foot is: what keeps a
+                    // river stable over a cliff.
+                    let pours = self.depth[o] + grid.ground[o] < grid.ground[c];
+                    if pours {
+                        let weir = WEIR * grid.width[c][k] * (2.0 * self.gravity).sqrt() * self.depth[c].powf(1.5);
+                        f = f.min(weir);
+                    }
+                    f.max(0.0)
                 };
                 self.flux[c][k] = f;
                 out += f;
@@ -421,10 +584,21 @@ impl ShallowWater {
                 }
             }
         }
+        self.solved = self.list.len();
+        // Springs give, as a transfer from outside the grid.
+        for i in 0..self.springs.len() {
+            let (c, q) = self.springs[i];
+            let v = (q * dt) as f64;
+            if self.dv[c as usize] == 0.0 {
+                self.touched.push(c);
+            }
+            self.dv[c as usize] += v;
+            self.exchanged += v;
+        }
         // Moved as transfers: what leaves `c` towards `o` is exactly what `o`
-        // receives from `c`.
-        for i in 0..self.list.len() {
-            let c = self.list[i] as usize;
+        // receives from `c`. Frozen cells pass on their kept flow the same way.
+        for i in 0..self.list.len() + self.rails.len() {
+            let c = if i < self.list.len() { self.list[i] } else { self.rails[i - self.list.len()] } as usize;
             for k in 0..4 {
                 let o = grid.nbr[c][k];
                 let v = (self.flux[c][k] * dt) as f64;
@@ -443,14 +617,45 @@ impl ShallowWater {
         for i in 0..self.touched.len() {
             let c = self.touched[i] as usize;
             let v = std::mem::take(&mut self.dv[c]);
-            self.depth[c] = ((self.depth[c] as f64 + v / grid.area[c] as f64).max(0.0)) as f32;
-            // Water arriving wakes a cell, but not rounding noise: a sea whose
-            // level differs in the last bit would otherwise wake whole.
-            if v > (STILL * dt) as f64 {
+            let before = self.depth[c];
+            let mut d = (before as f64 + v / grid.area[c] as f64).max(0.0);
+            // A held level takes or gives whatever keeps it there.
+            let hold = self.hold[c];
+            if hold.is_finite() {
+                let want = (hold - grid.ground[c]).max(0.0) as f64;
+                self.exchanged += (want - d) * grid.area[c] as f64;
+                d = want;
+            }
+            self.depth[c] = d as f32;
+            let moved = (self.depth[c] - before).abs() > STEADY;
+            self.moved[c] = moved;
+            if self.frozen[c] {
+                // A frozen cell is solved again once what reaches it has
+                // changed enough to move it.
+                if (self.depth[c] - self.froze_at[c]).abs() > DRIFT {
+                    self.wake(c);
+                }
+            } else if v > (STILL * dt) as f64 && (moved || !self.awake[c]) {
+                // Water arriving wakes a cell, but not rounding noise: a sea
+                // whose level differs in the last bit would otherwise wake
+                // whole.
                 self.wake(c);
             }
         }
         self.touched.clear();
+        // An awake cell whose water moved wakes the frozen cells beside it:
+        // a dig downstream changes what a frozen reach should pass on.
+        for i in 0..self.list.len() {
+            let c = self.list[i] as usize;
+            if self.moved[c] {
+                for k in 0..4 {
+                    let o = grid.nbr[c][k];
+                    if o != WALL && self.frozen[o as usize] {
+                        self.wake(o as usize);
+                    }
+                }
+            }
+        }
         // Still cells sleep: no flow out, and level with every neighbour that
         // has water to give or take.
         let mut i = 0;
@@ -464,14 +669,31 @@ impl ShallowWater {
                         higher_dry || (sc - so).abs() < LEVEL
                     }
                 });
-            self.calm[c] = if still { self.calm[c].saturating_add(1) } else { 0 };
+            // Flowing, but at a rate that no longer changes anything: a river
+            // in its steady state. A spring or a held level keeps solving, so
+            // the water it adds or takes is always the current answer.
+            let steady = !still
+                && !self.moved[c]
+                && !self.hold[c].is_finite()
+                && !self.springs.iter().any(|s| s.0 as usize == c);
+            self.moved[c] = false;
+            self.calm[c] = if still || steady { self.calm[c].saturating_add(1) } else { 0 };
             if self.calm[c] >= SLEEP_STEPS {
                 self.awake[c] = false;
-                self.flux[c] = [0.0; 4];
                 self.list.swap_remove(i);
+                if still {
+                    self.flux[c] = [0.0; 4];
+                } else {
+                    self.frozen[c] = true;
+                    self.froze_at[c] = self.depth[c];
+                    self.rails.push(c as u32);
+                }
             } else {
                 i += 1;
             }
+        }
+        for &c in &self.rails {
+            self.moved[c as usize] = false;
         }
     }
 }
@@ -502,6 +724,149 @@ mod tests {
         }
         let v = w.velocity(&grid, 30);
         assert!(v[0] > 0.05 && v[1].abs() < 0.05, "water down the channel moves at {v:?}");
+    }
+
+    /// A straight river bed: `rivers` channels `len` cells long and one cell
+    /// (2 m) wide, falling `slope` a metre toward +x, each between banks 5 m
+    /// high. Seeded at its Manning depth and flow for `q` m³/s, a spring at
+    /// its head and its mouth held at the river's own level.
+    fn rivers(n_rivers: usize, len: usize, slope: f32, q: f32, cliff: Option<(usize, f32)>) -> (WaterGrid, ShallowWater, f32) {
+        let rows = n_rivers * 2 + 1;
+        let fall = move |x: usize| {
+            let step = cliff.map_or(0.0, |(at, h)| if x >= at { h } else { 0.0 });
+            20.0 - x as f32 * 2.0 * slope - step
+        };
+        let grid = WaterGrid::flat(len, rows, 2.0, |x, y| if y % 2 == 1 { fall(x) } else { fall(x) + 5.0 });
+        let h = manning_depth(q, 2.0, slope, 0.035);
+        let seeded: Vec<f32> = (0..grid.len())
+            .map(|c| if (c / len) % 2 == 1 && cliff.is_none() { grid.ground[c] + h } else { grid.ground[c] })
+            .collect();
+        let mut w = ShallowWater::at_rest(&grid, &seeded);
+        w.roughness = 0.035;
+        for r in 0..n_rivers {
+            let row = (2 * r + 1) * len;
+            if cliff.is_none() {
+                for x in 0..len - 1 {
+                    w.set_flow(row + x, 0, q);
+                }
+            }
+            w.add_spring(row, q);
+            let mouth = row + len - 1;
+            w.hold_level(mouth, grid.ground[mouth] + h);
+        }
+        (grid, w, h)
+    }
+
+    /// **A river seeded at its steady state stays there.** A fresh world's
+    /// rivers start at Manning's normal depth with their flow already
+    /// moving, and a minute of simulation changes no river surface by more
+    /// than 10 cm. The water runs at `Q / (w·h)`.
+    #[test]
+    fn a_river_seeded_steady_stays_steady() {
+        let (grid, mut w, h) = rivers(1, 60, 0.01, 2.0, None);
+        let start = w.surface(&grid);
+        let v0 = w.volume(&grid);
+        let dt = w.stable_dt(&grid);
+        let mut t = 0.0;
+        while t < 60.0 {
+            w.step(&grid, dt);
+            t += dt;
+        }
+        let worst = w.surface(&grid).iter().zip(&start).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 0.1, "a steady river moved {worst} m in a minute (normal depth {h:.3} m)");
+        let mid = 60 + 30;
+        let want = 2.0 / (2.0 * h);
+        let u = w.velocity(&grid, mid)[0];
+        assert!((u - want).abs() / want < 0.15, "the river runs at {u:.3} m/s, not Q/(w·h) = {want:.3}");
+        let drift = (w.volume(&grid) - v0 - w.exchanged()).abs();
+        assert!(drift < 1e-3 * v0, "{drift} m³ of water appeared or vanished");
+    }
+
+    /// **Twenty steady rivers cost a handful of cells a step.** A reach flowing
+    /// at a rate that no longer changes freezes with its flow kept and is not
+    /// solved; only the springs, the mouths and what is still changing are.
+    #[test]
+    fn twenty_steady_rivers_solve_only_a_few_cells() {
+        let (grid, mut w, _) = rivers(20, 300, 0.01, 2.0, None);
+        let v0 = w.volume(&grid);
+        let dt = w.stable_dt(&grid);
+        for _ in 0..(30.0 / dt) as usize {
+            w.step(&grid, dt);
+        }
+        assert!(w.frozen_count() > 5_000, "only {} of 6,000 river cells froze", w.frozen_count());
+        assert!(w.solved_count() <= 2_000, "a step still solves {} cells", w.solved_count());
+        let drift = (w.volume(&grid) - v0 - w.exchanged()).abs();
+        assert!(drift < 1e-3 * v0, "{drift} m³ of water appeared or vanished");
+    }
+
+    /// **The sea is a boundary.** A trench dug from the beach inland, below
+    /// sea level, fills from the sea and stays full: the sea's level is held,
+    /// so a small sea does not drop to fill it.
+    #[test]
+    fn a_trench_dug_from_the_beach_fills_from_the_sea() {
+        let mut grid = WaterGrid::flat(30, 5, 1.0, |x, _| if x < 10 { -3.0 } else { 0.2 * (x as f32 - 9.0) });
+        let level = lake_levels(&grid, 0.0);
+        let mut w = ShallowWater::at_rest(&grid, &level);
+        for y in 0..5 {
+            for x in 0..3 {
+                w.hold_level(y * 30 + x, 0.0);
+            }
+        }
+        let v0 = w.volume(&grid);
+        for x in 10..26 {
+            let c = 2 * 30 + x;
+            grid.ground[c] = -1.0;
+            w.wake(c);
+            w.wake(c - 1);
+        }
+        for _ in 0..2 {
+            let dt = w.stable_dt(&grid);
+            for _ in 0..(60.0 / dt) as usize {
+                w.step(&grid, dt);
+            }
+        }
+        let surface = w.surface(&grid);
+        for x in 10..26 {
+            let s = surface[2 * 30 + x];
+            assert!(s.abs() < 0.02, "the trench at {x} m stands at {s:.3}, not the sea's 0");
+        }
+        assert!(w.exchanged() > 10.0, "the sea gave only {:.2} m³ to a 16 m³ trench", w.exchanged());
+        let drift = (w.volume(&grid) - v0 - w.exchanged()).abs();
+        assert!(drift < 1e-3, "{drift} m³ of water appeared or vanished");
+    }
+
+    /// **A river over a 10 m cliff is stable, and the cliff is a fall.** The
+    /// water pouring off the edge passes what a weir does, so the lip runs at
+    /// a steady depth at the ordinary step rather than emptying and filling
+    /// every step; `falls` reports the drop with the river's discharge.
+    #[test]
+    fn a_river_over_a_cliff_is_stable_and_reports_its_fall() {
+        let q = 2.0;
+        let (grid, mut w, _) = rivers(1, 40, 0.01, q, Some((20, 10.0)));
+        let lip = 40 + 19;
+        let mut lips = Vec::new();
+        let mut t = 0.0;
+        while t < 240.0 {
+            let dt = w.stable_dt(&grid);
+            w.step(&grid, dt);
+            t += dt;
+            if t > 220.0 {
+                lips.push(w.depth[lip]);
+            }
+        }
+        assert!(w.depth.iter().all(|d| d.is_finite() && *d < 3.0), "the river blew up");
+        let weir_depth = (q / (WEIR * 2.0 * (2.0 * 9.81f32).sqrt())).powf(2.0 / 3.0);
+        let (lo, hi) = lips.iter().fold((f32::INFINITY, 0.0f32), |(a, b), d| (a.min(*d), b.max(*d)));
+        assert!(
+            (lo - weir_depth).abs() / weir_depth < 0.25 && (hi - lo) < 0.05 * weir_depth,
+            "the lip ran between {lo:.3} and {hi:.3} m, not steady at the weir's {weir_depth:.3}"
+        );
+        let falls = w.falls(&grid, 1.5);
+        assert_eq!(falls.len(), 1, "falls: {falls:?}");
+        let f = falls[0];
+        assert_eq!((f.cell as usize, f.face), (lip, 0));
+        assert!((f.discharge - q).abs() / q < 0.05, "{} m³/s over the edge, not {q}", f.discharge);
+        assert!(f.drop > 9.0 && f.drop < 11.0, "a {} m drop", f.drop);
     }
 
     /// A bowl 40 cells across with a rim, inside a wider plain that slopes off

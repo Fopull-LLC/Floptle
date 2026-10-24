@@ -160,3 +160,35 @@ From outside, a planet is its surface. Its caves are sealed under at least three
 On a 400 m world with an 80 m cave zone that leaves about a quarter of the chunks for later, and the planet fills and keeps about a quarter less. A chunk comes out the same whichever order chunks are made in, so two players' games agree on its caves. It is evened out on its own rather than with its neighbours, so where it meets a chunk the first fill made, its walls can sit a hair (well under a voxel) from where filling the whole planet at once would put them.
 
 A saved field remembers which chunks are still to make; the body's generation spec makes them when it is loaded again.
+
+## Small bodies
+
+`smallBody` makes an asteroid or a comet's nucleus instead of a ball. `radius` is its size, `relief` roughens its surface, and it has no cave zone or craters:
+
+```lua
+terrain.generatePlanet(7, { seed = 12, radius = 30, voxel = 1, relief = 1,
+  smallBody = { shape = "binary", elongation = 1.6, lumpiness = 0.4, neck = 0.3 } })
+```
+
+| Key | What it does |
+|---|---|
+| `shape` | `"potato"`: one stretched, lumpy lump. `"binary"`: two lobes joined at a neck, end to end along X. `"rubble"`: a pile of lumps pressed together. |
+| `elongation` | How many times longer than wide, along X (1.5). |
+| `lumpiness` | How lumpy the surface is, 0 to 1 (0.35). |
+| `neck` | A binary's neck, 0 (pinched) to 1 (filled in) (0.35). |
+| `lumps` | How many lumps a rubble pile has (8). |
+
+The same seed always makes the same rock. Made far from the player, a rock is coarse stand-ins only; its ground is made exactly as the player comes near. `space.belt{ ..., shape = "mixed" }` gives every rock in a belt one of the three shapes.
+
+## Generator versions
+
+A planet's save holds only the digs and edits made to it. Everything else is made again from its options when it loads, so if a newer engine made ground differently, saved digs would land in different ground. Each change to how the generator makes ground has its own version number, and a world is made by the rules of one version:
+
+| Version | What changed |
+|---|---|
+| 0 | The first rules. |
+| 1 | Rivers follow how water drains to the sea. Paint depth is measured under the ground the overhangs leave. |
+| 2 | A world with `caveDepth = 0` has no deep cave rock: its subsoil and strata show. |
+| 3 | Relief layers take `latitude`. |
+
+`generator = 3` in the options picks a version. Without it, a world is made by the project's version, which `project.ron` holds as `terrain_generator`. A new project starts at the current version. Upgrading a project sets its version to the one its last engine used, so its worlds come out as they did before. Every save also records the version its ground was made by, and a project can raise its version without moving ground under the digs it has already saved.

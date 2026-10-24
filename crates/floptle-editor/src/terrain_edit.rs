@@ -281,10 +281,23 @@ const IMPOSTOR_RADII: f64 = 60.0;
 const IMPOSTOR_LEAVE: f64 = 0.7;
 
 /// Whether a celestial terrain of `radius` is drawn as its impostor when its
-/// LOD centre is `dist` away, given whether it was last frame.
-fn impostor_next(was: bool, dist: f64, radius: f64) -> bool {
-    let enter = radius.max(1.0) * IMPOSTOR_RADII;
+/// LOD centre is `dist` away, given whether it was last frame: past `enter`
+/// of its radii ([`impostor_enter_radii`]).
+fn impostor_next(was: bool, dist: f64, radius: f64, enter: f64) -> bool {
+    let enter = radius.max(1.0) * enter;
     if was { dist > enter * IMPOSTOR_LEAVE } else { dist > enter }
+}
+
+/// How many of its radii from the camera a body starts drawing as its
+/// impostor: sixty, unless a game set its own rule (`terrain.impostorAt`).
+/// A rule in pixels is the distance its disc is that many pixels across at,
+/// `px_per_radian` being the view's pixels per radian of height.
+fn impostor_enter_radii(rule: Option<floptle_script::ImpostorRule>, px_per_radian: f64) -> f64 {
+    match rule {
+        None => IMPOSTOR_RADII,
+        Some(floptle_script::ImpostorRule::Radii(n)) => n.max(0.0),
+        Some(floptle_script::ImpostorRule::Pixels(px)) => 2.0 * px_per_radian / px.max(1e-3),
+    }
 }
 
 /// G1 residency (docs/subsystems/large-world-space.md): a cold celestial terrain's
@@ -439,7 +452,10 @@ const CHECKPOINT_FORCE_SECS: f64 = 20.0;
 /// only the ground within a few chunks of it, and stands the rest in coarse,
 /// to be made on approach ([`Editor::stream_far_chunks`]). `None` makes it
 /// all.
-fn load_terrain_from(sources: Vec<TerrainSource>, genspec: Option<String>, near: Option<Vec3>) -> Option<EditorTerrain> {
+///
+/// `generator` is the project's planet generator version, what a recipe that
+/// names none is made by ([`resolve_spec`]).
+fn load_terrain_from(sources: Vec<TerrainSource>, genspec: Option<String>, near: Option<Vec3>, generator: u32) -> Option<EditorTerrain> {
     let make = |fill: &floptle_field::procgen::PlanetFill| match near {
         Some(p) => floptle_field::procgen::generate_planet_near(fill, p, NEAR_ON_LOAD_CHUNKS * floptle_field::CHUNK as f32 * fill.voxel),
         None => floptle_field::procgen::generate_planet(fill),
@@ -452,7 +468,7 @@ fn load_terrain_from(sources: Vec<TerrainSource>, genspec: Option<String>, near:
             TerrainSource::File(_) => None,
         })
     });
-    let spec: Option<floptle_field::procgen::PlanetFill> = genspec.as_deref().and_then(|s| ron::from_str(s).ok());
+    let spec = genspec.as_deref().and_then(|s| resolve_spec(s, generator));
     for src in sources {
         let field = match src {
             TerrainSource::File(path) => floptle_vfs::read(&path)
@@ -462,30 +478,30 @@ fn load_terrain_from(sources: Vec<TerrainSource>, genspec: Option<String>, near:
                     if f.is_delta() {
                         // Only the edits: laid over the ground they were dug
                         // into, made again from the recipe the save carries.
-                        let fill: floptle_field::procgen::PlanetFill = ron::from_str(f.spec()?).ok()?;
-                        return Some(f.lay_over(make(&fill)));
+                        let (fill, text) = resolve_spec(f.spec()?, generator.max(DELTA_SAVES_SINCE))?;
+                        let mut f = f.lay_over(make(&fill));
+                        f.set_spec(text);
+                        return Some(f);
                     }
                     let mut f = f;
-                    if let (Some(fill), Some(text)) = (spec.as_ref(), genspec.as_ref()) {
+                    if let Some((fill, text)) = spec.as_ref() {
                         // A save from before edits were tracked: what differs
                         // from a fresh generation is what was dug, and from
                         // here on only that is saved.
                         f.set_spec(text.clone());
                         f.adopt_generation(&floptle_field::procgen::generate_planet(fill));
                     } else if f.pending_count() > 0
-                        && let Some(source) = spec.as_ref().and_then(floptle_field::procgen::pending_source_for)
+                        && let Some(source) = spec.as_ref().and_then(|(fill, _)| floptle_field::procgen::pending_source_for(fill))
                     {
                         f.set_pending_source(source);
                     }
                     Some(f)
                 }),
-            TerrainSource::Generate(text) => ron::from_str(&text)
-                .ok()
-                .map(|fill: floptle_field::procgen::PlanetFill| {
-                    let mut f = make(&fill);
-                    f.set_spec(text);
-                    f
-                }),
+            TerrainSource::Generate(text) => resolve_spec(&text, generator).map(|(fill, text)| {
+                let mut f = make(&fill);
+                f.set_spec(text);
+                f
+            }),
         };
         if let Some(field) = field {
             return Some(EditorTerrain::new(field));
@@ -498,15 +514,35 @@ fn load_terrain_from(sources: Vec<TerrainSource>, genspec: Option<String>, near:
 /// were dug into, whose chunks are made again from the recipe the save
 /// carries as the camera comes near them. A whole field comes back as it is.
 /// `None` when the recipe does not parse.
-fn whole_field(f: floptle_field::ChunkField) -> Option<floptle_field::ChunkField> {
+fn whole_field(f: floptle_field::ChunkField, generator: u32) -> Option<floptle_field::ChunkField> {
     if !f.is_delta() {
         return Some(f);
     }
-    let fill: floptle_field::procgen::PlanetFill = ron::from_str(f.spec()?).ok()?;
+    let (fill, text) = resolve_spec(f.spec()?, generator.max(DELTA_SAVES_SINCE))?;
     // Opening a scene, on the frame: nothing is made but the edits, and the
     // rest of the world stands in coarse until the camera comes near it.
     let nowhere = Vec3::splat(f32::MAX);
-    Some(f.lay_over(floptle_field::procgen::generate_planet_near(&fill, nowhere, 0.0)))
+    let mut f = f.lay_over(floptle_field::procgen::generate_planet_near(&fill, nowhere, 0.0));
+    f.set_spec(text);
+    Some(f)
+}
+
+/// The generator version saves of only a planet's edits began with: both of
+/// the first version's changes shipped in the same release as they did, so
+/// such a save is never older, whatever its project says.
+const DELTA_SAVES_SINCE: u32 = floptle_field::procgen::RIVERS_FOLLOW_DRAINAGE;
+
+/// A planet recipe read from text, made by the version it names or, naming
+/// none, by `generator`: the project's. With the text it is kept as from here,
+/// version and all, so a save made from it says which rules made its ground.
+fn resolve_spec(text: &str, generator: u32) -> Option<(floptle_field::procgen::PlanetFill, String)> {
+    let mut fill: floptle_field::procgen::PlanetFill = ron::from_str(text).ok()?;
+    if fill.generator.is_some() {
+        return Some((fill, text.to_string()));
+    }
+    fill.generator = Some(generator);
+    let text = ron::to_string(&fill).ok()?;
+    Some((fill, text))
 }
 
 /// Stable hash of a genspec string — recorded in the `.meta` sidecar when a
@@ -523,17 +559,51 @@ fn genspec_hash(spec: &str) -> u64 {
     h
 }
 
-/// A genspec body's impostor color without generating anything: its surface
-/// palette's primary tint (close enough for a sub-pixel-to-few-pixel sphere).
-fn genspec_impostor_color(spec: &str) -> Option<[f32; 3]> {
+/// A genspec body's impostor color without generating anything: its primary
+/// surface paint as it is drawn (close enough for a sub-pixel-to-few-pixel
+/// sphere). `means` is the palette's, see [`drawn_color`].
+fn genspec_impostor_color(spec: &str, means: &[[f32; 3]]) -> Option<[f32; 3]> {
     let fill: floptle_field::procgen::PlanetFill = ron::from_str(spec).ok()?;
-    Some(fill.surface_a.color)
+    let [r, g, b] = fill.surface_a.color.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+    Some(drawn_color([r, g, b, fill.surface_a.slot], means))
+}
+
+/// A voxel's paint as the ground draws it, on average: its tint, and for a
+/// textured slot the tint times the mean of the slot's palette texture, lifted
+/// as the terrain shader lifts it. `means` holds each palette layer's mean
+/// colour, linear (the layers are sampled as sRGB); a slot past them draws
+/// white, as the shader's blank layer does. A ball drawn in the tint alone
+/// was olive over brown ground.
+pub(crate) fn drawn_color(c: [u8; 4], means: &[[f32; 3]]) -> [f32; 3] {
+    let tint = [c[0], c[1], c[2]].map(|v| f32::from(v) / 255.0);
+    if c[3] == 0 || c[3] == 255 {
+        return tint;
+    }
+    let m = means.get(usize::from(c[3]) - 1).copied().unwrap_or([1.0; 3]);
+    [tint[0] * m[0] * 1.6, tint[1] * m[1] * 1.6, tint[2] * m[2] * 1.6]
+}
+
+/// The mean colour of one palette layer, linear.
+pub(crate) fn layer_mean(t: &floptle_render::TextureData) -> [f32; 3] {
+    let lin = |v: u8| {
+        let c = f32::from(v) / 255.0;
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    let mut sum = [0.0f64; 3];
+    let n = (t.pixels.len() / 4).max(1);
+    for p in t.pixels.as_chunks::<4>().0 {
+        for k in 0..3 {
+            sum[k] += f64::from(lin(p[k]));
+        }
+    }
+    sum.map(|v| (v / n as f64) as f32)
 }
 
 /// The body's average surface color for its impostor sphere: 26 rays from
-/// outside toward the center, averaging the voxel color where each first hits.
+/// outside toward the center, averaging the color the ground is drawn where
+/// each first hits ([`drawn_color`], with the palette's `means`).
 /// Field-space — celestial terrain fields are authored centered on the origin.
-pub(crate) fn impostor_surface_color(field: &floptle_field::ChunkField, radius: f32) -> [f32; 3] {
+pub(crate) fn impostor_surface_color(field: &floptle_field::ChunkField, radius: f32, means: &[[f32; 3]]) -> [f32; 3] {
     let mut sum = [0.0f32; 3];
     let mut n = 0.0f32;
     for x in -1..=1i32 {
@@ -545,10 +615,10 @@ pub(crate) fn impostor_surface_color(field: &floptle_field::ChunkField, radius: 
                 let d = Vec3::new(x as f32, y as f32, z as f32).normalize();
                 let start = d * (radius * 1.6 + 8.0);
                 if let Some(hit) = field.raycast(start, -d, radius * 3.2) {
-                    let c = field.color(hit);
-                    sum[0] += c[0] as f32 / 255.0;
-                    sum[1] += c[1] as f32 / 255.0;
-                    sum[2] += c[2] as f32 / 255.0;
+                    let c = drawn_color(field.color(hit), means);
+                    sum[0] += c[0];
+                    sum[1] += c[1];
+                    sum[2] += c[2];
                     n += 1.0;
                 }
             }
@@ -829,6 +899,8 @@ impl Editor {
         // Moving bodies hold the ground under them at full detail too: what a
         // body lands on is drawn as it collides, however far from the camera.
         let bodies = self.moving_bodies();
+        let px_per_radian = self.view_px_per_radian();
+        let slot_means = self.terrain_slot_means.clone();
         let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
             return;
         };
@@ -903,7 +975,11 @@ impl Editor {
             if let Some(cb) = self.world.get::<floptle_core::CelestialBody>(e) {
                 let cam_dist = (cam_world - anchor).length();
                 let was = render.impostor;
-                render.impostor = impostor_next(was, cam_dist, cb.body_radius);
+                let rule = match self.world.get::<Matter>(e) {
+                    Some(Matter::Terrain { id, .. }) => self.terrain_impostor_rules.get(id).copied(),
+                    _ => None,
+                };
+                render.impostor = impostor_next(was, cam_dist, cb.body_radius, impostor_enter_radii(rule, px_per_radian));
                 if render.impostor != was {
                     // The SDF shadow/AO atlas excludes impostor bodies — re-lay it out.
                     self.terrain_gpu_dirty = true;
@@ -914,7 +990,7 @@ impl Editor {
                 // chunks. Sampled once, on whichever comes first.
                 if render.impostor_color.is_none() {
                     render.impostor_color =
-                        Some(impostor_surface_color(&terrain.field, cb.body_radius as f32));
+                        Some(impostor_surface_color(&terrain.field, cb.body_radius as f32, &slot_means));
                 }
                 if render.impostor {
                     render.pending.clear();
@@ -1814,6 +1890,12 @@ impl Editor {
     /// what a query reads is always the ground after some number of whole
     /// ops; `terrain.pending()` says how many are still to land.
     pub(crate) fn apply_script_terrain_ops(&mut self, ops: Vec<floptle_script::TerrainOp>) {
+        for (id, rule) in self.script_host.take_terrain_impostors() {
+            match rule {
+                Some(rule) => self.terrain_impostor_rules.insert(id, rule),
+                None => self.terrain_impostor_rules.remove(&id),
+            };
+        }
         // Each op is placed in its terrain's own frame now, the frame it was
         // made in: one carried to a later frame lands where it was aimed on a
         // planet that has moved on its rails since (5 to 6 m off, before).
@@ -2333,6 +2415,59 @@ impl Editor {
         match (it.next(), it.next(), it.next()) {
             (Some(Ok(r)), Some(Ok(g)), Some(Ok(b))) => Some([r, g, b]),
             _ => None,
+        }
+    }
+
+    /// The view's height in pixels per radian: how big a planet is on screen
+    /// at a distance. The game's camera in Play, the editor's otherwise.
+    pub(crate) fn view_px_per_radian(&self) -> f64 {
+        let h = self.gpu.as_ref().map_or(1080.0, |g| f64::from(g.config.height.max(1)));
+        let fov = if self.playing {
+            floptle_core::active_camera(&self.world)
+                .and_then(|c| match self.world.get::<Matter>(c) {
+                    Some(Matter::Camera { fov_y, ortho: false, .. }) => Some(f64::from(*fov_y)),
+                    _ => None,
+                })
+                .unwrap_or(60f64.to_radians())
+        } else {
+            60f64.to_radians()
+        };
+        h / (2.0 * (fov.clamp(0.01, 3.0) * 0.5).tan())
+    }
+
+    /// The palette's layers changed: take each one's mean colour, and draw
+    /// every planet's impostor in the colours its ground now draws. A resident
+    /// body samples its field again; a cold one made from a genspec with no
+    /// colour saved takes its recipe's again.
+    pub(crate) fn set_terrain_slot_means(&mut self, layers: &[floptle_render::TextureData]) {
+        let means: Vec<[f32; 3]> = layers.iter().map(layer_mean).collect();
+        if means == self.terrain_slot_means {
+            return;
+        }
+        self.terrain_slot_means = means;
+        for e in self.terrains.keys() {
+            if let Some(r) = self.terrain_render.get_mut(e) {
+                r.impostor_color = None;
+            }
+        }
+        let cold: Vec<(Entity, u32)> = self.terrain_cold.iter().map(|(&e, c)| (e, c.id)).collect();
+        for (e, id) in cold {
+            if self.read_terrain_meta(id).is_some() {
+                continue;
+            }
+            let Some(color) = self
+                .world
+                .get::<floptle_core::TerrainGen>(e)
+                .and_then(|g| genspec_impostor_color(&g.0, &self.terrain_slot_means))
+            else {
+                continue;
+            };
+            if let Some(c) = self.terrain_cold.get_mut(&e) {
+                c.color = color;
+            }
+            if let Some(r) = self.terrain_render.get_mut(&e) {
+                r.impostor_color = Some(color);
+            }
         }
     }
 
@@ -2963,6 +3098,11 @@ impl Editor {
                 .collect()
         };
         let near = |p: DVec3, reach: f64| anchors.iter().any(|a| (*a - p).length() < reach);
+        // A body a game keeps meshed farther out than the default loads and is
+        // put away as much farther out, so its ground is in before it draws.
+        let px_per_radian = self.view_px_per_radian();
+        let rules = self.terrain_impostor_rules.clone();
+        let reach = |id: u32| (impostor_enter_radii(rules.get(&id).copied(), px_per_radian) / IMPOSTOR_RADII).max(1.0);
 
         // 0. Adopt terrain bodies born at runtime: a game's loading screen builds
         //    its galaxy with createNode + setTerrainGen, and those nodes went
@@ -2992,7 +3132,7 @@ impl Editor {
                 .or_else(|| {
                     self.world
                         .get::<floptle_core::TerrainGen>(e)
-                        .map(|g| genspec_impostor_color(&g.0).unwrap_or([0.62, 0.62, 0.68]))
+                        .map(|g| genspec_impostor_color(&g.0, &self.terrain_slot_means).unwrap_or([0.62, 0.62, 0.68]))
                 })
                 // A file with no meta and no genspec is still loadable — a
                 // neutral sphere beats an invisible planet.
@@ -3073,7 +3213,7 @@ impl Editor {
             // the background instead (the run is paused; nothing can fall).
             if !self.play_stream_hold && near(p, r * RESIDENT_SYNC_RADII) {
                 to_sync.push((e, cold.id));
-            } else if warm.contains(&e) || near(p, r * RESIDENT_LOAD_RADII) {
+            } else if warm.contains(&e) || near(p, r * RESIDENT_LOAD_RADII * reach(cold.id)) {
                 to_load.push((e, cold.id));
             }
         }
@@ -3096,7 +3236,7 @@ impl Editor {
             let Some(Matter::Terrain { id, .. }) = self.world.get::<Matter>(e) else { continue };
             let r = cb.body_radius.max(1.0);
             let p = floptle_core::world_transform(&self.world, e).translation;
-            if !near(p, r * RESIDENT_EVICT_RADII) {
+            if !near(p, r * RESIDENT_EVICT_RADII * reach(*id)) {
                 to_evict.push((e, *id));
             }
         }
@@ -3231,8 +3371,9 @@ impl Editor {
             None,
         );
         let (tx, rx) = std::sync::mpsc::channel();
+        let generator = self.project.terrain_generator_resolved();
         crate::worker::spawn("terrain-load", move || {
-            let _ = tx.send(load_terrain_from(sources, genspec, near));
+            let _ = tx.send(load_terrain_from(sources, genspec, near, generator));
         });
         self.terrain_load_jobs.push(TerrainLoadJob {
             e,
@@ -3310,6 +3451,11 @@ impl Editor {
             self.touch_terrain_edit(e);
         }
         self.terrain_gpu_dirty = true;
+        // Its colour is taken from the ground itself now it is here: a colour
+        // saved by an older engine was the paint's tint alone.
+        if let Some(r) = self.terrain_render.get_mut(&e) {
+            r.impostor_color = None;
+        }
         // The render entry stays in impostor mode; the streaming loop flips it by
         // distance (still beyond 60 r at load time, so nothing pops).
         if self.playing {
@@ -3354,7 +3500,7 @@ impl Editor {
                     .get::<floptle_core::CelestialBody>(e)
                     .map(|c| c.body_radius as f32)
                     .unwrap_or(50.0);
-                impostor_surface_color(&t.field, r)
+                impostor_surface_color(&t.field, r, &self.terrain_slot_means)
             });
         // Edited fields save before dropping. Destination (G2): the game's
         // save-slot dir when set (player state — writable even during Play,
@@ -3451,7 +3597,7 @@ impl Editor {
                     // path would give it a flat starter slab — it has no file to
                     // load); a garbled spec just gets a neutral sphere color.
                     self.world.get::<floptle_core::TerrainGen>(e).map(|g| {
-                        genspec_impostor_color(&g.0).unwrap_or([0.62, 0.62, 0.68])
+                        genspec_impostor_color(&g.0, &self.terrain_slot_means).unwrap_or([0.62, 0.62, 0.68])
                     })
                 };
                 if let Some(color) = color {
@@ -3489,7 +3635,7 @@ impl Editor {
             let loaded = floptle_vfs::read(self.terrain_field_path_id(id))
                 .ok()
                 .and_then(|b| floptle_field::ChunkField::from_bytes(&b))
-                .and_then(whole_field)
+                .and_then(|f| whole_field(f, self.project.terrain_generator_resolved()))
                 .or_else(dense_migration);
             // A terrain node in a saved scene that has no field on disk is the
             // shape of lost work, not of a new terrain — say so rather than
@@ -3522,7 +3668,7 @@ impl Editor {
                 && self.read_terrain_meta(id).is_none()
                 && floptle_vfs::exists(self.terrain_field_path_id(id))
             {
-                let color = impostor_surface_color(&field, cb.body_radius as f32);
+                let color = impostor_surface_color(&field, cb.body_radius as f32, &self.terrain_slot_means);
                 let hash = self.terrain_spec_hash_of(e);
                 self.write_terrain_meta(id, color, hash);
             }
@@ -3915,11 +4061,11 @@ mod tests {
     /// real hysteresis: in at 60 radii, out at 42.
     #[test]
     fn terrain_detail_follows_the_anchor_not_a_roaming_camera() {
-        use super::impostor_next;
+        use super::{impostor_next, IMPOSTOR_RADII};
         let r = 150.0;
-        assert!(!impostor_next(false, 59.0 * r, r) && impostor_next(false, 61.0 * r, r));
-        assert!(impostor_next(true, 45.0 * r, r), "a camera parked just inside 60 radii does not flip it back");
-        assert!(!impostor_next(true, 41.0 * r, r), "it returns to meshes inside 42 radii");
+        assert!(!impostor_next(false, 59.0 * r, r, IMPOSTOR_RADII) && impostor_next(false, 61.0 * r, r, IMPOSTOR_RADII));
+        assert!(impostor_next(true, 45.0 * r, r, IMPOSTOR_RADII), "a camera parked just inside 60 radii does not flip it back");
+        assert!(!impostor_next(true, 41.0 * r, r, IMPOSTOR_RADII), "it returns to meshes inside 42 radii");
 
         let mut ed = crate::Editor::default();
         let ship = ed.world.spawn();
@@ -3932,7 +4078,7 @@ mod tests {
         for k in [50.0, 80.0, 50.0] {
             let c = ed.lod_center(far(k));
             assert_eq!(c, DVec3::new(0.0, r + 2.0, 0.0), "camera at {k} R: the ship stays the centre");
-            assert!(!impostor_next(false, c.length(), r), "and the planet under it stays meshed");
+            assert!(!impostor_next(false, c.length(), r, IMPOSTOR_RADII), "and the planet under it stays meshed");
         }
         ed.world.despawn(ship);
         assert_eq!(ed.lod_center(far(80.0)), far(80.0), "an anchor node that is gone hands it back to the camera");
@@ -4974,9 +5120,11 @@ mod residency_tests {
             ..Default::default()
         };
         let spec = ron::to_string(&fill).expect("genspec serializes");
-        let color = genspec_impostor_color(&spec).expect("impostor color from genspec");
-        assert_eq!(color, fill.surface_a.color);
-        let t = load_terrain_from(vec![TerrainSource::Generate(spec.clone())], None, None)
+        let color = genspec_impostor_color(&spec, &[]).expect("impostor color from genspec");
+        // The surface paint as it draws: its tint, over a blank (white) layer.
+        let [r, g, b] = fill.surface_a.color.map(|c| (c * 255.0).round() as u8);
+        assert_eq!(color, drawn_color([r, g, b, fill.surface_a.slot], &[]));
+        let t = load_terrain_from(vec![TerrainSource::Generate(spec.clone())], None, None, 0)
             .expect("genspec generates a terrain");
         assert!(t.field.data_chunks() > 0, "generated field is empty");
         // The surface is really there: a ray from outside hits near the radius.
@@ -4991,8 +5139,8 @@ mod residency_tests {
             fill.radius
         );
         // A garbled genspec fails cleanly (None → the loud-failure path), never panics.
-        assert!(load_terrain_from(vec![TerrainSource::Generate("(not ron".into())], None, None).is_none());
-        assert!(genspec_impostor_color("(not ron").is_none());
+        assert!(load_terrain_from(vec![TerrainSource::Generate("(not ron".into())], None, None, 0).is_none());
+        assert!(genspec_impostor_color("(not ron", &[]).is_none());
         // A corrupt file falls back to the genspec instead of failing the stream —
         // the exact failure seen in practice (LFS pointer stubs where fields should be).
         let dir = std::env::temp_dir().join(format!("floptle-badfield-{}", std::process::id()));
@@ -5002,12 +5150,142 @@ mod residency_tests {
         let t2 = load_terrain_from(vec![
             TerrainSource::File(bad),
             TerrainSource::Generate(spec),
-        ], None, None)
+        ], None, None, 0)
         .expect("corrupt file falls back to genspec generation");
         assert!(t2.field.data_chunks() > 0);
         let _ = std::fs::remove_dir_all(&dir);
         // Genspec-hash gate: same spec → same hash, different spec → different.
         assert_eq!(genspec_hash("abc"), genspec_hash("abc"));
         assert_ne!(genspec_hash("abc"), genspec_hash("abd"));
+    }
+
+    /// **A recipe that names no generator is made by the project's, and keeps
+    /// it from then on; one that names one keeps its own.** The text a script's
+    /// `setTerrainGen` writes without a version is the text it wrote before
+    /// versions (its hash, which trusts a saved field for the body, does not
+    /// move); a field made from it carries the project's version, so its save
+    /// says which rules made its ground. And a save of only edits is never
+    /// older than such saves are, whatever its project says.
+    #[test]
+    fn a_recipe_without_a_version_is_made_by_the_projects_generator() {
+        use floptle_field::procgen::{PlanetFill, DEEP_ROCK_NEEDS_CAVES};
+        let read = |f: &floptle_field::ChunkField| ron::from_str::<PlanetFill>(f.spec().unwrap()).unwrap().generator;
+        let fill = PlanetFill { seed: 4, radius: 30.0, voxel: 2.0, relief: 3.0, cave_depth: 0.0, generator: None, ..Default::default() };
+        let text = ron::to_string(&fill).unwrap();
+        assert!(!text.contains("generator"), "an unversioned recipe's text changed: {text}");
+
+        let (made, kept) = resolve_spec(&text, DEEP_ROCK_NEEDS_CAVES).unwrap();
+        assert_eq!(made.generator, Some(DEEP_ROCK_NEEDS_CAVES));
+        assert_eq!(resolve_spec(&kept, 0).unwrap().1, kept, "a named version was not kept");
+
+        let t = load_terrain_from(vec![TerrainSource::Generate(text.clone())], None, None, DEEP_ROCK_NEEDS_CAVES).unwrap();
+        assert_eq!(read(&t.field), Some(DEEP_ROCK_NEEDS_CAVES), "the field forgot the version that made it");
+
+        // An edits-only save whose recipe names none, in a project that names
+        // none either.
+        let mut g = floptle_field::procgen::generate_planet(&PlanetFill { generator: Some(DELTA_SAVES_SINCE), ..fill.clone() });
+        g.set_spec(text);
+        let ground = g.raycast(Vec3::new(0.0, 60.0, 0.0), Vec3::NEG_Y, 60.0).unwrap();
+        g.sculpt(floptle_field::Brush::Lower, ground, 2.0, 1.0, floptle_field::BrushProfile::default());
+        let f = floptle_field::ChunkField::from_bytes(&g.to_bytes()).unwrap();
+        assert!(f.is_delta());
+        let back = whole_field(f, 0).unwrap();
+        assert_eq!(read(&back), Some(DELTA_SAVES_SINCE), "an edits-only save read as older than such saves are");
+    }
+
+    /// **A planet's impostor is the colour its ground draws, palette texture
+    /// and all.** The ball was drawn in the paint's tint alone, so a world of
+    /// a pale tint over a brown texture showed as a pale ball over brown
+    /// ground. Now each palette layer's mean colour multiplies the tint, as
+    /// the terrain shader does; a genspec body's colour without a field does
+    /// the same, and a change of palette takes every resident body's again.
+    #[test]
+    fn a_planets_impostor_is_the_colour_its_ground_draws() {
+        use floptle_field::procgen::{LayerPaint, PlanetFill};
+        let near = |a: [f32; 3], b: [f32; 3]| (0..3).all(|k| (a[k] - b[k]).abs() < 0.01);
+        // Layer 0 white, layer 1 a brown texture: slot 2 draws layer 1.
+        let brown = [0.30, 0.18, 0.08];
+        let means = vec![[1.0; 3], brown];
+        let tint = 204.0 / 255.0;
+        let want = brown.map(|m| tint * m * 1.6);
+
+        let fill = PlanetFill { seed: 2, radius: 40.0, voxel: 2.0, relief: 3.0, cave_depth: 0.0, ..Default::default() };
+        let mut field = floptle_field::procgen::generate_planet(&fill);
+        field.fill_color([0.8; 3]);
+        field.fill_texture(2);
+        let got = impostor_surface_color(&field, 40.0, &means);
+        assert!(near(got, want), "the ball is {got:?}, its ground draws {want:?}");
+        assert!(near(impostor_surface_color(&field, 40.0, &[]), [tint * 1.6; 3]), "a blank layer draws white");
+
+        let spec = PlanetFill { surface_a: LayerPaint { slot: 2, color: [0.8; 3] }, ..fill.clone() };
+        let got = genspec_impostor_color(&ron::to_string(&spec).unwrap(), &means).unwrap();
+        assert!(near(got, want), "a genspec ball is {got:?}, its ground draws {want:?}");
+
+        // sRGB mid grey is a fifth of full light, linear.
+        let grey = floptle_render::TextureData { pixels: [128u8, 128, 128, 255].repeat(16), width: 4, height: 4 };
+        assert!(near(layer_mean(&grey), [0.2159; 3]), "{:?}", layer_mean(&grey));
+
+        // A palette change takes a resident body's colour again.
+        let mut ed = crate::Editor::default();
+        let e = ed.world.spawn();
+        ed.terrains.insert(e, EditorTerrain::new(field));
+        ed.terrain_render.entry(e).or_default().impostor_color = Some([0.8; 3]);
+        ed.set_terrain_slot_means(&[grey]);
+        assert_eq!(ed.terrain_render[&e].impostor_color, None, "a palette change left the old colour");
+    }
+
+    /// **A game decides when one of its planets becomes a ball.**
+    /// `terrain.impostorAt(id, { radii = n })` switches it past `n` of its
+    /// radii; `{ pixels = n }` once its disc is smaller than that on screen. A
+    /// body with no rule keeps the sixty radii it always had; the switch was a
+    /// fixed constant before, and a world 42 to 60 radii away drew all its
+    /// chunks however small it was.
+    #[test]
+    fn a_game_decides_when_its_planet_draws_as_a_ball() {
+        let r = 50.0;
+        assert_eq!(impostor_enter_radii(None, 900.0), IMPOSTOR_RADII, "the default moved");
+        assert_eq!(impostor_enter_radii(Some(floptle_script::ImpostorRule::Radii(5.0)), 900.0), 5.0);
+        // Ten pixels at 900 px a radian: a disc of 2r is ten pixels at 180 r.
+        let px = impostor_enter_radii(Some(floptle_script::ImpostorRule::Pixels(10.0)), 900.0);
+        assert!((px - 180.0).abs() < 1e-9, "{px}");
+
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let fill = floptle_field::procgen::PlanetFill { seed: 3, radius: r as f32, voxel: 2.0, relief: 3.0, cave_depth: 0.0, ..Default::default() };
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        ed.world.insert(e, floptle_core::Matter::Terrain { id: 7, collision: Default::default() });
+        ed.world.insert(e, floptle_core::CelestialBody { body_radius: r, ..Default::default() });
+        ed.terrains.insert(e, EditorTerrain::new(floptle_field::procgen::generate_planet(&fill)));
+        let cam = DVec3::new(0.0, 0.0, 10.0 * r);
+        ed.sync_terrain_meshes(true, cam);
+        assert!(!ed.terrain_render[&e].impostor, "a world ten radii away is a ball with no rule set");
+
+        ed.terrain_impostor_rules.insert(7, floptle_script::ImpostorRule::Radii(5.0));
+        ed.sync_terrain_meshes(false, cam);
+        assert!(ed.terrain_render[&e].impostor, "a world past the radii its game set is not a ball");
+        let view_proj = Mat4::perspective_rh(1.0, 1.0, 0.5, 10000.0) * Mat4::look_at_rh(cam.as_vec3(), Vec3::ZERO, Vec3::Y);
+        let mut drawn = Vec::new();
+        push_terrain_instances(
+            &ed.terrain_render,
+            &ed.terrains,
+            &ed.world,
+            ed.raster.as_ref().unwrap(),
+            &MaterialParams::flat([0.5, 0.5, 0.5]),
+            cam,
+            view_proj,
+            ed.mesh_ids[floptle_core::Shape::Sphere as usize],
+            None,
+            &mut drawn,
+        );
+        assert_eq!(drawn.len(), 1, "a ball is one draw");
+
+        // By size on screen: the disc at ten radii is 2 / 10 of a radian.
+        let disc = 0.2 * ed.view_px_per_radian();
+        ed.terrain_impostor_rules.insert(7, floptle_script::ImpostorRule::Pixels(disc * 0.5));
+        ed.sync_terrain_meshes(false, cam);
+        assert!(!ed.terrain_render[&e].impostor, "a world twice the pixels its game set is still a ball");
+        ed.terrain_impostor_rules.insert(7, floptle_script::ImpostorRule::Pixels(disc * 2.0));
+        ed.sync_terrain_meshes(false, cam);
+        assert!(ed.terrain_render[&e].impostor, "a world half the pixels its game set is not a ball");
     }
 }

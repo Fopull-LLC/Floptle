@@ -60,6 +60,25 @@ pub(crate) struct TerrainReceipts {
     /// Edits the engine has taken and not applied yet: it applies a few
     /// milliseconds of them a frame, in order.
     pub queued: Rc<std::cell::Cell<usize>>,
+    /// The generator version a planet whose options name none is made by
+    /// (the project's; see `ScriptHost::set_terrain_generator`).
+    pub generator: Rc<std::cell::Cell<u32>>,
+    /// `terrain.impostorAt` calls since the engine last took them: a body's
+    /// terrain id and its rule, `None` to go back to the default.
+    pub impostors: ImpostorCalls,
+}
+
+/// `terrain.impostorAt` calls waiting for the engine: a terrain id and its
+/// rule, `None` for the default.
+pub(crate) type ImpostorCalls = Rc<RefCell<Vec<(u32, Option<ImpostorRule>)>>>;
+
+/// When a planet stops drawing its ground and draws as one shaded ball.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ImpostorRule {
+    /// Farther than this many of its radii from the camera.
+    Radii(f64),
+    /// Smaller on screen than this many pixels across.
+    Pixels(f64),
 }
 
 /// What a planet question comes back with.
@@ -261,7 +280,7 @@ pub(crate) fn install_terrain_api(
     receipts: TerrainReceipts,
 ) {
     let TerrainStreamShared { save_dir, lod_anchor, warm, flush, busy, paths } = stream;
-    let TerrainReceipts { yields, next_op_id, planet, queued } = receipts;
+    let TerrainReceipts { yields, next_op_id, planet, queued, generator, impostors } = receipts;
     let Ok(t) = lua.create_table() else { return };
 
     // terrain.deleteSaveDir(path) — delete a save slot's persisted terrain from
@@ -400,6 +419,43 @@ pub(crate) fn install_terrain_api(
         let (ops, queued) = (ops.clone(), queued.clone());
         if let Ok(f) = lua.create_function(move |_, ()| Ok(ops.borrow().len() + queued.get())) {
             let _ = t.set("pending", f);
+        }
+    }
+
+    // terrain.impostorAt(id, { radii = n } | { pixels = n }) — when the planet
+    // with terrain id `id` stops drawing its ground and draws as one shaded
+    // ball: past `radii` of its radii from the camera, or once it is smaller
+    // on screen than `pixels` across. With no rule it goes back to the
+    // default, sixty radii.
+    {
+        let impostors = impostors.clone();
+        if let Ok(f) = lua.create_function(move |_, (id, opts): (u32, Option<Table>)| {
+            const CALL: &str = "terrain.impostorAt";
+            let rule = match &opts {
+                None => None,
+                Some(t) => {
+                    crate::opts::check_keys(t, &["radii", "pixels"], CALL)?;
+                    let radii = t.raw_get::<Option<f64>>("radii")?;
+                    let pixels = t.raw_get::<Option<f64>>("pixels")?;
+                    match (radii, pixels) {
+                        (Some(r), None) if r.is_finite() && r >= 0.0 => Some(ImpostorRule::Radii(r)),
+                        (None, Some(p)) if p.is_finite() && p > 0.0 => Some(ImpostorRule::Pixels(p)),
+                        (Some(_), Some(_)) => {
+                            return Err(mlua::Error::runtime(format!("{CALL}: give radii or pixels, not both")));
+                        }
+                        (None, None) => None,
+                        _ => {
+                            return Err(mlua::Error::runtime(format!(
+                                "{CALL}: radii is 0 or more, pixels more than 0"
+                            )));
+                        }
+                    }
+                }
+            };
+            impostors.borrow_mut().push((id, rule));
+            Ok(())
+        }) {
+            let _ = t.set("impostorAt", f);
         }
     }
 
@@ -590,8 +646,10 @@ pub(crate) fn install_terrain_api(
         let q = generates.clone();
         let logs2 = logs.clone();
         let busy2 = busy.clone();
+        let generator = generator.clone();
         if let Ok(f) = lua.create_function(move |_, (id, opts): (u32, Option<Table>)| {
-            let fill = planet_fill_from_table(opts.as_ref())?;
+            let mut fill = planet_fill_from_table(opts.as_ref())?;
+            fill.generator.get_or_insert(generator.get());
             let mut q = q.borrow_mut();
             if q.len() >= 16 {
                 logs2.borrow_mut().push(crate::ScriptLog {
@@ -630,8 +688,11 @@ pub(crate) fn install_terrain_api(
     // the callback gets the answer in a later frame.
     {
         let planet = planet.clone();
+        let generator = generator.clone();
         if let Ok(f) = lua.create_function(move |lua, (opts, cb): (Option<Table>, Option<mlua::Function>)| {
-            let fill = planet_fill_from_table(opts.as_ref())?;
+            let mut fill = planet_fill_from_table(opts.as_ref())?;
+            // The rivers of the world this project makes from these options.
+            fill.generator.get_or_insert(generator.get());
             match cb {
                 Some(cb) => {
                     planet.borrow_mut().ask(lua, cb, move || {
@@ -653,6 +714,7 @@ pub(crate) fn install_terrain_api(
     // the script thread and the callback gets the answer in a later frame.
     {
         let planet = planet.clone();
+        let generator = generator.clone();
         if let Ok(f) = lua.create_function(move |lua, args: mlua::MultiValue| {
             let mut args = args.into_iter();
             let opts = match args.next() {
@@ -668,7 +730,8 @@ pub(crate) fn install_terrain_api(
                 (None | Some(Value::Nil), None | Some(Value::Nil)) => (None, None),
                 _ => return Err(mlua::Error::runtime("terrain.planetLakes(opts [, query] [, callback]): query is a table and callback a function")),
             };
-            let fill = planet_fill_from_table(opts.as_ref())?;
+            let mut fill = planet_fill_from_table(opts.as_ref())?;
+            fill.generator.get_or_insert(generator.get());
             if let Some(q) = &query {
                 crate::opts::check_keys(q, &["cell", "minDepth", "seaLevel"], "terrain.planetLakes")?;
             }
@@ -835,8 +898,11 @@ pub(crate) const PLANET_KEYS: &[&str] = &[
     "craterMin", "craterMax", "patchBias", "patchThr", "subsoilDepth", "strataDepth",
     "corePaint", "craterDust", "surfaceA", "surfaceB", "subsoil", "strata", "deep", "pockets",
     "seam", "iceCaps", "mountains", "warp", "plateau", "terrace", "overhangs", "ravines", "rivers",
-    "biomes", "moistureScale", "deferCaves",
+    "biomes", "moistureScale", "deferCaves", "generator", "smallBody",
 ];
+
+/// A small body's keys.
+const SMALL_BODY_KEYS: &[&str] = &["shape", "elongation", "lumpiness", "neck", "lumps"];
 
 /// The relief layers' inner keys.
 const MOUNTAIN_KEYS: &[&str] = &["height", "scale", "sharpness", "coverage", "octaves", "latitude", "latitudeEdge"];
@@ -863,7 +929,10 @@ pub(crate) fn planet_fill_from_table(
     // A misspelled `relif` therefore produces a world that is wrong and stays
     // wrong across restarts, with nothing anywhere saying which key did it.
     const CALL: &str = "terrain.generatePlanet";
-    let mut fill = PlanetFill::default();
+    // No version unless the options name one: the caller decides what an
+    // unnamed one means (the project's), and an on-node genspec written
+    // without one reads back as the same text.
+    let mut fill = PlanetFill { generator: None, ..PlanetFill::default() };
     {
         if let Some(t) = opts {
                 check_keys(t, PLANET_KEYS, CALL)?;
@@ -1085,6 +1154,48 @@ fn relief_layers_from_table(t: &Table, fill: &mut floptle_field::procgen::Planet
     }
     if let Some(v) = t.raw_get::<Option<bool>>("deferCaves").ok().flatten() {
         fill.defer_caves = v;
+    }
+    // An irregular small body instead of a ball.
+    if let Some(b) = t.raw_get::<Option<Table>>("smallBody").ok().flatten() {
+        crate::opts::check_keys(&b, SMALL_BODY_KEYS, "terrain.generatePlanet smallBody")?;
+        use floptle_field::procgen::{SmallBody, SmallBodyShape};
+        let mut body = SmallBody::default();
+        if let Some(name) = b.raw_get::<Option<String>>("shape")? {
+            body.shape = match name.as_str() {
+                "potato" => SmallBodyShape::Potato,
+                "binary" => SmallBodyShape::ContactBinary,
+                "rubble" => SmallBodyShape::Rubble,
+                other => {
+                    return Err(mlua::Error::runtime(format!(
+                        "terrain.generatePlanet: smallBody shape \"{other}\" is not one of \"potato\", \"binary\", \"rubble\""
+                    )));
+                }
+            };
+        }
+        if let Some(v) = b.raw_get::<Option<f64>>("elongation")? {
+            body.elongation = v as f32;
+        }
+        if let Some(v) = b.raw_get::<Option<f64>>("lumpiness")? {
+            body.lumpiness = v as f32;
+        }
+        if let Some(v) = b.raw_get::<Option<f64>>("neck")? {
+            body.neck = v as f32;
+        }
+        if let Some(v) = b.raw_get::<Option<u32>>("lumps")? {
+            body.lumps = v;
+        }
+        fill.small_body = Some(body);
+    }
+    // Which generator's rules to make the world by. Named, it is kept with
+    // the world; left out, the world is made by the project's.
+    if let Some(v) = t.raw_get::<Option<i64>>("generator").ok().flatten() {
+        let now = floptle_field::procgen::GENERATOR_VERSION;
+        if !(0..=i64::from(now)).contains(&v) {
+            return Err(mlua::Error::runtime(format!(
+                "terrain.generatePlanet: generator = {v}, but this engine's planet generator is version {now} (0 to {now})"
+            )));
+        }
+        fill.generator = Some(v as u32);
     }
     Ok(())
 }

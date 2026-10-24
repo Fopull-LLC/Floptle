@@ -165,6 +165,7 @@ impl Editor {
                 .collect();
             let mask =
                 crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings, &self.project_root);
+            self.set_terrain_slot_means(&layers);
             if let Some(gpu) = self.gpu.as_ref() {
                 if let Some(raymarch) = self.raymarch.as_mut() {
                     raymarch.set_terrain_textures(gpu, &layers);

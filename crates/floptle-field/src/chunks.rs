@@ -93,6 +93,10 @@ pub(crate) struct Lattice {
 }
 
 impl Lattice {
+    fn new(dist: Vec<f32>, color: Vec<[u8; 4]>) -> Self {
+        Lattice { dist, color }
+    }
+
     #[inline]
     fn at(x: usize, y: usize, z: usize) -> usize {
         (z * LATTICE_N + y) * LATTICE_N + x
@@ -112,12 +116,26 @@ impl Lattice {
         l(x0, x1, fz)
     }
 
-    /// The colour at voxel `li`: the nearest point's.
+    /// The colour at voxel `li`: that of the corner of its cell nearest the
+    /// ground, above it before below. The points are [`LATTICE_STRIDE`]
+    /// voxels apart, so the nearest one to a voxel on the surface can be
+    /// metres down, in the subsoil or the strata: a world seen from orbit
+    /// showed grey squares where its chunks were put away. A point in the air
+    /// is painted as the surface it is over.
     #[inline]
     fn color(&self, li: usize) -> [u8; 4] {
         let (x, y, z) = (li % CHUNK_U, (li / CHUNK_U) % CHUNK_U, li / (CHUNK_U * CHUNK_U));
-        let n = |v: usize| (v + LATTICE_STRIDE / 2) / LATTICE_STRIDE;
-        self.color[Self::at(n(x), n(y), n(z))]
+        let (gx, gy, gz) = (x / LATTICE_STRIDE, y / LATTICE_STRIDE, z / LATTICE_STRIDE);
+        let mut best = (f32::MAX, [0u8; 4]);
+        for k in 0..8 {
+            let i = Self::at(gx + (k & 1), gy + ((k >> 1) & 1), gz + (k >> 2));
+            let d = self.dist[i];
+            let key = if d >= 0.0 { d } else { 1e6 - d };
+            if key < best.0 {
+                best = (key, self.color[i]);
+            }
+        }
+        best.1
     }
 
     fn heap_bytes(&self) -> usize {
@@ -2013,7 +2031,7 @@ impl ChunkField {
                     }
                 }
             }
-            Made::Pending(Chunk::Lattice(std::sync::Arc::new(Lattice { dist, color })))
+            Made::Pending(Chunk::Lattice(std::sync::Arc::new(Lattice::new(dist, color))))
         });
         for (c, m) in coords.into_iter().zip(made) {
             match m {
@@ -2181,7 +2199,7 @@ impl ChunkField {
                     }
                 }
             }
-            let new = Chunk::Lattice(std::sync::Arc::new(Lattice { dist, color }));
+            let new = Chunk::Lattice(std::sync::Arc::new(Lattice::new(dist, color)));
             if let Some(old) = self.chunks.insert(c, new.clone()) {
                 self.pending.insert(c);
                 out.push(Eviction { c, old, new });

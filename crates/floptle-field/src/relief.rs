@@ -98,6 +98,10 @@ impl Layers<'_> {
         // Each layer only as far as its latitude band reaches, fading at its
         // edges; a layer with none is everywhere.
         let lat = |band: Option<[f32; 2]>, edge: f32| crate::procgen::latitude_weight(band, edge, d);
+        // A spec from before the bands takes each layer whole, by the rule it
+        // was made with: the blend below is not bit for bit the layer at a
+        // weight of one.
+        let bands = s.has(crate::procgen::LATITUDE_BANDS);
         let w = match &s.warp {
             Some(w) if w.strength != 0.0 => {
                 let q = d * w.scale;
@@ -105,30 +109,38 @@ impl Layers<'_> {
                     n.fbm(q + Vec3::splat(311.0), 3),
                     n.fbm(q + Vec3::splat(-77.0), 3),
                     n.fbm(q + Vec3::splat(19.5), 3),
-                ) * (w.strength * lat(w.latitude, w.latitude_edge))
+                ) * if bands { w.strength * lat(w.latitude, w.latitude_edge) } else { w.strength }
             }
             _ => d,
         };
         let mut h = n.fbm(w * s.bump_freq, 5) * s.relief;
         if let Some(m) = &s.mountains {
-            let k = lat(m.latitude, m.latitude_edge);
+            let k = if bands { lat(m.latitude, m.latitude_edge) } else { 1.0 };
             if k > 0.0 {
                 // Ranges where a slow mask is high, ridged peaks inside them.
                 let edge = 1.0 - m.coverage.clamp(0.0, 1.0);
                 let mask = smoothstep(edge - 0.12, edge + 0.12, 0.5 + 0.5 * n.fbm(w * m.scale * 0.3 + Vec3::splat(241.0), 3));
                 let ridges = n.ridged(w * m.scale + Vec3::splat(57.0), m.octaves.clamp(1, 8), m.sharpness.max(0.1));
-                h += m.height * mask * ridges * k;
+                h += if bands { m.height * mask * ridges * k } else { m.height * mask * ridges };
             }
         }
         if let Some(p) = &s.plateau {
-            let k = lat(p.latitude, p.latitude_edge);
-            h += (smin(h, p.height, p.smooth.max(0.01)) - h) * k;
+            if bands {
+                let k = lat(p.latitude, p.latitude_edge);
+                h += (smin(h, p.height, p.smooth.max(0.01)) - h) * k;
+            } else {
+                h = smin(h, p.height, p.smooth.max(0.01));
+            }
         }
         if let Some(t) = &s.terrace
             && t.step > 0.0
         {
-            let k = lat(t.latitude, t.latitude_edge);
-            h += (terrace(h, t.step, t.sharpness) - h) * k;
+            if bands {
+                let k = lat(t.latitude, t.latitude_edge);
+                h += (terrace(h, t.step, t.sharpness) - h) * k;
+            } else {
+                h = terrace(h, t.step, t.sharpness);
+            }
         }
         h
     }
@@ -331,7 +343,11 @@ fn trace_channels(s: &PlanetFill, layers: &Layers) -> Vec<Channel> {
     let noise = Noise::new(s.seed.wrapping_add(5));
     let mut out = Vec::new();
     if let Some(r) = &s.rivers {
-        out.extend(trace_rivers(r, s.radius, &ground, &mut rng, &noise));
+        if s.has(crate::procgen::RIVERS_FOLLOW_DRAINAGE) {
+            out.extend(trace_rivers(r, s.radius, &ground, &mut rng, &noise));
+        } else {
+            out.extend(trace_rivers_marching(r, s.radius, &ground, &mut rng, &noise));
+        }
     }
     if let Some(r) = &s.ravines {
         out.extend(trace_ravines(r, s.radius, &mut rng, &noise));
@@ -444,6 +460,58 @@ fn trace_rivers(r: &Rivers, radius: f32, ground: &(impl Fn(Vec3) -> f32 + Sync),
         }
     }
     out
+}
+
+/// Rivers as a spec from before [`crate::procgen::RIVERS_FOLLOW_DRAINAGE`]
+/// makes them, kept so its world is the world its edits were made in: from
+/// the same springs, downhill along the ground's slope (and a little
+/// meander), a step at a time, until the sea or forty steps in a row that do
+/// not go down.
+fn trace_rivers_marching(r: &Rivers, radius: f32, ground: &impl Fn(Vec3) -> f32, rng: &mut Rng, noise: &Noise) -> Vec<Channel> {
+    let mut springs: Vec<(f32, Vec3)> = (0..2048).map(|_| random_dir(rng)).map(|d| (ground(d), d)).collect();
+    springs.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let apart = (0.6 / (r.count.max(1) as f32).sqrt()).min(0.5);
+    let mut chosen: Vec<Vec3> = Vec::new();
+    for (_, d) in springs {
+        if chosen.len() >= r.count as usize {
+            break;
+        }
+        if chosen.iter().all(|c| c.dot(d) < apart.cos()) {
+            chosen.push(d);
+        }
+    }
+    let step = (r.width.max(0.5) * 1.5 / radius.max(1.0)).clamp(1e-4, 0.05);
+    let e = step * 0.5;
+    chosen
+        .into_iter()
+        .map(|mut d| {
+            let (mut points, mut widths) = (vec![d], vec![r.width * 0.5]);
+            let mut stuck = 0;
+            for k in 0..4000 {
+                let h = ground(d);
+                if h < r.sea_level {
+                    break;
+                }
+                let t1 = d.any_orthonormal_vector();
+                let t2 = d.cross(t1);
+                let g = t1 * (ground((d + t1 * e).normalize()) - ground((d - t1 * e).normalize()))
+                    + t2 * (ground((d + t2 * e).normalize()) - ground((d - t2 * e).normalize()));
+                let down = (-g).try_normalize().unwrap_or(t1);
+                let side = d.cross(down);
+                let wander = noise.fbm(d * 40.0 + Vec3::splat(k as f32 * 0.01), 2) * r.meander;
+                let next = (d + (down + side * wander).normalize_or_zero() * step).normalize();
+                stuck = if ground(next) >= h { stuck + 1 } else { 0 };
+                if stuck > 40 {
+                    break; // a basin: the river ends in a lake
+                }
+                d = next;
+                points.push(d);
+                widths.push(r.width * (0.5 + 0.5 * (k as f32 / 200.0).min(1.0)));
+            }
+            Channel { points, widths, depth: r.depth, river: true }
+        })
+        .filter(|c| c.points.len() > 4)
+        .collect()
 }
 
 /// Ravines: long meandering cuts with steep walls, laid without regard to the

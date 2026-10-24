@@ -117,6 +117,159 @@ pub struct PlanetFill {
     /// chunks: a deferred planet fills its surface shell and keeps the rest as
     /// stand-in rock, made when a dig, a body or the camera reaches it.
     pub defer_caves: bool,
+    /// Which version of the generator's rules this spec is made by; see
+    /// [`GENERATOR_VERSION`]. A spec made in code is stamped with the current
+    /// one. A spec read without it is from before versions, and is made by the
+    /// oldest rules, so ground saved under it comes back where it was;
+    /// [`PlanetFill::generator`] is the one place that is decided. Absent from
+    /// the text when unset, so an unversioned genspec reads back as the same
+    /// string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generator: Option<u32>,
+    /// An irregular small body (an asteroid, a comet's nucleus) instead of a
+    /// ball: see [`SmallBody`]. `radius` is its size; it has no cave zone and
+    /// no craters, and `relief` roughens its surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub small_body: Option<SmallBody>,
+}
+
+/// The shapes a small body comes in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SmallBodyShape {
+    /// One lumpy, stretched lump.
+    #[default]
+    Potato,
+    /// Two lobes joined at a neck, end to end along X.
+    ContactBinary,
+    /// A loose cluster of lumps, pressed together.
+    Rubble,
+}
+
+/// An irregular small body's shape, from the spec's seed and these.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct SmallBody {
+    pub shape: SmallBodyShape,
+    /// How much longer than wide, along X (1 is round, 2 twice as long).
+    pub elongation: f32,
+    /// How lumpy the surface is, 0 (smooth) to 1.
+    pub lumpiness: f32,
+    /// A contact binary's neck, 0 (pinched) to 1 (filled in).
+    pub neck: f32,
+    /// How many lumps a rubble pile is made of.
+    pub lumps: u32,
+}
+
+impl Default for SmallBody {
+    fn default() -> Self {
+        SmallBody { shape: SmallBodyShape::Potato, elongation: 1.5, lumpiness: 0.35, neck: 0.35, lumps: 8 }
+    }
+}
+
+/// A small body's shape before the surface detail: ellipsoid lobes, blended.
+#[derive(Clone, Debug)]
+pub(crate) struct SmallShape {
+    /// Each lobe's centre and half-axes.
+    lobes: Vec<(Vec3, Vec3)>,
+    /// How far lobes blend into each other where they meet.
+    blend: f32,
+    /// The lumpiness noise's reach in metres, and its scale.
+    lump: f32,
+    lump_scale: f32,
+    /// Nothing of it is farther from its centre than this.
+    pub(crate) outer: f32,
+}
+
+impl SmallShape {
+    pub(crate) fn new(b: &SmallBody, radius: f32, seed: u32) -> Self {
+        let mut rng = Rng::new(seed.wrapping_add(4271));
+        let mut f = |lo: f64, hi: f64| rng.range(lo, hi) as f32;
+        let r = radius.max(0.5);
+        let e = b.elongation.clamp(1.0, 4.0);
+        let ellipsoid = |size: f32, stretch: f32| {
+            let long = stretch.powf(2.0 / 3.0);
+            let short = stretch.powf(-1.0 / 3.0);
+            Vec3::new(size * long, size * short, size * short * 0.85)
+        };
+        let (lobes, blend) = match b.shape {
+            SmallBodyShape::Potato => (vec![(Vec3::ZERO, ellipsoid(r, e))], 0.0),
+            SmallBodyShape::ContactBinary => {
+                let (r1, r2) = (r * 0.62, r * 0.62 * f(0.7, 0.95));
+                let (a1, a2) = (ellipsoid(r1, e.sqrt()), ellipsoid(r2, e.sqrt()));
+                // End to end, overlapping by a little: the neck is where they meet.
+                let gap = (a1.x + a2.x) * 0.95;
+                let c1 = Vec3::new(-gap * a2.x / (a1.x + a2.x), 0.0, 0.0);
+                (vec![(c1, a1), (c1 + Vec3::new(gap, 0.0, 0.0), a2)], b.neck.clamp(0.0, 1.0) * r2 * 0.5)
+            }
+            SmallBodyShape::Rubble => {
+                let n = b.lumps.clamp(2, 32);
+                let stretch = Vec3::new(e.powf(2.0 / 3.0), e.powf(-1.0 / 3.0), e.powf(-1.0 / 3.0));
+                let lobes = (0..n)
+                    .map(|k| {
+                        let d = loop {
+                            let v = Vec3::new(f(-1.0, 1.0), f(-1.0, 1.0), f(-1.0, 1.0));
+                            if v.length_squared() <= 1.0 {
+                                break v;
+                            }
+                        };
+                        // The first lump sits at the middle, so the pile has one.
+                        let at = if k == 0 { Vec3::ZERO } else { d * r * 0.55 * stretch };
+                        let size = r * f(0.28, 0.48);
+                        (at, Vec3::new(size, size * f(0.75, 1.0), size * f(0.7, 1.0)))
+                    })
+                    .collect();
+                (lobes, r * 0.12)
+            }
+        };
+        let lump = b.lumpiness.clamp(0.0, 1.0) * r * 0.18;
+        let outer = lobes.iter().map(|(c, a): &(Vec3, Vec3)| c.length() + a.max_element()).fold(0.0f32, f32::max) + blend + lump;
+        SmallShape { lobes, blend, lump, lump_scale: 1.3 / r, outer }
+    }
+
+    /// The signed distance at `p`, near enough: the lobes, blended, with the
+    /// lumps on them.
+    pub(crate) fn d(&self, p: Vec3, noise: &Noise) -> f32 {
+        let mut d = f32::MAX;
+        for (c, a) in &self.lobes {
+            let q = p - *c;
+            let k0 = (q / *a).length();
+            let k1 = (q / (*a * *a)).length();
+            let e = if k1 > 1e-6 { k0 * (k0 - 1.0) / k1 } else { -a.min_element() };
+            d = if d == f32::MAX { e } else if self.blend > 0.0 { smin(d, e, self.blend) } else { d.min(e) };
+        }
+        if self.lump > 0.0 {
+            d += self.lump * noise.fbm(p * self.lump_scale + Vec3::splat(61.0), 3);
+        }
+        d
+    }
+}
+
+/// The generator's current version (see [`floptle_core::TERRAIN_GENERATOR`]).
+pub const GENERATOR_VERSION: u32 = floptle_core::TERRAIN_GENERATOR;
+
+/// The version rivers began following the drainage of the ground to the sea.
+/// Before it they marched downhill a step at a time.
+pub const RIVERS_FOLLOW_DRAINAGE: u32 = 1;
+/// The version a voxel's paint depth began counting from the ground the
+/// overhangs leave, not from the ground's height in its direction.
+pub const DEPTH_UNDER_OVERHANGS: u32 = 1;
+/// The version deep cave rock began needing a cave zone. Before it a world
+/// with `cave_depth = 0` was deep rock a hair under its ground.
+pub const DEEP_ROCK_NEEDS_CAVES: u32 = 2;
+/// The version relief layers began taking a latitude band.
+pub const LATITUDE_BANDS: u32 = 3;
+
+impl PlanetFill {
+    /// The version this spec is made by: its own, or the oldest when it has
+    /// none.
+    pub fn generator(&self) -> u32 {
+        self.generator.unwrap_or(0)
+    }
+
+    /// Does this spec get the rules of version `v`?
+    pub fn has(&self, v: u32) -> bool {
+        self.generator() >= v
+    }
 }
 
 /// Mountain ranges: `height` at the crests, ranges `coverage` (0..1) of the
@@ -314,6 +467,8 @@ impl Default for PlanetFill {
             biomes: Vec::new(),
             moisture_scale: 1.5,
             defer_caves: false,
+            generator: Some(GENERATOR_VERSION),
+            small_body: None,
         }
     }
 }
@@ -373,6 +528,8 @@ pub(crate) struct PlanetShape {
     /// The precomputed ground, for a world with relief layers.
     ground: Option<std::sync::Arc<crate::relief::Relief>>,
     overhangs: Option<Overhangs>,
+    /// A small body's shape, in place of the ball.
+    small: Option<SmallShape>,
 }
 
 impl PlanetShape {
@@ -403,7 +560,10 @@ impl PlanetShape {
 
     /// The ground with its overhangs, before the craters: negative under it.
     fn ground_with(&self, p: Vec3, bump: f32) -> f32 {
-        let mut body = p.length() - (self.radius + bump);
+        let mut body = match &self.small {
+            Some(s) => s.d(p, &self.noise) - bump,
+            None => p.length() - (self.radius + bump),
+        };
         if let Some(o) = &self.overhangs
             && o.strength != 0.0
         {
@@ -591,7 +751,10 @@ impl Planet {
         let mut rng = Rng::new(spec.seed.wrapping_add(31));
         let (radius, relief) = (spec.radius, spec.relief);
         // Impact craters: spherical dents subtracted in the fill SDF.
-        let craters: Vec<(Vec3, f32)> = (0..spec.craters)
+        // A small body has no cave zone and no craters: both are laid out
+        // round a ball.
+        let small = spec.small_body.as_ref().map(|b| SmallShape::new(b, radius, spec.seed));
+        let craters: Vec<(Vec3, f32)> = (0..if small.is_some() { 0 } else { spec.craters })
             .map(|_| {
                 let d = Vec3::new(
                     rng.range(-1.0, 1.0) as f32,
@@ -608,13 +771,14 @@ impl Planet {
             noise: Noise::new(spec.seed),
             radius,
             relief,
-            cave_depth: spec.cave_depth,
+            cave_depth: if small.is_some() { 0.0 } else { spec.cave_depth },
             core_r: spec.core_r,
             bump_freq: spec.bump_freq,
             voxel: spec.voxel.clamp(0.25, 16.0),
             craters,
             ground: crate::relief::Relief::wanted(spec).then(|| std::sync::Arc::new(crate::relief::Relief::new(spec))),
             overhangs: spec.overhangs,
+            small,
         };
         Planet { shape, spec: spec.clone() }
     }
@@ -645,7 +809,8 @@ impl Planet {
     /// little to spare. The cube a fill walks.
     pub(crate) fn extent(&self) -> f32 {
         let s = &self.shape;
-        s.radius + s.height_range().1.max(s.relief.abs()) + s.overhang_reach() + 2.0
+        let body = s.small.as_ref().map_or(s.radius, |sm| sm.outer);
+        body + s.height_range().1.max(s.relief.abs()) + s.overhang_reach() + 2.0
     }
 
     /// The colour a voxel at `p` is painted, the ground there raised `bump`.
@@ -662,7 +827,11 @@ impl Planet {
         let r = p.length();
         let dir = if r > 1e-3 { p / r } else { Vec3::X };
         let alt = (r - radius) / relief.max(1.0);
-        let depth = -self.shape.ground_with(p, bump);
+        let depth = if spec.has(DEPTH_UNDER_OVERHANGS) || self.shape.small.is_some() {
+            -self.shape.ground_with(p, bump)
+        } else {
+            (radius + bump) - r
+        };
         let vary = noise.fbm_cached(p * 0.05 + Vec3::splat(83.0), 2, &mut k.vary);
         let patch = noise.fbm_cached(dir * 9.0 + Vec3::splat(37.0), 3, &mut k.patch);
 
@@ -689,7 +858,7 @@ impl Planet {
         // Depth layers: deep cave walls → strata → subsoil. A world with no
         // cave zone has no deep cave rock: at a zone of zero, everything a
         // hair under the ground was deep rock, and no subsoil or strata showed.
-        if cave_depth > 0.0 && depth > cave_depth * 0.5 {
+        if (cave_depth > 0.0 || !spec.has(DEEP_ROCK_NEEDS_CAVES)) && depth > cave_depth * 0.5 {
             return rgba(tint(spec.deep.color, vary), spec.deep.slot);
         }
         if depth > spec.strata_depth {
@@ -806,6 +975,21 @@ impl crate::VoxelSource for Planet {
         use crate::BlockClass;
         let s = &self.shape;
         let margin = s.voxel;
+        // A small body: from the distance at the box's middle, which moves
+        // no faster than twice the distance moved (the lumps and the blends
+        // bend it), and the surface detail either way.
+        if let Some(sm) = &s.small {
+            let mid = (lo + hi) * 0.5;
+            let slack = (hi - lo).length() + s.height_range().1.max(s.relief.abs()) + s.overhang_reach();
+            let d = sm.d(mid, &s.noise);
+            return if d - slack >= band + margin {
+                BlockClass::Air
+            } else if d + slack <= -(band + margin) {
+                BlockClass::Solid
+            } else {
+                BlockClass::Mixed
+            };
+        }
         let near = Vec3::ZERO.clamp(lo, hi);
         let far = lo.abs().max(hi.abs());
         let (r_min, r_max) = (near.length(), far.length());
@@ -1393,6 +1577,8 @@ mod tests {
         f.evict(&f.chunk_coords());
         let mut r = Rng::new(3);
         let mut off = Vec::new();
+        let under = [spec.subsoil.slot, spec.strata.slot, spec.deep.slot];
+        let (mut deep, mut rays) = (0, 0);
         for _ in 0..300 {
             let d = Vec3::new(r.range(-1.0, 1.0) as f32, r.range(-1.0, 1.0) as f32, r.range(-1.0, 1.0) as f32).normalize_or_zero();
             if d == Vec3::ZERO {
@@ -1401,7 +1587,14 @@ mod tests {
             let (a, b) = (whole.raycast(d * 200.0, -d, 200.0), f.raycast(d * 200.0, -d, 200.0));
             let (Some(a), Some(b)) = (a, b) else { panic!("a ray at {d:?} missed: {a:?} {b:?}") };
             off.push((a - b).length());
+            rays += 1;
+            deep += usize::from(!under.contains(&whole.color(a)[3]) && under.contains(&f.color(b)[3]));
         }
+        // Its ground is painted as the ground is, not as the rock a few metres
+        // under it, which the nearest point of a stand-in often was: 15% of
+        // these rays read subsoil or strata. 2% do now.
+        let wrong = deep as f32 / rays as f32;
+        assert!(wrong < 0.03, "{:.0}% of the stand-ins' ground reads as the rock under it", wrong * 100.0);
         off.sort_by(f32::total_cmp);
         let (p95, worst) = (off[off.len() * 95 / 100], off[off.len() - 1]);
         assert!(p95 < spec.voxel && worst < 3.0 * spec.voxel, "the stand-ins' ground is {p95:.2} m off the real at the 95th percentile, {worst:.2} m at worst");
@@ -1552,6 +1745,7 @@ mod tests {
             craters: Vec::new(),
             ground: None,
             overhangs: None,
+            small: None,
         }
     }
 
@@ -1739,5 +1933,226 @@ mod tests {
         assert!(total > 500, "sample too small ({total})");
         let frac = seam_px as f32 / total as f32;
         assert!(frac < 0.15, "seams flood the rock: {frac:.2} of solid voxels glow");
+    }
+
+    /// A world's fingerprint: its river lines, and every voxel's distance and
+    /// paint, each folded into a hash; with how many voxels are deep rock.
+    fn fingerprint(spec: &PlanetFill) -> (usize, u64, usize, u64, u64, usize) {
+        fn fnv(h: &mut u64, x: u32) {
+            for b in x.to_le_bytes() {
+                *h = (*h ^ u64::from(b)).wrapping_mul(0x100000001b3);
+            }
+        }
+        let (mut points, mut rivers) = (0, 0xcbf29ce484222325u64);
+        for c in crate::relief::channels_of(spec) {
+            for p in &c.points {
+                points += 1;
+                for v in p.to_array() {
+                    fnv(&mut rivers, v.to_bits());
+                }
+            }
+        }
+        let f = generate_planet(spec);
+        let mut cs = f.chunk_coords();
+        cs.sort();
+        let (mut dist, mut paint, mut deep) = (0xcbf29ce484222325u64, 0xcbf29ce484222325u64, 0);
+        let (mut d, mut col) = (Vec::new(), Vec::new());
+        for c in &cs {
+            f.gather([c[0] * 32, c[1] * 32, c[2] * 32], 32, &mut d, &mut col);
+            for v in &d {
+                fnv(&mut dist, v.to_bits());
+            }
+            for k in &col {
+                fnv(&mut paint, u32::from_le_bytes(*k));
+                deep += usize::from(k[3] == spec.deep.slot);
+            }
+        }
+        (points, rivers, cs.len(), dist, paint, deep)
+    }
+
+    /// **A spec from an older generator makes the world it made then, voxel
+    /// for voxel; a new one gets the new rules.** The numbers are the
+    /// fingerprint the 0.117.0-rc2 generator gave this spec, built from that
+    /// release's source: its rivers marching downhill, its paint depth taken
+    /// from the ground's height, deep rock a hair under the ground of a world
+    /// with no cave zone, and every relief layer whole. Ground saved as edits
+    /// is laid over this, so a shift here moves the ground under them.
+    #[test]
+    fn an_old_spec_makes_the_world_it_made_then() {
+        let spec = |generator| PlanetFill {
+            seed: 31,
+            radius: 60.0,
+            voxel: 1.5,
+            relief: 5.0,
+            cave_depth: 0.0,
+            core_r: 0.0,
+            mountains: Some(Mountains::default()),
+            warp: Some(Warp { strength: 0.2, scale: 2.0, ..Default::default() }),
+            plateau: Some(Plateau::default()),
+            terrace: Some(Terrace::default()),
+            overhangs: Some(Overhangs::default()),
+            rivers: Some(Rivers { count: 3, ..Default::default() }),
+            generator,
+            ..PlanetFill::default()
+        };
+        const RC2: (usize, u64, usize, u64, u64, usize) =
+            (1630, 0x932b54a136b3b8d4, 46, 0xc74ccbb5cd31a222, 0xfd997b1d5fa633cb, 309795);
+        let old = fingerprint(&spec(Some(0)));
+        assert_eq!(old, RC2, "an unversioned world is no longer the world it was");
+        assert_eq!(spec(None).generator(), 0, "a spec with no version is not the oldest");
+
+        let new = fingerprint(&spec(Some(GENERATOR_VERSION)));
+        assert_ne!(new.1, RC2.1, "a new spec's rivers still march");
+        assert_eq!(new.5, 0, "a new world with no cave zone still has deep rock");
+        assert!(RC2.5 > 0);
+        assert_eq!(PlanetFill::default().generator(), GENERATOR_VERSION, "a spec made today is not stamped today");
+    }
+
+    fn rock(shape: SmallBodyShape, seed: u32) -> PlanetFill {
+        PlanetFill {
+            seed,
+            radius: 30.0,
+            voxel: 1.0,
+            relief: 0.8,
+            small_body: Some(SmallBody { shape, elongation: 1.8, ..SmallBody::default() }),
+            ..PlanetFill::default()
+        }
+    }
+
+    /// Every chunk the classifier settles as open air or solid rock is what
+    /// sampling every voxel of it makes.
+    struct Unclassified<'a>(&'a Planet);
+    impl crate::VoxelSource for Unclassified<'_> {
+        type Scratch = Caches;
+        fn classify(&self, _: Vec3, _: Vec3, _: f32) -> crate::BlockClass {
+            crate::BlockClass::Mixed
+        }
+        fn sample(&self, p: Vec3, band: f32, k: &mut Caches) -> Option<(f32, [u8; 4])> {
+            self.0.sample(p, band, k)
+        }
+        fn solid_color(&self, p: Vec3, k: &mut Caches) -> [u8; 4] {
+            self.0.solid_color(p, k)
+        }
+    }
+
+    /// **A small body is made from its seed, the same every time, and the
+    /// shortcuts that make it cheap change none of it.** Each shape twice from
+    /// one seed is the same world voxel for voxel, another seed is another
+    /// rock, and the fill that settles open air and solid rock a block at a
+    /// time makes what sampling every voxel makes.
+    #[test]
+    fn a_small_body_is_its_seed_exactly() {
+        for shape in [SmallBodyShape::Potato, SmallBodyShape::ContactBinary, SmallBodyShape::Rubble] {
+            let spec = rock(shape, 11);
+            let a = fingerprint(&spec);
+            assert_eq!(a, fingerprint(&spec), "{shape:?} came out two ways from one seed");
+            assert_ne!(a.3, fingerprint(&rock(shape, 12)).3, "{shape:?}: another seed made the same rock");
+            assert_eq!(a.5, 0, "{shape:?} has deep cave rock: a small body has no cave zone");
+
+            let planet = Planet::new(&spec);
+            let ext = planet.extent();
+            let quick = generate_planet(&spec);
+            let slow = ChunkField::generate(spec.voxel, Vec3::splat(-ext), Vec3::splat(ext), &Unclassified(&planet));
+            let mut coords = quick.all_chunk_coords();
+            coords.extend(slow.all_chunk_coords());
+            coords.sort();
+            coords.dedup();
+            identical(&quick, &slow, &coords).map_err(|e| format!("{shape:?}: the classifier settled a block wrongly: {e}")).unwrap();
+        }
+    }
+
+    /// **A rock far from anyone holds only stand-ins, and what it makes on
+    /// approach is the rock.** Made for a player a long way off, none of it
+    /// is made exactly and it keeps a small part of the memory; brought near,
+    /// each chunk comes out as the whole fill makes it.
+    #[test]
+    fn a_far_rock_holds_only_stand_ins() {
+        let spec = rock(SmallBodyShape::ContactBinary, 5);
+        let whole = generate_planet(&spec);
+        let mut far = generate_planet_near(&spec, Vec3::splat(1.0e5), 10.0);
+        let coords = far.chunk_coords();
+        assert!(!coords.is_empty());
+        assert_eq!(far.evicted_count(), coords.len(), "a far rock made chunks exactly");
+        assert!(far.memory_bytes() * 3 < whole.memory_bytes() * 2, "{} bytes of stand-ins against {} whole", far.memory_bytes(), whole.memory_bytes());
+        far.realize(&coords);
+        assert_eq!(far.evicted_count(), 0);
+        identical(&whole, &far, &whole.chunk_coords()).map_err(|e| format!("a rock made on approach is not the rock: {e}")).unwrap();
+    }
+
+    /// The highest ground over each point of the X axis, from above.
+    fn profile(f: &ChunkField, half: f32) -> Vec<f32> {
+        (0..=60)
+            .map(|k| {
+                let x = -half + 2.0 * half * k as f32 / 60.0;
+                f.raycast(Vec3::new(x, 200.0, 0.0), Vec3::NEG_Y, 400.0).map_or(f32::NEG_INFINITY, |h| h.y)
+            })
+            .collect()
+    }
+
+    /// **A small body is the shape its parameters say.** A contact binary has
+    /// two lobes: seen from above along its axis the ground rises over each
+    /// and dips at the neck between. A potato has one, and is as much longer
+    /// than wide as its elongation asks. A rubble pile is lumpier than a
+    /// potato of the same size.
+    #[test]
+    fn a_small_body_is_the_shape_its_parameters_say() {
+        let make = |shape| generate_planet(&rock(shape, 3));
+        let humps = |p: &[f32]| {
+            let mut tops = Vec::new();
+            for i in 1..p.len() - 1 {
+                if p[i].is_finite() && p[i] > p[i - 1] && p[i] >= p[i + 1] {
+                    tops.push((i, p[i]));
+                }
+            }
+            tops
+        };
+        // The two highest humps, and the lowest ground between them.
+        let lobes = |p: &[f32]| {
+            let mut tops = humps(p);
+            tops.sort_by(|a, b| b.1.total_cmp(&a.1));
+            if tops.len() < 2 {
+                return (tops[0].1, tops[0].1, 0);
+            }
+            let (a, b) = (tops[0].0.min(tops[1].0), tops[0].0.max(tops[1].0));
+            let dip = p[a..=b].iter().copied().fold(f32::MAX, f32::min);
+            (tops[0].1.min(tops[1].1), dip, b - a)
+        };
+        let binary = profile(&make(SmallBodyShape::ContactBinary), 60.0);
+        let (low_top, neck, apart) = lobes(&binary);
+        assert!(neck < low_top * 0.75 && apart > 15, "no neck between two lobes: tops {low_top:.1} m, neck {neck:.1} m, {apart} steps apart");
+
+        let potato = make(SmallBodyShape::Potato);
+        let reach = |d: Vec3| potato.raycast(d * 200.0, -d, 400.0).map_or(0.0, |h| h.length());
+        let (long, wide) = (reach(Vec3::X).max(reach(Vec3::NEG_X)), reach(Vec3::Y).max(reach(Vec3::NEG_Y)));
+        let stretch = long / wide;
+        assert!((stretch - 1.8).abs() < 0.45, "a potato asked to be 1.8 times as long as wide is {stretch:.2}");
+        let p = profile(&potato, 60.0);
+        let (top, dip, _) = lobes(&p);
+        assert!(dip > top * 0.8, "a potato has a neck: tops {top:.1}, dip {dip:.1}");
+
+        // How much the ground's distance from the middle changes between
+        // neighbouring directions, against that distance: crevices between
+        // lumps.
+        let rough = |f: &ChunkField| {
+            let n = 1500;
+            let dirs: Vec<Vec3> = (0..n)
+                .map(|k| {
+                    let y = 1.0 - 2.0 * (k as f32 + 0.5) / n as f32;
+                    let a = k as f32 * 2.399_963;
+                    let r = (1.0 - y * y).sqrt();
+                    Vec3::new(r * a.cos(), y, r * a.sin())
+                })
+                .collect();
+            let reach: Vec<f32> = dirs.iter().map(|d| f.raycast(*d * 200.0, -*d, 400.0).map_or(0.0, |h| h.length())).collect();
+            let mean = reach.iter().sum::<f32>() / n as f32;
+            let mut change = 0.0;
+            for (k, d) in dirs.iter().enumerate() {
+                let next = (0..n).filter(|&j| j != k).max_by(|&a, &b| d.dot(dirs[a]).total_cmp(&d.dot(dirs[b]))).unwrap();
+                change += (reach[k] - reach[next]).abs();
+            }
+            change / n as f32 / mean
+        };
+        let rubble = make(SmallBodyShape::Rubble);
+        assert!(rough(&rubble) > rough(&potato) * 1.25, "a rubble pile is no lumpier than a potato: {:.3} against {:.3}", rough(&rubble), rough(&potato));
     }
 }
