@@ -37,6 +37,10 @@ impl crate::Editor {
             while Instant::now() < slot {
                 std::hint::spin_loop();
             }
+            // Named inside `untimed`: holding to the cap is not the engine
+            // being slow, and `perf.pacing()` says `frameCap` from it.
+            let ms = now.elapsed().as_secs_f32() * 1000.0;
+            self.script_host.profile().borrow_mut().record_wait("frameCap", ms);
         }
         self.frame_next = Some(slot + period);
     }

@@ -302,6 +302,48 @@ pub struct PhysicsWorld {
     /// Hinges, welds, ropes, springs, sliders and wheels between bodies,
     /// solved after every body has moved. See [`crate::joints`].
     pub joints: Vec<crate::joints::JointRt>,
+    /// Where the steps' time went, while somebody asks: `None` (the default)
+    /// times nothing, so a step costs one branch per stage for it. See
+    /// [`Self::time_steps`].
+    timing: Option<Box<StepTiming>>,
+}
+
+/// Where the time of every step since the last [`PhysicsWorld::take_timing`]
+/// went, by stage and by owner.
+///
+/// "physics" alone does not say whether a slow tick was the level (bodies and
+/// assemblies resting on and sliding over colliders), a fast mover's sweeps,
+/// a chain of joints or a pile of movers pushing each other; these are the
+/// stages a step runs, in order, and the owners whose own moves cost the most.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StepTiming {
+    /// Steps folded in.
+    pub steps: u32,
+    /// Rebuilding the index over the colliders.
+    pub broadphase_ms: f32,
+    /// Bodies and assemblies moving against the static world: gravity,
+    /// water, contacts with colliders and kinematic hulls. Sweeps excluded.
+    pub static_ms: f32,
+    /// Fast movers swept along their move so they stop at first touch.
+    pub sweeps_ms: f32,
+    /// Hinges, welds, ropes, springs, sliders and wheels.
+    pub joints_ms: f32,
+    /// Assemblies and bodies against each other.
+    pub pairs_ms: f32,
+    /// The periodic re-check of what sleepers rest on.
+    pub sleep_ms: f32,
+    /// Each owner's own move (a body's node, an assembly's root, by entity
+    /// index), sweeps included: `(owner, ms)`, unordered.
+    pub owners: Vec<(u32, f32)>,
+}
+
+impl StepTiming {
+    fn charge(&mut self, owner: u32, ms: f32) {
+        match self.owners.iter_mut().find(|(o, _)| *o == owner) {
+            Some((_, v)) => *v += ms,
+            None => self.owners.push((owner, ms)),
+        }
+    }
 }
 
 /// Two owners (a body's node or an assembly's root, by entity index) the pair
@@ -325,6 +367,7 @@ impl Default for PhysicsWorld {
             matrix: [!0u32; 32],
             ignored_pairs: Vec::new(),
             joints: Vec::new(),
+            timing: None,
             kin_hulls: Vec::new(),
             kin_contacts: Vec::new(),
             compounds: Vec::new(),
@@ -1429,41 +1472,91 @@ impl PhysicsWorld {
         }
     }
 
+    /// Start or stop timing the steps by stage and by owner
+    /// ([`StepTiming`]). Off by default; stopping drops what was collected.
+    pub fn time_steps(&mut self, on: bool) {
+        match (on, self.timing.is_some()) {
+            (true, false) => self.timing = Some(Box::default()),
+            (false, true) => self.timing = None,
+            _ => {}
+        }
+    }
+
+    /// What the steps since the last call cost, and start again; `None`
+    /// while timing is off.
+    pub fn take_timing(&mut self) -> Option<StepTiming> {
+        self.timing.as_mut().map(|t| std::mem::take(&mut **t))
+    }
+
+    /// Milliseconds since `t`, when timing.
+    fn lap(t: Option<floptle_core::time::Instant>) -> f32 {
+        t.map(|t| t.elapsed().as_secs_f32() * 1000.0).unwrap_or(0.0)
+    }
+
     pub fn step(&mut self, dt: f32) {
         let dt = dt.clamp(0.0, 0.1); // guard against a huge stalled frame
+        let timed = self.timing.is_some();
+        let clock = || timed.then(floptle_core::time::Instant::now);
+        let t = clock();
         self.reindex_colliders();
+        let broadphase = Self::lap(t);
         self.contacts.clear();
         self.kin_contacts.clear();
         self.compound_contacts.clear();
+        let sweeps0 = self.timing.as_ref().map(|t| t.sweeps_ms).unwrap_or(0.0);
+        let t_moves = clock();
         for bi in 0..self.bodies.len() {
             // Driver-stepped bodies advance through `Sim::step_body_tick`
             // instead — see `Body::driven`.
             if !self.bodies[bi].driven {
+                let t = clock();
                 self.step_body(bi, dt);
+                if let Some(tm) = self.timing.as_mut() {
+                    tm.charge(self.bodies[bi].owner, Self::lap(t));
+                }
             }
         }
         for ci in 0..self.compounds.len() {
+            let t = clock();
             self.step_compound(ci, dt);
+            if let Some(tm) = self.timing.as_mut() {
+                tm.charge(self.compounds[ci].owner, Self::lap(t));
+            }
         }
+        let moves = Self::lap(t_moves);
         // Joints after the bodies have moved and before they are pushed apart,
         // so a hinged arm is held to its shoulder and still kept out of a wall.
+        let t = clock();
         self.solve_joints(dt);
+        let joints = Self::lap(t);
         // Compounds against each other and against bodies, once everything
         // has made its own move. Never moves a driven body; see `pairs.rs`.
+        let t = clock();
         self.resolve_pairs();
+        let pairs = Self::lap(t);
         self.age_ignored_pairs(dt);
         // Safety net for geometry that changed in place under a sleeping
         // body — terrain sculpting, a map edit — which `set_colliders`
         // cannot see because nothing replaced the collider list.
         // Only sleeping bodies are checked, at most once
         // per `SLEEP_REVALIDATE_INTERVAL`.
+        let t = clock();
         self.resting_check_elapsed += dt;
         if self.resting_check_elapsed >= SLEEP_REVALIDATE_INTERVAL {
             self.resting_check_elapsed = 0.0;
             self.revalidate_sleeping_bodies();
             self.revalidate_sleeping_compounds();
         }
+        let sleep = Self::lap(t);
         self.index_fresh = false;
+        if let Some(tm) = self.timing.as_mut() {
+            tm.steps += 1;
+            tm.broadphase_ms += broadphase;
+            tm.static_ms += (moves - (tm.sweeps_ms - sweeps0)).max(0.0);
+            tm.joints_ms += joints;
+            tm.pairs_ms += pairs;
+            tm.sleep_ms += sleep;
+        }
     }
 
     /// Let two owners pass through each other, a body or an assembly on each
@@ -1683,7 +1776,11 @@ impl PhysicsWorld {
         // where the field has a usable normal, and is thrown back out.
         // Spin counts: a corner of a tumbling craft travels as surely as its
         // centre does.
+        let t = self.timing.is_some().then(floptle_core::time::Instant::now);
         let f = self.sweep_compound(ci, dt);
+        if let Some(tm) = self.timing.as_mut() {
+            tm.sweeps_ms += Self::lap(t);
+        }
         {
             let c = &mut self.compounds[ci];
 
@@ -3096,7 +3193,11 @@ impl PhysicsWorld {
                 self.rub(bi, (-g.dot(n)).max(0.0) * dt, n);
             }
             let v = self.bodies[bi].vel;
+            let t = self.timing.is_some().then(floptle_core::time::Instant::now);
             let swept = self.swept_move(bi, v * dt);
+            if let Some(tm) = self.timing.as_mut() {
+                tm.sweeps_ms += Self::lap(t);
+            }
             // Whether it stood on something last step, and on what — what
             // lets the feet pull a body down onto ground it is walking over
             // rather than only pushing it up out of ground it is walking into.
@@ -5812,5 +5913,51 @@ mod narrowed_sweep_tests {
         let (ignored, kept) = sweep_all(&hulls, &[7], false);
         assert_eq!(kept, 0, "an ignored craft still had {kept} parts marched");
         assert!(ignored.iter().all(Option::is_none), "a cast that ignores the craft hit something");
+    }
+}
+
+#[cfg(test)]
+mod step_timing_tests {
+    use super::*;
+    use crate::shapes::SphereShape;
+
+    /// **A step names its stages and its costliest owner, and costs nothing
+    /// while nobody asks.** One body sits in a heap of 400 overlapping
+    /// spheres, another falls through empty space far away; the heap's body
+    /// is the costliest owner by a wide margin, and every stage is reported
+    /// for every step. Off, there is nothing to take.
+    ///
+    /// Compared with each other rather than against a time, so a loaded
+    /// machine slows both alike.
+    #[test]
+    fn a_step_names_its_stages_and_its_costliest_owner() {
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        for i in 0..400 {
+            let a = i as f32 * 0.37;
+            w.add_collider(Box::new(SphereShape { center: Vec3::new(a.cos() * 0.4, a.sin() * 0.4, (i % 7) as f32 * 0.1), radius: 1.0 }));
+        }
+        let mut heavy = Body::sphere(Vec3::ZERO, 0.5);
+        heavy.owner = 7;
+        let mut light = Body::sphere(Vec3::new(5000.0, 0.0, 0.0), 0.5);
+        light.owner = 9;
+        w.add_body(heavy);
+        w.add_body(light);
+        w.step(1.0 / 120.0);
+        assert_eq!(w.take_timing(), None, "timing while nobody asked for it");
+        w.time_steps(true);
+        for _ in 0..20 {
+            w.step(1.0 / 120.0);
+        }
+        let t = w.take_timing().expect("timing is on");
+        assert_eq!(t.steps, 20);
+        let ms = |o: u32| t.owners.iter().find(|(x, _)| *x == o).map(|(_, ms)| *ms).unwrap_or(0.0);
+        assert!(ms(7) > 0.0 && ms(9) > 0.0, "both owners are charged: {:?}", t.owners);
+        assert!(ms(7) > ms(9) * 5.0, "the body in the heap ({}) should cost far more than the one alone ({})", ms(7), ms(9));
+        assert!(t.static_ms >= ms(7) * 0.5, "the static stage holds the heap's contacts: {t:?}");
+        assert!(t.broadphase_ms >= 0.0 && t.joints_ms >= 0.0 && t.pairs_ms >= 0.0);
+        // A take empties it; the next step starts again.
+        assert_eq!(w.take_timing().map(|t| t.steps), Some(0));
+        w.time_steps(false);
+        assert_eq!(w.take_timing(), None);
     }
 }

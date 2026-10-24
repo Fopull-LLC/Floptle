@@ -282,6 +282,90 @@ A hitch whose time is in `untimed` happened outside everything the engine times:
 another program, the OS, or work not yet given a bucket. `perf.ms("other")`
 still answers `untimed`, its old name.
 
+Where the engine knows what the time was, `untimed` says so in the frame's
+parts: `outsideFrame` (between two frames: the window system's events, and the
+OS or compositor not running or not asking for the game), `frameCap` (holding to
+`app.setFrameCap`), `sceneLoad` (a scene swap) and `physicsRebuild`. What is
+left over is still unnamed.
+
+### Every frame, exactly
+
+`perf.ms` is a rolling average and `perf.worstMs` the worst of the last second.
+A benchmark wants each frame's own numbers, including the frames its probe did
+not see (a scene swap, a load), so `perf.frames(n)` returns the last `n` of the
+300 the engine keeps, oldest first, unsmoothed:
+
+```lua
+for _, f in ipairs(perf.frames(60)) do
+  if f.ms > 33 then
+    log(string.format("frame %d: %.1f ms, physics %.1f, held by %s",
+      f.frame, f.ms, f.buckets.physics or 0, f.paced or "the engine"))
+  end
+end
+```
+
+Each record has `buckets`, `parts`, `scripts` (hook time, costliest first),
+`calls` (engine calls each script made), `samples` (the sampler's hottest
+lines), `bodies` (the costliest physics bodies and assemblies), `counts` and
+`paced`.
+
+A frame is kept in `perf.hitches()` once it takes 50 ms; `perf.hitchThreshold(33)`
+catches every frame that makes a 30 fps game miss, `perf.hitchThreshold(20)` one
+aiming at 60.
+
+### Inside physics and render
+
+`perf.parts()` splits the two biggest buckets. Physics: `physicsBroadphase`
+(indexing the colliders), `physicsStatic` (bodies and assemblies against the
+static world), `physicsSweeps` (fast movers swept to their first touch),
+`physicsJoints`, `physicsPairs` (movers against each other) and `physicsSleep`.
+`perf.bodies(5)` names the five bodies and assemblies whose own moves cost the
+most, by node name. Render: `renderCull` (the on-screen test), `renderInstancing`
+(the scene walked into instances) and `renderPasses` (the GPU passes encoded
+and submitted, uploads included); `perf.counts().draws` and `unbatched` are the
+batch counts.
+
+### Which line: the sampler
+
+`perf.scripts()` says which script; the sampler says which line.
+
+```lua
+perf.enable(true)
+perf.sampleScripts(true)        -- every 0.25 ms of script time; or (true, 0.1)
+-- …later:
+for i, s in ipairs(perf.samples()) do
+  if i > 5 then break end
+  log(string.format("%s:%d in %s — %.1f ms", s.script, s.line, s.fn, s.ms))
+end
+```
+
+Each sample carries the wall time since the one before, so a long engine call
+(a sweep, a terrain query) is charged to the line that made it. Every frame
+record and every hitch keeps its ten hottest lines, so a 559 ms frame says the
+function it was in. The sampler makes a tight loop slower while it runs, which
+is why it is off until asked for.
+
+`perf.scripts()` rows also carry `engineMs` and `calls`: last frame's raycasts
+and sweeps made from that script, so "27 ms, 25 of it in `spherecast`" is one
+read.
+
+### Is it the display?
+
+A frame spent waiting for the display is not the game being slow, and a window
+a compositor paces at 20 fps (hidden, or on a locked session) looks exactly
+like a slow game to anything that only measures frames. `perf.pacing()` says
+which it is:
+
+```lua
+local p = perf.pacing()
+-- p.presentMode "fifo", p.refreshHz 60, p.limitedBy "compositor", p.pacedFrames 58 of p.frames 60
+if p.limitedBy == "compositor" then log("the window is being paced; these numbers are not the game") end
+```
+
+`limitedBy` is `display` (vsync, about one refresh), `compositor` (fewer frames
+than the display shows), `frameCap`, `gpu`, or nil when the engine's own work
+filled the frame.
+
 ### GPU time
 
 The buckets above are the CPU's side of a frame. The GPU's side is

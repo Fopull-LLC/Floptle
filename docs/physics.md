@@ -327,6 +327,37 @@ placed millions of units out simulates as precisely as content at the origin.
 
 Stop (F1) drops the sim and restores the scene to its pre-Play state.
 
+### When the ticks get expensive
+
+A frame runs every fixed tick its time has banked. While a tick is cheap that is
+one or two. While it is expensive, every long frame banks more ticks for the next
+one, and two settings in **Project Settings → Game** decide what happens:
+
+- **Tick overload** (`tick_overload` in `project.ron`) covers a tick that costs
+  *more* than the time it simulates. `SlowMotion`, the default, runs one tick a
+  frame until the cost comes down; `CatchUp` runs every banked tick and lets the
+  frame rate fall as far as it has to.
+- **Catch-up budget** (`tick_budget_ms`) covers a tick that costs a little *less*
+  than its slice and still compounds. Two 14 ms ticks make a 30 ms frame, which
+  banks two more, and the game settles at a few frames a second without ever
+  being overloaded. With a budget, a frame runs another tick only while the
+  ticks so far plus one more fit inside it (the first always runs), and drops the
+  time that does not fit.
+
+What a budget costs: while the ticks are expensive the game runs **slower than
+real time**, the way slow motion does, and the dropped time is not made up
+afterwards. Physics and `fixedUpdate` see fewer ticks per second of wall time;
+`time` on the tick still keeps pace with `update`'s. Off (`0`, or absent) runs
+every banked tick, which is what every project made before the setting did.
+
+A networked session ignores both and always catches up, because its clock is
+shared with the other machines and running slow would desync it.
+
+`perf.parts()` names the stages of a physics tick (`physicsBroadphase`,
+`physicsStatic`, `physicsSweeps`, `physicsJoints`, `physicsPairs`), and
+`perf.bodies(n)` the assemblies and bodies that cost the most, so a game can see
+*why* its ticks are expensive.
+
 ### What it costs as a scene grows
 
 Depenetration used to test **every body against every collider**, twice per tick.

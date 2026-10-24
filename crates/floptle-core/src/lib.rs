@@ -67,7 +67,7 @@ pub use tile::{
 };
 pub use script::{ScriptInst, Scripts};
 pub use origin::FloatingOrigin;
-pub use time::{FixedTimestep, LoadChange, OverloadPolicy, Time, TickLoad};
+pub use time::{within_tick_budget, FixedTimestep, LoadChange, OverloadPolicy, Time, TickLoad};
 pub use transform::Transform;
 
 /// Engine-wide version string, surfaced in the editor title bar and crash logs.

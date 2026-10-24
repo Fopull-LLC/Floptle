@@ -130,8 +130,167 @@ impl Bucket {
 
 /// A frame that takes this many milliseconds or more, by the time between
 /// frames or by its buckets, is a hitch, and is kept for
-/// [`FrameProfile::take_hitches`].
+/// [`FrameProfile::take_hitches`]. The default: a game aiming at 30 or 60 fps
+/// lowers it with [`FrameProfile::set_hitch_threshold`] (`perf.hitchThreshold`).
 pub const HITCH_MS: f32 = 50.0;
+/// How many frames [`FrameProfile::recent_frames`] (`perf.frames(n)`) can look
+/// back: five seconds at 60 fps.
+pub const FRAME_RING: usize = 300;
+/// How many sampled lines a frame record keeps, costliest first.
+pub const FRAME_SAMPLES: usize = 10;
+/// How many assemblies and bodies a frame record keeps, costliest first.
+pub const FRAME_BODIES: usize = 16;
+/// The most distinct lines the sampler holds in one frame or between two reads
+/// of [`FrameProfile::take_samples`]; past that, new lines are folded into one
+/// row named `(other)`, so a script with thousands of hot lines cannot grow
+/// the profile without bound.
+pub const MAX_SAMPLE_LINES: usize = 512;
+
+/// Engine calls one script made in a frame: `n` calls of `call` that took
+/// `ms` between them. A part of that script's own time, not beside it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EngineCall {
+    /// The script that made the calls, by file name.
+    pub script: String,
+    /// The binding: `raycast`, `spherecast`, …
+    pub call: &'static str,
+    pub n: u64,
+    pub ms: f32,
+}
+
+/// One line the script sampler landed on, and the time that went to it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sample {
+    /// The script, by file name.
+    pub script: String,
+    /// The function the line is in, or `?` for a chunk's main body or an
+    /// anonymous function.
+    pub func: String,
+    pub line: u32,
+    /// Samples that landed here.
+    pub n: u32,
+    /// The wall time those samples stood for: each sample carries the time
+    /// since the one before it, so an engine call that ran long is charged to
+    /// the line that made it.
+    pub ms: f32,
+}
+
+/// One frame, exactly, as `perf.frames(n)` returns it: no smoothing.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FrameRecord {
+    /// Which frame, counted since collection started.
+    pub frame: u64,
+    /// The buckets added up, `untimed` included: the time from the end of the
+    /// frame before to the end of this one.
+    pub ms: f32,
+    /// Every bucket that spent anything, in [`Bucket::ALL`] order.
+    pub buckets: Vec<(Bucket, f32)>,
+    /// The named parts, in the order they were first reported.
+    pub parts: Vec<(&'static str, f32)>,
+    /// Each script's hook time this frame, costliest first.
+    pub scripts: Vec<(String, f32)>,
+    /// The engine calls each script made, costliest first.
+    pub calls: Vec<EngineCall>,
+    /// The hottest sampled lines, costliest first, at most [`FRAME_SAMPLES`];
+    /// empty unless the sampler is on.
+    pub samples: Vec<Sample>,
+    /// The costliest physics assemblies and bodies, by node name, at most
+    /// [`FRAME_BODIES`].
+    pub bodies: Vec<(String, f32)>,
+    pub counts: Counts,
+    /// What held the frame's rate, when it was not the engine's own work:
+    /// `display` (vsync), `compositor` (a window system pacing the window
+    /// slower than the display, as a hidden or locked session does),
+    /// `frameCap` (`app.setFrameCap`) or `gpu`. See [`pacing_cause`].
+    pub paced: Option<&'static str>,
+}
+
+impl FrameRecord {
+    /// One bucket's milliseconds this frame, zero when it spent nothing.
+    pub fn bucket(&self, b: Bucket) -> f32 {
+        self.buckets.iter().find(|(x, _)| *x == b).map(|(_, ms)| *ms).unwrap_or(0.0)
+    }
+
+    /// One part's milliseconds this frame, zero when it did not run.
+    pub fn part(&self, name: &str) -> f32 {
+        self.parts.iter().find(|(p, _)| *p == name).map(|(_, ms)| *ms).unwrap_or(0.0)
+    }
+}
+
+/// How the frame is shown, as the driver set it up: what
+/// [`FrameProfile::pacing`] reports beside its verdict.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PacingSetup {
+    /// The swapchain's present mode: `fifo`, `fifoRelaxed`, `mailbox`,
+    /// `immediate`, or `none` when nothing presents (a headless run).
+    pub present_mode: &'static str,
+    /// Whether that mode waits for the display.
+    pub vsync: bool,
+    /// The display's refresh rate, 0 when unknown.
+    pub refresh_hz: f32,
+    /// `app.setFrameCap`, 0 when off.
+    pub frame_cap: f32,
+}
+
+/// What the frame's pacing looked like, last frame and recently.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Pacing {
+    pub setup: PacingSetup,
+    /// The last frame, end to end.
+    pub frame_ms: f32,
+    /// …of which waiting for a swapchain image and presenting it.
+    pub wait_ms: f32,
+    /// The GPU's own time for the latest frame it timed, if any.
+    pub gpu_ms: Option<f32>,
+    /// What held the last frame, if anything did ([`pacing_cause`]).
+    pub limited_by: Option<&'static str>,
+    /// Of the last [`WINDOW`] frames, how many something other than the
+    /// engine's own work held.
+    pub paced_frames: usize,
+    /// …out of this many.
+    pub frames: usize,
+}
+
+/// What held a frame to its length, when the engine's own work did not.
+///
+/// A frame mostly spent waiting for a swapchain image is not slow because of
+/// anything the game did. Waiting about one refresh under a vsync mode is the
+/// `display`; waiting longer than one refresh with a GPU that finished early
+/// (or that cannot say) is a `compositor` handing out fewer frames than the
+/// display shows, which is what a hidden window or a locked session looks
+/// like; a GPU whose own time fills the frame is `gpu`; a frame cap's sleep is
+/// `frameCap`. A frame whose waits are under 40% of it was the engine's work,
+/// and gets `None`.
+pub fn pacing_cause(
+    frame_ms: f32,
+    wait_ms: f32,
+    cap_wait_ms: f32,
+    gpu_ms: Option<f32>,
+    refresh_ms: f32,
+    vsync: bool,
+) -> Option<&'static str> {
+    if frame_ms <= 0.0 {
+        return None;
+    }
+    if cap_wait_ms >= 0.4 * frame_ms {
+        return Some("frameCap");
+    }
+    if wait_ms < 0.4 * frame_ms {
+        return None;
+    }
+    if gpu_ms.is_some_and(|g| g >= 0.7 * frame_ms) {
+        return Some("gpu");
+    }
+    if !vsync {
+        // Without vsync a wait for an image is the GPU still drawing, unless
+        // the GPU says it finished early.
+        return Some(if gpu_ms.is_some() { "compositor" } else { "gpu" });
+    }
+    if refresh_ms > 0.0 && frame_ms <= 1.25 * refresh_ms {
+        return Some("display");
+    }
+    Some("compositor")
+}
 /// The most hitches kept between two reads; past that the oldest go.
 pub const MAX_HITCHES: usize = 64;
 
@@ -152,6 +311,14 @@ pub struct Hitch {
     /// the work it was (`assetDecode`, `assetUpload`, `shaderCompile`,
     /// `pipelineCompile`), and its milliseconds.
     pub assets: Vec<(String, &'static str, f32)>,
+    /// Each script's hook time, costliest first.
+    pub scripts: Vec<(String, f32)>,
+    /// The engine calls the scripts made, costliest first.
+    pub calls: Vec<EngineCall>,
+    /// The hottest sampled lines, when the sampler is on.
+    pub samples: Vec<Sample>,
+    /// The costliest physics assemblies and bodies, by node name.
+    pub bodies: Vec<(String, f32)>,
 }
 
 /// How many assets a hitch names.
@@ -370,6 +537,29 @@ pub struct FrameProfile {
     /// Counted whether or not collection is on: it feeds a warning, not a
     /// readout.
     rebuild_streak: u32,
+    /// What a hitch is, when a game has said ([`Self::set_hitch_threshold`]);
+    /// [`HITCH_MS`] otherwise.
+    hitch_ms: Option<f32>,
+    /// The last [`FRAME_RING`] frames, exactly, oldest first.
+    ring: std::collections::VecDeque<FrameRecord>,
+    /// Engine calls each script made this frame, and last frame's.
+    calls_frame: Vec<EngineCall>,
+    calls_last: Vec<EngineCall>,
+    /// The script sampler: on while `Some`, with the interval in ms.
+    sampling: Option<f32>,
+    /// This frame's sampled lines, and every one since the last
+    /// [`Self::take_samples`].
+    samples_frame: Vec<Sample>,
+    samples_total: Vec<Sample>,
+    /// Physics owners' cost this frame by node name, and last frame's.
+    bodies_frame: Vec<(String, f32)>,
+    bodies_last: Vec<(String, f32)>,
+    /// When the driver began this frame ([`Self::begin_frame`]): the time
+    /// before it, back to the last frame's end, was spent outside the frame.
+    began: Option<crate::time::Instant>,
+    /// How frames are shown, as the driver last said, and the last verdict.
+    pacing_setup: PacingSetup,
+    pacing_last: Pacing,
 }
 
 /// What the script mirror did over one frame.
@@ -403,6 +593,148 @@ impl FrameProfile {
         self.frames = 0;
         self.mirror_frame = MirrorWork::default();
         self.mirror_last = MirrorWork::default();
+        self.ring.clear();
+        self.calls_frame.clear();
+        self.calls_last.clear();
+        self.samples_frame.clear();
+        self.samples_total.clear();
+        self.bodies_frame.clear();
+        self.bodies_last.clear();
+        self.parts_frame.clear();
+        self.parts_last.clear();
+        self.pacing_last = Pacing::default();
+        if !on {
+            self.sampling = None;
+        }
+    }
+
+    /// The frame time at or over which a frame is kept as a hitch: [`HITCH_MS`]
+    /// unless a game has set its own.
+    pub fn hitch_threshold(&self) -> f32 {
+        self.hitch_ms.unwrap_or(HITCH_MS)
+    }
+
+    /// Keep every frame of `ms` or more as a hitch: 33 for a game aiming at
+    /// 30 fps, 20 for one aiming at 60. Clamped to at least 1 ms, so a
+    /// threshold of zero cannot make every frame a hitch and push the real
+    /// ones out of the log.
+    pub fn set_hitch_threshold(&mut self, ms: f32) {
+        self.hitch_ms = Some(if ms.is_finite() { ms.max(1.0) } else { HITCH_MS });
+    }
+
+    /// Mark the start of a frame's own work. The time from the end of the
+    /// frame before to here was spent outside the engine's frame: the window
+    /// system's events, and the OS or compositor not running or not asking
+    /// for the frame. It is named `outsideFrame` inside `untimed`.
+    pub fn begin_frame(&mut self) {
+        if self.on {
+            self.began = Some(crate::time::Instant::now());
+        }
+    }
+
+    /// `ms` of this frame went to a wait no bucket owns, named `what`:
+    /// counted into `untimed` and named there as a part, so the frame's
+    /// untimed time says what it was where the engine knows.
+    pub fn record_wait(&mut self, what: &'static str, ms: f32) {
+        if !self.on {
+            return;
+        }
+        *self.frame.entry(Bucket::Other).or_default() += ms;
+        self.record_part(what, ms);
+    }
+
+    /// Every bucket's total for the frame in progress added up. Read it
+    /// either side of a piece of work to time that work net of the buckets
+    /// recorded inside it, as [`Self::record_wait`] needs.
+    pub fn frame_measured(&self) -> f32 {
+        self.frame.values().sum()
+    }
+
+    /// `n` calls of the binding `call` that `script` made, taking `ms` between
+    /// them: what of a script's own time went to the engine on its behalf.
+    /// Nothing while off.
+    pub fn record_call(&mut self, script: &str, call: &'static str, n: u64, ms: f32) {
+        if !self.on {
+            return;
+        }
+        match self.calls_frame.iter_mut().find(|c| c.call == call && c.script == script) {
+            Some(c) => {
+                c.n += n;
+                c.ms += ms;
+            }
+            None => self.calls_frame.push(EngineCall { script: script.to_string(), call, n, ms }),
+        }
+    }
+
+    /// The engine calls each script made last frame, costliest first.
+    pub fn last_calls(&self) -> &[EngineCall] {
+        &self.calls_last
+    }
+
+    /// Start or stop the script sampler, sampling every `interval_ms` of a
+    /// script's run time. Only meaningful while collection is on.
+    pub fn set_sampling(&mut self, interval_ms: Option<f32>) {
+        self.sampling = if self.on { interval_ms.map(|ms| ms.clamp(0.01, 50.0)) } else { None };
+        if self.sampling.is_none() {
+            self.samples_frame.clear();
+        }
+    }
+
+    /// The sampler's interval in milliseconds while it is on.
+    pub fn sampling(&self) -> Option<f32> {
+        self.sampling
+    }
+
+    /// One sample: the script was at `line` of `func` in `script`, standing
+    /// for `ms` of wall time since the sample before it.
+    pub fn record_sample(&mut self, script: &str, func: &str, line: u32, ms: f32) {
+        if !self.on || self.sampling.is_none() {
+            return;
+        }
+        add_sample(&mut self.samples_frame, script, func, line, 1, ms);
+    }
+
+    /// Every sampled line since the last call, costliest first.
+    pub fn take_samples(&mut self) -> Vec<Sample> {
+        let mut v = std::mem::take(&mut self.samples_total);
+        v.sort_by(|a, b| b.ms.total_cmp(&a.ms));
+        v
+    }
+
+    /// `ms` of physics this frame went to the body or assembly whose node is
+    /// called `name`. Nothing while off.
+    pub fn record_body(&mut self, name: &str, ms: f32) {
+        if !self.on {
+            return;
+        }
+        match self.bodies_frame.iter_mut().find(|(n, _)| n == name) {
+            Some((_, v)) => *v += ms,
+            None => self.bodies_frame.push((name.to_string(), ms)),
+        }
+    }
+
+    /// Last frame's physics owners by node name, costliest first.
+    pub fn last_bodies(&self) -> &[(String, f32)] {
+        &self.bodies_last
+    }
+
+    /// The last `n` frames, oldest first, at most [`FRAME_RING`].
+    pub fn recent_frames(&self, n: usize) -> impl Iterator<Item = &FrameRecord> {
+        let skip = self.ring.len().saturating_sub(n);
+        self.ring.iter().skip(skip)
+    }
+
+    /// Say how frames are shown: the present mode, whether it waits for the
+    /// display, the display's rate and the frame cap. Read by
+    /// [`Self::pacing`] and by each frame's verdict.
+    pub fn set_pacing_setup(&mut self, setup: PacingSetup) {
+        self.pacing_setup = setup;
+    }
+
+    /// The last frame's pacing and the recent share of frames something other
+    /// than the engine held.
+    pub fn pacing(&self) -> Pacing {
+        Pacing { setup: self.pacing_setup, ..self.pacing_last }
     }
 
     /// Is anything being collected?
@@ -631,18 +963,26 @@ impl FrameProfile {
     pub fn end_frame(&mut self) {
         self.rebuild_streak = if self.mirror_frame.rebuilds > 0 { self.rebuild_streak.saturating_add(1) } else { 0 };
         let now = crate::time::Instant::now();
-        let between = self.last_end.replace(now).map(|t| (now - t).as_secs_f32() * 1000.0);
+        let last_end = self.last_end.replace(now);
+        let between = last_end.map(|t| (now - t).as_secs_f32() * 1000.0);
+        let began = self.began.take();
         if !self.on {
             self.mirror_frame = MirrorWork::default();
             self.rays_frame = (0, 0.0);
             self.sweeps_frame = (0, 0.0);
             return;
         }
+        // The time before this frame's own work began, back to the end of the
+        // one before: outside the frame, named as such inside `untimed`.
+        if let (Some(t0), Some(b)) = (last_end, began)
+            && b > t0
+        {
+            self.record_wait("outsideFrame", (b - t0).as_secs_f32() * 1000.0);
+        }
         // The frame's time no bucket measured. Recorded by whoever ended the
         // frame calling here, so it is the real gap between two frames.
         if let Some(between) = between {
-            let measured: f32 = self.frame.iter().filter(|(b, _)| **b != Bucket::Other).map(|(_, ms)| ms).sum();
-            let rest = between - measured;
+            let rest = between - self.frame_measured();
             if rest > 0.0 {
                 *self.frame.entry(Bucket::Other).or_insert(0.0) += rest;
             }
@@ -662,17 +1002,83 @@ impl FrameProfile {
             }
         }
         let total: f32 = spent.iter().map(|(_, ms)| ms).sum();
-        let mut parts = std::mem::take(&mut self.parts_frame);
+        let parts = std::mem::take(&mut self.parts_frame);
         let assets = std::mem::take(&mut self.assets_frame);
         self.parts_last.clone_from(&parts);
-        if total >= HITCH_MS {
-            spent.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let mut calls = std::mem::take(&mut self.calls_frame);
+        calls.sort_by(|a, b| b.ms.total_cmp(&a.ms));
+        self.calls_last.clone_from(&calls);
+        let mut samples = std::mem::take(&mut self.samples_frame);
+        for x in &samples {
+            add_sample(&mut self.samples_total, &x.script, &x.func, x.line, x.n, x.ms);
+        }
+        samples.sort_by(|a, b| b.ms.total_cmp(&a.ms));
+        samples.truncate(FRAME_SAMPLES);
+        let mut bodies = std::mem::take(&mut self.bodies_frame);
+        bodies.sort_by(|a, b| b.1.total_cmp(&a.1));
+        bodies.truncate(FRAME_BODIES);
+        self.bodies_last.clone_from(&bodies);
+        let mut scripts: Vec<(String, f32)> = self.script_frame.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        scripts.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        // What held the frame, judged from its own waits.
+        let wait: f32 = spent.iter().filter(|(b, _)| matches!(b, Bucket::GpuWait | Bucket::Present)).map(|(_, ms)| ms).sum();
+        let cap: f32 = parts.iter().filter(|(p, _)| *p == "frameCap").map(|(_, ms)| *ms).sum();
+        let gpu_ms = self.gpu.as_ref().map(|g| g.1);
+        let refresh_ms = if self.pacing_setup.refresh_hz > 0.0 { 1000.0 / self.pacing_setup.refresh_hz } else { 0.0 };
+        let paced = pacing_cause(total, wait, cap, gpu_ms, refresh_ms, self.pacing_setup.vsync);
+        let record = FrameRecord {
+            frame: self.frames,
+            ms: total,
+            buckets: spent,
+            parts,
+            scripts,
+            calls,
+            samples,
+            bodies,
+            counts: self.counts,
+            paced,
+        };
+        if total >= self.hitch_threshold() {
+            let mut buckets = record.buckets.clone();
+            buckets.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let mut parts = record.parts.clone();
             parts.sort_by(|a, b| b.1.total_cmp(&a.1));
             if self.hitches.len() >= MAX_HITCHES {
                 self.hitches.pop_front();
             }
-            self.hitches.push_back(Hitch { frame: self.frames, ms: total, buckets: spent, parts, assets });
+            self.hitches.push_back(Hitch {
+                frame: self.frames,
+                ms: total,
+                buckets,
+                parts,
+                assets,
+                scripts: record.scripts.clone(),
+                calls: record.calls.clone(),
+                samples: record.samples.clone(),
+                bodies: record.bodies.clone(),
+            });
         }
+        if self.ring.len() >= FRAME_RING {
+            self.ring.pop_front();
+        }
+        self.ring.push_back(record);
+        let recent = self.ring.iter().rev().take(WINDOW);
+        let (mut held, mut n) = (0, 0);
+        for r in recent {
+            n += 1;
+            if matches!(r.paced, Some("display" | "compositor" | "frameCap")) {
+                held += 1;
+            }
+        }
+        self.pacing_last = Pacing {
+            setup: self.pacing_setup,
+            frame_ms: total,
+            wait_ms: wait,
+            gpu_ms,
+            limited_by: paced,
+            paced_frames: held,
+            frames: n,
+        };
         // A script that stopped running this frame gets a zero for the same
         // reason, and a script that has been destroyed stops being listed at all.
         let names: Vec<String> = self.scripts.keys().cloned().collect();
@@ -771,6 +1177,27 @@ impl FrameProfile {
         }
         Some(Bucket::ALL.iter().filter_map(|b| self.bucket(*b)).map(|c| c.ms).sum())
     }
+}
+
+/// Fold `n` samples of `ms` at one line into a list, keeping it to
+/// [`MAX_SAMPLE_LINES`] rows: past that, a new line lands in `(other)`.
+fn add_sample(list: &mut Vec<Sample>, script: &str, func: &str, line: u32, n: u32, ms: f32) {
+    if let Some(x) = list.iter_mut().find(|x| x.line == line && x.script == script && x.func == func) {
+        x.n += n;
+        x.ms += ms;
+        return;
+    }
+    if list.len() >= MAX_SAMPLE_LINES {
+        if let Some(x) = list.iter_mut().find(|x| x.script == "(other)") {
+            x.n += n;
+            x.ms += ms;
+            return;
+        }
+        list.pop();
+        list.push(Sample { script: "(other)".into(), func: String::new(), line: 0, n, ms });
+        return;
+    }
+    list.push(Sample { script: script.to_string(), func: func.to_string(), line, n, ms });
 }
 
 /// A scope timer: `let _t = Span::new();` … `p.record(bucket, t.ms())`.
@@ -1087,5 +1514,137 @@ mod last_parts_tests {
         assert!(p.take_hitches().is_empty(), "1.5 ms is no hitch, so only last_parts could carry it");
         p.end_frame();
         assert!(p.last_parts().is_empty(), "a frame that settled nothing reports nothing");
+    }
+}
+
+#[cfg(test)]
+mod frame_record_tests {
+    use super::*;
+
+    /// **Every frame is kept exactly, not smoothed.** A 40 ms physics frame
+    /// between 2 ms ones reads 40 in its own record, with its parts, its
+    /// scripts and the engine calls they made, where the mean reads a few;
+    /// the ring holds [`FRAME_RING`] and drops the oldest.
+    #[test]
+    fn each_frame_is_kept_exactly_with_its_parts_scripts_and_calls() {
+        let mut p = FrameProfile::default();
+        p.enable(true);
+        for _ in 0..10 {
+            p.record(Bucket::Physics, 2.0);
+            p.end_frame();
+        }
+        p.record(Bucket::Physics, 40.0);
+        p.record_part("physicsPairs", 30.0);
+        p.record_script("planet_camera", 27.0);
+        p.record_call("planet_camera", "spherecast", 12, 25.0);
+        p.record_body("Plane", 31.0);
+        p.end_frame();
+        let last = p.recent_frames(1).next().expect("a frame").clone();
+        assert_eq!(last.frame, 10);
+        assert_eq!(last.bucket(Bucket::Physics), 40.0, "{last:?}");
+        assert!(p.bucket(Bucket::Physics).unwrap().ms < 10.0, "the mean is what it was");
+        assert_eq!(last.part("physicsPairs"), 30.0);
+        assert_eq!(last.scripts, vec![("planet_camera".to_string(), 27.0)]);
+        assert_eq!(last.calls, vec![EngineCall { script: "planet_camera".into(), call: "spherecast", n: 12, ms: 25.0 }]);
+        assert_eq!(last.bodies, vec![("Plane".to_string(), 31.0)]);
+        assert_eq!(p.last_calls().len(), 1);
+        // The frame before is still the 2 ms one.
+        let two: Vec<_> = p.recent_frames(2).collect();
+        assert_eq!(two[0].bucket(Bucket::Physics), 2.0);
+        for _ in 0..FRAME_RING + 5 {
+            p.end_frame();
+        }
+        assert_eq!(p.recent_frames(10_000).count(), FRAME_RING);
+        assert!(p.last_calls().is_empty(), "a frame that called nothing reports nothing");
+    }
+
+    /// **The hitch threshold is the game's.** A 40 ms frame is no hitch at
+    /// the default 50 and is one at 33, with its scripts and samples.
+    #[test]
+    fn a_game_sets_its_own_hitch_threshold() {
+        let mut p = FrameProfile::default();
+        p.enable(true);
+        p.end_frame();
+        p.record(Bucket::Scripts, 40.0);
+        p.end_frame();
+        assert!(p.take_hitches().is_empty(), "40 ms is under the default {HITCH_MS}");
+        p.set_hitch_threshold(33.0);
+        assert_eq!(p.hitch_threshold(), 33.0);
+        p.set_sampling(Some(0.25));
+        p.record(Bucket::Scripts, 40.0);
+        p.record_script("vessel", 38.0);
+        p.record_sample("vessel", "solve", 120, 35.0);
+        p.record_sample("vessel", "solve", 120, 1.0);
+        p.record_sample("vessel", "update", 9, 2.0);
+        p.end_frame();
+        let h = p.take_hitches();
+        assert_eq!(h.len(), 1, "{h:?}");
+        assert_eq!(h[0].scripts[0].0, "vessel");
+        assert_eq!((h[0].samples[0].func.as_str(), h[0].samples[0].line, h[0].samples[0].n), ("solve", 120, 2));
+        p.set_hitch_threshold(0.0);
+        assert_eq!(p.hitch_threshold(), 1.0, "a zero threshold would make every frame a hitch");
+        // The totals since the last read, hottest first, then empty.
+        let s = p.take_samples();
+        assert_eq!((s[0].line, s[0].ms), (120, 36.0));
+        assert!(p.take_samples().is_empty());
+    }
+
+    /// **Untimed says what it was where the engine knows.** A named wait is
+    /// counted into `untimed` once, not on top of the rest of the gap, and a
+    /// sample list cannot grow past its cap.
+    #[test]
+    fn a_named_wait_is_part_of_untimed_and_not_added_twice() {
+        let mut p = FrameProfile::default();
+        p.enable(true);
+        let outer = crate::time::Instant::now();
+        p.end_frame();
+        p.record_wait("frameCap", 5.0);
+        p.record(Bucket::Render, 1.0);
+        // A frame longer than what was recorded, so there is a remainder.
+        while outer.elapsed().as_secs_f32() < 0.010 {}
+        p.end_frame();
+        let wall = outer.elapsed().as_secs_f32() * 1000.0;
+        let r = p.recent_frames(1).next().unwrap().clone();
+        assert_eq!(r.part("frameCap"), 5.0);
+        // The frame is its wall time, not the wall time plus the wait again.
+        assert!(r.ms <= wall + 0.5, "a {wall:.2} ms frame added up to {:.2}: {r:?}", r.ms);
+        assert!(r.bucket(Bucket::Other) >= 5.0, "{r:?}");
+        let mut list = Vec::new();
+        for i in 0..MAX_SAMPLE_LINES as u32 + 50 {
+            add_sample(&mut list, "s", "f", i, 1, 1.0);
+        }
+        assert_eq!(list.len(), MAX_SAMPLE_LINES);
+        assert_eq!(list.last().unwrap().script, "(other)");
+    }
+
+    /// **What held a frame.** Mostly waiting, about one refresh: the display.
+    /// Mostly waiting, three refreshes with a GPU that finished in 2 ms: a
+    /// compositor (a hidden window paced at 20 fps). The GPU's own time
+    /// filling the frame: the GPU. Mostly work: nothing held it.
+    #[test]
+    fn a_frame_mostly_spent_waiting_names_what_held_it() {
+        let r = 1000.0 / 60.0;
+        assert_eq!(pacing_cause(16.7, 15.0, 0.0, Some(3.0), r, true), Some("display"));
+        assert_eq!(pacing_cause(50.0, 48.0, 0.0, Some(2.0), r, true), Some("compositor"));
+        assert_eq!(pacing_cause(50.0, 48.0, 0.0, None, r, true), Some("compositor"));
+        assert_eq!(pacing_cause(50.0, 40.0, 0.0, Some(45.0), r, true), Some("gpu"));
+        assert_eq!(pacing_cause(50.0, 5.0, 0.0, Some(3.0), r, true), None);
+        assert_eq!(pacing_cause(33.0, 1.0, 25.0, None, r, false), Some("frameCap"));
+        assert_eq!(pacing_cause(20.0, 15.0, 0.0, None, r, false), Some("gpu"));
+        let mut p = FrameProfile::default();
+        p.enable(true);
+        p.set_pacing_setup(PacingSetup { present_mode: "fifo", vsync: true, refresh_hz: 60.0, frame_cap: 0.0 });
+        p.end_frame();
+        p.set_gpu(Vec::new(), 2.0);
+        for _ in 0..10 {
+            p.record(Bucket::GpuWait, 48.0);
+            p.record(Bucket::Render, 2.0);
+            p.end_frame();
+        }
+        let pace = p.pacing();
+        assert_eq!(pace.limited_by, Some("compositor"), "{pace:?}");
+        assert_eq!(pace.setup.present_mode, "fifo");
+        assert!(pace.paced_frames >= 10, "{pace:?}");
+        assert_eq!(p.recent_frames(1).next().unwrap().paced, Some("compositor"));
     }
 }

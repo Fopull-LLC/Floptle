@@ -119,6 +119,9 @@ impl Editor {
 
     #[cfg(feature = "editor-ui")]
     pub(crate) fn render(&mut self) {
+        // The frame's own work starts here; the time before it, back to the
+        // last frame's end, was the window system and the OS.
+        self.script_host.profile().borrow_mut().begin_frame();
         self.pace_frame();
         // A held selection the world has emptied — the node deleted, the scene
         // switched — releases here, before anything draws. The lock's only
@@ -1117,9 +1120,12 @@ impl Editor {
                     );
                 }
 
-                profile
-                    .borrow_mut()
-                    .record(floptle_core::profile::Bucket::Render, draw_t.ms());
+                {
+                    let ms = draw_t.ms();
+                    let mut p = profile.borrow_mut();
+                    p.record(floptle_core::profile::Bucket::Render, ms);
+                    p.record_part("renderPasses", ms);
+                }
 
                 // ---- game UI: over the finished frame (native res), before
                 // the editor's own chrome. One instanced pass per frame.

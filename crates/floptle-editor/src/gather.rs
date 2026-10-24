@@ -1914,6 +1914,10 @@ impl Editor {
         let frustum = floptle_render::Frustum::from_view_proj(view_proj);
         // How much was skipped, reported in the window title beside the fps.
         let mut culled_nodes = 0usize;
+        // The node walk and the cull test inside it, as render parts.
+        let timing = profile.borrow().enabled();
+        let walk_t = floptle_core::profile::Span::new();
+        let mut cull_ms = 0.0f32;
         for (e, matter) in &ents {
             // Hidden nodes (Visible(false), on the node or an ancestor) don't draw their
             // geometry (a script or the Inspector can toggle this); they still keep
@@ -1954,10 +1958,15 @@ impl Editor {
                     raster.texture_size(id)
                 })
                 .flatten();
-            if crate::node_bounds::node_is_off_screen(
+            let cull_t = timing.then(floptle_core::profile::Span::new);
+            let off_screen = crate::node_bounds::node_is_off_screen(
                 &self.world, &self.mesh_registry, &self.anim.poses,
                 *e, matter, &t, cam.world_position, &frustum, sprite_px,
-            ) {
+            );
+            if let Some(c) = cull_t {
+                cull_ms += c.ms();
+            }
+            if off_screen {
                 culled_nodes += 1;
                 continue;
             }
@@ -2245,6 +2254,11 @@ impl Editor {
         // ordinary lighting, fog and shadows, including the underwater fog that
         // makes a shoreline forest go murky at the same rate as its ground.
         // Nothing here is a scene node.
+        if timing {
+            let mut p = profile.borrow_mut();
+            p.record_part("renderCull", cull_ms);
+            p.record_part("renderInstancing", (walk_t.ms() - cull_ms).max(0.0));
+        }
         let scatter_t = floptle_core::profile::Span::new();
         let scatter_props = crate::scatter_draw::push_scatter(
             &mut self.script_host,
@@ -2262,8 +2276,9 @@ impl Editor {
         // Scatter. A field can ask for 117,000 props and make a scene
         // unplayable; `props` in the counts below is that number, and
         // this is what it cost.
+        let scatter_ms = if scatter_props > 0 { scatter_t.ms() } else { 0.0 };
         if scatter_props > 0 {
-            profile.borrow_mut().record(floptle_core::profile::Bucket::Scatter, scatter_t.ms());
+            profile.borrow_mut().record(floptle_core::profile::Bucket::Scatter, scatter_ms);
         }
         // …of which dropping arriving props onto the ground was this much: a
         // part of the bucket, named so a slow frame says it was settling.
@@ -2328,7 +2343,8 @@ impl Editor {
                 // Filled in once the volumes are known: `note_shadow_casters`.
                 ..Default::default()
             });
-            prof.record(floptle_core::profile::Bucket::Render, gather_t.ms());
+            // Net of the scatter push, which has its own bucket.
+            prof.record(floptle_core::profile::Bucket::Render, (gather_t.ms() - scatter_ms).max(0.0));
         }
 
         // Undo any transient scene-binding animation preview now that the draw list

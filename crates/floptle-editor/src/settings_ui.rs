@@ -90,7 +90,10 @@ impl SettingsSection {
     /// what someone would actually *type* looking for this topic.
     fn keywords(self) -> &'static str {
         match self {
-            SettingsSection::Game => "title name entry scene boot build export ships",
+            SettingsSection::Game => {
+                "title name entry scene boot build export ships tick overload slow motion \
+                 catch up budget physics fixed"
+            }
             SettingsSection::Scripting => {
                 "vec3 vector script scripts lua luau fast exact precision allocation"
             }
@@ -729,6 +732,59 @@ impl<'a> SettingsCtx<'a> {
                 {
                     id_chars(&mut t);
                     project.studio = floptle_scene::valid_data_id(&t).then_some(t);
+                    out.save_project = true;
+                }
+            },
+        );
+        // How the game behaves when its fixed tick gets expensive. Two
+        // settings side by side, because they answer the same question for
+        // two kinds of cost: a tick dearer than its slice, and one just under
+        // it that still compounds.
+        row(
+            ui,
+            "Tick overload",
+            Some("what the game does when one fixed tick costs more than the time it \
+                  simulates. Slow motion runs one tick a frame, so the game plays slower \
+                  and stays responsive; Catch up runs every banked tick and the frame rate \
+                  falls as far as it has to. A networked session always catches up"),
+            |ui| {
+                use floptle_scene::TickOverloadDoc as T;
+                let mut v = project.tick_overload;
+                egui::ComboBox::from_id_salt("project-tick-overload")
+                    .width(fit_here(ui, 220.0))
+                    .selected_text(match v {
+                        T::SlowMotion => "slow motion",
+                        T::CatchUp => "catch up",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut v, T::SlowMotion, "slow motion");
+                        ui.selectable_value(&mut v, T::CatchUp, "catch up");
+                    });
+                if v != project.tick_overload {
+                    project.tick_overload = v;
+                    out.save_project = true;
+                }
+            },
+        );
+        row(
+            ui,
+            "Catch-up budget",
+            Some("the most milliseconds of fixed ticks one frame runs; 0 runs every banked \
+                  tick, as projects always have. A tick a little under its slice still \
+                  compounds: two 14 ms ticks make a 30 ms frame, which banks two more. With \
+                  a budget, the time that does not fit is dropped, so while the ticks are \
+                  expensive the game runs slower than real time instead of falling to a few \
+                  frames a second. A networked session ignores it and always catches up"),
+            |ui| {
+                let mut ms = project.tick_budget_ms.unwrap_or(0.0);
+                if ui
+                    .add_sized(
+                        [fit(ui, 120.0), 20.0],
+                        egui::DragValue::new(&mut ms).range(0.0..=250.0).speed(0.5).suffix(" ms"),
+                    )
+                    .changed()
+                {
+                    project.tick_budget_ms = (ms > 0.0).then_some(ms);
                     out.save_project = true;
                 }
             },

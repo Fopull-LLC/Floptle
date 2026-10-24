@@ -64,6 +64,9 @@ pub struct Budget {
     /// time then where the platform can say.
     deadline: Cell<Option<(Instant, Option<Duration>)>>,
     ticks: Cell<u32>,
+    /// Outermost entries into Lua so far, so a reader of the interrupt (the
+    /// script sampler) can tell one pass from the next.
+    entries: Cell<u64>,
 }
 
 /// CPU time this thread has used so far, where the platform can say.
@@ -103,6 +106,7 @@ impl Budget {
             limit: Cell::new(DEFAULT_BUDGET),
             deadline: Cell::new(None),
             ticks: Cell::new(0),
+            entries: Cell::new(0),
         })
     }
 
@@ -122,6 +126,7 @@ impl Budget {
         let prev = self.deadline.get();
         if prev.is_none() {
             self.deadline.set(Some((Instant::now(), thread_cpu())));
+            self.entries.set(self.entries.get().wrapping_add(1));
         }
         Armed { budget: self.clone(), prev }
     }
@@ -183,6 +188,11 @@ impl Budget {
     /// sentence, because the host wraps it in the hook's name first.
     pub fn is_timeout(msg: &str) -> bool {
         msg.contains(MARKER)
+    }
+
+    /// Outermost entries into Lua so far.
+    pub fn entries(&self) -> u64 {
+        self.entries.get()
     }
 
     /// Hang [`check`](Self::check) on the state's interrupt.

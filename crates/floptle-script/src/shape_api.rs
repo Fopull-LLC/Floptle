@@ -35,11 +35,18 @@ pub(crate) struct QueryShared {
 
 impl QueryShared {
     /// Run one sweep, counted and timed into the profile when it is on.
-    fn swept<T>(&self, sweep: impl FnOnce() -> T) -> T {
+    /// `call` is the binding's name, which the calling script is charged
+    /// under in `perf.scripts()`.
+    fn swept<T>(&self, call: &'static str, sweep: impl FnOnce() -> T) -> T {
         let timer = self.profile.borrow().enabled().then(floptle_core::profile::Span::new);
         let out = sweep();
         if let Some(t) = timer {
-            self.profile.borrow_mut().record_sweeps(1, t.ms());
+            let ms = t.ms();
+            let mut p = self.profile.borrow_mut();
+            p.record_sweeps(1, ms);
+            if let Some((_, kind)) = self.current.borrow().as_ref() {
+                p.record_call(kind, call, 1, ms);
+            }
         }
         out
     }
@@ -354,7 +361,7 @@ pub(crate) fn install_shape_api(
             let sim = *s.sim_origin.borrow();
             let p = (glam::DVec3::new(o.x, o.y, o.z) - sim).as_vec3();
             let dir = glam::Vec3::new(d.x as f32, d.y as f32, d.z as f32);
-            let hit = s.swept(|| {
+            let hit = s.swept("spherecast", || {
                 floptle_physics::spherecast(
                     &s.colliders.borrow(),
                     &s.hulls.borrow(),
@@ -414,7 +421,7 @@ pub(crate) fn install_shape_api(
                 .find(|h| s.current.borrow().as_ref().is_some_and(|(e, _)| *e == h.eid))
                 .map(|h| h.up)
                 .unwrap_or(glam::Vec3::Y);
-            let hit = s.swept(|| {
+            let hit = s.swept("capsulecast", || {
                 floptle_physics::capsulecast(
                     &s.colliders.borrow(),
                     &s.hulls.borrow(),
@@ -468,7 +475,7 @@ pub(crate) fn install_shape_api(
             let sim = *s.sim_origin.borrow();
             let p = (glam::DVec3::new(o.x, o.y, o.z) - sim).as_vec3();
             let dir = glam::Vec3::new(d.x as f32, d.y as f32, 0.0);
-            let hit = s.swept(|| {
+            let hit = s.swept("boxcast", || {
                 floptle_physics::boxcast(
                     &s.colliders.borrow(),
                     &s.hulls.borrow(),

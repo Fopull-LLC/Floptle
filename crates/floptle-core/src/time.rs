@@ -236,6 +236,29 @@ impl TickLoad {
     }
 }
 
+/// May a frame that has already run `ticks_run` ticks, costing `spent_ms` of
+/// wall time between them, run one more under a catch-up budget of
+/// `budget_ms`?
+///
+/// A tick a little cheaper than its slice never trips [`TickLoad`], and still
+/// compounds: a frame running two 14 ms ticks is 30 ms long, which banks two
+/// ticks for the next one, and the game settles at 15 fps doing nothing but
+/// catching up. A budget caps the ticks a frame runs: the first always runs,
+/// and another only while the ticks so far, plus one more at their average
+/// cost, fit in it. What does not fit is dropped (see
+/// [`FixedTimestep::drop_backlog`]), so the game runs slower than real time
+/// while the ticks are expensive instead of falling further behind.
+///
+/// `None` or a budget of zero or less is no budget: every banked tick runs,
+/// as it always has.
+pub fn within_tick_budget(ticks_run: u32, spent_ms: f32, budget_ms: Option<f32>) -> bool {
+    let Some(budget) = budget_ms.filter(|b| *b > 0.0) else { return true };
+    if ticks_run == 0 {
+        return true;
+    }
+    spent_ms + spent_ms / ticks_run as f32 <= budget
+}
+
 impl FixedTimestep {
     /// Drop whatever is banked beyond the part of a step already in progress,
     /// keeping `alpha`. What [`OverloadPolicy::SlowMotion`] does after the one
@@ -292,6 +315,50 @@ mod load_tests {
         }
         assert_eq!(left, 1);
         assert!(!l.overloaded() && l.overloaded_for() == 0.0);
+    }
+
+    /// **A budget bounds a frame's ticks however long they take; no budget
+    /// leaves the spiral.** Fed back the way a window feeds it (each frame is
+    /// as long as its ticks plus 10 ms of other work), a 14 ms tick under a
+    /// 16.7 ms slice runs one tick a frame inside a 20 ms budget and the
+    /// banked time never grows past a step; without one the frames settle at
+    /// several ticks each.
+    #[test]
+    fn a_catch_up_budget_bounds_the_ticks_a_frame_runs() {
+        fn run(budget: Option<f32>) -> (u32, f32) {
+            let mut t = FixedTimestep::new(60.0);
+            let (tick_ms, other_ms) = (14.0f32, 10.0f32);
+            let mut frame_s = STEP;
+            let mut most = 0;
+            let mut banked = 0.0f32;
+            for _ in 0..300 {
+                t.accumulate(frame_s);
+                let mut ran = 0u32;
+                loop {
+                    if !within_tick_budget(ran, ran as f32 * tick_ms, budget) {
+                        t.drop_backlog();
+                        break;
+                    }
+                    if !t.tick() {
+                        break;
+                    }
+                    ran += 1;
+                }
+                most = most.max(ran);
+                banked = banked.max(t.accumulator);
+                frame_s = (ran as f32 * tick_ms + other_ms) / 1000.0;
+            }
+            (most, banked)
+        }
+        let (most, banked) = run(Some(20.0));
+        assert_eq!(most, 1, "a 20 ms budget ran {most} ticks of 14 ms in one frame");
+        assert!(banked < STEP, "the backlog grew to {banked} s under a budget");
+        let (most, _) = run(None);
+        assert!(most >= 3, "without a budget the frames should compound, ran at most {most}");
+        // The first tick always runs, and a budget of zero is no budget.
+        assert!(within_tick_budget(0, 0.0, Some(1.0)));
+        assert!(within_tick_budget(5, 500.0, Some(0.0)));
+        assert!(within_tick_budget(5, 500.0, None));
     }
 
     #[test]

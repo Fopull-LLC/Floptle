@@ -196,6 +196,9 @@ impl Editor {
     /// [`Editor::begin_draw_frame`] here, and it was once missing.
     pub(crate) fn player_frame(&mut self, capture: bool) -> Option<(Vec<u8>, u32, u32)> {
         // Before the clock is read, so the frame's dt is the paced one.
+        // The frame's own work starts here; the time before it, back to the
+        // last frame's end, was the window system and the OS.
+        self.script_host.profile().borrow_mut().begin_frame();
         self.pace_frame();
         let now = Instant::now();
         let raw_dt = self.last.map(|l| (now - l).as_secs_f32()).unwrap_or(0.0);
@@ -408,6 +411,11 @@ impl Editor {
         size: (u32, u32),
         opts: OffscreenOpts<'_>,
     ) {
+        // The whole of this view is render time, net of the buckets recorded
+        // inside it (assets warmed, scatter): the build's frame drew its world
+        // through here with no bucket at all, and all of it read as untimed.
+        let whole_t = floptle_core::profile::Span::new();
+        let measured0 = self.script_host.profile().borrow().frame_measured();
         // The same pre-warm the window frame does. This path is reached without
         // one by `floptle shot` and by any embedder driving the editor headless,
         // and a gather here resolves textures through exactly the same registry:
@@ -590,6 +598,10 @@ impl Editor {
         // zero if it never
         // ran this session.
         let mut culled_nodes = 0usize;
+        // The node walk, and the cull test inside it, named as render parts.
+        let timing = self.script_host.profile().borrow().enabled();
+        let walk_t = floptle_core::profile::Span::new();
+        let mut cull_ms = 0.0f32;
         for (ent, matter) in &ents {
             if floptle_core::is_hidden(&self.world, *ent) {
                 continue;
@@ -622,10 +634,15 @@ impl Editor {
                     self.raster.as_ref()?.texture_size(id)
                 })
                 .flatten();
-            if crate::node_bounds::node_is_off_screen(
+            let cull_t = timing.then(floptle_core::profile::Span::new);
+            let off_screen = crate::node_bounds::node_is_off_screen(
                 &self.world, &self.mesh_registry, &self.anim.poses,
                 *ent, matter, &t, cam.world_position, &off_frustum, sprite_px,
-            ) {
+            );
+            if let Some(c) = cull_t {
+                cull_ms += c.ms();
+            }
+            if off_screen {
                 culled_nodes += 1;
                 continue;
             }
@@ -923,6 +940,12 @@ impl Editor {
             }
         }
 
+        if timing {
+            let mut p = self.script_host.profile().borrow_mut();
+            p.record_part("renderCull", cull_ms);
+            p.record_part("renderInstancing", (walk_t.ms() - cull_ms).max(0.0));
+        }
+        let terrain_t = floptle_core::profile::Span::new();
         let (mut sky_params, sky_tint, sky_rot, sky_solid) = skybox_uniforms(&self.world);
         // An orthographic camera's sky, through its field of view.
         sky_params[2] = cam.projection.sky_spread();
@@ -951,8 +974,12 @@ impl Editor {
             );
             crate::decals::push_decal_instances(&self.decal_batches, &self.world, raster, cam.world_position, &mut instances);
         }
+        if timing {
+            self.script_host.profile().borrow_mut().record_part("renderInstancing", terrain_t.ms());
+        }
         // Scatter too, through the window gather's own function: a capture
         // without it photographs bare ground under everything that stands on it.
+        let scatter_t = floptle_core::profile::Span::new();
         let scatter_props = match (opts.overlay, self.raster.as_mut(), self.gpu.as_ref()) {
             (false, Some(raster), Some(gpu)) => crate::scatter_draw::push_scatter(
                 &mut self.script_host,
@@ -969,6 +996,12 @@ impl Editor {
             ),
             _ => 0,
         };
+        // In its own bucket, as the window gather records it, and out of the
+        // render time around it.
+        if scatter_props > 0 {
+            self.script_host.profile().borrow_mut().record(Bucket::Scatter, scatter_t.ms());
+        }
+        let passes_t = floptle_core::profile::Span::new();
         // …and the counts a game can read via `perf.counts()`. Every view that
         // comes through this gather — the docked or split Game view, `floptle
         // shot`, a render target — would otherwise leave the profile holding whatever the
@@ -1445,6 +1478,12 @@ impl Editor {
             && let Some(h) = self.game_scene_history.as_mut()
         {
             h.capture(gpu, color, view_proj, cam.world_position);
+        }
+        if timing {
+            let mut p = self.script_host.profile().borrow_mut();
+            p.record_part("renderPasses", passes_t.ms());
+            let inside = p.frame_measured() - measured0;
+            p.record(Bucket::Render, (whole_t.ms() - inside).max(0.0));
         }
     }
 }

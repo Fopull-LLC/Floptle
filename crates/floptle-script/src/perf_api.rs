@@ -26,25 +26,154 @@
 //! nothing. So every getter raises while collection is off and says to call
 //! `perf.enable(true)`.
 
-use mlua::Lua;
+use std::rc::Rc;
 
-use floptle_core::profile::Bucket;
+use mlua::{Lua, Table};
 
+use floptle_core::profile::{Bucket, Counts, EngineCall, Sample};
+
+use crate::sampler::Sampler;
 use crate::SharedProfile;
 
+/// The sampler's interval when a script does not name one: four samples a
+/// millisecond of script time.
+const DEFAULT_SAMPLE_MS: f32 = 0.25;
+
 /// Install the `perf` global.
-pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
+pub fn install(lua: &Lua, profile: &SharedProfile, sampler: &Rc<Sampler>) -> mlua::Result<()> {
     let t = lua.create_table()?;
 
     // perf.enable(on) — start or stop collecting. Off is the default, and off is
     // free. Stopping clears the history: a stale mean from before a fix looks
     // exactly like a fix that did not work.
     let p = profile.clone();
+    let smp = sampler.clone();
     t.set(
         "enable",
         lua.create_function(move |_, on: Option<bool>| {
-            p.borrow_mut().enable(on.unwrap_or(true));
+            let on = on.unwrap_or(true);
+            p.borrow_mut().enable(on);
+            if !on {
+                smp.set(None);
+            }
             Ok(())
+        })?,
+    )?;
+
+    // perf.frames(n) -> the last n frames (at most 300), oldest first, each
+    // exactly as it was: no smoothing, so a probe needs no `update` of its own
+    // in every frame to read them.
+    let p = profile.clone();
+    t.set(
+        "frames",
+        lua.create_function(move |lua, n: Option<usize>| {
+            let prof = p.borrow();
+            require_on(&prof, "frames")?;
+            let n = n.unwrap_or(floptle_core::profile::FRAME_RING);
+            let list = lua.create_table()?;
+            for (i, r) in prof.recent_frames(n).enumerate() {
+                let row = lua.create_table()?;
+                row.set("frame", r.frame)?;
+                row.set("ms", r.ms)?;
+                let buckets = lua.create_table()?;
+                for (b, ms) in &r.buckets {
+                    buckets.set(b.name(), *ms)?;
+                }
+                row.set("buckets", buckets)?;
+                row.set("parts", parts_table(lua, &r.parts)?)?;
+                row.set("scripts", named_ms(lua, &r.scripts)?)?;
+                row.set("calls", calls_table(lua, &r.calls)?)?;
+                row.set("samples", samples_table(lua, &r.samples)?)?;
+                row.set("bodies", named_ms(lua, &r.bodies)?)?;
+                row.set("counts", counts_table(lua, &r.counts)?)?;
+                if let Some(why) = r.paced {
+                    row.set("paced", why)?;
+                }
+                list.raw_set(i + 1, row)?;
+            }
+            Ok(list)
+        })?,
+    )?;
+
+    // perf.hitchThreshold([ms]) -> the frame time a hitch starts at, after
+    // setting it when given: 50 by default, 33 to catch what makes a 30 fps
+    // game miss, 20 for 60.
+    let p = profile.clone();
+    t.set(
+        "hitchThreshold",
+        lua.create_function(move |_, ms: Option<f32>| {
+            if let Some(ms) = ms {
+                p.borrow_mut().set_hitch_threshold(ms);
+            }
+            Ok(p.borrow().hitch_threshold())
+        })?,
+    )?;
+
+    // perf.sampleScripts(on [, intervalMs]) — the script sampler: which line of
+    // which script the time went to, kept with every frame and every hitch.
+    let p = profile.clone();
+    let smp = sampler.clone();
+    t.set(
+        "sampleScripts",
+        lua.create_function(move |_, (on, interval): (Option<bool>, Option<f32>)| {
+            require_on(&p.borrow(), "sampleScripts")?;
+            let on = on.unwrap_or(true);
+            smp.set(on.then(|| interval.unwrap_or(DEFAULT_SAMPLE_MS)));
+            Ok(smp.on())
+        })?,
+    )?;
+
+    // perf.samples() -> every sampled line since the last call, hottest first:
+    // { {script=, fn=, line=, n=, ms=}, … }.
+    let p = profile.clone();
+    t.set(
+        "samples",
+        lua.create_function(move |lua, ()| {
+            require_on(&p.borrow(), "samples")?;
+            let all = p.borrow_mut().take_samples();
+            samples_table(lua, &all)
+        })?,
+    )?;
+
+    // perf.bodies(n) -> the costliest physics assemblies and bodies last
+    // frame, by node name: { {name=, ms=}, … }.
+    let p = profile.clone();
+    t.set(
+        "bodies",
+        lua.create_function(move |lua, n: Option<usize>| {
+            let prof = p.borrow();
+            require_on(&prof, "bodies")?;
+            let rows = prof.last_bodies();
+            named_ms(lua, &rows[..rows.len().min(n.unwrap_or(rows.len()))])
+        })?,
+    )?;
+
+    // perf.pacing() -> how frames reach the display and what held the last
+    // one, so a frame spent waiting on vsync or a compositor does not read
+    // as the game being slow.
+    let p = profile.clone();
+    t.set(
+        "pacing",
+        lua.create_function(move |lua, ()| {
+            let prof = p.borrow();
+            require_on(&prof, "pacing")?;
+            let pc = prof.pacing();
+            let out = lua.create_table()?;
+            out.set("presentMode", if pc.setup.present_mode.is_empty() { "none" } else { pc.setup.present_mode })?;
+            out.set("vsync", pc.setup.vsync)?;
+            out.set("refreshHz", pc.setup.refresh_hz)?;
+            out.set("frameCap", pc.setup.frame_cap)?;
+            out.set("frameMs", pc.frame_ms)?;
+            out.set("waitMs", pc.wait_ms)?;
+            if let Some(g) = pc.gpu_ms {
+                out.set("gpuMs", g)?;
+            }
+            if let Some(why) = pc.limited_by {
+                out.set("limitedBy", why)?;
+            }
+            out.set("pacedFrames", pc.paced_frames)?;
+            out.set("frames", pc.frames)?;
+            Ok(out)
         })?,
     )?;
 
@@ -160,11 +289,18 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
             let prof = p.borrow();
             require_on(&prof, "scripts")?;
             let out = lua.create_table()?;
+            let calls = prof.last_calls();
             for (i, (name, c)) in prof.scripts().into_iter().enumerate() {
                 let row = lua.create_table()?;
-                row.set("name", name)?;
                 row.set("ms", c.ms as f64)?;
                 row.set("worstMs", c.worst_ms as f64)?;
+                // Last frame's engine calls made from this script, costliest
+                // first, and their total: the part of its time that was the
+                // engine working on its behalf.
+                let mine: Vec<EngineCall> = calls.iter().filter(|c| c.script == name).cloned().collect();
+                row.set("engineMs", mine.iter().map(|c| c.ms).sum::<f32>())?;
+                row.set("calls", calls_table(lua, &mine)?)?;
+                row.set("name", name)?;
                 out.raw_set(i + 1, row)?;
             }
             Ok(out)
@@ -196,44 +332,7 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
         "counts",
         lua.create_function(move |lua, ()| {
             let c = p.borrow().counts();
-            let out = lua.create_table()?;
-            out.set("nodes", c.nodes)?;
-            out.set("culled", c.culled)?;
-            out.set("instances", c.instances)?;
-            out.set("draws", c.draws)?;
-            // Draws that carried one instance, and why each did not join a
-            // batch: a `draws` far above the meshes on screen is the symptom,
-            // and this table names the cause.
-            out.set("unbatched", c.unbatched.total())?;
-            let by = lua.create_table()?;
-            for (why, n) in c.unbatched.reasons() {
-                by.set(why, n)?;
-            }
-            out.set("unbatchedBy", by)?;
-            out.set("chunks", c.chunks)?;
-            out.set("props", c.props)?;
-            out.set("particles", c.particles)?;
-            // The capped resources, and what each cap actually cut. A ceiling a
-            // game cannot see is one it discovers as "my seventeenth torch does
-            // nothing", so the pair is the
-            // point: one number for the cost, one for what was refused.
-            out.set("effects", c.effects)?;
-            out.set("effectsDropped", c.effects_dropped)?;
-            out.set("lights", c.lights)?;
-            out.set("lightsDropped", c.lights_dropped)?;
-            out.set("voices", c.voices)?;
-            // What 2D lighting costs this frame: flat surfaces rasterized a
-            // second time into its G-buffer. Zero when no light
-            // can reach them, which is the answer a 2D game most wants to be
-            // able to check.
-            out.set("flat2d", c.flat2d)?;
-            // What the shadow march tests along each ray: collider proxies
-            // (32 at most, the nearest) and baked volumes. A room built from
-            // many boxes costs lighting time per box, and this is the number
-            // that says so.
-            out.set("shadowProxies", c.shadow_proxies)?;
-            out.set("shadowProxiesDropped", c.shadow_proxies_dropped)?;
-            out.set("shadowVolumes", c.shadow_volumes)?;
+            let out = counts_table(lua, &c)?;
             // The script mirror, last frame: whole rebuilds (O(scene) each)
             // and single nodes re-read because a component of theirs changed.
             // Rebuilds climbing every frame is something structural changing
@@ -261,12 +360,16 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
             let (decals, decal_tris) = p.borrow().decal_counts();
             out.set("decals", decals)?;
             out.set("decalTris", decal_tris)?;
+            // Terrain edits refused because the queue was full, since the
+            // start: zero for a game that paces with `terrain.capacity()`.
+            out.set("terrainDropped", crate::terrain_api::dropped_count(lua))?;
             Ok(out)
         })?,
     )?;
 
     // perf.hitches() -> every frame since the last call whose buckets added up
-    // to 50 ms or more: { {frame=, ms=, top=, buckets={terrain=157.4, ...}}, ... },
+    // to the hitch threshold (50 ms unless `perf.hitchThreshold` says otherwise)
+    // or more: { {frame=, ms=, top=, buckets={terrain=157.4, ...}}, ... },
     // oldest first. The window behind `worstMs` is sixty frames, so a probe
     // that reads every few seconds had already lost the spike it was after.
     let p = profile.clone();
@@ -303,6 +406,10 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
                     assets.raw_set(j + 1, a)?;
                 }
                 row.set("assets", assets)?;
+                row.set("scripts", named_ms(lua, &h.scripts)?)?;
+                row.set("calls", calls_table(lua, &h.calls)?)?;
+                row.set("samples", samples_table(lua, &h.samples)?)?;
+                row.set("bodies", named_ms(lua, &h.bodies)?)?;
                 list.raw_set(i + 1, row)?;
             }
             Ok(list)
@@ -353,6 +460,100 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
     lua.globals().set("perf", t)
 }
 
+/// The counts a frame produced, as `perf.counts()` and each `perf.frames`
+/// record give them.
+fn counts_table(lua: &Lua, c: &Counts) -> mlua::Result<Table> {
+    let out = lua.create_table()?;
+    out.set("nodes", c.nodes)?;
+    out.set("culled", c.culled)?;
+    out.set("instances", c.instances)?;
+    out.set("draws", c.draws)?;
+    // Draws that carried one instance, and why each did not join a
+    // batch: a `draws` far above the meshes on screen is the symptom,
+    // and this table names the cause.
+    out.set("unbatched", c.unbatched.total())?;
+    let by = lua.create_table()?;
+    for (why, n) in c.unbatched.reasons() {
+        by.set(why, n)?;
+    }
+    out.set("unbatchedBy", by)?;
+    out.set("chunks", c.chunks)?;
+    out.set("props", c.props)?;
+    out.set("particles", c.particles)?;
+    // The capped resources, and what each cap actually cut. A ceiling a
+    // game cannot see is one it discovers as "my seventeenth torch does
+    // nothing", so the pair is the
+    // point: one number for the cost, one for what was refused.
+    out.set("effects", c.effects)?;
+    out.set("effectsDropped", c.effects_dropped)?;
+    out.set("lights", c.lights)?;
+    out.set("lightsDropped", c.lights_dropped)?;
+    out.set("voices", c.voices)?;
+    // What 2D lighting costs this frame: flat surfaces rasterized a
+    // second time into its G-buffer. Zero when no light
+    // can reach them, which is the answer a 2D game most wants to be
+    // able to check.
+    out.set("flat2d", c.flat2d)?;
+    // What the shadow march tests along each ray: collider proxies
+    // (32 at most, the nearest) and baked volumes. A room built from
+    // many boxes costs lighting time per box, and this is the number
+    // that says so.
+    out.set("shadowProxies", c.shadow_proxies)?;
+    out.set("shadowProxiesDropped", c.shadow_proxies_dropped)?;
+    out.set("shadowVolumes", c.shadow_volumes)?;
+    Ok(out)
+}
+
+/// `{ name = ms, … }`.
+fn parts_table(lua: &Lua, parts: &[(&'static str, f32)]) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    for (name, ms) in parts {
+        t.set(*name, *ms)?;
+    }
+    Ok(t)
+}
+
+/// `{ {name=, ms=}, … }`, in the order given.
+fn named_ms(lua: &Lua, rows: &[(String, f32)]) -> mlua::Result<Table> {
+    let t = lua.create_table_with_capacity(rows.len(), 0)?;
+    for (i, (name, ms)) in rows.iter().enumerate() {
+        let r = lua.create_table()?;
+        r.set("name", name.as_str())?;
+        r.set("ms", *ms)?;
+        t.raw_set(i + 1, r)?;
+    }
+    Ok(t)
+}
+
+/// `{ {script=, call=, n=, ms=}, … }`, in the order given.
+fn calls_table(lua: &Lua, calls: &[EngineCall]) -> mlua::Result<Table> {
+    let t = lua.create_table_with_capacity(calls.len(), 0)?;
+    for (i, c) in calls.iter().enumerate() {
+        let r = lua.create_table()?;
+        r.set("script", c.script.as_str())?;
+        r.set("call", c.call)?;
+        r.set("n", c.n)?;
+        r.set("ms", c.ms)?;
+        t.raw_set(i + 1, r)?;
+    }
+    Ok(t)
+}
+
+/// `{ {script=, fn=, line=, n=, ms=}, … }`, in the order given.
+fn samples_table(lua: &Lua, samples: &[Sample]) -> mlua::Result<Table> {
+    let t = lua.create_table_with_capacity(samples.len(), 0)?;
+    for (i, x) in samples.iter().enumerate() {
+        let r = lua.create_table()?;
+        r.set("script", x.script.as_str())?;
+        r.set("fn", x.func.as_str())?;
+        r.set("line", x.line)?;
+        r.set("n", x.n)?;
+        r.set("ms", x.ms)?;
+        t.raw_set(i + 1, r)?;
+    }
+    Ok(t)
+}
+
 /// Resolve a bucket name and read its cost, refusing clearly on both failures.
 fn cost(
     p: &SharedProfile,
@@ -398,7 +599,8 @@ fn require_on(
 /// against this list — so a getter added later cannot quietly default to
 /// answering zero without somebody deciding it should.
 #[cfg(test)]
-const READABLE_WHILE_OFF: &[&str] = &["enable", "enabled", "buckets", "counts", "mirrorCause", "overloaded"];
+const READABLE_WHILE_OFF: &[&str] =
+    &["enable", "enabled", "buckets", "counts", "mirrorCause", "overloaded", "hitchThreshold"];
 
 #[cfg(test)]
 mod tests {
@@ -408,7 +610,10 @@ mod tests {
     fn host() -> (Lua, SharedProfile) {
         let lua = Lua::new();
         let p: SharedProfile = std::rc::Rc::new(std::cell::RefCell::new(FrameProfile::default()));
-        install(&lua, &p).expect("install perf");
+        let sampler = Sampler::new(p.clone());
+        let budget = crate::budget::Budget::new();
+        crate::sampler::install(&lua, &budget, &sampler);
+        install(&lua, &p, &sampler).expect("install perf");
         (lua, p)
     }
 

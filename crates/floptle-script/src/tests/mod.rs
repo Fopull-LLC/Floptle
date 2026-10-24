@@ -19,6 +19,7 @@ mod materials;
 mod math;
 mod net;
 mod params;
+mod perf;
 mod physics;
 mod preprocess;
 mod refs;

@@ -69,6 +69,45 @@ impl Editor {
         self.gpu_timing_headless = false;
     }
 
+    /// How frames reach the display, for `perf.pacing()`: the swapchain's
+    /// present mode, whether it waits for the display, the display's rate and
+    /// the frame cap. `none` when nothing presents (a headless run).
+    pub(crate) fn pacing_setup(&self) -> floptle_core::profile::PacingSetup {
+        let mode = self.gpu.as_ref().filter(|_| self.window.is_some()).map(|g| g.config.present_mode);
+        let (present_mode, vsync) = match mode {
+            Some(wgpu::PresentMode::Fifo) => ("fifo", true),
+            Some(wgpu::PresentMode::FifoRelaxed) => ("fifoRelaxed", true),
+            Some(wgpu::PresentMode::Mailbox) => ("mailbox", false),
+            Some(wgpu::PresentMode::Immediate) => ("immediate", false),
+            Some(_) => ("auto", true),
+            None => ("none", false),
+        };
+        floptle_core::profile::PacingSetup {
+            present_mode,
+            vsync,
+            refresh_hz: if self.refresh_period > 0.0 { 1.0 / self.refresh_period } else { 0.0 },
+            frame_cap: self.frame_cap,
+        }
+    }
+
+    /// Run `f` and name its wall time, net of any bucket recorded inside it,
+    /// as `what` inside `untimed`: work between the buckets that a slow frame
+    /// should still be able to name (a scene loading, the sim rebuilt).
+    pub(crate) fn timed_wait<R>(&mut self, what: &'static str, f: impl FnOnce(&mut Self) -> R) -> R {
+        let on = self.script_host.profile().borrow().enabled();
+        if !on {
+            return f(self);
+        }
+        let before = self.script_host.profile().borrow().frame_measured();
+        let span = floptle_core::profile::Span::new();
+        let out = f(self);
+        let ms = span.ms();
+        let mut p = self.script_host.profile().borrow_mut();
+        let inside = p.frame_measured() - before;
+        p.record_wait(what, (ms - inside).max(0.0));
+        out
+    }
+
     /// Frames in a row a game may rebuild the script mirror before the Console
     /// says so: half a second at 60 fps. A one-off rebuild (a scene swap, a
     /// burst of renames) never reaches it.
@@ -81,6 +120,9 @@ impl Editor {
     pub(crate) fn end_profile_frame(&mut self) {
         let (streak, cause) = {
             let mut p = self.script_host.profile().borrow_mut();
+            if p.enabled() {
+                p.set_pacing_setup(self.pacing_setup());
+            }
             p.end_frame();
             (p.mirror_rebuild_streak(), p.mirror_cause().map(str::to_string))
         };
@@ -322,9 +364,15 @@ impl Editor {
 
     /// Run `f` with a wall clock around it, into `bucket`.
     pub(crate) fn timed_into<R>(&mut self, bucket: floptle_core::profile::Bucket, f: impl FnOnce(&mut Self) -> R) -> R {
+        // Net of whatever buckets the work recorded inside itself (a render
+        // target drawing its world records `render`), so nothing is counted
+        // twice and the buckets still add up to the frame.
+        let before = self.script_host.profile().borrow().frame_measured();
         let span = floptle_core::profile::Span::new();
         let out = f(self);
-        self.profile_record(bucket, span.ms());
+        let ms = span.ms();
+        let inside = self.script_host.profile().borrow().frame_measured() - before;
+        self.profile_record(bucket, (ms - inside).max(0.0));
         out
     }
 
@@ -363,7 +411,7 @@ impl Editor {
                 if !f.swapped && f.t >= half {
                     f.swapped = true;
                     let req = f.req.clone();
-                    self.perform_scene_request(&req);
+                    self.timed_wait("sceneLoad", |ed| ed.perform_scene_request(&req));
                 }
                 if f.t < f.fade.seconds {
                     self.scene_fade = Some(f);
@@ -384,7 +432,7 @@ impl Editor {
                     }
                     break;
                 }
-                self.perform_scene_request(&req);
+                self.timed_wait("sceneLoad", |ed| ed.perform_scene_request(&req));
                 // A full swap ends the queue: the requests behind it named the
                 // world that no longer exists, and the new scene's own `start`
                 // is the right place to ask for anything else.
@@ -640,7 +688,7 @@ impl Editor {
                 }
             }
             if changed {
-                self.rebuild_sim();
+                self.timed_wait("physicsRebuild", |ed| ed.rebuild_sim());
             }
         }
         // GPU-load any models a script swapped via `node.model` (the Matter is
@@ -898,6 +946,9 @@ impl Editor {
             // that runs, and the game plays in slow motion instead of at 2 fps.
             let slow_motion = self.tick_load.overloaded()
                 && self.overload_policy() == floptle_core::OverloadPolicy::SlowMotion;
+            // The project's catch-up budget: a frame stops running ticks once
+            // another would take it past the budget, and drops the rest.
+            let budget = self.tick_budget_ms();
             let ticks_began = floptle_core::time::Instant::now();
             let mut ticks_run = 0u32;
             loop {
@@ -906,7 +957,16 @@ impl Editor {
                         break;
                     }
                     self.tick_steps -= 1;
-                } else if slow_motion && ticks_run >= 1 {
+                } else if (slow_motion && ticks_run >= 1)
+                    || (budget.is_some()
+                        && !floptle_core::within_tick_budget(
+                            ticks_run,
+                            ticks_began.elapsed().as_secs_f32() * 1000.0,
+                            budget,
+                        ))
+                {
+                    // Slow motion's one tick, or the catch-up budget spent:
+                    // what is still banked is dropped, not carried.
                     self.game_tick.drop_backlog();
                     break;
                 } else if !self.game_tick.tick() {
@@ -1133,12 +1193,17 @@ impl Editor {
                         // a catch-up frame, which is exactly the spike a game
                         // notices.
                         let t = floptle_core::profile::Span::new();
+                        // By stage and by owner while somebody is reading:
+                        // "physics" alone does not say what in the tick.
+                        let profiling = self.script_host.profile().borrow().enabled();
+                        sim.world.time_steps(profiling);
                         sim.step_tick(self.game_tick.step, focus);
                         let ms = t.ms();
-                        self.script_host
-                            .profile()
-                            .borrow_mut()
-                            .record(floptle_core::profile::Bucket::Physics, ms);
+                        let mut p = self.script_host.profile().borrow_mut();
+                        p.record(floptle_core::profile::Bucket::Physics, ms);
+                        if let Some(tm) = sim.world.take_timing() {
+                            crate::play_step::record_step_timing(&mut p, &self.world, &tm);
+                        }
                     }
                 }
                 self.warn_water_density_mismatch();
@@ -1271,10 +1336,27 @@ impl Editor {
     /// its clock with other machines must keep up or desync, so it always
     /// catches up.
     fn overload_policy(&self) -> floptle_core::OverloadPolicy {
-        if self.net_server.is_some() || self.net_client.is_some() || self.net_rollback.is_some() {
+        if self.clock_is_shared() {
             return floptle_core::OverloadPolicy::CatchUp;
         }
         self.project.tick_overload.policy()
+    }
+
+    /// A networked session shares its clock with other machines, so it runs
+    /// every tick it owes.
+    fn clock_is_shared(&self) -> bool {
+        self.net_server.is_some() || self.net_client.is_some() || self.net_rollback.is_some()
+    }
+
+    /// The project's catch-up budget for this session, in milliseconds of
+    /// ticks a frame, or `None` to run every banked tick: off unless the
+    /// project sets one, and off for a networked session, for the same
+    /// reason as [`Self::overload_policy`].
+    pub(crate) fn tick_budget_ms(&self) -> Option<f32> {
+        if self.clock_is_shared() {
+            return None;
+        }
+        self.project.tick_budget_ms.filter(|ms| *ms > 0.0)
     }
 
     /// Fold one frame's ticks into the load watch, and say so — once a Play
@@ -1982,5 +2064,35 @@ mod framed_draw_tests {
         let lag = (DVec3::from(worked.a) - at).length();
         assert!(lag > 1.0, "a line placed in update was only {lag:.3} m behind: this does not test the lag");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// One tick's physics stages into the frame's parts, and its owners into the
+/// costliest bodies by node name.
+pub(crate) fn record_step_timing(
+    p: &mut floptle_core::profile::FrameProfile,
+    world: &floptle_core::World,
+    tm: &floptle_physics::StepTiming,
+) {
+    for (part, ms) in [
+        ("physicsBroadphase", tm.broadphase_ms),
+        ("physicsStatic", tm.static_ms),
+        ("physicsSweeps", tm.sweeps_ms),
+        ("physicsJoints", tm.joints_ms),
+        ("physicsPairs", tm.pairs_ms),
+        ("physicsSleep", tm.sleep_ms),
+    ] {
+        if ms > 0.0 {
+            p.record_part(part, ms);
+        }
+    }
+    let mut owners: Vec<(u32, f32)> = tm.owners.iter().filter(|(o, _)| *o != u32::MAX).copied().collect();
+    owners.sort_by(|a, b| b.1.total_cmp(&a.1));
+    for (owner, ms) in owners.into_iter().take(floptle_core::profile::FRAME_BODIES) {
+        let name = world
+            .entity_with::<floptle_core::Transform>(owner)
+            .and_then(|e| world.get::<floptle_core::Name>(e).map(|n| n.0.clone()))
+            .unwrap_or_else(|| format!("node {owner}"));
+        p.record_body(&name, ms);
     }
 }
