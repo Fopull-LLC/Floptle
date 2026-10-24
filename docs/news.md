@@ -1,6 +1,6 @@
 ## Just shipped
 
-**v0.117.0-rc9 — "Whole Worlds"** (beta). Big digs and marks land without
+**v0.117.0-rc10 — "Whole Worlds"** (beta). Big digs and marks land without
 stalling the frame, planets give back the memory they no longer need, wheels
 roll freely, and a walker can no longer slip through a narrow post.
 
