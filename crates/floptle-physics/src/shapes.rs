@@ -502,6 +502,9 @@ struct Surface {
     /// from a few cells meshed for the asking. A chunk asked about often is
     /// worth meshing whole.
     asked: std::collections::HashMap<[i32; 3], u8>,
+    /// Chunks meshed by a query, on the thread that asked: what a cast near
+    /// ground nobody had meshed pays for. Meshes handed in are not counted.
+    meshed_by_queries: u64,
 }
 
 /// The meshed chunks around one query, looked up once rather than once per
@@ -890,6 +893,13 @@ impl ChunkTerrain {
         self.surface.borrow().chunks.len()
     }
 
+    /// How many chunks a query has had to mesh itself, on the thread that
+    /// asked, since this collider was made: the cost of the first cast at
+    /// ground no worker meshed (see [`Self::adopt`]).
+    pub fn meshed_by_queries(&self) -> u64 {
+        self.surface.borrow().meshed_by_queries
+    }
+
     pub fn adopt_mesh(&mut self, c: [i32; 3], m: &floptle_field::ChunkMesh) {
         let built = CollisionChunk::from_mesh(m, self.bucket());
         self.adopt(c, built);
@@ -999,6 +1009,7 @@ impl ChunkTerrain {
         }
         let m = drawn_chunk(&self.field, c);
         s.chunks.insert(c, CollisionChunk::from_mesh(&m, self.bucket()));
+        s.meshed_by_queries += 1;
     }
 
     /// The closest point on the drawn surface to `local`, and the surface's

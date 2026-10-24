@@ -1243,6 +1243,24 @@ impl Sim {
         }
     }
 
+    /// Give terrain node `tv.eid` the collider `tv` describes, in place of the
+    /// one it had, or as a new one: a world arriving while the game runs.
+    ///
+    /// Nothing else is rebuilt. Rebuilding the whole sim for it copied every
+    /// terrain's field, remade every body, assembly and static collider, and
+    /// threw away the collision meshes every other terrain had made, so the
+    /// first cast near the ground anywhere paid to mesh it again. Sleepers
+    /// whose ground this changed wake. A volume with no entity is added.
+    pub fn set_terrain(&mut self, tv: &TerrainVolume) -> &mut ChunkTerrain {
+        let mut terrain = ChunkTerrain::posed(tv.field.clone(), tv.rot, tv.scale);
+        terrain.mesh_accurate = tv.drawn;
+        let i = match tv.eid {
+            Some(eid) => self.world.replace_collider_of(eid, tv.anchor, Box::new(terrain), tv.layer),
+            None => self.world.add_collider_tagged(tv.anchor, Box::new(terrain), tv.layer, None, false),
+        };
+        self.world.colliders[i].shape.chunk_terrain_mut().expect("the collider just put there is a terrain")
+    }
+
     /// Remove every static collider entity `eid` baked, and nothing else: a
     /// static piece that moved is re-baked where it is now.
     pub fn remove_statics_of(&mut self, eid: u32) {

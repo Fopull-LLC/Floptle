@@ -1223,6 +1223,34 @@ impl PhysicsWorld {
         self.colliders.len() - 1
     }
 
+    /// Put `shape` in place of node `eid`'s collider, at the same index, or
+    /// add it when the node has none: the level changes where that one
+    /// collider is and nowhere else. Contacts are dropped, as removing a
+    /// collider drops them, and every sleeper is checked against its ground
+    /// again, as when the collider set is replaced.
+    pub fn replace_collider_of(&mut self, eid: u32, anchor: DVec3, shape: Box<dyn CollisionShape>, layer: u8) -> usize {
+        let offset = (anchor - self.origin).as_vec3();
+        let at = match self.colliders.iter().position(|c| c.eid == Some(eid)) {
+            Some(i) => {
+                self.colliders[i] = AnchoredCollider { shape, anchor, layer, eid: Some(eid), sensor: false, one_way: None, offset };
+                // Anything else the node baked goes: a terrain node has one collider.
+                let mut k = 0;
+                self.colliders.retain(|c| {
+                    k += 1;
+                    k - 1 == i || c.eid != Some(eid)
+                });
+                i
+            }
+            None => self.add_collider_tagged(anchor, shape, layer, Some(eid), false),
+        };
+        self.contacts.clear();
+        self.note_level_edit(&[None]);
+        self.index_fresh = false;
+        self.revalidate_sleeping_bodies();
+        self.revalidate_sleeping_compounds();
+        at
+    }
+
     /// Recenter the sim's local frame on `new_origin` (a world point; pass a
     /// whole-number position so the shift is exact in f32). Bodies, contacts and
     /// gravity centers shift by the delta; collider offsets are recomputed from
