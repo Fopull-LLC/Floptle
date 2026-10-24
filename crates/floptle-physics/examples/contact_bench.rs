@@ -8,9 +8,12 @@
 //!
 //! Prints the mean and worst milliseconds of physics per 60 Hz frame (two
 //! 120 Hz steps) for each case, and where each craft ends up, so a change to
-//! the contact pass can be checked for cost and for behaviour in one run; then
-//! what twenty chase-camera sweeps past the thousand-part craft cost, with the
-//! craft in `ignore` and not.
+//! the contact pass can be checked for cost and for behaviour in one run. Then
+//! the thousand-part craft let go on the ground beside a base, lying down and
+//! falling over, second by second: physics a frame by stage (the parts
+//! `perf.parts()` names) and when it fell asleep. Last, what twenty
+//! chase-camera sweeps past the craft cost, with the craft in `ignore` and
+//! not.
 use floptle_core::math::{Quat, Vec3};
 use floptle_physics::*;
 
@@ -89,6 +92,80 @@ fn tower(base_y: f32) -> Compound {
     c
 }
 
+/// A base round the pad at the origin: sheds, towers and walls within reach
+/// of a craft's sphere but nowhere near most of its parts.
+fn base(cols: &mut Vec<AnchoredCollider>) {
+    for k in 0..60 {
+        let a = k as f32 / 60.0 * std::f32::consts::TAU;
+        let r = 8.0 + (k % 5) as f32 * 7.0;
+        let h = 1.0 + (k % 7) as f32 * 2.0;
+        cols.push(AnchoredCollider::world(Box::new(BoxShape::new(
+            Vec3::new(a.cos() * r, h, a.sin() * r),
+            Vec3::new(1.5, h, 1.5),
+            Quat::IDENTITY,
+        ))));
+    }
+    for k in 0..6 {
+        let x = -15.0 + k as f32 * 6.0;
+        let verts: Vec<Vec3> = (0..=10).flat_map(|z| (0..=10).map(move |y| Vec3::new(x, y as f32 * 3.0, -12.0 + z as f32))).collect();
+        let mut idx = Vec::new();
+        for z in 0..10u32 {
+            for y in 0..10u32 {
+                let (a, b, c, d) = (z * 11 + y, z * 11 + y + 1, (z + 1) * 11 + y, (z + 1) * 11 + y + 1);
+                idx.extend_from_slice(&[a, c, b, b, c, d]);
+            }
+        }
+        cols.push(AnchoredCollider::world(Box::new(TriMeshCollider::new(&verts, &idx))));
+    }
+}
+
+/// Run `frames` 60 Hz frames of a craft let go on the ground beside the
+/// base, and say per second what physics cost and in which stage, the
+/// worst frame, and when every assembly was asleep.
+fn release(name: &str, craft: Compound, frames: usize) {
+    let mut field = floptle_field::ChunkField::new(0.75);
+    field.fill_slab(Vec3::new(-70.0, -6.0, -45.0), Vec3::new(70.0, 0.0, 60.0), 0.0, [0.5; 3]);
+    let mut cols = vec![AnchoredCollider::world(Box::new(ChunkTerrain::new(field)))];
+    base(&mut cols);
+    let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+    w.set_colliders(cols);
+    let ci = w.add_compound(craft);
+    w.time_steps(true);
+    let mut ms = Vec::new();
+    let mut asleep_at = None;
+    println!("{name}:");
+    for f in 0..frames {
+        ms.push(frame(&mut w));
+        if asleep_at.is_none() && w.compounds.iter().all(|c| c.asleep) {
+            asleep_at = Some(f);
+        }
+        if (f + 1) % 60 == 0 {
+            let t = w.take_timing().unwrap_or_default();
+            let sec = &ms[f + 1 - 60..=f];
+            let mean = sec.iter().sum::<f64>() / 60.0;
+            let worst = sec.iter().cloned().fold(0.0, f64::max);
+            let c = &w.compounds[ci];
+            println!(
+                "  second {}: mean {mean:.2} ms, worst {worst:.1}; per frame static {:.2}, sweeps {:.2}, broadphase {:.2}, pairs {:.2}, joints {:.2}, sleep {:.2}; centre {:.2} m up, spine {:.0} degrees from upright",
+                (f + 1) / 60,
+                t.static_ms / 60.0,
+                t.sweeps_ms / 60.0,
+                t.broadphase_ms / 60.0,
+                t.pairs_ms / 60.0,
+                t.joints_ms / 60.0,
+                t.sleep_ms / 60.0,
+                c.pos.y,
+                (c.orient * Vec3::Y).angle_between(Vec3::Y).to_degrees(),
+            );
+        }
+    }
+    let c = &w.compounds[ci];
+    match asleep_at {
+        Some(f) => println!("  asleep from frame {f}; ends at {:?} turned {:?}", c.pos, c.orient),
+        None => println!("  never asleep in {frames} frames; ends at {:?} moving {:?}", c.pos, c.vel),
+    }
+}
+
 fn frame(w: &mut PhysicsWorld) -> f64 {
     let t = std::time::Instant::now();
     w.step(1.0 / 120.0);
@@ -158,32 +235,9 @@ fn main() {
     let t = ChunkTerrain::new(field);
     let mut w = PhysicsWorld::new(g());
     let mut cols = vec![AnchoredCollider::world(Box::new(t))];
-    // A base round the pad: sheds, towers and walls within reach of the
-    // craft's sphere but nowhere near most of its parts. `NO_BASE=1` leaves
-    // the pad bare.
+    // `NO_BASE=1` leaves the pad bare.
     if std::env::var("NO_BASE").is_err() {
-        for k in 0..60 {
-            let a = k as f32 / 60.0 * std::f32::consts::TAU;
-            let r = 8.0 + (k % 5) as f32 * 7.0;
-            let h = 1.0 + (k % 7) as f32 * 2.0;
-            cols.push(AnchoredCollider::world(Box::new(BoxShape::new(
-                Vec3::new(a.cos() * r, h, a.sin() * r),
-                Vec3::new(1.5, h, 1.5),
-                Quat::IDENTITY,
-            ))));
-        }
-        for k in 0..6 {
-            let x = -15.0 + k as f32 * 6.0;
-            let verts: Vec<Vec3> = (0..=10).flat_map(|z| (0..=10).map(move |y| Vec3::new(x, y as f32 * 3.0, -12.0 + z as f32))).collect();
-            let mut idx = Vec::new();
-            for z in 0..10u32 {
-                for y in 0..10u32 {
-                    let (a, b, c, d) = (z * 11 + y, z * 11 + y + 1, (z + 1) * 11 + y, (z + 1) * 11 + y + 1);
-                    idx.extend_from_slice(&[a, c, b, b, c, d]);
-                }
-            }
-            cols.push(AnchoredCollider::world(Box::new(TriMeshCollider::new(&verts, &idx))));
-        }
+        base(&mut cols);
     }
     w.set_colliders(cols);
     let ci = w.add_compound(tower(0.01));
@@ -235,6 +289,28 @@ fn main() {
         report(name, &ms, &w.compounds[raft]);
         println!("  asleep: {:?}", w.compounds.iter().map(|c| c.asleep).collect::<Vec<_>>());
     }
+
+    // A big craft let go beside a base: the 1,002 parts lying with the spine
+    // along the ground, a centimetre up; and the same craft standing, tipped
+    // and already toppling over.
+    let mut lying = tower(0.0);
+    lying.anchored = false;
+    // Laid about its centre with its spine along x, on the ground at z = 40,
+    // clear of the base: the fins reach 1.7 from the spine.
+    lying.orient = Quat::from_rotation_z(-std::f32::consts::FRAC_PI_2);
+    lying.pos = Vec3::new(0.0, 1.71, 40.0);
+    lying.prev_pos = lying.pos;
+    lying.prev_orient = lying.orient;
+    release("1,002 parts let go lying beside a base", lying, 600);
+    // Tipped 6 degrees about its centre and already toppling toward -x.
+    let mut tipped = tower(0.0);
+    tipped.anchored = false;
+    tipped.orient = Quat::from_rotation_z(0.1);
+    tipped.ang_vel = Vec3::new(0.0, 0.0, 0.2);
+    tipped.pos += Vec3::new(40.0, 0.1, 44.0);
+    tipped.prev_pos = tipped.pos;
+    tipped.prev_orient = tipped.orient;
+    release("1,002 parts let go standing beside a base, falling over", tipped, 900);
 
     // A chase camera's casts past the craft: its parts as the hulls queries
     // see, each owned by the craft's root (node 7 here).

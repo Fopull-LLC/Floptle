@@ -27,7 +27,8 @@ pub const SLEEP_SETTLE_TIME: f32 = 0.5;
 /// changes in place (terrain sculpting, a map edit) rather than through
 /// `set_colliders`'s wholesale replacement. Not gameplay-latency-sensitive
 /// (nothing is waiting on this to feel instant, unlike waking on contact),
-/// so it can be coarser than [`SLEEP_SETTLE_TIME`].
+/// so it can be coarser than [`SLEEP_SETTLE_TIME`]. A sleeping assembly is
+/// re-checked a slice of its parts a step, all of them once per interval.
 pub const SLEEP_REVALIDATE_INTERVAL: f32 = 1.0;
 
 /// A collider plus the world-space frame its geometry is expressed in.
@@ -175,6 +176,10 @@ thread_local! {
     /// sphere, every distance asked in full. The reference the narrowed
     /// passes are compared with, bit for bit. Test-only.
     pub(crate) static REFERENCE_CONTACT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Let a compound fall asleep only on its velocity, as it did before its
+    /// motion counted: the reference the sleep guards compare with.
+    /// Test-only.
+    pub(crate) static REFERENCE_SLEEP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// How far a sample may move during a compound contact pass before the list
@@ -182,6 +187,13 @@ thread_local! {
 /// Small, so a part in open air beside a wall is not offered the wall; a
 /// pass that moves the craft further pays for lists made again.
 const CONTACT_NEAR_TRAVEL: f32 = 0.1;
+
+/// How far clear of the static world a sleeping compound's samples are
+/// told: a sample further than this reads as this far. Well past the 0.01 a
+/// re-check allows either way, so a resting sample that comes clear is still
+/// seen to, and anything coming this near a sleeper still wakes it before it
+/// touches; how far beyond that the ground is changes nothing.
+const REST_CLEAR: f32 = 0.05;
 
 /// How many recent level edits [`PhysicsWorld::level_edit_log`] keeps.
 pub const LEVEL_EDIT_LOG: usize = 512;
@@ -1545,8 +1557,8 @@ impl PhysicsWorld {
         if self.resting_check_elapsed >= SLEEP_REVALIDATE_INTERVAL {
             self.resting_check_elapsed = 0.0;
             self.revalidate_sleeping_bodies();
-            self.revalidate_sleeping_compounds();
         }
+        self.recheck_sleeping_compounds(dt);
         let sleep = Self::lap(t);
         self.index_fresh = false;
         if let Some(tm) = self.timing.as_mut() {
@@ -2022,10 +2034,18 @@ impl PhysicsWorld {
         // so anything genuinely sliding (a slope, ice) stays above the
         // threshold and keeps sliding — only true rest gets clamped.
         let c = &mut self.compounds[ci];
-        if c.grounded && c.vel.length() < 0.05 && c.ang_vel.length() < 0.05 {
+        let slow = c.grounded && c.vel.length() < 0.05 && c.ang_vel.length() < 0.05;
+        if slow {
             c.vel = Vec3::ZERO;
             c.ang_vel = Vec3::ZERO;
-            // At rest, consecutively, for as long as a body waits: asleep.
+        }
+        // At rest, consecutively, for as long as a body waits: asleep. At
+        // rest is slow by the threshold above, or barely moved this step,
+        // pushes included. A wide craft lying flat needs the second: the
+        // contact pass ends each step with the craft rising at a few cm/s
+        // and its pushes holding it where it is, so the velocity reads around
+        // the threshold, step after step, while the craft does not move.
+        if slow || Self::compound_barely_moved(c, dt) {
             c.sleep_time += dt;
             if c.sleep_time >= SLEEP_SETTLE_TIME {
                 self.put_compound_to_sleep(ci);
@@ -2033,6 +2053,21 @@ impl PhysicsWorld {
         } else {
             c.sleep_time = 0.0;
         }
+    }
+
+    /// Whether compound `c`, on the ground, moved and turned this step by
+    /// less than [`SLEEP_LINEAR_SPEED`] carries it in `dt`: the motion
+    /// itself, where its velocity is what the contact pass left on it.
+    fn compound_barely_moved(c: &Compound, dt: f32) -> bool {
+        #[cfg(test)]
+        if REFERENCE_SLEEP.with(|r| r.get()) {
+            return false;
+        }
+        let still = SLEEP_LINEAR_SPEED * dt;
+        let turned = (c.orient * c.prev_orient.inverse()).normalize();
+        // The angle of the turn; `w` near 1 is a turn near zero.
+        let angle = 2.0 * turned.xyz().length().atan2(turned.w.abs());
+        c.grounded && c.pos.distance(c.prev_pos) < still && angle < still
     }
 
     /// [`Self::reachable`] for samples that may move [`CONTACT_NEAR_TRAVEL`]:
@@ -2224,6 +2259,8 @@ impl PhysicsWorld {
         let c = &mut self.compounds[ci];
         c.asleep = true;
         c.sleep_time = 0.0;
+        c.recheck_next = 0;
+        c.recheck_time = 0.0;
         c.vel = Vec3::ZERO;
         c.ang_vel = Vec3::ZERO;
         c.rest_pens = pens;
@@ -2232,43 +2269,75 @@ impl PhysicsWorld {
 
     /// How deep each of compound `ci`'s shape samples sits in the static
     /// world (the deepest over the colliders it collides with; negative is
-    /// clear by that much), in sample order, and the contacts within a hair
-    /// of the surface, as the step would report them at rest. One pass of
-    /// the step's collider work — what falling asleep and each re-check cost.
+    /// clear by that much, told only as far as [`REST_CLEAR`]), in sample
+    /// order, and the contacts within a hair of the surface, as the step
+    /// would report them at rest. What falling asleep and each re-check cost.
     fn compound_rest_probe(&self, ci: usize) -> (Vec<f32>, Vec<CompoundContact>) {
+        let (mut pens, mut resting) = (Vec::new(), Vec::new());
+        self.compound_rest_probe_shapes(ci, 0..self.compounds[ci].shapes.len(), &mut pens, &mut resting);
+        (pens, resting)
+    }
+
+    /// [`Self::compound_rest_probe`] for the shapes in `shapes` alone,
+    /// appended to `pens` and `resting`.
+    fn compound_rest_probe_shapes(
+        &self,
+        ci: usize,
+        shapes: std::ops::Range<usize>,
+        pens: &mut Vec<f32>,
+        resting: &mut Vec<CompoundContact>,
+    ) {
         let c = &self.compounds[ci];
         let row = self.matrix[c.layer as usize];
-        let mut pens = Vec::new();
-        let mut resting = Vec::new();
-        for si in 0..c.shapes.len() {
+        #[cfg(test)]
+        let reference = REFERENCE_CONTACT.with(|r| r.get());
+        #[cfg(not(test))]
+        let reference = false;
+        let mut near: Vec<usize> = Vec::new();
+        for si in shapes {
             let (centers, n_samples, radius) = c.shape_samples(si);
+            // Every distance is told up to here and no further, so a collider
+            // that cannot come this near any of the shape's samples, by its
+            // box or by the terrain's open air, changes no answer and is not
+            // asked: a part lying on the ground is asked about the ground,
+            // not about every shed of the base beside it.
+            let within = radius + REST_CLEAR;
+            let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+            for p in &centers[..n_samples] {
+                lo = lo.min(*p);
+                hi = hi.max(*p);
+            }
+            near.clear();
+            for (coli, col) in self.colliders.iter().enumerate() {
+                if (row >> col.layer) & 1 == 0 || col.sensor {
+                    continue;
+                }
+                if reference || (col.may_reach(lo, hi, within) && !col.clear_of(lo, hi, within)) {
+                    near.push(coli);
+                }
+            }
             for &p in &centers[..n_samples] {
-                let mut deepest = f32::NEG_INFINITY;
-                // The nearest distance asked so far. A collider whose box or
+                // Clear by `REST_CLEAR` until a collider says nearer: a
+                // distance told as `within` or more reads no deeper than this.
+                let mut deepest = radius - within;
+                // The nearest distance told so far. A collider whose box or
                 // sphere alone puts it farther than that, and farther than a
                 // resting touch, can be neither the deepest nor resting: it is
                 // skipped without its distance, which changes no answer here.
                 let mut nearest = f32::INFINITY;
-                for coli in 0..self.colliders.len() {
-                    if (row >> self.colliders[coli].layer) & 1 == 0 || self.colliders[coli].sensor {
-                        continue;
-                    }
+                for &coli in &near {
                     let col = &self.colliders[coli];
                     let floor = {
                         let by_box = col.aabb().map_or(0.0, |(lo, hi)| (lo - p).max(p - hi).max(Vec3::ZERO).length());
                         let by_sphere = col.bounds().map_or(0.0, |(c, r)| p.distance(c) - r);
                         by_box.max(by_sphere)
                     };
-                    #[cfg(test)]
-                    let reference = REFERENCE_CONTACT.with(|r| r.get());
-                    #[cfg(not(test))]
-                    let reference = false;
                     if !reference && floor * 0.999 - 1e-4 > nearest.max(radius + 0.011) {
                         continue;
                     }
                     #[cfg(test)]
                     REST_PROBES.with(|n| n.set(n.get() + 1));
-                    let d = col.distance(p);
+                    let d = if reference { col.distance(p) } else { col.distance_within(p, within) };
                     nearest = nearest.min(d);
                     let pen = radius - d;
                     if !pen.is_finite() {
@@ -2278,7 +2347,7 @@ impl PhysicsWorld {
                     // The same hair of slack a resting body's cache allows:
                     // the step just resolved it to the surface.
                     if pen > -0.01 {
-                        let n = self.colliders[coli].normal(p);
+                        let n = col.normal(p);
                         resting.push(CompoundContact {
                             compound: ci,
                             shape: si,
@@ -2295,7 +2364,6 @@ impl PhysicsWorld {
                 pens.push(deepest);
             }
         }
-        (pens, resting)
     }
 
     /// Re-check every sleeping compound against the static world as it is
@@ -2322,6 +2390,60 @@ impl PhysicsWorld {
                 c.wake();
             } else {
                 c.resting = resting;
+            }
+        }
+    }
+
+    /// The periodic re-check of sleeping compounds, a slice of each one's
+    /// shapes a step, in proportion to the time gone by: every shape is
+    /// checked once each [`SLEEP_REVALIDATE_INTERVAL`], as the whole craft was
+    /// at once, with the same test. All at once, a thousand-part craft lying
+    /// on the ground cost a 35 ms step every second; a slice costs about a
+    /// hundredth of that every step.
+    fn recheck_sleeping_compounds(&mut self, dt: f32) {
+        const MOVED: f32 = 0.01;
+        let (mut pens, mut resting) = (Vec::new(), Vec::new());
+        for ci in 0..self.compounds.len() {
+            if !self.compounds[ci].asleep || !self.compounds[ci].live() {
+                continue;
+            }
+            let c = &mut self.compounds[ci];
+            let n = c.shapes.len();
+            // Up to where the interval so far has come, in shapes.
+            c.recheck_time += dt;
+            let a = c.recheck_next.min(n);
+            let b = ((n as f32 * c.recheck_time / SLEEP_REVALIDATE_INTERVAL) as usize).clamp(a, n);
+            if a == b {
+                continue;
+            }
+            let c = &self.compounds[ci];
+            let first: usize = (0..a).map(|si| c.sample_count(si)).sum();
+            let total = first + (a..n).map(|si| c.sample_count(si)).sum::<usize>();
+            pens.clear();
+            resting.clear();
+            self.compound_rest_probe_shapes(ci, a..b, &mut pens, &mut resting);
+            let c = &mut self.compounds[ci];
+            let changed = total != c.rest_pens.len()
+                || pens.iter().zip(&c.rest_pens[first..]).any(|(&now, &was)| {
+                    (was > -MOVED && now < was - MOVED) || now > was + MOVED
+                });
+            if changed {
+                c.wake();
+                continue;
+            }
+            // What the slice's shapes rest on now, in place of what they did:
+            // the cache is in shape order, so theirs is one run of it.
+            let lo = c.resting.partition_point(|t| t.shape < a);
+            let hi = c.resting.partition_point(|t| t.shape < b);
+            c.resting.splice(lo..hi, resting.drain(..));
+            if c.resting.is_empty() {
+                c.wake();
+                continue;
+            }
+            c.recheck_next = b;
+            if b >= n {
+                c.recheck_next = 0;
+                c.recheck_time = (c.recheck_time - SLEEP_REVALIDATE_INTERVAL).max(0.0);
             }
         }
     }
@@ -5959,5 +6081,133 @@ mod step_timing_tests {
         assert_eq!(w.take_timing().map(|t| t.steps), Some(0));
         w.time_steps(false);
         assert_eq!(w.take_timing(), None);
+    }
+}
+
+#[cfg(test)]
+mod compound_sleep_tests {
+    //! A compound falls asleep once it has stopped moving, whatever its
+    //! velocity reads, and asleep it pays for its re-check a slice a step.
+    use super::*;
+    use crate::compound::{Compound, CompoundShape, ShapeGeom};
+    use crate::gravity::GravityField;
+    use crate::shapes::{BoxShape, ChunkTerrain};
+    use floptle_core::math::Quat;
+
+    /// A raft of 100 boxes a centimetre over flat terrain. Lying flat, the
+    /// contact pass leaves it rising at 2 to 6 cm/s at the end of every step
+    /// while its pushes hold it where it is: the velocity never stays under
+    /// the threshold for long, and it never fell asleep.
+    fn raft(w: &mut PhysicsWorld) -> usize {
+        let shapes: Vec<CompoundShape> = (0..100u64)
+            .map(|k| CompoundShape {
+                geom: ShapeGeom::Box { half: Vec3::new(0.5, 0.25, 0.5) },
+                offset: Vec3::new((k % 10) as f32 * 1.02 - 5.0, 0.26, (k / 10) as f32 * 1.02 - 5.0),
+                rot: Quat::IDENTITY,
+                mass: 5.0,
+                id: k + 1,
+            })
+            .collect();
+        w.add_compound(Compound::new(Vec3::ZERO, Quat::IDENTITY, shapes))
+    }
+
+    fn on_terrain() -> (PhysicsWorld, usize) {
+        let mut field = floptle_field::ChunkField::new(0.75);
+        field.fill_slab(Vec3::new(-12.0, -6.0, -12.0), Vec3::new(12.0, 0.0, 12.0), 0.0, [0.5; 3]);
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        w.add_collider(Box::new(ChunkTerrain::new(field)));
+        let ci = raft(&mut w);
+        (w, ci)
+    }
+
+    type Pose = ([u32; 3], [u32; 4]);
+
+    fn pose(c: &Compound) -> Pose {
+        (c.pos.to_array().map(f32::to_bits), c.orient.to_array().map(f32::to_bits))
+    }
+
+    /// Asleep within a second, on the very pose the step had it at: every
+    /// step until then is the step it always was, bit for bit, and after it
+    /// the raft stays exactly there. Judged on velocity alone, it is still
+    /// awake two seconds in.
+    #[test]
+    fn a_raft_lying_flat_falls_asleep_where_it_lies() {
+        let run = |reference: bool| {
+            REFERENCE_SLEEP.with(|r| r.set(reference));
+            let (mut w, ci) = on_terrain();
+            let mut poses = Vec::new();
+            let mut slept = None;
+            for tick in 0..240 {
+                w.step(1.0 / 120.0);
+                poses.push(pose(&w.compounds[ci]));
+                if slept.is_none() && w.compounds[ci].asleep {
+                    slept = Some(tick);
+                }
+            }
+            REFERENCE_SLEEP.with(|r| r.set(false));
+            (poses, slept)
+        };
+        let (ref_poses, ref_slept) = run(true);
+        let (poses, slept) = run(false);
+        assert_eq!(ref_slept, None, "on velocity alone it fell asleep at tick {ref_slept:?}: the fixture proves nothing");
+        let slept = slept.expect("the raft lying still never fell asleep");
+        assert!(slept < 120, "the raft took {slept} ticks to fall asleep");
+        assert_eq!(ref_poses[..=slept], poses[..=slept], "it moved differently before it fell asleep");
+        assert!(poses[slept..].iter().all(|p| *p == poses[slept]), "asleep, it moved");
+    }
+
+    /// Asleep, a craft re-checks what it rests on a slice of its shapes a
+    /// step: no step asks more than a tenth of what checking it whole does,
+    /// and a second of steps asks about all of it.
+    #[test]
+    fn a_sleeping_raft_rechecks_its_ground_a_slice_a_step() {
+        let (mut w, ci) = on_terrain();
+        for _ in 0..240 {
+            w.step(1.0 / 120.0);
+        }
+        assert!(w.compounds[ci].asleep, "fixture: the raft should be asleep by now");
+        REST_PROBES.with(|n| n.set(0));
+        let _ = w.compound_rest_probe(ci);
+        let whole = REST_PROBES.with(|n| n.get());
+        let (mut most, mut all) = (0, 0);
+        for _ in 0..120 {
+            REST_PROBES.with(|n| n.set(0));
+            w.step(1.0 / 120.0);
+            let n = REST_PROBES.with(|n| n.get());
+            most = most.max(n);
+            all += n;
+        }
+        assert!(w.compounds[ci].asleep, "nothing changed under it");
+        assert!(whole > 100, "checking it whole asked only {whole} distances: the fixture proves nothing");
+        assert!(most * 10 <= whole, "one step asked {most} distances, checking it whole {whole}");
+        assert!(all >= whole, "a second of steps asked {all} distances, short of the {whole} checking it whole asks");
+    }
+
+    /// Ground that drops away or rises in place, with nothing replacing the
+    /// collider list, still wakes the sleeping raft within the re-check's
+    /// interval: dropped, nothing is under it; risen, every part is pressed
+    /// deeper than it slept.
+    #[test]
+    fn a_sleeping_raft_wakes_when_its_ground_moves_in_place() {
+        for dy in [-0.2, 0.05] {
+            let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+            w.add_collider(Box::new(BoxShape::new(Vec3::new(0.0, -1.0, 0.0), Vec3::new(12.0, 1.0, 12.0), Quat::IDENTITY)));
+            let ci = raft(&mut w);
+            for _ in 0..240 {
+                w.step(1.0 / 120.0);
+            }
+            assert!(w.compounds[ci].asleep, "fixture: the raft should be asleep by now");
+            let (anchor, origin) = (w.colliders()[0].anchor, w.origin);
+            w.colliders[0].re_anchor(anchor + floptle_core::math::DVec3::new(0.0, dy, 0.0), origin);
+            let mut woke = false;
+            for _ in 0..=(SLEEP_REVALIDATE_INTERVAL * 120.0) as usize {
+                w.step(1.0 / 120.0);
+                if !w.compounds[ci].asleep {
+                    woke = true;
+                    break;
+                }
+            }
+            assert!(woke, "the ground moved {dy} m and the raft slept on");
+        }
     }
 }

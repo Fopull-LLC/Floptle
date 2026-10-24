@@ -181,6 +181,11 @@ pub struct Compound {
     /// the colliders, in sample order). A re-check that finds a sample
     /// clearly deeper or clearly clear of where it was wakes the compound.
     pub(crate) rest_pens: Vec<f32>,
+    /// The shape the periodic re-check of a sleeping compound takes up
+    /// next; see `PhysicsWorld::recheck_sleeping_compounds`.
+    pub(crate) recheck_next: usize,
+    /// Seconds into the current round of that re-check.
+    pub(crate) recheck_time: f32,
     /// Force accumulator (sim frame, applied at the CoM), cleared each step.
     pub(crate) force: Vec3,
     /// Torque accumulator (sim frame), cleared each step.
@@ -240,6 +245,8 @@ impl Compound {
             sleep_time: 0.0,
             resting: Vec::new(),
             rest_pens: Vec::new(),
+            recheck_next: 0,
+            recheck_time: 0.0,
             force: Vec3::ZERO,
             torque: Vec3::ZERO,
         }
@@ -542,6 +549,16 @@ impl Compound {
         // clamp / a construction hold): the anchor is the stronger claim.
         merged.anchored = self.anchored || other.anchored;
         *self = merged;
+    }
+
+    /// How many samples [`Self::shape_samples`] gives shape `i`, without
+    /// posing them.
+    pub(crate) fn sample_count(&self, i: usize) -> usize {
+        match self.shapes[i].geom {
+            ShapeGeom::Sphere { .. } => 1,
+            ShapeGeom::Capsule { .. } => 2,
+            ShapeGeom::Box { .. } => 9,
+        }
     }
 
     /// The shape sample points for collision, like `Body::sample_centers` but
