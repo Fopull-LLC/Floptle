@@ -1279,6 +1279,17 @@ fn mat_shading_ui(ui: &mut egui::Ui, ctx: &mut MatCtx, m: &mut Material, r: &mut
                 r.changed |=
                     crate::responsive::slider(ui, egui::Slider::new(&mut m.backlight, 0.0..=1.0), "").changed();
                 ui.end_row();
+                ui.label("near fade").on_hover_text(
+                    "Dissolve toward the camera, in metres: none of the surface is \
+                     drawn nearer than the first distance and all of it beyond the \
+                     second, so a wall between the camera and the player thins out \
+                     of the way. It still casts its shadow. 0 and 0 is off.",
+                );
+                ui.horizontal(|ui| {
+                    r.changed |= ui.add(egui::DragValue::new(&mut m.near_fade[0]).range(0.0..=1.0e4).speed(0.05)).changed();
+                    r.changed |= ui.add(egui::DragValue::new(&mut m.near_fade[1]).range(0.0..=1.0e4).speed(0.05)).changed();
+                });
+                ui.end_row();
             });
         });
     }
@@ -1417,13 +1428,15 @@ fn mat_rim_ui(ui: &mut egui::Ui, m: &mut Material, r: &mut MatEditResult) {
                 ui.end_row();
             }
             ui.label("opacity");
-            let faded = crate::responsive::slider(ui, egui::Slider::new(&mut m.alpha, 0.0..=1.0), "")
-                .on_hover_text("1 = opaque; below 1 blends over the scene, and turns blend on")
+            let mut alpha = m.alpha;
+            let faded = crate::responsive::slider(ui, egui::Slider::new(&mut alpha, 0.0..=1.0), "")
+                .on_hover_text("1 = opaque; below 1 blends over the scene, and turns blend on until it is back at 1")
                 .changed();
             // Fading a solid surface means wanting to see through it, so it
-            // blends — what dragging this slider has always done.
-            if faded && m.alpha < 1.0 && m.blend != floptle_core::BlendMode::Blend && !m.retro.dither_alpha {
-                m.blend = floptle_core::BlendMode::Blend;
+            // blends — what dragging this slider has always done — and back
+            // at 1 it draws as it did.
+            if faded {
+                m.fade_to(alpha);
             }
             r.changed |= faded;
             ui.end_row();

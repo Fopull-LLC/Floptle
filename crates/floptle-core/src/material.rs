@@ -379,6 +379,8 @@ impl Material {
             "thickness" => self.thickness = src.thickness,
             "sway" => self.sway = src.sway,
             "backlight" => self.backlight = src.backlight,
+            "nearFadeStart" => self.near_fade[0] = src.near_fade[0],
+            "nearFadeEnd" => self.near_fade[1] = src.near_fade[1],
             "shading" => self.shading = src.shading,
             "jitter" => self.retro.jitter = src.retro.jitter,
             "affineUv" => self.retro.affine_uv = src.retro.affine_uv,
@@ -437,6 +439,9 @@ pub struct Material {
     /// How alpha is drawn: solid, solid with cut-out holes, or blended. Decides
     /// the pass the surface is drawn in.
     pub blend: BlendMode,
+    /// The mode an opacity fade replaced ([`Material::fade_to`]), put back
+    /// when the fade returns to full opacity. Runtime only; never saved.
+    pub faded_from: Option<BlendMode>,
     /// Where a [`BlendMode::Cutout`] surface's texture alpha cuts it out:
     /// texels with less alpha than this are holes. `0.5` (the default) is what
     /// every surface has always done; a model's own MASK cutoff goes here as
@@ -552,6 +557,12 @@ pub struct Material {
     /// through to the front, 0..1: a leaf, a petal, a paper lantern, a sail
     /// lit from behind. `0` (the default) is a surface light stops at.
     pub backlight: f32,
+    /// Dissolve toward the camera: none of the surface is drawn nearer than
+    /// `[0]` metres, all of it beyond `[1]`, and a share of its pixels that
+    /// follows the distance between. A wall between the camera and what it
+    /// looks at thins out of the way. It still casts its shadow. `[0, 0]`
+    /// (the default) is off.
+    pub near_fade: [f32; 2],
     /// Which lighting model this surface answers to.
     pub shading: Shading,
     /// Deliberate PS1/N64-era artefacts. All off by default.
@@ -600,6 +611,26 @@ pub struct Material {
     pub source: Option<String>,
 }
 
+impl Material {
+    /// Set the opacity as a fade does. Fading a solid or cut-out surface below
+    /// full opacity is asking to see through it, so it blends; brought back to
+    /// full opacity, it draws as it did before the fade. A dithered surface
+    /// fades by its dither and keeps its mode.
+    pub fn fade_to(&mut self, alpha: f32) {
+        self.alpha = alpha.clamp(0.0, 1.0);
+        if self.alpha < 1.0 {
+            if self.blend != BlendMode::Blend && !self.retro.dither_alpha {
+                self.faded_from = Some(self.blend);
+                self.blend = BlendMode::Blend;
+            }
+        } else if let Some(was) = self.faded_from.take()
+            && self.blend == BlendMode::Blend
+        {
+            self.blend = was;
+        }
+    }
+}
+
 impl Default for Material {
     fn default() -> Self {
         Self {
@@ -617,6 +648,7 @@ impl Default for Material {
             ambient: 1.0,
             alpha: 1.0,
             blend: BlendMode::Cutout,
+            faded_from: None,
             alpha_cutoff: 0.5,
             double_sided: true,
             normal_map: None,
@@ -634,6 +666,7 @@ impl Default for Material {
             thickness: 0.5,
             sway: 0.0,
             backlight: 0.0,
+            near_fade: [0.0, 0.0],
             shading: Shading::Classic,
             retro: Retro::default(),
             shader: None,

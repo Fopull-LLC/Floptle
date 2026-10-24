@@ -430,6 +430,7 @@ fn flsl_sun_color(p: vec3<f32>) -> vec3<f32> { return g.light_color.rgb; }
 fn sun_shadow(p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return vec3<f32>(1.0); }
 fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 { return 1.0; }
 fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return color; }
+fn surface_fade_cut(in: VsOut, pix: vec2<u32>) -> bool { return false; }
 // A "ground" below the tile's lower third, so fieldDistance-driven looks
 // (shoreline foam, contact glows) show a gradient instead of a constant.
 fn map_d(p: vec3<f32>) -> f32 { return p.y + 0.55; }

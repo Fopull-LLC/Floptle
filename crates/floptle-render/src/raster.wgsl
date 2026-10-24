@@ -127,9 +127,10 @@ fn sun_map_vis(p: vec3<f32>, n: vec3<f32>) -> f32 {
 // The SURFACE EXTRAS store — the per-material properties that had no instance
 // attribute left to ride (the stream is FULL at 16/16). Two vec4s per entry,
 // indexed by `ext_index` (which arrives packed above the modulate bit in n1.w):
-//   mat_ext[i*3 + 0] = roughness, metallic, normal strength, occlusion strength
-//   mat_ext[i*3 + 1] = flag bits, retro jitter, reflectivity, transmission
-//   mat_ext[i*3 + 2] = ior, thickness, sway, backlight
+//   mat_ext[i*4 + 0] = roughness, metallic, normal strength, occlusion strength
+//   mat_ext[i*4 + 1] = flag bits, retro jitter, reflectivity, transmission
+//   mat_ext[i*4 + 2] = ior, thickness, sway, backlight
+//   mat_ext[i*4 + 3] = near fade start, near fade end (metres), unused, unused
 // Entry 0 is the reserved NEUTRAL: an instance that sets none of this reads it
 // and shades exactly as it did before these lanes existed.
 @group(0) @binding(10) var<storage, read> mat_ext: array<vec4<f32>>;
@@ -152,9 +153,9 @@ fn sun_map_vis(p: vec3<f32>, n: vec3<f32>) -> f32 {
 
 // vec4s per entry. Mirrored as `EXT_LANES` in raster.rs; the two are the same
 // number and the store is misread by exactly one material if they disagree.
-const EXT_LANES: u32 = 3u;
+const EXT_LANES: u32 = 4u;
 
-// Flag bits in `mat_ext[i*3 + 1].x`. Mirrored in raster.rs (`EXT_*`) — the two
+// Flag bits in `mat_ext[i*4 + 1].x`. Mirrored in raster.rs (`EXT_*`) — the two
 // lists are the same list and must be edited together.
 const EXT_PHYSICAL: u32 = 1u;
 const EXT_AFFINE_UV: u32 = 2u;
@@ -193,6 +194,8 @@ struct Ext {
     thick: f32,
     sway: f32,
     backlight: f32,
+    fade_near: f32,
+    fade_far: f32,
 };
 
 // Read entry `idx`, clamped into the store. The store always holds at least the
@@ -203,7 +206,29 @@ fn ext_at(idx: u32) -> Ext {
     let a = mat_ext[i];
     let b = mat_ext[i + 1u];
     let c = mat_ext[i + 2u];
-    return Ext(a.x, a.y, a.z, a.w, u32(b.x + 0.5), b.y, b.z, b.w, c.x, c.y, c.z, c.w);
+    let d = mat_ext[i + 3u];
+    return Ext(a.x, a.y, a.z, a.w, u32(b.x + 0.5), b.y, b.z, b.w, c.x, c.y, c.z, c.w, d.x, d.y);
+}
+
+// NEAR FADE — whether this pixel of a surface that dissolves toward the camera
+// (`Material::near_fade`) is cut: none of it nearer than `fade_near`, all of it
+// beyond `fade_far`, and between them a share of pixels that follows the
+// distance. Gradient noise, not a 4×4 grid, so a wall thins out rather than
+// turning into a screen door. Every pass that draws the surface for the
+// camera (the colour pass, the depth prepass, a `.flsl` surface) asks this
+// same function with the same inputs, so they cut the same pixels; the sun's
+// shadow map does not, because the wall is still there.
+// A `.flsl` surface's near fade: its fragment entry asks this.
+fn surface_fade_cut(in: VsOut, pix: vec2<u32>) -> bool {
+    return near_fade_cut(ext_at(u32(in.imeta.y)), in.view_pos, pix);
+}
+
+fn near_fade_cut(e: Ext, view_pos: vec3<f32>, pix: vec2<u32>) -> bool {
+    if (e.fade_far <= e.fade_near) {
+        return false;
+    }
+    let k = clamp((length(view_pos) - e.fade_near) / (e.fade_far - e.fade_near), 0.0, 1.0);
+    return k < 1.0 && ign(pix) >= k;
 }
 
 fn ext_has(e: Ext, bit: u32) -> bool {
@@ -1657,6 +1682,9 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     if (ext_has(ext, EXT_DITHER_ALPHA) && alpha < 0.999 && door >= alpha) {
         discard;
     }
+    if (near_fade_cut(ext, in.view_pos, pix)) {
+        discard;
+    }
     // Once it dithers, what survives is fully opaque — anything less would blend
     // the surviving pixels on top of the screen door.
     let out_a = select(alpha, 1.0, ext_has(ext, EXT_DITHER_ALPHA));
@@ -1858,12 +1886,49 @@ fn fs_depth(in: VsOut, @builtin(front_facing) front: bool) {
     }
     let a = texel_a * in.color.a * in.vcolor.a;
     let ext = ext_at(u32(in.imeta.y));
+    let pix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));
+    // The sun's shadow map draws through here too (`sun_extra.y` set). What
+    // fades a surface for the CAMERA, its screen door and its near fade, does
+    // not apply there: a wall faded so the player can see past it still
+    // stands in the sunlight and still shades the room.
+    let sun_view = g.sun_extra.y > 0.5;
+    if (ext_has(ext, EXT_DITHER_ALPHA)) {
+        if (sun_view) {
+            // The whole surface, as if it were not fading: its picture's own
+            // alpha still decides.
+            let whole = texel_a * in.vcolor.a;
+            if (!(whole >= 0.99 || (ext_cutoff(ext) == 0.0 && !ext_has(ext, EXT_BLEND))) || (ext_has(ext, EXT_SINGLE_SIDED) && !front)) {
+                discard;
+            }
+            return;
+        }
+        // For the camera, the colour pass's own tests in its own order, so a
+        // dithered surface primes depth for exactly the pixels it draws; every
+        // pixel that survives them is drawn solid.
+        if (!ext_has(ext, EXT_BLEND) && in.color.a >= 0.999 && a < ext_cutoff(ext)) {
+            discard;
+        }
+        if (ext_has(ext, EXT_SINGLE_SIDED) && !front) {
+            discard;
+        }
+        let door = select(bayer4(pix), 1.0 - bayer4(pix), ext_has(ext, EXT_DITHER_INVERT));
+        if (a < 0.999 && door >= a) {
+            discard;
+        }
+        if (near_fade_cut(ext, in.view_pos, pix)) {
+            discard;
+        }
+        return;
+    }
     // An OPAQUE model (cutoff 0) draws every texel solid, so it primes depth
     // for every one; otherwise only the certainly-opaque ones, as ever. A face
     // the color pass will drop from behind must not prime depth either, or it
     // would hide what is behind it and draw nothing in its place.
     let solid = a >= 0.99 || (in.color.a >= 0.999 && ext_cutoff(ext) == 0.0 && !ext_has(ext, EXT_BLEND));
     if (!solid || (ext_has(ext, EXT_SINGLE_SIDED) && !front)) {
+        discard;
+    }
+    if (!sun_view && near_fade_cut(ext, in.view_pos, pix)) {
         discard;
     }
 }

@@ -43,6 +43,12 @@ pub const DEFAULT_MAX_ANGLE: f32 = 100.0;
 /// How far a decal sits off the surface it lies on, in metres, so it never
 /// fights the surface for the same depth.
 pub const LIFT: f32 = 0.004;
+/// How long laying marks may take in one frame, in milliseconds. A mark asked
+/// for once this is spent waits its turn and is laid in a later frame, within
+/// the same budget: a big mark over finely meshed ground takes tens of
+/// milliseconds to lay, and a frame that lays a handful of them at once is a
+/// visible hitch.
+pub const LAY_BUDGET_MS: f64 = 2.0;
 
 /// One corner of a laid decal, relative to the decal's centre.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -71,6 +77,9 @@ pub struct Decal {
     /// it is dug or re-meshed. Its `normal` and `up` are as they stood when it
     /// was laid; its centre is `pos`.
     pub spec: DecalSpec,
+    /// Not laid yet: asked for once the frame's laying budget was spent, it
+    /// waits its turn (see [`LAY_BUDGET_MS`]).
+    pub waiting: bool,
 }
 
 /// The node a decal rides, if any.
@@ -92,8 +101,9 @@ pub struct DecalStore {
     decals: BTreeMap<u32, Decal>,
     next: u32,
     max: usize,
-    /// Pictures whose batch the editor must rebuild.
-    dirty: HashSet<String>,
+    /// Decals changed, added or gone since the editor last looked, by id: the
+    /// editor rebuilds only the batch pages these are in.
+    dirty: std::collections::BTreeSet<u32>,
     /// Changes when the store is emptied wholesale (a new Play, a scene
     /// switch), so the editor drops every batch it holds.
     epoch: u64,
@@ -101,6 +111,12 @@ pub struct DecalStore {
     /// The nodes whose colliders draw nothing (see [`lay_on`]), set by the
     /// driver.
     undrawn: HashSet<u32>,
+    /// Milliseconds spent laying marks this frame, against [`LAY_BUDGET_MS`].
+    spent_ms: f64,
+    /// The laying still to do for each waiting mark.
+    jobs: std::collections::HashMap<u32, LayJob>,
+    /// What the last whole frame spent laying, in milliseconds.
+    last_ms: f64,
 }
 
 impl Default for DecalStore {
@@ -109,10 +125,13 @@ impl Default for DecalStore {
             decals: BTreeMap::new(),
             next: 1,
             max: DEFAULT_MAX,
-            dirty: HashSet::new(),
+            dirty: std::collections::BTreeSet::new(),
             epoch: next_epoch(),
             warned: HashSet::new(),
             undrawn: HashSet::new(),
+            spent_ms: 0.0,
+            jobs: std::collections::HashMap::new(),
+            last_ms: 0.0,
         }
     }
 }
@@ -145,6 +164,11 @@ impl DecalStore {
         self.decals.get(&id)
     }
 
+    /// The decals with ids in `lo..hi`, oldest first.
+    pub fn in_range(&self, lo: u32, hi: u32) -> impl Iterator<Item = (u32, &Decal)> + '_ {
+        self.decals.range(lo..hi).map(|(&id, d)| (id, d))
+    }
+
     /// Every decal showing `texture`, oldest first.
     pub fn with_texture<'a>(&'a self, texture: &'a str) -> impl Iterator<Item = &'a Decal> + 'a {
         self.decals.values().filter(move |d| d.texture == texture)
@@ -166,15 +190,13 @@ impl DecalStore {
     pub fn place(&mut self, id: u32, frame: DecalFrame) {
         if let Some(d) = self.decals.get_mut(&id) {
             d.frame = frame;
-            self.dirty.insert(d.texture.clone());
+            self.dirty.insert(id);
         }
     }
 
-    /// The pictures changed since the last call.
-    pub fn take_dirty(&mut self) -> Vec<String> {
-        let mut out: Vec<String> = self.dirty.drain().collect();
-        out.sort();
-        out
+    /// The decals changed, added or gone since the last call, by id.
+    pub fn take_dirty(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.dirty).into_iter().collect()
     }
 
     /// Empty the store: every decal goes, and the editor drops its batches.
@@ -189,10 +211,70 @@ impl DecalStore {
     fn insert(&mut self, d: Decal) -> u32 {
         let id = self.next;
         self.next = self.next.wrapping_add(1).max(1);
-        self.dirty.insert(d.texture.clone());
+        self.dirty.insert(id);
         self.decals.insert(id, d);
         self.trim();
         id
+    }
+
+    /// What is left of this frame's laying budget, in milliseconds.
+    pub fn budget_left_ms(&self) -> f64 {
+        LAY_BUDGET_MS - self.spent_ms
+    }
+
+    /// Count `ms` of laying against this frame's budget.
+    pub fn spend(&mut self, ms: f64) {
+        self.spent_ms += ms;
+    }
+
+    /// A new frame: its laying budget is whole again.
+    pub fn new_frame(&mut self) {
+        self.last_ms = std::mem::take(&mut self.spent_ms);
+    }
+
+    /// What the last whole frame spent laying marks, in milliseconds: in
+    /// `decals.add` and in the pieces laid after it.
+    pub fn last_frame_ms(&self) -> f64 {
+        self.last_ms
+    }
+
+    /// Lay the next piece of waiting mark `id`, which is at `center` (sim
+    /// frame) now and has turned by `turn` since it was asked for, and count
+    /// the time against the frame's budget. `Some(true)` when the mark is
+    /// done: laid, or gone for having nothing to lie on. `None` for a mark
+    /// with nothing left to lay.
+    pub fn step_job(
+        &mut self,
+        id: u32,
+        cols: &[floptle_physics::AnchoredCollider],
+        center: Vec3,
+        turn: glam::Quat,
+    ) -> Option<bool> {
+        let mut job = self.jobs.remove(&id)?;
+        let t0 = floptle_core::time::Instant::now();
+        let done = job.step(cols, &self.undrawn, center, turn);
+        self.spend(t0.elapsed().as_secs_f64() * 1000.0);
+        if !done {
+            self.jobs.insert(id, job);
+            return Some(false);
+        }
+        let laid = job.finish();
+        if laid.indices.is_empty() {
+            self.remove(id);
+            return Some(true);
+        }
+        if let Some(d) = self.decals.get_mut(&id) {
+            d.verts = laid.verts;
+            d.indices = laid.indices;
+            d.waiting = false;
+            self.dirty.insert(id);
+        }
+        Some(true)
+    }
+
+    /// The marks waiting to be laid, oldest first.
+    pub fn waiting(&self) -> Vec<u32> {
+        self.decals.iter().filter(|(_, d)| d.waiting).map(|(&id, _)| id).collect()
     }
 
     /// The nodes whose colliders draw nothing, so no mark lies on them.
@@ -223,14 +305,16 @@ impl DecalStore {
         d.spec = spec;
         d.verts = laid.verts;
         d.indices = laid.indices;
-        self.dirty.insert(d.texture.clone());
+        d.waiting = false;
+        self.dirty.insert(id);
         true
     }
 
     fn remove(&mut self, id: u32) -> bool {
+        self.jobs.remove(&id);
         match self.decals.remove(&id) {
-            Some(d) => {
-                self.dirty.insert(d.texture);
+            Some(_) => {
+                self.dirty.insert(id);
                 true
             }
             None => false,
@@ -315,91 +399,205 @@ pub fn lay(cols: &[floptle_physics::AnchoredCollider], spec: &DecalSpec) -> Laid
 /// with a collider and nothing drawn (an Empty holding a box) is not a
 /// surface anyone sees, and a mark on it floats in the air as a pane.
 pub fn lay_on(cols: &[floptle_physics::AnchoredCollider], spec: &DecalSpec, undrawn: &HashSet<u32>) -> Laid {
-    let (right, up, n) = decal_axes(spec.normal, spec.up);
-    let half = Vec3::new(spec.width * 0.5, spec.height * 0.5, spec.depth * 0.5);
-    // The box's reach grows by its depth on every side: a face that folds in
-    // from beside the box still lands inside the picture.
-    let reach = right.abs() * half.x + up.abs() * half.y + n.abs() * half.z + Vec3::splat(half.z);
-    let (lo, hi) = (spec.center - reach, spec.center + reach);
-    let (tris, faceless) = if undrawn.is_empty() {
-        floptle_physics::triangles_in_box(cols, lo, hi, spec.mask)
-    } else {
-        let mut tris = Vec::new();
-        let mut faceless = 0;
-        for c in cols.iter().filter(|c| c.eid.is_none_or(|e| !undrawn.contains(&e))) {
-            let (t, f) = floptle_physics::triangles_in_box(std::slice::from_ref(c), lo, hi, spec.mask);
-            tris.extend(t);
-            faceless += f;
-        }
-        (tris, faceless)
-    };
-    let mut laid = Laid { faceless, ..Default::default() };
-    let mut poly: Vec<Corner> = Vec::new();
-    let mut next: Vec<Corner> = Vec::new();
-    for t in tris {
-        let face = (t.p[1] - t.p[0]).cross(t.p[2] - t.p[0]);
-        let Some(face) = face.try_normalize() else { continue };
-        let facing = face.dot(n);
-        if facing < spec.min_facing {
-            continue;
-        }
-        // Into the decal's frame: x along right, y along up, z out.
-        poly.clear();
-        for k in 0..3 {
-            let r = t.p[k] - spec.center;
-            let vn = t.n[k].try_normalize().unwrap_or(face);
-            poly.push(Corner {
-                at: Vec3::new(r.dot(right), r.dot(up), r.dot(n)),
-                normal: Vec3::new(vn.dot(right), vn.dot(up), vn.dot(n)),
-                flat: [0.0; 2],
-            });
-        }
-        // The depth first, in the box's own frame…
-        for sign in [1.0f32, -1.0] {
-            clip(&poly, |c| sign * c.at.z - half.z, &mut next);
-            std::mem::swap(&mut poly, &mut next);
-        }
-        // …then the border, in the unfolded picture.
-        for c in &mut poly {
-            c.flat = [c.at.x - c.at.z * c.normal.x, c.at.y - c.at.z * c.normal.y];
-        }
-        for (axis, limit) in [(0, half.x), (1, half.y)] {
-            for sign in [1.0f32, -1.0] {
-                clip(&poly, |c| sign * c.flat[axis] - limit, &mut next);
-                std::mem::swap(&mut poly, &mut next);
-            }
-        }
-        if poly.len() < 3 {
-            continue;
-        }
-        if laid.indices.len() / 3 + poly.len() - 2 > MAX_TRIS {
-            laid.capped = true;
-            break;
-        }
-        let fade = ((facing - spec.min_facing) / FADE_BAND).clamp(0.0, 1.0);
-        let fade = fade * fade * (3.0 - 2.0 * fade);
-        let lift = face * LIFT;
-        let base = laid.verts.len() as u32;
-        for c in &poly {
-            let s = c.flat[0] / spec.width + 0.5;
-            let tv = 0.5 - c.flat[1] / spec.height;
-            let normal = right * c.normal.x + up * c.normal.y + n * c.normal.z;
-            laid.verts.push(DecalVert {
-                pos: right * c.at.x + up * c.at.y + n * c.at.z + lift,
-                normal: normal.try_normalize().unwrap_or(face),
-                uv: [spec.uv[0] + s * (spec.uv[2] - spec.uv[0]), spec.uv[1] + tv * (spec.uv[3] - spec.uv[1])],
-                fade,
-            });
-        }
-        for k in 1..poly.len() as u32 - 1 {
-            laid.indices.extend_from_slice(&[base, base + k, base + k + 1]);
+    let mut job = LayJob::new(spec);
+    while !job.step(cols, undrawn, spec.center, glam::Quat::IDENTITY) {}
+    job.finish()
+}
+
+/// The side of one piece of a [`LayJob`], in metres. A step gathers the
+/// surface under one piece; on terrain that means meshing the chunks there
+/// the first time they are asked, so a piece this size is a chunk or two of
+/// work rather than the whole mark's.
+pub const LAY_TILE: f32 = 8.0;
+
+/// Laying one decal, a piece at a time, so a big mark can be spread over
+/// frames. Everything is kept in the mark's own frame as it stood when it was
+/// asked for, centred on it: a mark on a world that moves between steps still
+/// fits together, because each step is told where the mark is now and how far
+/// it has turned since.
+#[derive(Debug)]
+pub struct LayJob {
+    spec: DecalSpec,
+    right: Vec3,
+    up: Vec3,
+    n: Vec3,
+    half: Vec3,
+    /// The box every face that could take the picture lies in, around the
+    /// centre, in world axes as they stood when it was asked for.
+    lo: Vec3,
+    hi: Vec3,
+    tiles: [u32; 3],
+    next: u32,
+    laid: Laid,
+    poly: Vec<Corner>,
+    scratch: Vec<Corner>,
+}
+
+impl LayJob {
+    pub fn new(spec: &DecalSpec) -> Self {
+        let (right, up, n) = decal_axes(spec.normal, spec.up);
+        let half = Vec3::new(spec.width * 0.5, spec.height * 0.5, spec.depth * 0.5);
+        // The box's reach grows by its depth on every side: a face that folds
+        // in from beside the box still lands inside the picture.
+        let reach = right.abs() * half.x + up.abs() * half.y + n.abs() * half.z + Vec3::splat(half.z);
+        let tiles = ((reach * 2.0) / LAY_TILE).ceil().max(Vec3::ONE);
+        Self {
+            spec: spec.clone(),
+            right,
+            up,
+            n,
+            half,
+            lo: -reach,
+            hi: reach,
+            tiles: [tiles.x as u32, tiles.y as u32, tiles.z as u32],
+            next: 0,
+            laid: Laid::default(),
+            poly: Vec::new(),
+            scratch: Vec::new(),
         }
     }
-    laid
+
+    /// Pieces in all, and pieces done.
+    pub fn pieces(&self) -> (u32, u32) {
+        (self.tiles[0] * self.tiles[1] * self.tiles[2], self.next)
+    }
+
+    /// Is every piece laid?
+    pub fn done(&self) -> bool {
+        self.next >= self.tiles[0] * self.tiles[1] * self.tiles[2] || self.laid.capped
+    }
+
+    /// The piece a point (in the job's frame) belongs to: the one its
+    /// position, held to the box, falls in.
+    fn tile_of(&self, p: Vec3) -> u32 {
+        let size = (self.hi - self.lo) / Vec3::new(self.tiles[0] as f32, self.tiles[1] as f32, self.tiles[2] as f32);
+        let k = ((p.clamp(self.lo, self.hi) - self.lo) / size).floor();
+        let ix = (k.x as u32).min(self.tiles[0] - 1);
+        let iy = (k.y as u32).min(self.tiles[1] - 1);
+        let iz = (k.z as u32).min(self.tiles[2] - 1);
+        (iz * self.tiles[1] + iy) * self.tiles[0] + ix
+    }
+
+    /// Lay the next piece. `center` is where the mark is now (sim frame) and
+    /// `turn` how far it has turned since it was asked for. True when the
+    /// whole mark is laid.
+    pub fn step(
+        &mut self,
+        cols: &[floptle_physics::AnchoredCollider],
+        undrawn: &HashSet<u32>,
+        center: Vec3,
+        turn: glam::Quat,
+    ) -> bool {
+        if self.done() {
+            return true;
+        }
+        let t = self.next;
+        self.next += 1;
+        let size = (self.hi - self.lo) / Vec3::new(self.tiles[0] as f32, self.tiles[1] as f32, self.tiles[2] as f32);
+        let (ix, iy, iz) = (t % self.tiles[0], (t / self.tiles[0]) % self.tiles[1], t / (self.tiles[0] * self.tiles[1]));
+        let tlo = self.lo + size * Vec3::new(ix as f32, iy as f32, iz as f32);
+        let thi = tlo + size;
+        // The piece where the mark is now: its turned box, boxed in world axes.
+        let (c, h) = ((tlo + thi) * 0.5, (thi - tlo) * 0.5);
+        let m = glam::Mat3::from_quat(turn);
+        let wh = m.x_axis.abs() * h.x + m.y_axis.abs() * h.y + m.z_axis.abs() * h.z;
+        let wc = center + turn * c;
+        let (glo, ghi) = (wc - wh, wc + wh);
+        let mask = self.spec.mask;
+        let (tris, faceless) = if undrawn.is_empty() {
+            floptle_physics::triangles_in_box(cols, glo, ghi, mask)
+        } else {
+            let mut tris = Vec::new();
+            let mut faceless = 0;
+            for col in cols.iter().filter(|c| c.eid.is_none_or(|e| !undrawn.contains(&e))) {
+                let (t, f) = floptle_physics::triangles_in_box(std::slice::from_ref(col), glo, ghi, mask);
+                tris.extend(t);
+                faceless += f;
+            }
+            (tris, faceless)
+        };
+        self.laid.faceless = self.laid.faceless.max(faceless);
+        let back = turn.inverse();
+        let (right, up, n, half, spec) = (self.right, self.up, self.n, self.half, &self.spec);
+        for tri in tris {
+            // Into the frame the mark was asked for in, centred on it.
+            let p = tri.p.map(|p| back * (p - center));
+            let nrm = tri.n.map(|v| back * v);
+            // Each face is laid by exactly one piece: the one its middle is in.
+            if self.tile_of((p[0] + p[1] + p[2]) / 3.0) != t {
+                continue;
+            }
+            let face = (p[1] - p[0]).cross(p[2] - p[0]);
+            let Some(face) = face.try_normalize() else { continue };
+            let facing = face.dot(n);
+            if facing < spec.min_facing {
+                continue;
+            }
+            // Into the decal's frame: x along right, y along up, z out.
+            self.poly.clear();
+            for k in 0..3 {
+                let r = p[k];
+                let vn = nrm[k].try_normalize().unwrap_or(face);
+                self.poly.push(Corner {
+                    at: Vec3::new(r.dot(right), r.dot(up), r.dot(n)),
+                    normal: Vec3::new(vn.dot(right), vn.dot(up), vn.dot(n)),
+                    flat: [0.0; 2],
+                });
+            }
+            // The depth first, in the box's own frame…
+            for sign in [1.0f32, -1.0] {
+                clip(&self.poly, |c| sign * c.at.z - half.z, &mut self.scratch);
+                std::mem::swap(&mut self.poly, &mut self.scratch);
+            }
+            // …then the border, in the unfolded picture.
+            for c in &mut self.poly {
+                c.flat = [c.at.x - c.at.z * c.normal.x, c.at.y - c.at.z * c.normal.y];
+            }
+            for (axis, limit) in [(0, half.x), (1, half.y)] {
+                for sign in [1.0f32, -1.0] {
+                    clip(&self.poly, |c| sign * c.flat[axis] - limit, &mut self.scratch);
+                    std::mem::swap(&mut self.poly, &mut self.scratch);
+                }
+            }
+            let poly = &self.poly;
+            if poly.len() < 3 {
+                continue;
+            }
+            let laid = &mut self.laid;
+            if laid.indices.len() / 3 + poly.len() - 2 > MAX_TRIS {
+                laid.capped = true;
+                break;
+            }
+            let fade = ((facing - spec.min_facing) / FADE_BAND).clamp(0.0, 1.0);
+            let fade = fade * fade * (3.0 - 2.0 * fade);
+            let lift = face * LIFT;
+            let base = laid.verts.len() as u32;
+            for c in poly {
+                let s = c.flat[0] / spec.width + 0.5;
+                let tv = 0.5 - c.flat[1] / spec.height;
+                let normal = right * c.normal.x + up * c.normal.y + n * c.normal.z;
+                laid.verts.push(DecalVert {
+                    pos: right * c.at.x + up * c.at.y + n * c.at.z + lift,
+                    normal: normal.try_normalize().unwrap_or(face),
+                    uv: [spec.uv[0] + s * (spec.uv[2] - spec.uv[0]), spec.uv[1] + tv * (spec.uv[3] - spec.uv[1])],
+                    fade,
+                });
+            }
+            for k in 1..poly.len() as u32 - 1 {
+                laid.indices.extend_from_slice(&[base, base + k, base + k + 1]);
+            }
+        }
+        self.done()
+    }
+
+    /// What the job laid.
+    pub fn finish(self) -> Laid {
+        self.laid
+    }
 }
 
 /// A corner of a face being clipped, in the decal's frame.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct Corner {
     at: Vec3,
     normal: Vec3,
@@ -572,9 +770,38 @@ pub(crate) fn install_decal_api(lua: &Lua, shared: DecalShared) -> mlua::Result<
                 mask,
                 min_facing: max_angle.to_radians().cos(),
             };
-            let laid = lay_on(&s.colliders.borrow(), &spec, s.store.borrow().undrawn());
-            let mut store = s.store.borrow_mut();
             let keep = spec.clone();
+            // Laid a piece at a time while this frame's budget lasts; what is
+            // left waits its turn, the driver lays it in later frames, and
+            // `decals.landed(id)` says when it is done.
+            let mut job = LayJob::new(&spec);
+            let mut done = false;
+            while s.store.borrow().budget_left_ms() > 0.0 {
+                let t0 = floptle_core::time::Instant::now();
+                done = job.step(&s.colliders.borrow(), s.store.borrow().undrawn(), spec.center, glam::Quat::IDENTITY);
+                s.store.borrow_mut().spend(t0.elapsed().as_secs_f64() * 1000.0);
+                if done {
+                    break;
+                }
+            }
+            let mut store = s.store.borrow_mut();
+            if !done {
+                let id = store.insert(Decal {
+                    texture,
+                    pos,
+                    verts: Vec::new(),
+                    indices: Vec::new(),
+                    color,
+                    alpha,
+                    frame: DecalFrame::Asked(frame),
+                    spec: keep,
+                    waiting: true,
+                });
+                store.jobs.insert(id, job);
+                publish_counts(&s, &store);
+                return Ok(Some(id));
+            }
+            let laid = job.finish();
             if laid.capped {
                 warn_once(
                     &s,
@@ -608,6 +835,7 @@ pub(crate) fn install_decal_api(lua: &Lua, shared: DecalShared) -> mlua::Result<
                 alpha,
                 frame: DecalFrame::Asked(frame),
                 spec: keep,
+                waiting: false,
             });
             publish_counts(&s, &store);
             Ok(Some(id))
@@ -632,8 +860,7 @@ pub(crate) fn install_decal_api(lua: &Lua, shared: DecalShared) -> mlua::Result<
             if let Some(c) = color {
                 d.color = c;
             }
-            let tex = d.texture.clone();
-            store.dirty.insert(tex);
+            store.dirty.insert(id);
             Ok(true)
         })?,
     )?;
@@ -658,6 +885,15 @@ pub(crate) fn install_decal_api(lua: &Lua, shared: DecalShared) -> mlua::Result<
             publish_counts(&s, &store);
             Ok(())
         })?,
+    )?;
+
+    // decals.landed(id) → true once the mark is laid, false while it waits
+    // its turn, nil when there is no such mark (removed, trimmed, or it found
+    // nothing to lie on).
+    let s = shared.clone();
+    t.set(
+        "landed",
+        lua.create_function(move |_, id: u32| Ok(s.store.borrow().get(id).map(|d| !d.waiting)))?,
     )?;
 
     let s = shared.clone();

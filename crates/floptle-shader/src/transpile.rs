@@ -175,6 +175,11 @@ pub fn transpile_fragment(ir: &ShaderIr, ck: &Checked) -> Result<CompiledFragmen
     w.line("fn fs_flsl(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {".into(), None);
     w.line("    let c = flsl_surface(in, front);".into(), None);
     w.line("    let pix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));".into(), None);
+    // The material's near fade cuts the same pixels here as in the depth
+    // prepass, which draws a shader-wearing surface with the built-in one.
+    w.line("    if (surface_fade_cut(in, pix)) {".into(), None);
+    w.line("        discard;".into(), None);
+    w.line("    }".into(), None);
     w.line("    return vec4<f32>(apply_fog(c.rgb, in.view_pos, pix), c.a * in.color.a);".into(), None);
     w.line("}".into(), None);
 
@@ -1292,6 +1297,7 @@ fn flsl_sun_color(p: vec3<f32>) -> vec3<f32> { return g.light_color.rgb; }
 fn sun_shadow(p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return vec3<f32>(1.0); }
 fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 { return 1.0; }
 fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return color; }
+fn surface_fade_cut(in: VsOut, pix: vec2<u32>) -> bool { return false; }
 fn map_d(p: vec3<f32>) -> f32 { return 1e9; }
 fn flsl_surface_gap(p: vec3<f32>) -> f32 { return 1e9; }
 fn base_texel(in: VsOut) -> vec4<f32> { return textureSample(tex, samp, in.uv); }

@@ -359,6 +359,63 @@ pub(crate) struct OpTarget {
     flat_normal: Option<Vec3>,
 }
 
+/// An op this many voxels across its radius or more is made off the frame:
+/// one 20 m flatten was 100 to 400 ms of a frame under load, past any
+/// budget, since a budget is checked between ops and cannot split one.
+const BIG_OP_VOXELS: f32 = 4.0;
+
+/// The most a frame of edits may cost while a big one is made off it, in
+/// small flattens. Made on the frame, one 20 m flatten on a 150 m world
+/// cost 7.4 (debug); made off it, the worst frame, the one it lands in with
+/// the small edits behind it, costs 2.3 to 2.4.
+#[cfg(test)]
+const BIG_OP_FRAME_RATIO: f64 = 5.0;
+
+/// A big script terrain op being made on a worker, on a copy of its
+/// terrain's field. The queue waits behind it, so ops land in order, and
+/// until it lands every query reads the field as it was before it.
+pub(crate) struct OpJob {
+    e: Entity,
+    rx: std::sync::mpsc::Receiver<OpDone>,
+}
+
+/// A big op, made: the copy it was made on, what it wrote, and the proxy
+/// cells over its box sampled from it.
+struct OpDone {
+    op: floptle_script::TerrainOp,
+    at: OpTarget,
+    field: floptle_field::ChunkField,
+    touched: Vec<[i32; 3]>,
+    changed: Option<([i32; 3], [i32; 3])>,
+    measured: Option<floptle_field::SculptYield>,
+    region: floptle_field::DenseRegion,
+}
+
+/// Make a script op on `field` (in its terrain's frame): the chunks it wrote,
+/// and for a sculpt what it moved. The one place an op is made, inline or on
+/// a worker, so the two cannot come out different.
+fn make_op(field: &mut floptle_field::ChunkField, op: &floptle_script::TerrainOp, at: &OpTarget) -> (Vec<[i32; 3]>, Option<floptle_field::SculptYield>) {
+    use floptle_field::{Brush, BrushProfile};
+    use floptle_script::TerrainOpMode as M;
+    let OpTarget { local, ts, flat_normal, .. } = *at;
+    let r_local = op.radius / ts;
+    let profile = BrushProfile::default();
+    match op.mode {
+        M::Flatten => (field.flatten_to_plane(local, flat_normal.unwrap_or(Vec3::Y), r_local, op.strength, profile), None),
+        M::Raise | M::Lower | M::Smooth => {
+            let brush = match op.mode {
+                M::Raise => Brush::Raise,
+                M::Lower => Brush::Lower,
+                _ => Brush::Smooth,
+            };
+            let (touched, y) = field.sculpt_measured(brush, local, r_local, op.strength, profile);
+            (touched, Some(y))
+        }
+        M::Paint(c) => (field.paint(local, r_local, op.strength, c, profile), None),
+        M::PaintTexture(slot) => (field.paint_texture(local, r_local, slot), None),
+    }
+}
+
 /// A script terrain op waiting its turn, with where it lands; `None` when no
 /// terrain was near enough when it was made.
 pub(crate) struct QueuedEdit {
@@ -397,6 +454,28 @@ const PROMOTE_PER_JOB: usize = 4;
 /// The far-chunk scan walks every chunk of a planet; it runs every this many
 /// frames.
 const FAR_SCAN_FRAMES: u64 = 8;
+/// Memory let go of goes back to the system at most this often.
+const TRIM_EVERY_SECS: f64 = 2.0;
+
+/// Hand memory the program has let go of back to the system.
+///
+/// The system allocator keeps what is freed for the program to use again,
+/// and gives the system back little of it: freed in the middle of its heaps,
+/// and in the heaps of the worker threads that generated a world, it stays
+/// in the process. A 650 m world held 1.2 GB more than it used once it had
+/// generated, and putting nine tenths of its chunks away freed 400 MB that
+/// the process went on holding (Solar measured 2.36 against 2.23 GB, for a
+/// field ten times smaller). Trimmed, the same world came down from 1.14 GB
+/// to 0.67 GB. Only glibc keeps memory this way; elsewhere it does nothing.
+pub(crate) fn give_memory_back() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only returns free pages; it touches no live allocation.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+/// …and puts away at most this many chunks of a terrain a scan.
+const EVICT_PER_SCAN: usize = 96;
 
 /// One in-flight background checkpoint (`terrain.flush()` → the save slot):
 /// the field encodes a few chunks per frame on the main thread (it can't leave
@@ -671,11 +750,37 @@ pub(crate) struct RemeshJob {
     pub coord: [i32; 3],
     pub lod: u8,
     pub epoch: u64,
-    pub scratch: floptle_field::MeshScratch,
+    pub scratch: JobScratch,
     /// A collision mesh, bucketed this many units across, rather than a drawn
     /// one: no skirt (as collision it would be an invisible wall round every
     /// chunk), and the bucketing done here too.
     pub collision: Option<f32>,
+}
+
+/// What a remesh job meshes from: the voxels round its chunk, gathered, or
+/// the field to gather them from on the worker. A coarse chunk reads a dense
+/// block of the field half again its size on every side (half a million
+/// voxels at stride 8), and gathered on the frame, a world that had just
+/// landed spent 190 ms a frame (debug) on it for seconds.
+pub(crate) enum JobScratch {
+    Ready(floptle_field::MeshScratch),
+    /// A copy of the field (its chunks are shared), and the stride.
+    Field(std::sync::Arc<floptle_field::ChunkField>, i32),
+}
+
+/// Drawn chunks meshed, by where their voxels were gathered: `[on a worker,
+/// on the frame]`.
+#[cfg(test)]
+pub(crate) static DRAWN_GATHERS: [std::sync::atomic::AtomicUsize; 2] =
+    [std::sync::atomic::AtomicUsize::new(0), std::sync::atomic::AtomicUsize::new(0)];
+
+impl JobScratch {
+    fn into_scratch(self, coord: [i32; 3]) -> floptle_field::MeshScratch {
+        match self {
+            JobScratch::Ready(s) => s,
+            JobScratch::Field(f, stride) => floptle_field::scratch_for_chunk(&f, coord, stride),
+        }
+    }
 }
 
 pub(crate) struct RemeshDone {
@@ -798,7 +903,13 @@ impl TerrainWorker {
     /// One job: mesh the scratch and hand the result back. `false` when the
     /// receiving side is gone.
     fn run(job: RemeshJob, done: &std::sync::mpsc::Sender<RemeshDone>) -> bool {
-        let mesh = floptle_field::mesh_scratch(&job.scratch, job.collision.is_none());
+        #[cfg(test)]
+        if job.collision.is_none() {
+            let on_frame = matches!(job.scratch, JobScratch::Ready(_));
+            DRAWN_GATHERS[on_frame as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let scratch = job.scratch.into_scratch(job.coord);
+        let mesh = floptle_field::mesh_scratch(&scratch, job.collision.is_none());
         let collision = job.collision.map(|cell| floptle_physics::CollisionChunk::from_mesh(&mesh, cell));
         done.send(RemeshDone { entity: job.entity, coord: job.coord, lod: job.lod, epoch: job.epoch, mesh, collision })
             .is_ok()
@@ -1203,6 +1314,9 @@ impl Editor {
         // ---- 5: top up the worker — dirty edits first (uncapped), then nearest ----
         if let Some(w) = self.terrain_worker.as_mut() {
             queue.sort_unstable_by_key(|&(d, ..)| d);
+            // One copy of each terrain's field a frame for its jobs to gather
+            // from: a table of shared chunks, not the voxels.
+            let mut snaps: HashMap<Entity, std::sync::Arc<floptle_field::ChunkField>> = HashMap::new();
             for (prio, e, coord, lod) in queue {
                 let dirty = prio <= -DIRTY_PRIORITY_BOOST / 2;
                 if !dirty && w.in_flight >= WORKER_IN_FLIGHT_CAP {
@@ -1217,9 +1331,8 @@ impl Editor {
                     coord,
                     lod,
                     epoch: self.terrain_epoch,
-                    scratch: floptle_field::scratch_for_chunk(
-                        &terrain.field,
-                        coord,
+                    scratch: JobScratch::Field(
+                        snaps.entry(e).or_insert_with(|| std::sync::Arc::new(terrain.field.clone())).clone(),
                         1 << lod,
                     ),
                     collision: None,
@@ -1903,7 +2016,7 @@ impl Editor {
             let at = self.resolve_terrain_op(&op);
             self.terrain_op_queue.push_back(QueuedEdit { op, at });
         }
-        if self.terrain_op_queue.is_empty() {
+        if self.terrain_op_queue.is_empty() && self.terrain_op_job.is_none() {
             self.script_host.set_terrain_edits_queued(0);
             return;
         }
@@ -1920,7 +2033,11 @@ impl Editor {
         let t0 = floptle_core::profile::Span::new();
         let started = floptle_core::time::Instant::now();
         let mut batch: HashMap<Entity, TerrainBatch> = HashMap::new();
-        while let Some(front) = self.terrain_op_queue.front() {
+        // A big op made on a worker lands first: everything behind it waited.
+        self.land_op_job(&mut dirty, scatter);
+        while self.terrain_op_job.is_none()
+            && let Some(front) = self.terrain_op_queue.front()
+        {
             // An edit waits for its terrain to land: a field streaming in or
             // being generated replaces the one there now, and would take the
             // edit with it. The edits after it wait their turn behind it.
@@ -1930,6 +2047,14 @@ impl Editor {
                 break;
             }
             let Some(QueuedEdit { op, at }) = self.terrain_op_queue.pop_front() else { break };
+            // Too big for any frame's budget: made off the frame, and the rest
+            // wait behind it.
+            if let Some(at) = at
+                && self.terrains.get(&at.e).is_some_and(|t| op.radius / at.ts >= BIG_OP_VOXELS * t.field.voxel())
+            {
+                self.start_op_job(op, at);
+                break;
+            }
             if scatter && op.affects_geometry() {
                 dirty.push((DVec3::new(op.pos[0], op.pos[1], op.pos[2]), op.radius as f64));
             }
@@ -1971,7 +2096,82 @@ impl Editor {
                 self.scatter_cache.invalidate_near(&sources, p, r);
             }
         }
-        self.script_host.set_terrain_edits_queued(self.terrain_op_queue.len());
+        self.script_host.set_terrain_edits_queued(self.terrain_op_queue.len() + usize::from(self.terrain_op_job.is_some()));
+    }
+
+    /// Start a big op on a worker, on a copy of its terrain's field (the
+    /// chunks are shared, so the copy costs a table of pointers). The proxy
+    /// cells over its box are sampled there too: refreshing them was most of
+    /// the rest of the op's frame.
+    fn start_op_job(&mut self, op: floptle_script::TerrainOp, at: OpTarget) {
+        let Some(t) = self.terrains.get(&at.e) else { return };
+        let mut field = t.field.clone();
+        let _ = field.take_changed();
+        let (dims, center, half) = (t.shadow.dims, t.shadow.center, t.shadow.half_extent);
+        let reach = op.radius / at.ts + t.field.band() + t.field.voxel();
+        let (tx, rx) = std::sync::mpsc::channel();
+        crate::worker::spawn("terrain-op", move || {
+            let (touched, measured) = make_op(&mut field, &op, &at);
+            let changed = field.take_changed();
+            let region = field.sample_dense_region(dims, center, half, at.local - Vec3::splat(reach), at.local + Vec3::splat(reach));
+            let _ = tx.send(OpDone { op, at, field, touched, changed, measured, region });
+        });
+        self.terrain_op_job = Some(OpJob { e: at.e, rx });
+    }
+
+    /// Land the big op in flight, if it is made: its chunks into the field in
+    /// one step, its proxy cells, the sim's copy, the remesh queue and its
+    /// report. Nothing to do while it is still being made.
+    fn land_op_job(&mut self, dirty: &mut Vec<(DVec3, f64)>, scatter: bool) {
+        let Some(job) = &self.terrain_op_job else { return };
+        let done = match job.rx.try_recv() {
+            Ok(done) => done,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                // The worker died: the op is lost, and the queue goes on.
+                self.terrain_op_job = None;
+                self.console.push(floptle_script::LogLevel::Error, "a terrain edit failed to apply and was dropped".into(), None);
+                return;
+            }
+        };
+        let e = job.e;
+        self.terrain_op_job = None;
+        let OpDone { op, at, field, touched, changed, measured, region } = done;
+        if scatter && op.affects_geometry() {
+            dirty.push((DVec3::new(op.pos[0], op.pos[1], op.pos[2]), op.radius as f64));
+        }
+        let Some(t) = self.terrains.get_mut(&e) else { return };
+        let mut coords = touched.clone();
+        if let Some((lo, hi)) = changed {
+            coords.extend(field.chunks_holding(lo, hi));
+        }
+        coords.sort_unstable();
+        coords.dedup();
+        t.field.adopt_edit(&field, &coords, changed);
+        let (mn, mx) = region.write_into(&mut t.shadow);
+        // Its report and chunks, as an inline op's; its proxy is already done.
+        let mut one: HashMap<Entity, TerrainBatch> = HashMap::new();
+        self.landed_op(&op, &at, touched, measured, &mut one);
+        let Some(b) = one.remove(&e) else { return };
+        if b.geom {
+            self.mirror_terrain_chunks_to_sim(e, &b.touched);
+        }
+        self.note_region_dirty(e, mn, mx, b.geom);
+        self.terrain_chunks_dirty.entry(e).or_default().extend(b.touched);
+        self.touch_terrain_edit(e);
+    }
+
+    /// Merge a rewritten proxy box into the atlas's partial upload.
+    fn note_region_dirty(&mut self, e: Entity, mn: [u32; 3], mx: [u32; 3], geom: bool) {
+        self.terrain_region_dirty = Some(match self.terrain_region_dirty {
+            Some((se, omn, omx, og)) if se == e => (
+                e,
+                [omn[0].min(mn[0]), omn[1].min(mn[1]), omn[2].min(mn[2])],
+                [omx[0].max(mx[0]), omx[1].max(mx[1]), omx[2].max(mx[2])],
+                og || geom,
+            ),
+            _ => (e, mn, mx, geom),
+        });
     }
 
     /// Is a field for terrain `e` on its way, to replace the one there now: a
@@ -2043,29 +2243,24 @@ impl Editor {
     /// Apply a script terrain op at the place [`Self::resolve_terrain_op`]
     /// found for it.
     fn apply_resolved_op(&mut self, op: &floptle_script::TerrainOp, at: &OpTarget, batch: &mut HashMap<Entity, TerrainBatch>) {
-        use floptle_field::{Brush, BrushProfile};
+        let Some(t) = self.terrains.get_mut(&at.e) else { return };
+        let (touched, measured) = make_op(&mut t.field, op, at);
+        self.landed_op(op, at, touched, measured, batch);
+    }
+
+    /// What follows an op made, inline or on a worker: its report to the
+    /// script, and its chunks into the frame's batch.
+    fn landed_op(
+        &mut self,
+        op: &floptle_script::TerrainOp,
+        at: &OpTarget,
+        touched: Vec<[i32; 3]>,
+        measured: Option<floptle_field::SculptYield>,
+        batch: &mut HashMap<Entity, TerrainBatch>,
+    ) {
         use floptle_script::TerrainOpMode as M;
-        let OpTarget { e, local, ts, flat_normal } = *at;
+        let OpTarget { e, local, ts, .. } = *at;
         let r_local = op.radius / ts;
-        let profile = BrushProfile::default();
-        let Some(t) = self.terrains.get_mut(&e) else { return };
-        let mut measured = None;
-        let touched = match op.mode {
-            M::Flatten => t.field.flatten_to_plane(local, flat_normal.unwrap_or(Vec3::Y), r_local, op.strength, profile),
-            M::Raise | M::Lower | M::Smooth => {
-                let brush = match op.mode {
-                    M::Raise => Brush::Raise,
-                    M::Lower => Brush::Lower,
-                    _ => Brush::Smooth,
-                };
-                let (touched, y) =
-                    t.field.sculpt_measured(brush, local, r_local, op.strength, profile);
-                measured = Some(y);
-                touched
-            }
-            M::Paint(c) => t.field.paint(local, r_local, op.strength, c, profile),
-            M::PaintTexture(slot) => t.field.paint_texture(local, r_local, slot),
-        };
         // Report before the empty-touch bail: a dab that moved nothing has to
         // report zero rather than nothing, or a game cannot tell "I dug air"
         // from "the report is still coming". Volumes are measured
@@ -2176,7 +2371,7 @@ impl Editor {
                         coord: c,
                         lod: 0,
                         epoch: self.terrain_epoch,
-                        scratch: floptle_field::scratch_for_chunk(&t.field, c, 1),
+                        scratch: JobScratch::Ready(floptle_field::scratch_for_chunk(&t.field, c, 1)),
                         collision: Some(t.field.voxel()),
                     });
                 }
@@ -2261,15 +2456,7 @@ impl Editor {
         let (wmin, wmax) =
             (local - Vec3::splat(radius + pad), local + Vec3::splat(radius + pad));
         let (mn, mx) = t.field.refresh_dense_region(&mut t.shadow, wmin, wmax);
-        self.terrain_region_dirty = Some(match self.terrain_region_dirty {
-            Some((se, omn, omx, og)) if se == e => (
-                e,
-                [omn[0].min(mn[0]), omn[1].min(mn[1]), omn[2].min(mn[2])],
-                [omx[0].max(mx[0]), omx[1].max(mx[1]), omx[2].max(mx[2])],
-                og || geom,
-            ),
-            _ => (e, mn, mx, geom),
-        });
+        self.note_region_dirty(e, mn, mx, geom);
         self.terrain_chunks_dirty.entry(e).or_default().extend(touched);
         self.touch_terrain_edit(e); // an eviction must save this field first
     }
@@ -2780,6 +2967,26 @@ impl Editor {
     /// wants it; its coarse mesh stands until then. Chunks anybody has edited
     /// are never put away.
     pub(crate) fn stream_far_chunks(&mut self, cam_world: DVec3) {
+        let t0 = floptle_core::profile::Span::new();
+        self.stream_far_chunks_now(cam_world);
+        // Named inside `terrain`: the frame after a big world lands put
+        // thousands of its chunks away at once, and nothing said so.
+        self.script_host.profile().borrow_mut().record_part("terrainStreaming", t0.ms());
+        self.give_memory_back_soon();
+    }
+
+    /// Hand the memory let go of back to the system, off the frame and at
+    /// most every [`TRIM_EVERY_SECS`], once something has been let go of.
+    fn give_memory_back_soon(&mut self) {
+        if !self.terrain_trim_due || self.terrain_trimmed.is_some_and(|t| t.elapsed().as_secs_f64() < TRIM_EVERY_SECS) {
+            return;
+        }
+        self.terrain_trim_due = false;
+        self.terrain_trimmed = Some(floptle_core::time::Instant::now());
+        crate::worker::spawn("memory-trim", give_memory_back);
+    }
+
+    fn stream_far_chunks_now(&mut self, cam_world: DVec3) {
         // Land what the workers made.
         let mut landed = Vec::new();
         self.terrain_promotions.retain(|j| match j.rx.try_recv() {
@@ -2849,7 +3056,7 @@ impl Editor {
                         near.push((d, c));
                     }
                 } else if d > rings[FAR_RING] + EVICT_PAST_RING && t.field.evictable(c) {
-                    far.push(c);
+                    far.push((d, c));
                 }
             }
             // Made again nearest first, a few at a time on workers.
@@ -2873,10 +3080,15 @@ impl Editor {
             if far.is_empty() {
                 continue;
             }
+            // The farthest first, and a few a scan: a world that has just
+            // landed is almost all far, and putting it all away was one frame.
+            far.sort_unstable_by_key(|&(d, _)| std::cmp::Reverse(d));
+            let far: Vec<[i32; 3]> = far.into_iter().take(EVICT_PER_SCAN).map(|(_, c)| c).collect();
             let evicted = self.terrains.get_mut(&e).map(|t| t.field.evict(&far)).unwrap_or_default();
             if evicted.is_empty() {
                 continue;
             }
+            self.terrain_trim_due = true;
             // The sim's copy and Play's snapshot share these chunks: put away
             // there too, or nothing is freed.
             let coords: Vec<[i32; 3]> = evicted.iter().map(|v| v.coord()).collect();
@@ -3441,6 +3653,8 @@ impl Editor {
     /// A field arrived (background or blocking): make it resident. During Play the
     /// sim rebuilds so the body's collider exists — the established mid-Play path.
     fn finish_terrain_load(&mut self, e: Entity, t: EditorTerrain) {
+        // Making it let go of a great deal: see `give_memory_back`.
+        self.terrain_trim_due = true;
         // A whole-field save that found its edits on loading is written again
         // at the next save, as edits: nothing dug since would otherwise leave
         // the old file, hundreds of MB, in the slot for good.
@@ -4882,11 +5096,13 @@ mod residency_tests {
                     ed.stream_far_chunks(cam);
                 }
                 if ed.terrain_promotions.is_empty() {
-                    // Once more: a scan with nothing in flight starts nothing.
+                    // Once more: a scan with nothing in flight starts nothing,
+                    // and puts nothing more away (a scan puts away a few).
+                    let away = ed.terrains[&e].field.evicted_count();
                     for _ in 0..FAR_SCAN_FRAMES {
                         ed.stream_far_chunks(cam);
                     }
-                    if ed.terrain_promotions.is_empty() {
+                    if ed.terrain_promotions.is_empty() && ed.terrains[&e].field.evicted_count() == away {
                         break;
                     }
                 }
@@ -5287,5 +5503,250 @@ mod residency_tests {
         ed.terrain_impostor_rules.insert(7, floptle_script::ImpostorRule::Pixels(disc * 2.0));
         ed.sync_terrain_meshes(false, cam);
         assert!(ed.terrain_render[&e].impostor, "a world half the pixels its game set is not a ball");
+    }
+
+
+    /// **One big edit is made off the frame, and lands whole.** A single
+    /// 20 m flatten cost 100 to 400 ms of one frame under load: the budget is
+    /// checked between edits and cannot split one. It is made on a worker,
+    /// on a copy of the field, and taken into the field in one step, so a
+    /// query in the frames between reads the ground as it was before it; the
+    /// small edits behind it wait their turn; no frame costs more than a few
+    /// small flattens; and the ground left is the ground making them all at
+    /// once leaves.
+    #[test]
+    fn one_big_flatten_is_made_off_the_frame_and_lands_whole() {
+        let fill = floptle_field::procgen::PlanetFill { seed: 8, radius: 150.0, voxel: 1.5, relief: 6.0, cave_depth: 0.0, ..Default::default() };
+        let field = floptle_field::procgen::generate_planet(&fill);
+        let ground = field.raycast(Vec3::new(0.0, 250.0, 0.0), Vec3::NEG_Y, 250.0).unwrap();
+        let flatten = |p: Vec3, radius: f32| floptle_script::TerrainOp {
+            pos: [p.x as f64, p.y as f64, p.z as f64],
+            radius,
+            strength: 0.6,
+            mode: floptle_script::TerrainOpMode::Flatten,
+            id: 0,
+            normal: None,
+        };
+        let mut ops = vec![flatten(ground + Vec3::Y * 3.0, 20.0)];
+        ops.extend((0..6).map(|i| flatten(ground + Vec3::new(i as f32 * 2.0, 1.0, 0.0), 3.0)));
+        let editor = || {
+            let mut ed = crate::Editor::default();
+            let e = ed.world.spawn();
+            ed.world.insert(e, floptle_core::Transform::IDENTITY);
+            ed.terrains.insert(e, EditorTerrain::new(field.clone()));
+            (ed, e)
+        };
+        let (mut once, eo) = editor();
+        let mut batch: HashMap<Entity, TerrainBatch> = HashMap::new();
+        for op in &ops {
+            once.apply_terrain_op(op, &mut batch);
+        }
+
+        let (mut ed, e) = editor();
+        let (mut solo, _) = editor();
+        let small = flatten(ground + Vec3::new(-6.0, 1.0, 4.0), 3.0);
+        let watch = field.chunks_holding(
+            [(ground.x / 1.5) as i32, (ground.y / 1.5) as i32, (ground.z / 1.5) as i32],
+            [(ground.x / 1.5) as i32, (ground.y / 1.5) as i32, (ground.z / 1.5) as i32],
+        )[0];
+        let lo = [watch[0] * floptle_field::CHUNK, watch[1] * floptle_field::CHUNK, watch[2] * floptle_field::CHUNK];
+        let (mut before, mut c0, mut now, mut c1) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        field.gather(lo, floptle_field::CHUNK as usize, &mut before, &mut c0);
+        let (mut frames, mut ratios, mut waited) = (0usize, Vec::new(), 0usize);
+        let mut first = Some(ops);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            let t = std::time::Instant::now();
+            ed.pump_collision_meshes();
+            ed.apply_script_terrain_ops(first.take().unwrap_or_default());
+            let frame = t.elapsed().as_secs_f64();
+            let t = std::time::Instant::now();
+            solo.pump_collision_meshes();
+            solo.apply_script_terrain_ops(vec![small.clone()]);
+            ratios.push(frame / t.elapsed().as_secs_f64());
+            frames += 1;
+            if ed.terrain_op_job.is_some() {
+                // In flight: the field reads as it did before the edit.
+                waited += 1;
+                assert_eq!(ed.terrain_op_queue.len(), 6, "an edit behind the big one went ahead of it");
+                ed.terrains[&e].field.gather(lo, floptle_field::CHUNK as usize, &mut now, &mut c1);
+                assert!(now.iter().zip(&before).all(|(a, b)| a.to_bits() == b.to_bits()), "a query read the big edit half made");
+            }
+            if ed.terrain_op_queue.is_empty() && ed.terrain_op_job.is_none() {
+                break;
+            }
+            assert!(std::time::Instant::now() < until, "the edits never landed");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        ratios.sort_by(f64::total_cmp);
+        let worst = ratios[ratios.len() - 1];
+        assert!(worst < BIG_OP_FRAME_RATIO, "a frame cost {worst:.1} small flattens over {frames} frames: {ratios:.1?}");
+        assert!(waited > 0, "the big flatten was made on the frame");
+        let (a, b) = (&once.terrains[&eo].field, &ed.terrains[&e].field);
+        let mut coords = a.all_chunk_coords();
+        coords.extend(b.all_chunk_coords());
+        coords.sort_unstable();
+        coords.dedup();
+        let (mut da, mut ca, mut db, mut cb) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for c in coords {
+            let lo = [c[0] * floptle_field::CHUNK, c[1] * floptle_field::CHUNK, c[2] * floptle_field::CHUNK];
+            a.gather(lo, floptle_field::CHUNK as usize, &mut da, &mut ca);
+            b.gather(lo, floptle_field::CHUNK as usize, &mut db, &mut cb);
+            let same = da.iter().zip(&db).all(|(x, y)| x.to_bits() == y.to_bits()) && ca == cb;
+            assert!(same, "chunk {c:?} differs from making the edits all at once");
+        }
+        // Its proxy cells, sampled off the frame, are the ones refreshing them
+        // in place from the field it left would write.
+        let t = &ed.terrains[&e];
+        let mut fresh = t.shadow.clone();
+        let r = 20.0 + t.field.band() + t.field.voxel();
+        t.field.refresh_dense_region(&mut fresh, ground + Vec3::Y * 3.0 - Vec3::splat(r), ground + Vec3::Y * 3.0 + Vec3::splat(r));
+        assert!(fresh.distance.iter().zip(&t.shadow.distance).all(|(a, b)| a.to_bits() == b.to_bits()) && fresh.color == t.shadow.color, "the proxy over the big edit is stale");
+    }
+
+
+    /// **A world that has just landed puts its far ground away a little at a
+    /// time.** It is almost all far from the player, and every chunk of it
+    /// was put away in the first scan: on Solar's scale-3 worlds that was a
+    /// 320 to 720 ms frame with no part named. A scan now puts away at most
+    /// [`EVICT_PER_SCAN`] chunks, farthest first, and the scans go on until
+    /// the far ground is all away.
+    #[test]
+    fn a_landed_world_puts_its_far_ground_away_a_little_at_a_time() {
+        let fill = floptle_field::procgen::PlanetFill { seed: 5, radius: 300.0, voxel: 1.5, relief: 6.0, cave_depth: 0.0, ..Default::default() };
+        let mut field = floptle_field::procgen::generate_planet(&fill);
+        field.set_spec("test".into());
+        let mut ed = crate::Editor::default();
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        ed.world.insert(e, floptle_core::CelestialBody { body_radius: 300.0, ..Default::default() });
+        ed.terrains.insert(e, EditorTerrain::new(field));
+        let cam = DVec3::new(0.0, 310.0, 0.0);
+        let (mut scans, mut most, mut last) = (0, 0, 0);
+        for _ in 0..FAR_SCAN_FRAMES * 400 {
+            ed.stream_far_chunks(cam);
+            let now = ed.terrains[&e].field.evicted_count();
+            if now != last {
+                scans += 1;
+                most = most.max(now - last);
+                last = now;
+            }
+        }
+        assert!(last > EVICT_PER_SCAN * 3, "only {last} chunks were put away: the fixture is not far enough");
+        assert!(most <= EVICT_PER_SCAN, "one scan put {most} chunks away");
+        assert!(scans > 3, "{last} chunks went in {scans} scan(s)");
+        // And the scans went on until the far ground was all away.
+        let t = &ed.terrains[&e].field;
+        let left = t.chunk_coords().into_iter().filter(|c| t.evictable(*c)).count();
+        assert!(left < t.chunk_coords().len() / 2, "{left} chunks were never put away");
+    }
+
+    /// **A world's chunks are gathered for meshing off the frame.** A coarse
+    /// chunk is meshed from a dense block of the field half again its size on
+    /// every side, half a million voxels, and up to sixteen were gathered on
+    /// the frame each frame while a world that had just landed was meshed:
+    /// 190 ms a frame for seconds (debug). The workers gather from a shared
+    /// copy now, so a world's drawn chunks reach them with nothing gathered.
+    /// Counted, not timed: a ratio of frame to gather read 13 under a loaded
+    /// test run against 17.5 gathered on the frame.
+    #[test]
+    fn a_new_worlds_chunks_are_gathered_off_the_frame() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let fill = floptle_field::procgen::PlanetFill { seed: 5, radius: 300.0, voxel: 1.5, relief: 6.0, cave_depth: 0.0, ..Default::default() };
+        let field = floptle_field::procgen::generate_planet(&fill);
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        ed.world.insert(e, floptle_core::CelestialBody { body_radius: 300.0, ..Default::default() });
+        ed.terrains.insert(e, EditorTerrain::new(field));
+        let cam = DVec3::new(0.0, 310.0, 0.0);
+        let (off, on) = (DRAWN_GATHERS[0].load(Relaxed), DRAWN_GATHERS[1].load(Relaxed));
+        ed.sync_terrain_meshes(true, cam);
+        for _ in 0..40 {
+            ed.sync_terrain_meshes(false, cam);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let off = DRAWN_GATHERS[0].load(Relaxed) - off;
+        let on = DRAWN_GATHERS[1].load(Relaxed) - on;
+        assert!(off > 16, "only {off} chunks were meshed: the fixture is not meshing a world");
+        assert_eq!(on, 0, "{on} drawn chunks were gathered on the frame ({off} on a worker)");
+    }
+
+
+    /// **Ground put away goes back to the system.** Putting nine tenths of a
+    /// 650 m world's chunks away freed 400 MB that the process went on
+    /// holding: the system allocator keeps what is freed. Handed back, the
+    /// process is smaller by most of what the ground held.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn ground_put_away_goes_back_to_the_system() {
+        // Measured in a process of its own: the other tests in this one
+        // allocate hundreds of megabytes while it measures.
+        if std::env::var_os("FLOPTLE_TEST_ALONE").is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "terrain_edit::residency_tests::ground_put_away_goes_back_to_the_system", "--test-threads=1"])
+                .env("FLOPTLE_TEST_ALONE", "1")
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success() && said.contains("1 passed"), "{said}");
+            return;
+        }
+        fn rss() -> f64 {
+            let s = std::fs::read_to_string("/proc/self/statm").unwrap();
+            s.split_whitespace().nth(1).unwrap().parse::<f64>().unwrap() * 4096.0
+        }
+        let fill = floptle_field::procgen::PlanetFill { seed: 3, radius: 450.0, voxel: 1.5, relief: 8.0, cave_depth: 0.0, ..Default::default() };
+        let mut field = floptle_field::procgen::generate_planet(&fill);
+        field.set_spec("test".into());
+        give_memory_back();
+        let held = field.memory_bytes() as f64;
+        let before = rss();
+        let far: Vec<[i32; 3]> = field.chunk_coords().into_iter().filter(|c| c[1] < 6).collect();
+        field.evict(&far);
+        let freed = held - field.memory_bytes() as f64;
+        give_memory_back();
+        let back = before - rss();
+        assert!(freed > 50e6, "the fixture frees only {:.0} MB", freed / 1e6);
+        assert!(back > freed * 0.4, "{:.0} MB of ground was put away and the process is {:.0} MB smaller", freed / 1e6, back / 1e6);
+    }
+
+    /// **A world generated over a terrain draws none of what stood there
+    /// before.** A scene opens on a starter slab and its script generates a
+    /// planet over it; the slab's chunk meshes stayed, merged into the new
+    /// world's far groups, and drew inside it. Every chunk drawn is one the
+    /// world holds.
+    #[test]
+    fn a_world_generated_over_a_terrain_draws_none_of_the_old_one() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        ed.world.insert(e, floptle_core::Matter::Terrain { id: 1, collision: Default::default() });
+        ed.world.insert(e, floptle_core::CelestialBody { body_radius: 120.0, ..Default::default() });
+        let mut slab = floptle_field::ChunkField::new(1.5);
+        slab.fill_slab(Vec3::new(-24.0, -6.0, -24.0), Vec3::new(24.0, 6.0, 24.0), 6.0, [0.35, 0.6, 0.28]);
+        ed.terrains.insert(e, EditorTerrain::new(slab));
+        let cam = DVec3::new(0.0, 0.0, 450.0);
+        for _ in 0..40 {
+            ed.sync_terrain_meshes(false, cam);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!ed.terrain_render[&e].slots.is_empty(), "the slab never meshed");
+        let fill = floptle_field::procgen::PlanetFill { seed: 6, radius: 120.0, voxel: 1.5, relief: 6.0, cave_depth: 0.0, ..Default::default() };
+        ed.start_terrain_generates(vec![(1, fill)]);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while ed.planet_gen_job.is_some() {
+            ed.poll_terrain_generates();
+            assert!(std::time::Instant::now() < until, "the world never landed");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        for _ in 0..200 {
+            ed.sync_terrain_meshes(false, cam);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let (r, f) = (&ed.terrain_render[&e], &ed.terrains[&e].field);
+        assert!(!r.slots.is_empty(), "the world never meshed");
+        let stale: Vec<_> = r.slots.keys().filter(|c| !f.has_data(**c)).collect();
+        assert!(stale.is_empty(), "chunks of what stood there before still draw: {stale:?}");
     }
 }

@@ -1652,6 +1652,10 @@ fn is_default_target_w(v: &u32) -> bool {
 fn is_default_target_h(v: &u32) -> bool {
     *v == Matter::TARGET_H
 }
+fn is_no_fade(f: &(f32, f32)) -> bool {
+    f.0 == 0.0 && f.1 == 0.0
+}
+
 fn is_zero_f32(v: &f32) -> bool {
     *v == 0.0
 }
@@ -3604,6 +3608,10 @@ pub struct MaterialDoc {
     /// [`floptle_core::Material::backlight`]). Absent is none.
     #[serde(default, skip_serializing_if = "is_zero_f32")]
     pub backlight: f32,
+    /// Dissolve toward the camera between two distances (see
+    /// [`floptle_core::Material::near_fade`]). Absent is off.
+    #[serde(default, skip_serializing_if = "is_no_fade")]
+    pub near_fade: (f32, f32),
     #[serde(default, skip_serializing_if = "ShadingDoc::is_classic")]
     pub shading: ShadingDoc,
     #[serde(default, skip_serializing_if = "RetroDoc::is_off")]
@@ -3912,12 +3920,14 @@ impl MaterialDoc {
             thickness: self.thickness.clamp(0.0, 100.0),
             sway: self.sway.clamp(0.0, 100.0),
             backlight: self.backlight.clamp(0.0, 1.0),
+            near_fade: [self.near_fade.0.max(0.0), self.near_fade.1.max(0.0)],
             shading: self.shading.to_shading(),
             retro: self.retro.to_retro(),
             source: self.source.clone(),
             alpha_cutoff: self.alpha_cutoff.clamp(0.0, 1.0),
             double_sided: self.double_sided,
             blend: self.blend_resolved(),
+            faded_from: None,
         }
     }
     pub fn from_material(m: &Material) -> Self {
@@ -3963,6 +3973,7 @@ impl MaterialDoc {
             thickness: m.thickness,
             sway: m.sway,
             backlight: m.backlight,
+            near_fade: (m.near_fade[0], m.near_fade[1]),
             shading: ShadingDoc::from_shading(m.shading),
             retro: RetroDoc::from_retro(m.retro),
             source: m.source.clone(),

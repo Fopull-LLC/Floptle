@@ -144,6 +144,40 @@ impl Lattice {
 }
 
 
+/// A box of a dense proxy's cells sampled from a field, to be written into the
+/// proxy later: the costly half of a proxy refresh, which can run where the
+/// field is, off the frame. See [`ChunkField::sample_dense_region`].
+#[derive(Clone, Debug)]
+pub struct DenseRegion {
+    /// The inclusive index box.
+    mn: [u32; 3],
+    mx: [u32; 3],
+    layers: Vec<Vec<(f32, [u8; 4])>>,
+}
+
+impl DenseRegion {
+    /// Write the cells into `baked`, returning the index box as
+    /// [`ChunkField::refresh_dense_region`] does (inclusive min, exclusive max).
+    pub fn write_into(&self, baked: &mut crate::mesh2sdf::BakedSdf) -> ([u32; 3], [u32; 3]) {
+        let [w, h, _] = baked.dims;
+        let (mn, mx) = (self.mn, self.mx);
+        for (k, layer) in self.layers.iter().enumerate() {
+            let iz = mn[2] + k as u32;
+            let mut cells = layer.iter();
+            for iy in mn[1]..=mx[1] {
+                for ix in mn[0]..=mx[0] {
+                    let i = ((iz * h + iy) * w + ix) as usize;
+                    if let Some((d, c)) = cells.next() {
+                        baked.distance[i] = *d;
+                        baked.color[i] = *c;
+                    }
+                }
+            }
+        }
+        (mn, [mx[0] + 1, mx[1] + 1, mx[2] + 1])
+    }
+}
+
 /// Chunk coordinate → the chunk containing global voxel `i`.
 #[inline]
 fn chunk_of(i: [i32; 3]) -> [i32; 3] {
@@ -1220,6 +1254,23 @@ impl ChunkField {
         }
     }
 
+    /// Take an edit made on a copy of this field: the chunks at `coords` as
+    /// the copy has them, marked edited as the copy marks them, and the box of
+    /// voxels the edit `changed` (what the copy's [`Self::take_changed`]
+    /// gave). An edit too big for one frame is made on a copy off the frame
+    /// and taken here whole, so nothing ever reads it half made.
+    pub fn adopt_edit(&mut self, src: &ChunkField, coords: &[[i32; 3]], changed: Option<([i32; 3], [i32; 3])>) {
+        self.copy_chunks_from(src, coords);
+        for c in coords {
+            if src.edited.contains(c) {
+                self.edited.insert(*c);
+            }
+        }
+        if let Some((lo, hi)) = changed {
+            self.note_changed(lo);
+            self.note_changed(hi);
+        }
+    }
 }
 
 /// How much material a sculpt moved, and what it was made of.
@@ -3076,12 +3127,19 @@ impl ChunkField {
         wmin: Vec3,
         wmax: Vec3,
     ) -> ([u32; 3], [u32; 3]) {
-        let [w, h, d] = baked.dims;
-        let lo = Vec3::from(baked.center) - Vec3::from(baked.half_extent);
+        self.sample_dense_region(baked.dims, baked.center, baked.half_extent, wmin, wmax).write_into(baked)
+    }
+
+    /// [`Self::refresh_dense_region`]'s samples, for a proxy with this grid,
+    /// without the proxy: taken where the field is (a worker's copy of it) and
+    /// written into the proxy later by [`DenseRegion::write_into`].
+    pub fn sample_dense_region(&self, dims: [u32; 3], center: [f32; 3], half_extent: [f32; 3], wmin: Vec3, wmax: Vec3) -> DenseRegion {
+        let [w, h, d] = dims;
+        let lo = Vec3::from(center) - Vec3::from(half_extent);
         let vs = Vec3::new(
-            2.0 * baked.half_extent[0] / w.max(1) as f32,
-            2.0 * baked.half_extent[1] / h.max(1) as f32,
-            2.0 * baked.half_extent[2] / d.max(1) as f32,
+            2.0 * half_extent[0] / w.max(1) as f32,
+            2.0 * half_extent[1] / h.max(1) as f32,
+            2.0 * half_extent[2] / d.max(1) as f32,
         );
         let idx = |p: Vec3| {
             let g = (p - lo) / vs - Vec3::splat(0.5);
@@ -3099,8 +3157,7 @@ impl ChunkField {
             (b[1].ceil() as i64 + 1).clamp(0, h as i64 - 1) as u32,
             (b[2].ceil() as i64 + 1).clamp(0, d as i64 - 1) as u32,
         ];
-        self.sample_into_dense(baked, mn, mx);
-        (mn, [mx[0] + 1, mx[1] + 1, mx[2] + 1])
+        DenseRegion { mn, mx, layers: self.sample_dense_cells(dims, center, half_extent, mn, mx) }
     }
 
     /// Sample this field (trilinear distance, nearest colour) into the proxy's grid
@@ -3112,12 +3169,18 @@ impl ChunkField {
         mn: [u32; 3],
         mx: [u32; 3],
     ) {
-        let [w, h, _d] = baked.dims;
-        let lo = Vec3::from(baked.center) - Vec3::from(baked.half_extent);
+        let layers = self.sample_dense_cells(baked.dims, baked.center, baked.half_extent, mn, mx);
+        DenseRegion { mn, mx, layers }.write_into(baked);
+    }
+
+    /// The proxy cells over the inclusive index box `[mn, mx]`, a z layer to a
+    /// list, x fastest.
+    fn sample_dense_cells(&self, dims: [u32; 3], center: [f32; 3], half_extent: [f32; 3], mn: [u32; 3], mx: [u32; 3]) -> Vec<Vec<(f32, [u8; 4])>> {
+        let lo = Vec3::from(center) - Vec3::from(half_extent);
         let vs = Vec3::new(
-            2.0 * baked.half_extent[0] / baked.dims[0].max(1) as f32,
-            2.0 * baked.half_extent[1] / baked.dims[1].max(1) as f32,
-            2.0 * baked.half_extent[2] / baked.dims[2].max(1) as f32,
+            2.0 * half_extent[0] / dims[0].max(1) as f32,
+            2.0 * half_extent[1] / dims[1].max(1) as f32,
+            2.0 * half_extent[2] / dims[2].max(1) as f32,
         );
         // A cell and a half: every cell whose colour can blend into a pixel on
         // the surface.
@@ -3141,20 +3204,7 @@ impl ChunkField {
             out
         };
         let n = (mx[2] + 1).saturating_sub(mn[2]) as usize;
-        let layers: Vec<Vec<(f32, [u8; 4])>> = if cells > 1 << 16 { par_map(n, layer) } else { (0..n).map(layer).collect() };
-        for (k, layer) in layers.into_iter().enumerate() {
-            let iz = mn[2] + k as u32;
-            let mut cells = layer.into_iter();
-            for iy in mn[1]..=mx[1] {
-                for ix in mn[0]..=mx[0] {
-                    let i = ((iz * h + iy) * w + ix) as usize;
-                    if let Some((d, c)) = cells.next() {
-                        baked.distance[i] = d;
-                        baked.color[i] = c;
-                    }
-                }
-            }
-        }
+        if cells > 1 << 16 { par_map(n, layer) } else { (0..n).map(layer).collect() }
     }
 
     /// The colour a proxy cell at `p` (field distance `d`) carries: within

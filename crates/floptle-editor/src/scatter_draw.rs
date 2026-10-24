@@ -53,6 +53,11 @@ const SETTLE_BUDGET: usize = 96;
 /// were most of a second on a planet: the count alone does not bound the frame.
 const SETTLE_MS: f32 = 1.0;
 
+/// How far past its range a source keeps the chunks it has settled, as a
+/// multiple of the range. Past that a chunk is forgotten, and rolled and
+/// settled again if the eye comes back.
+const KEEP_RANGE: f64 = 1.5;
+
 /// A frame starts a ray only when the rays so far, plus what a ray has been
 /// costing lately, still fit [`SETTLE_MS`]. When one ray alone costs more
 /// than the whole budget, the field still arrives, a ray every this many
@@ -94,7 +99,19 @@ pub(crate) struct ScatterCache {
     pub(crate) settle_ms: f32,
     /// The points bending props away this frame (`scatter.setInteractors`).
     pub(crate) interactors: Vec<scatter::Interactor>,
+    /// The game time this build is for, in seconds: how far a bent prop has
+    /// eased back since the last one.
+    pub(crate) time: f64,
+    last_time: Option<f64>,
+    /// The props leaning now, by `(source, instance)`: how far, and the build
+    /// that last drew them.
+    bent: HashMap<(u32, scatter::InstanceId), (Vec3, u64)>,
 }
+
+/// How quickly a bent prop stands back up once nothing presses on it, in
+/// seconds: about 2% of the lean is left a second later. Pressing in is at
+/// once; grass gives way to a boot, and straightens slowly behind it.
+const SPRING_BACK_S: f32 = 0.25;
 
 impl ScatterCache {
     /// Forget everything — a scene switch, or a terrain edit that moved the
@@ -381,6 +398,7 @@ pub(crate) fn push_scatter(
     const SCATTER_BUDGET: usize = 20_000;
     cache.settled_out = Some(script_host.scatter_settled());
     cache.interactors = script_host.scatter_interactors();
+    cache.time = script_host.weather_time();
     build_instances(
         cache,
         &sources,
@@ -415,12 +433,29 @@ pub(crate) fn build_instances(
 ) {
     // Disjoint borrows: the sweep list and the resolved chunks are read and
     // written in the same loop.
-    let ScatterCache { chunks: resolved, sweeps, settle_all, ray_ms, frame, settled_out, settle_ms: spent, interactors } =
-        cache;
+    let ScatterCache {
+        chunks: resolved,
+        sweeps,
+        settle_all,
+        ray_ms,
+        frame,
+        settled_out,
+        settle_ms: spent,
+        interactors,
+        time,
+        last_time,
+        bent,
+    } = cache;
+    let dt = last_time.map_or(0.0, |t| (*time - t).max(0.0)) as f32;
+    *last_time = Some(*time);
+    let spring = 1.0 - (-dt / SPRING_BACK_S).exp();
     *spent = 0.0;
     let mut landed = settled_out.as_ref().map(|s| s.borrow_mut());
     let settle_all = *settle_all;
     *frame += 1;
+    // A prop not drawn in the last build has gone out of view, and stands
+    // straight when it comes back.
+    bent.retain(|_, (_, seen)| *seen + 1 >= *frame);
     // One ray over budget is allowed now and then when a ray alone is more
     // than the budget; otherwise a ray starts only if it is expected to fit.
     let slow_turn = *frame % SLOW_RAY_EVERY == 0;
@@ -470,6 +505,28 @@ pub(crate) fn build_instances(
         if sweep.at != Some(at) {
             sweep.at = Some(at);
             sweep.keys = scatter::chunks_near(src, eye_local, range as f64);
+            // Chunks well behind the eye are forgotten, with where their props
+            // landed. Kept, every chunk ever passed stayed resolved and every
+            // prop stayed in the landed map, so a long flight grew both without
+            // end, and each time the map doubled it moved every entry inside
+            // one prop's settle: a frame of 11 to 21 ms, rarer and longer the
+            // further you had flown. A margin past the range keeps a chunk you
+            // turn back to from rolling again.
+            let span = floptle_core::profile::Span::new();
+            let keep = (range as f64 + 2.0 * src.chunk) * KEEP_RANGE;
+            resolved.retain(|(id, key), chunk| {
+                if *id != src.id || (scatter::chunk_center(src, *key) - eye_local).length() <= keep {
+                    return true;
+                }
+                if let Some(l) = landed.as_mut() {
+                    for i in &chunk.instances {
+                        l.remove(&(src.id, i.id));
+                    }
+                }
+                false
+            });
+            settle_ms += span.ms();
+            *spent = settle_ms;
         }
         // Nearest first, so the draw budget below cuts the horizon rather than
         // your feet, and so streaming spends its first frames on what you can
@@ -587,9 +644,23 @@ pub(crate) fn build_instances(
                     Mat4::from_scale_rotation_translation(Vec3::splat(inst.scale), rot, centre);
                 // Bent away from whatever is pushing through it: sheared about
                 // its base, so the foot stays planted and the top goes over.
-                if !interactors.is_empty() {
+                // Only a source that gives way bends (`bend`); a rock does not.
+                if src.bend > 0.0 && (!interactors.is_empty() || !bent.is_empty()) {
                     let up = rot * Vec3::Y;
-                    let l = scatter::lean(interactors, src.frame.to_world(inst.pos), up);
+                    let key = (src.id, inst.id);
+                    let pressed = if interactors.is_empty() {
+                        Vec3::ZERO
+                    } else {
+                        scatter::lean(interactors, src.frame.to_world(inst.pos), up) * src.bend
+                    };
+                    let was = bent.get(&key).map_or(Vec3::ZERO, |b| b.0);
+                    // Pushed over at once, eased back up.
+                    let l = if pressed.length_squared() >= was.length_squared() { pressed } else { was + (pressed - was) * spring };
+                    if l.length_squared() > 1e-8 {
+                        bent.insert(key, (l, *frame));
+                    } else {
+                        bent.remove(&key);
+                    }
                     if l != Vec3::ZERO {
                         let shear = Mat4::from_cols(
                             (Vec3::X + l * up.x).extend(0.0),
@@ -923,6 +994,7 @@ mod tests {
             anchor: None,
             frame: Default::default(),
             look: Default::default(),
+            bend: 0.0,
         }
     }
 
@@ -1447,6 +1519,80 @@ mod tests {
         // above catches that whatever the machine is doing.
     }
 
+    /// **A long flight over a planet's flora keeps a bounded cache.** Every
+    /// chunk the eye passed stayed resolved and every prop that landed stayed
+    /// in the landed map, so both grew for as long as you flew, and each time
+    /// the map doubled it rehashed inside a prop's settle: frames of 11 to
+    /// 21 ms while flying low. Flying 25 m up at 40 m/s for 40 s over ground
+    /// partly meshed for drawing, the map holds a fraction of the props ever
+    /// landed, and no terrain chunk is meshed on a prop's account (three were,
+    /// at the edge of the drawn ground). Counts, not times: a shared runner
+    /// can pause any frame.
+    #[test]
+    fn flying_low_over_flora_keeps_a_bounded_cache() {
+        let radius = 600.0;
+        let field = floptle_field::procgen::generate_planet(&floptle_field::procgen::PlanetFill {
+            seed: 11,
+            radius,
+            voxel: 1.5,
+            relief: radius * 0.065,
+            cave_depth: radius * 0.35,
+            core_r: 10.5,
+            ..Default::default()
+        });
+        let mut world = floptle_physics::PhysicsWorld::default();
+        let mut terrain = floptle_physics::ChunkTerrain::new(field.clone());
+        // The ground near the start is meshed for drawing, as it is round the
+        // camera in a game; the flight crosses out of it.
+        let mut adopted = 0;
+        for c in field.chunk_coords() {
+            let centre = (Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32) + 0.5) * field.voxel() * floptle_field::CHUNK as f32;
+            let dir = centre.normalize_or_zero();
+            if dir.z > 0.95 && dir.x.abs() < 0.2 {
+                terrain.adopt_mesh(c, &floptle_physics::drawn_chunk(&field, c));
+                adopted += 1;
+            }
+        }
+        world.add_collider(Box::new(terrain));
+        let s = ScatterSource {
+            region: Region::Sphere { center: DVec3::ZERO, radius: radius as f64 },
+            chunk: 18.0,
+            per_chunk: 30,
+            bands: vec![Band { asset: "plant".into(), distance: 120.0 }],
+            ..src()
+        };
+        let landed: Settled = Default::default();
+        let mut cache = ScatterCache { settled_out: Some(landed.clone()), ..Default::default() };
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
+        let mut landed_max = 0;
+        let mut ever: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let frames = 2400;
+        for f in 0..frames {
+            let a = f as f64 / 60.0 * 40.0 / radius as f64;
+            let eye = DVec3::new(a.sin(), 0.2, a.cos()).normalize() * (radius as f64 + 25.0);
+            let mut ground = |from: DVec3, dir: Vec3, max: f32| {
+                world.raycast_ground(from.as_vec3(), dir, max).map(|h| (h.distance, Vec3::from(h.normal)))
+            };
+            let mut out = Vec::new();
+            build_instances(
+                &mut cache, std::slice::from_ref(&s), eye, &mut mesh, &mut |_: &str| None, &mut ground,
+                &floptle_render::Frustum::everything(), 20_000, &mut out,
+            );
+            landed_max = landed_max.max(landed.borrow().len());
+            ever.extend(landed.borrow().keys().map(|k| k.1));
+        }
+        // 1.6 km of flight lands several times what is in range at once; kept
+        // forever, the map would hold all of it.
+        assert!(ever.len() > 2000, "the field never arrived: {} props landed", ever.len());
+        assert!(
+            landed_max * 3 < ever.len(),
+            "the landed map kept what the flight left behind: at most {landed_max} of the {} props ever landed",
+            ever.len()
+        );
+        let meshed = world.colliders[0].shape.chunk_terrain().map_or(0, |t| t.meshed_chunks());
+        assert_eq!(meshed, adopted, "settling meshed {} terrain chunks for collision", meshed - adopted);
+    }
+
     /// **The first ray of a frame counts against the budget too.** Ground
     /// whose every ray costs 3 ms, more than the whole budget: a frame used to
     /// cast one regardless, so every frame a field was arriving went 3 ms
@@ -1867,7 +2013,7 @@ mod tests {
     /// in front of a player.
     #[test]
     fn a_prop_beside_an_interactor_leans_away_and_a_far_one_does_not() {
-        let s = src();
+        let s = ScatterSource { bend: 1.0, ..src() };
         let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
         let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
         let mut build = |points: Vec<scatter::Interactor>| {
@@ -1908,5 +2054,67 @@ mod tests {
             }
         }
         assert!(far > 10, "no props far from the walker to compare");
+    }
+
+    /// **Grass gives way and springs back; a rock does not move.** Every
+    /// source bent, rocks and trunks included, and a bent prop snapped
+    /// upright the frame its walker left. Now only a source with `bend`
+    /// gives way, and a prop eases back up over about a second.
+    #[test]
+    fn only_grass_bends_and_it_springs_back_after_the_walker_leaves() {
+        // A small field: this builds it seventy times.
+        let small = Region::Ground { center: DVec3::ZERO, half: [12.0, 12.0] };
+        let rock = ScatterSource { id: 1, region: small, bands: vec![Band { asset: "rock".into(), distance: 50.0 }], ..src() };
+        let grass = ScatterSource { id: 2, bend: 1.0, region: small, bands: vec![Band { asset: "grass".into(), distance: 50.0 }], ..src() };
+        let sources = [rock, grass];
+        let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
+        let mut mesh = |a: &str| {
+            let id = if a == "rock" { MeshId(1) } else { MeshId(2) };
+            Some(vec![(id, None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])])
+        };
+        let mut cache = ScatterCache { settle_all: true, ..Default::default() };
+        // The worst lean among one source's props: how far a prop's top is
+        // off its foot, across the ground.
+        let mut build = |cache: &mut ScatterCache, t: f64| {
+            cache.time = t;
+            let mut out = Vec::new();
+            build_instances(
+                cache, &sources, DVec3::ZERO, &mut mesh, &mut |_: &str| None,
+                &mut ground, &floptle_render::Frustum::everything(), 100_000, &mut out,
+            );
+            let tilt = |id: u32| {
+                out.iter()
+                    .filter(|(m, _, _)| m.0 == id)
+                    .map(|(_, _, r)| {
+                        let m = Mat4::from_cols_array_2d(&r.model);
+                        let top = m.transform_point3(Vec3::Y) - m.w_axis.truncate();
+                        (top - Vec3::Y * top.y).length()
+                    })
+                    .fold(0.0f32, f32::max)
+            };
+            (tilt(1), tilt(2))
+        };
+        let (rock0, grass0) = build(&mut cache, 0.0);
+        assert!(rock0 < 1e-5 && grass0 < 1e-5, "the field leaned with nothing pressing on it");
+        // A walker standing in the middle of the field.
+        cache.interactors = vec![scatter::Interactor { pos: DVec3::new(0.0, 1.0, 0.0), radius: 6.0, strength: 1.0 }];
+        let (rock, grass) = build(&mut cache, 1.0 / 60.0);
+        assert!(rock < 1e-5, "a rock leaned {rock} away from the walker");
+        assert!(grass > 0.2, "the grass beside the walker barely leaned: {grass}");
+        // The walker leaves; the grass straightens over the frames after.
+        cache.interactors.clear();
+        let mut t = 1.0 / 60.0;
+        let mut after = |cache: &mut ScatterCache, until: f64| {
+            let mut last = (0.0, 0.0);
+            while t < until {
+                t += 1.0 / 60.0;
+                last = build(cache, t);
+            }
+            last
+        };
+        let (_, soon) = after(&mut cache, 0.1);
+        assert!(soon > grass * 0.4, "the grass snapped upright: {soon} a tenth of a second after leaning {grass}");
+        let (_, later) = after(&mut cache, 1.1);
+        assert!(later < grass * 0.05, "a second after the walker left the grass still leans {later} (from {grass})");
     }
 }

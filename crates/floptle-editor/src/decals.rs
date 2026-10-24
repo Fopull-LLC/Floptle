@@ -28,9 +28,16 @@ pub(crate) struct DecalBatch {
     anchor: DVec3,
 }
 
-/// A batch's key: the picture, and the node its marks ride (`None` for marks
-/// that stay where they were laid).
-type BatchKey = (String, Option<u32>);
+/// A batch's key: the picture, the node its marks ride (`None` for marks
+/// that stay where they were laid), and the page: the decal's id over
+/// [`PAGE`]. A mark that changes rebuilds its own page, not every mark
+/// sharing its picture.
+type BatchKey = (String, Option<u32>, u32);
+
+/// Marks per batch page. Small enough that rebuilding the page a dug mark is
+/// in costs a handful of marks; big enough that a meadow of marks is a few
+/// dozen draws, not hundreds.
+const PAGE: u32 = 16;
 
 #[derive(Default)]
 pub(crate) struct DecalBatches {
@@ -47,6 +54,12 @@ pub(crate) struct DecalBatches {
     /// Marks laid again since Play started, for the guard that a dig lays
     /// only the marks it reached.
     relaid: u64,
+    /// The page each mark was last packed into, so a mark that moves to
+    /// another frame (or goes) rebuilds the page it left.
+    keyed: std::collections::HashMap<u32, BatchKey>,
+    /// Marks packed into batches since Play started, for the guard that a
+    /// change repacks its page and not the whole picture.
+    repacked: u64,
 }
 
 /// How long a frame may spend checking and laying marks again after digs.
@@ -90,7 +103,15 @@ fn ridden(d: &Decal) -> Option<(u32, Transform)> {
 /// Pack every decal showing one picture on one frame into a mesh, relative to
 /// the first one's centre, in the frame's own space when it has one. `None`
 /// when there are none.
+#[cfg(test)]
 pub(crate) fn pack(store: &DecalStore, texture: &str, frame: Option<u32>) -> Option<(DVec3, MeshData)> {
+    pack_decals(store.with_texture(texture).filter(|d| ridden(d).map(|(f, _)| f) == frame))
+}
+
+/// Pack these decals (one picture, one frame) into a mesh, relative to the
+/// first one's centre, in the frame's own space when it has one. `None` when
+/// there are none.
+pub(crate) fn pack_decals<'a>(decals: impl Iterator<Item = &'a Decal>) -> Option<(DVec3, MeshData)> {
     // Each mark's centre and turn in the space the batch is kept in.
     let placed = |d: &Decal| -> (DVec3, Quat) {
         match ridden(d) {
@@ -101,7 +122,7 @@ pub(crate) fn pack(store: &DecalStore, texture: &str, frame: Option<u32>) -> Opt
             None => (d.pos, Quat::IDENTITY),
         }
     };
-    let mut decals = store.with_texture(texture).filter(|d| ridden(d).map(|(f, _)| f) == frame).peekable();
+    let mut decals = decals.peekable();
     let anchor = placed(decals.peek()?).0;
     let mut data = MeshData { vertices: Vec::new(), indices: Vec::new(), colors: Some(Vec::new()) };
     let colors = data.colors.as_mut().expect("colors");
@@ -147,33 +168,87 @@ impl crate::Editor {
         }
     }
 
-    /// Rebuild the batch of every picture whose decals changed since the last
-    /// frame. Once a frame, after the scripts; nothing to do without a GPU.
+    /// Rebuild the batch pages whose decals changed since the last frame:
+    /// the page each changed mark is in now, and the one it was in before.
+    /// Once a frame, after the scripts; nothing to do without a GPU. Timed as
+    /// the `decalBatches` part of the terrain bucket.
     pub(crate) fn sync_decals(&mut self) {
+        self.lay_waiting_decals();
         self.relay_decals_on_edits();
+        let t0 = floptle_core::time::Instant::now();
         let store = self.script_host.decals().clone();
         let mut store = store.borrow_mut();
         let mut dirty = store.take_dirty();
         if store.epoch() != self.decal_batches.epoch {
-            // The store was emptied wholesale: every batch goes.
+            // The store was emptied wholesale: every batch goes, and every
+            // mark it holds now is packed afresh.
             self.decal_batches.epoch = store.epoch();
-            dirty.extend(self.decal_batches.batches.keys().map(|(t, _)| t.clone()));
-            dirty.sort();
-            dirty.dedup();
+            if let Some(raster) = self.raster.as_mut() {
+                for b in std::mem::take(&mut self.decal_batches.batches).into_values() {
+                    raster.free_dynamic(b.mesh);
+                }
+            }
+            self.decal_batches.batches.clear();
+            self.decal_batches.keyed.clear();
+            dirty = store.ids();
         }
         if dirty.is_empty() || self.gpu.is_none() || self.raster.is_none() {
             return;
         }
-        for texture in dirty {
-            // Every frame this picture is on now, and every one it had a batch on.
-            let mut frames: Vec<Option<u32>> =
-                store.with_texture(&texture).map(|d| ridden(d).map(|(f, _)| f)).collect();
-            frames.extend(self.decal_batches.batches.keys().filter(|(t, _)| *t == texture).map(|(_, f)| *f));
-            frames.sort();
-            frames.dedup();
-            for frame in frames {
-                self.rebuild_decal_batch(&store, &texture, frame);
+        let mut pages: std::collections::BTreeSet<BatchKey> = std::collections::BTreeSet::new();
+        for id in dirty {
+            if let Some(old) = self.decal_batches.keyed.remove(&id) {
+                pages.insert(old);
             }
+            if let Some(d) = store.get(id) {
+                pages.insert((d.texture.clone(), ridden(d).map(|(f, _)| f), id / PAGE));
+            }
+        }
+        for key in pages {
+            self.rebuild_decal_page(&store, key);
+        }
+        drop(store);
+        let ms = t0.elapsed().as_secs_f64() as f32 * 1000.0;
+        self.profile_record(floptle_core::profile::Bucket::Terrain, ms);
+        self.script_host.profile().borrow_mut().record_part("decalBatches", ms);
+    }
+
+    /// Carry on laying the marks `decals.add` could not finish in its frame's
+    /// budget, oldest first, a piece at a time in what is left of this
+    /// frame's budget; then the next frame's budget starts whole. Each piece
+    /// is gathered where the mark is now, on whatever it rides as that stands
+    /// now. Timed as the `decalLay` part.
+    fn lay_waiting_decals(&mut self) {
+        let store_rc = self.script_host.decals().clone();
+        let Some(sim) = self.sim.as_ref() else {
+            store_rc.borrow_mut().new_frame();
+            return;
+        };
+        let waiting = store_rc.borrow().waiting();
+        let t0 = floptle_core::time::Instant::now();
+        let mut worked = false;
+        'marks: for id in waiting {
+            // Not placed yet (asked for in the pass just run, and placed
+            // after it): its turn comes next frame.
+            let Some((pos, turn, _)) = store_rc.borrow().get(id).and_then(|d| self.decal_place_now(d)) else { continue };
+            let center = (pos - sim.world.origin).as_vec3();
+            loop {
+                let mut store = store_rc.borrow_mut();
+                if store.budget_left_ms() <= 0.0 {
+                    break 'marks;
+                }
+                worked = true;
+                match store.step_job(id, &sim.world.colliders, center, turn) {
+                    Some(false) => continue,
+                    _ => break,
+                }
+            }
+        }
+        store_rc.borrow_mut().new_frame();
+        if worked {
+            let ms = t0.elapsed().as_secs_f64() as f32 * 1000.0;
+            self.profile_record(floptle_core::profile::Bucket::Terrain, ms);
+            self.script_host.profile().borrow_mut().record_part("decalLay", ms);
         }
     }
 
@@ -249,7 +324,9 @@ impl crate::Editor {
             self.decal_batches.relaid += 1;
         }
         drop(store);
-        self.profile_record(floptle_core::profile::Bucket::Terrain, t0.elapsed().as_secs_f64() as f32 * 1000.0);
+        let ms = t0.elapsed().as_secs_f64() as f32 * 1000.0;
+        self.profile_record(floptle_core::profile::Bucket::Terrain, ms);
+        self.script_host.profile().borrow_mut().record_part("decalRelay", ms);
     }
 
     /// Where a placed mark is now, which way it has turned since it was laid,
@@ -270,9 +347,19 @@ impl crate::Editor {
         }
     }
 
-    fn rebuild_decal_batch(&mut self, store: &DecalStore, texture: &str, frame: Option<u32>) {
-        let key = (texture.to_string(), frame);
-        let packed = pack(store, texture, frame);
+    /// Pack one page again: the marks with ids in it that show its picture on
+    /// its frame.
+    fn rebuild_decal_page(&mut self, store: &DecalStore, key: BatchKey) {
+        let (texture, frame, page) = (key.0.as_str(), key.1, key.2);
+        let members: Vec<(u32, &Decal)> = store
+            .in_range(page * PAGE, page.saturating_add(1).saturating_mul(PAGE))
+            .filter(|(_, d)| d.texture == texture && ridden(d).map(|(f, _)| f) == frame)
+            .collect();
+        for (id, _) in &members {
+            self.decal_batches.keyed.insert(*id, key.clone());
+        }
+        self.decal_batches.repacked += members.len() as u64;
+        let packed = pack_decals(members.iter().map(|(_, d)| *d));
         let tex = packed.as_ref().and_then(|_| self.ensure_texture(texture));
         if packed.is_some() && tex.is_none() && self.decal_batches.warned.insert(texture.to_string()) {
             self.console.push(
@@ -313,7 +400,7 @@ pub(crate) fn push_decal_instances(
     cam_world: DVec3,
     instances: &mut Vec<(MeshId, Option<TexId>, floptle_render::InstanceRaw)>,
 ) {
-    for ((_, frame), b) in &batches.batches {
+    for ((_, frame, _), b) in &batches.batches {
         let model = match frame.and_then(|f| world.entity_with::<Transform>(f)) {
             Some(e) => floptle_core::world_transform(world, e)
                 .mul_transform(&Transform::from_translation(b.anchor))
@@ -411,11 +498,21 @@ mod tests {
     /// A project with `script` on one node and a terrain slab 24 m across,
     /// its top at 0, in Play.
     fn on_a_slab(tag: &str, script: &str, half: f32) -> (crate::Editor, floptle_core::Entity, std::path::PathBuf) {
+        on_a_slab_in(crate::Editor::default(), tag, script, half)
+    }
+
+    /// [`on_a_slab`], starting from `ed` (one with a GPU, say).
+    fn on_a_slab_in(
+        mut ed: crate::Editor,
+        tag: &str,
+        script: &str,
+        half: f32,
+    ) -> (crate::Editor, floptle_core::Entity, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("floptle-decal-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
         floptle_vfs::write(dir.join("scripts/marks.lua"), script).unwrap();
-        let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+        ed.project_root = dir.clone();
         let mut field = floptle_field::ChunkField::new(0.5);
         field.fill_slab(Vec3::new(-half, -6.0, -half), Vec3::new(half, 0.0, half), 0.0, [0.5, 0.5, 0.5]);
         let e = ed.world.spawn();
@@ -491,6 +588,117 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **A dig repacks the pages of the marks it reached, not the meadow.**
+    /// Every mark sharing a picture was one mesh, rebuilt whole when any one
+    /// of them changed: a dig among 150 marks repacked all 150 and uploaded
+    /// them again, the 250 ms Solar's meadow digs spent outside every timer.
+    /// Now a picture's marks are pages of 16, and only the pages holding a
+    /// mark laid again are packed.
+    #[test]
+    fn a_dig_repacks_only_the_pages_of_the_marks_it_reached() {
+        use floptle_field::{Brush, BrushProfile};
+        let Some(gpu_ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let script = "local done = false\nfunction update(node, dt)\n  if done then return end\n  done = true\n  \
+                      for i = 0, 149 do\n    local a = i * 2.39996\n    local r = 2 + 27 * (i / 149)\n    \
+                      decals.add{ texture = 'turf.png', pos = vec3(r * math.cos(a), 0, r * math.sin(a)), \
+                      normal = vec3(0, 1, 0), size = 1.5, depth = 4 }\n  end\nend\n";
+        let (mut ed, e, dir) = on_a_slab_in(gpu_ed, "pages", script, 36.0);
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([90, 140, 60, 255])).save(dir.join("turf.png")).unwrap();
+        ed.toggle_play();
+        // Marks past a frame's laying budget land over the next frames; a
+        // loaded machine lays fewer a frame, so wait for the last of them
+        // rather than for a count of frames.
+        for _ in 0..5000 {
+            ed.play_step(1.0 / 60.0, true);
+            if ed.script_host.decals().borrow().waiting().is_empty() {
+                break;
+            }
+        }
+        assert!(ed.script_host.decals().borrow().waiting().is_empty(), "the marks never all landed");
+        ed.play_step(1.0 / 60.0, true);
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        assert_eq!(ed.script_host.decals().borrow().len(), 150, "the marks were not all laid");
+        let pages = ed.decal_batches.batches.len();
+        assert!((10..=12).contains(&pages), "150 marks make {pages} pages, not about 150 / 16");
+        let before = ed.decal_batches.repacked;
+        assert!(before >= 150, "the first frames packed only {before} marks");
+        let touched = {
+            let t = ed.terrains.get_mut(&e).unwrap();
+            t.field.sculpt(Brush::Lower, Vec3::new(2.0, 0.0, 0.0), 2.4, 1.0, BrushProfile { hardness: 1.0, ..Default::default() })
+        };
+        ed.mirror_terrain_chunks_to_sim(e, &touched);
+        for _ in 0..4 {
+            ed.pump_collision_meshes();
+        }
+        for _ in 0..600 {
+            ed.sync_decals();
+            if ed.decal_batches.pending.is_empty() {
+                break;
+            }
+        }
+        ed.sync_decals();
+        let relaid = ed.decal_batches.relaid;
+        let repacked = ed.decal_batches.repacked - before;
+        assert!(relaid >= 1, "the mark under the bite was not laid again");
+        assert!(
+            repacked <= relaid * u64::from(super::PAGE),
+            "{relaid} marks laid again repacked {repacked} marks: more than their pages hold"
+        );
+        assert!(repacked < 75, "a dig among 150 marks repacked {repacked} of them");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Big marks asked for at once land over frames, a piece at a time,
+    /// and the script can tell when.** Laying a 29 m mark over terrain took
+    /// 30 to 100 ms, all of it inside the `decals.add` call: ten asked for at
+    /// once were a second-long hitch. Now a mark is laid a piece of its box at
+    /// a time while the frame's budget lasts, and the rest is carried over;
+    /// `decals.landed(id)` is false until it is done. No frame does more than
+    /// a small share of the whole job.
+    #[test]
+    fn big_marks_land_over_frames_within_the_budget() {
+        let script = "ids = ids or {}\nlocal asked = false\nfunction update(node, dt)\n  if not asked then\n    asked = true\n    \
+                      for i = 0, 9 do\n      ids[#ids + 1] = decals.add{ texture = 'scorch.png', pos = vec3(-27 + i * 6, 0, 0), \
+                      normal = vec3(0, 1, 0), size = 29, depth = 4 }\n    end\n  end\n  local landed = 0\n  \
+                      for _, id in ipairs(ids) do\n    if decals.landed(id) then landed = landed + 1 end\n  end\n  \
+                      print('landed ' .. landed)\nend\n";
+        let (mut ed, _e, dir) = on_a_slab("budgeted", script, 60.0);
+        ed.toggle_play();
+        let landed = |ed: &crate::Editor| {
+            let store = ed.script_host.decals().clone();
+            let store = store.borrow();
+            store.ids().into_iter().filter(|id| store.get(*id).is_some_and(|d| !d.waiting)).count()
+        };
+        let lay_ms = |ed: &crate::Editor| ed.script_host.decals().borrow().last_frame_ms();
+        ed.play_step(1.0 / 60.0, true);
+        ed.drain_script_logs();
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        assert_eq!(ed.script_host.decals().borrow().len(), 10, "a mark was refused");
+        let first = landed(&ed);
+        assert!(first < 10, "all ten 29 m marks were laid in the frame that asked for them");
+        let mut frames_ms = vec![lay_ms(&ed)];
+        while landed(&ed) < 10 && frames_ms.len() < 2000 {
+            ed.play_step(1.0 / 60.0, true);
+            ed.drain_script_logs();
+            frames_ms.push(lay_ms(&ed));
+        }
+        assert_eq!(landed(&ed), 10, "the marks were still waiting after {} frames", frames_ms.len());
+        let total: f64 = frames_ms.iter().sum();
+        let worst = frames_ms.iter().copied().fold(0.0, f64::max);
+        assert!(
+            worst < total / 5.0,
+            "one frame spent {worst:.1} ms of the {total:.1} ms the ten marks took to lay, over {} frames",
+            frames_ms.len()
+        );
+        assert!(ed.script_host.decals().borrow().get(1).is_some_and(|d| d.indices.len() > 300), "a landed mark is empty");
+        ed.play_step(1.0 / 60.0, true);
+        ed.drain_script_logs();
+        let said: Vec<String> = ed.console.entries.iter().map(|e| e.msg.clone()).collect();
+        assert!(said.iter().any(|m| m.contains("landed 10")), "decals.landed never said all ten had landed");
+        assert!(said.iter().any(|m| m.contains(&format!("landed {first}"))), "the first frame's count");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// **A mark does not lie on a collider nothing draws.** An Empty node with
     /// a box collider is a wall nobody sees; a mark laid over it hung in the
     /// air as a pane. It lies on the drawn ground below instead.
@@ -524,3 +732,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+

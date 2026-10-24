@@ -621,10 +621,14 @@ its place in the prop), or a mesh a script built with `mesh.build`.
 
 `scatter.setInteractors` gives the props something to bend away from: the crew
 walking through a meadow, a rover's wheels, a ship settling onto a landing pad.
-Each prop within `radius` of a point, measured across the ground, leans away
-from it, its foot staying where it is. `strength` is how far a prop right beside
-the point leans (the tangent of the lean, so `1` lays it over at 45 degrees);
-it eases to nothing at the radius.
+Only a source that gives way bends: `scatter.create{ ..., bend = 1 }` for grass
+and flowers, a smaller number for stiffer plants, and nothing (the default, 0)
+for rocks and trunks. Each such prop within `radius` of a point, measured
+across the ground, leans away from it, its foot staying where it is.
+`strength` is how far a prop right beside the point leans (the tangent of the
+lean, so `1` lays it over at 45 degrees, times the source's `bend`); it eases to
+nothing at the radius. A prop is pushed over at once and straightens over about
+a second after the point has moved on.
 
 ```lua
 function update(dt)
@@ -764,6 +768,25 @@ The other options:
 the mark: a spray into the sky, or a sphere or capsule collider, which has no
 faces for a decal to lie on.
 
+**Big marks land over a few frames.** Laying a mark costs time in proportion
+to the surface under it: a 29 m mark over finely meshed terrain is tens of
+milliseconds of work, most of it meshing ground nothing had asked about yet.
+So a mark is laid a piece of its box at a time (8 m pieces), and a frame lays
+pieces only until about 2 ms is spent. `decals.add` gives back the id at once;
+what it could not finish is carried on in later frames, oldest mark first, and
+the mark is drawn when it is whole. Ten 29 m marks asked for at once land over
+about half a second. `decals.landed(id)` is `true` once the mark is laid,
+`false` while it is still being laid, and `nil` when there is no such mark
+(removed, trimmed, or it found nothing to lie on). A mark on a world that moves
+while it is laid still fits together: each piece is laid where the mark is
+then.
+
+```lua
+local id = decals.add{ texture = "textures/decals/crater.png", pos = p, normal = n, size = 29 }
+-- later
+if decals.landed(id) then spawnDust(p) end
+```
+
 ```lua
 local id = decals.add{ texture = "textures/decals/scorch.png", pos = p, normal = n, size = 2 }
 decals.set(id, { alpha = 0.5 })     -- fade it; also color = {r, g, b}
@@ -777,17 +800,21 @@ when a new one arrives past that. `decals.setMax(n)` changes the budget, up to
 65536. `decals.set` and `decals.remove` on a decal that has already gone
 answer `false`.
 
-**What they cost.** All the decals that share a picture are one mesh and one
-draw, whatever their number. Adding, changing or removing a decal rebuilds its
-picture's mesh once, that frame. `perf.counts().decals` and
+**What they cost.** The decals that share a picture are drawn in pages of 16,
+one mesh and one draw a page. Adding, changing or removing a decal rebuilds
+only its own page, that frame. `perf.parts()` names the work: `decalLay`
+(laying marks that waited), `decalRelay` (laying again marks a dig reached) and
+`decalBatches` (rebuilding the pages that changed). `perf.counts().decals` and
 `perf.counts().decalTris` are the number in the world and the triangles they
 were laid as. A mark is cut to its box at the moment it's added, so on a big
 flat floor it's a handful of triangles, and on finely meshed ground it's the
 triangles under it, up to 4096.
 
-Decals stay where they were laid. One on a door that later opens stays in the
-doorway, and one on terrain that is later dug stays in the air. Remove it when
-its surface changes. Playing again, or switching scene, clears them all.
+A mark on terrain that is dug is laid again on the ground there, once the dig's
+collision lands; a mark with nothing left under it goes. A mark that rides a
+node (`frame`) moves with it. Otherwise decals stay where they were laid: one
+on a door that later opens stays in the doorway, so remove it when its surface
+changes. Playing again, or switching scene, clears them all.
 
 ## 25. Space: orbits, gravity & time-warp
 

@@ -218,6 +218,7 @@ fn field(far: f32) -> ScatterSource {
         anchor: None,
         frame: Default::default(),
         look: Default::default(),
+        bend: 0.0,
     }
 }
 

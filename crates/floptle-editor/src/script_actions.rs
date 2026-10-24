@@ -156,9 +156,14 @@ impl Editor {
             };
             let chunks = terrain.field.data_chunks();
             self.terrains.insert(e, terrain);
-            // Its impostor was the colour of whatever stood there before.
-            if let Some(r) = self.terrain_render.get_mut(&e) {
-                r.impostor_color = None;
+            // Generating it let go of a great deal: see `give_memory_back`.
+            self.terrain_trim_due = true;
+            // Its meshes and impostor were of whatever stood there before: the
+            // starter slab's chunks went on drawing inside the new world, and
+            // the ball was the slab's grass.
+            if let (Some(raster), Some(mut r)) = (self.raster.as_mut(), self.terrain_render.remove(&e)) {
+                r.free_all(raster);
+                r.born.clear();
             }
             // A generated field exists only in RAM until the scene is saved — an
             // eviction (G1 residency) must write it to disk before dropping it.

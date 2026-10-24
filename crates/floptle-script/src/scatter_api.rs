@@ -100,7 +100,7 @@ fn color_opt(opts: &mlua::Table, key: &str) -> Option<[f32; 3]> {
 pub(crate) const CREATE_KEYS: &[&str] = &[
     "asset", "lod", "range", "seed", "center", "radius", "halfX", "halfZ", "align", "perChunk",
     "chunk", "scaleMin", "scaleMax", "fade", "density", "densityRows", "parent", "tint", "emissive",
-    "emissiveStrength",
+    "emissiveStrength", "bend",
 ];
 
 /// Chunks resident at once, above which a source is reported rather than left
@@ -273,6 +273,9 @@ pub(crate) fn install_scatter_api(
                     emissive: color_opt(&opts, "emissive"),
                     emissive_strength: num(&opts, "emissiveStrength", 0.0) as f32,
                 },
+                // Rocks and trunks stand firm unless the source says its
+                // props give way.
+                bend: num(&opts, "bend", 0.0).clamp(0.0, 1.0) as f32,
             };
             // Say what this costs, here, while the two numbers that decided it
             // are still on screen. The alternative is what

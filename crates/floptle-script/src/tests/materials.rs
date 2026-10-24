@@ -1499,3 +1499,40 @@ fn set_material_blend_is_named_or_follows_a_fade() {
     assert_eq!(world.get::<Material>(cut).map(|m| m.alpha_cutoff), Some(0.2));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **A fade brought back to full opacity draws as it did before it.** A solid
+/// surface faded with `alpha` blends while it is faded, and is solid again at
+/// 1; a surface that blended on its own keeps blending when its fade ends.
+#[test]
+fn a_fade_back_to_full_opacity_puts_the_blend_back() {
+    use floptle_core::{BlendMode, Material, Matter};
+    let dir = std::env::temp_dir().join(format!("floptle-matunfade-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "pulse",
+        "local n = 0\nfunction update(node, dt)\n  n = n + 1\n  node:setMaterial{ alpha = (n == 1) and 0.3 or 1 }\nend\n",
+    );
+    let mut world = World::default();
+    let mut node = |blend: BlendMode| {
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [1.0; 3] });
+        world.insert(e, Material { blend, ..Default::default() });
+        world.insert(e, Scripts(vec![floptle_core::ScriptInst::new("pulse")]));
+        e
+    };
+    let (solid, cut, glass) = (node(BlendMode::Opaque), node(BlendMode::Cutout), node(BlendMode::Blend));
+    let mut host = ScriptHost::new();
+    let blend = |world: &World, e| world.get::<Material>(e).map(|m| (m.alpha, m.blend));
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    assert_eq!(blend(&world, solid), Some((0.3, BlendMode::Blend)), "a fade blends");
+    assert_eq!(blend(&world, cut), Some((0.3, BlendMode::Blend)));
+    host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    assert_eq!(blend(&world, solid), Some((1.0, BlendMode::Opaque)), "back at 1 it is solid again");
+    assert_eq!(blend(&world, cut), Some((1.0, BlendMode::Cutout)), "back at 1 it cuts out again");
+    assert_eq!(blend(&world, glass), Some((1.0, BlendMode::Blend)), "glass blended before the fade");
+    let _ = std::fs::remove_dir_all(&dir);
+}

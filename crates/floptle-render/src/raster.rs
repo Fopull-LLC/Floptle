@@ -519,6 +519,10 @@ pub struct SurfaceExtras {
     pub double_sided: bool,
     /// Drawn in the blended pass ([`floptle_core::BlendMode::Blend`]).
     pub blend: bool,
+    /// Dissolve toward the camera ([`floptle_core::Material::near_fade`]):
+    /// gone nearer than `[0]` metres, whole beyond `[1]`. Off when `[1]` is
+    /// not past `[0]`.
+    pub near_fade: [f32; 2],
 }
 
 impl Default for SurfaceExtras {
@@ -540,6 +544,7 @@ impl Default for SurfaceExtras {
             alpha_cutoff: 0.5,
             double_sided: true,
             blend: false,
+            near_fade: [0.0, 0.0],
         }
     }
 }
@@ -552,9 +557,9 @@ impl Default for SurfaceExtras {
 /// entry, and the shader's own indexing. It went from two to three the first time
 /// a material needed a field that would not fit, and every one of those six is a
 /// silent wrong-material-read if it is missed.
-pub(crate) const EXT_LANES: usize = 3;
+pub(crate) const EXT_LANES: usize = 4;
 
-/// Flag bits in `mat_ext[i*2 + 1].x`. Mirrored in `raster.wgsl` — the two lists
+/// Flag bits in `mat_ext[i*4 + 1].x`. Mirrored in `raster.wgsl` — the two lists
 /// are the same list and must be edited together.
 pub(crate) const EXT_PHYSICAL: u32 = 1;
 pub(crate) const EXT_AFFINE_UV: u32 = 2;
@@ -608,6 +613,7 @@ impl SurfaceExtras {
             },
             double_sided: m.double_sided,
             blend: m.blend == floptle_core::BlendMode::Blend,
+            near_fade: m.near_fade,
         }
     }
 
@@ -659,6 +665,7 @@ impl SurfaceExtras {
             [self.roughness, self.metallic, self.normal_strength, self.occlusion_strength],
             [self.flags() as f32, self.retro.jitter, self.reflectivity, self.transmission],
             [self.ior, self.thickness, self.sway, self.backlight],
+            [self.near_fade[0], self.near_fade[1], 0.0, 0.0],
         ]
     }
 
@@ -4318,6 +4325,13 @@ impl Raster {
         // A blended material never primes depth, whatever its opacity.
         let blend_flags = self.ext_blends();
         let blended = |raw: &InstanceRaw| blend_flags.get(ext_index_of(raw) as usize).copied().unwrap_or(false);
+        // A screen-door surface is drawn in the opaque pass whatever its
+        // opacity, so it primes depth and casts its shadow too: `fs_depth`
+        // cuts the same pixels the colour pass does for the camera, and none
+        // for the sun.
+        let dither_flags: Vec<bool> =
+            self.mat_ext_cpu.as_chunks::<EXT_LANES>().0.iter().map(|c| (c[1][0] as u32) & EXT_DITHER_ALPHA != 0).collect();
+        let dithered = |raw: &InstanceRaw| dither_flags.get(ext_index_of(raw) as usize).copied().unwrap_or(false);
         const OPAQUE_CUTOFF: f32 = 0.999;
         // A shader that moves its vertices draws depth through its own
         // pipelines (`displaced` below); the built-in ones would put it where
@@ -4340,7 +4354,7 @@ impl Raster {
             instances
                 .iter()
                 .filter(|(_, _, raw)| {
-                    solid(raw) && (is_terrain(raw) || (raw.color[3] >= OPAQUE_CUTOFF && !blended(raw)))
+                    solid(raw) && (is_terrain(raw) || dithered(raw) || (raw.color[3] >= OPAQUE_CUTOFF && !blended(raw)))
                 })
                 .map(|(id, tex, raw)| ((id.0 as usize, tex.map(|t| t.0)), *raw))
                 .chain(
@@ -4361,7 +4375,11 @@ impl Raster {
         // agree bit for bit. Priming from the bind pose instead would depth-reject
         // the pose, and a character would vanish behind its own T-stance.
         let skin_buckets = self.bucket_skins_where(skins, &mut raws, |d| match &d.flsl {
-            None => is_terrain(&d.instance) || (d.instance.color[3] >= OPAQUE_CUTOFF && !blended(&d.instance)),
+            None => {
+                is_terrain(&d.instance)
+                    || dithered(&d.instance)
+                    || (d.instance.color[3] >= OPAQUE_CUTOFF && !blended(&d.instance))
+            }
             Some(bind) => flsl_opaque(bind),
         });
         let displaced =
@@ -4411,6 +4429,9 @@ impl Raster {
         }
         let mut g = globals;
         g.view_proj = g.sun_vp;
+        // Tells `fs_depth` this is the sun's view: what fades a surface for the
+        // camera does not thin its shadow.
+        g.sun_extra[1] = 1.0;
         self.begin_pass(gpu, g);
         let (buckets, skin_buckets, displaced) = self.upload_opaque_depth_draws(gpu, instances, flsl, skins);
         let mut encoder = gpu

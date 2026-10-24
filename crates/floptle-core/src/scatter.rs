@@ -212,6 +212,9 @@ pub struct ScatterSource {
     pub frame: Frame,
     /// How its props are coloured.
     pub look: ScatterLook,
+    /// How far its props give way to [`Interactor`]s, 0 to 1: grass bends
+    /// (1), a rock or a trunk does not (0, the default).
+    pub bend: f32,
 }
 
 /// The colour a source's props are drawn with, on top of their own textures.
@@ -712,6 +715,7 @@ mod tests {
             anchor: None,
             frame: Default::default(),
             look: Default::default(),
+            bend: 0.0,
         }
     }
 
