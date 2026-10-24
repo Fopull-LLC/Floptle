@@ -1,5 +1,9 @@
 ## Just shipped
 
+**v0.117.0-rc9 — "Whole Worlds"** (beta). Big digs and marks land without
+stalling the frame, planets give back the memory they no longer need, wheels
+roll freely, and a walker can no longer slip through a narrow post.
+
 **v0.117.0-rc8 — "Whole Worlds"** (beta). Projects upgrade themselves to
 keep their look, script suggestions fit what you are typing, every body size
 follows its node, and rivers, rock belts and irregular rocks arrive.
