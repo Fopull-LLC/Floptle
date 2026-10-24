@@ -449,12 +449,12 @@ pub(crate) struct OpTarget {
 /// budget, since a budget is checked between ops and cannot split one.
 const BIG_OP_VOXELS: f32 = 4.0;
 
-/// The most a frame of edits may cost while a big one is made off it, in
-/// small flattens. Made on the frame, one 20 m flatten on a 150 m world
-/// cost 7.4 (debug); made off it, the worst frame, the one it lands in with
-/// the small edits behind it, costs 2.3 to 2.4.
 #[cfg(test)]
-const BIG_OP_FRAME_RATIO: f64 = 5.0;
+thread_local! {
+    /// Big ops ([`BIG_OP_VOXELS`]) made on the calling thread rather than on
+    /// a worker. Test-only.
+    static BIG_OPS_ON_FRAME: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// The most ops handed to an op worker ahead of what has landed. The worker
 /// makes them one after another while the frames go on, and each frame lands
@@ -2489,6 +2489,10 @@ impl Editor {
     fn apply_resolved_op(&mut self, op: &floptle_script::TerrainOp, at: &OpTarget, batch: &mut HashMap<Entity, TerrainBatch>) {
         let Some(t) = self.terrains.get_mut(&at.e) else { return };
         let unmade = t.field.pending_count();
+        #[cfg(test)]
+        if op.radius / at.ts >= BIG_OP_VOXELS * t.field.voxel() {
+            BIG_OPS_ON_FRAME.with(|n| n.set(n.get() + 1));
+        }
         let (touched, measured) = make_op(&mut t.field, op, at);
         // Ground made on the frame by an edit that should have gone to the
         // worker ([`Self::op_goes_off_frame`]): tens of milliseconds a chunk.
@@ -5862,9 +5866,10 @@ mod residency_tests {
     /// checked between edits and cannot split one. It is made on a worker,
     /// on a copy of the field, and taken into the field in one step, so a
     /// query in the frames between reads the ground as it was before it; the
-    /// small edits behind it wait their turn; no frame costs more than a few
-    /// small flattens; and the ground left is the ground making them all at
-    /// once leaves.
+    /// small edits behind it wait their turn; and the ground left is the
+    /// ground making them all at once leaves. Counted, not timed: the frame it
+    /// lands in also lands the six small edits queued behind it, so a ratio
+    /// to one small flatten read 5.7 on a CI runner with nothing wrong.
     #[test]
     fn one_big_flatten_is_made_off_the_frame_and_lands_whole() {
         let fill = floptle_field::procgen::PlanetFill { seed: 8, radius: 150.0, voxel: 1.5, relief: 6.0, cave_depth: 0.0, ..Default::default() };
@@ -5894,8 +5899,6 @@ mod residency_tests {
         }
 
         let (mut ed, e) = editor();
-        let (mut solo, _) = editor();
-        let small = flatten(ground + Vec3::new(-6.0, 1.0, 4.0), 3.0);
         let watch = field.chunks_holding(
             [(ground.x / 1.5) as i32, (ground.y / 1.5) as i32, (ground.z / 1.5) as i32],
             [(ground.x / 1.5) as i32, (ground.y / 1.5) as i32, (ground.z / 1.5) as i32],
@@ -5903,18 +5906,13 @@ mod residency_tests {
         let lo = [watch[0] * floptle_field::CHUNK, watch[1] * floptle_field::CHUNK, watch[2] * floptle_field::CHUNK];
         let (mut before, mut c0, mut now, mut c1) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         field.gather(lo, floptle_field::CHUNK as usize, &mut before, &mut c0);
-        let (mut frames, mut ratios, mut waited) = (0usize, Vec::new(), 0usize);
+        let (mut frames, mut waited) = (0usize, 0usize);
+        let inline_before = BIG_OPS_ON_FRAME.with(|n| n.get());
         let mut first = Some(ops);
         let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
         loop {
-            let t = std::time::Instant::now();
             ed.pump_collision_meshes();
             ed.apply_script_terrain_ops(first.take().unwrap_or_default());
-            let frame = t.elapsed().as_secs_f64();
-            let t = std::time::Instant::now();
-            solo.pump_collision_meshes();
-            solo.apply_script_terrain_ops(vec![small.clone()]);
-            ratios.push(frame / t.elapsed().as_secs_f64());
             frames += 1;
             if ed.terrain_op_job.is_some() {
                 // In flight: the field reads as it did before the edit.
@@ -5929,10 +5927,9 @@ mod residency_tests {
             assert!(std::time::Instant::now() < until, "the edits never landed");
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        ratios.sort_by(f64::total_cmp);
-        let worst = ratios[ratios.len() - 1];
-        assert!(worst < BIG_OP_FRAME_RATIO, "a frame cost {worst:.1} small flattens over {frames} frames: {ratios:.1?}");
-        assert!(waited > 0, "the big flatten was made on the frame");
+        let inline = BIG_OPS_ON_FRAME.with(|n| n.get()) - inline_before;
+        assert_eq!(inline, 0, "the big flatten was made on the frame ({frames} frames)");
+        assert!(waited > 0, "the big flatten was never in flight");
         let (a, b) = (&once.terrains[&eo].field, &ed.terrains[&e].field);
         let mut coords = a.all_chunk_coords();
         coords.extend(b.all_chunk_coords());
