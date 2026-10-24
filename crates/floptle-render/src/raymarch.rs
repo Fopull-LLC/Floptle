@@ -2651,6 +2651,16 @@ mod atlas_tests {
         panic!("the larger atlas never came");
     }
 
+    /// A device these tests can judge the atlas on. OpenGL takes the path
+    /// without GPU copies (as the browser does), so the counts these tests
+    /// expect are not its counts; and reading a slot past the first back
+    /// from a 3D texture answers wrongly there even for the plain whole
+    /// upload, so a slot cannot be checked bit for bit.
+    fn copying_gpu() -> Option<crate::Gpu> {
+        let gpu = crate::Gpu::headless(4, 4);
+        (gpu.adapter.get_info().backend != wgpu::Backend::Gl).then_some(gpu)
+    }
+
     fn cells(b: &BakedSdf) -> u64 {
         b.distance.len() as u64
     }
@@ -2666,7 +2676,7 @@ mod atlas_tests {
     /// holds its own bake, bit for bit.
     #[test]
     fn a_volume_that_arrives_uploads_itself_and_nothing_else() {
-        let gpu = crate::Gpu::headless(4, 4);
+        let Some(gpu) = copying_gpu() else { return };
         let mut rm = Raymarch::new(&gpu);
         let (a, b, c) = (bake(1, [48, 40, 64]), bake(2, [64, 64, 48]), bake(3, [64, 56, 64]));
         let ab = [AtlasVolume { baked: &a, key: 11 }, AtlasVolume { baked: &b, key: 12 }];
@@ -2696,7 +2706,7 @@ mod atlas_tests {
     /// way joins the same build, keeping what it wrote.
     #[test]
     fn a_growing_atlas_copies_what_it_holds() {
-        let gpu = crate::Gpu::headless(4, 4);
+        let Some(gpu) = copying_gpu() else { return };
         let mut rm = Raymarch::new(&gpu);
         let (a, b, c) = (bake(4, [32, 32, 32]), bake(5, [32, 32, 300]), bake(6, [32, 24, 40]));
         let va = AtlasVolume { baked: &a, key: 21 };
@@ -2722,7 +2732,7 @@ mod atlas_tests {
     /// atlas is re-laid is not lost when the new atlas takes over.
     #[test]
     fn an_edit_box_reaches_both_atlases() {
-        let gpu = crate::Gpu::headless(4, 4);
+        let Some(gpu) = copying_gpu() else { return };
         let mut rm = Raymarch::new(&gpu);
         let mut a = bake(7, [40, 40, 40]);
         let b = bake(8, [40, 40, 600]);
