@@ -837,12 +837,79 @@ impl ChunkField {
         }
     }
 
+    /// Whether [`Self::d`] reads at least the band at every point of the box
+    /// `min ..= max`: every voxel a read anywhere in it can touch holds a
+    /// distance from the band to twice the band, which only open air does.
+    ///
+    /// Judged from what the chunks store: an absent chunk is open air, a
+    /// uniform one is its value, and a stored one answers by its blocks, one
+    /// holding a single value by that value and one holding varied values by
+    /// the voxels the box covers. A coarse stand-in for an evicted chunk says
+    /// no. So `false` means "cannot tell", never "solid", and a box wider than
+    /// a few chunks is not asked about.
+    ///
+    /// Why the values must be at most twice the band: `d` blends neighbours,
+    /// and a blend of two values that close is never rounded below the
+    /// smaller of them, so every read lands at or above the band.
+    pub fn open_air_in_box(&self, min: Vec3, max: Vec3) -> bool {
+        if !(min.is_finite() && max.is_finite()) {
+            return false;
+        }
+        let band = self.band();
+        let (lo, hi) = (min / self.voxel, max / self.voxel);
+        let lo = [lo.x.floor() as i32, lo.y.floor() as i32, lo.z.floor() as i32];
+        // A read uses the voxel at the floor and the one past it.
+        let hi = [hi.x.floor() as i32 + 1, hi.y.floor() as i32 + 1, hi.z.floor() as i32 + 1];
+        let (c0, c1) = (chunk_of(lo), chunk_of(hi));
+        if (0..3).any(|k| c1[k] - c0[k] > 3) {
+            return false;
+        }
+        for cz in c0[2]..=c1[2] {
+            for cy in c0[1]..=c1[1] {
+                for cx in c0[0]..=c1[0] {
+                    let ok = match self.chunks.get(&[cx, cy, cz]) {
+                        None => true,
+                        Some(Chunk::Uniform(v)) => *v >= band && *v <= 2.0 * band,
+                        Some(Chunk::Lattice(_)) => false,
+                        Some(Chunk::Data(d)) => {
+                            let at = [cx, cy, cz];
+                            let span = |k: usize| {
+                                let base = at[k] * CHUNK;
+                                ((lo[k].max(base) - base) as usize, (hi[k].min(base + CHUNK - 1) - base) as usize)
+                            };
+                            let (x, y, z) = (span(0), span(1), span(2));
+                            d.fills_within([x.0, y.0, z.0], [x.1, y.1, z.1], band, 2.0 * band)
+                        }
+                    };
+                    if !ok {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
     /// Trilinearly-sampled distance at a world position.
     pub fn d(&self, p: Vec3) -> f32 {
         let g = p / self.voxel;
         let b = [g.x.floor() as i32, g.y.floor() as i32, g.z.floor() as i32];
         let f = Vec3::new(g.x - b[0] as f32, g.y - b[1] as f32, g.z - b[2] as f32);
-        let c = |dx: i32, dy: i32, dz: i32| self.voxel_at([b[0] + dx, b[1] + dy, b[2] + dz]);
+        // All eight corners in one chunk, which is all but the last voxel of
+        // each row: that chunk is found once rather than once a corner. The
+        // same voxels are read, so the same value comes back.
+        let one_chunk = b.iter().all(|&k| k.rem_euclid(CHUNK) < CHUNK - 1);
+        let chunk = if one_chunk { Some(self.chunks.get(&chunk_of(b))) } else { None };
+        let c = |dx: i32, dy: i32, dz: i32| {
+            let i = [b[0] + dx, b[1] + dy, b[2] + dz];
+            match chunk {
+                Some(None) => self.band(),
+                Some(Some(Chunk::Uniform(v))) => *v,
+                Some(Some(Chunk::Data(d))) => d.dist(local_of(i)),
+                Some(Some(Chunk::Lattice(l))) => l.dist(local_of(i)),
+                None => self.voxel_at(i),
+            }
+        };
         let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
         let x00 = lerp(c(0, 0, 0), c(1, 0, 0), f.x);
         let x10 = lerp(c(0, 1, 0), c(1, 1, 0), f.x);

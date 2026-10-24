@@ -13,6 +13,28 @@ pub trait CollisionShape {
     fn distance(&self, p: Vec3) -> f32;
     /// Outward unit surface normal at `p` (direction of increasing distance).
     fn normal(&self, p: Vec3) -> Vec3;
+    /// [`Self::distance`], asked only whether it is under `r`.
+    ///
+    /// Where `distance(p) < r` this returns exactly `distance(p)`, bit for
+    /// bit; anywhere else it returns some value at least `r`. A contact needs
+    /// nothing more: a sample is touching when its distance is under its
+    /// radius, and how far beyond that the nearest face is changes nothing.
+    /// A shape whose search can stop at `r` overrides this; the default asks
+    /// the whole question.
+    fn distance_within(&self, p: Vec3, r: f32) -> f32 {
+        let _ = r;
+        self.distance(p)
+    }
+    /// Whether [`Self::distance`] is at least `r` at every point of the box
+    /// `lo ..= hi`, known without asking point by point.
+    ///
+    /// `true` is a promise; `false` means only "cannot tell cheaply", and is
+    /// the default. What lets a shape with no bounds of its own (a terrain
+    /// field) be skipped for the parts of a craft in open air above it.
+    fn clear_of(&self, lo: Vec3, hi: Vec3, r: f32) -> bool {
+        let _ = (lo, hi, r);
+        false
+    }
     /// The outward normal only where it's reliable — `None` when the field
     /// cannot resolve a direction here (a point deep inside a saturated SDF
     /// interior, where the gradient is zero). `normal()` masks that with a
@@ -475,11 +497,70 @@ struct Surface {
     /// air or pure rock extracts nothing and belongs in here exactly as much as
     /// one that extracted a thousand triangles, so it is not re-meshed every
     /// query.
-    chunks: std::collections::HashMap<[i32; 3], CollisionChunk>,
+    chunks: CellMap<[i32; 3], CollisionChunk>,
     /// How many rays found the drawn surface in each chunk not meshed yet,
     /// from a few cells meshed for the asking. A chunk asked about often is
     /// worth meshing whole.
     asked: std::collections::HashMap<[i32; 3], u8>,
+}
+
+/// The meshed chunks around one query, looked up once rather than once per
+/// cell: up to two chunks a side, which covers every cell a query within a
+/// chunk's width can visit. `None` when the box needs more, and the caller
+/// asks [`Surface::each_in`] instead.
+struct NearChunks<'a> {
+    lo: [i32; 3],
+    table: [Option<&'a CollisionChunk>; 8],
+    /// Every bucket any of them holds triangles in is inside this range.
+    occupied: ((i32, i32, i32), (i32, i32, i32)),
+}
+
+impl<'a> NearChunks<'a> {
+    fn new(s: &'a Surface, lo_cell: (i32, i32, i32), hi_cell: (i32, i32, i32)) -> Option<Self> {
+        let n = floptle_field::CHUNK;
+        let lo = [lo_cell.0, lo_cell.1, lo_cell.2].map(|k| (k - 2).div_euclid(n));
+        let hi = [hi_cell.0, hi_cell.1, hi_cell.2].map(|k| (k + 2).div_euclid(n));
+        if (0..3).any(|i| hi[i] - lo[i] > 1) {
+            return None;
+        }
+        let mut table = [None; 8];
+        let mut occupied = NO_CELLS;
+        for z in lo[2]..=hi[2] {
+            for y in lo[1]..=hi[1] {
+                for x in lo[0]..=hi[0] {
+                    let ch = s.chunks.get(&[x, y, z]);
+                    if let Some(ch) = ch {
+                        let ((a, b), (c, d)) = (occupied, ch.occupied);
+                        occupied = ((a.0.min(c.0), a.1.min(c.1), a.2.min(c.2)), (b.0.max(d.0), b.1.max(d.1), b.2.max(d.2)));
+                    }
+                    table[Self::at(lo, x, y, z)] = ch;
+                }
+            }
+        }
+        Some(Self { lo, table, occupied })
+    }
+
+    #[inline]
+    fn at(lo: [i32; 3], x: i32, y: i32, z: i32) -> usize {
+        ((x - lo[0]) + 2 * ((y - lo[1]) + 2 * (z - lo[2]))) as usize
+    }
+
+    /// [`Surface::each_in`], from the table: the same chunks in the same
+    /// order, so the same triangles in the same order.
+    #[inline]
+    fn each_in(&self, cell: (i32, i32, i32), mut f: impl FnMut(&SurfaceTri)) {
+        let span = |k: i32| ((k - 2).div_euclid(floptle_field::CHUNK), (k + 2).div_euclid(floptle_field::CHUNK));
+        let ((x0, x1), (y0, y1), (z0, z1)) = (span(cell.0), span(cell.1), span(cell.2));
+        for z in z0..=z1 {
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    if let Some(ch) = self.table[Self::at(self.lo, x, y, z)] {
+                        ch.cell(cell).iter().for_each(&mut f);
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Surface {
@@ -503,15 +584,83 @@ impl Surface {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Bounded mesh searches run, and triangles any mesh search tested,
+    /// bounded or not. Test-only.
+    pub(crate) static MESH_BOUNDED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static MESH_TRIS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Drawn-surface triangles a terrain query walked, and of those, the ones
+    /// it tested rather than skipped by their box. Test-only.
+    pub(crate) static TERRAIN_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static TERRAIN_TRIS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// A hasher for small integer keys (cell and chunk coordinates).
+///
+/// A query near the ground looks a bucket up in every cell it visits, and the
+/// standard hasher spent more on each lookup than the triangle tests did. A key
+/// is a few `i32`s, chosen by geometry and never by an adversary, so a
+/// multiply-rotate mix is enough. Only lookups go through it; nothing iterates
+/// these maps in an order that could change an answer.
+#[derive(Default, Clone, Copy)]
+struct CellHasher(u64);
+
+impl std::hash::Hasher for CellHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for c in bytes.chunks(8) {
+            let mut b = [0u8; 8];
+            b[..c.len()].copy_from_slice(c);
+            self.write_u64(u64::from_le_bytes(b));
+        }
+    }
+    #[inline]
+    fn write_u64(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+    #[inline]
+    fn write_u32(&mut self, v: u32) {
+        self.write_u64(v as u64);
+    }
+    #[inline]
+    fn write_i32(&mut self, v: i32) {
+        self.write_u64(v as u32 as u64);
+    }
+    #[inline]
+    fn write_usize(&mut self, v: usize) {
+        self.write_u64(v as u64);
+    }
+}
+
+type CellMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<CellHasher>>;
+
 /// One chunk's collision triangles, bucketed for closest-point queries: one
 /// list sorted by bucket, each bucket a run of it. Two allocations a chunk,
 /// whatever its size, so building one off the main thread and handing it over
 /// costs the main thread nothing to speak of; a bucket each was thousands of
 /// small allocations, a few milliseconds a chunk, every time a dig re-meshed.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct CollisionChunk {
-    runs: std::collections::HashMap<(i32, i32, i32), (u32, u32)>,
+    runs: CellMap<(i32, i32, i32), (u32, u32)>,
     tris: Vec<SurfaceTri>,
+    /// The inclusive range of buckets that hold anything, so a query can
+    /// leave the air above a floor without asking about each bucket in it.
+    /// Inverted (`lo > hi`) when the chunk holds nothing.
+    occupied: ((i32, i32, i32), (i32, i32, i32)),
+}
+
+/// The empty bucket range: every `min`/`max` folded into it gives the other.
+const NO_CELLS: ((i32, i32, i32), (i32, i32, i32)) = ((i32::MAX, i32::MAX, i32::MAX), (i32::MIN, i32::MIN, i32::MIN));
+
+impl Default for CollisionChunk {
+    fn default() -> Self {
+        Self { runs: CellMap::default(), tris: Vec::new(), occupied: NO_CELLS }
+    }
 }
 
 impl CollisionChunk {
@@ -546,7 +695,7 @@ impl CollisionChunk {
             }
         }
         placed.sort_by_key(|(k, _)| *k);
-        let mut runs = std::collections::HashMap::new();
+        let mut runs = CellMap::default();
         let mut tris = Vec::with_capacity(placed.len());
         let mut i = 0;
         while i < placed.len() {
@@ -558,7 +707,10 @@ impl CollisionChunk {
             }
             runs.insert(k, (start, tris.len() as u32 - start));
         }
-        Self { runs, tris }
+        let occupied = runs.keys().fold(NO_CELLS, |(lo, hi), k| {
+            ((lo.0.min(k.0), lo.1.min(k.1), lo.2.min(k.2)), (hi.0.max(k.0), hi.1.max(k.1), hi.2.max(k.2)))
+        });
+        Self { runs, tris, occupied }
     }
 
     fn cell(&self, k: (i32, i32, i32)) -> &[SurfaceTri] {
@@ -758,10 +910,34 @@ impl ChunkTerrain {
 
     /// Make sure every chunk within `cell()` of `local` has been meshed.
     fn ensure_meshed(&self, local: Vec3, s: &mut Surface) {
-        let r = Vec3::splat(self.reach());
-        for c in self.field.chunks_in_world_box(local - r, local + r) {
+        self.each_chunk_near(local, |c| {
             self.mesh_into(c, s);
+            true
+        });
+    }
+
+    /// The chunks the drawn surface near `local` is read from — the ones
+    /// `ChunkField::chunks_in_world_box` names for the reach round it —
+    /// walked in place, while `f` answers true. Every query near the ground
+    /// asks this and nearly always finds them all meshed already, so
+    /// building the list was most of what it cost.
+    fn each_chunk_near(&self, local: Vec3, mut f: impl FnMut([i32; 3]) -> bool) -> bool {
+        let r = Vec3::splat(self.reach());
+        let (lo, hi) = (local - r, local + r);
+        let v = self.field.voxel();
+        let n = floptle_field::CHUNK;
+        let lo = [(lo.x / v).floor() as i32, (lo.y / v).floor() as i32, (lo.z / v).floor() as i32].map(|i| i.div_euclid(n));
+        let hi = [(hi.x / v).ceil() as i32, (hi.y / v).ceil() as i32, (hi.z / v).ceil() as i32].map(|i| i.div_euclid(n));
+        for cz in lo[2]..=hi[2] {
+            for cy in lo[1]..=hi[1] {
+                for cx in lo[0]..=hi[0] {
+                    if !f([cx, cy, cz]) {
+                        return false;
+                    }
+                }
+            }
         }
+        true
     }
 
     /// The first drawn triangle a ray from `o` along `d` (local, unit) meets
@@ -812,9 +988,8 @@ impl ChunkTerrain {
 
     /// Is every chunk the drawn surface near `local` is read from meshed?
     fn meshed_near(&self, local: Vec3) -> bool {
-        let r = Vec3::splat(self.reach());
         let s = self.surface.borrow();
-        self.field.chunks_in_world_box(local - r, local + r).iter().all(|c| s.chunks.contains_key(c))
+        self.each_chunk_near(local, |c| s.chunks.contains_key(&c))
     }
 
     /// Mesh chunk `c` into the surface, unless it is there already.
@@ -832,11 +1007,20 @@ impl ChunkTerrain {
         if !self.mesh_accurate {
             return None;
         }
+        self.closest_surface_at(local, self.field.d(local))
+    }
+
+    /// [`Self::closest_surface`], for a caller that has the field's distance
+    /// `d` at `local` already and wants it again if no triangle answers.
+    fn closest_surface_at(&self, local: Vec3, d: f32) -> Option<(Vec3, Vec3)> {
+        if !self.mesh_accurate {
+            return None;
+        }
         // Cheap reject before any meshing: outside the band the field saturates
         // and there is nothing for a triangle to correct. Saturated, it reads
         // the band exactly, not more, so the band itself is the test: asking
         // for more than it let every query in open air run the whole search.
-        if self.field.d(local).abs() >= self.field.band() {
+        if d.abs() >= self.field.band() {
             return None;
         }
         let mut s = self.surface.borrow_mut();
@@ -860,10 +1044,51 @@ impl ChunkTerrain {
         // The ring is bounded by the reach the reject above established; past
         // it there is no triangle worth finding and the field answers.
         let max_ring = (self.reach() / cell).ceil().max(1.0) as i32;
+        let reach = |k: i32| k - max_ring;
+        let near = NearChunks::new(
+            &s,
+            (reach(c.0), reach(c.1), reach(c.2)),
+            (c.0 + max_ring, c.1 + max_ring, c.2 + max_ring),
+        );
+        let each_in = |cell: (i32, i32, i32), f: &mut dyn FnMut(&SurfaceTri)| match &near {
+            Some(near) => near.each_in(cell, f),
+            None => s.each_in(cell, f),
+        };
+        // Buckets outside every nearby chunk's occupied range hold nothing,
+        // so the walk is clamped to it: the same buckets in the same order,
+        // less the empty ones. Without the table, nothing is clamped.
+        let (olo, ohi) = near.as_ref().map_or(
+            ((i32::MIN, i32::MIN, i32::MIN), (i32::MAX, i32::MAX, i32::MAX)),
+            |n| n.occupied,
+        );
+        let tol = 1e-5 * (1.0 + local.abs().max_element());
+        // A bound before the walk starts: the distance to some triangle near
+        // the point, from the occupied bucket nearest it (under a point in
+        // open air, the ground straight below). The walk is unchanged; a
+        // triangle is skipped only when it cannot come within this bound,
+        // and no triangle the walk would end on is ever that far. Whichever
+        // ring the walk stops at, everything outside it is at least that
+        // ring's floor away, and the walk only stops once its best is inside
+        // the floor; so the answer is at most this bound, and every triangle
+        // that could be the answer or tie with it is still tested, in the
+        // same order.
+        let mut seed = f32::INFINITY;
+        if let Some(near) = &near
+            && olo.0 <= ohi.0
+        {
+            let at = (c.0.clamp(olo.0, ohi.0), c.1.clamp(olo.1, ohi.1), c.2.clamp(olo.2, ohi.2));
+            near.each_in(at, |tri| {
+                let q = closest_point_on_triangle(local, tri.p[0], tri.p[1], tri.p[2]);
+                let d2 = (q - local).length_squared();
+                if d2.is_finite() {
+                    seed = seed.min(d2);
+                }
+            });
+        }
         for r in 0..=max_ring {
-            for cz in c.2 - r..=c.2 + r {
-                for cy in c.1 - r..=c.1 + r {
-                    for cx in c.0 - r..=c.0 + r {
+            for cz in (c.2 - r).max(olo.2)..=(c.2 + r).min(ohi.2) {
+                for cy in (c.1 - r).max(olo.1)..=(c.1 + r).min(ohi.1) {
+                    for cx in (c.0 - r).max(olo.0)..=(c.0 + r).min(ohi.0) {
                         // Only the shell: the inside was scanned at a smaller r.
                         let on_shell = (cx - c.0).abs() == r
                             || (cy - c.1).abs() == r
@@ -871,7 +1096,16 @@ impl ChunkTerrain {
                         if !on_shell {
                             continue;
                         }
-                        s.each_in((cx, cy, cz), |tri| {
+                        each_in((cx, cy, cz), &mut |tri| {
+                            #[cfg(test)]
+                            TERRAIN_VISITS.with(|n| n.set(n.get() + 1));
+                            // Past the best so far, it can neither beat it nor
+                            // tie it; see `box_lower_d2`.
+                            if box_lower_d2(local, tol, &tri.p) > best.min(seed) {
+                                return;
+                            }
+                            #[cfg(test)]
+                            TERRAIN_TRIS.with(|n| n.set(n.get() + 1));
                             let q = closest_point_on_triangle(local, tri.p[0], tri.p[1], tri.p[2]);
                             let d2 = (q - local).length_squared();
                             if d2 < best {
@@ -890,6 +1124,13 @@ impl ChunkTerrain {
                 if floor > 0.0 && best <= floor * floor {
                     break;
                 }
+            }
+            // Every bucket that holds anything has been walked: a wider ring
+            // finds nothing.
+            if (c.0 - r <= olo.0 && c.1 - r <= olo.1 && c.2 - r <= olo.2)
+                && (c.0 + r >= ohi.0 && c.1 + r >= ohi.1 && c.2 + r >= ohi.2)
+            {
+                break;
             }
         }
         hit
@@ -1079,7 +1320,9 @@ impl CollisionShape for ChunkTerrain {
     fn distance(&self, p: Vec3) -> f32 {
         let local = self.to_local(p);
         let scale = self.scale.max(1e-6);
-        match self.closest_surface(local) {
+        // The field once: the band test and, in open air, the answer.
+        let d = self.field.d(local);
+        match self.closest_surface_at(local, d) {
             // Magnitude and side from the drawn surface: which way of the
             // closest point the point lies, judged by the surface's own
             // normal there. Exactly on the surface both are zero, and the
@@ -1089,7 +1332,7 @@ impl CollisionShape for ChunkTerrain {
                 let side = if off.dot(n) < 0.0 { -1.0 } else { 1.0 };
                 off.length() * side * scale
             }
-            None => self.field.d(local) * scale,
+            None => d * scale,
         }
     }
     fn normal(&self, p: Vec3) -> Vec3 {
@@ -1118,6 +1361,26 @@ impl CollisionShape for ChunkTerrain {
     }
     fn chunk_terrain_mut(&mut self) -> Option<&mut ChunkTerrain> {
         Some(self)
+    }
+    /// Where the field reads open air at every point of the box, `distance`
+    /// answers the field there, the band or more, and never asks a triangle:
+    /// see [`floptle_field::ChunkField::open_air_in_box`]. So the box is
+    /// clear of anything up to the band.
+    fn clear_of(&self, lo: Vec3, hi: Vec3, r: f32) -> bool {
+        let scale = self.scale.max(1e-6);
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        if !(r <= self.field.band() * scale) {
+            return false;
+        }
+        // The box in the field's frame, grown by a rounding allowance: a
+        // point inside the world box must land inside this one however
+        // `to_local` rounds it.
+        let m = floptle_core::math::Mat3::from_quat(self.rot.inverse());
+        let (c, half) = ((lo + hi) * 0.5, (hi - lo) * 0.5);
+        let half_l = (m.x_axis.abs() * half.x + m.y_axis.abs() * half.y + m.z_axis.abs() * half.z) / scale;
+        let c_l = self.to_local(c);
+        let pad = Vec3::splat(1e-4 * self.field.voxel() + 1e-5 * (1.0 + c_l.abs().max_element() + half_l.max_element()));
+        self.field.open_air_in_box(c_l - half_l - pad, c_l + half_l + pad)
     }
     /// The drawn triangles under the box, with the drawn surface's normals:
     /// the same LOD-0 faces the collider meshes, from the same cache.
@@ -1157,6 +1420,19 @@ impl CollisionShape for ChunkTerrain {
         }
         true
     }
+}
+
+/// A squared distance from `p` that triangle `t` is certainly not closer than:
+/// the distance to its box, pulled in by `tol` (a rounding allowance scaled to
+/// the coordinates) and then by a thousandth, so it never lands above what
+/// the closest-point test computes. Skipping a triangle whose bound is past
+/// the best so far leaves the answer bit-identical, as in
+/// [`TriMeshCollider::lower_d2`].
+#[inline]
+fn box_lower_d2(p: Vec3, tol: f32, t: &[Vec3; 3]) -> f32 {
+    let (lo, hi) = (t[0].min(t[1]).min(t[2]), t[0].max(t[1]).max(t[2]));
+    let d = ((lo - p).max(p - hi).max(Vec3::ZERO).length() - tol).max(0.0);
+    d * d * 0.999
 }
 
 /// Grid cell index containing `p` (one cell = `cell` units on a side).
@@ -1510,6 +1786,8 @@ impl TriMeshCollider {
                         if self.lower_d2(p, ti) > bound {
                             continue;
                         }
+                        #[cfg(test)]
+                        MESH_TRIS.with(|n| n.set(n.get() + 1));
                         let t = self.tris[ti as usize];
                         let q = closest_point_on_triangle(p, t[0], t[1], t[2]);
                         let d2 = (p - q).length_squared();
@@ -1556,6 +1834,50 @@ impl TriMeshCollider {
         let out = ((lo - p).max(p - hi).max(Vec3::ZERO).length() - tol).max(0.0);
         let d = plane.max(out);
         d * d * 0.999
+    }
+
+    /// The squared distance [`Self::nearest_tri`] finds, where it is at most
+    /// `limit2`; `None` where nothing is that close.
+    ///
+    /// The same walk over the same block, starting from `limit2` instead of
+    /// from the closest triangle in `p`'s own cell. Every triangle the full
+    /// search could pick that is within the limit is still tested, and the
+    /// least of them is the full search's answer, so wherever this answers it
+    /// answers the same bits. A sample metres from the mesh skips every cell
+    /// and every triangle on the bound alone.
+    fn nearest_d2_within(&self, p: Vec3, limit2: f32) -> Option<f32> {
+        #[cfg(test)]
+        MESH_BOUNDED.with(|n| n.set(n.get() + 1));
+        let c = cell_coord(p, self.cell);
+        let s = Self::SEARCH;
+        let mut bound = limit2;
+        let mut best: Option<f32> = None;
+        let (lo, hi) = self.cells;
+        for cz in (c.2 - s).max(lo.2)..=(c.2 + s).min(hi.2) {
+            for cy in (c.1 - s).max(lo.1)..=(c.1 + s).min(hi.1) {
+                for cx in (c.0 - s).max(lo.0)..=(c.0 + s).min(hi.0) {
+                    if cell_min_dist2(p, (cx, cy, cz), self.cell) > bound {
+                        continue;
+                    }
+                    let Some(list) = self.grid.get(&(cx, cy, cz)) else { continue };
+                    for &ti in list {
+                        if self.lower_d2(p, ti) > bound {
+                            continue;
+                        }
+                        #[cfg(test)]
+                        MESH_TRIS.with(|n| n.set(n.get() + 1));
+                        let t = self.tris[ti as usize];
+                        let q = closest_point_on_triangle(p, t[0], t[1], t[2]);
+                        let d2 = (p - q).length_squared();
+                        if d2.is_finite() && d2 <= bound && best.is_none_or(|bd| d2 < bd) {
+                            best = Some(d2);
+                            bound = d2;
+                        }
+                    }
+                }
+            }
+        }
+        best
     }
 
     /// Closest point on the mesh to `p`, and its squared distance.
@@ -1713,6 +2035,23 @@ impl CollisionShape for TriMeshCollider {
     fn distance(&self, p: Vec3) -> f32 {
         // No nearby triangle → far away (no collision). Unsigned, so always ≥ 0.
         self.nearest(p).map(|(_, d2)| d2.sqrt()).unwrap_or(1e6)
+    }
+    /// Unsigned, so nothing is under a limit of zero or less, and a box
+    /// corner (a sample of no radius) never needs a search at all. Otherwise
+    /// the search starts bounded by `r`: a hair over `r²`, so a distance that
+    /// rounds to just under `r` is never lost to the squaring.
+    fn distance_within(&self, p: Vec3, r: f32) -> f32 {
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        if !(r > 0.0) {
+            return 1e6;
+        }
+        let (lo, hi) = self.aabb;
+        let gap = (lo - p).max(p - hi).max(Vec3::ZERO);
+        if gap.length_squared() > r * r * 1.001 + 1e-6 {
+            return 1e6f32.max(r);
+        }
+        let limit2 = if r.is_finite() { r * r * 1.001 + 1e-9 } else { f32::INFINITY };
+        self.nearest_d2_within(p, limit2).map(|d2| d2.sqrt()).unwrap_or(1e6f32.max(r))
     }
     /// Away from the nearest point on the mesh, which rounds a body over an
     /// edge rather than catching it on one.
@@ -2221,64 +2560,48 @@ mod drawn_surface_tests {
         f
     }
 
-    /// What agreeing with the picture costs a step, as a ratio against the
-    /// field collider, never as a duration, so runner speed cancels.
+    /// **Colliding with the drawn surface is not dear.** Twenty bodies
+    /// resting on rough ground, the state a game is in almost all of the time
+    /// and the one the query is asked hardest, and how many triangles the
+    /// queries walk a step: every one a bucket hands over, whether its box
+    /// lets it be skipped or not.
     ///
-    /// Twenty bodies resting on rough ground, the state a game is in almost
-    /// all of the time and the one the query is asked hardest. About 3.5–4.5×,
-    /// a few hundred µs a step, well under a frame. The field collider got
-    /// cheaper when it stopped searching in open air, which raised the ratio
-    /// from the 3.2× it read before.
-    ///
-    /// The ceiling sits close to that on purpose. Triangle buckets sized to the
-    /// query reach rather than to a voxel put every triangle in the band into
-    /// the bucket a resting body stands in, and finding the triangle under its
-    /// feet walked hundreds of them: that reads about 10×.
+    /// Counted, not timed. It was a ratio of two timings, the drawn surface
+    /// against the field collider, at about 4x with a ceiling of 7; once the
+    /// field's own read got cheaper the ratio sat near 5 and read 8.8 on a
+    /// loaded machine with nothing wrong. Triangle buckets sized to the query
+    /// reach rather than to a voxel put every triangle in the band into the
+    /// bucket a resting body stands in, and finding the one under its feet
+    /// walked hundreds of them; so does a ring search that stops stopping
+    /// early. Measured at about 4,700 a step; buckets one reach across read
+    /// 34,000 and a ring search that never stops early 58,000.
     #[test]
     fn colliding_with_the_drawn_surface_is_not_dear() {
-        let world = |accurate: bool| {
-            let mut t = ChunkTerrain::new(rough());
-            t.mesh_accurate = accurate;
-            let mut w = crate::PhysicsWorld::new(Default::default());
-            w.add_collider(Box::new(t));
-            for i in 0..20 {
-                let a = i as f32 * 0.31;
-                w.add_body(crate::Body::sphere(
-                    Vec3::new(a.cos() * 4.0, 6.0, a.sin() * 4.0),
-                    0.4,
-                ));
-            }
-            for _ in 0..120 {
-                w.step(1.0 / 60.0); // let them land — settle is not the subject
-            }
-            w
-        };
-        let window = |w: &mut crate::PhysicsWorld| {
-            let t0 = std::time::Instant::now();
-            for _ in 0..10 {
-                w.step(1.0 / 60.0);
-            }
-            t0.elapsed().as_secs_f64() / 10.0
-        };
-        // Both worlds built first, then timed in alternating windows, each side
-        // keeping its fastest: interference on a shared machine only ever adds
-        // time, and one slow reading of the field alone read 6.6x on a runner.
-        let (mut fw, mut mw) = (world(false), world(true));
-        let (mut field, mut mesh) = (f64::MAX, f64::MAX);
-        for _ in 0..6 {
-            field = field.min(window(&mut fw));
-            mesh = mesh.min(window(&mut mw));
+        let mut t = ChunkTerrain::new(rough());
+        t.mesh_accurate = true;
+        let mut w = crate::PhysicsWorld::new(Default::default());
+        w.add_collider(Box::new(t));
+        for i in 0..20 {
+            let a = i as f32 * 0.31;
+            w.add_body(crate::Body::sphere(Vec3::new(a.cos() * 4.0, 6.0, a.sin() * 4.0), 0.4));
         }
-        let ratio = mesh / field.max(1e-9);
-        eprintln!("step cost: field {:.0} us, mesh {:.0} us, ratio {ratio:.2}x", field * 1e6, mesh * 1e6);
+        for _ in 0..120 {
+            w.step(1.0 / 60.0); // let them land — settle is not the subject
+        }
+        let resting = w.bodies.iter().filter(|b| b.asleep || b.vel.length() < 0.5).count();
+        TERRAIN_VISITS.with(|n| n.set(0));
+        let steps = 20;
+        for _ in 0..steps {
+            w.step(1.0 / 60.0);
+        }
+        let walked = TERRAIN_VISITS.with(|n| n.get()) / steps;
+        eprintln!("triangles walked a step for 20 resting bodies: {walked}");
+        assert!(resting >= 15, "only {resting} of 20 bodies came to rest: the setup is not the resting case");
         assert!(
-            ratio < 7.0,
-            "colliding against the drawn triangles costs {ratio:.1}x the field collider \
-             ({:.0} µs against {:.0} µs a step). Measured at about 4x; past 7 something has \
-             stopped narrowing — check that the triangle buckets are still one VOXEL and \
-             not one reach, and that the expanding-ring search still stops early.",
-            mesh * 1e6,
-            field * 1e6
+            walked <= 10_000,
+            "the drawn-surface queries walked {walked} triangles a step for twenty resting bodies. \
+             Past this something has stopped narrowing — check that the triangle buckets are \
+             still one VOXEL and not one reach, and that the expanding-ring search still stops early."
         );
     }
 
@@ -2798,13 +3121,18 @@ mod drawn_surface_tests {
         );
     }
 
-    /// **A short ray at the ground finds what the march finds, for less.** A
-    /// player's tool aim, a camera's roof probe and a walker each cast a few
+    /// **A short ray at the ground finds what the march finds, for no more.**
+    /// A player's tool aim, a camera's roof probe and a walker each cast a few
     /// metres from just above the ground. A thousand 5 m rays over a generated
     /// planet, from 2 m up and in every direction down and across, take about
     /// 0.03 ms each on a desktop. Tracing the field to its surface, rather than
     /// to within a voxel of it, missed three of them: rays grazing a bump that
     /// passed over the field's surface and clipped the drawn one.
+    ///
+    /// The march was dearer than this path until a drawn-surface query got
+    /// cheap; now the two cost about the same for a ray this short, so the
+    /// bound allows a quarter more. Meshing the cells under every ray, which
+    /// this path exists to avoid, costs several times the march.
     #[test]
     fn a_short_ray_at_the_ground_finds_what_the_march_finds() {
         let radius = 150.0;
@@ -2854,7 +3182,7 @@ mod drawn_surface_tests {
             }
         }
         // Against the march on the same rays, so a slow machine slows both.
-        assert!(ms < march_ms, "a 5 m ray costs {ms:.4} ms against the march's {march_ms:.4}");
+        assert!(ms < march_ms * 1.25, "a 5 m ray costs {ms:.4} ms against the march's {march_ms:.4}");
     }
 
     /// **A ray at a planet nothing has stood on costs about what one at
@@ -2933,9 +3261,10 @@ mod drawn_surface_tests {
                 _ => assert_eq!(a.is_some(), b.is_some(), "ray {i}: {a:?} against {b:?}"),
             }
         }
-        // About 4x in a release build and 6x in a debug one; meshing each
-        // chunk a ray reaches, the cost this guards, read 280x.
-        assert!(cold < 20.0 * built, "60 rays at fresh ground took {:.2} ms, at meshed ground {:.2} ms", cold * 1e3, built * 1e3);
+        // About 10x in a debug build, 11x with every core busy, since a ray at
+        // meshed ground got cheaper (it was 6x); meshing each chunk a ray
+        // reaches, the cost this guards, read 280x.
+        assert!(cold < 40.0 * built, "60 rays at fresh ground took {:.2} ms, at meshed ground {:.2} ms", cold * 1e3, built * 1e3);
     }
 
     /// A terrain collider that leaves every ray to the general march, as all
@@ -3007,5 +3336,211 @@ mod drawn_surface_tests {
         assert!(miss_fast.iter().filter(|h| h.is_none()).count() > 950, "the rays past it were not misses");
         println!("1000 rays of 124 m: down {:.3} ms each, past {:.3} ms each", hit_s, miss_s);
         assert!(miss_s < 2.0 * hit_s, "a miss costs {:.1}x a hit", miss_s / hit_s);
+    }
+}
+
+#[cfg(test)]
+mod narrowed_query_tests {
+    //! The narrowed terrain and mesh queries answer what the full ones do.
+    use super::*;
+    use floptle_field::{Brush, BrushProfile, ChunkField};
+
+    fn rough() -> ChunkField {
+        let mut f = ChunkField::new(0.5);
+        f.fill_slab(Vec3::new(-14.0, -3.0, -14.0), Vec3::new(14.0, 0.0, 14.0), 0.0, [0.5; 3]);
+        let mut seed = 777u32;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 8) as f32 / 16777216.0
+        };
+        for _ in 0..40 {
+            let c = Vec3::new(rnd() * 20.0 - 10.0, rnd() * 2.0 - 0.5, rnd() * 20.0 - 10.0);
+            let b = if rnd() > 0.4 { Brush::Raise } else { Brush::Lower };
+            f.sculpt(b, c, 1.0 + rnd() * 2.0, 1.0, BrushProfile::default());
+        }
+        f
+    }
+
+    fn rnd_from(mut seed: u64) -> impl FnMut() -> f32 {
+        move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / (1u64 << 24) as f32
+        }
+    }
+
+    /// The drawn-surface search as it was: every bucket of every ring, every
+    /// triangle tested, from the hashed chunks.
+    fn closest_reference(t: &ChunkTerrain, local: Vec3) -> Option<(Vec3, Vec3)> {
+        if t.field.d(local).abs() >= t.field.band() {
+            return None;
+        }
+        let mut s = t.surface.borrow_mut();
+        t.ensure_meshed(local, &mut s);
+        let cell = t.bucket();
+        let c = cell_coord(local, cell);
+        let mut best = f32::INFINITY;
+        let mut hit: Option<(Vec3, Vec3)> = None;
+        let max_ring = (t.reach() / cell).ceil().max(1.0) as i32;
+        for r in 0..=max_ring {
+            for cz in c.2 - r..=c.2 + r {
+                for cy in c.1 - r..=c.1 + r {
+                    for cx in c.0 - r..=c.0 + r {
+                        if (cx - c.0).abs() != r && (cy - c.1).abs() != r && (cz - c.2).abs() != r {
+                            continue;
+                        }
+                        s.each_in((cx, cy, cz), |tri| {
+                            let q = closest_point_on_triangle(local, tri.p[0], tri.p[1], tri.p[2]);
+                            let d2 = (q - local).length_squared();
+                            if d2 < best {
+                                best = d2;
+                                hit = Some((q, normal_at(tri, q)));
+                            }
+                        });
+                    }
+                }
+            }
+            if hit.is_some() {
+                let lo = Vec3::new((c.0 - r) as f32, (c.1 - r) as f32, (c.2 - r) as f32) * cell;
+                let hi = lo + Vec3::splat(cell * (2 * r + 1) as f32);
+                let floor = (local - lo).min(hi - local).min_element();
+                if floor > 0.0 && best <= floor * floor {
+                    break;
+                }
+            }
+        }
+        hit
+    }
+
+    /// The field's trilinear read from one voxel at a time, as it was.
+    fn d_reference(f: &ChunkField, p: Vec3) -> f32 {
+        let g = p / f.voxel();
+        let b = [g.x.floor() as i32, g.y.floor() as i32, g.z.floor() as i32];
+        let fr = Vec3::new(g.x - b[0] as f32, g.y - b[1] as f32, g.z - b[2] as f32);
+        let c = |dx: i32, dy: i32, dz: i32| f.voxel_at([b[0] + dx, b[1] + dy, b[2] + dz]);
+        let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        let x00 = lerp(c(0, 0, 0), c(1, 0, 0), fr.x);
+        let x10 = lerp(c(0, 1, 0), c(1, 1, 0), fr.x);
+        let x01 = lerp(c(0, 0, 1), c(1, 0, 1), fr.x);
+        let x11 = lerp(c(0, 1, 1), c(1, 1, 1), fr.x);
+        lerp(lerp(x00, x10, fr.y), lerp(x01, x11, fr.y), fr.z)
+    }
+
+    /// Over rough drawn ground, inside it and above it, across chunk
+    /// borders, the narrowed search finds the same point and the same normal
+    /// to the bit as the full walk, and the field reads what it read voxel
+    /// by voxel.
+    #[test]
+    fn the_narrowed_surface_search_answers_what_the_full_walk_does() {
+        let t = ChunkTerrain::new(rough());
+        let mut rnd = rnd_from(0x9e37_79b9_7f4a_7c15);
+        let mut probes: Vec<Vec3> = (0..5000)
+            .map(|_| Vec3::new(rnd() * 26.0 - 13.0, rnd() * 5.0 - 2.5, rnd() * 26.0 - 13.0))
+            .collect();
+        // Along a chunk face (16 m at half-metre voxels) and its corner.
+        probes.extend((0..200).map(|k| Vec3::new(16.0 - 0.003 * k as f32, 0.2 + 0.01 * k as f32, -0.5)));
+        // In open air: in chunks nothing was ever written to, and past the
+        // field's edge, where the field reads the band from no chunk at all.
+        probes.extend((0..400).map(|_| Vec3::new(rnd() * 80.0 - 40.0, rnd() * 30.0 - 5.0, rnd() * 80.0 - 40.0)));
+        let bits = |r: Option<(Vec3, Vec3)>| r.map(|(q, n)| (q.to_array().map(f32::to_bits), n.to_array().map(f32::to_bits)));
+        let mut found = 0;
+        for p in probes {
+            assert_eq!(t.field.d(p).to_bits(), d_reference(&t.field, p).to_bits(), "the field reads differently at {p}");
+            let want = closest_reference(&t, p);
+            let got = t.closest_surface(p);
+            assert_eq!(bits(got), bits(want), "at {p}: the narrowed search found another point");
+            found += usize::from(got.is_some());
+        }
+        assert!(found > 2000, "only {found} probes were near the surface: the comparison proved little");
+    }
+
+    /// A query in the air over flat ground tests a few triangles, not the
+    /// several hundred in the buckets between it and the ground.
+    #[test]
+    fn a_query_over_the_ground_tests_a_handful_of_triangles() {
+        let mut f = ChunkField::new(0.75);
+        f.fill_slab(Vec3::new(-30.0, -6.0, -30.0), Vec3::new(30.0, 0.0, 30.0), 0.0, [0.5; 3]);
+        let t = ChunkTerrain::new(f);
+        let mut rnd = rnd_from(42);
+        let mut worst = 0;
+        for h in [0.3f32, 1.2, 2.0, 2.8] {
+            let points: Vec<Vec3> = (0..200).map(|_| Vec3::new(rnd() * 30.0 - 15.0, h, rnd() * 30.0 - 15.0)).collect();
+            for &p in &points {
+                t.distance(p); // meshed first, so meshing is not counted
+            }
+            TERRAIN_TRIS.with(|n| n.set(0));
+            for &p in &points {
+                t.distance(p);
+            }
+            let per = TERRAIN_TRIS.with(|n| n.get()) / points.len() as u64;
+            eprintln!("{h} m up: {per} triangles a query");
+            worst = worst.max(per);
+        }
+        assert!(worst <= 24, "a query over flat ground tested {worst} triangles");
+    }
+
+    /// Wherever the field promises open air over a box, the distance at every
+    /// point of the box is at least what it promised; and over open air well
+    /// above the ground it does promise, or the promise saves nothing.
+    #[test]
+    fn a_box_called_clear_of_the_terrain_is() {
+        let t = ChunkTerrain::posed(rough(), Quat::from_rotation_z(0.2), 1.5);
+        let mut rnd = rnd_from(7);
+        let (mut clear, mut high) = (0, 0);
+        for _ in 0..3000 {
+            let c = Vec3::new(rnd() * 30.0 - 15.0, rnd() * 24.0 - 4.0, rnd() * 30.0 - 15.0);
+            let half = Vec3::new(rnd(), rnd(), rnd()) * 2.0;
+            let r = rnd() * 0.8;
+            let ok = t.clear_of(c - half, c + half, r);
+            if c.y - half.y > 14.0 && c.x.abs() < 6.0 && c.z.abs() < 6.0 {
+                high += 1;
+                clear += usize::from(ok);
+            }
+            if ok {
+                for _ in 0..12 {
+                    let p = c + (Vec3::new(rnd(), rnd(), rnd()) * 2.0 - Vec3::ONE) * half;
+                    let d = t.distance(p);
+                    assert!(d >= r, "called clear of {r} at {p}, distance {d}");
+                }
+            }
+        }
+        assert!(high > 20 && clear == high, "only {clear} of {high} boxes high over the ground were called clear");
+    }
+
+    /// A mesh asked whether a point is within `r` answers the full distance
+    /// to the bit wherever it is, and at least `r` wherever it is not.
+    #[test]
+    fn a_bounded_mesh_distance_is_the_distance_where_it_matters() {
+        let (mut verts, mut idx) = (Vec::new(), Vec::new());
+        let n = 30u32;
+        for z in 0..=n {
+            for x in 0..=n {
+                let (fx, fz) = (x as f32 * 0.6 - 9.0, z as f32 * 0.6 - 9.0);
+                verts.push(Vec3::new(fx, 0.4 * (fx * 0.5).sin() * (fz * 0.4).cos(), fz));
+            }
+        }
+        for z in 0..n {
+            for x in 0..n {
+                let a = z * (n + 1) + x;
+                idx.extend([a, a + 1, a + n + 1, a + 1, a + n + 2, a + n + 1]);
+            }
+        }
+        let m = TriMeshCollider::new(&verts, &idx);
+        let mut rnd = rnd_from(99);
+        let mut under = 0;
+        for k in 0..20000 {
+            let p = Vec3::new(rnd() * 24.0 - 12.0, rnd() * 6.0 - 2.0, rnd() * 24.0 - 12.0);
+            let r = if k % 50 == 0 { 0.0 } else { rnd() * 3.0 };
+            let full = m.distance(p);
+            let got = m.distance_within(p, r);
+            if full < r {
+                assert_eq!(got.to_bits(), full.to_bits(), "at {p} within {r}: {got} for {full}");
+                under += 1;
+            } else {
+                assert!(got >= r, "at {p} within {r}: {got} although the distance is {full}");
+            }
+        }
+        assert!(under > 3000, "only {under} probes were within their radius");
     }
 }

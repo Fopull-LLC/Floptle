@@ -90,6 +90,41 @@ impl ChunkData {
         }
     }
 
+    /// Whether every voxel in the inclusive chunk-local range `lo ..= hi`
+    /// holds a distance in `min ..= max`. A block holding a single value
+    /// answers by it; one holding a page of values is read, but only where
+    /// the range covers it.
+    pub(crate) fn fills_within(&self, lo: [usize; 3], hi: [usize; 3], min: f32, max: f32) -> bool {
+        let within = |v: f32| v >= min && v <= max;
+        for bz in lo[2] / B..=hi[2] / B {
+            for by in lo[1] / B..=hi[1] / B {
+                for bx in lo[0] / B..=hi[0] / B {
+                    let b = (bz * BE + by) * BE + bx;
+                    let s = self.dist_slot[b];
+                    if s == FILL {
+                        if !within(self.dist_fill[b]) {
+                            return false;
+                        }
+                        continue;
+                    }
+                    let page = &self.dist_pages[s as usize];
+                    let span = |k: usize, base: usize| (lo[k].max(base) - base, hi[k].min(base + B - 1) - base);
+                    let ((x0, x1), (y0, y1), (z0, z1)) = (span(0, bx * B), span(1, by * B), span(2, bz * B));
+                    for z in z0..=z1 {
+                        for y in y0..=y1 {
+                            for x in x0..=x1 {
+                                if !within(page[(z * B + y) * B + x]) {
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
     #[inline]
     pub(crate) fn color(&self, li: usize) -> [u8; 4] {
         let (b, i) = split(li);

@@ -22,6 +22,43 @@ use crate::body::BodyShape;
 use crate::compound::{CompoundContact, ContactPeer, ShapeGeom};
 use crate::world::PhysicsWorld;
 
+#[cfg(test)]
+thread_local! {
+    /// (part, part) pairs the pair pass compared. Test-only.
+    pub(crate) static PAIR_SOLID_TESTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Compare every part of one side with every part of the other, as the
+    /// pass did before it culled: the reference it is tested against.
+    /// Test-only.
+    pub(crate) static REFERENCE_PAIRS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Keep only the parts of `mine` whose bounding sphere reaches the box round
+/// every part of `other`, in their order. A rounding allowance keeps any
+/// part whose sphere might touch one in `other`.
+fn cull_to_reach(mine: &mut Vec<(usize, Solid)>, other: &[(usize, Solid)]) {
+    #[cfg(test)]
+    if REFERENCE_PAIRS.with(|r| r.get()) {
+        return;
+    }
+    if mine.len() < 2 && other.len() < 2 {
+        return;
+    }
+    let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+    for (_, s) in other {
+        let (c, r) = s.bound();
+        lo = lo.min(c - Vec3::splat(r));
+        hi = hi.max(c + Vec3::splat(r));
+    }
+    mine.retain(|(_, s)| {
+        let (c, r) = s.bound();
+        let gap = (lo - c).max(c - hi).max(Vec3::ZERO).length();
+        // NaN bounds keep the part, as the loop's own test would decide it.
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        let keep = !(gap > r * 1.001 + 1e-3);
+        keep
+    });
+}
+
 /// Scale a correction down to what is left of `budget`, and take its length off
 /// the budget.
 ///
@@ -606,6 +643,16 @@ impl PhysicsWorld {
                 }
                 self.pair_solids(a, &mut sa);
                 self.pair_solids(b, &mut sb);
+                // Each side's parts that reach the box round the other's: a
+                // part whose sphere misses that box misses every sphere in
+                // it, so it meets nothing on the other side and the loop
+                // below would skip all of its pairs. Two big assemblies side
+                // by side meet along a seam, and testing every part of one
+                // against every part of the other was most of the step.
+                cull_to_reach(&mut sa, &sb);
+                cull_to_reach(&mut sb, &sa);
+                #[cfg(test)]
+                PAIR_SOLID_TESTS.with(|n| n.set(n.get() + (sa.len() * sb.len()) as u64));
                 for &(shape_a, solid_a) in &sa {
                     let (ca, ra) = solid_a.bound();
                     for &(shape_b, solid_b) in &sb {

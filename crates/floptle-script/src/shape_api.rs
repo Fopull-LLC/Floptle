@@ -29,6 +29,20 @@ pub(crate) struct QueryShared {
     pub sim_origin: Rc<RefCell<glam::DVec3>>,
     pub current: Rc<RefCell<Option<(u32, String)>>>,
     pub layers: Rc<RefCell<floptle_core::Layers>>,
+    /// Where a sweep's count and time go: `perf.counts().sweeps`/`sweepMs`.
+    pub profile: crate::SharedProfile,
+}
+
+impl QueryShared {
+    /// Run one sweep, counted and timed into the profile when it is on.
+    fn swept<T>(&self, sweep: impl FnOnce() -> T) -> T {
+        let timer = self.profile.borrow().enabled().then(floptle_core::profile::Span::new);
+        let out = sweep();
+        if let Some(t) = timer {
+            self.profile.borrow_mut().record_sweeps(1, t.ms());
+        }
+        out
+    }
 }
 
 /// Every key a query options table reads (`raycast`, `overlapSphere`,
@@ -340,17 +354,19 @@ pub(crate) fn install_shape_api(
             let sim = *s.sim_origin.borrow();
             let p = (glam::DVec3::new(o.x, o.y, o.z) - sim).as_vec3();
             let dir = glam::Vec3::new(d.x as f32, d.y as f32, d.z as f32);
-            let hit = floptle_physics::spherecast(
-                &s.colliders.borrow(),
-                &s.hulls.borrow(),
-                p,
-                dir,
-                radius as f32,
-                max as f32,
-                &exclude,
-                mask,
-                skip,
-            );
+            let hit = s.swept(|| {
+                floptle_physics::spherecast(
+                    &s.colliders.borrow(),
+                    &s.hulls.borrow(),
+                    p,
+                    dir,
+                    radius as f32,
+                    max as f32,
+                    &exclude,
+                    mask,
+                    skip,
+                )
+            });
             match hit {
                 Some(h) => Ok(Value::Table(shape_hit_table(lua, &h, sim)?)),
                 None => Ok(Value::Nil),
@@ -398,19 +414,21 @@ pub(crate) fn install_shape_api(
                 .find(|h| s.current.borrow().as_ref().is_some_and(|(e, _)| *e == h.eid))
                 .map(|h| h.up)
                 .unwrap_or(glam::Vec3::Y);
-            let hit = floptle_physics::capsulecast(
-                &s.colliders.borrow(),
-                &s.hulls.borrow(),
-                p,
-                dir,
-                radius as f32,
-                half as f32,
-                up,
-                max as f32,
-                &exclude,
-                mask,
-                skip,
-            );
+            let hit = s.swept(|| {
+                floptle_physics::capsulecast(
+                    &s.colliders.borrow(),
+                    &s.hulls.borrow(),
+                    p,
+                    dir,
+                    radius as f32,
+                    half as f32,
+                    up,
+                    max as f32,
+                    &exclude,
+                    mask,
+                    skip,
+                )
+            });
             match hit {
                 Some(h) => Ok(Value::Table(shape_hit_table(lua, &h, sim)?)),
                 None => Ok(Value::Nil),
@@ -450,17 +468,19 @@ pub(crate) fn install_shape_api(
             let sim = *s.sim_origin.borrow();
             let p = (glam::DVec3::new(o.x, o.y, o.z) - sim).as_vec3();
             let dir = glam::Vec3::new(d.x as f32, d.y as f32, 0.0);
-            let hit = floptle_physics::boxcast(
-                &s.colliders.borrow(),
-                &s.hulls.borrow(),
-                p,
-                dir,
-                [hx.max(0.0) as f32, hy.max(0.0) as f32],
-                max as f32,
-                &exclude,
-                mask,
-                skip,
-            );
+            let hit = s.swept(|| {
+                floptle_physics::boxcast(
+                    &s.colliders.borrow(),
+                    &s.hulls.borrow(),
+                    p,
+                    dir,
+                    [hx.max(0.0) as f32, hy.max(0.0) as f32],
+                    max as f32,
+                    &exclude,
+                    mask,
+                    skip,
+                )
+            });
             match hit {
                 Some(h) => Ok(Value::Table(shape_hit_table(lua, &h, sim)?)),
                 None => Ok(Value::Nil),

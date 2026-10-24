@@ -102,6 +102,18 @@ impl AnchoredCollider {
         self.shape.distance(p - self.offset)
     }
 
+    /// [`Self::distance`] where it is under `r`, and some value at least `r`
+    /// elsewhere — see [`CollisionShape::distance_within`].
+    pub fn distance_within(&self, p: Vec3, r: f32) -> f32 {
+        self.shape.distance_within(p - self.offset, r)
+    }
+
+    /// Whether the distance is at least `r` everywhere in the sim-frame box
+    /// `lo ..= hi` — see [`CollisionShape::clear_of`].
+    pub fn clear_of(&self, lo: Vec3, hi: Vec3, r: f32) -> bool {
+        self.shape.clear_of(lo - self.offset, hi - self.offset, r)
+    }
+
     /// Outward unit surface normal at sim-frame point `p`.
     pub fn normal(&self, p: Vec3) -> Vec3 {
         self.shape.normal(p - self.offset)
@@ -149,7 +161,27 @@ thread_local! {
     /// How many times the broadphase was actually rebuilt — the guard on the
     /// input hash in `reindex_colliders`. Test-only.
     pub(crate) static REINDEXES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// (sample, collider) pairs the compound contact pass tested. Test-only.
+    pub(crate) static CONTACT_TESTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Sweep every hull the filters let through, near the path or not: the
+    /// reference the narrowed sweep is compared with. Test-only.
+    pub(crate) static REFERENCE_SWEEP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Hulls a sphere cast kept to march against. Test-only.
+    pub(crate) static SWEPT_HULLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Distances the compound rest probe asked for. Test-only.
+    pub(crate) static REST_PROBES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Run the compound contact pass and rest probe the way they ran before
+    /// they were narrowed: every part against everything in the craft's
+    /// sphere, every distance asked in full. The reference the narrowed
+    /// passes are compared with, bit for bit. Test-only.
+    pub(crate) static REFERENCE_CONTACT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
+
+/// How far a sample may move during a compound contact pass before the list
+/// of what it can touch is made again where it stands — see `step_compound`.
+/// Small, so a part in open air beside a wall is not offered the wall; a
+/// pass that moves the craft further pays for lists made again.
+const CONTACT_NEAR_TRAVEL: f32 = 0.1;
 
 /// How many recent level edits [`PhysicsWorld::level_edit_log`] keeps.
 pub const LEVEL_EDIT_LOG: usize = 512;
@@ -201,6 +233,15 @@ pub struct PhysicsWorld {
     collider_index: floptle_core::spatial::Grid,
     /// Scratch candidate list, reused so the broadphase allocates nothing per body.
     cand: Vec<u32>,
+    /// Per shape of the compound being stepped, the candidates its own samples
+    /// can reach this pass, as places in `cand`:
+    /// `shape_cand[shape_cand_at[si]..shape_cand_at[si + 1]]`; one shape's list
+    /// made again mid-pass; and each shape's lever about the centre of mass.
+    /// Scratch, like `cand` — see `step_compound`.
+    shape_cand: Vec<u32>,
+    shape_cand_at: Vec<u32>,
+    shape_cand_fresh: Vec<u32>,
+    shape_lever: Vec<f32>,
     /// The candidates a capsule's feet could reach this pass — see `step_body`.
     cand_feet: Vec<u32>,
     /// True while `step` has already rebuilt the index for this tick.
@@ -290,6 +331,10 @@ impl Default for PhysicsWorld {
             compound_contacts: Vec::new(),
             collider_index: Default::default(),
             cand: Vec::new(),
+            shape_cand: Vec::new(),
+            shape_cand_at: Vec::new(),
+            shape_cand_fresh: Vec::new(),
+            shape_lever: Vec::new(),
             cand_feet: Vec::new(),
             index_fresh: false,
             indexed_hash: 0,
@@ -602,6 +647,20 @@ pub struct BodyHull {
 }
 
 impl BodyHull {
+    /// How far the surface reaches from `pos`, for the shapes whose distance
+    /// outside is exact, so that `distance(p) >= |p - pos| - reach`. `None`
+    /// for a mesh hull, whose distance outside is the farthest face plane
+    /// and can read less than that.
+    pub fn bounding_radius(&self) -> Option<f32> {
+        match self.shape {
+            BodyShape::Sphere => Some(self.radius),
+            BodyShape::Capsule { half_height } => Some(half_height + self.radius),
+            BodyShape::Box { half } => Some(half.length()),
+            BodyShape::Polygon { outline, half_depth } => Some(outline.reach().hypot(half_depth)),
+            BodyShape::Hull(_) => None,
+        }
+    }
+
     /// Signed distance from sim-frame `p` to the hull surface.
     pub fn distance(&self, p: Vec3) -> f32 {
         let d = p - self.pos;
@@ -665,6 +724,13 @@ pub fn raycast_hulls(
     mask: u32,
 ) -> Option<(u32, RayHit)> {
     let rd = dir.try_normalize()?;
+    // Who the ray can hit, decided once rather than again at every step: a
+    // ray past a thousand-part craft it ignores walked the whole craft each
+    // step to skip it.
+    let hulls: Vec<&BodyHull> = hulls
+        .iter()
+        .filter(|h| !(exclude.contains(&h.eid) || exclude.contains(&h.owner)) && (mask >> h.layer) & 1 == 1)
+        .collect();
     let mut t = 0.0f32;
     for _ in 0..512 {
         if t > max_dist {
@@ -673,10 +739,7 @@ pub fn raycast_hulls(
         let p = origin + rd * t;
         let mut dmin = f32::MAX;
         let mut hit: Option<&BodyHull> = None;
-        for h in hulls {
-            if exclude.contains(&h.eid) || exclude.contains(&h.owner) || (mask >> h.layer) & 1 == 0 {
-                continue;
-            }
+        for &h in &hulls {
             let d = h.distance(p);
             if d < dmin {
                 dmin = d;
@@ -814,6 +877,8 @@ pub fn spherecast(
     const SLACK: f32 = 0.05;
     // A gap wider than the march's stop distance.
     const CLEAR: f32 = 0.03;
+    // The longest step the march takes.
+    const STEP_MAX: f32 = 1.0;
     let rd = dir.try_normalize()?;
     let r = radius.max(0.0);
     let near: Vec<&AnchoredCollider> = colliders
@@ -840,12 +905,31 @@ pub fn spherecast(
             if d0 - r < CLEAR { (d0 - CLEAR).max(0.0) } else { r }
         })
         .collect();
+    // A hull farther from the whole path than a step can ever be long is
+    // never the nearest thing that limits a step or stops the sweep: each
+    // step is at most a unit, so dropping it changes no step. That is what
+    // keeps a cast beside a thousand-part craft from asking every part its
+    // distance at every step. Only the shapes whose distance is exact
+    // outside are dropped by their sphere; a mesh hull's understates.
+    let far_from_path = |h: &BodyHull| {
+        #[cfg(test)]
+        if REFERENCE_SWEEP.with(|r| r.get()) {
+            return false;
+        }
+        let Some(reach) = h.bounding_radius() else { return false };
+        let tc = (h.pos - origin).dot(rd).clamp(0.0, max_dist.max(0.0));
+        let gap = (origin + rd * tc).distance(h.pos) - reach - r;
+        gap > STEP_MAX * 1.01 + SLACK
+    };
     let live = |h: &&BodyHull| {
         !(exclude.contains(&h.eid) || exclude.contains(&h.owner))
             && (mask >> h.layer) & 1 == 1
+            && !far_from_path(h)
             && !(skip_start && h.distance(origin) - r < CLEAR)
     };
     let hulls: Vec<&BodyHull> = hulls.iter().filter(live).collect();
+    #[cfg(test)]
+    SWEPT_HULLS.with(|n| n.set(n.get() + hulls.len() as u64));
     let mut t = 0.0f32;
     for _ in 0..512 {
         if t > max_dist {
@@ -888,7 +972,7 @@ pub fn spherecast(
         }
         // Same floor as the ray march: an SDF that reports a huge sentinel far
         // from any surface must not let the sweep step over thin geometry.
-        t += dmin.clamp(0.02, 1.0);
+        t += dmin.clamp(0.02, STEP_MAX);
     }
     None
 }
@@ -1633,7 +1717,50 @@ impl PhysicsWorld {
                 let mut cand = std::mem::take(&mut self.cand);
                 cand.clear();
                 self.collider_index.sphere(c.pos, c.reach() + push_budget + 0.01, &mut cand);
+                cand.retain(|&i| {
+                    let col = &self.colliders[i as usize];
+                    (row >> col.layer) & 1 == 1 && !col.sensor
+                });
                 cand
+            };
+            // Then, per shape, only the candidates that shape's own samples can
+            // reach. The whole craft's sphere offered every part everything
+            // near any part, which was most of the physics of a big assembly
+            // near a base or over terrain.
+            //
+            // A sample moves during the pass only by the pushes and turns the
+            // budgets allow: what `push_budget` has spent along, plus what
+            // `rot_budget` has spent in radians about the centre of mass,
+            // which carries a sample at lever `l` at most that times `l`. So a
+            // list made at the start of the pass, for samples that may move
+            // `CONTACT_NEAR_TRAVEL`, holds for a shape until what has been spent could
+            // have moved it further; from then that shape's list is made
+            // again where it stands, for everything the budgets still allow.
+            // Either way a collider is dropped only when it cannot touch the
+            // sample, so no contact changes, and the ones kept are tested in
+            // the order they always were.
+            #[cfg(test)]
+            let reference = REFERENCE_CONTACT.with(|r| r.get());
+            #[cfg(not(test))]
+            let reference = false;
+            let (push0, rot0) = (push_budget, rot_budget);
+            let mut lists = std::mem::take(&mut self.shape_cand);
+            let mut at = std::mem::take(&mut self.shape_cand_at);
+            let mut fresh = std::mem::take(&mut self.shape_cand_fresh);
+            let mut levers = std::mem::take(&mut self.shape_lever);
+            lists.clear();
+            at.clear();
+            levers.clear();
+            at.push(0);
+            for si in 0..self.compounds[ci].shapes.len() {
+                levers.push(self.reachable_near(ci, si, &cand, reference, &mut lists));
+                at.push(lists.len() as u32);
+            }
+            // Whether what the pass has spent so far could have carried a
+            // sample at `lever` past `CONTACT_NEAR_TRAVEL`, with a rounding allowance.
+            let moved_far = |push_budget: f32, rot_budget: f32, lever: f32| {
+                let moved = (push0 - push_budget) + (rot0 - rot_budget) * lever;
+                !reference && moved * 1.001 + 1e-5 >= CONTACT_NEAR_TRAVEL
             };
             // Explicit indices throughout: each resolve moves the body, so the
             // sample position is recomputed fresh for every (shape, sample,
@@ -1641,17 +1768,42 @@ impl PhysicsWorld {
             // its stale pre-correction position.
             for si in 0..self.compounds[ci].shapes.len() {
                 let n_samples = self.compounds[ci].shape_samples(si).1;
+                let lever = levers[si];
+                let mine = at[si] as usize..at[si + 1] as usize;
+                let mut own = false;
+                if moved_far(push_budget, rot_budget, lever) {
+                    fresh.clear();
+                    let (pb, rb) = (push_budget, rot_budget);
+                    self.reachable(ci, si, &cand, move |l| pb + rb * l + 0.01, reference, &mut fresh);
+                    own = true;
+                }
+                // The samples are a function of the pose alone, so they are
+                // posed again only after a resolve may have moved it.
+                let mut posed = self.compounds[ci].shape_samples(si);
+                let mut stale = false;
                 for k in 0..n_samples {
-                    for &coli in &cand {
-                        let coli = coli as usize;
-                        if (row >> self.colliders[coli].layer) & 1 == 0
-                            || self.colliders[coli].sensor
-                        {
-                            continue;
+                    let mut next = 0;
+                    loop {
+                        let list = if own { &fresh[..] } else { &lists[mine.clone()] };
+                        let Some(&slot) = list.get(next) else { break };
+                        next += 1;
+                        let coli = cand[slot as usize] as usize;
+                        if stale {
+                            posed = self.compounds[ci].shape_samples(si);
+                            stale = false;
                         }
-                        let (centers, _, radius) = self.compounds[ci].shape_samples(si);
+                        #[cfg(test)]
+                        CONTACT_TESTS.with(|t| t.set(t.get() + 1));
+                        let (centers, _, radius) = posed;
                         let p = centers[k];
-                        let pen = radius - self.colliders[coli].distance(p);
+                        // Bounded: past the sample's radius nothing about the
+                        // distance matters here, and a mesh stops looking there.
+                        let d = if reference {
+                            self.colliders[coli].distance(p)
+                        } else {
+                            self.colliders[coli].distance_within(p, radius)
+                        };
+                        let pen = radius - d;
                         #[allow(clippy::neg_cmp_op_on_partial_ord)]
                         if !(pen > 0.0) {
                             continue;
@@ -1672,6 +1824,7 @@ impl PhysicsWorld {
                             }
                         };
                         let c = &mut self.compounds[ci];
+                        stale = true;
                         let contact_pt = p - n * radius;
                         let r = contact_pt - c.pos;
                         let inv_i = c.world_inv_inertia();
@@ -1744,10 +1897,25 @@ impl PhysicsWorld {
                             speed,
                             speed_abs,
                         });
+                        // This resolve spent budget. Once that could have
+                        // carried this shape past the list made for it, the
+                        // rest of its tests come from one made where it is
+                        // now, carried on after the collider just tested.
+                        if !own && moved_far(push_budget, rot_budget, lever) {
+                            fresh.clear();
+                            let (pb, rb) = (push_budget, rot_budget);
+                            self.reachable(ci, si, &cand, move |l| pb + rb * l + 0.01, reference, &mut fresh);
+                            own = true;
+                            next = fresh.partition_point(|&q| q <= slot);
+                        }
                     }
                 }
             }
             self.cand = cand;
+            self.shape_cand = lists;
+            self.shape_cand_at = at;
+            self.shape_cand_fresh = fresh;
+            self.shape_lever = levers;
         }
 
         // Rest threshold: a grounded compound whose residual motion is below
@@ -1768,6 +1936,54 @@ impl PhysicsWorld {
         } else {
             c.sleep_time = 0.0;
         }
+    }
+
+    /// [`Self::reachable`] for samples that may move [`CONTACT_NEAR_TRAVEL`]:
+    /// the list a contact pass starts each shape with.
+    fn reachable_near(&self, ci: usize, si: usize, cand: &[u32], everything: bool, out: &mut Vec<u32>) -> f32 {
+        self.reachable(ci, si, cand, |_| CONTACT_NEAR_TRAVEL, everything, out)
+    }
+
+    /// The places in `cand` of the colliders shape `si` of compound `ci` can
+    /// touch while each of its samples moves at most `travel(lever)` from
+    /// where it is now, appended to `out` in `cand`'s order; and the shape's
+    /// lever, its samples' farthest distance from the centre of mass.
+    /// `everything` keeps every candidate (the reference the narrowing is
+    /// tested against).
+    fn reachable(
+        &self,
+        ci: usize,
+        si: usize,
+        cand: &[u32],
+        travel: impl Fn(f32) -> f32,
+        everything: bool,
+        out: &mut Vec<u32>,
+    ) -> f32 {
+        let c = &self.compounds[ci];
+        let (centres, n, radius) = c.shape_samples(si);
+        let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+        let mut lever = 0.0f32;
+        for p in &centres[..n] {
+            lo = lo.min(*p);
+            hi = hi.max(*p);
+            lever = lever.max(p.distance(c.pos));
+        }
+        let travel = travel(lever);
+        let reach = radius + travel;
+        let (swept_lo, swept_hi) = (lo - Vec3::splat(travel), hi + Vec3::splat(travel));
+        for (slot, &coli) in cand.iter().enumerate() {
+            let col = &self.colliders[coli as usize];
+            let near_sphere = col.bounds().is_none_or(|(centre, r)| {
+                let gap = (lo - centre).max(centre - hi).max(Vec3::ZERO).length();
+                gap <= r + reach * 1.001 + 1e-3
+            });
+            if everything
+                || (near_sphere && col.may_reach(lo, hi, reach) && !col.clear_of(swept_lo, swept_hi, radius))
+            {
+                out.push(slot as u32);
+            }
+        }
+        lever
     }
 
     /// How much of this step's move compound `ci` can make before one of its
@@ -1829,9 +2045,23 @@ impl PhysicsWorld {
         if cands.is_empty() {
             return 1.0;
         }
-        let dist = |p: Vec3| {
-            cands.iter().map(|&i| self.colliders[i].distance(p)).fold(f32::INFINITY, f32::min)
+        // The nearest distance where it is under `within`, and some value at
+        // least `within` where it is not: each question below says how far it
+        // needs to see, and a mesh stops looking there. See
+        // `CollisionShape::distance_within`.
+        #[cfg(test)]
+        let reference = REFERENCE_CONTACT.with(|r| r.get());
+        #[cfg(not(test))]
+        let reference = false;
+        let dist = |p: Vec3, within: f32| {
+            let one = |i: usize| match reference {
+                true => self.colliders[i].distance(p),
+                false => self.colliders[i].distance_within(p, within),
+            };
+            cands.iter().map(|&i| one(i)).fold(f32::INFINITY, f32::min)
         };
+        // A hair past a limit, so a distance that rounds onto it is still seen.
+        let past = |v: f32| v + 1e-3 + v.abs() * 1e-4;
         // The fraction of the step every sample can make, found along each
         // sample's own line.
         let mut stop = 1.0f32;
@@ -1840,7 +2070,9 @@ impl PhysicsWorld {
             if len.is_nan() || len <= 1e-6 {
                 continue;
             }
-            let s0 = dist(p);
+            // Only the threshold below reads it, and past `r - SKIN + MARGIN`
+            // the threshold is `r - SKIN` whatever it is.
+            let s0 = dist(p, past(r - SKIN + MARGIN));
             if !s0.is_finite() {
                 continue;
             }
@@ -1853,7 +2085,9 @@ impl PhysicsWorld {
             let (mut clear, mut t) = (0.0f32, 0.0f32);
             let mut hit = None;
             for _ in 0..40 {
-                let s = dist(p + d * t);
+                // Far enough that the next step reaches `stop` is all this
+                // step needs to know: any distance past it steps to `stop`.
+                let s = dist(p + d * t, past(thr + len * (stop - t).max(0.0)));
                 if s <= thr {
                     hit = Some(t);
                     break;
@@ -1871,7 +2105,7 @@ impl PhysicsWorld {
             // Narrow down where it crosses.
             for _ in 0..10 {
                 let mid = 0.5 * (clear + inside);
-                if dist(p + d * mid) <= thr {
+                if dist(p + d * mid, past(thr)) <= thr {
                     inside = mid;
                 } else {
                     clear = mid;
@@ -1913,11 +2147,33 @@ impl PhysicsWorld {
             let (centers, n_samples, radius) = c.shape_samples(si);
             for &p in &centers[..n_samples] {
                 let mut deepest = f32::NEG_INFINITY;
+                // The nearest distance asked so far. A collider whose box or
+                // sphere alone puts it farther than that, and farther than a
+                // resting touch, can be neither the deepest nor resting: it is
+                // skipped without its distance, which changes no answer here.
+                let mut nearest = f32::INFINITY;
                 for coli in 0..self.colliders.len() {
                     if (row >> self.colliders[coli].layer) & 1 == 0 || self.colliders[coli].sensor {
                         continue;
                     }
-                    let pen = radius - self.colliders[coli].distance(p);
+                    let col = &self.colliders[coli];
+                    let floor = {
+                        let by_box = col.aabb().map_or(0.0, |(lo, hi)| (lo - p).max(p - hi).max(Vec3::ZERO).length());
+                        let by_sphere = col.bounds().map_or(0.0, |(c, r)| p.distance(c) - r);
+                        by_box.max(by_sphere)
+                    };
+                    #[cfg(test)]
+                    let reference = REFERENCE_CONTACT.with(|r| r.get());
+                    #[cfg(not(test))]
+                    let reference = false;
+                    if !reference && floor * 0.999 - 1e-4 > nearest.max(radius + 0.011) {
+                        continue;
+                    }
+                    #[cfg(test)]
+                    REST_PROBES.with(|n| n.set(n.get() + 1));
+                    let d = col.distance(p);
+                    nearest = nearest.min(d);
+                    let pen = radius - d;
                     if !pen.is_finite() {
                         continue;
                     }
@@ -2587,7 +2843,8 @@ impl PhysicsWorld {
                 let (centres, n_c, radius) = self.contact_samples(bi, ci);
                 let mut hits: Vec<(Vec3, Vec3, f32)> = Vec::new();
                 for &p in &centres[..n_c] {
-                    let pen = radius - self.colliders[ci].distance(p);
+                    // Bounded at the radius: see `CollisionShape::distance_within`.
+                    let pen = radius - self.colliders[ci].distance_within(p, radius);
                     #[allow(clippy::neg_cmp_op_on_partial_ord)]
                     if !(pen > 0.0) {
                         continue;
@@ -2979,7 +3236,7 @@ impl PhysicsWorld {
                     let sampled_at = self.bodies[bi].pos;
                     for (si, &c0) in centers[..n_c].iter().enumerate() {
                         let c = c0 + (self.bodies[bi].pos - sampled_at);
-                        let pen = radius - self.colliders[ci].distance(c);
+                        let pen = radius - self.colliders[ci].distance_within(c, radius);
                         // `!(pen > 0.0)` also rejects NaN/Inf (a degenerate collider),
                         // so a bad distance can never push the body to a non-finite pos.
                         #[allow(clippy::neg_cmp_op_on_partial_ord)]
@@ -3298,8 +3555,9 @@ impl PhysicsWorld {
                 // "clear" side of zero must still read as resting, or a body
                 // that settled exactly onto a surface finds nothing here and
                 // wakes up floorless the instant `report_resting_contacts`
-                // asks.
-                let pen = radius - self.colliders[ci].distance(c);
+                // asks. Bounded a hair past that slack: beyond it nothing is
+                // resting, however far the nearest face is.
+                let pen = radius - self.colliders[ci].distance_within(c, radius + 0.011);
                 #[allow(clippy::neg_cmp_op_on_partial_ord)]
                 if !(pen > -0.01) {
                     continue;
@@ -4949,5 +5207,610 @@ mod polygon_hull_tests {
         assert!(n.dot(Vec3::new(1.0, 1.0, 0.0).normalize()) > 0.99, "{n:?}");
         // Past its depth, nothing.
         assert!(raycast_hulls(&[hull], Vec3::new(3.0, 3.0, 1.0), Vec3::new(-1.0, -1.0, 0.0), 10.0, &[], !0).is_none());
+    }
+}
+
+#[cfg(test)]
+mod narrowed_contact_tests {
+    //! The compound contact pass tests each part against only what that part
+    //! can reach, and asks a mesh only whether it is within the sample's
+    //! radius. Both are narrowings: every guard here runs the same world the
+    //! way the pass ran before (`REFERENCE_CONTACT`) and the way it runs now,
+    //! and the answers must agree to the bit while the work does not.
+    use super::*;
+    use crate::compound::{Compound, CompoundShape, ShapeGeom};
+    use crate::gravity::GravityField;
+    use crate::shapes::{BoxShape, ChunkTerrain, TriMeshCollider};
+    use floptle_core::math::Quat;
+
+    fn part(geom: ShapeGeom, offset: Vec3, rot: Quat, mass: f32, id: u64) -> CompoundShape {
+        CompoundShape { geom, offset, rot, mass, id }
+    }
+
+    /// Ground of drawn terrain with bumps, a warped mesh ramp and a ring of
+    /// boxes: every kind of static the contact pass narrows differently.
+    fn grounds(w: &mut PhysicsWorld) {
+        let mut field = floptle_field::ChunkField::new(0.5);
+        field.fill_slab(Vec3::new(-24.0, -4.0, -24.0), Vec3::new(24.0, 0.0, 24.0), 0.0, [0.5; 3]);
+        for k in 0..12 {
+            let a = k as f32 * 0.9;
+            field.sculpt(
+                floptle_field::Brush::Raise,
+                Vec3::new(a.cos() * 3.0, 0.0, a.sin() * 3.0),
+                1.5,
+                1.0,
+                floptle_field::BrushProfile::default(),
+            );
+        }
+        w.add_collider(Box::new(ChunkTerrain::new(field)));
+        let (mut verts, mut idx) = (Vec::new(), Vec::new());
+        let n = 24u32;
+        for z in 0..=n {
+            for x in 0..=n {
+                let (fx, fz) = (x as f32 * 0.5 + 4.0, z as f32 * 0.5 - 6.0);
+                verts.push(Vec3::new(fx, 0.3 * (fx - 4.0) + 0.1 * (fz * 0.9).sin(), fz));
+            }
+        }
+        for z in 0..n {
+            for x in 0..n {
+                let a = z * (n + 1) + x;
+                idx.extend([a, a + n + 1, a + 1, a + 1, a + n + 1, a + n + 2]);
+            }
+        }
+        w.add_collider(Box::new(TriMeshCollider::new(&verts, &idx)));
+        for k in 0..16 {
+            let a = k as f32 / 16.0 * std::f32::consts::TAU;
+            w.add_collider(Box::new(BoxShape::new(
+                Vec3::new(a.cos() * 9.0, 0.8, a.sin() * 9.0),
+                Vec3::new(0.6, 0.8 + (k % 3) as f32 * 0.5, 0.6),
+                Quat::from_rotation_y(a),
+            )));
+        }
+    }
+
+    /// A tumbling cluster of boxes, balls and rods, thrown across all of it.
+    fn tumbling(at: Vec3, vel: Vec3) -> Compound {
+        let mut s = Vec::new();
+        for k in 0..36u64 {
+            let (x, y, z) = ((k % 4) as f32 * 0.7, (k / 16) as f32 * 0.7, ((k / 4) % 4) as f32 * 0.7);
+            let o = Vec3::new(x, y, z);
+            let rot = Quat::from_rotation_y(k as f32 * 0.4) * Quat::from_rotation_x(k as f32 * 0.25);
+            let geom = match k % 3 {
+                0 => ShapeGeom::Box { half: Vec3::new(0.3, 0.2, 0.35) },
+                1 => ShapeGeom::Sphere { radius: 0.3 },
+                _ => ShapeGeom::Capsule { radius: 0.15, half_height: 0.3 },
+            };
+            s.push(part(geom, o, rot, 1.0 + (k % 5) as f32, k + 1));
+        }
+        let mut c = Compound::new(at, Quat::from_rotation_z(0.3), s);
+        c.vel = vel;
+        c.ang_vel = Vec3::new(0.7, 1.9, -1.1);
+        c
+    }
+
+    fn world() -> PhysicsWorld {
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        grounds(&mut w);
+        // Onto the bumps, onto the ramp, and into a box.
+        w.add_compound(tumbling(Vec3::new(-6.0, 3.0, -1.0), Vec3::new(2.0, -2.0, 0.6)));
+        w.add_compound(tumbling(Vec3::new(8.0, 5.0, 0.0), Vec3::new(1.0, -1.0, -0.5)));
+        w.add_compound(tumbling(Vec3::new(-1.0, 1.5, 4.5), Vec3::new(0.0, 0.0, 7.0)));
+        w
+    }
+
+    type Pose = ([u32; 3], [u32; 4], [u32; 3], [u32; 3]);
+    type Poses = Vec<Pose>;
+    type Touch = (usize, u64, [u32; 3], [u32; 3], u32);
+
+    fn pose(c: &Compound) -> Pose {
+        let b = |v: Vec3| v.to_array().map(f32::to_bits);
+        (b(c.pos), c.orient.to_array().map(f32::to_bits), b(c.vel), b(c.ang_vel))
+    }
+
+    fn touches(w: &PhysicsWorld) -> Vec<Touch> {
+        let b = |v: Vec3| v.to_array().map(f32::to_bits);
+        w.compound_contacts
+            .iter()
+            .map(|t| {
+                let peer = match t.peer {
+                    crate::compound::ContactPeer::Collider(i) => i,
+                    _ => usize::MAX,
+                };
+                (peer, t.compound as u64 * 1000 + t.shape_id, b(t.point), b(t.normal), t.impulse.to_bits())
+            })
+            .collect()
+    }
+
+    /// Steps, poses and touches, with the pass narrowed or not.
+    fn run(reference: bool, steps: usize) -> (Vec<Poses>, Vec<Vec<Touch>>, u64) {
+        REFERENCE_CONTACT.with(|r| r.set(reference));
+        CONTACT_TESTS.with(|t| t.set(0));
+        let mut w = world();
+        let (mut poses, mut all) = (Vec::new(), Vec::new());
+        for _ in 0..steps {
+            w.step(1.0 / 120.0);
+            poses.push(w.compounds.iter().map(pose).collect());
+            all.push(touches(&w));
+        }
+        REFERENCE_CONTACT.with(|r| r.set(false));
+        (poses, all, CONTACT_TESTS.with(|t| t.get()))
+    }
+
+    /// Over terrain, a mesh and boxes, a spinning cluster lands, bounces and
+    /// rolls through the same poses and the same contacts, to the bit,
+    /// whether each part is tested against everything in the craft's reach
+    /// with every distance asked in full, or against its own reach with the
+    /// mesh asked only about the sample's radius.
+    #[test]
+    fn narrowed_contacts_land_exactly_where_the_full_search_does() {
+        let (ref_poses, ref_touches, ref_tests) = run(true, 360);
+        let (poses, touches, tests) = run(false, 360);
+        let touched: usize = ref_touches.iter().map(Vec::len).sum();
+        let peers: std::collections::HashSet<usize> = ref_touches.iter().flatten().map(|t| t.0).collect();
+        assert!(touched > 300 && peers.len() >= 3, "{touched} touches on {} colliders: the cluster has to hit terrain, mesh and boxes", peers.len());
+        for (k, (a, b)) in ref_poses.iter().zip(&poses).enumerate() {
+            assert_eq!(a, b, "step {k}: the narrowed pass put the cluster somewhere else");
+            assert_eq!(ref_touches[k], touches[k], "step {k}: the narrowed pass touched differently");
+        }
+        assert!(tests * 2 < ref_tests, "the narrowed pass tested {tests} pairs against {ref_tests}");
+    }
+
+    /// Falling asleep caches what each sample rests on and how deep, and the
+    /// probe that does it skips colliders whose box alone puts them out of
+    /// it: the cache is the same, and the distances asked are fewer.
+    #[test]
+    fn a_compound_falls_asleep_on_the_same_contacts_either_way() {
+        let settle = |reference: bool| {
+            REFERENCE_CONTACT.with(|r| r.set(reference));
+            let mut w = world();
+            for _ in 0..240 {
+                w.step(1.0 / 120.0);
+            }
+            REST_PROBES.with(|n| n.set(0));
+            w.put_compound_to_sleep(0);
+            REFERENCE_CONTACT.with(|r| r.set(false));
+            let c = &w.compounds[0];
+            let pens: Vec<u32> = c.rest_pens.iter().map(|p| p.to_bits()).collect();
+            let resting: Vec<(usize, [u32; 3])> = c
+                .resting
+                .iter()
+                .map(|t| {
+                    let i = match t.peer {
+                        crate::compound::ContactPeer::Collider(i) => i,
+                        _ => usize::MAX,
+                    };
+                    (i, t.normal.to_array().map(f32::to_bits))
+                })
+                .collect();
+            (pens, resting, REST_PROBES.with(|n| n.get()))
+        };
+        let (ref_pens, ref_resting, ref_asked) = settle(true);
+        let (pens, resting, asked) = settle(false);
+        assert_eq!(ref_pens, pens, "the cached depths differ");
+        assert_eq!(ref_resting, resting, "the cached contacts differ");
+        assert!(!resting.is_empty(), "nothing to rest on: the comparison proves nothing");
+        assert!(asked * 3 < ref_asked, "the probe asked {asked} distances against {ref_asked}");
+    }
+
+    /// A push early in a pass can carry a later part into something its
+    /// list, made at the start of the pass, left out: a buried ball is shoved
+    /// up its full budget, which lifts a light ball beside it into a knob a
+    /// quarter metre over it. The later part's list is made again once the
+    /// push could have carried it that far, so it meets the knob in the same
+    /// pass, as the full search does.
+    #[test]
+    fn a_part_pushed_into_a_knob_meets_it_in_the_same_pass() {
+        let run = |reference: bool| {
+            REFERENCE_CONTACT.with(|r| r.set(reference));
+            let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+            w.add_collider(Box::new(BoxShape::new(Vec3::new(0.0, -1.0, 0.0), Vec3::new(10.0, 1.0, 10.0), Quat::IDENTITY)));
+            // A knob whose underside is 0.25 over the light ball's top: a
+            // sphere, whose bound is exact, so the start-of-pass list leaves
+            // it out.
+            w.add_collider(Box::new(crate::shapes::SphereShape { center: Vec3::new(2.0, 0.45 + 0.2, 0.0), radius: 0.2 }));
+            let shapes = vec![
+                part(ShapeGeom::Sphere { radius: 0.5 }, Vec3::new(0.0, 0.1, 0.0), Quat::IDENTITY, 100.0, 1),
+                part(ShapeGeom::Sphere { radius: 0.1 }, Vec3::new(2.0, 0.1, 0.0), Quat::IDENTITY, 0.01, 2),
+            ];
+            w.add_compound(Compound::new(Vec3::ZERO, Quat::IDENTITY, shapes));
+            w.step(1.0 / 120.0);
+            REFERENCE_CONTACT.with(|r| r.set(false));
+            (pose(&w.compounds[0]), touches(&w))
+        };
+        let (ref_pose, ref_touches) = run(true);
+        let (pose, touches) = run(false);
+        assert!(ref_touches.iter().any(|t| t.0 == 1), "the full search did not meet the knob: the setup proves nothing");
+        assert_eq!(ref_touches, touches, "the light ball met the knob differently");
+        assert_eq!(ref_pose, pose, "the pair landed somewhere else");
+    }
+
+    /// A raft of 1,000 boxes on the ground split in two: the halves meet
+    /// along one seam, and the pair pass compares the parts near it rather
+    /// than every part of one half with every part of the other, landing
+    /// both halves to the bit where comparing them all does.
+    #[test]
+    fn two_halves_of_a_split_raft_compare_only_the_parts_along_the_seam() {
+        let run = |reference: bool| {
+            crate::pairs::REFERENCE_PAIRS.with(|r| r.set(reference));
+            crate::pairs::PAIR_SOLID_TESTS.with(|n| n.set(0));
+            let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+            w.add_collider(Box::new(BoxShape::new(Vec3::new(0.0, -1.0, 0.0), Vec3::new(40.0, 1.0, 40.0), Quat::IDENTITY)));
+            let shapes: Vec<CompoundShape> = (0..1000u64)
+                .map(|k| {
+                    let o = Vec3::new((k % 32) as f32 * 1.0 - 16.0, 0.26, (k / 32) as f32 * 1.0 - 16.0);
+                    part(ShapeGeom::Box { half: Vec3::new(0.5, 0.25, 0.5) }, o, Quat::IDENTITY, 5.0, k + 1)
+                })
+                .collect();
+            let raft = w.add_compound(Compound::new(Vec3::ZERO, Quat::IDENTITY, shapes));
+            let half: Vec<u64> = (1..=500).collect();
+            let other = w.compounds[raft].split(&half).expect("split");
+            let other = w.add_compound(other);
+            // Pressed together, so the seam is a contact.
+            w.compounds[raft].vel = Vec3::new(0.0, 0.0, -0.5);
+            w.compounds[other].vel = Vec3::new(0.0, 0.0, 0.5);
+            let mut poses = Vec::new();
+            let mut all = Vec::new();
+            for _ in 0..6 {
+                w.step(1.0 / 120.0);
+                poses.push(w.compounds.iter().map(pose).collect::<Vec<_>>());
+                all.push(touches(&w));
+            }
+            crate::pairs::REFERENCE_PAIRS.with(|r| r.set(false));
+            let between = all.iter().flatten().filter(|t| t.0 == usize::MAX).count();
+            (poses, all, between, crate::pairs::PAIR_SOLID_TESTS.with(|n| n.get()))
+        };
+        let (ref_poses, ref_touches, between, ref_tests) = run(true);
+        let (poses, touches, _, tests) = run(false);
+        assert!(between > 0, "the halves never touched: the comparison proves nothing");
+        assert_eq!(ref_touches, touches, "the halves touched differently");
+        assert_eq!(ref_poses, poses, "the halves landed somewhere else");
+        eprintln!("part pairs compared: {tests} culled, {ref_tests} in full");
+        assert!(tests * 50 < ref_tests, "the pair pass compared {tests} part pairs against {ref_tests}");
+    }
+
+    /// Random poses of the cluster in among the boxes, ramp and terrain.
+    fn poses(n: usize) -> Vec<(Vec3, Quat)> {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / (1u64 << 24) as f32
+        };
+        (0..n)
+            .map(|k| {
+                // Half of them pressed against a box's foot, the rest anywhere.
+                let a = (k % 16) as f32 / 16.0 * std::f32::consts::TAU;
+                let at = if k % 2 == 0 {
+                    Vec3::new(a.cos() * 7.6, 0.3 + rnd() * 0.6, a.sin() * 7.6)
+                } else {
+                    Vec3::new(rnd() * 20.0 - 10.0, rnd() * 1.5, rnd() * 20.0 - 10.0)
+                };
+                let q = Quat::from_scaled_axis(Vec3::new(rnd() - 0.5, rnd() - 0.5, rnd() - 0.5) * 6.0);
+                (at, q)
+            })
+            .collect()
+    }
+
+    /// Every collider a shape's list leaves out is out of reach of each of
+    /// that shape's samples moved as far as the list allows: nowhere within
+    /// `NEAR_TRAVEL` of a sample is it within the sample's radius.
+    #[test]
+    fn a_shape_leaves_out_only_what_its_samples_cannot_reach() {
+        let mut w = world();
+        w.reindex_colliders();
+        let mut seed = 99u64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / (1u64 << 24) as f32
+        };
+        let travel = CONTACT_NEAR_TRAVEL;
+        let mut dropped_near = 0;
+        for (at, q) in poses(3000) {
+            w.compounds[0].pos = at;
+            w.compounds[0].orient = q;
+            let cand: Vec<u32> = (0..w.colliders.len() as u32).collect();
+            for si in 0..w.compounds[0].shapes.len() {
+                let mut kept = Vec::new();
+                w.reachable_near(0, si, &cand, false, &mut kept);
+                let (centres, n, radius) = w.compounds[0].shape_samples(si);
+                for slot in 0..cand.len() as u32 {
+                    if kept.contains(&slot) {
+                        continue;
+                    }
+                    let col = &w.colliders[slot as usize];
+                    for p in &centres[..n] {
+                        let d0 = col.distance(*p);
+                        assert!(d0 >= radius, "collider {slot} was left out of shape {si} while touching it");
+                        if d0 >= radius + 2.0 * travel {
+                            continue;
+                        }
+                        dropped_near += 1;
+                        for _ in 0..16 {
+                            let dir = Vec3::new(rnd() - 0.5, rnd() - 0.5, rnd() - 0.5).normalize_or_zero();
+                            let moved = *p + dir * travel * rnd().sqrt();
+                            let d = col.distance(moved);
+                            assert!(d >= radius, "collider {slot} was left out of shape {si}, yet a sample moved to {moved} is {d} from it, inside its radius {radius}");
+                        }
+                    }
+                }
+            }
+        }
+        // Left out while within twice the travel of a sample: the close calls
+        // that make this test mean something.
+        eprintln!("{dropped_near} close calls left out");
+        assert!(dropped_near > 20, "only {dropped_near} close calls were left out: the poses proved little");
+    }
+
+    /// The rest probe skips colliders by their bounds and caches what it
+    /// would have: over poses wedged against the boxes' feet, where a sample
+    /// touches two things at once, and anywhere else.
+    #[test]
+    fn the_rest_probe_caches_what_it_always_did_wherever_the_craft_sits() {
+        let mut w = world();
+        let (mut both, mut asked, mut ref_asked) = (0, 0, 0);
+        for (at, q) in poses(160) {
+            w.compounds[0].pos = at;
+            w.compounds[0].orient = q;
+            let probe = |w: &PhysicsWorld, reference: bool| {
+                REFERENCE_CONTACT.with(|r| r.set(reference));
+                REST_PROBES.with(|n| n.set(0));
+                let (pens, resting) = w.compound_rest_probe(0);
+                REFERENCE_CONTACT.with(|r| r.set(false));
+                let pens: Vec<u32> = pens.iter().map(|p| p.to_bits()).collect();
+                let resting: Vec<(usize, usize, [u32; 3])> = resting
+                    .iter()
+                    .map(|t| {
+                        let i = match t.peer {
+                            crate::compound::ContactPeer::Collider(i) => i,
+                            _ => usize::MAX,
+                        };
+                        (t.shape, i, t.normal.to_array().map(f32::to_bits))
+                    })
+                    .collect();
+                (pens, resting, REST_PROBES.with(|n| n.get()))
+            };
+            let (ref_pens, ref_resting, n_ref) = probe(&w, true);
+            let (pens, resting, n) = probe(&w, false);
+            assert_eq!(ref_pens, pens, "at {at}: the cached depths differ");
+            assert_eq!(ref_resting, resting, "at {at}: the cached contacts differ");
+            let mut per_shape: std::collections::HashMap<usize, std::collections::HashSet<usize>> = Default::default();
+            for (shape, i, _) in &resting {
+                per_shape.entry(*shape).or_default().insert(*i);
+            }
+            both += per_shape.values().filter(|s| s.len() > 1).count();
+            asked += n;
+            ref_asked += n_ref;
+        }
+        assert!(both > 10, "only {both} shapes rested on two colliders at once: the case the slack is for went untested");
+        assert!(asked * 3 < ref_asked, "the probe asked {asked} distances against {ref_asked}");
+    }
+
+    /// A 40-tank spine ringed with fins, 1,002 parts, released over terrain
+    /// beside a base: each part is tested against what its own samples can
+    /// reach, so the parts in open air test nothing and the base costs only
+    /// the parts beside it. Against the craft's sphere every part was offered
+    /// the whole base and the ground.
+    #[test]
+    fn a_thousand_part_craft_tests_each_part_against_only_what_it_can_reach() {
+        let build = || {
+            let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+            let mut field = floptle_field::ChunkField::new(0.75);
+            field.fill_slab(Vec3::new(-20.0, -6.0, -20.0), Vec3::new(20.0, 0.0, 20.0), 0.0, [0.5; 3]);
+            w.add_collider(Box::new(ChunkTerrain::new(field)));
+            for k in 0..60 {
+                let a = k as f32 / 60.0 * std::f32::consts::TAU;
+                let r = 8.0 + (k % 5) as f32 * 7.0;
+                let h = 1.0 + (k % 7) as f32 * 2.0;
+                w.add_collider(Box::new(BoxShape::new(Vec3::new(a.cos() * r, h, a.sin() * r), Vec3::new(1.5, h, 1.5), Quat::IDENTITY)));
+            }
+            let mut s = Vec::new();
+            let mut id = 0;
+            for t in 0..40 {
+                let y = 1.26 + t as f32 * 2.5;
+                id += 1;
+                s.push(part(ShapeGeom::Capsule { radius: 1.2, half_height: 0.05 }, Vec3::new(0.0, y, 0.0), Quat::IDENTITY, 50.0, id));
+                for f in 0..24 {
+                    let a = f as f32 / 24.0 * std::f32::consts::TAU;
+                    id += 1;
+                    let o = Vec3::new(a.cos() * 1.45, y, a.sin() * 1.45);
+                    s.push(part(ShapeGeom::Box { half: Vec3::new(0.25, 1.0, 0.04) }, o, Quat::from_rotation_y(-a), 1.0, id));
+                }
+            }
+            for k in 0..2 {
+                id += 1;
+                s.push(part(ShapeGeom::Sphere { radius: 0.6 }, Vec3::new(k as f32 * 1.6 - 0.8, 0.61, 0.0), Quat::IDENTITY, 20.0, id));
+            }
+            assert_eq!(s.len(), 1002);
+            w.add_compound(Compound::new(Vec3::ZERO, Quat::IDENTITY, s));
+            w
+        };
+        let tested = |reference: bool| {
+            REFERENCE_CONTACT.with(|r| r.set(reference));
+            let mut w = build();
+            CONTACT_TESTS.with(|t| t.set(0));
+            for _ in 0..4 {
+                w.step(1.0 / 120.0);
+            }
+            REFERENCE_CONTACT.with(|r| r.set(false));
+            (CONTACT_TESTS.with(|t| t.get()) / 4, pose(&w.compounds[0]))
+        };
+        let (ref_tests, ref_pose) = tested(true);
+        let (tests, pose) = tested(false);
+        assert_eq!(ref_pose, pose, "the narrowed pass moved the craft differently");
+        eprintln!("pairs tested a step: {tests} narrowed, {ref_tests} against the craft's sphere");
+        assert!(
+            tests * 20 < ref_tests,
+            "each step tested {tests} (sample, collider) pairs against {ref_tests} for the whole \
+             craft's sphere: the per-part narrowing is no longer narrowing"
+        );
+    }
+
+    /// A 15-part plane rolling at 40 m/s on a 20,000-triangle runway: its box
+    /// corners have no radius and never ask the mesh, and its wheels ask only
+    /// about the few triangles within a wheel's radius.
+    #[test]
+    fn a_plane_rolling_on_a_big_mesh_asks_it_about_a_few_triangles() {
+        let (mut verts, mut idx) = (Vec::new(), Vec::new());
+        let n = 100u32;
+        for z in 0..=n {
+            for x in 0..=n {
+                let (px, pz) = (x as f32 * 4.0 - 200.0, z as f32 * 4.0 - 200.0);
+                verts.push(Vec3::new(px, 0.05 * (px * 0.11).sin() * (pz * 0.07).cos(), pz));
+            }
+        }
+        for z in 0..n {
+            for x in 0..n {
+                let a = z * (n + 1) + x;
+                idx.extend([a, a + n + 1, a + 1, a + 1, a + n + 1, a + n + 2]);
+            }
+        }
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        w.add_collider(Box::new(TriMeshCollider::new(&verts, &idx)));
+        let b = |h: [f32; 3]| ShapeGeom::Box { half: Vec3::from(h) };
+        let mut s = vec![
+            part(b([0.5, 0.5, 3.0]), Vec3::new(0.0, 1.2, 0.0), Quat::IDENTITY, 400.0, 1),
+            part(b([0.4, 0.4, 1.0]), Vec3::new(0.0, 1.2, 3.8), Quat::IDENTITY, 100.0, 2),
+            part(b([0.3, 0.3, 1.0]), Vec3::new(0.0, 1.3, -3.8), Quat::IDENTITY, 80.0, 3),
+            part(b([3.0, 0.08, 0.8]), Vec3::new(3.5, 1.3, 0.3), Quat::IDENTITY, 60.0, 4),
+            part(b([3.0, 0.08, 0.8]), Vec3::new(-3.5, 1.3, 0.3), Quat::IDENTITY, 60.0, 5),
+            part(b([1.2, 0.06, 0.4]), Vec3::new(1.4, 1.5, -4.4), Quat::IDENTITY, 20.0, 6),
+            part(b([1.2, 0.06, 0.4]), Vec3::new(-1.4, 1.5, -4.4), Quat::IDENTITY, 20.0, 7),
+            part(b([0.06, 0.8, 0.5]), Vec3::new(0.0, 2.2, -4.4), Quat::IDENTITY, 15.0, 8),
+            part(b([0.3, 0.3, 0.6]), Vec3::new(2.0, 1.0, 0.8), Quat::IDENTITY, 30.0, 9),
+            part(b([0.3, 0.3, 0.6]), Vec3::new(-2.0, 1.0, 0.8), Quat::IDENTITY, 30.0, 10),
+            part(b([0.1, 0.4, 0.1]), Vec3::new(0.0, 0.6, 3.5), Quat::IDENTITY, 10.0, 11),
+            part(b([0.1, 0.4, 0.1]), Vec3::new(1.5, 0.6, -0.5), Quat::IDENTITY, 10.0, 12),
+        ];
+        s.push(part(ShapeGeom::Sphere { radius: 0.3 }, Vec3::new(0.0, 0.3, 3.5), Quat::IDENTITY, 15.0, 13));
+        s.push(part(ShapeGeom::Sphere { radius: 0.35 }, Vec3::new(1.5, 0.35, -0.5), Quat::IDENTITY, 15.0, 14));
+        s.push(part(ShapeGeom::Sphere { radius: 0.35 }, Vec3::new(-1.5, 0.35, -0.5), Quat::IDENTITY, 15.0, 15));
+        let ci = w.add_compound(Compound::new(Vec3::new(0.0, 0.02, -150.0), Quat::IDENTITY, s));
+        for _ in 0..60 {
+            w.step(1.0 / 120.0);
+        }
+        crate::shapes::MESH_BOUNDED.with(|n| n.set(0));
+        crate::shapes::MESH_TRIS.with(|n| n.set(0));
+        let steps = 120u64;
+        let mut touched = 0u64;
+        for _ in 0..steps {
+            let v = w.compounds[ci].vel;
+            w.compounds[ci].vel = Vec3::new(v.x, v.y, 40.0);
+            w.step(1.0 / 120.0);
+            touched += w.compound_contacts.len() as u64;
+        }
+        let asked = crate::shapes::MESH_BOUNDED.with(|n| n.get()) / steps;
+        let tris = crate::shapes::MESH_TRIS.with(|n| n.get()) / steps;
+        eprintln!("a step: {asked} bounded mesh searches, {tris} triangles tested, {touched} touches in all");
+        assert!(touched >= steps, "the plane is not rolling on the mesh ({touched} touches)");
+        // The wheels in the contact pass, and the sweep's march along the
+        // ground, each asked only as far as it needs to see: measured at
+        // under 700. Asked in full, the sweep alone tested over 3,800.
+        assert!(asked > 0, "no bounded mesh search ran: the count proves nothing");
+        assert!(tris <= 1200, "{tris} triangles tested a step for a plane rolling on a 4 m grid");
+    }
+}
+
+#[cfg(test)]
+mod narrowed_sweep_tests {
+    //! A sphere cast beside a big assembly marches only the parts near its
+    //! path, and one that ignores the assembly marches none of them; either
+    //! way it stops where it always did.
+    use super::*;
+    use crate::shapes::Plane;
+
+    /// A 1,000-part spine, as the hulls a craft's parts lend the queries:
+    /// each part named by its own node and owned by the craft's root.
+    fn craft(root: u32) -> Vec<BodyHull> {
+        (0..1000u32)
+            .map(|k| {
+                let (ring, slot) = (k / 25, k % 25);
+                let a = slot as f32 / 25.0 * std::f32::consts::TAU;
+                let shape = match k % 3 {
+                    0 => BodyShape::Box { half: Vec3::new(0.25, 0.5, 0.05) },
+                    1 => BodyShape::Sphere,
+                    _ => BodyShape::Capsule { half_height: 0.3 },
+                };
+                BodyHull {
+                    eid: 100 + k,
+                    owner: root,
+                    pos: Vec3::new(a.cos() * 1.5, 1.0 + ring as f32 * 2.5, a.sin() * 1.5),
+                    radius: 0.2,
+                    shape,
+                    up: Vec3::Y,
+                    layer: 0,
+                    orient: Quat::from_rotation_y(-a),
+                }
+            })
+            .collect()
+    }
+
+    /// Twenty chase-camera casts: from round the craft, toward its middle,
+    /// some stopping short and some reaching it.
+    fn casts() -> Vec<(Vec3, Vec3, f32)> {
+        (0..20)
+            .map(|k| {
+                let a = k as f32 * 0.7;
+                let from = Vec3::new(a.cos() * 12.0, 3.0 + k as f32 * 4.0, a.sin() * 12.0);
+                let to = Vec3::new(0.0, 2.0 + k as f32 * 4.5, 0.0);
+                let reach = if k % 2 == 0 { 14.0 } else { 6.0 };
+                (from, to - from, reach)
+            })
+            .collect()
+    }
+
+    fn sweep_all(hulls: &[BodyHull], exclude: &[u32], reference: bool) -> (Vec<Option<[u32; 7]>>, u64) {
+        let ground = vec![AnchoredCollider::world(Box::new(Plane::ground(0.0)))];
+        REFERENCE_SWEEP.with(|r| r.set(reference));
+        SWEPT_HULLS.with(|n| n.set(0));
+        let hits = casts()
+            .into_iter()
+            .map(|(o, d, max)| {
+                spherecast(&ground, hulls, o, d, 0.25, max, exclude, !0, false).map(|h| {
+                    let mut b = [0u32; 7];
+                    for i in 0..3 {
+                        b[i] = h.point[i].to_bits();
+                        b[3 + i] = h.normal[i].to_bits();
+                    }
+                    b[6] = h.distance.to_bits();
+                    b
+                })
+            })
+            .collect();
+        REFERENCE_SWEEP.with(|r| r.set(false));
+        (hits, SWEPT_HULLS.with(|n| n.get()))
+    }
+
+    #[test]
+    fn a_cast_past_a_big_craft_marches_only_the_parts_near_its_path() {
+        let hulls = craft(7);
+        let best = |reference: bool, exclude: &[u32]| {
+            (0..5)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    sweep_all(&hulls, exclude, reference);
+                    t.elapsed().as_secs_f64() * 1e3
+                })
+                .fold(f64::MAX, f64::min)
+        };
+        eprintln!(
+            "20 casts: {:.3} ms in full, {:.3} ms narrowed, {:.3} ms ignoring the craft",
+            best(true, &[]),
+            best(false, &[]),
+            best(false, &[7])
+        );
+        let (ref_hits, ref_kept) = sweep_all(&hulls, &[], true);
+        let (hits, kept) = sweep_all(&hulls, &[], false);
+        assert_eq!(ref_hits, hits, "a cast stopped somewhere else");
+        let landed = hits.iter().filter(|h| h.is_some()).count();
+        assert!(landed >= 5 && landed < hits.len(), "{landed} of {} casts hit: some must reach the craft", hits.len());
+        eprintln!("hulls marched over 20 casts: {kept} narrowed, {ref_kept} in full");
+        assert!(kept * 10 < ref_kept, "the casts marched {kept} hulls against {ref_kept}");
+        // Ignoring the craft by its root leaves nothing of it to march.
+        let (ignored, kept) = sweep_all(&hulls, &[7], false);
+        assert_eq!(kept, 0, "an ignored craft still had {kept} parts marched");
+        assert!(ignored.iter().all(Option::is_none), "a cast that ignores the craft hit something");
     }
 }

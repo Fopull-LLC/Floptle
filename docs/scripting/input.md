@@ -447,6 +447,8 @@ collider answers by walking its own triangles along the ray, so a short ray
 costs about a microsecond on a level of a hundred models. `perf.counts().rays`
 is how many rays scripts cast last frame and `perf.counts().rayMs` what they
 took (with `perf.enable(true)`; the time is part of `scripts`).
+The sweeps below are counted the same way, in `perf.counts().sweeps` and
+`sweepMs`.
 
 ### Shape queries — `overlapSphere`, `spherecast`, `capsulecast`, `boxcast`
 
@@ -497,6 +499,10 @@ These are cheap here for a structural reason: every collider already answers a
 signed distance, so an overlap is one distance test and a swept sphere is the
 ray march with the radius subtracted. Unlike a ray, they also see **sensors** —
 a hitbox usually does want to know it swept a trigger volume.
+
+A sweep past an assembly marches only the parts near its path, and an assembly
+named in `ignore` by its root costs nothing to march at all: a chase camera
+beside a thousand-part craft pays for the parts it passes, not for the craft.
 
 ### Debug gizmos
 
