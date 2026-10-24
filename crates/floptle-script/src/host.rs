@@ -3131,6 +3131,7 @@ impl ScriptHost {
         let terrain_save_dir: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         let terrain_warm: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
         let terrain_lod_anchor: Rc<RefCell<Option<crate::terrain_api::LodAnchor>>> = Rc::new(RefCell::new(None));
+        let terrain_edit_budget: Rc<std::cell::Cell<Option<f64>>> = Rc::default();
         let terrain_flush: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
         let terrain_busy: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
         let terrain_yields: Rc<RefCell<Vec<crate::terrain_api::TerrainYield>>> =
@@ -3149,6 +3150,7 @@ impl ScriptHost {
             crate::terrain_api::TerrainStreamShared {
                 save_dir: terrain_save_dir.clone(),
                 lod_anchor: terrain_lod_anchor.clone(),
+                edit_budget: terrain_edit_budget.clone(),
                 warm: terrain_warm.clone(),
                 flush: terrain_flush.clone(),
                 busy: terrain_busy.clone(),
@@ -3344,6 +3346,7 @@ impl ScriptHost {
             terrain_save_dir,
             terrain_warm,
             terrain_lod_anchor,
+            terrain_edit_budget,
             terrain_flush,
             terrain_busy,
             create_requests,
@@ -4184,6 +4187,7 @@ impl ScriptHost {
         // an anchor names a node in it.
         self.terrain_ops.borrow_mut().clear();
         *self.terrain_lod_anchor.borrow_mut() = None;
+        self.terrain_edit_budget.set(None);
         // Marks were laid on the old world's surfaces.
         self.clear_decals();
         // So do agents: one belongs to a node in a world that is going away, and
@@ -4709,6 +4713,18 @@ impl ScriptHost {
     /// Set what `terrain.lodAnchor` would, from the engine side.
     pub fn set_terrain_lod_anchor(&self, a: Option<crate::terrain_api::LodAnchor>) {
         *self.terrain_lod_anchor.borrow_mut() = a;
+    }
+
+    /// The milliseconds of script terrain edits to land a frame: the game's
+    /// `terrain.editBudget`, else the default.
+    pub fn terrain_edit_budget_ms(&self) -> f64 {
+        self.terrain_edit_budget.get().unwrap_or(crate::terrain_api::TERRAIN_EDIT_BUDGET_MS)
+    }
+
+    /// Set what `terrain.editBudget` would, from the engine side (`None` is
+    /// the default).
+    pub fn set_terrain_edit_budget(&self, ms: Option<f64>) {
+        self.terrain_edit_budget.set(ms);
     }
 
     pub fn take_terrain_warm(&self) -> Vec<String> {

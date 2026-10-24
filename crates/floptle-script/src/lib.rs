@@ -394,7 +394,7 @@ pub use net_api::{
 };
 pub use assembly_api::{AssemblyCmd, AssemblyImpact, AssemblyInfo};
 pub use space_api::{belt_orbits, SpaceBodyInfo, SpaceInfo};
-pub use terrain_api::{ImpostorRule, LodAnchor, TerrainOp, TerrainOpMode, TerrainYield};
+pub use terrain_api::{ImpostorRule, LodAnchor, TERRAIN_EDIT_BUDGET_MS, TerrainOp, TerrainOpMode, TerrainYield};
 pub use rollback_api::{ScriptState, MAX_STATE_DEPTH};
 pub use view_api::ViewInfo;
 
@@ -770,6 +770,9 @@ pub struct ScriptHost {
     /// `terrain.lodAnchor(...)`: what drives terrain detail instead of the
     /// render camera. Cleared on a scene swap.
     terrain_lod_anchor: Rc<RefCell<Option<terrain_api::LodAnchor>>>,
+    /// `terrain.editBudget(ms)`: the game's per-frame budget for landing its
+    /// terrain edits, when it set one. Cleared on a scene swap.
+    terrain_edit_budget: Rc<std::cell::Cell<Option<f64>>>,
     /// The editor's answer to `terrain.busy()`: true while the background
     /// terrain worker has a field generating or streaming in. Published each
     /// frame so a game that builds its world on demand can wait its turn

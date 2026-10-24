@@ -230,6 +230,9 @@ const MAX_RADIUS: f32 = 64.0;
 /// What `terrain.sculpt`'s options table reads.
 pub(crate) const SCULPT_KEYS: &[&str] = &["normal"];
 const MAX_PENDING_OPS: usize = 4096;
+/// The milliseconds of script terrain edits landed a frame unless a game sets
+/// another with `terrain.editBudget`.
+pub const TERRAIN_EDIT_BUDGET_MS: f64 = 4.0;
 
 /// The streaming-related shared slots (`terrain.saveDir` / `warm` / `flush`) —
 /// bundled so the install signature stays sane as the API grows.
@@ -238,6 +241,9 @@ pub(crate) struct TerrainStreamShared {
     /// `terrain.lodAnchor(...)`: what drives terrain detail instead of the
     /// render camera.
     pub lod_anchor: Rc<RefCell<Option<LodAnchor>>>,
+    /// `terrain.editBudget(ms)`: the milliseconds of script terrain edits the
+    /// engine lands a frame, when a game has asked for other than the default.
+    pub edit_budget: Rc<std::cell::Cell<Option<f64>>>,
     pub warm: Rc<RefCell<Vec<String>>>,
     pub flush: Rc<RefCell<bool>>,
     /// Mirror of "the background terrain worker has something to do" — a field
@@ -279,7 +285,7 @@ pub(crate) fn install_terrain_api(
     stream: TerrainStreamShared,
     receipts: TerrainReceipts,
 ) {
-    let TerrainStreamShared { save_dir, lod_anchor, warm, flush, busy, paths } = stream;
+    let TerrainStreamShared { save_dir, lod_anchor, edit_budget, warm, flush, busy, paths } = stream;
     let TerrainReceipts { yields, next_op_id, planet, queued, generator, impostors } = receipts;
     let Ok(t) = lua.create_table() else { return };
 
@@ -391,6 +397,30 @@ pub(crate) fn install_terrain_api(
             })
         }) {
             let _ = t.set("lodAnchor", f);
+        }
+    }
+
+    // terrain.editBudget([ms]) — how many milliseconds of a frame the engine
+    // spends landing script terrain edits; the rest wait, in order, for the
+    // frames after. A loading screen that covers the view can raise it to land
+    // a big batch sooner, and lower it again (or pass nil for the default) as
+    // the view is shown. Clamped to 0.5..1000 ms. Returns the budget it
+    // replaced, in ms; with no argument it only reads it.
+    {
+        let eb = edit_budget.clone();
+        if let Ok(f) = lua.create_function(move |_, v: mlua::MultiValue| {
+            let prev = eb.get().unwrap_or(TERRAIN_EDIT_BUDGET_MS);
+            if let Some(v) = v.into_iter().next() {
+                match v {
+                    Value::Nil => eb.set(None),
+                    Value::Integer(n) => eb.set(Some((n as f64).clamp(0.5, 1000.0))),
+                    Value::Number(n) if n.is_finite() => eb.set(Some(n.clamp(0.5, 1000.0))),
+                    _ => return Err(mlua::Error::runtime("terrain.editBudget takes milliseconds or nil")),
+                }
+            }
+            Ok(prev)
+        }) {
+            let _ = t.set("editBudget", f);
         }
     }
 

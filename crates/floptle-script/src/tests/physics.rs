@@ -896,6 +896,36 @@ fn a_terrain_lod_anchor_is_a_node_a_point_or_nothing() {
     let _ = e;
 }
 
+/// **`terrain.editBudget` sets the milliseconds a frame lands edits in,
+/// and hands back what it replaced.** No argument only reads it, nil goes
+/// back to the default, a budget is clamped, and anything else is refused.
+#[test]
+fn a_terrain_edit_budget_is_milliseconds_or_nothing() {
+    let dir = std::env::temp_dir().join(format!("floptle-editbudget-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "budget",
+        "function update(node, dt)\n  \
+           local was = terrain.editBudget(40)\n  \
+           local now = terrain.editBudget()\n  \
+           local big = terrain.editBudget(1e9)\n  \
+           local back = terrain.editBudget(nil)\n  \
+           local ok = pcall(terrain.editBudget, 'fast')\n  \
+           terrain.editBudget(25)\n  \
+           log(string.format('%g %g %g %g %g %s', was, now, big, back, terrain.editBudget(), tostring(ok)))\n\
+         end\n",
+    );
+    let (mut world, _) = world_with_script("budget");
+    let mut host = ScriptHost::new();
+    assert_eq!(host.terrain_edit_budget_ms(), crate::TERRAIN_EDIT_BUDGET_MS);
+    host.run(&mut world, &dir, 0.1, 0.1);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    assert!(said.iter().any(|m| m == "4 40 40 1000 25 false"), "{said:?}");
+    assert_eq!(host.terrain_edit_budget_ms(), 25.0);
+}
+
 /// `node.dropThrough` queues seconds for the sim: a number as written, `true`
 /// as a quarter second.
 #[test]

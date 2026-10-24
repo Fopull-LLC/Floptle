@@ -341,10 +341,12 @@ pub(crate) struct TerrainLoadJob {
 /// is ready; the rest is made on approach, nearest first.
 const NEAR_ON_LOAD_CHUNKS: f32 = 3.0;
 
-/// Milliseconds of script terrain edits applied a frame (at least one edit).
-const TERRAIN_EDIT_BUDGET_MS: f64 = 4.0;
-/// …and at most this many shadow-proxy cells refreshed after them: about a
-/// millisecond in a release build.
+/// Milliseconds of script terrain edits applied a frame (at least one edit),
+/// unless the game sets another with `terrain.editBudget`.
+const TERRAIN_EDIT_BUDGET_MS: f64 = floptle_script::TERRAIN_EDIT_BUDGET_MS;
+/// …and at most this many shadow-proxy cells refreshed after them at that
+/// budget, about a millisecond in a release build; a raised budget refreshes
+/// as many more.
 const TERRAIN_EDIT_PROXY_CELLS: usize = 4_000;
 
 /// Where a script terrain op lands, worked out the frame it was made.
@@ -371,21 +373,46 @@ const BIG_OP_VOXELS: f32 = 4.0;
 #[cfg(test)]
 const BIG_OP_FRAME_RATIO: f64 = 5.0;
 
-/// A big script terrain op being made on a worker, on a copy of its
-/// terrain's field. The queue waits behind it, so ops land in order, and
-/// until it lands every query reads the field as it was before it.
+/// The most ops handed to an op worker ahead of what has landed. The worker
+/// makes them one after another while the frames go on, and each frame lands
+/// what it has made: one op a frame was 1,240 frames for a loading screen's
+/// grade, the worker idle most of each.
+const OP_JOB_AHEAD: usize = 32;
+
+/// Voxels past an op's reach that its write may make ground in, where the
+/// ground there has not been made yet (`ChunkField::realize_voxels` reads 8
+/// past the box it writes).
+const OP_REALIZE_VOXELS: f32 = 9.0;
+
+/// Big script terrain ops being made on a worker, in order, on a copy of
+/// their terrain's field. The queue waits behind them, so ops land in order,
+/// and until each lands every query reads the field as it was before it.
 pub(crate) struct OpJob {
     e: Entity,
+    /// The worker's next ops: more are handed over as they reach the front of
+    /// the queue, and the worker ends once this is dropped.
+    tx: std::sync::mpsc::Sender<(floptle_script::TerrainOp, OpTarget)>,
     rx: std::sync::mpsc::Receiver<OpDone>,
+    /// Ops handed over and not landed yet.
+    in_flight: usize,
+    /// Ops handed over, and how many of them the worker has made: what a
+    /// test waits on.
+    #[cfg(test)]
+    handed: usize,
+    #[cfg(test)]
+    made: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
-/// A big op, made: the copy it was made on, what it wrote, and the proxy
-/// cells over its box sampled from it.
+/// A big op, made: the copy it was made on, what it wrote, the chunks it
+/// made from nothing, and the proxy cells over its box sampled from it.
 struct OpDone {
     op: floptle_script::TerrainOp,
     at: OpTarget,
     field: floptle_field::ChunkField,
     touched: Vec<[i32; 3]>,
+    /// Chunks not made yet that the write made first (exactly as the
+    /// generator makes them), written or not.
+    realized: Vec<[i32; 3]>,
     changed: Option<([i32; 3], [i32; 3])>,
     measured: Option<floptle_field::SculptYield>,
     region: floptle_field::DenseRegion,
@@ -1997,7 +2024,11 @@ impl Editor {
     /// for ops from anywhere.
     ///
     /// Ops land in the order they were made, [`TERRAIN_EDIT_BUDGET_MS`] of
-    /// them a frame and at least one, and the rest wait for the next frame.
+    /// them a frame (or the game's `terrain.editBudget`) and at least one,
+    /// and the rest wait for the next frame. Big ones, and ones over ground
+    /// not made yet, are made on a worker one after another while the frames
+    /// go on ([`Self::op_goes_off_frame`]), and each frame lands what it has
+    /// made.
     /// A game grading a base site made 1,119 flattens in one frame, and that
     /// frame took seconds. An op is applied whole before the next starts, so
     /// what a query reads is always the ground after some number of whole
@@ -2033,11 +2064,11 @@ impl Editor {
         let t0 = floptle_core::profile::Span::new();
         let started = floptle_core::time::Instant::now();
         let mut batch: HashMap<Entity, TerrainBatch> = HashMap::new();
-        // A big op made on a worker lands first: everything behind it waited.
-        self.land_op_job(&mut dirty, scatter);
-        while self.terrain_op_job.is_none()
-            && let Some(front) = self.terrain_op_queue.front()
-        {
+        let budget = self.script_host.terrain_edit_budget_ms();
+        let proxy_cap = (TERRAIN_EDIT_PROXY_CELLS as f64 * (budget / TERRAIN_EDIT_BUDGET_MS).max(1.0)) as usize;
+        // The big ops made on a worker land first: everything behind them waited.
+        self.land_op_job(&mut dirty, scatter, started, budget);
+        while let Some(front) = self.terrain_op_queue.front() {
             // An edit waits for its terrain to land: a field streaming in or
             // being generated replaces the one there now, and would take the
             // edit with it. The edits after it wait their turn behind it.
@@ -2046,14 +2077,24 @@ impl Editor {
             {
                 break;
             }
+            let off = front.at.as_ref().is_some_and(|at| self.op_goes_off_frame(&front.op, at));
+            // While ops are being made on a worker nothing lands on the frame,
+            // or it would land ahead of them: the next big ones for the same
+            // terrain go to the worker behind them, a few ahead at most.
+            if let Some(job) = &self.terrain_op_job {
+                if !off || front.at.is_none_or(|at| at.e != job.e) || job.in_flight >= OP_JOB_AHEAD {
+                    break;
+                }
+                let Some(QueuedEdit { op, at: Some(at) }) = self.terrain_op_queue.pop_front() else { break };
+                self.feed_op_job(op, at);
+                continue;
+            }
             let Some(QueuedEdit { op, at }) = self.terrain_op_queue.pop_front() else { break };
-            // Too big for any frame's budget: made off the frame, and the rest
-            // wait behind it.
-            if let Some(at) = at
-                && self.terrains.get(&at.e).is_some_and(|t| op.radius / at.ts >= BIG_OP_VOXELS * t.field.voxel())
-            {
+            // Too big for any frame's budget, or over ground not made yet:
+            // made off the frame, and the rest wait behind it.
+            if off && let Some(at) = at {
                 self.start_op_job(op, at);
-                break;
+                continue;
             }
             if scatter && op.affects_geometry() {
                 dirty.push((DVec3::new(op.pos[0], op.pos[1], op.pos[2]), op.radius as f64));
@@ -2065,9 +2106,7 @@ impl Editor {
             // boxes the ops touched, which grows with their spread rather
             // than their number: a spiral of flattens merges into one box
             // tens of metres across.
-            if self.terrain_edit_ms + started.elapsed().as_secs_f64() * 1e3 >= TERRAIN_EDIT_BUDGET_MS
-                || self.proxy_cells(&batch) > TERRAIN_EDIT_PROXY_CELLS
-            {
+            if self.terrain_edit_ms + started.elapsed().as_secs_f64() * 1e3 >= budget || self.proxy_cells(&batch) > proxy_cap {
                 break;
             }
         }
@@ -2096,63 +2135,163 @@ impl Editor {
                 self.scatter_cache.invalidate_near(&sources, p, r);
             }
         }
-        self.script_host.set_terrain_edits_queued(self.terrain_op_queue.len() + usize::from(self.terrain_op_job.is_some()));
+        self.script_host.set_terrain_edits_queued(self.terrain_ops_waiting());
     }
 
-    /// Start a big op on a worker, on a copy of its terrain's field (the
-    /// chunks are shared, so the copy costs a table of pointers). The proxy
-    /// cells over its box are sampled there too: refreshing them was most of
-    /// the rest of the op's frame.
+    /// Script terrain ops taken and not landed: queued, or being made on a
+    /// worker.
+    pub(crate) fn terrain_ops_waiting(&self) -> usize {
+        self.terrain_op_queue.len() + self.terrain_op_job.as_ref().map_or(0, |j| j.in_flight)
+    }
+
+    /// Is an op made on a worker rather than on the frame? One this many
+    /// voxels across its radius ([`BIG_OP_VOXELS`]) costs more than any
+    /// frame's budget, and so does one over ground not made yet: the write
+    /// makes that ground first, chunks of tens of milliseconds each, on
+    /// whichever thread it runs on: a 3 m flatten over ground a fresh world
+    /// had not made took 120 ms of its frame (debug), against 0.1 ms handed
+    /// to the worker. A grade's first cuts are small and high over the site.
+    fn op_goes_off_frame(&self, op: &floptle_script::TerrainOp, at: &OpTarget) -> bool {
+        let Some(t) = self.terrains.get(&at.e) else { return false };
+        let (f, r) = (&t.field, op.radius / at.ts);
+        if r >= BIG_OP_VOXELS * f.voxel() {
+            return true;
+        }
+        let reach = Vec3::splat(r + f.band() + f.voxel() * OP_REALIZE_VOXELS);
+        !f.pending_in_box(at.local - reach, at.local + reach).is_empty()
+    }
+
+    /// Start a worker for big ops on a copy of `op`'s terrain's field (the
+    /// chunks are shared, so the copy costs a table of pointers), and hand it
+    /// `op`. The proxy cells over each op's box are sampled there too:
+    /// refreshing them was most of the rest of an op's frame.
     fn start_op_job(&mut self, op: floptle_script::TerrainOp, at: OpTarget) {
         let Some(t) = self.terrains.get(&at.e) else { return };
         let mut field = t.field.clone();
         let _ = field.take_changed();
         let (dims, center, half) = (t.shadow.dims, t.shadow.center, t.shadow.half_extent);
-        let reach = op.radius / at.ts + t.field.band() + t.field.voxel();
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (band, voxel) = (t.field.band(), t.field.voxel());
+        let (tx, work) = std::sync::mpsc::channel::<(floptle_script::TerrainOp, OpTarget)>();
+        let (done, rx) = std::sync::mpsc::channel();
+        #[cfg(test)]
+        let made = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        #[cfg(test)]
+        let count = made.clone();
         crate::worker::spawn("terrain-op", move || {
-            let (touched, measured) = make_op(&mut field, &op, &at);
-            let changed = field.take_changed();
-            let region = field.sample_dense_region(dims, center, half, at.local - Vec3::splat(reach), at.local + Vec3::splat(reach));
-            let _ = tx.send(OpDone { op, at, field, touched, changed, measured, region });
+            for (op, at) in work {
+                let reach = Vec3::splat(op.radius / at.ts + band + voxel);
+                let near = Vec3::splat(voxel * OP_REALIZE_VOXELS);
+                let (lo, hi) = (at.local - reach, at.local + reach);
+                let unmade = field.pending_in_box(lo - near, hi + near);
+                let (touched, measured) = make_op(&mut field, &op, &at);
+                let changed = field.take_changed();
+                let still = field.pending_in_box(lo - near, hi + near);
+                let realized = unmade.into_iter().filter(|c| !still.contains(c)).collect();
+                let region = field.sample_dense_region(dims, center, half, lo, hi);
+                let out = OpDone { op, at, field: field.clone(), touched, realized, changed, measured, region };
+                if done.send(out).is_err() {
+                    break;
+                }
+                #[cfg(test)]
+                count.fetch_add(1, std::sync::atomic::Ordering::Release);
+            }
         });
-        self.terrain_op_job = Some(OpJob { e: at.e, rx });
+        self.terrain_op_job = Some(OpJob {
+            e: at.e,
+            tx,
+            rx,
+            in_flight: 0,
+            #[cfg(test)]
+            handed: 0,
+            #[cfg(test)]
+            made,
+        });
+        self.feed_op_job(op, at);
     }
 
-    /// Land the big op in flight, if it is made: its chunks into the field in
-    /// one step, its proxy cells, the sim's copy, the remesh queue and its
-    /// report. Nothing to do while it is still being made.
-    fn land_op_job(&mut self, dirty: &mut Vec<(DVec3, f64)>, scatter: bool) {
+    /// Hand the op worker its next op.
+    fn feed_op_job(&mut self, op: floptle_script::TerrainOp, at: OpTarget) {
+        let Some(job) = self.terrain_op_job.as_mut() else { return };
+        // A worker that died has dropped its end; what it held is reported
+        // lost when its results run dry.
+        let _ = job.tx.send((op, at));
+        job.in_flight += 1;
+        #[cfg(test)]
+        {
+            job.handed += 1;
+        }
+    }
+
+    /// Wait until the op worker has made everything it was handed, so that
+    /// a test's frames count what a frame lands, not how fast a worker is.
+    #[cfg(test)]
+    fn wait_for_op_worker(&self) {
         let Some(job) = &self.terrain_op_job else { return };
-        let done = match job.rx.try_recv() {
-            Ok(done) => done,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                // The worker died: the op is lost, and the queue goes on.
-                self.terrain_op_job = None;
-                self.console.push(floptle_script::LogLevel::Error, "a terrain edit failed to apply and was dropped".into(), None);
-                return;
-            }
-        };
-        let e = job.e;
-        self.terrain_op_job = None;
-        let OpDone { op, at, field, touched, changed, measured, region } = done;
-        if scatter && op.affects_geometry() {
-            dirty.push((DVec3::new(op.pos[0], op.pos[1], op.pos[2]), op.radius as f64));
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while job.made.load(std::sync::atomic::Ordering::Acquire) < job.handed {
+            assert!(std::time::Instant::now() < until, "the op worker never finished");
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        let Some(t) = self.terrains.get_mut(&e) else { return };
-        let mut coords = touched.clone();
-        if let Some((lo, hi)) = changed {
-            coords.extend(field.chunks_holding(lo, hi));
-        }
-        coords.sort_unstable();
-        coords.dedup();
-        t.field.adopt_edit(&field, &coords, changed);
-        let (mn, mx) = region.write_into(&mut t.shadow);
-        // Its report and chunks, as an inline op's; its proxy is already done.
+    }
+
+    /// Land the big ops the worker has made, in order and while the frame's
+    /// budget lasts (at least one): their chunks into the field, each in one
+    /// step, their proxy cells and reports, and then the sim's copy and the
+    /// remesh queue once for them all. The job ends once all it was handed
+    /// has landed. Nothing to do while the next is still being made.
+    fn land_op_job(&mut self, dirty: &mut Vec<(DVec3, f64)>, scatter: bool, started: floptle_core::time::Instant, budget: f64) {
+        let Some(e) = self.terrain_op_job.as_ref().map(|j| j.e) else { return };
         let mut one: HashMap<Entity, TerrainBatch> = HashMap::new();
-        self.landed_op(&op, &at, touched, measured, &mut one);
-        let Some(b) = one.remove(&e) else { return };
+        let mut proxy: Option<([u32; 3], [u32; 3])> = None;
+        let mut realized: Vec<[i32; 3]> = Vec::new();
+        while let Some(job) = self.terrain_op_job.as_mut() {
+            if job.in_flight == 0 {
+                break;
+            }
+            let done = match job.rx.try_recv() {
+                Ok(done) => done,
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // The worker died: what it held is lost, and the queue goes on.
+                    job.in_flight = 0;
+                    self.console.push(floptle_script::LogLevel::Error, "a terrain edit failed to apply and was dropped".into(), None);
+                    break;
+                }
+            };
+            job.in_flight -= 1;
+            let OpDone { op, at, field, touched, realized: made, changed, measured, region } = done;
+            if scatter && op.affects_geometry() {
+                dirty.push((DVec3::new(op.pos[0], op.pos[1], op.pos[2]), op.radius as f64));
+            }
+            let Some(t) = self.terrains.get_mut(&e) else { continue };
+            let mut coords = touched.clone();
+            coords.extend_from_slice(&made);
+            if let Some((lo, hi)) = changed {
+                coords.extend(field.chunks_holding(lo, hi));
+            }
+            coords.sort_unstable();
+            coords.dedup();
+            t.field.adopt_edit(&field, &coords, changed);
+            let (mn, mx) = region.write_into(&mut t.shadow);
+            proxy = Some(match proxy {
+                Some((a, b)) => ([a[0].min(mn[0]), a[1].min(mn[1]), a[2].min(mn[2])], [b[0].max(mx[0]), b[1].max(mx[1]), b[2].max(mx[2])]),
+                None => (mn, mx),
+            });
+            realized.extend(made);
+            // Its report and chunks, as an inline op's; its proxy is already done.
+            self.landed_op(&op, &at, touched, measured, &mut one);
+            if self.terrain_edit_ms + started.elapsed().as_secs_f64() * 1e3 >= budget {
+                break;
+            }
+        }
+        if self.terrain_op_job.as_ref().is_some_and(|j| j.in_flight == 0) {
+            self.terrain_op_job = None;
+        }
+        let Some((mn, mx)) = proxy else { return };
+        let mut b = one.remove(&e).unwrap_or_default();
+        b.touched.extend(realized);
+        b.touched.sort_unstable();
+        b.touched.dedup();
         if b.geom {
             self.mirror_terrain_chunks_to_sim(e, &b.touched);
         }
@@ -3271,13 +3410,18 @@ impl Editor {
     /// Per-frame residency driver: land finished background loads, kick loads
     /// for cold bodies something is approaching, evict residents left behind.
     ///
-    /// residency is gameplay-based, not camera-based. During Play the anchors
-    /// are the world positions of every dynamic body (ship, astronaut, debris)
-    /// plus any bodies the game explicitly warmed (`terrain.warm` — the map's
-    /// focused planet); the camera doesn't count — opening the map and zooming
-    /// across the system must never unload the planet you're standing on (that
-    /// evicted the ground under the player's feet and dropped them through the world).
-    /// In edit mode the editor camera is your presence, so it anchors there.
+    /// During Play the anchors are the world positions of every dynamic body
+    /// (ship, astronaut, debris), the point streaming centres on (the game's
+    /// camera, or its `terrain.lodAnchor` while one is set), plus any bodies
+    /// the game explicitly warmed (`terrain.warm` — the map's focused planet).
+    /// A body loads as any anchor nears it and is put away only once every
+    /// one has left it far behind, so a map that pulls the camera across the
+    /// system never unloads the planet the player stands on (that evicted the
+    /// ground under the player's feet and dropped them through the world).
+    /// The camera counts because what it nears has to have ground to draw: a
+    /// belt rock the camera flew up to with no body beside it stayed a plain
+    /// ball, its ground never made. In edit mode the editor camera is your
+    /// presence, so it anchors there.
     /// The impostor flip stays camera-based — that's visual LOD (screen size),
     /// a different question from which fields are in RAM.
     ///
@@ -3290,13 +3434,11 @@ impl Editor {
             self.world
                 .query::<floptle_core::RigidBody>()
                 .map(|(e, _)| floptle_core::world_transform(&self.world, e).translation)
+                .chain(std::iter::once(self.lod_center(self.streaming_anchor())))
                 .collect()
         } else {
             vec![cam_world]
         };
-        if anchors.is_empty() {
-            return; // a playing scene with no dynamic bodies: leave residency as-is
-        }
         // (terrain.flush() checkpoints are handled by `step_terrain_checkpoint`
         // — background, amortized. Exit paths use `flush_slot_terrains_sync`.)
         let warm_names = self.script_host.take_terrain_warm();
@@ -5604,6 +5746,165 @@ mod residency_tests {
         assert!(fresh.distance.iter().zip(&t.shadow.distance).all(|(a, b)| a.to_bits() == b.to_bits()) && fresh.color == t.shadow.color, "the proxy over the big edit is stale");
     }
 
+
+    /// Every chunk of two fields, compared to the bit: what a test of edits
+    /// landed over frames checks against the same edits made at once.
+    fn assert_same_chunks(a: &floptle_field::ChunkField, b: &floptle_field::ChunkField, what: &str) {
+        let mut coords = a.all_chunk_coords();
+        coords.extend(b.all_chunk_coords());
+        coords.sort_unstable();
+        coords.dedup();
+        let (mut da, mut ca, mut db, mut cb) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for c in coords {
+            let lo = [c[0] * floptle_field::CHUNK, c[1] * floptle_field::CHUNK, c[2] * floptle_field::CHUNK];
+            a.gather(lo, floptle_field::CHUNK as usize, &mut da, &mut ca);
+            b.gather(lo, floptle_field::CHUNK as usize, &mut db, &mut cb);
+            let same = da.iter().zip(&db).all(|(x, y)| x.to_bits() == y.to_bits()) && ca == cb;
+            assert!(same, "chunk {c:?} differs from {what}");
+        }
+    }
+
+    fn flatten_op(p: Vec3, radius: f32) -> floptle_script::TerrainOp {
+        floptle_script::TerrainOp {
+            pos: [p.x as f64, p.y as f64, p.z as f64],
+            radius,
+            strength: 0.6,
+            mode: floptle_script::TerrainOpMode::Flatten,
+            id: 0,
+            normal: None,
+        }
+    }
+
+    fn editor_on(field: &floptle_field::ChunkField) -> (crate::Editor, Entity) {
+        let mut ed = crate::Editor::default();
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        ed.terrains.insert(e, EditorTerrain::new(field.clone()));
+        (ed, e)
+    }
+
+    /// Frames, as the frame loop runs them, until every op has landed; after
+    /// each, the op worker is let finish what it holds, so the count is what
+    /// a frame lands and not how fast the machine is.
+    fn frames_to_land(ed: &mut crate::Editor, ops: Vec<floptle_script::TerrainOp>) -> usize {
+        let (mut frames, mut first) = (0usize, Some(ops));
+        loop {
+            ed.pump_collision_meshes();
+            ed.apply_script_terrain_ops(first.take().unwrap_or_default());
+            frames += 1;
+            if ed.terrain_op_queue.is_empty() && ed.terrain_op_job.is_none() {
+                return frames;
+            }
+            ed.wait_for_op_worker();
+            assert!(frames < 100_000, "the edits never all landed");
+        }
+    }
+
+    /// **Big edits are made ahead on the worker, and a frame lands all it has
+    /// made.** A big op was made on a worker one at a time, and the next was
+    /// handed over only once the last had landed: one a frame, whatever the
+    /// frame rate, so a loading screen's 1,240-op grade took 21.7 s at 60 fps
+    /// and 50 s at 20, the worker idle most of each frame. The worker is
+    /// handed up to [`OP_JOB_AHEAD`] at a time now. Counted in frames, with
+    /// the worker let finish each frame and the budget out of the way: 64
+    /// ops land in a few frames (one a frame was 64), in order, and leave
+    /// the ground making them all at once leaves.
+    #[test]
+    fn big_edits_are_made_ahead_and_land_many_a_frame() {
+        let fill = floptle_field::procgen::PlanetFill { seed: 8, radius: 150.0, voxel: 1.5, relief: 6.0, cave_depth: 0.0, ..Default::default() };
+        let field = floptle_field::procgen::generate_planet(&fill);
+        let ground = field.raycast(Vec3::new(0.0, 250.0, 0.0), Vec3::NEG_Y, 250.0).unwrap();
+        let n = 64;
+        let ops: Vec<floptle_script::TerrainOp> = (0..n)
+            .map(|i| {
+                let (a, r) = (i as f32 * 2.399, 2.0 + (i % 16) as f32 * 1.5);
+                flatten_op(ground + Vec3::new(a.cos() * r, 0.5, a.sin() * r), 6.0)
+            })
+            .collect();
+        let (mut once, eo) = editor_on(&field);
+        assert!(once.op_goes_off_frame(&ops[0], &once.resolve_terrain_op(&ops[0]).unwrap()), "the fixture's ops are not big");
+        let mut batch: HashMap<Entity, TerrainBatch> = HashMap::new();
+        for op in &ops {
+            once.apply_terrain_op(op, &mut batch);
+        }
+        let (mut ed, e) = editor_on(&field);
+        ed.script_host.set_terrain_edit_budget(Some(1000.0));
+        let frames = frames_to_land(&mut ed, ops);
+        eprintln!("{n} big edits landed in {frames} frames");
+        assert!(frames * 8 <= n, "{n} big edits took {frames} frames");
+        assert_same_chunks(&once.terrains[&eo].field, &ed.terrains[&e].field, "making the edits all at once");
+    }
+
+    /// **The budget sets how many small edits a frame lands, and a game can
+    /// raise it.** Small edits land on the frame while
+    /// [`TERRAIN_EDIT_BUDGET_MS`] lasts; `terrain.editBudget` raises it, for
+    /// a loading screen that covers the view. Counted in frames: 800 small
+    /// flattens land in far fewer frames than 800 at the default, and in
+    /// fewer again at ten times the budget.
+    #[test]
+    fn the_edit_budget_sets_how_many_small_edits_a_frame_lands() {
+        let fill = floptle_field::procgen::PlanetFill { seed: 8, radius: 120.0, voxel: 1.5, relief: 6.0, cave_depth: 0.0, ..Default::default() };
+        let field = floptle_field::procgen::generate_planet(&fill);
+        let ground = field.raycast(Vec3::new(0.0, 200.0, 0.0), Vec3::NEG_Y, 200.0).unwrap();
+        let n = 800;
+        let ops: Vec<floptle_script::TerrainOp> = (0..n)
+            .map(|i| {
+                let (a, r) = (i as f32 * 2.399, (i % 8) as f32 * 0.4);
+                flatten_op(ground + Vec3::new(a.cos() * r, 0.3, a.sin() * r), 1.5)
+            })
+            .collect();
+        let (mut ed, _) = editor_on(&field);
+        let t = std::time::Instant::now();
+        let at_default = frames_to_land(&mut ed, ops.clone());
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        let (mut ed, _) = editor_on(&field);
+        ed.script_host.set_terrain_edit_budget(Some(TERRAIN_EDIT_BUDGET_MS * 10.0));
+        let raised = frames_to_land(&mut ed, ops);
+        eprintln!("{n} small edits: {at_default} frames at the default budget ({ms:.0} ms), {raised} at ten times it");
+        assert!(at_default * 4 <= n, "{n} small edits took {at_default} frames at the default budget");
+        assert!(raised * 2 <= at_default, "ten times the budget took {raised} frames, against {at_default}");
+    }
+
+    /// **An edit over ground not made yet is made off the frame.** A world
+    /// that has just streamed in has made only the ground near the player,
+    /// and an edit over the rest makes it first, chunks of tens of
+    /// milliseconds each, on the frame: a fresh world's first grade had a
+    /// 504 ms frame, 450 of it `terrainEdits`, and its first ops are small
+    /// cuts high over the site. Such an edit goes to the worker however small it is:
+    /// the frame it is taken in makes no ground (counted in chunks still not
+    /// made), and it lands as making it on the frame would have.
+    #[test]
+    fn an_edit_over_ground_not_made_yet_is_made_off_the_frame() {
+        let fill = floptle_field::procgen::PlanetFill { seed: 8, radius: 150.0, voxel: 1.5, relief: 6.0, cave_depth: 0.0, ..Default::default() };
+        let whole = floptle_field::procgen::generate_planet(&fill);
+        let top = whole.raycast(Vec3::new(0.0, 250.0, 0.0), Vec3::NEG_Y, 250.0).unwrap();
+        let side = whole.raycast(Vec3::new(250.0, 0.0, 0.0), Vec3::NEG_X, 250.0).unwrap();
+        // Made round the top only, as a world streamed in under a player is.
+        let field = floptle_field::procgen::generate_planet_near(&fill, top, floptle_field::CHUNK as f32 * fill.voxel);
+        let op = flatten_op(side, 3.0);
+        let reach = Vec3::splat(3.0 + field.band() + field.voxel());
+        let before = field.pending_in_box(side - reach, side + reach).len();
+        assert!(before > 0, "the fixture's edit is over ground already made");
+        // Made on the frame, as before: it makes the ground there first.
+        let (mut once, eo) = editor_on(&field);
+        let t = std::time::Instant::now();
+        let mut batch: HashMap<Entity, TerrainBatch> = HashMap::new();
+        once.apply_terrain_op(&op, &mut batch);
+        let inline_ms = t.elapsed().as_secs_f64() * 1e3;
+        assert!(once.terrains[&eo].field.pending_in_box(side - reach, side + reach).len() < before, "making it on the frame made no ground");
+        let (mut ed, e) = editor_on(&field);
+        let t = std::time::Instant::now();
+        ed.pump_collision_meshes();
+        ed.apply_script_terrain_ops(vec![op]);
+        let frame_ms = t.elapsed().as_secs_f64() * 1e3;
+        eprintln!("an edit over ground not made yet: {inline_ms:.1} ms made on the frame, the frame taking it {frame_ms:.1} ms");
+        let left = ed.terrains[&e].field.pending_in_box(side - reach, side + reach).len();
+        assert_eq!(left, before, "the frame that took the edit made {} chunks of ground", before - left);
+        assert!(ed.terrain_op_job.is_some(), "the edit was not handed to the worker");
+        frames_to_land(&mut ed, Vec::new());
+        assert!(ed.terrains[&e].field.pending_in_box(side - reach, side + reach).len() < before, "the ground the worker made did not land");
+        assert_same_chunks(&once.terrains[&eo].field, &ed.terrains[&e].field, "making the edit on the frame");
+    }
 
     /// **A world that has just landed puts its far ground away a little at a
     /// time.** It is almost all far from the player, and every chunk of it
