@@ -1219,6 +1219,47 @@ impl ChunkTerrain {
         None
     }
 
+    /// [`CollisionShape::distance`], or [`CollisionShape::distance_within`]
+    /// `r` when `r` is finite: looking for triangles no farther than `r`.
+    ///
+    /// A sample of a craft a few metres up, inside the band, walked every
+    /// bucket out to the ground under it, so the parts of a plane lifting off
+    /// cost more the higher they rose until they left the band: on 2 m
+    /// voxels, 3 us a query 8 m up against 0.3 within half a metre, and ten
+    /// times the roll's physics for a plane climbing out. Bounded only where
+    /// the field has the point a voxel or more out in the open, past where
+    /// the drawn surface can be: there no triangle within `r` means the drawn
+    /// surface is at least `r` away and the point outside it. In the rock, or
+    /// near the surface, it asks the whole question.
+    fn distance_at(&self, p: Vec3, r: f32) -> f32 {
+        let local = self.to_local(p);
+        let scale = self.scale.max(1e-6);
+        // The field once: the band test and, in open air, the answer.
+        let d = self.field.d(local);
+        let limit = r / scale;
+        let bounded = limit.is_finite() && d > self.field.voxel();
+        // Out in the open, nothing is nearer than nothing: a box's corner, a
+        // sample of no radius, needs no triangle at all.
+        if bounded && limit <= 0.0 {
+            return d * scale;
+        }
+        match self.closest_surface_at(local, d, true, if bounded { limit } else { f32::INFINITY }) {
+            // Magnitude and side from the drawn surface: which way of the
+            // closest point the point lies, judged by the surface's own
+            // normal there. Exactly on the surface both are zero, and the
+            // sign of a zero does not matter. Within the limit it is the
+            // nearest triangle, as the whole question finds it.
+            Some((q, n)) if !bounded || (local - q).length_squared() < limit * limit => {
+                let off = local - q;
+                let side = if off.dot(n) < 0.0 { -1.0 } else { 1.0 };
+                off.length() * side * scale
+            }
+            // Nothing within the limit: at least `r` away, outside.
+            _ if bounded && d < self.field.band() => (d * scale).max(r),
+            _ => d * scale,
+        }
+    }
+
     /// Is every chunk the drawn surface near `local` is read from meshed?
     fn meshed_near(&self, local: Vec3) -> bool {
         let s = self.surface.borrow();
@@ -1241,7 +1282,7 @@ impl ChunkTerrain {
         if !self.mesh_accurate {
             return None;
         }
-        self.closest_surface_at(local, self.field.d(local), false)
+        self.closest_surface_at(local, self.field.d(local), false, f32::INFINITY)
     }
 
     /// [`Self::closest_surface`], for a caller that has the field's distance
@@ -1255,7 +1296,11 @@ impl ChunkTerrain {
     /// of a fast craft's sweep. The walk tests the same triangles to the same
     /// nearest distance; only which of two triangles exactly as near is kept
     /// can differ, and both are that far.
-    fn closest_surface_at(&self, local: Vec3, d: f32, distance_only: bool) -> Option<(Vec3, Vec3)> {
+    ///
+    /// `limit`: no triangle farther than this is looked for (infinite for
+    /// none). The answer is the nearest triangle where one is within it, and
+    /// otherwise `None` or one farther than it.
+    fn closest_surface_at(&self, local: Vec3, d: f32, distance_only: bool, limit: f32) -> Option<(Vec3, Vec3)> {
         if !self.mesh_accurate {
             return None;
         }
@@ -1287,6 +1332,9 @@ impl ChunkTerrain {
         // The ring is bounded by the reach the reject above established; past
         // it there is no triangle worth finding and the field answers.
         let max_ring = (self.reach() / cell).ceil().max(1.0) as i32;
+        let limit2 = if limit.is_finite() { limit * limit * 1.001 + 1e-9 } else { f32::INFINITY };
+        // Past this ring every bucket is farther than the limit.
+        let rings = if limit.is_finite() { max_ring.min((limit / cell).ceil() as i32 + 1) } else { max_ring };
         let reach = |k: i32| k - max_ring;
         let near = NearChunks::new(
             &s,
@@ -1330,7 +1378,7 @@ impl ChunkTerrain {
                 }
             });
         }
-        for r in 0..=max_ring {
+        for r in 0..=rings {
             for cz in (c.2 - r).max(olo.2)..=(c.2 + r).min(ohi.2) {
                 for cy in (c.1 - r).max(olo.1)..=(c.1 + r).min(ohi.1) {
                     for cx in (c.0 - r).max(olo.0)..=(c.0 + r).min(ohi.0) {
@@ -1346,7 +1394,7 @@ impl ChunkTerrain {
                         // touches, and the one holding its box's nearest
                         // point is at most that far, so it is tested there.
                         // Twice the slack, for the bucket's own rounding.
-                        if distance_only && bucket_lower_d2(local, 2.0 * tol, (cx, cy, cz), cell) > best.min(seed) {
+                        if distance_only && bucket_lower_d2(local, 2.0 * tol, (cx, cy, cz), cell) > best.min(seed).min(limit2) {
                             continue;
                         }
                         #[cfg(test)]
@@ -1356,7 +1404,7 @@ impl ChunkTerrain {
                             TERRAIN_VISITS.with(|n| n.set(n.get() + 1));
                             // Past the best so far, it can neither beat it nor
                             // tie it; see `box_lower_d2`.
-                            if box_lower_d2(local, tol, &tri.p) > best.min(seed) {
+                            if box_lower_d2(local, tol, &tri.p) > best.min(seed).min(limit2) {
                                 return;
                             }
                             #[cfg(test)]
@@ -1573,22 +1621,10 @@ impl CollisionShape for ChunkTerrain {
         RayAnswer::Hit(t * scale, if n.dot(rd) > 0.0 { -n } else { n })
     }
     fn distance(&self, p: Vec3) -> f32 {
-        let local = self.to_local(p);
-        let scale = self.scale.max(1e-6);
-        // The field once: the band test and, in open air, the answer.
-        let d = self.field.d(local);
-        match self.closest_surface_at(local, d, true) {
-            // Magnitude and side from the drawn surface: which way of the
-            // closest point the point lies, judged by the surface's own
-            // normal there. Exactly on the surface both are zero, and the
-            // sign of a zero does not matter.
-            Some((q, n)) => {
-                let off = local - q;
-                let side = if off.dot(n) < 0.0 { -1.0 } else { 1.0 };
-                off.length() * side * scale
-            }
-            None => d * scale,
-        }
+        self.distance_at(p, f32::INFINITY)
+    }
+    fn distance_within(&self, p: Vec3, r: f32) -> f32 {
+        self.distance_at(p, r)
     }
     fn normal(&self, p: Vec3) -> Vec3 {
         self.normal_reliable(p).unwrap_or(Vec3::Y)
@@ -2904,6 +2940,55 @@ mod drawn_surface_tests {
         let (_, few) = walk(false, true);
         assert!(high.len() > 400, "fixture: only {} points a metre or more up inside the band", high.len());
         assert!(few * 2 <= all, "a metre or more up, the walk looked up {few} buckets of the {all} it used to");
+    }
+
+    /// A part of a craft a few metres over the ground, inside the band, asks
+    /// whether the ground is within its radius and looks no farther: its
+    /// answer is `distance`'s, bit for bit, wherever that is under the
+    /// radius, and at least the radius everywhere else, over rough ground,
+    /// fine and coarse, from inside the rock to past the band. Two voxels and
+    /// more up it looks up a tenth of the buckets the whole question does,
+    /// and a box's corner, a sample of no radius, none (a plane lifting off
+    /// over 2 m voxels cost ten times its roll).
+    #[test]
+    fn a_distance_asked_within_a_radius_looks_no_farther() {
+        for (field, top) in [(rough(), 3.0f32), (coarse(), 10.0)] {
+            let mut t = ChunkTerrain::new(field);
+            t.mesh_accurate = true;
+            let voxel = t.field.voxel();
+            let (mut whole, mut bounded, mut asked, mut corners) = (0u64, 0u64, 0, 0u64);
+            for i in 0..20 {
+                for k in 0..20 {
+                    for j in 0..40 {
+                        let p = Vec3::new(i as f32 * 0.53 - 5.0, j as f32 * (top + 1.0) / 40.0 - 1.0, k as f32 * 0.53 - 5.0);
+                        for r in [-0.1f32, 0.0, 0.02, 0.1, 0.4, 1.2, 3.0] {
+                            TERRAIN_BUCKETS.with(|n| n.set(0));
+                            let full = t.distance(p);
+                            let a = TERRAIN_BUCKETS.with(|n| n.get());
+                            TERRAIN_BUCKETS.with(|n| n.set(0));
+                            let got = t.distance_within(p, r);
+                            let b = TERRAIN_BUCKETS.with(|n| n.get());
+                            if full < r {
+                                assert_eq!(got.to_bits(), full.to_bits(), "at {p:?} within {r}: {got}, the whole question {full}");
+                            } else {
+                                assert!(got >= r, "at {p:?} within {r}: {got}, under the radius, where the whole question found {full}");
+                            }
+                            if r == 0.0 && t.field.d(p) > 2.0 * voxel {
+                                corners += b;
+                            }
+                            if r == 0.4 && t.field.d(p) > 2.0 * voxel {
+                                whole += a;
+                                bounded += b;
+                                asked += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(asked > 400, "fixture: only {asked} points two voxels up");
+            assert_eq!(corners, 0, "two voxels up, a sample of no radius looked up {corners} buckets");
+            assert!(bounded * 10 <= whole, "two voxels up, within 0.4 it looked up {bounded} buckets, the whole question {whole}");
+        }
     }
 
     /// The cached surface must be a cache — meshed once per chunk, not per

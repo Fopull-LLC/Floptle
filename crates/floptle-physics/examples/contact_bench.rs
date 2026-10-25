@@ -599,6 +599,47 @@ fn sweep_frames(speed: f32) {
     println!("  frames that meshed nothing: worst {worst:.1} ms of {}", quiet.len());
 }
 
+/// The plane flying level at `h` over chunk terrain of `voxel` at 50 m/s,
+/// as it does lifting off: what a frame costs, its sweeps and its static
+/// contact. A part inside the band, a few metres up, asked for the ground
+/// under it however far below its radius that was.
+fn liftoff(voxel: f32) {
+    let mut field = floptle_field::ChunkField::new(voxel);
+    field.fill_with(
+        Vec3::new(-60.0, -16.0, -200.0),
+        Vec3::new(60.0, 16.0, 400.0),
+        |p| p.y - 0.4 * (p.x * 0.05).sin() * (p.z * 0.03).cos(),
+        |_| [0.5; 3],
+    );
+    let band = field.band();
+    let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::ZERO));
+    w.set_colliders(vec![AnchoredCollider::world(Box::new(ChunkTerrain::new(field)))]);
+    let ci = w.add_compound(plane());
+    w.time_steps(true);
+    for h in [1.0f32, 2.0, 4.0, 6.0, 8.0, 10.0] {
+        let c = &mut w.compounds[ci];
+        c.pos = Vec3::new(0.0, h, -150.0);
+        c.prev_pos = c.pos;
+        let (mut ms, mut sweeps, mut stat) = (0.0, 0.0, 0.0);
+        let n = 60;
+        for _ in 0..n {
+            w.compounds[ci].vel = Vec3::new(0.0, 0.0, 50.0);
+            w.compounds[ci].ang_vel = Vec3::ZERO;
+            ms += frame(&mut w);
+            let t = w.take_timing().unwrap_or_default();
+            sweeps += t.sweeps_ms;
+            stat += t.static_ms;
+        }
+        let n = n as f64;
+        println!(
+            "voxel {voxel} (band {band}), {h} m up: {:.2} ms a frame (sweeps {:.2}, static {:.2})",
+            ms / n,
+            sweeps as f64 / n,
+            stat as f64 / n
+        );
+    }
+}
+
 fn frame(w: &mut PhysicsWorld) -> f64 {
     let t = std::time::Instant::now();
     w.step(1.0 / 120.0);
@@ -657,6 +698,39 @@ fn main() {
     if std::env::var("ONLY").is_ok_and(|v| v == "sweeps") {
         sweep_frames(40.0);
         sweep_frames(70.0);
+        return;
+    }
+    // `ONLY=heights`: what one terrain distance costs, asked whole and
+    // within half a metre, from the ground to past the band.
+    if std::env::var("ONLY").is_ok_and(|v| v == "heights") {
+        for voxel in [0.75f32, 2.0] {
+            let mut field = floptle_field::ChunkField::new(voxel);
+            field.fill_with(Vec3::new(-60.0, -16.0, -200.0), Vec3::new(60.0, 16.0, 400.0), |p| p.y - 0.4 * (p.x * 0.05).sin() * (p.z * 0.03).cos(), |_| [0.5; 3]);
+            let t = ChunkTerrain::new(field);
+            for h in [0.3f32, 1.0, 2.0, 4.0, 6.0, 8.0, 10.0] {
+                let at = |k: usize| Vec3::new(12.0 + (k % 100) as f32 * 0.02 - 1.0, h, 12.0 + (k / 100) as f32 * 0.01 - 1.0);
+                let _ = t.distance(at(0));
+                let n = 20000;
+                let t0 = std::time::Instant::now();
+                let mut sum = 0.0;
+                for k in 0..n {
+                    sum += t.distance(at(k));
+                }
+                let whole = t0.elapsed().as_secs_f64() * 1e6 / n as f64;
+                let t0 = std::time::Instant::now();
+                for k in 0..n {
+                    sum += t.distance_within(at(k), 0.5);
+                }
+                let within = t0.elapsed().as_secs_f64() * 1e6 / n as f64;
+                println!("voxel {voxel}, {h} m up: {whole:.3} us whole, {within:.3} us within 0.5 ({sum:.0})");
+            }
+        }
+        return;
+    }
+    // `ONLY=liftoff` the plane flying level a few metres up.
+    if std::env::var("ONLY").is_ok_and(|v| v == "liftoff") {
+        liftoff(0.75);
+        liftoff(2.0);
         return;
     }
     // `ONLY=rover` the parked rovers alone.

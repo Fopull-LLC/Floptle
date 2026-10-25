@@ -1424,6 +1424,17 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("speed".to_string(), j.speed as f64),
                 // A wheel's steering, degrees about its suspension axis.
                 ("steer".to_string(), j.steer as f64),
+                // Read-only: where it holds on this node and on the other, each
+                // in its own node's space, and its axis in the other's.
+                ("anchorX".to_string(), j.anchor[0] as f64),
+                ("anchorY".to_string(), j.anchor[1] as f64),
+                ("anchorZ".to_string(), j.anchor[2] as f64),
+                ("otherAnchorX".to_string(), j.other_anchor[0] as f64),
+                ("otherAnchorY".to_string(), j.other_anchor[1] as f64),
+                ("otherAnchorZ".to_string(), j.other_anchor[2] as f64),
+                ("axisX".to_string(), j.axis[0] as f64),
+                ("axisY".to_string(), j.axis[1] as f64),
+                ("axisZ".to_string(), j.axis[2] as f64),
             ]),
         );
     }

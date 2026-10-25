@@ -56,7 +56,8 @@ pub struct AssemblyInfo {
     /// Asleep: the solver is skipping it until something wakes it.
     pub asleep: bool,
     /// Why it is awake: what last woke it or restarted its count toward
-    /// sleep, or `settling` while it counts (`WakeReason::name`).
+    /// sleep, kept while it counts, or `settling` while it counts after
+    /// stopping on its own (`WakeReason::name`).
     pub wake: &'static str,
 }
 

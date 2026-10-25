@@ -353,7 +353,7 @@ fn vessel_node(ed: &mut crate::Editor, name: &str, at: DVec3, half: [f32; 3], ma
 
 /// From Lua: a servo hinge between two sub-assemblies is driven to a new
 /// goal through its Joint handle each tick, with no rebuild, and reads its
-/// angle back; a vessel grips the world where it hangs, holds there against
+/// angle back, and where it holds and turns about; a vessel grips the world where it hangs, holds there against
 /// gravity, says so in `assembly.info`, and falls when it lets go.
 #[test]
 fn lua_drives_a_servo_between_sub_assemblies_and_grips_and_releases_a_vessel() {
@@ -368,6 +368,8 @@ function update(node, dt)
   if step == 2 then assembly.grip(lander, vec3(20, 5, 0)) end
   if step == 100 then
     log(string.format("SERVO a %.1f", j.position))
+    log(string.format("ANCHOR %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f", j.anchorX, j.anchorY, j.anchorZ,
+      j.otherAnchorX, j.otherAnchorY, j.otherAnchorZ, j.axisX, j.axisY, j.axisZ))
     j.goal = -10
   end
   if step == 200 then
@@ -411,6 +413,8 @@ end
     let deg = |l: &str| -> f32 { l.split(' ').nth(1).unwrap().parse().unwrap() };
     assert!((deg(&servo[0]) - 30.0).abs() < 1.5, "servo should sit at 30°: {servo:?}");
     assert!((deg(&servo[1]) + 10.0).abs() < 1.5, "and drive to the new goal, -10°: {servo:?}");
+    let anchor = lines(&mut ed, "ANCHOR");
+    assert_eq!(anchor, ["-1.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 1.0"], "the hinge's anchors and axis, as set");
     let grip = lines(&mut ed, "GRIP");
     assert_eq!(grip.len(), 2, "{grip:?}");
     let y = |l: &str| -> f32 { l.split(' ').nth(2).unwrap().parse().unwrap() };

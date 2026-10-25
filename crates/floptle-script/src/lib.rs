@@ -2683,7 +2683,8 @@ pub struct BodyState {
     /// `node.asleep`.
     pub asleep: bool,
     /// Why it is awake (`node.wake`): what last woke it or restarted its
-    /// count toward sleep, or `settling` while it counts.
+    /// count toward sleep, kept while it counts, or `settling` while it
+    /// counts after stopping on its own.
     pub wake: &'static str,
     /// How fast a turning body spins about Z, degrees a second
     /// (`node.spin`); anticlockwise positive.

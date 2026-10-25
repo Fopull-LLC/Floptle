@@ -87,6 +87,18 @@ impl WakeReason {
         }
     }
 
+    /// What it is awake for while it counts toward sleep: `Settling` when
+    /// its own motion was what stopped its count, or the cause that set it
+    /// counting again (a joint, a contact, a script), kept until it sleeps.
+    /// Overwritten with `Settling`, a craft woken again and again by the
+    /// same thing read `settling` every frame and never named it.
+    pub fn counting(self) -> Self {
+        match self {
+            Self::Moving | Self::Unsupported => Self::Settling,
+            other => other,
+        }
+    }
+
     /// The name scripts read: `settling`, `moving`, `unsupported`,
     /// `contact`, `ground`, `joint`, `force`, `impulse`, `script` or
     /// `reshaped`.
