@@ -1332,11 +1332,18 @@ impl eframe::App for HubApp {
             self.toast = None;
             self.toast_seen = None;
         }
-        // Repaint at full rate only for the short, active jobs; the minutes-long device flow
-        // and the toast countdown just need a gentle tick so they don't spin the CPU/GPU.
-        if self.job.is_some() || self.proc.is_some() || matches!(self.manifest, ManifestState::Loading(_)) {
-            ctx.request_repaint();
-        } else if self.auth_job.is_some() || self.toast.is_some() {
+        // Work in the background is polled on a tick, never at full rate: an
+        // unthrottled repaint spins a core, and a Hub that had launched an
+        // editor, or was still waiting on the version list, sat at 80-100% of
+        // one for hours with nothing on screen moving. A download's progress
+        // bar reads smoothly at 20 a second; the rest needs far less.
+        if self.job.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        } else if self.proc.is_some()
+            || matches!(self.manifest, ManifestState::Loading(_))
+            || self.auth_job.is_some()
+            || self.toast.is_some()
+        {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
         // A moving theme keeps the window ticking at its backdrop rate, and only
