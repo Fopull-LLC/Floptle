@@ -57,44 +57,104 @@ impl Kind {
     }
 }
 
-/// Expressions this engine answers with a vector, used to decide that a local
-/// holds one.
-///
-/// Deliberately a list of engine spellings rather than a guess at any
-/// expression: the cost of a false positive here is somebody editing working
-/// code, which is worse than the cost of a miss (the miss still raises loudly
-/// in `fast`, because mutation is an error there rather than a silent nil).
-const VEC_SOURCES: &[&str] = &[
-    "vec3(",
-    ":normalized(",
-    ":cross(",
-    ":lerp(",
-    ":flatten(",
-    ":withX(",
-    ":withY(",
-    ":withZ(",
-    ":rotatedY(",
-    ":rotatedAround(",
-    ":towards(",
-    ".pos",
-    ".position",
-    ".velocity",
-    ".forward",
-    ".up",
-    ".right",
-    ".scale",
-];
-
-/// Strip a Lua line comment, so a commented-out `v.x = 1` is not a finding.
-///
-/// Long strings and `--[[ ]]` blocks are not handled, and that is a deliberate
-/// limit rather than an oversight: the scan reports possibilities for a human
-/// to read, and the summary says as much.
-fn strip_comment(line: &str) -> &str {
-    match line.find("--") {
-        Some(i) => &line[..i],
-        None => line,
+/// The source with every string's contents and every comment blanked out,
+/// line for line, so a keyword, a `--` or an `=` inside a string is not code
+/// and a commented-out `v.x = 1` is not a finding. Long strings and
+/// `--[[ ]]` blocks are followed across lines: an `end` inside one would
+/// otherwise close a scope that is still open.
+fn code_lines(src: &str) -> Vec<String> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum In {
+        Code,
+        Short(char),
+        Long(usize),
+        LineComment,
+        LongComment(usize),
     }
+    // `[[`, `[=[`, …: the level, and how many characters the opener takes.
+    fn long_open(c: &[char]) -> Option<(usize, usize)> {
+        if c.first() != Some(&'[') {
+            return None;
+        }
+        let eqs = c[1..].iter().take_while(|&&x| x == '=').count();
+        (c.get(1 + eqs) == Some(&'[')).then_some((eqs, eqs + 2))
+    }
+    fn long_close(c: &[char], level: usize) -> bool {
+        c.first() == Some(&']')
+            && c.len() > level + 1
+            && c[1..=level].iter().all(|&x| x == '=')
+            && c[level + 1] == ']'
+    }
+    let chars: Vec<char> = src.chars().collect();
+    let mut out = String::with_capacity(src.len());
+    let mut state = In::Code;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\n' {
+            out.push('\n');
+            if state == In::LineComment {
+                state = In::Code;
+            }
+            i += 1;
+            continue;
+        }
+        match state {
+            In::Code => {
+                if c == '-' && chars.get(i + 1) == Some(&'-') {
+                    if let Some((level, len)) = long_open(&chars[i + 2..]) {
+                        state = In::LongComment(level);
+                        out.extend(std::iter::repeat_n(' ', 2 + len));
+                        i += 2 + len;
+                    } else {
+                        state = In::LineComment;
+                        out.push_str("  ");
+                        i += 2;
+                    }
+                    continue;
+                }
+                if let Some((level, len)) = long_open(&chars[i..]) {
+                    state = In::Long(level);
+                    out.push('"');
+                    out.extend(std::iter::repeat_n(' ', len - 1));
+                    i += len;
+                    continue;
+                }
+                if c == '"' || c == '\'' {
+                    state = In::Short(c);
+                }
+                out.push(c);
+            }
+            In::Short(q) => {
+                if c == '\\' {
+                    out.push(' ');
+                    if chars.get(i + 1).is_some_and(|&n| n != '\n') {
+                        out.push(' ');
+                        i += 1;
+                    }
+                } else if c == q {
+                    state = In::Code;
+                    out.push(c);
+                } else {
+                    out.push(' ');
+                }
+            }
+            In::Long(level) | In::LongComment(level) => {
+                if long_close(&chars[i..], level) {
+                    let closer = if matches!(state, In::Long(_)) { '"' } else { ' ' };
+                    out.extend(std::iter::repeat_n(' ', level + 1));
+                    out.push(closer);
+                    i += level + 2;
+                    state = In::Code;
+                    continue;
+                }
+                out.push(' ');
+            }
+            In::LineComment => out.push(' '),
+        }
+        i += 1;
+    }
+    out.split('\n').map(str::to_string).collect()
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -145,13 +205,14 @@ fn assignment_eqs(line: &str) -> Vec<usize> {
     out
 }
 
-/// The bare names an assignment's left-hand side binds: the part of `lhs`
-/// after the statement it shares the line with (`;`, or a `then`/`do`/`else`
-/// as a whole word), less a leading `local`, split on commas. Anything that is
-/// not a plain identifier — `t.pos`, `a[1]` — binds no local and is dropped.
-fn names_on_the_left(lhs: &str) -> Vec<String> {
+/// The bare names an assignment's left-hand side binds, and whether it
+/// declares them `local`: the part of `lhs` after the statement it shares
+/// the line with (`;`, or a `then`/`do`/`else`/`repeat` as a whole word),
+/// split on commas. Anything that is not a plain identifier — `t.pos`,
+/// `a[1]` — binds no local and is dropped.
+fn names_on_the_left(lhs: &str) -> (bool, Vec<String>) {
     let mut stmt = lhs.rsplit(';').next().unwrap_or(lhs);
-    for kw in ["then", "do", "else"] {
+    for kw in ["then", "do", "else", "repeat"] {
         let mut cut = None;
         for (i, _) in stmt.match_indices(kw) {
             let before = stmt[..i].chars().next_back().is_none_or(|c| !is_ident_char(c));
@@ -165,8 +226,12 @@ fn names_on_the_left(lhs: &str) -> Vec<String> {
         }
     }
     let stmt = stmt.trim();
-    let stmt = stmt.strip_prefix("local ").unwrap_or(stmt);
-    stmt.split(',')
+    let (local, stmt) = match stmt.strip_prefix("local ") {
+        Some(rest) => (true, rest),
+        None => (false, stmt),
+    };
+    let names = stmt
+        .split(',')
         .map(str::trim)
         .filter(|n| {
             !n.is_empty()
@@ -174,90 +239,338 @@ fn names_on_the_left(lhs: &str) -> Vec<String> {
                 && !n.starts_with(|c: char| c.is_ascii_digit())
         })
         .map(str::to_string)
-        .collect()
+        .collect();
+    (local, names)
 }
 
-/// Names this file binds to a vector.
-fn vector_locals(src: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    for raw in src.lines() {
-        let line = strip_comment(raw);
-        let eqs = assignment_eqs(line);
-        for (i, &eq) in eqs.iter().enumerate() {
-            // The right-hand side runs to the next assignment on the line, or
-            // to the next statement — `x = 1; v = vec3()` must not make `x` a
-            // vector.
-            let rhs_end = eqs.get(i + 1).copied().unwrap_or(line.len());
-            let rhs = &line[eq + 1..rhs_end];
-            let rhs = rhs.split(';').next().unwrap_or(rhs);
-            if !VEC_SOURCES.iter().any(|p| rhs.contains(p)) {
-                continue;
+/// Expressions this engine answers with a vector, used to decide that a
+/// name holds one.
+///
+/// Deliberately a list of engine spellings rather than a guess at any
+/// expression: the cost of a false positive here is somebody editing working
+/// code, which is worse than the cost of a miss (the miss still raises loudly
+/// in `fast`, because mutation is an error there rather than a silent nil).
+const VEC_SOURCES: &[&str] = &[
+    "vec3(",
+    ":normalized(",
+    ":cross(",
+    ":lerp(",
+    ":flatten(",
+    ":withX(",
+    ":withY(",
+    ":withZ(",
+    ":rotatedY(",
+    ":rotatedAround(",
+    ":towards(",
+    ".pos",
+    ".position",
+    ".velocity",
+    ".forward",
+    ".up",
+    ".right",
+    ".scale",
+];
+
+/// Is the value of `rhs` a vector? Only when a source is the expression
+/// itself, not a piece of it: `#scatter.near(id, vec3(x, y, z), r)` is a
+/// count that takes a vector, `(a.pos - b.pos):length()` and `node.pos.y`
+/// are numbers, and `{ at = node.pos }` is a table.
+fn rhs_is_vector(rhs: &str) -> bool {
+    let b = rhs.as_bytes();
+    // What follows a value: a field, an index or a method makes it something
+    // else (a vector-returning method is a source of its own).
+    let used = |at: usize| {
+        let rest = rhs[at..].trim_start();
+        rest.starts_with(['.', ':', '['])
+    };
+    VEC_SOURCES.iter().any(|src| {
+        rhs.match_indices(src).any(|(at, _)| {
+            let depth = rhs[..at].bytes().fold(0i32, |d, c| match c {
+                b'(' | b'[' | b'{' => d + 1,
+                b')' | b']' | b'}' => d - 1,
+                _ => d,
+            });
+            if depth != 0 {
+                return false;
             }
-            names.extend(names_on_the_left(&line[..eq]));
+            let end = at + src.len();
+            if src.ends_with('(') {
+                // `vec3(` must not be the end of a longer name.
+                if !src.starts_with([':', '.']) && at > 0 && (is_ident_char(b[at - 1] as char) || matches!(b[at - 1], b'.' | b':')) {
+                    return false;
+                }
+                let mut d = 1;
+                let mut j = end;
+                while j < b.len() && d > 0 {
+                    match b[j] {
+                        b'(' => d += 1,
+                        b')' => d -= 1,
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                d == 0 && !used(j)
+            } else {
+                // `.up` is not `.upgrade`.
+                !rhs[end..].starts_with(is_ident_char) && !used(end)
+            }
+        })
+    })
+}
+
+/// What the scan knows about names at one point in a file: a stack of
+/// scopes, innermost last, each naming whether a name holds a vector.
+///
+/// A name is only a vector from where it is bound until its scope ends, and
+/// a parameter or a later binding of the same name is not. A file-wide set
+/// of names flagged a `local s = w.scale` in one function and every `s.x =`
+/// and `type(s)` in every other function.
+struct Scopes(Vec<Vec<(String, bool)>>);
+
+impl Scopes {
+    fn new() -> Self {
+        Self(vec![Vec::new()])
+    }
+
+    fn open(&mut self) {
+        self.0.push(Vec::new());
+    }
+
+    fn close(&mut self) {
+        if self.0.len() > 1 {
+            self.0.pop();
         }
     }
-    names.sort();
-    names.dedup();
-    names
+
+    fn declare(&mut self, name: &str, vector: bool) {
+        if let Some(top) = self.0.last_mut() {
+            top.retain(|(n, _)| n != name);
+            top.push((name.to_string(), vector));
+        }
+    }
+
+    /// An assignment without `local`: the innermost scope that has the name,
+    /// or a global.
+    fn assign(&mut self, name: &str, vector: bool) {
+        for scope in self.0.iter_mut().rev() {
+            if let Some(slot) = scope.iter_mut().find(|(n, _)| n == name) {
+                slot.1 = vector;
+                return;
+            }
+        }
+        self.0[0].push((name.to_string(), vector));
+    }
+
+    fn is_vector(&self, name: &str) -> bool {
+        self.0.iter().rev().find_map(|s| s.iter().find(|(n, _)| n == name).map(|(_, v)| *v)).unwrap_or(false)
+    }
 }
+
+/// The identifiers in a comma list starting at `from`, up to the first
+/// thing that is neither: `a, b` of `local a, b = …`, `i, v` of `for i, v in`.
+fn ident_list(s: &str, from: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for part in s[from..].split(',') {
+        let name: String = part.trim_start().chars().take_while(|c| is_ident_char(*c)).collect();
+        if name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) {
+            break;
+        }
+        let rest = part.trim_start()[name.len()..].trim();
+        out.push(name);
+        if !rest.is_empty() {
+            break;
+        }
+    }
+    out
+}
+
+/// One thing that happens at a byte offset of a line, in the order the
+/// scan meets them.
+enum Event {
+    Word(&'static str),
+    Assign(usize),
+    Mutation(String),
+    TypeOf(String),
+}
+
+const WORDS: &[&str] = &["function", "do", "then", "repeat", "else", "elseif", "end", "until", "for", "local"];
 
 /// Scan one script.
 pub(crate) fn scan(file: &Path, src: &str) -> Vec<Finding> {
-    let names = vector_locals(src);
+    let raw_lines: Vec<&str> = src.lines().collect();
+    let mut scopes = Scopes::new();
+    // Names a `for` declares, waiting for its `do`.
+    let mut loop_vars: Vec<String> = Vec::new();
+    // Inside a table constructor, `name = value` is a field, not a binding;
+    // a constructor can run over several lines.
+    let mut braces = 0i32;
     let mut out = Vec::new();
-    for (i, raw) in src.lines().enumerate() {
-        let line = strip_comment(raw);
+    for (i, line) in code_lines(src).iter().enumerate() {
+        let line = line.as_str();
+        let raw = raw_lines.get(i).copied().unwrap_or("");
         let line_no = i as u32 + 1;
+        let mut events: Vec<(usize, Event)> = Vec::new();
 
-        // A component assignment on a name we believe is a vector.
+        // Keywords, as whole words and never as the name after a `.` or `:`.
+        let bytes = line.as_bytes();
+        let mut j = 0;
+        while j < bytes.len() {
+            if is_ident_char(bytes[j] as char) {
+                let start = j;
+                while j < bytes.len() && is_ident_char(bytes[j] as char) {
+                    j += 1;
+                }
+                let word = &line[start..j];
+                let field = start > 0 && matches!(bytes[start - 1], b'.' | b':');
+                if !field && let Some(w) = WORDS.iter().find(|w| **w == word) {
+                    events.push((start, Event::Word(w)));
+                }
+            } else {
+                j += 1;
+            }
+        }
+
+        // Assignments outside a table constructor.
+        let mut depth_at = Vec::with_capacity(bytes.len() + 1);
+        let mut d = braces;
+        for &c in bytes {
+            depth_at.push(d);
+            match c {
+                b'{' => d += 1,
+                b'}' => d -= 1,
+                _ => {}
+            }
+        }
+        braces = d.max(0);
+        for eq in assignment_eqs(line) {
+            if depth_at.get(eq).copied().unwrap_or(0) <= 0 {
+                events.push((eq, Event::Assign(eq)));
+            }
+        }
+
+        // A component assignment: `.x =`, not `.x ==` and not `.xs =`.
         for comp in [".x", ".y", ".z"] {
             let mut from = 0;
             while let Some(rel) = line[from..].find(comp) {
                 let at = from + rel;
                 from = at + comp.len();
-                // Must be an assignment, not a read: `= ` after, and not `==`.
                 let rest = line[from..].trim_start();
                 if !rest.starts_with('=') || rest.starts_with("==") {
                     continue;
                 }
-                // The character after the component must end the path — `v.xs`
-                // is not `v.x`.
                 if line[from..].starts_with(is_ident_char) {
                     continue;
                 }
-                let Some(name) = ident_ending_at(line, at) else { continue };
                 // `a.b.x = ` — the base is a path, so the owner is `b`; a node
                 // field stays mutable in both modes and must not be flagged.
-                if names.iter().any(|n| n == name) {
-                    out.push(Finding {
-                        file: file.to_path_buf(),
-                        line: line_no,
-                        kind: Kind::Mutation,
-                        text: raw.trim().to_string(),
-                    });
-                    break;
+                if let Some(name) = ident_ending_at(line, at) {
+                    events.push((at, Event::Mutation(name.to_string())));
                 }
             }
         }
 
-        // `type(v)` where v is one of ours.
+        // `type(v)`, not `typeof(` and not a longer identifier ending in `type`.
         let mut from = 0;
         while let Some(rel) = line[from..].find("type(") {
             let at = from + rel;
             from = at + "type(".len();
-            // Not `typeof(` and not a longer identifier ending in `type`.
-            if at > 0 && is_ident_char(line.as_bytes()[at - 1] as char) {
+            if at > 0 && (is_ident_char(bytes[at - 1] as char) || matches!(bytes[at - 1], b'.' | b':')) {
                 continue;
             }
-            let arg: String =
-                line[from..].chars().take_while(|c| is_ident_char(*c)).collect();
-            if !arg.is_empty() && names.contains(&arg) {
-                out.push(Finding {
-                    file: file.to_path_buf(),
-                    line: line_no,
-                    kind: Kind::TypeCheck,
-                    text: raw.trim().to_string(),
-                });
+            let arg: String = line[from..].chars().take_while(|c| is_ident_char(*c)).collect();
+            if !arg.is_empty() {
+                events.push((at, Event::TypeOf(arg)));
+            }
+        }
+
+        events.sort_by_key(|(at, _)| *at);
+        let eqs = assignment_eqs(line);
+        let mut flagged = (false, false);
+        for (at, ev) in events {
+            match ev {
+                Event::Word("function") => {
+                    scopes.open();
+                    // The parameters: plain names, never vectors as far as
+                    // this file can tell.
+                    if let Some(open) = line[at..].find('(').map(|o| at + o) {
+                        let close = line[open..].find(')').map_or(line.len(), |c| open + c);
+                        for p in line[open + 1..close].split(',') {
+                            let p = p.trim();
+                            if !p.is_empty() && p.chars().all(is_ident_char) {
+                                scopes.declare(p, false);
+                            }
+                        }
+                    }
+                }
+                Event::Word("for") => loop_vars = ident_list(line, at + "for".len()),
+                Event::Word("do") => {
+                    scopes.open();
+                    for v in std::mem::take(&mut loop_vars) {
+                        scopes.declare(&v, false);
+                    }
+                }
+                Event::Word("then" | "repeat") => scopes.open(),
+                Event::Word("else") => {
+                    scopes.close();
+                    scopes.open();
+                }
+                Event::Word("elseif" | "end" | "until") => scopes.close(),
+                Event::Word("local") => {
+                    // `local a, b` declares before any `=`, so an assignment
+                    // after it is to this local, not to a global.
+                    let names = ident_list(line, at + "local".len());
+                    if names.first().is_some_and(|n| n != "function") {
+                        for n in names {
+                            scopes.declare(&n, false);
+                        }
+                    }
+                }
+                Event::Word(_) => {}
+                Event::Assign(eq) => {
+                    // The right-hand side runs to the next assignment on the
+                    // line, or to the next statement — `x = 1; v = vec3()`
+                    // must not make `x` a vector.
+                    let next = eqs.iter().copied().find(|&e| e > eq).unwrap_or(line.len());
+                    let rhs = &line[eq + 1..next];
+                    let rhs = rhs.split(';').next().unwrap_or(rhs);
+                    // …and it stops at a keyword that ends the statement.
+                    let rhs = [" end", " then", " do", " else"]
+                        .iter()
+                        .filter_map(|k| rhs.find(k))
+                        .min()
+                        .map_or(rhs, |k| &rhs[..k]);
+                    let vector = rhs_is_vector(rhs);
+                    let (local, names) = names_on_the_left(&line[..eq]);
+                    for n in names {
+                        if local {
+                            scopes.declare(&n, vector);
+                        } else {
+                            scopes.assign(&n, vector);
+                        }
+                    }
+                }
+                Event::Mutation(name) => {
+                    if !flagged.0 && scopes.is_vector(&name) {
+                        flagged.0 = true;
+                        out.push(Finding {
+                            file: file.to_path_buf(),
+                            line: line_no,
+                            kind: Kind::Mutation,
+                            text: raw.trim().to_string(),
+                        });
+                    }
+                }
+                Event::TypeOf(name) => {
+                    if !flagged.1 && scopes.is_vector(&name) {
+                        flagged.1 = true;
+                        out.push(Finding {
+                            file: file.to_path_buf(),
+                            line: line_no,
+                            kind: Kind::TypeCheck,
+                            text: raw.trim().to_string(),
+                        });
+                    }
+                }
             }
         }
     }
@@ -489,6 +802,91 @@ mod tests {
              local k = typeof(v)\n",
         );
         assert!(hits.is_empty(), "{hits:?}");
+    }
+
+    /// **A name is a vector only where it is bound to one.** Every shape here
+    /// was a false positive on a real game's scripts: the scan kept one set of
+    /// names for the whole file, so a `local s = w.scale` in one function made
+    /// a string parameter `s` in another a vector, and a `local n = vec3(…)`
+    /// near the end of a file flagged an `n.x =` two thousand lines above it.
+    #[test]
+    fn a_vector_local_does_not_reach_other_functions_or_earlier_lines() {
+        let hits = scan_str(
+            "function scale_of(w)\n\
+             \x20 local s = w.scale or 1\n\
+             \x20 return s\n\
+             end\n\
+             function decode(s)\n\
+             \x20 if type(s) ~= \"string\" then return nil end\n\
+             end\n\
+             function fill(n, s)\n\
+             \x20 n.x, n.y, n.z = 1, 2, 3\n\
+             \x20 s.x, s.y, s.z = 4, 5, 6\n\
+             end\n\
+             function place()\n\
+             \x20 local o = vec3(0, 0, 0)\n\
+             \x20 return o\n\
+             end\n\
+             function offsets()\n\
+             \x20 local o = {}\n\
+             \x20 o.x = 1\n\
+             \x20 if true then w.x, w.y = 1, 2 end\n\
+             end\n\
+             function later()\n\
+             \x20 local n = vec3(1, 2, 3)\n\
+             \x20 local w = vec3(1, 2, 3)\n\
+             end\n",
+        );
+        assert!(hits.is_empty(), "{hits:?}");
+    }
+
+    /// **A vector given to a call is not what the call returns.** A count of
+    /// props near a point, a length, a component and a table holding a
+    /// vector are none of them vectors, and a field inside a table
+    /// constructor (on its own line or not) binds no name.
+    #[test]
+    fn a_value_that_only_contains_a_vector_is_not_one() {
+        let hits = scan_str(
+            "local n = #scatter.near(id, vec3(1, 2, 3), 5)\n\
+             local d = (a.pos - b.pos):length()\n\
+             local h = node.pos.y\n\
+             local t = { at = node.pos }\n\
+             local u = node.upgrade\n\
+             cfg = {\n\
+             \x20 dir = node.forward,\n\
+             }\n\
+             if type(n) == \"number\" and type(d) == \"number\" and type(h) == \"number\" then end\n\
+             t.x = 1\n\
+             u.x = 1\n\
+             dir.x = 1\n",
+        );
+        assert!(hits.is_empty(), "{hits:?}");
+    }
+
+    /// **The same scan still finds what it should**, scoped: a vector in a
+    /// function is a vector to the end of it, inside its loops and branches,
+    /// a parameter shadows an outer vector only inside its function, and a
+    /// string or a comment holding `end` closes nothing.
+    #[test]
+    fn scoped_vectors_are_still_found() {
+        let hits = scan_str(
+            "local p = node.pos\n\
+             function f(p)\n\
+             \x20 p.x = 1\n\
+             end\n\
+             p.y = 2\n\
+             function g()\n\
+             \x20 local v = vec3(1, 2, 3):normalized()\n\
+             \x20 print(\"the end\") --[[ end\n\
+             \x20 end ]]\n\
+             \x20 for i = 1, 3 do\n\
+             \x20   if i == 2 then v.z = i end\n\
+             \x20 end\n\
+             \x20 if type(v) == \"table\" then end\n\
+             end\n",
+        );
+        let lines: Vec<(u32, Kind)> = hits.iter().map(|h| (h.line, h.kind)).collect();
+        assert_eq!(lines, vec![(5, Kind::Mutation), (11, Kind::Mutation), (13, Kind::TypeCheck)], "{hits:?}");
     }
 
     /// **The exit code is the answer.** The rule this command line follows is

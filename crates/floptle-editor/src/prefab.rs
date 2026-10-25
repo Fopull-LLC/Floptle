@@ -711,11 +711,15 @@ impl Editor {
                     }
                 }
                 floptle_script::AssemblyCmd::Rebuild { root, cb } => {
-                    let built = self.sim.as_mut().is_some_and(|sim| {
-                        // The fresh compound inherits the old one's anchor (a
-                        // rebuild must not release launch clamps) and its
-                        // motion (a moving vessel must not stop dead).
-                        sim.rebuild_compound(root, &self.world)
+                    // Named, so a frame that rebuilt a big craft says so
+                    // rather than reading as untimed.
+                    let built = self.timed_wait("assemblyRebuild", |ed| {
+                        ed.sim.as_mut().is_some_and(|sim| {
+                            // The fresh compound inherits the old one's anchor (a
+                            // rebuild must not release launch clamps) and its
+                            // motion (a moving vessel must not stop dead).
+                            sim.rebuild_compound(root, &ed.world)
+                        })
                     });
                     match cb {
                         Some(cb) if built => {
@@ -754,7 +758,10 @@ impl Editor {
                     }
                 }
                 floptle_script::AssemblyCmd::Split { root, parts, cb, prefab } => {
-                    let new_root = self.perform_assembly_split(root, &parts, prefab.as_deref());
+                    // Named, as the rebuild is: splitting a 1,000-part craft
+                    // is engine work, and it was read as the callback's.
+                    let new_root =
+                        self.timed_wait("assemblySplit", |ed| ed.perform_assembly_split(root, &parts, prefab.as_deref()));
                     match (new_root, cb) {
                         (Some(nr), Some(cb)) => {
                             // Re-feed the mirror first: the callback's whole job

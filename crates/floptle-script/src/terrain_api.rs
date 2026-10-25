@@ -301,6 +301,9 @@ pub(crate) struct TerrainStreamShared {
     /// being generated, or one streaming in. Published so a game that creates
     /// worlds on demand can wait its turn.
     pub busy: Rc<std::cell::Cell<bool>>,
+    /// Whether a terrain body or a checkpoint could still use the save slot —
+    /// see [`crate::ScriptHost::set_terrain_save_dir_in_use`].
+    pub save_dir_in_use: Rc<std::cell::Cell<bool>>,
     /// The ground not made yet, as the engine last published it.
     pub unmade: Rc<RefCell<Vec<UnmadeRegion>>>,
     /// `terrain.prepare` asks since the engine last took them.
@@ -395,7 +398,7 @@ pub(crate) fn install_terrain_api(
     stream: TerrainStreamShared,
     receipts: TerrainReceipts,
 ) {
-    let TerrainStreamShared { save_dir, lod_anchor, edit_budget, warm, flush, busy, unmade, prepare, paths } = stream;
+    let TerrainStreamShared { save_dir, lod_anchor, edit_budget, warm, flush, busy, save_dir_in_use, unmade, prepare, paths } = stream;
     let TerrainReceipts { yields, next_op_id, planet, queued, generator, impostors, dropped } = receipts;
     lua.set_app_data(TerrainDrops(dropped.clone()));
     let Ok(t) = lua.create_table() else { return };
@@ -403,12 +406,18 @@ pub(crate) fn install_terrain_api(
     // terrain.deleteSaveDir(path) — delete a save slot's persisted terrain from
     // disk ("delete this save" UIs, paired with save.deleteSlot). Deliberately
     // narrow, not a generic rm -rf: the path must be relative with no "..",
-    // must not be the active saveDir (clear it first), and only terrain files
-    // (.cfield/.tfield/.meta) inside that one directory are removed — the
-    // directory itself (and an emptied parent) goes only once it's empty.
-    // Returns the number of files removed.
+    // and only terrain files (.cfield/.tfield/.meta) inside that one directory
+    // are removed — the directory itself (and an emptied parent) goes only
+    // once it's empty. Returns the number of files removed.
+    //
+    // The ACTIVE saveDir is refused only while something can still use it: a
+    // terrain body in the world (streaming reads it and writes edits back)
+    // or a checkpoint still writing. A game that left its world for a menu
+    // has neither, so "exit to menu, then delete this save" deletes it, and
+    // the slot is released (saveDir reads nil) because it no longer exists.
     {
         let sd = save_dir.clone();
+        let in_use = save_dir_in_use.clone();
         let paths = paths.clone();
         if let Ok(f) = lua.create_function(move |_, path: String| {
             if !valid_save_dir(&path) {
@@ -416,11 +425,17 @@ pub(crate) fn install_terrain_api(
                     "terrain.deleteSaveDir(\"{path}\"): needs a relative project path with no \"..\""
                 )));
             }
-            if sd.borrow().as_deref() == Some(path.as_str()) {
+            let active = sd.borrow().as_deref() == Some(path.as_str());
+            if active && in_use.get() {
                 return Err(mlua::Error::RuntimeError(format!(
-                    "terrain.deleteSaveDir(\"{path}\"): that is the ACTIVE saveDir — \
-                     clear it (terrain.saveDir(\"\")) before deleting the slot"
+                    "terrain.deleteSaveDir(\"{path}\"): that is the ACTIVE saveDir, and terrain in \
+                     this scene still streams from it and saves edits into it. Release it first \
+                     with terrain.saveDir(\"\"), or delete it from a scene with no terrain (after \
+                     scene.load into a menu), where it is released for you"
                 )));
+            }
+            if active {
+                *sd.borrow_mut() = None;
             }
             let dir = save_dir_path(&paths, &path);
             let Ok(entries) = floptle_vfs::read_dir(&dir) else { return Ok(0) };

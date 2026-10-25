@@ -331,6 +331,55 @@ fn node_asleep_reads_the_body_and_a_write_queues_for_the_sim() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `node.asleep` on a part of an assembly reads its craft's: the part has
+/// no body of its own, the root above it does. A node under the root that
+/// is not a part (a light, a mesh with no rigidbody) still reads false.
+#[test]
+fn node_asleep_on_a_part_reads_its_assembly() {
+    let dir = std::env::temp_dir().join(format!("floptle_part_sleep_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(&dir, "part_nap", "function update(node, dt)\n  node.x = node.asleep and 1 or 0\nend\n");
+    let script = || {
+        Scripts(vec![floptle_core::ScriptInst {
+            kind: "part_nap".into(),
+            enabled: true,
+            params: Vec::new(),
+            refs: Vec::new(),
+            strs: Vec::new(),
+            pinned_bools: None,
+        }])
+    };
+    for asleep in [true, false] {
+        let mut world = World::default();
+        let root = world.spawn();
+        world.insert(root, Transform::IDENTITY);
+        world.insert(root, floptle_core::RigidBody { assembly: true, ..Default::default() });
+        // A part two levels down, under a group node, and a plain child.
+        let group = world.spawn();
+        world.insert(group, Transform::IDENTITY);
+        world.insert(group, floptle_core::Parent(root));
+        let part = world.spawn();
+        world.insert(part, Transform::from_translation(glam::DVec3::new(0.0, 5.0, 0.0)));
+        world.insert(part, floptle_core::Parent(group));
+        world.insert(part, floptle_core::RigidBody { kind: floptle_core::BodyKind::Box, ..Default::default() });
+        world.insert(part, script());
+        let plain = world.spawn();
+        world.insert(plain, Transform::from_translation(glam::DVec3::new(0.0, 5.0, 0.0)));
+        world.insert(plain, floptle_core::Parent(root));
+        world.insert(plain, script());
+        let mut host = ScriptHost::new();
+        let mut bodies = HashMap::new();
+        bodies.insert(root.index(), BodyState { grounded: true, asleep, ..Default::default() });
+        host.set_bodies(bodies);
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let x = |e| world.get::<Transform>(e).unwrap().translation.x;
+        assert_eq!(x(part), if asleep { 1.0 } else { 0.0 }, "a part reads its craft asleep = {asleep}");
+        assert_eq!(x(plain), 0.0, "a node with no rigidbody is not a part");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Three lines of Lua, and the node walks across the level.
 ///
 /// This is the shape the whole agent layer exists to make possible, so it is

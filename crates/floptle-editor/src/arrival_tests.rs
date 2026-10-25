@@ -570,3 +570,107 @@ fn a_scene_swap_names_its_steps() {
     let steps: f32 = r.parts.iter().filter(|(p, _)| STEPS.contains(p)).map(|(_, ms)| ms).sum();
     assert!(steps <= took * 1.01 + 0.05, "the steps ({steps:.2} ms) add up to more than the swap ({took:.2} ms)");
 }
+
+/// **A save left for the menu can be deleted from the menu.** A game plays a
+/// world with its terrain saved under one slot, goes back to a main menu
+/// with no terrain, and deletes that save. `terrain.saveDir` still names the
+/// slot (a game may set it in the menu before loading its world, so a scene
+/// change cannot clear it), but nothing reads or writes it any more, so the
+/// delete goes through, the folder goes with it, and the slot is released.
+/// In the world itself the same call is refused, and says how to release it.
+#[test]
+fn a_save_left_for_a_menu_can_be_deleted_from_the_menu() {
+    let dir = std::env::temp_dir().join(format!("floptle_arrival_savedel_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    floptle_vfs::create_dir_all(dir.join("scenes")).unwrap();
+    floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+    floptle_vfs::write(
+        dir.join("scripts/game.lua"),
+        "function start(node)\n\
+         \x20 terrain.saveDir('saves/slot1/terrain')\n\
+         \x20 local ok, why = pcall(terrain.deleteSaveDir, 'saves/slot1/terrain')\n\
+         \x20 print('world ok=' .. tostring(ok) .. ' why=' .. tostring(why))\n\
+         end\n",
+    )
+    .unwrap();
+    floptle_vfs::write(
+        dir.join("scripts/menu.lua"),
+        "function start(node)\n\
+         \x20 local ok, n = pcall(terrain.deleteSaveDir, 'saves/slot1/terrain')\n\
+         \x20 print('menu ok=' .. tostring(ok) .. ' n=' .. tostring(n) .. ' dir=' .. tostring(terrain.saveDir()))\n\
+         end\n",
+    )
+    .unwrap();
+    let scripted = |w: &mut floptle_core::World, kind: &str| {
+        let e = w.spawn();
+        w.insert(e, Transform::IDENTITY);
+        w.insert(e, Name(kind.into()));
+        w.insert(e, Matter::Empty);
+        w.insert(
+            e,
+            Scripts(vec![ScriptInst {
+                kind: kind.into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+                pinned_bools: None,
+            }]),
+        );
+    };
+    let mut menu = floptle_core::World::default();
+    scripted(&mut menu, "menu");
+    floptle_scene::save(&floptle_scene::to_doc("menu", &menu), &dir.join("scenes/menu.ron")).unwrap();
+    let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+    let ground = ed.world.spawn();
+    ed.world.insert(ground, Transform::IDENTITY);
+    ed.world.insert(ground, Name("Ground".into()));
+    ed.world.insert(ground, Matter::Terrain { id: 7, collision: Default::default() });
+    scripted(&mut ed.world, "game");
+    ed.toggle_play();
+    ed.play_step(1.0 / 60.0, true);
+    let slot = ed.script_host.terrain_save_path().expect("the world's script set no save slot");
+    // What a played slot holds: a field the player dug.
+    floptle_vfs::create_dir_all(&slot).unwrap();
+    floptle_vfs::write(slot.join("world.7.cfield"), b"dug").unwrap();
+    let said: Vec<String> = ed.script_host.drain_logs().into_iter().map(|l| l.msg).collect();
+    let world = said.iter().find(|m| m.starts_with("world ok=")).cloned().unwrap_or_default();
+    assert!(world.starts_with("world ok=false"), "the slot was deleted under the terrain using it: {said:?}");
+    assert!(world.contains("terrain.saveDir(\"\")"), "the refusal does not say how to release it: {world}");
+
+    let req = floptle_script::SceneRequest::Load { name: "menu".into(), fade: None };
+    ed.perform_scene_request(&req);
+    assert_eq!(ed.scene_name, "menu", "the menu did not load");
+    ed.play_step(1.0 / 60.0, true);
+    let said: Vec<String> = ed.script_host.drain_logs().into_iter().map(|l| l.msg).collect();
+    let gone = !slot.exists();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        said.iter().any(|m| m == "menu ok=true n=1 dir=nil"),
+        "the menu could not delete the save it left: {said:?}"
+    );
+    assert!(gone, "the slot's folder is still there");
+}
+
+/// **A frame the GPU ran out of memory in names its untimed time.** The
+/// failing allocation is slow and timed by nobody, and the error arrives
+/// after it. The frame that sees the out-of-memory count move names what no
+/// wait named as `gpuOutOfMemory`; the frame after, with the count still,
+/// does not.
+#[test]
+fn a_frame_the_gpu_ran_out_of_memory_in_names_its_untimed_time() {
+    let mut ed = crate::Editor::default();
+    let profile = ed.script_host.profile().clone();
+    profile.borrow_mut().enable(true);
+    ed.end_profile_frame();
+    let seen = floptle_render::out_of_memory_events();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    ed.name_gpu_out_of_memory(seen + 1);
+    profile.borrow_mut().end_frame();
+    let named = |p: &floptle_core::profile::FrameProfile| p.recent_frames(1).next().unwrap().part("gpuOutOfMemory");
+    let first = named(&profile.borrow());
+    assert!(first >= 10.0, "a 20 ms frame with an out-of-memory error named {first:.2} ms of it");
+    ed.name_gpu_out_of_memory(seen + 1);
+    profile.borrow_mut().end_frame();
+    assert_eq!(named(&profile.borrow()), 0.0, "a frame with no new error was named too");
+}

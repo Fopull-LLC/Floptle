@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use floptle_core::math::{DVec3, Mat4, Quat};
+use floptle_core::math::{DVec3, Mat4, Quat, Vec3};
 use floptle_core::transform::Transform;
 use floptle_script::decal_api::{Decal, DecalFrame, DecalStore};
 use floptle_render::{MaterialParams, MeshData, MeshId, TexId, Vertex};
@@ -54,12 +54,88 @@ pub(crate) struct DecalBatches {
     /// Marks laid again since Play started, for the guard that a dig lays
     /// only the marks it reached.
     relaid: u64,
+    /// Marks asked whether their ground moved since Play started, for the
+    /// guard that a dig asks only the marks over its own box.
+    checked: u64,
     /// The page each mark was last packed into, so a mark that moves to
     /// another frame (or goes) rebuilds the page it left.
     keyed: std::collections::HashMap<u32, BatchKey>,
     /// Marks packed into batches since Play started, for the guard that a
     /// change repacks its page and not the whole picture.
     repacked: u64,
+    /// Counts `sync_decals` calls: when each mark was last laid, and when each
+    /// terrain chunk was last put away, are told apart by it.
+    tick: u64,
+    /// The tick each mark was last laid (or laid again) at.
+    laid_at: std::collections::HashMap<u32, u64>,
+    /// The tick after which a mark laid over each put-away chunk lay on its
+    /// coarse stand-in, by (terrain node, chunk). A chunk with no entry has
+    /// been a stand-in since before anything was laid.
+    evicted_at: std::collections::HashMap<(floptle_core::Entity, [i32; 3]), u64>,
+    /// Terrain chunks made again since the last frame: (terrain node, chunks).
+    landed: Vec<(floptle_core::Entity, Vec<[i32; 3]>)>,
+    /// Terrain writes since the last frame: (terrain node, the box written,
+    /// in the terrain's own frame).
+    dug: Vec<(floptle_core::Entity, Vec3, Vec3)>,
+    /// Level edits (`level_edits` numbers) the terrain reported here itself,
+    /// as `landed` or `dug`, so the edit log's copy of them is passed over.
+    pub(crate) handled: std::collections::BTreeSet<u64>,
+    /// Waiting marks known to have been laid on other ground than is there
+    /// now: laid again without first asking whether their ground moved.
+    forced: HashSet<u32>,
+    /// The mark being laid again, a piece a frame within the budget; the old
+    /// mark stays drawn until it is done.
+    relaying: Option<Relay>,
+    /// This frame's marks asked whether their ground moved, and marks laid
+    /// again: `perf.counts().decalsChecked` / `decalsRelaid`.
+    checked_frame: u32,
+    relaid_frame: u32,
+}
+
+/// One mark being laid again: its job, and where it was and what it rode
+/// when the job started, which is the frame the job lays it in.
+struct Relay {
+    id: u32,
+    job: floptle_script::decal_api::LayJob,
+    pos: DVec3,
+    frame: DecalFrame,
+    spec: floptle_script::decal_api::DecalSpec,
+    /// How far the mark had turned since it was first laid, when the job started.
+    turn: Quat,
+}
+
+/// Each terrain's world anchor, turn, scale and voxel size.
+struct TerrainFrames(std::collections::HashMap<floptle_core::Entity, (DVec3, Quat, f32, f32)>);
+
+impl TerrainFrames {
+    /// A mark at `pos` (world) reaching `reach` metres, in terrain `e`'s own
+    /// frame: its centre and reach there.
+    fn local(&self, e: floptle_core::Entity, pos: DVec3, reach: f64) -> Option<(Vec3, f32)> {
+        let &(anchor, rot, scale, _) = self.0.get(&e)?;
+        Some(((rot.inverse() * (pos - anchor).as_vec3()) / scale, reach as f32 / scale))
+    }
+
+    /// Does the ball `local`, `r` across (terrain frame), reach the box `lo..hi`?
+    fn ball_meets(local: Vec3, r: f32, lo: Vec3, hi: Vec3) -> bool {
+        (lo - local).max(local - hi).max(Vec3::ZERO).length() <= r
+    }
+
+    /// Terrain `e`'s chunk `c`, in its own frame, grown by two voxels: a
+    /// neighbour's surface along its border is read from it.
+    fn chunk_box(&self, e: floptle_core::Entity, c: [i32; 3]) -> Option<(Vec3, Vec3)> {
+        let v = self.0.get(&e)?.3;
+        let side = floptle_field::CHUNK as f32 * v;
+        let lo = Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32) * side;
+        Some((lo - Vec3::splat(2.0 * v), lo + Vec3::splat(side + 2.0 * v)))
+    }
+
+    /// Does a mark at `pos` reaching `reach` lie over terrain `e`'s chunk `c`?
+    fn meets_chunk(&self, e: floptle_core::Entity, c: [i32; 3], pos: DVec3, reach: f64) -> bool {
+        match (self.local(e, pos, reach), self.chunk_box(e, c)) {
+            (Some((p, r)), Some((lo, hi))) => Self::ball_meets(p, r, lo, hi),
+            _ => false,
+        }
+    }
 }
 
 /// How long a frame may spend checking and laying marks again after digs.
@@ -90,6 +166,11 @@ fn ground_holds(
             None => false,
         }
     })
+}
+
+/// How far from its centre a mark's box reaches, folded faces included.
+fn mark_reach(d: &Decal) -> f64 {
+    (Vec3::new(d.spec.width, d.spec.height, d.spec.depth).length() * 0.5 + d.spec.depth) as f64
 }
 
 /// The frame a placed decal rides, and the frame's pose when it was laid.
@@ -173,8 +254,11 @@ impl crate::Editor {
     /// Once a frame, after the scripts; nothing to do without a GPU. Timed as
     /// the `decalBatches` part of the terrain bucket.
     pub(crate) fn sync_decals(&mut self) {
+        self.decal_batches.tick += 1;
         self.lay_waiting_decals();
         self.relay_decals_on_edits();
+        let (checked, relaid) = (self.decal_batches.checked_frame, self.decal_batches.relaid_frame);
+        self.script_host.profile().borrow_mut().set_decal_relay_counts(checked, relaid);
         let t0 = floptle_core::time::Instant::now();
         let store = self.script_host.decals().clone();
         let mut store = store.borrow_mut();
@@ -191,6 +275,19 @@ impl crate::Editor {
             self.decal_batches.batches.clear();
             self.decal_batches.keyed.clear();
             dirty = store.ids();
+        }
+        // When each mark changed was laid: a chunk made again lays again only
+        // the marks laid while it was a stand-in.
+        for &id in &dirty {
+            match store.get(id) {
+                Some(d) if !d.waiting => {
+                    self.decal_batches.laid_at.insert(id, self.decal_batches.tick);
+                }
+                Some(_) => {}
+                None => {
+                    self.decal_batches.laid_at.remove(&id);
+                }
+            }
         }
         if dirty.is_empty() || self.gpu.is_none() || self.raster.is_none() {
             return;
@@ -252,77 +349,259 @@ impl crate::Editor {
         }
     }
 
-    /// Lay again every mark whose ground was dug or re-meshed, on the surface
-    /// there now; a mark with nothing left under it goes.
+    /// Tell the marks that terrain `e`'s chunks `coords` were put away: each
+    /// becomes a coarse stand-in, and a mark laid over one from now on lies on
+    /// that. Nothing is laid again: the ground a mark already lies on comes
+    /// back exactly as it was. Call after the sim's copy is told, as
+    /// [`Self::decals_note_terrain_edit`] for the edit the sim recorded.
+    pub(crate) fn decals_note_evicted(&mut self, e: floptle_core::Entity, coords: &[[i32; 3]]) {
+        let after = self.decal_batches.tick + 1;
+        for &c in coords {
+            self.decal_batches.evicted_at.insert((e, c), after);
+        }
+        self.decals_note_terrain_edit();
+    }
+
+    /// Tell the marks that terrain `e`'s chunks `coords` were made again,
+    /// exactly as generated. Only a mark laid while one of them was a
+    /// stand-in is laid again.
+    pub(crate) fn decals_note_landed(&mut self, e: floptle_core::Entity, coords: Vec<[i32; 3]>) {
+        if !coords.is_empty() {
+            self.decal_batches.landed.push((e, coords));
+        }
+        self.decals_note_terrain_edit();
+    }
+
+    /// Tell the marks that terrain `e` was written over `lo..hi`, in its own
+    /// frame: the marks over that box are asked whether their ground moved,
+    /// once the collision meshes there have landed.
+    pub(crate) fn decals_note_dug(&mut self, e: floptle_core::Entity, lo: Vec3, hi: Vec3) {
+        self.decal_batches.dug.push((e, lo, hi));
+        self.decals_note_terrain_edit();
+    }
+
+    /// The level edit the sim recorded last was a terrain change these marks
+    /// are told of directly, by chunk or box: their reading of the edit log
+    /// passes over it.
+    pub(crate) fn decals_note_terrain_edit(&mut self) {
+        if let Some(sim) = self.sim.as_ref() {
+            self.decal_batches.handled.insert(sim.world.level_edits);
+        }
+    }
+
+    /// Where each terrain stands now, for asking which marks lie over its
+    /// chunks: read once a frame, not once a mark.
+    fn terrain_frames(&self) -> TerrainFrames {
+        TerrainFrames(
+            self.terrains
+                .iter()
+                .map(|(&e, t)| {
+                    let (anchor, rot, scale) = self.terrain_world_frame_of(e);
+                    (e, (anchor, rot, scale, t.field.voxel()))
+                })
+                .collect(),
+        )
+    }
+
+    /// Is a collision mesh under this mark still being rebuilt? Its ground
+    /// is asked about once the new triangles stand.
+    fn mark_awaits_collision(&self, frames: &TerrainFrames, pos: DVec3, reach: f64) -> bool {
+        self.collision_pending.keys().any(|&(e, c)| frames.meets_chunk(e, c, pos, reach))
+    }
+
+    /// Is ground under this mark being made again on a worker? A 29 m mark
+    /// lies over several chunks, which arrive a few at a time: laid again
+    /// once they are all in, it is laid again once, not once a chunk.
+    fn mark_awaits_ground(&self, frames: &TerrainFrames, pos: DVec3, reach: f64) -> bool {
+        self.chunks_being_made().any(|(e, c)| frames.meets_chunk(e, c, pos, reach))
+    }
+
+    /// Queue mark `id` to be laid again; `forced` when its ground is known
+    /// to have changed, so it is laid again without asking.
+    fn queue_relay(&mut self, id: u32, forced: bool) {
+        if forced {
+            self.decal_batches.forced.insert(id);
+        }
+        if self.decal_batches.relaying.as_ref().is_some_and(|r| r.id == id) {
+            // Laid partly on the ground before: start again.
+            self.decal_batches.relaying = None;
+            self.decal_batches.forced.insert(id);
+        }
+        if self.decal_batches.pending_set.insert(id) {
+            self.decal_batches.pending.push_back(id);
+        }
+    }
+
+    /// Lay again every mark whose ground was dug, re-meshed or made exactly,
+    /// on the surface there now; a mark with nothing left under it goes.
     ///
-    /// The level's edit log names whole collision chunks, tens of metres
-    /// across, so it only says which marks *might* have moved. Each of those
-    /// is asked first whether the ground under its own corners still lies
-    /// where the mark does, a few rays, and only one whose ground moved is laid
-    /// again. The asking and laying take at most [`RELAY_BUDGET_MS`] a frame;
-    /// what is left waits for the next frame. Laying every mark in a chunk on
-    /// every bite of a mining laser cost up to a second a frame.
+    /// The terrain says what it changed: a dig names the box it wrote, and a
+    /// chunk made again names itself. A mark over a dig is asked first whether
+    /// the ground under its own corners still lies where the mark does, a few
+    /// rays, once the dig's collision meshes have landed, and only one whose
+    /// ground moved is laid again. A mark over a chunk made again is laid
+    /// again only when it was laid while that chunk was a coarse stand-in. A
+    /// chunk put away lays nothing again. Other level edits come from the
+    /// level's edit log, whose regions name whole colliders or chunks.
+    ///
+    /// The laying goes a piece of the mark at a time (a `LayJob`, like a
+    /// first lay), carried over frames, the old mark drawn until the new one
+    /// is whole. The asking and laying take at most [`RELAY_BUDGET_MS`] a
+    /// frame, checked before every piece; what is left waits for the next
+    /// frame. A streamed chunk landing re-laid every mark in the world, one
+    /// whole mark a frame, 12 to 34 ms each.
     fn relay_decals_on_edits(&mut self) {
+        self.decal_batches.checked_frame = 0;
+        self.decal_batches.relaid_frame = 0;
+        let store_rc = self.script_host.decals().clone();
+        if store_rc.borrow().epoch() != self.decal_batches.epoch {
+            // The store was emptied wholesale, and its ids start again: what
+            // was queued or being laid was another mark.
+            let b = &mut self.decal_batches;
+            b.relaying = None;
+            b.pending.clear();
+            b.pending_set.clear();
+            b.forced.clear();
+            b.laid_at.clear();
+        }
+        // Out of Play there are no marks to lay again, and nothing is kept.
+        let landed = std::mem::take(&mut self.decal_batches.landed);
+        let dug = std::mem::take(&mut self.decal_batches.dug);
         let Some(sim) = self.sim.as_ref() else { return };
         let t0 = floptle_core::time::Instant::now();
         let edits = sim.world.level_edits;
-        let store_rc = self.script_host.decals().clone();
-        if edits != self.decal_batches.seen_edits {
+        let mut queue: Vec<(u32, bool)> = Vec::new();
+        let logged = edits != self.decal_batches.seen_edits;
+        if logged || !landed.is_empty() || !dug.is_empty() {
             let seen = std::mem::replace(&mut self.decal_batches.seen_edits, edits);
-            // Where the ground changed: each edit's bounding sphere, or anywhere
-            // when one could be anywhere or the log no longer reaches back.
+            // Where else the level changed: each edit's bounding sphere, or
+            // anywhere when one could be anywhere or the log no longer reaches
+            // back past edits the terrain did not report itself.
+            let handled = &self.decal_batches.handled;
             let log = &sim.world.level_edit_log;
-            let mut anywhere = log.front().is_none_or(|(first, _)| *first > seen + 1);
+            let mut anywhere = logged
+                && log.front().is_none_or(|(first, _)| (seen + 1..*first).any(|s| !handled.contains(&s)));
             let mut regions = Vec::new();
-            for (_, r) in log.iter().filter(|(seq, _)| *seq > seen) {
+            for (_, r) in log.iter().filter(|(seq, _)| *seq > seen && !handled.contains(seq)) {
                 match r {
                     Some(r) => regions.push(*r),
                     None => anywhere = true,
                 }
             }
+            self.decal_batches.handled.clear();
             let store = store_rc.borrow();
-            for id in store.ids() {
+            let frames = self.terrain_frames();
+            let b = &self.decal_batches;
+            let relaying = b.relaying.as_ref().map(|r| r.id);
+            // Nothing to ask when every edit was one the terrain reported and
+            // none of those reached a mark (a collision mesh landing).
+            let asked = anywhere || !regions.is_empty() || !landed.is_empty() || !dug.is_empty();
+            for id in if asked { store.ids() } else { Vec::new() } {
                 let Some(d) = store.get(id) else { continue };
-                if self.decal_batches.pending_set.contains(&id) {
+                let Some((pos, _, _)) = self.decal_place_now(d) else { continue };
+                let reach = mark_reach(d);
+                // Over a chunk made again that was a stand-in when the mark
+                // was laid, or is being laid: what it lies on changed.
+                let laid = if d.waiting || relaying == Some(id) { None } else { b.laid_at.get(&id).copied() };
+                let on_standin = landed.iter().any(|(e, coords)| {
+                    let Some((p, r)) = frames.local(*e, pos, reach) else { return false };
+                    coords.iter().any(|&c| {
+                        let laid_on_it = laid.is_none_or(|t| t >= b.evicted_at.get(&(*e, c)).copied().unwrap_or(0));
+                        laid_on_it && frames.chunk_box(*e, c).is_some_and(|(lo, hi)| TerrainFrames::ball_meets(p, r, lo, hi))
+                    })
+                });
+                if on_standin {
+                    queue.push((id, true));
                     continue;
                 }
-                let reach = (floptle_core::math::Vec3::new(d.spec.width, d.spec.height, d.spec.depth).length() * 0.5
-                    + d.spec.depth) as f64;
                 let near = anywhere
-                    || match self.decal_place_now(d) {
-                        Some((pos, _, _)) => regions.iter().any(|(c, r)| (pos - *c).length() < r + reach),
-                        None => false,
-                    };
+                    || regions.iter().any(|(c, r)| (pos - *c).length() < r + reach)
+                    || dug.iter().any(|(e, lo, hi)| {
+                        frames.local(*e, pos, reach).is_some_and(|(p, r)| TerrainFrames::ball_meets(p, r, *lo, *hi))
+                    });
                 if near {
-                    self.decal_batches.pending_set.insert(id);
-                    self.decal_batches.pending.push_back(id);
+                    queue.push((id, false));
+                }
+            }
+            for (e, coords) in &landed {
+                for c in coords {
+                    self.decal_batches.evicted_at.remove(&(*e, *c));
                 }
             }
         }
-        if self.decal_batches.pending.is_empty() {
+        for (id, forced) in queue {
+            self.queue_relay(id, forced);
+        }
+        if self.decal_batches.pending.is_empty() && self.decal_batches.relaying.is_none() {
             return;
         }
         let mut store = store_rc.borrow_mut();
         let undrawn = store.undrawn().clone();
+        let mut relay = self.decal_batches.relaying.take();
+        let frames = self.terrain_frames();
+        // Marks whose turn is not yet: being laid for the first time, or over
+        // collision meshes not built yet. They wait in the queue.
+        let mut later = Vec::new();
         loop {
             if t0.elapsed().as_secs_f64() * 1000.0 > RELAY_BUDGET_MS {
                 break;
             }
+            if let Some(r) = relay.as_mut() {
+                // The next piece, where the mark is now.
+                let Some(((pos, turn, _), reach)) = store.get(r.id).and_then(|d| self.decal_place_now(d).map(|p| (p, mark_reach(d)))) else {
+                    relay = None;
+                    continue;
+                };
+                // Ground beside a chunk made again loses its collision mesh
+                // too: the piece waits for it rather than meshing it here.
+                if !self.collision_meshed_under(pos, reach) {
+                    break;
+                }
+                let Some(sim) = self.sim.as_ref() else { break };
+                let center = (pos - sim.world.origin).as_vec3();
+                if !r.job.step(&sim.world.colliders, &undrawn, center, turn * r.turn.inverse()) {
+                    continue;
+                }
+                let r = relay.take().expect("a relay");
+                store.relaid(r.id, r.pos, r.frame, r.spec, r.job.finish());
+                self.decal_batches.relaid += 1;
+                self.decal_batches.relaid_frame += 1;
+                continue;
+            }
             let Some(id) = self.decal_batches.pending.pop_front() else { break };
-            self.decal_batches.pending_set.remove(&id);
+            let placed = store.get(id).and_then(|d| self.decal_place_now(d).map(|p| (p, mark_reach(d), d.waiting)));
+            let Some(((pos, turn, frame), reach, waiting)) = placed else {
+                self.decal_batches.pending_set.remove(&id);
+                self.decal_batches.forced.remove(&id);
+                continue;
+            };
+            // Its ground is asked about on finished ground: none still being
+            // made, a dig's triangles once they land, and none meshed on this
+            // thread.
+            if waiting
+                || self.mark_awaits_ground(&frames, pos, reach)
+                || self.mark_awaits_collision(&frames, pos, reach)
+                || !self.collision_meshed_under(pos, reach) {
+                later.push(id);
+                continue;
+            }
+            let Some(sim) = self.sim.as_ref() else { break };
             let Some(d) = store.get(id) else { continue };
-            let Some((pos, turn, frame)) = self.decal_place_now(d) else { continue };
-            if ground_holds(&sim.world.colliders, sim.world.origin, d, pos, turn) {
+            self.decal_batches.pending_set.remove(&id);
+            let forced = self.decal_batches.forced.remove(&id);
+            self.decal_batches.checked_frame += 1;
+            self.decal_batches.checked += 1;
+            if !forced && ground_holds(&sim.world.colliders, sim.world.origin, d, pos, turn) {
                 continue;
             }
             let mut spec = d.spec.clone();
             spec.center = (pos - sim.world.origin).as_vec3();
             spec.normal = turn * spec.normal;
             spec.up = turn * spec.up;
-            let laid = floptle_script::decal_api::lay_on(&sim.world.colliders, &spec, &undrawn);
-            store.relaid(id, pos, frame, spec, laid);
-            self.decal_batches.relaid += 1;
+            relay = Some(Relay { id, job: floptle_script::decal_api::LayJob::new(&spec), pos, frame, spec, turn });
         }
+        self.decal_batches.pending.extend(later);
+        self.decal_batches.relaying = relay;
         drop(store);
         let ms = t0.elapsed().as_secs_f64() as f32 * 1000.0;
         self.profile_record(floptle_core::profile::Bucket::Terrain, ms);
@@ -478,10 +757,7 @@ mod tests {
             t.field.sculpt(Brush::Lower, Vec3::new(1.0, 0.0, 1.0), 2.0, 1.0, BrushProfile { hardness: 1.0, ..Default::default() })
         };
         ed.mirror_terrain_chunks_to_sim(e, &touched);
-        for _ in 0..4 {
-            ed.pump_collision_meshes();
-        }
-        ed.sync_decals();
+        settle(&mut ed);
         let ground = {
             let sim = ed.sim.as_ref().unwrap();
             let o = (DVec3::new(1.0, 5.0, 1.0) - sim.world.origin).as_vec3();
@@ -493,6 +769,23 @@ mod tests {
         let lift = f64::from(floptle_script::decal_api::LIFT);
         assert!((after - ground - lift).abs() < 0.02, "the mark is at {after}, the ground at {ground}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Frames of the decal passes (and the collision meshes they wait for)
+    /// until no mark is waiting to be laid again, bounded by the clock: a
+    /// loaded machine takes more frames.
+    fn settle(ed: &mut crate::Editor) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            ed.pump_collision_meshes();
+            ed.sync_decals();
+            let b = &ed.decal_batches;
+            if b.pending.is_empty() && b.relaying.is_none() && ed.collision_pending.is_empty() {
+                break;
+            }
+            assert!(std::time::Instant::now() < until, "the marks were still waiting to be laid again");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
 
     /// A project with `script` on one node and a terrain slab 24 m across,
@@ -554,24 +847,19 @@ mod tests {
         ed.play_step(1.0 / 60.0, true);
         assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
         assert_eq!(ed.script_host.decals().borrow().len(), 150, "the marks were not all laid");
+        // Play starting is a change anywhere: every mark is asked once.
+        settle(&mut ed);
+        let checked_before = ed.decal_batches.checked;
         // A bite at the first mark's spot, through the path `terrain.dig` takes.
         let touched = {
             let t = ed.terrains.get_mut(&e).unwrap();
+            // The field's record of what changed still holds the slab being
+            // made; a game's first edit has had earlier ones take it.
+            let _ = t.field.take_changed();
             t.field.sculpt(Brush::Lower, Vec3::new(2.0, 0.0, 0.0), 2.4, 1.0, BrushProfile { hardness: 1.0, ..Default::default() })
         };
         ed.mirror_terrain_chunks_to_sim(e, &touched);
-        for _ in 0..4 {
-            ed.pump_collision_meshes();
-        }
-        let mut frames = 0;
-        loop {
-            ed.sync_decals();
-            frames += 1;
-            if ed.decal_batches.pending.is_empty() || frames > 600 {
-                break;
-            }
-        }
-        assert!(ed.decal_batches.pending.is_empty(), "the marks were still waiting after {frames} frames");
+        settle(&mut ed);
         // Marks whose box reaches the bite: within its radius plus a mark's
         // half-diagonal of it.
         let reached = (0..150)
@@ -585,6 +873,22 @@ mod tests {
         let relaid = ed.decal_batches.relaid;
         assert!(relaid >= 1, "the mark under the bite was not laid again");
         assert!(relaid <= reached, "{relaid} marks laid again for a bite that reaches {reached} of 150");
+        // Asked about: the marks whose box reaches the box the bite wrote
+        // (its radius, the field's 2 m band, a voxel more); not every mark
+        // in the bite's 16 m chunks.
+        let asked = (0..150)
+            .filter(|i| {
+                let a = *i as f64 * 2.39996;
+                let r = 2.0 + 27.0 * (*i as f64 / 149.0);
+                let (x, z) = (r * a.cos(), r * a.sin());
+                let reach = (1.5f64 * 1.5 * 2.0 + 16.0).sqrt() * 0.5 + 4.0;
+                let half = 2.4 + 2.0 + 1.0;
+                let (gx, gz) = (((x - 2.0).abs() - half).max(0.0), (z.abs() - half).max(0.0));
+                (gx * gx + gz * gz).sqrt() <= reach
+            })
+            .count() as u64;
+        let checked = ed.decal_batches.checked - checked_before;
+        assert!(checked <= asked, "{checked} marks asked about their ground for a bite whose box reaches {asked} of 150");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -637,12 +941,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert!(ed.collision_pending.is_empty(), "the bite's collision meshes never landed");
-        for _ in 0..600 {
-            ed.sync_decals();
-            if ed.decal_batches.pending.is_empty() {
-                break;
-            }
-        }
+        settle(&mut ed);
         ed.sync_decals();
         let relaid = ed.decal_batches.relaid;
         let repacked = ed.decal_batches.repacked - before;
@@ -707,6 +1006,390 @@ mod tests {
         let said: Vec<String> = ed.console.entries.iter().map(|e| e.msg.clone()).collect();
         assert!(said.iter().any(|m| m.contains("landed 10")), "decals.landed never said all ten had landed");
         assert!(said.iter().any(|m| m.contains(&format!("landed {first}"))), "the first frame's count");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A 200 m planet in Play, its far side put away to stand-ins by the
+    /// camera standing at the top, and a script laying 29 m marks at `marks`
+    /// (surface points, facing up from the centre). The field as generated,
+    /// whole, comes back too.
+    fn planet_with_marks(
+        tag: &str,
+        marks: &dyn Fn(&floptle_field::ChunkField) -> Vec<Vec3>,
+    ) -> (crate::Editor, floptle_core::Entity, floptle_field::ChunkField, std::path::PathBuf) {
+        let fill = floptle_field::procgen::PlanetFill { seed: 12, radius: 200.0, voxel: 1.5, relief: 8.0, cave_depth: 0.0, ..Default::default() };
+        let mut field = floptle_field::procgen::generate_planet(&fill);
+        field.set_spec("marks".into());
+        let exact = field.clone();
+        let points = marks(&field);
+        let list: Vec<String> = points
+            .iter()
+            .map(|p| {
+                let n = p.normalize();
+                format!("{{{},{},{},{},{},{}}}", p.x, p.y, p.z, n.x, n.y, n.z)
+            })
+            .collect();
+        let script = format!(
+            "local P = {{ {} }}\nlocal done = false\nfunction update(node, dt)\n  if done then return end\n  done = true\n  \
+             for _, p in ipairs(P) do\n    decals.add{{ texture = 'turf.png', pos = vec3(p[1], p[2], p[3]), \
+             normal = vec3(p[4], p[5], p[6]), size = 29, depth = 4 }}\n  end\nend\n",
+            list.join(",")
+        );
+        let dir = std::env::temp_dir().join(format!("floptle-decal-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        floptle_vfs::write(dir.join("scripts/marks.lua"), script).unwrap();
+        let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        ed.world.insert(e, floptle_core::CelestialBody { body_radius: 200.0, ..Default::default() });
+        ed.world.insert(e, floptle_core::Matter::Terrain { id: 1, collision: Default::default() });
+        ed.terrains.insert(e, crate::terrain_edit::EditorTerrain::new(field));
+        let host = ed.world.spawn();
+        ed.world.insert(host, floptle_core::Transform::IDENTITY);
+        ed.world.insert(host, floptle_core::Matter::Sprite { ppu: 32.0, size: 1.0, cell: 0, flip_x: false, flip_y: false, pivot: [0.5, 0.5] });
+        ed.world.insert(
+            host,
+            floptle_core::Scripts(vec![floptle_core::ScriptInst {
+                kind: "marks".into(),
+                enabled: true,
+                params: Vec::new(),
+                refs: Vec::new(),
+                strs: Vec::new(),
+                pinned_bools: None,
+            }]),
+        );
+        let top = DVec3::new(0.0, 205.0, 0.0);
+        settle_streaming(&mut ed, top, &mut RelayWatch::default());
+        assert!(ed.terrains[&e].field.evicted_count() > 0, "nothing was put away: the far side is not far enough");
+        ed.toggle_play();
+        assert!(ed.playing && ed.sim.is_some());
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        loop {
+            ed.play_step(1.0 / 60.0, true);
+            assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+            let store = ed.script_host.decals().clone();
+            if store.borrow().len() == points.len() && store.borrow().waiting().is_empty() {
+                break;
+            }
+            assert!(std::time::Instant::now() < until, "the marks never all landed");
+        }
+        (ed, e, exact, dir)
+    }
+
+    /// What the relay did over the frames watched.
+    #[derive(Default)]
+    struct RelayWatch {
+        checked: u64,
+        relaid: u64,
+        /// The mark being laid again, and its triangles when it started.
+        laying: Option<(u32, Vec<floptle_script::decal_api::DecalVert>)>,
+        /// Frames a mark being laid again stayed drawn as it was.
+        held: u64,
+        /// Terrain collision chunks the decal passes meshed on the frame,
+        /// which is what made one mark's re-lay cost 12 to 34 ms.
+        meshed_on_frame: u64,
+    }
+
+    /// One frame of the passes a mark's ground moves under, with the camera
+    /// at `cam`: streaming, collision meshes, the decal passes.
+    fn stream_frame(ed: &mut crate::Editor, cam: DVec3, w: &mut RelayWatch) {
+        ed.camera.position = cam;
+        let at = ed.lod_center(cam);
+        ed.stream_far_chunks(at);
+        ed.pump_collision_meshes();
+        let meshed = |ed: &crate::Editor| {
+            ed.sim.as_ref().map_or(0, |s| s.world.colliders.iter().filter_map(|c| c.shape.chunk_terrain()).map(|t| t.meshed_by_queries()).sum())
+        };
+        let before = meshed(ed);
+        ed.sync_decals();
+        w.meshed_on_frame += meshed(ed) - before;
+        let b = &ed.decal_batches;
+        w.checked += u64::from(b.checked_frame);
+        w.relaid += u64::from(b.relaid_frame);
+        // A mark being laid again is drawn as it was until the new one is
+        // whole: never gone, never half laid.
+        let store = ed.script_host.decals().clone();
+        let store = store.borrow();
+        match (b.relaying.as_ref().map(|r| r.id), w.laying.take()) {
+            (Some(id), Some((was, verts))) if id == was => {
+                let d = store.get(id).expect("a mark being laid again went");
+                assert!(!d.verts.is_empty() && d.verts == verts, "mark {id} changed before its new lay was whole");
+                w.held += 1;
+                w.laying = Some((id, verts));
+            }
+            (Some(id), _) => {
+                let d = store.get(id).expect("a mark being laid again went");
+                assert!(!d.verts.is_empty(), "mark {id} is drawn as nothing while it is laid again");
+                w.laying = Some((id, d.verts.clone()));
+            }
+            (None, _) => {}
+        }
+    }
+
+    /// Frames at `cam` until the ground there has settled (nothing being made,
+    /// nothing more put away) and no mark waits to be laid again, bounded by
+    /// the clock.
+    fn settle_streaming(ed: &mut crate::Editor, cam: DVec3, w: &mut RelayWatch) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        let away = |ed: &crate::Editor| ed.terrains.values().map(|t| t.field.evicted_count()).sum::<usize>();
+        loop {
+            let before = away(ed);
+            for _ in 0..crate::terrain_edit::FAR_SCAN_FRAMES * 2 {
+                stream_frame(ed, cam, w);
+            }
+            let b = &ed.decal_batches;
+            let idle = b.pending.is_empty() && b.relaying.is_none() && ed.collision_pending.is_empty();
+            if ed.terrain_promotions.is_empty() && away(ed) == before && idle {
+                return;
+            }
+            assert!(std::time::Instant::now() < until, "the ground or the marks never settled at {cam:?}");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// The marks' vertices, by id, where they are in the world.
+    fn mark_verts(ed: &crate::Editor) -> std::collections::BTreeMap<u32, (DVec3, Vec<floptle_script::decal_api::DecalVert>)> {
+        let store = ed.script_host.decals().clone();
+        let store = store.borrow();
+        store.ids().into_iter().filter_map(|id| store.get(id).map(|d| (id, (d.pos, d.verts.clone())))).collect()
+    }
+
+    /// How far a mark's vertices lie off the ground `field` holds, on average.
+    fn off_ground(field: &floptle_field::ChunkField, pos: DVec3, verts: &[floptle_script::decal_api::DecalVert]) -> f32 {
+        let sum: f32 = verts.iter().map(|v| field.d((pos.as_vec3()) + v.pos).abs()).sum();
+        sum / verts.len().max(1) as f32
+    }
+
+    /// **Streaming ground lays again only the marks laid on its stand-ins.**
+    /// Every chunk made again or put away as the player walked was noted as
+    /// a change that could be anywhere, and every mark in the world was laid
+    /// again, a whole mark a frame: Solar's meadow of 70 marks cost 12 ms on
+    /// the average frame and 21 to 27 ms on each landing. Now a chunk put
+    /// away lays nothing again, and a chunk made again lays again only the
+    /// marks laid while it was a stand-in, a piece at a time within the
+    /// frame's budget, the old mark drawn until the new one is whole.
+    ///
+    /// 150 marks of 29 m, half on the ground the camera stands on and half on
+    /// the far side's stand-ins; the camera walks to the far side and back.
+    /// The near marks' ground is put away and made again, exactly as it was:
+    /// not one is laid again. Each far mark is laid again on the exact ground
+    /// when it arrives. No frame of the walk spends more than half of what
+    /// laying one mark again takes.
+    #[test]
+    fn streaming_ground_lays_again_only_the_marks_on_its_stand_ins() {
+        let ring = |field: &floptle_field::ChunkField, up: Vec3| -> Vec<Vec3> {
+            let (u, v) = (up.any_orthonormal_vector(), up.cross(up.any_orthonormal_vector()));
+            (0..75)
+                .map(|i| {
+                    let (r, a) = (0.18 * (i as f32 / 75.0).sqrt(), i as f32 * 2.39996);
+                    let dir = (up + u * (r * a.cos()) + v * (r * a.sin())).normalize();
+                    field.raycast(dir * 300.0, -dir, 300.0).expect("ground under a mark")
+                })
+                .collect()
+        };
+        let marks = |f: &floptle_field::ChunkField| [ring(f, Vec3::Y), ring(f, Vec3::NEG_Y)].concat();
+        let (mut ed, e, exact, dir) = planet_with_marks("streaming", &marks);
+        let laid = mark_verts(&ed);
+        assert_eq!(laid.len(), 150, "the marks were not all laid");
+        let near = |pos: &DVec3| pos.y > 0.0;
+        // The far marks were laid on stand-ins: further off the ground than
+        // the near ones.
+        let mean = |pick: &dyn Fn(&DVec3) -> bool, marks: &std::collections::BTreeMap<u32, (DVec3, Vec<floptle_script::decal_api::DecalVert>)>| {
+            let picked: Vec<f32> = marks.values().filter(|(p, _)| pick(p)).map(|(p, v)| off_ground(&exact, *p, v)).collect();
+            picked.iter().sum::<f32>() / picked.len().max(1) as f32
+        };
+        let (near_off, far_off) = (mean(&near, &laid), mean(&|p: &DVec3| !near(p), &laid));
+        assert!(far_off > near_off * 3.0, "the far marks lie {far_off:.3} m off the ground, the near {near_off:.3}: not on stand-ins");
+
+        // When each near mark was laid: one laid again, even identically,
+        // is laid at a later frame.
+        let near_laid_at: Vec<(u32, Option<u64>)> =
+            laid.iter().filter(|(_, (p, _))| near(p)).map(|(id, _)| (*id, ed.decal_batches.laid_at.get(id).copied())).collect();
+        assert!(near_laid_at.iter().all(|(_, t)| t.is_some()), "a near mark has no record of when it was laid");
+        let mut w = RelayWatch::default();
+        // Standing still, nothing is asked about.
+        let top = DVec3::new(0.0, 205.0, 0.0);
+        for _ in 0..120 {
+            stream_frame(&mut ed, top, &mut w);
+        }
+        assert_eq!((w.checked, w.relaid), (0, 0), "marks were asked about with nothing changing");
+        // Round to the far side and back.
+        let mut near_put_away = false;
+        for step in (0..=16).chain((0..16).rev()) {
+            let a = std::f64::consts::PI * step as f64 / 16.0;
+            settle_streaming(&mut ed, DVec3::new(a.sin(), a.cos(), 0.0) * 205.0, &mut w);
+            let f = &ed.terrains[&e].field;
+            let side = floptle_field::CHUNK as f32 * f.voxel();
+            near_put_away |= laid.values().filter(|(p, _)| near(p)).any(|(p, _)| {
+                f.is_evicted((p.as_vec3() / side).floor().to_array().map(|v| v as i32))
+            });
+        }
+        assert!(near_put_away, "the near marks' ground was never put away: the walk tests nothing");
+        let now = mark_verts(&ed);
+        let moved: Vec<u32> = laid.iter().filter(|(id, (p, _))| near(p) && now.get(id) != laid.get(id)).map(|(id, _)| *id).collect();
+        assert!(moved.is_empty(), "{} near marks were laid again on ground that came back as it was", moved.len());
+        let again = near_laid_at.iter().filter(|(id, t)| ed.decal_batches.laid_at.get(id).copied() != *t).count();
+        assert_eq!(again, 0, "{again} near marks were laid again, identically, on ground that came back as it was");
+        let far_after = mean(&|p: &DVec3| !near(p), &now);
+        assert!(
+            far_after < near_off * 1.5 + 0.02,
+            "the far marks lie {far_after:.3} m off the ground after it arrived, the near ones {near_off:.3}"
+        );
+        assert!(w.relaid >= 75, "only {} marks were laid again for 75 on stand-ins", w.relaid);
+        // A 29 m mark lies over up to eight 48 m chunks, which arrive with
+        // the walk a few at a time: it is laid again as each batch under it
+        // lands, a handful of times. Every mark laid again on every landing
+        // was 150 a landing, hundreds of landings.
+        assert!(w.relaid <= 75 * 4 && w.checked <= 75 * 4, "{} marks asked about and {} laid again for 75 on stand-ins", w.checked, w.relaid);
+        // A mark's ground is meshed on the collision worker before it is laid
+        // again, so a piece of it is a piece's work, never a chunk meshed on
+        // the frame.
+        assert_eq!(w.meshed_on_frame, 0, "laying marks again meshed {} collision chunks on the frame", w.meshed_on_frame);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A big mark is laid again a piece at a time, drawn as it was until
+    /// it is whole.** Laying a mark again ran every piece of it in one call,
+    /// unlike its first lay: one 28.8 m mark was 12 to 34 ms of one frame.
+    /// One 29 m mark over finely meshed ground, laid again as though its
+    /// ground had just arrived: the work is carried over frames, no frame
+    /// does more than a share of it, and every frame between, the mark is
+    /// the one laid before.
+    #[test]
+    fn a_big_mark_is_laid_again_over_frames() {
+        let script = "local done = false\nfunction update(node, dt)\n  if done then return end\n  done = true\n  \
+                      decals.add{ texture = 'turf.png', pos = vec3(0, 0, 0), normal = vec3(0, 1, 0), size = 29, depth = 4 }\nend\n";
+        let (mut ed, e, dir) = on_a_slab("relay-pieces", script, 40.0);
+        // Finer ground than the slab's: a quarter-metre voxel, so the mark is
+        // tens of thousands of faces to sort, many budgets' work on any machine.
+        let mut field = floptle_field::ChunkField::new(0.25);
+        field.fill_slab(Vec3::new(-24.0, -3.0, -24.0), Vec3::new(24.0, 0.0, 24.0), 0.0, [0.5, 0.5, 0.5]);
+        ed.terrains.insert(e, crate::terrain_edit::EditorTerrain::new(field));
+        ed.toggle_play();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        while !(ed.script_host.decals().borrow().len() == 1 && ed.script_host.decals().borrow().waiting().is_empty()) {
+            ed.play_step(1.0 / 60.0, true);
+            assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+            assert!(std::time::Instant::now() < until, "the mark never landed");
+        }
+        settle(&mut ed);
+        let laid = mark_verts(&ed);
+        let chunks = ed.terrains[&e].field.chunk_coords();
+        ed.decals_note_landed(e, chunks);
+        let relaid = ed.decal_batches.relaid;
+        let mut w = RelayWatch::default();
+        let mut frames_ms = Vec::new();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        while ed.decal_batches.relaid == relaid {
+            ed.pump_collision_meshes();
+            let t = std::time::Instant::now();
+            ed.sync_decals();
+            frames_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+            if let Some(r) = ed.decal_batches.relaying.as_ref() {
+                let store = ed.script_host.decals().clone();
+                let store = store.borrow();
+                let same = store.get(r.id).map(|d| (d.pos, d.verts.clone())) == laid.get(&r.id).cloned();
+                assert!(same, "the mark changed before its new lay was whole");
+                w.held += 1;
+            }
+            assert!(std::time::Instant::now() < until, "the mark was never laid again");
+        }
+        let total: f64 = frames_ms.iter().sum();
+        let worst = frames_ms.iter().copied().fold(0.0, f64::max);
+        assert!(w.held > 0, "the mark was laid again in one frame, {total:.1} ms of work");
+        assert!(worst < total / 3.0, "one frame spent {worst:.2} ms of the {total:.2} ms the re-lay took");
+        assert_eq!(mark_verts(&ed), laid, "laid again on the same ground, the mark came out otherwise");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A mark laid again is drawn the same, every frame of it.** Ten 29 m
+    /// marks on a slab, every one laid again as though its ground had just
+    /// arrived (a chunk made again under a mark laid on its stand-in), and a
+    /// picture taken every frame of the re-lay: each is the picture from
+    /// before, to the pixel. The old mark stays drawn until the new one is
+    /// whole, and on the same ground the new one is the old one.
+    /// `FLOPTLE_DECAL_PNG=<dir>` writes the first, a middle and the last.
+    #[test]
+    #[cfg(feature = "editor-ui")]
+    fn a_mark_laid_again_draws_the_same_every_frame() {
+        let Some(gpu_ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let script = "local done = false\nfunction update(node, dt)\n  if done then return end\n  done = true\n  \
+                      for i = 0, 9 do\n    decals.add{ texture = 'turf.png', pos = vec3(-27 + i * 6, 0, (i % 3) * 8 - 8), \
+                      normal = vec3(0, 1, 0), size = 29, depth = 4 }\n  end\nend\n";
+        let (mut ed, e, dir) = on_a_slab_in(gpu_ed, "relay-png", script, 60.0);
+        // A picture with a pattern, so a mark laid even slightly otherwise shows.
+        let turf = image::RgbaImage::from_fn(16, 16, |x, y| {
+            if (x / 2 + y / 2) % 2 == 0 { image::Rgba([40, 160, 60, 200]) } else { image::Rgba([200, 90, 30, 120]) }
+        });
+        turf.save(dir.join("turf.png")).unwrap();
+        let sun = ed.world.spawn();
+        ed.world.insert(
+            sun,
+            floptle_core::Transform {
+                rotation: floptle_core::math::Quat::from_rotation_x(-0.9) * floptle_core::math::Quat::from_rotation_y(0.4),
+                ..floptle_core::Transform::IDENTITY
+            },
+        );
+        ed.world.insert(sun, floptle_core::Light { intensity: 1.2, ..Default::default() });
+        ed.toggle_play();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        while !(ed.script_host.decals().borrow().len() == 10 && ed.script_host.decals().borrow().waiting().is_empty()) {
+            ed.play_step(1.0 / 60.0, true);
+            assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+            assert!(std::time::Instant::now() < until, "the marks never all landed");
+        }
+        settle(&mut ed);
+        ed.sync_decals();
+        ed.camera.position = DVec3::new(0.0, 45.0, 40.0);
+        ed.camera.pitch = -0.85;
+        ed.camera.yaw = 0.0;
+        let cam_world = ed.camera.position;
+        ed.settle_terrain_meshes(cam_world, std::time::Duration::from_secs(60));
+        let (w, h) = (240u32, 150u32);
+        let cam = ed.camera.render_camera();
+        let shoot = |ed: &mut crate::Editor| crate::shot::render_frame_pixels(ed, &cam, None, w, h, !0, false).expect("a frame");
+        let before = shoot(&mut ed);
+        let lum: Vec<i32> = before.chunks(4).map(|p| p[0] as i32 + p[1] as i32 + p[2] as i32).collect();
+        assert!(lum.iter().max().unwrap() - lum.iter().min().unwrap() > 60, "the picture is one flat colour: nothing to compare");
+        let laid = mark_verts(&ed);
+        // Every chunk of the slab made again, none of them recorded as put
+        // away: every mark is laid again.
+        let chunks = ed.terrains[&e].field.chunk_coords();
+        ed.decals_note_landed(e, chunks);
+        let relaid = ed.decal_batches.relaid;
+        let (mut frames, mut mid_relay, mut middle) = (0, 0, None);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        loop {
+            ed.pump_collision_meshes();
+            ed.sync_decals();
+            let px = shoot(&mut ed);
+            frames += 1;
+            let differ = before.chunks(4).zip(px.chunks(4)).filter(|(a, b)| a != b).count();
+            assert_eq!(differ, 0, "{differ} pixels changed on frame {frames} of the re-lay");
+            if ed.decal_batches.relaying.is_some() {
+                mid_relay += 1;
+                if middle.is_none() && ed.decal_batches.relaid > relaid + 3 {
+                    middle = Some(px);
+                }
+            }
+            let b = &ed.decal_batches;
+            if b.pending.is_empty() && b.relaying.is_none() && ed.collision_pending.is_empty() {
+                break;
+            }
+            assert!(std::time::Instant::now() < until, "the marks were never all laid again");
+        }
+        assert_eq!(ed.decal_batches.relaid - relaid, 10, "every mark is laid again");
+        assert!(mid_relay > 0, "no picture was taken with a mark half laid again: the fixture shows nothing");
+        let after = shoot(&mut ed);
+        assert_eq!(mark_verts(&ed), laid, "a mark laid again on the same ground came out otherwise");
+        if let Ok(out) = std::env::var("FLOPTLE_DECAL_PNG") {
+            for (name, px) in [("before", Some(&before)), ("middle", middle.as_ref()), ("after", Some(&after))] {
+                let Some(px) = px else { continue };
+                let tex = floptle_render::TextureData { pixels: px.clone(), width: w, height: h };
+                std::fs::write(std::path::Path::new(&out).join(format!("relay-{name}.png")), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

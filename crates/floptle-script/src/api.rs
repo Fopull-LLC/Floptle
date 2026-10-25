@@ -4540,7 +4540,25 @@ let node_mt = lua.create_table()?;
                 ));
             }
             "asleep" => {
-                return Ok(Value::Boolean(bodies.borrow().get(&e).is_some_and(|b| b.asleep)));
+                let bodies = bodies.borrow();
+                if let Some(b) = bodies.get(&e) {
+                    return Ok(Value::Boolean(b.asleep));
+                }
+                // A part of an assembly is asleep when its craft is: the
+                // nearest node above it with a body of its own is the root
+                // whose compound it is part of.
+                let s = scene.borrow();
+                if s.components.get(&e).is_some_and(|c| c.contains_key("RigidBody")) {
+                    let mut cur = e;
+                    for _ in 0..64 {
+                        let Some(&p) = s.parent.get(&cur) else { break };
+                        if let Some(b) = bodies.get(&p) {
+                            return Ok(Value::Boolean(b.asleep));
+                        }
+                        cur = p;
+                    }
+                }
+                return Ok(Value::Boolean(false));
             }
             // Degrees a second about Z, anticlockwise positive: how fast a
             // turning body spins.

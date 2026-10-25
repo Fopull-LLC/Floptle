@@ -779,6 +779,10 @@ pub struct ScriptHost {
     /// frame so a game that builds its world on demand can wait its turn
     /// instead of queueing new worlds behind the ground someone stands on.
     terrain_busy: Rc<std::cell::Cell<bool>>,
+    /// Whether anything in the world could still read or write the save slot:
+    /// a terrain body, or a checkpoint in flight. `terrain.deleteSaveDir`
+    /// refuses the active slot only while this holds.
+    terrain_save_dir_in_use: Rc<std::cell::Cell<bool>>,
     /// The ground not made yet, published by the engine each frame for
     /// `terrain.ready` and `terrain.raycast`.
     terrain_unmade: Rc<RefCell<Vec<terrain_api::UnmadeRegion>>>,

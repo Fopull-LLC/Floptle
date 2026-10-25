@@ -336,6 +336,27 @@ impl crate::Editor {
         }
     }
 
+    /// Wait, until `deadline`, for every capture in flight to be read back
+    /// and encoded, so its answer reaches the script on the next pass.
+    ///
+    /// For a headless play (`shot --after`), which steps as fast as it can
+    /// with game time fixed: a readback and an encode take wall time, and on
+    /// a loaded machine every step of `--after` passed before a capture asked
+    /// for a second in had come back, so its callback never ran. A game's
+    /// frame loop never waits; it answers on whichever frame the picture lands.
+    #[cfg(feature = "editor-ui")]
+    pub(crate) fn wait_for_captures(&mut self, deadline: floptle_core::time::Instant) {
+        while !(self.capture_jobs.is_empty() && self.capture_encodes.is_empty())
+            && floptle_core::time::Instant::now() < deadline
+        {
+            if let Some(gpu) = self.gpu.as_ref() {
+                let _ = gpu.device.poll(wgpu::PollType::Poll);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            self.pump_captures();
+        }
+    }
+
     /// Tell the script its picture is not coming, and why.
     fn refuse_capture(&self, req: &CaptureRequest, why: String) {
         match req.format {

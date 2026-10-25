@@ -528,7 +528,8 @@ function draw.quad(texture, x0, y0, z0, x1, y1, z1, x2, y2, z2, x3, y3, z3, r, g
 function spawn(prefab, pos, fn, opts) end
 ---The milliseconds of each frame spent making spawned prefabs; past it the
 ---rest wait, in order, for the frames after (at least one a frame). nil, the
----default, makes every spawn at once. Returns the budget it replaced.
+---default, makes every spawn at once; `spawnBudget(nil)` clears a budget, and
+---no argument only reads it. Returns the budget it replaced.
 ---@param ms? number|nil
 ---@return number|nil
 function spawnBudget(ms) end
@@ -2007,7 +2008,8 @@ function terrain.planetLakes(opts, query, callback) end
 ---FIRST — before the project file or its genspec — and writes edited fields
 ---back here when bodies stream out, so a player's digs persist per save slot
 ---without touching authored project data. Pass "" to clear; cleared
----automatically when Play stops.
+---automatically when Play stops, and kept across scene.load (a menu may set
+---it before loading the world).
 ---@param path? string
 ---@return string|nil
 function terrain.saveDir(path) end
@@ -2106,10 +2108,12 @@ function terrain.impostorAt(id, rule) end
 function terrain.flush() end
 ---Delete a save slot's persisted terrain directory from disk (pair with
 ---`save.deleteSlot` in a "delete this save" UI). Narrow by design: the path
----must be relative with no "..", must not be the ACTIVE `terrain.saveDir`
----(clear it first), and only terrain files (.cfield/.tfield/.meta) in that one
----directory are removed — the emptied directory (and an emptied parent) is
----then tidied away. Returns the number of files removed.
+---must be relative with no "..", and only terrain files (.cfield/.tfield/.meta)
+---in that one directory are removed — the emptied directory (and an emptied
+---parent) is then tidied away. The ACTIVE `terrain.saveDir` is refused while
+---terrain in the scene still uses it (release it with `terrain.saveDir("")`);
+---from a scene with no terrain (a menu after scene.load) it is deleted and
+---released. Returns the number of files removed.
 ---@param path string e.g. "saves/slot2/terrain"
 ---@return number
 function terrain.deleteSaveDir(path) end

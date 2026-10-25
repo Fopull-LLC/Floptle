@@ -291,8 +291,13 @@ still answers `untimed`, its old name.
 Where the engine knows what the time was, `untimed` says so in the frame's
 parts: `outsideFrame` (between two frames: the window system's events, and the
 OS or compositor not running or not asking for the game), `frameCap` (holding to
-`app.setFrameCap`), `sceneLoad` (a scene swap) and `physicsRebuild`. What is
-left over is still unnamed.
+`app.setFrameCap`), `sceneLoad` (a scene swap), `physicsRebuild`,
+`assemblySplit` and `assemblyRebuild` (an `assembly.split` or `assembly.rebuild`
+the engine carried out), and `gpuOutOfMemory`: on a frame the GPU ran out of
+memory, the untimed time nothing else named, because the allocation that failed
+is slow and nobody timed it. What is left over is still unnamed. Inside
+`scripts`, `scriptOutOfMemory` is the collection after a script passed the
+memory limit.
 
 ### Every frame, exactly
 
@@ -346,7 +351,10 @@ end
 ```
 
 Each sample carries the wall time since the one before, so a long engine call
-(a sweep, a terrain query) is charged to the line that made it. Every frame
+(a sweep, a terrain query) is charged to the line that made it. The clock
+starts afresh at every entry into Lua, a callback from `spawn` or
+`assembly.split` included, so the engine's work before a callback is not
+charged to its first line. Every frame
 record and every hitch keeps its ten hottest lines, so a 559 ms frame says the
 function it was in. The sampler makes a tight loop slower while it runs, which
 is why it is off until asked for.
@@ -371,6 +379,11 @@ if p.limitedBy == "compositor" then log("the window is being paced; these number
 `limitedBy` is `display` (vsync, about one refresh), `compositor` (fewer frames
 than the display shows), `frameCap`, `gpu`, or nil when the engine's own work
 filled the frame.
+
+The setup (`presentMode`, `vsync`, `refreshHz`, `frameCap`) is there from the
+first `start`; `refreshHz` is 0 until the display has said its rate. The verdict
+(`frameMs`, `waitMs`, `gpuMs`, `limitedBy`) is about the last finished frame, so
+until one has finished `frames` is 0 and they read 0 and nil.
 
 ### GPU time
 

@@ -1824,6 +1824,51 @@ end
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **A split and a rebuild are named parts.** The engine's own work for
+/// `assembly.split` and `assembly.rebuild` happens between the buckets, and
+/// on a big craft it is tens of milliseconds; unnamed, it read as `untimed`,
+/// and the sampler charged it to the callback. Each is named on the frame it
+/// ran, once.
+#[test]
+fn a_split_and_a_rebuild_are_named_parts() {
+    let (mut ed, dir) = project(
+        "split_parts",
+        r#"
+local ship, parts, frame = nil, {}, 0
+function update(node, dt)
+  frame = frame + 1
+  if frame == 1 then
+    spawn("Vessel", vec3(0, 0, 0), function(v)
+      ship = v
+      for i = 1, 4 do
+        spawn("Part", vec3(i - 2.5, 0, 0), function(p)
+          parts[#parts + 1] = p
+          if #parts == 4 then assembly.rebuild(v) end
+        end, v)
+      end
+    end)
+  end
+  if frame == 10 then assembly.split(ship, { parts[3], parts[4] }) end
+end
+"#,
+    );
+    ed.toggle_play();
+    let profile = ed.script_host.profile().clone();
+    profile.borrow_mut().enable(true);
+    for _ in 0..14 {
+        ed.play_step(1.0 / 60.0, true);
+        ed.end_profile_frame();
+    }
+    assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+    let p = profile.borrow();
+    let frames_naming = |part: &str| p.recent_frames(300).filter(|r| r.parts.iter().any(|(n, _)| *n == part)).count();
+    let (split, rebuild) = (frames_naming("assemblySplit"), frames_naming("assemblyRebuild"));
+    drop(p);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(rebuild, 1, "the rebuild was not named on its frame");
+    assert_eq!(split, 1, "the split was not named on its frame");
+}
+
 /// A thousand parts under one vessel, asked for in one frame, with or
 /// without a spawn budget: the frame each frame took, the frames it took, and
 /// what the script heard.

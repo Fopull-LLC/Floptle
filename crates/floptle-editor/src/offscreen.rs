@@ -199,6 +199,7 @@ impl Editor {
         // The frame's own work starts here; the time before it, back to the
         // last frame's end, was the window system and the OS.
         self.script_host.profile().borrow_mut().begin_frame();
+        self.publish_pacing_setup();
         self.pace_frame();
         let now = Instant::now();
         let raw_dt = self.last.map(|l| (now - l).as_secs_f32()).unwrap_or(0.0);

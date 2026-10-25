@@ -31,7 +31,7 @@ fn a_capture_mid_play_matches_the_frame() {
          terrain.generatePlanet(1, { radius = 24, voxel = 1, seed = 3 })\nend\n\
          function update(node, dt)\n  t = t + dt\n  if t > 1.0 and not snapped then\n    snapped = true\n    \
          camera.capture({ w = 160, h = 90 }, function(bytes, err)\n      \
-         if bytes then assets.writeBytes('user://cap.png', bytes) end\n    end)\n  end\nend\n",
+         if bytes then assets.writeBytes('user://cap.png', bytes) else log('capture refused: ' .. tostring(err)) end\n    end)\n  end\nend\n",
     )
     .unwrap();
     // The sea: a ball a little smaller than the ground, so the ground hides

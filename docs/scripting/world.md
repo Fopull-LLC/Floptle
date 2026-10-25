@@ -803,10 +803,14 @@ answer `false`.
 **What they cost.** The decals that share a picture are drawn in pages of 16,
 one mesh and one draw a page. Adding, changing or removing a decal rebuilds
 only its own page, that frame. `perf.parts()` names the work: `decalLay`
-(laying marks that waited), `decalRelay` (laying again marks a dig reached) and
+(laying marks that waited), `decalRelay` (laying again marks a dig or arriving ground reached) and
 `decalBatches` (rebuilding the pages that changed). `perf.counts().decals` and
 `perf.counts().decalTris` are the number in the world and the triangles they
-were laid as. A mark is cut to its box at the moment it's added, so on a big
+were laid as; `perf.counts().decalsChecked` and `decalsRelaid` are last
+frame's marks asked whether their ground moved and marks laid again. Only a
+change under a mark lays it again: a dig, or streamed ground arriving under a
+mark laid on its stand-in. A mark is laid again a piece at a time within the
+frame's budget, and drawn as it was until the new one is whole. A mark is cut to its box at the moment it's added, so on a big
 flat floor it's a handful of triangles, and on finely meshed ground it's the
 triangles under it, up to 4096.
 

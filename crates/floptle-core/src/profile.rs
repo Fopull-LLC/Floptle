@@ -508,6 +508,9 @@ pub struct FrameProfile {
     anim_counts: (usize, usize),
     /// Decals in the world and the triangles they were laid as.
     decal_counts: (usize, usize),
+    /// Last frame's marks asked whether the ground under them moved, and
+    /// marks laid again.
+    decal_relay_counts: (u32, u32),
     /// Rays scripts cast this frame and the milliseconds they took, and last
     /// frame's once folded. Inside the `scripts` bucket, not beside it.
     rays_frame: (u64, f32),
@@ -560,6 +563,12 @@ pub struct FrameProfile {
     /// How frames are shown, as the driver last said, and the last verdict.
     pacing_setup: PacingSetup,
     pacing_last: Pacing,
+    /// This frame's waits named inside `untimed` ([`Self::record_wait`]), so
+    /// the rest of it can be told apart.
+    waits_frame: f32,
+    /// What the frame's unnamed `untimed` was, when the driver knows only
+    /// that something happened in it ([`Self::name_untimed_rest`]).
+    untimed_rest: Option<&'static str>,
 }
 
 /// What the script mirror did over one frame.
@@ -640,7 +649,19 @@ impl FrameProfile {
             return;
         }
         *self.frame.entry(Bucket::Other).or_default() += ms;
+        self.waits_frame += ms;
         self.record_part(what, ms);
+    }
+
+    /// Name the rest of this frame's `untimed`, what no wait named, as
+    /// `what`: for an event the driver learns of only after it happened,
+    /// such as the GPU running out of memory, where the failing call was
+    /// slow but nothing timed it. Takes effect when the frame ends; the
+    /// frame's untimed total is unchanged, and its waits keep their names.
+    pub fn name_untimed_rest(&mut self, what: &'static str) {
+        if self.on {
+            self.untimed_rest = Some(what);
+        }
     }
 
     /// Every bucket's total for the frame in progress added up. Read it
@@ -902,6 +923,17 @@ impl FrameProfile {
         self.decal_counts
     }
 
+    /// This frame's marks asked whether their ground moved, and marks laid
+    /// again, once a frame whether or not any were.
+    pub fn set_decal_relay_counts(&mut self, checked: u32, relaid: u32) {
+        self.decal_relay_counts = (checked, relaid);
+    }
+
+    /// `(checked, relaid)`, as of the last frame.
+    pub fn decal_relay_counts(&self) -> (u32, u32) {
+        self.decal_relay_counts
+    }
+
     /// Say whether the game has fallen behind real time.
     pub fn set_overloaded(&mut self, on: bool) {
         self.overloaded = on;
@@ -966,7 +998,9 @@ impl FrameProfile {
         let last_end = self.last_end.replace(now);
         let between = last_end.map(|t| (now - t).as_secs_f32() * 1000.0);
         let began = self.began.take();
+        let untimed_rest = self.untimed_rest.take();
         if !self.on {
+            self.waits_frame = 0.0;
             self.mirror_frame = MirrorWork::default();
             self.rays_frame = (0, 0.0);
             self.sweeps_frame = (0, 0.0);
@@ -985,6 +1019,13 @@ impl FrameProfile {
             let rest = between - self.frame_measured();
             if rest > 0.0 {
                 *self.frame.entry(Bucket::Other).or_insert(0.0) += rest;
+            }
+        }
+        let waits = std::mem::take(&mut self.waits_frame);
+        if let Some(what) = untimed_rest {
+            let unnamed = self.frame.get(&Bucket::Other).copied().unwrap_or(0.0) - waits;
+            if unnamed > 0.0 {
+                self.record_part(what, unnamed);
             }
         }
         self.mirror_last = std::mem::take(&mut self.mirror_frame);
@@ -1615,6 +1656,31 @@ mod frame_record_tests {
         }
         assert_eq!(list.len(), MAX_SAMPLE_LINES);
         assert_eq!(list.last().unwrap().script, "(other)");
+    }
+
+    /// **The rest of a frame's `untimed` can be named after the fact.** The
+    /// driver learns the GPU ran out of memory only once the failing call has
+    /// returned, so it names what no wait named: the part is the untimed time
+    /// less the named waits, those keep their own names, and the next frame
+    /// is not named unless asked again.
+    #[test]
+    fn the_rest_of_untimed_is_named_when_asked() {
+        let mut p = FrameProfile::default();
+        p.enable(true);
+        p.end_frame();
+        p.record(Bucket::Render, 5.0);
+        p.record_wait("sceneLoad", 10.0);
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        p.name_untimed_rest("gpuOutOfMemory");
+        p.end_frame();
+        let r = p.recent_frames(1).next().unwrap().clone();
+        let (untimed, oom) = (r.bucket(Bucket::Other), r.part("gpuOutOfMemory"));
+        assert!(oom >= 20.0, "slept 40 ms with 15 accounted, named {oom:.2}: {r:?}");
+        assert!((oom - (untimed - 10.0)).abs() < 0.01, "untimed {untimed:.2}, named {oom:.2}: {r:?}");
+        assert_eq!(r.part("sceneLoad"), 10.0, "the wait lost its name");
+        p.end_frame();
+        let next = p.recent_frames(1).next().unwrap();
+        assert!(!next.parts.iter().any(|(n, _)| *n == "gpuOutOfMemory"), "the next frame was named too: {next:?}");
     }
 
     /// **What held a frame.** Mostly waiting, about one refresh: the display.

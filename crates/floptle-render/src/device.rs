@@ -7,7 +7,7 @@
 //! live window, and a battle-tested implementation already exists in
 //! `crates/floptle-proof/src/main.rs` (wgpu 29) — Phase 1 lifts it here.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use winit::window::Window;
@@ -53,6 +53,18 @@ static GPU_TROUBLE: AtomicBool = AtomicBool::new(false);
 /// messages a frame that all say the one thing already said.
 static OUT_OF_MEMORY: AtomicBool = AtomicBool::new(false);
 
+/// How many times the GPU has said it is out of memory since the process
+/// started. A frame that sees it move had an allocation fail somewhere in
+/// it, which the profiler names: the failing call is slow (the driver tries
+/// to make room first) and lands in no bucket. One relaxed load a frame.
+static OUT_OF_MEMORY_EVENTS: AtomicU64 = AtomicU64::new(0);
+
+/// [`OUT_OF_MEMORY_EVENTS`]: how many out-of-memory errors the GPU has
+/// reported so far. Compared frame to frame.
+pub fn out_of_memory_events() -> u64 {
+    OUT_OF_MEMORY_EVENTS.load(Ordering::Relaxed)
+}
+
 /// [`GPU_TROUBLE`]: has anything gone wrong on the GPU yet?
 pub fn gpu_trouble() -> bool {
     GPU_TROUBLE.load(Ordering::Relaxed)
@@ -96,6 +108,7 @@ pub fn report_gpu_error(e: &wgpu::Error) {
     let follows_oom = !oom && OUT_OF_MEMORY.load(Ordering::Relaxed) && message.contains("is invalid");
     if oom {
         OUT_OF_MEMORY.store(true, Ordering::Relaxed);
+        OUT_OF_MEMORY_EVENTS.fetch_add(1, Ordering::Relaxed);
     }
     if let Ok(mut g) = GPU_ERRORS.lock() {
         let (queue, seen) = &mut *g;

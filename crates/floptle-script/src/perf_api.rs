@@ -360,6 +360,11 @@ pub fn install(lua: &Lua, profile: &SharedProfile, sampler: &Rc<Sampler>) -> mlu
             let (decals, decal_tris) = p.borrow().decal_counts();
             out.set("decals", decals)?;
             out.set("decalTris", decal_tris)?;
+            // Last frame's marks asked whether the ground under them moved
+            // (a dig or a chunk landing near them), and marks laid again.
+            let (checked, relaid) = p.borrow().decal_relay_counts();
+            out.set("decalsChecked", checked)?;
+            out.set("decalsRelaid", relaid)?;
             // Terrain edits refused because the queue was full, since the
             // start: zero for a game that paces with `terrain.capacity()`.
             out.set("terrainDropped", crate::terrain_api::dropped_count(lua))?;
@@ -682,6 +687,8 @@ mod tests {
         assert!(!lua.load("return perf.enabled()").eval::<bool>().unwrap());
         assert!(lua.load("return #perf.buckets()").eval::<i64>().unwrap() > 0);
         assert!(lua.load("return perf.counts().nodes").eval::<i64>().is_ok());
+        // The decal relay's counts are there while off too, zero with no marks.
+        assert_eq!(lua.load("return perf.counts().decalsChecked + perf.counts().decalsRelaid").eval::<i64>().unwrap(), 0);
     }
 
     /// A misspelled bucket names every accepted value.

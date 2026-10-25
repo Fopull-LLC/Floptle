@@ -688,7 +688,7 @@ const MOVING_BODY_ANCHORS: usize = 32;
 const PROMOTE_PER_JOB: usize = 4;
 /// The far-chunk scan walks every chunk of a planet; it runs every this many
 /// frames.
-const FAR_SCAN_FRAMES: u64 = 8;
+pub(crate) const FAR_SCAN_FRAMES: u64 = 8;
 /// Memory let go of goes back to the system at most this often.
 const TRIM_EVERY_SECS: f64 = 2.0;
 
@@ -2816,13 +2816,28 @@ impl Editor {
         // holding it and forgets the meshes that read it: a dig writes a few
         // voxels of one chunk, and copying that chunk's whole neighbourhood and
         // re-meshing every collision chunk next to it was most of a bite's frame.
-        let (copy, stale) = match t.field.take_changed() {
+        let voxel = t.field.voxel();
+        let (copy, stale, written) = match t.field.take_changed() {
             Some((lo, hi)) => {
                 let mut copy = t.field.chunks_holding(lo, hi);
                 copy.extend_from_slice(touched);
                 copy.sort_unstable();
                 copy.dedup();
-                (copy, t.field.chunks_reading(lo, hi, 1))
+                // The voxels written, as a box in the terrain's frame, a
+                // voxel more each side for the surface between them, and no
+                // wider than the chunks the edit touched: the record of
+                // what changed reaches back to whatever wrote the field
+                // before, a whole generated world the first time.
+                let at = |i: [i32; 3], k: f32| Vec3::new(i[0] as f32 + k, i[1] as f32 + k, i[2] as f32 + k) * voxel;
+                let side = floptle_field::CHUNK as f32 * voxel;
+                let corner = |c: &[i32; 3]| Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32) * side;
+                let (mut wlo, mut whi) = (at(lo, -1.0), at(hi, 2.0));
+                if !touched.is_empty() {
+                    let tlo = touched.iter().map(corner).fold(Vec3::splat(f32::MAX), Vec3::min) - Vec3::splat(voxel);
+                    let thi = touched.iter().map(corner).fold(Vec3::splat(f32::MIN), Vec3::max) + Vec3::splat(side + voxel);
+                    (wlo, whi) = (wlo.max(tlo), whi.min(thi));
+                }
+                (copy, t.field.chunks_reading(lo, hi, 1), (wlo, whi))
             }
             // No record of the write: every chunk touched and its neighbours.
             None => {
@@ -2838,7 +2853,11 @@ impl Editor {
                 }
                 region.sort_unstable();
                 region.dedup();
-                (region.clone(), region)
+                let side = floptle_field::CHUNK as f32 * voxel;
+                let corner = |c: &[i32; 3]| Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32) * side;
+                let lo = region.iter().map(corner).fold(Vec3::splat(f32::MAX), Vec3::min);
+                let hi = region.iter().map(corner).fold(Vec3::splat(f32::MIN), Vec3::max) + Vec3::splat(side);
+                (region.clone(), region, (lo, hi))
             }
         };
         let t = &self.terrains[&e];
@@ -2885,6 +2904,61 @@ impl Editor {
                 }
             }
         }
+        // The marks over what was written are told the box, not the chunks.
+        self.decals_note_dug(e, written.0, written.1);
+    }
+
+    /// Every terrain chunk a worker is making again right now, by node.
+    pub(crate) fn chunks_being_made(&self) -> impl Iterator<Item = (Entity, [i32; 3])> + '_ {
+        self.terrain_promotions.iter().flat_map(|j| j.coords.iter().map(move |&c| (j.e, c)))
+    }
+
+    /// Are the collision meshes of the terrain under a ball at `pos` (world),
+    /// `reach` metres across, all built? The ones no query has built yet are
+    /// handed to the collision worker, as a dig's are, and land within
+    /// [`COLLISION_MESH_FRAMES`]; until then this is false. The worker
+    /// gathers their voxels too, from a copy of the field that shares its
+    /// chunks. For work that can wait a frame or two, such as laying a mark
+    /// again: a query reaching a chunk nobody meshed meshes it whole on the
+    /// spot, tens of milliseconds.
+    pub(crate) fn collision_meshed_under(&mut self, pos: DVec3, reach: f64) -> bool {
+        let Some(sim) = self.sim.as_ref() else { return true };
+        let mut want: Vec<(Entity, [i32; 3])> = Vec::new();
+        for (&e, t) in &self.terrains {
+            let Some(col) = sim.world.colliders.iter().find(|c| c.eid == Some(e.index())).and_then(|c| c.shape.chunk_terrain()) else {
+                continue;
+            };
+            let (anchor, rot, ts) = self.terrain_world_frame_of(e);
+            let local = (rot.inverse() * (pos - anchor).as_vec3()) / ts;
+            let r = Vec3::splat(reach as f32 / ts);
+            for c in t.field.chunks_in_world_box(local - r, local + r) {
+                // Only a chunk holding data has a surface to mesh.
+                if t.field.has_data(c) && !col.is_meshed(c) {
+                    want.push((e, c));
+                }
+            }
+        }
+        let mut ready = true;
+        let mut snaps: HashMap<Entity, std::sync::Arc<floptle_field::ChunkField>> = HashMap::new();
+        for (e, c) in want {
+            ready = false;
+            if self.collision_pending.contains_key(&(e, c)) {
+                continue;
+            }
+            let t = &self.terrains[&e];
+            let worker = self.collision_worker.get_or_insert_with(TerrainWorker::spawn);
+            self.terrain_epoch += 1;
+            self.collision_pending.insert((e, c), (self.terrain_epoch, self.collision_frame + COLLISION_MESH_FRAMES));
+            worker.send(RemeshJob {
+                entity: e,
+                coord: c,
+                lod: 0,
+                epoch: self.terrain_epoch,
+                scratch: JobScratch::Field(snaps.entry(e).or_insert_with(|| std::sync::Arc::new(t.field.clone())).clone(), 1),
+                collision: Some(t.field.voxel()),
+            });
+        }
+        ready
     }
 
     /// Hand the terrain colliders the collision meshes the worker has built,
@@ -2917,6 +2991,12 @@ impl Editor {
                     (self.sim.as_mut().and_then(|s| s.terrain_collider_mut_at(done.entity.index(), &[done.coord])), done.collision)
                 {
                     collider.adopt(done.coord, built);
+                }
+                // The marks over it were told of the edit that stales it, and
+                // wait for this mesh before they ask about their ground (the
+                // decals' `decals_note_terrain_edit`, borrowing apart).
+                if let Some(sim) = self.sim.as_ref() {
+                    self.decal_batches.handled.insert(sim.world.level_edits);
                 }
             }
             let due = self.collision_pending.values().any(|p| p.1 <= frame);
@@ -3493,11 +3573,15 @@ impl Editor {
             let Some(t) = self.terrains.get_mut(&e) else { continue };
             let coords: Vec<[i32; 3]> = made.iter().map(|(c, _)| *c).collect();
             let region = t.field.adopt_generated(made);
-            if let Some(col) = self.sim.as_mut().and_then(|s| s.terrain_collider_mut(e.index())) {
+            // Recorded as the chunks made, not "anywhere": what rests on the
+            // ground elsewhere is not disturbed by it, and a mark laid on
+            // the exact ground these chunks bring back is not laid again.
+            if let Some(col) = self.sim.as_mut().and_then(|s| s.terrain_collider_mut_at(e.index(), &coords)) {
                 col.field.copy_chunks_from(&t.field, &coords);
                 col.invalidate_meshes(&region);
             }
             self.terrain_chunks_dirty.entry(e).or_default().extend(region);
+            self.decals_note_landed(e, coords);
         }
 
         self.prepare_asked_ground();
@@ -3588,10 +3672,11 @@ impl Editor {
             // The sim's copy and Play's snapshot share these chunks: put away
             // there too, or nothing is freed.
             let coords: Vec<[i32; 3]> = evicted.iter().map(|v| v.coord()).collect();
-            if let Some(col) = self.sim.as_mut().and_then(|s| s.terrain_collider_mut(e.index())) {
+            if let Some(col) = self.sim.as_mut().and_then(|s| s.terrain_collider_mut_at(e.index(), &coords)) {
                 col.field.apply_evictions(&evicted);
                 col.invalidate_meshes(&coords);
             }
+            self.decals_note_evicted(e, &coords);
             if let (Some(Matter::Terrain { id, .. }), Some((fields, _))) = (self.world.get::<Matter>(e), self.play_terrains.as_mut())
                 && let Some((_, f)) = fields.iter_mut().find(|(i, _)| i == id)
             {
@@ -3688,6 +3773,24 @@ impl Editor {
         self.script_host.set_terrain_busy(busy);
         let unmade = self.terrain_unmade_regions();
         self.script_host.set_terrain_unmade(unmade);
+        let in_use = self.terrain_save_slot_in_use();
+        self.script_host.set_terrain_save_dir_in_use(in_use);
+    }
+
+    /// Could anything still read or write the save slot? A terrain body in the
+    /// world (resident or put away: streaming reads the slot first and writes
+    /// edits back), or a checkpoint still being written. `terrain.deleteSaveDir`
+    /// refuses the active slot only while this holds, so a game back at its
+    /// menu can delete the save it just left.
+    ///
+    /// Asked whether or not a slot is set, because a game may set one and
+    /// delete another in the same pass. The world is scanned only when no
+    /// field is resident, and stops at the first terrain body.
+    pub(crate) fn terrain_save_slot_in_use(&self) -> bool {
+        !self.terrains.is_empty()
+            || self.terrain_save_job.is_some()
+            || !self.terrain_flush_queue.is_empty()
+            || self.world.query::<Matter>().any(|(_, m)| matches!(m, Matter::Terrain { .. }))
     }
 
     /// The ground the world has not made yet, for `terrain.ready` and

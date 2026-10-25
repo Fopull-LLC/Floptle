@@ -183,8 +183,11 @@ fn play_for(
         // Render targets before captures, in the frame loop's order: a capture
         // of a screen wearing `rt:<name>` shows that camera's picture.
         ed.update_render_targets(ed.play_t);
-        // `camera.capture` asked for in a shot is answered like in a game.
+        // `camera.capture` asked for in a shot is answered like in a game,
+        // on the next step: the loop has no wall clock, so it waits for the
+        // readback as it waits for the terrain workers.
         ed.pump_captures();
+        ed.wait_for_captures(deadline);
         ed.drain_script_logs();
         // Fold the step into the profiler's history, as `run` does: without
         // it every `perf` reading in a shot was "no frame has completed yet",

@@ -1130,7 +1130,7 @@ pub(crate) const VERBS: &[Verb] = &[
         detail: "Scans every script for the two things that differ between `script_vec3: Exact` \
                  and `Fast`: a vec3 component being assigned, which raises in `fast` \
                  because a native vector is immutable, and a `type()` asked about a vec3, which \
-                 answers \"vector\" there instead of \"userdata\" and so silently takes the \
+                 answers \"vector\" there instead of \"table\" and so silently takes the \
                  other branch. Everything else about the two is identical. This is a textual \
                  scan and not a type checker: it finds the common shapes and says so rather \
                  than implying it found them all.",

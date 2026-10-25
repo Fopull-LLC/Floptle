@@ -1303,6 +1303,8 @@ impl Editor {
             // The first `start` asks `terrain.ready` before any frame has
             // pumped the streamer: it must already know which ground is cold.
             self.publish_terrain_busy();
+            // …and `perf.pacing()` how frames are shown.
+            self.publish_pacing_setup();
         }
     }
 
@@ -1585,6 +1587,10 @@ impl Editor {
         self.vfx.start_play(&self.world);
         self.audio_start_play();
         part(self, "sceneAudio");
+        // The incoming scene's `start` asks about the world it is in, not the
+        // one it replaced: which ground is cold, and whether the save slot is
+        // still in use.
+        self.publish_terrain_busy();
         self.console.push(
             floptle_script::LogLevel::Debug,
             format!("⏵ scene → {}", self.scene_name),

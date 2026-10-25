@@ -697,10 +697,17 @@ terrain.deleteSaveDir("saves/slot2/terrain")  -- that slot's persisted terrain
 
 `save.deleteSlot` on the *active* slot also empties the in-memory store, so
 the slot is instantly reusable as a fresh save. `terrain.deleteSaveDir` is
-deliberately narrow — relative path, no `..`, never the active `saveDir`, and
-it only removes terrain files (`.cfield`/`.tfield`/`.meta`) from that one
-directory (tidying emptied directories after) — a save-management UI can call
-it without any chance of eating unrelated files.
+deliberately narrow — relative path, no `..`, and it only removes terrain
+files (`.cfield`/`.tfield`/`.meta`) from that one directory (tidying emptied
+directories after) — a save-management UI can call it without any chance of
+eating unrelated files.
+
+`terrain.saveDir` is kept across `scene.load`, so a menu can set it before it
+loads the world. When the game leaves its world for a menu, the slot it played
+is still the active one, but with no terrain in the menu nothing uses it, so
+`terrain.deleteSaveDir` deletes it there and releases it (`terrain.saveDir()`
+then reads nil). Inside a scene whose terrain still streams from the slot it is
+refused, and the error says to release it first with `terrain.saveDir("")`.
 
 **The full player flow** (the solar demo implements this — `menu.ron` +
 `game_manager.lua` are the reference):

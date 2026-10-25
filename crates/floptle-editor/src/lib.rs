@@ -3777,6 +3777,9 @@ struct Editor {
     /// The display's refresh period, seconds (0 = unknown) — dt snaps to whole
     /// multiples of it so scheduler noise never reaches the simulation clock.
     refresh_period: f32,
+    /// The GPU's out-of-memory count as of the last frame's end: a frame that
+    /// sees it move names its unnamed `untimed` as `gpuOutOfMemory`.
+    gpu_oom_seen: u64,
     /// Frames until the refresh rate is re-queried (the window can change monitors).
     refresh_poll: u32,
     /// Banked (raw − snapped) dt, folded back ≤0.25 ms/frame — keeps long-term

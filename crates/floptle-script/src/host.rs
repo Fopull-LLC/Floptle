@@ -3227,6 +3227,9 @@ impl ScriptHost {
         let terrain_edit_budget: Rc<std::cell::Cell<Option<f64>>> = Rc::default();
         let terrain_flush: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
         let terrain_busy: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
+        // Until the engine says otherwise, the slot counts as in use: a host
+        // that never publishes keeps the old, cautious refusal.
+        let terrain_save_dir_in_use: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(true));
         let terrain_yields: Rc<RefCell<Vec<crate::terrain_api::TerrainYield>>> =
             Rc::new(RefCell::new(Vec::new()));
         let terrain_op_id: Rc<std::cell::Cell<u64>> = Rc::new(std::cell::Cell::new(0));
@@ -3250,6 +3253,7 @@ impl ScriptHost {
                 warm: terrain_warm.clone(),
                 flush: terrain_flush.clone(),
                 busy: terrain_busy.clone(),
+                save_dir_in_use: terrain_save_dir_in_use.clone(),
                 unmade: terrain_unmade.clone(),
                 prepare: terrain_prepare.clone(),
                 paths: paths.clone(),
@@ -3448,6 +3452,7 @@ impl ScriptHost {
             terrain_edit_budget,
             terrain_flush,
             terrain_busy,
+            terrain_save_dir_in_use,
             terrain_unmade,
             terrain_dropped,
             terrain_prepare,
@@ -4861,6 +4866,15 @@ impl ScriptHost {
         *self.terrain_save_dir.borrow_mut() = None;
     }
 
+    /// Is the save slot still in use: a terrain body in the world that could
+    /// stream from it or into it, or a checkpoint still writing? Published each
+    /// frame beside [`Self::set_terrain_busy`]. While it is not (a menu scene
+    /// the game left its world for), `terrain.deleteSaveDir` may delete the
+    /// active slot, and releases it.
+    pub fn set_terrain_save_dir_in_use(&self, on: bool) {
+        self.terrain_save_dir_in_use.set(on);
+    }
+
     /// Drain this frame's `terrain.warm(name)` requests — body names whose
     /// terrain must be resident regardless of gameplay-anchor distance
     /// (immediate mode: callers re-warm every frame, e.g. the map's focus).
@@ -5235,8 +5249,15 @@ impl ScriptHost {
     /// incremental path only ever inserts — it cannot correct a `parent` that
     /// changed. A split is one event when a vessel comes apart, not one per node
     /// of a level being built, so the cost is in the right place.
+    ///
+    /// The callback is an entry into Lua of its own, armed like every other:
+    /// the pass budget bounds it, and the script sampler's clock starts at
+    /// its first line. Unarmed, it ran on as part of the pass before it, and
+    /// the split's own engine work (tens of ms on a big craft) was charged to
+    /// the callback's first line.
     pub fn call_resync_callback(&mut self, world: &mut World, cb: mlua::RegistryKey, eid: u32) {
         self.sync_scene(world);
+        let _budget = self.budget.arm();
         let Ok(f) = self.lua.registry_value::<mlua::Function>(&cb) else { return };
         let Ok(node) = new_node_handle(&self.lua, eid) else { return };
         if let Err(err) = f.call::<()>(node) {
@@ -9058,8 +9079,16 @@ impl ScriptHost {
         // Past the memory limit: what the script was holding is unreachable
         // now that its call has unwound, so collect it here, outside Lua, or
         // every script after it trips the same limit on the same garbage.
+        //
+        // Named as a part: collecting a heap at the limit is a full sweep of
+        // half a gigabyte, the better part of a second, and a frame that paid
+        // for it should say so.
         if msg.contains("not enough memory") {
+            let t = floptle_core::profile::Span::new();
             self.lua.gc_collect().ok();
+            if let Ok(mut p) = self.profile.try_borrow_mut() {
+                p.record_part("scriptOutOfMemory", t.ms());
+            }
         }
         let mut msg = self.explain_runtime(name, msg);
         // Past the budget: the pass is abandoned and the script runs again
@@ -10168,10 +10197,15 @@ mod host_tests {
         floptle_vfs::write(dir.join("scripts/after.lua"), "function update() print('still here') end\n").unwrap();
         let mut world = world_with_script("hog");
         let mut host = ScriptHost::new();
+        host.profile().borrow_mut().enable(true);
         host.set_playing(true);
         host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 0.0);
         let errors = host.errors().join("\n");
         assert!(errors.to_lowercase().contains("not enough memory"), "the limit is not named:\n{errors}");
+        // The collection after it is named, so the frame says what it paid for.
+        host.profile().borrow_mut().end_frame();
+        let parts = host.profile().borrow().last_parts().to_vec();
+        assert!(parts.iter().any(|(p, _)| *p == "scriptOutOfMemory"), "the collection was not named: {parts:?}");
         // Afterwards: a fresh script on a fresh node runs and prints.
         let mut world = world_with_script("after");
         host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 0.0);
@@ -10211,6 +10245,48 @@ mod host_tests {
         let again: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
         assert_eq!(again.len(), MAX_CONSOLE_LINES_PER_FRAME + 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A split's callback starts the sampler's clock afresh.** The engine
+    /// does an `assembly.split` after the pass, then calls back into Lua. The
+    /// callback was not armed as an entry of its own, so the sampler took it
+    /// for more of the pass before it and charged everything since that
+    /// pass's last sample, the split's engine work included (24 ms on a
+    /// 1,000-part craft), to the callback's first line. Here 20 ms of engine
+    /// work sits between a sampled pass and a callback whose body is a short
+    /// loop.
+    #[test]
+    fn a_resync_callback_starts_the_sampler_clock_afresh() {
+        let mut host = ScriptHost::new();
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, floptle_core::transform::Transform::IDENTITY);
+        host.profile().borrow_mut().enable(true);
+        // The callback, made by the pass that asks for the split.
+        let f: mlua::Function = host
+            .lua
+            .load("return function(n)\n  local x = 0\n  for i = 1, 2000 do x = x + i end\nend\n")
+            .set_name("=split_cb")
+            .eval()
+            .unwrap();
+        let key = host.lua.create_registry_value(f).unwrap();
+        {
+            let _pass = host.budget.arm();
+            host.lua
+                .load("perf.sampleScripts(true, 0.05)\nlocal x = 0\nfor i = 1, 200000 do x = x + i end\n")
+                .set_name("=pass")
+                .exec()
+                .unwrap();
+        }
+        // The split: engine work, on this thread, between the two.
+        let t = floptle_core::time::Instant::now();
+        while t.elapsed().as_secs_f32() < 0.02 {}
+        host.call_resync_callback(&mut world, key, e.index());
+        host.profile().borrow_mut().end_frame();
+        let samples = host.profile().borrow_mut().take_samples();
+        let cb: f32 = samples.iter().filter(|s| s.script == "split_cb").map(|s| s.ms).sum();
+        assert!(samples.iter().any(|s| s.script == "pass"), "the pass was never sampled: {samples:?}");
+        assert!(cb < 10.0, "the callback was charged {cb:.2} ms for a short loop after 20 ms of engine work: {samples:?}");
     }
 
     /// **`terrain.saveDir` is a directory the engine writes into**, so it is

@@ -90,6 +90,29 @@ impl Editor {
         }
     }
 
+    /// A frame in which the GPU ran out of memory (`events`, the count so
+    /// far, moved since the last frame) names the untimed time nobody else
+    /// named as `gpuOutOfMemory`. The allocation that failed is slow, because
+    /// the driver tries to make room first, and it happens wherever the
+    /// texture or buffer was made, often outside every bucket; the error
+    /// arrives after. A count compared once a frame, so a normal frame pays a
+    /// load and a compare.
+    pub(crate) fn name_gpu_out_of_memory(&mut self, events: u64) {
+        if events != self.gpu_oom_seen {
+            self.gpu_oom_seen = events;
+            self.script_host.profile().borrow_mut().name_untimed_rest("gpuOutOfMemory");
+        }
+    }
+
+    /// Say how frames reach the display before anything asks: at Play's start
+    /// and at the top of every frame, so `perf.pacing()` in the first `start`
+    /// already names the present mode, the refresh and the cap. Read only at
+    /// a frame's end, the first frame answered `none` with a refresh of 0.
+    /// A few field copies; done whether or not anyone is profiling.
+    pub(crate) fn publish_pacing_setup(&self) {
+        self.script_host.profile().borrow_mut().set_pacing_setup(self.pacing_setup());
+    }
+
     /// Run `f` and name its wall time, net of any bucket recorded inside it,
     /// as `what` inside `untimed`: work between the buckets that a slow frame
     /// should still be able to name (a scene loading, the sim rebuilt).
@@ -118,11 +141,10 @@ impl Editor {
     /// [`Self::MIRROR_CHURN_FRAMES`]: a cost in proportion to the whole scene
     /// that nothing else names unless the game asks `perf.mirrorCause()`.
     pub(crate) fn end_profile_frame(&mut self) {
+        self.name_gpu_out_of_memory(floptle_render::out_of_memory_events());
         let (streak, cause) = {
             let mut p = self.script_host.profile().borrow_mut();
-            if p.enabled() {
-                p.set_pacing_setup(self.pacing_setup());
-            }
+            p.set_pacing_setup(self.pacing_setup());
             p.end_frame();
             (p.mirror_rebuild_streak(), p.mirror_cause().map(str::to_string))
         };

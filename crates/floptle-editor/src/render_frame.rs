@@ -122,6 +122,7 @@ impl Editor {
         // The frame's own work starts here; the time before it, back to the
         // last frame's end, was the window system and the OS.
         self.script_host.profile().borrow_mut().begin_frame();
+        self.publish_pacing_setup();
         self.pace_frame();
         // A held selection the world has emptied — the node deleted, the scene
         // switched — releases here, before anything draws. The lock's only

@@ -490,6 +490,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **`perf.pacing()` in the first `start` knows how frames are shown.**
+    /// The setup was read only at a frame's end, so before the first frame
+    /// finished it answered `none` with a refresh of 0 on a 60 Hz display.
+    /// The verdict (`frameMs`, `limitedBy`) still waits for a finished frame,
+    /// and `frames` says how many there have been.
+    #[test]
+    fn pacing_on_the_first_frame_knows_the_display() {
+        let dir = std::env::temp_dir().join(format!("floptle-app-pacing-{}", std::process::id()));
+        settings_project(
+            &dir,
+            "function start(node)\n  perf.enable(true)\n  local p = perf.pacing()\n  \
+             print(string.format('PACE %d %d %s', math.floor(p.refreshHz + 0.5), p.frames, p.presentMode))\nend\n",
+        );
+        let mut ed = crate::Editor::default();
+        ed.open_project(dir.clone());
+        // A 60 Hz display, as a windowed run reads it before Play.
+        ed.refresh_period = 1.0 / 60.0;
+        ed.toggle_play();
+        ed.play_step(1.0 / 60.0, true);
+        ed.drain_script_logs();
+        let said: Vec<&str> = ed.console.entries.iter().map(|e| e.msg.as_str()).filter(|m| m.starts_with("PACE")).collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(said, vec!["PACE 60 0 none"], "the first frame's pacing");
+    }
+
     /// In the editor, `app.quit()` stops Play. It must not be a process exit:
     /// closing the editor because a game under test called quit would take an
     /// afternoon's unsaved work with it.
