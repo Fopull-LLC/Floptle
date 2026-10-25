@@ -630,6 +630,8 @@ impl Editor {
                     parts: c.shapes.iter().map(|s| s.id as u32).collect(),
                     rot: [c.orient.x, c.orient.y, c.orient.z, c.orient.w],
                     carry: self.tick_carry.get(&eid).copied().unwrap_or([0.0; 3]),
+                    asleep: c.asleep,
+                    wake: c.wake.name(),
                 },
             );
         }

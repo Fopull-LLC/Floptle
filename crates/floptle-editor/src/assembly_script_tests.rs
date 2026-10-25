@@ -2321,3 +2321,88 @@ end
     assert!(!lines(&mut ed, "R").is_empty(), "one ask on a world moving {per_frame:.1} m a frame never made the box it asked for ready");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A craft parked on a pad on a planet carried on its rails at 350 m/s
+/// sleeps as it would on still ground: asleep within three seconds, and
+/// from then on it stands on the very spot on its pad, to the bit, while the
+/// planet carries it ten kilometres. Carried by shifting it after its pad
+/// each tick, its place on the pad was rounded afresh every tick and it
+/// crept over it. Pushed, it wakes, and `assembly.info` and `node.wake` say
+/// it was a force.
+#[test]
+fn a_craft_parked_on_a_planet_on_its_rails_sleeps_on_the_spot() {
+    let (mut ed, dir) = project(
+        "railsleep",
+        r#"
+local n = 0
+function fixedUpdate(node, dt)
+  n = n + 1
+  local ship = find("Ship")
+  if not ship then return end
+  if n == 1800 then assembly.force(ship, vec3(0, 0, 4000)) end
+  if n == 1801 then log("WAKE " .. tostring(assembly.info(ship).asleep) .. " " .. assembly.info(ship).wake .. " " .. ship.wake) end
+end
+"#,
+    );
+    // 350 m/s on its rails: v = sqrt(mu / a).
+    let star = ed.world.query::<Name>().find(|(_, n)| n.0 == "Star").map(|(e, _)| e).unwrap();
+    ed.world.get_mut::<CelestialBody>(star).unwrap().mu = 350.0f64 * 350.0 * 1000.0;
+    let planet = ed.world.spawn();
+    ed.world.insert(planet, Transform::IDENTITY);
+    ed.world.insert(planet, Name("Planet".into()));
+    ed.world.insert(planet, Matter::Empty);
+    ed.world.insert(planet, CelestialBody { mu: 9.8 * 2500.0, body_radius: 50.0, soi: 2000.0, parent: "Star".into(), a: 1000.0, ..Default::default() });
+    ed.toggle_play();
+    run(&mut ed, 1);
+    let p = floptle_core::world_transform(&ed.world, planet).translation;
+    ed.toggle_play();
+    ed.world.get_mut::<Transform>(planet).unwrap().translation = p;
+    let pad = ed.world.spawn();
+    ed.world.insert(pad, Transform::from_translation(DVec3::new(0.0, 49.0, 0.0)));
+    ed.world.insert(pad, Name("Pad".into()));
+    ed.world.insert(pad, Matter::Empty);
+    ed.world.insert(pad, floptle_core::Parent(planet));
+    ed.world.insert(pad, RigidBody { kind: BodyKind::Box, mode: floptle_core::BodyMode::Static, half_extents: [10.0, 1.0, 10.0], ..Default::default() });
+    let ship = vessel_node(&mut ed, "Ship", p + DVec3::new(0.0, 50.52, 0.0), [1.5, 0.5, 1.0], 400.0);
+    // The camera rides the planet beside the craft, as a chase camera does.
+    let cam = ed.world.query::<Name>().find(|(_, n)| n.0 == "Camera").map(|(e, _)| e).unwrap();
+    ed.world.insert(cam, floptle_core::Parent(planet));
+    ed.world.get_mut::<Transform>(cam).unwrap().translation = DVec3::new(12.0, 53.0, 8.0);
+    ed.toggle_play();
+    // Where the craft stands on its pad, the sim's own numbers.
+    let on_pad = |ed: &crate::Editor| {
+        let sim = ed.sim.as_ref().unwrap();
+        let pad = sim.world.colliders().iter().find(|c| c.eid == Some(pad.index())).expect("the pad's collider").offset();
+        let c = sim.compound_of(ship.index()).expect("the craft's compound");
+        (c.asleep, (c.pos - pad).to_array().map(f32::to_bits), c.orient.to_array().map(f32::to_bits))
+    };
+    let mut was = floptle_core::world_transform(&ed.world, planet).translation;
+    let mut carried = 0.0;
+    let mut asleep_at = None;
+    let mut spot = None;
+    for frame in 0..1790 {
+        ed.play_step(1.0 / 60.0, true);
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        let now = floptle_core::world_transform(&ed.world, planet).translation;
+        carried += now.distance(was);
+        was = now;
+        let (asleep, at, turned) = on_pad(&ed);
+        match asleep_at {
+            None if asleep => {
+                asleep_at = Some(frame);
+                spot = Some((at, turned));
+            }
+            Some(k) => {
+                assert!(asleep, "it woke at frame {frame}, asleep from frame {k}");
+                assert_eq!(Some((at, turned)), spot, "asleep since frame {k}, it moved on its pad by frame {frame}");
+            }
+            None => {}
+        }
+    }
+    assert!(carried > 9000.0, "the planet should have carried it ten kilometres: {carried} m");
+    let k = asleep_at.expect("parked on a planet on its rails, the craft never fell asleep");
+    assert!(k < 180, "parked on a planet on its rails, the craft fell asleep only at frame {k}");
+    run(&mut ed, 15);
+    assert_eq!(lines(&mut ed, "WAKE"), ["false force force".to_string()]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

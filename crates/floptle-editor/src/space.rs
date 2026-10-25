@@ -127,6 +127,10 @@ impl Editor {
         // Filled below for whatever this tick carries; nothing moved, nothing
         // carried.
         self.tick_carry.clear();
+        // Where the floating origin's focus is before anything moves: the
+        // sim's frame rides the frame it is in (see the carry below).
+        let focus = floptle_core::active_camera(&self.world)
+            .map(|e| floptle_core::world_transform(&self.world, e).translation);
         let cb: Vec<(Entity, CelestialBody)> = self
             .world
             .query::<CelestialBody>()
@@ -201,6 +205,10 @@ impl Editor {
         // from its rails.
         let first_tick = !cb.iter().any(|(e, _)| self.space_rails_prev.contains_key(e));
         let mut rails_now = std::collections::HashMap::with_capacity(cb.len());
+        // Terrain colliders to put where their celestial is now: (celestial
+        // index, entity, world anchor). Placed with the carry below, so the
+        // one the sim's frame rides keeps its exact place in it.
+        let mut terrain_moves = Vec::new();
         for (i, (e, b)) in cb.iter().enumerate() {
             let (sp, sv) = sys.body_pos_vel(i, t);
             let wp = root_pos + sp;
@@ -223,10 +231,8 @@ impl Editor {
                 }
             }
             // An orbiting planet's terrain collider must ride along.
-            if self.terrains.contains_key(e)
-                && let Some(sim) = self.sim.as_mut()
-            {
-                sim.set_collider_anchor(e.index(), wp);
+            if self.terrains.contains_key(e) {
+                terrain_moves.push((i, e.index(), wp));
             }
             bodies.push(floptle_script::SpaceBodyInfo {
                 name: names[i].clone(),
@@ -261,13 +267,77 @@ impl Editor {
             self.space_coast.clear();
         }
         let lod_anchor = self.lod_anchor_world();
+        // Surface structures ride their planet: a Static-bodied node parented
+        // (at any depth) under a celestial follows it visually through the
+        // transform hierarchy for free, but its baked collider blob would stay
+        // behind in space. Each moves by its celestial's rails delta, so a
+        // launchpad on an orbiting world stays exactly as solid as the
+        // terrain it stands on.
+        let carried: Vec<(Entity, usize)> = self
+            .world
+            .query::<floptle_core::RigidBody>()
+            .filter(|(_, rb)| rb.mode == floptle_core::BodyMode::Static)
+            .filter_map(|(e, _)| {
+                let mut cur = e;
+                for _ in 0..64 {
+                    let floptle_core::Parent(p) =
+                        self.world.get::<floptle_core::Parent>(cur).copied()?;
+                    if let Some(j) = cb.iter().position(|(ce, _)| *ce == p) {
+                        return Some((e, j));
+                    }
+                    cur = p;
+                }
+                None
+            })
+            .collect();
+        // The smallest sphere of influence holding `p` before this tick, by
+        // each celestial's old centre.
+        let dom_before = |p: DVec3| -> Option<usize> {
+            let mut dom: Option<(usize, f64)> = None;
+            for (i, sb) in sys.bodies.iter().enumerate() {
+                let old_center = DVec3::from(bodies[i].pos) - deltas[i];
+                if (p - old_center).length() <= sb.soi && dom.is_none_or(|(_, s)| sb.soi < s) {
+                    dom = Some((i, sb.soi));
+                }
+            }
+            dom.map(|(i, _)| i)
+        };
         if let Some(sim) = self.sim.as_mut() {
             let states: std::collections::HashMap<u32, (floptle_core::math::Vec3, bool)> = sim
                 .body_states()
                 .map(|r| (r.entity.index(), (r.vel, r.grounded)))
                 .collect();
+            // Where everything was before this tick moved it.
+            let body_pos = sim.body_positions();
+            let compound_pos = sim.compound_positions();
+            // The sim's frame rides the frame the floating origin's focus is
+            // in, exactly: the origin moves with that celestial and nothing
+            // in it moves in the sim at all. Shifting every body by the rails
+            // delta and re-anchoring its ground rounded both, a different way
+            // each tick, a few tenths of a millimetre kilometres out. The
+            // contact pass answered that with a few cm/s of push, and nothing
+            // on a moving world ever slept. It also carried the craft away
+            // from the origin at the planet's speed, kilometres out within
+            // seconds, where f32 steps are a quarter of a millimetre.
+            // Bodies in another frame move by the difference, those in none
+            // by `-ride`.
+            // With no camera, the frame the first craft or body is in.
+            let anchor = focus.or_else(|| compound_pos.first().map(|c| c.1)).or_else(|| body_pos.first().map(|b| b.1));
+            let ride_i = anchor.and_then(dom_before);
+            let ride = ride_i.map_or(DVec3::ZERO, |i| deltas[i]);
+            let mut riders: Vec<u32> = Vec::new();
+            if let Some(f) = ride_i {
+                riders.push(cb[f].0.index());
+                riders.extend(carried.iter().filter(|(_, j)| *j == f).map(|(e, _)| e.index()));
+            }
+            sim.ride_frame(ride, &riders);
+            for &(i, eid, wp) in &terrain_moves {
+                if Some(i) != ride_i {
+                    sim.set_collider_anchor(eid, wp);
+                }
+            }
             let t_old = t - tick_dt * self.space_warp;
-            for (eid, pos) in sim.body_positions() {
+            for (eid, pos) in body_pos {
                 let mut dom: Option<(usize, f64)> = None; // (index, soi)
                 for (i, sb) in sys.bodies.iter().enumerate() {
                     // Containment against the old center: `pos` is the body's
@@ -284,7 +354,13 @@ impl Editor {
                         dom = Some((i, sb.soi));
                     }
                 }
-                let Some((i, _)) = dom else { continue };
+                let Some((i, _)) = dom else {
+                    // In no frame: it stays where it is in the world.
+                    if ride != DVec3::ZERO {
+                        sim.shift_body(eid, -ride);
+                    }
+                    continue;
+                };
                 // `node.carry`: how far this tick moved the frame it rides in.
                 self.tick_carry.insert(eid, deltas[i].to_array());
                 let (mut vel, grounded) = states.get(&eid).copied().unwrap_or_default();
@@ -436,6 +512,10 @@ impl Editor {
                             ),
                             None,
                         );
+                        // Not carried this tick, as before the frame rode.
+                        if ride != DVec3::ZERO {
+                            sim.shift_body(eid, -ride);
+                        }
                         continue;
                     }
                     // Surface proximity kills warp (the KSP rule): a conic
@@ -450,14 +530,20 @@ impl Editor {
                             "time-warp dropped to 1× — surface proximity".into(),
                             None,
                         );
+                        if ride != DVec3::ZERO {
+                            sim.shift_body(eid, -ride);
+                        }
                         continue;
                     }
                     sim.set_body_position(eid, DVec3::from(bodies[fd].pos) + r2);
                     sim.set_body_velocity(eid, v2.as_vec3());
                 } else {
                     self.space_coast.remove(&eid);
-                    if deltas[i].length_squared() > 1e-18 {
-                        sim.shift_body(eid, deltas[i]);
+                    // The frame it rides in, less what the sim's frame rode:
+                    // nothing at all in the frame the sim rides.
+                    let d = deltas[i] - ride;
+                    if d.length_squared() > 1e-18 {
+                        sim.shift_body(eid, d);
                     }
                 }
             }
@@ -470,17 +556,13 @@ impl Editor {
             // velocity step; no warp coasting yet (v0 vessels fly realtime —
             // grounded compounds are contact-pinned, which is what makes
             // warping while parked safe, same as single bodies).
-            for (eid, pos) in sim.compound_positions() {
-                let mut dom: Option<(usize, f64)> = None;
-                for (i, sb) in sys.bodies.iter().enumerate() {
-                    let old_center = DVec3::from(bodies[i].pos) - deltas[i];
-                    if (pos - old_center).length() <= sb.soi
-                        && dom.is_none_or(|(_, s)| sb.soi < s)
-                    {
-                        dom = Some((i, sb.soi));
+            for (eid, pos) in compound_pos {
+                let Some(i) = dom_before(pos) else {
+                    if ride != DVec3::ZERO {
+                        sim.shift_compound(eid, -ride);
                     }
-                }
-                let Some((i, _)) = dom else { continue };
+                    continue;
+                };
                 // `node.carry`: how far this tick moved the frame it rides in.
                 self.tick_carry.insert(eid, deltas[i].to_array());
                 let dom_key = cb[i].0;
@@ -501,36 +583,17 @@ impl Editor {
                         None,
                     );
                 }
-                if deltas[i].length_squared() > 1e-18 {
-                    sim.shift_compound(eid, deltas[i]);
+                let d = deltas[i] - ride;
+                if d.length_squared() > 1e-18 {
+                    sim.shift_compound(eid, d);
                 }
             }
-            // surface structures ride their planet: a Static-bodied node
-            // parented (at any depth) under a celestial follows it visually
-            // through the transform hierarchy for free — but its baked
-            // collider blob would stay behind in space. Shift the colliders
-            // by the same rails delta so a launchpad on an orbiting world
-            // stays exactly as solid as the terrain it stands on.
-            let carried: Vec<(Entity, usize)> = self
-                .world
-                .query::<floptle_core::RigidBody>()
-                .filter(|(_, rb)| rb.mode == floptle_core::BodyMode::Static)
-                .filter_map(|(e, _)| {
-                    let mut cur = e;
-                    for _ in 0..64 {
-                        let floptle_core::Parent(p) =
-                            self.world.get::<floptle_core::Parent>(cur).copied()?;
-                        if let Some(j) = cb.iter().position(|(ce, _)| *ce == p) {
-                            return Some((e, j));
-                        }
-                        cur = p;
-                    }
-                    None
-                })
-                .collect();
-            for (e, j) in carried {
+            for &(e, j) in &carried {
                 if deltas[j].length_squared() > 1e-18 {
-                    sim.shift_statics_of(e.index(), deltas[j]);
+                    // The frame the sim rides carried its own already.
+                    if Some(j) != ride_i {
+                        sim.shift_statics_of(e.index(), deltas[j]);
+                    }
                     // Followed by script moves too: what the rails carried is
                     // not a move of the script's to carry again.
                     if let Some(b) = self.static_baked.borrow_mut().get_mut(&e.index()) {

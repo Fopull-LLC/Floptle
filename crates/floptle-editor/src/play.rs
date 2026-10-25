@@ -31,6 +31,7 @@ pub(crate) fn body_state(r: &floptle_physics::BodyReport) -> floptle_script::Bod
         ground_normal: r.ground_normal.map(|n| n.to_array()),
         wall_normal: r.wall_normal.map(|n| n.to_array()),
         asleep: r.asleep,
+        wake: r.wake.name(),
         spin: r.ang_vel.z.to_degrees(),
     }
 }

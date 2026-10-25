@@ -928,6 +928,7 @@ impl Editor {
                     ground_normal: None,
                     wall_normal: None,
                     asleep,
+                    wake: sim.compound_of(eid).map_or("settling", |c| c.wake.name()),
                     spin: 0.0,
                 },
             );

@@ -15,7 +15,7 @@ each group, and meant to be searched.
 ## Contents
 
 - [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 206
-- [node — transform & body fields](#node--transform--body-fields) — 43
+- [node — transform & body fields](#node--transform--body-fields) — 44
 - [node — methods & handles](#node--methods--handles) — 37
 - [vectors, directions & easing](#vectors-directions--easing) — 51
 - [scene lookups & raycast](#scene-lookups--raycast) — 18
@@ -1108,6 +1108,10 @@ Rigidbody velocity Y (m/s). Keep this for gravity/jump while replacing the horiz
 ### `node.vz`
 
 Rigidbody velocity Z (m/s).
+
+### `node.wake`
+
+Why this rigidbody is awake, as a name (read-only): what last woke it or started its half second toward sleep again. "settling" while it is still and counting toward sleep (and while asleep, since nothing has woken it); "moving" when it moved or turned more in a step than a sleeper may; "unsupported" when nothing holds it up; "contact" when something moving touched it; "ground" when what it rests on changed or went away; "joint" when a joint pulled it or a motor drives it; "force" for a held force or torque; "impulse" for an impulse; "script" for a velocity, position or asleep written to it; "reshaped" when its parts moved or changed mass. On a part of an assembly it reads the craft's. Read it to find what keeps a parked vehicle awake: a wake of joint on a parked rover is its motors, a wake of script a script writing its velocity every tick.
 
 ### `node.wallNormal`
 
@@ -3279,7 +3283,7 @@ assembly.impulseAt(node, impulse, at) — a one-shot kick at a world point, appl
 
 ### `assembly.info`
 
-assembly.info(node) — { mass, com, origin, vel, angVel, inertia, grounded, anchored, gripped, parts, right, up, forward, carry }. carry is node.carry for the craft: how far the frame it rides in moved this tick. right, up and forward are the craft's axes as they are this tick, the way node:worldRight/worldUp/worldForward give a node's drawn ones: read in fixedUpdate they are that tick's, where the node's are a frame's. com is the world-space centre of mass as a vec3 — the number a flight controller, a CoM gizmo and a landing check all need. inertia is the tensor the solver turns torques with, about the centre of mass in world axes, as three rows: inertia[1].x .. inertia[3].z. A torque of I × (wanted change in angVel) / dt stops a spin in one tick without overshooting.
+assembly.info(node) — { mass, com, origin, vel, angVel, inertia, grounded, anchored, gripped, parts, right, up, forward, carry, asleep, wake }. carry is node.carry for the craft: how far the frame it rides in moved this tick. asleep and wake are node.asleep and node.wake for the craft: whether it is asleep, and why it is awake. right, up and forward are the craft's axes as they are this tick, the way node:worldRight/worldUp/worldForward give a node's drawn ones: read in fixedUpdate they are that tick's, where the node's are a frame's. com is the world-space centre of mass as a vec3 — the number a flight controller, a CoM gizmo and a landing check all need. inertia is the tensor the solver turns torques with, about the centre of mass in world axes, as three rows: inertia[1].x .. inertia[3].z. A torque of I × (wanted change in angVel) / dt stops a spin in one tick without overshooting.
 
 ### `assembly.keepLive`
 

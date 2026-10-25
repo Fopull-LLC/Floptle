@@ -4560,6 +4560,29 @@ let node_mt = lua.create_table()?;
                 }
                 return Ok(Value::Boolean(false));
             }
+            // Why it is awake, a part reading its craft's, as `asleep` does.
+            "wake" => {
+                let bodies = bodies.borrow();
+                let mut why = bodies.get(&e).map(|b| b.wake);
+                if why.is_none() {
+                    let s = scene.borrow();
+                    if s.components.get(&e).is_some_and(|c| c.contains_key("RigidBody")) {
+                        let mut cur = e;
+                        for _ in 0..64 {
+                            let Some(&p) = s.parent.get(&cur) else { break };
+                            if let Some(b) = bodies.get(&p) {
+                                why = Some(b.wake);
+                                break;
+                            }
+                            cur = p;
+                        }
+                    }
+                }
+                return match why {
+                    Some(w) => Ok(Value::String(lua.create_string(w)?)),
+                    None => Ok(Value::Nil),
+                };
+            }
             // Degrees a second about Z, anticlockwise positive: how fast a
             // turning body spins.
             "spin" => {

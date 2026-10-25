@@ -2682,6 +2682,9 @@ pub struct BodyState {
     /// The solver is skipping this body until something wakes it —
     /// `node.asleep`.
     pub asleep: bool,
+    /// Why it is awake (`node.wake`): what last woke it or restarted its
+    /// count toward sleep, or `settling` while it counts.
+    pub wake: &'static str,
     /// How fast a turning body spins about Z, degrees a second
     /// (`node.spin`); anticlockwise positive.
     pub spin: f32,
@@ -2698,6 +2701,7 @@ impl Default for BodyState {
             ground_normal: None,
             wall_normal: None,
             asleep: false,
+            wake: "settling",
             spin: 0.0,
         }
     }
@@ -2819,6 +2823,7 @@ mod shipped_script_tests {
                     ground_normal: Some([0.0, 1.0, 0.0]),
                     wall_normal: None,
                     asleep: false,
+                    wake: "settling",
                     spin: 0.0,
                 },
             );

@@ -53,6 +53,11 @@ pub struct AssemblyInfo {
     pub rot: [f32; 4],
     /// How far the frame the craft rides in moved this tick (`node.carry`).
     pub carry: [f64; 3],
+    /// Asleep: the solver is skipping it until something wakes it.
+    pub asleep: bool,
+    /// Why it is awake: what last woke it or restarted its count toward
+    /// sleep, or `settling` while it counts (`WakeReason::name`).
+    pub wake: &'static str,
 }
 
 /// One part's contact load over the last physics tick, refreshed by the editor
@@ -425,6 +430,8 @@ pub(crate) fn install_assembly_api(
             out.set("up", axis(glam::Vec3::Y)?)?;
             out.set("forward", axis(glam::Vec3::NEG_Z)?)?;
             out.set("carry", vec3_table(lua, i.carry)?)?;
+            out.set("asleep", i.asleep)?;
+            out.set("wake", i.wake)?;
             let parts = lua.create_table()?;
             for (k, p) in i.parts.iter().enumerate() {
                 parts.set(k + 1, *p)?;
