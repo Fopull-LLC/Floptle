@@ -1,5 +1,9 @@
 ## Just shipped
 
+**v0.117.0-rc23 — "Whole Worlds"** (beta). A refresh rate that follows the
+window, additive scenes that leave the running world alone, and new decals
+that wait for their ground.
+
 **v0.117.0-rc22 — "Whole Worlds"** (beta). No more decal stutter on a
 streamed world, crafts and parked vehicles that come to rest, and a smoother
 take-off roll.
