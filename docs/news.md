@@ -1,5 +1,8 @@
 ## Just shipped
 
+**v0.117.0-rc25 — "Whole Worlds"** (beta). Craft that come to rest on a
+moving planet, cheaper physics near the ground, and a quiet Hub.
+
 **v0.117.0-rc24 — "Whole Worlds"** (beta). Scattered props a game can
 find and highlight one at a time, and beams that bow.
 
