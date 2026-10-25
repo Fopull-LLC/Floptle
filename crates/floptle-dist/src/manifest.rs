@@ -190,9 +190,10 @@ pub enum PreId {
 
 /// A comparable key for a version string: `(major, minor, patch)` compared numerically
 /// (so 0.10 > 0.9, and a missing component is 0), then a stage (0 = pre-release, sorts
-/// before 1 = final release of the same base), then the pre-release identifiers compared
-/// semver-style (so `rc2` < `rc10`). A fixed-width numeric head keeps the stage/pre tiebreak
-/// meaningful regardless of how many components the string has.
+/// before 1 = final release of the same base), then the pre-release identifiers, with any
+/// run of digits compared as a number (so `rc2` < `rc10`, dotted or not). A fixed-width
+/// numeric head keeps the stage/pre tiebreak meaningful regardless of how many components
+/// the string has.
 pub fn version_key(v: &str) -> (u64, u64, u64, u8, Vec<PreId>) {
     let (base, pre) = match v.split_once('-') {
         Some((b, p)) => (b, Some(p)),
@@ -203,16 +204,30 @@ pub fn version_key(v: &str) -> (u64, u64, u64, u8, Vec<PreId>) {
     let minor = nums.next().unwrap_or(0);
     let patch = nums.next().unwrap_or(0);
     let stage = if pre.is_some() { 0u8 } else { 1u8 };
-    let ids = pre
-        .map(|p| {
-            p.split('.')
-                .map(|id| {
-                    id.parse::<u64>().map(PreId::Num).unwrap_or_else(|_| PreId::Text(id.to_string()))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let ids = pre.map(|p| p.split('.').flat_map(pre_ids).collect()).unwrap_or_default();
     (major, minor, patch, stage, ids)
+}
+
+/// One dot-separated identifier as its runs of digits and of everything else, so
+/// `rc22` compares as `rc`, `22` — the same as `rc.22`.
+///
+/// Semver proper compares `rc22` as one alphanumeric string, which puts `rc3` above
+/// `rc22`. Floptle tags its pre-releases `-rcN` with no dot, so the strict reading
+/// listed 0.117.0-rc8 at the top and rc22 seventh.
+fn pre_ids(id: &str) -> Vec<PreId> {
+    let mut out = Vec::new();
+    let mut rest = id;
+    while let Some(c) = rest.chars().next() {
+        let digit = c.is_ascii_digit();
+        let end = rest.find(|c: char| c.is_ascii_digit() != digit).unwrap_or(rest.len());
+        let (run, tail) = rest.split_at(end);
+        out.push(match run.parse::<u64>() {
+            Ok(n) if digit => PreId::Num(n),
+            _ => PreId::Text(run.to_string()),
+        });
+        rest = tail;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -226,6 +241,32 @@ mod tests {
         let mut vs = ["0.10.0", "0.2.0", "1.0.0", "1.0.0-rc.10", "1.0.0-rc.2", "0.9.0", "1.0"];
         vs.sort_by(|a, b| version_key(a).cmp(&version_key(b)).then(a.cmp(b)));
         assert_eq!(vs, ["0.2.0", "0.9.0", "0.10.0", "1.0.0-rc.2", "1.0.0-rc.10", "1.0", "1.0.0"]);
+    }
+
+    /// The Hub's Installs list as it was reported, top to bottom: sorted as text, so
+    /// rc8 sat above rc22. Floptle's tags are `-rcN` with no dot, and the number in one
+    /// has to compare as a number.
+    #[test]
+    fn an_undotted_rc_number_compares_as_a_number() {
+        let mut vs = [
+            "0.117.0-rc8", "0.117.0-rc7", "0.117.0-rc6", "0.117.0-rc3", "0.117.0-rc22",
+            "0.117.0-rc20", "0.117.0-rc2", "0.117.0-rc19", "0.117.0-rc16", "0.117.0-rc12",
+            "0.116.1", "0.117.0",
+        ];
+        vs.sort_by_key(|v| std::cmp::Reverse(version_key(v)));
+        assert_eq!(
+            vs,
+            [
+                "0.117.0", "0.117.0-rc22", "0.117.0-rc20", "0.117.0-rc19", "0.117.0-rc16",
+                "0.117.0-rc12", "0.117.0-rc8", "0.117.0-rc7", "0.117.0-rc6", "0.117.0-rc3",
+                "0.117.0-rc2", "0.116.1",
+            ]
+        );
+        // The dotted spelling still orders the same way, and a bare tag still
+        // sorts before the numbered ones.
+        assert!(version_key("0.117.0-rc.22") > version_key("0.117.0-rc.8"));
+        assert!(version_key("0.117.0-rc") < version_key("0.117.0-rc1"));
+        assert!(version_key("0.117.0-beta9") < version_key("0.117.0-rc1"));
     }
 
     #[test]

@@ -69,9 +69,15 @@ impl Paths {
 /// User-tweakable settings persisted in `hub.json`.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Settings {
-    /// Release channel to show in Installs ("stable" | "beta").
-    #[serde(default = "default_channel")]
-    pub channel: String,
+    /// List beta releases beside the stable ones, and offer a newer beta as an update.
+    /// Off for a new user: stable releases only.
+    #[serde(default)]
+    pub beta_updates: bool,
+    /// The setting [`beta_updates`](Self::beta_updates) replaced: a `"stable"` | `"beta"`
+    /// channel, which showed one channel's releases and hid the other's. Read so a hub.json
+    /// from before keeps its choice (see [`HubConfig::load`]); never written back.
+    #[serde(default, rename = "channel", skip_serializing)]
+    legacy_channel: Option<String>,
     /// The version launched for a project that pins none.
     #[serde(default)]
     pub default_version: Option<String>,
@@ -103,9 +109,6 @@ fn default_true() -> bool {
     true
 }
 
-fn default_channel() -> String {
-    "stable".to_string()
-}
 fn default_manifest_url() -> String {
     DEFAULT_MANIFEST_URL.to_string()
 }
@@ -124,10 +127,24 @@ pub fn default_projects_dir() -> String {
         .into_owned()
 }
 
+impl Settings {
+    /// Whether a release on `channel` is listed and offered: stable always, beta when
+    /// [`beta_updates`](Self::beta_updates) is on.
+    pub fn lists(&self, channel: &str) -> bool {
+        channel == "stable" || (self.beta_updates && channel == "beta")
+    }
+
+    /// The channel this Hub follows, by its old name — what the install ping reports.
+    pub fn channel(&self) -> &'static str {
+        if self.beta_updates { "beta" } else { "stable" }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            channel: default_channel(),
+            beta_updates: false,
+            legacy_channel: None,
             default_version: None,
             manifest_url: default_manifest_url(),
             projects_dir: None,
@@ -157,6 +174,11 @@ impl HubConfig {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
         cfg.sort_projects();
+        // The channel picker became a toggle. Someone who had picked beta keeps seeing
+        // betas; stable, or no choice at all, is the toggle's default of off.
+        if let Some(channel) = cfg.settings.legacy_channel.take() {
+            cfg.settings.beta_updates |= channel == "beta";
+        }
         // Distribution moved to the public releases repo: configs saved before
         // that carry the old private-repo URL — migrate them (a URL the user
         // customized to anything else is respected).
@@ -231,7 +253,8 @@ mod tests {
         let paths = Paths::at(tmp.path());
         // Missing file → defaults.
         let loaded = HubConfig::load(&paths);
-        assert_eq!(loaded.settings.channel, "stable");
+        assert!(!loaded.settings.beta_updates, "a new user sees stable releases only");
+        assert_eq!(loaded.settings.channel(), "stable");
         assert!(loaded.projects.is_empty());
 
         let mut cfg = HubConfig::default();
@@ -248,6 +271,38 @@ mod tests {
         assert_eq!(back.projects.len(), 1);
         assert_eq!(back.projects[0].name, "My Game");
         assert_eq!(back.settings.default_version.as_deref(), Some("0.3.0"));
+    }
+
+    /// **A beta user stays on betas.** hub.json used to carry a `channel` of `"stable"`
+    /// or `"beta"`; the toggle that replaced it has to read the old choice, and the file
+    /// it writes back must not carry the old field to be misread later.
+    #[test]
+    fn an_old_beta_channel_turns_beta_updates_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::at(tmp.path());
+        std::fs::create_dir_all(&paths.config).unwrap();
+        std::fs::write(
+            paths.config_file(),
+            r#"{"settings":{"channel":"beta","default_version":"0.117.0-rc22"},"projects":[]}"#,
+        )
+        .unwrap();
+        let cfg = HubConfig::load(&paths);
+        assert!(cfg.settings.beta_updates, "an old beta choice survives the upgrade");
+        assert_eq!(cfg.settings.channel(), "beta");
+        assert!(cfg.settings.lists("beta") && cfg.settings.lists("stable"));
+        assert_eq!(cfg.settings.default_version.as_deref(), Some("0.117.0-rc22"));
+
+        // Saved and read back: the toggle, and nothing of the old field.
+        cfg.save(&paths).unwrap();
+        let text = std::fs::read_to_string(paths.config_file()).unwrap();
+        assert!(!text.contains("\"channel\""), "{text}");
+        assert!(HubConfig::load(&paths).settings.beta_updates);
+
+        // An old stable choice is the toggle off.
+        std::fs::write(paths.config_file(), r#"{"settings":{"channel":"stable"},"projects":[]}"#).unwrap();
+        let cfg = HubConfig::load(&paths);
+        assert!(!cfg.settings.beta_updates);
+        assert!(cfg.settings.lists("stable") && !cfg.settings.lists("beta"));
     }
 
     #[test]

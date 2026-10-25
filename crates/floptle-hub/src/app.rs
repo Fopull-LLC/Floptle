@@ -314,6 +314,10 @@ struct VersionRow {
     /// engines. False for a release the manifest says nothing about, which is every release
     /// published before the Hub could tell the difference.
     hub_only: bool,
+    /// A pre-release: on the manifest's beta channel, or, for an install the manifest
+    /// does not list, a version with a pre-release tag. Marked so a beta listed beside
+    /// the stables is never mistaken for one.
+    beta: bool,
 }
 
 impl HubApp {
@@ -383,7 +387,7 @@ impl HubApp {
             &app.paths,
             app.config.settings.install_ping,
             app.config.settings.ping_notice_seen,
-            app.config.settings.channel.clone(),
+            app.config.settings.channel().to_string(),
         );
         // Proactively refresh a restored session whose access token is near expiry.
         app.refresh_session_if_stale();
@@ -783,7 +787,7 @@ impl HubApp {
             .iter()
             .map(|i| crate::releases::version_key(&i.version))
             .max()?;
-        m.on_channel_refs(&self.config.settings.channel)
+        crate::releases::listed(m, &self.config.settings)
             .into_iter()
             .find(|r| {
                 r.artifact_here().is_some()
@@ -801,7 +805,7 @@ impl HubApp {
     /// you have it" is a useful thing for a news page to say.
     fn newest_release(&self) -> Option<&crate::releases::ReleaseInfo> {
         let ManifestState::Loaded(m) = &self.manifest else { return None };
-        m.on_channel_refs(&self.config.settings.channel).into_iter().next()
+        crate::releases::listed(m, &self.config.settings).into_iter().next()
     }
 
     /// Which engine a release actually ships: the newest release below it that changed one.
@@ -812,7 +816,7 @@ impl HubApp {
     fn engine_behind(&self, version: &str) -> Option<String> {
         let ManifestState::Loaded(m) = &self.manifest else { return None };
         let k = crate::releases::version_key(version);
-        m.on_channel_refs(&self.config.settings.channel)
+        crate::releases::listed(m, &self.config.settings)
             .into_iter()
             .find(|r| r.changes_engine() && crate::releases::version_key(&r.version) < k)
             .map(|r| r.version.clone())
@@ -843,7 +847,7 @@ impl HubApp {
     fn hub_update_available(&self) -> Option<crate::releases::ReleaseInfo> {
         let ManifestState::Loaded(m) = &self.manifest else { return None };
         let mine = crate::releases::version_key(Self::hub_version()?);
-        m.on_channel_refs(&self.config.settings.channel)
+        crate::releases::listed(m, &self.config.settings)
             .into_iter()
             .find(|r| {
                 r.hub_artifact_here().is_some()
@@ -924,7 +928,7 @@ impl HubApp {
         let default = self.config.settings.default_version.as_deref();
 
         if let ManifestState::Loaded(m) = &self.manifest {
-            for r in m.on_channel_refs(&self.config.settings.channel) {
+            for r in crate::releases::listed(m, &self.config.settings) {
                 rows.push(VersionRow {
                     version: r.version.clone(),
                     date: r.date.clone(),
@@ -934,6 +938,7 @@ impl HubApp {
                     installed: None,
                     is_default: default == Some(r.version.as_str()),
                     hub_only: r.is_hub_only(),
+                    beta: r.channel == "beta",
                 });
             }
         }
@@ -949,6 +954,14 @@ impl HubApp {
                     installed: Some(i.clone()),
                     is_default: default == Some(i.version.as_str()),
                     hub_only: false,
+                    // A beta installed while the toggle was on stays listed after it is
+                    // turned off — it is on the disk — and still says what it is.
+                    beta: match &self.manifest {
+                        ManifestState::Loaded(m) => m
+                            .release(&i.version)
+                            .map_or(i.version.contains('-'), |r| r.channel == "beta"),
+                        _ => i.version.contains('-'),
+                    },
                 }),
             }
         }
@@ -1467,7 +1480,7 @@ impl eframe::App for HubApp {
                 }
                 self.save();
                 if ok {
-                    crate::ping::start(&self.paths, true, true, self.config.settings.channel.clone());
+                    crate::ping::start(&self.paths, true, true, self.config.settings.channel().to_string());
                 }
             }
         }
@@ -1917,7 +1930,9 @@ impl HubApp {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(6.0);
-                look::chip(ui, format!("{} channel", self.config.settings.channel), look::Chip::Neutral);
+                // What this list holds, which the Settings toggle decides.
+                let shows = if self.config.settings.beta_updates { "stable + beta" } else { "stable only" };
+                look::chip(ui, shows, look::Chip::Neutral);
             });
         });
         // say which versions these are. "Engine versions" alone left the reader to work out
@@ -2022,6 +2037,9 @@ impl HubApp {
                                 look::chip(ui, "new", look::Chip::Good);
                             } else if r.hub_only {
                                 ui.label(look::fine(ui, "Hub only"));
+                            }
+                            if r.beta {
+                                look::chip(ui, "beta", look::Chip::Warn);
                             }
                         });
                         // The release name, which the column had no room for before — it is
@@ -2374,16 +2392,11 @@ impl HubApp {
         let mut changed = false;
         let mut reveal_data = false;
         egui::Grid::new("settings").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-            ui.label("Channel");
-            egui::ComboBox::from_id_salt("channel")
-                .selected_text(&self.config.settings.channel)
-                .show_ui(ui, |ui| {
-                    for c in ["stable", "beta"] {
-                        if ui.selectable_value(&mut self.config.settings.channel, c.to_string(), c).changed() {
-                            changed = true;
-                        }
-                    }
-                });
+            ui.label("Beta updates");
+            changed |= ui
+                .checkbox(&mut self.config.settings.beta_updates, "Enable beta updates")
+                .on_hover_text("List beta releases beside the stable ones, and offer a newer beta as an update — for the engine and for the Hub")
+                .changed();
             ui.end_row();
 
             ui.label("Manifest URL");
@@ -2628,7 +2641,10 @@ mod tests {
             let mut m = Manifest { schema: 1, ..Default::default() };
             // 0.21.1 is HUB-only on purpose: the "Hub only" chip and the line that tells you
             // which engine is really in it are the whole point of this snapshot.
+            // 0.22.0-rc12 is a beta, listed because the toggle is on below: its chip sits
+            // beside "new" on the longest version string a release candidate carries.
             for (v, date, title) in [
+                ("0.22.0-rc12", "2026-08-04", "Next Up"),
                 ("0.21.1", "2026-08-03", "Front Page"),
                 ("0.21.0", "2026-08-03", "Who's Playing"),
                 ("0.20.0", "2026-08-02", "Say It Simply"),
@@ -2637,7 +2653,7 @@ mod tests {
             ] {
                 m.versions.push(crate::releases::ReleaseInfo {
                     version: v.into(),
-                    channel: "stable".into(),
+                    channel: if v.contains('-') { "beta" } else { "stable" }.into(),
                     date: date.into(),
                     notes_url: format!("https://example.invalid/v{v}"),
                     title: title.into(),
@@ -2664,6 +2680,7 @@ mod tests {
             app.installs =
                 vec![Install { version: "0.20.0".into(), path: tmp.path().join("versions/0.20.0") }];
             app.config.settings.default_version = Some("0.20.0".into());
+            app.config.settings.beta_updates = true;
             app.selected_version = Some(selected.to_string());
             // The temp dir has to outlive the render — the paths are read while drawing.
             (app, tmp)
@@ -2884,6 +2901,71 @@ mod tests {
             app.upgrade_target(&project("0.22.0")).map(|i| i.version),
             Some("0.22.1".into())
         );
+    }
+
+    /// **The Installs list, as it was reported.** Ten 0.117.0 release candidates read
+    /// rc8, rc7, rc6, rc3, rc22, rc20, rc2, rc19, rc16, rc12 — sorted as text. Newest
+    /// first by version, with the stables placed against them; and the beta toggle
+    /// decides whether a newer beta is listed and offered at all.
+    #[test]
+    fn the_installs_list_is_newest_first_and_betas_follow_the_toggle() {
+        use super::*;
+
+        let screenshot = [
+            "0.117.0-rc8", "0.117.0-rc7", "0.117.0-rc6", "0.117.0-rc3", "0.117.0-rc22",
+            "0.117.0-rc20", "0.117.0-rc2", "0.117.0-rc19", "0.117.0-rc16", "0.117.0-rc12",
+        ];
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = HubApp::new(Paths::at(tmp.path()));
+        let mut m = Manifest { schema: 1, ..Default::default() };
+        for (v, channel) in [("0.116.1", "stable"), ("0.117.0-rc25", "beta")]
+            .into_iter()
+            .chain(screenshot.iter().map(|v| (*v, "beta")))
+        {
+            m.versions.push(crate::releases::ReleaseInfo {
+                version: v.into(),
+                channel: channel.into(),
+                changed: vec!["engine".into(), "hub".into()],
+                date: String::new(),
+                notes_url: String::new(),
+                title: String::new(),
+                notes: String::new(),
+                artifacts: [(
+                    crate::releases::platform_target(),
+                    crate::releases::Artifact { url: "u".into(), sha256: "s".into(), size: 1 },
+                )]
+                .into_iter()
+                .collect(),
+                hub_artifacts: Default::default(),
+            });
+        }
+        app.manifest = ManifestState::Loaded(m);
+        // Installed in the screenshot's order, and sorted the way the disk scan sorts.
+        app.installs = screenshot
+            .iter()
+            .map(|v| Install { version: (*v).into(), path: tmp.path().join("versions").join(v) })
+            .collect();
+        app.installs.sort_by_key(|i| crate::releases::version_key(&i.version));
+        let newest_first = [
+            "0.117.0-rc22", "0.117.0-rc20", "0.117.0-rc19", "0.117.0-rc16", "0.117.0-rc12",
+            "0.117.0-rc8", "0.117.0-rc7", "0.117.0-rc6", "0.117.0-rc3", "0.117.0-rc2",
+        ];
+        let rows = |app: &HubApp| app.version_rows().into_iter().map(|r| (r.version, r.beta)).collect::<Vec<_>>();
+
+        // Off: the installed betas stay listed — they are on the disk — and still say
+        // they are betas, but rc25, which is not installed, is neither listed nor offered.
+        app.config.settings.beta_updates = false;
+        let mut want: Vec<(String, bool)> = newest_first.iter().map(|v| (v.to_string(), true)).collect();
+        want.push(("0.116.1".into(), false));
+        assert_eq!(rows(&app), want);
+        assert_eq!(app.update_available().map(|r| r.version), None);
+        assert_eq!(app.installs.last().map(|i| i.version.as_str()), Some("0.117.0-rc22"), "the default pick");
+
+        // On: rc25 joins the list at the top and is the update on offer.
+        app.config.settings.beta_updates = true;
+        want.insert(0, ("0.117.0-rc25".into(), true));
+        assert_eq!(rows(&app), want);
+        assert_eq!(app.update_available().map(|r| r.version), Some("0.117.0-rc25".into()));
     }
 
     fn project_unpinned(path: &std::path::Path) -> super::Project {
