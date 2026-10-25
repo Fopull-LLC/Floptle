@@ -1,5 +1,9 @@
 ## Just shipped
 
+**v0.117.0-rc20 — "Whole Worlds"** (beta). Worlds that arrive without
+stalling the frame, planets a built game can generate, shaders that build
+beside play, and fixes to scatter queries and JSON numbers.
+
 **v0.117.0-rc19 — "Whole Worlds"** (beta). Saves that never stall a frame or
 lose a player's data, a warm-up that prepares a level without crowding it,
 and terrain answers that stay true once they say they are final.
