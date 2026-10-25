@@ -1,6 +1,6 @@
 ## Just shipped
 
-**v0.117.0-rc21 — "Whole Worlds"** (beta). No more decal stutter on a
+**v0.117.0-rc22 — "Whole Worlds"** (beta). No more decal stutter on a
 streamed world, crafts and parked vehicles that come to rest, and a smoother
 take-off roll.
 
