@@ -33,7 +33,7 @@ pub(crate) struct PerfSnapshot {
 /// The two get confused constantly — "my game runs at 300 fps and stutters" is
 /// almost never a scene that is slow — so they are reported side by side and
 /// named differently.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Pacing {
     /// Smoothed frame time, ms.
     pub(crate) mean_ms: f32,
@@ -50,6 +50,17 @@ pub(crate) struct Pacing {
     /// `mean_ms - present_wait_ms`: what the frame cost apart from waiting on
     /// the display. The same subtraction the window-title `cost` figure does.
     pub(crate) cost_ms: f32,
+    /// The swapchain's present mode, as `perf.pacing()` names it.
+    pub(crate) present_mode: &'static str,
+    /// Whether that mode waits for the display. Snapping means nothing
+    /// without it.
+    pub(crate) vsync: bool,
+    /// The game's frame cap, 0 when off.
+    pub(crate) frame_cap: f32,
+    /// The output the window is on, as the refresh was last read from.
+    pub(crate) on: Option<OutputInfo>,
+    /// Every output, so a frame paced by another one's clock can be named.
+    pub(crate) outputs: Vec<OutputInfo>,
 }
 
 impl PerfSnapshot {
@@ -279,124 +290,533 @@ mod readout_tests {
     }
 }
 
+/// One display output, as the refresh choice sees it: what winit says about a
+/// monitor, reduced to plain values so the choice can be tested without one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct OutputInfo {
+    /// What the system calls it (`DP-2`), or "" where it says nothing.
+    pub(crate) name: String,
+    /// Top-left corner and size on the desktop, physical pixels: x, y, w, h.
+    pub(crate) rect: [i64; 4],
+    /// Its refresh rate in millihertz, where it says.
+    pub(crate) mhz: Option<u32>,
+}
+
+impl OutputInfo {
+    pub(crate) fn of(m: &winit::monitor::MonitorHandle) -> Self {
+        let (p, s) = (m.position(), m.size());
+        Self {
+            name: m.name().unwrap_or_default(),
+            rect: [p.x as i64, p.y as i64, s.width as i64, s.height as i64],
+            mhz: m.refresh_rate_millihertz().filter(|&r| r > 0),
+        }
+    }
+
+    /// One refresh, milliseconds, where the output says its rate.
+    fn period_ms(&self) -> Option<f32> {
+        self.mhz.map(|m| 1_000_000.0 / m as f32)
+    }
+
+    /// `DP-2 (144.0 Hz)`, or `an unnamed output` where it has no name.
+    fn label(&self) -> String {
+        let name = if self.name.is_empty() { "an unnamed output" } else { &self.name };
+        match self.mhz {
+            Some(m) => format!("{name} ({:.1} Hz)", m as f32 / 1000.0),
+            None => name.to_string(),
+        }
+    }
+}
+
+/// The window's outer rectangle, where the platform says where it is: X11,
+/// Windows and macOS do, Wayland never does.
+pub(crate) fn window_rect(w: &winit::window::Window) -> Option<[i64; 4]> {
+    let p = w.outer_position().ok()?;
+    let s = w.outer_size();
+    Some([p.x as i64, p.y as i64, s.width as i64, s.height as i64])
+}
+
+/// How many pixels two rectangles share.
+fn overlap(a: [i64; 4], b: [i64; 4]) -> i64 {
+    let w = (a[0] + a[2]).min(b[0] + b[2]) - a[0].max(b[0]);
+    let h = (a[1] + a[3]).min(b[1] + b[3]) - a[1].max(b[1]);
+    w.max(0) * h.max(0)
+}
+
+/// The output the window is on.
+///
+/// * `window` — the window's rectangle, where the platform says ([`window_rect`]).
+/// * `current` — `current_monitor()`.
+/// * `all` — `available_monitors()`.
+///
+/// **Where the window's rectangle is known, the output under most of it
+/// wins.** X11's `current_monitor()` is the output winit guessed when the
+/// window was made, corrected only when the window manager sends a synthetic
+/// configure: under XWayland it named the 60 Hz HDMI output for a window on
+/// the 144 Hz DisplayPort one. Wayland gives no rectangle, and there
+/// `current_monitor()` is the compositor's own answer, the first output the
+/// surface entered, which is the best there is.
+pub(crate) fn window_output<'a>(
+    window: Option<[i64; 4]>,
+    current: Option<&'a OutputInfo>,
+    all: &'a [OutputInfo],
+) -> Option<&'a OutputInfo> {
+    let is_current = |o: &OutputInfo| current.is_some_and(|c| c.name == o.name && c.rect == o.rect);
+    let under = window.and_then(|w| {
+        all.iter()
+            .map(|o| (overlap(w, o.rect), o))
+            .filter(|(area, _)| *area > 0)
+            .max_by(|(a, x), (b, y)| a.cmp(b).then_with(|| is_current(x).cmp(&is_current(y))))
+            .map(|(_, o)| o)
+    });
+    under.or(current)
+}
+
+/// The refresh period held, and where it came from.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct RefreshRead {
+    /// Seconds, compared against `dt`; 0 when nothing is known.
+    pub(crate) period: f32,
+    /// The output it was read from.
+    pub(crate) output: Option<String>,
+    /// Read from the output the window is on this time, rather than held over
+    /// a non-answer or guessed. Until it is, the read is repeated every frame.
+    pub(crate) confirmed: bool,
+}
+
 /// Which refresh period to hold, given what the platform just said.
 ///
 /// Pulled out of [`Editor::reread_refresh_period`] because it cannot be
 /// tested through a real window.
 ///
-/// * `held` — what we already believe (0 = nothing yet).
-/// * `current` — `current_monitor()`'s refresh in mHz, if it answered.
-/// * `any` — a monitor, any monitor, in mHz. Only consulted when nothing is
-///   known at all, because on a mixed-refresh desktop it is a guess.
-pub(crate) fn chosen_refresh_period(held: f32, current: Option<u32>, any: impl FnOnce() -> Option<u32>) -> f32 {
-    if let Some(mhz) = current.filter(|&m| m > 0) {
-        return 1000.0 / mhz as f32;
+/// * `held` — what we already believe.
+/// * `on` — the output the window is on ([`window_output`]), if anything said.
+/// * `all` — every output. Only consulted when nothing is known at all.
+///
+/// **A non-answer means "ask again", not "there is no display."** Mapping it
+/// onto 0 switched dt snapping off for a whole session. And with nothing
+/// known, the guess is the FASTEST output: a Wayland window has no output
+/// until it is first shown, which is after a game's `start` has run, and a
+/// game that sets its frame cap from `app.refreshRate()` there keeps what it
+/// read. Guessed too high, the cap holds nothing back for the frame or two
+/// until the real answer arrives; guessed too low, as the first-listed 60 Hz
+/// output was, it capped a 144 Hz window at 60 for the whole session.
+pub(crate) fn chosen_refresh(held: &RefreshRead, on: Option<&OutputInfo>, all: &[OutputInfo]) -> RefreshRead {
+    if let Some(o) = on
+        && let Some(mhz) = o.mhz
+    {
+        return RefreshRead { period: 1000.0 / mhz as f32, output: Some(o.name.clone()), confirmed: true };
     }
-    // A `None` means "ask again", not "there is no display" — mapping it onto
-    // 0.0 is what switched dt snapping off for a whole session.
-    if held > 0.0 {
-        return held;
+    if held.period > 0.0 {
+        return RefreshRead { confirmed: false, ..held.clone() };
     }
-    any().filter(|&m| m > 0).map(|mhz| 1000.0 / mhz as f32).unwrap_or(0.0)
+    all.iter()
+        .filter_map(|o| o.mhz.map(|m| (m, o)))
+        .max_by_key(|(m, _)| *m)
+        .map(|(m, o)| RefreshRead { period: 1000.0 / m as f32, output: Some(o.name.clone()), confirmed: false })
+        .unwrap_or_default()
 }
 
-/// Is the display pacing the frame, rather than the scene being slow
-///?
+/// The display holding each frame back, as opposed to the scene being slow.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DisplayPacing {
+    /// Frames are shown every this many refreshes of `output`.
+    pub(crate) every: u32,
+    /// The output whose refreshes the frames land on.
+    pub(crate) output: OutputInfo,
+    /// It is not the output the window is on: the compositor is presenting
+    /// the window on another output's clock.
+    pub(crate) elsewhere: bool,
+}
+
+/// Is the display pacing the frame, rather than the scene being slow? And on
+/// which output's clock?
 ///
-/// The signature `docs/subsystems/renderer.md` already describes: `acquire`
-/// blocks for very close to a whole multiple (≥2) of the refresh period —
-/// the compositor presenting every Nth vblank rather than every one — while
-/// the frame's own work (`cost_ms`, the same subtraction the window title's
-/// "cost" figure already does) is small next to that wait. A scene that is
-/// genuinely heavy can also land near a multiple by coincidence, which is
-/// exactly why `cost_ms` is the second half of the test: a real 40 ms scene
-/// waiting 50 ms is a slow scene, not this.
+/// The signature `docs/subsystems/renderer.md` describes: `acquire` blocks for
+/// very close to a whole number of refreshes while the frame's own work
+/// (`cost_ms`, the subtraction the window title's "cost" figure does) is small
+/// next to that wait. A scene that is genuinely heavy can also land near a
+/// multiple by coincidence, which is why the cost is the second half of the
+/// test: a real 40 ms scene waiting 50 ms is a slow scene, not this.
 ///
-/// Returns the multiple when detected, so a message can say "every Nth
-/// refresh" rather than just "something is off".
-pub(crate) fn fifo_pacing_multiple(present_wait_ms: f32, cost_ms: f32, refresh_ms: f32) -> Option<u32> {
-    if refresh_ms <= 0.0 || present_wait_ms <= 0.0 {
+/// **Every output's period is tried, not only the window's.** A compositor can
+/// present a window on one output's clock while it sits on another: KWin held a
+/// window on a 144 Hz output to every third refresh of a 60 Hz one, 50 ms a
+/// frame, which is no whole number of 6.94 ms refreshes. Judged against the
+/// window's own output alone, that read as nothing at all. On the window's own
+/// output one refresh of waiting is just vsync working, so it takes two or
+/// more; on another output a single refresh is already the finding.
+pub(crate) fn display_pacing(
+    present_wait_ms: f32,
+    cost_ms: f32,
+    on: Option<&OutputInfo>,
+    all: &[OutputInfo],
+) -> Option<DisplayPacing> {
+    if present_wait_ms <= 0.0 {
         return None;
     }
-    let n = (present_wait_ms / refresh_ms).round();
-    // Same 12% band `smooth_dt` snaps dt within, so "close to a multiple"
-    // means the same thing in both places.
-    if n < 2.0 || (present_wait_ms - n * refresh_ms).abs() > refresh_ms * 0.12 {
-        return None;
+    // Whole refreshes of `period` the wait spans, if it is close to a whole
+    // number of them while the frame itself barely costs anything. The same
+    // 12% band `smooth_dt` snaps within, so "close to a multiple" means the
+    // same thing in both places.
+    let fit = |period: f32| -> Option<(u32, f32)> {
+        let n = (present_wait_ms / period).round();
+        let off = (present_wait_ms - n * period).abs();
+        (n >= 1.0 && off <= period * 0.12 && cost_ms <= period * 0.5).then_some((n as u32, off / period))
+    };
+    if let Some(o) = on
+        && let Some(period) = o.period_ms()
+    {
+        match fit(period) {
+            Some((n, _)) if n >= 2 => return Some(DisplayPacing { every: n, output: o.clone(), elsewhere: false }),
+            // One refresh of its own output: vsync doing its job.
+            Some(_) => return None,
+            None => {}
+        }
     }
-    if cost_ms > refresh_ms * 0.5 {
-        return None; // the frame is doing real work — this is not a null scene
-    }
-    Some(n as u32)
+    let same = |a: &OutputInfo, b: &OutputInfo| a.name == b.name && a.rect == b.rect;
+    let min_n = if on.is_some() { 1 } else { 2 };
+    all.iter()
+        .filter(|o| !on.is_some_and(|w| same(w, o)))
+        .filter_map(|o| fit(o.period_ms()?).filter(|(n, _)| *n >= min_n).map(|(n, off)| (n, off, o)))
+        // The fewest refreshes explains it best; a long enough wait is
+        // close to SOME multiple of any period.
+        .min_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)))
+        .map(|(n, _, o)| DisplayPacing { every: n, output: o.clone(), elsewhere: on.is_some() })
+}
+
+/// "1st", "2nd", "3rd", "7th".
+fn ordinal(n: u32) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (1, 11) | (2, 12) | (3, 13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
+}
+
+/// What the Console and the ⏱ panel say when the display is pacing the frame.
+pub(crate) fn display_pacing_message(p: &DisplayPacing, wait_ms: f32, cost_ms: f32, on: Option<&OutputInfo>) -> String {
+    let refresh = if p.every == 1 { "refresh".to_string() } else { format!("{} refresh", ordinal(p.every)) };
+    let whose = match (p.elsewhere, on) {
+        (true, Some(w)) => format!(
+            "every {refresh} of {}, though the window is on {}: the compositor is presenting this \
+             window on the other output's clock",
+            p.output.label(),
+            w.label()
+        ),
+        _ => format!("every {refresh} of {}", p.output.label()),
+    };
+    format!(
+        "the DISPLAY is pacing this, not the scene: {wait_ms:.1} ms of every frame is spent waiting \
+         on `acquire`, {whose}, while the scene itself costs {cost_ms:.1} ms. Project Settings ⏵ \
+         Rendering ⏵ Frame pacing chooses how frames are presented."
+    )
 }
 
 #[cfg(test)]
-mod fifo_pacing_tests {
-    use super::fifo_pacing_multiple;
+mod display_pacing_tests {
+    use super::{OutputInfo, display_pacing, display_pacing_message};
 
-    /// The card's own capture: 50.0 ms `acquire` on a 16.68 ms (59.95 Hz)
-    /// refresh — three refreshes, near-zero scene cost either side of it.
-    #[test]
-    fn the_cards_own_capture_is_detected_as_three_refreshes() {
-        assert_eq!(fifo_pacing_multiple(50.0, 0.3, 16.68), Some(3));
+    fn out(name: &str, x: i64, mhz: u32) -> OutputInfo {
+        OutputInfo { name: name.into(), rect: [x, 0, 1920, 1080], mhz: Some(mhz) }
     }
 
-    /// An ordinary vsynced frame — `acquire` near one refresh — is not this.
-    /// One refresh of waiting is just vsync working; the signature is being
-    /// held for *more* than the display's own pace warrants.
+    /// 50.0 ms of `acquire` on a 59.95 Hz output, near-zero scene cost:
+    /// three refreshes of the window's own output.
+    #[test]
+    fn three_refreshes_of_the_windows_own_output() {
+        let hdmi = out("HDMI-A-1", 1920, 59_951);
+        let p = display_pacing(50.0, 0.3, Some(&hdmi), std::slice::from_ref(&hdmi)).unwrap();
+        assert_eq!((p.every, p.output.name.as_str(), p.elsewhere), (3, "HDMI-A-1", false));
+    }
+
+    /// **The measured case: a window on the 144 Hz output held to every third
+    /// refresh of the 60 Hz one.** 50 ms is 7.2 refreshes of 6.94 ms, so
+    /// judged against its own output alone it read as nothing.
+    #[test]
+    fn a_window_paced_by_another_outputs_clock_names_that_output() {
+        let dp = out("DP-2", 0, 144_001);
+        let hdmi = out("HDMI-A-1", 1920, 59_951);
+        let all = [hdmi.clone(), dp.clone()];
+        let p = display_pacing(50.0, 0.3, Some(&dp), &all).expect("the pacing output was not found");
+        assert_eq!((p.every, p.output.name.as_str(), p.elsewhere), (3, "HDMI-A-1", true));
+        let said = display_pacing_message(&p, 50.0, 0.3, Some(&dp));
+        assert!(said.contains("every 3rd refresh of HDMI-A-1 (60.0 Hz)"), "{said}");
+        assert!(said.contains("the window is on DP-2 (144.0 Hz)"), "{said}");
+    }
+
+    /// One refresh of waiting on the window's own output is vsync working,
+    /// and must not be blamed on another output whose period it also fits.
     #[test]
     fn one_refresh_of_waiting_is_ordinary_vsync_not_the_bug() {
-        assert_eq!(fifo_pacing_multiple(16.7, 0.3, 16.68), None);
+        let dp = out("DP-2", 0, 144_001);
+        let half = out("slow", 1920, 72_000);
+        assert_eq!(display_pacing(6.9, 0.3, Some(&dp), &[dp.clone(), half]), None);
     }
 
     /// A genuinely slow scene that happens to cost close to two refreshes is
-    /// not this — the whole point of the `cost_ms` half of the test.
+    /// not this: the whole point of the cost half of the test.
     #[test]
     fn a_scene_that_is_actually_slow_is_not_reported_as_display_pacing() {
-        assert_eq!(fifo_pacing_multiple(33.3, 30.0, 16.68), None);
+        let hdmi = out("HDMI-A-1", 1920, 59_951);
+        assert_eq!(display_pacing(33.3, 30.0, Some(&hdmi), std::slice::from_ref(&hdmi)), None);
     }
 
-    /// No known refresh rate, or nothing waited on `acquire`: nothing to say.
+    /// No outputs to compare against, or nothing waited on `acquire`.
     #[test]
     fn nothing_to_compare_against_says_nothing() {
-        assert_eq!(fifo_pacing_multiple(50.0, 0.3, 0.0), None);
-        assert_eq!(fifo_pacing_multiple(0.0, 0.3, 16.68), None);
+        let hdmi = out("HDMI-A-1", 1920, 59_951);
+        assert_eq!(display_pacing(50.0, 0.3, None, &[]), None);
+        assert_eq!(display_pacing(0.0, 0.3, Some(&hdmi), std::slice::from_ref(&hdmi)), None);
     }
 }
 
 #[cfg(test)]
 mod refresh_tests {
-    use super::chosen_refresh_period;
+    use super::{OutputInfo, RefreshRead, chosen_refresh, window_output};
 
-    /// Measured with `present_stats`: `current_monitor()` is
-    /// **none** at window creation and becomes `Some(DP-2, 144001)` once the
-    /// surface is mapped, while `available_monitors()` reports
-    /// `[HDMI-A-1 59951, DP-2 144001]` correctly the entire time.
+    // The machine the bug was measured on: a 144 Hz DisplayPort output at the
+    // desktop's origin and a 60 Hz HDMI one to its right, listed HDMI first.
+    fn dp2() -> OutputInfo {
+        OutputInfo { name: "DP-2".into(), rect: [0, 0, 1920, 1080], mhz: Some(144_001) }
+    }
+    fn hdmi() -> OutputInfo {
+        OutputInfo { name: "HDMI-A-1".into(), rect: [1920, 0, 2560, 1440], mhz: Some(59_951) }
+    }
+    fn hz(r: &RefreshRead) -> f32 {
+        1.0 / r.period
+    }
+
+    /// **A window moved between a 60 Hz and a 144 Hz output reports the
+    /// right refresh on each**, on both kinds of platform.
+    #[test]
+    fn a_window_moved_between_outputs_reports_each_outputs_refresh() {
+        let all = [hdmi(), dp2()];
+        let on_dp = [100, 100, 1280, 720];
+        let on_hdmi = [2200, 100, 1280, 720];
+        // Mostly on HDMI, a corner still on DP-2.
+        let straddling = [1500, 100, 1280, 720];
+
+        // X11: the window's rectangle is known, and `current_monitor()` is the
+        // output guessed at creation — HDMI, the whole time.
+        let stale = hdmi();
+        let mut r = RefreshRead::default();
+        r = chosen_refresh(&r, window_output(Some(on_dp), Some(&stale), &all), &all);
+        assert!((hz(&r) - 144.001).abs() < 0.01, "on DP-2 under X11: {r:?}");
+        assert_eq!(r.output.as_deref(), Some("DP-2"));
+        r = chosen_refresh(&r, window_output(Some(on_hdmi), Some(&stale), &all), &all);
+        assert!((hz(&r) - 59.951).abs() < 0.01, "moved to HDMI under X11: {r:?}");
+        r = chosen_refresh(&r, window_output(Some(straddling), Some(&dp2()), &all), &all);
+        assert_eq!(r.output.as_deref(), Some("HDMI-A-1"), "the output under most of the window");
+        r = chosen_refresh(&r, window_output(Some(on_dp), Some(&stale), &all), &all);
+        assert!((hz(&r) - 144.001).abs() < 0.01, "and back: {r:?}");
+
+        // Wayland: no rectangle, ever. `current_monitor()` is None until the
+        // surface is shown, then follows the window, with a None between
+        // outputs while it is dragged.
+        let mut r = RefreshRead::default();
+        r = chosen_refresh(&r, window_output(None, None, &all), &all);
+        assert!((hz(&r) - 144.001).abs() < 0.01, "boot guesses the fastest output, not the first listed: {r:?}");
+        assert!(!r.confirmed, "a guess is re-asked every frame until it is confirmed");
+        let (d, h) = (dp2(), hdmi());
+        r = chosen_refresh(&r, window_output(None, Some(&h), &all), &all);
+        assert!((hz(&r) - 59.951).abs() < 0.01, "shown on HDMI: {r:?}");
+        assert!(r.confirmed);
+        r = chosen_refresh(&r, window_output(None, None, &all), &all);
+        assert!((hz(&r) - 59.951).abs() < 0.01, "a None mid-drag keeps the last answer: {r:?}");
+        assert!(!r.confirmed, "…and asks again next frame");
+        r = chosen_refresh(&r, window_output(None, Some(&d), &all), &all);
+        assert!((hz(&r) - 144.001).abs() < 0.01, "dropped on DP-2: {r:?}");
+        assert_eq!(r.output.as_deref(), Some("DP-2"));
+    }
+
+    /// A move, a resize or a scale change asks which output the window is on
+    /// at the next frame rather than at the next poll; other events do not.
+    #[test]
+    fn a_moved_window_is_asked_again_at_once() {
+        use winit::event::WindowEvent as E;
+        let mut ed = crate::Editor { refresh_poll: 50, ..Default::default() };
+        ed.note_window_moved(&E::Focused(true));
+        assert_eq!(ed.refresh_poll, 50, "an unrelated event re-read the refresh");
+        ed.note_window_moved(&E::Moved(winit::dpi::PhysicalPosition::new(2200, 100)));
+        assert_eq!(ed.refresh_poll, 0, "a moved window kept the old output until the next poll");
+        ed.refresh_poll = 50;
+        ed.note_window_moved(&E::Resized(winit::dpi::PhysicalSize::new(2560, 1440)));
+        assert_eq!(ed.refresh_poll, 0, "a fullscreen toggle can land on another output");
+    }
+
+    /// Measured with `present_stats`: `current_monitor()` is None at window
+    /// creation and becomes `Some(DP-2, 144001)` once the surface is mapped.
+    /// A None never zeroes a good period, and a display that reports no rate
+    /// is treated as no answer.
     #[test]
     fn a_none_from_current_monitor_never_zeroes_a_good_period() {
-        let dp2 = Some(144_001);
-        let hdmi = || Some(59_951);
+        let all = [hdmi(), dp2()];
+        let live = chosen_refresh(&RefreshRead::default(), Some(&dp2()), &all);
+        // In seconds: compared against `dt`. 144.001 Hz -> 6.944 ms.
+        assert!((live.period - 1.0 / 144.001).abs() < 1e-6, "{live:?}");
+        assert_eq!(chosen_refresh(&live, None, &all).period, live.period);
+        let silent = OutputInfo { mhz: None, ..dp2() };
+        assert_eq!(chosen_refresh(&live, Some(&silent), &all).period, live.period);
+        assert_eq!(chosen_refresh(&RefreshRead::default(), None, &[]).period, 0.0, "genuinely nothing to go on");
+    }
+}
 
-        // Startup: nothing known and nothing current. Snapping used to be dead
-        // here for 240 frames; a monitor — any monitor — beats no snapping.
-        let boot = chosen_refresh_period(0.0, None, hdmi);
-        assert!(boot > 0.0, "startup must not come up with snapping switched off");
+/// The ⏱ panel's dt-snapping line, and whether it is a warning.
+///
+/// **Snapping only means something when frames wait for the display.** Under
+/// vsync a frame is on screen for a whole number of refreshes, and the snap
+/// removes the scheduler's noise from the measurement. Under mailbox or
+/// immediate nothing waits for a refresh, so frame times are the scene's own
+/// and there is no grid for them to land on. The old line warned there that
+/// the snap was inert and blamed the display's reported rate, which sent a
+/// reader after a display fault that did not exist. Under vsync an inert snap
+/// IS a finding, and the line names the output the frames are really landing
+/// on when it can tell.
+pub(crate) fn snap_line(p: &Pacing) -> (String, bool) {
+    let hz = if p.refresh_ms > 0.0 { 1000.0 / p.refresh_ms } else { 0.0 };
+    let on = p.on.as_ref().map(OutputInfo::label).unwrap_or_else(|| "the display".to_string());
+    if !p.vsync {
+        let mode = p.present_mode;
+        if p.snap_rate >= 0.5 {
+            return (
+                format!(
+                    "{mode}: dt snapping on — frames are held to whole refreshes of {on} by the frame \
+                     cap, applied to {:.0}% of them.",
+                    p.snap_rate * 100.0
+                ),
+                false,
+            );
+        }
+        let hold = if p.frame_cap > 0.0 {
+            format!("the frame cap ({:.0} fps) holds them to its own clock", p.frame_cap)
+        } else if hz > 0.0 {
+            format!("app.setFrameCap({hz:.0}) would hold them to the refresh of {on}")
+        } else {
+            "app.setFrameCap holds them to a steady rate".to_string()
+        };
+        return (
+            format!(
+                "{mode}: dt snapping does not apply — nothing in this present mode waits for the \
+                 display, so frame times are the scene's own and have no refresh to land on. Not a \
+                 fault; {hold}."
+            ),
+            false,
+        );
+    }
+    if p.refresh_ms <= 0.0 {
+        return (
+            "⚠ no display refresh rate available, so dt snapping is off — frame-time jitter is \
+             reaching the simulation clock unfiltered."
+                .to_string(),
+            true,
+        );
+    }
+    if p.snap_rate >= 0.5 {
+        return (
+            format!(
+                "dt snapping: on — {:.2} ms refresh of {on}, applied to {:.0}% of frames.",
+                p.refresh_ms,
+                p.snap_rate * 100.0
+            ),
+            false,
+        );
+    }
+    let why = match display_pacing(p.present_wait_ms, p.cost_ms, p.on.as_ref(), &p.outputs) {
+        Some(d) if d.elsewhere => format!(
+            "they land on {} of {} instead: the compositor is presenting this window on that \
+             output's clock",
+            if d.every == 1 { "every refresh".to_string() } else { format!("every {} refreshes", d.every) },
+            d.output.label()
+        ),
+        _ => "the present mode waits for vblank, so frames that miss every whole refresh are being \
+              shown on some other clock than the one reported"
+            .to_string(),
+    };
+    (
+        format!(
+            "⚠ dt snapping is inert — the window is on {on}, {:.2} ms a refresh, but frames arrive \
+             every {:.2} ms, no whole number of those refreshes (the snap caught {:.0}% of them): \
+             {why}. Frame-time jitter is reaching the simulation clock.",
+            p.refresh_ms,
+            p.mean_ms,
+            p.snap_rate * 100.0
+        ),
+        true,
+    )
+}
 
-        // The surface maps and the real output answers.
-        let live = chosen_refresh_period(boot, dp2, hdmi);
-        // In seconds: `refresh_period` is compared against `dt`, not against a
-        // millisecond readout. 144.001 Hz -> 6.944 ms.
-        assert!((live - 1.0 / 144.001).abs() < 1e-6, "{live}");
+#[cfg(test)]
+mod snap_line_tests {
+    use super::{OutputInfo, Pacing, snap_line};
 
-        // A later transient None — an output hotplug, a window drag — must keep
-        // the good value rather than replace it with a guess about the other
-        // monitor or with zero.
-        let after = chosen_refresh_period(live, None, hdmi);
-        assert_eq!(after, live, "a transient None is 'ask again', not 'no display'");
+    fn dp2() -> OutputInfo {
+        OutputInfo { name: "DP-2".into(), rect: [0, 0, 1920, 1080], mhz: Some(144_001) }
+    }
+    fn hdmi() -> OutputInfo {
+        OutputInfo { name: "HDMI-A-1".into(), rect: [1920, 0, 2560, 1440], mhz: Some(59_951) }
+    }
 
-        // And a display that reports nonsense is treated as no answer at all.
-        assert_eq!(chosen_refresh_period(live, Some(0), hdmi), live);
-        assert_eq!(chosen_refresh_period(0.0, None, || None), 0.0, "genuinely nothing to go on");
+    /// **Mailbox is not a display fault.** Slow, jittery frames under mailbox
+    /// land on no multiple of anything, and that is the present mode doing what
+    /// it does — the line says snapping does not apply, and does not warn.
+    #[test]
+    fn mailbox_says_snapping_does_not_apply_rather_than_warning() {
+        let p = Pacing {
+            present_mode: "mailbox",
+            vsync: false,
+            mean_ms: 11.3,
+            refresh_ms: 1000.0 / 59.951,
+            snap_rate: 0.05,
+            on: Some(hdmi()),
+            outputs: vec![hdmi(), dp2()],
+            ..Default::default()
+        };
+        let (said, warn) = snap_line(&p);
+        assert!(!warn, "{said}");
+        assert!(said.starts_with("mailbox: dt snapping does not apply"), "{said}");
+        assert!(!said.contains("inert"), "{said}");
+        assert!(said.contains("app.setFrameCap(60)"), "{said}");
+    }
+
+    /// Under vsync an inert snap is a real finding, and when the frames fit
+    /// another output's clock the line names it.
+    #[test]
+    fn an_inert_snap_under_vsync_names_the_output_pacing_the_window() {
+        let p = Pacing {
+            present_mode: "fifo",
+            vsync: true,
+            mean_ms: 50.0,
+            present_wait_ms: 49.7,
+            cost_ms: 0.3,
+            refresh_ms: 1000.0 / 144.001,
+            snap_rate: 0.0,
+            on: Some(dp2()),
+            outputs: vec![hdmi(), dp2()],
+            ..Default::default()
+        };
+        let (said, warn) = snap_line(&p);
+        assert!(warn, "{said}");
+        assert!(said.contains("the window is on DP-2 (144.0 Hz)"), "{said}");
+        assert!(said.contains("every 3 refreshes of HDMI-A-1 (60.0 Hz)"), "{said}");
+    }
+
+    /// Working snapping says so, quietly.
+    #[test]
+    fn working_snapping_is_not_a_warning() {
+        let p = Pacing {
+            present_mode: "fifo",
+            vsync: true,
+            mean_ms: 6.94,
+            refresh_ms: 6.94,
+            snap_rate: 0.97,
+            on: Some(dp2()),
+            ..Default::default()
+        };
+        let (said, warn) = snap_line(&p);
+        assert!(!warn && said.starts_with("dt snapping: on"), "{said}");
     }
 }
 
@@ -405,12 +825,10 @@ mod refresh_tests {
 /// **Two different questions, and an fps number answers neither on its own.** A
 /// scene costing 8 ms that presents at 20 fps is a display path pacing the
 /// engine; the same 8 ms at 120 fps is the same scene doing fine. And when dt
-/// snapping goes inert — the measured frame time stops landing near a whole
-/// multiple of the reported refresh, because the window is on a different output
-/// than `current_monitor()` names, or nothing is pacing to vblank — the raw
-/// scheduler jitter goes straight into the fixed-step accumulator and the render
-/// judders by `velocity x noise`. The readout says so: a load-bearing path
-/// that switches off in silence is the worst kind.
+/// snapping goes inert under vsync, the raw scheduler jitter goes straight into
+/// the fixed-step accumulator and the render judders by `velocity x noise`.
+/// The readout says so: a load-bearing path that switches off in silence is
+/// the worst kind.
 #[cfg(feature = "editor-ui")]
 pub(crate) fn pacing_readout(ui: &mut egui::Ui, p: &Pacing) {
     if p.mean_ms <= 0.0 {
@@ -440,52 +858,23 @@ pub(crate) fn pacing_readout(ui: &mut egui::Ui, p: &Pacing) {
             .color(warn),
         );
     }
-    // The display pacing the frame, not the scene being slow:
-    // `acquire` blocked for a whole multiple of the refresh period while the
-    // frame's own work barely registers. Compared, the two numbers tell it
-    // apart from "the scene is heavy"; on screen side by side they do not.
-    if let Some(n) = fifo_pacing_multiple(p.present_wait_ms, p.cost_ms, p.refresh_ms) {
+    // The display pacing the frame, not the scene being slow: `acquire`
+    // blocked for a whole number of some output's refreshes while the frame's
+    // own work barely registers.
+    if let Some(d) = display_pacing(p.present_wait_ms, p.cost_ms, p.on.as_ref(), &p.outputs) {
         ui.small(
             egui::RichText::new(format!(
-                "⚠ the DISPLAY is pacing this, not the scene: {:.1} ms of every frame is \
-                 spent waiting on `acquire` — every {n}th refresh — while the scene itself \
-                 costs {:.1} ms. Try Project Settings ⏵ Rendering ⏵ Frame pacing.",
-                p.present_wait_ms, p.cost_ms
+                "⚠ {}",
+                display_pacing_message(&d, p.present_wait_ms, p.cost_ms, p.on.as_ref())
             ))
             .color(warn),
         );
     }
-    if p.refresh_ms <= 0.0 {
-        ui.small(
-            egui::RichText::new(
-                "⚠ no display refresh rate available, so dt snapping is off — frame-time \
-                 jitter is reaching the simulation clock unfiltered.",
-            )
-            .color(warn),
-        );
-        return;
-    }
-    let hz = 1000.0 / p.refresh_ms;
-    if p.snap_rate >= 0.5 {
-        ui.small(format!(
-            "dt snapping: on — {:.2} ms refresh ({hz:.4} Hz), applied to {:.0}% of frames.",
-            p.refresh_ms,
-            p.snap_rate * 100.0
-        ));
+    let (line, warning) = snap_line(p);
+    if warning {
+        ui.small(egui::RichText::new(line).color(warn));
     } else {
-        ui.small(
-            egui::RichText::new(format!(
-                "⚠ dt snapping is inert — the display reports {:.2} ms ({hz:.4} Hz) but frames \
-                 are arriving every {:.2} ms, so they aren't landing on whole refreshes and the \
-                 snap can't apply (it caught {:.0}% of them). Usually the window is on a \
-                 different output than the one being reported, or the present mode isn't pacing \
-                 to vblank. Frame-time jitter is reaching the simulation clock.",
-                p.refresh_ms,
-                p.mean_ms,
-                p.snap_rate * 100.0
-            ))
-            .color(warn),
-        );
+        ui.small(line);
     }
 }
 
@@ -671,25 +1060,41 @@ impl Editor {
         v[v.len() - n..].iter().sum::<f32>() / n as f32
     }
 
-    /// Re-read the display's refresh period, without throwing away a good one.
-    ///
-    /// **A `None` from `current_monitor()` means "ask again", not "there is no
-    /// display."** On Wayland it returns `None` from `create_window` until the
-    /// surface is mapped, and `None` again on an output hotplug, a monitor
-    /// change or a window drag. The old read mapped that straight onto `0.0`,
-    /// and `period <= 0.0` is how dt snapping switches itself off — so the
-    /// anti-jitter path `docs/subsystems/time.md` §10 calls load-bearing was
-    /// inert for the whole of startup, and for the whole poll interval after
-    /// every later hiccup, on a machine where `available_monitors()` was
-    /// answering correctly the entire time.
+    /// Re-read the display's refresh period from the output the window is
+    /// on, without throwing away a good one. See [`window_output`] for which
+    /// output that is, and [`chosen_refresh`] for what a non-answer keeps.
     pub(crate) fn reread_refresh_period(&mut self) {
         let Some(w) = self.window.as_ref() else { return };
-        let hz = |m: &winit::monitor::MonitorHandle| m.refresh_rate_millihertz();
-        let current = w.current_monitor().as_ref().and_then(hz);
-        // Only asked for when there is nothing else to go on, so it is computed
-        // lazily — enumerating monitors is not free and the common case never
-        // needs it.
-        let any = || w.primary_monitor().or_else(|| w.available_monitors().next()).as_ref().and_then(hz);
-        self.refresh_period = chosen_refresh_period(self.refresh_period, current, any);
+        let outputs: Vec<OutputInfo> = w.available_monitors().map(|m| OutputInfo::of(&m)).collect();
+        let current = w.current_monitor().map(|m| OutputInfo::of(&m));
+        let rect = window_rect(w);
+        self.apply_refresh_read(rect, current, outputs);
+    }
+
+    /// What [`Self::reread_refresh_period`] does with the platform's answers,
+    /// apart from asking for them, so a test can play a window moving between
+    /// outputs without a display.
+    pub(crate) fn apply_refresh_read(&mut self, rect: Option<[i64; 4]>, current: Option<OutputInfo>, outputs: Vec<OutputInfo>) {
+        let on = window_output(rect, current.as_ref(), &outputs);
+        self.refresh = chosen_refresh(&self.refresh, on, &outputs);
+        self.refresh_period = self.refresh.period;
+        self.refresh_outputs = outputs;
+    }
+
+    /// Ask which output the window is on at the next frame, rather than at
+    /// the next poll, when the window has moved, resized or changed scale:
+    /// each can put it on another output (a fullscreen toggle, a drag, a
+    /// Wayland surface entering an output of another scale).
+    pub(crate) fn note_window_moved(&mut self, event: &winit::event::WindowEvent) {
+        use winit::event::WindowEvent as E;
+        if matches!(event, E::Moved(_) | E::Resized(_) | E::ScaleFactorChanged { .. }) {
+            self.refresh_poll = 0;
+        }
+    }
+
+    /// The output the refresh was last read from, for a message to name.
+    pub(crate) fn refresh_output(&self) -> Option<&OutputInfo> {
+        let name = self.refresh.output.as_deref()?;
+        self.refresh_outputs.iter().find(|o| o.name == name)
     }
 }

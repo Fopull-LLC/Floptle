@@ -25,6 +25,7 @@
 //! Project Settings, and shipped.
 
 use std::rc::Rc;
+use crate::perf_readout::{OutputInfo, window_output, window_rect};
 
 use floptle_script::app_api::{AppInfo, AppRequests, DisplayMode, DisplayModeRequest, MonitorInfo, Vsync};
 
@@ -40,12 +41,15 @@ pub(crate) struct DisplayCache {
 /// The window's monitors as `app.monitors()` lists them, and every mode of
 /// each. A mode a monitor lists once per colour depth is listed once.
 fn gather_displays(window: &winit::window::Window) -> (Vec<MonitorInfo>, Vec<DisplayMode>) {
-    let current = window.current_monitor();
-    // The same screen by what it is as well as by handle: a platform that
-    // hands back a fresh handle for the same output would otherwise mark no
-    // monitor current, which is what a game saw under Wayland.
-    let key = |m: &winit::monitor::MonitorHandle| (m.name(), m.position(), m.size());
-    let current_key = current.as_ref().map(key);
+    // The output the window is on, decided the way the refresh rate is (see
+    // `perf_readout::window_output`): X11's `current_monitor()` can name the
+    // output the window was made on rather than the one it is on now. Matched
+    // by what the screen is rather than by handle: a platform that hands back
+    // a fresh handle for the same output would otherwise mark no monitor
+    // current, which is what a game saw under Wayland.
+    let outputs: Vec<OutputInfo> = window.available_monitors().map(|m| OutputInfo::of(&m)).collect();
+    let current = window.current_monitor().map(|m| OutputInfo::of(&m));
+    let on = window_output(window_rect(window), current.as_ref(), &outputs).cloned();
     let raw = window.available_monitors().map(|m| {
         let (size, pos) = (m.size(), m.position());
         let info = MonitorInfo {
@@ -55,7 +59,7 @@ fn gather_displays(window: &winit::window::Window) -> (Vec<MonitorInfo>, Vec<Dis
             refresh: m.refresh_rate_millihertz().map(|r| r as f32 / 1000.0),
             x: pos.x,
             y: pos.y,
-            current: current.as_ref() == Some(&m) || current_key.as_ref().is_some_and(|k| *k == key(&m)),
+            current: on.as_ref().is_some_and(|o| *o == OutputInfo::of(&m)),
         };
         let modes = m
             .video_modes()
@@ -513,6 +517,51 @@ mod tests {
         let said: Vec<&str> = ed.console.entries.iter().map(|e| e.msg.as_str()).filter(|m| m.starts_with("PACE")).collect();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(said, vec!["PACE 60 0 none"], "the first frame's pacing");
+    }
+
+    /// **`app.refreshRate()` is the refresh of the output the window is on,
+    /// and follows it when it moves.** On a 144 Hz + 60 Hz desktop a game
+    /// read 59.95 for a window on the 144 Hz output and capped itself to 60.
+    /// Played through the same step a build runs, with the platform's answers
+    /// as each kind of platform gives them.
+    #[test]
+    fn refresh_rate_follows_the_window_between_outputs() {
+        use crate::perf_readout::OutputInfo;
+        let dir = std::env::temp_dir().join(format!("floptle-app-refresh-{}", std::process::id()));
+        settings_project(
+            &dir,
+            "local n = 0\nfunction update(node, dt)\n  n = n + 1\n  \
+             print(string.format('HZ %d %.1f', n, app.refreshRate() or 0))\nend\n",
+        );
+        let mut ed = crate::Editor::default();
+        ed.open_project(dir.clone());
+        ed.toggle_play();
+        let dp = OutputInfo { name: "DP-2".into(), rect: [0, 0, 1920, 1080], mhz: Some(144_001) };
+        let hdmi = OutputInfo { name: "HDMI-A-1".into(), rect: [1920, 0, 2560, 1440], mhz: Some(59_951) };
+        let all = vec![hdmi.clone(), dp.clone()];
+        let steps: [(Option<[i64; 4]>, Option<&OutputInfo>); 6] = [
+            // Wayland before the window is first shown: no rectangle, no output.
+            (None, None),
+            // Shown on DP-2.
+            (None, Some(&dp)),
+            // Dragged to HDMI.
+            (None, Some(&hdmi)),
+            // X11 on DP-2, `current_monitor()` still naming the output it was
+            // made on.
+            (Some([100, 100, 1280, 720]), Some(&hdmi)),
+            // Moved to HDMI.
+            (Some([2200, 100, 1280, 720]), Some(&hdmi)),
+            // And back.
+            (Some([100, 100, 1280, 720]), Some(&hdmi)),
+        ];
+        for (rect, current) in steps {
+            ed.apply_refresh_read(rect, current.cloned(), all.clone());
+            ed.play_step(1.0 / 60.0, true);
+        }
+        ed.drain_script_logs();
+        let said: Vec<&str> = ed.console.entries.iter().map(|e| e.msg.as_str()).filter(|m| m.starts_with("HZ")).collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(said, vec!["HZ 1 144.0", "HZ 2 144.0", "HZ 3 60.0", "HZ 4 144.0", "HZ 5 60.0", "HZ 6 144.0"]);
     }
 
     /// In the editor, `app.quit()` stops Play. It must not be a process exit:

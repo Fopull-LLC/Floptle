@@ -225,9 +225,52 @@ fn wanted_mode(v: Vsync) -> wgpu::PresentMode {
 
 /// …and what the surface can actually do. `Fifo` is required of every surface by
 /// the spec, so it is always a valid answer.
+///
+/// **Asked before the surface is configured, never after.** wgpu treats a mode
+/// the surface does not list as a validation error inside `configure`, and its
+/// default handler panics: XWayland on an NVIDIA driver offers only `Fifo` and
+/// `Immediate`, and a probe that configured `Mailbox` there unchecked ended the
+/// process.
 fn pick_present_mode(v: Vsync, available: &[wgpu::PresentMode]) -> wgpu::PresentMode {
     let want = wanted_mode(v);
     if available.contains(&want) { want } else { wgpu::PresentMode::Fifo }
+}
+
+/// A present mode as `perf.pacing()` and the messages name it.
+pub fn present_mode_name(m: wgpu::PresentMode) -> &'static str {
+    match m {
+        wgpu::PresentMode::Fifo => "fifo",
+        wgpu::PresentMode::FifoRelaxed => "fifoRelaxed",
+        wgpu::PresentMode::Mailbox => "mailbox",
+        wgpu::PresentMode::Immediate => "immediate",
+        _ => "auto",
+    }
+}
+
+/// What to tell the developer when a [`Vsync`] setting could not have the
+/// present mode it asks for, or `None` when it got it.
+///
+/// A fallback the developer is not told about reads as a setting that does
+/// nothing: Adaptive chosen, the frame rate unchanged, and no way to see why.
+pub fn vsync_fallback_note(want: Vsync, applied: wgpu::PresentMode, available: &[wgpu::PresentMode]) -> Option<String> {
+    let asked = wanted_mode(want);
+    if applied == asked {
+        return None;
+    }
+    let offered: Vec<&str> = available.iter().map(|m| present_mode_name(*m)).collect();
+    let offered = if offered.is_empty() { "nothing it names".to_string() } else { offered.join(", ") };
+    let behaves = match applied {
+        wgpu::PresentMode::Fifo | wgpu::PresentMode::FifoRelaxed => {
+            "every frame waits for the display's refresh, the same as On"
+        }
+        _ => "frames are presented without waiting for the display",
+    };
+    Some(format!(
+        "frame pacing: {want:?} needs {} presentation, which this display path does not offer (it \
+         offers {offered}), so frames are presented with {} instead: {behaves}.",
+        present_mode_name(asked),
+        present_mode_name(applied),
+    ))
 }
 
 /// A surface image acquired for one frame. Render into `view`, then `present()`.
@@ -511,6 +554,11 @@ impl Gpu {
         self.surface.is_some() && self.present_modes.contains(&wanted_mode(mode))
     }
 
+    /// The present modes the surface offers; empty without one.
+    pub fn present_modes(&self) -> &[wgpu::PresentMode] {
+        &self.present_modes
+    }
+
     /// Returns the wgpu mode actually applied — which is not always the one
     /// asked for, since a surface need only support `Fifo`. The caller reports
     /// it, so a setting that quietly did nothing is visible instead of being
@@ -756,5 +804,36 @@ impl Gpu {
             });
         }
         self.queue.submit([encoder.finish()]);
+    }
+}
+
+#[cfg(test)]
+mod present_mode_tests {
+    use super::{Vsync, pick_present_mode, vsync_fallback_note};
+    use wgpu::PresentMode as P;
+
+    /// **A mode the surface does not offer falls back before `configure`
+    /// sees it, and says so.** XWayland on NVIDIA offers `[Fifo, Immediate]`;
+    /// configuring `Mailbox` there is a wgpu validation panic.
+    #[test]
+    fn adaptive_without_mailbox_falls_back_to_fifo_and_says_why() {
+        let xwayland = [P::Fifo, P::Immediate];
+        let applied = pick_present_mode(Vsync::Adaptive, &xwayland);
+        assert_eq!(applied, P::Fifo);
+        let said = vsync_fallback_note(Vsync::Adaptive, applied, &xwayland).expect("a silent fallback");
+        assert!(said.contains("Adaptive needs mailbox presentation"), "{said}");
+        assert!(said.contains("it offers fifo, immediate"), "{said}");
+        assert!(said.contains("presented with fifo instead"), "{said}");
+    }
+
+    /// A mode that is offered is used, and there is nothing to say.
+    #[test]
+    fn an_offered_mode_is_used_and_says_nothing() {
+        let wayland = [P::Mailbox, P::Fifo, P::Immediate];
+        for v in [Vsync::On, Vsync::Adaptive, Vsync::Off] {
+            let applied = pick_present_mode(v, &wayland);
+            assert_eq!(vsync_fallback_note(v, applied, &wayland), None, "{v:?} -> {applied:?}");
+        }
+        assert_eq!(pick_present_mode(Vsync::Adaptive, &wayland), P::Mailbox);
     }
 }

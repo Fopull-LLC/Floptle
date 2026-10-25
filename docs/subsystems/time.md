@@ -265,13 +265,30 @@ origin (a regression test now proves a rebase renders zero discontinuity:
    hotplug, a monitor change or a window drag; since the period was only
    re-read every 240 frames, one transient `None` disabled this whole layer for
    seconds at a time and startup never had it at all. A `None` now means "ask
-   again": the last known good period is retained, any monitor is used only when
-   nothing is known yet, and the poll interval is 60 frames. When snapping is
-   nonetheless inert — the frame times are not landing near whole refreshes,
-   usually because the window is on a different output than the one being
-   reported, or nothing is pacing to vblank — **the ⏱ panel says so**, with both
-   numbers. A load-bearing path being switched off used to be silent, which is
-   the worst way for it to be.
+   again": the last known good period is retained, and the poll interval is 60
+   frames once the window's own output has answered (every frame until then,
+   and at once when the window moves, resizes or changes scale).
+
+   **Which output the window is on** is decided in one place,
+   `perf_readout::window_output`, and `app.refreshRate()`, `app.monitors()`'s
+   `current` and the snap all read it. Where the platform says where the window
+   is (X11, Windows, macOS), the output under most of it wins: X11's
+   `current_monitor()` is the output winit guessed at creation, so under
+   XWayland it named a 60 Hz output for a window on a 144 Hz one. Wayland never
+   says, and its `current_monitor()` (the first output the surface entered) is
+   used. With nothing known at all, as on Wayland before the window is first
+   shown, the guess is the *fastest* output, never the first listed: a game
+   that sets its frame cap from `app.refreshRate()` in `start` keeps what it
+   read, and a guess too low capped a 144 Hz window at 60.
+
+   When snapping is inert under a vsync present mode — frames not landing near
+   whole refreshes of the window's output — **the ⏱ panel says so**, with both
+   numbers, and names the other output when the frames fit its refreshes
+   instead (a compositor presenting the window on another output's clock).
+   Under mailbox or immediate nothing waits for a refresh, so there is no grid
+   to land on, and the panel says snapping does not apply rather than warning.
+   A load-bearing path being switched off used to be silent, which is the worst
+   way for it to be.
 
 **Reading the result.** The window title reports fps from a smoothed frame
 *time*, inverted at the end, plus a **1% low** beside the mean. Smoothing

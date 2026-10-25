@@ -33,6 +33,19 @@ impl ApplicationHandler for App {
         let size = w.inner_size();
         let caps = surface.get_capabilities(&adapter);
         println!("formats {:?}\npresent modes {:?}", caps.formats, caps.present_modes);
+        let asked = match std::env::var("PM").as_deref() {
+            Ok("mailbox") => wgpu::PresentMode::Mailbox,
+            Ok("immediate") => wgpu::PresentMode::Immediate,
+            _ => wgpu::PresentMode::Fifo,
+        };
+        // A mode the surface does not list is a wgpu validation panic inside
+        // `configure`; every surface offers Fifo.
+        let mode = if caps.present_modes.contains(&asked) {
+            asked
+        } else {
+            println!("{asked:?} is not offered here; measuring Fifo instead");
+            wgpu::PresentMode::Fifo
+        };
         surface.configure(
             &device,
             &wgpu::SurfaceConfiguration {
@@ -40,11 +53,7 @@ impl ApplicationHandler for App {
                 format: caps.formats[0],
                 width: size.width.max(1),
                 height: size.height.max(1),
-                present_mode: match std::env::var("PM").as_deref() {
-                    Ok("mailbox") => wgpu::PresentMode::Mailbox,
-                    Ok("immediate") => wgpu::PresentMode::Immediate,
-                    _ => wgpu::PresentMode::Fifo,
-                },
+                present_mode: mode,
                 desired_maximum_frame_latency: 2,
                 alpha_mode: caps.alpha_modes[0],
                 view_formats: vec![],

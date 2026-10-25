@@ -49,15 +49,22 @@ impl ApplicationHandler for App {
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
         let size = w.inner_size();
         let caps = surface.get_capabilities(&adapter);
-        let mode = match std::env::var("PM").as_deref() {
+        let asked = match std::env::var("PM").as_deref() {
             Ok("mailbox") => wgpu::PresentMode::Mailbox,
             Ok("immediate") => wgpu::PresentMode::Immediate,
             _ => wgpu::PresentMode::Fifo,
         };
+        // A mode the surface does not list is a wgpu validation panic inside
+        // `configure` (XWayland on NVIDIA offers only Fifo and Immediate);
+        // every surface offers Fifo.
+        let mode = if caps.present_modes.contains(&asked) { asked } else { wgpu::PresentMode::Fifo };
         println!("adapter        {:?}", adapter.get_info().name);
         println!("backend        {:?}", adapter.get_info().backend);
         println!("present modes  {:?}", caps.present_modes);
-        println!("requested      {:?}", mode);
+        println!("requested      {:?}", asked);
+        if mode != asked {
+            println!("measuring      {:?}  <- {:?} is not offered here", mode, asked);
+        }
         // The number `Editor::smooth_dt` snaps dt against. If this is None or
         // disagrees with the panel actually presenting, the snapping is either
         // inert or actively wrong.

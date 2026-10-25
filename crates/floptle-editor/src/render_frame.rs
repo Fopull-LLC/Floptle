@@ -84,13 +84,18 @@ impl Editor {
             floptle_scene::VsyncDoc::Adaptive => floptle_render::Vsync::Adaptive,
             floptle_scene::VsyncDoc::Off => floptle_render::Vsync::Off,
         };
-        let applied = self.gpu.as_mut().and_then(|gpu| gpu.set_vsync(want_vsync));
-        if let Some(mode) = applied {
-            self.console.push(
+        let Some(gpu) = self.gpu.as_mut() else { return };
+        let Some(mode) = gpu.set_vsync(want_vsync) else { return };
+        // A setting the display path cannot honour is said out loud, once per
+        // change: otherwise Adaptive on a surface without mailbox reads as a
+        // setting that does nothing.
+        match floptle_render::vsync_fallback_note(want_vsync, mode, gpu.present_modes()) {
+            Some(note) => self.console.push(floptle_script::LogLevel::Warn, note, None),
+            None => self.console.push(
                 floptle_script::LogLevel::Debug,
-                format!("frame pacing: {want_vsync:?} → {mode:?}"),
+                format!("frame pacing: {want_vsync:?} → {}", floptle_render::present_mode_name(mode)),
                 None,
-            );
+            ),
         }
     }
 

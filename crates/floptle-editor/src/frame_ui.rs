@@ -292,6 +292,7 @@ impl Editor {
             // their own `host:port`.
             self.net_relay_addr = "cloud".into();
         }
+        let setup = self.pacing_setup();
         out.perf_snapshot.pacing = Pacing {
             mean_ms: self.frame_ms,
             p99_ms: self.frame_low_ms,
@@ -300,6 +301,11 @@ impl Editor {
             snap_rate: self.dt_snap_rate,
             present_wait_ms: self.present_wait_ms,
             cost_ms: (self.frame_ms - self.present_wait_ms).max(0.0),
+            present_mode: setup.present_mode,
+            vsync: setup.vsync,
+            frame_cap: self.frame_cap,
+            on: self.refresh_output().cloned(),
+            outputs: self.refresh_outputs.clone(),
         };
         // Player mode (an exported build / --play): no editor chrome at all —
         // the Game view is the window. F1 (handled at the winit layer) toggles

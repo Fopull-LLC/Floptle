@@ -318,6 +318,7 @@ impl ApplicationHandler for Player {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        self.ed.note_window_moved(&event);
         match event {
             // A build's window close is quitting: there is no unsaved work to
             // ask about.
