@@ -148,6 +148,25 @@ pub fn install(lua: &Lua, json: &Table) -> mlua::Result<()> {
     Ok(())
 }
 
+/// A table entry's number as the double it is. mlua reads a Luau number as
+/// an integer when it lies within `f64::EPSILON` of one, so `1e-20` arrived as
+/// `0` and `0.9999999999999999` as `1`, and `json.encode` wrote them so. Only
+/// values beside 0 and ±1 can be that close to an integer without being one,
+/// so those entries are read again as the double the table holds. A bare
+/// number handed to `json.encode` has no table to read again from. Both JSON
+/// encoders (the game's `json.encode` and `floptle exec`'s) read through it.
+pub fn exact_number(t: &mlua::Table, key: mlua::Value, v: mlua::Value) -> mlua::Value {
+    match v {
+        // Only when the table holds something else: a true 0 or 1 stays an
+        // integer, and is written without a decimal point.
+        mlua::Value::Integer(i) if i.abs() <= 1 => match t.raw_get::<f64>(key) {
+            Ok(f) if f != i as f64 => mlua::Value::Number(f),
+            _ => v,
+        },
+        v => v,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

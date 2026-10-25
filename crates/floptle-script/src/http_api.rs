@@ -258,24 +258,6 @@ pub(crate) fn lua_to_json(v: &Value) -> mlua::Result<serde_json::Value> {
 /// so the limit that the editor's encoder always had belongs here too.
 const JSON_MAX_DEPTH: usize = 64;
 
-/// A table entry's number as the double it is. mlua reads a Luau number as
-/// an integer when it lies within `f64::EPSILON` of one, so `1e-20` arrived as
-/// `0` and `0.9999999999999999` as `1`, and `json.encode` wrote them so. Only
-/// values beside 0 and ±1 can be that close to an integer without being one,
-/// so those entries are read again as the double the table holds. A bare
-/// number handed to `json.encode` has no table to read again from.
-fn exact_number(t: &mlua::Table, key: Value, v: Value) -> Value {
-    match v {
-        // Only when the table holds something else: a true 0 or 1 stays an
-        // integer, and is written without a decimal point.
-        Value::Integer(i) if i.abs() <= 1 => match t.raw_get::<f64>(key) {
-            Ok(f) if f != i as f64 => Value::Number(f),
-            _ => v,
-        },
-        v => v,
-    }
-}
-
 fn lua_to_json_at(v: &Value, depth: usize) -> mlua::Result<serde_json::Value> {
     if depth > JSON_MAX_DEPTH {
         return Err(mlua::Error::RuntimeError(
@@ -309,7 +291,7 @@ fn lua_to_json_at(v: &Value, depth: usize) -> mlua::Result<serde_json::Value> {
                 }
                 let mut a = Vec::new();
                 for (i, x) in t.clone().sequence_values::<Value>().enumerate() {
-                    let x = exact_number(t, Value::Integer(i as mlua::Integer + 1), x?);
+                    let x = crate::json_array::exact_number(t, Value::Integer(i as mlua::Integer + 1), x?);
                     a.push(lua_to_json_at(&x, depth + 1)?);
                 }
                 serde_json::Value::Array(a)
@@ -317,7 +299,7 @@ fn lua_to_json_at(v: &Value, depth: usize) -> mlua::Result<serde_json::Value> {
                 let mut o = serde_json::Map::new();
                 for pair in t.clone().pairs::<Value, Value>() {
                     let (k, x) = pair?;
-                    let x = exact_number(t, k.clone(), x);
+                    let x = crate::json_array::exact_number(t, k.clone(), x);
                     let k = match k {
                         Value::String(s) => s.to_string_lossy().to_string(),
                         Value::Integer(i) => i.to_string(),

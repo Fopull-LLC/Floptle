@@ -2203,13 +2203,15 @@ fn to_json(v: &Value, depth: usize) -> mlua::Result<serde_json::Value> {
                 }
                 let mut arr = Vec::with_capacity(len);
                 for i in 1..=len {
-                    arr.push(to_json(&t.get::<Value>(i)?, depth + 1)?);
+                    let v = floptle_script::json_array::exact_number(t, Value::Integer(i as mlua::Integer), t.get::<Value>(i)?);
+                    arr.push(to_json(&v, depth + 1)?);
                 }
                 serde_json::Value::Array(arr)
             } else {
                 let mut map = serde_json::Map::new();
                 for pair in t.clone().pairs::<Value, Value>() {
                     let (k, v) = pair?;
+                    let v = floptle_script::json_array::exact_number(t, k.clone(), v);
                     let key = match k {
                         Value::String(s) => s.to_string_lossy().to_string(),
                         Value::Integer(i) => i.to_string(),

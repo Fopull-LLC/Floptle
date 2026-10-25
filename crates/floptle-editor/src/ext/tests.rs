@@ -445,6 +445,31 @@ fn json_round_trips_a_table() {
     let _ = std::fs::remove_dir_all(&proj);
 }
 
+/// **A tiny number in a table is written as itself, not as 0.** mlua reads a
+/// number within machine epsilon of an integer as that integer, and this
+/// encoder wrote 1e-20 as 0 and 0.9999999999999999 as 1, as the game's own
+/// `json.encode` did before it.
+#[test]
+fn json_writes_a_tiny_number_in_a_table_as_itself() {
+    let proj = temp("jsontiny");
+    install(
+        &proj,
+        "com.t.a",
+        "",
+        r#"
+        local xs = { 1e-20, 5e-324, -3e-300, 0.9999999999999999, 0, 1 }
+        local back = json.decode(json.encode(xs))
+        local obj = json.decode(json.encode({ a = 1e-20 }))
+        local same = obj.a == 1e-20
+        for i, x in ipairs(xs) do if back[i] ~= x then same = false end end
+        ed.log(tostring(same))
+        "#,
+    );
+    let host = host_for(&proj);
+    assert_eq!(host.take_log()[0].msg, "true", "a tiny number in a table did not survive json.encode");
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
 /// `json.null` writes a null; `nil` removes the key.
 ///
 /// The distinction is the whole reason the sentinel exists — an API that reads
