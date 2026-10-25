@@ -258,6 +258,24 @@ pub(crate) fn lua_to_json(v: &Value) -> mlua::Result<serde_json::Value> {
 /// so the limit that the editor's encoder always had belongs here too.
 const JSON_MAX_DEPTH: usize = 64;
 
+/// A table entry's number as the double it is. mlua reads a Luau number as
+/// an integer when it lies within `f64::EPSILON` of one, so `1e-20` arrived as
+/// `0` and `0.9999999999999999` as `1`, and `json.encode` wrote them so. Only
+/// values beside 0 and ±1 can be that close to an integer without being one,
+/// so those entries are read again as the double the table holds. A bare
+/// number handed to `json.encode` has no table to read again from.
+fn exact_number(t: &mlua::Table, key: Value, v: Value) -> Value {
+    match v {
+        // Only when the table holds something else: a true 0 or 1 stays an
+        // integer, and is written without a decimal point.
+        Value::Integer(i) if i.abs() <= 1 => match t.raw_get::<f64>(key) {
+            Ok(f) if f != i as f64 => Value::Number(f),
+            _ => v,
+        },
+        v => v,
+    }
+}
+
 fn lua_to_json_at(v: &Value, depth: usize) -> mlua::Result<serde_json::Value> {
     if depth > JSON_MAX_DEPTH {
         return Err(mlua::Error::RuntimeError(
@@ -290,14 +308,16 @@ fn lua_to_json_at(v: &Value, depth: usize) -> mlua::Result<serde_json::Value> {
                     )));
                 }
                 let mut a = Vec::new();
-                for x in t.clone().sequence_values::<Value>() {
-                    a.push(lua_to_json_at(&x?, depth + 1)?);
+                for (i, x) in t.clone().sequence_values::<Value>().enumerate() {
+                    let x = exact_number(t, Value::Integer(i as mlua::Integer + 1), x?);
+                    a.push(lua_to_json_at(&x, depth + 1)?);
                 }
                 serde_json::Value::Array(a)
             } else {
                 let mut o = serde_json::Map::new();
                 for pair in t.clone().pairs::<Value, Value>() {
                     let (k, x) = pair?;
+                    let x = exact_number(t, k.clone(), x);
                     let k = match k {
                         Value::String(s) => s.to_string_lossy().to_string(),
                         Value::Integer(i) => i.to_string(),
@@ -982,6 +1002,26 @@ mod tests {
         let logs: Rc<RefCell<Vec<ScriptLog>>> = Rc::new(RefCell::new(Vec::new()));
         install_http_api(&lua, state.clone(), logs.clone(), Rc::new(Cell::new(false)));
         (lua, state, logs)
+    }
+
+    /// **A tiny number in a table is encoded as itself, not as 0.** mlua
+    /// reads a number within machine epsilon of an integer as that integer, so
+    /// `1e-20`, subnormals and `-3e-300` were written as 0, and
+    /// `0.9999999999999999` as 1.
+    #[test]
+    fn a_tiny_number_in_a_table_encodes_as_itself() {
+        let (lua, _, _) = lua_with_http();
+        let same: bool = lua
+            .load(
+                "local xs = { 1e-20, 5e-324, -3e-300, 2.5e-16, 0.9999999999999999, -1.0000000000000002, 0, 1, -1 }\n\
+                 local back = json.decode(json.encode(xs))\n\
+                 local obj = json.decode(json.encode({ a = 1e-20, b = 0.9999999999999999 }))\n\
+                 for i, x in ipairs(xs) do if back[i] ~= x then return false end end\n\
+                 return obj.a == 1e-20 and obj.b == 0.9999999999999999",
+            )
+            .call(())
+            .unwrap();
+        assert!(same, "a tiny number in a table did not survive json.encode");
     }
 
     /// **A number written at full precision reads back as the same double.**
