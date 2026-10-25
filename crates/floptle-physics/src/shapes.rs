@@ -927,6 +927,25 @@ impl ChunkTerrain {
         self.surface.borrow().chunks.contains_key(&c)
     }
 
+    /// The chunks a gather of the faces in the box `lo..hi` (anchor-relative,
+    /// as a query's) would mesh on the spot, not meshed yet: the ones to hand
+    /// a worker first, so laying a mark there costs the frame no meshing.
+    pub fn unmeshed_in_box(&self, lo: Vec3, hi: Vec3) -> Vec<[i32; 3]> {
+        let (llo, lhi) = self.local_box(lo, hi);
+        let s = self.surface.borrow();
+        self.field.chunks_in_world_box(llo, lhi).into_iter().filter(|c| !s.chunks.contains_key(c)).collect()
+    }
+
+    /// An anchor-relative box, boxed again in the field's own frame.
+    fn local_box(&self, lo: Vec3, hi: Vec3) -> (Vec3, Vec3) {
+        let scale = self.scale.max(1e-6);
+        let (c, half) = ((lo + hi) * 0.5, (hi - lo) * 0.5);
+        let m = floptle_core::math::Mat3::from_quat(self.rot.inverse());
+        let half_l = (m.x_axis.abs() * half.x + m.y_axis.abs() * half.y + m.z_axis.abs() * half.z) / scale;
+        let c_l = self.to_local(c);
+        (c_l - half_l, c_l + half_l)
+    }
+
     /// How many chunks' collision meshes are cached.
     pub fn meshed_chunks(&self) -> usize {
         self.surface.borrow().chunks.len()
@@ -1595,12 +1614,7 @@ impl CollisionShape for ChunkTerrain {
     /// the same LOD-0 faces the collider meshes, from the same cache.
     fn triangles_in(&self, lo: Vec3, hi: Vec3, out: &mut Vec<FaceTri>) -> bool {
         let scale = self.scale.max(1e-6);
-        let inv = self.rot.inverse();
-        let (c, half) = ((lo + hi) * 0.5, (hi - lo) * 0.5);
-        let m = floptle_core::math::Mat3::from_quat(inv);
-        let half_l = (m.x_axis.abs() * half.x + m.y_axis.abs() * half.y + m.z_axis.abs() * half.z) / scale;
-        let c_l = self.to_local(c);
-        let (llo, lhi) = (c_l - half_l, c_l + half_l);
+        let (llo, lhi) = self.local_box(lo, hi);
         let mut s = self.surface.borrow_mut();
         let cell = self.bucket();
         for ch in self.field.chunks_in_world_box(llo, lhi) {

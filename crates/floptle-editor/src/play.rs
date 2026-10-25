@@ -53,6 +53,16 @@ impl Editor {
     #[cfg(not(feature = "devices"))]
     fn audio_start_play(&mut self) {}
 
+    /// Start an additive layer's own play-on-start sources, and no others.
+    #[cfg(feature = "devices")]
+    fn audio_start_layer(&mut self, ents: &[Entity]) {
+        let root = self.project_root.clone();
+        self.audio.start_sources(&self.world, &root, ents);
+    }
+
+    #[cfg(not(feature = "devices"))]
+    fn audio_start_layer(&mut self, _ents: &[Entity]) {}
+
     #[cfg(feature = "devices")]
     fn audio_stop_play(&mut self) {
         let mixer = self.project.mixer.clone();
@@ -1663,6 +1673,13 @@ impl Editor {
         offset: Option<[f64; 3]>,
         parent: Option<floptle_core::Entity>,
     ) -> Vec<floptle_core::Entity> {
+        // Each step named inside `sceneLoad`, as a swap's are: a layer that
+        // took 274 ms named none of it.
+        let mut t0 = floptle_core::profile::Span::new();
+        let mut part = |ed: &Self, name: &'static str| {
+            ed.script_host.profile().borrow_mut().record_part(name, t0.ms());
+            t0 = floptle_core::profile::Span::new();
+        };
         let Some(path) = self.resolve_scene_request(req) else {
             self.console.push(
                 floptle_script::LogLevel::Error,
@@ -1682,6 +1699,7 @@ impl Editor {
                 return Vec::new();
             }
         };
+        part(self, "sceneParse");
         // The TAG is the request string as written, so `scene.unload` takes the
         // same name back. Loading the same scene twice is allowed and both
         // copies carry the tag — `unload` then removes both, which is the only
@@ -1719,11 +1737,14 @@ impl Editor {
                 self.world.insert(e, floptle_core::Parent(p));
             }
         }
+        part(self, "sceneSpawn");
         self.adopt_layer_maps(&path, &tag, &ents);
+        part(self, "sceneMaps");
         // Meshes need GPU parts before they can draw; map/paint sidecars are
         // keyed by scene name and belong to the base scene, so an additive
         // layer does not touch them.
         self.register_scene_meshes();
+        part(self, "sceneModels");
         // Physics: the same incremental wiring a spawned prefab gets. Bodies
         // first, then compounds — `add_body_for` refuses an assembly's parts,
         // and `add_compound_for` claims the whole hierarchy at its root.
@@ -1747,19 +1768,25 @@ impl Editor {
         } else {
             self.add_static_colliders_for(&ents);
         }
-        // Audio sources in the layer start now; the running scene's voices are
-        // untouched (`start_play` is additive over live voices).
-        self.audio_start_play();
-        self.vfx.start_play(&self.world);
+        part(self, "scenePhysics");
+        // The layer's own sounds and effects start now, and nothing else:
+        // starting the whole world's again played every looping sound in the
+        // running scene from the top, put out every effect in the air, and
+        // made every play-on-start effect afresh, a cost in proportion to the
+        // world, on the frame.
+        self.audio_start_layer(&ents);
+        self.vfx.start_entities(&self.world, &ents);
         self.console.push(
             floptle_script::LogLevel::Debug,
             format!("⏵ scene + {tag} ({} nodes)", ents.len()),
             None,
         );
+        part(self, "sceneAudio");
         // The layer's own scripts have not run yet — they start on the next
         // frame's pass, like any node that appears mid-play. `onLoaded` fires
         // here anyway: the nodes exist, which is what the caller asked about.
         self.script_host.fire_scene_loaded(&mut self.world, &tag, true);
+        part(self, "sceneScripts");
         ents
     }
 

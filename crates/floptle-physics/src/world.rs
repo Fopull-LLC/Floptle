@@ -482,6 +482,23 @@ pub fn triangles_in_box(colliders: &[AnchoredCollider], lo: Vec3, hi: Vec3, mask
     (out, faceless)
 }
 
+/// The terrain chunks [`triangles_in_box`] would mesh on the spot for the
+/// same box and layers, by the terrain node's entity index: none once their
+/// collision meshes are in, so a caller that hands these to a worker first
+/// lays its decal without meshing anything on its own thread.
+pub fn unmeshed_ground_in_box(colliders: &[AnchoredCollider], lo: Vec3, hi: Vec3, mask: u32) -> Vec<(Option<u32>, [i32; 3])> {
+    let mut out = Vec::new();
+    for c in colliders {
+        if (mask >> c.layer) & 1 == 0 || c.sensor || !c.may_reach(lo, hi, 0.0) {
+            continue;
+        }
+        if let Some(t) = c.shape.chunk_terrain() {
+            out.extend(t.unmeshed_in_box(lo - c.offset, hi - c.offset).into_iter().map(|ch| (c.eid, ch)));
+        }
+    }
+    out
+}
+
 /// The first surface a ray meets among `colliders`, within `max_dist`.
 ///
 /// Only colliders whose box (or bounding sphere) the ray crosses are asked at

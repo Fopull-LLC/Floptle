@@ -3780,8 +3780,16 @@ struct Editor {
     /// The GPU's out-of-memory count as of the last frame's end: a frame that
     /// sees it move names its unnamed `untimed` as `gpuOutOfMemory`.
     gpu_oom_seen: u64,
-    /// Frames until the refresh rate is re-queried (the window can change monitors).
+    /// Frames until the refresh rate is re-queried (the window can change
+    /// monitors). Every frame until the read is confirmed, and at once when
+    /// the window moves, resizes or changes scale.
     refresh_poll: u32,
+    /// Where `refresh_period` came from: the output, and whether it was read
+    /// from the output the window is on or held over a non-answer.
+    refresh: perf_readout::RefreshRead,
+    /// Every output as of the last refresh read, so a frame held to another
+    /// output's clock can be named.
+    refresh_outputs: Vec<perf_readout::OutputInfo>,
     /// Banked (raw − snapped) dt, folded back ≤0.25 ms/frame — keeps long-term
     /// time wall-clock exact under dt snapping.
     dt_snap_error: f32,
@@ -3822,7 +3830,7 @@ struct Editor {
     /// exists to prevent. Only the first gather to run in a frame checks;
     /// every later one this same frame is a no-op.
     lights_dropped_checked_frame: u64,
-    /// Which multiple `fifo_pacing_multiple` last warned about in the Console,
+    /// Which multiple `display_pacing` last warned about in the Console,
     /// so a session pinned at "every 3rd refresh" says so once rather than
     /// every 0.4s the title bar refreshes. `0` = not warned;
     /// resets when the condition clears, so it re-warns if it comes back.
@@ -4521,6 +4529,7 @@ impl ApplicationHandler for Editor {
         if let (Some(egui), Some(window)) = (self.egui.as_mut(), self.window.as_ref()) {
             let _ = egui.state.on_window_event(window, &event);
         }
+        self.note_window_moved(&event);
 
         match event {
             WindowEvent::CloseRequested => {

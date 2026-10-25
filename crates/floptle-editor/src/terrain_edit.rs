@@ -2870,10 +2870,13 @@ impl Editor {
                 // old triangles stand until they land, a frame or two later,
                 // as the old drawn mesh does. A chunk never meshed for
                 // collision needs nothing: it meshes from the new field when
-                // something first stands in it.
+                // something first stands in it. One already on the worker
+                // (asked for by a mark, say) was gathered from the field
+                // before this write, and is sent again from this one, or the
+                // ground from before the dig would land.
                 let worker = self.collision_worker.get_or_insert_with(TerrainWorker::spawn);
                 for c in stale {
-                    if !collider.is_meshed(c) {
+                    if !collider.is_meshed(c) && !self.collision_pending.contains_key(&(e, c)) {
                         continue;
                     }
                     self.terrain_epoch += 1;
@@ -2938,6 +2941,31 @@ impl Editor {
                 }
             }
         }
+        self.mesh_collision_on_worker(want)
+    }
+
+    /// Are the collision meshes a decal laid over the sim-frame box `lo..hi`
+    /// on layers `mask` would gather all built? The ones not built yet are
+    /// handed to the collision worker, as [`Self::collision_meshed_under`]
+    /// does, and this is false until they land. Asks the colliders the
+    /// decal gathers from, by the same box, so no chunk is left to be meshed
+    /// on the frame. A collider that is not one of the editor's terrains is
+    /// meshed where it is asked, as before.
+    pub(crate) fn collision_meshed_in_box(&mut self, lo: Vec3, hi: Vec3, mask: u32) -> bool {
+        let Some(sim) = self.sim.as_ref() else { return true };
+        let want: Vec<(Entity, [i32; 3])> = floptle_physics::unmeshed_ground_in_box(&sim.world.colliders, lo, hi, mask)
+            .into_iter()
+            .filter_map(|(eid, c)| {
+                let e = self.terrains.keys().copied().find(|e| Some(e.index()) == eid)?;
+                Some((e, c))
+            })
+            .collect();
+        self.mesh_collision_on_worker(want)
+    }
+
+    /// Hand these terrain chunks' collision meshes to the collision worker,
+    /// those not already on it. True when there were none.
+    fn mesh_collision_on_worker(&mut self, want: Vec<(Entity, [i32; 3])>) -> bool {
         let mut ready = true;
         let mut snaps: HashMap<Entity, std::sync::Arc<floptle_field::ChunkField>> = HashMap::new();
         for (e, c) in want {
@@ -4788,6 +4816,18 @@ impl Editor {
                 self.terrain_glow_mask = glow;
                 self.terrain_textures_dirty = true;
             }
+    }
+
+    /// Every terrain's field chunks at full detail, dug since they were
+    /// generated, and put away as stand-ins, summed: `perf.counts()`'s
+    /// `fieldChunks`, `fieldEdited` and `fieldStandIns`. A pass over each
+    /// field's table, so asked only with collection on.
+    pub(crate) fn field_residency(&self) -> (usize, usize, usize) {
+        self.terrains.values().fold((0, 0, 0), |(data, edited, standins), t| {
+            let (d, s) = t.field.residency();
+            let dug = if t.field.is_generated() { t.field.edited_count() } else { 0 };
+            (data + d, edited + dug, standins + s)
+        })
     }
 
 /// The world translation of a terrain node (places its field in world space).
@@ -6732,6 +6772,54 @@ mod residency_tests {
         let t = &ed.terrains[&e].field;
         let left = t.chunk_coords().into_iter().filter(|c| t.evictable(*c)).count();
         assert!(left < t.chunk_coords().len() / 2, "{left} chunks were never put away");
+    }
+
+    /// **`perf.counts()` tells the field's chunks from the meshes drawn.**
+    /// `chunks` counts render slots, about the same on every save, and a
+    /// game had no number for what its worlds hold. Counted on a generated
+    /// world: every surface chunk at full detail to begin with; the far side
+    /// put away moves chunks from full detail to stand-ins one for one; a dig
+    /// counts the chunks it wrote as edited; and a sculpted terrain that was
+    /// never generated adds its chunks and no edits.
+    #[test]
+    fn the_field_counts_tell_full_detail_from_stand_ins_and_dug() {
+        use floptle_field::{Brush, BrushProfile};
+        let fill = floptle_field::procgen::PlanetFill { seed: 5, radius: 300.0, voxel: 1.5, relief: 6.0, cave_depth: 0.0, ..Default::default() };
+        let mut field = floptle_field::procgen::generate_planet(&fill);
+        field.set_spec("test".into());
+        let made = field.data_chunks();
+        let mut ed = crate::Editor::default();
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        ed.world.insert(e, floptle_core::CelestialBody { body_radius: 300.0, ..Default::default() });
+        ed.terrains.insert(e, EditorTerrain::new(field));
+        assert_eq!(ed.field_residency(), (made, 0, 0), "a world just generated");
+        let cam = DVec3::new(0.0, 310.0, 0.0);
+        for _ in 0..FAR_SCAN_FRAMES * 40 {
+            ed.stream_far_chunks(cam);
+        }
+        let away = ed.terrains[&e].field.evicted_count();
+        assert!(away > 0, "nothing was put away: the fixture is not far enough");
+        let (full, dug, standins) = ed.field_residency();
+        assert_eq!((full + standins, dug, standins), (made, 0, away), "the far side put away");
+        // A bite at the top, where the camera is.
+        let top = ed.terrains[&e].field.raycast(Vec3::new(0.0, 320.0, 0.0), Vec3::NEG_Y, 100.0).expect("ground at the top");
+        let written = {
+            let t = ed.terrains.get_mut(&e).unwrap();
+            t.field.sculpt(Brush::Lower, top, 3.0, 1.0, BrushProfile { hardness: 1.0, ..Default::default() });
+            t.field.edited_count()
+        };
+        assert!(written > 0, "the dig wrote nothing");
+        assert_eq!(ed.field_residency().1, written, "the dug chunks");
+        // A sculpted slab, never generated: its chunks, none of them dug.
+        let mut slab = floptle_field::ChunkField::new(0.5);
+        slab.fill_slab(Vec3::new(-12.0, -6.0, -12.0), Vec3::new(12.0, 0.0, 12.0), 0.0, [0.5, 0.5, 0.5]);
+        let slab_chunks = slab.data_chunks();
+        let s = ed.world.spawn();
+        ed.world.insert(s, floptle_core::Transform::IDENTITY);
+        ed.terrains.insert(s, EditorTerrain::new(slab));
+        let (full2, dug2, standins2) = ed.field_residency();
+        assert_eq!((full2, dug2, standins2), (full + slab_chunks, written, standins), "a sculpted terrain beside the world");
     }
 
     /// **Ground a game asked for stays made, even what was made already.**

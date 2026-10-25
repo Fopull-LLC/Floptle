@@ -2323,6 +2323,9 @@ impl Editor {
             } else {
                 Default::default()
             };
+            // A pass over every terrain field's table: with collection on.
+            let (field_chunks, field_edited, field_stand_ins) =
+                if prof.enabled() { self.field_residency() } else { (0, 0, 0) };
             prof.set_counts(floptle_core::profile::Counts {
                 nodes: ents.len(),
                 culled: culled_nodes,
@@ -2330,6 +2333,9 @@ impl Editor {
                 draws,
                 unbatched,
                 chunks,
+                field_chunks,
+                field_edited,
+                field_stand_ins,
                 props: scatter_props,
                 particles,
                 effects,

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use floptle_core::time::Instant;
 use crate::{Editor, FOCUS_SECS, anim, grab_cursor};
 
-use crate::perf_readout::fifo_pacing_multiple;
+use crate::perf_readout::{display_pacing, display_pacing_message};
 
 /// What one frame's script pass settles before the scripts run, and what
 /// the later phases of the step read back.
@@ -193,11 +193,14 @@ impl Editor {
         // (Re)read the monitor's refresh rate occasionally — cheap, and the
         // window can move between monitors.
         if self.refresh_poll == 0 {
-            // 60 frames rather than 240. The poll interval is also the length of
-            // every outage below, so a long one turned a momentary hiccup into
-            // seconds of unsnapped dt.
-            self.refresh_poll = 60;
             self.reread_refresh_period();
+            // 60 frames once the window's own output has answered, or where no
+            // output says its rate at all (a browser). Until then every frame:
+            // a Wayland window has no output until it is first shown, and
+            // every frame spent on the guess is a frame a game's
+            // `app.refreshRate()` reads it.
+            let settled = self.refresh.confirmed || self.refresh_outputs.iter().all(|o| o.mhz.is_none());
+            self.refresh_poll = if settled { 60 } else { 1 };
         }
         self.refresh_poll -= 1;
         let period = self.refresh_period;
@@ -285,20 +288,12 @@ impl Editor {
                     // title — the panel is opt-in and the title is easy not to
                     // read closely, and this is exactly the report a user who
                     // is not looking for it needs to see.
-                    match fifo_pacing_multiple(self.present_wait_ms, cost, self.refresh_period * 1000.0) {
-                        Some(n) if n != self.fifo_pacing_warned => {
-                            self.fifo_pacing_warned = n;
-                            self.console.push(
-                                floptle_script::LogLevel::Warn,
-                                format!(
-                                    "⏱ the DISPLAY is pacing this frame, not the scene: {:.1} ms \
-                                     spent waiting on `acquire` every {n}th refresh, while the \
-                                     scene itself costs {cost:.1} ms. Try Project Settings ⏵ \
-                                     Rendering ⏵ Frame pacing.",
-                                    self.present_wait_ms
-                                ),
-                                None,
-                            );
+                    let on = self.refresh_output().cloned();
+                    match display_pacing(self.present_wait_ms, cost, on.as_ref(), &self.refresh_outputs) {
+                        Some(d) if d.every != self.fifo_pacing_warned => {
+                            self.fifo_pacing_warned = d.every;
+                            let msg = display_pacing_message(&d, self.present_wait_ms, cost, on.as_ref());
+                            self.console.push(floptle_script::LogLevel::Warn, format!("⏱ {msg}"), None);
                         }
                         None => self.fifo_pacing_warned = 0,
                         Some(_) => {} // same multiple as last time — already said

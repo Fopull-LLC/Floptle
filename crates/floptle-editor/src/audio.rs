@@ -418,6 +418,17 @@ impl AudioSystem {
         }
     }
 
+    /// Fire the play-on-start sources among `ents` (an additive layer's
+    /// nodes), leaving every voice already playing as it is and the mixer as
+    /// the scene set it.
+    pub fn start_sources(&mut self, world: &World, root: &Path, ents: &[Entity]) {
+        for &e in ents {
+            if world.get::<AudioSource>(e).is_some_and(|s| s.play_on_start && !s.clip.is_empty()) {
+                self.source_play(world, root, e);
+            }
+        }
+    }
+
     /// Play-mode stop: silence everything, clear session state, restore the
     /// saved project mixer for editor-side previews. A clip still decoding
     /// carries on and lands in the cache; nothing waits on it any more.

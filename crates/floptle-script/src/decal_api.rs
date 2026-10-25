@@ -272,6 +272,11 @@ impl DecalStore {
         Some(true)
     }
 
+    /// The laying still to do for waiting mark `id`.
+    pub fn job(&self, id: u32) -> Option<&LayJob> {
+        self.jobs.get(&id)
+    }
+
     /// The marks waiting to be laid, oldest first.
     pub fn waiting(&self) -> Vec<u32> {
         self.decals.iter().filter(|(_, d)| d.waiting).map(|(&id, _)| id).collect()
@@ -457,9 +462,33 @@ impl LayJob {
         }
     }
 
+    /// Faces laid so far: the work done, where pieces are not alike (one
+    /// over the ground holds most of a mark, one in the air above it none).
+    pub fn faces(&self) -> usize {
+        self.laid.indices.len() / 3
+    }
+
     /// Pieces in all, and pieces done.
     pub fn pieces(&self) -> (u32, u32) {
         (self.tiles[0] * self.tiles[1] * self.tiles[2], self.next)
+    }
+
+    /// The box, in world axes (sim frame), the whole job gathers faces from
+    /// with the mark at `center`, turned by `turn` since it was asked for.
+    pub fn ground_box(&self, center: Vec3, turn: glam::Quat) -> (Vec3, Vec3) {
+        let (c, h) = ((self.lo + self.hi) * 0.5, (self.hi - self.lo) * 0.5);
+        let m = glam::Mat3::from_quat(turn);
+        let wh = m.x_axis.abs() * h.x + m.y_axis.abs() * h.y + m.z_axis.abs() * h.z;
+        let wc = center + turn * c;
+        // A step's tile boxes are the same box cut up, turned the same way:
+        // a hair of slack so rounding never leaves one poking out.
+        let pad = Vec3::splat(1e-3);
+        (wc - wh - pad, wc + wh + pad)
+    }
+
+    /// The layers the mark lies on.
+    pub fn mask(&self) -> u32 {
+        self.spec.mask
     }
 
     /// Is every piece laid?
@@ -776,7 +805,13 @@ pub(crate) fn install_decal_api(lua: &Lua, shared: DecalShared) -> mlua::Result<
             // `decals.landed(id)` says when it is done.
             let mut job = LayJob::new(&spec);
             let mut done = false;
-            while s.store.borrow().budget_left_ms() > 0.0 {
+            // Terrain under the mark whose collision meshes are not built yet
+            // would be meshed here, on the frame, tens of milliseconds a
+            // chunk: the mark waits, and the driver hands that ground to its
+            // collision worker and lays the mark once it is in.
+            let (glo, ghi) = job.ground_box(spec.center, glam::Quat::IDENTITY);
+            let ground_ready = floptle_physics::unmeshed_ground_in_box(&s.colliders.borrow(), glo, ghi, spec.mask).is_empty();
+            while ground_ready && s.store.borrow().budget_left_ms() > 0.0 {
                 let t0 = floptle_core::time::Instant::now();
                 done = job.step(&s.colliders.borrow(), s.store.borrow().undrawn(), spec.center, glam::Quat::IDENTITY);
                 s.store.borrow_mut().spend(t0.elapsed().as_secs_f64() * 1000.0);

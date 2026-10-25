@@ -2460,6 +2460,18 @@ impl ChunkField {
         }
     }
 
+    /// How many chunks hold their voxels at full detail, and how many are put
+    /// away and stand in as coarse lattices: one pass over the table, for a
+    /// count a game reads (`perf.counts().fieldChunks` / `fieldStandIns`).
+    /// Solid and empty chunks that store one value are neither.
+    pub fn residency(&self) -> (usize, usize) {
+        self.chunks.values().fold((0, 0), |(data, standins), c| match c {
+            Chunk::Data(_) => (data + 1, standins),
+            Chunk::Lattice(_) => (data, standins + 1),
+            Chunk::Uniform(_) => (data, standins),
+        })
+    }
+
     /// How many chunks are put away, standing in as lattices.
     pub fn evicted_count(&self) -> usize {
         self.chunks.values().filter(|c| matches!(c, Chunk::Lattice(_))).count()

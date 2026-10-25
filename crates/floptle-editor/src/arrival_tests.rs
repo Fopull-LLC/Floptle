@@ -571,6 +571,78 @@ fn a_scene_swap_names_its_steps() {
     assert!(steps <= took * 1.01 + 0.05, "the steps ({steps:.2} ms) add up to more than the swap ({took:.2} ms)");
 }
 
+/// **An additive layer names its steps, and leaves the world playing.**
+/// Entering Solar's builder, a layer loaded over the running world, was one
+/// `sceneLoad` of 68 to 274 ms with none of it named: the layer path named
+/// no step. Each is a part now, as a swap's are. And it started the whole
+/// world's sounds and effects again, not only its own: every play-on-start
+/// effect in the running scene was made afresh from its first frame, and
+/// every one-shot in the air was put out. Counted: a fire burning in the
+/// running scene and a one-shot in the air; a layer of 200 nodes with a
+/// fire of its own loads over them. The steps are named and no more than
+/// the load took; the running fire's playhead goes on from where it was,
+/// the one-shot is still in the air, and the layer's fire is lit.
+#[test]
+fn an_additive_layer_names_its_steps_and_leaves_the_world_playing() {
+    let dir = std::env::temp_dir().join(format!("floptle_arrival_layer_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    floptle_vfs::create_dir_all(dir.join("scenes")).unwrap();
+    floptle_vfs::create_dir_all(dir.join("vfx")).unwrap();
+    floptle_scene::save_vfx_effect(&crate::vfx::starter_effect_doc("Puff"), &dir.join("vfx/Puff.vfx.ron")).unwrap();
+    let mut layer = floptle_core::World::default();
+    for i in 0..200 {
+        let e = layer.spawn();
+        layer.insert(e, Transform::from_translation(DVec3::new(i as f64, 0.0, 0.0)));
+        layer.insert(e, Name(format!("Part{i}")));
+        layer.insert(e, Matter::Empty);
+    }
+    let lit = layer.spawn();
+    layer.insert(lit, Transform::IDENTITY);
+    layer.insert(lit, Name("LayerFire".into()));
+    layer.insert(lit, Matter::Empty);
+    layer.insert(lit, floptle_core::ParticleSystem { asset: "vfx/Puff".into(), play_on_start: true });
+    floptle_scene::save(&floptle_scene::to_doc("layer", &layer), &dir.join("scenes/layer.ron")).unwrap();
+    let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+    ed.vfx.rescan(&dir);
+    let fire = ed.world.spawn();
+    ed.world.insert(fire, Transform::IDENTITY);
+    ed.world.insert(fire, Matter::Empty);
+    ed.world.insert(fire, floptle_core::ParticleSystem { asset: "vfx/Puff".into(), play_on_start: true });
+    ed.toggle_play();
+    for _ in 0..30 {
+        ed.play_step(1.0 / 60.0, true);
+    }
+    ed.vfx.spawn_detached_with(
+        "vfx/Puff",
+        crate::vfx::DetachedSpawn { emitter: Transform::IDENTITY, vel: Default::default(), frame: None, intensity: None, tint: None, up: None },
+    );
+    let playhead = ed.vfx.instances.get(&fire).map(|(_, i)| i.t).expect("the running scene's fire is not burning");
+    assert!(playhead > 0.2, "the fire has played {playhead} s: the fixture tests nothing");
+    assert_eq!(ed.vfx.detached.len(), 1, "the one-shot did not start");
+    let profile = ed.script_host.profile().clone();
+    profile.borrow_mut().enable(true);
+    ed.end_profile_frame();
+    profile.borrow_mut().begin_frame();
+    let req = floptle_script::SceneRequest::Additive { name: "layer".into(), environment: false, offset: None, replicate: false, parent: None };
+    let t = std::time::Instant::now();
+    ed.timed_wait("sceneLoad", |ed| ed.perform_scene_request(&req));
+    let took = t.elapsed().as_secs_f32() * 1e3;
+    ed.end_profile_frame();
+    let _ = std::fs::remove_dir_all(&dir);
+    let layer_fire = ed.world.query::<Name>().find(|(_, n)| n.0 == "LayerFire").map(|(e, _)| e).expect("the layer did not load");
+    let p = profile.borrow();
+    let r = p.recent_frames(1).next().unwrap();
+    const STEPS: [&str; 7] = ["sceneParse", "sceneSpawn", "sceneMaps", "sceneModels", "scenePhysics", "sceneAudio", "sceneScripts"];
+    let missing: Vec<&str> = STEPS.iter().copied().filter(|s| !r.parts.iter().any(|(p, _)| p == s)).collect();
+    assert!(missing.is_empty(), "the layer did not name {missing:?}: {:?}", r.parts);
+    let steps: f32 = r.parts.iter().filter(|(p, _)| STEPS.contains(p)).map(|(_, ms)| ms).sum();
+    assert!(steps <= took * 1.01 + 0.05, "the steps ({steps:.2} ms) add up to more than the load ({took:.2} ms)");
+    let after = ed.vfx.instances.get(&fire).map(|(_, i)| i.t).expect("the running scene's fire went out");
+    assert!(after >= playhead, "the running scene's fire started again: its playhead went {playhead} -> {after}");
+    assert_eq!(ed.vfx.detached.len(), 1, "the one-shot in the air was put out");
+    assert!(ed.vfx.instances.contains_key(&layer_fire), "the layer's own fire was not lit");
+}
+
 /// **A save left for the menu can be deleted from the menu.** A game plays a
 /// world with its terrain saved under one slot, goes back to a main menu
 /// with no terrain, and deletes that save. `terrain.saveDir` still names the

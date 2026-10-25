@@ -483,6 +483,11 @@ fn counts_table(lua: &Lua, c: &Counts) -> mlua::Result<Table> {
     }
     out.set("unbatchedBy", by)?;
     out.set("chunks", c.chunks)?;
+    // The terrain's fields, not its meshes: chunks at full detail, those
+    // dug since they were generated, and those put away as stand-ins.
+    out.set("fieldChunks", c.field_chunks)?;
+    out.set("fieldEdited", c.field_edited)?;
+    out.set("fieldStandIns", c.field_stand_ins)?;
     out.set("props", c.props)?;
     out.set("particles", c.particles)?;
     // The capped resources, and what each cap actually cut. A ceiling a
@@ -718,7 +723,15 @@ mod tests {
             prof.record_script("pulsate", 0.25);
             prof.record(Bucket::Mirror, 1.5);
             prof.record(Bucket::Render, 3.0);
-            prof.set_counts(Counts { nodes: 5500, culled: 2700, props: 117_000, ..Default::default() });
+            prof.set_counts(Counts {
+                nodes: 5500,
+                culled: 2700,
+                props: 117_000,
+                field_chunks: 3100,
+                field_edited: 80,
+                field_stand_ins: 9400,
+                ..Default::default()
+            });
             prof.end_frame();
         }
         assert!(lua.load("return perf.enabled()").eval::<bool>().unwrap());
@@ -742,6 +755,11 @@ mod tests {
         );
         // The counts that would have diagnosed 0071 and 0075 in one line each.
         assert_eq!(lua.load("return perf.counts().props").eval::<i64>().unwrap(), 117_000);
+        // The terrain's fields, apart from the meshes drawn.
+        assert_eq!(
+            lua.load("local c = perf.counts() return {c.fieldChunks, c.fieldEdited, c.fieldStandIns}").eval::<Vec<i64>>().unwrap(),
+            vec![3100, 80, 9400]
+        );
         assert_eq!(lua.load("return perf.counts().culled").eval::<i64>().unwrap(), 2700);
     }
 

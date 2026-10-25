@@ -49,7 +49,7 @@ pub mod woff2;
 pub use camera::{FlyCamera, Input, ViewLock};
 pub use camera_stack::{StackComposite, StackLayer};
 pub use cull::Frustum;
-pub use device::{Gpu, Vsync, gpu_trouble, out_of_memory_events, report_gpu_error, take_gpu_errors, SAMPLED_TEXTURES_WANTED};
+pub use device::{Gpu, Vsync, present_mode_name, vsync_fallback_note, gpu_trouble, out_of_memory_events, report_gpu_error, take_gpu_errors, SAMPLED_TEXTURES_WANTED};
 #[cfg(not(target_arch = "wasm32"))]
 pub use device::adapter_stage_limits;
 pub use env::{EnvMap, ENV_H, ENV_W};

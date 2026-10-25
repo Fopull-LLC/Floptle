@@ -1038,6 +1038,8 @@ impl Editor {
             } else {
                 Default::default()
             };
+            let (field_chunks, field_edited, field_stand_ins) =
+                if profile.borrow().enabled() { self.field_residency() } else { (0, 0, 0) };
             profile.borrow_mut().set_counts(floptle_core::profile::Counts {
                 nodes: ents.len(),
                 culled: culled_nodes,
@@ -1045,6 +1047,9 @@ impl Editor {
                 draws,
                 unbatched,
                 chunks,
+                field_chunks,
+                field_edited,
+                field_stand_ins,
                 props: scatter_props,
                 particles,
                 effects,

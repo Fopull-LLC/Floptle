@@ -458,9 +458,77 @@ type AtlasTextures = (wgpu::Texture, wgpu::Texture);
 /// browser makes it on the frame, so there it is only ever `Failed`.)
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 enum Grown {
-    Made(AtlasTextures),
+    /// Made, holding the first this many of the volumes asked for: all of
+    /// them unless memory was short.
+    Made(AtlasTextures, usize),
     Waiting,
+    /// Not even one of the volumes fits in what memory there is.
+    Refused,
+    /// The worker could not run: the frame makes it.
     Failed,
+}
+
+/// What the atlas worker was asked for: the roomy size, and each volume's
+/// dims in order, from which it works out the exact size and the smaller
+/// ones it falls back to.
+#[derive(Clone, PartialEq, Debug)]
+struct GrowAsk {
+    roomy: [u32; 3],
+    plan: Vec<[u32; 3]>,
+}
+
+/// What the atlas worker made: the textures, their dims, and how many of the
+/// volumes asked for they hold. `None` when not even one fit.
+type GrowMade = Option<(AtlasTextures, [u32; 3], usize)>;
+
+/// The atlas the first `n` volumes of `plan` need: stacked along Z.
+fn stacked_dims(plan: &[[u32; 3]], n: usize) -> [u32; 3] {
+    let mut dims = [1u32, 1, 0];
+    for d in &plan[..n.min(plan.len())] {
+        dims = [dims[0].max(d[0]), dims[1].max(d[1]), dims[2] + d[2]];
+    }
+    dims[2] = dims[2].max(1);
+    dims
+}
+
+/// The atlases [`grow_atlas`] tries, in order, and how many of the volumes
+/// asked for each holds: the roomy size, the exact one, then the first half
+/// of the volumes, a quarter, down to one.
+#[cfg(any(not(target_arch = "wasm32"), test))]
+fn grow_tries(ask: &GrowAsk) -> Vec<([u32; 3], usize)> {
+    let mut tries = vec![(ask.roomy, ask.plan.len())];
+    let mut n = ask.plan.len();
+    while n > 0 {
+        tries.push((stacked_dims(&ask.plan, n), n));
+        n /= 2;
+    }
+    if ask.plan.is_empty() {
+        tries.clear();
+    }
+    tries
+}
+
+/// Make the atlas `ask` wants, as the frame would have: the roomy size, or
+/// short of memory for that the exact one, or failing that the first half
+/// of the volumes, then a quarter, down to none. Each one made is zeroed
+/// here: wgpu zeroes a new texture on the first submit that writes part of
+/// it, which is otherwise the frame's.
+#[cfg(not(target_arch = "wasm32"))]
+fn grow_atlas(device: &wgpu::Device, queue: &wgpu::Queue, ask: &GrowAsk, cap: Option<u64>) -> GrowMade {
+    for (dims, n) in grow_tries(ask) {
+        let Some((d, c)) = try_alloc_volume_textures(device, dims, cap) else { continue };
+        for (t, texel) in [(&d, &[0u8; 2][..]), (&c, &[0u8; 4][..])] {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: t, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                texel,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: None, rows_per_image: None },
+                wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            );
+        }
+        queue.submit(None);
+        return Some(((d, c), dims, n));
+    }
+    None
 }
 
 impl AtlasBuild {
@@ -556,8 +624,16 @@ pub struct Raymarch {
     building: Option<AtlasBuild>,
     /// A larger atlas the driver is making on a worker: handing over one of
     /// hundreds of megabytes takes it milliseconds, which the frame must not
-    /// wait for. Its size, and where it arrives.
-    growing: Option<([u32; 3], std::sync::mpsc::Receiver<Option<AtlasTextures>>)>,
+    /// wait for. What it was asked for, and where it arrives.
+    growing: Option<(GrowAsk, std::sync::mpsc::Receiver<GrowMade>)>,
+    /// Atlases made on the frame's own thread since the renderer was made:
+    /// none natively, where the worker makes every one (a browser makes
+    /// them on the frame). Each is an allocation of up to hundreds of
+    /// megabytes and its zeroing, waited for by the frame.
+    frame_allocs: u64,
+    /// Refuse an atlas larger than this many bytes, as a GPU out of memory
+    /// would: for tests.
+    alloc_cap: Option<u64>,
     /// Volume cells written from the CPU since the renderer was made (each
     /// one 6 bytes: an f16 distance and an RGBA8 colour). GPU-side copies are
     /// not counted.
@@ -812,6 +888,8 @@ impl Raymarch {
             atlas_refused: None,
             building: None,
             growing: None,
+            frame_allocs: 0,
+            alloc_cap: None,
             uploaded_cells: 0,
             terrain_tex,
             sky_tex,
@@ -1321,7 +1399,8 @@ impl Raymarch {
         let mut refused = None;
         let (dist_tex, color_tex) = loop {
             let dims = atlas_dims(&accepted);
-            if let Some(t) = try_alloc_volume_textures(&gpu.device, dims) {
+            if let Some(t) = try_alloc_volume_textures(&gpu.device, dims, self.alloc_cap) {
+                self.frame_allocs += 1;
                 break t;
             }
             refused.get_or_insert(wanted);
@@ -1587,23 +1666,36 @@ impl Raymarch {
         let wanted = volume_bytes(need);
         let mut plan = plan;
         let mut refused = None;
-        let made = match self.grown(gpu, roomy, need) {
+        let plan_dims: Vec<[u32; 3]> = plan.iter().map(|(d, _)| *d).collect();
+        let made = match self.grown(gpu, GrowAsk { roomy, plan: plan_dims }, need) {
             Grown::Waiting => {
                 self.building = old;
                 return true;
             }
-            Grown::Made(t) => Some(t),
-            Grown::Failed => try_alloc_volume_textures(&gpu.device, roomy),
+            Grown::Made(t, n) => {
+                if n < plan.len() {
+                    refused = Some(wanted);
+                    plan.truncate(n);
+                }
+                Some(t)
+            }
+            Grown::Refused => {
+                // Not even one voxel: keep drawing what there is.
+                self.building = None;
+                self.atlas_refused = Some(AtlasRefused { bytes: wanted, dropped: asked });
+                return false;
+            }
+            Grown::Failed => {
+                self.frame_allocs += 1;
+                try_alloc_volume_textures(&gpu.device, roomy, self.alloc_cap)
+            }
         };
         let (dist, color) = match made {
             Some(t) => t,
             None => loop {
-                let mut dims = [1u32, 1, 0];
-                for (d, _) in &plan {
-                    dims = [dims[0].max(d[0]), dims[1].max(d[1]), dims[2] + d[2]];
-                }
-                dims[2] = dims[2].max(1);
-                if let Some(t) = try_alloc_volume_textures(&gpu.device, dims) {
+                let dims = stacked_dims(&plan.iter().map(|(d, _)| *d).collect::<Vec<_>>(), plan.len());
+                self.frame_allocs += 1;
+                if let Some(t) = try_alloc_volume_textures(&gpu.device, dims, self.alloc_cap) {
                     if dims != need {
                         refused.get_or_insert(wanted);
                     }
@@ -1640,57 +1732,64 @@ impl Raymarch {
         false
     }
 
-    /// An atlas of at least `need` from the worker making one of `roomy`,
-    /// started here when none is under way. Native only: a browser hands a
-    /// texture over at once, so there it is made on the frame.
+    /// The atlas `ask` wants, at least `need`, from the worker making it,
+    /// started here when none is under way: the roomy size, or as much as
+    /// memory allows, all of it off the frame. Native only: a browser hands
+    /// a texture over at once, so there it is made on the frame.
     #[cfg(target_arch = "wasm32")]
-    fn grown(&mut self, _gpu: &Gpu, _roomy: [u32; 3], _need: [u32; 3]) -> Grown {
+    fn grown(&mut self, _gpu: &Gpu, _ask: GrowAsk, _need: [u32; 3]) -> Grown {
         Grown::Failed
     }
 
     /// See the browser's [`grown`](Self::grown) above: natively the driver's
-    /// work is a worker's.
+    /// work is a worker's, the fallbacks short of memory included. Made on
+    /// the frame, an atlas the roomy size could not have was a whole
+    /// allocation and its zeroing in one frame, as memory ran short.
     #[cfg(not(target_arch = "wasm32"))]
-    fn grown(&mut self, gpu: &Gpu, roomy: [u32; 3], need: [u32; 3]) -> Grown {
+    fn grown(&mut self, gpu: &Gpu, ask: GrowAsk, need: [u32; 3]) -> Grown {
         let fits = |d: [u32; 3]| d[0] >= need[0] && d[1] >= need[1] && d[2] >= need[2];
-        if let Some((dims, rx)) = self.growing.take() {
+        if let Some((asked, rx)) = self.growing.take() {
             match rx.try_recv() {
-                Ok(Some(t)) if fits(dims) => return Grown::Made(t),
-                // Too small for what is asked now: another is made below.
-                Ok(Some(_)) => {}
-                // Refused: the frame's own attempt says how short it is.
-                Ok(None) | Err(std::sync::mpsc::TryRecvError::Disconnected) => return Grown::Failed,
+                // Everything asked for, in room enough for what is asked now.
+                Ok(Some((t, dims, n))) if n == asked.plan.len() && fits(dims) => return Grown::Made(t, ask.plan.len()),
+                // Short of memory, for exactly this list: what fitted.
+                Ok(Some((t, _, n))) if asked == ask => return Grown::Made(t, n),
+                Ok(None) if asked == ask => return Grown::Refused,
+                // Made for another list: another is made below.
+                Ok(_) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return Grown::Failed,
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    self.growing = Some((dims, rx));
+                    self.growing = Some((asked, rx));
                     return Grown::Waiting;
                 }
             }
         }
         let (tx, rx) = std::sync::mpsc::channel();
         let (device, queue) = (gpu.device.clone(), gpu.queue.clone());
+        let (job, cap) = (ask.clone(), self.alloc_cap);
         let made = std::thread::Builder::new().name("sdf-atlas".into()).spawn(move || {
-            let made = try_alloc_volume_textures(&device, roomy);
-            if let Some((d, c)) = &made {
-                // A new texture is zeroed by wgpu on the first submit that
-                // writes part of it, which is otherwise the frame's: one
-                // texel each, submitted here, has it zeroed on this thread.
-                for (t, texel) in [(d, &[0u8; 2][..]), (c, &[0u8; 4][..])] {
-                    queue.write_texture(
-                        wgpu::TexelCopyTextureInfo { texture: t, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                        texel,
-                        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: None, rows_per_image: None },
-                        wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-                    );
-                }
-                queue.submit(None);
-            }
-            let _ = tx.send(made);
+            let _ = tx.send(grow_atlas(&device, &queue, &job, cap));
         });
         if made.is_err() {
             return Grown::Failed;
         }
-        self.growing = Some((roomy, rx));
+        self.growing = Some((ask, rx));
         Grown::Waiting
+    }
+
+    /// Atlases made on the frame's own thread since the renderer was made
+    /// (see the field): zero natively. For guards.
+    #[doc(hidden)]
+    pub fn atlas_allocs_on_frame(&self) -> u64 {
+        self.frame_allocs
+    }
+
+    /// Refuse an atlas of more than `bytes`, as a GPU short of memory would,
+    /// or lift the cap with `None`. For tests: no GPU's memory can be made
+    /// short to order.
+    #[doc(hidden)]
+    pub fn set_atlas_memory_cap(&mut self, bytes: Option<u64>) {
+        self.alloc_cap = bytes;
     }
 
     /// Encode the GPU copies `fit_slots` asked for into `(dist, color)`: from
@@ -2360,8 +2459,11 @@ fn atlas_dims(accepted: &[(&BakedSdf, [u32; 3])]) -> [u32; 3] {
 /// Asked through an error scope, which native wgpu answers at once. A browser
 /// answers later; there the first poll comes back empty, the textures are
 /// taken as made, and a failure arrives as the reported error it always was.
-fn try_alloc_volume_textures(device: &wgpu::Device, dims: [u32; 3]) -> Option<(wgpu::Texture, wgpu::Texture)> {
+fn try_alloc_volume_textures(device: &wgpu::Device, dims: [u32; 3], cap: Option<u64>) -> Option<(wgpu::Texture, wgpu::Texture)> {
     use std::task::{Context, Poll, Waker};
+    if cap.is_some_and(|c| volume_bytes(dims) > c) {
+        return None;
+    }
     let scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
     let made = alloc_volume_textures(device, dims);
     let mut pop = std::pin::pin!(scope.pop());
@@ -2586,10 +2688,41 @@ mod oom_tests {
     fn an_atlas_bigger_than_video_memory_is_refused() {
         let gpu = crate::Gpu::headless(4, 4);
         assert!(
-            super::try_alloc_volume_textures(&gpu.device, [2048, 2048, 2048]).is_none(),
+            super::try_alloc_volume_textures(&gpu.device, [2048, 2048, 2048], None).is_none(),
             "a 48 GB atlas came back as made"
         );
-        assert!(super::try_alloc_volume_textures(&gpu.device, [64, 64, 64]).is_some(), "a small one must still be made");
+        assert!(super::try_alloc_volume_textures(&gpu.device, [64, 64, 64], None).is_some(), "a small one must still be made");
+    }
+}
+
+#[cfg(test)]
+mod grow_tests {
+    use super::{GrowAsk, grow_tries, stacked_dims};
+
+    /// **Short of memory, the atlas worker falls back as the frame did, so
+    /// the frame never has to.** The frame made an atlas itself whenever the
+    /// roomy one was refused: the exact size, then half the volumes, each an
+    /// allocation of up to hundreds of megabytes and its zeroing on the
+    /// frame. The worker tries them all now, in the frame's order: roomy,
+    /// exact, then halves down to one volume, never none.
+    #[test]
+    fn the_worker_tries_every_size_the_frame_would_have() {
+        let plan = vec![[192, 192, 192], [128, 96, 64], [64, 64, 64], [192, 13, 192], [32, 32, 32]];
+        let need = stacked_dims(&plan, plan.len());
+        assert_eq!(need, [192, 192, 192 + 64 + 64 + 192 + 32]);
+        let roomy = [need[0], need[1], need[2] + need[2] / 2];
+        let tries = grow_tries(&GrowAsk { roomy, plan: plan.clone() });
+        assert_eq!(
+            tries,
+            vec![
+                (roomy, 5),
+                (need, 5),
+                (stacked_dims(&plan, 2), 2),
+                (stacked_dims(&plan, 1), 1),
+            ]
+        );
+        assert_eq!(stacked_dims(&plan, 1), [192, 192, 192]);
+        assert!(grow_tries(&GrowAsk { roomy, plan: Vec::new() }).is_empty(), "nothing to hold, nothing to make");
     }
 }
 

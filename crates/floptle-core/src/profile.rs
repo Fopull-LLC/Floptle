@@ -385,8 +385,19 @@ pub struct Counts {
     pub instances: usize,
     /// Draw calls issued.
     pub draws: usize,
-    /// Terrain chunks resident (meshed and in memory).
+    /// Terrain chunk meshes drawn from: render slots, every terrain summed.
     pub chunks: usize,
+    /// Terrain field chunks holding their voxels at full detail, every
+    /// terrain summed (counted with collection on: a pass over each field's
+    /// table).
+    pub field_chunks: usize,
+    /// …of those, the ones written since their field was generated (dug,
+    /// raised or painted): kept, saved and never put away. A terrain that
+    /// was not generated counts none.
+    pub field_edited: usize,
+    /// Field chunks put away, standing in as coarse lattices until something
+    /// comes near.
+    pub field_stand_ins: usize,
     /// Scatter props submitted this frame. A field can ask for 117,000 of
     /// these, and this is how you see the number.
     pub props: usize,

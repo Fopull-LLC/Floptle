@@ -314,13 +314,15 @@ impl crate::Editor {
     /// budget, oldest first, a piece at a time in what is left of this
     /// frame's budget; then the next frame's budget starts whole. Each piece
     /// is gathered where the mark is now, on whatever it rides as that stands
-    /// now. Timed as the `decalLay` part.
+    /// now. A mark over terrain whose collision meshes are not built yet
+    /// waits for them from the collision worker, as a mark laid again does,
+    /// rather than meshing them here. Timed as the `decalLay` part.
     fn lay_waiting_decals(&mut self) {
         let store_rc = self.script_host.decals().clone();
-        let Some(sim) = self.sim.as_ref() else {
+        if self.sim.is_none() {
             store_rc.borrow_mut().new_frame();
             return;
-        };
+        }
         let waiting = store_rc.borrow().waiting();
         let t0 = floptle_core::time::Instant::now();
         let mut worked = false;
@@ -328,7 +330,16 @@ impl crate::Editor {
             // Not placed yet (asked for in the pass just run, and placed
             // after it): its turn comes next frame.
             let Some((pos, turn, _)) = store_rc.borrow().get(id).and_then(|d| self.decal_place_now(d)) else { continue };
-            let center = (pos - sim.world.origin).as_vec3();
+            let Some(origin) = self.sim.as_ref().map(|s| s.world.origin) else { break };
+            let center = (pos - origin).as_vec3();
+            // Its ground, as the job will gather it: built, or on the worker.
+            let ground = store_rc.borrow().job(id).map(|j| (j.ground_box(center, turn), j.mask()));
+            if let Some(((lo, hi), mask)) = ground
+                && !self.collision_meshed_in_box(lo, hi, mask)
+            {
+                continue;
+            }
+            let Some(sim) = self.sim.as_ref() else { break };
             loop {
                 let mut store = store_rc.borrow_mut();
                 if store.budget_left_ms() <= 0.0 {
@@ -554,11 +565,13 @@ impl crate::Editor {
                 };
                 // Ground beside a chunk made again loses its collision mesh
                 // too: the piece waits for it rather than meshing it here.
-                if !self.collision_meshed_under(pos, reach) {
+                let Some(origin) = self.sim.as_ref().map(|s| s.world.origin) else { break };
+                let center = (pos - origin).as_vec3();
+                let (lo, hi) = r.job.ground_box(center, turn * r.turn.inverse());
+                if !self.collision_meshed_under(pos, reach) || !self.collision_meshed_in_box(lo, hi, r.job.mask()) {
                     break;
                 }
                 let Some(sim) = self.sim.as_ref() else { break };
-                let center = (pos - sim.world.origin).as_vec3();
                 if !r.job.step(&sim.world.colliders, &undrawn, center, turn * r.turn.inverse()) {
                     continue;
                 }
@@ -704,8 +717,26 @@ mod tests {
     /// collision lands.
     #[test]
     fn a_decal_follows_the_ground_dug_from_under_it() {
+        dug_from_under_a_mark("dig", true);
+    }
+
+    /// **A dig while a new mark waits for its ground lays it on the dug
+    /// ground.** A new mark waits for its collision meshes from the worker,
+    /// gathered from the field as it was asked for. A dig landing before
+    /// they did skipped every chunk not meshed yet, so the meshes from
+    /// before the dig landed and the mark lay on ground that was gone, 1.5 m
+    /// up. Now a chunk on the worker is sent again from the dug field.
+    #[test]
+    fn a_dig_before_a_new_mark_lands_lays_it_on_the_dug_ground() {
+        dug_from_under_a_mark("dig-waiting", false);
+    }
+
+    /// A mark on a slab, and 2 m dug from under it: the mark lies on the
+    /// ground there after. `landed` digs once the mark is laid; otherwise
+    /// the dig comes while it waits for its ground.
+    fn dug_from_under_a_mark(tag: &str, landed: bool) {
         use floptle_field::{Brush, BrushProfile};
-        let dir = std::env::temp_dir().join(format!("floptle-decal-dig-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("floptle-decal-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
         floptle_vfs::write(
@@ -738,6 +769,16 @@ mod tests {
         assert!(ed.playing && ed.sim.is_some());
         ed.play_step(1.0 / 60.0, true);
         assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        let waiting = |ed: &crate::Editor| !ed.script_host.decals().borrow().waiting().is_empty();
+        assert_eq!(ed.script_host.decals().borrow().len(), 1, "the mark was not asked for");
+        assert!(waiting(&ed), "the mark was laid on ground with no collision mesh built");
+        if landed {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            while waiting(&ed) {
+                assert!(std::time::Instant::now() < until, "the mark never landed");
+                ed.play_step(1.0 / 60.0, true);
+            }
+        }
         let height = |ed: &crate::Editor| {
             let store = ed.script_host.decals().clone();
             let store = store.borrow();
@@ -748,7 +789,7 @@ mod tests {
                 d.verts.iter().filter(|v| v.pos.x.abs() < 0.3 && v.pos.z.abs() < 0.3).map(|v| d.pos.y + v.pos.y as f64).collect();
             near.iter().sum::<f64>() / near.len().max(1) as f64
         };
-        let before = height(&ed);
+        let before = if landed { height(&ed) } else { 0.0 };
         assert!(before.abs() < 0.1, "the mark is not on the slab: {before}");
 
         // Dig 2 m out from under it, through the path `terrain.dig` takes.
@@ -758,6 +799,12 @@ mod tests {
         };
         ed.mirror_terrain_chunks_to_sim(e, &touched);
         settle(&mut ed);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while waiting(&ed) {
+            assert!(std::time::Instant::now() < until, "the mark never landed after the dig");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            settle(&mut ed);
+        }
         let ground = {
             let sim = ed.sim.as_ref().unwrap();
             let o = (DVec3::new(1.0, 5.0, 1.0) - sim.world.origin).as_vec3();
@@ -1249,6 +1296,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **A new mark waits for its ground from the collision worker.** A
+    /// first lay gathered the terrain's faces under it through the collider,
+    /// which meshes every chunk nobody had meshed on the spot, on the frame:
+    /// tens of milliseconds a chunk, inside `decals.add` or the pieces laid
+    /// after it. A mark laid again already waited for the worker. Now a first
+    /// lay does too: 75 marks of 29 m on a planet's fresh ground in Play mesh
+    /// no collision chunk on the frame, and each lies exactly as one laid
+    /// whole on the built ground would.
+    #[test]
+    fn first_lays_wait_for_their_ground_from_the_collision_worker() {
+        let marks = |field: &floptle_field::ChunkField| -> Vec<Vec3> {
+            let (up, u) = (Vec3::Y, Vec3::Y.any_orthonormal_vector());
+            let v = up.cross(u);
+            (0..75)
+                .map(|i| {
+                    let (r, a) = (0.18 * (i as f32 / 75.0).sqrt(), i as f32 * 2.39996);
+                    let dir = (up + u * (r * a.cos()) + v * (r * a.sin())).normalize();
+                    field.raycast(dir * 300.0, -dir, 300.0).expect("ground under a mark")
+                })
+                .collect()
+        };
+        let (ed, _e, _exact, dir) = planet_with_marks("firstlay", &marks);
+        let sim = ed.sim.as_ref().expect("in Play");
+        let terrain: Vec<&floptle_physics::ChunkTerrain> = sim.world.colliders.iter().filter_map(|c| c.shape.chunk_terrain()).collect();
+        assert!(!terrain.is_empty(), "the planet has no terrain collider");
+        let on_frame: u64 = terrain.iter().map(|t| t.meshed_by_queries()).sum();
+        let built: usize = terrain.iter().map(|t| t.meshed_chunks()).sum();
+        assert!(built > 0, "no collision chunk was built under the marks");
+        assert_eq!(on_frame, 0, "laying 75 new marks meshed {on_frame} collision chunks on the frame ({built} built in all)");
+        // Each lies as it would laid whole, at once, on the ground built now.
+        let store = ed.script_host.decals().clone();
+        let store = store.borrow();
+        assert_eq!(store.len(), 75, "a mark was refused or went");
+        for id in store.ids() {
+            let d = store.get(id).unwrap();
+            assert!(!d.indices.is_empty(), "mark {id} lies on nothing");
+            let whole = floptle_script::decal_api::lay_on(&sim.world.colliders, &d.spec, store.undrawn());
+            assert!(whole.verts == d.verts && whole.indices == d.indices, "mark {id} lies other than one laid whole would");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// **A big mark is laid again a piece at a time, drawn as it was until
     /// it is whole.** Laying a mark again ran every piece of it in one call,
     /// unlike its first lay: one 28.8 m mark was 12 to 34 ms of one frame.
@@ -1279,13 +1368,27 @@ mod tests {
         ed.decals_note_landed(e, chunks);
         let relaid = ed.decal_batches.relaid;
         let mut w = RelayWatch::default();
-        let mut frames_ms = Vec::new();
+        // Faces of the mark laid each frame, counted rather than timed: a
+        // machine running the suite on two busy cores loses a frame's worth
+        // of time to the others at any moment.
+        let faces_now = |ed: &crate::Editor| -> usize {
+            let store = ed.script_host.decals().clone();
+            let store = store.borrow();
+            store.ids().iter().filter_map(|id| store.get(*id)).map(|d| d.indices.len() / 3).sum()
+        };
+        let total_faces = faces_now(&ed);
+        let (mut per_frame, mut done) = (Vec::new(), 0usize);
         let until = std::time::Instant::now() + std::time::Duration::from_secs(300);
         while ed.decal_batches.relaid == relaid {
             ed.pump_collision_meshes();
-            let t = std::time::Instant::now();
             ed.sync_decals();
-            frames_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+            let now = match ed.decal_batches.relaying.as_ref() {
+                Some(r) => r.job.faces(),
+                None if ed.decal_batches.relaid != relaid => faces_now(&ed),
+                None => done,
+            };
+            per_frame.push(now.saturating_sub(done));
+            done = now;
             if let Some(r) = ed.decal_batches.relaying.as_ref() {
                 let store = ed.script_host.decals().clone();
                 let store = store.borrow();
@@ -1295,10 +1398,13 @@ mod tests {
             }
             assert!(std::time::Instant::now() < until, "the mark was never laid again");
         }
-        let total: f64 = frames_ms.iter().sum();
-        let worst = frames_ms.iter().copied().fold(0.0, f64::max);
-        assert!(w.held > 0, "the mark was laid again in one frame, {total:.1} ms of work");
-        assert!(worst < total / 3.0, "one frame spent {worst:.2} ms of the {total:.2} ms the re-lay took");
+        let worst = per_frame.iter().copied().max().unwrap_or(0);
+        assert!(w.held > 0 && total_faces > 0, "the mark was laid again in one frame");
+        assert!(
+            worst * 3 < total_faces,
+            "one frame laid {worst} of the {total_faces} faces of the mark, over {} frames",
+            per_frame.len()
+        );
         assert_eq!(mark_verts(&ed), laid, "laid again on the same ground, the mark came out otherwise");
         let _ = std::fs::remove_dir_all(&dir);
     }

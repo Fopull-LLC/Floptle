@@ -418,6 +418,8 @@ scene.unload("rooms/armoury")                      -- and take it away again
 This is how you stream a level in pieces, bring in a UI overlay without losing
 the world behind it, or keep a hub scene resident while a mission loads.
 
+- The layer's own play-on-start sounds and particle effects start as it
+  loads. Everything already playing in the running scene plays on as it was.
 - An additive scene brings **nodes only** — no second sun, skybox or
   post-processing chain. A world has one environment, and the base scene owns
   it. Unless you hand it over — see `environment` below.

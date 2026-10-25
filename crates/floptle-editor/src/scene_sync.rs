@@ -33,8 +33,17 @@ impl Editor {
         // when the globals are built. Only structural changes (add/edit/delete/resize)
         // re-lay the volume set in the shared 3D atlas. Static collider meshes
         // join the same atlas as shadow-only occluder volumes (they cast, never draw).
+        // Each step named inside `terrainShadow`: one 627 ms frame of it on a
+        // cold load said nothing of which.
+        let mut t0 = floptle_core::profile::Span::new();
+        let mut part = |ed: &Self, name: &'static str| {
+            ed.script_host.profile().borrow_mut().record_part(name, t0.ms());
+            t0 = floptle_core::profile::Span::new();
+        };
         self.land_terrain_proxies();
+        part(self, "terrainProxies");
         let occluders_changed = self.refresh_mesh_occluders();
+        part(self, "terrainOccluders");
         let mut budget = crate::terrain_edit::TERRAIN_SHADOW_UPLOAD_CELLS;
         if let (Some(gpu), Some(raymarch)) = (self.gpu.as_ref(), self.raymarch.as_mut()) {
             // Edits' boxes, nearest-first by nothing in particular but
@@ -78,6 +87,7 @@ impl Editor {
             // proxies as they are by then.
             self.terrain_region_dirty.clear();
         }
+        part(self, "terrainShadowEdits");
         let laying = self.raymarch.as_ref().is_some_and(|r| r.atlas_building());
         if (self.terrain_gpu_dirty || self.terrain_atlas_dirty || occluders_changed || laying)
             && let (Some(gpu), Some(raymarch)) = (self.gpu.as_ref(), self.raymarch.as_mut())
@@ -206,6 +216,7 @@ impl Editor {
                 }
             }
         }
+        part(self, "terrainShadowAtlas");
     }
 
     /// The terrain texture palette, put on the GPU when it changes.
@@ -605,6 +616,45 @@ mod shadow_atlas_tests {
     fn atlas_is_current(ed: &crate::Editor) -> bool {
         let (gpu, r) = (ed.gpu.as_ref().unwrap(), ed.raymarch.as_ref().unwrap());
         ed.terrain_slots.iter().enumerate().all(|(i, s)| r.slot_holds(gpu, i, &ed.terrains[&s.e].shadow))
+    }
+
+    /// **The first atlas after a world lands is made off the frame, even
+    /// short of video memory.** On a cold start the atlas is a placeholder,
+    /// so the first world to land has a new one made, room for half as much
+    /// again, on a worker. When the GPU refused that, the frame made one
+    /// itself: the exact size, then half the volumes, each an allocation of
+    /// up to hundreds of megabytes and its zeroing, on the frame. A 627 ms
+    /// `terrainShadow` frame on a cold load had that shape. The worker
+    /// falls back now, and the frame makes none. Counted, with the memory
+    /// capped as a full GPU would: room for the world but not the roomy
+    /// atlas, it is drawn and nothing was made on the frame; room for one of
+    /// three worlds landing at once, one is drawn, the rest are reported
+    /// refused, and nothing was made on the frame; room for none, the same.
+    #[test]
+    fn the_first_atlas_after_a_world_lands_is_made_off_the_frame() {
+        let field = rock();
+        let cells = |ed: &crate::Editor| ed.terrains.values().map(|t| t.shadow.distance.len() as u64).max().unwrap_or(0);
+        for (worlds, cap_of, drawn) in [(1usize, 1.2f64, 1usize), (3, 1.5, 1), (1, 0.5, 0)] {
+            let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+            for k in 0..worlds {
+                add_body(&mut ed, 1 + k as u32, DVec3::new(900.0 * k as f64, 0.0, 0.0), &field);
+            }
+            // Six bytes a cell: an f16 distance and an RGBA8 colour.
+            let one = cells(&ed) * 6;
+            ed.raymarch.as_mut().unwrap().set_atlas_memory_cap(Some((one as f64 * cap_of) as u64));
+            let before = ed.raymarch.as_ref().unwrap().atlas_allocs_on_frame();
+            let per_frame = settle(&mut ed);
+            let r = ed.raymarch.as_ref().unwrap();
+            let made = r.atlas_allocs_on_frame() - before;
+            assert_eq!(made, 0, "{worlds} world(s) landing in {:.1} worlds of memory made {made} atlas(es) on the frame", cap_of);
+            assert_eq!(ed.terrain_slots.len(), drawn, "{worlds} world(s) in {cap_of:.1} worlds of memory");
+            assert_eq!(r.atlas_refused().is_some(), drawn < worlds, "{worlds} world(s), {drawn} drawn: refused said {:?}", r.atlas_refused());
+            let worst = per_frame.iter().copied().max().unwrap_or(0);
+            assert!(worst <= TERRAIN_SHADOW_UPLOAD_CELLS + LAYER, "a frame uploaded {worst} cells, over the budget");
+            if drawn > 0 {
+                assert!(atlas_is_current(&ed), "a slot does not hold its terrain's proxy");
+            }
+        }
     }
 
     /// **Bodies arriving one after another upload only themselves, a budget

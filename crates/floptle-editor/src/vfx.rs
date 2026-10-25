@@ -610,6 +610,19 @@ impl VfxSystem {
         }
     }
 
+    /// Spawn instances for the `play_on_start` particle systems among `ents`
+    /// (an additive layer's nodes), leaving every effect already playing as
+    /// it is: a level streamed in under a campfire does not start the fire
+    /// again or put out the sparks in the air.
+    pub fn start_entities(&mut self, world: &World, ents: &[Entity]) {
+        for &e in ents {
+            if let Some(ps) = world.get::<ParticleSystem>(e).filter(|ps| ps.play_on_start) {
+                let asset = ps.asset.clone();
+                self.spawn(e, &asset);
+            }
+        }
+    }
+
     /// Spawn (or replace) the instance on `entity` from the effect at `key`.
     /// Seeded by the entity index so two campfires don't march in lockstep.
     pub fn spawn(&mut self, entity: Entity, key: &str) {
