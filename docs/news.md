@@ -1,5 +1,8 @@
 ## Just shipped
 
+**v0.117.0-rc26 — "Whole Worlds"** (beta). Beta updates as one switch in
+the Hub (Settings → Beta updates), and versions listed in the right order.
+
 **v0.117.0-rc25 — "Whole Worlds"** (beta). Craft that come to rest on a
 moving planet, cheaper physics near the ground, and a quiet Hub.
 
