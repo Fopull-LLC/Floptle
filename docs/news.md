@@ -1,5 +1,9 @@
 ## Just shipped
 
+**v0.117.0-rc21 — "Whole Worlds"** (beta). No more decal stutter on a
+streamed world, crafts and parked vehicles that come to rest, and a smoother
+take-off roll.
+
 **v0.117.0-rc20 — "Whole Worlds"** (beta). Worlds that arrive without
 stalling the frame, planets a built game can generate, shaders that build
 beside play, and fixes to scatter queries and JSON numbers.
