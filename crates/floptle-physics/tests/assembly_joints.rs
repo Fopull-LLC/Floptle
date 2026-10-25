@@ -688,66 +688,81 @@ fn a_joints_rest_survives_the_joints_being_rebuilt() {
 /// A four-wheeled rover parked on a floor and teleported a kilometre onto
 /// another one arrives whole: the tick after, every tyre is within a
 /// centimetre of where it sat on its mount, and neither a tyre nor the
-/// chassis has been kicked.
+/// chassis has been kicked, against the same rover woken where it stood.
+/// (Parked for two seconds, the rover is asleep, and a sleeper's speed reads
+/// nothing; its first tick awake is the yardstick, not its last asleep.)
 #[test]
 fn a_teleported_rover_takes_its_wheels_with_it() {
-    let mut ecs = World::default();
-    // The same floor here and a kilometre off.
-    for x in [0.0, 1000.0] {
-        let floor = ecs.spawn();
-        ecs.insert(floor, Transform::from_translation(DVec3::new(x, -1.0, 0.0)));
-        ecs.insert(floor, RigidBody { kind: BodyKind::Box, mode: BodyMode::Static, half_extents: [50.0, 1.0, 50.0], friction: 1.0, ..Default::default() });
-    }
-    let chassis = segment(&mut ecs, "Chassis", DVec3::new(0.0, 0.9, 0.0), [1.2, 0.2, 0.7], 40.0);
-    let mut wheels = Vec::new();
-    for (dx, dz) in [(-1.0f64, -0.9f64), (1.0, -0.9), (-1.0, 0.9), (1.0, 0.9)] {
-        let w = ecs.spawn();
-        ecs.insert(w, Transform::from_translation(DVec3::new(dx, 0.45, dz)));
-        ecs.insert(w, RigidBody { radius: 0.45, mass: 5.0, friction: 1.0, rotates: true, ..Default::default() });
-        ecs.insert(
-            w,
-            Joint {
-                kind: JointKind::Wheel,
-                other: "Chassis".into(),
-                axis: [0.0, 1.0, 0.0],
-                stiffness: 3.0,
-                damping: 0.8,
-                motor: true,
-                motor_speed: 0.0,
-                max_force: 400.0,
-                ..Default::default()
-            },
-        );
-        wheels.push(w);
-    }
-    let mut sim = build(&ecs);
-    run(&mut sim, &mut ecs, 2.0);
-    let state = |sim: &Sim| -> (Vec<Vec3>, Vec<Vec3>, Vec3) {
+    let parked = || {
+        let mut ecs = World::default();
+        // The same floor here and a kilometre off.
+        for x in [0.0, 1000.0] {
+            let floor = ecs.spawn();
+            ecs.insert(floor, Transform::from_translation(DVec3::new(x, -1.0, 0.0)));
+            ecs.insert(floor, RigidBody { kind: BodyKind::Box, mode: BodyMode::Static, half_extents: [50.0, 1.0, 50.0], friction: 1.0, ..Default::default() });
+        }
+        let chassis = segment(&mut ecs, "Chassis", DVec3::new(0.0, 0.9, 0.0), [1.2, 0.2, 0.7], 40.0);
+        let mut wheels = Vec::new();
+        for (dx, dz) in [(-1.0f64, -0.9f64), (1.0, -0.9), (-1.0, 0.9), (1.0, 0.9)] {
+            let w = ecs.spawn();
+            ecs.insert(w, Transform::from_translation(DVec3::new(dx, 0.45, dz)));
+            ecs.insert(w, RigidBody { radius: 0.45, mass: 5.0, friction: 1.0, rotates: true, ..Default::default() });
+            ecs.insert(
+                w,
+                Joint {
+                    kind: JointKind::Wheel,
+                    other: "Chassis".into(),
+                    axis: [0.0, 1.0, 0.0],
+                    stiffness: 3.0,
+                    damping: 0.8,
+                    motor: true,
+                    motor_speed: 0.0,
+                    max_force: 400.0,
+                    ..Default::default()
+                },
+            );
+            wheels.push(w);
+        }
+        let mut sim = build(&ecs);
+        run(&mut sim, &mut ecs, 2.0);
+        (sim, ecs, chassis, wheels)
+    };
+    let state = |sim: &Sim, chassis: floptle_core::Entity, wheels: &[floptle_core::Entity]| -> (Vec<Vec3>, Vec<Vec3>, Vec3) {
         let c = sim.compound_of(chassis.index()).unwrap();
         let (mut at, mut vel) = (Vec::new(), Vec::new());
-        for w in &wheels {
+        for w in wheels {
             let r = sim.body_states().find(|r| r.entity == *w).unwrap();
             at.push(c.orient.inverse() * (r.pos.as_vec3() - c.pos));
             vel.push(r.vel);
         }
         (at, vel, c.vel)
     };
-    let (at0, vel0, cv0) = state(&sim);
+    // Woken where it stands, for a tick.
+    let (mut still, mut still_ecs, chassis, wheels) = parked();
+    still.set_body_asleep(chassis.index(), false);
+    for w in &wheels {
+        still.set_body_asleep(w.index(), false);
+    }
+    still.sync_joints(&mut still_ecs);
+    still.step_tick(DT, None);
+    let (_, vel0, cv0) = state(&still, chassis, &wheels);
     // Set down a kilometre off, standing on the far floor as it stood here.
+    let (mut sim, mut ecs, chassis, wheels) = parked();
+    let (at0, _, _) = state(&sim, chassis, &wheels);
     let origin = sim.world.origin;
     let to = sim.compound_of(chassis.index()).unwrap().origin().as_dvec3() + origin + DVec3::new(1000.0, 0.0, 0.0);
     let moved = sim.set_compound_origin(chassis.index(), to);
     assert_eq!(moved.len(), 5, "the chassis and its four wheels should all move: {moved:?}");
     sim.sync_joints(&mut ecs);
     sim.step_tick(DT, None);
-    let (at1, vel1, cv1) = state(&sim);
+    let (at1, vel1, cv1) = state(&sim, chassis, &wheels);
     // Parked, it should not have moved at all.
     let fall = 0.05;
     for k in 0..4 {
         assert!((at1[k] - at0[k]).length() < 0.01, "wheel {k} is {} m off its mount", (at1[k] - at0[k]).length());
-        assert!((vel1[k] - vel0[k]).length() < fall, "wheel {k} was kicked to {:?}", vel1[k]);
+        assert!((vel1[k] - vel0[k]).length() < fall, "wheel {k} was kicked to {:?}, against {:?} woken in place", vel1[k], vel0[k]);
     }
-    assert!((cv1 - cv0).length() < fall, "the chassis was kicked to {cv1:?}");
+    assert!((cv1 - cv0).length() < fall, "the chassis was kicked to {cv1:?}, against {cv0:?} woken in place");
 }
 
 /// How far past its goal a servo arm swings, in degrees: a 2 m arm with a

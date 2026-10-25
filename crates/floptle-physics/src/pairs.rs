@@ -325,7 +325,28 @@ enum Side {
     Compound(usize),
 }
 
+/// What two sleepers touching each other reported, kept while both sleep:
+/// see `PhysicsWorld::resolve_pairs`. Points are relative to the first
+/// side's position, so a rebase carries them.
+#[derive(Clone, Debug)]
+pub(crate) struct SleepingPair {
+    owners: (u32, u32),
+    rows: Vec<CompoundContact>,
+    seen: bool,
+}
+
+/// A pair of sides, as a key: `(kind, index)` each, a body 0 and a
+/// compound 1.
+pub(crate) type PairKey = ((u8, usize), (u8, usize));
+
 impl Side {
+    fn key(self) -> (u8, usize) {
+        match self {
+            Side::Body(i) => (0, i),
+            Side::Compound(i) => (1, i),
+        }
+    }
+
     fn peer(self) -> ContactPeer {
         match self {
             Side::Body(i) => ContactPeer::Body(i),
@@ -377,6 +398,20 @@ impl PhysicsWorld {
         match s {
             Side::Body(i) => !self.bodies[i].driven,
             Side::Compound(i) => !self.compounds[i].anchored,
+        }
+    }
+
+    fn side_asleep(&self, s: Side) -> bool {
+        match s {
+            Side::Body(i) => self.bodies[i].asleep,
+            Side::Compound(i) => self.compounds[i].asleep,
+        }
+    }
+
+    fn side_pos(&self, s: Side) -> Vec3 {
+        match s {
+            Side::Body(i) => self.bodies[i].pos,
+            Side::Compound(i) => self.compounds[i].pos,
         }
     }
 
@@ -589,6 +624,7 @@ impl PhysicsWorld {
             }
         }
         if sides.len() < 2 {
+            self.sleeping_pairs.clear();
             return;
         }
         let mut scratch = Vec::new();
@@ -627,6 +663,7 @@ impl PhysicsWorld {
         }
         pairs.sort_unstable();
         if pairs.is_empty() {
+            self.sleeping_pairs.clear();
             return;
         }
         let mut budgets: Vec<(f32, f32)> = vec![(PUSH_BUDGET, ROT_BUDGET); sides.len()];
@@ -641,6 +678,25 @@ impl PhysicsWorld {
                 if !a_moves && !b_moves {
                     continue;
                 }
+                // Two sleepers touching: neither moves, so what they report
+                // touching is what it was when they were first seen asleep
+                // together, given again without the geometry.
+                let key = (a.key(), b.key());
+                let owners = (self.pair_owner(a), self.pair_owner(b));
+                let cacheable = !crate::world::reference_settle()
+                    && self.side_asleep(a) && self.side_asleep(b) && owners.0 != u32::MAX && owners.1 != u32::MAX;
+                let base = self.side_pos(a);
+                if cacheable
+                    && let Some(e) = self.sleeping_pairs.get_mut(&key)
+                    && e.owners == owners
+                {
+                    e.seen = true;
+                    for row in &e.rows {
+                        self.compound_contacts.push(CompoundContact { point: row.point + base, ..*row });
+                    }
+                    continue;
+                }
+                let first_row = self.compound_contacts.len();
                 self.pair_solids(a, &mut sa);
                 self.pair_solids(b, &mut sb);
                 // Each side's parts that reach the box round the other's: a
@@ -699,8 +755,17 @@ impl PhysicsWorld {
                         }
                     }
                 }
+                // Asleep before this pair was solved and asleep after: kept.
+                if cacheable && self.side_asleep(a) && self.side_asleep(b) {
+                    let rows = self.compound_contacts[first_row..]
+                        .iter()
+                        .map(|r| CompoundContact { point: r.point - base, ..*r })
+                        .collect();
+                    self.sleeping_pairs.insert(key, SleepingPair { owners, rows, seen: true });
+                }
             }
         }
+        self.sleeping_pairs.retain(|_, e| std::mem::take(&mut e.seen));
     }
 
     /// One contact between A and B at `cp`, with `n` pointing from B towards

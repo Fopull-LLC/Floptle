@@ -108,6 +108,19 @@ pub struct JointShape {
     pub collide_connected: bool,
 }
 
+impl JointRt {
+    /// Whether this joint moves what it holds of its own accord, so that
+    /// nothing it holds may sleep: a turning motor, a servo, a target pull,
+    /// or a far end that rides a collider (a grip on the ground of a planet
+    /// carried on its rails, where the two ends are carried separately and
+    /// only the joint keeps them together).
+    pub(crate) fn drives(&self) -> bool {
+        matches!(self.kind, JointKind::Target)
+            || (self.motor && (self.motor_speed != 0.0 || self.servo))
+            || (self.b.is_none() && self.on_collider.is_some())
+    }
+}
+
 impl JointShape {
     pub fn of(j: &floptle_core::joint::Joint) -> Self {
         Self {
@@ -438,12 +451,27 @@ impl PhysicsWorld {
         if self.joints.is_empty() || dt <= 0.0 {
             return;
         }
+        // A joint whose ends are both at rest, one of them asleep, rests
+        // too: nothing on either side has moved since they fell asleep
+        // together (see `PhysicsWorld::settle`), and what the joint would
+        // correct is only what was left when they did, which woke them every
+        // step. It keeps the force it last carried. A joint that drives (a
+        // turning motor, a servo, a target pull, a grip riding a collider)
+        // wakes what it drives, as its first correction always did.
+        let resting: Vec<bool> = if !crate::world::reference_settle() && self.joints.iter().any(|j| self.joint_end_asleep(Some(j.a)) || self.joint_end_asleep(j.b)) {
+            (0..self.joints.len()).map(|j| self.joint_rests(j)).collect()
+        } else {
+            Vec::new()
+        };
+        let rests = |j: usize| resting.get(j).copied().unwrap_or(false);
         for j in 0..self.joints.len() {
-            self.joints[j].force = 0.0;
+            if !rests(j) {
+                self.joints[j].force = 0.0;
+            }
         }
         for _ in 0..ITERATIONS {
             for j in 0..self.joints.len() {
-                if self.joints[j].broken {
+                if self.joints[j].broken || rests(j) {
                     continue;
                 }
                 let spent = self.solve_hard(j, dt);
@@ -452,7 +480,7 @@ impl PhysicsWorld {
             }
         }
         for j in 0..self.joints.len() {
-            if self.joints[j].broken {
+            if self.joints[j].broken || rests(j) {
                 continue;
             }
             let spent = self.solve_soft(j, dt);
@@ -465,6 +493,55 @@ impl PhysicsWorld {
                 jt.broken = true;
             }
         }
+    }
+
+    /// Whether end `l` of a joint is asleep.
+    fn joint_end_asleep(&self, l: Option<Link>) -> bool {
+        match l {
+            Some(Link::Compound(i)) => self.compounds.get(i).is_some_and(|c| c.asleep),
+            Some(Link::Body(i)) => self.bodies.get(i).is_some_and(|b| b.asleep),
+            None => false,
+        }
+    }
+
+    /// Whether end `l` of a joint cannot move this step: asleep, pinned,
+    /// moved by something else, or the world.
+    fn joint_end_rests(&self, l: Option<Link>) -> bool {
+        match l {
+            Some(Link::Compound(i)) => self.compounds.get(i).is_none_or(|c| c.asleep || !c.live() || c.anchored),
+            Some(Link::Body(i)) => self.bodies.get(i).is_none_or(|b| b.asleep || !b.live() || b.kinematic || b.driven || b.pushbox_only),
+            None => true,
+        }
+    }
+
+    /// Whether joint `j` rests this step (see `solve_joints`), waking its
+    /// sleeping ends instead when it drives them.
+    fn joint_rests(&mut self, j: usize) -> bool {
+        let jt = &self.joints[j];
+        let (a, b) = (Some(jt.a), jt.b);
+        if jt.broken || !(self.joint_end_asleep(a) || self.joint_end_asleep(b)) {
+            return false;
+        }
+        if !(self.joint_end_rests(a) && self.joint_end_rests(b)) {
+            return false;
+        }
+        let drives = jt.drives();
+        if !drives {
+            return true;
+        }
+        for l in [a, b].into_iter().flatten() {
+            match l {
+                Link::Compound(i) => self.compounds[i].wake(),
+                Link::Body(i) => {
+                    let b = &mut self.bodies[i];
+                    if b.asleep {
+                        b.asleep = false;
+                        b.sleep_time = 0.0;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Where joint `j` is and how fast that is changing: a hinge's or a

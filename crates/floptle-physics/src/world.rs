@@ -180,6 +180,24 @@ thread_local! {
     /// motion counted: the reference the sleep guards compare with.
     /// Test-only.
     pub(crate) static REFERENCE_SLEEP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Judge sleep, sleeping joints and sleeping pairs, and mesh the ground,
+    /// the way the step did before sleep was judged on the whole step: no
+    /// `settle`, no resting joints, no kept pairs, nothing meshed ahead. The reference the settle guards compare
+    /// with, bit for bit, up to the first sleep. Test-only.
+    pub(crate) static REFERENCE_SETTLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether [`REFERENCE_SETTLE`] is on: never outside tests.
+#[inline]
+pub(crate) fn reference_settle() -> bool {
+    #[cfg(test)]
+    {
+        REFERENCE_SETTLE.with(|r| r.get())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
 }
 
 /// How far a sample may move during a compound contact pass before the list
@@ -194,6 +212,15 @@ const CONTACT_NEAR_TRAVEL: f32 = 0.1;
 /// seen to, and anything coming this near a sleeper still wakes it before it
 /// touches; how far beyond that the ground is changes nothing.
 const REST_CLEAR: f32 = 0.05;
+
+/// The root of `k`'s set in a union-find over `root`, halving the path.
+fn find_root(root: &mut [usize], mut k: usize) -> usize {
+    while root[k] != k {
+        root[k] = root[root[k]];
+        k = root[k];
+    }
+    k
+}
 
 /// How many recent level edits [`PhysicsWorld::level_edit_log`] keeps.
 pub const LEVEL_EDIT_LOG: usize = 512;
@@ -256,6 +283,13 @@ pub struct PhysicsWorld {
     shape_lever: Vec<f32>,
     /// The candidates a capsule's feet could reach this pass — see `step_body`.
     cand_feet: Vec<u32>,
+    /// Each compound's settle timer as the step began, and each joined
+    /// body's: what [`Self::settle`] carries on from. Scratch.
+    settle_was: Vec<f32>,
+    settle_was_bodies: Vec<f32>,
+    /// Sleepers touching each other, and what they reported touching: see
+    /// `resolve_pairs`.
+    pub(crate) sleeping_pairs: std::collections::HashMap<crate::pairs::PairKey, crate::pairs::SleepingPair>,
     /// True while `step` has already rebuilt the index for this tick.
     ///
     /// `step_body` is also reachable directly (the rollback driver steps bodies
@@ -391,6 +425,9 @@ impl Default for PhysicsWorld {
             shape_cand_fresh: Vec::new(),
             shape_lever: Vec::new(),
             cand_feet: Vec::new(),
+            settle_was: Vec::new(),
+            settle_was_bodies: Vec::new(),
+            sleeping_pairs: std::collections::HashMap::new(),
             index_fresh: false,
             indexed_hash: 0,
             level_edits: 0,
@@ -1503,7 +1540,7 @@ impl PhysicsWorld {
                 continue;
             }
             let fresh = self.find_resting_contacts(bi);
-            if fresh.is_empty() {
+            if fresh.is_empty() && !self.held_by_a_joint(crate::joints::Link::Body(bi)) {
                 self.bodies[bi].asleep = false;
                 self.bodies[bi].sleep_time = 0.0;
             } else {
@@ -1539,11 +1576,18 @@ impl PhysicsWorld {
         let clock = || timed.then(floptle_core::time::Instant::now);
         let t = clock();
         self.reindex_colliders();
+        self.mesh_ground_ahead();
         let broadphase = Self::lap(t);
         self.contacts.clear();
         self.kin_contacts.clear();
         self.compound_contacts.clear();
         let sweeps0 = self.timing.as_ref().map(|t| t.sweeps_ms).unwrap_or(0.0);
+        let mut was = std::mem::take(&mut self.settle_was_bodies);
+        was.clear();
+        if !self.joints.is_empty() {
+            was.extend(self.bodies.iter().map(|b| if b.asleep { SLEEP_SETTLE_TIME } else { b.sleep_time }));
+        }
+        self.settle_was_bodies = was;
         let t_moves = clock();
         for bi in 0..self.bodies.len() {
             // Driver-stepped bodies advance through `Sim::step_body_tick`
@@ -1556,6 +1600,11 @@ impl PhysicsWorld {
                 }
             }
         }
+        // Where each settle timer stood before the step: see `Self::settle`.
+        let mut was = std::mem::take(&mut self.settle_was);
+        was.clear();
+        was.extend(self.compounds.iter().map(|c| if c.asleep { SLEEP_SETTLE_TIME } else { c.sleep_time }));
+        self.settle_was = was;
         for ci in 0..self.compounds.len() {
             let t = clock();
             self.step_compound(ci, dt);
@@ -1586,6 +1635,7 @@ impl PhysicsWorld {
             self.resting_check_elapsed = 0.0;
             self.revalidate_sleeping_bodies();
         }
+        self.settle(dt);
         self.recheck_sleeping_compounds(dt);
         let sleep = Self::lap(t);
         self.index_fresh = false;
@@ -2276,6 +2326,286 @@ impl PhysicsWorld {
         stop
     }
 
+    /// Have the terrain mesh, off this thread, the ground each fast mover is
+    /// heading for in the next half second, so the step that reaches it
+    /// finds its triangles made rather than making them itself: see
+    /// [`ChunkTerrain::mesh_ahead`]. Every terrain is told once a step, with
+    /// no boxes when nothing is moving.
+    fn mesh_ground_ahead(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            const AHEAD: f32 = 0.5;
+            // Slower than this, a mover reaches new ground seldom enough that
+            // meshing it on the step is the lesser cost.
+            const FAST: f32 = 2.0;
+            if reference_settle() || !self.colliders.iter().any(|c| c.shape.chunk_terrain().is_some()) {
+                return;
+            }
+            let mut boxes: Vec<(Vec3, Vec3)> = Vec::new();
+            let mut add = |pos: Vec3, vel: Vec3, reach: f32| {
+                let to = pos + vel * AHEAD;
+                boxes.push((pos.min(to) - Vec3::splat(reach), pos.max(to) + Vec3::splat(reach)));
+            };
+            for c in &self.compounds {
+                if c.asleep || !c.live() || c.anchored || c.shapes.is_empty() || c.vel.length_squared() < FAST * FAST {
+                    continue;
+                }
+                add(c.pos, c.vel, c.reach());
+            }
+            for b in &self.bodies {
+                if b.asleep || !b.live() || b.kinematic || b.vel.length_squared() < FAST * FAST {
+                    continue;
+                }
+                add(b.pos, b.vel, b.bounding_radius());
+            }
+            for col in &self.colliders {
+                if let Some(t) = col.shape.chunk_terrain() {
+                    let off = col.offset();
+                    let local: Vec<(Vec3, Vec3)> = boxes.iter().map(|&(lo, hi)| (lo - off, hi - off)).collect();
+                    t.mesh_ahead(&local);
+                }
+            }
+        }
+    }
+
+    /// Whether a joint holds `l`: a sleeper resting on nothing but its
+    /// joints (a rover's chassis on its wheels) has not lost its ground.
+    fn held_by_a_joint(&self, l: crate::joints::Link) -> bool {
+        !reference_settle() && self.joints.iter().any(|j| !j.broken && (j.a == l || j.b == Some(l)))
+    }
+
+    /// Falling asleep, judged on the whole step: after the joints have held
+    /// things together and the pair pass has pushed them apart, not on a
+    /// mover's own move alone.
+    ///
+    /// An assembly leaning on another moves into it every step and is pushed
+    /// back out by the pair pass after its own step has judged it, so judged
+    /// there it never looked still, and two pieces of a broken-up craft lying
+    /// against each other stayed awake for good. Judged here, it is still by
+    /// the same measure: moved and turned by less than [`SLEEP_LINEAR_SPEED`]
+    /// carries it in `dt`, on the ground or on something it rests on.
+    ///
+    /// Things joined by joints (a rover's chassis and its wheels) settle
+    /// together: each is judged by its own motion this step, the group is
+    /// held up by any of them on the ground (or by a joint to the world), and
+    /// they fall asleep together once all of them have been still for
+    /// [`SLEEP_SETTLE_TIME`]. None of them sleeps alone, since the joints
+    /// would wake it on the next step and start its count again. See
+    /// `PhysicsWorld::solve_joints` for how a sleeping group's joints rest.
+    ///
+    /// Only the moment of falling asleep changes: nothing here moves a
+    /// thing that is awake, so up to then every motion is what it was. A
+    /// compound alone that nothing touched or held moved only by its own
+    /// step, which already judged it the same way, so for it nothing changes
+    /// at all.
+    fn settle(&mut self, dt: f32) {
+        if reference_settle() {
+            return;
+        }
+        let still = SLEEP_LINEAR_SPEED * dt;
+        let nc = self.compounds.len();
+        let nb = self.bodies.len();
+        // Joined groups, by joint: compounds are nodes `0..nc`, bodies after.
+        let joined = !self.joints.is_empty() && self.settle_was_bodies.len() == nb;
+        let mut root: Vec<usize> = Vec::new();
+        if joined {
+            root.extend(0..nc + nb);
+            let node = |l: crate::joints::Link| match l {
+                crate::joints::Link::Compound(i) if i < nc => Some(i),
+                crate::joints::Link::Body(i) if i < nb => Some(nc + i),
+                _ => None,
+            };
+            for j in &self.joints {
+                if j.broken {
+                    continue;
+                }
+                if let (Some(a), Some(b)) = (node(j.a), j.b.and_then(node)) {
+                    let (ra, rb) = (find_root(&mut root, a), find_root(&mut root, b));
+                    if ra != rb {
+                        root[ra.max(rb)] = ra.min(rb);
+                    }
+                }
+            }
+        }
+        // How many nodes share each root: a node is joined when its group
+        // has two or more.
+        let mut size = vec![0u32; root.len()];
+        for k in 0..root.len() {
+            let r = find_root(&mut root, k);
+            root[k] = r;
+            size[r] += 1;
+        }
+        let in_group = |root: &[usize], k: usize| -> bool { joined && size[root[k]] >= 2 };
+        // Compounds a joint moves of its own accord.
+        let mut driven = vec![false; if joined { nc } else { 0 }];
+        for j in self.joints.iter().filter(|j| !j.broken && j.drives()) {
+            if let crate::joints::Link::Compound(i) = j.a
+                && i < driven.len()
+            {
+                driven[i] = true;
+            }
+        }
+        // On its own: still by the whole step, on what it stands on.
+        for ci in 0..nc {
+            let c = &self.compounds[ci];
+            if c.asleep || !c.live() || c.anchored || c.shapes.is_empty() || (joined && in_group(&root, ci)) {
+                continue;
+            }
+            if driven.get(ci).copied().unwrap_or(false) {
+                // Held by something that moves it: it sleeps on its own count
+                // or not at all, as it always did.
+                continue;
+            }
+            // Woken during this step (it was asleep as the step began), it
+            // starts its count again.
+            let was = self.settle_was.get(ci).copied().filter(|&t| t < SLEEP_SETTLE_TIME).unwrap_or(0.0);
+            if Self::compound_barely_moved(c, dt) {
+                let c = &mut self.compounds[ci];
+                c.sleep_time = c.sleep_time.max(was + dt);
+                if c.sleep_time >= SLEEP_SETTLE_TIME {
+                    self.put_compound_to_sleep(ci);
+                }
+            }
+        }
+        if !joined {
+            return;
+        }
+        // Joined: each group together. Groups by root, in node order.
+        let mut groups: Vec<(usize, usize)> = (0..nc + nb).filter(|&k| in_group(&root, k)).map(|k| (root[k], k)).collect();
+        groups.sort_unstable();
+        let mut start = 0;
+        while start < groups.len() {
+            let r = groups[start].0;
+            let end = start + groups[start..].iter().take_while(|g| g.0 == r).count();
+            let members: Vec<usize> = groups[start..end].iter().map(|g| g.1).collect();
+            start = end;
+            self.settle_group(&members, &root, dt, still);
+        }
+    }
+
+    /// [`Self::settle`] for one joined group, by node (compounds first,
+    /// then bodies offset by the compound count).
+    fn settle_group(&mut self, members: &[usize], root: &[usize], dt: f32, still: f32) {
+        let nc = self.compounds.len();
+        let mut supported = false;
+        let mut any_awake = false;
+        let mut all_still = true;
+        let mut t = f32::INFINITY;
+        let mut movers = 0;
+        for &k in members {
+            if k < nc {
+                let c = &self.compounds[k];
+                if !c.live() {
+                    return;
+                }
+                if c.anchored {
+                    // Pinned: holds the rest up, and is not itself asleep or awake.
+                    supported = true;
+                    continue;
+                }
+                movers += 1;
+                supported |= c.grounded || c.asleep;
+                // Asleep as the step began and woken during it: counting
+                // again from nothing.
+                let was = self.settle_was.get(k).copied().unwrap_or(0.0);
+                t = t.min(if was >= SLEEP_SETTLE_TIME && !c.asleep { 0.0 } else { was });
+                if c.asleep && self.settle_was.get(k) == Some(&SLEEP_SETTLE_TIME) {
+                    continue;
+                }
+                any_awake = true;
+                let turned = (c.orient * c.prev_orient.inverse()).normalize();
+                let angle = 2.0 * turned.xyz().length().atan2(turned.w.abs());
+                all_still &= c.pos.distance(c.prev_pos) < still && angle < still;
+            } else {
+                let bi = k - nc;
+                let b = &self.bodies[bi];
+                if !b.live() || b.driven || b.pushbox_only || b.sensor {
+                    // A rollback-driven body decides its own sleep, alone.
+                    return;
+                }
+                if b.kinematic {
+                    supported = true;
+                    continue;
+                }
+                movers += 1;
+                supported |= b.grounded || b.asleep;
+                let was = self.settle_was_bodies[bi];
+                t = t.min(if was >= SLEEP_SETTLE_TIME && !b.asleep { 0.0 } else { was });
+                if b.asleep && self.settle_was_bodies[bi] == SLEEP_SETTLE_TIME {
+                    continue;
+                }
+                any_awake = true;
+                // A ball on a wheel joint is the same ball however it is
+                // turned: what it touches, and what holds it, are where its
+                // centre is. Braked on a slope, the grip and the brake leave
+                // one turning in place by a few tenths of a radian a second
+                // that never moves it, which judged by its turn kept a
+                // parked rover awake for good.
+                let wheel = matches!(b.shape, crate::body::BodyShape::Sphere)
+                    && self.joints.iter().any(|j| j.kind == floptle_core::joint::JointKind::Wheel && j.a == crate::joints::Link::Body(bi));
+                let angle = if b.rotates && !wheel {
+                    let turned = (b.orient * b.prev_orient.inverse()).normalize();
+                    2.0 * turned.xyz().length().atan2(turned.w.abs())
+                } else {
+                    0.0
+                };
+                // A turn as the farthest point of it moves.
+                all_still &= b.pos.distance(b.prev_pos) < still && angle * b.bounding_radius() < still;
+            }
+        }
+        if movers == 0 || !any_awake {
+            return;
+        }
+        // Something in it moves it of its own accord.
+        let in_this = |l: crate::joints::Link| match l {
+            crate::joints::Link::Compound(i) => i < nc && root[i] == root[members[0]],
+            crate::joints::Link::Body(i) => nc + i < root.len() && root[nc + i] == root[members[0]],
+        };
+        if self.joints.iter().any(|j| !j.broken && j.drives() && in_this(j.a)) {
+            return;
+        }
+        // Held up by a joint to the world.
+        supported |= self.joints.iter().any(|j| !j.broken && j.b.is_none() && in_this(j.a));
+        if !(all_still && supported) {
+            return;
+        }
+        let t = t + dt;
+        for &k in members {
+            if k < nc {
+                let c = &mut self.compounds[k];
+                if c.anchored || (c.asleep && self.settle_was.get(k) == Some(&SLEEP_SETTLE_TIME)) {
+                    continue;
+                }
+                if t >= SLEEP_SETTLE_TIME {
+                    if !c.asleep {
+                        self.put_compound_to_sleep(k);
+                    }
+                } else {
+                    // Not alone: fell asleep on its own count this step,
+                    // while the group has not.
+                    c.asleep = false;
+                    c.sleep_time = t;
+                }
+            } else {
+                let bi = k - nc;
+                let b = &mut self.bodies[bi];
+                if b.kinematic || (b.asleep && self.settle_was_bodies[bi] == SLEEP_SETTLE_TIME) {
+                    continue;
+                }
+                if t >= SLEEP_SETTLE_TIME {
+                    if !b.asleep {
+                        self.set_asleep(bi, true);
+                        self.bodies[bi].ang_vel = Vec3::ZERO;
+                    }
+                } else {
+                    b.asleep = false;
+                    b.sleep_time = t;
+                    self.resting[bi].clear();
+                }
+            }
+        }
+    }
+
     /// Put compound `ci` to sleep where it stands, caching what it rests on
     /// and how deep each sample sits (see [`Self::compound_rest_probe`]).
     pub fn put_compound_to_sleep(&mut self, ci: usize) {
@@ -2406,9 +2736,10 @@ impl PhysicsWorld {
                 continue;
             }
             let (pens, resting) = self.compound_rest_probe(ci);
+            let held = self.held_by_a_joint(crate::joints::Link::Compound(ci));
             let c = &mut self.compounds[ci];
             let changed = pens.len() != c.rest_pens.len()
-                || resting.is_empty()
+                || (resting.is_empty() && !held)
                 || pens.iter().zip(&c.rest_pens).any(|(&now, &was)| {
                     // A sample that was touching and has come clear, or one
                     // pressed deeper than it slept.
@@ -2464,10 +2795,11 @@ impl PhysicsWorld {
             let lo = c.resting.partition_point(|t| t.shape < a);
             let hi = c.resting.partition_point(|t| t.shape < b);
             c.resting.splice(lo..hi, resting.drain(..));
-            if c.resting.is_empty() {
-                c.wake();
+            if c.resting.is_empty() && !self.held_by_a_joint(crate::joints::Link::Compound(ci)) {
+                self.compounds[ci].wake();
                 continue;
             }
+            let c = &mut self.compounds[ci];
             c.recheck_next = b;
             if b >= n {
                 c.recheck_next = 0;
@@ -6237,5 +6569,367 @@ mod compound_sleep_tests {
             }
             assert!(woke, "the ground moved {dy} m and the raft slept on");
         }
+    }
+}
+
+#[cfg(test)]
+mod settle_tests {
+    //! Falling asleep judged on the whole step: assemblies lying against each
+    //! other, and things held together by joints, sleep once they are still,
+    //! and every step until something sleeps is the step it always was.
+    use super::*;
+    use crate::compound::{Compound, CompoundShape, ShapeGeom};
+    use crate::gravity::GravityField;
+    use crate::shapes::ChunkTerrain;
+    use floptle_core::math::Quat;
+
+    fn boxes(halves: &[(Vec3, Vec3)], first_id: u64) -> Vec<CompoundShape> {
+        halves
+            .iter()
+            .enumerate()
+            .map(|(k, &(offset, half))| CompoundShape { geom: ShapeGeom::Box { half }, offset, rot: Quat::IDENTITY, mass: 5.0, id: first_id + k as u64 })
+            .collect()
+    }
+
+    /// A wall of boxes two metres high on flat terrain, and a plank of four
+    /// boxes leaning on it with its foot on the ground: two assemblies, each
+    /// with its own root, one resting on the other.
+    fn leaning() -> (PhysicsWorld, [usize; 2]) {
+        let mut field = floptle_field::ChunkField::new(0.75);
+        field.fill_slab(Vec3::new(-12.0, -6.0, -12.0), Vec3::new(12.0, 0.0, 12.0), 0.0, [0.5; 3]);
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        w.add_collider(Box::new(ChunkTerrain::new(field)));
+        let wall: Vec<(Vec3, Vec3)> = (0..12)
+            .map(|k| (Vec3::new(0.0, 0.26 + (k / 3) as f32 * 0.51, (k % 3) as f32 * 1.02 - 1.02), Vec3::new(0.25, 0.25, 0.5)))
+            .collect();
+        let mut a = Compound::new(Vec3::ZERO, Quat::IDENTITY, boxes(&wall, 1));
+        a.owner = 7;
+        // Four boxes end to end along the plank, tipped 60 degrees off the
+        // ground toward the wall, foot on the ground a metre out.
+        let plank: Vec<(Vec3, Vec3)> = (0..4).map(|k| (Vec3::new(0.0, k as f32 * 0.5 - 0.75, 0.0), Vec3::new(0.05, 0.25, 0.4))).collect();
+        let mut plank = boxes(&plank, 101);
+        // As heavy as the wall it leans on: what presses on a sleeper is
+        // its weight, as against the sleeper's.
+        for s in &mut plank {
+            s.mass = 15.0;
+        }
+        let mut b = Compound::new(Vec3::ZERO, Quat::IDENTITY, plank);
+        b.orient = Quat::from_rotation_z(-30f32.to_radians());
+        b.pos = Vec3::new(-0.3 - 0.06 - 1.0 * 30f32.to_radians().sin(), 1.0 * 30f32.to_radians().cos() + 0.02, 0.0);
+        b.prev_pos = b.pos;
+        b.prev_orient = b.orient;
+        b.owner = 8;
+        let ia = w.add_compound(a);
+        let ib = w.add_compound(b);
+        (w, [ia, ib])
+    }
+
+    type State = [u32; 13];
+
+    fn state(c: &Compound) -> State {
+        let mut s = [0; 13];
+        for (k, v) in c.pos.to_array().into_iter().chain(c.orient.to_array()).chain(c.vel.to_array()).chain(c.ang_vel.to_array()).enumerate() {
+            s[k] = v.to_bits();
+        }
+        s
+    }
+
+    /// Every step before `first` the same in both runs, positions,
+    /// orientations and velocities, bit for bit; and, when `first` is one
+    /// step, on step `first`, where something fell asleep (its velocity set
+    /// to nothing), every pose. A sim tick is two steps, and the second may
+    /// already differ.
+    fn same_until_asleep(reference: &[Vec<State>], now: &[Vec<State>], first: usize, one_step: bool) {
+        let differs = (0..first).find(|&k| reference[k] != now[k]);
+        assert_eq!(differs, None, "it moved differently before anything slept (at step {first})");
+        if one_step {
+            let poses = |s: &Vec<State>| s.iter().map(|s| s[..7].to_vec()).collect::<Vec<_>>();
+            assert_eq!(poses(&reference[first]), poses(&now[first]), "it fell asleep somewhere else than it was");
+        }
+    }
+
+    /// Run `steps` of a fixture's world, the reference way or not: every
+    /// compound's state each step, the first step anything was asleep after,
+    /// and the step all were.
+    fn run(reference: bool, steps: usize, fixture: fn() -> (PhysicsWorld, [usize; 2])) -> (Vec<Vec<State>>, Option<usize>, Option<usize>, PhysicsWorld) {
+        REFERENCE_SETTLE.with(|r| r.set(reference));
+        let (mut w, _) = fixture();
+        let (mut states, mut first, mut all) = (Vec::new(), None, None);
+        for tick in 0..steps {
+            w.step(1.0 / 120.0);
+            states.push(w.compounds.iter().map(state).collect());
+            if first.is_none() && w.compounds.iter().any(|c| c.asleep) {
+                first = Some(tick);
+            }
+            if all.is_none() && w.compounds.iter().all(|c| c.asleep) {
+                all = Some(tick);
+            }
+        }
+        REFERENCE_SETTLE.with(|r| r.set(false));
+        (states, first, all, w)
+    }
+
+    /// A plank leaning on a wall: it slides down the wall to a low lean,
+    /// and once it is still the two are asleep within two seconds; every step
+    /// until the first of them slept is the step it always was, bit for bit.
+    /// Judged on each one's own move, the plank pressed into the wall every
+    /// step and was pushed back out after it, so it never looked still, and
+    /// its press woke the wall: twelve seconds in, neither had both asleep.
+    #[test]
+    fn a_plank_leaning_on_a_wall_falls_asleep_with_it() {
+        let (ref_states, ref_first, ref_all, _) = run(true, 1440, leaning);
+        let (states, first, all, _) = run(false, 1440, leaning);
+        assert_eq!(ref_all, None, "the reference had both asleep at step {ref_all:?}: the fixture proves nothing");
+        let first = first.expect("neither ever fell asleep");
+        let all = all.expect("never both asleep");
+        assert!(all < first + 240, "the first slept at step {first}, both only at step {all}");
+        assert!(all < 720, "both asleep only at step {all}");
+        let first = first.min(ref_first.unwrap_or(usize::MAX));
+        same_until_asleep(&ref_states, &states, first, true);
+        // Still asleep at the end, where they were.
+        assert!(states[all..].iter().all(|s| *s == states[all]), "asleep, they moved");
+    }
+
+    /// Asleep, the plank and the wall report what the pair pass finds
+    /// between them, step after step, and the pass compares none of their
+    /// parts to find it: what it found the first time it saw them both
+    /// asleep, and found again whenever it is asked afresh.
+    #[test]
+    fn sleepers_touching_are_not_compared_again() {
+        let (mut w, [ia, ib]) = leaning();
+        let rows = |w: &PhysicsWorld| {
+            let mut r: Vec<(usize, u64, [u32; 3], [u32; 3])> = w
+                .compound_contacts
+                .iter()
+                .filter(|c| matches!(c.peer, crate::compound::ContactPeer::Compound(_)))
+                .map(|c| (c.compound, c.shape_id, c.point.to_array().map(f32::to_bits), c.normal.to_array().map(f32::to_bits)))
+                .collect();
+            r.sort();
+            r
+        };
+        for _ in 0..1440 {
+            w.step(1.0 / 120.0);
+            if w.compounds[ia].asleep && w.compounds[ib].asleep {
+                break;
+            }
+        }
+        assert!(w.compounds[ia].asleep && w.compounds[ib].asleep, "fixture: both should fall asleep");
+        // Asked afresh: the pass compares their parts.
+        w.sleeping_pairs.clear();
+        crate::pairs::PAIR_SOLID_TESTS.with(|n| n.set(0));
+        w.step(1.0 / 120.0);
+        let fresh = rows(&w);
+        let compared = crate::pairs::PAIR_SOLID_TESTS.with(|n| n.get());
+        assert!(compared > 0, "asked afresh, the pass compared nothing: the fixture proves nothing");
+        crate::pairs::PAIR_SOLID_TESTS.with(|n| n.set(0));
+        for _ in 0..240 {
+            w.step(1.0 / 120.0);
+            assert_eq!(rows(&w), fresh, "asleep, what they report changed");
+        }
+        assert!(w.compounds[ia].asleep && w.compounds[ib].asleep, "they woke with nothing waking them");
+        let compared = crate::pairs::PAIR_SOLID_TESTS.with(|n| n.get());
+        assert_eq!(compared, 0, "two seconds asleep compared {compared} pairs of parts");
+    }
+
+    /// A six-wheeled rover braked on a 20 degree slope of terrain: a
+    /// chassis assembly on six wheel bodies held by wheel joints. On a slope
+    /// that steep the grip and the brakes leave each wheel turning in place.
+    fn rover(braked: bool) -> (crate::sim::Sim, floptle_core::World, floptle_core::Entity, Vec<floptle_core::Entity>) {
+        use floptle_core::joint::{Joint, JointKind};
+        use floptle_core::math::DVec3;
+        use floptle_core::{Name, Parent, RigidBody, Transform, World};
+        let tilt = Quat::from_rotation_z(20f32.to_radians());
+        let up = tilt * Vec3::Y;
+        let along = tilt * Vec3::X;
+        let mut field = floptle_field::ChunkField::new(0.75);
+        field.fill_with(Vec3::new(-20.0, -10.0, -10.0), Vec3::new(20.0, 8.0, 10.0), |p| p.dot(up), |_| [0.5; 3]);
+        let mut ecs = World::default();
+        let centre = up * 1.1;
+        let chassis = ecs.spawn();
+        ecs.insert(chassis, Transform { translation: centre.as_dvec3(), rotation: tilt, scale: Vec3::ONE });
+        ecs.insert(chassis, Name("Chassis".into()));
+        ecs.insert(chassis, RigidBody { assembly: true, ..Default::default() });
+        let part = ecs.spawn();
+        ecs.insert(part, Transform::default());
+        ecs.insert(part, Parent(chassis));
+        ecs.insert(part, RigidBody { kind: floptle_core::BodyKind::Box, half_extents: [1.6, 0.25, 0.9], mass: 300.0, ..Default::default() });
+        let mut wheels = Vec::new();
+        for (dx, dz) in [(-1.3f32, -1.15f32), (0.0, -1.15), (1.3, -1.15), (-1.3, 1.15), (0.0, 1.15), (1.3, 1.15)] {
+            let wh = ecs.spawn();
+            let at = centre + along * dx + tilt * Vec3::new(0.0, -0.6, dz);
+            ecs.insert(wh, Transform { translation: at.as_dvec3(), rotation: tilt, scale: Vec3::ONE });
+            ecs.insert(wh, RigidBody { radius: 0.45, mass: 20.0, friction: 1.0, rotates: true, ..Default::default() });
+            ecs.insert(
+                wh,
+                Joint {
+                    kind: JointKind::Wheel,
+                    other: "Chassis".into(),
+                    axis: [0.0, 1.0, 0.0],
+                    stiffness: 3.0,
+                    damping: 0.8,
+                    motor: braked,
+                    motor_speed: 0.0,
+                    max_force: 800.0,
+                    ..Default::default()
+                },
+            );
+            wheels.push(wh);
+        }
+        let sim = crate::sim::Sim::build_layered(
+            &ecs,
+            &[crate::sim::TerrainVolume::new(DVec3::ZERO, &field)],
+            GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)),
+            DVec3::ZERO,
+            floptle_core::Layers::default(),
+        );
+        (sim, ecs, chassis, wheels)
+    }
+
+    /// Every body's and compound's state in a sim.
+    fn sim_state(sim: &crate::sim::Sim) -> Vec<State> {
+        let body = |b: &crate::body::Body| {
+            let mut s = [0; 13];
+            for (k, v) in b.pos.to_array().into_iter().chain(b.orient.to_array()).chain(b.vel.to_array()).chain(b.ang_vel.to_array()).enumerate() {
+                s[k] = v.to_bits();
+            }
+            s
+        };
+        sim.world.compounds.iter().map(state).chain(sim.world.bodies.iter().map(body)).collect()
+    }
+
+    /// A rover parked on its brakes: the chassis and all six wheels asleep
+    /// together within two seconds, and asleep they stay where they are, the
+    /// joints between them left at rest; every tick until then the tick it
+    /// always was. Each judged alone, the wheels' grip and the suspension
+    /// moved every one a hair each step and the chassis never touched the
+    /// ground, so none of them ever slept. Then the motors turn, and the
+    /// rover wakes and drives.
+    #[test]
+    fn a_parked_rover_falls_asleep_wheels_and_all() {
+        let run = |reference: bool, ticks: usize| {
+            REFERENCE_SETTLE.with(|r| r.set(reference));
+            let (mut sim, mut ecs, chassis, wheels) = rover(true);
+            let (mut states, mut first, mut all) = (Vec::new(), None, None);
+            for tick in 0..ticks {
+                sim.sync_joints(&mut ecs);
+                sim.step_tick(1.0 / 60.0, None);
+                states.push(sim_state(&sim));
+                let asleep = sim.world.compounds.iter().map(|c| c.asleep).chain(sim.world.bodies.iter().map(|b| b.asleep));
+                let n = asleep.filter(|a| *a).count();
+                if first.is_none() && n > 0 {
+                    first = Some(tick);
+                }
+                if all.is_none() && n == 7 {
+                    all = Some(tick);
+                }
+            }
+            REFERENCE_SETTLE.with(|r| r.set(false));
+            (states, first, all, sim, ecs, chassis, wheels)
+        };
+        // A minute parked.
+        let (ref_states, ref_first, ref_all, ..) = run(true, 360);
+        let (states, first, all, mut sim, mut ecs, chassis, wheels) = run(false, 3600);
+        assert_eq!(ref_all, None, "the reference had the rover asleep at tick {ref_all:?}: the fixture proves nothing");
+        let all = all.expect("the parked rover never fell asleep");
+        assert!(all < 120, "the rover was asleep only at tick {all}");
+        let first = first.unwrap().min(ref_first.unwrap_or(usize::MAX));
+        same_until_asleep(&ref_states, &states, first, false);
+        assert!(states[all..].iter().all(|s| *s == states[all]), "asleep, the rover moved");
+        // Driven, it wakes and goes.
+        for &wh in &wheels {
+            ecs.get_mut::<floptle_core::joint::Joint>(wh).unwrap().motor_speed = -120.0;
+        }
+        let start = sim.compound_of(chassis.index()).unwrap().pos;
+        for _ in 0..60 {
+            sim.sync_joints(&mut ecs);
+            sim.step_tick(1.0 / 60.0, None);
+        }
+        let c = sim.compound_of(chassis.index()).unwrap();
+        assert!(!c.asleep, "its motors turning, the rover slept on");
+        assert!(c.pos.distance(start) > 0.5, "its motors turning, the rover went {} m in a second", c.pos.distance(start));
+    }
+
+    /// Woken during a step, a craft that was asleep counts its half second
+    /// again before it sleeps, alone or joined: a nudge too small to move it
+    /// far wakes it for that long, not for one step. The nudge here is a
+    /// speed written straight into it, which the step itself wakes on.
+    #[test]
+    fn a_woken_craft_counts_its_rest_again() {
+        // Alone: the wall of the leaning fixture, its plank taken away.
+        let (mut w, [ia, ib]) = leaning();
+        w.compounds[ib].active = false;
+        for _ in 0..240 {
+            w.step(1.0 / 120.0);
+        }
+        assert!(w.compounds[ia].asleep, "fixture: the wall should be asleep");
+        w.compounds[ia].vel = Vec3::new(0.0, 0.051, 0.0);
+        let mut awake = 0;
+        for _ in 0..240 {
+            w.step(1.0 / 120.0);
+            if w.compounds[ia].asleep {
+                break;
+            }
+            awake += 1;
+        }
+        assert!(awake + 1 >= (SLEEP_SETTLE_TIME * 120.0) as usize, "woken, the wall slept again after {awake} steps");
+        // Joined: the parked rover, woken by one wheel.
+        let (mut sim, mut ecs, chassis, wheels) = rover(true);
+        for _ in 0..180 {
+            sim.sync_joints(&mut ecs);
+            sim.step_tick(1.0 / 60.0, None);
+        }
+        assert!(sim.compound_of(chassis.index()).unwrap().asleep, "fixture: the rover should be asleep");
+        let wheel = sim.world.bodies.iter().position(|b| b.owner == wheels[0].index()).expect("a wheel body");
+        sim.world.bodies[wheel].vel = Vec3::new(0.06, 0.0, 0.0);
+        let mut awake = 0;
+        for _ in 0..120 {
+            sim.sync_joints(&mut ecs);
+            sim.step_tick(1.0 / 60.0, None);
+            if sim.compound_of(chassis.index()).unwrap().asleep {
+                break;
+            }
+            awake += 1;
+        }
+        assert!(awake + 1 >= (SLEEP_SETTLE_TIME * 60.0) as usize, "woken, the rover slept again after {awake} ticks");
+    }
+
+    /// A sled sliding at 30 m/s across terrain finds the ground it reaches
+    /// meshed ahead of it: past its first few steps no query meshes a chunk
+    /// on the step, and it slides exactly as it does meshing its own.
+    #[test]
+    fn a_fast_craft_finds_its_ground_meshed_ahead() {
+        let run = |reference: bool| {
+            REFERENCE_SETTLE.with(|r| r.set(reference));
+            let mut field = floptle_field::ChunkField::new(0.75);
+            field.fill_slab(Vec3::new(-20.0, -6.0, -20.0), Vec3::new(20.0, 0.0, 200.0), 0.0, [0.5; 3]);
+            let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+            w.add_collider(Box::new(ChunkTerrain::new(field)));
+            let sled = boxes(&[(Vec3::new(0.0, 0.26, 0.0), Vec3::new(1.0, 0.25, 2.0)), (Vec3::new(0.0, 0.26, 2.5), Vec3::new(1.0, 0.25, 0.5))], 1);
+            let c = Compound::new(Vec3::new(0.0, 0.01, -10.0), Quat::IDENTITY, sled);
+            let ci = w.add_compound(c);
+            let terrain = |w: &PhysicsWorld| w.colliders[0].shape.chunk_terrain().map(|t| (t.meshed_by_queries(), t.meshed_ahead())).unwrap();
+            let mut states = Vec::new();
+            let mut early = (0, 0);
+            for tick in 0..480 {
+                // Held at its speed, as a craft under power is.
+                let v = w.compounds[ci].vel;
+                w.compounds[ci].vel = Vec3::new(0.0, v.y, 30.0);
+                w.step(1.0 / 120.0);
+                states.push(state(&w.compounds[ci]));
+                if tick == 30 {
+                    early = terrain(&w);
+                }
+            }
+            REFERENCE_SETTLE.with(|r| r.set(false));
+            (states, early, terrain(&w), w.compounds[ci].pos)
+        };
+        let (ref_states, _, (ref_queries, _), ref_end) = run(true);
+        let (states, (early_queries, _), (queries, ahead), end) = run(false);
+        assert!(ref_end.z > 100.0, "fixture: the sled should cover 100 m, it went to {ref_end:?}");
+        assert!(ref_queries >= early_queries + 4, "the reference meshed {ref_queries} chunks on the step: the fixture proves nothing");
+        assert_eq!(queries, early_queries, "after its first steps the sled meshed {} chunks on the step", queries - early_queries);
+        assert!(ahead >= 4, "only {ahead} chunks were meshed ahead");
+        assert_eq!(ref_states, states, "meshed ahead, the sled slid differently");
+        assert_eq!(ref_end, end);
     }
 }

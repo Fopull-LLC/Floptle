@@ -505,6 +505,40 @@ struct Surface {
     /// Chunks meshed by a query, on the thread that asked: what a cast near
     /// ground nobody had meshed pays for. Meshes handed in are not counted.
     meshed_by_queries: u64,
+    /// Chunks meshed ahead of a mover, off the thread that steps: see
+    /// [`ChunkTerrain::mesh_ahead`].
+    #[cfg(not(target_arch = "wasm32"))]
+    ahead: MeshAhead,
+}
+
+/// A chunk to mesh ahead: `(epoch, chunk, its voxels, bucket size)`.
+#[cfg(not(target_arch = "wasm32"))]
+type AheadJob = (u64, [i32; 3], floptle_field::MeshScratch, f32);
+/// A chunk meshed ahead: `(epoch, chunk, its triangles)`.
+#[cfg(not(target_arch = "wasm32"))]
+type AheadDone = (u64, [i32; 3], CollisionChunk);
+
+/// Collision meshes being made off the stepping thread for ground a mover is
+/// heading for, and when each lands. See [`ChunkTerrain::mesh_ahead`].
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct MeshAhead {
+    /// The worker's job and answer channels, once anything has been asked.
+    worker: Option<(std::sync::mpsc::Sender<AheadJob>, std::sync::mpsc::Receiver<AheadDone>)>,
+    /// Asked for and not landed yet, in the order asked: `(step it lands
+    /// on, epoch, chunk)`.
+    queued: std::collections::VecDeque<(u64, u64, [i32; 3])>,
+    /// The chunks in `queued`.
+    queued_set: std::collections::HashSet<[i32; 3]>,
+    /// Answers in, waiting for their step.
+    ready: std::collections::HashMap<[i32; 3], (u64, CollisionChunk)>,
+    /// Steps counted by [`ChunkTerrain::mesh_ahead`].
+    step: u64,
+    /// Bumped whenever cached triangles are forgotten: an answer made from
+    /// the field before is dropped.
+    epoch: u64,
+    /// Chunks landed this way. Test-only reads.
+    landed: u64,
 }
 
 /// The meshed chunks around one query, looked up once rather than once per
@@ -852,7 +886,12 @@ impl ChunkTerrain {
     /// next query after an edit, which is precisely when the collision has to be
     /// right.
     pub fn invalidate_surface(&mut self) {
-        self.surface.get_mut().chunks.clear();
+        let s = self.surface.get_mut();
+        s.chunks.clear();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            s.ahead.epoch += 1;
+        }
     }
 
     /// **Forget the meshed chunks an edit of `written` could have changed**:
@@ -916,6 +955,165 @@ impl ChunkTerrain {
         for c in stale {
             s.chunks.remove(c);
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            s.ahead.epoch += 1;
+        }
+    }
+
+    /// How many steps after it is asked for a chunk meshed ahead lands.
+    #[cfg(not(target_arch = "wasm32"))]
+    const AHEAD_STEPS: u64 = 12;
+
+    /// Mesh, off the thread that steps, the chunks of ground a mover is
+    /// heading for: the ones a query anywhere in the box `lo..hi` (this
+    /// collider's frame, as a query's point is) would mesh. Called once a
+    /// step, with every box, empty included, since it is also what lands the
+    /// chunks asked for before.
+    ///
+    /// A query that reaches a chunk no one has meshed meshes it on the spot,
+    /// whole, which on detailed ground is tens of milliseconds a chunk, and a
+    /// craft crossing a corner meets four at once: a fast plane's sweep paid
+    /// for its ground that way. Asked for here half a second ahead, a chunk
+    /// is meshed on a worker and lands a fixed number of steps after it was
+    /// asked for, waited for if the worker has not finished it by then, so
+    /// when a chunk lands depends only on the steps, never on how fast the
+    /// worker was. Its triangles are the ones a query would have made, from
+    /// the same voxels, and a query that needs a chunk before it lands
+    /// meshes it as it did, so what anything collides with is unchanged.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn mesh_ahead(&self, boxes: &[(Vec3, Vec3)]) {
+        // At most this many chunks asked for a step, and outstanding.
+        const PER_STEP: usize = 16;
+        const OUTSTANDING: usize = 128;
+        let mut s = self.surface.borrow_mut();
+        let s = &mut *s;
+        let a = &mut s.ahead;
+        a.step += 1;
+        if a.worker.is_none() && boxes.is_empty() {
+            return;
+        }
+        // Land what is due, waiting for any still on the worker.
+        while let Some(&(due, epoch, c)) = a.queued.front() {
+            if due > a.step {
+                break;
+            }
+            a.queued.pop_front();
+            a.queued_set.remove(&c);
+            let mut answer = a.ready.remove(&c);
+            if answer.as_ref().is_none_or(|(e, _)| *e != epoch)
+                && let Some((_, rx)) = a.worker.as_ref()
+            {
+                while let Ok((e, k, chunk)) = rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                    if k == c && e == epoch {
+                        answer = Some((e, chunk));
+                        break;
+                    }
+                    a.ready.insert(k, (e, chunk));
+                }
+            }
+            if let Some((e, chunk)) = answer
+                && e == a.epoch
+                && !s.chunks.contains_key(&c)
+            {
+                s.chunks.insert(c, chunk);
+                a.landed += 1;
+            }
+        }
+        if let Some((_, rx)) = a.worker.as_ref() {
+            while let Ok((e, k, chunk)) = rx.try_recv() {
+                a.ready.insert(k, (e, chunk));
+            }
+        }
+        let mut asked = 0;
+        for &(lo, hi) in boxes {
+            // The box in the field's own frame, grown by how far a query
+            // looks, in chunks.
+            let corners = [
+                Vec3::new(lo.x, lo.y, lo.z),
+                Vec3::new(hi.x, lo.y, lo.z),
+                Vec3::new(lo.x, hi.y, lo.z),
+                Vec3::new(hi.x, hi.y, lo.z),
+                Vec3::new(lo.x, lo.y, hi.z),
+                Vec3::new(hi.x, lo.y, hi.z),
+                Vec3::new(lo.x, hi.y, hi.z),
+                Vec3::new(hi.x, hi.y, hi.z),
+            ]
+            .map(|p| self.to_local(p));
+            let r = Vec3::splat(self.reach());
+            let llo = corners.iter().fold(Vec3::splat(f32::INFINITY), |m, p| m.min(*p)) - r;
+            let lhi = corners.iter().fold(Vec3::splat(f32::NEG_INFINITY), |m, p| m.max(*p)) + r;
+            let v = self.field.voxel();
+            let n = floptle_field::CHUNK;
+            let clo = [(llo.x / v).floor() as i32, (llo.y / v).floor() as i32, (llo.z / v).floor() as i32].map(|i| i.div_euclid(n));
+            let chi = [(lhi.x / v).ceil() as i32, (lhi.y / v).ceil() as i32, (lhi.z / v).ceil() as i32].map(|i| i.div_euclid(n));
+            // A box this many chunks across is a craft far too fast for the
+            // ground to matter (or nowhere near it); asked about, it would
+            // queue the planet.
+            let count = (0..3).map(|k| (chi[k] - clo[k] + 1).max(0) as i64).product::<i64>();
+            if count > 64 {
+                continue;
+            }
+            let side = n as f32 * v;
+            for cz in clo[2]..=chi[2] {
+                for cy in clo[1]..=chi[1] {
+                    for cx in clo[0]..=chi[0] {
+                        let c = [cx, cy, cz];
+                        if asked >= PER_STEP || a.queued.len() >= OUTSTANDING {
+                            return;
+                        }
+                        if s.chunks.contains_key(&c) || a.queued_set.contains(&c) {
+                            continue;
+                        }
+                        // Open air has no ground to mesh, and no query near
+                        // it meshes it either.
+                        let o = self.field.chunk_origin(c);
+                        if self.field.open_air_in_box(o, o + Vec3::splat(side)) {
+                            continue;
+                        }
+                        let (tx, _) = a.worker.get_or_insert_with(Self::spawn_mesher);
+                        let scratch = floptle_field::scratch_for_chunk(&self.field, c, 1);
+                        if tx.send((a.epoch, c, scratch, self.bucket())).is_err() {
+                            return;
+                        }
+                        a.queued.push_back((a.step + Self::AHEAD_STEPS, a.epoch, c));
+                        a.queued_set.insert(c);
+                        asked += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The worker [`Self::mesh_ahead`] hands chunks to: meshes each the way
+    /// a query does ([`drawn_chunk`]) and sends back its collision triangles.
+    /// It ends when this collider is dropped.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn spawn_mesher() -> (std::sync::mpsc::Sender<AheadJob>, std::sync::mpsc::Receiver<AheadDone>) {
+        let (jtx, jrx) = std::sync::mpsc::channel::<AheadJob>();
+        let (dtx, drx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new().name("terrain-collision-ahead".into()).spawn(move || {
+            for (epoch, c, scratch, bucket) in jrx {
+                let m = floptle_field::mesh_scratch(&scratch, false);
+                if dtx.send((epoch, c, CollisionChunk::from_mesh(&m, bucket))).is_err() {
+                    break;
+                }
+            }
+        });
+        if spawned.is_err() {
+            // No thread to be had: the senders close with this scope, every
+            // request fails, and queries mesh their own ground as before.
+            let (jtx, _) = std::sync::mpsc::channel();
+            let (_, drx) = std::sync::mpsc::channel();
+            return (jtx, drx);
+        }
+        (jtx, drx)
+    }
+
+    /// How many chunks [`Self::mesh_ahead`] has landed. Test-only reads.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn meshed_ahead(&self) -> u64 {
+        self.surface.borrow().ahead.landed
     }
 
     /// Make sure every chunk within `cell()` of `local` has been meshed.

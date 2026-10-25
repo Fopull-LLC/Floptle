@@ -166,6 +166,253 @@ fn release(name: &str, craft: Compound, frames: usize) {
     }
 }
 
+/// The thousand-part craft broken up on the ground: four pieces of ten
+/// tanks each, dropped a few centimetres onto rolling, sloping terrain at odd
+/// poses: two lying side by side with their fins meeting, one laid diagonally
+/// across the end of another, one tipped on the end of its spine and falling.
+/// Each lies on the edges and corners of its fins. Says per second what
+/// physics cost and which pieces were asleep, and when all of them were.
+fn broken_up(frames: usize) {
+    // A slope of about 7 degrees with a half-metre swell on it.
+    let ground = |x: f32, z: f32| 0.12 * x + 0.25 * (0.35 * x).sin() * (0.27 * z).cos();
+    let mut field = floptle_field::ChunkField::new(0.75);
+    field.fill_with(
+        Vec3::new(-45.0, -10.0, -45.0),
+        Vec3::new(45.0, 10.0, 45.0),
+        |p| (p.y - ground(p.x, p.z)) * 0.95,
+        |_| [0.5; 3],
+    );
+    let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+    w.set_colliders(vec![AnchoredCollider::world(Box::new(ChunkTerrain::new(field)))]);
+    let mut whole = tower(0.0);
+    whole.anchored = false;
+    // Tank `t`'s id is `1 + 25·t`, its fins the 24 after it.
+    let mut pieces = Vec::new();
+    for k in (1..4).rev() {
+        let ids: Vec<u64> = (k * 250 + 1..=k * 250 + 250).collect();
+        pieces.push(whole.split(&ids).expect("a piece splits off"));
+    }
+    pieces.push(whole);
+    pieces.reverse();
+    let along_x = Quat::from_rotation_z(-std::f32::consts::FRAC_PI_2);
+    let poses = [
+        // Side by side along x, fins a hair apart, each rolled about its spine.
+        (Vec3::new(-2.0, 0.0, -1.75), Quat::from_rotation_x(0.21) * along_x),
+        (Vec3::new(-2.0, 0.0, 1.75), Quat::from_rotation_x(-0.09) * along_x),
+        // Across the far end of the second, tilted, so it lies on it and on the ground.
+        (Vec3::new(13.0, 1.6, 6.0), Quat::from_rotation_y(0.9) * Quat::from_rotation_x(0.3) * along_x),
+        // Tipped on the end of its spine and falling over.
+        (Vec3::new(-8.0, 10.0, -14.0), Quat::from_rotation_x(0.7) * Quat::from_rotation_y(0.4)),
+    ];
+    let mut idx = Vec::new();
+    for (k, (mut c, (at, orient))) in pieces.into_iter().zip(poses).enumerate() {
+        // Each piece is its own assembly, rooted at its own node.
+        c.owner = 100 + k as u32;
+        c.orient = orient;
+        c.pos = Vec3::new(at.x, ground(at.x, at.z) + 1.85 + at.y, at.z);
+        c.prev_pos = c.pos;
+        c.prev_orient = c.orient;
+        c.vel = Vec3::ZERO;
+        c.ang_vel = Vec3::ZERO;
+        idx.push(w.add_compound(c));
+    }
+    w.time_steps(true);
+    let mut ms = Vec::new();
+    let mut asleep_at = None;
+    println!("1,002 parts broken into four pieces on a slope:");
+    for f in 0..frames {
+        ms.push(frame(&mut w));
+        if asleep_at.is_none() && w.compounds.iter().all(|c| c.asleep) {
+            asleep_at = Some(f);
+        }
+        if (f + 1) % 60 == 0 {
+            let t = w.take_timing().unwrap_or_default();
+            let sec = &ms[f + 1 - 60..=f];
+            let mean = sec.iter().sum::<f64>() / 60.0;
+            let worst = sec.iter().cloned().fold(0.0, f64::max);
+            let states: Vec<String> = idx
+                .iter()
+                .map(|&ci| {
+                    let c = &w.compounds[ci];
+                    if c.asleep {
+                        "asleep".to_string()
+                    } else {
+                        let moved = c.pos.distance(c.prev_pos) * 1000.0;
+                        let turned = (c.orient * c.prev_orient.inverse()).normalize();
+                        let angle = 2.0 * turned.xyz().length().atan2(turned.w.abs()) * 1000.0;
+                        format!(
+                            "awake v {:.3} w {:.3} step {moved:.2} mm {angle:.2} mrad{}",
+                            c.vel.length(),
+                            c.ang_vel.length(),
+                            if c.grounded { "" } else { " (not grounded)" }
+                        )
+                    }
+                })
+                .collect();
+            println!(
+                "  second {}: mean {mean:.2} ms, worst {worst:.1}; per frame static {:.2}, sweeps {:.2}, pairs {:.2}, sleep {:.2}; {}",
+                (f + 1) / 60,
+                t.static_ms / 60.0,
+                t.sweeps_ms / 60.0,
+                t.pairs_ms / 60.0,
+                t.sleep_ms / 60.0,
+                states.join(" | "),
+            );
+        }
+    }
+    let mean = ms.iter().sum::<f64>() / ms.len() as f64;
+    match asleep_at {
+        Some(f) => println!("  all asleep from frame {f}; mean {mean:.2} ms a frame"),
+        None => println!("  not all asleep in {frames} frames; mean {mean:.2} ms a frame"),
+    }
+    for &ci in &idx {
+        let c = &w.compounds[ci];
+        println!("  piece {ci}: ends at {:?} turned {:?} moving {:?} spinning {:?}", c.pos, c.orient, c.vel, c.ang_vel);
+    }
+}
+
+/// A six-wheeled rover parked on terrain: a chassis assembly with its wheels
+/// hung on wheel joints, braked (`braked`) or free, on a gentle slope. Says
+/// per second what physics cost and what was asleep.
+fn parked_rover(braked: bool, frames: usize) {
+    use floptle_core::joint::{Joint, JointKind};
+    use floptle_core::math::DVec3;
+    use floptle_core::{Name, Parent, RigidBody, Transform, World};
+    let slope = if braked { 8.0f32 } else { 0.0 };
+    let tilt = Quat::from_rotation_z(slope.to_radians());
+    let up = tilt * Vec3::Y;
+    let along = tilt * Vec3::X;
+    let mut field = floptle_field::ChunkField::new(0.75);
+    field.fill_with(Vec3::new(-30.0, -8.0, -15.0), Vec3::new(30.0, 8.0, 15.0), |p| p.dot(up), |_| [0.5; 3]);
+    let mut ecs = World::default();
+    let centre = up * 1.1;
+    let chassis = ecs.spawn();
+    ecs.insert(chassis, Transform { translation: centre.as_dvec3(), rotation: tilt, scale: Vec3::ONE });
+    ecs.insert(chassis, Name("Chassis".into()));
+    ecs.insert(chassis, RigidBody { assembly: true, ..Default::default() });
+    for (k, (half, at, mass)) in [([1.6f32, 0.25, 0.9], Vec3::ZERO, 300.0f32), ([0.5, 0.4, 0.6], Vec3::new(0.9, 0.6, 0.0), 80.0)].into_iter().enumerate() {
+        let part = ecs.spawn();
+        ecs.insert(part, Transform::from_translation(at.as_dvec3()));
+        ecs.insert(part, Parent(chassis));
+        ecs.insert(part, Name(format!("Part{k}")));
+        ecs.insert(part, RigidBody { kind: floptle_core::BodyKind::Box, half_extents: half, mass, ..Default::default() });
+    }
+    let mut wheels = Vec::new();
+    for (dx, dz) in [(-1.3f32, -1.15f32), (0.0, -1.15), (1.3, -1.15), (-1.3, 1.15), (0.0, 1.15), (1.3, 1.15)] {
+        let w = ecs.spawn();
+        let at = centre + along * dx + tilt * Vec3::new(0.0, -0.6, dz);
+        ecs.insert(w, Transform { translation: at.as_dvec3(), rotation: tilt, scale: Vec3::ONE });
+        ecs.insert(w, RigidBody { radius: 0.45, mass: 20.0, friction: 1.0, rotates: true, ..Default::default() });
+        ecs.insert(
+            w,
+            Joint {
+                kind: JointKind::Wheel,
+                other: "Chassis".into(),
+                axis: [0.0, 1.0, 0.0],
+                stiffness: 3.0,
+                damping: 0.8,
+                motor: braked,
+                motor_speed: 0.0,
+                max_force: 800.0,
+                ..Default::default()
+            },
+        );
+        wheels.push(w);
+    }
+    let mut sim = Sim::build_layered(
+        &ecs,
+        &[TerrainVolume::new(DVec3::ZERO, &field)],
+        GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)),
+        DVec3::ZERO,
+        floptle_core::Layers::default(),
+    );
+    sim.world.time_steps(true);
+    let mut ms = Vec::new();
+    let what = if braked { "braked on an 8 degree slope" } else { "on free wheels on the flat" };
+    println!("a six-wheeled rover parked {what}:");
+    for f in 0..frames {
+        let t = std::time::Instant::now();
+        let before: Vec<(Vec3, Quat)> = sim.world.bodies.iter().map(|b| (b.pos, b.orient)).chain(sim.world.compounds.iter().map(|c| (c.pos, c.orient))).collect();
+        sim.sync_joints(&mut ecs);
+        sim.step_tick(1.0 / 60.0, None);
+        if std::env::var("DIAG").is_ok() && f % 60 == 59 {
+            let after: Vec<(Vec3, Quat)> = sim.world.bodies.iter().map(|b| (b.pos, b.orient)).chain(sim.world.compounds.iter().map(|c| (c.pos, c.orient))).collect();
+            let m: Vec<String> = before.iter().zip(&after).map(|(a, b)| format!("{:.3}mm/{:.3}mrad", a.0.distance(b.0) * 1000.0, (b.1 * a.1.inverse()).normalize().xyz().length() * 2000.0)).collect();
+            println!("    moved a frame: {}", m.join(" "));
+        }
+        ms.push(t.elapsed().as_secs_f64() * 1e3);
+        if (f + 1) % 60 == 0 {
+            let t = sim.world.take_timing().unwrap_or_default();
+            let sec = &ms[f + 1 - 60..=f];
+            let mean = sec.iter().sum::<f64>() / 60.0;
+            let c = &sim.world.compounds[0];
+            let wheels_asleep = sim.world.bodies.iter().filter(|b| b.asleep).count();
+            println!(
+                "  second {}: mean {mean:.3} ms; per frame static {:.3}, joints {:.3}, sleep {:.3}; chassis {} (v {:.4}, w {:.4}), {wheels_asleep} of {} wheels asleep",
+                (f + 1) / 60,
+                t.static_ms / 60.0,
+                t.joints_ms / 60.0,
+                t.sleep_ms / 60.0,
+                if c.asleep { "asleep" } else { "awake" },
+                c.vel.length(),
+                c.ang_vel.length(),
+                sim.world.bodies.len(),
+            );
+        }
+    }
+    let c = &sim.world.compounds[0];
+    println!("  chassis ends at {:?} moving {:?}", c.pos, c.vel);
+}
+
+/// What makes a slow sweep frame: the plane rolling down terrain at
+/// takeoff speed, frame by frame, with the chunks its queries had to mesh on
+/// the frame. Prints the worst frames, then the frames with no new mesh.
+fn sweep_frames(speed: f32) {
+    let mut field = floptle_field::ChunkField::new(0.75);
+    field.fill_with(
+        Vec3::new(-60.0, -8.0, -200.0),
+        Vec3::new(60.0, 8.0, 400.0),
+        |p| p.y - 0.4 * (p.x * 0.05).sin() * (p.z * 0.03).cos(),
+        |_| [0.5; 3],
+    );
+    let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+    w.set_colliders(vec![AnchoredCollider::world(Box::new(ChunkTerrain::new(field)))]);
+    let mut c = plane();
+    c.pos.y += 0.5;
+    let ci = w.add_compound(c);
+    w.time_steps(true);
+    let meshed = |w: &PhysicsWorld| w.colliders[0].shape.chunk_terrain().map_or(0, |t| t.meshed_by_queries());
+    let mut rows = Vec::new();
+    for f in 0..540 {
+        if f >= 30 {
+            let v = w.compounds[ci].vel;
+            w.compounds[ci].vel = Vec3::new(v.x, v.y, speed);
+        }
+        let m0 = meshed(&w);
+        let ms = frame(&mut w);
+        let t = w.take_timing().unwrap_or_default();
+        rows.push((ms, t.sweeps_ms, t.static_ms, meshed(&w) - m0));
+    }
+    let rows = &rows[30..];
+    type Row = (f64, f32, f32, u64);
+    let mean = |f: &dyn Fn(&Row) -> f64| rows.iter().map(f).sum::<f64>() / rows.len() as f64;
+    println!(
+        "plane on terrain at {speed} m/s: mean {:.2} ms a frame (sweeps {:.2}, static {:.2}), {} chunks meshed by queries",
+        mean(&|r| r.0),
+        mean(&|r| r.1 as f64),
+        mean(&|r| r.2 as f64),
+        rows.iter().map(|r| r.3).sum::<u64>()
+    );
+    let mut top: Vec<_> = rows.to_vec();
+    top.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for r in top.iter().take(5) {
+        println!("  {:.1} ms: sweeps {:.1}, static {:.1}, {} chunks meshed", r.0, r.1, r.2, r.3);
+    }
+    let quiet: Vec<_> = rows.iter().filter(|r| r.3 == 0).collect();
+    let worst = quiet.iter().map(|r| r.0).fold(0.0, f64::max);
+    println!("  frames that meshed nothing: worst {worst:.1} ms of {}", quiet.len());
+}
+
 fn frame(w: &mut PhysicsWorld) -> f64 {
     let t = std::time::Instant::now();
     w.step(1.0 / 120.0);
@@ -188,6 +435,23 @@ fn report(name: &str, ms: &[f64], c: &Compound) {
 }
 
 fn main() {
+    // `ONLY=broken` runs the broken-up craft alone.
+    if std::env::var("ONLY").is_ok_and(|v| v == "broken") {
+        broken_up(1800);
+        return;
+    }
+    // `ONLY=sweeps` the plane's sweep frames alone.
+    if std::env::var("ONLY").is_ok_and(|v| v == "sweeps") {
+        sweep_frames(40.0);
+        sweep_frames(70.0);
+        return;
+    }
+    // `ONLY=rover` the parked rovers alone.
+    if std::env::var("ONLY").is_ok_and(|v| v == "rover") {
+        parked_rover(true, 600);
+        parked_rover(false, 600);
+        return;
+    }
     let g = || GravityField::uniform(Vec3::new(0.0, -9.81, 0.0));
 
     let mut w = PhysicsWorld::new(g());
@@ -345,4 +609,10 @@ fn main() {
         }
         println!("20 spherecasts past 1,002 parts, {name}: {best:.3} ms ({hits} hit)");
     }
+
+    broken_up(1800);
+    parked_rover(true, 600);
+    parked_rover(false, 600);
+    sweep_frames(40.0);
+    sweep_frames(70.0);
 }
