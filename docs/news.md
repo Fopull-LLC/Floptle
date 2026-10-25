@@ -1,5 +1,9 @@
 ## Just shipped
 
+**v0.117.0-rc27 — "Whole Worlds"** (beta). Parked vehicles and light props
+that rocked in place fall asleep, and a plane lifting off over terrain costs a
+tenth of what it did.
+
 **v0.117.0-rc26 — "Whole Worlds"** (beta). Beta updates as one switch in
 the Hub (Settings → Beta updates), and versions listed in the right order.
 
