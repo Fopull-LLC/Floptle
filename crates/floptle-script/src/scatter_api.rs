@@ -103,6 +103,19 @@ pub(crate) const CREATE_KEYS: &[&str] = &[
     "emissiveStrength", "bend",
 ];
 
+/// The keys a `scatter.setTint` look reads.
+pub(crate) const MARK_KEYS: &[&str] = &["tint", "emissive", "emissiveStrength", "rim", "rimStrength"];
+
+/// The most ids [`Seen`] holds before it starts again: a few thousand props
+/// asked about is a session of harvesting, and an index that grew with
+/// every query would be a leak.
+const SEEN_CAP: usize = 65_536;
+
+/// The chunk each id `scatter.near` has answered with was rolled in, so
+/// `scatter.instance` can describe a prop that has not settled yet. An id is a
+/// hash and names no chunk of its own.
+type Seen = Rc<RefCell<std::collections::HashMap<(u32, u64), floptle_core::scatter::ChunkKey>>>;
+
 /// Chunks resident at once, above which a source is reported rather than left
 /// to be discovered as "the engine is slow".
 ///
@@ -126,6 +139,7 @@ pub(crate) fn install_scatter_api(
 ) {
     use floptle_core::scatter::{Align, Band, Region, ScatterSource};
     let Ok(t) = lua.create_table() else { return };
+    let seen = Seen::default();
 
     // scatter.create{...} → a source id. Every knob has a default so the
     // shortest useful call is `scatter.create{ asset = "tree.glb" }`.
@@ -276,6 +290,7 @@ pub(crate) fn install_scatter_api(
                 // Rocks and trunks stand firm unless the source says its
                 // props give way.
                 bend: num(&opts, "bend", 0.0).clamp(0.0, 1.0) as f32,
+                marks: Default::default(),
             };
             // Say what this costs, here, while the two numbers that decided it
             // are still on screen. The alternative is what
@@ -356,6 +371,7 @@ pub(crate) fn install_scatter_api(
         if let Ok(f) = lua.create_function(move |_, (id, inst): (u32, f64)| {
             let mut v = s.borrow_mut();
             let Some(src) = v.iter_mut().find(|s| s.id == id) else { return Ok(false) };
+            src.marks.remove(&(inst as u64));
             Ok(src.removed.insert(inst as u64))
         }) {
             let _ = t.set("remove", f);
@@ -412,6 +428,7 @@ pub(crate) fn install_scatter_api(
     {
         let s = sources.clone();
         let settled = settled.clone();
+        let seen = seen.clone();
         if let Ok(f) = lua.create_function(move |lua, args: mlua::MultiValue| {
             let a: Vec<Value> = args.into_iter().collect();
             let id = match a.first() {
@@ -441,7 +458,8 @@ pub(crate) fn install_scatter_api(
             // world positions — a game should never have to know the difference.
             let pl = src.frame.to_local(p);
             let on_ground = settled.borrow();
-            let mut found: Vec<(f64, floptle_core::scatter::Instance, bool)> = Vec::new();
+            let mut found: Vec<(f64, floptle_core::scatter::Instance, bool, floptle_core::scatter::ChunkKey)> =
+                Vec::new();
             for key in floptle_core::scatter::chunks_under(src, pl, r) {
                 for mut i in floptle_core::scatter::chunk_instances(src, key) {
                     // Where it stands, once the driver has dropped it onto
@@ -455,12 +473,21 @@ pub(crate) fn install_scatter_api(
                     if d <= r {
                         i.pos = src.frame.to_world(i.pos);
                         i.up = src.frame.dir_to_world(i.up);
-                        found.push((d, i, landed.is_some()));
+                        found.push((d, i, landed.is_some(), key));
                     }
                 }
             }
             found.sort_by(|a, b| a.0.total_cmp(&b.0));
-            for (n, (d, i, landed)) in found.iter().enumerate() {
+            {
+                let mut seen = seen.borrow_mut();
+                if seen.len() + found.len() > SEEN_CAP {
+                    seen.clear();
+                }
+                for (_, i, _, key) in &found {
+                    seen.insert((src.id, i.id), *key);
+                }
+            }
+            for (n, (d, i, landed, _)) in found.iter().enumerate() {
                 let row = lua.create_table()?;
                 // A plain number: ids are 53 bits, which a Lua number holds
                 // exactly, and a Lua integer here is 32.
@@ -481,6 +508,111 @@ pub(crate) fn install_scatter_api(
             Ok(out)
         }) {
             let _ = t.set("near", f);
+        }
+    }
+
+    // scatter.instance(sourceId, instanceId) → one prop, by the id `near`
+    // answered with: where it stands now and how. nil once it is removed.
+    //
+    // The same row `near` returns, without asking around a point. A prop's
+    // place is where the field dropped it onto the ground, so a game that
+    // kept its own record of where each rock was is a record of where it
+    // was rolled, and on a hillside that is metres off.
+    {
+        let s = sources.clone();
+        let settled = settled.clone();
+        let seen = seen.clone();
+        if let Ok(f) = lua.create_function(move |lua, (id, inst): (u32, f64)| {
+            let inst = inst as u64;
+            let vols = s.borrow();
+            let Some(src) = vols.iter().find(|s| s.id == id) else { return Ok(Value::Nil) };
+            if src.removed.contains(&inst) {
+                return Ok(Value::Nil);
+            }
+            let landed = settled.borrow().get(&(id, inst)).copied();
+            let (pos, up) = match landed {
+                Some(at) => at,
+                // Not on the ground yet (no camera has been near it): where
+                // it was rolled, which is what `near` said too.
+                None => {
+                    let Some(key) = seen.borrow().get(&(id, inst)).copied() else { return Ok(Value::Nil) };
+                    let Some(i) =
+                        floptle_core::scatter::chunk_instances(src, key).into_iter().find(|i| i.id == inst)
+                    else {
+                        return Ok(Value::Nil);
+                    };
+                    (i.pos, i.up)
+                }
+            };
+            let r = floptle_core::scatter::rolled(src, inst);
+            let row = lua.create_table()?;
+            row.set("id", inst as f64)?;
+            row.set("pos", crate::math_api::LuaVec3(src.frame.to_world(pos)))?;
+            row.set("up", crate::math_api::LuaVec3(src.frame.dir_to_world(up).as_dvec3()))?;
+            row.set("yaw", r.yaw as f64)?;
+            row.set("scale", r.scale as f64)?;
+            row.set("param", r.param as f64)?;
+            row.set("settled", landed.is_some())?;
+            Ok(Value::Table(row))
+        }) {
+            let _ = t.set("instance", f);
+        }
+    }
+
+    // scatter.setTint(sourceId, instanceId, { tint, emissive, emissiveStrength,
+    // rim, rimStrength }) — one prop drawn in a look of its own, over its
+    // source's: the plant a harvest is aimed at. nil clears it.
+    //
+    // Read when the prop is drawn, so it can change every frame on a handful
+    // of props and re-roll or re-settle nothing.
+    {
+        let s = sources.clone();
+        if let Ok(f) = lua.create_function(move |_, (id, inst, look): (u32, f64, Option<Table>)| {
+            const CALL: &str = "scatter.setTint";
+            let mut v = s.borrow_mut();
+            let Some(src) = v.iter_mut().find(|s| s.id == id) else { return Ok(false) };
+            let inst = inst as u64;
+            let Some(look) = look else {
+                src.marks.remove(&inst);
+                return Ok(true);
+            };
+            check_keys(&look, MARK_KEYS, CALL)?;
+            let emissive = color_opt(&look, "emissive");
+            let rim = color_opt(&look, "rim");
+            // A colour named with no strength glows at 1: asking for a glow
+            // and getting none would be this call's whole failure.
+            let strength = |key: &str, named: bool| -> mlua::Result<f32> {
+                let v = num(&look, key, if named { 1.0 } else { 0.0 });
+                if !(v >= 0.0 && v.is_finite()) {
+                    return Err(mlua::Error::RuntimeError(format!("{CALL}: `{key}` must be 0 or more, got {v}")));
+                }
+                Ok(v as f32)
+            };
+            let mark = floptle_core::scatter::Mark {
+                tint: color_opt(&look, "tint").unwrap_or([1.0; 3]),
+                emissive: emissive.unwrap_or([1.0; 3]),
+                emissive_strength: strength("emissiveStrength", emissive.is_some())?,
+                rim: rim.unwrap_or([1.0; 3]),
+                rim_strength: strength("rimStrength", rim.is_some())?,
+            };
+            src.marks.insert(inst, mark);
+            Ok(true)
+        }) {
+            let _ = t.set("setTint", f);
+        }
+    }
+
+    // scatter.clearTints(sourceId) → how many props lost their own look.
+    {
+        let s = sources.clone();
+        if let Ok(f) = lua.create_function(move |_, id: u32| {
+            let mut v = s.borrow_mut();
+            let Some(src) = v.iter_mut().find(|s| s.id == id) else { return Ok(0u32) };
+            let n = src.marks.len() as u32;
+            src.marks.clear();
+            Ok(n)
+        }) {
+            let _ = t.set("clearTints", f);
         }
     }
 

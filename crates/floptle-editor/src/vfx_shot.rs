@@ -125,8 +125,10 @@ fn weigh(inst: &EffectInstance, mut each: impl FnMut(Vec3, f32)) -> f32 {
             let end = inst.beam_end(ti);
             let reach = (ct.wave_amplitude + ct.jitter).max(0.0);
             w += alpha * width * end.length().max(width);
+            // Along the line it is drawn on, which bows through a control
+            // point when it has one.
             for k in 0..=8 {
-                each(end * (k as f32 / 8.0), width.max(reach));
+                each(inst.beam_point(ti, k as f32 / 8.0), width.max(reach));
             }
         }
     }

@@ -674,6 +674,9 @@ pub(crate) fn build_instances(
                 // Mid-fade draws both bands, cross-dissolved. Drawing one and
                 // switching is what a pop is; two complementary screen doors
                 // for a few metres of walking is what nobody notices.
+                // This one prop's own look (`scatter.setTint`), asked only of
+                // a source that has marked any.
+                let mark = if src.marks.is_empty() { None } else { src.marks.get(&inst.id) };
                 let mut push = |b: usize, alpha: f32, arriving: bool| {
                     let Some(Some(parts)) = band_parts.get(b) else { return };
                     // The per-instance roll rides the albedo, so a game can
@@ -710,6 +713,18 @@ pub(crate) fn build_instances(
                                 None => t,
                             };
                             mp.emissive_strength = src.look.emissive_strength;
+                        }
+                        // …and one marked prop over all of that.
+                        if let Some(m) = mark {
+                            mp.color = [mp.color[0] * m.tint[0], mp.color[1] * m.tint[1], mp.color[2] * m.tint[2]];
+                            if m.emissive_strength > 0.0 {
+                                mp.emissive = m.emissive;
+                                mp.emissive_strength = m.emissive_strength;
+                            }
+                            if m.rim_strength > 0.0 {
+                                mp.rim = m.rim;
+                                mp.rim_strength = m.rim_strength;
+                            }
                         }
                         out.push((*mesh, *tex, instance_of_mat(model * *local, &mp)));
                     }
@@ -995,6 +1010,7 @@ mod tests {
             frame: Default::default(),
             look: Default::default(),
             bend: 0.0,
+            marks: Default::default(),
         }
     }
 
@@ -1689,6 +1705,92 @@ mod tests {
         }
         host.run(&mut world, &dir, 1.0 / 60.0, 2.0 / 60.0);
         assert_eq!(read(&host), (0.0, false), "a prop with no ground left is still reported standing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **One prop of ten thousand can be marked and found again by its id.**
+    /// A game that selected props had no per-prop highlight, so a targeted
+    /// plant wore a particle effect scaled to its bounds; and no lookup by id,
+    /// so it kept its own record of where each rock was rolled, which on a
+    /// hillside is metres from where it settled.
+    #[test]
+    fn one_marked_prop_of_ten_thousand_draws_marked_and_is_found_by_its_id() {
+        let dir = std::env::temp_dir().join(format!("floptle_scatter_mark_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        // Frame 1 asks before anything settled; frame 2 marks the prop
+        // nearest (10, 0, 10) and reads it back by id; frame 3 cuts it.
+        std::fs::write(
+            dir.join("field.lua"),
+            "function start() id = scatter.create{ asset = 'a', halfX = 50, halfZ = 50, chunk = 16, perChunk = 270, \
+             \x20 scaleMin = 0.5, scaleMax = 2 } frame = 0 end\n\
+             function update() frame = frame + 1\n\
+             \x20 local hit = scatter.near(id, vec3(10, 0, 10), 4)[1]\n\
+             \x20 if frame == 3 then scatter.remove(id, target) gone = scatter.instance(id, target) == nil return end\n\
+             \x20 local got = scatter.instance(id, hit.id)\n\
+             \x20 target, gx, gy, gz = hit.id, got.pos.x, got.pos.y, got.pos.z\n\
+             \x20 off = (got.pos - hit.pos):length()\n\
+             \x20 same = got.settled == hit.settled and math.abs(got.scale - hit.scale) < 1e-6\n\
+             \x20\x20\x20 and math.abs(got.yaw - hit.yaw) < 1e-6 and (got.up - hit.up):length() < 1e-6\n\
+             \x20 landed = got.settled\n\
+             \x20 if frame == 2 then scatter.setTint(id, hit.id, { tint = {0, 1, 0}, rim = {1, 0, 0}, rimStrength = 2 }) end\n\
+             end\n",
+        )
+        .unwrap();
+        let mut world = floptle_core::World::new();
+        let e = world.spawn();
+        world.insert(e, floptle_core::Transform::IDENTITY);
+        world.insert(e, floptle_core::Scripts(vec![floptle_core::ScriptInst::new("field")]));
+        let mut host = floptle_script::ScriptHost::new();
+        let env = |host: &floptle_script::ScriptHost| host.instance_env(e.index(), "field").unwrap();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        // Nothing has settled: the id still finds the prop, where it was rolled.
+        let (off, same, landed): (f64, bool, bool) =
+            (env(&host).get("off").unwrap(), env(&host).get("same").unwrap(), env(&host).get("landed").unwrap());
+        assert!(off < 1e-3 && same && !landed, "unsettled lookup: off {off}, same {same}, settled {landed}");
+
+        // A hillside: the ground under each prop is at its own height, and
+        // leans, so a settled prop is nowhere near where it was rolled.
+        let normal = Vec3::new(0.3, 1.0, 0.0).normalize();
+        let mut ground = |from: DVec3, _: Vec3, _: f32| Some((61.0 + 0.05 * from.x as f32, normal));
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
+        let mut cache = ScatterCache { settle_all: true, settled_out: Some(host.scatter_settled()), ..Default::default() };
+        let mut draw = |host: &floptle_script::ScriptHost, cache: &mut ScatterCache| {
+            let mut out = Vec::new();
+            build_instances(
+                cache, &host.scatter_sources(), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground,
+                &floptle_render::Frustum::everything(), 20_000, &mut out,
+            );
+            out
+        };
+        let before = draw(&host, &mut cache);
+        assert!(before.len() >= 10_000, "the fixture is a field of ten thousand, drew {}", before.len());
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let (off, same, landed): (f64, bool, bool) =
+            (env(&host).get("off").unwrap(), env(&host).get("same").unwrap(), env(&host).get("landed").unwrap());
+        assert!(landed, "the prop should have settled");
+        assert!(off < 1e-3 && same, "scatter.instance is {off} m from what near reported (same row: {same})");
+        let at = DVec3::new(env(&host).get("gx").unwrap(), env(&host).get("gy").unwrap(), env(&host).get("gz").unwrap());
+        // Settled onto the slope, not left at the region's surface.
+        assert!((at.y + 1.0 + 0.05 * at.x).abs() < 1e-3, "lookup answered the rolled place {at:?}");
+
+        let after = draw(&host, &mut cache);
+        assert_eq!(after.len(), before.len(), "marking a prop changed what draws");
+        let marked: Vec<_> = after.iter().filter(|(_, _, r)| r.color[1] > 0.5 && r.color[0] < 0.01).collect();
+        assert_eq!(marked.len(), 1, "exactly one prop should draw tinted, {} did", marked.len());
+        let raw = marked[0].2;
+        let place = DVec3::new(raw.model[3][0] as f64, raw.model[3][1] as f64, raw.model[3][2] as f64);
+        assert!((place - at).length() < 1e-3, "the tinted prop is at {place:?}, the marked one at {at:?}");
+        assert_eq!((&raw.rim[..3], raw.params[1]), (&[1.0, 0.0, 0.0][..], 2.0), "no rim on the marked prop");
+        let looks_marked = after.iter().filter(|(_, _, r)| r.color[0] < 0.5 || r.params[1] != 0.0).count();
+        assert_eq!(looks_marked, 1, "an unmarked prop drew marked");
+
+        // Cut: gone from the lookup, and its look goes with it.
+        host.run(&mut world, &dir, 1.0 / 60.0, 2.0 / 60.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        assert!(env(&host).get::<bool>("gone").unwrap(), "a removed prop is still found by its id");
+        assert!(host.scatter_sources()[0].marks.is_empty(), "a removed prop kept its look");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

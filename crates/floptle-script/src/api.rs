@@ -8018,6 +8018,53 @@ fn node_particles_method(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::R
         )?;
     }
     {
+        // ps:setBeamControl(x, y, z) — bow every Beam track of the node's effect
+        // toward a World-space point: the ribbon curves from the origin to its
+        // end, pulled toward it (a rope's sag, a tether's bow). No point puts
+        // each track back to its authored control point, or straight.
+        let cmds = shared.vfx_commands.clone();
+        vfx_methods.set(
+            "setBeamControl",
+            lua.create_function(move |_, (this, rest): (Table, mlua::MultiValue)| {
+                let e: u32 = this.raw_get("__id")?;
+                let a: Vec<Value> = rest.into_iter().collect();
+                let num = |v: Option<&Value>| match v {
+                    Some(Value::Number(n)) => Some(*n),
+                    Some(Value::Integer(i)) => Some(*i as f64),
+                    _ => None,
+                };
+                let at = match a.first() {
+                    None | Some(Value::Nil) => None,
+                    Some(v) => match (num(Some(v)), num(a.get(1)), num(a.get(2))) {
+                        (Some(x), Some(y), Some(z)) => Some([x, y, z]),
+                        _ => Some(crate::vec3_of(v).map(|p| p.to_array()).ok_or_else(|| {
+                            mlua::Error::runtime("ps:setBeamControl(x, y, z), ps:setBeamControl(vec3) or ps:setBeamControl()")
+                        })?),
+                    },
+                };
+                cmds.borrow_mut().push((e, VfxCmd::SetBeamControl(at)));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // ps:setVolume(v) — how big the space the effect fills is, as a
+        // multiple of its authored emission shape. Particle size, count and
+        // brightness stay as authored, so one mark fits a tuft or a tree.
+        let cmds = shared.vfx_commands.clone();
+        vfx_methods.set(
+            "setVolume",
+            lua.create_function(move |_, (this, v): (Table, f64)| {
+                let e: u32 = this.raw_get("__id")?;
+                if !(v >= 0.0 && v.is_finite()) {
+                    return Err(mlua::Error::runtime(format!("ps:setVolume(v): v must be 0 or more, got {v}")));
+                }
+                cmds.borrow_mut().push((e, VfxCmd::Volume(v.min(1.0e4) as f32)));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
         let inf = shared.vfx_info.clone();
         vfx_methods.set(
             "isPlaying",

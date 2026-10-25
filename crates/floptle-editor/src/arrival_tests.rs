@@ -614,7 +614,7 @@ fn an_additive_layer_names_its_steps_and_leaves_the_world_playing() {
     }
     ed.vfx.spawn_detached_with(
         "vfx/Puff",
-        crate::vfx::DetachedSpawn { emitter: Transform::IDENTITY, vel: Default::default(), frame: None, intensity: None, tint: None, up: None },
+        crate::vfx::DetachedSpawn { emitter: Transform::IDENTITY, vel: Default::default(), frame: None, intensity: None, volume: None, tint: None, up: None },
     );
     let playhead = ed.vfx.instances.get(&fire).map(|(_, i)| i.t).expect("the running scene's fire is not burning");
     assert!(playhead > 0.2, "the fire has played {playhead} s: the fixture tests nothing");

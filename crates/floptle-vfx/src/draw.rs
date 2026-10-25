@@ -334,6 +334,7 @@ pub fn collect_beams(
         }
         let origin = xf.transform_point3(Vec3::ZERO);
         let end = xf.transform_point3(inst.beam_end(ti));
+        let curved = inst.beam_control(ti).is_some();
         let axis = (end - origin).normalize_or_zero();
         if axis == Vec3::ZERO {
             continue;
@@ -350,7 +351,10 @@ pub fn collect_beams(
         let seed = inst.beam_jitter_seed(ti);
         let point = |k: u32| -> Vec3 {
             let u = k as f32 / n as f32;
-            let mut p = origin.lerp(end, u);
+            // The chord, or the curve through the control point's pull: an
+            // affine map keeps a quadratic curve one, so the local curve is
+            // carried out whole.
+            let mut p = if curved { xf.transform_point3(inst.beam_point(ti, u)) } else { origin.lerp(end, u) };
             if amp != 0.0 {
                 // `wave_frequency` cycles along the chain, phase advancing one full
                 // cycle per second; sin(πu) pins both endpoints in place.
@@ -896,6 +900,109 @@ mod tests {
         for p in &packed {
             let (a, b) = segment_ends(p);
             assert!((a.z + 5.0).abs() < 1e-4 && (b.z + 5.0).abs() < 1e-4, "the ribbon stays on the path's line: {a} {b}");
+        }
+    }
+
+    /// **A beam bows through its control point.** A track ran origin → end
+    /// as a straight line, so a tether, a rope or a hose could only be drawn
+    /// straight. With a control point the chain is a quadratic curve: pinned at
+    /// both ends, and halfway along it is halfway to the control point.
+    #[test]
+    fn a_beam_with_a_control_point_bows_through_its_pull_and_keeps_its_ends() {
+        use crate::curve::ValueOrCurve;
+        let track = |control: Option<Vec3>| Track {
+            look: Look { render: RenderMode::Beam { texture: None }, ..Look::default() },
+            size: ValueOrCurve::constant(0.2),
+            segments: 16,
+            beam_end: Vec3::new(8.0, 0.0, 0.0),
+            beam_control: control,
+            ..Track::default()
+        };
+        let chain = |inst: &EffectInstance| {
+            let (mut packed, mut draws) = (Vec::new(), Vec::new());
+            let xf = Mat4::from_translation(Vec3::new(0.0, 0.0, -10.0));
+            collect_beams(inst, xf, xf, Vec3::X, &mut packed, &mut draws);
+            let mut pts: Vec<Vec3> = packed.iter().map(|p| segment_ends(p).0).collect();
+            pts.push(segment_ends(packed.last().unwrap()).1);
+            pts
+        };
+        let fx = |c| Arc::new(ParticleEffect { lifetime: 1.0, playback: Playback::Looping, tracks: vec![track(c)], ..ParticleEffect::default() }.compile());
+        let at = Vec3::new(0.0, 0.0, -10.0);
+        // Authored: a sag of 3 below the middle.
+        let mut sag = EffectInstance::new(fx(Some(Vec3::new(4.0, -3.0, 0.0))), 1);
+        sag.simulate_to(0.25, Vec3::ZERO);
+        let pts = chain(&sag);
+        assert_eq!(pts.len(), 17);
+        assert!((pts[0] - at).length() < 1e-4, "the origin moved: {}", pts[0]);
+        assert!((pts[16] - (at + Vec3::new(8.0, 0.0, 0.0))).length() < 1e-4, "the end moved: {}", pts[16]);
+        // B(1/2) = c/2 + e/4: (4, -1.5, 0).
+        assert!((pts[8] - (at + Vec3::new(4.0, -1.5, 0.0))).length() < 1e-4, "the middle is at {}", pts[8]);
+        for (k, p) in pts.iter().enumerate() {
+            let u = k as f32 / 16.0;
+            let want = at + Vec3::new(4.0, -3.0, 0.0) * (2.0 * u * (1.0 - u)) + Vec3::new(8.0, 0.0, 0.0) * (u * u);
+            assert!((*p - want).length() < 1e-4, "point {k} is {p}, the curve has {want}");
+        }
+        // A script's control point wins over the authored one, and clearing it
+        // goes back to the authored one.
+        sag.set_beam_control(Some(Vec3::new(4.0, 2.0, 0.0)));
+        assert!((chain(&sag)[8] - (at + Vec3::new(4.0, 1.0, 0.0))).length() < 1e-4, "the script's point did not bow it");
+        sag.set_beam_control(None);
+        assert!((chain(&sag)[8] - (at + Vec3::new(4.0, -1.5, 0.0))).length() < 1e-4, "clearing did not go back to the authored point");
+        // No control point is the straight beam it always was.
+        let mut straight = EffectInstance::new(fx(None), 1);
+        straight.simulate_to(0.25, Vec3::ZERO);
+        for p in chain(&straight) {
+            assert!((p.y).abs() < 1e-5 && (p.z + 10.0).abs() < 1e-5, "a straight beam bowed: {p}");
+        }
+    }
+
+    /// **An effect fills a space of any size with the same motes.**
+    /// `setIntensity` shades size with emission and a node's scale scales its
+    /// billboards, so one mark could not be fitted to a 0.4 m tuft and a 12 m
+    /// tree without oversized or dim motes. `volume` scales where particles
+    /// are born and nothing else.
+    #[test]
+    fn one_effect_at_volume_0_4_and_12_fills_each_with_the_same_particles() {
+        use crate::curve::{Value, ValueOrCurve};
+        use crate::effect::EmitShape;
+        let fx = Arc::new(
+            ParticleEffect {
+                lifetime: 2.0,
+                playback: Playback::OneShot,
+                tracks: vec![Track {
+                    clips: vec![burst_clip(400, 2.0)],
+                    shape: EmitShape::Sphere { radius: 1.0, shell: false },
+                    velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
+                    size: ValueOrCurve::constant(0.1),
+                    color: ValueOrCurve::Const(Value::Rgba([0.9, 0.8, 0.3, 0.7])),
+                    ..Track::default()
+                }],
+                ..ParticleEffect::default()
+            }
+            .compile(),
+        );
+        let drawn = |volume: f32| {
+            let mut inst = EffectInstance::new(fx.clone(), 5);
+            inst.set_volume(volume);
+            inst.simulate_to(0.5, Vec3::ZERO);
+            let (mut packed, mut draws) = (Vec::new(), Vec::new());
+            collect_billboards(&inst, Mat4::IDENTITY, Mat4::IDENTITY, Vec3::NEG_Z, Vec3::X, Vec3::Y, &mut packed, &mut draws);
+            packed
+        };
+        let (small, big) = (drawn(0.4), drawn(12.0));
+        assert_eq!(small.len(), 400, "every particle of the burst draws");
+        assert_eq!(big.len(), small.len(), "volume changed the count");
+        let reach = |ps: &[ParticleInstance]| {
+            ps.iter().map(|p| Vec3::new(p.pos_rot[0], p.pos_rot[1], p.pos_rot[2]).length()).fold(0.0f32, f32::max)
+        };
+        for (ps, v) in [(&small, 0.4f32), (&big, 12.0)] {
+            let r = reach(ps);
+            assert!(r <= v * 1.0001 && r >= v * 0.9, "volume {v}: the burst reaches {r}, not the volume");
+        }
+        for (a, b) in small.iter().zip(&big) {
+            assert_eq!(a.size, b.size, "the particle size changed with the volume");
+            assert_eq!(a.color, b.color, "the brightness changed with the volume");
+            assert!((a.size[0] - 0.1).abs() < 1e-6, "size {} is not the authored 0.1", a.size[0]);
         }
     }
 

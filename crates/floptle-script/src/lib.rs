@@ -1604,6 +1604,9 @@ pub struct SpawnedEffect {
     pub up: Option<[f64; 3]>,
     pub scale: Option<f32>,
     pub intensity: Option<f32>,
+    /// How big the space it fills is, as a multiple of its authored emission
+    /// shape; particle size and brightness stay as authored.
+    pub volume: Option<f32>,
     pub tint: Option<[f32; 4]>,
     /// The node the effect rides (a planet, a ship). `None` is the moving
     /// world it is in, if any.
@@ -1626,6 +1629,14 @@ pub enum VfxCmd {
     /// Aim every Beam track's endpoint at a world-space point — the editor
     /// converts it to effect-local before applying (`ps:setBeamEnd(x, y, z)`).
     SetBeamEnd([f64; 3]),
+    /// Bow every Beam track toward a world-space control point, or back to
+    /// each track's authored one with `None` (`ps:setBeamControl(x, y, z)`).
+    /// Converted to effect-local like the end.
+    SetBeamControl(Option<[f64; 3]>),
+    /// How big the space the effect fills is, as a multiple of its authored
+    /// emission shape, leaving particle size and brightness alone
+    /// (`ps:setVolume(v)`). Kept for the node, like the tint.
+    Volume(f32),
     /// A colour every particle of the node's effect is multiplied by
     /// (`ps:setTint(r, g, b [, a])`). Kept for the node, so it holds across a
     /// restart.
@@ -2574,6 +2585,7 @@ pub fn option_keys(call: &str) -> Option<&'static [&'static str]> {
     Some(match call {
         "scatter.create" => scatter_api::CREATE_KEYS,
         "scatter.setInteractors" => scatter_api::INTERACTOR_KEYS,
+        "scatter.setTint" => scatter_api::MARK_KEYS,
         "node:setMaterial" => api::MATERIAL_KEYS,
         "node:setCelestial" => api::CELESTIAL_KEYS,
         "node:setTilemap" => api::TILEMAP_KEYS,

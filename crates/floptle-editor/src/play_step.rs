@@ -1555,6 +1555,7 @@ impl Editor {
                 vel: DVec3::from_array(fx.vel).as_vec3(),
                 frame,
                 intensity: fx.intensity,
+                volume: fx.volume,
                 tint: fx.tint,
                 up: fx.up.map(to_vec).filter(|v| *v != Vec3::ZERO),
             };

@@ -39,6 +39,7 @@ pub struct OptTable {
 /// appears that is neither registered nor excused.
 pub const TABLES: &[OptTable] = &[
     OptTable { call: "scatter.create", keys: crate::scatter_api::CREATE_KEYS },
+    OptTable { call: "scatter.setTint", keys: crate::scatter_api::MARK_KEYS },
     OptTable { call: "node:setCamera", keys: crate::api::CAMERA_KEYS },
     OptTable { call: "node:setParent", keys: crate::api::SET_PARENT_KEYS },
     OptTable { call: "node:setMaterial", keys: crate::api::MATERIAL_KEYS },
@@ -368,6 +369,7 @@ mod tests {
     fn bogus_call(call: &str) -> &'static str {
         match call {
             "scatter.create" => "scatter.create{ asset = 'a.glb', nonesuch = 1 }",
+            "scatter.setTint" => "scatter.setTint(scatter.create{ asset = 'a.glb' }, 1, { nonesuch = 1 })",
             "space.beltOrbits" => "space.beltOrbits{ count = 1, aMin = 10, aMax = 20, nonesuch = 1 }",
             "space.belt" => "space.belt{ parent = 'Sun', count = 1, aMin = 10, aMax = 20, nonesuch = 1 }",
             "node:setCamera" => "node:setCamera{ nonesuch = 1 }",

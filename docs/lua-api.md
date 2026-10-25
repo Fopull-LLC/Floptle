@@ -31,7 +31,7 @@ each group, and meant to be searched.
 - [pathfinding — nav.*](#pathfinding--nav) — 26
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 11
 - [weather — wind](#weather--wind) — 6
-- [scatter — instanced props](#scatter--instanced-props) — 9
+- [scatter — instanced props](#scatter--instanced-props) — 12
 - [2D — sprites, sorting & the flat camera](#2d--sprites-sorting--the-flat-camera) — 38
 - [vessels — assembly.*](#vessels--assembly) — 16
 - [the camera & the screen](#the-camera--the-screen) — 9
@@ -43,7 +43,7 @@ each group, and meant to be searched.
 - [space — orbits & time-warp](#space--orbits--time-warp) — 21
 - [components — getcomponent](#components--getcomponent) — 113
 - [animation — node:animator](#animation--nodeanimator) — 29
-- [particles — effects from script](#particles--effects-from-script) — 11
+- [particles — effects from script](#particles--effects-from-script) — 13
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 36
 - [assets](#assets) — 19
 - [debug gizmos](#debug-gizmos) — 5
@@ -3053,6 +3053,10 @@ weather.windAt(point) → vec3, the wind at that point in world space: every win
 
 Thousands of props from a seed — GPU-instanced, with no scene node anywhere in it. Your generator still decides WHAT grows where; the engine decides where each instance stands and draws them. scatter.create declares a source, scatter.remove harvests one.
 
+### `scatter.clearTints`
+
+scatter.clearTints(sourceId) — every prop of the source back to the source's own look; returns how many had one of their own.
+
 ### `scatter.cost`
 
 scatter.cost(id) — what this source asks for every frame: { chunks, props, far, chunkSize, perChunk }. Read it BEFORE you ship the field. The knobs look like a look, but the outermost `lod` distance is really the budget: it sets how many chunks stay resident, as a sweep whose side grows with it, walked every frame. Cost is about (far/chunk)^2 per source — halving the distance, or doubling the chunk, quarters it. A field big enough to matter also says so in the Console when you declare it. On a body smaller than your view distance the count saturates at the body, so a planet never costs more than a planet.
@@ -3064,6 +3068,10 @@ scatter.create{ asset = "tree.glb", seed = 7, perChunk = 24, chunk = 16 } — de
 ### `scatter.destroy`
 
 scatter.destroy(id) — remove a whole source and everything it was drawing. Returns true if there was one. A source also goes when the node whose script created it is destroyed, or when that script is hot-reloaded (the reload makes its own).
+
+### `scatter.instance`
+
+scatter.instance(sourceId, instanceId) — one prop by the id scatter.near answered with: { id, pos, up, yaw, scale, param, settled }, the same row near returns, without asking around a point. `pos` is where the field dropped it onto the ground, wherever that is, so a game needs no record of its own of where each rock stands. nil once it is removed. A prop no camera has been near yet answers with where it was rolled and `settled = false`, as near does; an id this source has never answered near with and that has not settled is nil.
 
 ### `scatter.near`
 
@@ -3084,6 +3092,10 @@ scatter.restore(sourceId [, instanceId]) — put one prop back, or all of them w
 ### `scatter.setInteractors`
 
 scatter.setInteractors{ { pos = vec3, radius = 1, strength = 1 }, ... } — this script's points that bend props away: every prop within `radius` of a point, measured across the ground, leans away from it with its foot planted. Only props of a source created with `bend` (0 to 1: 1 for grass, 0 the default for rocks and trunks) give way, and a pushed prop straightens over about a second once the point moves on. `strength` is how far a prop right beside the point leans (the tangent of the lean: 1 = 45 degrees), easing to nothing at the radius. Each call replaces this script's own list, so call it every frame with where the walkers are; `{}` clears it. Other scripts keep their own points. Up to 32 per script; a point more than its radius (and at least 2 m) above or below a prop does not touch it.
+
+### `scatter.setTint`
+
+scatter.setTint(sourceId, instanceId, { tint = {r,g,b}, emissive = {r,g,b}, emissiveStrength = 1, rim = {r,g,b}, rimStrength = 1 }) — one prop drawn in a look of its own, over its source's: the plant a harvest is aimed at, the rock a build would replace. `tint` multiplies the colour it would otherwise be drawn in; `emissive` makes it glow and `rim` lights its silhouette, each at strength 1 when only the colour is named. nil for the look clears it. Read when the prop is drawn, so changing it every frame on a handful of props re-rolls nothing; removing the prop drops its look. Returns false for a source that does not exist.
 
 ## 2D — sprites, sorting & the flat camera
 
@@ -4243,7 +4255,7 @@ anim:time([layer]) — seconds into the current state.
 
 ### `node:particles`
 
-node:particles() — the particle handle for this node's Particle System component. Setters: :play/:stop/:restart/:setIntensity/:setBeamEnd. Getters: :isPlaying/:alive/:asset. e.g. on a hit, node:particles():restart() to re-fire a burst.
+node:particles() — the particle handle for this node's Particle System component. Setters: :play/:stop/:restart/:setIntensity/:setVolume/:setTint/:setBeamEnd/:setBeamControl. Getters: :isPlaying/:alive/:asset. e.g. on a hit, node:particles():restart() to re-fire a burst.
 
 ### `particles:alive`
 
@@ -4265,6 +4277,10 @@ particles:play() — start emitting if the effect is idle (spawns a fresh instan
 
 particles:restart() — re-spawn from t=0 (re-fire a one-shot burst, e.g. a muzzle flash on each shot).
 
+### `particles:setBeamControl`
+
+particles:setBeamControl(x, y, z) or particles:setBeamControl(vec3) — bow every Beam track toward a WORLD-space control point: the ribbon curves from the emitter to its end, pulled toward the point and passing halfway to it. A rope's sag, a tether's bow, a hose. Converted to effect-local like setBeamEnd, so re-call it per tick with setBeamEnd to follow both ends. particles:setBeamControl() with no point puts each track back to its authored control point (the Particles tab's `bow`), or straight.
+
 ### `particles:setBeamEnd`
 
 particles:setBeamEnd(x, y, z) — aim every Beam track's endpoint at a WORLD-space point (the engine converts it to effect-local, so the beam keeps tracking the target as the node moves). Re-call per tick to follow a moving target.
@@ -4277,13 +4293,17 @@ particles:setIntensity(i) — live emission scale (0..~2): multiplies rates/burs
 
 particles:setTint(r, g, b [, a]) or particles:setTint(color) — multiply every particle of the node's effect by a colour, on top of the colours the effect authors. Kept for the node, so a restart keeps it. One dust effect matching each world's ground: p:setTint(0.8, 0.55, 0.4).
 
+### `particles:setVolume`
+
+particles:setVolume(v) — how big the space the effect fills is, as a multiple of its authored emission shape (1 = as authored): a sphere of radius 1 at volume 12 is born within 12 m of the node. Only where particles are born changes: their size, count, speed and brightness stay as authored, so one mark effect fits a 0.4 m tuft and a 12 m tree alike. setIntensity changes count and size; the node's scale changes particle size too. Kept for the node, so a restart keeps it.
+
 ### `particles:stop`
 
 particles:stop() — stop + despawn the effect; its live particles vanish.
 
 ### `spawnEffect`
 
-spawnEffect(key, pos [, opts]) or spawnEffect(key, x, y, z [, vx, vy, vz]) — fire a one-shot particle effect at a world point, no node needed. It plays once and despawns itself. opts: normal (vec3: the effect's +Y, so a ring lies across it and a cone fires along it; default world up, or against gravity on a round world), up (vec3: which way Vertical and Horizontal billboards stand; default normal), scale, intensity, tint (a color), vel (vec3: the emitter's velocity, which inherit-velocity tracks keep a share of), frame (a node the effect rides: its emit point and its World-track particles move with it). With no frame it rides the planet on rails whose sphere of influence it is in, so dust on a moving world stays over its spot; vel is then relative to that. The point is placed against the world as it was when you asked, so a point worked out in update lands where you meant on a moving planet. Local to this machine: in a session, spawn it from state that replicates (a synced counter every peer watches), or the server's sparks stay on the server. e.g. local h = raycast(...); if h then spawnEffect("vfx/Impact", vec3(h.x, h.y, h.z), { normal = vec3(h.nx, h.ny, h.nz) }) end.
+spawnEffect(key, pos [, opts]) or spawnEffect(key, x, y, z [, vx, vy, vz]) — fire a one-shot particle effect at a world point, no node needed. It plays once and despawns itself. opts: normal (vec3: the effect's +Y, so a ring lies across it and a cone fires along it; default world up, or against gravity on a round world), up (vec3: which way Vertical and Horizontal billboards stand; default normal), scale, intensity, volume (how big the space it fills is, as a multiple of its emission shape; particle size and brightness stay as authored, where scale grows the particles too), tint (a color), vel (vec3: the emitter's velocity, which inherit-velocity tracks keep a share of), frame (a node the effect rides: its emit point and its World-track particles move with it). With no frame it rides the planet on rails whose sphere of influence it is in, so dust on a moving world stays over its spot; vel is then relative to that. The point is placed against the world as it was when you asked, so a point worked out in update lands where you meant on a moving planet. Local to this machine: in a session, spawn it from state that replicates (a synced counter every peer watches), or the server's sparks stay on the server. e.g. local h = raycast(...); if h then spawnEffect("vfx/Impact", vec3(h.x, h.y, h.z), { normal = vec3(h.nx, h.ny, h.nz) }) end.
 
 ## audio — sounds & the mixer
 

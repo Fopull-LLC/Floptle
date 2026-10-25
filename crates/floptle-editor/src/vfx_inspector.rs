@@ -584,6 +584,27 @@ fn beam_editor(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, dirty:
         }
     });
     ui.horizontal(|ui| {
+        let mut bows = track.beam_control.is_some();
+        if ui
+            .checkbox(&mut bows, "bow")
+            .on_hover_text("curve the beam toward a control point: a rope's sag, a tether's bow")
+            .changed()
+        {
+            // Starts halfway along, a little below: a sag you can see and pull.
+            let e = track.beam_end;
+            track.beam_control = bows.then(|| [e[0] * 0.5, e[1] * 0.5 - 1.0, e[2] * 0.5]);
+            *dirty = true;
+        }
+        if let Some(c) = &mut track.beam_control {
+            for (i, p) in ["x", "y", "z"].iter().enumerate() {
+                *dirty |= ui
+                    .add(egui::DragValue::new(&mut c[i]).speed(0.05).prefix(*p))
+                    .on_hover_text("the control point, a LOCAL offset from the node: the beam passes halfway to it")
+                    .changed();
+            }
+        }
+    });
+    ui.horizontal(|ui| {
         ui.label("wave");
         *dirty |= ui
             .add(egui::DragValue::new(&mut track.wave_amplitude).speed(0.01).range(0.0..=100.0))
@@ -616,7 +637,7 @@ fn beam_editor(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, dirty:
         ui,
         "One ribbon from the emitter to its end point; width is the size row and tint the \
          colour row, both read at the timeline position. A script aims it with \
-         node:particles():setBeamEnd(x, y, z).",
+         node:particles():setBeamEnd(x, y, z), and bends it with setBeamControl(x, y, z).",
     );
 }
 

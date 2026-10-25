@@ -361,6 +361,12 @@ pub struct VfxTrackDoc {
     /// Beam tracks only: the ribbon's endpoint as a local offset from the effect origin.
     #[serde(default = "default_beam_end", skip_serializing_if = "is_default_beam_end")]
     pub beam_end: [f32; 3],
+    /// Beam tracks only: a control point the ribbon bows toward, as a local
+    /// offset from the effect origin like `beam_end` (None = straight). The
+    /// beam is a quadratic curve from the origin to the end that passes
+    /// halfway to this point: a rope's sag, a tether's bow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub beam_control: Option<[f32; 3]>,
     /// Beam tracks only: sine-ripple amplitude across the segment chain (0 = straight).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub wave_amplitude: f32,
@@ -862,6 +868,7 @@ mod tests {
                 }),
                 segments: 12,
                 beam_end: [0.0, 5.0, 0.0],
+                beam_control: None,
                 wave_amplitude: 0.0,
                 wave_frequency: 2.0,
                 scroll: 0.0,
@@ -1156,13 +1163,14 @@ mod tests {
         assert!(t.trail.is_none());
         assert_eq!(t.segments, 12);
         assert_eq!(t.beam_end, [0.0, 5.0, 0.0]);
+        assert_eq!(t.beam_control, None);
         assert_eq!(t.wave_amplitude, 0.0);
         assert_eq!(t.wave_frequency, 2.0);
         assert_eq!(t.scroll, 0.0);
         assert_eq!((t.jitter, t.jitter_rate, t.jitter_seed), (0.0, 0.0, 0));
         // …and the defaults don't bloat a fresh save.
         let text = ron::ser::to_string_pretty(&doc, Default::default()).unwrap();
-        for field in ["trail", "segments", "beam_end", "wave_amplitude", "wave_frequency", "scroll", "jitter"] {
+        for field in ["trail", "segments", "beam_end", "beam_control", "wave_amplitude", "wave_frequency", "scroll", "jitter"] {
             assert!(!text.contains(field), "default {field} must not serialize: {text}");
         }
     }
@@ -1173,6 +1181,7 @@ mod tests {
         track.render = VfxRenderDoc::Beam { texture: Some("vfx/beam.png".into()) };
         track.segments = 24;
         track.beam_end = [1.0, 0.0, -3.0];
+        track.beam_control = Some([0.5, -2.0, -1.5]);
         track.wave_amplitude = 0.4;
         track.wave_frequency = 3.0;
         track.scroll = 1.5;

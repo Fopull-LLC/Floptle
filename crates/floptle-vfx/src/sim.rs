@@ -262,6 +262,15 @@ pub struct EffectInstance {
     /// Script override for every Beam track's endpoint (effect-local offset), set
     /// via [`Self::set_beam_end`]. `None` = each track's authored `beam_end`.
     beam_end_override: Option<Vec3>,
+    /// Script override for every Beam track's control point (effect-local),
+    /// set via [`Self::set_beam_control`]. `None` = each track's authored one.
+    beam_control_override: Option<Vec3>,
+    /// How big the space the effect fills is, as a multiple of its authored
+    /// emission shape: where particles are born, and nothing else. Their size,
+    /// count, colour and speed stay as authored, so one mark effect fits a
+    /// tuft and a tree alike without its motes growing or dimming. 1 until the
+    /// host sets it (`setVolume`).
+    pub volume: f32,
     /// Loops a looping effect has completed since it started: each loop is a
     /// new pulse, and a beam's jitter is thrown again per pulse.
     loops: u32,
@@ -307,6 +316,8 @@ impl EffectInstance {
             anchored: false,
             pending_emit_vel: Vec3::ZERO,
             beam_end_override: None,
+            beam_control_override: None,
+            volume: 1.0,
             loops: 0,
             wind: Vec3::ZERO,
             up: Vec3::Y,
@@ -377,9 +388,38 @@ impl EffectInstance {
         self.beam_end_override.unwrap_or(self.effect.tracks[track].beam_end)
     }
 
+    /// Bow every Beam track toward an effect-local control point (the
+    /// `setBeamControl` script path), or `None` for each track's authored one.
+    pub fn set_beam_control(&mut self, local: Option<Vec3>) {
+        self.beam_control_override = local;
+    }
+
+    /// The control point a Beam track's ribbon bows toward, if it bows
+    /// (script override, else authored).
+    pub fn beam_control(&self, track: usize) -> Option<Vec3> {
+        self.beam_control_override.or(self.effect.tracks[track].beam_control)
+    }
+
+    /// Where along a Beam track's line, at `u` from 0 (the origin) to 1 (the
+    /// end), effect-local and before any ripple or jitter: the straight
+    /// chord, or the quadratic curve through the control point's pull.
+    pub fn beam_point(&self, track: usize, u: f32) -> Vec3 {
+        let end = self.beam_end(track);
+        match self.beam_control(track) {
+            None => end * u,
+            Some(c) => c * (2.0 * u * (1.0 - u)) + end * (u * u),
+        }
+    }
+
     /// Set the live emission scale (clamped 0..4). 1 = the authored effect.
     pub fn set_intensity(&mut self, i: f32) {
         self.intensity = i.clamp(0.0, 4.0);
+    }
+
+    /// Set how big the space the effect fills is, as a multiple of its
+    /// authored emission shape (see [`Self::volume`]); clamped 0..10,000.
+    pub fn set_volume(&mut self, v: f32) {
+        self.volume = if v.is_finite() { v.clamp(0.0, 1.0e4) } else { 1.0 };
     }
 
     /// Where this instance's gravity points — the host picks the pull vector accordingly.
@@ -662,7 +702,7 @@ impl EffectInstance {
                             // Reconstruct the exact accumulator-crossing time so birth
                             // spacing is even regardless of frame boundaries.
                             let tau = (s + (k as f32 - acc0) / rate_eff).clamp(s, e);
-                            spawn(ts, ct, ti as u32, inst_seed, tau, clip_life, jitter, now, lifetime, gravity, emitter, emit_vel, self.intensity);
+                            spawn(ts, ct, ti as u32, inst_seed, tau, clip_life, jitter, now, lifetime, gravity, emitter, emit_vel, self.intensity, self.volume);
                         }
                     }
                     Emit::Burst { count, count_jitter, pulses, interval, interval_jitter } => {
@@ -683,7 +723,7 @@ impl EffectInstance {
                                     .round()
                                     .max(0.0) as u32;
                                 for _ in 0..n {
-                                    spawn(ts, ct, ti as u32, inst_seed, tp, clip_life, jitter, now, lifetime, gravity, emitter, emit_vel, self.intensity);
+                                    spawn(ts, ct, ti as u32, inst_seed, tp, clip_life, jitter, now, lifetime, gravity, emitter, emit_vel, self.intensity, self.volume);
                                 }
                             }
                         }
@@ -935,6 +975,7 @@ fn spawn(
     emitter: &Transform,
     emit_vel: Vec3,
     intensity: f32,
+    volume: f32,
 ) {
     if ts.particles.count as u32 >= ct.capacity {
         // Pool full: drop, never reallocate mid-play. Recorded so the editor
@@ -949,7 +990,7 @@ fn spawn(
 
     let un = tau / lifetime; // normalized effect time for lane sampling
     let shape_scale = ct.lane_shape.sample(un);
-    let (mut offset, mut dir) = sample_shape(ct.shape, shape_scale, seed);
+    let (mut offset, mut dir) = sample_shape(ct.shape, shape_scale * volume, seed);
     // A World-space track bakes the birth offset + emit direction into world
     // orientation (the emitter's rotation/scale); the anchor carries translation, so
     // the particle stops riding the node. Local tracks stay emitter-local (the node

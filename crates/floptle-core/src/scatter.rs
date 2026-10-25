@@ -10,7 +10,7 @@
 //! same places; a multiplayer session never replicates scenery; and a removal
 //! set is a handful of `u64` ids, each stable because the placement that
 //! produced it is.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::math::{DQuat, DVec3, Quat, Vec3};
 
@@ -215,6 +215,32 @@ pub struct ScatterSource {
     /// How far its props give way to [`Interactor`]s, 0 to 1: grass bends
     /// (1), a rock or a trunk does not (0, the default).
     pub bend: f32,
+    /// Props drawn in a look of their own, by id: the plant a harvest is
+    /// aimed at, the rock a build would replace. Read at draw time, so marking
+    /// one prop every frame costs a map write and re-rolls nothing; an empty
+    /// map is one branch per source.
+    pub marks: HashMap<InstanceId, Mark>,
+}
+
+/// One prop's look on top of its source's (`scatter.setTint`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mark {
+    /// Multiplies the colour the prop would otherwise be drawn in.
+    pub tint: [f32; 3],
+    /// The light the prop gives off, at `emissive_strength`. A strength of `0`
+    /// leaves the prop's own glow (its source's, or its model's) alone.
+    pub emissive: [f32; 3],
+    pub emissive_strength: f32,
+    /// A glow around the prop's silhouette, at `rim_strength`. A strength of
+    /// `0` leaves the model's own rim alone.
+    pub rim: [f32; 3],
+    pub rim_strength: f32,
+}
+
+impl Default for Mark {
+    fn default() -> Self {
+        Mark { tint: [1.0; 3], emissive: [1.0; 3], emissive_strength: 0.0, rim: [1.0; 3], rim_strength: 0.0 }
+    }
 }
 
 /// The colour a source's props are drawn with, on top of their own textures.
@@ -358,9 +384,7 @@ pub fn chunk_instances(src: &ScatterSource, key: ChunkKey) -> Vec<Instance> {
         // Four independent streams off the same id — deriving them by shifting
         // one value correlates position with scale, and a forest whose big
         // trees are all in the north-east reads as a bug you cannot name.
-        let (hx, hz, hy, hp) =
-            (mix(id), mix(id ^ 0xA1), mix(id ^ 0xB2), mix(id ^ 0xC3));
-        let (fx, fz) = (unit(hx), unit(hz));
+        let (fx, fz) = (unit(mix(id)), unit(mix(id ^ 0xA1)));
         let (pos, up) = match src.region {
             Region::Ground { center, half } => {
                 let x = (key.0 as f64 + fx) * src.chunk;
@@ -414,17 +438,31 @@ pub fn chunk_instances(src: &ScatterSource, key: ChunkKey) -> Vec<Instance> {
                 continue;
             }
         }
-        let (smin, smax) = src.scale;
-        out.push(Instance {
-            id,
-            pos,
-            up,
-            yaw: (unit(hy) * std::f64::consts::TAU) as f32,
-            scale: smin + (smax - smin) * unit(hp) as f32,
-            param: unit(mix(id ^ 0xD4)) as f32,
-        });
+        let r = rolled(src, id);
+        out.push(Instance { id, pos, up, yaw: r.yaw, scale: r.scale, param: r.param });
     }
     out
+}
+
+/// What an instance's id alone decides: its spin, its size and its free
+/// roll. Where it stands needs its chunk as well; these do not, so a prop can
+/// be described from its id wherever it settled.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rolled {
+    pub yaw: f32,
+    pub scale: f32,
+    pub param: f32,
+}
+
+/// The [`Rolled`] traits of instance `id` of `src`, exactly as
+/// [`chunk_instances`] rolls them.
+pub fn rolled(src: &ScatterSource, id: InstanceId) -> Rolled {
+    let (smin, smax) = src.scale;
+    Rolled {
+        yaw: (unit(mix(id ^ 0xB2)) * std::f64::consts::TAU) as f32,
+        scale: smin + (smax - smin) * unit(mix(id ^ 0xC3)) as f32,
+        param: unit(mix(id ^ 0xD4)) as f32,
+    }
 }
 
 /// The outward direction for a point `(u, v)` in `[-1, 1]²` on cube face `f`.
@@ -730,6 +768,7 @@ mod tests {
             frame: Default::default(),
             look: Default::default(),
             bend: 0.0,
+            marks: Default::default(),
         }
     }
 

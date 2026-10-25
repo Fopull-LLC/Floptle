@@ -308,6 +308,9 @@
 ---@field asset fun(self: ParticleSystemHandle): string|nil The effect asset key this node references.
 ---@field setIntensity fun(self: ParticleSystemHandle, i: number) Live emission scale 0..4 (1 = authored): multiplies rates/burst counts and shades particle size — drive an engine plume with the throttle.
 ---@field setTint fun(self: ParticleSystemHandle, r: number|Color, g?: number, b?: number, a?: number) Multiply every particle by a colour (or pass one color()); kept across restarts. One dust effect matching each world's ground.
+---@field setBeamEnd fun(self: ParticleSystemHandle, x: number, y: number, z: number) Aim every Beam track's end at a WORLD point.
+---@field setBeamControl fun(self: ParticleSystemHandle, x?: number|Vec3, y?: number, z?: number) Bow every Beam track through a WORLD control point (a rope's sag); no point = the authored one, or straight.
+---@field setVolume fun(self: ParticleSystemHandle, v: number) Fill v times the authored emission shape; particle size, count and brightness stay as authored. Kept across restarts.
 
 ---A node's Audio Source, controlled from a script via `node:sound()`.
 ---@class AudioSourceHandle
@@ -1733,6 +1736,25 @@ function scatter.create(opts) end
 ---@param radius? number
 ---@return { id: number, distance: number, pos: Vec3, scale: number, param: number, up: Vec3, yaw: number }[]
 function scatter.near(id, point, radius) end
+---One instance by the id `near` answered with: where it stands now (on the
+---ground it settled on), and how. nil once it is removed, or for an id this
+---source has never answered with and that no camera has been near.
+---@param id integer
+---@param instanceId number
+---@return { id: number, pos: Vec3, up: Vec3, yaw: number, scale: number, param: number, settled: boolean }?
+function scatter.instance(id, instanceId) end
+---Draw one instance in a look of its own over its source's: `tint` multiplies
+---its colour, `emissive` and `rim` (with strengths, 1 when only the colour is
+---named) make it glow. nil clears it. Cheap to change every frame.
+---@param id integer
+---@param instanceId number
+---@param look? { tint?: number[], emissive?: number[], emissiveStrength?: number, rim?: number[], rimStrength?: number }
+---@return boolean
+function scatter.setTint(id, instanceId, look) end
+---Clear every instance's own look on a source; returns how many there were.
+---@param id integer
+---@return integer
+function scatter.clearTints(id) end
 ---Remove one instance, permanently. By ID, so it survives the chunk streaming
 ---out and back in.
 ---@param id integer

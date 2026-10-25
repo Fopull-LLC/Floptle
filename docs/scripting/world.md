@@ -585,12 +585,43 @@ end
 | `scatter.cost(id)` | what it asks for per frame: `{chunks, props, far, chunkSize, perChunk}` |
 | `scatter.destroy(id)` | drop the whole source |
 | `scatter.setInteractors{ {pos, radius, strength}, ... }` | this script's points that bend props away; `{}` clears them |
+| `scatter.instance(id, instanceId)` | one instance by its id, wherever it settled: the row `near` returns (`pos`, `up`, `yaw`, `scale`, `param`, `settled`), or nil once it is removed |
+| `scatter.setTint(id, instanceId, {tint, emissive, emissiveStrength, rim, rimStrength})` | one instance drawn in a look of its own over its source's; nil clears it |
+| `scatter.clearTints(id)` | every instance back to its source's look |
 
 `param` is a stable per-instance 0..1 you can map to a variant or a yield. It
 also rides the albedo, so one species gets a spread of shades without a material
 per plant. `up` is the way an instance stands and `yaw` its turn about that, in
 radians. An instance id is an exact Lua number, so the `id` `near` hands you is
 the one `remove` takes.
+
+### Pointing at one prop
+
+An id is also how a game marks the prop it is aiming at, and finds it again
+without a record of its own:
+
+```lua
+local target                                   -- the id under the cursor
+function update()
+  local hits = scatter.near(forest, aimPoint, 1.5)
+  local id = hits[1] and hits[1].id
+  if id ~= target then
+    if target then scatter.setTint(forest, target, nil) end
+    if id then scatter.setTint(forest, id, { rim = {1, 0.9, 0.4}, rimStrength = 2 }) end
+    target = id
+  end
+  local prop = target and scatter.instance(forest, target)
+  if prop then aimAt = prop.pos end          -- where it stands now
+end
+```
+
+`setTint` is read when the prop is drawn, so changing it every frame on a
+handful of props costs a table write and re-rolls nothing; a source with no
+marked props pays nothing. `tint` multiplies the colour the prop is drawn in;
+`emissive` and `rim` make it glow, each at strength 1 when only the colour is
+named. `scatter.instance` answers with where the prop settled on the ground,
+which on a hillside is not where it was rolled; a prop no camera has been near
+yet answers with its rolled place and `settled = false`, as `near` does.
 
 ### How the props look
 

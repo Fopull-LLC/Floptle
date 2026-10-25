@@ -456,6 +456,13 @@ pub struct Track {
     /// Beam tracks only: the ribbon's endpoint, a local offset from the effect origin
     /// (scripts override it per instance via `setBeamEnd`).
     pub beam_end: Vec3,
+    /// Beam tracks only: a control point the ribbon bows toward, a local
+    /// offset from the effect origin like [`Self::beam_end`]: the chain is then
+    /// a quadratic curve from the origin to the end, pulled toward this point
+    /// and passing halfway to it. A rope's sag, a tether's bow. `None` (the
+    /// default) is a straight beam. Scripts override it per instance via
+    /// `setBeamControl`.
+    pub beam_control: Option<Vec3>,
     /// Beam tracks only: sine-ripple amplitude across the chain (0 = straight).
     pub wave_amplitude: f32,
     /// Beam tracks only: ripple cycles along the beam, animated by effect time.
@@ -498,6 +505,7 @@ impl Default for Track {
             collide: None,
             segments: 12,
             beam_end: Vec3::new(0.0, 5.0, 0.0),
+            beam_control: None,
             wave_amplitude: 0.0,
             wave_frequency: 2.0,
             scroll: 0.0,
@@ -581,6 +589,7 @@ pub struct CompiledTrack {
     /// Beam subdivision + shape knobs (see the [`Track`] fields; beam tracks only).
     pub segments: u32,
     pub beam_end: Vec3,
+    pub beam_control: Option<Vec3>,
     pub wave_amplitude: f32,
     pub wave_frequency: f32,
     pub scroll: f32,
@@ -759,6 +768,7 @@ impl Track {
             }),
             segments: self.segments.max(1),
             beam_end: self.beam_end,
+            beam_control: self.beam_control,
             wave_amplitude: self.wave_amplitude,
             wave_frequency: self.wave_frequency,
             scroll: self.scroll,

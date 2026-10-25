@@ -1885,7 +1885,7 @@ fn install_ui(lua: &Lua, net: &crate::net_api::SharedNet) -> UiCells {
 }
 
 /// Every key `spawnEffect`'s options table reads.
-pub const SPAWN_EFFECT_KEYS: &[&str] = &["normal", "up", "scale", "intensity", "vel", "tint", "frame"];
+pub const SPAWN_EFFECT_KEYS: &[&str] = &["normal", "up", "scale", "intensity", "volume", "vel", "tint", "frame"];
 
 /// Read `spawnEffect`'s arguments in either form: `x, y, z [, vx, vy, vz]`, or
 /// `pos [, opts]`.
@@ -1935,6 +1935,7 @@ fn spawn_effect_args(key: String, args: Vec<mlua::Value>) -> mlua::Result<crate:
     fx.vel = vec("vel")?.unwrap_or([0.0; 3]);
     fx.scale = crate::opts::opt_num(&opts, CALL, "scale", 0.0, 1.0e4)?.map(|v| v as f32);
     fx.intensity = crate::opts::opt_num(&opts, CALL, "intensity", 0.0, 100.0)?.map(|v| v as f32);
+    fx.volume = crate::opts::opt_num(&opts, CALL, "volume", 0.0, 1.0e4)?.map(|v| v as f32);
     fx.tint = match opts.get::<mlua::Value>("tint")? {
         mlua::Value::Nil => None,
         mlua::Value::Table(t) => Some(crate::api::read_color(&t)?),

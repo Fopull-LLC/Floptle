@@ -307,6 +307,7 @@ fn a_lit_cloud_beside_a_lamp_takes_its_light() {
                 vel: Vec3::ZERO,
                 frame: None,
                 intensity: None,
+                volume: None,
                 tint: None,
                 up: None,
             },

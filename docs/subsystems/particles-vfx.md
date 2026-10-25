@@ -380,11 +380,23 @@ fx:restart()                     -- re-fire a one-shot burst on every hit
 fx:setIntensity(throttle)        -- live emission scale off a control input
 fx:setTint(0.8, 0.55, 0.4)       -- one dust effect, each world's ground colour
 fx:setBeamEnd(target:pos())      -- aim every Beam track, in WORLD space
+fx:setBeamControl(sagPoint)      -- and bow it through a point: a rope, a tether
+fx:setVolume(targetRadius)       -- fill a bigger or smaller space, same motes
 if fx:isPlaying() then … end     -- and :alive(), :asset(), :play(), :stop()
 ```
 
 `setBeamEnd` takes a world point and converts it to effect-local itself, so a
-beam keeps tracking its target as the emitter moves.
+beam keeps tracking its target as the emitter moves. `setBeamControl` does the
+same for a control point: the beam is then a quadratic curve from the emitter
+to its end, pulled toward the point and passing halfway to it. A track can
+author one too (the **bow** row of a Beam track), as a local offset like its
+end.
+
+`setVolume(v)` scales where particles are born, the emission shape, and
+nothing else: size, count, speed and brightness stay as authored. That is what
+fits one mark effect to a small target and a large one. `setIntensity` changes
+count and size, and the node's scale changes particle size along with the
+space. `spawnEffect` takes the same as a `volume` option.
 
 ## Editor integration
 

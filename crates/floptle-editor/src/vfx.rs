@@ -116,8 +116,20 @@ pub struct DetachedSpawn {
     pub vel: Vec3,
     pub frame: Option<(Entity, floptle_core::transform::Transform)>,
     pub intensity: Option<f32>,
+    /// How big the space it fills is (see [`EffectInstance::volume`]).
+    pub volume: Option<f32>,
     pub tint: Option<[f32; 4]>,
     pub up: Option<Vec3>,
+}
+
+/// A world point in node `e`'s effect space: its rotation and scale undone,
+/// so a beam aimed at it keeps reaching it as the node moves.
+fn effect_local(world: &World, e: Entity, p: [f64; 3]) -> Vec3 {
+    let tr = floptle_core::world_transform(world, e);
+    let rel = (DVec3::from_array(p) - tr.translation).as_vec3();
+    let unrotated = tr.rotation.inverse() * rel;
+    let safe = |v: f32| if v.abs() > 1e-6 { v } else { 1.0 };
+    Vec3::new(unrotated.x / safe(tr.scale.x), unrotated.y / safe(tr.scale.y), unrotated.z / safe(tr.scale.z))
 }
 
 /// The world's own up where an effect plays, if anything defines one:
@@ -264,6 +276,8 @@ pub struct VfxSystem {
     node_frames: HashMap<Entity, (Entity, floptle_core::transform::Transform)>,
     /// Each node's `setTint`, given to every instance it plays.
     node_tints: HashMap<Entity, [f32; 4]>,
+    /// Each node's `setVolume`, given to every instance it plays.
+    node_volumes: HashMap<Entity, f32>,
     /// The level's shape as particles resting on it last saw it — see
     /// [`Self::note_level`].
     level: LevelWatch,
@@ -401,6 +415,7 @@ impl Default for VfxSystem {
             preview: None,
             node_frames: HashMap::new(),
             node_tints: HashMap::new(),
+            node_volumes: HashMap::new(),
             level: LevelWatch::default(),
         }
     }
@@ -531,13 +546,14 @@ impl VfxSystem {
         self.instances.clear();
         self.detached.clear();
         self.node_tints.clear();
+        self.node_volumes.clear();
     }
 
     /// Fire a one-shot effect (`spawnEffect`): it plays once and is reaped when
     /// it finishes, no node needed. The emitter can be turned and sized, ride
     /// a frame, and carry an intensity and a tint.
     pub fn spawn_detached_with(&mut self, key: &str, spawn: DetachedSpawn) {
-        let DetachedSpawn { emitter, vel, frame, intensity, tint, up } = spawn;
+        let DetachedSpawn { emitter, vel, frame, intensity, volume, tint, up } = spawn;
         let pos = emitter.translation;
         if let Some(fx) = self.effect(key) {
             // Fire-and-forget contract: coerce to a self-destructing one-shot even if
@@ -575,6 +591,9 @@ impl VfxSystem {
             let mut inst = EffectInstance::new(fx, seed);
             if let Some(i) = intensity {
                 inst.set_intensity(i);
+            }
+            if let Some(v) = volume {
+                inst.set_volume(v);
             }
             if let Some(t) = tint {
                 inst.tint = t;
@@ -630,6 +649,9 @@ impl VfxSystem {
             let mut inst = EffectInstance::new(fx, entity.index().wrapping_add(1));
             if let Some(t) = self.node_tints.get(&entity) {
                 inst.tint = *t;
+            }
+            if let Some(v) = self.node_volumes.get(&entity) {
+                inst.set_volume(*v);
             }
             self.instances.insert(entity, (key.to_string(), inst));
         }
@@ -815,16 +837,18 @@ impl VfxSystem {
                 // target as the node moves — the sim/draw side only knows local.
                 floptle_script::VfxCmd::SetBeamEnd(p) => {
                     if let Some((_, inst)) = self.instances.get_mut(&e) {
-                        let tr = floptle_core::world_transform(world, e);
-                        let rel = (DVec3::from_array(p) - tr.translation).as_vec3();
-                        let unrotated = tr.rotation.inverse() * rel;
-                        let safe = |v: f32| if v.abs() > 1e-6 { v } else { 1.0 };
-                        let local = Vec3::new(
-                            unrotated.x / safe(tr.scale.x),
-                            unrotated.y / safe(tr.scale.y),
-                            unrotated.z / safe(tr.scale.z),
-                        );
-                        inst.set_beam_end(local);
+                        inst.set_beam_end(effect_local(world, e, p));
+                    }
+                }
+                floptle_script::VfxCmd::SetBeamControl(p) => {
+                    if let Some((_, inst)) = self.instances.get_mut(&e) {
+                        inst.set_beam_control(p.map(|p| effect_local(world, e, p)));
+                    }
+                }
+                floptle_script::VfxCmd::Volume(v) => {
+                    self.node_volumes.insert(e, v);
+                    if let Some((_, inst)) = self.instances.get_mut(&e) {
+                        inst.set_volume(v);
                     }
                 }
             }
@@ -1063,6 +1087,7 @@ pub fn starter_effect_doc(name: &str) -> VfxEffectDoc {
         trail: None,
         segments: 12,
         beam_end: [0.0, 5.0, 0.0],
+        beam_control: None,
         wave_amplitude: 0.0,
         wave_frequency: 2.0,
         scroll: 0.0,
@@ -1316,6 +1341,7 @@ pub fn effect_from_doc(doc: &VfxEffectDoc) -> ParticleEffect {
                 }),
                 segments: t.segments,
                 beam_end: Vec3::from_array(t.beam_end),
+                beam_control: t.beam_control.map(Vec3::from_array),
                 wave_amplitude: t.wave_amplitude,
                 wave_frequency: t.wave_frequency,
                 scroll: t.scroll,

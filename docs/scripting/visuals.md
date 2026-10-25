@@ -136,6 +136,8 @@ end
 | `p:restart()` | re-spawn from `t=0` (re-fire a one-shot burst) |
 | `p:setIntensity(i)` | live emission scale 0..~2 — throttle a plume without touching the asset |
 | `p:setBeamEnd(x, y, z)` | aim every **Beam** track's endpoint at a WORLD point (converted to effect-local, so the beam tracks the target as the node moves) |
+| `p:setBeamControl(x, y, z)` | bow every **Beam** track toward a WORLD control point: the ribbon curves from the emitter to its end and passes halfway to the point (a rope's sag, a tether's bow); `p:setBeamControl()` puts back the authored one, or straight |
+| `p:setVolume(v)` | fill `v` times the effect's authored emission shape; particle size, count, speed and brightness stay as authored, so one mark fits a tuft or a tree. Kept across a restart |
 | `p:isPlaying()` | is an instance emitting/ageing right now |
 | `p:alive()` | live particle count across the effect's tracks |
 | `p:asset()` | the effect asset key this node references, or `nil` |
