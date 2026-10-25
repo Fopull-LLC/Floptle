@@ -3339,9 +3339,9 @@ mod drawn_surface_tests {
     /// passed over the field's surface and clipped the drawn one.
     ///
     /// The march was dearer than this path until a drawn-surface query got
-    /// cheap; now the two cost about the same for a ray this short, so the
-    /// bound allows a quarter more. Meshing the cells under every ray, which
-    /// this path exists to avoid, costs several times the march.
+    /// cheap; now the two cost about the same for a ray this short. Meshing
+    /// the cells under every ray, which this path exists to avoid, costs
+    /// several times the march, and is what this counts.
     #[test]
     fn a_short_ray_at_the_ground_finds_what_the_march_finds() {
         let radius = 150.0;
@@ -3390,8 +3390,12 @@ mod drawn_surface_tests {
                 _ => assert_eq!(a.is_some(), b.is_some(), "ray {i}: {a:?} against the march's {b:?}"),
             }
         }
-        // Against the march on the same rays, so a slow machine slows both.
-        assert!(ms < march_ms * 1.25, "a 5 m ray costs {ms:.4} ms against the march's {march_ms:.4}");
+        // Counted, not timed: the two paths cost about the same for a ray this
+        // short, so a ratio of their times read 1.38 on a CI runner with
+        // nothing wrong. What this path must not do is mesh the cells under
+        // every ray: the thousand rays mesh 222 chunks between them, each once.
+        let meshed = cols[0].shape.chunk_terrain().unwrap().meshed_by_queries();
+        assert!(meshed <= 300, "1000 short rays meshed {meshed} chunks ({ms:.4} ms each, the march {march_ms:.4})");
     }
 
     /// **A ray at a planet nothing has stood on costs about what one at
