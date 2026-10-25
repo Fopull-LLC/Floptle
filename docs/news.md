@@ -1,5 +1,8 @@
 ## Just shipped
 
+**v0.117.0-rc24 — "Whole Worlds"** (beta). Scattered props a game can
+find and highlight one at a time, and beams that bow.
+
 **v0.117.0-rc23 — "Whole Worlds"** (beta). A refresh rate that follows the
 window, additive scenes that leave the running world alone, and new decals
 that wait for their ground.
