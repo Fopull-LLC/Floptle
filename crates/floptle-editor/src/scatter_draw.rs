@@ -1436,6 +1436,7 @@ mod tests {
             Some((60.0f32, Vec3::Y))
         };
         let mut cache = ScatterCache::default();
+        let mut first = None;
         for _ in 0..5 {
             let mut casts = 0usize;
             let mut ground = |_: DVec3, _: Vec3, _: f32| slow(&mut casts);
@@ -1445,8 +1446,14 @@ mod tests {
                 &floptle_render::Frustum::everything(), 20_000, &mut out,
             );
             assert!(casts <= (SETTLE_MS / 0.25) as usize + 1, "one frame cast {casts} slow rays");
+            first.get_or_insert(cache.len());
         }
-        assert!(cache.len() < keys / 2, "the first frames rolled {} of {keys} chunks", cache.len());
+        // The first frame alone: what the rays leave of the budget goes to
+        // rolling, and a roll costs well under a microsecond, so how many
+        // later frames roll follows the machine (five frames rolled 2,189 of
+        // 3,577 on a CI runner). Rolling the whole sweep in one frame was the bug.
+        let first = first.unwrap_or(0);
+        assert!(first < keys / 2, "the first frame rolled {first} of {keys} chunks");
         // No bound on the frame's wall time: on a shared runner any one frame
         // can be paused. The ray count above is the budget at work.
 
