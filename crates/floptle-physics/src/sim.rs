@@ -217,6 +217,8 @@ pub struct BodyReport {
     pub wall_normal: Option<Vec3>,
     /// The solver is skipping this body until something wakes it.
     pub asleep: bool,
+    /// What last woke it or restarted its count toward sleep.
+    pub wake: crate::body::WakeReason,
     /// Angular velocity, radians a second about each world axis.
     pub ang_vel: Vec3,
 }
@@ -1511,7 +1513,10 @@ impl Sim {
         if let Some(f) = focus {
             let local = f - self.world.origin;
             if local.length_squared() >= self.fo.threshold * self.fo.threshold {
-                let new_origin = f.round(); // whole numbers → the shift is exact in f32
+                // A whole-number shift is exact in f32. A frame that rides
+                // its planet leaves the origin between whole numbers, so the
+                // shift is rounded, not the origin.
+                let new_origin = self.world.origin + local.round();
                 self.fo.total_shift += self.world.origin - new_origin;
                 self.world.rebase(new_origin);
             }
@@ -1548,7 +1553,10 @@ impl Sim {
         if let Some(f) = focus {
             let local = f - self.world.origin;
             if local.length_squared() >= self.fo.threshold * self.fo.threshold {
-                let new_origin = f.round(); // whole numbers → the shift is exact in f32
+                // A whole-number shift is exact in f32. A frame that rides
+                // its planet leaves the origin between whole numbers, so the
+                // shift is rounded, not the origin.
+                let new_origin = self.world.origin + local.round();
                 self.fo.total_shift += self.world.origin - new_origin;
                 self.world.rebase(new_origin);
             }
@@ -1651,7 +1659,7 @@ impl Sim {
     pub fn set_compound_velocity(&mut self, eid: u32, vel: Vec3) {
         if let Some(c) = self.compound_of_mut(eid) {
             if c.vel != vel {
-                c.wake();
+                c.wake(crate::body::WakeReason::Script);
             }
             c.vel = vel;
         }
@@ -1675,7 +1683,7 @@ impl Sim {
     pub fn set_compound_angular_velocity(&mut self, eid: u32, ang: Vec3) {
         if let Some(c) = self.compound_of_mut(eid) {
             if c.ang_vel != ang {
-                c.wake();
+                c.wake(crate::body::WakeReason::Script);
             }
             c.ang_vel = ang;
         }
@@ -1801,8 +1809,7 @@ impl Sim {
                     let b = &mut self.world.bodies[i];
                     b.pos += d;
                     b.prev_pos += d;
-                    b.asleep = false;
-                    b.sleep_time = 0.0;
+                    b.wake_for(crate::body::WakeReason::Script);
                     if let Some(p) = self.tick_prev.get_mut(i) {
                         *p += d;
                     }
@@ -1815,7 +1822,7 @@ impl Sim {
                     c.pos += d;
                     c.prev_pos += d;
                     // Set down somewhere else, it rests on whatever is there, if anything.
-                    c.wake();
+                    c.wake(crate::body::WakeReason::Script);
                     if let Some(p) = self.tick_prev_c.get_mut(i) {
                         p.0 += d;
                     }
@@ -2613,6 +2620,7 @@ impl Sim {
                 ground_normal: b.ground_normal,
                 wall_normal: b.wall_normal,
                 asleep: b.asleep,
+                wake: b.wake,
                 ang_vel: b.ang_vel,
             }
         })
@@ -2725,8 +2733,7 @@ impl Sim {
             let now = off(l.entity.index());
             if b.off != now {
                 b.off = now;
-                b.asleep = false;
-                b.sleep_time = 0.0;
+                b.wake_for(crate::body::WakeReason::Script);
                 changed = true;
             }
         }
@@ -2783,6 +2790,15 @@ impl Sim {
     /// the runtime terrain API (`terrain.sculpt`/`dig` from Lua) applies each edit to
     /// the sim's copy through this, keeping collision in lockstep with the authority
     /// field the editor applies the same op to.
+    /// The dominant-frame carry, done exactly: the whole sim rides `delta`
+    /// through the world (see [`PhysicsWorld::ride`]), and of the colliders
+    /// only those owned by an entity in `riders` (the planet's terrain, what
+    /// stands on it) ride with it. Bodies and assemblies in another frame are
+    /// then shifted by the difference, those in none by `-delta`.
+    pub fn ride_frame(&mut self, delta: DVec3, riders: &[u32]) {
+        self.world.ride(delta, |c| c.eid.is_some_and(|e| riders.contains(&e)));
+    }
+
     /// Re-anchor a tagged collider (an on-rails planet's terrain moved this tick).
     pub fn set_collider_anchor(&mut self, eid: u32, anchor: DVec3) {
         let origin = self.world.origin;
@@ -2826,8 +2842,7 @@ impl Sim {
                 // A teleport moves the body out from under whatever it was
                 // resting on — asleep or not, the ground underneath it is
                 // now a question the solver has not asked yet.
-                self.world.bodies[l.body].asleep = false;
-                self.world.bodies[l.body].sleep_time = 0.0;
+                self.world.bodies[l.body].wake_for(crate::body::WakeReason::Script);
                 return;
             }
         }
@@ -2964,7 +2979,7 @@ impl Sim {
             self.world.reindex_colliders();
             self.world.put_compound_to_sleep(ci);
         } else {
-            self.world.compounds[ci].wake();
+            self.world.compounds[ci].wake(crate::body::WakeReason::Script);
         }
     }
 
@@ -2976,8 +2991,7 @@ impl Sim {
                 // it, and the next step must actually integrate it rather
                 // than silently discard the write until something else wakes
                 // the body.
-                self.world.bodies[l.body].asleep = false;
-                self.world.bodies[l.body].sleep_time = 0.0;
+                self.world.bodies[l.body].wake_for(crate::body::WakeReason::Script);
                 return;
             }
         }
@@ -3032,8 +3046,7 @@ impl Sim {
                     // must not hand back a body the solver still thinks is
                     // asleep from before it was ever picked up.
                     b.vel = Vec3::ZERO;
-                    b.asleep = false;
-                    b.sleep_time = 0.0;
+                    b.wake_for(crate::body::WakeReason::Script);
                 }
                 b.kinematic = kinematic;
                 if let Some(p) = kin_pos {

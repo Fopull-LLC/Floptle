@@ -556,8 +556,7 @@ impl PhysicsWorld {
                     b.ang_vel += b.free_spin(inv_i * r.cross(impulse));
                 }
                 if (d.length_squared() > 1e-12 || dv.length_squared() > 1e-12) && b.asleep {
-                    b.asleep = false;
-                    b.sleep_time = 0.0;
+                    b.wake_for(crate::body::WakeReason::Contact);
                 }
             }
             Side::Compound(i) => {
@@ -573,7 +572,7 @@ impl PhysicsWorld {
                     if dv.length_squared() < crate::SLEEP_LINEAR_SPEED * crate::SLEEP_LINEAR_SPEED {
                         return;
                     }
-                    c.wake();
+                    c.wake(crate::body::WakeReason::Contact);
                 }
                 let d = spend(shift * inv_m, &mut budget.0);
                 c.pos += d;

@@ -631,6 +631,12 @@ thread_local! {
     /// it tested rather than skipped by their box. Test-only.
     pub(crate) static TERRAIN_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     pub(crate) static TERRAIN_TRIS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Buckets a terrain query looked up. Test-only.
+    pub(crate) static TERRAIN_BUCKETS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Walk every bucket a terrain distance reaches, as it did before far
+    /// buckets were skipped: the reference that walk is compared with.
+    /// Test-only.
+    pub(crate) static TERRAIN_EVERY_BUCKET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A hasher for small integer keys (cell and chunk coordinates).
@@ -1235,12 +1241,21 @@ impl ChunkTerrain {
         if !self.mesh_accurate {
             return None;
         }
-        self.closest_surface_at(local, self.field.d(local))
+        self.closest_surface_at(local, self.field.d(local), false)
     }
 
     /// [`Self::closest_surface`], for a caller that has the field's distance
     /// `d` at `local` already and wants it again if no triangle answers.
-    fn closest_surface_at(&self, local: Vec3, d: f32) -> Option<(Vec3, Vec3)> {
+    ///
+    /// `distance_only`: the caller reads the distance to the answer and the
+    /// side it is on, not which triangle gave it, so a bucket too far to
+    /// hold a triangle the walk would test is not looked up at all. A point
+    /// a metre or two above the ground, inside the band, walked a hundred
+    /// buckets of two or four chunks each to find the ground under it, most
+    /// of a fast craft's sweep. The walk tests the same triangles to the same
+    /// nearest distance; only which of two triangles exactly as near is kept
+    /// can differ, and both are that far.
+    fn closest_surface_at(&self, local: Vec3, d: f32, distance_only: bool) -> Option<(Vec3, Vec3)> {
         if !self.mesh_accurate {
             return None;
         }
@@ -1290,6 +1305,8 @@ impl ChunkTerrain {
             |n| n.occupied,
         );
         let tol = 1e-5 * (1.0 + local.abs().max_element());
+        #[cfg(test)]
+        let distance_only = distance_only && !TERRAIN_EVERY_BUCKET.with(|r| r.get());
         // A bound before the walk starts: the distance to some triangle near
         // the point, from the occupied bucket nearest it (under a point in
         // open air, the ground straight below). The walk is unchanged; a
@@ -1324,6 +1341,16 @@ impl ChunkTerrain {
                         if !on_shell {
                             continue;
                         }
+                        // No triangle in a bucket this far can pass the
+                        // test below: each lies in every bucket its box
+                        // touches, and the one holding its box's nearest
+                        // point is at most that far, so it is tested there.
+                        // Twice the slack, for the bucket's own rounding.
+                        if distance_only && bucket_lower_d2(local, 2.0 * tol, (cx, cy, cz), cell) > best.min(seed) {
+                            continue;
+                        }
+                        #[cfg(test)]
+                        TERRAIN_BUCKETS.with(|n| n.set(n.get() + 1));
                         each_in((cx, cy, cz), &mut |tri| {
                             #[cfg(test)]
                             TERRAIN_VISITS.with(|n| n.set(n.get() + 1));
@@ -1550,7 +1577,7 @@ impl CollisionShape for ChunkTerrain {
         let scale = self.scale.max(1e-6);
         // The field once: the band test and, in open air, the answer.
         let d = self.field.d(local);
-        match self.closest_surface_at(local, d) {
+        match self.closest_surface_at(local, d, true) {
             // Magnitude and side from the drawn surface: which way of the
             // closest point the point lies, judged by the surface's own
             // normal there. Exactly on the surface both are zero, and the
@@ -1655,6 +1682,14 @@ impl CollisionShape for ChunkTerrain {
 fn box_lower_d2(p: Vec3, tol: f32, t: &[Vec3; 3]) -> f32 {
     let (lo, hi) = (t[0].min(t[1]).min(t[2]), t[0].max(t[1]).max(t[2]));
     let d = ((lo - p).max(p - hi).max(Vec3::ZERO).length() - tol).max(0.0);
+    d * d * 0.999
+}
+
+/// [`box_lower_d2`] for a bucket: below what every triangle bucketed in
+/// grid cell `c` that touches it nearest there reads, `tol` of slack taken
+/// off the distance.
+fn bucket_lower_d2(p: Vec3, tol: f32, c: (i32, i32, i32), cell: f32) -> f32 {
+    let d = (cell_min_dist2(p, c, cell).sqrt() - tol).max(0.0);
     d * d * 0.999
 }
 
@@ -2826,6 +2861,49 @@ mod drawn_surface_tests {
              Past this something has stopped narrowing — check that the triangle buckets are \
              still one VOXEL and not one reach, and that the expanding-ring search still stops early."
         );
+    }
+
+    /// A point above the ground, inside the band where the drawn surface
+    /// answers, finds the ground under it without looking up the buckets too
+    /// far away to hold anything nearer: under half of them a metre and
+    /// more up, where a craft's sweep asks most (97,044 of 212,881 here). Its distance is the one
+    /// the full walk finds, bit for bit, over rough ground, across a chunk's
+    /// faces and its corner, from inside the rock to the edge of the band.
+    #[test]
+    fn a_distance_above_the_ground_skips_the_buckets_too_far_to_matter() {
+        let mut t = ChunkTerrain::new(rough());
+        t.mesh_accurate = true;
+        let mut points = Vec::new();
+        for i in 0..28 {
+            for k in 0..28 {
+                for j in 0..18 {
+                    points.push(Vec3::new(i as f32 * 0.37 - 5.0, j as f32 * 0.29 - 1.0, k as f32 * 0.37 - 5.0));
+                }
+            }
+        }
+        let walk = |every: bool, high: bool| {
+            TERRAIN_EVERY_BUCKET.with(|r| r.set(every));
+            TERRAIN_BUCKETS.with(|n| n.set(0));
+            let d: Vec<u32> = points
+                .iter()
+                .filter(|p| !high || {
+                    let d = t.field.d(**p);
+                    d > 1.0 && d < t.field.band()
+                })
+                .map(|p| t.distance(*p).to_bits())
+                .collect();
+            TERRAIN_EVERY_BUCKET.with(|r| r.set(false));
+            (d, TERRAIN_BUCKETS.with(|n| n.get()))
+        };
+        let (every, _) = walk(true, false);
+        let (skipping, _) = walk(false, false);
+        assert_eq!(every.len(), points.len());
+        let differs = (0..every.len()).find(|&k| every[k] != skipping[k]);
+        assert_eq!(differs.map(|k| points[k]), None, "skipping buckets, a distance came out different");
+        let (high, all) = walk(true, true);
+        let (_, few) = walk(false, true);
+        assert!(high.len() > 400, "fixture: only {} points a metre or more up inside the band", high.len());
+        assert!(few * 2 <= all, "a metre or more up, the walk looked up {few} buckets of the {all} it used to");
     }
 
     /// The cached surface must be a cache — meshed once per chunk, not per

@@ -44,6 +44,68 @@ pub(crate) const MAX_SAMPLES: usize = {
     if poly > hull { poly } else { hull }
 };
 
+/// Why a body or an assembly is awake: what last woke it or started its
+/// count toward sleep again, or `Settling` while it counts. Scripts read it
+/// as `node.wake` and `assembly.info(node).wake`. Only reported: nothing in
+/// the solver reads it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WakeReason {
+    /// Still, and counting toward sleep (or never judged yet).
+    #[default]
+    Settling,
+    /// It moved or turned more in a step than a sleeper may.
+    Moving,
+    /// Nothing holds it up: in the air, or on ground too steep to rest on.
+    Unsupported,
+    /// Something moving touched it: a body, an assembly, a platform.
+    Contact,
+    /// What it rests on changed or went away: a dig, a chunk, a collider.
+    Ground,
+    /// A joint pulled it into place, or a motor or servo drives it.
+    Joint,
+    /// A held force or torque.
+    Force,
+    /// An impulse.
+    Impulse,
+    /// A velocity, position or `asleep` written by a script or the engine.
+    Script,
+    /// Its parts moved or changed mass.
+    Reshaped,
+}
+
+impl WakeReason {
+    /// What it is awake for once its own motion has stopped its count: the
+    /// cause that set it going, kept until it settles again, or its own
+    /// motion (`Moving`, or `Unsupported` when nothing holds it up) when it
+    /// was settling.
+    pub fn or_own(self, supported: bool) -> Self {
+        match self {
+            Self::Settling if supported => Self::Moving,
+            Self::Settling | Self::Moving | Self::Unsupported if !supported => Self::Unsupported,
+            Self::Unsupported => Self::Moving,
+            other => other,
+        }
+    }
+
+    /// The name scripts read: `settling`, `moving`, `unsupported`,
+    /// `contact`, `ground`, `joint`, `force`, `impulse`, `script` or
+    /// `reshaped`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Settling => "settling",
+            Self::Moving => "moving",
+            Self::Unsupported => "unsupported",
+            Self::Contact => "contact",
+            Self::Ground => "ground",
+            Self::Joint => "joint",
+            Self::Force => "force",
+            Self::Impulse => "impulse",
+            Self::Script => "script",
+            Self::Reshaped => "reshaped",
+        }
+    }
+}
+
 /// A dynamic body — a sphere or capsule integrated + depenetrated each step.
 #[derive(Clone, Copy, Debug)]
 pub struct Body {
@@ -174,6 +236,8 @@ pub struct Body {
     /// consecutively — reset the instant either condition breaks. Reaching
     /// [`crate::world::SLEEP_SETTLE_TIME`] is what sets `asleep`.
     pub sleep_time: f32,
+    /// What last woke it or restarted its count toward sleep.
+    pub wake: WakeReason,
     /// Feet (`RigidBody::feet`): a capsule stands on the ground straight
     /// beneath its centre line, not wherever its rounded bottom first touches.
     ///
@@ -216,6 +280,14 @@ pub struct Body {
 }
 
 impl Body {
+    /// Wake it for `why`: the next step simulates it in full, and its
+    /// count toward sleep starts again.
+    pub fn wake_for(&mut self, why: WakeReason) {
+        self.asleep = false;
+        self.sleep_time = 0.0;
+        self.wake = why;
+    }
+
     pub fn sphere(pos: Vec3, radius: f32) -> Self {
         Self {
             pos,
@@ -245,6 +317,7 @@ impl Body {
             owner: u32::MAX,
             off: false,
             sleep_time: 0.0,
+            wake: WakeReason::Settling,
             feet: false,
             drop_through: 0.0,
             rotates: false,

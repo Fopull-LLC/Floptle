@@ -1368,6 +1368,35 @@ impl PhysicsWorld {
         }
     }
 
+    /// Carry the sim's whole frame by `delta` through the world, exactly: a
+    /// planet on rails moving everything on it. The origin moves by `delta`
+    /// and nothing in the sim frame moves at all, so what rides is carried
+    /// with no rounding. Shifting each body and re-anchoring its ground
+    /// rounds both, by up to half an `f32` step at their distance from the
+    /// origin, a different way every tick: kilometres out that is a few
+    /// tenths of a millimetre a tick, which the contact pass answers with
+    /// a few cm/s of push, and nothing on the moving ground ever slept.
+    ///
+    /// Colliders `rides` picks keep their sim-frame offset and move their
+    /// anchor by `delta`. The rest stay where they are in the world, so they
+    /// move by `-delta` in the sim frame. Every body, assembly, contact, joint
+    /// anchor, gravity source and water volume rides. A caller with something
+    /// that does not (a body in another frame, a field that stays put)
+    /// shifts it back itself, as it would any other move.
+    pub fn ride(&mut self, delta: DVec3, rides: impl Fn(&AnchoredCollider) -> bool) {
+        if delta == DVec3::ZERO {
+            return;
+        }
+        self.origin += delta;
+        for c in &mut self.colliders {
+            if rides(c) {
+                c.anchor += delta;
+            } else {
+                c.offset = (c.anchor - self.origin).as_vec3();
+            }
+        }
+    }
+
     /// The live collider set, for a caller that needs to run its own query
     /// shape over it (a masked line-of-sight test, say).
     pub fn colliders(&self) -> &[AnchoredCollider] {
@@ -1558,8 +1587,7 @@ impl PhysicsWorld {
             }
             let fresh = self.find_resting_contacts(bi);
             if fresh.is_empty() && !self.held_by_a_joint(crate::joints::Link::Body(bi)) {
-                self.bodies[bi].asleep = false;
-                self.bodies[bi].sleep_time = 0.0;
+                self.bodies[bi].wake_for(crate::body::WakeReason::Ground);
             } else {
                 self.resting[bi] = fresh;
             }
@@ -1711,6 +1739,7 @@ impl PhysicsWorld {
             self.resting[bi] = self.find_resting_contacts(bi);
         } else {
             self.bodies[bi].asleep = false;
+            self.bodies[bi].wake = crate::body::WakeReason::Script;
         }
         self.bodies[bi].sleep_time = 0.0;
     }
@@ -1851,7 +1880,7 @@ impl PhysicsWorld {
                 }
                 return;
             }
-            c.wake();
+            c.wake(if pushed { crate::body::WakeReason::Force } else { crate::body::WakeReason::Script });
         }
         {
             let c = &mut self.compounds[ci];
@@ -2142,11 +2171,13 @@ impl PhysicsWorld {
         // the threshold, step after step, while the craft does not move.
         if slow || Self::compound_barely_moved(c, dt) {
             c.sleep_time += dt;
+            c.wake = crate::body::WakeReason::Settling;
             if c.sleep_time >= SLEEP_SETTLE_TIME {
                 self.put_compound_to_sleep(ci);
             }
         } else {
             c.sleep_time = 0.0;
+            c.wake = c.wake.or_own(c.grounded);
         }
     }
 
@@ -2479,6 +2510,7 @@ impl PhysicsWorld {
             if Self::compound_barely_moved(c, dt) {
                 let c = &mut self.compounds[ci];
                 c.sleep_time = c.sleep_time.max(was + dt);
+                c.wake = crate::body::WakeReason::Settling;
                 if c.sleep_time >= SLEEP_SETTLE_TIME {
                     self.put_compound_to_sleep(ci);
                 }
@@ -2579,13 +2611,16 @@ impl PhysicsWorld {
             crate::joints::Link::Body(i) => nc + i < root.len() && root[nc + i] == root[members[0]],
         };
         if self.joints.iter().any(|j| !j.broken && j.drives() && in_this(j.a)) {
+            self.mark_awake(members, |_| crate::body::WakeReason::Joint);
             return;
         }
         // Held up by a joint to the world.
         supported |= self.joints.iter().any(|j| !j.broken && j.b.is_none() && in_this(j.a));
         if !(all_still && supported) {
+            self.mark_awake(members, |was| was.or_own(supported));
             return;
         }
+        self.mark_awake(members, |_| crate::body::WakeReason::Settling);
         let t = t + dt;
         for &k in members {
             if k < nc {
@@ -2619,6 +2654,24 @@ impl PhysicsWorld {
                     b.sleep_time = t;
                     self.resting[bi].clear();
                 }
+            }
+        }
+    }
+
+    /// Say why the awake members of a joined group (nodes as in
+    /// [`Self::settle_group`]) are awake: `why` of what each said before.
+    fn mark_awake(&mut self, members: &[usize], why: impl Fn(crate::body::WakeReason) -> crate::body::WakeReason) {
+        let nc = self.compounds.len();
+        for &k in members {
+            if k < nc {
+                let c = &mut self.compounds[k];
+                if !c.asleep {
+                    c.wake = why(c.wake);
+                }
+            } else if let Some(b) = self.bodies.get_mut(k - nc)
+                && !b.asleep
+            {
+                b.wake = why(b.wake);
             }
         }
     }
@@ -2763,7 +2816,7 @@ impl PhysicsWorld {
                     (was > -MOVED && now < was - MOVED) || now > was + MOVED
                 });
             if changed {
-                c.wake();
+                c.wake(crate::body::WakeReason::Ground);
             } else {
                 c.resting = resting;
             }
@@ -2804,7 +2857,7 @@ impl PhysicsWorld {
                     (was > -MOVED && now < was - MOVED) || now > was + MOVED
                 });
             if changed {
-                c.wake();
+                c.wake(crate::body::WakeReason::Ground);
                 continue;
             }
             // What the slice's shapes rest on now, in place of what they did:
@@ -2813,7 +2866,7 @@ impl PhysicsWorld {
             let hi = c.resting.partition_point(|t| t.shape < b);
             c.resting.splice(lo..hi, resting.drain(..));
             if c.resting.is_empty() && !self.held_by_a_joint(crate::joints::Link::Compound(ci)) {
-                self.compounds[ci].wake();
+                self.compounds[ci].wake(crate::body::WakeReason::Ground);
                 continue;
             }
             let c = &mut self.compounds[ci];
@@ -3380,12 +3433,15 @@ impl PhysicsWorld {
             b.vel = Vec3::ZERO;
             b.ang_vel = Vec3::ZERO;
             b.sleep_time += dt;
+            b.wake = crate::body::WakeReason::Settling;
             if b.sleep_time >= SLEEP_SETTLE_TIME {
                 b.asleep = true;
                 self.resting[bi] = self.find_resting_contacts(bi);
             }
         } else {
-            self.bodies[bi].sleep_time = 0.0;
+            let b = &mut self.bodies[bi];
+            b.sleep_time = 0.0;
+            b.wake = b.wake.or_own(b.grounded || was_grounded);
         }
     }
 
@@ -3589,8 +3645,7 @@ impl PhysicsWorld {
                     // because driven bodies are few.
                     let fresh = self.find_resting_contacts(bi);
                     if fresh.is_empty() {
-                        self.bodies[bi].asleep = false;
-                        self.bodies[bi].sleep_time = 0.0;
+                        self.bodies[bi].wake_for(crate::body::WakeReason::Ground);
                         // Falls through to the ordinary step below, same as
                         // the has_velocity/kin_hull wake path just below.
                     } else {
@@ -3611,8 +3666,7 @@ impl PhysicsWorld {
                     return;
                 }
             }
-            self.bodies[bi].asleep = false;
-            self.bodies[bi].sleep_time = 0.0;
+            self.bodies[bi].wake_for(if has_velocity { crate::body::WakeReason::Script } else { crate::body::WakeReason::Contact });
             // Falls through to the ordinary step below, which resolves the
             // contact that woke it this same tick — a platform sliding under
             // a sleeping mug does not wait a frame to start carrying it.
@@ -4012,6 +4066,7 @@ impl PhysicsWorld {
                     < SLEEP_LINEAR_SPEED * SLEEP_LINEAR_SPEED
             {
                 self.bodies[bi].sleep_time += dt;
+                self.bodies[bi].wake = crate::body::WakeReason::Settling;
                 if self.bodies[bi].sleep_time >= SLEEP_SETTLE_TIME {
                     self.bodies[bi].asleep = true;
                     // Stop exactly here rather than let a whisper of
@@ -4025,7 +4080,9 @@ impl PhysicsWorld {
                     self.resting[bi] = self.find_resting_contacts(bi);
                 }
             } else {
-                self.bodies[bi].sleep_time = 0.0;
+                let b = &mut self.bodies[bi];
+                b.sleep_time = 0.0;
+                b.wake = b.wake.or_own(b.grounded);
             }
         }
     }
@@ -6948,5 +7005,146 @@ mod settle_tests {
         assert!(ahead >= 4, "only {ahead} chunks were meshed ahead");
         assert_eq!(ref_states, states, "meshed ahead, the sled slid differently");
         assert_eq!(ref_end, end);
+    }
+
+    /// How far a planet on rails at 347 m/s carries what stands on it in a
+    /// 60 Hz tick: 5.79 m.
+    const RAILS_TICK: DVec3 = DVec3::new(4.1, 0.6, -4.05);
+
+    /// The terrain's entity, so a carry can name it.
+    const RAILS_GROUND: u32 = 77;
+
+    /// How the ground moves in [`rover_on_rails`] and [`raft_on_rails`].
+    #[derive(Clone, Copy, PartialEq)]
+    enum Rails {
+        /// It stands still.
+        Still,
+        /// It is carried, the sim's frame riding it (`Sim::ride_frame`).
+        Ride,
+        /// It is carried the way the rails carried it before: re-anchored
+        /// at its new place, and every body and assembly shifted after it.
+        /// The floating origin stays where it was.
+        Shift,
+    }
+
+    /// The braked rover on its 20 degree slope for `ticks` 60 Hz ticks, its
+    /// ground moving as `rails` says, starting `origin` from the floating
+    /// origin, the craft the origin's focus: every tick's state, the first
+    /// tick all of it was asleep, and where the chassis ended up on its
+    /// ground.
+    fn rover_on_rails(rails: Rails, ticks: usize, origin: DVec3) -> (Vec<Vec<State>>, Option<usize>, Vec3) {
+        let (mut sim, mut ecs, chassis, _) = rover(true);
+        sim.world.colliders[0].eid = Some(RAILS_GROUND);
+        sim.world.rebase(origin);
+        let (mut states, mut all) = (Vec::new(), None);
+        for tick in 0..ticks {
+            sim.sync_joints(&mut ecs);
+            let focus = match rails {
+                Rails::Still => Some(sim.compound_positions()[0].1),
+                Rails::Ride => {
+                    sim.ride_frame(RAILS_TICK, &[RAILS_GROUND]);
+                    Some(sim.compound_positions()[0].1)
+                }
+                Rails::Shift => {
+                    let anchor = sim.world.colliders[0].anchor + RAILS_TICK;
+                    sim.set_collider_anchor(RAILS_GROUND, anchor);
+                    for (eid, _) in sim.body_positions() {
+                        sim.shift_body(eid, RAILS_TICK);
+                    }
+                    sim.shift_compound(chassis.index(), RAILS_TICK);
+                    None
+                }
+            };
+            sim.step_tick(1.0 / 60.0, focus);
+            states.push(sim_state(&sim));
+            if all.is_none() && sim.world.compounds.iter().all(|c| c.asleep) && sim.world.bodies.iter().all(|b| b.asleep) {
+                all = Some(tick);
+            }
+        }
+        let on_ground = sim.compound_of(chassis.index()).unwrap().pos - sim.world.colliders[0].offset();
+        (states, all, on_ground)
+    }
+
+    /// A raft of 1,000 boxes lying on terrain for `steps` 120 Hz steps, its
+    /// ground moving as `rails` says a 60 Hz tick: every step's state, the
+    /// first step it was asleep, and where it ended up on its ground.
+    fn raft_on_rails(rails: Rails, steps: usize) -> (Vec<State>, Option<usize>, Vec3) {
+        let mut field = floptle_field::ChunkField::new(0.75);
+        field.fill_slab(Vec3::new(-24.0, -6.0, -24.0), Vec3::new(24.0, 0.0, 24.0), 0.0, [0.5; 3]);
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        w.add_collider(Box::new(ChunkTerrain::new(field)));
+        let shapes: Vec<CompoundShape> = (0..1000u64)
+            .map(|k| CompoundShape {
+                geom: ShapeGeom::Box { half: Vec3::new(0.3, 0.2, 0.3) },
+                offset: Vec3::new((k % 32) as f32 * 0.62 - 10.0, 0.21, (k / 32) as f32 * 0.62 - 10.0),
+                rot: Quat::IDENTITY,
+                mass: 2.0,
+                id: k + 1,
+            })
+            .collect();
+        let ci = w.add_compound(Compound::new(Vec3::ZERO, Quat::IDENTITY, shapes));
+        let (mut states, mut slept) = (Vec::new(), None);
+        for k in 0..steps {
+            if k % 2 == 0 {
+                match rails {
+                    Rails::Still => {}
+                    Rails::Ride => w.ride(RAILS_TICK, |_| true),
+                    Rails::Shift => {
+                        let (anchor, origin) = (w.colliders[0].anchor + RAILS_TICK, w.origin);
+                        w.colliders[0].re_anchor(anchor, origin);
+                        let c = &mut w.compounds[ci];
+                        c.pos += RAILS_TICK.as_vec3();
+                        c.prev_pos += RAILS_TICK.as_vec3();
+                    }
+                }
+            }
+            w.step(1.0 / 120.0);
+            states.push(state(&w.compounds[ci]));
+            if slept.is_none() && w.compounds[ci].asleep {
+                slept = Some(k);
+            }
+        }
+        let on_ground = w.compounds[ci].pos - w.colliders[0].offset();
+        (states, slept, on_ground)
+    }
+
+    /// A braked rover and a 1,000-part raft resting on the terrain of a
+    /// planet carried on rails at 347 m/s do exactly what they do on ground
+    /// that stands still: every tick the same, bit for bit, asleep within
+    /// three seconds and asleep for a minute, on the very spot.
+    ///
+    /// Carried by shifting each body after its ground, the rover kilometres
+    /// from the floating origin, as a craft is while its planet carries it
+    /// away from where the origin was set, never sleeps; and a sleeper
+    /// carried that way creeps over its ground, its place rounded afresh
+    /// every tick.
+    #[test]
+    fn a_rover_and_a_raft_on_a_world_on_rails_sleep_as_on_still_ground() {
+        let near = DVec3::ZERO;
+        let (still, still_all, still_at) = rover_on_rails(Rails::Still, 3600, near);
+        let (ride, ride_all, ride_at) = rover_on_rails(Rails::Ride, 3600, near);
+        let all = still_all.expect("fixture: the rover on still ground never fell asleep");
+        assert!(all < 180, "fixture: on still ground the rover slept only at tick {all}");
+        assert_eq!(ride_all, Some(all), "carried on rails, the rover fell asleep at tick {ride_all:?}, on still ground at {all}");
+        let differs = (0..still.len()).find(|&k| still[k] != ride[k]);
+        assert_eq!(differs, None, "carried on rails, the rover moved differently from tick {differs:?}");
+        assert!(ride[all..].iter().all(|s| *s == ride[all]), "asleep on rails, the rover moved");
+        assert_eq!(ride_at, still_at, "carried on rails, the rover ended somewhere else on its ground");
+        // The old carry, kilometres out.
+        let far = DVec3::new(-2600.0, -300.0, 1800.0);
+        let (_, shift_all, _) = rover_on_rails(Rails::Shift, 600, far);
+        assert_eq!(shift_all, None, "shifted after its ground 3 km out, the rover slept at tick {shift_all:?}: the fixture proves nothing");
+
+        let (still, still_slept, still_at) = raft_on_rails(Rails::Still, 7200);
+        let (ride, ride_slept, ride_at) = raft_on_rails(Rails::Ride, 7200);
+        let slept = still_slept.expect("fixture: the raft on still ground never fell asleep");
+        assert!(slept < 360, "fixture: on still ground the raft slept only at step {slept}");
+        assert_eq!(ride_slept, Some(slept), "carried on rails, the raft fell asleep at step {ride_slept:?}, on still ground at {slept}");
+        let differs = (0..still.len()).find(|&k| still[k] != ride[k]);
+        assert_eq!(differs, None, "carried on rails, the raft moved differently from step {differs:?}");
+        assert_eq!(ride_at, still_at, "carried on rails, the raft ended somewhere else on its ground");
+        let (_, _, shift_at) = raft_on_rails(Rails::Shift, 7200);
+        let crept = shift_at.distance(still_at);
+        assert!(crept > 1e-3, "shifted after its ground, the raft crept only {crept} m in a minute: the fixture proves nothing");
     }
 }

@@ -174,6 +174,8 @@ pub struct Compound {
     pub asleep: bool,
     /// Seconds it has been grounded and still, toward falling asleep.
     pub(crate) sleep_time: f32,
+    /// What last woke it or restarted its count toward sleep.
+    pub wake: crate::body::WakeReason,
     /// What it was resting on when it fell asleep, re-reported every asleep
     /// step so touches and `assembly.impacts` see it touching what it was.
     pub(crate) resting: Vec<CompoundContact>,
@@ -243,6 +245,7 @@ impl Compound {
             off: false,
             asleep: false,
             sleep_time: 0.0,
+            wake: crate::body::WakeReason::Settling,
             resting: Vec::new(),
             rest_pens: Vec::new(),
             recheck_next: 0,
@@ -284,7 +287,7 @@ impl Compound {
         let lo = self.local_origin;
         // A leg that moved may no longer be what the craft stands on.
         if !updates.is_empty() {
-            self.wake();
+            self.wake(crate::body::WakeReason::Reshaped);
         }
         for (id, off_origin, rot) in updates {
             if let Some(s) = self.shapes.iter_mut().find(|s| s.id == *id) {
@@ -352,7 +355,7 @@ impl Compound {
         self.mass = mass;
         self.inv_inertia_local = compose_inertia(&self.shapes).inverse();
         // A centre of mass that moved can tip a craft that was standing.
-        self.wake();
+        self.wake(crate::body::WakeReason::Reshaped);
         true
     }
 
@@ -374,17 +377,19 @@ impl Compound {
             .fold(f32::INFINITY, f32::min)
     }
 
-    /// Wake it: the next step simulates it in full.
-    pub fn wake(&mut self) {
+    /// Wake it for `why`: the next step simulates it in full, and its
+    /// count toward sleep starts again.
+    pub fn wake(&mut self, why: crate::body::WakeReason) {
         self.asleep = false;
         self.sleep_time = 0.0;
+        self.wake = why;
     }
 
     /// Accumulate a force (sim frame) acting through the CoM for the next step.
     pub fn apply_force(&mut self, f: Vec3) {
         self.force += f;
         if f != Vec3::ZERO {
-            self.wake();
+            self.wake(crate::body::WakeReason::Force);
         }
     }
 
@@ -394,7 +399,7 @@ impl Compound {
         self.force += f;
         self.torque += (at - self.pos).cross(f);
         if f != Vec3::ZERO {
-            self.wake();
+            self.wake(crate::body::WakeReason::Force);
         }
     }
 
@@ -402,7 +407,7 @@ impl Compound {
     pub fn apply_torque(&mut self, t: Vec3) {
         self.torque += t;
         if t != Vec3::ZERO {
-            self.wake();
+            self.wake(crate::body::WakeReason::Force);
         }
     }
 
@@ -411,7 +416,7 @@ impl Compound {
         self.vel += imp / self.mass;
         self.ang_vel += self.world_inv_inertia() * (at - self.pos).cross(imp);
         if imp != Vec3::ZERO {
-            self.wake();
+            self.wake(crate::body::WakeReason::Impulse);
         }
     }
 

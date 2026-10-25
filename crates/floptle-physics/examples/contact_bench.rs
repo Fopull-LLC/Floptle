@@ -274,7 +274,7 @@ fn broken_up(frames: usize) {
 /// A six-wheeled rover parked on terrain: a chassis assembly with its wheels
 /// hung on wheel joints, braked (`braked`) or free, on a gentle slope. Says
 /// per second what physics cost and what was asleep.
-fn parked_rover(braked: bool, frames: usize) {
+fn parked_rover(braked: bool, frames: usize, carry: Option<Rails>) {
     use floptle_core::joint::{Joint, JointKind};
     use floptle_core::math::DVec3;
     use floptle_core::{Name, Parent, RigidBody, Transform, World};
@@ -283,7 +283,10 @@ fn parked_rover(braked: bool, frames: usize) {
     let up = tilt * Vec3::Y;
     let along = tilt * Vec3::X;
     let mut field = floptle_field::ChunkField::new(0.75);
-    field.fill_with(Vec3::new(-30.0, -8.0, -15.0), Vec3::new(30.0, 8.0, 15.0), |p| p.dot(up), |_| [0.5; 3]);
+    // On rails, the ground's own frame is a planet's: its anchor the
+    // planet's centre, a kilometre from where the rover stands.
+    let local = if carry.is_some() { GROUND_LOCAL } else { Vec3::ZERO };
+    field.fill_with(Vec3::new(-30.0, -8.0, -15.0) + local, Vec3::new(30.0, 8.0, 15.0) + local, |p| (p - local).dot(up), |_| [0.5; 3]);
     let mut ecs = World::default();
     let centre = up * 1.1;
     let chassis = ecs.spawn();
@@ -319,22 +322,48 @@ fn parked_rover(braked: bool, frames: usize) {
         );
         wheels.push(w);
     }
+    let mut tv = TerrainVolume::new(-local.as_dvec3(), &field);
+    tv.eid = Some(TERRAIN_EID);
     let mut sim = Sim::build_layered(
         &ecs,
-        &[TerrainVolume::new(DVec3::ZERO, &field)],
+        &[tv],
         GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)),
         DVec3::ZERO,
         floptle_core::Layers::default(),
     );
     sim.world.time_steps(true);
+    if carry.is_some_and(|r| r.far) {
+        let k = std::env::var("FAR").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(1.0);
+        sim.world.rebase((FAR_ORIGIN * k).round());
+    }
     let mut ms = Vec::new();
     let what = if braked { "braked on an 8 degree slope" } else { "on free wheels on the flat" };
-    println!("a six-wheeled rover parked {what}:");
+    let riding = carry.map_or(String::new(), |r| r.name());
+    println!("a six-wheeled rover parked {what}{riding}:");
+    let mut asleep_at = None;
+    let (mut diag_from, mut diag_max): (Vec<(Vec3, Quat)>, Vec<f32>) = (Vec::new(), Vec::new());
     for f in 0..frames {
         let t = std::time::Instant::now();
         let before: Vec<(Vec3, Quat)> = sim.world.bodies.iter().map(|b| (b.pos, b.orient)).chain(sim.world.compounds.iter().map(|c| (c.pos, c.orient))).collect();
         sim.sync_joints(&mut ecs);
-        sim.step_tick(1.0 / 60.0, None);
+        let focus = carry.map(|r| ride_rails(&mut sim, r, f));
+        sim.step_tick(1.0 / 60.0, focus);
+        if asleep_at.is_none() && sim.world.compounds.iter().all(|c| c.asleep) && sim.world.bodies.iter().all(|b| b.asleep) {
+            asleep_at = Some(f);
+        }
+        if std::env::var("DIAG").is_ok() {
+            let now: Vec<(Vec3, Quat)> = sim.world.bodies.iter().map(|b| (b.pos, b.orient)).chain(sim.world.compounds.iter().map(|c| (c.pos, c.orient))).collect();
+            if f % 30 == 0 {
+                diag_from = now.clone();
+                diag_max = vec![0.0; now.len()];
+            }
+            for (k, (a, b)) in diag_from.iter().zip(&now).enumerate() {
+                diag_max[k] = f32::max(diag_max[k], a.0.distance(b.0) * 1000.0);
+            }
+            if f % 30 == 29 {
+                println!("    excursion over half a second, mm: {:?}", diag_max);
+            }
+        }
         if std::env::var("DIAG").is_ok() && f % 60 == 59 {
             let after: Vec<(Vec3, Quat)> = sim.world.bodies.iter().map(|b| (b.pos, b.orient)).chain(sim.world.compounds.iter().map(|c| (c.pos, c.orient))).collect();
             let m: Vec<String> = before.iter().zip(&after).map(|(a, b)| format!("{:.3}mm/{:.3}mrad", a.0.distance(b.0) * 1000.0, (b.1 * a.1.inverse()).normalize().xyz().length() * 2000.0)).collect();
@@ -361,7 +390,164 @@ fn parked_rover(braked: bool, frames: usize) {
         }
     }
     let c = &sim.world.compounds[0];
-    println!("  chassis ends at {:?} moving {:?}", c.pos, c.vel);
+    let ground = sim.world.colliders()[0].offset();
+    match asleep_at {
+        Some(f) => println!("  all asleep from frame {f}"),
+        None => println!("  never all asleep in {frames} frames"),
+    }
+    println!("  chassis ends {:?} from its ground's anchor, moving {:?}", c.pos - ground, c.vel);
+}
+
+/// The 1,002-part craft lying on terrain, its ground standing still
+/// (`carry` none) or carried by `carry` a tick on rails, the way the editor
+/// carries a planet: re-anchored, the craft shifted with it, the floating
+/// origin following the craft. Says when it fell asleep, what physics cost
+/// a frame before and after, and where it ends relative to its ground.
+fn carried_craft(rails: Rails, frames: usize) {
+    let mut field = floptle_field::ChunkField::new(0.75);
+    let local = GROUND_LOCAL;
+    field.fill_slab(Vec3::new(-40.0, -6.0, -20.0) + local, Vec3::new(40.0, 0.0, 20.0) + local, local.y, [0.5; 3]);
+    let mut ground = AnchoredCollider::world(Box::new(ChunkTerrain::new(field)));
+    ground.re_anchor(-local.as_dvec3(), floptle_core::math::DVec3::ZERO);
+    ground.eid = Some(TERRAIN_EID);
+    let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+    w.set_colliders(vec![ground]);
+    let mut lying = tower(0.0);
+    lying.anchored = false;
+    lying.orient = Quat::from_rotation_z(-std::f32::consts::FRAC_PI_2);
+    lying.pos = Vec3::new(0.0, 1.71, 0.0);
+    lying.prev_pos = lying.pos;
+    lying.prev_orient = lying.orient;
+    let ci = w.add_compound(lying);
+    if rails.far {
+        w.rebase(FAR_ORIGIN);
+    }
+    let mut ms = Vec::new();
+    let mut asleep_at = None;
+    let mut trail = Vec::new();
+    for f in 0..frames {
+        let d = rails.d;
+        if rails.exact {
+            w.ride(d, |c| c.eid == Some(TERRAIN_EID));
+        } else {
+            let origin = w.origin;
+            w.colliders[0].re_anchor(d * (f + 1) as f64 - local.as_dvec3(), origin);
+            let c = &mut w.compounds[ci];
+            c.pos += d.as_vec3();
+            c.prev_pos += d.as_vec3();
+        }
+        let focus = w.compounds[ci].pos.as_dvec3() + w.origin;
+        if (focus - w.origin).length() >= 4096.0 {
+            let o = w.origin + (focus - w.origin).round();
+            w.rebase(o);
+        }
+        ms.push(frame(&mut w));
+        let c = &w.compounds[ci];
+        trail.push((c.pos - w.colliders[0].offset(), c.orient, c.vel, c.ang_vel));
+        if asleep_at.is_none() && c.asleep {
+            asleep_at = Some(f);
+        }
+    }
+    let name = rails.name();
+    let mean = |r: &[f64]| r.iter().sum::<f64>() / r.len().max(1) as f64;
+    let c = &w.compounds[ci];
+    match asleep_at {
+        Some(f) => println!(
+            "1,002 parts lying on the ground{name}: asleep from frame {f}; {:.2} ms a frame before, {:.3} after",
+            mean(&ms[..f]),
+            mean(&ms[f + 1..])
+        ),
+        None => println!(
+            "1,002 parts lying on the ground{name}: never asleep in {frames} frames, {:.2} ms a frame; moving {:.4} m/s turning {:.4} rad/s",
+            mean(&ms),
+            c.vel.length(),
+            c.ang_vel.length()
+        ),
+    }
+    let (p, q, _, _) = trail[trail.len() - 1];
+    println!("  ends {p:?} from its ground's anchor, turned {q:?}");
+}
+
+/// Where the floating origin sits when a carried case starts: the craft
+/// about 3.2 km from it, as it is most of the time while its planet carries
+/// it away from where the origin was last set.
+const FAR_ORIGIN: floptle_core::math::DVec3 = floptle_core::math::DVec3::new(-2600.0, -300.0, 1800.0);
+
+/// Where a carried case's ground lies in its own frame: about a kilometre
+/// from the frame's anchor, as a planet's surface is from its centre.
+const GROUND_LOCAL: Vec3 = Vec3::new(900.0, -300.0, 200.0);
+
+/// The entity the bench's terrain is tagged with, so the rails can move it.
+const TERRAIN_EID: u32 = 999;
+
+/// How a carried case's ground moves: `d` a tick, carried `exact`ly (the
+/// sim's frame rides it) or by shifting the craft and re-anchoring the
+/// ground as the rails did before, starting `far` from the floating origin
+/// or on it.
+#[derive(Clone, Copy)]
+struct Rails {
+    d: floptle_core::math::DVec3,
+    exact: bool,
+    far: bool,
+}
+
+impl Rails {
+    fn name(&self) -> String {
+        let at = if self.far { ", 3.2 km from the floating origin" } else { "" };
+        match (self.d == floptle_core::math::DVec3::ZERO, self.exact) {
+            (true, _) => format!(" standing still{at}"),
+            (false, true) => format!(" carried on rails, the frame riding it{at}"),
+            (false, false) => format!(" carried on rails by shifting each body{at}"),
+        }
+    }
+}
+
+/// The parked rover and the lying craft on ground standing still and on
+/// ground carried on rails at 347 m/s (5.79 m a tick, as on Solar's
+/// planet): carried the old way, kilometres out, and carried exactly.
+fn carried(frames: usize) {
+    use floptle_core::math::DVec3;
+    let d = DVec3::new(4.1, 0.6, -4.05);
+    let still = Rails { d: DVec3::ZERO, exact: true, far: false };
+    let cases = [
+        still,
+        Rails { d, exact: false, far: true },
+        Rails { d, exact: true, far: false },
+        Rails { d, exact: true, far: true },
+        Rails { far: true, ..still },
+    ];
+    // `CASE=k` runs the rover in case `k` alone.
+    if let Some(k) = std::env::var("CASE").ok().and_then(|v| v.parse::<usize>().ok()) {
+        parked_rover(true, frames, Some(cases[k]));
+        return;
+    }
+    for r in cases {
+        parked_rover(true, frames, Some(r));
+    }
+    for r in cases {
+        carried_craft(r, frames);
+    }
+}
+
+/// One tick of a planet on rails carrying everything on it by `rails.d`:
+/// the frame riding it, or the terrain re-anchored at its new place and
+/// every body and assembly shifted with it. The camera on the craft is the
+/// floating origin's focus. Returns that focus.
+fn ride_rails(sim: &mut Sim, rails: Rails, tick: usize) -> floptle_core::math::DVec3 {
+    let d = rails.d;
+    if rails.exact {
+        sim.ride_frame(d, &[TERRAIN_EID]);
+    } else {
+        let anchor = d * (tick + 1) as f64 - GROUND_LOCAL.as_dvec3();
+        sim.set_collider_anchor(TERRAIN_EID, anchor);
+        for (eid, _) in sim.body_positions() {
+            sim.shift_body(eid, d);
+        }
+        for (eid, _) in sim.compound_positions() {
+            sim.shift_compound(eid, d);
+        }
+    }
+    sim.compound_positions().first().map_or(floptle_core::math::DVec3::ZERO, |p| p.1)
 }
 
 /// What makes a slow sweep frame: the plane rolling down terrain at
@@ -440,6 +626,33 @@ fn main() {
         broken_up(1800);
         return;
     }
+    // `ONLY=queries`: what one terrain distance costs near the ground, over
+    // a chunk's middle, on a face between two chunks and at a corner of
+    // four, at heights a sweep asks about.
+    if std::env::var("ONLY").is_ok_and(|v| v == "queries") {
+        let mut field = floptle_field::ChunkField::new(0.75);
+        field.fill_with(Vec3::new(-60.0, -8.0, -200.0), Vec3::new(60.0, 8.0, 400.0), |p| p.y - 0.4 * (p.x * 0.05).sin() * (p.z * 0.03).cos(), |_| [0.5; 3]);
+        let t = ChunkTerrain::new(field);
+        for (x0, z0, what) in [(12.0f32, 12.0f32, "mid-chunk"), (0.0, 12.0, "on a face"), (0.0, 0.0, "at a corner")] {
+            for h in [0.02f32, 0.3, 1.0, 2.0] {
+                // Meshed first: the cost of a query on meshed ground.
+                for z in -3..3 {
+                    for x in -3..3 {
+                        let _ = t.distance(Vec3::new(x0 + x as f32, h, z0 + z as f32));
+                    }
+                }
+                let n = 20000;
+                let t0 = std::time::Instant::now();
+                let mut sum = 0.0;
+                for k in 0..n {
+                    let (x, z) = (x0 + (k % 100) as f32 * 0.02 - 1.0, z0 + (k / 100) as f32 * 0.01 - 1.0);
+                    sum += t.distance(Vec3::new(x, h, z));
+                }
+                println!("{what}, {h} m up: {:.3} us a query (distances sum to {sum})", t0.elapsed().as_secs_f64() * 1e6 / n as f64);
+            }
+        }
+        return;
+    }
     // `ONLY=sweeps` the plane's sweep frames alone.
     if std::env::var("ONLY").is_ok_and(|v| v == "sweeps") {
         sweep_frames(40.0);
@@ -448,8 +661,14 @@ fn main() {
     }
     // `ONLY=rover` the parked rovers alone.
     if std::env::var("ONLY").is_ok_and(|v| v == "rover") {
-        parked_rover(true, 600);
-        parked_rover(false, 600);
+        parked_rover(true, 600, None);
+        parked_rover(false, 600, None);
+        return;
+    }
+    // `ONLY=carried` the parked rover and the big craft on ground carried on
+    // rails at 350 m/s, beside the same on ground that stands still.
+    if std::env::var("ONLY").is_ok_and(|v| v == "carried") {
+        carried(1200);
         return;
     }
     let g = || GravityField::uniform(Vec3::new(0.0, -9.81, 0.0));
@@ -611,8 +830,9 @@ fn main() {
     }
 
     broken_up(1800);
-    parked_rover(true, 600);
-    parked_rover(false, 600);
+    parked_rover(true, 600, None);
+    parked_rover(false, 600, None);
+    carried(1200);
     sweep_frames(40.0);
     sweep_frames(70.0);
 }
