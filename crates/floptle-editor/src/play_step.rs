@@ -421,6 +421,11 @@ impl Editor {
             // Last frame's wakes, every tick of it, for `perf.counts().wakes`.
             self.script_host.profile().borrow_mut().set_wakes(floptle_physics::take_wake_counts());
         }
+        // `perf.fogPaths`: only while a game runs, so Stop puts the view back.
+        let fog_paths = self.playing && self.script_host.profile().borrow().fog_paths();
+        if let Some(rm) = self.raymarch.as_mut() {
+            rm.set_fog_debug(fog_paths);
+        }
         // Play mode: advance the (pausable) script clock and run the Lua scripts
         // attached to nodes. Scripts hot-reload as their files change.
         if self.playing {

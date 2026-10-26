@@ -110,6 +110,21 @@ pub fn install(lua: &Lua, profile: &SharedProfile, sampler: &Rc<Sampler>) -> mlu
         })?,
     )?;
 
+    // perf.fogPaths([on]) -> on — a view, not a measurement: every pixel
+    // that read the volumetric fog marched once for its neighbourhood is
+    // painted magenta, and what is left in its own colour marched its own.
+    // Where the fog costs more than it should, this shows which pixels.
+    let p = profile.clone();
+    t.set(
+        "fogPaths",
+        lua.create_function(move |_, on: Option<bool>| {
+            if let Some(on) = on {
+                p.borrow_mut().set_fog_paths(on);
+            }
+            Ok(p.borrow().fog_paths())
+        })?,
+    )?;
+
     // perf.sampleScripts(on [, intervalMs]) — the script sampler: which line of
     // which script the time went to, kept with every frame and every hitch.
     let p = profile.clone();
@@ -620,7 +635,7 @@ fn require_on(
 /// answering zero without somebody deciding it should.
 #[cfg(test)]
 const READABLE_WHILE_OFF: &[&str] =
-    &["enable", "enabled", "buckets", "counts", "mirrorCause", "overloaded", "hitchThreshold"];
+    &["enable", "enabled", "buckets", "counts", "mirrorCause", "overloaded", "hitchThreshold", "fogPaths"];
 
 #[cfg(test)]
 mod tests {
@@ -635,6 +650,18 @@ mod tests {
         crate::sampler::install(&lua, &budget, &sampler);
         install(&lua, &p, &sampler).expect("install perf");
         (lua, p)
+    }
+
+    /// `perf.fogPaths` is a switch the driver reads off the profile, set and
+    /// read back whether or not collection is on.
+    #[test]
+    fn the_fog_paths_view_is_a_switch() {
+        let (lua, p) = host();
+        assert!(!lua.load("return perf.fogPaths()").eval::<bool>().unwrap());
+        assert!(lua.load("return perf.fogPaths(true)").eval::<bool>().unwrap());
+        assert!(p.borrow().fog_paths());
+        lua.load("perf.fogPaths(false)").exec().unwrap();
+        assert!(!p.borrow().fog_paths());
     }
 
     /// Reading a time while collection is off raises, and the message says how to

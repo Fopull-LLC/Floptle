@@ -837,6 +837,16 @@ struct FogOut {
 
 // The fog to one pixel `px` of the depth prepass: to its surface, or out
 // through the sky.
+// The camera-relative point a prepass texel's depth `d` puts its surface at.
+fn fog_world_at(px: vec2<u32>, pdims: vec2<u32>, d: f32) -> vec3<f32> {
+    let ndc = vec2<f32>(
+        (f32(px.x) + 0.5) / f32(pdims.x) * 2.0 - 1.0,
+        1.0 - (f32(px.y) + 0.5) / f32(pdims.y) * 2.0,
+    );
+    let wp = G.inv_view_proj * vec4<f32>(ndc, d, 1.0);
+    return wp.xyz / wp.w;
+}
+
 fn fog_to_pixel(px: vec2<u32>, pdims: vec2<u32>) -> vec4<u32> {
     let ndc = vec2<f32>(
         (f32(px.x) + 0.5) / f32(pdims.x) * 2.0 - 1.0,
@@ -844,8 +854,7 @@ fn fog_to_pixel(px: vec2<u32>, pdims: vec2<u32>) -> vec4<u32> {
     );
     let d = textureLoad(prime_tex, px, 0).x;
     if (d < 1.0) {
-        let wp = G.inv_view_proj * vec4<f32>(ndc, d, 1.0);
-        let p = wp.xyz / wp.w;
+        let p = fog_world_at(px, pdims, d);
         let dist = length(p);
         return fog_pack(fog_march(p / max(dist, 1e-4), dist, px), dist);
     }
@@ -875,12 +884,29 @@ fn fs_fog(in: VOut) -> FogOut {
         }
     }
     var out: FogOut;
-    out.near = fog_to_pixel(near_px, pdims);
     if (far_px.x == near_px.x && far_px.y == near_px.y) {
+        out.near = fog_to_pixel(near_px, pdims);
         out.far = out.near;
-    } else {
-        out.far = fog_to_pixel(far_px, pdims);
+        return out;
     }
+    // Two surfaces not far apart (sloping ground, most of a picture): one
+    // march along the near pixel's ray gives both, the far one carried on
+    // from where the near one stopped. A leaf in front of distant ground or
+    // the sky keeps a march of its own each.
+    if (far_d < 1.0) {
+        let pn = fog_world_at(near_px, pdims, near_d);
+        let pf = fog_world_at(far_px, pdims, far_d);
+        let dn = length(pn);
+        let df = length(pf);
+        if (df <= dn * 1.5) {
+            let m = fog_march_pair(pn / max(dn, 1e-4), dn, df, near_px);
+            out.near = fog_pack(m.near, dn);
+            out.far = fog_pack(m.far, df);
+            return out;
+        }
+    }
+    out.near = fog_to_pixel(near_px, pdims);
+    out.far = fog_to_pixel(far_px, pdims);
     return out;
 }
 

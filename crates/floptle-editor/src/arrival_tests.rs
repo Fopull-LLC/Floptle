@@ -214,6 +214,11 @@ fn a_generated_world_lands_with_its_ground_and_collision_made() {
     let mut field = floptle_field::ChunkField::new(1.5);
     field.fill_slab(floptle_core::math::Vec3::new(-40.0, -6.0, -40.0), floptle_core::math::Vec3::new(40.0, 0.0, 40.0), 0.0, [0.4, 0.5, 0.3]);
     ed.terrains.insert(slab, crate::terrain_edit::EditorTerrain::new(field));
+    // Something standing on the slab: ground no body is near is let go
+    // about once a second, which is not what this is about.
+    let rover = ed.world.spawn();
+    ed.world.insert(rover, Transform::from_translation(DVec3::new(20_000.0, 2.0, 0.0)));
+    ed.world.insert(rover, floptle_core::RigidBody { gravity: false, radius: 0.5, ..Default::default() });
     ed.toggle_play();
     assert!(ed.playing);
     assert!(!ed.terrains.contains_key(&w), "the world should start cold for this test to mean anything");
@@ -482,6 +487,11 @@ fn a_world_landing_mid_game_brings_its_collision_and_keeps_the_others() {
     let mut field = floptle_field::ChunkField::new(1.5);
     field.fill_slab(floptle_core::math::Vec3::new(-40.0, -6.0, -40.0), floptle_core::math::Vec3::new(40.0, 0.0, 40.0), 0.0, [0.4, 0.5, 0.3]);
     ed.terrains.insert(slab, crate::terrain_edit::EditorTerrain::new(field));
+    // Something standing on the slab: ground no body is near is let go
+    // about once a second, which is not what this is about.
+    let rover = ed.world.spawn();
+    ed.world.insert(rover, Transform::from_translation(DVec3::new(20_000.0, 2.0, 0.0)));
+    ed.world.insert(rover, floptle_core::RigidBody { gravity: false, radius: 0.5, ..Default::default() });
     ed.toggle_play();
     assert!(ed.playing);
     let slab_meshed = {

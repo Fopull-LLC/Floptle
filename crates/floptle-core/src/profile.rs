@@ -525,6 +525,8 @@ pub struct FrameProfile {
     /// Sleepers woken last frame, by cause, in the physics' `WakeReason`
     /// order.
     wakes: [u32; 10],
+    /// `perf.fogPaths`: paint the pixels that read the shared volumetric fog.
+    fog_paths: bool,
     /// Decals in the world and the triangles they were laid as.
     decal_counts: (usize, usize),
     /// Last frame's marks asked whether the ground under them moved, and
@@ -895,6 +897,17 @@ impl FrameProfile {
     /// [`Self::set_wakes`]'s counts.
     pub fn wakes(&self) -> [u32; 10] {
         self.wakes
+    }
+
+    /// `perf.fogPaths(on)`: the view paints every pixel that read the fog
+    /// marched once for its neighbourhood, so what marched its own shows.
+    pub fn set_fog_paths(&mut self, on: bool) {
+        self.fog_paths = on;
+    }
+
+    /// [`Self::set_fog_paths`]'s switch.
+    pub fn fog_paths(&self) -> bool {
+        self.fog_paths
     }
 
     /// Last frame's animators, and how many culling skipped.

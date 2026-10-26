@@ -1243,20 +1243,42 @@ struct FogMarch {
 };
 
 fn fog_march(rd: vec3<f32>, t_max: f32, pix: vec2<u32>) -> FogMarch {
+    return fog_march_pair(rd, t_max, t_max, pix).far;
+}
+
+// The fog to two distances along one ray, in one march: to `t_near` and on to
+// `t_max`. Two surfaces seen through neighbouring pixels (the shared fog's two
+// layers on sloping ground) share nearly one ray, and marching it twice was
+// the second layer's whole cost. The near answer is the march so far when it
+// passes `t_near`, the step that crosses it counted for the part in front.
+// With `t_near == t_max` both are the plain march, step for step.
+struct FogPair {
+    near: FogMarch,
+    far: FogMarch,
+};
+
+fn fog_march_pair(rd: vec3<f32>, t_near: f32, t_max: f32, pix: vec2<u32>) -> FogPair {
     var out: FogMarch;
     out.scattered = vec3<f32>(0.0);
     out.transmittance = 1.0;
+    var pair: FogPair;
+    pair.near = out;
+    pair.far = out;
     if (t_max <= 0.0) {
-        return out;
+        return pair;
     }
     // Only the part of the ray inside the layer has any media in it: outside
     // it every step was skipped, and the steps inside were that much coarser.
     let span = fog_layer_span(rd, t_max);
     if (span.y <= span.x) {
-        return out;
+        return pair;
     }
     let steps = u32(clamp(G.vol_fog_c.z, 2.0, 64.0));
     let dt = (span.y - span.x) / f32(steps);
+    // Where the near answer is taken: nothing of the layer in front of it
+    // leaves it the empty march.
+    let near_end = clamp(t_near, span.x, span.y);
+    var near_taken = near_end <= span.x;
     let jitter = ign(pix); // per-pixel start offset — the banding hider
     let amt = clamp(G.vol_fog_c.x, 0.0, 1.0);
     let gain = max(G.vol_fog_c.x, 1.0); // past 1 the slider brightens rather than blends
@@ -1270,23 +1292,34 @@ fn fog_march(rd: vec3<f32>, t_max: f32, pix: vec2<u32>) -> FogMarch {
     let stride = fog_noise_stride(dt);
     var noise = 1.0;
     for (var i = 0u; i < steps; i = i + 1u) {
-        let p = rd * (span.x + (f32(i) + jitter) * dt);
+        let s0 = span.x + f32(i) * dt;
+        let p = rd * (s0 + jitter * dt);
+        var sigma = 0.0;
         let layer = vol_fog_layer(p);
-        if (layer <= 1e-5) {
-            continue;
-        }
-        if (i32(i) % stride == 0) {
-            noise = vol_fog_noise(p, dt * f32(stride));
-        }
-        let sigma = layer * noise;
-        if (sigma <= 1e-5) {
-            continue;
+        if (layer > 1e-5) {
+            if (i32(i) % stride == 0) {
+                noise = vol_fog_noise(p, dt * f32(stride));
+            }
+            sigma = layer * noise;
         }
         var radiance = G.fog_color.rgb;
-        if (lit_on) {
+        if (sigma > 1e-5 && lit_on) {
             // The fog colour is the media's ALBEDO once light is injected: what
             // it scatters is the light that reaches it, tinted by its own colour.
             radiance = G.fog_color.rgb * mix(vec3<f32>(1.0), fog_inscatter(p, rd, amb, pix) * gain, amt);
+        }
+        if (!near_taken && s0 + dt >= near_end) {
+            pair.near = out;
+            let part = near_end - s0;
+            if (sigma > 1e-5 && part > 0.0) {
+                let a = 1.0 - exp(-sigma * part);
+                pair.near.scattered += pair.near.transmittance * a * radiance;
+                pair.near.transmittance *= 1.0 - a;
+            }
+            near_taken = true;
+        }
+        if (sigma <= 1e-5) {
+            continue;
         }
         // The fraction of this slab's light that gets out, attenuated by
         // everything already in front of it.
@@ -1301,7 +1334,11 @@ fn fog_march(rd: vec3<f32>, t_max: f32, pix: vec2<u32>) -> FogMarch {
             break;
         }
     }
-    return out;
+    if (!near_taken) {
+        pair.near = out;
+    }
+    pair.far = out;
+    return pair;
 }
 
 // Fog over a ray that hit NOTHING — the sky, or the flat background.

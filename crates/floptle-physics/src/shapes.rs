@@ -505,6 +505,11 @@ struct Surface {
     /// Chunks meshed by a query, on the thread that asked: what a cast near
     /// ground nobody had meshed pays for. Meshes handed in are not counted.
     meshed_by_queries: u64,
+    /// Steps since the triangles far from every mover were last let go: see
+    /// [`ChunkTerrain::release_far`].
+    since_release: u32,
+    /// Chunks let go that way, ever.
+    released: u64,
     /// Chunks meshed ahead of a mover, off the thread that steps: see
     /// [`ChunkTerrain::mesh_ahead`].
     #[cfg(not(target_arch = "wasm32"))]
@@ -567,6 +572,7 @@ impl<'a> NearChunks<'a> {
                 for x in lo[0]..=hi[0] {
                     let ch = s.chunks.get(&[x, y, z]);
                     if let Some(ch) = ch {
+                        ch.used.set(true);
                         let ((a, b), (c, d)) = (occupied, ch.occupied);
                         occupied = ((a.0.min(c.0), a.1.min(c.1), a.2.min(c.2)), (b.0.max(d.0), b.1.max(d.1), b.2.max(d.2)));
                     }
@@ -613,6 +619,7 @@ impl Surface {
             for y in y0..=y1 {
                 for x in x0..=x1 {
                     if let Some(ch) = self.chunks.get(&[x, y, z]) {
+                        ch.used.set(true);
                         ch.cell(cell).iter().for_each(&mut f);
                     }
                 }
@@ -695,6 +702,9 @@ pub struct CollisionChunk {
     /// leave the air above a floor without asking about each bucket in it.
     /// Inverted (`lo > hi`) when the chunk holds nothing.
     occupied: ((i32, i32, i32), (i32, i32, i32)),
+    /// A query read it since [`ChunkTerrain::release_far`] last looked: ground
+    /// a script keeps casting at is kept, however far it is from a body.
+    used: std::cell::Cell<bool>,
 }
 
 /// The empty bucket range: every `min`/`max` folded into it gives the other.
@@ -710,7 +720,7 @@ impl CollisionChunk {
 
 impl Default for CollisionChunk {
     fn default() -> Self {
-        Self { runs: CellMap::default(), tris: Vec::new(), occupied: NO_CELLS }
+        Self { runs: CellMap::default(), tris: Vec::new(), occupied: NO_CELLS, used: std::cell::Cell::new(true) }
     }
 }
 
@@ -761,7 +771,7 @@ impl CollisionChunk {
         let occupied = runs.keys().fold(NO_CELLS, |(lo, hi), k| {
             ((lo.0.min(k.0), lo.1.min(k.1), lo.2.min(k.2)), (hi.0.max(k.0), hi.1.max(k.1), hi.2.max(k.2)))
         });
-        Self { runs, tris, occupied }
+        Self { runs, tris, occupied, used: std::cell::Cell::new(true) }
     }
 
     fn cell(&self, k: (i32, i32, i32)) -> &[SurfaceTri] {
@@ -1005,6 +1015,55 @@ impl ChunkTerrain {
         {
             s.ahead.epoch += 1;
         }
+    }
+
+    /// Steps between [`Self::release_far`]'s looks: about a second.
+    const RELEASE_EVERY: u32 = 120;
+
+    /// Whether it is time to let go of far triangles: true once every
+    /// [`Self::RELEASE_EVERY`] calls, so a caller gathers where its movers are
+    /// only when it will be used. Called once a step.
+    pub fn release_due(&self) -> bool {
+        let mut s = self.surface.borrow_mut();
+        s.since_release += 1;
+        if s.since_release < Self::RELEASE_EVERY {
+            return false;
+        }
+        s.since_release = 0;
+        true
+    }
+
+    /// Let go of the collision triangles of every chunk farther than its
+    /// `keep` from each of `near` (`(point, keep)`, anchor-relative as a
+    /// query's point is) that no query has read since the last call. Returns
+    /// how many went.
+    ///
+    /// A walk across a world meshed every chunk the player passed and kept
+    /// them all, so collision grew with the distance walked and never came
+    /// back. What goes is only what nothing is near and nothing asked about
+    /// in a whole look: a scope ray at a far hill every frame keeps the hill.
+    /// A query that reaches released ground meshes it again from the same
+    /// voxels, so the triangles are the same ones and nothing collides
+    /// differently.
+    pub fn release_far(&self, near: &[(Vec3, f32)]) -> usize {
+        let mut s = self.surface.borrow_mut();
+        let before = s.chunks.len();
+        let close = |c: &[i32; 3]| {
+            let (centre, r) = self.chunk_sphere(*c);
+            near.iter().any(|&(p, keep)| (p - centre).length_squared() <= (keep + r) * (keep + r))
+        };
+        // Near a body, or read by a query since the last look: kept, and
+        // asked again next time.
+        s.chunks.retain(|c, ch| ch.used.replace(false) || close(c));
+        s.asked.retain(|c, _| close(c));
+        let gone = before - s.chunks.len();
+        s.released += gone as u64;
+        gone
+    }
+
+    /// Chunks [`Self::release_far`] has let go, ever.
+    pub fn released_chunks(&self) -> u64 {
+        self.surface.borrow().released
     }
 
     /// How many steps after it is asked for a chunk meshed ahead lands.
@@ -3010,6 +3069,44 @@ mod drawn_surface_tests {
             assert_eq!(corners, 0, "two voxels up, a sample of no radius looked up {corners} buckets");
             assert!(bounded * 10 <= whole, "two voxels up, within 0.4 it looked up {bounded} buckets, the whole question {whole}");
         }
+    }
+
+    /// **Ground walked past is let go, and comes back the same.** A walk the
+    /// length of a 400 m strip meshes every chunk it passes; let go of all but
+    /// what is near the walker's end, the surface holds a fraction, and a question
+    /// back at the start meshes that ground again and answers what it did.
+    /// Ground a query reads between looks stays, however far it is.
+    #[test]
+    fn ground_walked_past_is_let_go_and_comes_back_the_same() {
+        let mut f = ChunkField::new(1.0);
+        f.fill_slab(Vec3::new(-200.0, -3.0, -8.0), Vec3::new(200.0, 0.0, 8.0), 0.0, [0.5; 3]);
+        let t = ChunkTerrain::new(f);
+        let at = |x: f32| Vec3::new(x, 1.3, 0.7);
+        let start = t.distance(at(-190.0));
+        let mut x = -190.0;
+        while x <= 190.0 {
+            t.distance(at(x));
+            x += 4.0;
+        }
+        let walked = t.meshed_chunks();
+        assert!(walked >= 12, "the fixture: the walk meshed only {walked} chunks");
+        // Read by the walk since the last look: all kept, once.
+        assert_eq!(t.release_far(&[(at(190.0), 30.0)]), 0, "ground just read was let go");
+        let gone = t.release_far(&[(at(190.0), 30.0)]);
+        let kept = t.meshed_chunks();
+        assert!(kept * 3 <= walked && gone == walked - kept, "{walked} meshed, {gone} let go, {kept} kept");
+        assert_eq!(t.released_chunks(), gone as u64);
+        // Far from the walker but read every look: kept.
+        let hill = at(-100.0);
+        t.distance(hill);
+        t.release_far(&[(at(190.0), 30.0)]);
+        t.distance(hill);
+        let before = t.meshed_by_queries();
+        t.release_far(&[(at(190.0), 30.0)]);
+        t.distance(hill);
+        assert_eq!(t.meshed_by_queries(), before, "ground a query reads every look was let go and meshed again");
+        let again = t.distance(at(-190.0));
+        assert_eq!(again.to_bits(), start.to_bits(), "the ground let go answers {again}, where it answered {start}");
     }
 
     /// The cached surface must be a cache — meshed once per chunk, not per

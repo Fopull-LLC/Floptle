@@ -1634,6 +1634,7 @@ impl PhysicsWorld {
         let t = clock();
         self.reindex_colliders();
         self.mesh_ground_ahead();
+        self.release_far_ground();
         let broadphase = Self::lap(t);
         self.contacts.clear();
         self.kin_contacts.clear();
@@ -2433,6 +2434,39 @@ impl PhysicsWorld {
                     t.mesh_ahead(&local);
                 }
             }
+        }
+    }
+
+    /// About once a second, let each terrain go of the collision triangles of
+    /// ground no body is near (see [`ChunkTerrain::release_far`]). Every body
+    /// counts, asleep or not, so a parked craft keeps the ground it stands
+    /// on, and a fast one keeps a second's travel ahead of it, where its
+    /// ground is meshed before it arrives.
+    fn release_far_ground(&mut self) {
+        // Ground this far from every body goes; a second of travel is added.
+        const KEEP: f32 = 64.0;
+        if reference_settle() {
+            return;
+        }
+        let mut near: Option<Vec<(Vec3, f32)>> = None;
+        for col in &self.colliders {
+            let Some(t) = col.shape.chunk_terrain() else { continue };
+            if !t.release_due() {
+                continue;
+            }
+            let near = near.get_or_insert_with(|| {
+                let mut v: Vec<(Vec3, f32)> = Vec::new();
+                for c in self.compounds.iter().filter(|c| c.live() && !c.shapes.is_empty()) {
+                    v.push((c.pos, KEEP + c.reach() + c.vel.length()));
+                }
+                for b in self.bodies.iter().filter(|b| b.live()) {
+                    v.push((b.pos, KEEP + b.bounding_radius() + b.vel.length()));
+                }
+                v
+            });
+            let off = col.offset();
+            let local: Vec<(Vec3, f32)> = near.iter().map(|&(p, k)| (p - off, k)).collect();
+            t.release_far(&local);
         }
     }
 

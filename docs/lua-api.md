@@ -36,7 +36,7 @@ each group, and meant to be searched.
 - [vessels — assembly.*](#vessels--assembly) — 16
 - [the camera & the screen](#the-camera--the-screen) — 9
 - [physics controls — pause & step](#physics-controls--pause--step) — 5
-- [frame cost — perf.*](#frame-cost--perf) — 23
+- [frame cost — perf.*](#frame-cost--perf) — 24
 - [accessibility — access.*](#accessibility--access) — 11
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
@@ -2955,7 +2955,7 @@ terrain.slotAt(x, y, z) — the texture-palette slot at a world point, or nil wh
 
 ### `terrain.stats`
 
-terrain.stats([id]) → what the terrains hold in memory, in bytes: { total=, field= (voxels at full detail), standIns= (chunks put away as coarse stand-ins), tables=, meshesGpu= (drawn chunk meshes, at their capacity), meshesCpu=, collision=, shadow= (the volume shadows and AO are marched through), undo=, dataChunks=, standInChunks=, terrains=, age=, budget=, detail= }, every terrain summed, or terrain id's alone (nil when there is no such terrain). Counted once a second while a game runs; age is how many seconds old the count is (-1 before the first). Chunks shared between copies of a field (the physics' copy, Play's snapshot) are counted once. budget is what terrain.setBudget set (nil for none), and detail how much of its detail the terrain keeps to stay in it, 0 to 1.
+terrain.stats([id]) → what the terrains hold in memory, in bytes: { total=, field= (voxels at full detail), standIns= (chunks put away as coarse stand-ins), tables=, meshesGpu= (drawn chunk meshes, at their capacity), meshesCpu=, collision= (the physics' triangles for ground near a body: ground no body is within about 64 m of, plus a second of its travel, is let go about once a second and meshed again if anything reaches it), shadow= (the volume shadows and AO are marched through), undo=, dataChunks=, standInChunks=, terrains=, age=, budget=, detail= }, every terrain summed, or terrain id's alone (nil when there is no such terrain). Counted once a second while a game runs; age is how many seconds old the count is (-1 before the first). Chunks shared between copies of a field (the physics' copy, Play's snapshot) are counted once. budget is what terrain.setBudget set (nil for none), and detail how much of its detail the terrain keeps to stay in it, 0 to 1.
 
 ### `terrain.warm`
 
@@ -3502,6 +3502,10 @@ perf.enable(true) — start collecting; perf.enable(false) stops and CLEARS the 
 ### `perf.enabled`
 
 perf.enabled() — is anything being measured? Safe to call while off, so a script can ask before reading.
+
+### `perf.fogPaths`
+
+perf.fogPaths([on]) -> on — a view for finding where volumetric fog costs: every pixel that read the fog marched once for its neighbourhood is painted magenta, and anything left in its own colour marched fog of its own, which is the expensive path (thin things in front of distant ground, mostly). Only while a game runs; Stop puts the view back. Works whether or not perf collection is on.
 
 ### `perf.frames`
 
