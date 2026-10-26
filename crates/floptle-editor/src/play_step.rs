@@ -417,6 +417,7 @@ impl Editor {
             self.apply_simulated_input();
             // Files the player picked or dropped, for the scripts about to run.
             self.pump_files();
+            self.publish_terrain_stats(dt);
         }
         // Play mode: advance the (pausable) script clock and run the Lua scripts
         // attached to nodes. Scripts hot-reload as their files change.

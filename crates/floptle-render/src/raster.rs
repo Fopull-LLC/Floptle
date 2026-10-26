@@ -3538,6 +3538,13 @@ impl Raster {
             .map_or(0, |s| s.tpaint_base)
     }
 
+    /// Bytes mesh `id`'s vertex and index buffers hold on the GPU: their
+    /// capacity, which for a dynamic slot is more than it draws. 0 for a mesh
+    /// that is not there.
+    pub fn mesh_gpu_bytes(&self, id: MeshId) -> u64 {
+        self.meshes.get(id.0 as usize).map_or(0, |m| m.gpu_mesh.vbuf.size() + m.gpu_mesh.ibuf.size())
+    }
+
     /// Bytes the terrain color store currently holds on the GPU (for budget probes).
     pub fn tpaint_bytes(&self) -> u64 {
         self.tpaint_buf.size()

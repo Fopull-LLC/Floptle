@@ -137,6 +137,7 @@ mod upgrade_models;
 #[cfg(feature = "dialogs")]
 mod native_dialog;
 mod game_files;
+mod terrain_memory;
 mod reflect_capture;
 mod gizmo;
 #[cfg(feature = "editor-ui")]
@@ -2562,6 +2563,17 @@ struct Editor {
     /// Files dropped on the window during Play, for the game's
     /// `filesDropped` (see `game_files`).
     dropped_for_game: Vec<std::path::PathBuf>,
+    /// Seconds of Play until the terrains are counted again for
+    /// `terrain.stats` (see `terrain_memory`).
+    terrain_stats_in: f32,
+    /// How much of its detail the terrain has given up to stay in its memory
+    /// budget, 0..[`terrain_memory::MOST_SHED`] (0 = none), and whether the
+    /// game has been told it is shedding.
+    terrain_shed: f32,
+    terrain_shed_said: bool,
+    /// Whether the game has been told its budget is below what the ground
+    /// round the camera needs.
+    terrain_budget_floor_said: bool,
     /// Resolved scatter chunks, so props are dropped onto the
     /// real ground once per chunk instead of once per prop per frame.
     scatter_cache: crate::scatter_draw::ScatterCache,
@@ -4033,6 +4045,20 @@ struct History {
 impl Editor {
     pub(crate) fn render_sharpness(&self) -> f32 {
         self.render_sharpness.unwrap_or(floptle_render::retro::DEFAULT_SHARPNESS)
+    }
+}
+
+impl History {
+    /// Bytes the undo and redo snapshots of terrain `id`'s edits hold.
+    fn terrain_undo_bytes(&self, id: u32) -> u64 {
+        self.undo
+            .iter()
+            .chain(&self.redo)
+            .map(|s| match s {
+                Snapshot::Terrain(tid, u) if *tid == id => u.memory_bytes() as u64,
+                _ => 0,
+            })
+            .sum()
     }
 }
 

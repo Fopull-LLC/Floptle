@@ -325,6 +325,9 @@ impl ChunkData {
                 self.dist_slot[b] = (pages.len() - 1) as u16;
             }
         }
+        // Kept at exactly what it holds: pushed one at a time it grew by
+        // doubling, and a stored chunk lives for the whole session.
+        pages.shrink_to_fit();
         self.dist_pages = pages;
 
         let slots = &mut self.color_slot;
@@ -350,6 +353,7 @@ impl ChunkData {
                         slots[b] = (kept.len() - 1) as u16;
                     }
                 }
+                kept.shrink_to_fit();
                 *pages = kept;
                 // And the palette keeps only what is still used, so a chunk
                 // repainted many times does not run out of it.
@@ -370,6 +374,7 @@ impl ChunkData {
                         kept_palette.push(*c);
                     }
                 }
+                kept_palette.shrink_to_fit();
                 *palette = kept_palette;
                 fill.iter_mut().for_each(|k| *k = remap[*k as usize]);
                 pages.iter_mut().flatten().for_each(|k| *k = remap[*k as usize]);
@@ -390,6 +395,7 @@ impl ChunkData {
                         slots[b] = (kept.len() - 1) as u16;
                     }
                 }
+                kept.shrink_to_fit();
                 *pages = kept;
             }
         }
@@ -397,11 +403,14 @@ impl ChunkData {
 
     /// Bytes this chunk holds, its fixed tables included.
     pub(crate) fn heap_bytes(&self) -> usize {
+        // Capacity, not length: a page vector that grew holds room for more,
+        // and that room is memory as much as the pages are.
         let pages = match &self.colors {
-            Colors::Palette { palette, pages, .. } => palette.len() * 4 + pages.len() * BV,
-            Colors::Raw { pages, .. } => pages.len() * BV * 4 + BLOCKS * 3,
+            Colors::Palette { palette, pages, .. } => palette.capacity() * 4 + pages.capacity() * BV,
+            Colors::Raw { pages, .. } => pages.capacity() * BV * 4 + BLOCKS * 4,
         };
-        std::mem::size_of::<Self>() + self.dist_pages.len() * BV * 4 + pages
+        // The Arc that holds it: two counts beside the data.
+        2 * std::mem::size_of::<usize>() + std::mem::size_of::<Self>() + self.dist_pages.capacity() * BV * 4 + pages
     }
 }
 

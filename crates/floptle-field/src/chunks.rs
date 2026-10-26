@@ -60,6 +60,29 @@ pub const BAND_VOXELS: f32 = 4.0;
 /// normal. Nothing further from the plane than band + this is touched.
 pub const FLATTEN_FALLOFF_VOXELS: f32 = 2.0;
 
+/// What a [`ChunkField`] holds in memory, in bytes, by kind: see
+/// [`ChunkField::memory`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FieldMemory {
+    /// Chunks at full detail: their voxels, distance and colour.
+    pub data: usize,
+    /// Chunks put away as coarse stand-ins.
+    pub stand_ins: usize,
+    /// The maps of chunks, of chunks not yet made and of chunks edited.
+    pub tables: usize,
+    /// How many chunks are at full detail, and how many are stand-ins,
+    /// whether or not their bytes were counted here.
+    pub data_chunks: usize,
+    pub stand_in_chunks: usize,
+}
+
+impl FieldMemory {
+    /// Everything counted.
+    pub fn total(&self) -> usize {
+        self.data + self.stand_ins + self.tables
+    }
+}
+
 /// A chunk's contents. Absent from the map == `Uniform(+band)` (open air).
 #[derive(Clone, Debug)]
 enum Chunk {
@@ -688,6 +711,38 @@ impl ChunkField {
                 Chunk::Uniform(_) => 0,
             })
             .sum()
+    }
+
+    /// What this field holds in memory, by kind (see [`FieldMemory`]). Chunks
+    /// already in `seen` (by where their data lives) are not counted again,
+    /// and those counted here are added to it: the play snapshot of a field
+    /// and the physics sim's copy share their chunks with it until one of
+    /// them writes, so counting each copy alone counts the same voxels three
+    /// times.
+    pub fn memory(&self, seen: &mut std::collections::HashSet<usize>) -> FieldMemory {
+        let mut m = FieldMemory::default();
+        for c in self.chunks.values() {
+            match c {
+                Chunk::Data(d) => {
+                    m.data_chunks += 1;
+                    if seen.insert(std::sync::Arc::as_ptr(d) as usize) {
+                        m.data += d.heap_bytes();
+                    }
+                }
+                Chunk::Lattice(l) => {
+                    m.stand_in_chunks += 1;
+                    if seen.insert(std::sync::Arc::as_ptr(l) as usize) {
+                        m.stand_ins += l.heap_bytes();
+                    }
+                }
+                Chunk::Uniform(_) => {}
+            }
+        }
+        // The tables themselves: a slot per entry each, plus a control byte.
+        let key = std::mem::size_of::<[i32; 3]>();
+        m.tables = self.chunks.capacity() * (key + std::mem::size_of::<Chunk>() + 1)
+            + (self.pending.capacity() + self.edited.capacity()) * (key + 1);
+        m
     }
 
     /// Was this field generated, so that its unedited chunks are the generator's?
@@ -3572,6 +3627,28 @@ fn chamfer_expand_air(baked: &mut crate::mesh2sdf::BakedSdf, band: f32) {
 mod tests {
     use super::*;
     use crate::terrain::Terrain;
+
+    /// A copy of a field shares its chunks until it writes one, and counting
+    /// the two together counts each shared chunk once: the play snapshot and
+    /// the physics sim's copy are not three of everything. The bytes are the
+    /// chunks' own, as `memory_bytes` reports them.
+    #[test]
+    fn a_copy_of_a_field_counts_its_shared_chunks_once() {
+        let mut f = ChunkField::new(1.0);
+        f.fill_slab(Vec3::new(-40.0, -8.0, -40.0), Vec3::new(40.0, 0.0, 40.0), 0.0, [0.5; 3]);
+        let mut seen = std::collections::HashSet::new();
+        let own = f.memory(&mut seen);
+        assert_eq!(own.data + own.stand_ins, f.memory_bytes());
+        assert!(own.data_chunks > 4, "fixture: only {} chunks", own.data_chunks);
+        let mut copy = f.clone();
+        let shared = copy.memory(&mut seen);
+        assert_eq!(shared.data, 0, "the copy's chunks are the field's, counted again");
+        assert_eq!(shared.data_chunks, own.data_chunks);
+        copy.sculpt(Brush::Raise, Vec3::new(0.0, 0.0, 0.0), 3.0, 1.0, BrushProfile::default());
+        let written = copy.memory(&mut seen);
+        assert!(written.data > 0, "a chunk the copy wrote is its own and counts");
+        assert!(written.data < own.data, "only what the copy wrote counts: {} of {}", written.data, own.data);
+    }
 
     fn rolling_terrain() -> ChunkField {
         let mut f = ChunkField::new(1.5);

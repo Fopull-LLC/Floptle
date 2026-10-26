@@ -3269,6 +3269,10 @@ impl ScriptHost {
                 dropped: terrain_dropped.clone(),
             },
         );
+        let terrain_stats: Rc<RefCell<crate::terrain_stats_api::Counted>> = Rc::default();
+        if let Err(e) = crate::terrain_stats_api::install(&lua, terrain_stats.clone()) {
+            floptle_say::say_err!("[lua] failed to install terrain.stats: {e}");
+        }
         // `decals.*`: marks laid on the static colliders lent for the pass.
         let decals: Rc<RefCell<crate::decal_api::DecalStore>> = Rc::default();
         if let Err(e) = crate::decal_api::install_decal_api(
@@ -3584,6 +3588,7 @@ impl ScriptHost {
             meshes,
             captures,
             files,
+            terrain_stats,
             cloud,
             http_in_fixed,
             platform,
@@ -6380,6 +6385,20 @@ impl ScriptHost {
     pub fn answer_capture_texture(&self, id: u64, result: Result<String, String>) {
         self.captures.borrow_mut().texture_done(id);
         self.textures.borrow_mut().answer(id, result);
+    }
+
+    /// The engine's latest count of what each terrain holds in memory, for
+    /// `terrain.stats`.
+    pub fn set_terrain_stats(&self, terrains: Vec<crate::TerrainStats>, detail: f32) {
+        let mut c = self.terrain_stats.borrow_mut();
+        c.terrains = terrains;
+        c.detail = detail;
+        c.at = Some(floptle_core::time::Instant::now());
+    }
+
+    /// The memory budget a game set for its terrains (`terrain.setBudget`).
+    pub fn terrain_budget(&self) -> Option<u64> {
+        self.terrain_stats.borrow().budget
     }
 
     /// Files scripts asked the player for since the last call

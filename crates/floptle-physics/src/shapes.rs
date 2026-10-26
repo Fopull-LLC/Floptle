@@ -700,6 +700,14 @@ pub struct CollisionChunk {
 /// The empty bucket range: every `min`/`max` folded into it gives the other.
 const NO_CELLS: ((i32, i32, i32), (i32, i32, i32)) = ((i32::MAX, i32::MAX, i32::MAX), (i32::MIN, i32::MIN, i32::MIN));
 
+impl CollisionChunk {
+    /// Bytes its triangles and bucket map hold.
+    pub fn heap_bytes(&self) -> usize {
+        self.tris.capacity() * std::mem::size_of::<SurfaceTri>()
+            + self.runs.capacity() * (std::mem::size_of::<((i32, i32, i32), (u32, u32))>() + 1)
+    }
+}
+
 impl Default for CollisionChunk {
     fn default() -> Self {
         Self { runs: CellMap::default(), tris: Vec::new(), occupied: NO_CELLS }
@@ -962,6 +970,19 @@ impl ChunkTerrain {
     /// ground no worker meshed (see [`Self::adopt`]).
     pub fn meshed_by_queries(&self) -> u64 {
         self.surface.borrow().meshed_by_queries
+    }
+
+    /// Bytes the collision surface holds: every meshed chunk's triangles and
+    /// their buckets, and meshes made ahead waiting to land. The field this
+    /// collider reads is counted with the field (`ChunkField::memory`).
+    pub fn surface_bytes(&self) -> usize {
+        let s = self.surface.borrow();
+        let chunk = |c: &CollisionChunk| c.heap_bytes();
+        let per_entry = std::mem::size_of::<([i32; 3], CollisionChunk)>() + 1;
+        let bytes = s.chunks.values().map(chunk).sum::<usize>() + s.chunks.capacity() * per_entry;
+        #[cfg(not(target_arch = "wasm32"))]
+        let bytes = bytes + s.ahead.ready.values().map(|(_, c)| chunk(c)).sum::<usize>();
+        bytes
     }
 
     pub fn adopt_mesh(&mut self, c: [i32; 3], m: &floptle_field::ChunkMesh) {

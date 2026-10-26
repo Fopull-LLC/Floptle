@@ -205,7 +205,7 @@ impl EditorTerrain {
     /// from the same field, so what is drawn and what collides are unchanged.
     pub(crate) fn premesh(&mut self, v: &LandingView) {
         let chunk_units = floptle_field::CHUNK as f32 * self.field.voxel();
-        let rings = rings_for_body(v.body_radius, (chunk_units * v.scale) as f64);
+        let rings = rings_for_body(v.body_radius, (chunk_units * v.scale) as f64, 1.0);
         let cl = v.near / chunk_units;
         for c in self.field.chunk_coords() {
             let d = chunk_ring_dist(c, cl);
@@ -453,7 +453,7 @@ const RING_STEPS: i32 = 4;
 /// only tighten. Never smaller than one chunk per ring either — a body you can
 /// stand on always gets a ring of full detail under your feet and two coarser
 /// ones around it, however small it is.
-fn rings_for_body(body_radius: Option<f64>, chunk_units: f64) -> [i32; 3] {
+fn rings_for_body(body_radius: Option<f64>, chunk_units: f64, detail: f32) -> [i32; 3] {
     let chunk = chunk_units.max(1e-3);
     let steps = |metres: f64| (metres / chunk * RING_STEPS as f64).ceil() as i32;
     // What a player can touch is drawn as it collides, however small the body:
@@ -465,6 +465,12 @@ fn rings_for_body(body_radius: Option<f64>, chunk_units: f64) -> [i32; 3] {
         for (i, frac) in BODY_RING_FRACTION.iter().enumerate() {
             out[i] = out[i].min(steps(r * frac)).max((i as i32 + 1) * RING_STEPS);
         }
+    }
+    // Over its memory budget, the terrain keeps less of its detail: every
+    // ring drawn in, the farthest detail going first. Never past what the
+    // floors below hold, which is what the player can touch.
+    if detail < 1.0 {
+        out = out.map(|r| ((r as f32 * detail.max(0.0)).ceil() as i32).max(RING_STEPS));
     }
     out[0] = out[0].max(near);
     out[1] = out[1].max(mid);
@@ -1385,6 +1391,8 @@ impl Editor {
                     .get::<floptle_core::CelestialBody>(e)
                     .map(|cb| cb.body_radius * ts as f64),
                 (chunk_units * ts) as f64,
+                // The field, not `terrain_detail()`: the renderer is borrowed.
+                1.0 - self.terrain_shed,
             );
             // Camera into the field's local frame (rotation + uniform scale), so
             // LOD rings follow the terrain wherever its node puts it.
@@ -3638,6 +3646,7 @@ impl Editor {
             let rings = rings_for_body(
                 self.world.get::<floptle_core::CelestialBody>(e).map(|cb| cb.body_radius * ts as f64),
                 (chunk_units * ts) as f64,
+                self.terrain_detail(),
             );
             // The camera, and every moving body: ground is held whole under
             // whatever may land on it, wherever the camera is. A body three
@@ -5440,7 +5449,7 @@ mod tests {
     fn a_walkable_planet_no_longer_meshes_its_whole_surface_at_full_detail() {
         // Solar's planets are 100–230 units; one chunk is 32 voxels × 1.5.
         let (radius, chunk) = (180.0, 48.0);
-        let tight = rings_for_body(Some(radius), chunk);
+        let tight = rings_for_body(Some(radius), chunk, 1.0);
         let (surface, before) = lod0_chunks(radius, chunk, LOD_RINGS.map(|r| r * RING_STEPS));
         let (_, after) = lod0_chunks(radius, chunk, tight);
 
@@ -5464,17 +5473,32 @@ mod tests {
         assert!(tight[0] >= 1 && tight[1] > tight[0] && tight[2] > tight[1], "{tight:?}");
     }
 
+    /// Kept to a memory budget, a terrain draws its rings in, the far ones
+    /// most, and never past the floors that keep what a player can touch at
+    /// full detail and collide with: 64 m and 120 m whatever the budget.
+    #[test]
+    fn a_terrain_over_its_budget_draws_its_rings_in_to_their_floors() {
+        let chunk = 48.0;
+        let full = rings_for_body(None, chunk, 1.0);
+        let less = rings_for_body(None, chunk, 0.5);
+        let least = rings_for_body(None, chunk, 0.0);
+        assert!(less[2] < full[2] && less[1] <= full[1], "half its detail kept the far rings: {full:?} {less:?}");
+        let floor = |m: f64| (m / chunk * RING_STEPS as f64).ceil() as i32;
+        assert!(least[0] >= floor(super::NEAR_METRES) && least[1] >= floor(super::MID_METRES), "the floors gave way: {least:?}");
+        assert!(least[0] < least[1] && least[1] < least[2], "the rings came out of order: {least:?}");
+    }
+
     /// A world big enough for the absolute rings to mean what they say is
     /// untouched — this can only ever tighten.
     #[test]
     fn a_big_world_keeps_the_rings_it_had() {
         let quarters = LOD_RINGS.map(|r| r * RING_STEPS);
-        assert_eq!(rings_for_body(Some(100_000.0), 48.0), quarters);
-        assert_eq!(rings_for_body(None, 48.0), quarters, "ordinary terrain has no body");
+        assert_eq!(rings_for_body(Some(100_000.0), 48.0, 1.0), quarters);
+        assert_eq!(rings_for_body(None, 48.0, 1.0), quarters, "ordinary terrain has no body");
         // A tiny moon still gets a full-detail ring under your feet and two
         // coarser ones around it, rather than collapsing to nothing; the first
         // reaches 64 m and the second 120 m, as everywhere.
-        let tiny = rings_for_body(Some(20.0), 48.0);
+        let tiny = rings_for_body(Some(20.0), 48.0, 1.0);
         assert_eq!(tiny, [6, 10, 14], "ordered, and never empty: {tiny:?}");
     }
 
@@ -5489,7 +5513,7 @@ mod tests {
     fn ground_near_the_camera_is_drawn_at_full_detail() {
         for radius in [40.0, 120.0, 300.0, 1500.0] {
             for chunk in [24.0, 48.0, 96.0] {
-                let rings = rings_for_body(Some(radius), chunk);
+                let rings = rings_for_body(Some(radius), chunk, 1.0);
                 for m in 0..200 {
                     // The camera-to-chunk distance in the rings' quarter chunks.
                     let dist = (m as f64 / chunk * RING_STEPS as f64).ceil() as i32;

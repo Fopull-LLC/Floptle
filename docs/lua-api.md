@@ -27,7 +27,7 @@ each group, and meant to be searched.
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 74
 - [networking — net.*, synced](#networking--net-synced) — 41
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
-- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 25
+- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 27
 - [pathfinding — nav.*](#pathfinding--nav) — 26
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 11
 - [weather — wind](#weather--wind) — 6
@@ -2869,9 +2869,17 @@ terrain.saveDir(path) / terrain.saveDir() — set (or read) the game's SAVE-SLOT
 
 terrain.sculpt(x,y,z, radius [, strength [, mode [, opts]]]) — sculpt the nearest terrain at a world point, landing the same tick while the frame's few milliseconds of edits allow (collision updates with the surface). mode: "raise" (default), "lower"/"dig", "smooth", "flatten"; strength 0..1. "flatten" levels to the terrain's up, or on a planet to the radial up at the point, over a disc in that plane; opts = { normal = vec3 } names another plane (world space). Edits land a few milliseconds' worth a frame, in order, each whole before the next, and each where it was aimed when it was made, on a planet that moves on its rails too; terrain.pending() counts the ones still to land. No-op when no terrain surface is near the point. Refuses: an unknown opts key, a zero normal. Multiplayer: run on the server + mirror by RPC (deterministic ops).
 
+### `terrain.setBudget`
+
+terrain.setBudget(bytes | nil) → the most memory every terrain together may hold (terrain.stats().total). While the terrain holds more, it keeps less of its detail, the farthest first: a tenth more a second, to at most three quarters, and it takes the detail back once it holds under 85 % of the budget. What the player can touch, the ground within 64 m drawn in full and 120 m at no coarser than half, is kept whatever the budget; a budget too small for that is said once in the Console. nil (the default) sets no budget.
+
 ### `terrain.slotAt`
 
 terrain.slotAt(x, y, z) — the texture-palette slot at a world point, or nil where the field is untextured. The material half of the question terrain.query answers the distance half of: survey before you cut, and let a footstep know what it is standing on.
+
+### `terrain.stats`
+
+terrain.stats([id]) → what the terrains hold in memory, in bytes: { total=, field= (voxels at full detail), standIns= (chunks put away as coarse stand-ins), tables=, meshesGpu= (drawn chunk meshes, at their capacity), meshesCpu=, collision=, shadow= (the volume shadows and AO are marched through), undo=, dataChunks=, standInChunks=, terrains=, age=, budget=, detail= }, every terrain summed, or terrain id's alone (nil when there is no such terrain). Counted once a second while a game runs; age is how many seconds old the count is (-1 before the first). Chunks shared between copies of a field (the physics' copy, Play's snapshot) are counted once. budget is what terrain.setBudget set (nil for none), and detail how much of its detail the terrain keeps to stay in it, 0 to 1.
 
 ### `terrain.warm`
 
