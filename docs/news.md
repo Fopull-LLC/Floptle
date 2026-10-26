@@ -1,5 +1,8 @@
 ## Just shipped
 
+**v0.117.0-rc30 — "Whole Worlds"** (beta). Players can hand a running game their
+own files: a picker the game opens, or files dropped on its window.
+
 **v0.117.0-rc29 — "Whole Worlds"** (beta). Planets no longer draw in one flat
 colour after a terrain is destroyed during play, and the floating origin
 distance is a project setting.
