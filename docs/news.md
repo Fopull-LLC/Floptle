@@ -1,5 +1,9 @@
 ## Just shipped
 
+**v0.117.0-rc34 — "Whole Worlds"** (beta). Pictures a script draws with
+`image.new`, node handles that compare equal, a runtime `alignUp`, and a vessel's
+`tickPos` that is where its root is.
+
 **v0.117.0-rc33 — "Whole Worlds"** (beta). Fog through plants shared like the rest
 of the view, parked craft that sleep in the wind, and `perf.counts().wakes`.
 
