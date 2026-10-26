@@ -1137,7 +1137,10 @@ impl Raymarch {
                 module,
                 entry_point: Some("fs_fog"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState { format: FOG_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                targets: &[
+                    Some(wgpu::ColorTargetState { format: FOG_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL }),
+                    Some(wgpu::ColorTargetState { format: FOG_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL }),
+                ],
             }),
             multiview_mask: None,
             cache: gpu.pipeline_cache.as_ref(),
@@ -2203,12 +2206,20 @@ impl Raymarch {
         {
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("raymarch-fog"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &f.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
-                })],
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &f.layers[0].1,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &f.layers[1].1,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    }),
+                ],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
@@ -2220,18 +2231,21 @@ impl Raymarch {
             rp.set_bind_group(0, bind, &[]);
             rp.draw(0..3, 0..1);
         }
-        encoder.copy_texture_to_buffer(
-            f.tex.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &f.buf,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(f.stride * FOG_TEXEL),
-                    rows_per_image: Some(f.size.1),
+        // The near layer's texels, then the far layer's.
+        for (k, (tex, _)) in f.layers.iter().enumerate() {
+            encoder.copy_texture_to_buffer(
+                tex.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &f.buf,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: (k as u32 * f.stride * f.size.1 * FOG_TEXEL) as u64,
+                        bytes_per_row: Some(f.stride * FOG_TEXEL),
+                        rows_per_image: Some(f.size.1),
+                    },
                 },
-            },
-            wgpu::Extent3d { width: f.size.0, height: f.size.1, depth_or_array_layers: 1 },
-        );
+                wgpu::Extent3d { width: f.size.0, height: f.size.1, depth_or_array_layers: 1 },
+            );
+        }
         gpu.queue.submit([encoder.finish()]);
         // From here on the globals say the fog is there to read.
         self.fog_ready.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -2509,16 +2523,17 @@ const FOG_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Uint;
 /// Bytes in one packed fog texel.
 const FOG_TEXEL: u32 = 16;
 
-/// One view size's fog: half the view's size, rounded up. The pass renders
-/// into the texture and the frame copies it into the buffer the shading
-/// passes read: a raster surface's sampled textures are all spoken for.
+/// One view size's fog: half the view's size, rounded up, in two layers
+/// (the nearest and the farthest surface of each texel's pixels). The pass
+/// renders each layer into its texture and the frame copies both into the
+/// buffer the shading passes read, one after the other: a raster surface's
+/// sampled textures are all spoken for.
 struct FogSlot {
     size: (u32, u32),
     /// Texels in a row of the buffer: the width, padded to what a copy out
     /// of a texture needs.
     stride: u32,
-    tex: wgpu::Texture,
-    view: wgpu::TextureView,
+    layers: [(wgpu::Texture, wgpu::TextureView); 2],
     buf: wgpu::Buffer,
 }
 
@@ -2526,24 +2541,27 @@ impl FogSlot {
     fn new(device: &wgpu::Device, size: (u32, u32)) -> Self {
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT / FOG_TEXEL;
         let stride = size.0.div_ceil(align) * align;
-        let tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("raymarch-fog"),
-            size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: FOG_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let layer = || {
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("raymarch-fog"),
+                size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: FOG_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            (tex, view)
+        };
         let buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("raymarch-fog"),
-            size: (stride * size.1 * FOG_TEXEL) as u64,
+            size: (2 * stride * size.1 * FOG_TEXEL) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        Self { size, stride, tex, view, buf }
+        Self { size, stride, layers: [layer(), layer()], buf }
     }
 }
 

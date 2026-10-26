@@ -179,6 +179,11 @@ pub struct Compound {
     /// stays what it was (see `PhysicsWorld::step_compound`).
     pub(crate) last_push: (Vec3, Vec3),
     pub(crate) rest_push: (Vec3, Vec3),
+    /// How far the held force and torque may change from `rest_push` before
+    /// the sleeper wakes: a fifth of its weight where it fell asleep, and
+    /// that at its reach for the torque. Wind, buoyancy or a stabiliser that
+    /// wobbles by less is carried by what it rests on.
+    pub(crate) rest_give: (f32, f32),
     /// What last woke it or restarted its count toward sleep.
     pub wake: crate::body::WakeReason,
     /// What it was resting on when it fell asleep, re-reported every asleep
@@ -252,6 +257,7 @@ impl Compound {
             sleep_time: 0.0,
             last_push: (Vec3::ZERO, Vec3::ZERO),
             rest_push: (Vec3::ZERO, Vec3::ZERO),
+            rest_give: (0.0, 0.0),
             wake: crate::body::WakeReason::Settling,
             resting: Vec::new(),
             rest_pens: Vec::new(),
@@ -387,6 +393,9 @@ impl Compound {
     /// Wake it for `why`: the next step simulates it in full, and its
     /// count toward sleep starts again.
     pub fn wake(&mut self, why: crate::body::WakeReason) {
+        if self.asleep {
+            crate::body::note_wake(why);
+        }
         self.asleep = false;
         self.sleep_time = 0.0;
         self.wake = why;

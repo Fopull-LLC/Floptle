@@ -346,6 +346,15 @@ pub fn install(lua: &Lua, profile: &SharedProfile, sampler: &Rc<Sampler>) -> mlu
             let (animators, culled) = p.borrow().anim_counts();
             out.set("animators", animators)?;
             out.set("animatorsCulled", culled)?;
+            // Sleepers woken last frame, by cause: what keeps a parked craft
+            // awake, when between wakes its own readout says `settling`.
+            let wakes = lua.create_table()?;
+            for (why, n) in floptle_physics::WakeReason::ALL.iter().zip(p.borrow().wakes()) {
+                if n > 0 {
+                    wakes.set(why.name(), n)?;
+                }
+            }
+            out.set("wakes", wakes)?;
             // Rays scripts cast last frame (raycast + raycastMany) and what
             // they took, which is part of `scripts`, not beside it.
             let (rays, ray_ms) = p.borrow().rays();

@@ -522,6 +522,9 @@ pub struct FrameProfile {
     overloaded: bool,
     /// Last frame's animators and how many were culled.
     anim_counts: (usize, usize),
+    /// Sleepers woken last frame, by cause, in the physics' `WakeReason`
+    /// order.
+    wakes: [u32; 10],
     /// Decals in the world and the triangles they were laid as.
     decal_counts: (usize, usize),
     /// Last frame's marks asked whether the ground under them moved, and
@@ -882,6 +885,16 @@ impl FrameProfile {
     /// folds it. For a caller keeping its own distribution across a run.
     pub fn frame_scripts(&self) -> impl Iterator<Item = (&str, f32)> {
         self.script_frame.iter().map(|(k, v)| (k.as_str(), *v))
+    }
+
+    /// Sleepers woken last frame, by cause (see `perf.counts().wakes`).
+    pub fn set_wakes(&mut self, wakes: [u32; 10]) {
+        self.wakes = wakes;
+    }
+
+    /// [`Self::set_wakes`]'s counts.
+    pub fn wakes(&self) -> [u32; 10] {
+        self.wakes
     }
 
     /// Last frame's animators, and how many culling skipped.

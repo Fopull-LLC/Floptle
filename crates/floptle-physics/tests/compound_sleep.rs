@@ -143,8 +143,9 @@ fn a_sleeping_assembly_rides_its_ground_and_wakes_when_the_ground_goes() {
 
 /// A small force held on a parked craft every step, as an idle thruster,
 /// wind or buoyancy holds one: the craft falls asleep as it would without
-/// it, stays asleep while the force stays the same, and wakes the step the
-/// force changes. Each held force used to wake it, so it never slept.
+/// it, stays asleep while the force wobbles by less than a fifth of its
+/// weight (what it rests on carries that), and wakes the step it changes by
+/// more. Each held force used to wake it, so it never slept.
 #[test]
 fn a_parked_craft_sleeps_under_a_held_force_and_wakes_when_it_changes() {
     let (mut w, ci, _) = parked();
@@ -160,7 +161,15 @@ fn a_parked_craft_sleeps_under_a_held_force_and_wakes_when_it_changes() {
     let slept = slept.expect("held by a small force, the craft never fell asleep");
     assert!(slept < 120, "held by a small force, the craft slept only at step {slept}");
     assert!(w.compounds[ci].asleep, "asleep under the same force, it woke");
-    w.compounds[ci].apply_force(hold * 1.5);
+    let weight = w.compounds[ci].mass * 9.81;
+    for k in 0..60 {
+        // A breeze: up to a tenth of the weight, back and forth.
+        let gust = Vec3::new(0.1 * weight * (k as f32 * 0.7).sin(), 0.0, 0.0);
+        w.compounds[ci].apply_force(hold + gust);
+        w.step(DT);
+        assert!(w.compounds[ci].asleep, "a breeze of a tenth of its weight woke it at step {k}");
+    }
+    w.compounds[ci].apply_force(hold + Vec3::new(0.3 * weight, 0.0, 0.0));
     w.step(DT);
-    assert!(!w.compounds[ci].asleep, "the force changed and it slept on");
+    assert!(!w.compounds[ci].asleep, "a push of three tenths of its weight and it slept on");
 }

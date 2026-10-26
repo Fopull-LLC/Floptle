@@ -1419,12 +1419,14 @@ fn fog_pack(m: FogMarch, dist: f32) -> vec4<u32> {
 
 // The half-resolution volumetric fog the fog pass marched (`fs_fog`), read
 // for a fragment `dist` from the camera (negative: the sky): rgb scattered,
-// a transmittance. Of the four texels around the pixel, only those the pass
-// marched to this same depth are blended, so an edge never takes the fog of
-// what is behind or in front of it; a < 0 when none is, and the caller
-// marches its own. Every surface and the sky read one march per four pixels
-// instead of each fragment marching the whole ray. `fog_buf` is the host's:
-// `fog_cache` = (ready, width, height, row stride) of the texels in it.
+// a transmittance. Each of the four texels around the pixel holds two
+// layers, its nearest and farthest surface; only a layer the pass marched to
+// this same depth is blended, so an edge never takes the fog of what is
+// behind or in front of it; a < 0 when none is, and the caller marches its
+// own. Every surface and the sky read one march per four pixels instead of
+// each fragment marching the whole ray. `fog_buf` is the host's: the near
+// layer's texels, then the far layer's; `fog_cache` = (ready, width,
+// height, row stride).
 fn fog_cached(pix: vec2<u32>, dist: f32) -> vec4<f32> {
     let none = vec4<f32>(-1.0);
     if (G.fog_cache.x < 0.5) {
@@ -1440,15 +1442,17 @@ fn fog_cached(pix: vec2<u32>, dist: f32) -> vec4<f32> {
     for (var k = 0; k < 4; k = k + 1) {
         let o = vec2<i32>(k & 1, k >> 1u);
         let c = vec2<u32>(clamp(base + o, vec2<i32>(0), dims - vec2<i32>(1)));
-        let t = fog_buf[c.y * stride + c.x];
-        let td = bitcast<f32>(t.w & 0xFFFFF000u);
-        let same = select(abs(td - dist) <= 0.04 * dist + 0.05, td < 0.0, dist < 0.0);
-        if (!same) {
-            continue;
-        }
         let bw = select(1.0 - w.x, w.x, o.x == 1) * select(1.0 - w.y, w.y, o.y == 1);
-        acc += vec4<f32>(bitcast<f32>(t.x), bitcast<f32>(t.y), bitcast<f32>(t.z), f32(t.w & 0xFFFu) / 4095.0) * bw;
-        wsum += bw;
+        for (var layer = 0u; layer < 2u; layer = layer + 1u) {
+            let t = fog_buf[(layer * u32(dims.y) + c.y) * stride + c.x];
+            let td = bitcast<f32>(t.w & 0xFFFFF000u);
+            let same = select(abs(td - dist) <= 0.04 * dist + 0.05, td < 0.0, dist < 0.0);
+            if (same) {
+                acc += vec4<f32>(bitcast<f32>(t.x), bitcast<f32>(t.y), bitcast<f32>(t.z), f32(t.w & 0xFFFu) / 4095.0) * bw;
+                wsum += bw;
+                break;
+            }
+        }
     }
     if (wsum < 0.05) {
         return none;

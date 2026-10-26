@@ -358,8 +358,9 @@ fn the_sun_low_in_thick_air_keeps_its_disc_and_warms() {
 /// Lit volumetric fog over a field of blocks, drawn with the fog marched once
 /// per four pixels and drawn with every fragment marching its own: the same
 /// picture to within two steps of 8-bit colour on average, and 95 % or more
-/// of the ground taking the shared march (the rest are the blocks' edges,
-/// where no texel beside a pixel is at its depth). The fog is thick enough that
+/// of the ground taking the shared march, a field of thin poles in front of
+/// it included: each texel holds the nearest and the farthest surface of its
+/// pixels, so a pole and the ground behind it both find theirs. The fog is thick enough that
 /// marching it is most of what every pixel shows.
 #[test]
 fn volumetric_fog_marched_once_per_four_pixels_draws_the_same_picture() {
@@ -377,6 +378,15 @@ fn volumetric_fog_marched_once_per_four_pixels_draws_the_same_picture() {
             let (x, z) = ((k % 4) as f64 * 9.0 - 13.0, -8.0 - (k / 4) as f64 * 14.0);
             w.insert(b, Transform { translation: DVec3::new(x, 1.0, z), scale: Vec3::new(2.0, 3.0 + k as f32 * 0.4, 2.0), ..Transform::IDENTITY });
             w.insert(b, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [0.8, 0.75, 0.7] });
+        }
+        // A field of thin poles, a pixel or two wide: like the stems and
+        // leaves of plants, nearly every pixel of one is an edge with the
+        // ground behind it.
+        for k in 0..300 {
+            let b = w.spawn();
+            let (x, z) = ((k % 30) as f64 * 0.6 - 9.0, -3.0 - (k / 30) as f64 * 1.2);
+            w.insert(b, Transform { translation: DVec3::new(x, 0.5, z), scale: Vec3::new(0.06, 3.0, 0.06), ..Transform::IDENTITY });
+            w.insert(b, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [0.3, 0.5, 0.2] });
         }
         let lighting = w.spawn();
         w.insert(

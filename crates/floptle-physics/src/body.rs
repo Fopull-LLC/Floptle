@@ -73,7 +73,39 @@ pub enum WakeReason {
     Reshaped,
 }
 
+/// Sleepers woken since [`take_wake_counts`] last asked, by [`WakeReason`],
+/// every sim in the process together.
+static WAKES: [std::sync::atomic::AtomicU32; WakeReason::ALL.len()] =
+    [const { std::sync::atomic::AtomicU32::new(0) }; WakeReason::ALL.len()];
+
+/// How many sleepers woke for each reason since the last call, in
+/// [`WakeReason::ALL`] order, and start again: what `perf.counts().wakes`
+/// reads once a frame. A body or a craft woken again and again reads
+/// `settling` or `moving` between wakes, and this says what keeps waking it.
+pub fn take_wake_counts() -> [u32; WakeReason::ALL.len()] {
+    std::array::from_fn(|i| WAKES[i].swap(0, std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Count a sleeper woken for `why`.
+pub(crate) fn note_wake(why: WakeReason) {
+    WAKES[why as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 impl WakeReason {
+    /// Every reason, in the order [`take_wake_counts`] counts them.
+    pub const ALL: [WakeReason; 10] = [
+        Self::Settling,
+        Self::Moving,
+        Self::Unsupported,
+        Self::Contact,
+        Self::Ground,
+        Self::Joint,
+        Self::Force,
+        Self::Impulse,
+        Self::Script,
+        Self::Reshaped,
+    ];
+
     /// What it is awake for once its own motion has stopped its count. Its
     /// own motion (`Moving`, or `Unsupported` when nothing holds it up) when
     /// it was `counting` toward sleep: the most recent cause, not the first,
@@ -299,6 +331,9 @@ impl Body {
     /// Wake it for `why`: the next step simulates it in full, and its
     /// count toward sleep starts again.
     pub fn wake_for(&mut self, why: WakeReason) {
+        if self.asleep {
+            note_wake(why);
+        }
         self.asleep = false;
         self.sleep_time = 0.0;
         self.wake = why;

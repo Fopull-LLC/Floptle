@@ -823,14 +823,21 @@ fn fs(in: VOut) -> FsOut {
 // Silhouette mask: 1.0 where the matter field is hit and in front of the camera,
 // discarded elsewhere. A post-pass edge-detects this into a selection outline that
 // hugs the true SDF silhouette (not a bounding circle).
-// The fog pass: the volumetric fog marched once per half-resolution texel,
-// from the camera to the opaque surface the depth prepass has at the texel's
-// first pixel, or out through the sky where it has none. What every surface
-// and the sky then read (`fog_cached`), packed as `fog_pack` says.
-@fragment
-fn fs_fog(in: VOut) -> @location(0) vec4<u32> {
-    let pdims = textureDimensions(prime_tex);
-    let px = min(vec2<u32>(in.clip.xy) * 2u, pdims - vec2<u32>(1u));
+// The fog pass: the volumetric fog marched once per half-resolution texel
+// for each of two surfaces, the nearest and the farthest the depth prepass
+// has among the texel's four pixels (or out through the sky where it has
+// none). What every surface and the sky then read (`fog_cached`). Two
+// layers, because a block of foliage or an edge holds a leaf and what is
+// behind it, and a texel marched to only one of them served the other none.
+// Where the four agree, the far layer is the near one, marched once.
+struct FogOut {
+    @location(0) near: vec4<u32>,
+    @location(1) far: vec4<u32>,
+};
+
+// The fog to one pixel `px` of the depth prepass: to its surface, or out
+// through the sky.
+fn fog_to_pixel(px: vec2<u32>, pdims: vec2<u32>) -> vec4<u32> {
     let ndc = vec2<f32>(
         (f32(px.x) + 0.5) / f32(pdims.x) * 2.0 - 1.0,
         1.0 - (f32(px.y) + 0.5) / f32(pdims.y) * 2.0,
@@ -845,6 +852,36 @@ fn fs_fog(in: VOut) -> @location(0) vec4<u32> {
     let ro = camera_ray_origin(ndc);
     let srd = sky_ray(ndc, camera_ray_dir(ndc, ro));
     return fog_pack(fog_sky_march(srd, px), -1.0);
+}
+
+@fragment
+fn fs_fog(in: VOut) -> FogOut {
+    let pdims = textureDimensions(prime_tex);
+    let base = vec2<u32>(in.clip.xy) * 2u;
+    var near_px = min(base, pdims - vec2<u32>(1u));
+    var far_px = near_px;
+    var near_d = textureLoad(prime_tex, near_px, 0).x;
+    var far_d = near_d;
+    for (var k = 1u; k < 4u; k = k + 1u) {
+        let px = min(base + vec2<u32>(k & 1u, k >> 1u), pdims - vec2<u32>(1u));
+        let d = textureLoad(prime_tex, px, 0).x;
+        if (d < near_d) {
+            near_d = d;
+            near_px = px;
+        }
+        if (d > far_d) {
+            far_d = d;
+            far_px = px;
+        }
+    }
+    var out: FogOut;
+    out.near = fog_to_pixel(near_px, pdims);
+    if (far_px.x == near_px.x && far_px.y == near_px.y) {
+        out.far = out.near;
+    } else {
+        out.far = fog_to_pixel(far_px, pdims);
+    }
+    return out;
 }
 
 @fragment

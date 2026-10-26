@@ -1751,6 +1751,7 @@ impl PhysicsWorld {
             self.bodies[bi].vel = Vec3::ZERO;
             self.resting[bi] = self.find_resting_contacts(bi);
         } else {
+            crate::body::note_wake(crate::body::WakeReason::Script);
             self.bodies[bi].asleep = false;
             self.bodies[bi].wake = crate::body::WakeReason::Script;
         }
@@ -1877,8 +1878,8 @@ impl PhysicsWorld {
                 || c.ang_vel.length_squared() > SLEEP_LINEAR_SPEED * SLEEP_LINEAR_SPEED;
             // What is held on it now against what it fell asleep under: the
             // same push is one its support already carries.
-            let differs = |now: Vec3, rest: Vec3| (now - rest).length() > 0.01 * rest.length() + 1e-6;
-            let pushed = differs(c.force, c.rest_push.0) || differs(c.torque, c.rest_push.1);
+            let differs = |now: Vec3, rest: Vec3, give: f32| (now - rest).length() > 0.01 * rest.length() + give + 1e-6;
+            let pushed = differs(c.force, c.rest_push.0, c.rest_give.0) || differs(c.torque, c.rest_push.1, c.rest_give.1);
             if !moving && !pushed {
                 c.force = Vec3::ZERO;
                 c.torque = Vec3::ZERO;
@@ -2739,10 +2740,17 @@ impl PhysicsWorld {
             return;
         }
         let (pens, resting) = self.compound_rest_probe(ci);
+        let weight = {
+            let c = &self.compounds[ci];
+            let g = if c.use_gravity { self.gravity.accel_at(c.pos, &self.colliders).length() } else { 0.0 };
+            c.mass * g
+        };
+        let reach = self.compounds[ci].reach();
         let c = &mut self.compounds[ci];
         c.asleep = true;
         c.wake = crate::body::WakeReason::Settling;
         c.rest_push = c.last_push;
+        c.rest_give = (0.2 * weight, 0.2 * weight * reach);
         c.sleep_time = 0.0;
         c.recheck_next = 0;
         c.recheck_time = 0.0;

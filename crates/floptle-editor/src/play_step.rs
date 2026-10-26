@@ -418,6 +418,8 @@ impl Editor {
             // Files the player picked or dropped, for the scripts about to run.
             self.pump_files();
             self.publish_terrain_stats(dt);
+            // Last frame's wakes, every tick of it, for `perf.counts().wakes`.
+            self.script_host.profile().borrow_mut().set_wakes(floptle_physics::take_wake_counts());
         }
         // Play mode: advance the (pausable) script clock and run the Lua scripts
         // attached to nodes. Scripts hot-reload as their files change.
