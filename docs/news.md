@@ -1,5 +1,8 @@
 ## Just shipped
 
+**v0.117.0-rc33 — "Whole Worlds"** (beta). Fog through plants shared like the rest
+of the view, parked craft that sleep in the wind, and `perf.counts().wakes`.
+
 **v0.117.0-rc32 — "Whole Worlds"** (beta). `terrain.stats()` and
 `terrain.setBudget()`: what terrain holds in memory, and a budget it keeps to.
 Generated worlds take about an eighth less memory.
