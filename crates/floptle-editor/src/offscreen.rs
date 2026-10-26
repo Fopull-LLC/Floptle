@@ -1306,13 +1306,14 @@ impl Editor {
                 ssr[0] > 0.5,
                 point_shadows,
                 contact[0] > 0.5,
+                rm.volumetric_fog(),
             );
             if let Some(dtex) = opts.depth_tex.filter(|_| wants_depth || rm_draw) {
                 let hist = history_bind.as_ref().map(|(v, s)| (v, s));
                 headless_mark!("depth prepass");
                 prepass_and_bind(
                     gpu, raster, raymarch, globals, &instances, &flsl_draws, &skin_draws,
-                    dtex, hist,
+                    dtex, hist, rm,
                 );
             } else {
                 // No prepass this view: unbind, or this render would march the

@@ -174,6 +174,11 @@ pub struct Compound {
     pub asleep: bool,
     /// Seconds it has been grounded and still, toward falling asleep.
     pub(crate) sleep_time: f32,
+    /// The held force and torque its last step integrated, and those it
+    /// fell asleep under: asleep, it stays asleep while what is held on it
+    /// stays what it was (see `PhysicsWorld::step_compound`).
+    pub(crate) last_push: (Vec3, Vec3),
+    pub(crate) rest_push: (Vec3, Vec3),
     /// What last woke it or restarted its count toward sleep.
     pub wake: crate::body::WakeReason,
     /// What it was resting on when it fell asleep, re-reported every asleep
@@ -245,6 +250,8 @@ impl Compound {
             off: false,
             asleep: false,
             sleep_time: 0.0,
+            last_push: (Vec3::ZERO, Vec3::ZERO),
+            rest_push: (Vec3::ZERO, Vec3::ZERO),
             wake: crate::body::WakeReason::Settling,
             resting: Vec::new(),
             rest_pens: Vec::new(),
@@ -386,11 +393,13 @@ impl Compound {
     }
 
     /// Accumulate a force (sim frame) acting through the CoM for the next step.
+    ///
+    /// Held forces do not wake it here: the step does, when what is held on
+    /// a sleeper differs from what it fell asleep under, and an awake one's
+    /// count toward sleep is its motion's to judge. A parked craft with an
+    /// idle thruster, wind or buoyancy on it sleeps like any other.
     pub fn apply_force(&mut self, f: Vec3) {
         self.force += f;
-        if f != Vec3::ZERO {
-            self.wake(crate::body::WakeReason::Force);
-        }
     }
 
     /// Accumulate a force (sim frame) acting at sim-frame point `at` — the
@@ -398,17 +407,11 @@ impl Compound {
     pub fn apply_force_at(&mut self, f: Vec3, at: Vec3) {
         self.force += f;
         self.torque += (at - self.pos).cross(f);
-        if f != Vec3::ZERO {
-            self.wake(crate::body::WakeReason::Force);
-        }
     }
 
     /// Accumulate a pure torque (sim frame) for the next step.
     pub fn apply_torque(&mut self, t: Vec3) {
         self.torque += t;
-        if t != Vec3::ZERO {
-            self.wake(crate::body::WakeReason::Force);
-        }
     }
 
     /// Instantaneous impulse (sim frame) at sim-frame point `at`.

@@ -265,6 +265,11 @@ fn surface_fog(e: Ext, color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3
 // field.wgsl). The raymarch pass binds the same texture at its own group(0)
 // binding 7, where it caps the march instead.
 @group(2) @binding(5) var prime_tex: texture_2d<f32>;
+// The half-resolution volumetric fog, packed (see `fog_cached` in field.wgsl).
+// A buffer and not a texture: this stage's sampled textures are all spoken
+// for, and a material shader's own slots come out of the same count.
+@group(2) @binding(12) var<storage, read> fog_buf: array<vec4<u32>>;
+
 
 // `PI` itself lives in raymarch.wgsl, which this module is NOT concatenated
 // with — these are the raster pass's own.

@@ -203,6 +203,11 @@ pub struct FrameRecord {
     /// slower than the display, as a hidden or locked session does),
     /// `frameCap` (`app.setFrameCap`) or `gpu`. See [`pacing_cause`].
     pub paced: Option<&'static str>,
+    /// Fixed ticks (physics and `fixedUpdate`) run this frame. A frame of
+    /// several ticks is a game catching up: what a tick costs is the frame's
+    /// physics divided by this, and a cheaper tick can make a frame dearer
+    /// by letting it catch up where it used to fall behind.
+    pub ticks: u32,
 }
 
 impl FrameRecord {
@@ -526,6 +531,8 @@ pub struct FrameProfile {
     /// frame's once folded. Inside the `scripts` bucket, not beside it.
     rays_frame: (u64, f32),
     rays_last: (u64, f32),
+    /// Fixed ticks run this frame (see [`FrameRecord::ticks`]).
+    ticks_frame: u32,
     /// Sweeps scripts cast this frame (`spherecast`, `capsulecast`,
     /// `boxcast`) and their milliseconds, the same way as the rays.
     sweeps_frame: (u64, f32),
@@ -882,6 +889,11 @@ impl FrameProfile {
         self.anim_counts = (animators, culled);
     }
 
+    /// Say how many fixed ticks this frame ran.
+    pub fn set_ticks(&mut self, n: u32) {
+        self.ticks_frame = n;
+    }
+
     /// Count `n` script rays that took `ms` between them. Nothing while off.
     pub fn record_rays(&mut self, n: u64, ms: f32) {
         if self.on {
@@ -1015,6 +1027,7 @@ impl FrameProfile {
             self.mirror_frame = MirrorWork::default();
             self.rays_frame = (0, 0.0);
             self.sweeps_frame = (0, 0.0);
+            self.ticks_frame = 0;
             return;
         }
         // The time before this frame's own work began, back to the end of the
@@ -1089,6 +1102,7 @@ impl FrameProfile {
             bodies,
             counts: self.counts,
             paced,
+            ticks: std::mem::take(&mut self.ticks_frame),
         };
         if total >= self.hitch_threshold() {
             let mut buckets = record.buckets.clone();
@@ -1723,5 +1737,20 @@ mod frame_record_tests {
         assert_eq!(pace.setup.present_mode, "fifo");
         assert!(pace.paced_frames >= 10, "{pace:?}");
         assert_eq!(p.recent_frames(1).next().unwrap().paced, Some("compositor"));
+    }
+
+    /// Each frame says how many fixed ticks it ran, so physics a frame can be
+    /// told from physics a tick.
+    #[test]
+    fn a_frame_says_how_many_ticks_it_ran() {
+        let mut p = FrameProfile::default();
+        p.enable(true);
+        for n in [3u32, 0, 5] {
+            p.set_ticks(n);
+            p.record(Bucket::Physics, 1.0);
+            p.end_frame();
+        }
+        let ticks: Vec<u32> = p.recent_frames(3).map(|r| r.ticks).collect();
+        assert_eq!(ticks, [3, 0, 5]);
     }
 }

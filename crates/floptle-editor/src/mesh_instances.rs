@@ -53,8 +53,8 @@ pub(crate) enum PartLook<'a> {
 ///
 /// Adding a feature that reads the prepass means adding a parameter here, which
 /// is a compile error at both call sites rather than a silent omission at one.
-pub(crate) fn wants_prepass(flsl_wants_depth: bool, ssr: bool, point_shadows: bool, contact: bool) -> bool {
-    flsl_wants_depth || ssr || point_shadows || contact
+pub(crate) fn wants_prepass(flsl_wants_depth: bool, ssr: bool, point_shadows: bool, contact: bool, fog: bool) -> bool {
+    flsl_wants_depth || ssr || point_shadows || contact || fog
 }
 
 /// Run this view's opaque depth prepass **and bind it**, in one call.
@@ -69,6 +69,10 @@ pub(crate) fn wants_prepass(flsl_wants_depth: bool, ssr: bool, point_shadows: bo
 /// Both are the same mistake — a per-view resource bound less often than per
 /// view — and neither errors. Running and binding cannot be separated here, so
 /// they are not separable at the call site either.
+///
+/// The volumetric fog is marched here too, once for the view at half
+/// resolution, when `rm` draws it ([`floptle_render::Raymarch::march_fog`]):
+/// it reads this prepass, and every surface and the sky read it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepass_and_bind(
     gpu: &floptle_render::Gpu,
@@ -80,9 +84,14 @@ pub(crate) fn prepass_and_bind(
     skins: &[floptle_render::SkinDraw],
     depth_tex: &wgpu::Texture,
     history: Option<(&wgpu::TextureView, &wgpu::Sampler)>,
+    rm: floptle_render::RaymarchGlobals,
 ) {
     raster.depth_prepass_with(gpu, globals, instances, flsl, skins, depth_tex);
     raymarch.bind_frame_targets(gpu, raster.prepass_view(), history);
+    if rm.volumetric_fog() {
+        let size = depth_tex.size();
+        raymarch.march_fog(gpu, rm, (size.width, size.height));
+    }
 
 }
 

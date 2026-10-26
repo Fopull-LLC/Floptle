@@ -748,7 +748,7 @@ impl Editor {
                 // scene most of these shaders are ever put in.
                 let depth_wanted = raster.flsl_draws_want_depth(&flsl_draws);
                 let raster_clear = if rm_draw
-                    || wants_prepass(depth_wanted, ssr_on, point_shadows, contact[0] > 0.5)
+                    || wants_prepass(depth_wanted, ssr_on, point_shadows, contact[0] > 0.5, rm.volumetric_fog())
                 {
                     // Opaque depth prepass: primes the depth buffer (early-z kills
                     // hidden raster fragments before their shadow-marching shader
@@ -756,10 +756,10 @@ impl Editor {
                     let depth_tex =
                         if lowres { retro.depth_texture() } else { gpu.depth_texture() };
                     let hist = scene_history.as_ref().map(|h| (h.view(), h.sampler()));
-                    gpu_mark!("depth prepass");
+                    gpu_mark!("depth prepass + volumetric fog");
                     prepass_and_bind(
                         gpu, raster, raymarch, globals, &instances, &flsl_draws, &skin_draws,
-                        depth_tex, hist,
+                        depth_tex, hist, rm,
                     );
                     if rm_draw {
                         gpu_mark!("matter / terrain");

@@ -134,7 +134,14 @@ fn release(name: &str, craft: Compound, frames: usize) {
     let mut ms = Vec::new();
     let mut asleep_at = None;
     println!("{name}:");
+    let held = std::env::var("HELD").is_ok();
     for f in 0..frames {
+        if held && f >= 120 {
+            // A piloted craft: a script holding a small force on it every
+            // frame, as an idle thruster or a hover trim does.
+            let m = w.compounds[ci].mass;
+            w.compounds[ci].apply_force(Vec3::new(0.0, 0.001 * m * 9.81, 0.0));
+        }
         ms.push(frame(&mut w));
         if asleep_at.is_none() && w.compounds.iter().all(|c| c.asleep) {
             asleep_at = Some(f);
@@ -662,6 +669,19 @@ fn report(name: &str, ms: &[f64], c: &Compound) {
 }
 
 fn main() {
+    // `ONLY=lying` the thousand-part craft let go lying beside the base, alone
+    // (`HELD=1` holds a small force on it from the third second, as a piloted
+    // craft's script does).
+    if std::env::var("ONLY").is_ok_and(|v| v == "lying") {
+        let mut lying = tower(0.0);
+        lying.anchored = false;
+        lying.orient = Quat::from_rotation_z(-std::f32::consts::FRAC_PI_2);
+        lying.pos = Vec3::new(0.0, 1.71, 40.0);
+        lying.prev_pos = lying.pos;
+        lying.prev_orient = lying.orient;
+        release("1,002 parts let go lying beside a base", lying, 600);
+        return;
+    }
     // `ONLY=broken` runs the broken-up craft alone.
     if std::env::var("ONLY").is_ok_and(|v| v == "broken") {
         broken_up(1800);

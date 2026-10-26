@@ -273,6 +273,20 @@ pub struct RaymarchGlobals {
     /// Each atmosphere's star aureole: x = spread, y = strength, multiples of
     /// natural (1, 1 = as before). Appended at the end, like everything above.
     pub atmo_sun: [[f32; 4]; 4],
+    /// x = 1 when this view's volumetric fog was marched at half resolution
+    /// ([`Raymarch::march_fog`]) and every surface and the sky read it, 0 and
+    /// each fragment marches its own; y, z = the half-resolution size, w = the
+    /// row stride of the texels in the buffer. Stamped by the renderer, never
+    /// by the caller. Appended at the end, like everything above.
+    pub fog_cache: [f32; 4],
+}
+
+impl RaymarchGlobals {
+    /// Whether these globals draw the volumetric fog (the fog on, in its
+    /// volumetric mode): what [`Raymarch::march_fog`] is for.
+    pub fn volumetric_fog(&self) -> bool {
+        self.fog_params[2] > 0.5 && self.vol_fog_b[3] > 0.5
+    }
 }
 
 impl Default for RaymarchGlobals {
@@ -367,6 +381,7 @@ impl Default for RaymarchGlobals {
             fog_body: [0.0; 4],
             atmo_cloud: [[1.0, 1.0, 1.0, 0.0]; 4],
             atmo_sun: [[1.0, 1.0, 0.0, 0.0]; 4],
+            fog_cache: [0.0; 4],
             probe_pos: [[0.0; 4]; crate::reflect::MAX_PROBES],
             probe_half: [[1.0; 4]; crate::reflect::MAX_PROBES],
         }
@@ -602,6 +617,25 @@ pub struct Raymarch {
     pipeline: wgpu::RenderPipeline,
     /// Silhouette-mask pipeline (writes 1.0 where the blob is hit, no depth).
     mask_pipeline: wgpu::RenderPipeline,
+    /// The fog pass ([`march_fog`](Self::march_fog)): `fs_fog` into the
+    /// half-resolution fog and distance targets.
+    fog_pipeline: wgpu::RenderPipeline,
+    /// The half-resolution fog targets, one per view size (a frame draws the
+    /// window, a docked Game panel and render targets at different sizes),
+    /// and which of them every bind group carries now.
+    fog_slots: Vec<FogSlot>,
+    fog_active: Option<usize>,
+    /// Whether the bound fog targets hold this view's fog: set by
+    /// [`march_fog`](Self::march_fog), cleared whenever a view's frame
+    /// targets are bound, and stamped into the globals as `fog_cache.x`.
+    fog_ready: std::sync::atomic::AtomicBool,
+    /// What the fog bindings hold while no fog pass has run: one texel.
+    fog_fallback: wgpu::Buffer,
+    /// Whether [`march_fog`](Self::march_fog) runs at all (on unless a test
+    /// or a probe compares against every fragment marching its own).
+    fog_pass_on: bool,
+    /// Draw every fragment that reads the fog pass magenta.
+    fog_debug: bool,
     /// Kept so [`set_custom_field`](Self::set_custom_field) can rebuild the
     /// pipelines with spliced Field Shape code (the bind layout never changes).
     pipeline_layout: wgpu::PipelineLayout,
@@ -795,6 +829,8 @@ impl Raymarch {
                     },
                     count: None,
                 },
+                // The half-resolution fog (`fog_cached`).
+                fog_buf_entry(11),
             ],
         });
 
@@ -804,7 +840,7 @@ impl Raymarch {
             immediate_size: 0,
         });
 
-        let (pipeline, mask_pipeline) = Self::build_pipelines(gpu, &layout, &module);
+        let (pipeline, mask_pipeline, fog_pipeline) = Self::build_pipelines(gpu, &layout, &module);
         let env = crate::env::EnvMap::new(device);
         let env_pipeline = Self::build_env_pipeline(gpu, &layout, &module);
 
@@ -860,9 +896,10 @@ impl Raymarch {
         let prime_fallback = make_prime_fallback(gpu);
         // No bake yet: a 4x1x1 of zeroes, so the binding is valid and reads black.
         let gi = crate::gi::GiVolume::empty(gpu);
+        let fog_fallback = fog_fallback_buffer(device);
         let bind = make_bind(
             device, &bind_layout, &globals_buf, &dist_tex, &color_tex, &sampler, &terrain_tex,
-            &tile_sampler, &tile_sampler_nearest, &sky_tex, &prime_fallback, &gi.tex,
+            &tile_sampler, &tile_sampler_nearest, &sky_tex, &prime_fallback, &gi.tex, &fog_fallback,
         );
         let field_layout = field_bind_layout(device);
         let scene_fallback = crate::ssr::SceneHistory::empty(device);
@@ -870,12 +907,19 @@ impl Raymarch {
         let field_bind = make_field_bind(
             device, &field_layout, &globals_buf, &dist_tex, &color_tex, &sampler, &gi.tex,
             &prime_fallback, env.view(), env.sampler(), &scene_fallback.0, &scene_fallback.1,
-            &probe_fallback.0, &probe_fallback.1,
+            &probe_fallback.0, &probe_fallback.1, &fog_fallback,
         );
 
         Self {
             pipeline,
             mask_pipeline,
+            fog_pipeline,
+            fog_slots: Vec::new(),
+            fog_active: None,
+            fog_ready: std::sync::atomic::AtomicBool::new(false),
+            fog_fallback,
+            fog_pass_on: true,
+            fog_debug: false,
             pipeline_layout: layout,
             globals_buf,
             bind_layout,
@@ -960,9 +1004,10 @@ impl Raymarch {
             label: Some("raymarch"),
             source: wgpu::ShaderSource::Wgsl(src.into()),
         });
-        let (pipeline, mask_pipeline) = Self::build_pipelines(gpu, &self.pipeline_layout, &module);
+        let (pipeline, mask_pipeline, fog_pipeline) = Self::build_pipelines(gpu, &self.pipeline_layout, &module);
         self.pipeline = pipeline;
         self.mask_pipeline = mask_pipeline;
+        self.fog_pipeline = fog_pipeline;
         // …and the capture, from the same module: a spliced Sky shader that did
         // not reach the environment map would leave every reflection showing
         // the previous sky.
@@ -1009,7 +1054,7 @@ impl Raymarch {
         gpu: &Gpu,
         layout: &wgpu::PipelineLayout,
         module: &wgpu::ShaderModule,
-    ) -> (wgpu::RenderPipeline, wgpu::RenderPipeline) {
+    ) -> (wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::RenderPipeline) {
         let device = &gpu.device;
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("raymarch"),
@@ -1075,7 +1120,29 @@ impl Raymarch {
             multiview_mask: None,
             cache: gpu.pipeline_cache.as_ref(),
         });
-        (pipeline, mask_pipeline)
+        // The fog pass: no depth, two targets (the fog, the distance marched).
+        let fog_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("raymarch-fog"),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some("vs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some("fs_fog"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState { format: FOG_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+            }),
+            multiview_mask: None,
+            cache: gpu.pipeline_cache.as_ref(),
+        });
+        (pipeline, mask_pipeline, fog_pipeline)
     }
 
     /// Splice (or clear, with `None`) the scene's Field Shape code into this
@@ -1132,6 +1199,7 @@ impl Raymarch {
     /// Three callers each remembering to rebuild it is the kind of rule that
     /// holds until the fourth one.
     fn rebuild_binds(&mut self, device: &wgpu::Device) {
+        let fog = self.fog_active.and_then(|i| self.fog_slots.get(i)).map_or(&self.fog_fallback, |f| &f.buf);
         self.field_bind = make_field_bind(
             device,
             &self.field_layout,
@@ -1147,6 +1215,7 @@ impl Raymarch {
             self.scene_view.as_ref().map_or(&self.scene_fallback.1, |s| &s.1),
             self.probe_view.as_ref().map_or(&self.probe_fallback.0, |s| &s.0),
             self.probe_view.as_ref().map_or(&self.probe_fallback.1, |s| &s.1),
+            fog,
         );
         self.bind = make_bind(
             device,
@@ -1161,6 +1230,7 @@ impl Raymarch {
             &self.sky_tex,
             &self.prime_fallback,
             &self.gi.tex,
+            fog,
         );
         self.bind_primed = self.prime_view.as_ref().map(|v| {
             make_bind(
@@ -1176,6 +1246,7 @@ impl Raymarch {
                 &self.sky_tex,
                 v,
                 &self.gi.tex,
+                fog,
             )
         });
     }
@@ -1265,6 +1336,7 @@ impl Raymarch {
     /// (Self::draw_into) is unaffected: offscreen previews and probes stay
     /// unprimed with their own cleared depth.
     pub fn set_depth_prime(&mut self, gpu: &Gpu, view: Option<&wgpu::TextureView>) {
+        self.fog_ready.store(false, std::sync::atomic::Ordering::Relaxed);
         self.prime_view = view.cloned();
         self.rebuild_binds(&gpu.device);
     }
@@ -1283,6 +1355,8 @@ impl Raymarch {
         prime: Option<&wgpu::TextureView>,
         scene: Option<(&wgpu::TextureView, &wgpu::Sampler)>,
     ) {
+        // A new view: whatever fog the targets hold is another view's.
+        self.fog_ready.store(false, std::sync::atomic::Ordering::Relaxed);
         self.prime_view = prime.cloned();
         self.scene_view = scene.map(|(v, s)| (v.clone(), s.clone()));
         self.rebuild_binds(&gpu.device);
@@ -1927,6 +2001,13 @@ impl Raymarch {
     /// it stays consistent under the floating origin. Callers only provide world
     /// data.
     fn patch_globals(&self, globals: &mut RaymarchGlobals) {
+        let fog = self.fog_active.and_then(|i| self.fog_slots.get(i));
+        globals.fog_cache = match fog {
+            Some(f) if self.fog_ready.load(std::sync::atomic::Ordering::Relaxed) => {
+                [if self.fog_debug { 2.0 } else { 1.0 }, f.size.0 as f32, f.size.1 as f32, f.stride as f32]
+            }
+            _ => [0.0; 4],
+        };
         let mut count = 0;
         for i in 0..MAX_VOLUMES {
             // The atlas region this instance samples: its own slot, or the one
@@ -2077,6 +2158,99 @@ impl Raymarch {
         gpu.queue.submit([encoder.finish()]);
     }
 
+    /// March this view's volumetric fog once per half-resolution texel, from
+    /// the camera to the depth prepass's surface or out through the sky, for
+    /// every surface and the sky to read instead of marching their own.
+    ///
+    /// Lit volumetric fog marched per fragment was most of a 1080p frame: at
+    /// sixteen steps, twenty milliseconds of a thirty-millisecond frame on a
+    /// mid-range card, paid once for the sky and again for every surface. Here
+    /// it is paid once for four pixels. A fragment the prepass has no surface
+    /// for at its depth (raymarched matter, glass, particles) still marches
+    /// its own, so nothing is drawn with the fog of something else.
+    ///
+    /// Call it after the depth prepass is bound
+    /// ([`bind_frame_targets`](Self::bind_frame_targets)) and before the
+    /// passes that shade; `size` is the prepass's. Without a prepass it does
+    /// nothing, and every fragment marches as before.
+    pub fn march_fog(&mut self, gpu: &Gpu, globals: RaymarchGlobals, size: (u32, u32)) {
+        if !self.fog_pass_on || self.prime_view.is_none() || size.0 == 0 || size.1 == 0 {
+            return;
+        }
+        let half = (size.0.div_ceil(2), size.1.div_ceil(2));
+        let slot = match self.fog_slots.iter().position(|f| f.size == half) {
+            Some(i) => i,
+            None => {
+                // A few view sizes at most; a resized window replaces the
+                // oldest rather than piling up targets.
+                if self.fog_slots.len() >= 4 {
+                    self.fog_slots.remove(0);
+                    self.fog_active = None;
+                }
+                self.fog_slots.push(FogSlot::new(&gpu.device, half));
+                self.fog_slots.len() - 1
+            }
+        };
+        if self.fog_active != Some(slot) {
+            self.fog_active = Some(slot);
+            self.rebuild_binds(&gpu.device);
+        }
+        let Some(bind) = self.bind_primed.as_ref() else { return };
+        self.fog_ready.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.upload_globals(gpu, globals);
+        let f = &self.fog_slots[slot];
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raymarch-fog") });
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("raymarch-fog"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &f.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rp.set_pipeline(&self.fog_pipeline);
+            // The buffer this pass's copy fills is bound here too; the march
+            // does not read it.
+            rp.set_bind_group(0, bind, &[]);
+            rp.draw(0..3, 0..1);
+        }
+        encoder.copy_texture_to_buffer(
+            f.tex.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &f.buf,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(f.stride * FOG_TEXEL),
+                    rows_per_image: Some(f.size.1),
+                },
+            },
+            wgpu::Extent3d { width: f.size.0, height: f.size.1, depth_or_array_layers: 1 },
+        );
+        gpu.queue.submit([encoder.finish()]);
+        // From here on the globals say the fog is there to read.
+        self.fog_ready.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.upload_globals(gpu, globals);
+    }
+
+    /// Turn the fog pass off (every fragment marches its own fog, as it did
+    /// before the pass) or back on: for comparing the two.
+    pub fn set_fog_pass(&mut self, on: bool) {
+        self.fog_pass_on = on;
+    }
+
+    /// Draw every surface and sky pixel that takes the fog pass's march
+    /// magenta, and leave those that march their own as they are: what shows
+    /// how much of a frame the pass serves.
+    pub fn set_fog_debug(&mut self, on: bool) {
+        self.fog_debug = on;
+    }
+
     /// Render the SDF matter's silhouette as 1.0 into a single-channel mask (clearing
     /// it first) — the selection-outline source for the blob.
     pub fn draw_mask(&self, gpu: &Gpu, mask: &wgpu::TextureView, globals: RaymarchGlobals) {
@@ -2210,6 +2384,8 @@ pub(crate) fn field_bind_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout 
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
+            // The half-resolution fog (`fog_cached`).
+            fog_buf_entry(12),
         ],
     })
 }
@@ -2244,6 +2420,7 @@ pub(crate) fn make_field_bind(
     scene_samp: &wgpu::Sampler,
     probes: &wgpu::TextureView,
     probes_samp: &wgpu::Sampler,
+    fog: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     let dist_view = dist.create_view(&wgpu::TextureViewDescriptor::default());
     let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
@@ -2264,6 +2441,7 @@ pub(crate) fn make_field_bind(
             wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(scene_samp) },
             wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(probes) },
             wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::Sampler(probes_samp) },
+            wgpu::BindGroupEntry { binding: 12, resource: fog.as_entire_binding() },
         ],
     })
 }
@@ -2295,6 +2473,7 @@ fn make_bind(
     sky: &wgpu::Texture,
     prime: &wgpu::TextureView,
     gi: &wgpu::Texture,
+    fog: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     let dist_view = dist.create_view(&wgpu::TextureViewDescriptor::default());
     let gi_view = gi.create_view(&wgpu::TextureViewDescriptor::default());
@@ -2319,7 +2498,76 @@ fn make_bind(
             wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&sky_view) },
             wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(prime) },
             wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&gi_view) },
+            wgpu::BindGroupEntry { binding: 11, resource: fog.as_entire_binding() },
         ],
+    })
+}
+
+/// The half-resolution fog as the fog pass writes it, one texel packed as
+/// `fog_pack` (field.wgsl) says.
+const FOG_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Uint;
+/// Bytes in one packed fog texel.
+const FOG_TEXEL: u32 = 16;
+
+/// One view size's fog: half the view's size, rounded up. The pass renders
+/// into the texture and the frame copies it into the buffer the shading
+/// passes read: a raster surface's sampled textures are all spoken for.
+struct FogSlot {
+    size: (u32, u32),
+    /// Texels in a row of the buffer: the width, padded to what a copy out
+    /// of a texture needs.
+    stride: u32,
+    tex: wgpu::Texture,
+    view: wgpu::TextureView,
+    buf: wgpu::Buffer,
+}
+
+impl FogSlot {
+    fn new(device: &wgpu::Device, size: (u32, u32)) -> Self {
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT / FOG_TEXEL;
+        let stride = size.0.div_ceil(align) * align;
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("raymarch-fog"),
+            size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FOG_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raymarch-fog"),
+            size: (stride * size.1 * FOG_TEXEL) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self { size, stride, tex, view, buf }
+    }
+}
+
+/// The fog binding, in both layouts that carry it.
+fn fog_buf_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+/// One texel's worth of fog buffer, for a frame no fog pass has run in.
+pub(crate) fn fog_fallback_buffer(device: &wgpu::Device) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("raymarch-fog-fallback"),
+        size: FOG_TEXEL as u64,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
     })
 }
 

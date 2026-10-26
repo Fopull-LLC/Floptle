@@ -183,6 +183,10 @@ struct Globals {
     // Appended at the END, like everything above it.
     atmo_cloud: array<vec4<f32>, 4>,
     atmo_sun: array<vec4<f32>, 4>,
+    // x = 1 when this view's volumetric fog was marched at half resolution
+    // (`fog_cached`), 2 to draw what reads it magenta; 0 and every fragment
+    // marches its own. y, z = its size, w = its row stride. Appended at the END.
+    fog_cache: vec4<f32>,
 };
 
 // The triplanar scale multiplier for palette slot `slot`.
@@ -1195,6 +1199,37 @@ fn fog_inscatter(p: vec3<f32>, rd: vec3<f32>, amb: vec3<f32>, pix: vec2<u32>) ->
     return lit;
 }
 
+// The span of a camera ray along `rd`, out to `t_max`, inside the fog layer:
+// below the top of its falloff band, where `vol_fog_layer` is above zero. Past
+// it the layer is exactly zero, so marching only this span changes nothing but
+// where the steps fall. (x, y) with y <= x for a ray that never enters it.
+fn fog_layer_span(rd: vec3<f32>, t_max: f32) -> vec2<f32> {
+    let top = G.vol_fog_a.y + max(G.vol_fog_a.z, 1e-3);
+    if (G.fog_body.w > 0.0) {
+        // A round world: inside the sphere of the band's top.
+        let r = G.fog_body.w + top;
+        let oc = -G.fog_body.xyz;
+        let b = dot(oc, rd);
+        let c = dot(oc, oc) - r * r;
+        let disc = b * b - c;
+        if (disc <= 0.0) {
+            return vec2<f32>(0.0, 0.0);
+        }
+        let h = sqrt(disc);
+        return vec2<f32>(max(-b - h, 0.0), min(-b + h, t_max));
+    }
+    // A flat one: below a height, `rd.y * t + camera height`.
+    let y0 = G.vol_fog_b.z;
+    if (abs(rd.y) < 1e-6) {
+        return select(vec2<f32>(0.0, 0.0), vec2<f32>(0.0, t_max), y0 < top);
+    }
+    let t_top = (top - y0) / rd.y;
+    if (rd.y > 0.0) {
+        return vec2<f32>(0.0, min(t_top, t_max));
+    }
+    return vec2<f32>(max(t_top, 0.0), t_max);
+}
+
 // One volumetric-fog ray: single scattering from the camera to `t_max` along
 // `rd`. The caller composites `behind * transmittance + scattered`.
 //
@@ -1214,8 +1249,14 @@ fn fog_march(rd: vec3<f32>, t_max: f32, pix: vec2<u32>) -> FogMarch {
     if (t_max <= 0.0) {
         return out;
     }
+    // Only the part of the ray inside the layer has any media in it: outside
+    // it every step was skipped, and the steps inside were that much coarser.
+    let span = fog_layer_span(rd, t_max);
+    if (span.y <= span.x) {
+        return out;
+    }
     let steps = u32(clamp(G.vol_fog_c.z, 2.0, 64.0));
-    let dt = t_max / f32(steps);
+    let dt = (span.y - span.x) / f32(steps);
     let jitter = ign(pix); // per-pixel start offset — the banding hider
     let amt = clamp(G.vol_fog_c.x, 0.0, 1.0);
     let gain = max(G.vol_fog_c.x, 1.0); // past 1 the slider brightens rather than blends
@@ -1229,7 +1270,7 @@ fn fog_march(rd: vec3<f32>, t_max: f32, pix: vec2<u32>) -> FogMarch {
     let stride = fog_noise_stride(dt);
     var noise = 1.0;
     for (var i = 0u; i < steps; i = i + 1u) {
-        let p = rd * ((f32(i) + jitter) * dt);
+        let p = rd * (span.x + (f32(i) + jitter) * dt);
         let layer = vol_fog_layer(p);
         if (layer <= 1e-5) {
             continue;
@@ -1315,6 +1356,24 @@ fn fog_sky(color: vec3<f32>, rd: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
         }
         return mix(color, G.fog_color.rgb, clamp(f, 0.0, 1.0));
     }
+    // Marched once for this pixel's neighbourhood by the fog pass, when it ran.
+    let c = fog_cached(pix, -1.0);
+    if (c.w >= 0.0) {
+        if (G.fog_cache.x > 1.5) {
+            return vec3<f32>(1.0, 0.0, 1.0); // `Raymarch::set_fog_debug`
+        }
+        return color * c.w + c.rgb;
+    }
+    let m = fog_sky_march(rd, pix);
+    return color * m.transmittance + m.scattered;
+}
+
+// The volumetric fog over a sky ray: from the camera to the "max distance"
+// fence, or to where the ray leaves the layer.
+fn fog_sky_march(rd: vec3<f32>, pix: vec2<u32>) -> FogMarch {
+    var none: FogMarch;
+    none.scattered = vec3<f32>(0.0);
+    none.transmittance = 1.0;
     var t_max = max(G.fog_params.y, 1.0); // the "max distance" fence
     if (G.fog_body.w > 0.0) {
         // A round world: the layer is a shell, and a sky ray leaves it where
@@ -1326,11 +1385,11 @@ fn fog_sky(color: vec3<f32>, rd: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
         let perp = oc - rd * b;
         let disc = top * top - dot(perp, perp);
         if (disc < 0.0) {
-            return color;
+            return none;
         }
         let far = -b + sqrt(disc);
         if (far <= 0.0) {
-            return color;
+            return none;
         }
         t_max = min(t_max, far);
     } else if (rd.y > 1e-3) {
@@ -1339,8 +1398,62 @@ fn fog_sky(color: vec3<f32>, rd: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
         let top = G.vol_fog_a.y + G.vol_fog_a.z;
         t_max = min(t_max, max((top - G.vol_fog_b.z) / rd.y, 0.0));
     }
-    let m = fog_march(rd, t_max, pix);
-    return color * m.transmittance + m.scattered;
+    return fog_march(rd, t_max, pix);
+}
+
+// One half-resolution fog texel as the fog pass stores it: the scattered
+// light as three floats, and the distance it was marched to (negative for the
+// sky) with the low twelve bits of its mantissa giving way to the
+// transmittance in twelve bits. The distance keeps 1 part in 2,000, far finer
+// than `fog_cached` compares it to. Plain bits, not halves: the OpenGL
+// backend cannot write half-float packing.
+fn fog_pack(m: FogMarch, dist: f32) -> vec4<u32> {
+    let t = u32(round(clamp(m.transmittance, 0.0, 1.0) * 4095.0));
+    return vec4<u32>(
+        bitcast<u32>(m.scattered.r),
+        bitcast<u32>(m.scattered.g),
+        bitcast<u32>(m.scattered.b),
+        (bitcast<u32>(dist) & 0xFFFFF000u) | t,
+    );
+}
+
+// The half-resolution volumetric fog the fog pass marched (`fs_fog`), read
+// for a fragment `dist` from the camera (negative: the sky): rgb scattered,
+// a transmittance. Of the four texels around the pixel, only those the pass
+// marched to this same depth are blended, so an edge never takes the fog of
+// what is behind or in front of it; a < 0 when none is, and the caller
+// marches its own. Every surface and the sky read one march per four pixels
+// instead of each fragment marching the whole ray. `fog_buf` is the host's:
+// `fog_cache` = (ready, width, height, row stride) of the texels in it.
+fn fog_cached(pix: vec2<u32>, dist: f32) -> vec4<f32> {
+    let none = vec4<f32>(-1.0);
+    if (G.fog_cache.x < 0.5) {
+        return none;
+    }
+    let dims = vec2<i32>(i32(G.fog_cache.y), i32(G.fog_cache.z));
+    let stride = u32(G.fog_cache.w);
+    let f = vec2<f32>(pix) * 0.5;
+    let base = vec2<i32>(floor(f));
+    let w = fract(f);
+    var acc = vec4<f32>(0.0);
+    var wsum = 0.0;
+    for (var k = 0; k < 4; k = k + 1) {
+        let o = vec2<i32>(k & 1, k >> 1u);
+        let c = vec2<u32>(clamp(base + o, vec2<i32>(0), dims - vec2<i32>(1)));
+        let t = fog_buf[c.y * stride + c.x];
+        let td = bitcast<f32>(t.w & 0xFFFFF000u);
+        let same = select(abs(td - dist) <= 0.04 * dist + 0.05, td < 0.0, dist < 0.0);
+        if (!same) {
+            continue;
+        }
+        let bw = select(1.0 - w.x, w.x, o.x == 1) * select(1.0 - w.y, w.y, o.y == 1);
+        acc += vec4<f32>(bitcast<f32>(t.x), bitcast<f32>(t.y), bitcast<f32>(t.z), f32(t.w & 0xFFFu) / 4095.0) * bw;
+        wsum += bw;
+    }
+    if (wsum < 0.05) {
+        return none;
+    }
+    return acc / wsum;
 }
 
 fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
@@ -1356,9 +1469,21 @@ fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
     let amp = G.fog_color.w;
     let dith = select(bayer4(pix), ign(pix), G.fog_params.w > 0.5);
     if (G.vol_fog_b.w > 0.5) {
-        // VOLUMETRIC: march camera → surface, scattering light in as it goes.
+        // VOLUMETRIC: march camera → surface, scattering light in as it goes —
+        // or read what the fog pass marched for a texel beside this one at
+        // the same depth.
         let dist = length(pos);
-        let m = fog_march(pos / max(dist, 1e-4), dist, pix);
+        var m: FogMarch;
+        let c = fog_cached(pix, dist);
+        if (c.w >= 0.0) {
+            if (G.fog_cache.x > 1.5) {
+                return vec3<f32>(1.0, 0.0, 1.0); // `Raymarch::set_fog_debug`
+            }
+            m.scattered = c.rgb;
+            m.transmittance = c.w;
+        } else {
+            m = fog_march(pos / max(dist, 1e-4), dist, pix);
+        }
         // The dither scales the whole result rather than nudging the blend
         // factor: a clear pixel has nothing to break up, and an additive nudge
         // there would darken it (there is no fog colour left to mix toward once

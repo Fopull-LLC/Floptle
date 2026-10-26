@@ -354,3 +354,73 @@ fn the_sun_low_in_thick_air_keeps_its_disc_and_warms() {
     let warm = |c: [f32; 3], s: [f32; 3]| (c[0] - s[0]) - (c[2] - s[2]);
     assert!(warm(air_disc, air_sky) > 0.05, "the low sun is not warmer than white: {air_disc:?} over {air_sky:?}");
 }
+
+/// Lit volumetric fog over a field of blocks, drawn with the fog marched once
+/// per four pixels and drawn with every fragment marching its own: the same
+/// picture to within two steps of 8-bit colour on average, and 95 % or more
+/// of the ground taking the shared march (the rest are the blocks' edges,
+/// where no texel beside a pixel is at its depth). The fog is thick enough that
+/// marching it is most of what every pixel shows.
+#[test]
+fn volumetric_fog_marched_once_per_four_pixels_draws_the_same_picture() {
+    use floptle_core::math::Vec3;
+    // `None` with no GPU; `pass` marches the fog once for the view, `debug`
+    // paints what reads it magenta.
+    let shot = |pass: bool, debug: bool| -> Option<Vec<u8>> {
+        let mut ed = crate::offscreen::test_editor_with_gpu()?;
+        let w = &mut ed.world;
+        let floor = w.spawn();
+        w.insert(floor, Transform { translation: DVec3::new(0.0, -1.0, -40.0), scale: Vec3::new(200.0, 1.0, 200.0), ..Transform::IDENTITY });
+        w.insert(floor, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [0.4, 0.5, 0.3] });
+        for k in 0..12 {
+            let b = w.spawn();
+            let (x, z) = ((k % 4) as f64 * 9.0 - 13.0, -8.0 - (k / 4) as f64 * 14.0);
+            w.insert(b, Transform { translation: DVec3::new(x, 1.0, z), scale: Vec3::new(2.0, 3.0 + k as f32 * 0.4, 2.0), ..Transform::IDENTITY });
+            w.insert(b, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [0.8, 0.75, 0.7] });
+        }
+        let lighting = w.spawn();
+        w.insert(
+            lighting,
+            floptle_core::Light {
+                fog: true,
+                fog_color: [0.85, 0.85, 0.9],
+                fog_volumetric: true,
+                fog_density: 0.06,
+                fog_height: 6.0,
+                fog_falloff: 4.0,
+                fog_noise: 0.5,
+                fog_light: 1.0,
+                fog_steps: 16,
+                ..Default::default()
+            },
+        );
+        let rm = ed.raymarch.as_mut()?;
+        rm.set_fog_pass(pass);
+        rm.set_fog_debug(debug);
+        // Looking down the field, the ground filling the frame.
+        let cam = RenderCamera::new(
+            DVec3::new(0.0, 6.0, 6.0),
+            Quat::from_rotation_x(-0.45),
+            Projection::Perspective { fov_y: 1.0, near: 0.05, far: 1000.0 },
+        );
+        let tex = crate::capture::render_frame_texture(&mut ed, &cam, None, 160, 90, u32::MAX, false, false)?;
+        crate::offscreen::read_back_frame(ed.gpu.as_ref()?, &tex)
+    };
+    let (Some(shared), Some(own), Some(served)) = (shot(true, false), shot(false, false), shot(true, true)) else { return };
+    let n = shared.len() / 4;
+    let px = |f: &[u8], i: usize| [f[i * 4], f[i * 4 + 1], f[i * 4 + 2]];
+    let mean = (0..n)
+        .map(|i| (0..3).map(|c| (px(&shared, i)[c] as i32 - px(&own, i)[c] as i32).abs()).max().unwrap() as f64)
+        .sum::<f64>()
+        / n as f64;
+    let fogged = (0..n).filter(|&i| px(&own, i) != px(&shared, i) || px(&served, i) == [255, 0, 255]).count();
+    assert!(fogged == n || mean > 0.0, "fixture: the shared march changed nothing");
+    assert!(mean <= 2.0, "marched once per four pixels, the picture is {mean:.2}/255 from every pixel marching its own");
+    // The ground below the horizon: above it are the sky (fogged by the
+    // raymarch pass, which a scene of meshes alone does not draw) and the far
+    // ground at a grazing angle, where neighbouring pixels are too far apart
+    // in depth to share a march.
+    let ground = (n / 5)..n;
+    let magenta = ground.clone().filter(|&i| px(&served, i) == [255, 0, 255]).count();
+    assert!(magenta * 100 >= ground.len() * 95, "only {magenta} of {} ground pixels took the shared march", ground.len());
+}

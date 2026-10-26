@@ -1383,7 +1383,10 @@ impl Editor {
         let step = self.game_tick.step;
         let change = self.tick_load.record(ticks, spent_ms, step, frame_s);
         let overloaded = self.tick_load.overloaded();
-        self.script_host.profile().borrow_mut().set_overloaded(overloaded);
+        let mut profile = self.script_host.profile().borrow_mut();
+        profile.set_overloaded(overloaded);
+        profile.set_ticks(ticks);
+        drop(profile);
         if change == Some(floptle_core::LoadChange::Entered) && !self.tick_overload_said {
             // The breakdown comes from the profiler. If nobody had it on, turn
             // it on and give it a second of frames to measure before speaking.

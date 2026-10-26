@@ -140,3 +140,27 @@ fn a_sleeping_assembly_rides_its_ground_and_wakes_when_the_ground_goes() {
     assert!(w.compounds[ci].pos.y < y - 0.5, "and fall: {y} -> {}", w.compounds[ci].pos.y);
     let _ = DVec3::ZERO;
 }
+
+/// A small force held on a parked craft every step, as an idle thruster,
+/// wind or buoyancy holds one: the craft falls asleep as it would without
+/// it, stays asleep while the force stays the same, and wakes the step the
+/// force changes. Each held force used to wake it, so it never slept.
+#[test]
+fn a_parked_craft_sleeps_under_a_held_force_and_wakes_when_it_changes() {
+    let (mut w, ci, _) = parked();
+    let hold = Vec3::new(0.3, 0.5, 0.0);
+    let mut slept = None;
+    for k in 0..240 {
+        w.compounds[ci].apply_force(hold);
+        w.step(DT);
+        if slept.is_none() && w.compounds[ci].asleep {
+            slept = Some(k);
+        }
+    }
+    let slept = slept.expect("held by a small force, the craft never fell asleep");
+    assert!(slept < 120, "held by a small force, the craft slept only at step {slept}");
+    assert!(w.compounds[ci].asleep, "asleep under the same force, it woke");
+    w.compounds[ci].apply_force(hold * 1.5);
+    w.step(DT);
+    assert!(!w.compounds[ci].asleep, "the force changed and it slept on");
+}

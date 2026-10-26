@@ -1819,6 +1819,7 @@ impl Raster {
             &empty_scene_samp,
             &empty_probes,
             &empty_probes_samp,
+            &crate::raymarch::fog_fallback_buffer(device),
         );
 
         let instance_cap = 16;

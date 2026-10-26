@@ -234,7 +234,9 @@ impl PhysicsWorld {
                     c.orient = (Quat::from_scaled_axis(rot) * c.orient).normalize();
                 }
                 c.ang_vel += rot / dt;
-                if d.length_squared() > 1e-12 || rot.length_squared() > 1e-12 {
+                // Only a sleeper is woken: an awake one's count is its
+                // motion's to judge (see `PhysicsWorld::settle_group`).
+                if c.asleep && (d.length_squared() > 1e-12 || rot.length_squared() > 1e-12) {
                     c.wake(crate::body::WakeReason::Joint);
                 }
                 return;
@@ -259,7 +261,7 @@ impl PhysicsWorld {
         let rot = b.free_spin(inv_i * r.cross(lin));
         b.turn(rot);
         b.ang_vel += rot / dt;
-        if lock.length_squared() > 1e-12 || rot.length_squared() > 1e-12 {
+        if b.asleep && (lock.length_squared() > 1e-12 || rot.length_squared() > 1e-12) {
             b.wake_for(crate::body::WakeReason::Joint);
         }
     }
@@ -278,7 +280,7 @@ impl PhysicsWorld {
                     c.orient = (Quat::from_scaled_axis(rot) * c.orient).normalize();
                 }
                 c.ang_vel += rot / dt;
-                if rot.length_squared() > 1e-12 {
+                if c.asleep && rot.length_squared() > 1e-12 {
                     c.wake(crate::body::WakeReason::Joint);
                 }
                 return;
@@ -292,7 +294,7 @@ impl PhysicsWorld {
         let rot = b.free_spin(b.world_inv_inertia() * ang);
         b.turn(rot);
         b.ang_vel += rot / dt;
-        if rot.length_squared() > 1e-12 {
+        if b.asleep && rot.length_squared() > 1e-12 {
             b.wake_for(crate::body::WakeReason::Joint);
         }
     }
@@ -310,7 +312,7 @@ impl PhysicsWorld {
                 let dw = c.world_inv_inertia() * r.cross(j);
                 c.vel += dv;
                 c.ang_vel += dw;
-                if dv.length_squared() > 1e-10 || dw.length_squared() > 1e-10 {
+                if c.asleep && (dv.length_squared() > 1e-10 || dw.length_squared() > 1e-10) {
                     c.wake(crate::body::WakeReason::Joint);
                 }
                 return;
@@ -331,7 +333,7 @@ impl PhysicsWorld {
         b.vel += dv;
         let dw = b.free_spin(b.world_inv_inertia() * r.cross(j));
         b.ang_vel += dw;
-        if dv.length_squared() > 1e-10 || dw.length_squared() > 1e-10 {
+        if b.asleep && (dv.length_squared() > 1e-10 || dw.length_squared() > 1e-10) {
             b.wake_for(crate::body::WakeReason::Joint);
         }
     }
@@ -970,7 +972,7 @@ impl PhysicsWorld {
                     let c = &mut self.compounds[i];
                     let dw = c.world_inv_inertia() * ang;
                     c.ang_vel += dw;
-                    if dw.length_squared() > 1e-10 {
+                    if c.asleep && dw.length_squared() > 1e-10 {
                         c.wake(crate::body::WakeReason::Joint);
                     }
                 }
@@ -980,7 +982,7 @@ impl PhysicsWorld {
                 if b.live() && !b.kinematic && !b.driven && b.rotates {
                     let dw = b.free_spin(b.world_inv_inertia() * ang);
                     b.ang_vel += dw;
-                    if dw.length_squared() > 1e-10 {
+                    if b.asleep && dw.length_squared() > 1e-10 {
                         b.wake_for(crate::body::WakeReason::Joint);
                     }
                 }

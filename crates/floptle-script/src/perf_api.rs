@@ -89,6 +89,7 @@ pub fn install(lua: &Lua, profile: &SharedProfile, sampler: &Rc<Sampler>) -> mlu
                 if let Some(why) = r.paced {
                     row.set("paced", why)?;
                 }
+                row.set("ticks", r.ticks)?;
                 list.raw_set(i + 1, row)?;
             }
             Ok(list)

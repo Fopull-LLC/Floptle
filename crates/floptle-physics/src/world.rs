@@ -1875,8 +1875,13 @@ impl PhysicsWorld {
             let c = &mut self.compounds[ci];
             let moving = c.vel.length_squared() > SLEEP_LINEAR_SPEED * SLEEP_LINEAR_SPEED
                 || c.ang_vel.length_squared() > SLEEP_LINEAR_SPEED * SLEEP_LINEAR_SPEED;
-            let pushed = c.force != Vec3::ZERO || c.torque != Vec3::ZERO;
+            // What is held on it now against what it fell asleep under: the
+            // same push is one its support already carries.
+            let differs = |now: Vec3, rest: Vec3| (now - rest).length() > 0.01 * rest.length() + 1e-6;
+            let pushed = differs(c.force, c.rest_push.0) || differs(c.torque, c.rest_push.1);
             if !moving && !pushed {
+                c.force = Vec3::ZERO;
+                c.torque = Vec3::ZERO;
                 c.prev_pos = c.pos;
                 c.prev_orient = c.orient;
                 c.vel = Vec3::ZERO;
@@ -1907,6 +1912,7 @@ impl PhysicsWorld {
             c.vel += (g + c.force / c.mass) * dt;
             let ang_acc = c.world_inv_inertia() * c.torque;
             c.ang_vel += ang_acc * dt;
+            c.last_push = (c.force, c.torque);
             c.force = Vec3::ZERO;
             c.torque = Vec3::ZERO;
         }
@@ -2185,12 +2191,12 @@ impl PhysicsWorld {
         if slow || Self::compound_barely_moved(c, dt) {
             c.sleep_time += dt;
             c.wake = c.wake.counting();
-            if c.sleep_time >= SLEEP_SETTLE_TIME {
+            if c.sleep_time >= SLEEP_SETTLE_TIME && !self.joined(crate::joints::Link::Compound(ci)) {
                 self.put_compound_to_sleep(ci);
             }
         } else {
+            c.wake = c.wake.or_own(c.grounded, c.sleep_time > 0.0);
             c.sleep_time = 0.0;
-            c.wake = c.wake.or_own(c.grounded);
         }
     }
 
@@ -2657,7 +2663,7 @@ impl PhysicsWorld {
             all_still &= pos.distance(from) < ball && angle < ball;
         }
         if !(all_still && supported) {
-            self.mark_awake(members, |was| was.or_own(supported));
+            self.mark_awake(members, |was| was.or_own(supported, t > 0.0));
             // Its count starts again, from where it is now.
             for &(k, _) in &awake {
                 self.settle_from[k].0 = Vec3::NAN;
@@ -2736,6 +2742,7 @@ impl PhysicsWorld {
         let c = &mut self.compounds[ci];
         c.asleep = true;
         c.wake = crate::body::WakeReason::Settling;
+        c.rest_push = c.last_push;
         c.sleep_time = 0.0;
         c.recheck_next = 0;
         c.recheck_time = 0.0;
@@ -3493,9 +3500,10 @@ impl PhysicsWorld {
             }
             b.sleep_time += dt;
             b.wake = b.wake.counting();
-            if b.sleep_time >= SLEEP_SETTLE_TIME {
+            if b.sleep_time >= SLEEP_SETTLE_TIME && !self.joined(crate::joints::Link::Body(bi)) {
                 // Stopped where it is: still by its count, it may end the
                 // step with a speed, and a sleeper with one wakes.
+                let b = &mut self.bodies[bi];
                 b.asleep = true;
                 b.vel = Vec3::ZERO;
                 b.ang_vel = Vec3::ZERO;
@@ -3507,9 +3515,16 @@ impl PhysicsWorld {
                 from.0 = Vec3::NAN;
             }
             let b = &mut self.bodies[bi];
+            b.wake = b.wake.or_own(b.grounded || was_grounded, b.sleep_time > 0.0);
             b.sleep_time = 0.0;
-            b.wake = b.wake.or_own(b.grounded || was_grounded);
         }
+    }
+
+    /// Whether `l` is held by a joint to another body or assembly: then it
+    /// falls asleep with the rest of its group (`settle_group`), never on
+    /// its own count.
+    fn joined(&self, l: crate::joints::Link) -> bool {
+        self.joints.iter().any(|j| !j.broken && j.b.is_some() && (j.a == l || j.b == Some(l)))
     }
 
     /// Whether body `bi` is within what a sleeper may move over the count of
@@ -4171,8 +4186,8 @@ impl PhysicsWorld {
                 }
             } else {
                 let b = &mut self.bodies[bi];
+                b.wake = b.wake.or_own(b.grounded, b.sleep_time > 0.0);
                 b.sleep_time = 0.0;
-                b.wake = b.wake.or_own(b.grounded);
             }
         }
     }
@@ -7042,6 +7057,31 @@ mod settle_tests {
             assert!(counted > 10, "round {round}: woken, it slept again after {counted} steps");
             assert_eq!(w.compounds[ci].wake, WakeReason::Settling, "round {round}: asleep, it still named a reason");
         }
+    }
+
+    /// Woken by a contact, counting toward sleep, and then moving on its own,
+    /// a craft says it is moving: the most recent cause, not the first. A rover woken by a joint
+    /// once and kept awake by its own rocking read `joint` for good.
+    #[test]
+    fn a_craft_moving_after_a_wake_says_it_is_moving() {
+        use crate::body::WakeReason;
+        let (mut w, [ci, ib]) = leaning();
+        w.compounds[ib].active = false;
+        for _ in 0..240 {
+            w.step(1.0 / 120.0);
+        }
+        assert!(w.compounds[ci].asleep, "fixture: the craft should be asleep");
+        // Woken, and counting toward sleep again: the contact is still what
+        // it is awake for.
+        w.compounds[ci].wake(WakeReason::Contact);
+        for _ in 0..5 {
+            w.step(1.0 / 120.0);
+        }
+        assert_eq!(w.compounds[ci].wake, WakeReason::Contact, "counting after a contact, it read {:?}", w.compounds[ci].wake);
+        w.compounds[ci].vel = Vec3::new(2.0, 0.0, 0.0);
+        w.step(1.0 / 120.0);
+        assert!(!w.compounds[ci].asleep, "fixture: set moving, the craft slept");
+        assert_eq!(w.compounds[ci].wake, WakeReason::Moving, "moving on its own after a contact, it read {:?}", w.compounds[ci].wake);
     }
 
     /// Woken during a step, a craft that was asleep counts its half second

@@ -63,7 +63,7 @@ pub enum WakeReason {
     Ground,
     /// A joint pulled it into place, or a motor or servo drives it.
     Joint,
-    /// A held force or torque.
+    /// The force or torque held on it changed while it slept.
     Force,
     /// An impulse.
     Impulse,
@@ -74,15 +74,19 @@ pub enum WakeReason {
 }
 
 impl WakeReason {
-    /// What it is awake for once its own motion has stopped its count: the
-    /// cause that set it going, kept until it settles again, or its own
-    /// motion (`Moving`, or `Unsupported` when nothing holds it up) when it
-    /// was settling.
-    pub fn or_own(self, supported: bool) -> Self {
+    /// What it is awake for once its own motion has stopped its count. Its
+    /// own motion (`Moving`, or `Unsupported` when nothing holds it up) when
+    /// it was `counting` toward sleep: the most recent cause, not the first,
+    /// or a rover woken by a joint once and kept awake by its own rocking
+    /// read `joint` for good. Not yet counting since something woke it, it
+    /// keeps that cause: the motion is that cause's doing.
+    pub fn or_own(self, supported: bool, counting: bool) -> Self {
         match self {
-            Self::Settling if supported => Self::Moving,
+            _ if counting => {
+                if supported { Self::Moving } else { Self::Unsupported }
+            }
             Self::Settling | Self::Moving | Self::Unsupported if !supported => Self::Unsupported,
-            Self::Unsupported => Self::Moving,
+            Self::Settling | Self::Unsupported => Self::Moving,
             other => other,
         }
     }

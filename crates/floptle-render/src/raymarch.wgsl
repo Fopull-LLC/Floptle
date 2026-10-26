@@ -39,6 +39,9 @@
 // otherwise): caps the march per pixel so rays stop at the nearest mesh instead
 // of marching the field behind it. Depth32Float binds as unfilterable float.
 @group(0) @binding(7) var prime_tex: texture_2d<f32>;
+// The half-resolution volumetric fog, packed (see `fog_cached` in field.wgsl).
+@group(0) @binding(11) var<storage, read> fog_buf: array<vec4<u32>>;
+
 
 // Baked GI probes (Matter::LightProbes): four texels per probe along x, holding
 // SH-L1 radiance plus the probe's own clearance. `textureLoad` only — the blend
@@ -791,6 +794,15 @@ fn fs(in: VOut) -> FsOut {
             drawn = true;
         }
     }
+    if (!drawn && pdims.x > 1u && textureLoad(prime_tex, min(vec2<u32>(in.clip.xy), pdims - vec2<u32>(1u)), 0).x < 1.0) {
+        // A mesh is in front of this pixel: the sky drawn here loses the depth
+        // test to it whatever its colour, so its atmosphere and its fog are not
+        // worth working out. Writing the depth turns off the early test that
+        // would have skipped this fragment on its own.
+        out.color = vec4<f32>(G.bg.rgb, 1.0);
+        out.depth = 1.0;
+        drawn = true;
+    }
     if (!drawn) {
         // Sanitize the sky: a NaN from a grazing-ray edge in the atmosphere math
         // resolves to 0 (black) in the attachment and flickers the sky. Any NaN
@@ -811,6 +823,30 @@ fn fs(in: VOut) -> FsOut {
 // Silhouette mask: 1.0 where the matter field is hit and in front of the camera,
 // discarded elsewhere. A post-pass edge-detects this into a selection outline that
 // hugs the true SDF silhouette (not a bounding circle).
+// The fog pass: the volumetric fog marched once per half-resolution texel,
+// from the camera to the opaque surface the depth prepass has at the texel's
+// first pixel, or out through the sky where it has none. What every surface
+// and the sky then read (`fog_cached`), packed as `fog_pack` says.
+@fragment
+fn fs_fog(in: VOut) -> @location(0) vec4<u32> {
+    let pdims = textureDimensions(prime_tex);
+    let px = min(vec2<u32>(in.clip.xy) * 2u, pdims - vec2<u32>(1u));
+    let ndc = vec2<f32>(
+        (f32(px.x) + 0.5) / f32(pdims.x) * 2.0 - 1.0,
+        1.0 - (f32(px.y) + 0.5) / f32(pdims.y) * 2.0,
+    );
+    let d = textureLoad(prime_tex, px, 0).x;
+    if (d < 1.0) {
+        let wp = G.inv_view_proj * vec4<f32>(ndc, d, 1.0);
+        let p = wp.xyz / wp.w;
+        let dist = length(p);
+        return fog_pack(fog_march(p / max(dist, 1e-4), dist, px), dist);
+    }
+    let ro = camera_ray_origin(ndc);
+    let srd = sky_ray(ndc, camera_ray_dir(ndc, ro));
+    return fog_pack(fog_sky_march(srd, px), -1.0);
+}
+
 @fragment
 fn fs_mask(in: VOut) -> @location(0) vec4<f32> {
     let ro = camera_ray_origin(in.ndc);
