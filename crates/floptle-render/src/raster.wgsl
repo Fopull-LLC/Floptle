@@ -74,6 +74,28 @@ fn sun_map_vis(p: vec3<f32>, n: vec3<f32>) -> f32 {
     // The last few percent of the map fade to sun, so its edge is never a line.
     return mix(1.0, vis, clamp(edge / 0.04, 0.0, 1.0));
 }
+// One look at the sun map for the fog's shafts (see raymarch.wgsl's
+// `fog_sun_tap`): -1 with no map, and the field march decides.
+fn fog_sun_tap(p: vec3<f32>) -> f32 {
+    if (g.sun_map.x < 0.5) {
+        return -1.0;
+    }
+    let clip = g.sun_vp * vec4<f32>(p, 1.0);
+    let uv = vec2<f32>(clip.x * 0.5 + 0.5, 0.5 - clip.y * 0.5);
+    if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || clip.z >= 1.0) {
+        return 1.0;
+    }
+    // Four looks over the map's blur radius, as the fog pass takes them.
+    let r = g.sun_map.y * g.sun_map.w;
+    let d = clip.z - g.sun_extra.x;
+    var lit = 0.0;
+    lit += textureSampleCompareLevel(sun_map_tex, sun_map_samp, uv + vec2<f32>(-0.5, -0.5) * r, d);
+    lit += textureSampleCompareLevel(sun_map_tex, sun_map_samp, uv + vec2<f32>(0.5, -0.5) * r, d);
+    lit += textureSampleCompareLevel(sun_map_tex, sun_map_samp, uv + vec2<f32>(-0.5, 0.5) * r, d);
+    lit += textureSampleCompareLevel(sun_map_tex, sun_map_samp, uv + vec2<f32>(0.5, 0.5) * r, d);
+    return lit * 0.25;
+}
+
 // Vertex paint: every painted mesh's RGBA8 colors packed back to back, read as
 // `vpaint[paint_base + vertex_index]`. A storage buffer rather than a vertex
 // attribute because locations 0..15 are FULL (see VsIn) — and because one global

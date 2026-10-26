@@ -279,6 +279,13 @@ pub struct RaymarchGlobals {
     /// row stride of the texels in the buffer. Stamped by the renderer, never
     /// by the caller. Appended at the end, like everything above.
     pub fog_cache: [f32; 4],
+    /// The sun shadow map's matrix, as the raster pass's `sun_vp`, for the
+    /// fog's shafts. Appended at the end, like everything above.
+    pub fog_sun_vp: [[f32; 4]; 4],
+    /// x = 1 when the fog may read the sun map (the raster pass drew one and
+    /// handed it over), y = its depth bias, z = its blur radius in map
+    /// coordinates. Appended at the end.
+    pub fog_sun: [f32; 4],
 }
 
 impl RaymarchGlobals {
@@ -382,6 +389,8 @@ impl Default for RaymarchGlobals {
             atmo_cloud: [[1.0, 1.0, 1.0, 0.0]; 4],
             atmo_sun: [[1.0, 1.0, 0.0, 0.0]; 4],
             fog_cache: [0.0; 4],
+            fog_sun_vp: [[0.0; 4]; 4],
+            fog_sun: [0.0; 4],
             probe_pos: [[0.0; 4]; crate::reflect::MAX_PROBES],
             probe_half: [[1.0; 4]; crate::reflect::MAX_PROBES],
         }
@@ -689,6 +698,11 @@ pub struct Raymarch {
     /// `bind` always carries — unprimed draws (offscreen previews, probes) and
     /// the mask pass march uncapped.
     prime_fallback: wgpu::TextureView,
+    /// The raster pass's sun shadow map, once [`Self::set_sun_map`] handed it
+    /// over; the 1x1 `sun_fallback` until then.
+    sun_map: Option<wgpu::TextureView>,
+    sun_fallback: wgpu::TextureView,
+    sun_samp: wgpu::Sampler,
     /// The real depth-prepass view, when the editor's surface path primed one —
     /// kept so atlas/sky/palette rebinds can rebuild `bind_primed`.
     prime_view: Option<wgpu::TextureView>,
@@ -831,6 +845,24 @@ impl Raymarch {
                 },
                 // The half-resolution fog (`fog_cached`).
                 fog_buf_entry(11),
+                // The raster pass's sun shadow map, which the fog pass reads for
+                // its shafts (`fog_sun_tap`), and its comparison sampler.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 12,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 13,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
             ],
         });
 
@@ -897,9 +929,31 @@ impl Raymarch {
         // No bake yet: a 4x1x1 of zeroes, so the binding is valid and reads black.
         let gi = crate::gi::GiVolume::empty(gpu);
         let fog_fallback = fog_fallback_buffer(device);
+        // No sun map until the raster hands one over (`set_sun_map`): a 1x1
+        // depth texture keeps the binding valid, and `fog_sun.x` stays 0.
+        let sun_fallback = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("raymarch-sun-fallback"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: Gpu::DEPTH_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let sun_samp = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("raymarch-sun-samp"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
         let bind = make_bind(
             device, &bind_layout, &globals_buf, &dist_tex, &color_tex, &sampler, &terrain_tex,
             &tile_sampler, &tile_sampler_nearest, &sky_tex, &prime_fallback, &gi.tex, &fog_fallback,
+            &sun_fallback, &sun_samp,
         );
         let field_layout = field_bind_layout(device);
         let scene_fallback = crate::ssr::SceneHistory::empty(device);
@@ -918,6 +972,9 @@ impl Raymarch {
             fog_active: None,
             fog_ready: std::sync::atomic::AtomicBool::new(false),
             fog_fallback,
+            sun_map: None,
+            sun_fallback,
+            sun_samp,
             fog_pass_on: true,
             fog_debug: false,
             pipeline_layout: layout,
@@ -1234,6 +1291,8 @@ impl Raymarch {
             &self.prime_fallback,
             &self.gi.tex,
             fog,
+            self.sun_map.as_ref().unwrap_or(&self.sun_fallback),
+            &self.sun_samp,
         );
         self.bind_primed = self.prime_view.as_ref().map(|v| {
             make_bind(
@@ -1250,6 +1309,8 @@ impl Raymarch {
                 v,
                 &self.gi.tex,
                 fog,
+                self.sun_map.as_ref().unwrap_or(&self.sun_fallback),
+                &self.sun_samp,
             )
         });
     }
@@ -2261,6 +2322,15 @@ impl Raymarch {
     /// Draw every surface and sky pixel that takes the fog pass's march
     /// magenta, and leave those that march their own as they are: what shows
     /// how much of a frame the pass serves.
+    /// Hand over the raster pass's sun shadow map (`Raster::sun_map_view`),
+    /// which the fog pass then reads for its shafts: one look a step where
+    /// the field march was a whole shadow march a step. Once, when both
+    /// exist; the map is the same texture every frame.
+    pub fn set_sun_map(&mut self, gpu: &Gpu, view: Option<&wgpu::TextureView>) {
+        self.sun_map = view.cloned();
+        self.rebuild_binds(&gpu.device);
+    }
+
     pub fn set_fog_debug(&mut self, on: bool) {
         self.fog_debug = on;
     }
@@ -2488,6 +2558,8 @@ fn make_bind(
     prime: &wgpu::TextureView,
     gi: &wgpu::Texture,
     fog: &wgpu::Buffer,
+    sun: &wgpu::TextureView,
+    sun_samp: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
     let dist_view = dist.create_view(&wgpu::TextureViewDescriptor::default());
     let gi_view = gi.create_view(&wgpu::TextureViewDescriptor::default());
@@ -2513,6 +2585,8 @@ fn make_bind(
             wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(prime) },
             wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&gi_view) },
             wgpu::BindGroupEntry { binding: 11, resource: fog.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(sun) },
+            wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(sun_samp) },
         ],
     })
 }

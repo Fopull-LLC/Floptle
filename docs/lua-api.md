@@ -41,7 +41,7 @@ each group, and meant to be searched.
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 21
-- [components — getcomponent](#components--getcomponent) — 114
+- [components — getcomponent](#components--getcomponent) — 115
 - [animation — node:animator](#animation--nodeanimator) — 29
 - [particles — effects from script](#particles--effects-from-script) — 13
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 36
@@ -3509,7 +3509,7 @@ perf.fogPaths([on]) -> on — a view for finding where volumetric fog costs: eve
 
 ### `perf.frames`
 
-perf.frames([n]) → the last n frames (all that are kept, 300, when n is left out), OLDEST FIRST, each exactly as it was: { {frame=, ms=, buckets={physics=26.1, ...}, parts={physicsStatic=19.0, ...}, scripts={ {name=, ms=}, ... }, calls={ {script=, call=, n=, ms=}, ... }, samples={ {script=, fn=, line=, n=, ms=}, ... }, bodies={ {name=, ms=}, ... }, counts={nodes=, draws=, props=, ...}, paced="compositor", ticks=}, ... }. ticks is how many fixed ticks (physics and fixedUpdate) the frame ran: a game catching up runs several, so physics a tick is the frame's physics divided by it. No smoothing, so a benchmark reads each frame's own numbers rather than inverting perf.ms's rolling average, and a frame that passed with no update of the probe's (a scene swap, a load) is still there. ms is the whole frame end to end, `untimed` included. scripts are hook time costliest first; samples only while perf.sampleScripts is on; paced is set when something other than the engine's own work held the frame (see perf.pacing). Needs perf.enable(true).
+perf.frames([n]) → the last n frames (all that are kept, 300, when n is left out), OLDEST FIRST, each exactly as it was: { {frame=, ms=, buckets={physics=26.1, ...}, parts={physicsStatic=19.0, ...}, scripts={ {name=, ms=}, ... }, calls={ {script=, call=, n=, ms=}, ... }, samples={ {script=, fn=, line=, n=, ms=}, ... }, bodies={ {name=, ms=}, ... }, counts={nodes=, draws=, props=, ...}, paced="compositor", ticks=, ticksDropped=}, ... }. ticks is how many fixed ticks (physics and fixedUpdate) the frame ran: a game catching up runs several, so physics a tick is the frame's physics divided by it. ticksDropped is how many it owed and dropped instead (the catch-up budget in Project Settings, or slow motion): the game ran that much slower than real time that frame. No smoothing, so a benchmark reads each frame's own numbers rather than inverting perf.ms's rolling average, and a frame that passed with no update of the probe's (a scene swap, a load) is still there. ms is the whole frame end to end, `untimed` included. scripts are hook time costliest first; samples only while perf.sampleScripts is on; paced is set when something other than the engine's own work held the frame (see perf.pacing). Needs perf.enable(true).
 
 ### `perf.gpu`
 
@@ -3786,7 +3786,7 @@ Vertical field of view, radians.
 
 ### `env.ambient2d`
 
-find("Lighting"):getcomponent("Light") — the scene's Lighting node, read and written like any other component. THIS IS WHERE A 2D SCENE'S BRIGHTNESS LIVES: ambient2dR/G/B is the 2D base light, the whole light a flat scene has before a single 2D light is placed, so turning it down is how you get a dark room for a torch to carve a circle out of — and reading it back first is how you put it where it was. Also colorR/G/B + intensity + directionX/Y/Z (a day cycle), ambientR/G/B (the 3D fill, deliberately a different value), shadows/shadowSoftness/shadowStrength/shadowTintR/G/B/shadowQuantize/shadowDither/shadowDistance/contactShadows/contactLength/contactSteps/contactStrength, the screen-space reflections that make a shiny floor show the room standing on it rather than only the sky (reflections, reflectionDistance, reflectionSteps, reflectionThickness), reflectionClamp (the most one reflected bounce may carry — two mirrors facing each other re-reflect each other every frame and a polished metal loses almost nothing per pass, so without a ceiling the pair climbs into a white blob; 0 removes it), refractionLayers (how many depths of glass can be seen through at once — at 1 only the nearest pane shows what is behind it, so a fish tank has to be one box; raise it and a window can have a bottle standing behind it), and the whole fog set: fog, fogColorR/G/B, fogStart, fogEnd, fogDensity, fogHeight, fogFalloff, fogNoise, fogNoiseScale, fogVolumetric, fogDither, fogDitherStrength, fogSky, fogFollowsBody, and the volumetric light injection (fogLight, fogAnisotropy, fogSteps, fogShafts). Every scene has exactly one Lighting node and the loader makes it, so find("Lighting") always finds it. Writes land the same frame.
+find("Lighting"):getcomponent("Light") — the scene's Lighting node, read and written like any other component. THIS IS WHERE A 2D SCENE'S BRIGHTNESS LIVES: ambient2dR/G/B is the 2D base light, the whole light a flat scene has before a single 2D light is placed, so turning it down is how you get a dark room for a torch to carve a circle out of — and reading it back first is how you put it where it was. Also colorR/G/B + intensity + directionX/Y/Z (a day cycle), ambientR/G/B (the 3D fill, deliberately a different value), shadows/shadowSoftness/shadowStrength/shadowTintR/G/B/shadowQuantize/shadowDither/shadowDistance/contactShadows/contactLength/contactSteps/contactStrength, the screen-space reflections that make a shiny floor show the room standing on it rather than only the sky (reflections, reflectionDistance, reflectionSteps, reflectionThickness), reflectionClamp (the most one reflected bounce may carry — two mirrors facing each other re-reflect each other every frame and a polished metal loses almost nothing per pass, so without a ceiling the pair climbs into a white blob; 0 removes it), refractionLayers (how many depths of glass can be seen through at once — at 1 only the nearest pane shows what is behind it, so a fish tank has to be one box; raise it and a window can have a bottle standing behind it), and the whole fog set: fog, fogColorR/G/B, fogStart, fogEnd, fogDensity, fogHeight, fogFalloff, fogNoise, fogNoiseScale, fogVolumetric, fogDither, fogDitherStrength, fogSky, fogFollowsBody, and the volumetric light injection (fogLight, fogAnisotropy, fogSteps, fogShafts, fogShaftsMap). Every scene has exactly one Lighting node and the loader makes it, so find("Lighting") always finds it. Writes land the same frame.
 
 ### `env.ambient2dB`
 
@@ -3915,6 +3915,10 @@ Volumetric: noise feature size, world units per repeat.
 ### `env.fogShafts`
 
 Volumetric (1/0): march the sun shadow at every fog step, so beams appear through windows and branches. The entire cost of lit fog lives here.
+
+### `env.fogShaftsMap`
+
+Volumetric shafts (true/false): read the sun shadow map at each fog step instead of marching the shadow — many times cheaper, a little softer and lighter. Needs the shadow map on (shadows from a shadow map); without one the shafts march. Off in scenes made before 0.117, on in new ones.
 
 ### `env.fogSky`
 

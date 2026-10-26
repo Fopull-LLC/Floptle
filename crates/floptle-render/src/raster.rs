@@ -2712,6 +2712,12 @@ impl Raster {
     /// knowing the source size: 9-slice (how big an *unstretched* corner is)
     /// and `Contain`/`Cover` aspect fitting. `floptle-ui` is renderer-agnostic
     /// and has no texture registry, so it hands those decisions here.
+    /// The sun shadow map [`Self::sun_shadow_pass`] draws into, the same
+    /// texture every frame: the fog pass reads it (`Raymarch::set_sun_map`).
+    pub fn sun_map_view(&self) -> &wgpu::TextureView {
+        &self.sun_map_view
+    }
+
     pub fn texture_size(&self, id: TexId) -> Option<[f32; 2]> {
         self.textures.get(id.0 as usize).map(|t| {
             let s = t._texture.size();

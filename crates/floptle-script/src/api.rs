@@ -591,6 +591,7 @@ pub fn is_bool_field(comp: &str, field: &str) -> bool {
                     | "fogDither"
                     | "fogVolumetric"
                     | "fogShafts"
+                    | "fogShaftsMap"
                     | "fogFollowsBody"
             )
             | (
@@ -894,6 +895,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("fogAnisotropy".to_string(), l.fog_anisotropy as f64),
                 ("fogSteps".to_string(), l.fog_steps as f64),
                 ("fogShafts".to_string(), f64::from(l.fog_shafts)),
+                ("fogShaftsMap".to_string(), f64::from(l.fog_shafts_map)),
                 ("fogSky".to_string(), l.fog_sky as f64),
                 ("fogFollowsBody".to_string(), f64::from(l.fog_follows_body)),
             ]),
@@ -2182,6 +2184,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "fogAnisotropy" => l.fog_anisotropy = v.clamp(-0.95, 0.95),
                     "fogSteps" => l.fog_steps = (val.max(2.0) as u32).min(64),
                     "fogShafts" => l.fog_shafts = val != 0.0,
+                    "fogShaftsMap" => l.fog_shafts_map = val != 0.0,
                     "fogSky" => l.fog_sky = v.clamp(0.0, 1.0),
                     "fogFollowsBody" => l.fog_follows_body = val != 0.0,
                     _ => {}

@@ -187,6 +187,11 @@ struct Globals {
     // (`fog_cached`), 2 to draw what reads it magenta; 0 and every fragment
     // marches its own. y, z = its size, w = its row stride. Appended at the END.
     fog_cache: vec4<f32>,
+    // The sun shadow map's matrix, and x = 1 when the fog may read it, y = its
+    // depth bias, z = its blur radius in map coordinates (`fog_sun_tap`).
+    // Appended at the END.
+    fog_sun_vp: mat4x4<f32>,
+    fog_sun: vec4<f32>,
 };
 
 // The triplanar scale multiplier for palette slot `slot`.
@@ -1157,10 +1162,20 @@ fn fog_inscatter(p: vec3<f32>, rd: vec3<f32>, amb: vec3<f32>, pix: vec2<u32>) ->
             let l = sun_dir_at(p);
             var sh = vec3<f32>(1.0);
             if (march) {
-                // n = l: no surface to lift off, so the normal-offset term
-                // degenerates to a small nudge along the ray, which is exactly
-                // what is wanted.
-                sh = shadow_post(light_vis(p, l, l), pix);
+                // A few looks at the sun's shadow map where the scene asks for
+                // it (`fog_shafts_map`) and there is one: a whole field march
+                // a step was the fog's single largest cost.
+                var v = -1.0;
+                if (G.vol_fog_c.w > 1.5) {
+                    v = fog_sun_tap(p);
+                }
+                if (v < 0.0) {
+                    // n = l: no surface to lift off, so the normal-offset term
+                    // degenerates to a small nudge along the ray, which is
+                    // exactly what is wanted.
+                    v = light_vis(p, l, l);
+                }
+                sh = shadow_post(v, pix);
             }
             lit += G.light_color.rgb * sh * fog_phase(dot(rd, l), g);
         }
@@ -1169,7 +1184,15 @@ fn fog_inscatter(p: vec3<f32>, rd: vec3<f32>, amb: vec3<f32>, pix: vec2<u32>) ->
             let l = star_dir_at(i, p);
             var sh = vec3<f32>(1.0);
             if (march) {
-                sh = shadow_post(light_vis(p, l, l), pix);
+                // The shadow map is the first star's, as the surfaces' is.
+                var v = -1.0;
+                if (i == 0u && G.vol_fog_c.w > 1.5) {
+                    v = fog_sun_tap(p);
+                }
+                if (v < 0.0) {
+                    v = light_vis(p, l, l);
+                }
+                sh = shadow_post(v, pix);
             }
             lit += star_col_at(i, p) * sh * fog_phase(dot(rd, l), g);
         }

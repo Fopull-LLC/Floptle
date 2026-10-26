@@ -1306,6 +1306,12 @@ pub struct Light {
     /// March the sun shadow at every fog step. This is what turns lit fog into
     /// actual beams, and it is essentially the entire cost of lit fog.
     pub fog_shafts: bool,
+    /// The shafts read the sun shadow map instead of marching the field at
+    /// every fog step: a few lookups a step, many times cheaper, where the
+    /// scene has a shadow map (`shadow_map`). The shafts come out a little
+    /// softer and lighter. Off in a scene made before it existed; a new
+    /// scene starts with it on.
+    pub fog_shafts_map: bool,
     /// flat ramp only — how much of the fog the **sky** takes at the horizon
     /// (0..1), weighted so the zenith keeps whatever is painted there.
     ///
@@ -1383,6 +1389,7 @@ impl Default for Light {
             fog_anisotropy: 0.6,
             fog_steps: 16,
             fog_shafts: true,
+            fog_shafts_map: false,
             fog_sky: 1.0,
             fog_follows_body: false,
         }

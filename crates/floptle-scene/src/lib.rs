@@ -2560,6 +2560,10 @@ pub struct LightDoc {
     pub fog_steps: u32,
     #[serde(default = "true_bool")]
     pub fog_shafts: bool,
+    /// Shafts from the sun shadow map (see `Light::fog_shafts_map`). Off, and
+    /// not written, by default: an old scene's shafts march as they did.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fog_shafts_map: bool,
     /// How much of the flat depth ramp the sky takes at the horizon (0..1).
     ///
     /// Fog that tints surfaces and stops there only reads as fog while its
@@ -2704,6 +2708,7 @@ impl From<&Light> for LightDoc {
             fog_anisotropy: l.fog_anisotropy,
             fog_steps: l.fog_steps,
             fog_shafts: l.fog_shafts,
+            fog_shafts_map: l.fog_shafts_map,
             fog_sky: l.fog_sky,
             fog_follows_body: l.fog_follows_body,
         }
@@ -2761,6 +2766,7 @@ impl LightDoc {
             fog_anisotropy: self.fog_anisotropy,
             fog_steps: self.fog_steps.clamp(2, 64),
             fog_shafts: self.fog_shafts,
+            fog_shafts_map: self.fog_shafts_map,
             fog_sky: self.fog_sky.clamp(0.0, 1.0),
             fog_follows_body: self.fog_follows_body,
         }
@@ -2947,9 +2953,10 @@ pub struct ProjectConfigDoc {
     /// ticks. Past it the time still banked is dropped rather than carried,
     /// so a tick that is expensive but still under its slice cannot compound
     /// into frames of several ticks each. What a game gives up: while the
-    /// ticks are expensive it runs slower than real time. `None` (the
-    /// default, and every project made before it existed) runs every banked
-    /// tick. A networked session always catches up, whatever this says.
+    /// ticks are expensive it runs slower than real time. A new project
+    /// starts at [`NEW_PROJECT_TICK_BUDGET_MS`]; `None` (every project made
+    /// before that, and anyone who set it to 0) runs every banked tick. A
+    /// networked session always catches up, whatever this says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tick_budget_ms: Option<f32>,
 
@@ -3140,6 +3147,10 @@ impl Default for ProjectConfigDoc {
     }
 }
 
+/// The catch-up budget a new project starts with, in milliseconds of fixed
+/// ticks a frame (see [`ProjectConfigDoc::tick_budget_ms`]).
+pub const NEW_PROJECT_TICK_BUDGET_MS: f32 = 12.0;
+
 impl ProjectConfigDoc {
     /// The default PS1 look: 240p retro upscale, matter on. Post effects start off.
     pub fn ps1() -> Self {
@@ -3202,10 +3213,20 @@ impl ProjectConfigDoc {
     /// ([`pin_script_vec3`](Self::pin_script_vec3)) and moves over on purpose
     /// after `floptle lint --vec3` has said what it would cost.
     ///
+    /// A new project also starts with a catch-up budget of
+    /// [`NEW_PROJECT_TICK_BUDGET_MS`]: generous enough that an ordinary hitch
+    /// still catches up in one frame, and it stops expensive ticks from
+    /// compounding into frames of several each. A project made before it
+    /// keeps running every banked tick.
+    ///
     /// The editor and the headless `floptle new` the Hub drives both start
     /// here, so they cannot drift apart.
     pub fn for_new_project() -> Self {
-        Self { script_vec3: Some(ScriptVec3Doc::Fast), ..Self::ps1() }
+        Self {
+            script_vec3: Some(ScriptVec3Doc::Fast),
+            tick_budget_ms: Some(NEW_PROJECT_TICK_BUDGET_MS),
+            ..Self::ps1()
+        }
     }
 
     /// How this project filters models' textures. A project file from before
@@ -6103,6 +6124,22 @@ mod tests {
     /// The shadow-map switch round-trips, and is not written while off, so a
     /// scene saved before it existed and one that never turned it on read the
     /// same.
+    /// Shafts from the shadow map round-trip, are not written while off (so
+    /// a scene from before them, and one that never turned them on, read the
+    /// same and keep marching), and a new scene's template turns them on.
+    #[test]
+    fn the_fog_shafts_map_switch_round_trips_and_is_omitted_when_off() {
+        let on = LightDoc::from(&Light { fog_shafts_map: true, ..Light::default() });
+        let ron = ron::to_string(&on).unwrap();
+        assert!(ron.contains("fog_shafts_map:true"), "{ron}");
+        let back: LightDoc = ron::from_str(&ron).unwrap();
+        assert!(back.to_light().fog_shafts_map);
+        let plain = ron::to_string(&LightDoc::from(&Light::default())).unwrap();
+        assert!(!plain.contains("fog_shafts_map"), "the default is not written: {plain}");
+        let old: LightDoc = ron::from_str("(direction: (0.0, 1.0, 0.0))").unwrap();
+        assert!(!old.to_light().fog_shafts_map, "an old scene's shafts march as they did");
+    }
+
     #[test]
     fn the_shadow_map_switch_round_trips_and_is_omitted_when_off() {
         let on = LightDoc::from(&Light { shadow_map: true, ..Light::default() });

@@ -769,12 +769,14 @@ impl<'a> SettingsCtx<'a> {
         row(
             ui,
             "Catch-up budget",
-            Some("the most milliseconds of fixed ticks one frame runs; 0 runs every banked \
-                  tick, as projects always have. A tick a little under its slice still \
+            Some("the most milliseconds of fixed ticks one frame runs; new projects start at 12, \
+                  and 0 runs every banked tick, as projects made before 0.117 do. A tick a \
+                  little under its slice still \
                   compounds: two 14 ms ticks make a 30 ms frame, which banks two more. With \
                   a budget, the time that does not fit is dropped, so while the ticks are \
                   expensive the game runs slower than real time instead of falling to a few \
-                  frames a second. A networked session ignores it and always catches up"),
+                  frames a second. Frames that dropped ticks count them as ticksDropped in \
+                  perf.frames. A networked session ignores it and always catches up"),
             |ui| {
                 let mut ms = project.tick_budget_ms.unwrap_or(0.0);
                 if ui

@@ -2027,7 +2027,9 @@ impl Editor {
             // `floptle new` path uses wholesale. Here the config has already
             // been loaded (as a default, there being no file), so this takes
             // the one field rather than replacing everything.
-            self.project.script_vec3 = floptle_scene::ProjectConfigDoc::for_new_project().script_vec3;
+            let new = floptle_scene::ProjectConfigDoc::for_new_project();
+            self.project.script_vec3 = new.script_vec3;
+            self.project.tick_budget_ms = new.tick_budget_ms;
             self.apply_script_vec3_mode();
             // Stamped with the engine that made it, so the upgrade pass knows
             // it needs nothing yet, and its generated stubs stay out of git.
@@ -2897,6 +2899,7 @@ pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
             fog_end: 220.0,
             fog_dither: true,
             fog_dither_strength: 0.4,
+            fog_shafts_map: true,
         ),
         nodes: [
             (
@@ -3217,6 +3220,7 @@ mod path_tests {
     #[test]
     fn default_scene_template_parses_with_the_starter_pieces() {
         let d = default_scene();
+        assert!(d.lighting.fog_shafts_map, "a new scene's shafts read the shadow map");
         assert!(d.lighting.fog);
         assert!(d
             .nodes

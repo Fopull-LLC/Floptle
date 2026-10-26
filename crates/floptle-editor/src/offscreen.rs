@@ -1324,6 +1324,11 @@ impl Editor {
             // metal model looked like a hole in the picture.
             raymarch.upload_globals(gpu, rm);
             raymarch.capture_env(gpu);
+            // The sun's shadow map first: the volumetric fog marched with the
+            // prepass reads it for its shafts.
+            headless_mark!("sun shadow map");
+            let map_draws = crate::shading::with_shadow_casters(&instances, &shadow_casters);
+            raster.sun_shadow_pass(gpu, globals, &map_draws, &flsl_draws, &skin_draws);
             let wants_depth = wants_prepass(
                 raster.flsl_draws_want_depth(&flsl_draws),
                 ssr[0] > 0.5,
@@ -1357,9 +1362,6 @@ impl Editor {
                 raymarch.upload_globals(gpu, rm);
                 Some(clear.map(|c| c as f64))
             };
-            headless_mark!("sun shadow map");
-            let map_draws = crate::shading::with_shadow_casters(&instances, &shadow_casters);
-            raster.sun_shadow_pass(gpu, globals, &map_draws, &flsl_draws, &skin_draws);
             headless_mark!("opaque + lighting");
             raster.defer_scene_readers(glass);
             raster.draw_scene_with(

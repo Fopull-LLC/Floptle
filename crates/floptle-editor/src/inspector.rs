@@ -4964,6 +4964,15 @@ impl EditorTabViewer<'_> {
                                  but never occluded.",
                             )
                             .changed();
+                        if l.fog_shafts {
+                            cmd.inspector_changed |= crate::responsive::check(ui, &mut l.fog_shafts_map, "from the shadow map")
+                                .on_hover_text(
+                                    "read the sun's shadow map at each fog step instead of marching the shadow: many times \
+                                     cheaper, and the beams come out a little softer and lighter. Needs \"shadow map\" on in \
+                                     the shadows above; without it the shafts march as before.",
+                                )
+                                .changed();
+                        }
                     });
                     ui.horizontal_wrapped(|ui| {
                         ui.label("quality");

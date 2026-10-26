@@ -353,6 +353,13 @@ every banked tick, which is what every project made before the setting did.
 A networked session ignores both and always catches up, because its clock is
 shared with the other machines and running slow would desync it.
 
+A new project starts with a **12 ms** budget: enough that an ordinary hitch
+still catches up in a frame or two, and it stops expensive ticks from
+compounding. A project made before 0.117 has none and runs every banked tick,
+as it always did; set it in **Project Settings** to opt in, or to 0 to turn it
+off. Each frame in `perf.frames()` counts the ticks it dropped as
+`ticksDropped`, and the Console says so the first time it happens in a Play.
+
 `perf.parts()` names the stages of a physics tick (`physicsBroadphase`,
 `physicsStatic`, `physicsSweeps`, `physicsJoints`, `physicsPairs`), and
 `perf.bodies(n)` the assemblies and bodies that cost the most, so a game can see

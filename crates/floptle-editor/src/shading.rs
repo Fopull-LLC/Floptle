@@ -727,7 +727,12 @@ pub(crate) fn vol_fog_uniforms(l: &Light, time: f32, cam_y: f32) -> ([f32; 4], [
             amount,
             l.fog_anisotropy.clamp(-0.95, 0.95),
             l.fog_steps.clamp(2, 64) as f32,
-            if l.fog_shafts && amount > 0.0 { 1.0 } else { 0.0 },
+            // 2: the shafts may read the sun shadow map (`fog_sun_tap`).
+            match (l.fog_shafts && amount > 0.0, l.fog_shafts_map) {
+                (false, _) => 0.0,
+                (true, false) => 1.0,
+                (true, true) => 2.0,
+            },
         ],
     )
 }

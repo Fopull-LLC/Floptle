@@ -208,6 +208,10 @@ pub struct FrameRecord {
     /// physics divided by this, and a cheaper tick can make a frame dearer
     /// by letting it catch up where it used to fall behind.
     pub ticks: u32,
+    /// Fixed ticks this frame owed and did not run: the project's catch-up
+    /// budget, or slow motion, dropped them. The game ran that much slower
+    /// than real time this frame.
+    pub ticks_dropped: u32,
 }
 
 impl FrameRecord {
@@ -538,6 +542,7 @@ pub struct FrameProfile {
     rays_last: (u64, f32),
     /// Fixed ticks run this frame (see [`FrameRecord::ticks`]).
     ticks_frame: u32,
+    ticks_dropped_frame: u32,
     /// Sweeps scripts cast this frame (`spherecast`, `capsulecast`,
     /// `boxcast`) and their milliseconds, the same way as the rays.
     sweeps_frame: (u64, f32),
@@ -920,6 +925,11 @@ impl FrameProfile {
         self.ticks_frame = n;
     }
 
+    /// Fixed ticks this frame owed and dropped (see [`FrameRecord::ticks_dropped`]).
+    pub fn set_ticks_dropped(&mut self, n: u32) {
+        self.ticks_dropped_frame = n;
+    }
+
     /// Count `n` script rays that took `ms` between them. Nothing while off.
     pub fn record_rays(&mut self, n: u64, ms: f32) {
         if self.on {
@@ -1054,6 +1064,7 @@ impl FrameProfile {
             self.rays_frame = (0, 0.0);
             self.sweeps_frame = (0, 0.0);
             self.ticks_frame = 0;
+            self.ticks_dropped_frame = 0;
             return;
         }
         // The time before this frame's own work began, back to the end of the
@@ -1129,6 +1140,7 @@ impl FrameProfile {
             counts: self.counts,
             paced,
             ticks: std::mem::take(&mut self.ticks_frame),
+            ticks_dropped: std::mem::take(&mut self.ticks_dropped_frame),
         };
         if total >= self.hitch_threshold() {
             let mut buckets = record.buckets.clone();

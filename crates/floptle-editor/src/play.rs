@@ -1241,6 +1241,7 @@ impl Editor {
             self.game_tick_no = 0;
             self.tick_load.reset();
             self.tick_overload_said = false;
+            self.tick_budget_said = false;
             self.tick_overload_report_in = None;
             self.script_host.profile().borrow_mut().set_overloaded(false);
             self.tick_keys_pressed.clear();

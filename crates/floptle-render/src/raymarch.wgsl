@@ -41,6 +41,9 @@
 @group(0) @binding(7) var prime_tex: texture_2d<f32>;
 // The half-resolution volumetric fog, packed (see `fog_cached` in field.wgsl).
 @group(0) @binding(11) var<storage, read> fog_buf: array<vec4<u32>>;
+// The raster pass's sun shadow map, for the fog's shafts (`fog_sun_tap`).
+@group(0) @binding(12) var fog_sun_tex: texture_depth_2d;
+@group(0) @binding(13) var fog_sun_samp: sampler_comparison;
 
 
 // Baked GI probes (Matter::LightProbes): four texels per probe along x, holding
@@ -966,7 +969,34 @@ fn fs_env(in: VOut) -> @location(0) vec4<f32> {
     return vec4<f32>(max(c, vec3<f32>(0.0)), 1.0);
 }
 
-// The raster pass's sun shadow map is not bound here: the field march decides.
+// The raster pass's sun shadow map is not used for surfaces here: the field
+// march decides.
 fn sun_map_vis(p: vec3<f32>, n: vec3<f32>) -> f32 {
     return -1.0;
+}
+
+// How much sun reaches the air at `p` (camera-relative), from one look at the
+// raster pass's shadow map, or -1 when there is no map and the field march
+// decides. One look a step is enough for fog: the steps' jitter averages it,
+// and the shaft's edge is a blur in the air anyway. Off the map is lit, as it
+// is for surfaces.
+fn fog_sun_tap(p: vec3<f32>) -> f32 {
+    if (G.fog_sun.x < 0.5) {
+        return -1.0;
+    }
+    let clip = G.fog_sun_vp * vec4<f32>(p, 1.0);
+    let uv = vec2<f32>(clip.x * 0.5 + 0.5, 0.5 - clip.y * 0.5);
+    if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || clip.z >= 1.0) {
+        return 1.0;
+    }
+    // Four looks over the map's own blur radius: one hard look a step
+    // printed the steps' per-pixel jitter into the air as a fine hatch.
+    let r = G.fog_sun.z;
+    let d = clip.z - G.fog_sun.y;
+    var lit = 0.0;
+    lit += textureSampleCompareLevel(fog_sun_tex, fog_sun_samp, uv + vec2<f32>(-0.5, -0.5) * r, d);
+    lit += textureSampleCompareLevel(fog_sun_tex, fog_sun_samp, uv + vec2<f32>(0.5, -0.5) * r, d);
+    lit += textureSampleCompareLevel(fog_sun_tex, fog_sun_samp, uv + vec2<f32>(-0.5, 0.5) * r, d);
+    lit += textureSampleCompareLevel(fog_sun_tex, fog_sun_samp, uv + vec2<f32>(0.5, 0.5) * r, d);
+    return lit * 0.25;
 }

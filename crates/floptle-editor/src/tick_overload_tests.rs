@@ -178,7 +178,9 @@ fn every_tick_reads_its_own_frames_clock() {
 /// Ticks each frame ran over `seconds` of wall time, after the first half
 /// second, for a project whose `fixedUpdate` burns `tick_ms` and whose
 /// `update` burns `frame_ms`, under the given catch-up budget.
-fn ticks_per_frame(dir: &std::path::Path, tick_ms: f64, frame_ms: f64, budget: Option<f32>, seconds: f64) -> Vec<u64> {
+/// Also: how many times the Console said the budget dropped ticks, and how
+/// many dropped ticks the profiler's frames recorded.
+fn ticks_and_drops(dir: &std::path::Path, tick_ms: f64, frame_ms: f64, budget: Option<f32>, seconds: f64) -> (Vec<u64>, usize, u64) {
     std::fs::create_dir_all(dir.join("scripts")).unwrap();
     std::fs::write(
         dir.join("scripts/dear.lua"),
@@ -203,21 +205,29 @@ fn ticks_per_frame(dir: &std::path::Path, tick_ms: f64, frame_ms: f64, budget: O
     ed.world.insert(e, Scripts(vec![ScriptInst::new("dear")]));
     ed.toggle_play();
     assert!(ed.playing, "did not enter play");
+    ed.script_host.profile().borrow_mut().enable(true);
     let start = Instant::now();
     let mut last = 1.0f32 / 60.0;
     let mut out = Vec::new();
+    let mut dropped = 0u64;
     while start.elapsed().as_secs_f64() < seconds {
         let t0 = Instant::now();
         let ticks0 = ed.game_tick_no;
         ed.play_step(last, true);
         ed.drain_script_logs();
+        {
+            let mut p = ed.script_host.profile().borrow_mut();
+            p.end_frame();
+            dropped += p.recent_frames(1).map(|r| r.ticks_dropped as u64).sum::<u64>();
+        }
         last = t0.elapsed().as_secs_f32().min(0.25);
         if start.elapsed().as_secs_f64() > 0.5 {
             out.push(ed.game_tick_no - ticks0);
         }
     }
     assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
-    out
+    let said = ed.console.entries.iter().filter(|e| e.msg.contains("the catch-up budget")).count();
+    (out, said, dropped)
 }
 
 /// **A catch-up budget keeps an expensive tick from compounding.** A 14 ms
@@ -233,8 +243,12 @@ fn ticks_per_frame(dir: &std::path::Path, tick_ms: f64, frame_ms: f64, budget: O
 fn a_catch_up_budget_bounds_the_ticks_a_frame_runs() {
     let dir = std::env::temp_dir().join(format!("floptle_tick_budget_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let bounded = ticks_per_frame(&dir, 14.0, 10.0, Some(20.0), 2.0);
-    let free = ticks_per_frame(&dir, 14.0, 10.0, None, 2.0);
+    let (bounded, said, dropped) = ticks_and_drops(&dir, 14.0, 10.0, Some(20.0), 2.0);
+    let (free, free_said, free_dropped) = ticks_and_drops(&dir, 14.0, 10.0, None, 2.0);
+    // What it gave up is counted and said: once, however many frames dropped.
+    assert_eq!(said, 1, "the Console said the budget dropped ticks {said} times");
+    assert!(dropped > 0, "perf.frames counted no dropped ticks under the budget");
+    assert_eq!((free_said, free_dropped), (0, 0), "with no budget nothing is dropped or said");
     assert!(bounded.len() > 10 && free.len() > 5, "too few frames: {} / {}", bounded.len(), free.len());
     let most = bounded.iter().copied().max().unwrap_or(0);
     assert_eq!(most, 1, "a 20 ms budget ran {most} ticks of 14 ms in one frame: {bounded:?}");
@@ -290,4 +304,25 @@ fn a_physics_frame_names_its_stages_and_its_body() {
         assert_eq!(p.last_bodies(), r.bodies.as_slice());
     }
     assert!(named >= 20, "the ball was named on {named} of the frames that ticked");
+}
+
+/// **A new project starts with the catch-up budget, and an old one without.**
+/// `floptle new` (the Hub) and the editor's New Project both make a project
+/// with the 12 ms budget; a `project.ron` from before it, with no such field,
+/// still runs every banked tick.
+#[test]
+fn a_new_project_has_the_catch_up_budget_and_an_old_one_does_not() {
+    assert_eq!(floptle_scene::ProjectConfigDoc::for_new_project().tick_budget_ms, Some(floptle_scene::NEW_PROJECT_TICK_BUDGET_MS));
+    assert_eq!(floptle_scene::NEW_PROJECT_TICK_BUDGET_MS, 12.0);
+    let old: floptle_scene::ProjectConfigDoc = ron::from_str("(title: Some(\"old\"))").unwrap();
+    assert_eq!(old.tick_budget_ms, None, "a project from before the budget got one");
+    let dir = std::env::temp_dir().join(format!("floptle_tick_budget_new_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut ed = crate::Editor::default();
+    ed.new_project(dir.clone());
+    assert_eq!(ed.project.tick_budget_ms, Some(12.0), "the editor's New Project made one without the budget");
+    let saved: floptle_scene::ProjectConfigDoc =
+        ron::from_str(&std::fs::read_to_string(dir.join("project.ron")).unwrap()).unwrap();
+    assert_eq!(saved.tick_budget_ms, Some(12.0), "the budget was not written to project.ron");
+    let _ = std::fs::remove_dir_all(&dir);
 }

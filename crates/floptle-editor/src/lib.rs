@@ -3096,6 +3096,8 @@ struct Editor {
     /// The overload has been reported this Play session — or, while `Some`,
     /// will be once the profiler has this many more frames to name the costs.
     tick_overload_said: bool,
+    /// The catch-up budget's first dropped ticks this Play were reported.
+    tick_budget_said: bool,
     tick_overload_report_in: Option<u32>,
     /// Frame-step: while `paused` freezes the gameplay tick, this releases exactly this
     /// many ticks — scripts, physics and animation each advancing one step. A fighter is
@@ -4272,7 +4274,10 @@ impl Editor {
         let capsule_id = raster.register(gpu, &primitive_mesh(Shape::Capsule), None);
         let plane_id = raster.register(gpu, &primitive_mesh(Shape::Plane), None);
         self.mesh_ids = vec![cube_id, sphere_id, capsule_id, plane_id];
-        self.raymarch = Some(Raymarch::new(gpu));
+        let mut raymarch = Raymarch::new(gpu);
+        // The fog pass reads the raster's sun shadow map for its shafts.
+        raymarch.set_sun_map(gpu, Some(raster.sun_map_view()));
+        self.raymarch = Some(raymarch);
         // **Everything `render_world_into` needs, in one place.** That function
         // binds gpu, raster, raymarch, particles, lines and tris as a single
         // six-way `if let`, and does nothing at all if one of them is missing —

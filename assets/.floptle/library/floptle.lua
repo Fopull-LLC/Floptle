@@ -210,6 +210,7 @@
 ---@field fogAnisotropy number Volumetric: which way the media throws light (-0.9..0.9, positive blooms toward the sun).
 ---@field fogSteps number Volumetric: samples along each pixel's fog ray (2..64).
 ---@field fogShafts number Volumetric (1/0): march the sun shadow per fog step — the beams, and the cost.
+---@field fogShaftsMap boolean Shafts from the sun shadow map instead of a march per step: many times cheaper.
 ---@field fogSky number How much of the fog the sky takes at the horizon, 0..1. Fade it to fade the sky's fog: the sky is infinitely far away, so a thinner fog alone never makes it fainter.
 ---@field fogFollowsBody number Fog on a round world (1/0): heights become altitudes over the nearest celestial body, the volumetric layer a shell around it, and the sky blend follows its horizon.
 

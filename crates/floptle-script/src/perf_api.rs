@@ -90,6 +90,7 @@ pub fn install(lua: &Lua, profile: &SharedProfile, sampler: &Rc<Sampler>) -> mlu
                     row.set("paced", why)?;
                 }
                 row.set("ticks", r.ticks)?;
+                row.set("ticksDropped", r.ticks_dropped)?;
                 list.raw_set(i + 1, row)?;
             }
             Ok(list)

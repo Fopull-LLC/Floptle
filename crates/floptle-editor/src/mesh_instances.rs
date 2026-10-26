@@ -84,11 +84,15 @@ pub(crate) fn prepass_and_bind(
     skins: &[floptle_render::SkinDraw],
     depth_tex: &wgpu::Texture,
     history: Option<(&wgpu::TextureView, &wgpu::Sampler)>,
-    rm: floptle_render::RaymarchGlobals,
+    mut rm: floptle_render::RaymarchGlobals,
 ) {
     raster.depth_prepass_with(gpu, globals, instances, flsl, skins, depth_tex);
     raymarch.bind_frame_targets(gpu, raster.prepass_view(), history);
     if rm.volumetric_fog() {
+        // The fog's shafts read the sun map the raster drew this frame (it
+        // draws it before the prepass), on the raster's own terms.
+        rm.fog_sun_vp = globals.sun_vp;
+        rm.fog_sun = [globals.sun_map[0], globals.sun_extra[0], 3.0 * globals.sun_map[1] * globals.sun_map[3], 0.0];
         let size = depth_tex.size();
         raymarch.march_fog(gpu, rm, (size.width, size.height));
     }

@@ -979,6 +979,7 @@ impl Editor {
             let budget = self.tick_budget_ms();
             let ticks_began = floptle_core::time::Instant::now();
             let mut ticks_run = 0u32;
+            let mut ticks_dropped = 0u32;
             loop {
                 if stepping {
                     if self.tick_steps == 0 {
@@ -995,7 +996,20 @@ impl Editor {
                 {
                     // Slow motion's one tick, or the catch-up budget spent:
                     // what is still banked is dropped, not carried.
+                    let before = self.game_tick.dropped();
                     self.game_tick.drop_backlog();
+                    let step = self.game_tick.step as f64;
+                    ticks_dropped = ((self.game_tick.dropped() - before) / step).round() as u32;
+                    if ticks_dropped > 0 && !slow_motion && !self.tick_budget_said {
+                        self.tick_budget_said = true;
+                        let msg = format!(
+                            "the catch-up budget ({:.0} ms, Project Settings) dropped {ticks_dropped} fixed tick(s) \
+                             in one frame: the game ran slower than real time for a moment rather than \
+                             stutter. perf.frames() rows count them as ticksDropped. Said once a Play.",
+                            budget.unwrap_or(0.0)
+                        );
+                        self.console.push(floptle_script::LogLevel::Debug, msg, None);
+                    }
                     break;
                 } else if !self.game_tick.tick() {
                     break;
@@ -1280,6 +1294,7 @@ impl Editor {
                 let spent = ticks_began.elapsed().as_secs_f32() * 1000.0;
                 self.note_tick_load(ticks_run, spent, sdt);
             }
+            self.script_host.profile().borrow_mut().set_ticks_dropped(ticks_dropped);
             if let Some(sim) = self.sim.as_mut() {
                 // Render this frame partway into the current tick: smooth at any fps.
                 sim.writeback_interpolated(&mut self.world, self.game_tick.alpha());

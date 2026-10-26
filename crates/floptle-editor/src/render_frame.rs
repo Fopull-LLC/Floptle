@@ -746,6 +746,11 @@ impl Editor {
                 // this the effect works in a terrain scene and silently does
                 // nothing in a scene made of meshes, which is the only kind of
                 // scene most of these shaders are ever put in.
+                // The sun's shadow map first: the volumetric fog marched with
+                // the prepass reads it for its shafts.
+                gpu_mark!("sun shadow map");
+                let map_draws = crate::shading::with_shadow_casters(&instances, &shadow_casters);
+                raster.sun_shadow_pass(gpu, globals, &map_draws, &flsl_draws, &skin_draws);
                 let depth_wanted = raster.flsl_draws_want_depth(&flsl_draws);
                 let raster_clear = if rm_draw
                     || wants_prepass(depth_wanted, ssr_on, point_shadows, contact[0] > 0.5, rm.volumetric_fog())
@@ -777,9 +782,6 @@ impl Editor {
                     raymarch.upload_globals(gpu, rm);
                     Some(clear.map(|c| c as f64))
                 };
-                gpu_mark!("sun shadow map");
-                let map_draws = crate::shading::with_shadow_casters(&instances, &shadow_casters);
-                raster.sun_shadow_pass(gpu, globals, &map_draws, &flsl_draws, &skin_draws);
                 gpu_mark!("opaque + lighting");
                 // The surfaces that show the scene behind them wait for the
                 // capture the glass takes below, when there is one to take.
