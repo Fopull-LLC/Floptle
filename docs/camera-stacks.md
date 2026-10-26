@@ -46,10 +46,12 @@ the scope over the arms. Setting `stack` replaces the whole list, and
 ## What a stacked camera draws
 
 * **Its own layers, lit by the scene.** The arms get the same sun, lamps and fog
-  as the world around them, and cast sun shadows onto themselves. The sun's
-  shadow map in a stacked camera holds only what that camera draws, so a wall
-  shades the arms through terrain and shadow-proxy shadows but not through the
-  map.
+  as the world around them, and cast sun shadows onto themselves. The terrain
+  shades them too: standing in the shadow of a hill or in a cave, the arms are
+  in shadow like everything else there. The sun's shadow map in a stacked
+  camera holds what that camera draws and the terrain, so a wall or a building
+  that the stacked camera does not draw shades the arms only through shadow
+  proxies.
 * **No sky, terrain, particles or script shapes.** The camera beneath has
   already drawn all of those, and drawing them again would cover the world.
 * **The base camera's framing.** The stacked camera renders at the same size and

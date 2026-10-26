@@ -551,7 +551,7 @@ impl Editor {
         // including the frustum cull, built from this camera's matrix.
         // The sun map's casters the camera culls, before the draw loop takes
         // the renderer: see `shadow_map_casters`.
-        let shadow_casters = self.shadow_map_casters(&globals, cam.world_position, view_proj);
+        let mut shadow_casters = self.shadow_map_casters(&globals, cam.world_position, view_proj);
         let off_frustum = floptle_render::Frustum::from_view_proj(view_proj);
         let ents: Vec<(Entity, Matter)> =
             self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
@@ -978,6 +978,29 @@ impl Editor {
                 &mut instances,
             );
             crate::decals::push_decal_instances(&self.decal_batches, &self.world, raster, cam.world_position, &mut instances);
+        } else if opts.overlay
+            && globals.sun_map[0] > 0.5
+            && let Some(raster) = self.raster.as_ref()
+        {
+            // A stacked camera draws no terrain, yet the ground still shades
+            // what it does draw: the terrain goes into its sun map, undrawn.
+            // Where that map has an answer the shader takes it and marches
+            // nothing, so without the terrain in it a view model in the shade
+            // of a hill was lit as in open sun. Culled by the sun's frustum:
+            // the hill shading the arms is as often behind the player.
+            let sun_vp = floptle_core::math::Mat4::from_cols_array_2d(&globals.sun_vp);
+            crate::terrain_edit::push_terrain_instances(
+                &self.terrain_render,
+                &self.terrains,
+                &self.world,
+                raster,
+                &terrain_mat,
+                cam.world_position,
+                sun_vp,
+                self.mesh_ids[floptle_core::Shape::Sphere as usize],
+                self.now(),
+                &mut shadow_casters,
+            );
         }
         if timing {
             self.script_host.profile().borrow_mut().record_part("renderInstancing", terrain_t.ms());
