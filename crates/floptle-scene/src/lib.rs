@@ -2953,6 +2953,17 @@ pub struct ProjectConfigDoc {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tick_budget_ms: Option<f32>,
 
+    /// How far, in metres, the camera may get from the physics' floating
+    /// origin before the origin moves to it. Physics positions are kept to
+    /// a fixed number of digits around the origin, so a body this far away
+    /// moves in steps of about one part in sixteen million of it: 0.25 mm at
+    /// 4 km. Nearer keeps everything near the camera finer; the origin then
+    /// moves more often, shifting every body by an exact whole number of
+    /// metres, so nothing jumps. `None` (the default, and every project
+    /// made before it existed) is 4,096 m.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_rebase_m: Option<f64>,
+
     /// How many baked volumes (terrains, then collidable meshes nearest the
     /// camera) the distance-field sun shadows and AO fold in at once, up to 32.
     /// Each one adds a little to every shadow ray that passes near it, so a
@@ -3144,6 +3155,7 @@ impl ProjectConfigDoc {
             vsync: VsyncDoc::default(),
             tick_overload: TickOverloadDoc::default(),
             tick_budget_ms: None,
+            origin_rebase_m: None,
             shadow_volumes: default_shadow_volumes(),
             render_scale: default_render_scale(),
             script_budget_ms: None,

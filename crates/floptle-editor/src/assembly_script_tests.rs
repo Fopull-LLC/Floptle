@@ -2410,3 +2410,30 @@ end
     assert_eq!(lines(&mut ed, "WAKE"), ["false force force".to_string()]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The project's floating origin distance is what Play recentres the physics
+/// on: a camera 700 m out recentres it at 500 m, and leaves it where it was at
+/// the default 4,096 m.
+#[test]
+fn play_recentres_the_physics_at_the_projects_floating_origin_distance() {
+    let recentred = |distance: Option<f64>| {
+        let (mut ed, dir) = project(&format!("origin{}", distance.unwrap_or(0.0)), "function update(node, dt) end\n");
+        let ball = ed.world.spawn();
+        ed.world.insert(ball, Transform::IDENTITY);
+        ed.world.insert(ball, Name("Ball".into()));
+        ed.world.insert(ball, Matter::Empty);
+        ed.world.insert(ball, RigidBody { gravity: false, radius: 0.5, ..Default::default() });
+        ed.project.origin_rebase_m = distance;
+        ed.toggle_play();
+        run(&mut ed, 1);
+        let origin0 = ed.sim.as_ref().unwrap().world.origin;
+        let cam = ed.world.query::<Name>().find(|(_, n)| n.0 == "Camera").map(|(e, _)| e).unwrap();
+        ed.world.get_mut::<Transform>(cam).unwrap().translation = DVec3::new(700.0, 0.0, 0.0);
+        run(&mut ed, 5);
+        let moved = ed.sim.as_ref().unwrap().world.origin != origin0;
+        let _ = std::fs::remove_dir_all(&dir);
+        moved
+    };
+    assert!(!recentred(None), "at the default distance a camera 700 m out recentred the physics");
+    assert!(recentred(Some(500.0)), "at a 500 m floating origin distance a camera 700 m out did not recentre the physics");
+}

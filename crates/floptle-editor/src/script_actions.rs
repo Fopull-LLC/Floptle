@@ -57,6 +57,14 @@ impl Editor {
         self.register_scene_meshes();
         // Prune terrain state for nodes the action destroyed (a generator
         // replacing a planet system destroys the old body nodes).
+        self.prune_dead_terrains();
+    }
+
+    /// Forget every terrain whose node is gone or no longer a terrain: its
+    /// field, its render state, and its place as the active terrain. Run
+    /// wherever nodes are destroyed, in edit mode and in Play alike. Kept, a
+    /// dead terrain read whatever node took its slot next.
+    pub(crate) fn prune_dead_terrains(&mut self) {
         let live: std::collections::HashSet<floptle_core::Entity> = self
             .world
             .query::<floptle_core::Matter>()
@@ -64,6 +72,10 @@ impl Editor {
             .collect();
         let before = self.terrains.len();
         self.terrains.retain(|t, _| live.contains(t));
+        self.terrain_render.retain(|t, _| live.contains(t));
+        if self.active_terrain.is_some_and(|t| !live.contains(&t)) {
+            self.active_terrain = None;
+        }
         if self.terrains.len() != before {
             // Their slots stay drawn-as-absent until the atlas is re-laid.
             self.terrain_gpu_dirty = true;

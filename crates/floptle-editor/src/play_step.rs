@@ -1215,6 +1215,9 @@ impl Editor {
                         // "physics" alone does not say what in the tick.
                         let profiling = self.script_host.profile().borrow().enabled();
                         sim.world.time_steps(profiling);
+                        if let Some(m) = self.project.origin_rebase_m.filter(|m| *m > 0.0) {
+                            sim.set_origin_threshold(m);
+                        }
                         sim.step_tick(self.game_tick.step, focus);
                         let ms = t.ms();
                         let mut p = self.script_host.profile().borrow_mut();

@@ -789,6 +789,28 @@ impl<'a> SettingsCtx<'a> {
                 }
             },
         );
+        row(
+            ui,
+            "Floating origin distance",
+            Some("how far the camera may get from the physics' origin before the origin moves \
+                  to it. Physics positions are finest near the origin: 4 km out they move in \
+                  steps of about 0.25 mm. Nearer keeps what is near the camera finer, at the \
+                  cost of moving the origin more often. A move shifts every body by an exact \
+                  whole number of metres, so nothing jumps. 0 is the default, 4,096 m"),
+            |ui| {
+                let mut m = project.origin_rebase_m.unwrap_or(0.0);
+                if ui
+                    .add_sized(
+                        [fit(ui, 120.0), 20.0],
+                        egui::DragValue::new(&mut m).range(0.0..=65_536.0).speed(16.0).suffix(" m"),
+                    )
+                    .changed()
+                {
+                    project.origin_rebase_m = (m > 0.0).then_some(m.max(64.0));
+                    out.save_project = true;
+                }
+            },
+        );
     }
 
     // --- Rendering ------------------------------------------------------

@@ -302,7 +302,9 @@ component to add, no "enable large coordinates" flag, no rule about staying near
 origin. You write world-space code; the engine keeps you precise. Minimal knobs exist
 for the rare case:
 
-- `FloatingOrigin.threshold` — rebase distance (default a few km).
+- **Floating origin distance** — rebase distance: Project Settings → Game, or
+  `origin_rebase_m` in `project.ron` (default 4 096 m). Nearer keeps what is near
+  the camera finer, at the cost of rebasing more often.
 - **Origin anchor** — which camera drags the origin (defaults to the active camera);
   set per-camera when a cutscene/security cam shouldn't move the world.
 - A **debug overlay** (editor + runtime toggle) showing live `world_offset`, the active

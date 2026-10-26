@@ -1093,6 +1093,11 @@ impl Editor {
         self.script_host.drop_ui_handlers(&gone);
         // Play-mode selections can now point at despawned entities.
         self.selection.retain(|&e| self.world.is_alive(e));
+        // …and so can the terrain tables, which the next node in a freed slot
+        // would otherwise answer for.
+        if !gone.is_empty() {
+            self.prune_dead_terrains();
+        }
     }
 }
 
@@ -1103,6 +1108,54 @@ mod tests {
     use floptle_ui::UiLayer;
 
     use crate::Editor;
+
+    /// A terrain destroyed in Play leaves every terrain table, a hundred times
+    /// over, and lends nothing to the node that takes its slot: the shared
+    /// terrain Material stays the default while an unlit magenta marker sits
+    /// in the freed slot. Kept, the dead terrain read the marker's Material
+    /// and painted every terrain flat magenta.
+    #[test]
+    fn a_terrain_destroyed_in_play_leaves_the_terrain_tables_and_lends_nothing() {
+        let mut ed = Editor::default();
+        let terrain = |ed: &mut Editor, id: u32| {
+            let e = ed.world.spawn();
+            ed.world.insert(e, Transform::IDENTITY);
+            ed.world.insert(e, Name(format!("T{id}")));
+            ed.world.insert(e, Matter::Terrain { id, collision: Default::default() });
+            ed.terrains.insert(e, crate::terrain_edit::EditorTerrain::new(floptle_field::ChunkField::new(1.0)));
+            ed.terrain_render.insert(e, Default::default());
+            e
+        };
+        let mut a = terrain(&mut ed, 1);
+        let b = terrain(&mut ed, 2);
+        ed.active_terrain = Some(a);
+        let plain = ed.terrain_material();
+        for round in 0..100 {
+            ed.apply_destroys(vec![a.index()]);
+            assert_eq!(ed.terrains.len(), 1, "round {round}: the destroyed terrain is still in the table");
+            assert!(!ed.terrain_render.contains_key(&a), "round {round}: its render state is still kept");
+            assert_ne!(ed.active_terrain, Some(a), "round {round}: it is still the active terrain");
+            let marker = ed.world.spawn();
+            assert_eq!(marker.index(), a.index(), "fixture: the marker should take the freed slot");
+            ed.world.insert(marker, Transform::IDENTITY);
+            ed.world.insert(
+                marker,
+                floptle_core::Material { unlit: true, color: [1.0, 0.0, 1.0], emissive: [1.0, 0.0, 1.0], ..Default::default() },
+            );
+            assert_eq!(ed.terrain_material(), plain, "round {round}: the terrain took the marker's Material");
+            ed.world.despawn(marker);
+            a = terrain(&mut ed, 1);
+        }
+        assert_eq!(ed.terrains.len(), 2);
+        assert!(ed.terrains.contains_key(&b));
+        // Two terrains with Materials of their own each shade with their own,
+        // not with one picked for both.
+        ed.world.insert(a, floptle_core::Material { color: [1.0, 0.0, 0.0], ..Default::default() });
+        ed.world.insert(b, floptle_core::Material { color: [0.0, 0.0, 1.0], ..Default::default() });
+        let shared = ed.terrain_material();
+        let own = |e| crate::terrain_edit::terrain_instance_material(&ed.world, e, &shared).color;
+        assert_eq!((own(a), own(b)), ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]), "each terrain should shade with its own Material");
+    }
 
     /// A browser playtest: NPCs, the entity and the tracer pool
     /// never spawned, with nothing in the log. In a browser every file's mtime

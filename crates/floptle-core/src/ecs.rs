@@ -52,10 +52,11 @@ struct Column<T> {
     /// How many times this column was handed out mutably — the per-type half
     /// of [`World::revision`]. See [`World::revision_of`].
     revision: u64,
-    /// Entity index → row. Keyed by `index` alone, not the generation, because
-    /// that is what row lookup has always matched on: a stale handle to a
-    /// reused slot finds the new occupant, and every caller above this already
-    /// checks liveness where it matters.
+    /// Entity index → row. Keyed by `index`; [`Self::position`] then checks
+    /// the row's generation, so a stale handle to a reused slot finds nothing
+    /// rather than the new occupant. Matching by index alone let a terrain
+    /// destroyed in Play keep reading the Material of whatever node took its
+    /// slot next, and paint every terrain with it.
     at: HashMap<u32, usize>,
 }
 
@@ -64,7 +65,7 @@ impl<T> Column<T> {
         Self { rows: Vec::new(), at: HashMap::new(), revision: 0 }
     }
     fn position(&self, e: Entity) -> Option<usize> {
-        self.at.get(&e.index).copied()
+        self.at.get(&e.index).copied().filter(|&i| self.rows[i].0.generation == e.generation)
     }
     /// Add or replace this entity's row.
     fn set(&mut self, e: Entity, value: T) {
@@ -83,7 +84,8 @@ impl<T> Column<T> {
     /// liability if it is ever forgotten, which is why removal lives here and
     /// nowhere else.
     fn take(&mut self, e: Entity) -> Option<T> {
-        let i = self.at.remove(&e.index)?;
+        let i = self.position(e)?;
+        self.at.remove(&e.index);
         let row = self.rows.swap_remove(i);
         if let Some((moved, _)) = self.rows.get(i) {
             self.at.insert(moved.index, i);
@@ -468,6 +470,24 @@ fn short_type_name<T: 'static>() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A handle to a destroyed node finds nothing once another node takes its
+    /// slot: not the new node's components, and it cannot remove them. A
+    /// terrain destroyed in Play kept reading the Material of the next node in
+    /// its slot and painted every terrain with it.
+    #[test]
+    fn a_stale_handle_finds_nothing_in_a_reused_slot() {
+        let mut w = World::default();
+        let old = w.spawn();
+        w.insert(old, 1u32);
+        w.despawn(old);
+        let new = w.spawn();
+        assert_eq!(new.index(), old.index(), "fixture: the slot should be reused");
+        w.insert(new, 2u32);
+        assert_eq!(w.get::<u32>(old), None, "the stale handle read the new node's component");
+        assert_eq!(w.remove::<u32>(old), None, "the stale handle removed the new node's component");
+        assert_eq!(w.get::<u32>(new), Some(&2), "the new node lost its component");
+    }
 
     /// **`revision() - revision_of::<T>()` moves for everything except mutable
     /// access to `T`.** That difference is what lets the script mirror skip a

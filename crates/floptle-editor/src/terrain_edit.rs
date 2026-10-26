@@ -1635,6 +1635,12 @@ impl Editor {
 
 }
 
+/// What terrain `e` shades with: its own [`Material`], or `shared` (see
+/// `Editor::terrain_material`) when it has none.
+pub(crate) fn terrain_instance_material(world: &floptle_core::World, e: Entity, shared: &MaterialParams) -> MaterialParams {
+    world.get::<Material>(e).map(crate::shading::material_params).unwrap_or(*shared)
+}
+
 /// Append every terrain's chunk-mesh instances to the raster draw list. The model matrix
 /// places the field-space chunk vertices via the node's f64 anchor, exactly as
 /// `fill_terrain_volumes` places the shadow/AO volume — so the drawn mesh and the marched
@@ -1704,6 +1710,8 @@ pub(crate) fn push_terrain_instances(
         if floptle_core::is_hidden(world, e) || floptle_core::is_disabled(world, e) {
             continue;
         }
+        // Its own Material, or the shared one when it has none.
+        let mat = terrain_instance_material(world, e, base_mat);
         // Far-body impostor: one shaded sphere at the body's position. The
         // positional star lights it with the correct terminator; beyond real
         // scale it grows to hold ~a couple of pixels so distant planets read
@@ -1784,7 +1792,7 @@ pub(crate) fn push_terrain_instances(
                     continue;
                 }
             }
-            let mut mp = *base_mat;
+            let mut mp = mat;
             mp.terrain_paint_base = raster.dyn_paint_base(mid);
             mp.terrain_splat = true;
             instances.push((mid, None, floptle_render::instance_of_mat(model, &mp)));
@@ -1806,7 +1814,7 @@ pub(crate) fn push_terrain_instances(
                     continue;
                 }
             }
-            let mut mp = *base_mat;
+            let mut mp = mat;
             mp.terrain_paint_base = raster.dyn_paint_base(mid);
             // Splat: interpret the chunk color's alpha as a palette slot + triplanar-sample
             // the terrain palette (bound to the raster in `set_terrain_palette`).
@@ -5000,12 +5008,15 @@ impl Editor {
         }
     }
 
-    /// The surface [`Material`] that drives terrain shading. Terrain uses the same
-    /// lighting model as the meshes, so this picks whose lighting params (ambient,
-    /// specular/reflectiveness, rim, emissive, unlit, color tint) every terrain
-    /// adopts: the active terrain's material if it has one, else any terrain that has
-    /// one, else a neutral matte default. Per-terrain color still comes from painting.
+    /// The surface [`Material`] a terrain with none of its own shades with.
+    /// Terrain uses the same lighting model as the meshes (ambient, specular,
+    /// rim, emissive, unlit, colour tint); a terrain with a Material uses its
+    /// own (see `push_terrain_instances`), and one without takes the active
+    /// terrain's, else the lowest-numbered terrain's that has one, else a
+    /// neutral matte default. Per-terrain colour still comes from painting.
     pub(crate) fn terrain_material(&self) -> MaterialParams {
+        // The lowest-numbered terrain, not the first a hash map happens to
+        // list, so every run picks the same one.
         let pick = self
             .active_terrain
             .filter(|e| self.world.get::<Material>(*e).is_some())
@@ -5013,7 +5024,8 @@ impl Editor {
                 self.terrains
                     .keys()
                     .copied()
-                    .find(|&e| self.world.get::<Material>(e).is_some())
+                    .filter(|&e| self.world.get::<Material>(e).is_some())
+                    .min_by_key(|e| e.index())
             });
         pick.and_then(|e| self.world.get::<Material>(e))
             .map(material_params)
