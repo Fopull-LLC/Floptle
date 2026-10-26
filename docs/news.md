@@ -1,5 +1,9 @@
 ## Just shipped
 
+**v0.117.0-rc29 — "Whole Worlds"** (beta). Planets no longer draw in one flat
+colour after a terrain is destroyed during play, and the floating origin
+distance is a project setting.
+
 **v0.117.0-rc28 — "Whole Worlds"** (beta). Volumetric fog worked out once for
 every four pixels instead of for each one, and craft that sleep with wind or a
 thruster on them.
