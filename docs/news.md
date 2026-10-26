@@ -1,5 +1,9 @@
 ## Just shipped
 
+**v0.117.0-rc32 — "Whole Worlds"** (beta). `terrain.stats()` and
+`terrain.setBudget()`: what terrain holds in memory, and a budget it keeps to.
+Generated worlds take about an eighth less memory.
+
 **v0.117.0-rc31 — "Whole Worlds"** (beta). First-person arms and tools drawn by a
 stacked camera are shaded by the terrain around them.
 
