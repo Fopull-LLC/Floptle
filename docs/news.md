@@ -1,5 +1,9 @@
 ## Just shipped
 
+**v0.117.0-rc35 — "Whole Worlds"** (beta). Terrain collision that no longer
+grows with every step the player takes, a cheaper second layer of shared fog,
+and `perf.fogPaths` to see which pixels use it.
+
 **v0.117.0-rc34 — "Whole Worlds"** (beta). Pictures a script draws with
 `image.new`, node handles that compare equal, a runtime `alignUp`, and a vessel's
 `tickPos` that is where its root is.
