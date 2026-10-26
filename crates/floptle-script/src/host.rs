@@ -2815,19 +2815,11 @@ fn install_node_queues(lua: &Lua) -> NodeQueueCells {
     // Also available as `node:destroy()` (installed with the handle API).
     let destroy_queue: Rc<RefCell<Vec<u32>>> = Rc::new(RefCell::new(Vec::new()));
     {
-        let q = destroy_queue.clone();
-        if let Ok(f) = lua.create_function(move |_, v: Value| {
-            let eid = match &v {
-                Value::Table(t) => t.raw_get::<u32>("__id").ok(),
-                _ => None,
-            };
-            match eid {
-                Some(id) => {
-                    q.borrow_mut().push(id);
-                    Ok(())
-                }
-                None => Err(mlua::Error::runtime("destroy(node): pass a node or node handle")),
-            }
+        if let Ok(f) = lua.create_function(move |_, v: Value| match &v {
+            // The handle's own `destroy`, so a handle whose node has gone is
+            // refused in one place.
+            Value::Table(t) if t.raw_get::<u32>("__id").is_ok() => t.get::<mlua::Function>("destroy")?.call::<()>(t.clone()),
+            _ => Err(mlua::Error::runtime("destroy(node): pass a node or node handle")),
         }) {
             let _ = lua.globals().set("destroy", f);
         }
@@ -7449,6 +7441,7 @@ impl ScriptHost {
     fn sync_scene(&self, world: &World) {
         let span = self.profile.borrow().enabled().then(floptle_core::profile::Span::new);
         self.sync_scene_inner(world);
+        self.retire_handles();
         self.refresh_scatter_frames();
         if let Some(span) = span {
             self.profile.borrow_mut().record(floptle_core::profile::Bucket::Mirror, span.ms());
@@ -7503,6 +7496,7 @@ impl ScriptHost {
         s.names.clear();
         s.by_name.clear();
         s.parent.clear();
+        s.ents_before = Some(std::mem::take(&mut s.ents));
         let old_children = std::mem::take(&mut s.children);
         s.scripts.clear();
         s.transforms.clear();
@@ -7658,6 +7652,7 @@ impl ScriptHost {
     /// Take a despawned node out of every per-node table. The lists built in
     /// scene order are the caller's to re-derive ([`Self::rebuild_indices`]).
     fn forget_node(s: &mut crate::SceneMirror, id: u32) {
+        s.retired.push(id);
         Self::forget_values(s, id);
         s.ents.remove(&id);
         s.transforms.remove(&id);
@@ -7913,7 +7908,9 @@ impl ScriptHost {
     ) {
             let id = e.index();
             s.order.push(id);
-            s.ents.insert(id, e);
+            if s.ents.insert(id, e).is_some_and(|was| was != e) {
+                s.retired.push(id);
+            }
             s.transforms.insert(id, *tr);
             let rebuilding = live.is_some();
             Self::mirror_values(s, world, e, live);
@@ -8105,10 +8102,32 @@ impl ScriptHost {
     /// spawns a bullet at a time, and the whole frame budget when it streams a
     /// building.
     pub fn sync_new_entities(&self, world: &World, ents: &[floptle_core::Entity]) {
-        let mut s = self.scene.borrow_mut();
-        for &e in ents {
-            let Some(tr) = world.get::<Transform>(e) else { continue };
-            Self::mirror_entity(&mut s, world, e, tr, None);
+        {
+            let mut s = self.scene.borrow_mut();
+            for &e in ents {
+                let Some(tr) = world.get::<Transform>(e) else { continue };
+                Self::mirror_entity(&mut s, world, e, tr, None);
+            }
+        }
+        self.retire_handles();
+    }
+
+    /// Retire the handles of every node that has gone, or whose slot another
+    /// node now holds, since the last sync.
+    fn retire_handles(&self) {
+        let ids = {
+            let mut s = self.scene.borrow_mut();
+            if let Some(before) = s.ents_before.take() {
+                for (id, e) in before {
+                    if s.ents.get(&id) != Some(&e) {
+                        s.retired.push(id);
+                    }
+                }
+            }
+            std::mem::take(&mut s.retired)
+        };
+        if !ids.is_empty() {
+            crate::env::retire_node_handles(&self.lua, &ids);
         }
     }
 

@@ -4295,7 +4295,8 @@ let node_mt = lua.create_table()?;
         }
         // Identity / hierarchy fields.
         match key.as_str() {
-            "id" => return Ok(Value::Integer(e as mlua::Integer)),
+            // A retired handle still says which node it was.
+            "id" => return Ok(Value::Integer(this.raw_get::<Option<u32>>("__was")?.unwrap_or(e) as mlua::Integer)),
             "name" => {
                 // Read-your-writes: a rename lands in the scene after the pass.
                 let n = name_changes.borrow().get(&e).cloned().or_else(|| scene.borrow().names.get(&e).cloned());
@@ -5096,7 +5097,12 @@ let node_mt = lua.create_table()?;
     node_mt.set(
         "__eq",
         lua.create_function(|_, (a, b): (Table, Table)| {
-            Ok(match (a.raw_get::<Option<u32>>("__id")?, b.raw_get::<Option<u32>>("__id")?) {
+            // Two handles of the same node, live or retired: a retired handle
+            // is still the node it was, and never the node that took its slot.
+            let id = |t: &Table| -> mlua::Result<Option<(u32, Option<u32>)>> {
+                Ok(t.raw_get::<Option<u32>>("__id")?.map(|id| (id, t.raw_get::<Option<u32>>("__was").ok().flatten())))
+            };
+            Ok(match (id(&a)?, id(&b)?) {
                 (Some(x), Some(y)) => x == y,
                 _ => false,
             })
@@ -5104,6 +5110,9 @@ let node_mt = lua.create_table()?;
     )?;
 }
 lua.set_app_data(crate::env::NodeMeta(node_mt.clone()));
+    let weak_keys = lua.create_table()?;
+    weak_keys.raw_set("__mode", "k")?;
+    lua.set_app_data(crate::env::NodeBook { by_id: lua.create_table()?, weak_keys });
 lua.set_named_registry_value("floptle_node_mt", node_mt)?;
     Ok(())
 }
@@ -7326,10 +7335,22 @@ fn node_tag_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlua::Result
 // handle stays safely readable for the rest of this call.
 {
     let q = shared.destroy_queue.clone();
+    let logs = shared.logs.clone();
     methods.set(
         "destroy",
         lua.create_function(move |_, this: Table| {
             let e: u32 = this.raw_get("__id")?;
+            // A retired handle's node is gone, and its slot may already hold
+            // another: nothing is queued, so nothing else can be removed.
+            if e == crate::env::RETIRED_NODE {
+                let was = this.raw_get::<Option<u32>>("__was")?.unwrap_or(e);
+                logs.borrow_mut().push(crate::ScriptLog {
+                    level: crate::LogLevel::Warn,
+                    msg: format!("destroy: node #{was} no longer exists (a stale handle) — nothing was removed"),
+                    source: None,
+                });
+                return Ok(());
+            }
             q.borrow_mut().push(e);
             Ok(())
         })?,

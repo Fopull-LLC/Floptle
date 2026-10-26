@@ -1980,6 +1980,9 @@ end
         "a destroy that worked is quiet"
     );
     run(&mut ed, 4);
+    // Said by the script host, as the handle is refused: the Console has it
+    // once the script lines are drained.
+    ed.drain_script_logs();
     let stale = format!("destroy: node #{} no longer exists", ids[0]);
     assert!(
         ed.console.entries.iter().any(|e| e.msg.starts_with(&stale)),
@@ -2607,4 +2610,56 @@ fn play_recentres_the_physics_at_the_projects_floating_origin_distance() {
     };
     assert!(!recentred(None), "at the default distance a camera 700 m out recentred the physics");
     assert!(recentred(Some(500.0)), "at a 500 m floating origin distance a camera 700 m out did not recentre the physics");
+}
+
+/// **A node handle names one node for that node's whole life.** Node A is
+/// destroyed and node B made next takes its slot: A's old handle reads not
+/// valid, with no name, and writing through it does nothing to B. It used to
+/// come back valid as B, so a game that cached a child's handle and checked
+/// `valid` drove whatever node next took the slot.
+#[test]
+fn a_destroyed_nodes_handle_never_drives_the_node_that_takes_its_slot() {
+    let (mut ed, dir) = project(
+        "stale",
+        r#"
+local co
+local function main()
+  local a
+  createNode("A", function(n) a = n end)
+  coroutine.yield(); coroutine.yield()
+  local id = a.id
+  a:destroy()
+  coroutine.yield(); coroutine.yield()
+  log("RP gone valid " .. tostring(a.valid))
+  local b
+  createNode("B", function(n) b = n end)
+  coroutine.yield(); coroutine.yield()
+  log(string.format("RP reused %s valid %s name %s id %s", tostring(b.id == id), tostring(a.valid), tostring(a.name), tostring(a.id == id)))
+  a.visible = false
+  a.x = 99
+  coroutine.yield(); coroutine.yield()
+  log(string.format("RP b visible %s x %s same %s", tostring(b.visible), tostring(b.x), tostring(a == b)))
+end
+function update(node, dt)
+  if not co then co = coroutine.create(main) end
+  if coroutine.status(co) ~= "dead" then
+    local ok, err = coroutine.resume(co)
+    if not ok then error(err) end
+  end
+end
+"#,
+    );
+    ed.toggle_play();
+    run(&mut ed, 12);
+    let got = lines(&mut ed, "RP");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        got,
+        vec![
+            "gone valid false".to_string(),
+            "reused true valid false name nil id true".to_string(),
+            "b visible true x 0 same false".to_string(),
+        ],
+        "a destroyed node's handle came back as the node that took its slot"
+    );
 }

@@ -1063,7 +1063,7 @@ Capsule standing height — write a smaller value to crouch (the engine resizes 
 
 ### `node.id`
 
-A stable numeric id for this node. Two handles to the same node compare equal with ==, however each was got (find, getChild, findScript(...).node, your own node), so a.id == b.id and a == b say the same thing.
+A stable numeric id for this node. Two handles to the same node compare equal with ==, however each was got (find, getChild, findScript(...).node, your own node), so a.id == b.id and a == b say the same thing. A handle names one node for that node's whole life: once the node is destroyed, node.valid is false, node.name is nil, and reads and writes through the handle reach nothing, even after a new node is made in its place. node.id keeps answering with the old number, but ids are reused: a node made later can have the same id as one destroyed earlier, so key a table by id only while the node is valid, and compare handles with == (a destroyed node's handle never equals the node that took its id).
 
 ### `node.layer`
 

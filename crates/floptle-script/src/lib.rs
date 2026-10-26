@@ -1878,6 +1878,13 @@ pub(crate) struct SceneMirror {
     /// Entity index → its `Entity` (with generation), so handle-written transforms flush
     /// back to the right ECS entity.
     ents: HashMap<u32, Entity>,
+    /// Indices whose node has gone, or whose slot now holds another node, since
+    /// the handles were last told: the handles made for the old node are
+    /// retired (see `env::retire_node_handles`), so a destroyed node's handle
+    /// never drives whatever reuses its slot.
+    retired: Vec<u32>,
+    /// The mirror's entities before a full rebuild, to tell which changed hands.
+    ents_before: Option<HashMap<u32, Entity>>,
     /// Entities whose transform a handle wrote this frame (so we only flush those back —
     /// the current node still flushes via the value-table path).
     dirty: std::collections::HashSet<u32>,

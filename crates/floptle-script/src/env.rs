@@ -443,6 +443,18 @@ pub(crate) fn node_id_of(v: &mlua::Value) -> Option<u32> {
 pub(crate) fn new_node_handle(lua: &Lua, e: u32) -> mlua::Result<Table> {
     let t = lua.create_table_with_capacity(0, 1)?;
     t.raw_set("__id", e)?;
+    if let Some(book) = lua.app_data_ref::<NodeBook>() {
+        let held = match book.by_id.raw_get::<Option<Table>>(e)? {
+            Some(held) => held,
+            None => {
+                let held = lua.create_table()?;
+                held.set_metatable(Some(book.weak_keys.clone()));
+                book.by_id.raw_set(e, &held)?;
+                held
+            }
+        };
+        held.raw_set(&t, true)?;
+    }
     // Held beside the state rather than looked up by name: `children()` on a
     // thousand-part craft makes a thousand of these, and the named lookup was
     // a registry string hash each.
@@ -457,6 +469,34 @@ pub(crate) fn new_node_handle(lua: &Lua, e: u32) -> mlua::Result<Table> {
 /// The node handle's metatable, kept as app data so making a handle is not a
 /// registry lookup by name.
 pub(crate) struct NodeMeta(pub(crate) Table);
+
+/// The id a retired handle answers to: no node ever has it, so every read
+/// through the handle finds nothing and every write reaches nothing, exactly
+/// as for a node that has gone.
+pub(crate) const RETIRED_NODE: u32 = u32::MAX;
+
+/// Every node handle made, by node id, each set weak-keyed so it keeps no
+/// handle alive. A handle names one node for that node's whole life: when
+/// the node goes, or its slot is taken by a new node, every handle made for
+/// it is retired, its `__id` replaced by [`RETIRED_NODE`] and the old id
+/// kept in `__was` for `node.id`.
+pub(crate) struct NodeBook {
+    pub(crate) by_id: Table,
+    pub(crate) weak_keys: Table,
+}
+
+/// Retire every handle made for the nodes at `ids`. See [`NodeBook`].
+pub(crate) fn retire_node_handles(lua: &Lua, ids: &[u32]) {
+    let Some(book) = lua.app_data_ref::<NodeBook>() else { return };
+    for &id in ids {
+        let Ok(Some(held)) = book.by_id.raw_get::<Option<Table>>(id) else { continue };
+        for (h, _) in held.pairs::<Table, mlua::Value>().flatten() {
+            let _ = h.raw_set("__was", id);
+            let _ = h.raw_set("__id", RETIRED_NODE);
+        }
+        let _ = book.by_id.raw_set(id, mlua::Value::Nil);
+    }
+}
 
 /// Create a Lua **component handle** for component `comp` on entity index `e`: a table
 /// `{__id, __comp}` with the shared component metatable, so `h.field` reads and
