@@ -5996,6 +5996,116 @@ mod residency_tests {
         }
     }
 
+    /// A generated planet with chunk terrain, gravity toward its centre, and
+    /// a capsule body placed `above` metres over the ground (negative: inside
+    /// it), the camera beside it; `orbiting`, the planet goes round a sun at
+    /// 250 m/s. Returns the editor, the planet, the body, the up at the body
+    /// and an untouched copy of the field to measure by, in the planet's frame.
+    fn capsule_on_a_planet(above: f32, orbiting: bool) -> (crate::Editor, Entity, Entity, Vec3, floptle_field::ChunkField) {
+        let fill = floptle_field::procgen::PlanetFill { seed: 21, radius: 200.0, voxel: 1.5, relief: 6.0, cave_depth: 0.0, ..Default::default() };
+        let mut field = floptle_field::procgen::generate_planet(&fill);
+        field.set_spec("rest".into());
+        let exact = field.clone();
+        let mut ed = crate::Editor::default();
+        let at = if orbiting {
+            let sun = ed.world.spawn();
+            ed.world.insert(sun, floptle_core::Name("Sun".into()));
+            ed.world.insert(sun, floptle_core::Transform::IDENTITY);
+            ed.world.insert(sun, floptle_core::CelestialBody { mu: 3.125e8, ..Default::default() });
+            floptle_core::math::DVec3::new(5000.0, 0.0, 0.0)
+        } else {
+            floptle_core::math::DVec3::ZERO
+        };
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Name("Home".into()));
+        ed.world.insert(e, floptle_core::Transform::from_translation(at));
+        let rails = if orbiting { ("Sun".to_string(), 5000.0) } else { (String::new(), 0.0) };
+        ed.world.insert(
+            e,
+            floptle_core::CelestialBody { body_radius: 200.0, mu: 8.0e5, parent: rails.0, a: rails.1, soi: 2000.0, ..Default::default() },
+        );
+        ed.world.insert(e, floptle_core::Matter::Terrain { id: 1, collision: Default::default() });
+        let up = Vec3::new(0.3, 1.0, 0.2).normalize();
+        let ground = field.raycast(up * 300.0, -up, 300.0).unwrap();
+        ed.terrains.insert(e, EditorTerrain::new(field));
+        let body = ed.world.spawn();
+        ed.world.insert(body, floptle_core::Transform::from_translation(at + (ground + up * above).as_dvec3()));
+        ed.world.insert(body, floptle_core::RigidBody { gravity: true, ..Default::default() });
+        ed.camera.position = at + (ground + up * 6.0).as_dvec3();
+        (ed, e, body, up, exact)
+    }
+
+    /// **A body resting on chunk terrain keeps its ground under it.** A
+    /// physics ray down from a capsule standing still on a planet's surface
+    /// must find the ground every frame for ten seconds, through a physics
+    /// rebuild while the scripts hold the colliders. A crew standing in a cave
+    /// lost the floor a few frames after arriving and fell into the planet,
+    /// while the terrain's own queries still found it a metre down.
+    #[test]
+    fn a_body_resting_on_chunk_terrain_keeps_its_ground_under_it() {
+        let (mut ed, planet, body, up, exact) = capsule_on_a_planet(1.5, true);
+        ed.toggle_play();
+        assert!(ed.playing && ed.sim.is_some());
+        let at = |ed: &crate::Editor| ed.sim.as_ref().unwrap().body_snapshot(body.index()).unwrap().pos;
+        for _ in 0..120 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        let (mut misses, mut worst) = (0, 0.0f32);
+        for frame in 0..600 {
+            if frame == 300 {
+                // As a script's `water.setFrozen` does in the frame pass.
+                let sim = ed.sim.as_mut().unwrap();
+                ed.script_host.set_colliders(std::mem::take(&mut sim.world.colliders), sim.world.origin);
+                ed.rebuild_sim();
+                let back = ed.script_host.take_colliders();
+                ed.sim.as_mut().unwrap().world.set_colliders(back);
+            }
+            ed.play_step(1.0 / 60.0, true);
+            let from = at(&ed) + up.as_dvec3() * 0.5;
+            match ed.sim.as_ref().unwrap().raycast(from, -up, 4.0) {
+                None => misses += 1,
+                // Where the ray stops, against the ground as the planet draws it.
+                Some(h) => {
+                    let hit = from - up.as_dvec3() * h.distance as f64;
+                    let local = (hit - floptle_core::world_transform(&ed.world, planet).translation).as_vec3();
+                    worst = worst.max(exact.d(local).abs());
+                }
+            }
+        }
+        assert_eq!(misses, 0, "the ground under a resting body was missing on {misses} of 600 frames");
+        assert!(worst < 0.1, "the ground under a resting body collided {worst:.2} m from where it is drawn");
+    }
+
+    /// **A body put inside the ground during play ends up on it.** A capsule
+    /// standing on a planet is moved wholly under the surface (as a regrade
+    /// raising the ground under it, or a script setting its position, does)
+    /// and must be pushed out along the ground's up to rest on top, not left
+    /// to sink into the planet.
+    #[test]
+    fn a_body_put_inside_the_ground_ends_up_on_it() {
+        let (mut ed, planet, body, up, exact) = capsule_on_a_planet(1.5, false);
+        ed.toggle_play();
+        assert!(ed.playing && ed.sim.is_some());
+        for _ in 0..60 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        let depth = |ed: &crate::Editor| {
+            let p = ed.sim.as_ref().unwrap().body_snapshot(body.index()).unwrap().pos;
+            exact.d((p - floptle_core::world_transform(&ed.world, planet).translation).as_vec3())
+        };
+        let rest = depth(&ed);
+        // Its centre 2.5 m down: the whole capsule (2 m tall) under the surface.
+        let p = ed.sim.as_ref().unwrap().body_snapshot(body.index()).unwrap().pos;
+        ed.sim.as_mut().unwrap().set_body_position(body.index(), p - up.as_dvec3() * (rest as f64 + 2.5));
+        let buried = depth(&ed);
+        assert!(buried < -2.0, "the fixture did not bury the body: {buried:.2}");
+        for _ in 0..180 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        let d = depth(&ed);
+        assert!(d > 0.0 && d < rest + 0.5, "a body buried in the ground ended {d:.2} m from its surface (it rested at {rest:.2})");
+    }
+
     /// **Walking round a planet keeps the ground it holds flat.** A generated
     /// planet held every chunk of its surface at full detail, gigabytes at a
     /// kilometre: the ground past the near rings is put away behind the
