@@ -690,32 +690,21 @@ impl Editor {
             }
         }
         // `water.setFrozen(node, on)` — freezing is a state, so it lands on
-        // the node and the physics field is rebuilt from it. The rebuild
-        // preserves live velocities, so a sea freezing under a swimmer does
-        // not fling them.
-        let freezes = self.script_host.take_water_freezes();
-        if !freezes.is_empty() {
-            let mut changed = false;
-            for (eid, on) in freezes {
-                let Some(e) =
-                    self.world.entity_with::<Matter>(eid)
-                else {
-                    continue;
-                };
-                match self.world.get_mut::<Matter>(e) {
-                    Some(Matter::WaterVolume { frozen, .. }) => {
-                        changed |= *frozen != on;
-                        *frozen = on;
-                    }
-                    _ => self.console.push(
-                        floptle_script::LogLevel::Warn,
-                        "water.setFrozen: that node is not a Water Volume".into(),
-                        None,
-                    ),
-                }
-            }
-            if changed {
-                self.timed_wait("physicsRebuild", |ed| ed.rebuild_sim());
+        // the node, and the solver's water field, built from the scene every
+        // frame, takes it from there this same frame. Nothing is rebuilt: a
+        // game freezing and thawing a sea as the camera comes and goes must
+        // not re-import every collider in the level each time.
+        for (eid, on) in self.script_host.take_water_freezes() {
+            let Some(e) = self.world.entity_with::<Matter>(eid) else {
+                continue;
+            };
+            match self.world.get_mut::<Matter>(e) {
+                Some(Matter::WaterVolume { frozen, .. }) => *frozen = on,
+                _ => self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    "water.setFrozen: that node is not a Water Volume".into(),
+                    None,
+                ),
             }
         }
         // GPU-load any models a script swapped via `node.model` (the Matter is

@@ -165,15 +165,23 @@ impl Editor {
     /// Centres are converted into the sim frame in f64 here, so a sea placed
     /// far out is exact, and the sea's own radius survives the
     /// node's scale — scaling a sea node scales the sea.
-    /// Warn once per body and volume when the water is more than fifty times
-    /// denser or lighter than the body. Water `density` and body `mass` share the
-    /// game's units, and a ratio that far out is a default mass or a unit mix-up,
-    /// not a crate or a lead ball; the line names both remedies.
+    /// Warn once per volume and kind of body (by name: a hundred crates
+    /// spawned from one prefab are one line) and once a Play when the water is
+    /// more than fifty times denser or lighter than the body. Water `density`
+    /// and body `mass` share the game's units, and a ratio that far out is a
+    /// default mass or a unit mix-up, not a crate or a lead ball; the line
+    /// names both remedies. A volume of density 0 holds nothing up on purpose
+    /// (it is there for its look, or the game floats things itself) and is
+    /// never warned about.
     pub(crate) fn warn_water_density_mismatch(&mut self) {
         const BAND: f32 = 50.0;
         let Some(sim) = self.sim.as_ref() else { return };
         for (body, vol, density, mass, ratio) in sim.water_density_ratios() {
-            if (1.0 / BAND..=BAND).contains(&ratio) || !self.water_ratio_warned.insert((body.index(), vol)) {
+            if density <= 0.0 || (1.0 / BAND..=BAND).contains(&ratio) {
+                continue;
+            }
+            let kind = self.world.get::<floptle_core::Name>(body).map_or_else(|| format!("#{}", body.index()), |n| n.0.clone());
+            if !self.water_ratio_warned.insert((vol, kind)) {
                 continue;
             }
             let name = |e: Option<floptle_core::Entity>| {
@@ -247,7 +255,8 @@ impl Editor {
             };
             field.volumes.push(floptle_physics::WaterVolume {
                 shape,
-                density: density.max(1e-3),
+                // 0 holds nothing up: a volume for its look alone.
+                density: density.max(0.0),
                 drag: drag.max(0.0),
                 angular_drag: angular_drag.max(0.0),
                 frozen: *frozen,
@@ -682,8 +691,6 @@ impl Editor {
         }
         // Water is a static field like gravity, sampled per step.
         sim.world.water = Self::build_water_field(&self.world, origin);
-        // Each Play says a density mismatch again: the warnings are per run.
-        self.water_ratio_warned.clear();
         self.kin_between_ticks_warned.clear();
         self.kin_tick_poses.clear();
         self.script_host.set_layers(sim.layers().clone());
@@ -768,11 +775,11 @@ impl Editor {
                 sim.set_compound_angular_velocity(eid, ang);
             }
         }
-        // Rebuilt while the scripts hold the colliders (a script's
-        // `water.setFrozen` asks for a rebuild mid-pass): the new sim's go out
-        // in their place. Otherwise taking them back hands the new sim the old
-        // one's, every one of them off by however far the origin moved, and
-        // nothing on the level could be stood on or hit again.
+        // Rebuilt while the scripts hold the colliders (anything in the frame
+        // pass that asks for a rebuild): the new sim's go out in their place.
+        // Otherwise taking them back hands the new sim the old one's, every
+        // one of them off by however far the origin moved, and nothing on the
+        // level could be stood on or hit again.
         if self.script_host.colliders_lent() {
             let _ = self.script_host.take_colliders();
             self.script_host.set_colliders(std::mem::take(&mut sim.world.colliders), sim.world.origin);
@@ -1228,6 +1235,9 @@ impl Editor {
             self.space_frame.clear(); // dominant-frame tracking restarts too
             self.space_rails_prev.clear(); // the first tick snaps authored → rails
             self.carried_statics = None;
+            // Each Play says a density mismatch again: the warnings are per
+            // run, not per sim build (a build mid-play is not a new run).
+            self.water_ratio_warned.clear();
             self.compound_lod.clear(); // distant-craft LOD restarts with them
             self.lod_keep_live.clear(); // keep-live exemptions don't persist runs
             self.lod_woken.clear();
@@ -2275,12 +2285,97 @@ mod water_streaming_tests {
             pos_of(&ed)
         );
     }
+
+    /// **Freezing water from a script takes hold the same frame, and does not
+    /// rebuild the physics world.** The water field is built from the scene
+    /// every frame, so a frozen flag needs nothing more. Freezing used to
+    /// rebuild the whole sim, re-importing every collider in the level each
+    /// time a game froze or thawed a sea, a hitch every time.
+    #[test]
+    fn freezing_water_lets_go_of_a_floating_body_without_a_rebuild() {
+        let dir = std::env::temp_dir().join(format!("floptle-freeze-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(
+            dir.join("scripts/freezer.lua"),
+            "local frames = 0\nfunction update(node, dt)\n  frames = frames + 1\n  \
+             if frames == 90 then water.setFrozen(find('Pool'), true) end\nend\n",
+        )
+        .unwrap();
+        let mut ed = Editor { project_root: dir.clone(), ..Default::default() };
+        let g = ed.world.spawn();
+        ed.world.insert(g, Transform::IDENTITY);
+        ed.world.insert(g, Matter::GravityVolume { mode: GravityMode::Down, strength: 15.0, radius: 0.0 });
+        let ball = ed.world.spawn();
+        ed.world.insert(ball, Name("Ball".into()));
+        ed.world.insert(ball, Transform { translation: [0.0, 0.0, 0.0].into(), ..Transform::IDENTITY });
+        ed.world.insert(ball, RigidBody::default());
+        let pool = ed.world.spawn();
+        ed.world.insert(pool, Name("Pool".into()));
+        ed.world.insert(pool, Transform::IDENTITY);
+        ed.world.insert(
+            pool,
+            Matter::WaterVolume {
+                kind: WaterKind::Pool,
+                radius: 0.0,
+                half_extents: [5.0, 5.0, 5.0],
+                density: 1000.0,
+                drag: 1.0,
+                angular_drag: 1.0,
+                frozen: false,
+                tint: [0.1, 0.3, 0.4],
+                visibility: 20.0,
+            },
+        );
+        let driver = ed.world.spawn();
+        ed.world.insert(driver, Transform::IDENTITY);
+        ed.world.insert(
+            driver,
+            super::Scripts(vec![super::ScriptInst {
+                kind: "freezer".into(),
+                enabled: true,
+                params: Vec::new(),
+                refs: Vec::new(),
+                strs: Vec::new(),
+                pinned_bools: None,
+            }]),
+        );
+        ed.toggle_play();
+        const DT: f32 = 1.0 / 60.0;
+        let vel_of = |ed: &Editor| ed.sim.as_ref().unwrap().body_states().find(|r| r.entity == ball).unwrap().vel.y;
+        for _ in 0..80 {
+            ed.play_step(DT, true);
+        }
+        // Something only this sim has: a rebuild would not bring it back.
+        let sentinel = floptle_core::math::DVec3::new(0.0, -500.0, 0.0);
+        ed.sim.as_mut().unwrap().world.add_collider_tagged(
+            sentinel,
+            Box::new(floptle_physics::SphereShape { center: floptle_core::math::Vec3::ZERO, radius: 1.0 }),
+            0,
+            None,
+            false,
+        );
+        let floating = vel_of(&ed);
+        for _ in 0..30 {
+            ed.play_step(DT, true);
+        }
+        let errors = ed.script_host.errors().to_vec();
+        let kept = ed.sim.as_ref().unwrap().world.colliders.iter().any(|c| (c.anchor - sentinel).length() < 1e-6);
+        let frozen = matches!(ed.world.get::<Matter>(pool), Some(Matter::WaterVolume { frozen: true, .. }));
+        let falling = vel_of(&ed);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(frozen, "the script froze the pool");
+        assert!(floating.abs() < 2.0, "the ball floats before the freeze: {floating}");
+        assert!(falling < -3.0, "frozen water holds nothing up, the ball must fall: {falling}");
+        assert!(kept, "freezing water rebuilt the physics world");
+    }
 }
 
 #[cfg(test)]
 mod water_density_tests {
     use crate::Editor;
-    use floptle_core::{Matter, Name, RigidBody, Transform, WaterKind};
+    use floptle_core::{GravityMode, Matter, Name, RigidBody, Transform, WaterKind};
 
     /// **A body the water will throw out is named once, with the remedy.**
     /// A game whose masses are tonnes set its sea to 1025, and its one-tonne
@@ -2330,6 +2425,86 @@ mod water_density_tests {
         assert!(said.iter().any(|l| l.contains("\"Astronaut\"")) && said.iter().any(|l| l.contains("\"Diver\"")), "{said:#?}");
         assert!(said.iter().all(|l| l.contains("\"Sea\"") && !l.contains("Buoy")), "{said:#?}");
         assert!(said[0].contains("fling it out") && said[0].contains("same units"), "{}", said[0]);
+    }
+
+    /// A pool of `density` with twenty light props of one kind in it.
+    fn props_in_a_sea(density: f32) -> (Editor, Vec<floptle_core::Entity>) {
+        let mut ed = Editor::default();
+        let g = ed.world.spawn();
+        ed.world.insert(g, Transform::IDENTITY);
+        ed.world.insert(g, Matter::GravityVolume { mode: GravityMode::Down, strength: 9.8, radius: 0.0 });
+        let sea = ed.world.spawn();
+        ed.world.insert(sea, Name("Sea".into()));
+        ed.world.insert(sea, Transform::IDENTITY);
+        ed.world.insert(
+            sea,
+            Matter::WaterVolume {
+                kind: WaterKind::Pool,
+                radius: 0.0,
+                half_extents: [40.0, 40.0, 40.0],
+                density,
+                drag: 1.0,
+                angular_drag: 1.0,
+                frozen: false,
+                tint: [0.1, 0.3, 0.4],
+                visibility: 20.0,
+            },
+        );
+        let props = (0..20)
+            .map(|i| {
+                let e = ed.world.spawn();
+                ed.world.insert(e, Name("PropCan".into()));
+                // A node with no Matter is not in the scene a Stop restores.
+                ed.world.insert(e, Matter::Empty);
+                ed.world.insert(e, Transform { translation: [i as f64 * 2.0 - 20.0, 0.0, 0.0].into(), ..Transform::IDENTITY });
+                ed.world.insert(e, RigidBody { mass: 0.07, ..RigidBody::default() });
+                e
+            })
+            .collect();
+        (ed, props)
+    }
+
+    fn buoyancy_lines(ed: &Editor) -> u32 {
+        ed.console.entries.iter().filter(|l| l.msg.contains("buoyancy")).map(|l| l.count.max(1)).sum()
+    }
+
+    /// **A hundred props of one kind are one line, and a rebuild mid-play is
+    /// not a new Play.** The warning was keyed by entity and forgotten at
+    /// every sim build, so a game that rebuilt physics as the camera moved
+    /// repeated it for every body, hundreds of times a session.
+    #[test]
+    fn a_density_mismatch_is_said_once_per_kind_of_body_however_often_physics_rebuilds() {
+        let (mut ed, _) = props_in_a_sea(0.001);
+        ed.toggle_play();
+        for i in 0..90 {
+            if i % 30 == 29 {
+                ed.rebuild_sim();
+            }
+            ed.play_step(1.0 / 60.0, true);
+        }
+        assert_eq!(buoyancy_lines(&ed), 1, "twenty cans, three rebuilds: one line");
+        // A new Play (which starts a clean Console) says it again, once.
+        ed.toggle_play();
+        ed.toggle_play();
+        for _ in 0..30 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        assert_eq!(buoyancy_lines(&ed), 1, "each Play says it once");
+    }
+
+    /// **Water of density 0 holds nothing up and warns about nothing.** A
+    /// game that floats things itself keeps the water for its look and for
+    /// `water.at`.
+    #[test]
+    fn water_of_density_zero_holds_nothing_up_and_says_nothing() {
+        let (mut ed, props) = props_in_a_sea(0.0);
+        ed.toggle_play();
+        for _ in 0..60 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        assert_eq!(buoyancy_lines(&ed), 0, "a look-only sea is not a mistake");
+        let vel = ed.sim.as_ref().unwrap().body_states().find(|r| r.entity == props[0]).unwrap().vel.y;
+        assert!(vel < -2.0, "nothing holds a can up in water of density 0: {vel}");
     }
 }
 

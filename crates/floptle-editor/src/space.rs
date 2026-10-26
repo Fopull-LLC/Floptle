@@ -1157,8 +1157,8 @@ mod tests {
     }
 
     /// **A sim rebuilt while the scripts hold its colliders keeps every one
-    /// where it is drawn.** A script's `water.setFrozen` rebuilds the sim in
-    /// the middle of the frame pass. Taking the lent colliders back then
+    /// where it is drawn.** `water.setFrozen` used to rebuild the sim in the
+    /// middle of the frame pass. Taking the lent colliders back then
     /// handed the new sim the old one's, measured from the old origin: on a
     /// planet on rails, where the origin rides, every static on the level
     /// moved by the difference for good, and the ground under a launch pad

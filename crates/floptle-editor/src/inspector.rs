@@ -2327,13 +2327,15 @@ fn water_volume_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
             }
         }
     }
-    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(density, 0.01..=5000.0).logarithmic(true),
+    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(density, 0.0..=5000.0).logarithmic(true),
                 "density")
         .on_hover_text(
             "Mass per cubic metre, in the same units as body mass: \
              1000 is fresh water when masses are kilograms, 1.0 when \
              they are tonnes. A hull floats when this is more than \
-             its own density, so a denser sea carries heavier craft.",
+             its own density, so a denser sea carries heavier craft. \
+             0 holds nothing up: water there only for its look and \
+             for water.at, in a game that floats things itself.",
         )
         .changed();
     cmd.inspector_changed |=

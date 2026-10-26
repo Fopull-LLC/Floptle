@@ -291,8 +291,7 @@ still answers `untimed`, its old name.
 Where the engine knows what the time was, `untimed` says so in the frame's
 parts: `outsideFrame` (between two frames: the window system's events, and the
 OS or compositor not running or not asking for the game), `frameCap` (holding to
-`app.setFrameCap`), `sceneLoad` (a scene swap), `physicsRebuild`,
-`assemblySplit` and `assemblyRebuild` (an `assembly.split` or `assembly.rebuild`
+`app.setFrameCap`), `sceneLoad` (a scene swap), `assemblySplit` and `assemblyRebuild` (an `assembly.split` or `assembly.rebuild`
 the engine carried out), and `gpuOutOfMemory`: on a frame the GPU ran out of
 memory, the untimed time nothing else named, because the allocation that failed
 is slow and nobody timed it. What is left over is still unnamed. Inside

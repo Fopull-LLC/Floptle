@@ -321,8 +321,15 @@ kilograms of its own: a volume's `density` and a body's `mass` are compared
 directly, so they have to be written in the same units. With masses in
 kilograms, fresh water is 1000 and sea water 1025; with masses in tonnes they
 are 1.0 and 1.025. A body 50 times lighter or heavier than the water it
-displaces gets one Console warning per Play, naming the body, the volume, and
-the mass at which it would float half under.
+displaces gets a Console warning once per Play for each kind of body (by its
+name) in each volume, naming the body, the volume, and the mass at which it
+would float half under.
+
+**Density 0 holds nothing up.** A volume of density 0 applies no buoyancy and
+is never warned about: use it for water that is there for its look (the tint
+and the murk under the surface) and for `water.at` and `water.depthAt`, in a
+game that floats things itself. Set its **drag** to 0 as well and it moves
+nothing at all.
 
 **Drag is quadratic**, which is what makes a gentle touchdown float and a
 60 m/s belly-flop stop hard without either being a special case.

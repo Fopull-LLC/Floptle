@@ -6053,7 +6053,7 @@ mod residency_tests {
         let (mut misses, mut worst) = (0, 0.0f32);
         for frame in 0..600 {
             if frame == 300 {
-                // As a script's `water.setFrozen` does in the frame pass.
+                // As anything in the frame pass that rebuilds the sim does.
                 let sim = ed.sim.as_mut().unwrap();
                 ed.script_host.set_colliders(std::mem::take(&mut sim.world.colliders), sim.world.origin);
                 ed.rebuild_sim();

@@ -2271,9 +2271,9 @@ struct Editor {
     /// several callers retry a failed model every frame, and one line is the
     /// message. A different reason for the same file is said again.
     model_import_reported: std::collections::HashSet<(String, String)>,
-    /// (body entity index, water volume entity index) pairs whose density
-    /// mismatch has been said this Play. See `warn_water_density_mismatch`.
-    water_ratio_warned: std::collections::HashSet<(u32, u32)>,
+    /// (water volume entity index, body name) pairs whose density mismatch
+    /// has been said this Play. See `warn_water_density_mismatch`.
+    water_ratio_warned: std::collections::HashSet<(u32, String)>,
     /// Scatter prototypes resolved to their drawable parts, by asset string —
     /// baked once (see `scatter_prototype`). An empty entry is a remembered
     /// Failure, so a prototype that cannot be drawn is reported once rather
