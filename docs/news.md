@@ -1,5 +1,8 @@
 ## Just shipped
 
+**v0.117.0-rc31 — "Whole Worlds"** (beta). First-person arms and tools drawn by a
+stacked camera are shaded by the terrain around them.
+
 **v0.117.0-rc30 — "Whole Worlds"** (beta). Players can hand a running game their
 own files: a picker the game opens, or files dropped on its window.
 
