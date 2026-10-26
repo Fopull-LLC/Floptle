@@ -124,6 +124,9 @@ The export owns the `assets/` copy, and deliberately leaves things out:
   first-person game it was **857 files and 45 MB**, most of it asset-pack
   leftovers. `.meta` is *not* on that list: the terrain streamer writes those.
 - **dot-entries** (`.floptle` caches, `.luarc.json`) — editor and IDE plumbing.
+  One file in `.floptle/` does ship: `textures.ron`, which says how each
+  texture is sampled (smooth or crisp, wrap) and the grid a sprite sheet is cut
+  into, so a build draws its textures the way Play does.
 - **`save/`** — the engine writes player save slots there (`save.set` in Lua).
   Shipping your copy hands every player a pre-populated save and changes what
   the game does on first launch.

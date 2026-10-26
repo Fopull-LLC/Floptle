@@ -607,6 +607,12 @@ fn serves_file(path: &Path) -> bool {
             .is_some_and(|e| NEVER_SERVES.contains(&e.to_ascii_lowercase().as_str()))
 }
 
+/// Files inside a dot-folder that are content, not plumbing, and ship with
+/// every build. `.floptle/textures.ron` is how each texture is sampled (smooth
+/// or crisp, mipmaps, wrap) and the grid a sprite sheet is cut into; left
+/// behind, every texture in a build drew pixelated and every sheet came apart.
+pub(crate) const SHIPPED_PLUMBING: &[&str] = &[".floptle/textures.ron"];
+
 /// Whether a project entry should ship, by name (dot-entries, and the runtime
 /// dirs at the project root).
 #[cfg(feature = "editor-ui")]
@@ -800,6 +806,20 @@ fn copy_tree_with(
                 let want = if mode & 0o111 != 0 { 0o755 } else { 0o644 };
                 std::fs::set_permissions(&to, std::fs::Permissions::from_mode(want))?;
             }
+            n += 1;
+        }
+    }
+    if rel.is_empty() {
+        for want in SHIPPED_PLUMBING {
+            let from = src.join(want);
+            if !floptle_vfs::is_file(&from) || ignore.ignores(want, false) {
+                continue;
+            }
+            let to = dst.join(want);
+            if let Some(dir) = to.parent() {
+                floptle_vfs::create_dir_all(dir)?;
+            }
+            std::fs::copy(&from, &to)?;
             n += 1;
         }
     }
@@ -2856,6 +2876,41 @@ mod tests {
         for d in [proj, tpl, out, other] {
             let _ = std::fs::remove_dir_all(d);
         }
+    }
+
+    /// **A build samples each texture the way the project does.** How a
+    /// texture is filtered and the grid a sheet is cut into live in
+    /// `.floptle/textures.ron`, and a build left the whole of `.floptle/`
+    /// behind: every texture in it drew pixelated while Play drew it smooth.
+    /// That one file ships; the rest of the folder still does not.
+    #[test]
+    fn a_build_keeps_how_each_texture_is_sampled() {
+        let proj = temp("texsettings");
+        floptle_vfs::create_dir_all(proj.join("scenes")).unwrap();
+        floptle_vfs::write(proj.join("project.ron"), "()").unwrap();
+        floptle_vfs::write(proj.join("scenes/first.ron"), "()").unwrap();
+        floptle_vfs::create_dir_all(proj.join(".floptle")).unwrap();
+        floptle_vfs::write(
+            proj.join(".floptle/textures.ron"),
+            "{ \"textures/bark.png\": (filter: SmoothMipmaps, wrap: Repeat, sheet_cols: 4, sheet_rows: 2) }",
+        )
+        .unwrap();
+        floptle_vfs::write(proj.join(".floptle/cache.bin"), "x").unwrap();
+        let out = temp("texsettings-out");
+        let me = std::env::current_exe().unwrap();
+        export_game_with(&proj, &out, "Bark", &me, &EXPORT_TARGETS[0]).expect("export succeeds");
+
+        let mut player = crate::Editor { project_root: out.join("assets"), ..Default::default() };
+        player.load_texture_settings();
+        let got = player.texture_settings.get("textures/bark.png").copied();
+        let cache_shipped = out.join("assets/.floptle/cache.bin").exists();
+        for d in [&proj, &out] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+        let got = got.expect("the build has the texture's settings");
+        assert!(matches!(got.filter, crate::assets::FilterMode::SmoothMipmaps), "the build samples it crisp");
+        assert_eq!((got.sheet_cols, got.sheet_rows), (4, 2), "the sheet's grid ships too");
+        assert!(!cache_shipped, "the rest of .floptle/ is still plumbing");
     }
 
     /// Export = binary + assets (dot-entries skipped) + a manifest that parses
