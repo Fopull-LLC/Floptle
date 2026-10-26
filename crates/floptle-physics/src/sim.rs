@@ -1722,11 +1722,12 @@ impl Sim {
                 let c = &self.world.compounds[l.compound];
                 let g = self.world.gravity.accel_at(c.pos, &self.world.colliders);
                 let up = if g.length_squared() > 1e-6 { -g.normalize() } else { Vec3::Y };
-                // The CoM in absolute world coordinates, matching what
-                // `body_states` reports — so `node.tickPos` on a vessel root
-                // answers with the compound's real pose rather than a
-                // convincing zero.
-                let pos = c.pos.as_dvec3() + self.world.origin;
+                // The root node's own tick place, in absolute world
+                // coordinates: `node.tickPos` on a vessel root is where the
+                // node is, as `assembly.info(root).origin` says, not its
+                // centre of mass. The two differ by an offset that turns with
+                // the craft, so a script mixing them drifted as it turned.
+                let pos = c.origin().as_dvec3() + self.world.origin;
                 (l.entity.index(), c.vel, up, self.compound_grounded(l.entity.index()) || c.anchored, pos, c.asleep)
             })
             .collect()
@@ -2846,6 +2847,11 @@ impl Sim {
                 return;
             }
         }
+        // An assembly root: its origin goes there, and what is jointed to it
+        // goes along. `node.tickPos = p` on a vessel root did nothing at all.
+        if self.cmap.iter().any(|l| l.entity.index() == eid) {
+            self.set_compound_origin(eid, pos);
+        }
     }
 
     /// Every dynamic body's entity index + absolute world position (carry pass).
@@ -2995,6 +3001,12 @@ impl Sim {
                 return;
             }
         }
+        // An assembly root takes it as the craft's velocity, and wakes for it
+        // as a body does. `node.vel = v` on a vessel root did nothing at all.
+        if let Some(c) = self.compound_of_mut(eid) {
+            c.vel = vel;
+            c.wake(crate::body::WakeReason::Script);
+        }
     }
 
     /// Re-read each dynamic body's tunable RigidBody params from the ECS (shape/size,
@@ -3008,8 +3020,11 @@ impl Sim {
         for i in 0..self.map.len() {
             let (ent, bidx) = (self.map[i].entity, self.map[i].body);
             if let Some(rb) = ecs.get::<RigidBody>(ent) {
-                let newly_rot_locked =
-                    (0..3).any(|a| rb.locks_rot()[a] && !self.map[i].lock_rot[a]);
+                // Letting go of align_up hands the turn back to the locks,
+                // which hold the angle they captured: from where the body
+                // stands now, not where it stood at spawn.
+                let newly_rot_locked = (0..3).any(|a| rb.locks_rot()[a] && !self.map[i].lock_rot[a])
+                    || (self.map[i].align_up && !rb.align_up && rb.locks_rot().iter().any(|&l| l));
                 if newly_rot_locked && let Some(t) = ecs.get::<Transform>(ent) {
                     // Locked axes were held at rot0 anyway, so a full re-capture keeps
                     // them while adopting the current angle on the newly-locked ones.
@@ -4110,6 +4125,42 @@ mod runtime_body_tests {
             }
         }
         assert!(origins.len() >= 3, "the rebase must actually have fired: {origins:?}");
+    }
+
+    /// **A script turns `align_up` on and off, and the body keeps the angle it
+    /// has.** A tilted body with its rotation locked stands up along gravity
+    /// while `align_up` is on; turned off, the locks hold where it stands now,
+    /// not the tilt it spawned with.
+    #[test]
+    fn align_up_turned_off_keeps_the_angle_the_body_has() {
+        let mut ecs = World::default();
+        let tilt = Quat::from_rotation_x(0.6);
+        let body = ecs.spawn();
+        ecs.insert(body, Transform { rotation: tilt, ..Transform::from_translation(DVec3::new(0.0, 3.0, 0.0)) });
+        ecs.insert(
+            body,
+            RigidBody { gravity: false, align_up: true, lock_rot: [true; 3], ..Default::default() },
+        );
+        let mut sim = Sim::build_layered(
+            &ecs,
+            &[],
+            GravityField::uniform(Vec3::new(0.0, -10.0, 0.0)),
+            DVec3::ZERO,
+            floptle_core::Layers::default(),
+        );
+        let run = |sim: &mut Sim, ecs: &mut World, n: usize| {
+            for _ in 0..n {
+                sim.sync_dynamic_params(ecs);
+                sim.step_tick(1.0 / 60.0, None);
+                sim.writeback_interpolated(ecs, 1.0);
+            }
+        };
+        let up = |ecs: &World| (ecs.get::<Transform>(body).unwrap().rotation * Vec3::Y).y;
+        run(&mut sim, &mut ecs, 60);
+        assert!(up(&ecs) > 0.999, "align_up stands it up: its +Y is {:.3} up", up(&ecs));
+        ecs.get_mut::<RigidBody>(body).unwrap().align_up = false;
+        run(&mut sim, &mut ecs, 30);
+        assert!(up(&ecs) > 0.999, "turned off, it went back toward its spawn tilt: its +Y is {:.3} up", up(&ecs));
     }
 }
 

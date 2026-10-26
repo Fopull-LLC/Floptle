@@ -1104,6 +1104,177 @@ end
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **A vessel root's `tickPos` is where its node is**: `assembly.info`'s
+/// origin, every tick, while the craft turns about a centre of mass a metre
+/// away. It was the centre of mass, an offset that turned with the craft, so
+/// a script mixing the two drifted. Written, it moves the craft there.
+#[test]
+fn a_vessel_roots_tick_pos_is_its_origin_and_moves_it() {
+    let (mut ed, dir) = project(
+        "rootpose",
+        r#"
+local n, ship, sent = 0, nil, nil
+local function d(a, b) return math.sqrt((a.x - b.x) ^ 2 + (a.y - b.y) ^ 2 + (a.z - b.z) ^ 2) end
+function fixedUpdate(node, dt)
+  n = n + 1
+  if n == 1 then
+    spawn("Vessel", vec3(0, 0, 0), function(v)
+      spawn("Part", vec3(1, 0, 0), function(p) assembly.rebuild(v, function(s) ship = s end) end, v)
+    end)
+  elseif ship then
+    local i = assembly.info(ship)
+    local t = ship.tickPos
+    if sent then
+      log(string.format("SENT %.4f", d(i.origin, sent)))
+      sent = nil
+    elseif n == 70 then
+      sent = vec3(i.origin.x + 5, i.origin.y, i.origin.z)
+      ship.tickPos = sent
+    else
+      log(string.format("GAP %.4f %.4f %d", d(t, i.origin), d(i.com, i.origin), n))
+    end
+  end
+end
+"#,
+    );
+    ed.toggle_play();
+    for _ in 0..3 {
+        ed.play_step(3.0 / 60.0, true);
+    }
+    let root = ed.world.query::<Name>().find(|(_, n)| n.0 == "Vessel").map(|(e, _)| e.index()).unwrap();
+    ed.sim.as_mut().unwrap().compound_of_mut(root).unwrap().ang_vel = Vec3::new(0.0, 2.0, 0.0);
+    for _ in 0..24 {
+        ed.play_step(3.0 / 60.0, true);
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+    }
+    let gaps = lines(&mut ed, "GAP");
+    assert!(gaps.len() >= 20, "{gaps:?}");
+    for g in &gaps {
+        let v: Vec<f64> = g.split(' ').map(|x| x.parse().unwrap()).collect();
+        assert!(v[1] > 0.3, "the fixture: the centre of mass should sit away from the origin: {gaps:?}");
+        assert!(v[0] < 0.001, "tickPos is {} m from the root's origin: {gaps:?}", v[0]);
+    }
+    let sent = lines(&mut ed, "SENT");
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let off: f64 = sent[0].parse().unwrap();
+    // One tick of travel at most: it was sent there, then moved on.
+    assert!(off < 0.2, "writing tickPos left the craft {off} m from where it was sent");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **`node.vel` on a sleeping vessel's root wakes it and moves it**, as it
+/// does a plain body. It used to reach only plain bodies, so on a root it did
+/// nothing at all.
+#[test]
+fn a_velocity_written_on_a_sleeping_vessel_root_moves_it() {
+    let (mut ed, dir) = project(
+        "rootvel",
+        r#"
+local n, ship, at = 0, nil, nil
+function fixedUpdate(node, dt)
+  n = n + 1
+  if n == 1 then
+    spawn("Vessel", vec3(0, 0, 0), function(v)
+      spawn("Part", vec3(1, 0, 0), function(p) assembly.rebuild(v, function(s) ship = s end) end, v)
+    end)
+  elseif ship and not at then
+    ship.asleep = true
+    at = n
+  elseif ship and n == at + 5 then
+    log(string.format("BEFORE %s", tostring(assembly.info(ship).asleep)))
+    ship.vel = vec3(4, 0, 0)
+  elseif ship and n == at + 20 then
+    local i = assembly.info(ship)
+    log(string.format("AFTER %s %.3f", tostring(i.asleep), i.vel.x))
+  end
+end
+"#,
+    );
+    ed.toggle_play();
+    run(&mut ed, 120);
+    assert_eq!(lines(&mut ed, "BEFORE"), ["true"], "the fixture: the vessel should be asleep before the write");
+    let after = lines(&mut ed, "AFTER");
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert!(after[0].starts_with("false 4.0"), "a velocity written on the root: {after:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **In `lateUpdate`, every handle to a moving craft's root says the same
+/// place**: its own `node.x` and another handle's `toWorld` agree, on
+/// frames that fall between ticks, at 200 m/s. Both are the drawn place;
+/// `tickPos` is the tick's, up to a tick of travel away.
+#[test]
+fn every_handle_to_a_moving_root_agrees_in_late_update() {
+    let (mut ed, dir) = project(
+        "handles",
+        r#"
+local n, ship = 0, nil
+function fixedUpdate(node, dt)
+  n = n + 1
+  if n == 1 then
+    spawn("Craft", vec3(0, 0, 0), function(v)
+      spawn("Part", vec3(1, 0, 0), function(p) assembly.rebuild(v, function(s) ship = s end) end, v)
+    end)
+  end
+end
+"#,
+    );
+    let ctl = r#"
+local n = 0
+function lateUpdate(node, dt)
+  n = n + 1
+  local other = find("Craft")
+  if not other then return end
+  local w = other:toWorld(vec3(0, 0, 0))
+  local mine = node:toWorld(vec3(0, 0, 0))
+  log(string.format("POSE %.4f %.4f %.4f %d", node.x - w.x, mine.x - w.x, node.tickPos.x - w.x, n))
+end
+"#;
+    floptle_vfs::write(dir.join("scripts/ctl.lua"), ctl).unwrap();
+    let mut w = floptle_core::World::default();
+    let e = w.spawn();
+    w.insert(e, Transform::IDENTITY);
+    w.insert(e, Name("Craft".into()));
+    w.insert(e, Matter::Empty);
+    w.insert(e, RigidBody { assembly: true, gravity: false, ..Default::default() });
+    w.insert(
+        e,
+        Scripts(vec![ScriptInst {
+            kind: "ctl".into(),
+            enabled: true,
+            params: Vec::new(),
+            refs: Vec::new(),
+            strs: Vec::new(),
+            pinned_bools: None,
+        }]),
+    );
+    let text = ron::ser::to_string(&floptle_scene::to_doc("Craft", &w).nodes).unwrap();
+    floptle_scene::portable::write(&dir.join(format!("prefabs/Craft{}", floptle_scene::PREFAB_EXT)), &text).unwrap();
+    ed.toggle_play();
+    for _ in 0..4 {
+        ed.play_step(2.5 / 60.0, true);
+    }
+    let root = ed.world.query::<Name>().find(|(_, n)| n.0 == "Craft").map(|(e, _)| e.index()).unwrap();
+    ed.sim.as_mut().unwrap().compound_of_mut(root).unwrap().vel = Vec3::new(200.0, 0.0, 0.0);
+    for _ in 0..12 {
+        ed.play_step(2.5 / 60.0, true);
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+    }
+    let poses = lines(&mut ed, "POSE");
+    assert!(poses.len() >= 12, "{poses:?}");
+    let mut between = 0;
+    for p in &poses {
+        let v: Vec<f64> = p.split(' ').map(|x| x.parse().unwrap()).collect();
+        assert!(v[0].abs() < 0.001 && v[1].abs() < 0.001, "two handles to one root disagree: {poses:?}");
+        // tickPos is the tick's place: up to a tick of travel (200 m/s over
+        // a sixtieth) from the drawn one, and on a frame between ticks it is.
+        assert!(v[2].abs() < 200.0 / 60.0 + 0.01, "{poses:?}");
+        between += (v[2].abs() > 0.1) as usize;
+    }
+    assert!(between > 0, "the fixture: no frame fell between ticks: {poses:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A four-wheeled rover standing on its wheels on a planet moving on its
 /// rails, creeping along at half a metre a second, can time-warp without
 /// being anchored: on its wheels it is on the ground, not in flight, and was

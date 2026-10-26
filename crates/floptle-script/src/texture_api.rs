@@ -85,7 +85,7 @@ impl Default for TextureLoads {
     }
 }
 
-const NO_GPU: &str = "this host draws nothing (a dedicated server, or floptle run), so it makes no textures";
+pub(crate) const NO_GPU: &str = "this host draws nothing (a dedicated server, or floptle run), so it makes no textures";
 
 impl TextureLoads {
     pub(crate) fn start(&mut self, cb: Function) -> u64 {
@@ -97,6 +97,26 @@ impl TextureLoads {
 
     fn request(&mut self, id: u64, bytes: Vec<u8>) {
         self.requests.push(TextureRequest { id, name: format!("img:{id}"), bytes, pixels: None });
+    }
+
+    /// Raw pixels to upload under `name` if it is still a texture this book
+    /// made, else under a new name. `None` on a host that draws nothing.
+    pub(crate) fn upload_pixels(&mut self, name: Option<&str>, w: u32, h: u32, bytes: Vec<u8>) -> Option<String> {
+        if !self.can_draw {
+            return None;
+        }
+        let name = match name.filter(|n| self.live.contains(*n)) {
+            Some(n) => n.to_string(),
+            None => {
+                let id = self.next;
+                self.next += 1;
+                let n = format!("img:{id}");
+                self.live.insert(n.clone());
+                n
+            }
+        };
+        self.requests.push(TextureRequest { id: 0, name: name.clone(), bytes, pixels: Some([w, h]) });
+        Some(name)
     }
 
     pub(crate) fn take_requests(&mut self) -> Vec<TextureRequest> {

@@ -19,6 +19,10 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The engine's own UI font (Roboto Regular, Apache 2.0): what game text
+/// draws with when no font is named.
+pub static DEFAULT_FONT: &[u8] = include_bytes!("../../floptle-render/fonts/Roboto-Regular.ttf");
+
 pub mod field;
 pub mod make;
 pub mod nav;

@@ -65,6 +65,8 @@ url = "2"
 # Lua. flate2's default backend is pure Rust, so it builds for the browser too.
 flate2 = "1"
 base64 = "0.22"
+# `img:text`: glyphs rasterised into a script's picture, pure Rust (wasm too).
+fontdue = "0.9"
 
 # **`http.*`, on the platforms that have sockets.** Blocking requests on worker
 # threads, never on the frame thread; ureq is already what the Hub and the dist
@@ -95,3 +97,7 @@ web-sys = { version = "0.3", features = ["Window"] }
 # `http.*` in a page: the request goes out through `floptle_account::web_fetch`
 # on the page's own event loop.
 wasm-bindgen-futures = "0.4"
+
+[dev-dependencies]
+# Tests decode what `img:png()` encodes.
+image = { workspace = true }

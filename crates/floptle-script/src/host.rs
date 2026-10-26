@@ -3157,6 +3157,14 @@ impl ScriptHost {
         {
             floptle_say::say_err!("[lua] failed to install the runtime texture API: {e}");
         }
+        // `image.*`: pictures a script draws, uploaded through the same book.
+        {
+            let pp = paths.clone();
+            let read: crate::image_api::ReadFile = Rc::new(move |path: &str| read_project_bytes(&pp, path, "img:text"));
+            if let Err(e) = crate::image_api::install(&lua, crate::image_api::ImageHost::new(textures.clone(), read)) {
+                floptle_say::say_err!("[lua] failed to install the image API: {e}");
+            }
+        }
         let meshes: Rc<RefCell<crate::mesh_api::MeshBook>> = Rc::default();
         if let Err(e) = crate::mesh_api::install(&lua, meshes.clone()) {
             floptle_say::say_err!("[lua] failed to install the runtime mesh API: {e}");
@@ -9787,6 +9795,33 @@ mod host_tests {
         ] {
             assert!(said.iter().any(|m| m == want), "missing {want} in:\n{joined}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Two handles to one node are equal**, however each was got: the own
+    /// `node`, and two separate lookups. A handle to another node is not.
+    #[test]
+    fn two_handles_to_one_node_compare_equal() {
+        let dir = std::env::temp_dir().join(format!("floptle-node-eq-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        floptle_vfs::write(
+            dir.join("scripts/eqtest.lua"),
+            "function start(node)\n\
+             \x20 local a, b = find('eqtest'), find('eqtest')\n\
+             \x20 print('lookups=' .. tostring(a == b) .. ' own=' .. tostring(node == a) .. ' ne=' .. tostring(a ~= b))\n\
+             \x20 print('other=' .. tostring(node == { __id = node.id + 1 }) .. ' plain=' .. tostring(node == {}))\n\
+             end\n",
+        )
+        .unwrap();
+        let mut world = world_with_script("eqtest");
+        let mut host = ScriptHost::new();
+        host.set_project_root(dir.clone());
+        host.set_playing(true);
+        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        assert_eq!(said, ["lookups=true own=true ne=false", "other=false plain=false"], "{said:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

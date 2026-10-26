@@ -605,6 +605,7 @@ pub fn is_bool_field(comp: &str, field: &str) -> bool {
                     | "lock_rot_y"
                     | "lock_rot_z"
                     | "two_d"
+                    | "alignUp"
             )
     )
 }
@@ -1389,6 +1390,9 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("two_d".to_string(), b(rb.two_d)),
                 // The physics turns it (1/0): a crate tips, a ball rolls.
                 ("rotates".to_string(), b(rb.rotates)),
+                // Stood up along gravity's up. A character leaving the ground
+                // (EVA, swimming, a tumble) turns it off to face what it holds.
+                ("alignUp".to_string(), b(rb.align_up)),
             ]),
         );
     }
@@ -2264,6 +2268,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "lock_rot_z" => rb.lock_rot[2] = val != 0.0,
                     "two_d" => rb.two_d = val != 0.0,
                     "rotates" => rb.rotates = val != 0.0,
+                    "alignUp" => rb.align_up = val != 0.0,
                     _ => {}
                 }
             }
@@ -5082,6 +5087,18 @@ let node_mt = lua.create_table()?;
         Ok(())
     })?;
     node_mt.set("__newindex", newidx)?;
+    // Two handles to one node are equal. Handles are built fresh per lookup,
+    // so without this `find("Door") == find("Door")` was false, and a script
+    // keeping a handle to compare against later saw every node as new.
+    node_mt.set(
+        "__eq",
+        lua.create_function(|_, (a, b): (Table, Table)| {
+            Ok(match (a.raw_get::<Option<u32>>("__id")?, b.raw_get::<Option<u32>>("__id")?) {
+                (Some(x), Some(y)) => x == y,
+                _ => false,
+            })
+        })?,
+    )?;
 }
 lua.set_app_data(crate::env::NodeMeta(node_mt.clone()));
 lua.set_named_registry_value("floptle_node_mt", node_mt)?;

@@ -4180,4 +4180,39 @@ mod script_draw_scale_tests {
             floptle_image::io::save_png(&out, &px, w, h).unwrap();
         }
     }
+
+    /// **A picture taken with `ui = false` has no `draw.text` or `draw.rect`
+    /// in it**, and one with `ui = true` has both: they are screen UI, and a
+    /// photo or a thumbnail must not pick up the HUD's labels.
+    #[test]
+    fn a_capture_without_ui_leaves_out_draw_text_and_draw_rect() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        ed.script_host.set_view(floptle_script::ViewInfo { vp_w: 200.0, vp_h: 100.0, valid: true, ..Default::default() });
+        ed.game_view_origin = [0.0, 0.0];
+        ed.script_rects.push(floptle_script::DrawRect { rect: [0.0, 0.0, 100.0, 100.0], color: [1.0, 0.0, 0.0, 1.0], outline: 0.0, radius: 0.0 });
+        ed.script_texts.push(floptle_script::DrawText {
+            pos: [150.0, 50.0],
+            text: "HELLO".into(),
+            size: 40.0,
+            color: [0.0, 1.0, 0.0, 1.0],
+            align: 1,
+            font: String::new(),
+        });
+        let cam = floptle_render::RenderCamera::new(
+            floptle_core::math::DVec3::ZERO,
+            floptle_core::math::Quat::IDENTITY,
+            floptle_render::Projection::Perspective { fov_y: 1.0, near: 0.05, far: 1000.0 },
+        );
+        // How many pixels are strongly red (the rect) and strongly green (the text).
+        let mut shot = |ui: bool| {
+            let tex = crate::capture::render_frame_texture(&mut ed, &cam, None, 200, 100, u32::MAX, ui, false).expect("a frame");
+            let px = crate::offscreen::read_back_frame(ed.gpu.as_ref().unwrap(), &tex).expect("the frame reads back");
+            let count = |f: fn(&[u8]) -> bool| px.chunks(4).filter(|p| f(p)).count();
+            (count(|p| p[0] > 200 && p[1] < 60 && p[2] < 60), count(|p| p[1] > 200 && p[0] < 60 && p[2] < 60))
+        };
+        let (red, green) = shot(true);
+        assert!(red > 5000 && green > 100, "the fixture: with ui = true the rect ({red} px) and the text ({green} px) should show");
+        let (red, green) = shot(false);
+        assert!(red == 0 && green == 0, "with ui = false the picture still has the rect ({red} px) or the text ({green} px)");
+    }
 }

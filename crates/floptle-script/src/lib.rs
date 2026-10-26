@@ -309,6 +309,7 @@ mod host;
 mod http_api;
 mod preload_api;
 mod texture_api;
+mod image_api;
 mod capture_api;
 mod file_api;
 mod terrain_stats_api;

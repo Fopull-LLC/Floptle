@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 208
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 227
 - [node — transform & body fields](#node--transform--body-fields) — 44
 - [node — methods & handles](#node--methods--handles) — 37
 - [vectors, directions & easing](#vectors-directions--easing) — 51
@@ -41,7 +41,7 @@ each group, and meant to be searched.
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 21
-- [components — getcomponent](#components--getcomponent) — 113
+- [components — getcomponent](#components--getcomponent) — 114
 - [animation — node:animator](#animation--nodeanimator) — 29
 - [particles — effects from script](#particles--effects-from-script) — 13
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 36
@@ -408,6 +408,82 @@ Define a function.
 ### `http`
 
 Talk to a web server: http.get / post / put / delete, plus json.*. Every call is asynchronous — the reply arrives in a callback, never as a return value.
+
+### `image`
+
+Pictures a script draws in the engine: an emblem, a decal, a minimap, an icon. image.new makes one, img:fill / blend / circle / ring / line / polygon / text / draw paint it, and img:texture() turns it into a texture anything can draw. Each call runs in the engine, so a 256² emblem of a ring, a disc, a star and a word costs about a millisecond, where a Lua loop over its pixels cost 150–200 ms. Colours are r, g, b [, a], each 0..1 (alpha 1 when left out), as draw.* takes them; positions are pixels from the top-left corner.
+
+### `image.fromPixels`
+
+image.fromPixels(w, h, bytes) — a picture from raw RGBA bytes, four per pixel row by row, as img:bytes() and assets.textureFromPixels use.
+
+### `image.new`
+
+image.new(w, h [, r, g, b [, a]]) — a picture w × h pixels (1–4096 each), transparent, or filled with the colour given.
+
+### `img.width`
+
+img.width / img.height — the picture's size in pixels.
+
+### `img:blend`
+
+img:blend(x, y, w, h, r, g, b [, a]) — lay the colour over a rectangle, by its alpha: 0.5 is half over what is there.
+
+### `img:bytes`
+
+img:bytes() — the pixels as raw RGBA bytes, four per pixel row by row: for image.fromPixels, assets.textureFromPixels or a save.
+
+### `img:circle`
+
+img:circle(x, y, radius, r, g, b [, a]) — a filled disc centred at x, y, its edge smoothed over one pixel, laid over what is there.
+
+### `img:clear`
+
+img:clear([r, g, b [, a]]) — every pixel set to the colour, or transparent with no colour.
+
+### `img:copy`
+
+img:copy() — a second picture with the same pixels, drawn on separately.
+
+### `img:draw`
+
+img:draw(other, x, y [, w, h [, alpha]]) — lay another picture over this one at x, y, scaled to w × h (its own size when left out), smoothly, by its alpha times alpha. An image drawn into itself reads itself as it was before the call.
+
+### `img:fill`
+
+img:fill(x, y, w, h, r, g, b [, a]) — set a rectangle to the colour, alpha and all: a transparent fill cuts a hole. Edges round to whole pixels; clipped to the picture.
+
+### `img:getPixel`
+
+img:getPixel(x, y) -> r, g, b, a (0..1), or nil outside the picture.
+
+### `img:line`
+
+img:line(x1, y1, x2, y2, width, r, g, b [, a]) — a line with round ends, width pixels thick.
+
+### `img:png`
+
+img:png() — the picture encoded as a PNG, for assets.writeBytes, a Cloud blob or assets.textureFromBytes.
+
+### `img:polygon`
+
+img:polygon({ x1, y1, x2, y2, x3, y3, ... }, r, g, b [, a]) — a filled shape through the corners in order, smooth-edged. Crossing edges fill even-odd, so a five-point star drawn as ten corners is solid and one drawn as five crossing lines has a hole in the middle.
+
+### `img:ring`
+
+img:ring(x, y, radius, width, r, g, b [, a]) — a circle's outline, width pixels thick, centred on the radius.
+
+### `img:setPixel`
+
+img:setPixel(x, y, r, g, b [, a]) — set one pixel. For more than a few, the shape calls are far cheaper.
+
+### `img:text`
+
+img:text(x, y, s, size, r, g, b [, a] [, align] [, font]) — text in the picture, its top at y, as draw.text takes it: align is "left" (default) | "center" | "right" and x is that edge. font is a project .ttf or .otf; left out, the engine's own UI font (Roboto).
+
+### `img:texture`
+
+img:texture() -> name — the picture as a texture, named like "img:7", for anywhere a texture path goes (draw.quad, a UI image, a material). Drawable from the next frame. Call it again after drawing more and the same name shows the new pixels; at the same size it is written in place, so a minimap redrawn every frame makes no new texture. assets.release(name) lets it go. On a host that draws nothing it answers nil and why.
 
 ### `json`
 
@@ -987,7 +1063,7 @@ Capsule standing height — write a smaller value to crouch (the engine resizes 
 
 ### `node.id`
 
-A stable numeric id for this node.
+A stable numeric id for this node. Two handles to the same node compare equal with ==, however each was got (find, getChild, findScript(...).node, your own node), so a.id == b.id and a == b say the same thing.
 
 ### `node.layer`
 
@@ -1063,7 +1139,7 @@ The node's tags as an array of strings (a fresh table each read). Assign a whole
 
 ### `node.tickPos`
 
-The body's TICK pose as a vec3 (read/write) — where the simulation says it is, as opposed to node.pos, which is the interpolated pose the camera renders. Inside fixedUpdate use this one: move with node.tickPos = node.tickPos + vec3(d, 0, 0) and build hurtboxes from it. `node.x = node.x + d` in fixedUpdate teleports the body onto its VISUAL position, so the model slides and the hitbox doesn't follow. In a rollback match this is the difference between a hit registering and not. Writing either one teleports a body: tickPos is the exact one, node.pos goes through the transform. From the write on, every read answers the new position (this node's next hook, and another node's handle), even while physics.pause is on.
+The body's TICK pose as a vec3 (read/write) — where the simulation says it is, as opposed to node.pos, which is the interpolated pose the camera renders. Inside fixedUpdate use this one: move with node.tickPos = node.tickPos + vec3(d, 0, 0) and build hurtboxes from it. `node.x = node.x + d` in fixedUpdate teleports the body onto its VISUAL position, so the model slides and the hitbox doesn't follow. In a rollback match this is the difference between a hit registering and not. Writing either one teleports a body: tickPos is the exact one, node.pos goes through the transform. From the write on, every read answers the new position (this node's next hook, and another node's handle), even while physics.pause is on. On an assembly root it is the root node's place, assembly.info(root).origin, not the centre of mass; writing it moves the craft and everything jointed to it.
 
 ### `node.tickYaw`
 
@@ -1127,7 +1203,7 @@ The steepest surface the body is pressed against, as a vec3 normal — the cliff
 
 ### `node.x`
 
-X position relative to the parent node (local; the world X for a node with no parent). node.worldPos for the world position.
+X position relative to the parent node (local; the world X for a node with no parent). node.worldPos for the world position. On a body this is the drawn place, between ticks as the frame shows it, and every handle to the node reads the same one in the same pass, as node:toWorld does. node.tickPos is where the simulation has it, up to a tick of travel away: read that in fixedUpdate.
 
 ### `node.y`
 
@@ -1319,7 +1395,7 @@ node:setShaderParam("cell", math.floor(time * 8) % 16)
 
 ### `node:setShaderTexture`
 
-node:setShaderTexture(slot, ref) — point one of this node's .flsl shader TEXTURE SLOTS somewhere else, at runtime. `slot` is the name the shader declares (`texture ramp` -> "ramp"); `ref` is a project-relative image path, an `rt:<name>` render target (what another camera sees, live), or "" to clear it. A shader may declare up to 8 slots, so a material can mix a base, a mask, a ramp and a screen — and a script can swap any of them per frame.
+node:setShaderTexture(slot, ref) — point one of this node's .flsl shader TEXTURE SLOTS somewhere else, at runtime. `slot` is the name the shader declares (`texture ramp` -> "ramp"); `ref` is a project-relative image path, an `rt:<name>` render target (what another camera sees, live), a picture a script made (an `img:` name from img:texture(), assets.textureFromPixels/Bytes/Url or camera.captureTexture), or "" to clear it. A shader may declare up to 8 slots, so a material can mix a base, a mask, a ramp and a screen — and a script can swap any of them per frame.
 
 ```lua
 -- swap a shader's texture slot at runtime (a path, or a live render target)
@@ -1487,7 +1563,7 @@ node:toLocal(v) — the inverse of node:toWorld: a world point expressed in this
 
 ### `node:toWorld`
 
-node:toWorld(v) — a point in this node's own frame, converted to world space: its position, rotation AND scale, composed up the whole parent chain. "Where is the muzzle?" is gun:toWorld(vec3(0, 0, -1.2)).
+node:toWorld(v) — a point in this node's own frame, converted to world space: its position, rotation AND scale, composed up the whole parent chain. "Where is the muzzle?" is gun:toWorld(vec3(0, 0, -1.2)). It is built from the same drawn place node.x gives, so between ticks it is not node.tickPos or assembly.info's origin, which are the tick's.
 
 ```lua
 -- composes position, rotation AND scale up the whole parent chain
@@ -4038,7 +4114,7 @@ mat:setShaderParam("glow", 2.5) / mat:setShaderParam("nose", x, y, z) — drive 
 
 ### `mat:setShaderTexture`
 
-mat:setShaderTexture(slot, ref) — point one of THIS material's .flsl texture slots somewhere else, at runtime — on one part of a model when the handle came from node:material("Head#2"). `slot` is the name the shader declares (`texture face` -> "face"); `ref` is a project-relative image path, an `rt:<name>` render target, or "" to clear it. The character creator's face swap is this one line: node:material("Head#2"):setShaderTexture("face", "faces/02.png"). Same rule as setShaderParam: it lands on an existing override that wears a shader, and never creates one.
+mat:setShaderTexture(slot, ref) — point one of THIS material's .flsl texture slots somewhere else, at runtime — on one part of a model when the handle came from node:material("Head#2"). `slot` is the name the shader declares (`texture face` -> "face"); `ref` is a project-relative image path, an `rt:<name>` render target, an `img:` picture a script made, or "" to clear it. The character creator's face swap is this one line: node:material("Head#2"):setShaderTexture("face", "faces/02.png"). Same rule as setShaderParam: it lands on an existing override that wears a shader, and never creates one.
 
 ### `mat:shaderParam`
 
@@ -4050,12 +4126,16 @@ mat:shaderTexture(slot) -> ref — which image a texture slot points at: what yo
 
 ### `node:getComponent`
 
-node:getComponent(name) — a component handle whose fields you can read AND assign at runtime (applies live during play), or nil if absent. Components: RigidBody (friction, restitution, gravity, kinematic 1/0 — live Dynamic/Kinematic switch, shape 0/1/2, radius, height, half_x/y/z, lock_x/y/z, lock_rot_x/y/z, two_d — 2D mode), PointLight (intensity, range, r/g/b, and the EMITTER: shape 0 point / 1 sphere / 2 rect / 3 disk / 4 tube, plus width, height, radius, length, thickness, twoSided — a rect light IS a window, so growing one softens the highlight it leaves on everything — plus shadows, which stops this lamp at the walls between it and what it lights instead of shining through them), Camera (fovY radians, active — assign true to switch cameras), ParticleSystem (play_on_start), UiElement (visible, opacity, posX/posY, width/height, radius, border, fillRGBA, textSize, textRGBA, tintRGBA, cell — spritesheet frame), UiSlider (value/min/max — drive a health bar), UiLayer (enabled, z, designHeight, worldSpace), PostProcess (enabled, bloom, bloomThreshold, bloomIntensity, vignette, vignetteStrength, vignetteRadius, aoStrength, aoRadius, posterizeBands, posterizeDither, tonemap, and the lens: dofFocus, dofRange, dofNearRange, dofBlur, dofBlades, dofBladeAngle, dofHighlight, dofSamples, plus the shutter: motionBlur, motionSamples, the grade: exposure, contrast, saturation, temperature, tint, lift, gradeGamma, gain (0 for the offsets and 1 for the scales is neutral), and the lens and film: aberration, distortion, grain (0 = off; a settings menu's toggles) — a cutscene pushing a vignette, pulling a rack focus, or opening the shutter for a slow-motion beat), LightProbes (enabled, intensity, leak, normalBias — the baked bounce's live knobs; the bake-time ones are not here because a script cannot bake), ReflectionProbe (enabled, intensity, fade — what a room reflects when what it is reflecting is off screen; the box is the node's own shape, and moving or resizing it re-captures). e.g. node:getcomponent("RigidBody").friction = 0.02 for ice.
+node:getComponent(name) — a component handle whose fields you can read AND assign at runtime (applies live during play), or nil if absent. Components: RigidBody (friction, restitution, gravity, kinematic 1/0 — live Dynamic/Kinematic switch, shape 0/1/2, radius, height, half_x/y/z, lock_x/y/z, lock_rot_x/y/z, two_d — 2D mode, alignUp — stand up along gravity), PointLight (intensity, range, r/g/b, and the EMITTER: shape 0 point / 1 sphere / 2 rect / 3 disk / 4 tube, plus width, height, radius, length, thickness, twoSided — a rect light IS a window, so growing one softens the highlight it leaves on everything — plus shadows, which stops this lamp at the walls between it and what it lights instead of shining through them), Camera (fovY radians, active — assign true to switch cameras), ParticleSystem (play_on_start), UiElement (visible, opacity, posX/posY, width/height, radius, border, fillRGBA, textSize, textRGBA, tintRGBA, cell — spritesheet frame), UiSlider (value/min/max — drive a health bar), UiLayer (enabled, z, designHeight, worldSpace), PostProcess (enabled, bloom, bloomThreshold, bloomIntensity, vignette, vignetteStrength, vignetteRadius, aoStrength, aoRadius, posterizeBands, posterizeDither, tonemap, and the lens: dofFocus, dofRange, dofNearRange, dofBlur, dofBlades, dofBladeAngle, dofHighlight, dofSamples, plus the shutter: motionBlur, motionSamples, the grade: exposure, contrast, saturation, temperature, tint, lift, gradeGamma, gain (0 for the offsets and 1 for the scales is neutral), and the lens and film: aberration, distortion, grain (0 = off; a settings menu's toggles) — a cutscene pushing a vignette, pulling a rack focus, or opening the shutter for a slow-motion beat), LightProbes (enabled, intensity, leak, normalBias — the baked bounce's live knobs; the bake-time ones are not here because a script cannot bake), ReflectionProbe (enabled, intensity, fade — what a room reflects when what it is reflecting is off screen; the box is the node's own shape, and moving or resizing it re-captures). e.g. node:getcomponent("RigidBody").friction = 0.02 for ice.
 
 ```lua
 local rb = node:getComponent("RigidBody")
 if rb then rb.friction = on_ice and 0.02 or 0.6 end
 ```
+
+### `rb.alignUp`
+
+Stand the node up along gravity's up (true/false, live), smoothed: a character on a round planet stands on it, and its camera and held items tilt with it. Overrides the rotation locks while on. Turn it off when the character leaves the ground (EVA, swimming, a tumble) to turn it yourself; the locks then hold the angle it has at that moment.
 
 ### `rb.friction`
 

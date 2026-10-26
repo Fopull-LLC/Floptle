@@ -44,8 +44,21 @@ impl Editor {
             if let Some([width, height]) = req.pixels {
                 if let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) {
                     let data = TextureData { pixels: req.bytes, width, height };
-                    let tex = raster.register_texture(gpu, &data, Default::default());
-                    self.texture_registry.insert(req.name, tex);
+                    // `img:texture()` again: new pixels under the same name.
+                    // The same size writes in place, so a picture redrawn
+                    // every frame (a minimap) makes no new texture each time.
+                    match self.texture_registry.get(&req.name).copied() {
+                        Some(tex) if raster.texture_size(tex) == Some([width as f32, height as f32]) => {
+                            raster.update_texture(gpu, tex, &data);
+                        }
+                        old => {
+                            if let Some(old) = old {
+                                raster.release_texture(gpu, old);
+                            }
+                            let tex = raster.register_texture(gpu, &data, Default::default());
+                            self.texture_registry.insert(req.name, tex);
+                        }
+                    }
                 }
                 continue;
             }
