@@ -1,5 +1,9 @@
 ## Just shipped
 
+**v0.117.0-rc37 — "Whole Worlds"** (beta). Solid ground that stays where it is
+drawn on a world moving along its orbit, and `floptle check` reporting scripts
+that don't compile.
+
 **v0.117.0-rc36 — "Whole Worlds"** (beta). Fog shafts from the sun's shadow
 map, many times cheaper, and a catch-up budget that new projects start with.
 
