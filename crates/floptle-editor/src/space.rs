@@ -23,6 +23,10 @@ pub(crate) struct CarriedStatics {
     cursor: floptle_core::ChangeCursor,
     baked: usize,
     list: Vec<(Entity, Entity)>,
+    /// The statics in `list`, and every celestial, by index: what a logged
+    /// change is held against.
+    members: std::collections::HashSet<u32>,
+    celestials: std::collections::HashSet<u32>,
 }
 
 /// Physics LOD for a distant compound craft (a deployed satellite, a spent
@@ -136,23 +140,36 @@ impl Editor {
     ///
     /// Walking each one's parents every tick cost half a millisecond a tick
     /// on a base of 5,000 pieces, so the answer is kept until the change log
-    /// says something it depends on changed: a spawn or a despawn, a parent,
-    /// a body, a collider or a celestial, or the set of baked statics.
+    /// says something changed that could change it: a parent, a collider, a
+    /// body turned static or no longer static, a celestial made or unmade, a
+    /// listed static spawned or despawned, or the set of baked statics. Bodies
+    /// a script writes every frame, props coming and going and a celestial's
+    /// fields changing are not that, and on a busy world they are most of the
+    /// log.
     fn carried_statics(&mut self) -> Vec<(Entity, Entity)> {
         use floptle_core::{ChangeKind, Collidable, MeshCollider, Parent, RigidBody};
         use std::any::TypeId;
         let baked = self.static_baked.borrow().len();
-        let depends = [
-            TypeId::of::<Parent>(),
-            TypeId::of::<RigidBody>(),
-            TypeId::of::<CelestialBody>(),
-            TypeId::of::<Collidable>(),
-            TypeId::of::<MeshCollider>(),
-        ];
+        let is_static = |w: &floptle_core::World, i: u32| {
+            w.entity_at(i).and_then(|e| w.get::<RigidBody>(e)).is_some_and(|rb| rb.mode == floptle_core::BodyMode::Static)
+        };
+        let is_celestial = |w: &floptle_core::World, i: u32| w.entity_at(i).is_some_and(|e| w.get::<CelestialBody>(e).is_some());
         let still = self.carried_statics.as_ref().is_some_and(|kept| {
             kept.baked == baked
                 && self.world.changes_since(kept.cursor).is_some_and(|log| {
-                    log.iter().all(|c| matches!(c.kind, ChangeKind::Component(t) if !depends.contains(&t)))
+                    log.iter().all(|c| match c.kind {
+                        ChangeKind::Lifetime => !kept.members.contains(&c.index) && !kept.celestials.contains(&c.index),
+                        ChangeKind::Component(t) if t == TypeId::of::<RigidBody>() => {
+                            is_static(&self.world, c.index) == kept.members.contains(&c.index)
+                                || self.static_baked.borrow().contains_key(&c.index)
+                        }
+                        ChangeKind::Component(t) if t == TypeId::of::<CelestialBody>() => {
+                            is_celestial(&self.world, c.index) == kept.celestials.contains(&c.index)
+                        }
+                        ChangeKind::Component(t) => {
+                            t != TypeId::of::<Parent>() && t != TypeId::of::<Collidable>() && t != TypeId::of::<MeshCollider>()
+                        }
+                    })
                 })
         });
         let cursor = self.world.change_cursor();
@@ -183,7 +200,9 @@ impl Editor {
                 None
             })
             .collect();
-        self.carried_statics = Some(CarriedStatics { cursor, baked, list: carried.clone() });
+        let members = carried.iter().map(|(e, _)| e.index()).collect();
+        let celestials = self.world.query::<CelestialBody>().map(|(e, _)| e.index()).collect();
+        self.carried_statics = Some(CarriedStatics { cursor, baked, list: carried.clone(), members, celestials });
         carried
     }
 
