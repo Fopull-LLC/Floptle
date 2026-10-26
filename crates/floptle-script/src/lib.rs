@@ -310,6 +310,7 @@ mod http_api;
 mod preload_api;
 mod texture_api;
 mod capture_api;
+mod file_api;
 pub mod paths;
 pub mod data_api;
 mod cloud_api;
@@ -318,6 +319,7 @@ pub mod mesh_api;
 pub use mesh_api::MeshRequest;
 pub use texture_api::TextureRequest;
 pub use capture_api::{CaptureCamera, CaptureFormat, CaptureRequest, MAX_CAPTURE_SIDE, NO_RENDERER};
+pub use file_api::{OpenFileAnswer, OpenFileRequest, DEFAULT_MAX_BYTES as OPEN_FILE_DEFAULT_MAX_BYTES, MAX_BYTES as OPEN_FILE_MAX_BYTES};
 pub use account_api::keep_account_signed_out;
 pub use preload_api::PreloadKind;
 pub use http_api::{browser_url, open_in_browser};
@@ -1067,6 +1069,8 @@ pub struct ScriptHost {
     meshes: Rc<RefCell<mesh_api::MeshBook>>,
     /// `camera.capture` / `captureTexture`: pictures waiting for the driver.
     captures: Rc<RefCell<capture_api::Captures>>,
+    /// `app.openFile` pickers waiting on the driver.
+    files: Rc<RefCell<file_api::Files>>,
     /// `cloud.*`: the game this project is connected to, set by the driver.
     cloud: cloud_api::CloudState,
     /// How long one pass into Lua may run — see [`budget`].

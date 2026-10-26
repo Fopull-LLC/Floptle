@@ -70,6 +70,38 @@ pub fn gpu_trouble() -> bool {
     GPU_TROUBLE.load(Ordering::Relaxed)
 }
 
+/// This run's file beside a pipeline cache, saying it is using the cache and
+/// has not yet saved it back cleanly (see `Gpu::open_pipeline_cache`). One
+/// per process, so runs side by side do not count against each other.
+#[cfg(not(target_arch = "wasm32"))]
+fn cache_marker(file: &std::path::Path) -> std::path::PathBuf {
+    file.with_extension(format!("open.{}", std::process::id()))
+}
+
+/// Markers left beside `file` by runs that are gone: they used the cache and
+/// never saved it back cleanly. A run is gone when its process is (Linux),
+/// or elsewhere when its marker is over a minute old, since a healthy run
+/// saves within its first frames.
+#[cfg(not(target_arch = "wasm32"))]
+fn abandoned_cache_markers(file: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let (Some(dir), Some(name)) = (file.parent(), file.file_name().and_then(|n| n.to_str())) else { return Vec::new() };
+    let prefix = format!("{name}.open.");
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let n = e.file_name().to_str()?.to_string();
+            let pid: u32 = n.strip_prefix(&prefix)?.parse().ok()?;
+            let gone = if cfg!(target_os = "linux") {
+                !std::path::Path::new("/proc").join(pid.to_string()).exists()
+            } else {
+                e.metadata().ok()?.modified().ok()?.elapsed().is_ok_and(|age| age.as_secs() > 60)
+            };
+            (gone && pid != std::process::id()).then(|| e.path())
+        })
+        .collect()
+}
+
 /// Which graphics backends to consider, honouring `WGPU_BACKEND`.
 ///
 /// **This exists so a backend-specific bug can be reproduced on a machine that
@@ -185,6 +217,12 @@ pub struct Gpu {
     pub pipeline_cache: Option<wgpu::PipelineCache>,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pipeline_cache_file: Option<std::path::PathBuf>,
+    /// Whether this device's errors go to [`report_gpu_error`] (the window's
+    /// device) or panic (a headless probe's): kept so a device made again
+    /// (`open_pipeline_cache`) is set up the same way. A browser keeps no
+    /// pipeline cache, so never makes its device again.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    reports_errors: bool,
 }
 
 /// How finished frames are handed to the display.
@@ -376,7 +414,31 @@ impl Gpu {
         // grows with each shader edit; past this it starts again empty.
         const MAX_BYTES: u64 = 256 << 20;
         let fits = std::fs::metadata(&file).is_ok_and(|m| m.len() <= MAX_BYTES);
-        let data = if fits { std::fs::read(&file).ok() } else { None };
+        // A cache the driver accepts can still be one it fails on: one saved
+        // while the driver was failing to map memory left every device that
+        // loaded it making invalid resources from the first texture on, so
+        // nothing on the machine would start. The marker says a run is using
+        // this cache and has not yet saved it back cleanly; found at start,
+        // the run before never did, and its cache is not trusted. A bad
+        // cache can cost one start, never every start.
+        let abandoned = abandoned_cache_markers(&file);
+        let suspect = !abandoned.is_empty();
+        if suspect {
+            let _ = std::fs::remove_file(&file);
+            for m in &abandoned {
+                let _ = std::fs::remove_file(m);
+            }
+            floptle_say::say_err!(
+                "the GPU pipeline cache was discarded: the last run that used it never got as far as a clean frame. \
+                 Shaders build again from scratch this time"
+            );
+        }
+        let data = if fits && !suspect { std::fs::read(&file).ok() } else { None };
+        let marker = cache_marker(&file);
+        if let Some(dir) = marker.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&marker, b"");
         // SAFETY: the data is only ever what `save_pipeline_cache` wrote from
         // `PipelineCache::get_data` for this adapter's key, and with
         // `fallback` a cache the driver will not take (another driver
@@ -389,14 +451,80 @@ impl Gpu {
                 fallback: true,
             })
         };
+        // A cache the driver takes can still leave it unable to make
+        // anything: one saved while it was failing to map memory did. Asked
+        // at once, with one small texture, rather than learned from a frame
+        // of invalid everything.
+        if !self.device_makes_textures() {
+            drop(cache);
+            let _ = std::fs::remove_file(&file);
+            let _ = std::fs::remove_file(cache_marker(&file));
+            // The device stays broken without it: ask the adapter for another.
+            let healthy = self.make_device_again() && self.device_makes_textures();
+            floptle_say::say_err!(
+                "the GPU pipeline cache left the graphics driver unable to make textures, so it was thrown \
+                 away{}",
+                if healthy { "" } else { ". The GPU still cannot make them: restart, and if that does not help, reboot" }
+            );
+            return;
+        }
         self.pipeline_cache = Some(cache);
         self.pipeline_cache_file = Some(file);
     }
 
+    /// Replace the device and queue with new ones from the same adapter, with
+    /// the same features and limits, and set up what hangs off them (the
+    /// surface, the depth target). Only before anything else is made from the
+    /// device: whatever was made from the old one is not made again.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn make_device_again(&mut self) -> bool {
+        let desc = wgpu::DeviceDescriptor {
+            label: Some("floptle-device"),
+            required_features: self.device.features(),
+            required_limits: self.device.limits(),
+            experimental_features: wgpu::ExperimentalFeatures::default(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        };
+        let Ok((device, queue)) = pollster::block_on(self.adapter.request_device(&desc)) else { return false };
+        if self.reports_errors {
+            device.on_uncaptured_error(Arc::new(|e: wgpu::Error| report_gpu_error(&e)));
+        }
+        self.device = device;
+        self.queue = queue;
+        self.resize(self.config.width, self.config.height);
+        true
+    }
+
+    /// Can the device still make a texture and a view of it? Asked inside its
+    /// own error scopes, so a failure is answered here and reported nowhere.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn device_makes_textures(&self) -> bool {
+        let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let memory = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let t = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("floptle-canary"),
+            size: wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        drop(t.create_view(&wgpu::TextureViewDescriptor::default()));
+        let oom = pollster::block_on(memory.pop());
+        let invalid = pollster::block_on(validation.pop());
+        oom.is_none() && invalid.is_none()
+    }
+
     /// Write the pipeline cache back to its file, on a worker thread, through
-    /// a temporary file so a run killed mid-write leaves the old one. Call
-    /// after new pipelines were built; it copies the whole cache, so not every
-    /// frame.
+    /// a temporary file so a run killed mid-write leaves the old one, and
+    /// mark it trusted for the next start (see `open_pipeline_cache`). Not
+    /// after any GPU error, when the cache is thrown away instead.
+    ///
+    /// Call after new pipelines were built; it copies the whole cache, so not
+    /// every frame.
     pub fn save_pipeline_cache(&self) {
         #[cfg(not(target_arch = "wasm32"))]
         self.write_pipeline_cache();
@@ -405,6 +533,18 @@ impl Gpu {
     #[cfg(not(target_arch = "wasm32"))]
     fn write_pipeline_cache(&self) {
         let (Some(cache), Some(file)) = (&self.pipeline_cache, &self.pipeline_cache_file) else { return };
+        // After any GPU error this session the cache is not saved, and what
+        // was loaded is not kept: the driver may have been failing, and a
+        // cache written then is the one that broke every start after it.
+        if gpu_trouble() {
+            let _ = std::fs::remove_file(file);
+            let _ = std::fs::remove_file(cache_marker(file));
+            return;
+        }
+        // A clean frame came first, so the next start may trust this cache:
+        // said here, not on the worker, so a run that exits before the worker
+        // finishes still says it (a write cut short leaves the old file).
+        let _ = std::fs::remove_file(cache_marker(file));
         let Some(data) = cache.get_data() else { return };
         let file = file.clone();
         let write = move || {
@@ -532,6 +672,7 @@ impl Gpu {
             scene_format: Self::HDR_FORMAT,
             frame_format,
             pipeline_cache: None,
+            reports_errors: true,
             pipeline_cache_file: None,
             present_modes,
             vsync,
@@ -662,6 +803,7 @@ impl Gpu {
             scene_format,
             frame_format: config.format,
             pipeline_cache: None,
+            reports_errors: false,
             pipeline_cache_file: None,
             config,
             // Headless has no surface, so no presentation to configure.

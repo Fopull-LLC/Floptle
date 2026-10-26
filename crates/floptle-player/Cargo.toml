@@ -34,7 +34,7 @@ steam = ["floptle-editor/steam"]
 # VM is chosen here and cannot be smuggled in twice.
 # `devices` because somebody is sitting at this one: it is a game, so it wants
 # the audio device and the gamepads. `floptle-server` is the build that does not.
-floptle-editor = { path = "../floptle-editor", default-features = false, features = ["vm-luau", "devices"] }
+floptle-editor = { path = "../floptle-editor", default-features = false, features = ["vm-luau", "devices", "dialogs"] }
 
 # The Windows executable icon (`build.rs`); a no-op build script elsewhere.
 [build-dependencies]

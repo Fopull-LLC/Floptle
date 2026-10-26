@@ -3410,6 +3410,10 @@ impl ScriptHost {
         if let Err(e) = crate::capture_api::install(&lua, captures.clone(), textures.clone()) {
             floptle_say::say_err!("[lua] failed to install camera.capture: {e}");
         }
+        let files: Rc<RefCell<crate::file_api::Files>> = Rc::default();
+        if let Err(e) = crate::file_api::install(&lua, files.clone()) {
+            floptle_say::say_err!("[lua] failed to install app.openFile: {e}");
+        }
 
         Self {
             lua,
@@ -3579,6 +3583,7 @@ impl ScriptHost {
             textures,
             meshes,
             captures,
+            files,
             cloud,
             http_in_fixed,
             platform,
@@ -4984,6 +4989,7 @@ impl ScriptHost {
             self.textures.borrow_mut().reset();
             self.meshes.borrow_mut().reset();
             self.captures.borrow_mut().cancel_all();
+            self.files.borrow_mut().cancel_all();
         }
         // Stop drops every leaderboard callback still waiting, for the same
         // reason as `http.*` — the backend's own request stays in flight and
@@ -5002,6 +5008,7 @@ impl ScriptHost {
         self.terrain_planet.borrow_mut().cancel_all();
         self.textures.borrow_mut().cancel_all();
         self.captures.borrow_mut().cancel_all();
+        self.files.borrow_mut().cancel_all();
         self.steam_state.borrow_mut().cancel_all();
     }
 
@@ -6375,6 +6382,55 @@ impl ScriptHost {
         self.textures.borrow_mut().answer(id, result);
     }
 
+    /// Files scripts asked the player for since the last call
+    /// (`app.openFile`), for the driver to show a picker for.
+    pub fn take_open_file_requests(&self) -> Vec<crate::OpenFileRequest> {
+        self.files.borrow_mut().take_requests()
+    }
+
+    /// The driver's answer for an `app.openFile`: the file's name and bytes,
+    /// or why not. The callback runs in the next frame pass.
+    pub fn answer_open_file(&self, id: u64, result: crate::OpenFileAnswer) {
+        self.files.borrow_mut().answer(id, result);
+    }
+
+    /// `filesDropped(node, files)` on every script that has it, with
+    /// `files[i] = { name = …, bytes = … }`: files the player dropped on the
+    /// window. Names only, never paths.
+    pub fn call_files_dropped(&mut self, world: &mut World, files: &[(String, Vec<u8>)]) {
+        if files.is_empty() {
+            return;
+        }
+        let _budget = self.budget.arm();
+        let keys: Vec<(u32, String)> = self.envs.borrow().keys().cloned().collect();
+        let mut called = false;
+        for key in keys {
+            let Some(env) = self.envs.borrow().get(&key).and_then(|k| self.env_of(k)) else { continue };
+            let Ok(Some(f)) = env.raw_get::<Option<mlua::Function>>("filesDropped") else { continue };
+            let list = (|| -> mlua::Result<mlua::Table> {
+                let list = self.lua.create_table()?;
+                for (i, (name, bytes)) in files.iter().enumerate() {
+                    let t = self.lua.create_table()?;
+                    t.set("name", name.as_str())?;
+                    t.set("bytes", self.lua.create_string(bytes)?)?;
+                    list.raw_set(i + 1, t)?;
+                }
+                Ok(list)
+            })();
+            let (Ok(list), Ok(node)) = (list, new_node_handle(&self.lua, key.0)) else { continue };
+            called = true;
+            *self.net.current.borrow_mut() = Some(key.clone());
+            let result = f.call::<()>((node, list));
+            *self.net.current.borrow_mut() = None;
+            if let Err(err) = result {
+                self.record_error(&key.1, format!("{}: filesDropped: {err}", key.1));
+            }
+        }
+        if called {
+            self.flush_scene(world);
+        }
+    }
+
     /// Errors raised by the most recent [`run`](Self::run) (one per failing script).
     pub fn errors(&self) -> &[String] {
         &self.errors
@@ -6490,6 +6546,7 @@ impl ScriptHost {
         crate::account_api::drain(&self.lua, &self.account, &self.logs);
         crate::preload_api::drain(&self.lua, &self.preloads, &self.logs);
         crate::capture_api::drain(&self.lua, &self.captures, &self.logs);
+        crate::file_api::drain(&self.lua, &self.files, &self.logs);
         crate::texture_api::drain(&self.lua, &self.textures, &self.logs);
         crate::terrain_api::drain_planet_queries(&self.lua, &self.terrain_planet, &self.logs);
         // Pumps the platform backend's callbacks and fires

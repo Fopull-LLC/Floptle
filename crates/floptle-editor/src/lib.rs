@@ -134,8 +134,9 @@ mod nav_bake;
 #[cfg(feature = "editor-ui")]
 mod model_convert;
 mod upgrade_models;
-#[cfg(feature = "editor-ui")]
+#[cfg(feature = "dialogs")]
 mod native_dialog;
+mod game_files;
 mod reflect_capture;
 mod gizmo;
 #[cfg(feature = "editor-ui")]
@@ -2555,6 +2556,12 @@ struct Editor {
     /// atlas keeps sun shadows + SDF AO through each terrain's shadow proxy (`w = 3` =
     /// in-field-but-not-drawn). This map is the per-terrain GPU slot set.
     terrain_render: HashMap<Entity, crate::terrain_edit::TerrainRender>,
+    /// `app.openFile` pickers open: the request, its size cap, the picker.
+    #[cfg(feature = "dialogs")]
+    open_files: Vec<(u64, u64, std::sync::mpsc::Receiver<Vec<std::path::PathBuf>>)>,
+    /// Files dropped on the window during Play, for the game's
+    /// `filesDropped` (see `game_files`).
+    dropped_for_game: Vec<std::path::PathBuf>,
     /// Resolved scatter chunks, so props are dropped onto the
     /// real ground once per chunk instead of once per prop per frame.
     scatter_cache: crate::scatter_draw::ScatterCache,

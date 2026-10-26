@@ -199,6 +199,16 @@ impl Editor {
             self.themes.import_path(p);
             self.show_preferences = true;
         }
+        // Anything else dropped during Play is the game's (`filesDropped`).
+        if self.playing {
+            self.dropped_for_game.extend(
+                raw_input
+                    .dropped_files
+                    .iter()
+                    .filter_map(|f| f.path.clone())
+                    .filter(|p| !floptle_theme::host::Host::is_theme_file(p)),
+            );
+        }
         // Fonts: the theme's faces, plus any a package shipped. `set_fonts`
         // rebuilds egui's glyph atlas, so it runs only when one of the two
         // changed, never per frame.

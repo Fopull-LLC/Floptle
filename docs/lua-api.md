@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 206
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 208
 - [node — transform & body fields](#node--transform--body-fields) — 44
 - [node — methods & handles](#node--methods--handles) — 37
 - [vectors, directions & easing](#vectors-directions--easing) — 51
@@ -178,6 +178,10 @@ app.isWeb() — true in a browser build. The same answer as app.platform() == "w
 ### `app.monitors`
 
 app.monitors() → { {index=, name=, width=, height=, refresh=, x=, y=, current=}, … } — the displays the game's window could be on, in the system's order; current is the one it is on now. Sizes are physical pixels. Under Wayland a window learns which screen it is on only once the compositor has shown it there, so for the first frames (or always, on a compositor that never says) no monitor is current. An empty list where there is no window (floptle run, a dedicated server). Kept up to date every couple of seconds, so a monitor plugged in while a settings page is open shows up.
+
+### `app.openFile`
+
+app.openFile([{ title=, filter={"png", "jpg"}, maxBytes= }], function(name, bytes, err) end) — ask the player for a file with the system's own picker: an emblem, an avatar, a save a friend sent, a mod. The game keeps running while the picker is open, and the callback runs on a later frame with the file's name and its bytes (a string, ready for assets.textureFromBytes or assets.writeBytes to user://), never its path. maxBytes defaults to 8 MB and is at most 64 MB. err is "cancelled" when the player closes the picker, "too-large", "busy" when a picker is already open (one at a time), or "unsupported" where there is no picker: a dedicated server, and the browser for now.
 
 ### `app.platform`
 
@@ -381,6 +385,10 @@ destroy(node) — remove a node AND its whole subtree (physics body included). Q
 ### `dt`
 
 Seconds since the last frame (number).
+
+### `filesDropped`
+
+function filesDropped(node, files) — files the player dropped on the game's window during play, with files[i] = { name=, bytes= }: the file's name and its bytes (a string), never its path, each at most 64 MB. Every script that defines it hears it. A file that cannot be read, or is larger, is left out and named in the Console. Windows, macOS and X11 deliver drops; a window on native Wayland gets none, and the browser does not yet.
 
 ### `fixedUpdate`
 

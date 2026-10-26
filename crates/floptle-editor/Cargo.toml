@@ -59,10 +59,13 @@ editor-ui = [
     "dep:floptle-theme",
     "dep:skrifa",
     "dep:flate2",
-    "dep:rfd",
-    "dep:tokio",
+    "dialogs",
     "dep:clap",
 ]
+# The system's own file pickers (`native_dialog`): the editor's, and a running
+# game's `app.openFile`. The player turns it on; a dedicated server and the
+# browser build leave it off and answer "unsupported".
+dialogs = ["dep:rfd", "dep:tokio"]
 vm-luau = ["floptle-script/vm-luau", "mlua/luau"]
 # Luau's code generator on the architectures that have one (x64/aarch64, never
 # wasm). Off by default: it is a performance lever, and the real-game bench

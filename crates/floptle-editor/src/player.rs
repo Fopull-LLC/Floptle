@@ -323,6 +323,9 @@ impl ApplicationHandler for Player {
             // A build's window close is quitting: there is no unsaved work to
             // ask about.
             WindowEvent::CloseRequested => event_loop.exit(),
+            // A file dropped on the window is the game's (`filesDropped`).
+            // Native Wayland delivers none; X11, Windows and macOS do.
+            WindowEvent::DroppedFile(path) => self.ed.dropped_for_game.push(path),
             WindowEvent::Resized(size) => {
                 if let Some(gpu) = self.ed.gpu.as_mut() {
                     gpu.resize(size.width, size.height);

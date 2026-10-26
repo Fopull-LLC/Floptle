@@ -415,6 +415,8 @@ impl Editor {
             self.push_app_info();
             // Input a script simulated last frame, before anything reads input.
             self.apply_simulated_input();
+            // Files the player picked or dropped, for the scripts about to run.
+            self.pump_files();
         }
         // Play mode: advance the (pausable) script clock and run the Lua scripts
         // attached to nodes. Scripts hot-reload as their files change.
