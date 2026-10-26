@@ -739,6 +739,9 @@ pub struct ScriptHost {
     /// The physics colliders for this frame, so `raycast(...)` works inside a script. The
     /// editor lends the sim's colliders before running scripts and takes them back after.
     colliders: Rc<RefCell<Vec<floptle_physics::AnchoredCollider>>>,
+    /// Whether the colliders are lent right now: an empty list cannot tell
+    /// "not lent" from "lent, and the level has none".
+    colliders_lent: std::cell::Cell<bool>,
     /// Raycastable dynamic-body hulls for this frame ([`Sim::body_hulls`] copies —
     /// players, crates), fed alongside the colliders so `raycast(...)` can hit
     /// bodies and name the node it hit (`hit.node`). `net.rewind` re-poses these

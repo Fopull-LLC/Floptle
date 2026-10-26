@@ -3177,6 +3177,9 @@ struct Editor {
     /// Each celestial's rails position as of the last tick: the "before" of
     /// the carry's per-tick delta. Empty at Play start.
     space_rails_prev: std::collections::HashMap<Entity, DVec3>,
+    /// The statics the rails carry, each with the celestial it rides, as of
+    /// a point in the change log (see `Editor::carried_statics`).
+    carried_statics: Option<space::CarriedStatics>,
     /// Physics LOD for distant compound craft (root eid → state): far from the
     /// camera, landed craft freeze in the carried frame and in-flight craft
     /// coast on analytic Kepler rails; both wake on approach (see space.rs).

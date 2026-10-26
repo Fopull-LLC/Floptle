@@ -1898,6 +1898,21 @@ impl Sim {
         }
     }
 
+    /// [`Self::shift_statics_of`] for many owners at once, in one pass over
+    /// the colliders rather than one per owner.
+    pub fn shift_statics_by(&mut self, deltas: &std::collections::HashMap<u32, DVec3>) {
+        if deltas.is_empty() {
+            return;
+        }
+        let origin = self.world.origin;
+        for c in &mut self.world.colliders {
+            if let Some(d) = c.eid.and_then(|e| deltas.get(&e)) {
+                let a = c.anchor + *d;
+                c.re_anchor(a, origin);
+            }
+        }
+    }
+
     /// Diff this tick's touching pairs against the last tick's into
     /// enter / stay / exit [`TouchEvent`]s. Four sources, all matrix-gated:
     /// the solver's resolved contacts (body vs solid collider), body-vs-sensor
@@ -2797,6 +2812,8 @@ impl Sim {
     /// stands on it) ride with it. Bodies and assemblies in another frame are
     /// then shifted by the difference, those in none by `-delta`.
     pub fn ride_frame(&mut self, delta: DVec3, riders: &[u32]) {
+        // A set: a planet's base can be thousands of pieces, each asked about.
+        let riders: std::collections::HashSet<u32> = riders.iter().copied().collect();
         self.world.ride(delta, |c| c.eid.is_some_and(|e| riders.contains(&e)));
     }
 

@@ -16,6 +16,15 @@ use floptle_core::math::DVec3;
 
 use crate::Editor;
 
+/// The statics the rails carry, each with the celestial it rides, as of a
+/// point in the change log and a count of baked statics. See
+/// `Editor::carried_statics`.
+pub(crate) struct CarriedStatics {
+    cursor: floptle_core::ChangeCursor,
+    baked: usize,
+    list: Vec<(Entity, Entity)>,
+}
+
 /// Physics LOD for a distant compound craft (a deployed satellite, a spent
 /// stage, a parked rover half a planet away). Far from the camera the full
 /// contact sim is wasted heat: landed/slow craft freeze (anchored — pinned,
@@ -120,6 +129,62 @@ impl Editor {
         // Zero time: every body already on the rails moves nowhere and carries
         // nothing; a new one takes the rails position its first tick would.
         self.update_space_rails(0.0);
+    }
+
+    /// Every static the rails carry, with the celestial it rides: a Static
+    /// body, or any other baked static, under a celestial at any depth.
+    ///
+    /// Walking each one's parents every tick cost half a millisecond a tick
+    /// on a base of 5,000 pieces, so the answer is kept until the change log
+    /// says something it depends on changed: a spawn or a despawn, a parent,
+    /// a body, a collider or a celestial, or the set of baked statics.
+    fn carried_statics(&mut self) -> Vec<(Entity, Entity)> {
+        use floptle_core::{ChangeKind, Collidable, MeshCollider, Parent, RigidBody};
+        use std::any::TypeId;
+        let baked = self.static_baked.borrow().len();
+        let depends = [
+            TypeId::of::<Parent>(),
+            TypeId::of::<RigidBody>(),
+            TypeId::of::<CelestialBody>(),
+            TypeId::of::<Collidable>(),
+            TypeId::of::<MeshCollider>(),
+        ];
+        let still = self.carried_statics.as_ref().is_some_and(|kept| {
+            kept.baked == baked
+                && self.world.changes_since(kept.cursor).is_some_and(|log| {
+                    log.iter().all(|c| matches!(c.kind, ChangeKind::Component(t) if !depends.contains(&t)))
+                })
+        });
+        let cursor = self.world.change_cursor();
+        if let Some(kept) = self.carried_statics.as_mut().filter(|_| still) {
+            kept.cursor = cursor;
+            return kept.list.clone();
+        }
+        let mut statics: Vec<Entity> = self
+            .world
+            .query::<RigidBody>()
+            .filter(|(_, rb)| rb.mode == floptle_core::BodyMode::Static)
+            .map(|(e, _)| e)
+            .collect();
+        statics.extend(self.static_baked.borrow().keys().filter_map(|&eid| self.world.entity_at(eid)));
+        statics.sort_unstable_by_key(|e| e.index());
+        statics.dedup();
+        let carried: Vec<(Entity, Entity)> = statics
+            .into_iter()
+            .filter_map(|e| {
+                let mut cur = e;
+                for _ in 0..64 {
+                    let Parent(p) = self.world.get::<Parent>(cur).copied()?;
+                    if self.world.get::<CelestialBody>(p).is_some() {
+                        return Some((e, p));
+                    }
+                    cur = p;
+                }
+                None
+            })
+            .collect();
+        self.carried_statics = Some(CarriedStatics { cursor, baked, list: carried.clone() });
+        carried
     }
 
     /// Advance rails one gameplay tick. No-op unless Playing with celestial bodies.
@@ -272,23 +337,14 @@ impl Editor {
         // transform hierarchy for free, but its baked collider blob would stay
         // behind in space. Each moves by its celestial's rails delta, so a
         // launchpad on an orbiting world stays exactly as solid as the
-        // terrain it stands on.
+        // terrain it stands on. That goes for every baked static, not only a
+        // Static body: a Collidable mesh or primitive left to the per-frame
+        // follow stood where its planet was before this frame's ticks, 4 m a
+        // tick behind at 250 m/s, and further while the follow took turns.
         let carried: Vec<(Entity, usize)> = self
-            .world
-            .query::<floptle_core::RigidBody>()
-            .filter(|(_, rb)| rb.mode == floptle_core::BodyMode::Static)
-            .filter_map(|(e, _)| {
-                let mut cur = e;
-                for _ in 0..64 {
-                    let floptle_core::Parent(p) =
-                        self.world.get::<floptle_core::Parent>(cur).copied()?;
-                    if let Some(j) = cb.iter().position(|(ce, _)| *ce == p) {
-                        return Some((e, j));
-                    }
-                    cur = p;
-                }
-                None
-            })
+            .carried_statics()
+            .into_iter()
+            .filter_map(|(e, c)| Some((e, cb.iter().position(|(ce, _)| *ce == c)?)))
             .collect();
         // The smallest sphere of influence holding `p` before this tick, by
         // each celestial's old centre.
@@ -588,11 +644,12 @@ impl Editor {
                     sim.shift_compound(eid, d);
                 }
             }
+            let mut shifts = std::collections::HashMap::new();
             for &(e, j) in &carried {
                 if deltas[j].length_squared() > 1e-18 {
                     // The frame the sim rides carried its own already.
                     if Some(j) != ride_i {
-                        sim.shift_statics_of(e.index(), deltas[j]);
+                        shifts.insert(e.index(), deltas[j]);
                     }
                     // Followed by script moves too: what the rails carried is
                     // not a move of the script's to carry again.
@@ -601,7 +658,8 @@ impl Editor {
                     }
                 }
             }
-            let dom_of = |p: DVec3| -> Option<usize> {
+            sim.shift_statics_by(&shifts);
+            let dom_of =|p: DVec3| -> Option<usize> {
                 let mut best: Option<(usize, f64)> = None;
                 for (i, sb) in sys.bodies.iter().enumerate() {
                     if (p - DVec3::from(bodies[i].pos)).length() <= sb.soi
@@ -1011,6 +1069,261 @@ mod tests {
             assert!(dev < 0.01, "the body moved {dev} m against its planet on a {dt} s frame");
         }
         assert!(moved > 5.0, "the fixture needs frames that run several ticks, the planet moved at most {moved} m");
+    }
+
+    /// **A static collider on a planet on rails is where the planet draws
+    /// it, between frames, which is what the next `update` raycasts.**
+    #[test]
+    fn a_static_on_a_planet_on_rails_collides_where_it_is_drawn() {
+        use floptle_core::{BodyKind, BodyMode, Collidable, Matter, Name, Parent, RigidBody, Shape};
+        let mut ed = crate::Editor::default();
+        let celestial = |ed: &mut crate::Editor, name: &str, at: DVec3, body: CelestialBody| {
+            let e = ed.world.spawn();
+            ed.world.insert(e, Name(name.into()));
+            ed.world.insert(e, Transform { translation: at, ..Transform::IDENTITY });
+            ed.world.insert(e, body);
+            e
+        };
+        // 250 m/s: sqrt(mu / a).
+        celestial(&mut ed, "Sun", DVec3::ZERO, CelestialBody { mu: 3.125e8, ..Default::default() });
+        let home = CelestialBody { parent: "Sun".into(), a: 5000.0, mu: 1.0e4, soi: 500.0, ..Default::default() };
+        let home = celestial(&mut ed, "Home", DVec3::new(5000.0, 0.0, 0.0), home);
+        let cam = ed.world.spawn();
+        ed.world.insert(cam, Transform { translation: DVec3::new(0.0, 0.0, 25.0), ..Transform::IDENTITY });
+        ed.world.insert(cam, Parent(home));
+        ed.world.insert(
+            cam,
+            Matter::Camera {
+                fov_y: 1.0,
+                active: true,
+                target: String::new(),
+                cull_mask: u32::MAX,
+                target_w: 0,
+                target_h: 0,
+                target_hz: 0.0,
+                ortho: false,
+                ortho_height: 10.0,
+                stack: Vec::new(),
+            },
+        );
+        let body_box = ed.world.spawn();
+        ed.world.insert(body_box, Transform { translation: DVec3::new(100.0, 0.0, 0.0), ..Transform::IDENTITY });
+        ed.world.insert(body_box, Parent(home));
+        let slab = RigidBody { kind: BodyKind::Box, mode: BodyMode::Static, half_extents: [2.0, 2.0, 2.0], ..Default::default() };
+        ed.world.insert(body_box, slab);
+        let plain_box = ed.world.spawn();
+        ed.world.insert(plain_box, Transform { translation: DVec3::new(-100.0, 0.0, 0.0), ..Transform::IDENTITY });
+        ed.world.insert(plain_box, Parent(home));
+        ed.world.insert(plain_box, Matter::Primitive { shape: Shape::Cube, color: [1.0; 3] });
+        ed.world.insert(plain_box, Collidable);
+        ed.toggle_play();
+        // How far in front of its drawn centre, along +z, each collider's near
+        // face is: constant while the collider stays with the node.
+        let face = |ed: &crate::Editor, e| {
+            let at = floptle_core::world_transform(&ed.world, e).translation;
+            let from = at - DVec3::new(0.0, 0.0, 30.0);
+            let hit = ed.sim.as_ref().unwrap().raycast(from, Vec3::Z, 60.0)?;
+            Some(from.z + hit.distance as f64 - at.z)
+        };
+        ed.play_step(1.0 / 60.0, true);
+        let rest = [face(&ed, body_box).expect("the body box"), face(&ed, plain_box).expect("the plain box")];
+        let mut worst = [0.0f64; 2];
+        for dt in [0.005f32, 0.016, 0.03, 0.008, 0.1, 0.0167, 0.004, 0.02, 0.033, 0.011].repeat(3) {
+            ed.play_step(dt, true);
+            for (k, e) in [body_box, plain_box].into_iter().enumerate() {
+                let off = face(&ed, e).map_or(f64::INFINITY, |f| (f - rest[k]).abs());
+                worst[k] = worst[k].max(off);
+            }
+        }
+        assert!(worst[0] < 0.05 && worst[1] < 0.05, "a static on a moving planet collided away from where it is drawn: {worst:?}");
+
+        // One that arrives while the planet is already moving rides it too.
+        let late = ed.world.spawn();
+        ed.world.insert(late, Transform { translation: DVec3::new(0.0, 100.0, 0.0), ..Transform::IDENTITY });
+        ed.world.insert(late, Parent(home));
+        ed.world.insert(late, Matter::Primitive { shape: Shape::Cube, color: [1.0; 3] });
+        ed.world.insert(late, Collidable);
+        let mut sim = ed.sim.take().unwrap();
+        ed.add_static_collider_for(&mut sim, late);
+        ed.sim = Some(sim);
+        ed.play_step(0.0, true);
+        let rest = face(&ed, late).expect("the late box");
+        let mut drift = 0.0f64;
+        for dt in [0.016f32, 0.03, 0.1, 0.0167, 0.033] {
+            ed.play_step(dt, true);
+            drift = drift.max(face(&ed, late).map_or(f64::INFINITY, |f| (f - rest).abs()));
+        }
+        assert!(drift < 0.05, "a static added mid-play collided {drift} m from where it is drawn");
+    }
+
+    /// **A sim rebuilt while the scripts hold its colliders keeps every one
+    /// where it is drawn.** A script's `water.setFrozen` rebuilds the sim in
+    /// the middle of the frame pass. Taking the lent colliders back then
+    /// handed the new sim the old one's, measured from the old origin: on a
+    /// planet on rails, where the origin rides, every static on the level
+    /// moved by the difference for good, and the ground under a launch pad
+    /// was no longer there to be hit.
+    #[test]
+    fn a_sim_rebuilt_while_scripts_hold_the_colliders_keeps_them_in_place() {
+        use floptle_core::{Collidable, Matter, Name, Parent, Shape};
+        let mut ed = crate::Editor::default();
+        let celestial = |ed: &mut crate::Editor, name: &str, at: DVec3, body: CelestialBody| {
+            let e = ed.world.spawn();
+            ed.world.insert(e, Name(name.into()));
+            ed.world.insert(e, Transform { translation: at, ..Transform::IDENTITY });
+            ed.world.insert(e, body);
+            e
+        };
+        // 250 m/s: sqrt(mu / a).
+        celestial(&mut ed, "Sun", DVec3::ZERO, CelestialBody { mu: 3.125e8, ..Default::default() });
+        let home = CelestialBody { parent: "Sun".into(), a: 5000.0, mu: 1.0e4, soi: 500.0, ..Default::default() };
+        let home = celestial(&mut ed, "Home", DVec3::new(5000.0, 0.0, 0.0), home);
+        let cam = ed.world.spawn();
+        ed.world.insert(cam, Transform { translation: DVec3::new(0.0, 0.0, 25.0), ..Transform::IDENTITY });
+        ed.world.insert(cam, Parent(home));
+        ed.world.insert(
+            cam,
+            Matter::Camera {
+                fov_y: 1.0,
+                active: true,
+                target: String::new(),
+                cull_mask: u32::MAX,
+                target_w: 0,
+                target_h: 0,
+                target_hz: 0.0,
+                ortho: false,
+                ortho_height: 10.0,
+                stack: Vec::new(),
+            },
+        );
+        let wall = ed.world.spawn();
+        ed.world.insert(wall, Transform { translation: DVec3::new(-100.0, 0.0, 0.0), ..Transform::IDENTITY });
+        ed.world.insert(wall, Parent(home));
+        ed.world.insert(wall, Matter::Primitive { shape: Shape::Cube, color: [1.0; 3] });
+        ed.world.insert(wall, Collidable);
+        ed.toggle_play();
+        let face = |ed: &crate::Editor| {
+            let at = floptle_core::world_transform(&ed.world, wall).translation;
+            let from = at - DVec3::new(0.0, 0.0, 30.0);
+            let hit = ed.sim.as_ref().unwrap().raycast(from, Vec3::Z, 60.0)?;
+            Some(from.z + hit.distance as f64 - at.z)
+        };
+        // Long enough for the origin to ride somewhere a rebuild would not put it.
+        for _ in 0..37 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        let rest = face(&ed).expect("the wall");
+        // The frame pass's order: lend, a script asks for a rebuild, take back.
+        let sim = ed.sim.as_mut().unwrap();
+        ed.script_host.set_colliders(std::mem::take(&mut sim.world.colliders), sim.world.origin);
+        ed.rebuild_sim();
+        let back = ed.script_host.take_colliders();
+        ed.sim.as_mut().unwrap().world.set_colliders(back);
+        let moved = face(&ed).map_or(f64::INFINITY, |f| (f - rest).abs());
+        assert!(moved < 0.05, "the wall collided {moved} m from where it is drawn after the rebuild");
+        ed.play_step(1.0 / 60.0, true);
+        let moved = face(&ed).map_or(f64::INFINITY, |f| (f - rest).abs());
+        assert!(moved < 0.05, "and {moved} m a frame later");
+    }
+
+    /// **A script's ray from a drawn point finds the static drawn there, in
+    /// `update` and in `lateUpdate`, and a body teleported onto it lands on
+    /// it,** on a planet moving at 250 m/s. A launch pad check rayed down
+    /// onto a deck a tick away from where it was drawn, and a crew put on a
+    /// pad fell past it.
+    #[test]
+    fn a_script_finds_a_static_on_a_planet_on_rails_where_it_is_drawn() {
+        use floptle_core::{Collidable, Matter, Name, Parent, RigidBody, Shape};
+        let dir = std::env::temp_dir().join(format!("floptle-rails-static-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        // How far the near face of the pad (a cube of half 0.7) is from where
+        // it is drawn, along the way the planet moves. Worst seen so far in
+        // `update` goes in node.x, in `lateUpdate` in node.y.
+        std::fs::write(
+            dir.join("scripts/probe.lua"),
+            "local frames, worstU, worstL = 0, 0, 0\n\
+             local function off()\n  local pad = find('Pad')\n  \
+             local hit = raycast(pad:toWorld(vec3(0, 0, -30)), vec3(0, 0, 1), 60)\n  \
+             if not hit then return 1000 end\n  return math.abs(hit.distance - 29.3)\nend\n\
+             function update(node, dt)\n  frames = frames + 1\n  worstU = math.max(worstU, off())\n  node.x = worstU\n  \
+             if frames == 30 then find('Crew').pos = find('Pad'):toWorld(vec3(0, 3, 0)) end\nend\n\
+             function lateUpdate(node, dt)\n  worstL = math.max(worstL, off())\n  node.y = worstL\nend\n",
+        )
+        .unwrap();
+        let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+        let celestial = |ed: &mut crate::Editor, name: &str, at: DVec3, body: CelestialBody| {
+            let e = ed.world.spawn();
+            ed.world.insert(e, Name(name.into()));
+            ed.world.insert(e, Transform { translation: at, ..Transform::IDENTITY });
+            ed.world.insert(e, body);
+            e
+        };
+        // 250 m/s: sqrt(mu / a).
+        celestial(&mut ed, "Sun", DVec3::ZERO, CelestialBody { mu: 3.125e8, ..Default::default() });
+        let home = CelestialBody { parent: "Sun".into(), a: 5000.0, mu: 1.0e4, soi: 500.0, ..Default::default() };
+        let home = celestial(&mut ed, "Home", DVec3::new(5000.0, 0.0, 0.0), home);
+        let cam = ed.world.spawn();
+        ed.world.insert(cam, Transform { translation: DVec3::new(0.0, 58.0, 25.0), ..Transform::IDENTITY });
+        ed.world.insert(cam, Parent(home));
+        ed.world.insert(
+            cam,
+            Matter::Camera {
+                fov_y: 1.0,
+                active: true,
+                target: String::new(),
+                cull_mask: u32::MAX,
+                target_w: 0,
+                target_h: 0,
+                target_hz: 0.0,
+                ortho: false,
+                ortho_height: 10.0,
+                stack: Vec::new(),
+            },
+        );
+        let pad = ed.world.spawn();
+        ed.world.insert(pad, Name("Pad".into()));
+        ed.world.insert(pad, Transform { translation: DVec3::new(0.0, 58.0, 0.0), ..Transform::IDENTITY });
+        ed.world.insert(pad, Parent(home));
+        ed.world.insert(pad, Matter::Primitive { shape: Shape::Cube, color: [1.0; 3] });
+        ed.world.insert(pad, Collidable);
+        // Falling toward the planet well away from the pad until it is put on it.
+        let crew = ed.world.spawn();
+        ed.world.insert(crew, Name("Crew".into()));
+        ed.world.insert(crew, Transform { translation: DVec3::new(5040.0, 58.0, 0.0), ..Transform::IDENTITY });
+        ed.world.insert(crew, RigidBody { gravity: true, ..Default::default() });
+        let probe = ed.world.spawn();
+        ed.world.insert(probe, Name("Probe".into()));
+        ed.world.insert(probe, Transform::IDENTITY);
+        ed.world.insert(
+            probe,
+            floptle_core::Scripts(vec![floptle_core::ScriptInst {
+                kind: "probe".into(),
+                enabled: true,
+                params: Vec::new(),
+                refs: Vec::new(),
+                strs: Vec::new(),
+                pinned_bools: None,
+            }]),
+        );
+        ed.toggle_play();
+        for dt in [0.005f32, 0.016, 0.03, 0.008, 0.1, 0.0167, 0.004, 0.02, 0.033, 0.011].repeat(4) {
+            ed.play_step(dt, true);
+            assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        }
+        for _ in 0..60 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        let world = |ed: &crate::Editor, e| floptle_core::world_transform(&ed.world, e).translation;
+        let worst = world(&ed, probe);
+        let on_pad = world(&ed, crew) - world(&ed, pad);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(worst.x < 0.05, "a ray in update found the pad {} m from where it is drawn", worst.x);
+        assert!(worst.y < 0.05, "a ray in lateUpdate found the pad {} m from where it is drawn", worst.y);
+        assert!(
+            on_pad.y > 0.5 && on_pad.y < 3.5 && on_pad.x.hypot(on_pad.z) < 1.0,
+            "the crew put on the pad did not land on it: {on_pad}"
+        );
     }
 
     /// **A label projected in `lateUpdate` sits on a planet-fixed point as

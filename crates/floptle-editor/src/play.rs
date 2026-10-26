@@ -768,6 +768,15 @@ impl Editor {
                 sim.set_compound_angular_velocity(eid, ang);
             }
         }
+        // Rebuilt while the scripts hold the colliders (a script's
+        // `water.setFrozen` asks for a rebuild mid-pass): the new sim's go out
+        // in their place. Otherwise taking them back hands the new sim the old
+        // one's, every one of them off by however far the origin moved, and
+        // nothing on the level could be stood on or hit again.
+        if self.script_host.colliders_lent() {
+            let _ = self.script_host.take_colliders();
+            self.script_host.set_colliders(std::mem::take(&mut sim.world.colliders), sim.world.origin);
+        }
         self.sim = Some(sim);
     }
 
@@ -1218,6 +1227,7 @@ impl Editor {
             self.space_coast.clear();
             self.space_frame.clear(); // dominant-frame tracking restarts too
             self.space_rails_prev.clear(); // the first tick snaps authored → rails
+            self.carried_statics = None;
             self.compound_lod.clear(); // distant-craft LOD restarts with them
             self.lod_keep_live.clear(); // keep-live exemptions don't persist runs
             self.lod_woken.clear();

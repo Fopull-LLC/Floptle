@@ -3454,6 +3454,7 @@ impl ScriptHost {
             shader_texture_sets: shared.shader_texture_sets.clone(),
             screen_shader_toggles: shared.screen_shader_toggles.clone(),
             colliders,
+            colliders_lent: Default::default(),
             hulls,
             sim_origin,
             terrain_ops,
@@ -5814,6 +5815,14 @@ impl ScriptHost {
     pub fn set_colliders(&self, cols: Vec<floptle_physics::AnchoredCollider>, origin: glam::DVec3) {
         *self.colliders.borrow_mut() = cols;
         *self.sim_origin.borrow_mut() = origin;
+        self.colliders_lent.set(true);
+    }
+
+    /// Whether the colliders are lent to the scripts right now, between
+    /// [`set_colliders`](Self::set_colliders) and
+    /// [`take_colliders`](Self::take_colliders).
+    pub fn colliders_lent(&self) -> bool {
+        self.colliders_lent.get()
     }
 
     /// The colliders lent via [`set_colliders`](Self::set_colliders), while
@@ -5826,6 +5835,7 @@ impl ScriptHost {
     /// Reclaim the colliders lent via [`set_colliders`](Self::set_colliders). Call after
     /// [`run`](Self::run), before stepping the sim.
     pub fn take_colliders(&self) -> Vec<floptle_physics::AnchoredCollider> {
+        self.colliders_lent.set(false);
         std::mem::take(&mut self.colliders.borrow_mut())
     }
 
