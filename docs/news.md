@@ -1,5 +1,8 @@
 ## Just shipped
 
+**v0.117.0-rc36 — "Whole Worlds"** (beta). Fog shafts from the sun's shadow
+map, many times cheaper, and a catch-up budget that new projects start with.
+
 **v0.117.0-rc35 — "Whole Worlds"** (beta). Terrain collision that no longer
 grows with every step the player takes, a cheaper second layer of shared fog,
 and `perf.fogPaths` to see which pixels use it.
