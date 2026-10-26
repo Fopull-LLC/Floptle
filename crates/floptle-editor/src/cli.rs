@@ -1090,7 +1090,8 @@ pub(crate) const VERBS: &[Verb] = &[
     Verb {
         name: "check",
         summary: "report anything wrong with a project, and exit",
-        detail: "Loads every scene, prefab, effect and material, runs the engine's own wiring \
+        detail: "Loads every scene, prefab, effect and material, compiles every shader and every \
+                 script under scripts/ without running them, runs the engine's own wiring \
                  checks, and reports every reference that does not resolve to a file, and every \
                  absolute path, which resolves only on the machine that wrote it. No window \
                  and no GPU. A `.ron` file that parses is not a scene that works, and this is \

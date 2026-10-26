@@ -98,7 +98,8 @@ and forget, the run says so rather than losing it quietly.
 **`floptle check` is the one to build a habit around.** A `.ron` file that parses
 is not a scene that works: a parent link can point at the wrong node, a material
 can name a texture that is not there, a node can carry a script with no file
-behind it. Parsing is the only part of that a text editor can tell you about.
+behind it, or one that does not compile. Parsing is the only part of that a text
+editor can tell you about.
 
 **`floptle api` before you call anything.** Every name a script can reach is in
 there with its description, searchable by part of a name or by a word from what

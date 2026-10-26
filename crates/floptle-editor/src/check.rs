@@ -22,8 +22,9 @@
 //! scene, prefab, effect and standalone material; every node's material maps
 //! (colour, normal, roughness, metallic, ambient occlusion), its surface
 //! shader and that shader's own textures, its model and its scripts; every
-//! effect track's texture, mesh and trail; and the entry scene `project.ron`
-//! names.
+//! effect track's texture, mesh and trail; every script under `scripts/`,
+//! compiled (never run) by the VM the game runs it with; and the entry scene
+//! `project.ron` names.
 //!
 //! What it does not: animation controllers, audio references, and anything
 //! inside an installed package.
@@ -70,6 +71,7 @@ pub(crate) struct Report {
     pub(crate) effects: usize,
     pub(crate) materials: usize,
     pub(crate) shaders: usize,
+    pub(crate) scripts: usize,
     /// Every shader a scene, prefab or material names, with the stage the
     /// place that names it needs. Judged once the whole tree is read.
     shader_refs: Vec<ShaderRef>,
@@ -101,7 +103,7 @@ impl Report {
     }
 
     fn examined(&self) -> usize {
-        self.scenes + self.prefabs + self.effects + self.materials + self.shaders
+        self.scenes + self.prefabs + self.effects + self.materials + self.shaders + self.scripts
     }
 }
 
@@ -212,6 +214,8 @@ pub(crate) fn examine(root: &Path) -> Report {
     walk(root, &mut files);
 
     check_linked_packages(root, &mut r);
+    // One VM for every script: building it is the dear part, a compile is not.
+    let mut vm: Option<floptle_script::ScriptHost> = None;
     for path in &files {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let where_ = rel(root, path);
@@ -242,6 +246,9 @@ pub(crate) fn examine(root: &Path) -> Report {
         } else if name.ends_with(".flsl") {
             r.shaders += 1;
             check_shader_file(path, &where_, &mut r);
+        } else if name.ends_with(".lua") && in_dir(root, path, "scripts") {
+            r.scripts += 1;
+            check_script_file(vm.get_or_insert_with(floptle_script::ScriptHost::new), path, &where_, &mut r);
         }
     }
     check_shader_refs(root, &mut r);
@@ -940,6 +947,21 @@ fn check_script(root: &Path, kind: &str, who: &str, where_: &str, r: &mut Report
     }
 }
 
+/// A script that does not compile, at the line the compiler names. Compiled
+/// the way the game compiles it and never run, so nothing in it can act.
+fn check_script_file(vm: &floptle_script::ScriptHost, path: &Path, where_: &str, r: &mut Report) {
+    let src = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => return r.error(Some(where_.into()), format!("{e}")),
+    };
+    if let Some((line, msg)) = vm.check_syntax(&src) {
+        // `syntax error: chunk:2: Expected …`: the place is said by `file` already.
+        let at = format!(":{line}:");
+        let said = msg.find(&at).map_or(msg.as_str(), |i| &msg[i + at.len()..]);
+        r.error(Some(format!("{where_}:{line}")), said.trim().to_string());
+    }
+}
+
 /// Does an asset reference resolve to something on disk? Through the editor's
 /// own resolver, so the answer matches what the editor would load.
 fn exists(root: &Path, reference: &str) -> bool {
@@ -977,14 +999,14 @@ fn print_text(r: &Report, root: &Path) {
         }
     }
     let counted = format!(
-        "{} scene(s), {} prefab(s), {} effect(s), {} material(s), {} shader(s)",
-        r.scenes, r.prefabs, r.effects, r.materials, r.shaders
+        "{} scene(s), {} prefab(s), {} effect(s), {} material(s), {} shader(s), {} script(s)",
+        r.scenes, r.prefabs, r.effects, r.materials, r.shaders, r.scripts
     );
     if r.examined() == 0 {
         // Said plainly: a checker that looked at nothing and printed nothing is
         // indistinguishable from a clean project, and that is the one way this
         // verb can lie.
-        floptle_say::say!("checked nothing in {} — no scenes, prefabs, effects, materials or shaders", root.display());
+        floptle_say::say!("checked nothing in {} — no scenes, prefabs, effects, materials, shaders or scripts", root.display());
         return;
     }
     match (r.errors(), r.warnings()) {
@@ -1015,6 +1037,7 @@ fn print_json(r: &Report) {
             "effects": r.effects,
             "materials": r.materials,
             "shaders": r.shaders,
+            "scripts": r.scripts,
         },
         "errors": r.errors(),
         "warnings": r.warnings(),
@@ -1230,6 +1253,25 @@ mod tests {
         assert_eq!(r.errors(), 0, "a clean project reported an error");
         assert_eq!(r.scenes, 1, "the scene was not examined");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **A script that does not compile is an error at its line,** and one
+    /// that does is counted and quiet. It used to pass a check, and showed
+    /// only once the scene was played.
+    #[test]
+    fn a_script_that_does_not_compile_is_an_error_at_its_line() {
+        let d = temp("script-syntax");
+        std::fs::write(d.join("scenes/first.ron"), scene("(name: \"Hero\", scripts: [(kind: \"broken\")])")).unwrap();
+        std::fs::write(d.join("scripts/broken.lua"), "function update(node, dt)\n  local x = = 1\nend\n").unwrap();
+        std::fs::create_dir_all(d.join("scripts/ai")).unwrap();
+        std::fs::write(d.join("scripts/ai/fine.lua"), "local n = 0\nfunction update(node, dt) n += 1 end\n").unwrap();
+        let r = examine(&d);
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(r.scripts, 2, "both scripts are examined");
+        let msgs: Vec<String> = r.findings.iter().map(|f| format!("{:?} {:?} {}", f.level, f.file, f.message)).collect();
+        assert_eq!(r.errors(), 1, "{msgs:?}");
+        assert_eq!(r.findings[0].file.as_deref(), Some("scripts/broken.lua:2"), "{msgs:?}");
+        assert!(!r.findings[0].message.contains(":2:"), "the place is said once, in file: {msgs:?}");
     }
 
     /// **Everything a material names, not just its colour map.**
