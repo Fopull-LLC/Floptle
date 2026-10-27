@@ -11,6 +11,7 @@ Follow-along projects that build a small, finished game from an empty one. Each 
 | [Build Flappy](flappy.md) | One button, endless obstacles, a score, and a game over you can restart. | no experience needed | ~30 min |
 | [Pathfinding — command a squad](pathfinding.md) | Click the ground, and a dozen units find their own way there. | some coding | ~40 min |
 | [Make it multiplayer](multiplayer.md) | The platformer, played by two machines at once — and everything that has to change for that to work. | some coding | ~50 min |
+| [Compute shaders — a pond the GPU simulates](compute.md) | Ripples spreading across a pond, simulated on the GPU, 65,000 points every step. | some coding | ~30 min |
 | [Floptle for programmers](for-programmers.md) | The model, the tick, and the six things that aren't like the engine you came from. | for programmers | ~20 min |
 
 ## Starter templates

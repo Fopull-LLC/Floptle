@@ -133,15 +133,22 @@ fn squeezed(s: &str) -> String {
     s.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
+/// Where a step's file goes in the project: `scripts/<stem>.lua`, or
+/// `shaders/<stem>` for a compute or post shader (`<stem>` ending `.wgsl`).
+pub(crate) fn step_file(stem: &str) -> String {
+    if stem.ends_with(".wgsl") { format!("shaders/{stem}") } else { format!("scripts/{stem}.lua") }
+}
+
 /// One step: what to do, why, and how the editor knows you did it.
 pub(crate) struct Step {
     pub(crate) title: &'static str,
     /// The body, in the same restricted markdown [`crate::EditorTabViewer::doc_body_ui`]
     /// renders: `## ` headings, `- ` bullets, and fenced code.
     pub(crate) body: &'static str,
-    /// A script this step writes: `(stem, source)`. The panel offers to create
-    /// `scripts/<stem>.lua` with it when the file doesn't exist yet, and to open
-    /// it when it does — it never overwrites work.
+    /// A file this step writes: `(stem, source)`. The panel offers to create
+    /// it ([`step_file`]: a script, or a shader for a stem ending `.wgsl`) when
+    /// it doesn't exist yet, and to open it when it does — it never overwrites
+    /// work.
     pub(crate) code: Option<(&'static str, &'static str)>,
     pub(crate) check: Check,
 }
@@ -364,7 +371,8 @@ pub(crate) fn render_markdown(t: &Tutorial) -> String {
             }
         }
         if let Some((stem, src)) = s.code {
-            out.push_str(&format!("\n`scripts/{stem}.lua`\n\n```lua\n{}\n```\n", src.trim_end()));
+            let lang = if stem.ends_with(".wgsl") { "wgsl" } else { "lua" };
+            out.push_str(&format!("\n`{}`\n\n```{lang}\n{}\n```\n", step_file(stem), src.trim_end()));
         }
         if s.check != Check::Read {
             out.push_str(&format!("\n*Done when: {}.*\n", s.check.describe()));
@@ -622,12 +630,13 @@ impl EditorTabViewer<'_> {
                 if let Some((stem, src)) = step.code {
                     ui.add_space(2.0);
                     self.doc_body_ui(ui, &format!("```\n{}\n```", src.trim_end()));
-                    let path = self.project_root.join("scripts").join(format!("{stem}.lua"));
+                    let file = step_file(stem);
+                    let path = self.project_root.join(&file);
                     let exists = path.exists();
                     ui.horizontal(|ui| {
                         if ui
                             .button("⎘ Copy")
-                            .on_hover_text("copy this script to the clipboard")
+                            .on_hover_text("copy this to the clipboard")
                             .clicked()
                         {
                             ui.ctx().copy_text(src.to_string());
@@ -636,11 +645,7 @@ impl EditorTabViewer<'_> {
                         // even if what they typed is different from this. The
                         // whole point of typing it out is being allowed to
                         // diverge from it.
-                        let label = if exists {
-                            format!("Open scripts/{stem}.lua")
-                        } else {
-                            format!("Create scripts/{stem}.lua")
-                        };
+                        let label = if exists { format!("Open {file}") } else { format!("Create {file}") };
                         if ui.button(label).clicked() {
                             write = Some((stem, src));
                         }
@@ -724,16 +729,18 @@ impl EditorTabViewer<'_> {
         }
     }
 
-    /// Create `scripts/<stem>.lua` if it isn't there, then open it in the editor.
+    /// Create a step's file ([`step_file`]) if it isn't there, then open it in the editor.
     fn learn_write_script(&mut self, stem: &str, src: &str) {
-        let dir = self.project_root.join("scripts");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join(format!("{stem}.lua"));
+        let file = step_file(stem);
+        let path = self.project_root.join(&file);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
         if !path.exists() {
             match std::fs::write(&path, format!("{}\n", src.trim_end())) {
-                Ok(()) => self.learn.note = Some(format!("wrote scripts/{stem}.lua")),
+                Ok(()) => self.learn.note = Some(format!("wrote {file}")),
                 Err(e) => {
-                    self.learn.note = Some(format!("couldn't write scripts/{stem}.lua: {e}"));
+                    self.learn.note = Some(format!("couldn't write {file}: {e}"));
                     return;
                 }
             }
@@ -769,6 +776,9 @@ mod tests {
         TUTORIALS
             .iter()
             .flat_map(|t| t.steps.iter().filter_map(move |s| s.code.map(|(n, c)| (t.id, n, c))))
+            // Lua only: a shader is checked by running it (see the compute
+            // tutorial's own test).
+            .filter(|(_, n, _)| !n.ends_with(".wgsl"))
             .collect()
     }
 
@@ -1052,5 +1062,80 @@ mod tests {
             let name = e.file_name().to_string_lossy().into_owned();
             assert!(expected.contains(&name), "docs/tutorials/{name} belongs to no tutorial");
         }
+    }
+}
+
+#[cfg(test)]
+mod compute_tutorial_tests {
+    use crate::learn_content::{POND_LUA_1, POND_LUA_2, POND_LUA_3, POND_WGSL_1, POND_WGSL_2, POND_WGSL_3};
+
+    /// Play one version of the pond (its script on a `Pond` plane, its shader
+    /// in `shaders/`) for `frames`, and return the Console's lines and every
+    /// problem: script errors, compute errors and what the GPU refused.
+    fn play_pond(lua: &str, wgsl: &str, frames: usize) -> Option<(Vec<String>, Vec<String>)> {
+        use floptle_core::{Matter, Name, ScriptInst, Scripts, Shape, Transform};
+        let mut ed = crate::offscreen::test_editor_with_gpu()?;
+        if let Err(why) = ed.gpu.as_ref().map_or(Ok(()), floptle_render::compute::Compute::supported) {
+            eprintln!("skipped — {why}");
+            return None;
+        }
+        let refused = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink = refused.clone();
+        ed.gpu.as_ref().unwrap().device.on_uncaptured_error(std::sync::Arc::new(move |e: wgpu::Error| {
+            if let Ok(mut v) = sink.lock() {
+                v.push(e.to_string());
+            }
+        }));
+        let dir = std::env::temp_dir().join(format!("floptle-pond-{}-{}", std::process::id(), lua.len()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("shaders")).unwrap();
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(dir.join(super::step_file("pond.wgsl")), wgsl).unwrap();
+        std::fs::write(dir.join(super::step_file("pond")), lua).unwrap();
+        ed.project_root = dir.clone();
+        let pond = ed.world.spawn();
+        ed.world.insert(pond, Transform::IDENTITY);
+        ed.world.insert(pond, Name("Pond".into()));
+        ed.world.insert(pond, Matter::Primitive { shape: Shape::Plane, color: [1.0; 3] });
+        ed.world.insert(
+            pond,
+            Scripts(vec![ScriptInst { kind: "pond".into(), enabled: true, params: Vec::new(), refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]),
+        );
+        ed.toggle_play();
+        for _ in 0..frames {
+            ed.play_step(1.0 / 60.0, true);
+            ed.run_compute_jobs(false);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let mut problems: Vec<String> = ed.script_host.errors().iter().map(|e| e.to_string()).collect();
+        ed.drain_script_logs();
+        let lines: Vec<String> = ed.console.entries.iter().map(|e| e.msg.clone()).collect();
+        problems.extend(lines.iter().filter(|l| l.starts_with("compute:")).cloned());
+        problems.extend(refused.lock().map(|v| v.clone()).unwrap_or_default());
+        ed.toggle_play();
+        let _ = std::fs::remove_dir_all(&dir);
+        Some((lines, problems))
+    }
+
+    /// **Every step of the compute tutorial runs as written.** Each version of
+    /// the pond, script and shader together, plays without a script error, a
+    /// shader error or anything the GPU refused; the last one reports a pond
+    /// that raindrops have set moving. A shader in a tutorial can only be
+    /// checked by running it: there is no parse step for WGSL short of the GPU.
+    #[test]
+    fn every_step_of_the_compute_tutorial_runs() {
+        for (n, lua, wgsl) in [(1, POND_LUA_1, POND_WGSL_1), (2, POND_LUA_2, POND_WGSL_2)] {
+            let Some((_, problems)) = play_pond(lua, wgsl, 30) else { return };
+            assert!(problems.is_empty(), "version {n} of the pond: {problems:?}");
+        }
+        let Some((lines, problems)) = play_pond(POND_LUA_3, POND_WGSL_3, 180) else { return };
+        assert!(problems.is_empty(), "the finished pond: {problems:?}");
+        let moving: Vec<u32> = lines
+            .iter()
+            .filter_map(|l| l.strip_suffix("% of the pond is moving"))
+            .filter_map(|n| n.trim().parse().ok())
+            .collect();
+        assert!(!moving.is_empty(), "the pond never said how much of it moves: {lines:?}");
+        assert!(moving.iter().any(|&m| m > 0), "raindrops never set the pond moving: {moving:?}");
     }
 }
