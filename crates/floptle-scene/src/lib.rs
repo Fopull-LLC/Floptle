@@ -1489,6 +1489,20 @@ pub enum ImportedMaterialsDoc {
     Classic,
 }
 
+/// How the 3D scene smooths the stair-steps along its edges.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AntialiasDoc {
+    /// Edges drawn as they fall on the pixels: how every project drew before
+    /// the setting, which is what a project from then keeps.
+    Off,
+    /// FXAA: one pass over the finished picture that blends the steps of each
+    /// edge, the leaves of a cutout tree included. Costs a fraction of a
+    /// millisecond, runs everywhere, and softens fine texture a little. New
+    /// projects start here.
+    #[default]
+    Fxaa,
+}
+
 /// Serializable reflection-probe detail — mirrors `floptle_render::ProbeDetail`.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ProbeDetailDoc {
@@ -3103,6 +3117,11 @@ pub struct ProjectConfigDoc {
     /// [`Classic`](ImportedMaterialsDoc::Classic).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported_materials: Option<ImportedMaterialsDoc>,
+    /// How edges are smoothed; see [`AntialiasDoc`]. `None` means the file
+    /// predates the setting and resolves to [`Off`](AntialiasDoc::Off). Retro
+    /// mode leaves its pixels as they are whatever this says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub antialias: Option<AntialiasDoc>,
     /// Whether opening the project seeds the engine's example scripts into
     /// `scripts/`. Off leaves only the scripts a new scene needs to run (the
     /// starter camera's `freelook.lua`), and a deleted example stays deleted.
@@ -3190,6 +3209,7 @@ impl ProjectConfigDoc {
             // fields is an old one's, and reads `None` (field-level defaults).
             model_texture_filter: Some(ModelTextureFilterDoc::AsFile),
             imported_materials: Some(ImportedMaterialsDoc::AsFile),
+            antialias: Some(AntialiasDoc::Fxaa),
             example_scripts: true,
             mixer: floptle_audio::MixerDesc::default(),
             bloom: false,
@@ -3233,6 +3253,12 @@ impl ProjectConfigDoc {
     /// the setting drew every model crisp, and still does.
     pub fn model_texture_filter_resolved(&self) -> ModelTextureFilterDoc {
         self.model_texture_filter.unwrap_or(ModelTextureFilterDoc::Crisp)
+    }
+
+    /// How this project smooths its edges. A project file from before the
+    /// setting drew them unsmoothed, and still does.
+    pub fn antialias_resolved(&self) -> AntialiasDoc {
+        self.antialias.unwrap_or(AntialiasDoc::Off)
     }
 
     /// How this project draws imported materials. A project file from before
@@ -4915,6 +4941,20 @@ mod tests {
         assert_eq!(back.script_vec3, Some(super::ScriptVec3Doc::Fast));
         assert_eq!(back.script_vec3_resolved(), super::ScriptVec3Doc::Fast);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A new project smooths its edges; one from before the setting keeps
+    /// its look.** Both asserted, because the contrast is the point.
+    #[test]
+    fn a_new_project_smooths_edges_and_an_existing_one_keeps_its_look() {
+        let old: ProjectConfigDoc = ron::from_str("(retro: false)").unwrap();
+        assert_eq!(old.antialias, None);
+        assert_eq!(old.antialias_resolved(), super::AntialiasDoc::Off);
+        let new = ProjectConfigDoc::for_new_project();
+        assert_eq!(new.antialias_resolved(), super::AntialiasDoc::Fxaa);
+        let text = ron::ser::to_string(&new).unwrap();
+        let back: ProjectConfigDoc = ron::from_str(&text).unwrap();
+        assert_eq!(back.antialias, Some(super::AntialiasDoc::Fxaa), "the choice is written down: {text}");
     }
 
     /// A new project starts at `fast`; an existing one never does. Asserted

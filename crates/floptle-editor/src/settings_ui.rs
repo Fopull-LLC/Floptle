@@ -1043,6 +1043,34 @@ impl<'a> SettingsCtx<'a> {
                 },
             );
         });
+        ui.add_enabled_ui(!project.retro, |ui| {
+            row(
+                ui,
+                "Anti-aliasing",
+                Some("smooths the stair-steps along edges, the leaves of cutout trees included. \
+                      FXAA is one pass over the finished picture: cheap, on every platform, and \
+                      softens fine texture a little. Retro mode keeps its pixels. A game's own \
+                      Video menu sets it with app.setAntialias"),
+                |ui| {
+                    use floptle_scene::AntialiasDoc as A;
+                    let mut a = project.antialias_resolved();
+                    egui::ComboBox::from_id_salt("project-antialias")
+                        .width(fit_here(ui, 220.0))
+                        .selected_text(match a {
+                            A::Off => "off",
+                            A::Fxaa => "FXAA",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut a, A::Fxaa, "FXAA");
+                            ui.selectable_value(&mut a, A::Off, "off");
+                        });
+                    if a != project.antialias_resolved() {
+                        project.antialias = Some(a);
+                        out.save_project = true;
+                    }
+                },
+            );
+        });
         row(ui, "Retro", Some("render at a low resolution and upscale"), |ui| {
             out.save_project |= check(ui, &mut project.retro, "pixelization").changed();
         });

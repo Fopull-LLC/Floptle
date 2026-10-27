@@ -1239,6 +1239,13 @@ pub(crate) fn dof_focus_distance(
     Some((p - cam_pos).length() as f32)
 }
 
+/// Whether the project's edges are smoothed (FXAA). Never in retro mode: its
+/// chunky pixels are the look, and smoothing them before the upscale would
+/// blur every one.
+pub(crate) fn fxaa_on(project: &floptle_scene::ProjectConfigDoc) -> bool {
+    !project.retro && project.antialias_resolved() == floptle_scene::AntialiasDoc::Fxaa
+}
+
 pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_render::PostSettings, [f32; 4]) {
     use floptle_core::AoMode;
     // `PostSettings::default()` is off, and is the one definition of what the
@@ -1871,5 +1878,25 @@ mod proxy_tests {
         assert!(zs.iter().all(|z| *z > 4.0), "the hidden-model and opted-out bodies are not in: {zs:?}");
         assert!(zs[31] < 320.0, "the 32 nearest, not the first 32 listed: farthest chosen at {}", zs[31]);
         assert!((zs[0] - (5.0 - 0.5)).abs() < 1.0, "the nearest body is in: {zs:?}");
+    }
+}
+
+#[cfg(test)]
+mod antialias_tests {
+    use floptle_scene::{AntialiasDoc, ProjectConfigDoc};
+
+    /// FXAA follows the project's choice, and retro mode keeps its pixels
+    /// whatever that is.
+    #[test]
+    fn fxaa_follows_the_project_and_never_smooths_retro_pixels() {
+        let mut p = ProjectConfigDoc { retro: false, antialias: Some(AntialiasDoc::Fxaa), ..Default::default() };
+        assert!(super::fxaa_on(&p));
+        p.antialias = Some(AntialiasDoc::Off);
+        assert!(!super::fxaa_on(&p));
+        p.antialias = None;
+        assert!(!super::fxaa_on(&p), "a project from before the setting is not smoothed");
+        p.antialias = Some(AntialiasDoc::Fxaa);
+        p.retro = true;
+        assert!(!super::fxaa_on(&p), "retro pixels were smoothed");
     }
 }

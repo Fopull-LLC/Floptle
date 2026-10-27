@@ -315,6 +315,7 @@ this page; `app.*` is the rest.
 | `app.isWeb()` | `true` in a browser build, to hide what a page cannot do |
 | `app.dataPath()` | the folder the player's `user://` files are in, for "your files are in …" (`nil` in a browser) |
 | `app.vsync()` / `app.setVsync(mode)` | `"On"`, `"Adaptive"` or `"Off"` |
+| `app.antialias()` / `app.setAntialias(mode)` | `"Fxaa"` or `"Off"`: whether the stair-steps along edges are smoothed (never in retro mode) |
 | `app.retro()` / `app.setRetro(on)` | the retro presentation — compositing small and upscaling |
 | `app.retroHeight()` / `app.setRetroHeight(px)` | the height it composites at, for a pixel-art game |
 | `app.renderScale()` / `app.setRenderScale(s)` | the fraction of the window the 3D scene renders at (0.25–1), upscaled smoothly with the UI kept sharp: the "render resolution" setting a weak GPU needs |

@@ -262,6 +262,132 @@ fn fs_sharpen(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(clamp(c + (c - blur) * p.f.x, vec3<f32>(0.0), max(hi * 1.25, c)), 1.0);
 }
 
+// FXAA: smooths the stair-steps along an edge. a.xy = texel.
+//
+// Finds where the brightness changes across a pixel, which way the edge runs,
+// and how far along it the edge goes either side, then reads the picture a
+// fraction of a pixel across the edge, by how near the pixel is to the edge's
+// end: the further along a long, shallow step, the more it is blended. A pixel
+// with no edge through it is returned untouched, so flat areas and text stay
+// sharp. Every read is at mip 0 with an explicit level, as the edge search
+// runs in a loop that differs from pixel to pixel.
+fn fxaa_luma(c: vec3<f32>) -> f32 {
+    // The chain is in linear light and may exceed 1: compress it and take a
+    // root, so the edge test sees brightness as an eye does, which is the scale
+    // its thresholds are set on.
+    let l = max(dot(c, vec3<f32>(0.2126, 0.7152, 0.0722)), 0.0);
+    return sqrt(l / (1.0 + l));
+}
+
+fn fxaa_at(uv: vec2<f32>) -> f32 {
+    return fxaa_luma(textureSampleLevel(tex, samp, uv, 0.0).rgb);
+}
+
+@fragment
+fn fs_fxaa(in: VsOut) -> @location(0) vec4<f32> {
+    let t = p.a.xy;
+    let uv = in.uv;
+    let centre = textureSampleLevel(tex, samp, uv, 0.0);
+    let lm = fxaa_luma(centre.rgb);
+    let ln = fxaa_at(uv + vec2<f32>(0.0, -t.y));
+    let ls = fxaa_at(uv + vec2<f32>(0.0, t.y));
+    let lw = fxaa_at(uv + vec2<f32>(-t.x, 0.0));
+    let le = fxaa_at(uv + vec2<f32>(t.x, 0.0));
+    let hi = max(lm, max(max(ln, ls), max(lw, le)));
+    let lo = min(lm, min(min(ln, ls), min(lw, le)));
+    let range = hi - lo;
+    if (range < max(0.0312, hi * 0.125)) {
+        return centre;
+    }
+    let lnw = fxaa_at(uv + vec2<f32>(-t.x, -t.y));
+    let lne = fxaa_at(uv + vec2<f32>(t.x, -t.y));
+    let lsw = fxaa_at(uv + vec2<f32>(-t.x, t.y));
+    let lse = fxaa_at(uv + vec2<f32>(t.x, t.y));
+    // Which way the edge runs: the brightness changes more down the column
+    // than along the row across a horizontal edge.
+    let across_rows = abs(lnw + lne - 2.0 * ln) + 2.0 * abs(lw + le - 2.0 * lm) + abs(lsw + lse - 2.0 * ls);
+    let across_cols = abs(lnw + lsw - 2.0 * lw) + 2.0 * abs(ln + ls - 2.0 * lm) + abs(lne + lse - 2.0 * le);
+    let horizontal = across_rows >= across_cols;
+
+    // The side of the pixel the edge lies on: the neighbour that differs more.
+    var l1 = lw;
+    var l2 = le;
+    var pitch = t.x;
+    if (horizontal) {
+        l1 = ln;
+        l2 = ls;
+        pitch = t.y;
+    }
+    let g1 = l1 - lm;
+    let g2 = l2 - lm;
+    let towards_1 = abs(g1) >= abs(g2);
+    let gradient = 0.25 * max(abs(g1), abs(g2));
+    var local = 0.5 * (l2 + lm);
+    if (towards_1) {
+        pitch = -pitch;
+        local = 0.5 * (l1 + lm);
+    }
+    // Walk along the edge, half a pixel over onto it, both ways at once,
+    // until the brightness there stops matching the edge's.
+    var on_edge = uv;
+    var along = vec2<f32>(0.0, t.y);
+    if (horizontal) {
+        on_edge.y += pitch * 0.5;
+        along = vec2<f32>(t.x, 0.0);
+    } else {
+        on_edge.x += pitch * 0.5;
+    }
+    var uv1 = on_edge - along;
+    var uv2 = on_edge + along;
+    var end1 = fxaa_at(uv1) - local;
+    var end2 = fxaa_at(uv2) - local;
+    var done1 = abs(end1) >= gradient;
+    var done2 = abs(end2) >= gradient;
+    if (!done1) { uv1 -= along; }
+    if (!done2) { uv2 += along; }
+    // Longer strides further out: a shallow pitch can run for many pixels.
+    var stride = array<f32, 10>(1.0, 1.0, 1.0, 1.5, 2.0, 2.0, 2.0, 2.0, 4.0, 8.0);
+    for (var i = 0; i < 10 && !(done1 && done2); i = i + 1) {
+        if (!done1) {
+            end1 = fxaa_at(uv1) - local;
+            done1 = abs(end1) >= gradient;
+            if (!done1) { uv1 -= along * stride[i]; }
+        }
+        if (!done2) {
+            end2 = fxaa_at(uv2) - local;
+            done2 = abs(end2) >= gradient;
+            if (!done2) { uv2 += along * stride[i]; }
+        }
+    }
+    var d1 = uv.y - uv1.y;
+    var d2 = uv2.y - uv.y;
+    if (horizontal) {
+        d1 = uv.x - uv1.x;
+        d2 = uv2.x - uv.x;
+    }
+    // Blend only on the side of the pitch the pixel belongs to: where the
+    // nearer end's brightness moves the other way from this pixel's.
+    let nearer_1 = d1 < d2;
+    let nearer_end = select(end2, end1, nearer_1);
+    var offset = 0.0;
+    if ((nearer_end < 0.0) != (lm < local)) {
+        offset = 0.5 - min(d1, d2) / max(d1 + d2, 1e-6);
+    }
+    // A pixel unlike all its neighbours (a thin line, a lone highlight) is
+    // blended by how much it stands out, whatever the edge search found.
+    let avg = (2.0 * (ln + ls + lw + le) + lnw + lne + lsw + lse) / 12.0;
+    let sub = clamp(abs(avg - lm) / range, 0.0, 1.0);
+    let sub_s = (-2.0 * sub + 3.0) * sub * sub;
+    offset = max(offset, sub_s * sub_s * 0.75);
+    var out_uv = uv;
+    if (horizontal) {
+        out_uv.y += offset * pitch;
+    } else {
+        out_uv.x += offset * pitch;
+    }
+    return vec4<f32>(textureSampleLevel(tex, samp, out_uv, 0.0).rgb, centre.a);
+}
+
 // Bilateral denoise. f.y = amount (0..1).
 //
 // A plain blur would remove the noise and the picture together. Bilateral

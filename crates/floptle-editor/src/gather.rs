@@ -524,6 +524,9 @@ impl Editor {
         // motion is not applied here: grain is texture, not
         // movement, and freezing it makes it more of a fixed pattern to look at.
         post_settings.time = self.fog_time;
+        // Anti-aliasing is the project's, not the scene's: it holds with the
+        // PostProcess node off, or with none.
+        post_settings.fxaa = crate::shading::fxaa_on(&self.project);
         // Sky shader: when active, `sky_meta.x = 1` makes the raymarch's `sky_color` call the
         // spliced `flsl_sky`, and its uniforms (Inspector knobs over `.flsl` defaults) drive
         // `sky_uniforms`. (Captured before the closure — it can't borrow `self`.)

@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 227
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 229
 - [node — transform & body fields](#node--transform--body-fields) — 44
 - [node — methods & handles](#node--methods--handles) — 37
 - [vectors, directions & easing](#vectors-directions--easing) — 51
@@ -148,6 +148,10 @@ agent:teleport(point) — put it AND its node somewhere without walking there, a
 
 The settings a game offers the person playing it, and the one thing every main menu needs: quit. app.quit(), app.title(), app.version(), and the video settings — app.vsync/setVsync, app.retro/setRetro, app.retroHeight/setRetroHeight, app.retroIntegerScale/setRetroIntegerScale. A setting you change here is for THIS SESSION: it lives in project.ron, the file that ships to every player, so Stop puts it back — persist the player's choice yourself with save.*, the same rule access.* follows. Window resolution and fullscreen are NOT here yet; that is one question (windowing) waiting to be answered properly. See docs/scripting.md §30.
 
+### `app.antialias`
+
+app.antialias() → how the 3D scene smooths its edges: "Fxaa" or "Off", the names project.ron uses. The project's setting until a script sets it.
+
 ### `app.dataPath`
 
 app.dataPath() — the folder a player's own files are in, as a full path: where `user://` points, for a screen that says "your levels are in …". In an exported build that is the per-user data folder (%APPDATA%\<studio>\<data_id>\user on Windows, ~/Library/Application Support/<data_id>/user on macOS, ~/.local/share/<data_id>/user on Linux); in the editor, floptle run and shot it is the project's save/user. nil in a browser, where the files live in the page's storage and there is no folder to show.
@@ -215,6 +219,10 @@ app.retroHeight() → the internal height the game composites at, in pixels. In 
 ### `app.retroIntegerScale`
 
 app.retroIntegerScale() → whether the retro composite is upscaled by a WHOLE number and letterboxed rather than stretched to fill.
+
+### `app.setAntialias`
+
+app.setAntialias("Fxaa") — smooth the stair-steps along edges ("Fxaa": one cheap pass over the finished picture, which softens fine texture a little) or not ("Off"). Retro mode keeps its pixels whatever this says. For this session only; persist it with save.*.
 
 ### `app.setDisplayMode`
 

@@ -168,6 +168,10 @@ impl crate::Editor {
             retro_integer_scale: self.project.retro_integer_scale,
             render_scale: self.project.render_scale,
             render_sharpness: self.render_sharpness(),
+            antialias: match self.project.antialias_resolved() {
+                floptle_scene::AntialiasDoc::Off => floptle_script::app_api::Antialias::Off,
+                floptle_scene::AntialiasDoc::Fxaa => floptle_script::app_api::Antialias::Fxaa,
+            },
             fullscreen: self.window.as_ref().is_some_and(|w| w.fullscreen().is_some()),
             frame_cap: self.frame_cap,
             refresh_hz: (self.refresh_period > 0.0).then(|| 1.0 / self.refresh_period),
@@ -209,6 +213,12 @@ impl crate::Editor {
         }
         if let Some(s) = req.render_sharpness {
             self.render_sharpness = Some(s);
+        }
+        if let Some(a) = req.antialias {
+            self.project.antialias = Some(match a {
+                floptle_script::app_api::Antialias::Off => floptle_scene::AntialiasDoc::Off,
+                floptle_script::app_api::Antialias::Fxaa => floptle_scene::AntialiasDoc::Fxaa,
+            });
         }
         if let Some(on) = req.fullscreen {
             self.app_set_fullscreen(on);
@@ -434,7 +444,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("floptle-app-revert-{}", std::process::id()));
         settings_project(
             &dir,
-            "function update(node, dt)\n  app.setVsync('Off')\n  app.setRetroHeight(360)\n  app.setRenderScale(0.5)\nend\n",
+            "function update(node, dt)\n  app.setVsync('Off')\n  app.setRetroHeight(360)\n  app.setRenderScale(0.5)\n  app.setAntialias('fxaa')\nend\n",
         );
         let mut ed = crate::Editor::default();
         ed.open_project(dir.clone());
@@ -451,6 +461,7 @@ mod tests {
         );
         assert_eq!(ed.project.retro_height, 360);
         assert_eq!(ed.project.render_scale, 0.5, "app.setRenderScale did not reach the project");
+        assert_eq!(ed.project.antialias, Some(floptle_scene::AntialiasDoc::Fxaa), "app.setAntialias did not reach the project");
 
         ed.toggle_play();
         assert!(!ed.playing);
@@ -462,6 +473,7 @@ mod tests {
         );
         assert_eq!(ed.project.retro_height, 240, "…and the same for the retro height");
         assert_eq!(ed.project.render_scale, 1.0, "…and the render scale");
+        assert_eq!(ed.project.antialias, None, "…and the anti-aliasing");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

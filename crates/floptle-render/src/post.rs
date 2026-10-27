@@ -137,6 +137,9 @@ pub struct PostSettings {
     /// Lens distortion: positive barrels, negative pincushions. 0 = off.
     pub distortion: f32,
 
+    /// Smooth the stair-steps along edges (FXAA), the first step of the chain
+    /// so what it softens is the geometry and not a later effect's pixels.
+    pub fxaa: bool,
     /// Unsharp amount. 0 = off.
     pub sharpen: f32,
     /// Bilateral denoise amount, 0..1. 0 = off.
@@ -242,6 +245,7 @@ impl Default for PostSettings {
             gain: 1.0,
             aberration: 0.0,
             distortion: 0.0,
+            fxaa: false,
             sharpen: 0.0,
             denoise: 0.0,
             grain: 0.0,
@@ -281,6 +285,7 @@ impl PostSettings {
             || self.color_filter_on()
             || self.grade_on()
             || self.lens_on()
+            || self.fxaa
             || self.sharpen > 0.0
             || self.denoise > 0.0
             || self.grain > 0.0
@@ -776,6 +781,7 @@ pub struct PostStack {
     grade_pipeline: wgpu::RenderPipeline,
     lens_pipeline: wgpu::RenderPipeline,
     sharpen_pipeline: wgpu::RenderPipeline,
+    fxaa_pipeline: wgpu::RenderPipeline,
     denoise_pipeline: wgpu::RenderPipeline,
     bright_pipeline: wgpu::RenderPipeline,
     blur_pipeline: wgpu::RenderPipeline,
@@ -931,6 +937,7 @@ impl PostStack {
         let grade_pipeline = make_pipeline("fs_grade", None);
         let lens_pipeline = make_pipeline("fs_lens", None);
         let sharpen_pipeline = make_pipeline("fs_sharpen", None);
+        let fxaa_pipeline = make_pipeline("fs_fxaa", None);
         let denoise_pipeline = make_pipeline("fs_denoise", None);
         let bright_pipeline = make_pipeline("fs_bright", None);
         let blur_pipeline = make_pipeline("fs_blur", None);
@@ -1100,6 +1107,7 @@ impl PostStack {
             grade_pipeline,
             lens_pipeline,
             sharpen_pipeline,
+            fxaa_pipeline,
             denoise_pipeline,
             bright_pipeline,
             blur_pipeline,
@@ -1237,6 +1245,7 @@ impl PostStack {
             || filter_on
             || grade_on
             || lens_on
+            || s.fxaa
             || sharpen_on
             || denoise_on
             || grain_on
@@ -1290,6 +1299,16 @@ impl PostStack {
                 wgpu::LoadOp::Clear(BLACK),
             );
             cur = &self.ping;
+        }
+
+        // Anti-aliasing before anything spreads light about: bloom, depth of
+        // field and the lens would otherwise carry the stair-steps with them.
+        if s.fxaa {
+            let dst: &Target = if std::ptr::eq(cur, &self.ping) { &self.pong } else { &self.ping };
+            let texel = [1.0 / self.width.max(1) as f32, 1.0 / self.height.max(1) as f32];
+            self.write_params(gpu, PostParams { a: [texel[0], texel[1], 0.0, 0.0], ..Default::default() });
+            self.pass(gpu, &self.fxaa_pipeline, &cur.bind, &dst.view, wgpu::LoadOp::Clear(BLACK));
+            cur = dst;
         }
 
         if s.bloom {

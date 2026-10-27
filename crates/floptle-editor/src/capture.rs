@@ -174,6 +174,7 @@ pub(crate) fn render_frame_texture(
     // preference, and a PNG of a project should not carry them.
     let mut look = crate::shading::post_process_uniforms(&ed.world).0;
     look.time = ed.fog_time;
+    look.fxaa = crate::shading::fxaa_on(&ed.project);
     if let Some(d) = crate::shading::dof_focus_distance(&ed.world, cam.world_position) {
         look.dof_focus = d;
     }

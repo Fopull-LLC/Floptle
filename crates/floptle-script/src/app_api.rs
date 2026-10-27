@@ -70,6 +70,35 @@ impl Vsync {
     }
 }
 
+/// How the 3D scene smooths its edges, the API's own copy (the file has
+/// `floptle_scene::AntialiasDoc`), for the same reason as [`Vsync`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Antialias {
+    #[default]
+    Off,
+    /// One pass over the finished picture that blends the steps of each edge.
+    Fxaa,
+}
+
+impl Antialias {
+    /// The name `project.ron` uses, which is the name a script says.
+    pub fn name(self) -> &'static str {
+        match self {
+            Antialias::Off => "Off",
+            Antialias::Fxaa => "Fxaa",
+        }
+    }
+
+    /// Parse a name a script wrote, case-insensitively.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(Antialias::Off),
+            "fxaa" => Some(Antialias::Fxaa),
+            _ => None,
+        }
+    }
+}
+
 /// What the game currently is — fed by the driver, read by `app.*`.
 #[derive(Clone, Debug, Default)]
 pub struct AppInfo {
@@ -89,6 +118,8 @@ pub struct AppInfo {
     pub render_scale: f32,
     /// How hard the upscale from a render scale below 1 sharpens, 0..=1.
     pub render_sharpness: f32,
+    /// How edges are smoothed.
+    pub antialias: Antialias,
     /// Whether the game's window currently covers the screen. Always `false`
     /// where there is no window (`floptle run`).
     pub fullscreen: bool,
@@ -185,6 +216,7 @@ pub struct AppRequests {
     pub retro_integer_scale: Option<bool>,
     pub render_scale: Option<f32>,
     pub render_sharpness: Option<f32>,
+    pub antialias: Option<Antialias>,
     /// Cover the screen (borderless, on the monitor the window is on), or
     /// go back to a window.
     pub fullscreen: Option<bool>,
@@ -207,6 +239,7 @@ impl AppRequests {
             && self.retro_integer_scale.is_none()
             && self.render_scale.is_none()
             && self.render_sharpness.is_none()
+            && self.antialias.is_none()
             && self.fullscreen.is_none()
             && self.frame_cap.is_none()
             && self.dynamic_resolution.is_none()
@@ -398,6 +431,29 @@ pub fn install(lua: &Lua, info: &SharedAppInfo, req: &SharedAppRequests) -> mlua
                 // back what it just set shows the new value on the same frame
                 // rather than the old one. The driver still has to apply it.
                 i.borrow_mut().vsync = v;
+                Ok(())
+            })?,
+        )?;
+    }
+
+    // --- anti-aliasing ------------------------------------------------------
+    {
+        let i = info.clone();
+        t.set("antialias", lua.create_function(move |_, ()| Ok(i.borrow().antialias.name()))?)?;
+    }
+    {
+        let r = req.clone();
+        let i = info.clone();
+        t.set(
+            "setAntialias",
+            lua.create_function(move |_, mode: String| {
+                let Some(a) = Antialias::parse(&mode) else {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "app.setAntialias({mode:?}) — the modes are \"Fxaa\" and \"Off\""
+                    )));
+                };
+                r.borrow_mut().antialias = Some(a);
+                i.borrow_mut().antialias = a;
                 Ok(())
             })?,
         )?;

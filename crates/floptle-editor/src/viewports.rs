@@ -637,6 +637,7 @@ impl Editor {
         // motion is not applied here: grain is texture, not
         // movement, and freezing it makes it more of a fixed pattern to look at.
         post_settings.time = self.fog_time;
+        post_settings.fxaa = crate::shading::fxaa_on(&self.project);
         let retro_on = self.project.retro;
         // Composited somewhere smaller and upscaled: retro mode, or a render
         // scale below 1. Either way the scene and post run on the small
