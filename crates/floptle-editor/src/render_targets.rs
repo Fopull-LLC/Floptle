@@ -111,9 +111,14 @@ pub(crate) fn plan_render_targets(
 }
 
 /// Collect the scene's render-target cameras.
+///
+/// A camera switched off (its node, or one above it) does not draw: its
+/// texture keeps the last picture it took. Drawn anyway, a game that hid a
+/// strip of portraits by switching their cameras off still paid for every one.
 pub(crate) fn target_requests(world: &floptle_core::World) -> Vec<TargetReq> {
     world
         .query::<Matter>()
+        .filter(|(e, _)| !floptle_core::is_disabled(world, *e))
         .filter_map(|(e, m)| match m {
             Matter::Camera {
                 fov_y,
@@ -155,6 +160,44 @@ mod tests {
     fn ents(n: usize) -> Vec<Entity> {
         let mut w = floptle_core::World::default();
         (0..n).map(|_| w.spawn()).collect()
+    }
+
+    /// **A camera switched off draws nothing.** Its node off, or a parent's:
+    /// the request is not made, and the texture keeps its last picture.
+    #[test]
+    fn a_switched_off_target_camera_is_not_drawn() {
+        let mut w = floptle_core::World::default();
+        let cam = |w: &mut floptle_core::World, target: &str| {
+            let e = w.spawn();
+            w.insert(
+                e,
+                Matter::Camera {
+                    fov_y: 1.0,
+                    active: false,
+                    target: target.into(),
+                    cull_mask: u32::MAX,
+                    target_w: 64,
+                    target_h: 64,
+                    target_hz: 0.0,
+                    ortho: false,
+                    ortho_height: Matter::ORTHO_HEIGHT,
+                    stack: Vec::new(),
+                    post_after: false,
+                    draws: Default::default(),
+                },
+            );
+            e
+        };
+        let on = cam(&mut w, "on");
+        let off = cam(&mut w, "off");
+        w.insert(off, floptle_core::Disabled);
+        let folder = w.spawn();
+        w.insert(folder, floptle_core::Disabled);
+        let under = cam(&mut w, "under");
+        w.insert(under, floptle_core::Parent(folder));
+        let names: Vec<String> = target_requests(&w).into_iter().map(|r| r.name).collect();
+        assert_eq!(names, vec!["on".to_string()], "only the camera that is on draws");
+        let _ = on;
     }
 
     fn req(name: &str, e: Entity, hz: f32) -> TargetReq {

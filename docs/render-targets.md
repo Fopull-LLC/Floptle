@@ -35,6 +35,10 @@ are spending; see [Where the frame went](scripting.md#28-where-the-frame-went-pe
 A target that has never drawn always draws immediately, however slow its `hz` —
 a 1 Hz camera must not show a second of black on the frame it appears.
 
+**A camera switched off draws nothing.** Switch its node off (or a folder above
+it) and the target keeps the last picture it took, at no cost, until it is
+switched back on.
+
 ## What it draws
 
 A target camera draws the nodes on its `cullMask` layers, and by default

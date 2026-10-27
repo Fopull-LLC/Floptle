@@ -1326,6 +1326,15 @@ impl Editor {
         ) {
             // Everything below is the draw. If the tuple above does not match,
             // the `else` at the end of it says so — see there.
+            //
+            // An offscreen view of a timed window frame: its draw, from here
+            // to the gap at the end, is the window's "render targets +
+            // previews". The scene gathering above it is CPU time and is left
+            // out by the gap the view before closed.
+            let offscreen_timed = self.gpu_timing_offscreen && !self.gpu_timing_headless;
+            if offscreen_timed && let Some(t) = self.gpu_timer.as_mut() {
+                t.mark(gpu, "render targets + previews");
+            }
             // ⏱ `floptle shot --timing`: one mark before each pass, so the
             // headless render answers "which pass is slow" the way the window
             // does. A label names the region that FOLLOWS it (see `GpuTimer`).
@@ -1507,6 +1516,9 @@ impl Editor {
                     raster,
                     None,
                 );
+            }
+            if offscreen_timed && let Some(t) = self.gpu_timer.as_mut() {
+                t.mark_gap(gpu);
             }
         } else {
             // **A view that cannot draw says so.** This binds six pieces of the

@@ -26,6 +26,26 @@ use crate::device::Gpu;
 /// one pass's time against another's name.
 const MAX_MARKS: u32 = 64;
 
+/// The label of a gap: time not counted (see [`GpuTimer::mark_gap`]).
+const GAP: &str = "";
+
+/// A frame's regions as spans: gaps dropped, and a label marked more than
+/// once (each offscreen view marks its own draw) summed into one span, where
+/// it first appeared.
+fn merge_regions<'a>(regions: impl Iterator<Item = (&'a str, f32)>) -> Vec<Span> {
+    let mut out: Vec<Span> = Vec::new();
+    for (label, ms) in regions {
+        if label == GAP {
+            continue;
+        }
+        match out.iter_mut().find(|s| s.label == label) {
+            Some(s) => s.ms += ms,
+            None => out.push(Span { label: label.to_string(), ms }),
+        }
+    }
+    out
+}
+
 /// One measured region of a frame.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Span {
@@ -127,6 +147,15 @@ impl GpuTimer {
         self.next += 1;
     }
 
+    /// End the region open now without starting another: the time until the
+    /// next mark is not counted, in its region or the total. For a stretch
+    /// where the GPU waits on the CPU (a view gathering its scene before it
+    /// draws), which an interval between timestamps would otherwise bill as GPU
+    /// time to whichever region was open.
+    pub fn mark_gap(&mut self, gpu: &Gpu) {
+        self.mark(gpu, GAP);
+    }
+
     /// Close the last region and ask for the frame's timings back.
     ///
     /// This writes the CLOSING timestamp — n labels need n+1 marks, and the
@@ -178,16 +207,13 @@ impl GpuTimer {
                 // fail.
                 .map(|c| u64::from_le_bytes(*c))
                 .collect();
-            self.last.clear();
             let ms = |a: u64, b: u64| (b.saturating_sub(a) as f64 * self.period_ns as f64 / 1e6) as f32;
-            for (i, label) in self.labels.iter().enumerate() {
-                let (Some(&a), Some(&b)) = (ticks.get(i), ticks.get(i + 1)) else { break };
-                self.last.push(Span { label: label.clone(), ms: ms(a, b) });
-            }
-            self.total_ms = match (ticks.first(), ticks.last()) {
-                (Some(&a), Some(&b)) => ms(a, b),
-                _ => 0.0,
-            };
+            let regions = self.labels.iter().enumerate().map_while(|(i, label)| {
+                let (Some(&a), Some(&b)) = (ticks.get(i), ticks.get(i + 1)) else { return None };
+                Some((label.as_str(), ms(a, b)))
+            });
+            self.last = merge_regions(regions);
+            self.total_ms = self.last.iter().map(|s| s.ms).sum();
         }
         self.read.unmap();
         self.inflight.store(false, Ordering::Release);
@@ -198,7 +224,7 @@ impl GpuTimer {
         &self.last
     }
 
-    /// That frame's total GPU time, first mark to last.
+    /// That frame's total GPU time: its regions, gaps left out.
     pub fn total_ms(&self) -> f32 {
         self.total_ms
     }
@@ -206,6 +232,22 @@ impl GpuTimer {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// **A gap is not GPU time.** The stretch after a gap mark, where the GPU
+    /// waits on the CPU, is in no region and not in the total; a label marked
+    /// twice is one span, its two stretches summed. Billed, the CPU's work
+    /// gathering a frame read as milliseconds of GPU time in the region
+    /// before it.
+    #[test]
+    fn a_gap_is_left_out_and_a_repeated_label_is_summed() {
+        let spans = merge_regions(
+            [("views", 1.0), (GAP, 4.0), ("views", 0.5), (GAP, 3.0), ("opaque", 2.0)].into_iter(),
+        );
+        let got: Vec<(&str, f32)> = spans.iter().map(|s| (s.label.as_str(), s.ms)).collect();
+        assert_eq!(got, vec![("views", 1.5), ("opaque", 2.0)]);
+        assert_eq!(spans.iter().map(|s| s.ms).sum::<f32>(), 3.5, "the total is the regions, not first mark to last");
+    }
 
     /// The label names the region that FOLLOWS the mark, so n marks describe
     /// n-1 regions. Off by one here and every cost is reported against the name

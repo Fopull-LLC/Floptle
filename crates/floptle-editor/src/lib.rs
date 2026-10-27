@@ -2086,6 +2086,11 @@ struct Editor {
     /// Game view, a render target), and marking it there would split the
     /// window's regions into pieces the panel was not written to show.
     gpu_timing_headless: bool,
+    /// The windowed frame is timing and is drawing its offscreen views (render
+    /// targets, previews, a camera stack): each view marks its own draw as
+    /// "render targets + previews" and closes a gap after it, so the CPU work
+    /// between views is not billed as GPU time.
+    gpu_timing_offscreen: bool,
     /// Load packages the way a shipped player does: their scripts and assets,
     /// never their editor tools. `floptle run` and `shot` play the game, and a
     /// package's `editor/` Lua is an editor panel — run there it asked for

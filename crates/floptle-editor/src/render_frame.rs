@@ -506,13 +506,11 @@ impl Editor {
         if let Some(ms) = landed {
             self.feed_dynamic_resolution(ms);
         }
-        // The offscreen views draw first, and under a region of their own: a
-        // render-target camera's whole picture is GPU work, and before it was
-        // marked it ran ahead of the timer's first mark and was billed to
-        // nothing, or to whatever region its work spilled into.
-        if timing && let (Some(t), Some(g)) = (self.gpu_timer.as_mut(), self.gpu.as_ref()) {
-            t.mark(g, "render targets + previews");
-        }
+        // The offscreen views draw first, and are timed: each marks its own
+        // draw as "render targets + previews" and closes a gap after it (see
+        // `gpu_timing_offscreen`). Unmarked, a render-target camera ran ahead
+        // of the timer's first mark and was billed to nothing.
+        self.gpu_timing_offscreen = timing;
         // A1 target cameras render first, so every later pass (previews, game
         // viewport, the surface itself) samples this frame's feed.
         self.update_render_targets(elapsed);
@@ -520,6 +518,7 @@ impl Editor {
         self.update_camera_preview(elapsed);
         self.update_game_viewport(elapsed);
         self.update_surface_stack(elapsed);
+        self.gpu_timing_offscreen = false;
         // The ◫ UI tab's canvas — the selected layer through the real UI
         // pipeline. Runs alongside the other offscreen views, and no-ops (and
         // frees nothing but time) when the tab isn't showing.
