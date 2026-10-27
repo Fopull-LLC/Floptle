@@ -1920,3 +1920,60 @@ fn a_burst_of_spawn_callbacks_writes_each_node_back_once() {
     assert_eq!(crate::host::FULL_SYNCS.with(|c| c.get()), full, "the pass after the burst rebuilt the whole mirror");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **A spawn's callback can hand the new node's script its setup data.** The
+/// spawned node's scripts were loaded on the pass after the spawn, so in the
+/// callback their handle read nil and `crew.bind(7)` was lost with a warning:
+/// a seated crew member stayed at its spawn point. Now the scripts load before
+/// the callback, and `start` still runs on the next pass, after the bind.
+#[test]
+fn a_spawn_callback_reaches_the_new_node_s_script() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_spawn_bind_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "spawner",
+        "local done = false\n\
+         function update(node)\n\
+           if done then return end\n\
+           done = true\n\
+           spawn('crew', vec3(0, 0, 0), function(c) c:getScript('crew').bind(7) end)\n\
+         end\n",
+    );
+    write_script(
+        &dir,
+        "crew",
+        "local seat = nil\n\
+         local started = false\n\
+         function bind(id) seat = id end\n\
+         function start(node) started = true; node.x = seat or -1 end\n",
+    );
+    let (mut world, _) = craft(0, "spawner");
+    let mut host = ScriptHost::new();
+    host.set_playing(true);
+    host.run(&mut world, &dir, 0.016, 0.016);
+    let reqs = host.take_spawn_requests();
+    assert_eq!(reqs.len(), 1);
+    // The driver spawns the prefab: a node carrying the crew script.
+    let crew = world.spawn();
+    world.insert(crew, Transform::IDENTITY);
+    world.insert(crew, Scripts(vec![floptle_core::ScriptInst {
+        kind: "crew".into(),
+        enabled: true,
+        params: Vec::new(),
+        refs: Vec::new(),
+        strs: Vec::new(),
+        pinned_bools: None,
+    }]));
+    let r = reqs.into_iter().next().unwrap();
+    host.call_spawn_callback(&mut world, r.cb.unwrap(), crew.index(), &[crew]);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let warned: Vec<_> = host.drain_logs().into_iter().filter(|l| l.msg.contains("not running")).collect();
+    assert!(warned.is_empty(), "the callback was told the script is not running: {warned:?}");
+    assert_eq!(world.get::<Transform>(crew).unwrap().translation.x, 0.0, "start ran before the next pass");
+    host.run(&mut world, &dir, 0.016, 0.016);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    assert_eq!(world.get::<Transform>(crew).unwrap().translation.x, 7.0, "the bind made in the spawn callback was lost");
+    let _ = std::fs::remove_dir_all(&dir);
+}

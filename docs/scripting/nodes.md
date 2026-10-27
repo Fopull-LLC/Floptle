@@ -170,9 +170,12 @@ Scene-wide lookups are globals:
 | `findScript("GameManager")` | a **script handle** for the first node anywhere running that script (the manager pattern), or `nil` |
 | `findScripts("third_person")` | an array of script handles — EVERY node carrying that script, in scene order (pair with `net.isMine` to pick the local player among many avatars) |
 
-**When a script handle has something behind it.** A script's state is built on
-the first frame its node is running, which is the frame *after* a `spawn` or after
-the node is first switched on. Until then every field on its handle reads `nil`, and
+**When a script handle has something behind it.** A spawned node's scripts are
+loaded before `spawn`'s callback runs, so the callback can hand them their setup
+data: `spawn("crew", p, function(c) c:getScript("crew").bind(seat) end)`. Their
+file-scope code has run, but their `start` has not: it runs on the next frame,
+after the callback. A node switched on for the first time has its scripts built on
+its first frame running. Until then every field on its handle reads `nil`, and
 the Console says once that the script is attached but not running. After that the
 state is kept while the node (or the script's own tickbox) is switched off, so a
 value you set or a function you call through the handle is still in effect when it

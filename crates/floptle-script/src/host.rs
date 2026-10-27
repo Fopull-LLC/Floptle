@@ -3502,6 +3502,7 @@ impl ScriptHost {
             sleepers,
             destroy_told: std::collections::HashSet::new(),
             kinds_this_frame: HashMap::new(),
+            last_scripts_dir: None,
             script_clock,
             space_info,
             nav_mesh,
@@ -5254,6 +5255,7 @@ impl ScriptHost {
     ) {
         let _budget = self.budget.arm();
         self.sync_new_entities(world, new);
+        self.load_spawned_scripts(world, new);
         let Ok(f) = self.lua.registry_value::<mlua::Function>(&cb) else { return };
         let Ok(node) = new_node_handle(&self.lua, eid) else { return };
         if let Err(err) = f.call::<()>(node) {
@@ -5261,6 +5263,28 @@ impl ScriptHost {
         }
         let _ = self.lua.remove_registry_value(cb);
         self.flush_writes(world);
+    }
+
+    /// Load the scripts on nodes a spawn just made, before its callback runs.
+    ///
+    /// Their file-scope code runs and their functions are there, so the
+    /// callback can hand a spawned object its setup data through its script
+    /// handle (`b:getScript("crew").bind(id)`). Waiting for the next pass, the
+    /// handle read nil and the call was lost. `start` still runs on the next
+    /// pass, with the node's other hooks; only the chunk runs early.
+    fn load_spawned_scripts(&mut self, world: &World, new: &[floptle_core::Entity]) {
+        let Some(dir) = self.last_scripts_dir.clone() else { return };
+        for &e in new {
+            if floptle_core::is_disabled(world, e) {
+                continue;
+            }
+            let Some(scripts) = world.get::<Scripts>(e) else { continue };
+            for inst in scripts.0.iter().filter(|i| i.enabled) {
+                if self.ensure_instance(e, &inst.kind, &dir) {
+                    self.seed_params(e, &inst.kind, &inst.params, &inst.refs, &inst.strs);
+                }
+            }
+        }
     }
 
     /// Run a callback after re-mirroring the whole scene.
@@ -5343,6 +5367,7 @@ impl ScriptHost {
         func: &str,
     ) -> bool {
         let _budget = self.budget.arm();
+        self.last_scripts_dir = Some(scripts_dir.to_path_buf());
         self.sync_scene(world);
         let Some(e) = self.scene.borrow().ents.get(&eid).copied() else {
             self.record_error(kind, format!("{kind}: editor action target node #{eid} not found"));
@@ -6579,6 +6604,9 @@ impl ScriptHost {
         // Pass 1: build/refresh every environment so cross-references (findScript, etc.)
         // resolve regardless of which script ticks first.
         self.kinds_this_frame.clear();
+        if self.last_scripts_dir.as_deref() != Some(scripts_dir) {
+            self.last_scripts_dir = Some(scripts_dir.to_path_buf());
+        }
         for &e in &work {
             let Some(scripts) = world.get::<Scripts>(e) else { continue };
             for inst in &scripts.0 {

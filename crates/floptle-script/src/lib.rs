@@ -910,6 +910,9 @@ pub struct ScriptHost {
     /// file), so the file is looked at once per kind rather than once per
     /// instance. Cleared at the start of every frame pass.
     kinds_this_frame: HashMap<String, Option<u64>>,
+    /// The scripts folder the last pass ran from, so a spawn's callback can
+    /// load the new node's scripts before it runs (see `call_spawn_callback`).
+    last_scripts_dir: Option<std::path::PathBuf>,
     /// The frame pass's `time`, for `script.sleep{seconds=}`.
     script_clock: Rc<std::cell::Cell<f64>>,
     /// This tick's celestial snapshot (`space.*` reads it; the editor feeds it).

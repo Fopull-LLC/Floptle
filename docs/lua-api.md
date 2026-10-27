@@ -1279,7 +1279,7 @@ The parent node handle, or nil (same as node.parent).
 
 ### `node:getScript`
 
-node:getScript("health") — a script handle for that script on this node, or nil. Read/write its state, call its methods, reach .node / .params. A script's state exists from the frame after its node is spawned or first switched on; a handle to a script that has never run reads nil for everything and warns once. Once built, it is kept while the node or the script is switched off, so a call made then is not lost.
+node:getScript("health") — a script handle for that script on this node, or nil. Read/write its state, call its methods, reach .node / .params. A spawned node's scripts are loaded before spawn's callback runs (their start runs the frame after), so the callback can call them; a node switched on for the first time has its scripts from its first frame running. A handle to a script that has never run reads nil for everything and warns once. Once built, it is kept while the node or the script is switched off, so a call made then is not lost.
 
 ### `node:hasTag`
 
