@@ -1328,12 +1328,13 @@ impl Editor {
             // the `else` at the end of it says so — see there.
             //
             // An offscreen view of a timed window frame: its draw, from here
-            // to the gap at the end, is the window's "render targets +
-            // previews". The scene gathering above it is CPU time and is left
-            // out by the gap the view before closed.
+            // to the gap at the end, is timed pass by pass as "views: …", every
+            // view's same pass summed into one region. The scene gathering
+            // above it is CPU time and is left out by the gap the view before
+            // closed.
             let offscreen_timed = self.gpu_timing_offscreen && !self.gpu_timing_headless;
             if offscreen_timed && let Some(t) = self.gpu_timer.as_mut() {
-                t.mark(gpu, "render targets + previews");
+                t.mark(gpu, "views: sky / environment");
             }
             // ⏱ `floptle shot --timing`: one mark before each pass, so the
             // headless render answers "which pass is slow" the way the window
@@ -1344,6 +1345,8 @@ impl Editor {
                         if let Some(t) = self.gpu_timer.as_mut() {
                             t.mark(gpu, $label);
                         }
+                    } else if offscreen_timed && let Some(t) = self.gpu_timer.as_mut() {
+                        t.mark(gpu, &format!("views: {}", $label));
                     }
                 };
             }

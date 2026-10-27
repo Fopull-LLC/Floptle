@@ -62,8 +62,10 @@ find('PortraitCam'):setCamera{
 
 Each one you name is set and the rest are left as they are. The same switches
 are under **draws** in the camera's Inspector, and a stacked camera
-([Camera stacks](camera-stacks.md)) takes them too. The profiler shows what
-targets cost as **render targets + previews**.
+([Camera stacks](camera-stacks.md)) takes them too. The GPU profiler shows what
+targets, previews and stacked cameras cost under **views:**, pass by pass:
+`views: sun shadow map`, `views: opaque + lighting` and so on, every such view's
+pass summed.
 
 ## The four things people want
 

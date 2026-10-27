@@ -507,7 +507,7 @@ impl Editor {
             self.feed_dynamic_resolution(ms);
         }
         // The offscreen views draw first, and are timed: each marks its own
-        // draw as "render targets + previews" and closes a gap after it (see
+        // passes as "views: …" and closes a gap after them (see
         // `gpu_timing_offscreen`). Unmarked, a render-target camera ran ahead
         // of the timer's first mark and was billed to nothing.
         self.gpu_timing_offscreen = timing;
