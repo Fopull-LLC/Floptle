@@ -1123,6 +1123,7 @@ mod tests {
                 ortho: false,
                 ortho_height: 10.0,
                 stack: Vec::new(),
+                draws: floptle_core::CameraDraws::default(),
                 post_after: false,
             },
         );
@@ -1214,6 +1215,7 @@ mod tests {
                 ortho: false,
                 ortho_height: 10.0,
                 stack: Vec::new(),
+                draws: floptle_core::CameraDraws::default(),
                 post_after: false,
             },
         );
@@ -1300,6 +1302,7 @@ mod tests {
                 ortho: false,
                 ortho_height: 10.0,
                 stack: Vec::new(),
+                draws: floptle_core::CameraDraws::default(),
                 post_after: false,
             },
         );
@@ -1400,6 +1403,7 @@ mod tests {
                 ortho: false,
                 ortho_height: 10.0,
                 stack: Vec::new(),
+                draws: floptle_core::CameraDraws::default(),
                 post_after: false,
             },
         );

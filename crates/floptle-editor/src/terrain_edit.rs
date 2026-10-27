@@ -5856,7 +5856,7 @@ mod residency_tests {
         ed.terrains.insert(e, EditorTerrain::new(field));
         let cam = ed.world.spawn();
         ed.world.insert(cam, floptle_core::Transform::from_translation(DVec3::new(0.0, ground.y as f64 + 6.0, 12.0)));
-        ed.world.insert(cam, floptle_core::Matter::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: !0, target_w: 0, target_h: 0, target_hz: 0.0, ortho: false, ortho_height: 10.0, stack: Vec::new() , post_after: false });
+        ed.world.insert(cam, floptle_core::Matter::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: !0, target_w: 0, target_h: 0, target_hz: 0.0, ortho: false, ortho_height: 10.0, stack: Vec::new(), post_after: false, draws: floptle_core::CameraDraws::default() });
         ed.toggle_play();
         {
             // Something stands where the laser bites, so its collision is meshed.

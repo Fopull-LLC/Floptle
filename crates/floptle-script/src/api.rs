@@ -2624,6 +2624,10 @@ pub(crate) fn apply_rich_sets(
                 ortho_height,
                 stack,
                 post_after,
+                shadows,
+                sky,
+                terrain,
+                fog,
             } => {
                 // A node that is not a camera becomes one, the way setPrimitive
                 // and setTerrain also set the node's Matter.
@@ -2641,6 +2645,7 @@ pub(crate) fn apply_rich_sets(
                             ortho: false,
                             ortho_height: Matter::ORTHO_HEIGHT,
                             stack: Vec::new(),
+                            draws: floptle_core::CameraDraws::default(),
                             post_after: false,
                         },
                     );
@@ -2662,6 +2667,7 @@ pub(crate) fn apply_rich_sets(
                     ortho: orth,
                     ortho_height: oh,
                     stack: st,
+                    draws,
                     post_after: pa,
                 }) = world.get_mut::<Matter>(e)
                 else {
@@ -2699,6 +2705,16 @@ pub(crate) fn apply_rich_sets(
                 }
                 if let Some(v) = post_after {
                     *pa = v;
+                }
+                for (want, have) in [
+                    (shadows, &mut draws.shadows),
+                    (sky, &mut draws.sky),
+                    (terrain, &mut draws.terrain),
+                    (fog, &mut draws.fog),
+                ] {
+                    if let Some(v) = want {
+                        *have = v;
+                    }
                 }
             }
             // Both write the element's text spec, creating it if the element
@@ -3199,7 +3215,7 @@ pub(crate) const SET_PARENT_KEYS: &[&str] = &["keepWorld"];
 /// nearest real one.
 pub(crate) const CAMERA_KEYS: &[&str] = &[
     "fovY", "active", "target", "width", "height", "hz", "cullMask", "projection", "orthoHeight",
-    "stack", "post",
+    "stack", "post", "shadows", "sky", "terrain", "fog",
 ];
 
 /// Every key `node:setMaterial{...}` reads.
@@ -7234,6 +7250,10 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                             )?),
                             None => None,
                         },
+                        shadows: opt_bool(&t, CALL, "shadows")?,
+                        sky: opt_bool(&t, CALL, "sky")?,
+                        terrain: opt_bool(&t, CALL, "terrain")?,
+                        fog: opt_bool(&t, CALL, "fog")?,
                     },
                 ));
                 Ok(())

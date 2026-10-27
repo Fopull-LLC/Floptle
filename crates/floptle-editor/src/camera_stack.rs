@@ -31,6 +31,8 @@ pub(crate) struct StackCam {
     pub(crate) mask: u32,
     /// Laid over after the base camera's depth of field and motion blur.
     pub(crate) post_after: bool,
+    /// What it draws besides its nodes.
+    pub(crate) draws: floptle_core::CameraDraws,
 }
 
 /// What a camera's stack resolves to this frame.
@@ -55,7 +57,7 @@ pub(crate) fn resolve_stack(world: &World, base: Entity) -> StackPlan {
             if e == base || n.0 != *name {
                 continue;
             }
-            let Some(Matter::Camera { fov_y, ortho, ortho_height, cull_mask, post_after, .. }) = world.get::<Matter>(e)
+            let Some(Matter::Camera { fov_y, ortho, ortho_height, cull_mask, post_after, draws, .. }) = world.get::<Matter>(e)
             else {
                 continue;
             };
@@ -68,6 +70,7 @@ pub(crate) fn resolve_stack(world: &World, base: Entity) -> StackPlan {
                     ortho_height: *ortho_height,
                     mask: *cull_mask,
                     post_after: *post_after,
+                    draws: *draws,
                 });
             }
             break;
@@ -250,7 +253,7 @@ impl crate::Editor {
                 sc.mask,
                 None,
                 size,
-                crate::offscreen::OffscreenOpts { overlay: true, ..Default::default() },
+                crate::offscreen::OffscreenOpts { overlay: true, draws: sc.draws, ..Default::default() },
             );
         }
         plan.draw.len()
@@ -327,6 +330,7 @@ mod tests {
                 ortho: false,
                 ortho_height: Matter::ORTHO_HEIGHT,
                 stack: stack.iter().map(|s| s.to_string()).collect(),
+                draws: floptle_core::CameraDraws::default(),
                 post_after: false,
             },
         );

@@ -46,6 +46,25 @@ pub(crate) struct OffscreenOpts<'a> {
     /// shapes, which the camera beneath has already drawn. The frame's counts
     /// are left to that camera as well.
     pub overlay: bool,
+    /// What the camera draws besides its nodes (`setCamera{ shadows = false }`
+    /// and the rest): each switched off is a pass this view does not pay for.
+    pub draws: floptle_core::CameraDraws,
+}
+
+/// The scene's light as a camera with `draws` sees it. A camera that turned
+/// the sun's shadows or the fog off sees the scene as if the light said so,
+/// and every uniform is built from this copy.
+fn light_seen_by(mut light: Light, draws: floptle_core::CameraDraws) -> Light {
+    if !draws.shadows {
+        light.shadows = false;
+        light.shadow_map = false;
+        light.contact_shadows = false;
+    }
+    if !draws.fog {
+        light.fog = false;
+        light.fog_volumetric = false;
+    }
+    light
 }
 
 /// Which scene-colour history an offscreen render uses.
@@ -449,10 +468,13 @@ impl Editor {
 
         // Sky-shader uniforms (Inspector knobs over `.flsl` defaults), resolved before any
         // GPU borrow — the offscreen / Game render reuses the same values as the editor view.
-        let sky_active = self.sky_shader.is_some();
+        let sky_active = opts.draws.sky && self.sky_shader.is_some();
         let sky_uniform_vals = self.sky_uniform_values();
 
-        let light_node = self.world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
+        let light_node = light_seen_by(
+            self.world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default(),
+            opts.draws,
+        );
         let sun = crate::shading::sun_vec(&self.world, &light_node, cam.world_position);
         let particle_light = crate::shading::particle_light(&self.world, &light_node, cam.world_position);
         let li = light_node.intensity;
@@ -954,6 +976,10 @@ impl Editor {
         }
         let terrain_t = floptle_core::profile::Span::new();
         let (mut sky_params, sky_tint, sky_rot, sky_solid) = skybox_uniforms(&self.world);
+        // No sky: the skybox's solid colour behind everything.
+        if !opts.draws.sky {
+            sky_params[0] = 0.0;
+        }
         // An orthographic camera's sky, through its field of view.
         sky_params[2] = cam.projection.sky_spread();
         let clear = [sky_solid[0], sky_solid[1], sky_solid[2], 1.0];
@@ -965,6 +991,7 @@ impl Editor {
         // docked Game viewport would show empty ground (its volume is `w = 3`, not drawn by
         // the raymarch). Same instance push as the main Scene view.
         if !opts.overlay
+            && opts.draws.terrain
             && let Some(raster) = self.raster.as_ref()
         {
             crate::terrain_edit::push_terrain_instances(
@@ -981,6 +1008,7 @@ impl Editor {
             );
             crate::decals::push_decal_instances(&self.decal_batches, &self.world, raster, cam.world_position, &mut instances);
         } else if opts.overlay
+            && opts.draws.terrain
             && globals.sun_map[0] > 0.5
             && let Some(raster) = self.raster.as_ref()
         {
@@ -1092,11 +1120,11 @@ impl Editor {
         // sky) — keep it running even with no terrain/blobs in the scene.
         let rm_draw = !opts.overlay
             && (show_blobs
-                || !self.terrains.is_empty()
+                || (opts.draws.terrain && !self.terrains.is_empty())
                 || sky_params[0] >= 0.5
-                || self.sky_shader.is_some() // a procedural sky shader must run the raymarch (sky pass)
+                || sky_active // a procedural sky shader must run the raymarch (sky pass)
                 // …and so must an atmosphere, the same as the window gather.
-                || atmo_meta[0] >= 1.0
+                || (opts.draws.sky && atmo_meta[0] >= 1.0)
                 || !self.flsl_shape_slots.is_empty());
         // Reflections in an offscreen view, on exactly the terms the window gets
         // them: this view's own stored picture, allocated the first frame it is
@@ -1325,7 +1353,11 @@ impl Editor {
             // build's first frame — drew every metal black, and a polished
             // metal model looked like a hole in the picture.
             raymarch.upload_globals(gpu, rm);
-            raymarch.capture_env(gpu);
+            // A camera with no sky reflects the one the frame's other views
+            // captured: the map is shared, and the sky is the same sky.
+            if opts.draws.sky {
+                raymarch.capture_env(gpu);
+            }
             // The sun's shadow map first: the volumetric fog marched with the
             // prepass reads it for its shafts.
             headless_mark!("sun shadow map");
@@ -1711,5 +1743,24 @@ mod tests {
         });
         let said: Vec<&str> = ed.console.entries.iter().map(|e| e.msg.as_str()).collect();
         assert!(reported, "the build's frame never put the GPU's error in its console: {said:?}");
+    }
+}
+
+#[cfg(test)]
+mod camera_draws_tests {
+    use super::*;
+
+    /// **A camera's switches reach the light it renders with**, and leave the
+    /// rest of it alone; all on, the light is the scene's exactly.
+    #[test]
+    fn a_camera_s_switches_turn_off_its_shadows_and_fog() {
+        let scene = Light { shadows: true, shadow_map: true, contact_shadows: true, fog: true, fog_volumetric: true, ..Default::default() };
+        assert_eq!(light_seen_by(scene, Default::default()), scene, "all on changed the light");
+        let dark = light_seen_by(scene, floptle_core::CameraDraws { shadows: false, ..Default::default() });
+        assert!(!dark.shadows && !dark.shadow_map && !dark.contact_shadows, "shadows stayed on");
+        assert!(dark.fog && dark.fog_volumetric, "turning shadows off touched the fog");
+        let clear = light_seen_by(scene, floptle_core::CameraDraws { fog: false, ..Default::default() });
+        assert!(!clear.fog && !clear.fog_volumetric, "fog stayed on");
+        assert!(clear.shadows && clear.shadow_map, "turning fog off touched the shadows");
     }
 }

@@ -456,7 +456,7 @@ impl Editor {
                 r.mask,
                 Some(tex),
                 (r.w, r.h),
-                Default::default(),
+                crate::offscreen::OffscreenOpts { draws: r.draws, ..Default::default() },
             );
             // No post runs on a render target: nothing reads its depth after,
             // and the layers laid over after depth of field go straight on.
@@ -728,6 +728,7 @@ impl Editor {
                 depth_tex: depth_tex.as_ref(),
                 history: crate::offscreen::HistorySlot::GamePanel,
                 overlay: false,
+                draws: Default::default(),
             },
         );
         self.lines_deferred = false;
@@ -968,6 +969,7 @@ impl Editor {
                 ortho: false,
                 ortho_height: Matter::ORTHO_HEIGHT,
                 stack: Vec::new(),
+                draws: floptle_core::CameraDraws::default(),
                 post_after: false,
             },
         );

@@ -480,6 +480,39 @@ impl Editor {
         // VFX assets not yet resolved. Reuses `elapsed` so it costs no extra clock read.
         // Both take &mut self and must live outside the main GPU destructure below, so
         // this is the last safe point before it.
+        // The frame profile, cloned out before the destructure below takes
+        // `&mut self`. It is an `Rc<RefCell<…>>` shared with the
+        // Lua `perf` table, so this is a refcount bump and the numbers a game
+        // reads are the same ones written here.
+        let profile = self.script_host.profile().clone();
+        // The panel, or a game that asked `perf` for GPU pass times.
+        // …or dynamic resolution, which is driven by the same timings.
+        let perf_on = self.playing && profile.borrow().enabled();
+        let live = perf_on || self.wants_gpu_for_resolution();
+        let mut landed = None;
+        let timing = (self.gpu_timing_open || live)
+            && self.gpu_timer.as_mut().map(|t| {
+                t.poll();
+                if live && !t.spans().is_empty() {
+                    if perf_on {
+                        profile
+                            .borrow_mut()
+                            .set_gpu(t.spans().iter().map(|s| (s.label.clone(), s.ms)).collect(), t.total_ms());
+                    }
+                    landed = Some(t.total_ms());
+                }
+                t.begin()
+            }) == Some(true);
+        if let Some(ms) = landed {
+            self.feed_dynamic_resolution(ms);
+        }
+        // The offscreen views draw first, and under a region of their own: a
+        // render-target camera's whole picture is GPU work, and before it was
+        // marked it ran ahead of the timer's first mark and was billed to
+        // nothing, or to whatever region its work spilled into.
+        if timing && let (Some(t), Some(g)) = (self.gpu_timer.as_mut(), self.gpu.as_ref()) {
+            t.mark(g, "render targets + previews");
+        }
         // A1 target cameras render first, so every later pass (previews, game
         // viewport, the surface itself) samples this frame's feed.
         self.update_render_targets(elapsed);
@@ -518,11 +551,6 @@ impl Editor {
         // Same reason: the terrain chunks' dissolve-in clock is read before the
         // destructure below takes `&mut self`.
         let chunk_now = self.now();
-        // The frame profile, cloned out before the destructure below takes
-        // `&mut self`. It is an `Rc<RefCell<…>>` shared with the
-        // Lua `perf` table, so this is a refcount bump and the numbers a game
-        // reads are the same ones written here.
-        let profile = self.script_host.profile().clone();
 
         // Every phase below takes its own borrows of these; one check here keeps
         // the early return where it always was.
@@ -548,27 +576,6 @@ impl Editor {
             return;
         };
 
-        // The panel, or a game that asked `perf` for GPU pass times.
-        // …or dynamic resolution, which is driven by the same timings.
-        let perf_on = self.playing && profile.borrow().enabled();
-        let live = perf_on || self.wants_gpu_for_resolution();
-        let mut landed = None;
-        let timing = (self.gpu_timing_open || live)
-            && self.gpu_timer.as_mut().map(|t| {
-                t.poll();
-                if live && !t.spans().is_empty() {
-                    if perf_on {
-                        profile
-                            .borrow_mut()
-                            .set_gpu(t.spans().iter().map(|s| (s.label.clone(), s.ms)).collect(), t.total_ms());
-                    }
-                    landed = Some(t.total_ms());
-                }
-                t.begin()
-            }) == Some(true);
-        if let Some(ms) = landed {
-            self.feed_dynamic_resolution(ms);
-        }
         // What this frame's scripts queued, under the timer's marks, before
         // anything that draws its results.
         self.run_compute_jobs(timing);

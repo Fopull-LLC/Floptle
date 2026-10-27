@@ -2335,6 +2335,12 @@ pub enum RichSet {
         /// `post = "after" | "with"`: stacked, laid over after the base
         /// camera's depth of field and motion blur, or with the picture.
         post_after: Option<bool>,
+        /// `shadows`, `sky`, `terrain`, `fog`: what it draws besides its
+        /// nodes. Each one named is set; the rest are left as they are.
+        shadows: Option<bool>,
+        sky: Option<bool>,
+        terrain: Option<bool>,
+        fog: Option<bool>,
     },
 }
 

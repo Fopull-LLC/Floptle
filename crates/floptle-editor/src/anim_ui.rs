@@ -5839,6 +5839,7 @@ mod tests {
                 ortho: true,
                 ortho_height: 10.0,
                 stack: Vec::new(),
+                draws: floptle_core::CameraDraws::default(),
                 post_after: false,
             },
         );

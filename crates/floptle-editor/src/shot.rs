@@ -896,6 +896,7 @@ mod tests {
                     ortho: false,
                     ortho_height: Matter::ORTHO_HEIGHT,
                     stack: Vec::new(),
+                    draws: floptle_core::CameraDraws::default(),
                     post_after: false,
                 },
             );
@@ -1345,6 +1346,7 @@ mod tests {
                 ortho: false,
                 ortho_height: floptle_core::Matter::ORTHO_HEIGHT,
                 stack: Vec::new(),
+                draws: Default::default(),
                 post_after: false,
             },
             ..blank_node()

@@ -1939,6 +1939,7 @@ fn camera_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
         ortho,
         ortho_height,
         stack,
+        draws,
         post_after,
     } = m else { return };
     let cmd = &mut *ctx.cmd;
@@ -2107,6 +2108,26 @@ fn camera_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
     {
         ctx.cmd.inspector_changed = true;
     }
+    // What a render-target or stacked camera draws besides its nodes. Each is
+    // a fixed cost whatever the camera's size, so a small portrait or monitor
+    // turns off what it does not need.
+    ui.horizontal_wrapped(|ui| {
+        ui.label("draws").on_hover_text(
+            "for a render-target or stacked camera: what it draws besides the \
+             nodes on its layers. A small screen pays for each of these whatever \
+             its size; switch off what it does not need.",
+        );
+        for (on, label) in [
+            (&mut draws.shadows, "sun shadows"),
+            (&mut draws.sky, "sky"),
+            (&mut draws.terrain, "terrain"),
+            (&mut draws.fog, "fog"),
+        ] {
+            if ui.checkbox(on, label).changed() {
+                ctx.cmd.inspector_changed = true;
+            }
+        }
+    });
 }
 
 /// Point light: colour, range and shadow knobs, and where the scene stands against the light cap.
@@ -8911,6 +8932,7 @@ mod tests {
                 ortho: ortho_camera,
                 ortho_height: 10.0,
                 stack: Vec::new(),
+                draws: floptle_core::CameraDraws::default(),
                 post_after: false,
             },
         );
@@ -9076,6 +9098,7 @@ mod tests {
                 ortho: true,
                 ortho_height: 10.0,
                 stack: Vec::new(),
+                draws: floptle_core::CameraDraws::default(),
                 post_after: false,
             },
         );

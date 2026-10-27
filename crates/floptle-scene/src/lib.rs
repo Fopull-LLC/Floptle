@@ -1124,6 +1124,9 @@ pub enum MatterDoc {
         /// motion blur rather than before.
         #[serde(default, skip_serializing_if = "is_false")]
         post_after: bool,
+        /// What it draws besides its nodes; all on when absent.
+        #[serde(default, skip_serializing_if = "CameraDrawsDoc::is_all")]
+        draws: CameraDrawsDoc,
     },
     /// A placeable point/omni/area light (position = node transform).
     PointLight {
@@ -1505,6 +1508,44 @@ pub enum AntialiasDoc {
     /// projects start here.
     #[default]
     Fxaa,
+}
+
+/// What a camera draws besides its nodes — mirrors [`floptle_core::CameraDraws`].
+/// Each switch is written only when off.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CameraDrawsDoc {
+    #[serde(default = "true_bool", skip_serializing_if = "is_true")]
+    pub shadows: bool,
+    #[serde(default = "true_bool", skip_serializing_if = "is_true")]
+    pub sky: bool,
+    #[serde(default = "true_bool", skip_serializing_if = "is_true")]
+    pub terrain: bool,
+    #[serde(default = "true_bool", skip_serializing_if = "is_true")]
+    pub fog: bool,
+}
+
+impl Default for CameraDrawsDoc {
+    fn default() -> Self {
+        floptle_core::CameraDraws::default().into()
+    }
+}
+
+impl CameraDrawsDoc {
+    fn is_all(&self) -> bool {
+        floptle_core::CameraDraws::from(*self).all()
+    }
+}
+
+impl From<floptle_core::CameraDraws> for CameraDrawsDoc {
+    fn from(d: floptle_core::CameraDraws) -> Self {
+        Self { shadows: d.shadows, sky: d.sky, terrain: d.terrain, fog: d.fog }
+    }
+}
+
+impl From<CameraDrawsDoc> for floptle_core::CameraDraws {
+    fn from(d: CameraDrawsDoc) -> Self {
+        Self { shadows: d.shadows, sky: d.sky, terrain: d.terrain, fog: d.fog }
+    }
 }
 
 /// Serializable reflection-probe detail — mirrors `floptle_render::ProbeDetail`.
@@ -1919,6 +1960,7 @@ impl From<&Matter> for MatterDoc {
                 ortho_height,
                 stack,
                 post_after,
+                draws,
             } => MatterDoc::Camera {
                 fov_y: *fov_y,
                 active: *active,
@@ -1931,6 +1973,7 @@ impl From<&Matter> for MatterDoc {
                 ortho_height: *ortho_height,
                 stack: stack.clone(),
                 post_after: *post_after,
+                draws: (*draws).into(),
             },
             Matter::PointLight { color, intensity, range, shape, shadows, spot_angle, spot_softness } => {
                 MatterDoc::PointLight {
@@ -2189,6 +2232,7 @@ impl MatterDoc {
                 ortho_height,
                 stack,
                 post_after,
+                draws,
             } => {
                 let (w, h) = Matter::clamp_target_size(*target_w, *target_h);
                 Matter::Camera {
@@ -2206,6 +2250,7 @@ impl MatterDoc {
                     ortho_height: Matter::clamp_ortho_height(*ortho_height),
                     stack: stack.clone(),
                     post_after: *post_after,
+                    draws: (*draws).into(),
                 }
             }
             MatterDoc::PointLight { color, intensity, range, shape, shadows, spot } => Matter::PointLight {
@@ -5093,6 +5138,7 @@ mod tests {
                 ortho_height: 10.0,
                 stack: Vec::new(),
                 post_after: false,
+                draws: Default::default(),
             },
         );
 
@@ -5113,6 +5159,7 @@ mod tests {
                 ortho_height: 10.0,
                 stack: Vec::new(),
                 post_after: false,
+                draws: Default::default(),
             },
         );
         let mut c = Camera2D {
@@ -5687,7 +5734,7 @@ mod tests {
                     terrain_gen: None,
                     name: "eye".into(),
                     transform: TransformDoc::default(),
-                    matter: MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT, stack: Vec::new(), post_after: false },
+                    matter: MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT, stack: Vec::new(), post_after: false, draws: Default::default() },
                     object_materials: Default::default(),
                     tint: None,
                     tint_rim: None,
@@ -5852,7 +5899,7 @@ mod tests {
         let eye = snap.nodes.iter().find(|n| n.name == "eye").unwrap();
         assert_eq!(
             eye.matter,
-            MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT, stack: Vec::new(), post_after: false }
+            MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT, stack: Vec::new(), post_after: false, draws: Default::default() }
         );
     }
 
@@ -6665,7 +6712,19 @@ mod camera_stack_doc_tests {
             ortho_height: Matter::ORTHO_HEIGHT,
             stack: vec!["Seat".into()],
             post_after,
+            draws: Default::default(),
         };
+        // The switches too: only the ones off are written.
+        let mut dim = cam(false);
+        if let floptle_core::Matter::Camera { draws, .. } = &mut dim {
+            draws.sky = false;
+            draws.terrain = false;
+        }
+        let text = ron::ser::to_string(&MatterDoc::from(&dim)).unwrap();
+        assert!(text.contains("sky:false") && !text.contains("shadows"), "{text}");
+        let back: MatterDoc = ron::from_str(&text).unwrap();
+        assert_eq!(back.to_matter(), dim, "the camera's switches did not survive: {text}");
+        assert!(!ron::ser::to_string(&MatterDoc::from(&cam(false))).unwrap().contains("draws"), "all on is written");
         for want in [false, true] {
             let text = ron::ser::to_string(&MatterDoc::from(&cam(want))).unwrap();
             assert_eq!(text.contains("post_after"), want, "{text}");

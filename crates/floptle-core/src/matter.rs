@@ -1577,6 +1577,10 @@ pub enum Matter {
         /// default), where it is blurred by its own distance like anything
         /// else. A viewmodel or a cockpit usually wants it.
         post_after: bool,
+        /// What a render-target or stacked camera draws besides its nodes.
+        /// All on by default; a small picture-in-picture camera turns off
+        /// what it does not need, and pays only for the rest.
+        draws: CameraDraws,
     },
     /// A placeable point/omni light. Its world position is the node's transform
     /// translation; `range` is the radius at which its contribution falls to ~zero.
@@ -2437,6 +2441,35 @@ impl Matter {
             dof_focus_node: String::new(),
             screen_shaders: Vec::new(),
         }
+    }
+}
+
+/// What a camera draws besides the nodes on its layers (see
+/// [`Matter::Camera`]). Each is a fixed cost whatever the camera's size, which
+/// is most of what a small render-target camera pays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CameraDraws {
+    /// The sun's shadow map: off, what it films is lit as in open sun.
+    pub shadows: bool,
+    /// The sky, and the reflections of it: off, the background is the
+    /// skybox's solid colour.
+    pub sky: bool,
+    /// Terrain and planets.
+    pub terrain: bool,
+    /// Distance and volumetric fog.
+    pub fog: bool,
+}
+
+impl Default for CameraDraws {
+    fn default() -> Self {
+        Self { shadows: true, sky: true, terrain: true, fog: true }
+    }
+}
+
+impl CameraDraws {
+    /// Everything on: what every camera drew before there was a choice.
+    pub fn all(&self) -> bool {
+        *self == Self::default()
     }
 }
 

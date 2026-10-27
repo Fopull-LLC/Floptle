@@ -35,6 +35,32 @@ are spending; see [Where the frame went](scripting.md#28-where-the-frame-went-pe
 A target that has never drawn always draws immediately, however slow its `hz` —
 a 1 Hz camera must not show a second of black on the frame it appears.
 
+## What it draws
+
+A target camera draws the nodes on its `cullMask` layers, and by default
+everything around them as well: the sun's shadows, the sky, terrain and fog.
+Some of that is a fixed cost whatever the target's size. A portrait of a
+crew member in a cabin needs none of it:
+
+```lua
+find('PortraitCam'):setCamera{
+    target = 'crew1', width = 192, height = 144, cullMask = 1 << 4,
+    shadows = false, sky = false, terrain = false, fog = false,
+}
+```
+
+| field | off means | default |
+|---|---|---|
+| `shadows` | no sun shadows: what it films is lit as in open sun | `true` |
+| `sky` | the skybox's solid colour behind everything, and no sky capture | `true` |
+| `terrain` | no terrain or planets | `true` |
+| `fog` | no distance or volumetric fog | `true` |
+
+Each one you name is set and the rest are left as they are. The same switches
+are under **draws** in the camera's Inspector, and a stacked camera
+([Camera stacks](camera-stacks.md)) takes them too. The profiler shows what
+targets cost as **render targets + previews**.
+
 ## The four things people want
 
 **Minimap.** A camera above the player looking straight down, parented to them

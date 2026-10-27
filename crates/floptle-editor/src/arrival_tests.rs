@@ -37,6 +37,7 @@ fn arrival_scene(tag: &str, radius: f64) -> Option<(crate::Editor, floptle_core:
             ortho: false,
             ortho_height: 10.0,
             stack: Vec::new(),
+            draws: floptle_core::CameraDraws::default(),
             post_after: false,
         },
     );
@@ -330,6 +331,7 @@ fn planet_from_file(tag: &str) -> (crate::Editor, floptle_core::Entity, floptle_
             ortho: false,
             ortho_height: 10.0,
             stack: Vec::new(),
+            draws: floptle_core::CameraDraws::default(),
             post_after: false,
         },
     );
@@ -477,6 +479,7 @@ fn a_world_landing_mid_game_brings_its_collision_and_keeps_the_others() {
             ortho: false,
             ortho_height: 10.0,
             stack: Vec::new(),
+            draws: floptle_core::CameraDraws::default(),
             post_after: false,
         },
     );

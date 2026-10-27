@@ -494,6 +494,7 @@ fn a_bad_camera_option_is_refused_where_it_was_written() {
         ("node:setCamera{ stack = 'Arms' }", &["stack", "list of strings"]),
         ("node:setCamera{ stack = { 'Arms', 3 } }", &["stack[2]", "string"]),
         ("node:setCamera{ post = 'before' }", &["post", "after"]),
+        ("node:setCamera{ shadows = 'no' }", &["shadows", "true or false"]),
     ];
     for (i, (src, wants)) in cases.iter().enumerate() {
         let name = format!("bad{i}");
@@ -525,7 +526,7 @@ local frame = 0
 function update(node, dt)
   frame = frame + 1
   if frame == 1 then node:setCamera{ stack = { 'Arms', 'Hud' } } end
-  if frame == 2 then node:setCamera{ fovY = 1.1, post = 'after' } end
+  if frame == 2 then node:setCamera{ fovY = 1.1, post = 'after', shadows = false, fog = false } end
   if frame == 3 then node:setCamera{ stack = {}, post = 'with' } end
 end
 ",
@@ -544,6 +545,14 @@ end
     host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
     assert_eq!(stack(&world).len(), 2, "a call that does not name the stack keeps it");
     assert!(after(&world), "`post = 'after'` did not reach the camera");
+    match world.get::<Matter>(e) {
+        Some(Matter::Camera { draws, .. }) => assert_eq!(
+            *draws,
+            floptle_core::CameraDraws { shadows: false, fog: false, ..Default::default() },
+            "the switches named are set and the rest left on"
+        ),
+        _ => unreachable!(),
+    }
     host.run(&mut world, &dir, 1.0 / 60.0, 2.0 / 60.0);
     assert!(stack(&world).is_empty(), "`stack = {{}}` clears it");
     assert!(!after(&world), "`post = 'with'` did not put it back");

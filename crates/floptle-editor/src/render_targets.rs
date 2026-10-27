@@ -44,6 +44,8 @@ pub(crate) struct TargetReq {
     /// perspective game wants an orthographic shot.
     pub(crate) ortho: bool,
     pub(crate) ortho_height: f32,
+    /// What it draws besides its nodes.
+    pub(crate) draws: floptle_core::CameraDraws,
 }
 
 /// What to do about render targets this frame.
@@ -122,6 +124,7 @@ pub(crate) fn target_requests(world: &floptle_core::World) -> Vec<TargetReq> {
                 target_hz,
                 ortho,
                 ortho_height,
+                draws,
                 ..
             } if !target.is_empty() => {
                 let (w, h) = Matter::clamp_target_size(*target_w, *target_h);
@@ -135,6 +138,7 @@ pub(crate) fn target_requests(world: &floptle_core::World) -> Vec<TargetReq> {
                     hz: target_hz.max(0.0),
                     ortho: *ortho,
                     ortho_height: *ortho_height,
+                    draws: *draws,
                 })
             }
             _ => None,
@@ -164,6 +168,7 @@ mod tests {
             hz,
             ortho: false,
             ortho_height: floptle_core::Matter::ORTHO_HEIGHT,
+            draws: Default::default(),
         }
     }
 

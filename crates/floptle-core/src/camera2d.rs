@@ -847,6 +847,7 @@ mod tests {
                 ortho: true,
                 ortho_height: 10.0,
                 stack: Vec::new(),
+                draws: crate::CameraDraws::default(),
                 post_after: false,
             },
         );
@@ -886,6 +887,7 @@ mod tests {
             ortho: true,
             ortho_height: 10.0,
             stack: Vec::new(),
+            draws: crate::CameraDraws::default(),
             post_after: false,
         };
         let follower = world.spawn();
@@ -931,6 +933,7 @@ mod tests {
                 ortho: true,
                 ortho_height: 10.0,
                 stack: Vec::new(),
+                draws: crate::CameraDraws::default(),
                 post_after: false,
             },
         );
@@ -1048,6 +1051,7 @@ mod tests {
             ortho: true,
             ortho_height: 11.0,
             stack: Vec::new(),
+            draws: crate::CameraDraws::default(),
             post_after: false,
         });
         world.insert(e, Camera2D { art_pixels: 8.0, ..Default::default() });

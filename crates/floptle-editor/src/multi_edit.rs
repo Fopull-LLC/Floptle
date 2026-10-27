@@ -411,6 +411,7 @@ fn matter_diff(before: &Matter, after: &Matter, target: &mut Matter) -> bool {
                 ortho,
                 ortho_height,
                 stack,
+                draws,
                 post_after,
             },
             Matter::Camera {
@@ -423,6 +424,7 @@ fn matter_diff(before: &Matter, after: &Matter, target: &mut Matter) -> bool {
                 ortho_height: boh,
                 stack: bs,
                 post_after: bpa,
+                draws: bd,
                 ..
             },
             Matter::Camera {
@@ -435,6 +437,7 @@ fn matter_diff(before: &Matter, after: &Matter, target: &mut Matter) -> bool {
                 ortho_height: toh,
                 stack: ts,
                 post_after: tpa,
+                draws: td,
                 ..
             },
         ) => {
@@ -452,6 +455,7 @@ fn matter_diff(before: &Matter, after: &Matter, target: &mut Matter) -> bool {
             set(ortho_height, boh, toh, &mut hit);
             set(stack, bs, ts, &mut hit);
             set(post_after, bpa, tpa, &mut hit);
+            set(draws, bd, td, &mut hit);
             hit
         }
         (
@@ -848,6 +852,7 @@ mod tests {
             ortho: false,
             ortho_height: 10.0,
             stack: Vec::new(),
+            draws: floptle_core::CameraDraws::default(),
             post_after: false,
         });
         let a = w.spawn();
@@ -890,6 +895,7 @@ mod tests {
                 ortho: false,
                 ortho_height: 10.0,
                 stack: Vec::new(),
+                draws: floptle_core::CameraDraws::default(),
                 post_after: false,
             });
             e

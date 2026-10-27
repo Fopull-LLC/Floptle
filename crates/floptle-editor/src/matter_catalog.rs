@@ -167,6 +167,7 @@ pub(crate) fn type_catalog() -> Vec<(&'static str, Matter)> {
             ortho: false,
             ortho_height: Matter::ORTHO_HEIGHT,
             stack: Vec::new(),
+            draws: floptle_core::CameraDraws::default(),
             post_after: false,
         }),
         ("●  Point Light", Matter::PointLight {

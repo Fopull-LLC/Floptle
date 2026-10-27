@@ -310,6 +310,7 @@ fn regenerate_platformer2d() {
             ortho: true,
             ortho_height: 11.0,
             stack: Vec::new(),
+            draws: floptle_core::CameraDraws::default(),
             post_after: false,
         },
     );
