@@ -1,5 +1,10 @@
 ## Just shipped
 
+**v0.117.0-rc38 — "Whole Worlds"** (beta). Compute shaders: `gpu.buffer`,
+`gpu.texture` and `compute.run` put programs on the GPU that draw nothing, for
+procedural textures, particle swarms and simulations. Moving worlds cost what
+they did before rc37 again, and exported builds draw textures the way Play does.
+
 **v0.117.0-rc37 — "Whole Worlds"** (beta). Solid ground that stays where it is
 drawn on a world moving along its orbit, and `floptle check` reporting scripts
 that don't compile.
