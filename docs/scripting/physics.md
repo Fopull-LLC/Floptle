@@ -327,8 +327,9 @@ print(j.position, j.speed)                   -- where it is, and how fast it mov
 ```
 
 A **wheel** joint hung from an assembly chassis turns only about its axle, grips
-the ground by the load its suspension carries, and parks on a slope with its
-motor held at zero.
+the ground by how hard the ground presses on it (measured at the contact, so a
+raked or slanted suspension axis grips the same both ways), and parks on a
+slope with its motor held at zero.
 
 `assembly.grip(node, at [, target] [, breakForce])` welds a craft at a point to a
 body, another assembly, or the ground under it; it rides that ground when the

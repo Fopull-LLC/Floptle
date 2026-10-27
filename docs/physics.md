@@ -178,7 +178,10 @@ it is when play starts: a sign's hook, a pendulum's pivot.
 
 A car is a body with two wheel nodes, each with a **wheel** joint naming the
 body, an **axis** of `0, 1, 0` for suspension that works up and down, and a
-motor. A chain is a row of small bodies, each hinged to the one before.
+motor. The axis can lean: a raked fork or an angled swing arm works along its
+own line. A tyre grips by how hard the ground presses on it, measured at the
+contact along the ground's normal, so a slanted axis grips the same driving
+forwards as backwards. A chain is a row of small bodies, each hinged to the one before.
 
 From a script:
 

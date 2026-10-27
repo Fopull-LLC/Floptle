@@ -831,11 +831,20 @@ impl PhysicsWorld {
 
     /// Tyre friction for a wheel joint's wheel (a body on the ground): the
     /// contact patch's sliding, along and across the tread, is stopped by an
-    /// impulse no larger than friction times what the wheel carries this
-    /// step, its own weight and the suspension's push `load`. Solved here,
-    /// after the joints, because the load arrives through the joint: the
-    /// contact pass alone sees only the wheel's own weight, and a rover parked
-    /// on a slope slid on wheels that held a third of it up.
+    /// impulse no larger than friction times how hard the ground presses on
+    /// the wheel. Solved here, after the joints, because the load arrives
+    /// through the joint: the contact pass alone sees only the wheel's own
+    /// weight, and a rover parked on a slope slid on wheels that held a third
+    /// of it up.
+    ///
+    /// How hard the ground presses is what the wheel's contacts took out along
+    /// the ground's normal last step ([`crate::body::Body::pressed`]), whatever
+    /// way its suspension leans. It was the spring's push along the
+    /// suspension's own axis, which is the same thing only for an axis square
+    /// to the ground: along a slanted one the spring also carries part of the
+    /// drive, and a raked bike's grip shrank as it drove forwards and grew in
+    /// reverse. Before the wheel has touched down for a step, the wheel's
+    /// weight and the spring's push `load` stand in.
     fn tyre_grip(&mut self, j: usize, jt: &JointRt, load: f32, dt: f32) -> f32 {
         let Link::Body(i) = jt.a else { return 0.0 };
         // Held only while braked and on the ground: a parked wheel.
@@ -850,9 +859,8 @@ impl PhysicsWorld {
             (n, -n * b.radius, b.friction.max(0.0), b.mass.max(1e-4))
         };
         let g = self.gravity.accel_at(self.bodies[i].pos, &self.colliders);
-        // What presses the patch into the ground: the wheel's weight and the
-        // suspension's share of the craft, both as impulses this step.
-        let press = (mass * (-g).dot(n)).max(0.0) * dt + load.abs();
+        let pressed = self.bodies[i].pressed;
+        let press = if pressed > 0.0 { pressed } else { (mass * (-g).dot(n)).max(0.0) * dt + load.abs() };
         let budget = mu * press;
         if budget <= 0.0 {
             return 0.0;

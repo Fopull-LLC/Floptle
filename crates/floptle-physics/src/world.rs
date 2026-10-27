@@ -3467,6 +3467,8 @@ impl PhysicsWorld {
             b.contact = None;
             b.ground_normal = None;
             b.wall_normal = None;
+            // Gathered afresh by this step's contacts (`rigid_impulse`).
+            b.pressed = 0.0;
         }
         let size = {
             let b = &self.bodies[bi];
@@ -3722,6 +3724,7 @@ impl PhysicsWorld {
         let vn = vp.dot(n);
         if vn < 0.0 {
             let j = -(1.0 + b.restitution) * vn / w;
+            b.pressed += j;
             b.vel += n * (j * inv_m);
             b.ang_vel += b.free_spin(inv_i * r.cross(n * j));
             let vp = b.vel + b.ang_vel.cross(r);
@@ -4174,6 +4177,10 @@ impl PhysicsWorld {
             if !self.bodies[bi].grounded && !self.bodies[bi].sensor {
                 self.touch_ground(bi, row);
             }
+
+            // What the contacts took out, as momentum: next step's tyre grip
+            // for a wheel joint's wheel (see `tyre_grip`).
+            self.bodies[bi].pressed = impact_dv * self.bodies[bi].mass.max(1e-4);
 
             // ---- friction, part two: what the contacts just absorbed --------
             //

@@ -914,3 +914,77 @@ fn a_craft_on_free_wheels_rolls() {
         assert!(v > free * 0.95 && v <= free * 1.001, "run {k}: {v} m/s after 5 s; with no friction it would be {free}");
     }
 }
+
+/// How fast a rover with its four suspension axes raked `rake` radians
+/// along the way it drives is going after a second of full throttle, `dir`
+/// forwards (+1) or backwards (-1), under gravity `g`. Its motors are far
+/// stronger than its tyres' grip, so what it reaches is the grip.
+fn raked_drive_speed(rake: f32, dir: f32, g: Vec3) -> f32 {
+    let mut ecs = World::default();
+    let floor = ecs.spawn();
+    ecs.insert(floor, Transform::from_translation(DVec3::new(0.0, -1.0, 0.0)));
+    ecs.insert(floor, RigidBody { kind: BodyKind::Box, mode: BodyMode::Static, half_extents: [200.0, 1.0, 50.0], friction: 0.6, ..Default::default() });
+    let chassis = segment(&mut ecs, "Chassis", DVec3::new(0.0, 0.8, 0.0), [1.2, 0.2, 0.7], 400.0);
+    let mut wheels = Vec::new();
+    for (dx, dz) in [(-1.0f64, -0.9f64), (1.0, -0.9), (-1.0, 0.9), (1.0, 0.9)] {
+        let w = ecs.spawn();
+        ecs.insert(w, Transform::from_translation(DVec3::new(dx, 0.4, dz)));
+        ecs.insert(w, RigidBody { radius: 0.4, mass: 7.5, friction: 0.6, rotates: true, ..Default::default() });
+        ecs.insert(
+            w,
+            Joint {
+                kind: JointKind::Wheel,
+                other: "Chassis".into(),
+                axis: [rake.sin(), rake.cos(), 0.0],
+                stiffness: 18.0,
+                damping: 0.8,
+                motor: true,
+                motor_speed: 0.0,
+                max_force: 5000.0,
+                ..Default::default()
+            },
+        );
+        wheels.push(w);
+    }
+    let mut sim = Sim::build_layered(&ecs, &[], GravityField::uniform(g), DVec3::ZERO, floptle_core::Layers::default());
+    run(&mut sim, &mut ecs, 1.0);
+    let x0 = sim.compound_of(chassis.index()).unwrap().vel.x;
+    for &w in &wheels {
+        ecs.get_mut::<Joint>(w).unwrap().motor_speed = -3000.0 * dir;
+    }
+    run(&mut sim, &mut ecs, 1.0);
+    (sim.compound_of(chassis.index()).unwrap().vel.x - x0) * dir
+}
+
+/// **A raked suspension grips the same both ways.** A tyre's grip is
+/// friction times how hard it is pressed into the ground, which does not
+/// depend on which way it drives. It was sized from the spring's push
+/// along the suspension's own axis instead, and a slanted axis takes part
+/// of the drive along it: one way the drive unloaded the spring and the
+/// grip shrank, the other way it loaded it. A raked bike crawled forwards
+/// and was a beast in reverse. With the axis raked 35°, on the flat and on
+/// a 25% grade, it now gains the same speed either way within 5%, and as
+/// much as with the axis upright.
+#[test]
+fn a_raked_suspension_grips_the_same_forwards_and_backwards() {
+    let flat = Vec3::new(0.0, -9.81, 0.0);
+    // A 25% grade, uphill along +x: gravity tilted back by atan(0.25).
+    let a = 0.25f32.atan();
+    let slope = Vec3::new(-a.sin(), -a.cos(), 0.0) * 9.81;
+    for (name, g) in [("flat", flat), ("a 25% grade", slope)] {
+        let up = raked_drive_speed(0.0, 1.0, g);
+        let fwd = raked_drive_speed(35f32.to_radians(), 1.0, g);
+        let back = raked_drive_speed(35f32.to_radians(), -1.0, g);
+        assert!(up > 0.5, "on {name} the upright rover gained only {up} m/s: the test is not traction-limited");
+        if name == "flat" {
+            assert!((fwd - back).abs() <= 0.05 * fwd.max(back), "on {name}, raked 35°: {fwd} m/s forwards against {back} backwards");
+            assert!((fwd - up).abs() <= 0.1 * up, "on {name}, raked it gained {fwd} m/s; upright {up}");
+        } else {
+            // Uphill and downhill differ by gravity; what must match is the
+            // raked rover and the upright one, each way.
+            let up_back = raked_drive_speed(0.0, -1.0, g);
+            assert!((fwd - up).abs() <= 0.1 * up, "on {name} uphill, raked {fwd} m/s against upright {up}");
+            assert!((back - up_back).abs() <= 0.1 * up_back, "on {name} downhill, raked {back} m/s against upright {up_back}");
+        }
+    }
+}

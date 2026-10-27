@@ -201,6 +201,10 @@ pub struct Body {
     /// normal of the step, or `None` when nothing this step counted as ground
     /// (so it is exactly `grounded`, with the surface attached).
     pub ground_normal: Option<Vec3>,
+    /// How hard the surfaces pressed on the body last step: the momentum its
+    /// contacts took out along their normals (a hard landing's whole impact,
+    /// a resting body's weight). What a wheel joint's tyre grip is sized from.
+    pub pressed: f32,
     /// The steepest surface the body is pressed against, when that surface is
     /// too steep to be a floor — a wall, a cliff face, the side of a crate.
     ///
@@ -355,6 +359,7 @@ impl Body {
             grounded: false,
             contact: None,
             ground_normal: None,
+            pressed: 0.0,
             wall_normal: None,
             home: pos,
             active: true,
