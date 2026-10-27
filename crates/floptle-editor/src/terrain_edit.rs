@@ -657,6 +657,26 @@ fn make_op(field: &mut floptle_field::ChunkField, op: &floptle_script::TerrainOp
     }
 }
 
+/// Where an op changed the ground, in the world as it is now.
+///
+/// The op's own point is the world as it was when the script made it, and a
+/// planet moves on before the edit lands: a frame later for one made on the
+/// frame, several for one made on a worker. The scatter standing on what
+/// changed is found through the planet's frame as it is now, so the point is
+/// taken from where the edit landed on the terrain, through the terrain's
+/// frame now. From the stale point the props round the edge of a flatten, the
+/// part that moved last, kept their old height and floated.
+fn edited_point_now(world: &floptle_core::World, op: &floptle_script::TerrainOp, at: Option<&OpTarget>) -> DVec3 {
+    match at {
+        Some(at) => {
+            let wt = floptle_core::world_transform(world, at.e);
+            let (rot, s) = (wt.rotation.normalize(), wt.scale.x.max(1e-6));
+            wt.translation + (rot * (at.local * s)).as_dvec3()
+        }
+        None => DVec3::new(op.pos[0], op.pos[1], op.pos[2]),
+    }
+}
+
 /// A script terrain op waiting its turn, with where it lands; `None` when no
 /// terrain was near enough when it was made.
 pub(crate) struct QueuedEdit {
@@ -2429,7 +2449,7 @@ impl Editor {
                 continue;
             }
             if scatter && op.affects_geometry() {
-                dirty.push((DVec3::new(op.pos[0], op.pos[1], op.pos[2]), op.radius as f64));
+                dirty.push((edited_point_now(&self.world, &op, at.as_ref()), op.radius as f64));
             }
             if let Some(at) = at {
                 self.apply_resolved_op(&op, &at, &mut batch);
@@ -2602,7 +2622,7 @@ impl Editor {
             job.in_flight -= 1;
             let OpDone { op, at, field, touched, realized: made, changed, measured, region } = done;
             if scatter && op.affects_geometry() {
-                dirty.push((DVec3::new(op.pos[0], op.pos[1], op.pos[2]), op.radius as f64));
+                dirty.push((edited_point_now(&self.world, &op, Some(&at)), op.radius as f64));
             }
             let Some(t) = self.terrains.get_mut(&e) else { continue };
             let mut coords = touched.clone();
@@ -7110,5 +7130,47 @@ mod residency_tests {
         assert!(!r.slots.is_empty(), "the world never meshed");
         let stale: Vec<_> = r.slots.keys().filter(|c| !f.has_data(**c)).collect();
         assert!(stale.is_empty(), "chunks of what stood there before still draw: {stale:?}");
+    }
+}
+
+#[cfg(test)]
+mod edited_point_tests {
+    use super::*;
+
+    /// **The ground an edit changed is found where the terrain is now.** A
+    /// flatten is made on a planet, which then moves and turns before the edit
+    /// lands. The scatter to re-settle is looked for at the edit's place on the
+    /// planet, carried along with it, not at the world point the script named
+    /// before the planet moved on: from there the props round the edge of a
+    /// base's graded ground were never re-settled and floated.
+    #[test]
+    fn an_edit_on_a_moving_planet_is_found_where_the_planet_went() {
+        let mut world = floptle_core::World::default();
+        let planet = world.spawn();
+        let at_first = floptle_core::Transform { translation: DVec3::new(1000.0, 0.0, 0.0), scale: Vec3::splat(2.0), ..Default::default() };
+        world.insert(planet, at_first);
+        let named = DVec3::new(1000.0, 40.0, 6.0);
+        let local = ((at_first.rotation.inverse() * (named - at_first.translation).as_vec3()) / 2.0, 2.0);
+        let op = floptle_script::TerrainOp {
+            pos: named.to_array(),
+            radius: 8.0,
+            strength: 1.0,
+            mode: floptle_script::TerrainOpMode::Flatten,
+            id: 0,
+            normal: None,
+        };
+        let at = OpTarget { e: planet, local: local.0, ts: local.1, flat_normal: None };
+        assert!((edited_point_now(&world, &op, Some(&at)) - named).length() < 1e-3, "an edit that lands at once is where it was made");
+        // The planet orbits on and turns before the edit lands.
+        let moved = floptle_core::Transform {
+            translation: DVec3::new(1030.0, 0.0, -12.0),
+            rotation: floptle_core::math::Quat::from_rotation_y(0.3),
+            scale: Vec3::splat(2.0),
+        };
+        world.insert(planet, moved);
+        let want = moved.translation + (moved.rotation * (local.0 * 2.0)).as_dvec3();
+        let got = edited_point_now(&world, &op, Some(&at));
+        assert!((got - want).length() < 1e-3, "the edit was looked for at {got}, not where the planet took it, {want}");
+        assert!((got - named).length() > 10.0, "the test planet did not move far enough to tell the two apart");
     }
 }
