@@ -31,6 +31,7 @@ fn wgsl(e: &Elem, struct_name: &str) -> String {
         Elem::F32 => "f32".into(),
         Elem::U32 => "u32".into(),
         Elem::I32 => "i32".into(),
+        Elem::AtomicU32 => "atomic<u32>".into(),
         Elem::Vec2 => "vec2<f32>".into(),
         Elem::Vec3 => "vec3<f32>".into(),
         Elem::Vec4 => "vec4<f32>".into(),

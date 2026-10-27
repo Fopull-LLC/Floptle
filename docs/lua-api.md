@@ -2202,7 +2202,7 @@ Buffers and textures on the GPU, for compute shaders to read and write: a proced
 
 ### `gpu.buffer`
 
-gpu.buffer{ count = n, type = "f32" } → buf — a typed array of n elements on the GPU, zeroed. type is f32, u32, i32, vec2, vec3 or vec4 (f32 when left out), or give layout = { "pos: vec3", "vel: vec3", "life: f32" } for a struct with those fields. In the shader it is a read_write storage array under the name you bind it to. A vec3 takes 16 bytes, as WGSL lays it out. A buffer bigger than the device binds is refused with the number (gpu.limits().maxBufferBytes). buf.count and buf.type say what it holds.
+gpu.buffer{ count = n, type = "f32" } → buf — a typed array of n elements on the GPU, zeroed. type is f32, u32, i32, atomic (whole numbers shaders change with atomicAdd and the rest), vec2, vec3 or vec4 (f32 when left out), or give layout = { "pos: vec3", "vel: vec3", "life: f32" } for a struct with those fields. In the shader it is a read_write storage array under the name you bind it to. A vec3 takes 16 bytes, as WGSL lays it out. A buffer bigger than the device binds is refused with the number (gpu.limits().maxBufferBytes). buf.count and buf.type say what it holds.
 
 ### `gpu.free`
 

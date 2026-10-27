@@ -131,7 +131,7 @@ fn parse_elem(call: &str, opts: &Table) -> mlua::Result<Elem> {
     match (opts.get::<Option<String>>("type")?, opts.get::<Option<Table>>("layout")?) {
         (Some(_), Some(_)) => Err(err(call, "give a type or a layout, not both")),
         (Some(t), None) => Elem::parse_scalar(&t)
-            .ok_or_else(|| err(call, format!("\"{t}\" is not a type a buffer holds (f32, u32, i32, vec2, vec3, vec4)"))),
+            .ok_or_else(|| err(call, format!("\"{t}\" is not a type a buffer holds (f32, u32, i32, atomic, vec2, vec3, vec4)"))),
         (None, Some(layout)) => {
             let mut fields = Vec::new();
             for line in layout.sequence_values::<String>() {
@@ -170,7 +170,7 @@ fn lanes(e: &Elem) -> usize {
 /// A scalar's four bytes, as the shader reads that type.
 fn put(out: &mut Vec<u8>, e: &Elem, v: f64) {
     match e {
-        Elem::U32 => out.extend_from_slice(&(v.max(0.0) as u32).to_le_bytes()),
+        Elem::U32 | Elem::AtomicU32 => out.extend_from_slice(&(v.max(0.0) as u32).to_le_bytes()),
         Elem::I32 => out.extend_from_slice(&(v as i32).to_le_bytes()),
         _ => out.extend_from_slice(&(v as f32).to_le_bytes()),
     }
@@ -193,7 +193,7 @@ fn vector(v: &Value, n: usize) -> Option<[f64; 4]> {
 fn encode_one(out: &mut Vec<u8>, e: &Elem, v: &Value) -> Result<(), String> {
     let start = out.len();
     match e {
-        Elem::F32 | Elem::U32 | Elem::I32 => match v {
+        Elem::F32 | Elem::U32 | Elem::I32 | Elem::AtomicU32 => match v {
             Value::Number(n) => put(out, e, *n),
             Value::Integer(n) => put(out, e, *n as f64),
             other => return Err(format!("a {} is a number, not a {}", type_name(e), other.type_name())),
@@ -227,6 +227,7 @@ fn type_name(e: &Elem) -> &'static str {
         Elem::F32 => "f32",
         Elem::U32 => "u32",
         Elem::I32 => "i32",
+        Elem::AtomicU32 => "atomic",
         Elem::Vec2 => "vec2",
         Elem::Vec3 => "vec3",
         Elem::Vec4 => "vec4",
@@ -274,7 +275,7 @@ fn encode(e: &Elem, v: &Value) -> Result<Vec<u8>, String> {
 fn scalar_at(lua: &Lua, e: &Elem, b: &[u8]) -> mlua::Result<Value> {
     let w = [b[0], b[1], b[2], b[3]];
     Ok(match e {
-        Elem::U32 => Value::Integer(u32::from_le_bytes(w) as mlua::Integer),
+        Elem::U32 | Elem::AtomicU32 => Value::Integer(u32::from_le_bytes(w) as mlua::Integer),
         Elem::I32 => Value::Integer(i32::from_le_bytes(w) as mlua::Integer),
         _ => {
             let _ = lua;
@@ -285,7 +286,7 @@ fn scalar_at(lua: &Lua, e: &Elem, b: &[u8]) -> mlua::Result<Value> {
 
 fn decode_one(lua: &Lua, e: &Elem, b: &[u8]) -> mlua::Result<Value> {
     match e {
-        Elem::F32 | Elem::U32 | Elem::I32 => scalar_at(lua, e, b),
+        Elem::F32 | Elem::U32 | Elem::I32 | Elem::AtomicU32 => scalar_at(lua, e, b),
         Elem::Vec2 | Elem::Vec3 | Elem::Vec4 => {
             let t = lua.create_table()?;
             for (i, k) in ["x", "y", "z", "w"].iter().enumerate().take(lanes(e)) {

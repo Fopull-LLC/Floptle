@@ -9,6 +9,10 @@ pub enum Elem {
     F32,
     U32,
     I32,
+    /// A `u32` shaders change with `atomicAdd`, `atomicMax` and the rest,
+    /// safely from every invocation at once: a counter, a histogram. Written
+    /// and read from a script as a plain whole number.
+    AtomicU32,
     Vec2,
     Vec3,
     Vec4,
@@ -23,7 +27,7 @@ impl Elem {
     /// WGSL's (size, alignment) for this type in a storage buffer.
     pub fn size_align(&self) -> (u32, u32) {
         match self {
-            Elem::F32 | Elem::U32 | Elem::I32 => (4, 4),
+            Elem::F32 | Elem::U32 | Elem::I32 | Elem::AtomicU32 => (4, 4),
             Elem::Vec2 => (8, 8),
             Elem::Vec3 => (12, 16),
             Elem::Vec4 => (16, 16),
@@ -67,6 +71,7 @@ impl Elem {
             "f32" | "float" => Elem::F32,
             "u32" | "uint" => Elem::U32,
             "i32" | "int" => Elem::I32,
+            "atomic" | "atomic<u32>" => Elem::AtomicU32,
             "vec2" | "vec2f" | "vec2<f32>" => Elem::Vec2,
             "vec3" | "vec3f" | "vec3<f32>" => Elem::Vec3,
             "vec4" | "vec4f" | "vec4<f32>" => Elem::Vec4,

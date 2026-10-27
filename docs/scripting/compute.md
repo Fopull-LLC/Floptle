@@ -36,8 +36,11 @@ fn double(@builtin(global_invocation_id) id: vec3<u32>) {
 ### Buffers
 
 `gpu.buffer{ count = n, type = "f32" }` is a typed array of `n` elements on
-the GPU, zeroed. `type` is `f32`, `u32`, `i32`, `vec2`, `vec3` or `vec4`. For
-a struct, give its fields instead:
+the GPU, zeroed. `type` is `f32`, `u32`, `i32`, `atomic`, `vec2`, `vec3` or
+`vec4`. An `atomic` buffer holds whole numbers that shaders change with
+`atomicAdd`, `atomicMax` and the rest, safely from every invocation at once: a
+counter, a histogram. From a script it reads and writes like `u32`. For a
+struct, give its fields instead:
 
 ```lua
 local parts = gpu.buffer{ count = 100000, layout = { "pos: vec3", "vel: vec3", "life: f32" } }
@@ -68,8 +71,8 @@ of life below does.
 ### Writing the shader
 
 A compute shader is a `.wgsl` file in your project, with one or more
-`@compute` entry points. It is plain WGSL: loops, atomics, workgroup memory
-and barriers are all there. The engine writes the declarations in front of
+`@compute` entry points. It is plain WGSL: loops, workgroup memory, barriers,
+and atomics (in workgroup memory, and in an `atomic` buffer) are all there. The engine writes the declarations in front of
 it, so you never count binding numbers:
 
 - every buffer and texture you bind, as a global under its bind name;
@@ -214,5 +217,7 @@ fn advance(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 ```
 
-The reference for every call is under
+For a step-by-step start, the tutorial
+[Compute shaders — a pond the GPU simulates](../tutorials/compute.md) builds a
+rippling pond from an empty scene. The reference for every call is under
 [compute in the API reference](../lua-api.md#compute--gpu--computerun).

@@ -148,3 +148,24 @@ fn a_file_of_several_entry_points_runs_each_with_its_own_bindings() {
     assert_eq!(&v[..3], &[100, 101, 102]);
     assert_eq!(v[63], 163);
 }
+
+/// **An atomic buffer counts from every invocation at once.** 4096
+/// invocations each add one to the same counter, and it comes back 4096:
+/// a counter, a histogram, a "how many particles are alive". Before there was
+/// an atomic type a buffer was a plain `u32` array, `atomicAdd` on it did not
+/// compile, and the guide's "atomics are all there" was true of workgroup
+/// memory alone.
+#[test]
+fn an_atomic_buffer_counts_from_every_invocation() {
+    let Some(gpu) = gpu() else { return };
+    let mut c = Compute::new();
+    let count = c.create_buffer(&gpu, Elem::AtomicU32, 1).unwrap();
+    let src = "@compute @workgroup_size(64)\nfn tally(@builtin(global_invocation_id) id: vec3<u32>) {\n  atomicAdd(&hits[0], 1u);\n}\n";
+    c.queue(job(src, "tally", [64, 1, 1], vec![("hits".into(), Bound::Buffer(count))], vec![]));
+    let failed = c.run_queued(&gpu, 0.0, &mut |_| {});
+    assert!(failed.is_empty(), "{failed:?}");
+    c.read_buffer(&gpu, count, 1).unwrap();
+    let got = answers(&mut c, &gpu, 1);
+    assert_eq!(got.len(), 1, "the readback never answered");
+    assert_eq!(u32s(&got[0].1), vec![4096]);
+}
