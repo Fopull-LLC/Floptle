@@ -42,3 +42,25 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     let solid = textureLoad(layer_depth, px, 0).x < 1.0;
     return select(c, vec4<f32>(c.rgb, 1.0), solid);
 }
+
+// The layer's depth into the frame's, where the layer drew something solid, as
+// a depth from the base camera: the layer's clip-space point, taken through
+// `to_base` (the layer's clip space to the base camera's). Elsewhere nothing
+// is written, so the frame keeps what it had. Its own bindings, so the two
+// passes never share a slot.
+@group(0) @binding(2) var stack_depth: texture_2d<f32>;
+struct ToBase { m: mat4x4<f32> };
+@group(0) @binding(3) var<uniform> to_base: ToBase;
+
+@fragment
+fn fs_depth(in: VOut) -> @builtin(frag_depth) f32 {
+    let dims = vec2<f32>(textureDimensions(stack_depth));
+    let px = vec2<i32>(clamp(in.uv * dims, vec2<f32>(0.0), dims - vec2<f32>(1.0)));
+    let d = textureLoad(stack_depth, px, 0).x;
+    if (d >= 1.0) {
+        discard;
+    }
+    let ndc = vec4<f32>(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0, d, 1.0);
+    let c = to_base.m * ndc;
+    return clamp(c.z / c.w, 0.0, 1.0);
+}

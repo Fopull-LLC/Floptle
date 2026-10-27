@@ -7,8 +7,11 @@
 //! the arms are drawn by a camera that never sees the wall.
 //!
 //! The layer is composited before post-processing, so the whole picture is
-//! tonemapped, bloomed and graded as one. Post reads the base camera's depth,
-//! which the layer leaves untouched.
+//! tonemapped, bloomed and graded as one. Where the layer drew something solid
+//! its depth goes into the frame's depth too
+//! ([`StackComposite::composite_depth`]), as a distance from the base camera,
+//! so depth of field and AO see a cockpit 0.6 m away as 0.6 m away rather
+//! than as the hills behind it.
 
 use crate::device::Gpu;
 
@@ -68,6 +71,9 @@ impl StackLayer {
 pub struct StackComposite {
     pipeline: wgpu::RenderPipeline,
     bind_layout: wgpu::BindGroupLayout,
+    depth_pipeline: wgpu::RenderPipeline,
+    depth_layout: wgpu::BindGroupLayout,
+    depth_buf: wgpu::Buffer,
 }
 
 impl StackComposite {
@@ -124,7 +130,106 @@ impl StackComposite {
             multiview_mask: None,
             cache: None,
         });
-        Self { pipeline, bind_layout }
+        // The depth pass: the layer's depth texture, and the matrix from the
+        // layer's clip space to the base camera's.
+        let depth_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("camera-stack-depth"),
+            entries: &[
+                texture(2),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let depth_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("camera-stack-depth"),
+            bind_group_layouts: &[Some(&depth_layout)],
+            immediate_size: 0,
+        });
+        let depth_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("camera-stack-depth"),
+            layout: Some(&depth_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            // Always: the layer is drawn over the frame whatever the frame had
+            // there, so its depth replaces the frame's where it drew.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Gpu::DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_depth"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let depth_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("camera-stack-depth"),
+            size: 64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self { pipeline, bind_layout, depth_pipeline, depth_layout, depth_buf }
+    }
+
+    /// Write where `layer` drew something solid into the frame's `depth`, as
+    /// the base camera would have seen it there. `layer_to_base` takes the
+    /// layer's clip space to the base camera's: the base camera's view-
+    /// projection, times the move from the layer camera's position to the base
+    /// camera's, times the inverse of the layer camera's view-projection.
+    pub fn composite_depth(&self, gpu: &Gpu, layer: &StackLayer, depth: &wgpu::TextureView, layer_to_base: glam::Mat4) {
+        gpu.queue.write_buffer(&self.depth_buf, 0, bytemuck::cast_slice(&layer_to_base.to_cols_array()));
+        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("camera-stack-depth"),
+            layout: &self.depth_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(layer.depth_view()),
+                },
+                wgpu::BindGroupEntry { binding: 3, resource: self.depth_buf.as_entire_binding() },
+            ],
+        });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("camera-stack-depth") });
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("camera-stack-depth"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rp.set_pipeline(&self.depth_pipeline);
+            rp.set_bind_group(0, &bind, &[]);
+            rp.draw(0..3, 0..1);
+        }
+        gpu.queue.submit([encoder.finish()]);
     }
 
     /// Lay `layer` over `target`, which keeps everything the layer did not draw.

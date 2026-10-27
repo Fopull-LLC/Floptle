@@ -3,7 +3,8 @@
 //! A camera's `stack` names other cameras, bottom first. Each one renders only
 //! the nodes on its own layers into a layer of its own, over a transparent
 //! clear and an empty depth buffer, and the layers are laid over the base
-//! camera's frame before post-processing. A first-person arm rig on its own
+//! camera's frame before post-processing, their depth with them, so the base
+//! camera's depth of field and AO see the stacked things where they are. A first-person arm rig on its own
 //! layer, filmed by a stacked camera, is drawn whole however close the player
 //! stands to a wall: the camera filming it never saw the wall.
 //!
@@ -82,6 +83,10 @@ pub(crate) fn resolve_stack(world: &World, base: Entity) -> StackPlan {
 pub(crate) struct CameraStacks {
     composite: Option<floptle_render::StackComposite>,
     layers: HashMap<(u32, u32), Vec<StackLayer>>,
+    /// Where the camera that last drew each layer stood, and the inverse of
+    /// its camera-relative view-projection: what takes a layer's depth back
+    /// into the world.
+    placed: HashMap<(u32, u32), Vec<(floptle_core::math::DVec3, floptle_core::math::Mat4)>>,
     /// `base → name` pairs already reported missing.
     warned: std::collections::HashSet<String>,
 }
@@ -95,6 +100,7 @@ impl CameraStacks {
     fn ensure(&mut self, gpu: &floptle_render::Gpu, size: (u32, u32), n: usize) {
         if !self.layers.contains_key(&size) && self.layers.len() >= SIZES_KEPT {
             self.layers.clear();
+            self.placed.clear();
         }
         let set = self.layers.entry(size).or_default();
         while set.len() < n {
@@ -106,18 +112,40 @@ impl CameraStacks {
     }
 
     /// Lay the first `n` layers at `size` over `target`, bottom first.
+    ///
+    /// With `depth` (the frame's depth, and the base camera and aspect it was
+    /// drawn with), each layer's depth goes into it where the layer drew
+    /// something solid, so depth-based post sees the stacked things at their
+    /// own distance.
     pub(crate) fn composite(
         &self,
         gpu: &floptle_render::Gpu,
         size: (u32, u32),
         n: usize,
         target: &wgpu::TextureView,
+        depth: Option<(&wgpu::TextureView, &RenderCamera, f32)>,
     ) {
         let (Some(pass), Some(set)) = (self.composite.as_ref(), self.layers.get(&size)) else { return };
-        for layer in set.iter().take(n) {
+        let placed = self.placed.get(&size);
+        for (i, layer) in set.iter().take(n).enumerate() {
             pass.composite(gpu, layer, target);
+            if let (Some((depth, base, aspect)), Some(&(at, inv_vp))) = (depth, placed.and_then(|p| p.get(i))) {
+                pass.composite_depth(gpu, layer, depth, layer_to_base(base, aspect, at, inv_vp));
+            }
         }
     }
+}
+
+/// The matrix from a layer's clip space to the base camera's: back into the
+/// world from the layer camera (`at`, `inv_vp`), across to the base camera's
+/// position, and through the base camera's view-projection.
+fn layer_to_base(
+    base: &RenderCamera,
+    aspect: f32,
+    at: floptle_core::math::DVec3,
+    inv_vp: floptle_core::math::Mat4,
+) -> floptle_core::math::Mat4 {
+    base.view_proj(aspect) * floptle_core::math::Mat4::from_translation((at - base.world_position).as_vec3()) * inv_vp
 }
 
 impl crate::Editor {
@@ -163,6 +191,9 @@ impl crate::Editor {
                 wt.rotation,
                 Projection::of_camera(sc.fov_y, sc.ortho, sc.ortho_height, 0.05, 300000.0),
             );
+            let placed = self.camera_stacks.placed.entry(size).or_default();
+            placed.resize(placed.len().max(i + 1), Default::default());
+            placed[i] = (cam.world_position, cam.view_proj(aspect).inverse());
             self.render_world_into(
                 &color,
                 &depth,
@@ -179,7 +210,8 @@ impl crate::Editor {
     }
 
     /// Render `base`'s stack and lay it straight over `target` — for a view
-    /// whose own picture is already finished.
+    /// whose own picture is already drawn. `depth` is that picture's depth and
+    /// the camera it was drawn with, for the post still to come.
     pub(crate) fn draw_camera_stack_over(
         &mut self,
         base: Entity,
@@ -187,12 +219,14 @@ impl crate::Editor {
         size: (u32, u32),
         aspect: f32,
         elapsed: f32,
+        depth: Option<(&wgpu::TextureView, &RenderCamera)>,
     ) {
         let n = self.render_camera_stack(base, size, aspect, elapsed);
         if n > 0
             && let Some(gpu) = self.gpu.as_ref()
         {
-            self.camera_stacks.composite(gpu, (size.0.max(1), size.1.max(1)), n, target);
+            let depth = depth.map(|(d, cam)| (d, cam, aspect));
+            self.camera_stacks.composite(gpu, (size.0.max(1), size.1.max(1)), n, target, depth);
         }
     }
 }
@@ -200,6 +234,32 @@ impl crate::Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A stacked camera's depth is converted into the base camera's.** A
+    /// cockpit camera at the eye with its own field of view: a point 0.6 m
+    /// ahead in its picture is 0.6 m ahead in the base camera's depth. Taken
+    /// as it was, it would read as whatever distance the layer's own
+    /// projection puts at that depth.
+    #[test]
+    fn a_stack_layer_s_depth_is_converted_to_the_base_camera_s() {
+        use floptle_core::math::{DVec3, Quat, Vec4};
+        let eye = DVec3::new(10.0, 2.0, -3.0);
+        let rot = Quat::from_rotation_y(0.4);
+        let base = RenderCamera::new(eye, rot, Projection::of_camera(1.0, false, 10.0, 0.1, 5000.0));
+        let stack = RenderCamera::new(eye, rot, Projection::of_camera(0.6, false, 10.0, 0.05, 300000.0));
+        let aspect = 1.5;
+        let ahead = rot * floptle_core::math::Vec3::NEG_Z * 0.6;
+        let clip = |c: &RenderCamera| {
+            let p = c.view_proj(aspect) * Vec4::new(ahead.x, ahead.y, ahead.z, 1.0);
+            p / p.w
+        };
+        let in_layer = clip(&stack);
+        let m = layer_to_base(&base, aspect, stack.world_position, stack.view_proj(aspect).inverse());
+        let got = m * Vec4::new(in_layer.x, in_layer.y, in_layer.z, 1.0);
+        let want = clip(&base).z;
+        assert!((got.z / got.w - want).abs() < 1e-4, "0.6 m ahead came out at depth {} in the base camera, not {want}", got.z / got.w);
+        assert!((in_layer.z - want).abs() > 1e-3, "the two projections agree, so this proves nothing");
+    }
 
     fn camera(world: &mut World, name: &str, stack: &[&str]) -> Entity {
         let e = world.spawn();

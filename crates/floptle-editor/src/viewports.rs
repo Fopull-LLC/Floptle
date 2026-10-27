@@ -458,7 +458,8 @@ impl Editor {
                 (r.w, r.h),
                 Default::default(),
             );
-            self.draw_camera_stack_over(r.e, &cv, (r.w, r.h), r.w as f32 / r.h as f32, elapsed);
+            // No post runs on a render target, so nothing reads its depth after.
+            self.draw_camera_stack_over(r.e, &cv, (r.w, r.h), r.w as f32 / r.h as f32, elapsed, None);
             self.render_target_last.insert(r.name, elapsed);
         }
     }
@@ -735,7 +736,7 @@ impl Editor {
         if stacked > 0
             && let Some(gpu) = self.gpu.as_ref()
         {
-            self.camera_stacks.composite(gpu, (cw.max(1), ch.max(1)), stacked, &scene_target);
+            self.camera_stacks.composite(gpu, (cw.max(1), ch.max(1)), stacked, &scene_target, Some((&depth, &cam, aspect)));
         }
         if self.gpu_timing_headless
             && let (Some(t), Some(g)) = (self.gpu_timer.as_mut(), self.gpu.as_ref())

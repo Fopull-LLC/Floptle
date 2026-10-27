@@ -58,8 +58,10 @@ the scope over the arms. Setting `stack` replaces the whole list, and
   aspect ratio as the picture it is laid over. Its position, rotation and field
   of view are its own.
 * **Before post-processing.** Bloom, tonemapping, grading and your `stage post`
-  shaders apply to the whole picture at once. Depth-based effects (ambient
-  occlusion, depth of field) read the base camera's depth.
+  shaders apply to the whole picture at once. Where the stacked camera drew
+  something solid, its depth goes into the picture's depth too, measured from
+  the base camera. So depth of field and ambient occlusion see a cockpit
+  0.6 m away as 0.6 m away, and keep it sharp while the hills blur.
 
 Wherever the stacked camera drew nothing, the picture underneath shows through
 unchanged.

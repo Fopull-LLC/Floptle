@@ -158,7 +158,7 @@ pub(crate) fn render_frame_texture(
         ed.draw_world_canvases(post.input_view(), &depth_view, cam, aspect);
     }
     if let Some(base) = stack_of {
-        ed.draw_camera_stack_over(base, post.input_view(), (cw, ch), aspect, 0.0);
+        ed.draw_camera_stack_over(base, post.input_view(), (cw, ch), aspect, 0.0, Some((&depth_view, cam)));
     }
 
     // The whole chain, not the tonemap: the one promise this verb makes is

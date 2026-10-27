@@ -1021,7 +1021,7 @@ impl Editor {
                 // The active camera's stack, over the finished scene and under
                 // post, exactly where the Game panel lays it.
                 if let Some((size, n)) = self.surface_stack.take() {
-                    self.camera_stacks.composite(gpu, size, n, color);
+                    self.camera_stacks.composite(gpu, size, n, color, Some((depth, &cam, aspect)));
                 }
                 // Post runs before any retro upscale, at the scene's composited
                 // resolution. SSAO reads whichever depth the scene rendered with;
