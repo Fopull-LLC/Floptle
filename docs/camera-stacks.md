@@ -36,6 +36,24 @@ The stacked camera has its own **field of view**. Shooters usually give the
 arms a narrower one than the world, so the arms don't stretch at the edges of
 a wide view.
 
+## Depth of field and a stacked camera
+
+By default a stacked camera's picture goes in with the rest, so depth of field
+blurs it by its own distance. A cockpit 0.6 m away, with the focus on a ship
+25 m off, is blurred the way anything that near would be. First-person arms,
+a gun or a cockpit usually want to stay sharp. Set `post = "after"` on the
+stacked camera, or tick **stacked: over depth of field** in its Inspector, and
+it is laid over after depth of field and motion blur:
+
+```lua
+find('SeatCam'):setCamera{ post = 'after' }
+```
+
+The rest of post still applies to it: the grade, tonemapping, film grain, your
+`stage post` shaders. Bloom and ambient occlusion run before depth of field,
+so a camera laid over after it gets neither. `post = "with"` goes back to the
+default.
+
 ## Order
 
 Rows draw bottom of the list last, so the bottom row is on top. Drag a row by

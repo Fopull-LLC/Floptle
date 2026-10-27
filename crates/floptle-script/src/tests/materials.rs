@@ -493,6 +493,7 @@ fn a_bad_camera_option_is_refused_where_it_was_written() {
         // A single name is the commonest slip: a stack is a list.
         ("node:setCamera{ stack = 'Arms' }", &["stack", "list of strings"]),
         ("node:setCamera{ stack = { 'Arms', 3 } }", &["stack[2]", "string"]),
+        ("node:setCamera{ post = 'before' }", &["post", "after"]),
     ];
     for (i, (src, wants)) in cases.iter().enumerate() {
         let name = format!("bad{i}");
@@ -524,8 +525,8 @@ local frame = 0
 function update(node, dt)
   frame = frame + 1
   if frame == 1 then node:setCamera{ stack = { 'Arms', 'Hud' } } end
-  if frame == 2 then node:setCamera{ fovY = 1.1 } end
-  if frame == 3 then node:setCamera{ stack = {} } end
+  if frame == 2 then node:setCamera{ fovY = 1.1, post = 'after' } end
+  if frame == 3 then node:setCamera{ stack = {}, post = 'with' } end
 end
 ",
     );
@@ -534,14 +535,18 @@ end
         Some(Matter::Camera { stack, .. }) => stack.clone(),
         _ => panic!("setCamera made the node a camera"),
     };
+    let after = |world: &World| matches!(world.get::<Matter>(e), Some(Matter::Camera { post_after: true, .. }));
     let mut host = ScriptHost::new();
     host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
     assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
     assert_eq!(stack(&world), vec!["Arms".to_string(), "Hud".to_string()], "bottom first, as written");
+    assert!(!after(&world), "a camera is laid over with the picture unless it says otherwise");
     host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
     assert_eq!(stack(&world).len(), 2, "a call that does not name the stack keeps it");
+    assert!(after(&world), "`post = 'after'` did not reach the camera");
     host.run(&mut world, &dir, 1.0 / 60.0, 2.0 / 60.0);
     assert!(stack(&world).is_empty(), "`stack = {{}}` clears it");
+    assert!(!after(&world), "`post = 'with'` did not put it back");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

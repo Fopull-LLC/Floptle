@@ -107,6 +107,7 @@ fn level_with_camera(kind: &str, n: usize) -> (World, Entity, Entity) {
             ortho: false,
             ortho_height: 10.0,
             stack: Vec::new(),
+            post_after: false,
         },
     );
     (world, e, cam)
@@ -977,6 +978,7 @@ fn a_component_added_by_a_create_callback_reaches_the_mirror() {
             ortho: false,
             ortho_height: Matter::ORTHO_HEIGHT,
             stack: Vec::new(),
+            post_after: false,
         },
     );
     host.sync_scene_for_test(&world);

@@ -51,6 +51,7 @@ fn project(tag: &str, script: &str) -> (crate::Editor, std::path::PathBuf) {
             ortho: false,
             ortho_height: 10.0,
             stack: Vec::new(),
+            post_after: false,
         },
     );
     let star = ed.world.spawn();

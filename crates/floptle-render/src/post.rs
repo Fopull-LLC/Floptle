@@ -1220,6 +1220,23 @@ impl PostStack {
         out: &wgpu::TextureView,
         custom: Option<&'a PostShaders>,
     ) {
+        self.run_with_overlay(gpu, s, ssao, out, custom, None);
+    }
+
+    /// [`run_with`](Self::run_with), with `overlay` drawing into the picture
+    /// after depth of field and motion blur and before everything else: what
+    /// it draws is graded, tonemapped and grained with the frame, and left
+    /// sharp by the two effects that blur by depth. A stacked camera's
+    /// viewmodel goes here.
+    pub fn run_with_overlay<'a>(
+        &'a self,
+        gpu: &Gpu,
+        s: &PostSettings,
+        ssao: Option<&SsaoFrame>,
+        out: &wgpu::TextureView,
+        custom: Option<&'a PostShaders>,
+        overlay: Option<&dyn Fn(&wgpu::TextureView)>,
+    ) {
         let custom = custom.filter(|c| c.has_passes());
         let ssao_on = s.ssao && ssao.is_some();
         let filter_on = s.color_filter_on();
@@ -1253,6 +1270,9 @@ impl PostStack {
             || (s.dof_on() && ssao.is_some())
             || (s.motion_on() && ssao.is_some()))
         {
+            if let Some(draw) = overlay {
+                draw(&self.scene.view);
+            }
             self.finish(gpu, s, &self.scene, out, [0.0, 0.0], 1.0);
             return;
         }
@@ -1484,6 +1504,10 @@ impl PostStack {
                 wgpu::LoadOp::Clear(BLACK),
             );
             cur = dst;
+        }
+
+        if let Some(draw) = overlay {
+            draw(&cur.view);
         }
 
         if denoise_on {

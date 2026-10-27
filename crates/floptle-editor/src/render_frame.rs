@@ -1020,7 +1020,8 @@ impl Editor {
 
                 // The active camera's stack, over the finished scene and under
                 // post, exactly where the Game panel lays it.
-                if let Some((size, n)) = self.surface_stack.take() {
+                let surface_stack = self.surface_stack.take();
+                if let Some((size, n)) = surface_stack {
                     self.camera_stacks.composite(gpu, size, n, color, Some((depth, &cam, aspect)));
                 }
                 // Post runs before any retro upscale, at the scene's composited
@@ -1110,7 +1111,14 @@ impl Editor {
                         ps.motion_blur = 0.0;
                     }
                     gpu_mark!("post (AO, bloom, blur…)");
-                    post.run_with(gpu, &ps, Some(&ssao_frame), out, post_shaders);
+                    let stacks = &self.camera_stacks;
+                    let after = |v: &wgpu::TextureView| {
+                        if let Some((size, n)) = surface_stack {
+                            stacks.composite_after(gpu, size, n, v);
+                        }
+                    };
+                    let any_after = surface_stack.is_some_and(|(size, n)| stacks.any_after(size, n));
+                    post.run_with_overlay(gpu, &ps, Some(&ssao_frame), out, post_shaders, any_after.then_some(&after as &dyn Fn(&wgpu::TextureView)));
                 }
                 if lowres {
                     if self.project.retro && self.project.retro_integer_scale {

@@ -2332,6 +2332,9 @@ pub enum RichSet {
         /// `stack = {"Arms", ...}` — the cameras drawn over this one, by node
         /// name, bottom first. Replaces the whole list; `{}` clears it.
         stack: Option<Vec<String>>,
+        /// `post = "after" | "with"`: stacked, laid over after the base
+        /// camera's depth of field and motion blur, or with the picture.
+        post_after: Option<bool>,
     },
 }
 

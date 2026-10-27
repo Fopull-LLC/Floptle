@@ -1120,6 +1120,10 @@ pub enum MatterDoc {
         /// Overlay cameras drawn on top of this one, by node name, bottom first.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         stack: Vec<String>,
+        /// Stacked on another camera, laid over after its depth of field and
+        /// motion blur rather than before.
+        #[serde(default, skip_serializing_if = "is_false")]
+        post_after: bool,
     },
     /// A placeable point/omni/area light (position = node transform).
     PointLight {
@@ -1914,6 +1918,7 @@ impl From<&Matter> for MatterDoc {
                 ortho,
                 ortho_height,
                 stack,
+                post_after,
             } => MatterDoc::Camera {
                 fov_y: *fov_y,
                 active: *active,
@@ -1925,6 +1930,7 @@ impl From<&Matter> for MatterDoc {
                 ortho: *ortho,
                 ortho_height: *ortho_height,
                 stack: stack.clone(),
+                post_after: *post_after,
             },
             Matter::PointLight { color, intensity, range, shape, shadows, spot_angle, spot_softness } => {
                 MatterDoc::PointLight {
@@ -2182,6 +2188,7 @@ impl MatterDoc {
                 ortho,
                 ortho_height,
                 stack,
+                post_after,
             } => {
                 let (w, h) = Matter::clamp_target_size(*target_w, *target_h);
                 Matter::Camera {
@@ -2198,6 +2205,7 @@ impl MatterDoc {
                     // renderer — every ray through its inverse would be NaN.
                     ortho_height: Matter::clamp_ortho_height(*ortho_height),
                     stack: stack.clone(),
+                    post_after: *post_after,
                 }
             }
             MatterDoc::PointLight { color, intensity, range, shape, shadows, spot } => Matter::PointLight {
@@ -5084,6 +5092,7 @@ mod tests {
                 ortho: true,
                 ortho_height: 10.0,
                 stack: Vec::new(),
+                post_after: false,
             },
         );
 
@@ -5103,6 +5112,7 @@ mod tests {
                 ortho: true,
                 ortho_height: 10.0,
                 stack: Vec::new(),
+                post_after: false,
             },
         );
         let mut c = Camera2D {
@@ -5677,7 +5687,7 @@ mod tests {
                     terrain_gen: None,
                     name: "eye".into(),
                     transform: TransformDoc::default(),
-                    matter: MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT, stack: Vec::new() },
+                    matter: MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT, stack: Vec::new(), post_after: false },
                     object_materials: Default::default(),
                     tint: None,
                     tint_rim: None,
@@ -5842,7 +5852,7 @@ mod tests {
         let eye = snap.nodes.iter().find(|n| n.name == "eye").unwrap();
         assert_eq!(
             eye.matter,
-            MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT, stack: Vec::new() }
+            MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT, stack: Vec::new(), post_after: false }
         );
     }
 
@@ -6631,5 +6641,39 @@ mod celestial_reach_tests {
         spawn_nodes(&from_ron(&old).unwrap().nodes, &mut back);
         let reach = back.query::<floptle_core::CelestialBody>().next().map(|(_, c)| c.reach);
         assert_eq!(reach, Some(floptle_core::frames::SMALL_BODY_REACH));
+    }
+}
+
+#[cfg(test)]
+mod camera_stack_doc_tests {
+    use super::*;
+
+    /// **A stacked camera's place in post survives the file.** Saved and loaded
+    /// back, `post_after` is what it was; left at its default it is not
+    /// written at all, so a scene from before the setting reads the same.
+    #[test]
+    fn a_stacked_camera_s_post_choice_survives_a_round_trip() {
+        let cam = |post_after| floptle_core::Matter::Camera {
+            fov_y: 1.0,
+            active: false,
+            target: String::new(),
+            cull_mask: !0,
+            target_w: Matter::TARGET_W,
+            target_h: Matter::TARGET_H,
+            target_hz: 0.0,
+            ortho: false,
+            ortho_height: Matter::ORTHO_HEIGHT,
+            stack: vec!["Seat".into()],
+            post_after,
+        };
+        for want in [false, true] {
+            let text = ron::ser::to_string(&MatterDoc::from(&cam(want))).unwrap();
+            assert_eq!(text.contains("post_after"), want, "{text}");
+            let back: MatterDoc = ron::from_str(&text).unwrap();
+            assert!(
+                matches!(back.to_matter(), floptle_core::Matter::Camera { post_after, .. } if post_after == want),
+                "post_after {want} did not survive: {text}"
+            );
+        }
     }
 }

@@ -438,6 +438,7 @@ fn drop_debris(
             ortho: false,
             ortho_height: 10.0,
             stack: Vec::new(),
+            post_after: false,
         },
     );
     let fx = ed.world.spawn();

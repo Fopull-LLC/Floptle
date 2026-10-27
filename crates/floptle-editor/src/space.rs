@@ -1123,6 +1123,7 @@ mod tests {
                 ortho: false,
                 ortho_height: 10.0,
                 stack: Vec::new(),
+                post_after: false,
             },
         );
         let body_box = ed.world.spawn();
@@ -1213,6 +1214,7 @@ mod tests {
                 ortho: false,
                 ortho_height: 10.0,
                 stack: Vec::new(),
+                post_after: false,
             },
         );
         let wall = ed.world.spawn();
@@ -1298,6 +1300,7 @@ mod tests {
                 ortho: false,
                 ortho_height: 10.0,
                 stack: Vec::new(),
+                post_after: false,
             },
         );
         let pad = ed.world.spawn();
@@ -1397,6 +1400,7 @@ mod tests {
                 ortho: false,
                 ortho_height: 10.0,
                 stack: Vec::new(),
+                post_after: false,
             },
         );
         let label = ed.world.spawn();

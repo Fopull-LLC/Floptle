@@ -896,6 +896,7 @@ mod tests {
                     ortho: false,
                     ortho_height: Matter::ORTHO_HEIGHT,
                     stack: Vec::new(),
+                    post_after: false,
                 },
             );
             e
@@ -1344,6 +1345,7 @@ mod tests {
                 ortho: false,
                 ortho_height: floptle_core::Matter::ORTHO_HEIGHT,
                 stack: Vec::new(),
+                post_after: false,
             },
             ..blank_node()
         });

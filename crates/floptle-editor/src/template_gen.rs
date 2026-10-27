@@ -310,6 +310,7 @@ fn regenerate_platformer2d() {
             ortho: true,
             ortho_height: 11.0,
             stack: Vec::new(),
+            post_after: false,
         },
     );
     w.insert(

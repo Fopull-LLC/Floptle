@@ -2821,6 +2821,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
             ortho: false,
             ortho_height: floptle_core::Matter::ORTHO_HEIGHT,
             stack: Vec::new(),
+            post_after: false,
         },
         // The default camera flies on play (hold right-mouse to look, wasd to move).
         scripts: vec![floptle_scene::ScriptDoc {

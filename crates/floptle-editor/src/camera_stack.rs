@@ -29,6 +29,8 @@ pub(crate) struct StackCam {
     pub(crate) ortho: bool,
     pub(crate) ortho_height: f32,
     pub(crate) mask: u32,
+    /// Laid over after the base camera's depth of field and motion blur.
+    pub(crate) post_after: bool,
 }
 
 /// What a camera's stack resolves to this frame.
@@ -53,7 +55,7 @@ pub(crate) fn resolve_stack(world: &World, base: Entity) -> StackPlan {
             if e == base || n.0 != *name {
                 continue;
             }
-            let Some(Matter::Camera { fov_y, ortho, ortho_height, cull_mask, .. }) = world.get::<Matter>(e)
+            let Some(Matter::Camera { fov_y, ortho, ortho_height, cull_mask, post_after, .. }) = world.get::<Matter>(e)
             else {
                 continue;
             };
@@ -65,6 +67,7 @@ pub(crate) fn resolve_stack(world: &World, base: Entity) -> StackPlan {
                     ortho: *ortho,
                     ortho_height: *ortho_height,
                     mask: *cull_mask,
+                    post_after: *post_after,
                 });
             }
             break;
@@ -83,12 +86,21 @@ pub(crate) fn resolve_stack(world: &World, base: Entity) -> StackPlan {
 pub(crate) struct CameraStacks {
     composite: Option<floptle_render::StackComposite>,
     layers: HashMap<(u32, u32), Vec<StackLayer>>,
-    /// Where the camera that last drew each layer stood, and the inverse of
-    /// its camera-relative view-projection: what takes a layer's depth back
-    /// into the world.
-    placed: HashMap<(u32, u32), Vec<(floptle_core::math::DVec3, floptle_core::math::Mat4)>>,
+    /// The camera that last drew each layer.
+    placed: HashMap<(u32, u32), Vec<Placed>>,
     /// `base → name` pairs already reported missing.
     warned: std::collections::HashSet<String>,
+}
+
+/// The camera that drew a layer, as compositing it needs to know.
+#[derive(Clone, Copy, Default)]
+struct Placed {
+    /// Where it stood, and the inverse of its camera-relative view-
+    /// projection: what takes the layer's depth back into the world.
+    at: floptle_core::math::DVec3,
+    inv_vp: floptle_core::math::Mat4,
+    /// Laid over after the base camera's depth of field and motion blur.
+    after: bool,
 }
 
 /// How many layer sizes are kept. The Game view and a render target or two;
@@ -116,7 +128,8 @@ impl CameraStacks {
     /// With `depth` (the frame's depth, and the base camera and aspect it was
     /// drawn with), each layer's depth goes into it where the layer drew
     /// something solid, so depth-based post sees the stacked things at their
-    /// own distance.
+    /// own distance. Layers laid over after depth of field are left for
+    /// [`Self::composite_after`].
     pub(crate) fn composite(
         &self,
         gpu: &floptle_render::Gpu,
@@ -128,9 +141,13 @@ impl CameraStacks {
         let (Some(pass), Some(set)) = (self.composite.as_ref(), self.layers.get(&size)) else { return };
         let placed = self.placed.get(&size);
         for (i, layer) in set.iter().take(n).enumerate() {
+            let placed = placed.and_then(|p| p.get(i));
+            if placed.is_some_and(|p| p.after) {
+                continue;
+            }
             pass.composite(gpu, layer, target);
-            if let (Some((depth, base, aspect)), Some(&(at, inv_vp))) = (depth, placed.and_then(|p| p.get(i))) {
-                pass.composite_depth(gpu, layer, depth, layer_to_base(base, aspect, at, inv_vp));
+            if let (Some((depth, base, aspect)), Some(p)) = (depth, placed) {
+                pass.composite_depth(gpu, layer, depth, layer_to_base(base, aspect, p.at, p.inv_vp));
             }
         }
     }
@@ -146,6 +163,36 @@ fn layer_to_base(
     inv_vp: floptle_core::math::Mat4,
 ) -> floptle_core::math::Mat4 {
     base.view_proj(aspect) * floptle_core::math::Mat4::from_translation((at - base.world_position).as_vec3()) * inv_vp
+}
+
+impl CameraStacks {
+    /// Whether any of the first `n` layers at `size` is laid over after depth
+    /// of field, so post has something to hand [`Self::composite_after`].
+    pub(crate) fn any_after(&self, size: (u32, u32), n: usize) -> bool {
+        self.placed.get(&size).is_some_and(|p| p.iter().take(n).any(|p| p.after))
+    }
+
+    /// Lay the layers [`Self::composite`] left out, bottom first: the ones
+    /// laid over after the base camera's depth of field and motion blur. Their
+    /// depth is not written, so nothing after reads them as the world.
+    pub(crate) fn composite_after(
+        &self,
+        gpu: &floptle_render::Gpu,
+        size: (u32, u32),
+        n: usize,
+        target: &wgpu::TextureView,
+    ) {
+        let (Some(pass), Some(set), Some(placed)) =
+            (self.composite.as_ref(), self.layers.get(&size), self.placed.get(&size))
+        else {
+            return;
+        };
+        for (layer, p) in set.iter().zip(placed).take(n) {
+            if p.after {
+                pass.composite(gpu, layer, target);
+            }
+        }
+    }
 }
 
 impl crate::Editor {
@@ -193,7 +240,7 @@ impl crate::Editor {
             );
             let placed = self.camera_stacks.placed.entry(size).or_default();
             placed.resize(placed.len().max(i + 1), Default::default());
-            placed[i] = (cam.world_position, cam.view_proj(aspect).inverse());
+            placed[i] = Placed { at: cam.world_position, inv_vp: cam.view_proj(aspect).inverse(), after: sc.post_after };
             self.render_world_into(
                 &color,
                 &depth,
@@ -211,7 +258,8 @@ impl crate::Editor {
 
     /// Render `base`'s stack and lay it straight over `target` — for a view
     /// whose own picture is already drawn. `depth` is that picture's depth and
-    /// the camera it was drawn with, for the post still to come.
+    /// the camera it was drawn with, for the post still to come. Returns the
+    /// layers' size and count, for [`CameraStacks::composite_after`].
     pub(crate) fn draw_camera_stack_over(
         &mut self,
         base: Entity,
@@ -220,14 +268,16 @@ impl crate::Editor {
         aspect: f32,
         elapsed: f32,
         depth: Option<(&wgpu::TextureView, &RenderCamera)>,
-    ) {
+    ) -> ((u32, u32), usize) {
+        let size = (size.0.max(1), size.1.max(1));
         let n = self.render_camera_stack(base, size, aspect, elapsed);
         if n > 0
             && let Some(gpu) = self.gpu.as_ref()
         {
             let depth = depth.map(|(d, cam)| (d, cam, aspect));
-            self.camera_stacks.composite(gpu, (size.0.max(1), size.1.max(1)), n, target, depth);
+            self.camera_stacks.composite(gpu, size, n, target, depth);
         }
+        (size, n)
     }
 }
 
@@ -277,6 +327,7 @@ mod tests {
                 ortho: false,
                 ortho_height: Matter::ORTHO_HEIGHT,
                 stack: stack.iter().map(|s| s.to_string()).collect(),
+                post_after: false,
             },
         );
         e
@@ -391,6 +442,73 @@ mod tests {
         let i = ((2 * w + 2) * 4) as usize;
         let (r, g) = (px[i], px[i + 1]);
         assert!(r > g + 40, "the wall's corner came out r{r} g{g}");
+    }
+
+    /// A cockpit 0.6 m away on a stacked camera, the base camera focused on a
+    /// wall 40 m off: how many pixels across the cockpit's edge are a mix of
+    /// the two. Depth of field on, unless `dof` is false.
+    #[cfg(feature = "editor-ui")]
+    fn cockpit_edge_blend(dof: bool, post_after: bool) -> Option<usize> {
+        use floptle_core::math::{DVec3, Vec3};
+        let mut ed = crate::offscreen::test_editor_with_gpu()?;
+        // At the picture's own resolution: retro would run post at 240 rows
+        // and shrink the blur to a pixel on the way down to this one.
+        ed.project.retro = false;
+        ed.project.layers = vec!["Default".to_string(), "Cockpit".to_string()];
+        let shape = |ed: &mut crate::Editor, at: DVec3, scale: Vec3, color: [f32; 3]| {
+            let e = ed.world.spawn();
+            ed.world.insert(e, floptle_core::Transform { translation: at, scale, ..Default::default() });
+            ed.world.insert(e, Matter::Primitive { shape: floptle_core::Shape::Cube, color });
+            e
+        };
+        shape(&mut ed, DVec3::new(0.0, 0.0, -40.0), Vec3::new(200.0, 200.0, 1.0), [1.0, 0.0, 0.0]);
+        // The left half of the view, its edge down the middle.
+        let panel = shape(&mut ed, DVec3::new(-0.5, 0.0, -0.6), Vec3::new(1.0, 2.0, 0.05), [0.0, 1.0, 0.0]);
+        ed.world.insert(panel, floptle_core::Layer("Cockpit".into()));
+        let main = camera(&mut ed.world, "Main", &["Seat"]);
+        let seat = camera(&mut ed.world, "Seat", &[]);
+        for (e, mask) in [(main, 1u32), (seat, 1 << 1)] {
+            ed.world.insert(e, floptle_core::Transform::default());
+            if let Some(Matter::Camera { cull_mask, post_after: pa, .. }) = ed.world.get_mut::<Matter>(e) {
+                *cull_mask = mask;
+                *pa = post_after;
+            }
+        }
+        // The scene's own chain, if it has one, and this one otherwise: the
+        // first PostProcess node is the scene's.
+        if !ed.world.query::<Matter>().any(|(_, m)| matches!(m, Matter::PostProcess { .. })) {
+            let pp = ed.world.spawn();
+            ed.world.insert(pp, Matter::default_post_process());
+        }
+        for (_, m) in ed.world.query_mut::<Matter>() {
+            if let Matter::PostProcess { enabled, ao, dof_focus, dof_range, dof_max_blur, .. } = m {
+                *enabled = true;
+                *ao = floptle_core::AoMode::Off;
+                *dof_focus = 40.0;
+                *dof_range = 5.0;
+                *dof_max_blur = if dof { 8.0 } else { 0.0 };
+            }
+        }
+        let (w, h) = (64u32, 36u32);
+        let cam = RenderCamera::new(DVec3::ZERO, Default::default(), Projection::of_camera(1.0, false, 1.0, 0.05, 300000.0));
+        let px = crate::shot::render_frame_pixels(&mut ed, &cam, Some(main), w, h, 1, false).expect("no device");
+        let row = (h / 2 * w * 4) as usize;
+        Some((0..w as usize).filter(|x| px[row + x * 4] > 40 && px[row + x * 4 + 1] > 40).count())
+    }
+
+    /// **A stacked cockpit can be left sharp by depth of field.** Laid over
+    /// with the picture, it is blurred by its own distance, 0.6 m against a
+    /// focus 40 m off, like anything that near. `post = "after"` lays it over
+    /// after depth of field, and its edge is as sharp as with none.
+    #[cfg(feature = "editor-ui")]
+    #[test]
+    fn a_stacked_camera_laid_over_after_depth_of_field_stays_sharp() {
+        let Some(sharp) = cockpit_edge_blend(false, false) else { return };
+        let blurred = cockpit_edge_blend(true, false).unwrap();
+        let after = cockpit_edge_blend(true, true).unwrap();
+        assert!(sharp <= 2, "with no depth of field the edge should be hard: {sharp} pixels mixed");
+        assert!(blurred >= sharp + 3, "depth of field did not reach the stacked layer: {blurred} pixels mixed");
+        assert!(after <= sharp, "laid over after depth of field, the edge still blurred: {after} pixels mixed");
     }
 
     #[test]

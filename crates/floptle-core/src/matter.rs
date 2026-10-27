@@ -1571,6 +1571,12 @@ pub enum Matter {
         /// so what it shows is never hidden by the world behind it — the
         /// first-person arms that would otherwise push into a wall.
         stack: Vec<String>,
+        /// When this camera is stacked on another: lay its picture over
+        /// *after* the base camera's depth of field and motion blur, so they
+        /// leave it sharp, rather than with the rest of the picture (the
+        /// default), where it is blurred by its own distance like anything
+        /// else. A viewmodel or a cockpit usually wants it.
+        post_after: bool,
     },
     /// A placeable point/omni light. Its world position is the node's transform
     /// translation; `range` is the radius at which its contribution falls to ~zero.

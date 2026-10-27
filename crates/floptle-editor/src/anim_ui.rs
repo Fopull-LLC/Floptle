@@ -5839,6 +5839,7 @@ mod tests {
                 ortho: true,
                 ortho_height: 10.0,
                 stack: Vec::new(),
+                post_after: false,
             },
         );
         let slider = w.spawn();

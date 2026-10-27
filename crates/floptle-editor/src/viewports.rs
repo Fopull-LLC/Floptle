@@ -458,8 +458,12 @@ impl Editor {
                 (r.w, r.h),
                 Default::default(),
             );
-            // No post runs on a render target, so nothing reads its depth after.
-            self.draw_camera_stack_over(r.e, &cv, (r.w, r.h), r.w as f32 / r.h as f32, elapsed, None);
+            // No post runs on a render target: nothing reads its depth after,
+            // and the layers laid over after depth of field go straight on.
+            let (size, n) = self.draw_camera_stack_over(r.e, &cv, (r.w, r.h), r.w as f32 / r.h as f32, elapsed, None);
+            if let Some(gpu) = self.gpu.as_ref() {
+                self.camera_stacks.composite_after(gpu, size, n, &cv);
+            }
             self.render_target_last.insert(r.name, elapsed);
         }
     }
@@ -781,7 +785,9 @@ impl Editor {
                     .map(|r| r.resolution().1)
                     .unwrap_or(h),
             ));
-            post.run_with(gpu, &ps, Some(&ssao_frame), &out, post_shaders);
+            let after = |v: &wgpu::TextureView| self.camera_stacks.composite_after(gpu, (cw.max(1), ch.max(1)), stacked, v);
+            let after = self.camera_stacks.any_after((cw.max(1), ch.max(1)), stacked).then_some(&after as &dyn Fn(&wgpu::TextureView));
+            post.run_with_overlay(gpu, &ps, Some(&ssao_frame), &out, post_shaders, after);
         }
         // Upscale into game_vp: chunky nearest-neighbour for retro, smooth for
         // a render scale.
@@ -962,6 +968,7 @@ impl Editor {
                 ortho: false,
                 ortho_height: Matter::ORTHO_HEIGHT,
                 stack: Vec::new(),
+                post_after: false,
             },
         );
         if let Some(p) = parent {

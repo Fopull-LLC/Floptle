@@ -324,6 +324,7 @@ fn regenerate_village2d() {
             ortho: true,
             ortho_height: 9.0,
             stack: Vec::new(),
+            post_after: false,
         },
     );
     w.insert(

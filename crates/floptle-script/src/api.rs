@@ -2623,6 +2623,7 @@ pub(crate) fn apply_rich_sets(
                 ortho,
                 ortho_height,
                 stack,
+                post_after,
             } => {
                 // A node that is not a camera becomes one, the way setPrimitive
                 // and setTerrain also set the node's Matter.
@@ -2640,6 +2641,7 @@ pub(crate) fn apply_rich_sets(
                             ortho: false,
                             ortho_height: Matter::ORTHO_HEIGHT,
                             stack: Vec::new(),
+                            post_after: false,
                         },
                     );
                 }
@@ -2660,6 +2662,7 @@ pub(crate) fn apply_rich_sets(
                     ortho: orth,
                     ortho_height: oh,
                     stack: st,
+                    post_after: pa,
                 }) = world.get_mut::<Matter>(e)
                 else {
                     continue;
@@ -2693,6 +2696,9 @@ pub(crate) fn apply_rich_sets(
                 }
                 if let Some(v) = stack {
                     *st = v;
+                }
+                if let Some(v) = post_after {
+                    *pa = v;
                 }
             }
             // Both write the element's text spec, creating it if the element
@@ -3193,7 +3199,7 @@ pub(crate) const SET_PARENT_KEYS: &[&str] = &["keepWorld"];
 /// nearest real one.
 pub(crate) const CAMERA_KEYS: &[&str] = &[
     "fovY", "active", "target", "width", "height", "hz", "cullMask", "projection", "orthoHeight",
-    "stack",
+    "stack", "post",
 ];
 
 /// Every key `node:setMaterial{...}` reads.
@@ -7214,6 +7220,20 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                         )?
                         .map(|v| v as f32),
                         stack: crate::opts::opt_str_list(&t, CALL, "stack")?,
+                        post_after: match opt_str(&t, CALL, "post")? {
+                            Some(s) => Some(crate::opts::parse_enum(
+                                CALL,
+                                "post",
+                                &s,
+                                &["after", "with"],
+                                |s| match s {
+                                    "after" => Some(true),
+                                    "with" => Some(false),
+                                    _ => None,
+                                },
+                            )?),
+                            None => None,
+                        },
                     },
                 ));
                 Ok(())

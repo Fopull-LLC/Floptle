@@ -157,9 +157,7 @@ pub(crate) fn render_frame_texture(
     if ui {
         ed.draw_world_canvases(post.input_view(), &depth_view, cam, aspect);
     }
-    if let Some(base) = stack_of {
-        ed.draw_camera_stack_over(base, post.input_view(), (cw, ch), aspect, 0.0, Some((&depth_view, cam)));
-    }
+    let stacked = stack_of.map(|base| ed.draw_camera_stack_over(base, post.input_view(), (cw, ch), aspect, 0.0, Some((&depth_view, cam))));
 
     // The whole chain, not the tonemap: the one promise this verb makes is
     // that the picture is the editor's, bloom, vignette, AO, posterise and
@@ -204,7 +202,13 @@ pub(crate) fn render_frame_texture(
     {
         t.mark(gpu, "post");
     }
-    post.run_with(gpu, &look, Some(&ssao), &composite, ed.post_shaders.as_ref());
+    let after = |v: &wgpu::TextureView| {
+        if let Some((size, n)) = stacked {
+            ed.camera_stacks.composite_after(gpu, size, n, v);
+        }
+    };
+    let any_after = stacked.is_some_and(|(size, n)| ed.camera_stacks.any_after(size, n));
+    post.run_with_overlay(gpu, &look, Some(&ssao), &composite, ed.post_shaders.as_ref(), any_after.then_some(&after as &dyn Fn(&wgpu::TextureView)));
     if ed.gpu_timing_headless
         && let Some(t) = ed.gpu_timer.as_mut()
     {
@@ -522,6 +526,7 @@ end
             ortho: false,
             ortho_height: Matter::ORTHO_HEIGHT,
             stack: Vec::new(),
+            post_after: false,
         }
     }
 

@@ -1939,6 +1939,7 @@ fn camera_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
         ortho,
         ortho_height,
         stack,
+        post_after,
     } = m else { return };
     let cmd = &mut *ctx.cmd;
     let e = ctx.e;
@@ -2094,6 +2095,18 @@ fn camera_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
         cmd.camera_from_view = Some(e);
     }
     camera_stack_ui(ui, ctx, stack);
+    if ui
+        .checkbox(post_after, "stacked: over depth of field")
+        .on_hover_text(
+            "when another camera stacks this one: lay its picture over after that \
+             camera's depth of field and motion blur, so they leave it sharp. For \
+             first-person arms and cockpits. Off, it is blurred by its own distance \
+             like anything else.",
+        )
+        .changed()
+    {
+        ctx.cmd.inspector_changed = true;
+    }
 }
 
 /// Point light: colour, range and shadow knobs, and where the scene stands against the light cap.
@@ -8898,6 +8911,7 @@ mod tests {
                 ortho: ortho_camera,
                 ortho_height: 10.0,
                 stack: Vec::new(),
+                post_after: false,
             },
         );
         let e = world.spawn();
@@ -9062,6 +9076,7 @@ mod tests {
                 ortho: true,
                 ortho_height: 10.0,
                 stack: Vec::new(),
+                post_after: false,
             },
         );
         // Every optional part on: a follow target, a dead zone and limits. With

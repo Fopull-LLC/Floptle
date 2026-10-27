@@ -847,6 +847,7 @@ mod tests {
                 ortho: true,
                 ortho_height: 10.0,
                 stack: Vec::new(),
+                post_after: false,
             },
         );
         world.insert(cam, Camera2D { follow: "Player".into(), smoothing: 0.0, ..Default::default() });
@@ -885,6 +886,7 @@ mod tests {
             ortho: true,
             ortho_height: 10.0,
             stack: Vec::new(),
+            post_after: false,
         };
         let follower = world.spawn();
         world.insert(follower, crate::transform::Transform::default());
@@ -929,6 +931,7 @@ mod tests {
                 ortho: true,
                 ortho_height: 10.0,
                 stack: Vec::new(),
+                post_after: false,
             },
         );
         world.insert(cam, Camera2D::default());
@@ -1045,6 +1048,7 @@ mod tests {
             ortho: true,
             ortho_height: 11.0,
             stack: Vec::new(),
+            post_after: false,
         });
         world.insert(e, Camera2D { art_pixels: 8.0, ..Default::default() });
         let height = |w: &World| match w.get::<Matter>(e) {
