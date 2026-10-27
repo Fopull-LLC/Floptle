@@ -2856,7 +2856,13 @@ impl Raster {
             // read; a float one was never encoded).
             format: gpu.scene_format(),
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
+            // An sRGB scene (the headless path) is also read through a linear
+            // view, which the texture has to name up front.
+            view_formats: if gpu.scene_format() == wgpu::TextureFormat::Rgba8UnormSrgb {
+                &[wgpu::TextureFormat::Rgba8Unorm]
+            } else {
+                &[]
+            },
         });
         let view = color.create_view(&wgpu::TextureViewDescriptor::default());
         let attach = color.create_view(&wgpu::TextureViewDescriptor::default());
@@ -2867,7 +2873,9 @@ impl Raster {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: Gpu::DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // TEXTURE_BINDING: a target camera draws the window's passes, and the
+            // particles read the depth they test against for their soft edges.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());

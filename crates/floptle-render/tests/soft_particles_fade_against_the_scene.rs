@@ -114,3 +114,35 @@ fn a_particle_fades_out_where_it_meets_the_scene() {
         "a particle 0.1 in front of the surface with a 0.5 soft edge draws at about a fifth (got {near})"
     );
 }
+
+/// **Particles draw into a render target.** A render-target camera (a portrait,
+/// a monitor) draws the same passes as the window, particles among them, and
+/// the particle pass samples the depth it tests against for its soft edges. A
+/// render target's depth that could only be attached made that bind group
+/// invalid: a validation error on the first frame a target saw particles, and
+/// no particles in the picture.
+#[test]
+fn particles_draw_into_a_render_target() {
+    let gpu = Gpu::headless(SIZE, SIZE);
+    let mut particles = Particles::new(&gpu);
+    if !gpu.adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::VIEW_FORMATS) {
+        eprintln!("skipped — this device cannot build the raster pass, so nothing can be drawn");
+        return;
+    }
+    let mut raster = Raster::new(&gpu);
+    let (_, color, depth) = raster.register_render_target(&gpu, SIZE, SIZE);
+    let proj = Mat4::perspective_rh(1.0, 1.0, 0.1, 100.0);
+    let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    particles.draw(
+        &gpu,
+        &color,
+        &depth,
+        ParticleGlobals { view_proj: proj.to_cols_array_2d(), proj_z: ParticleGlobals::proj_z(&proj, false), ..Default::default() },
+        &[ParticleInstance { pos_rot: [0.0, 0.0, -3.0, 0.0], size: [1.0, 1.0, 0.0, 0.0], color: [1.0; 4], ..Default::default() }],
+        &[ParticleBatch { texture: None, blend: ParticleBlend::Alpha, range: 0..1 }],
+        &raster,
+        None,
+    );
+    let refused = pollster::block_on(scope.pop()).map(|e| e.to_string());
+    assert_eq!(refused, None, "the GPU refused particles drawn into a render target");
+}
