@@ -2323,6 +2323,7 @@ impl Editor {
         hs.sim.world.gravity = Self::build_gravity_field(&hs.world, hs.sim.world.origin);
         hs.sim.sync_dynamic_params(&hs.world);
         hs.sim.sync_joints(&mut hs.world);
+        hs.sim.sync_surface_friction(&hs.world);
         for (eid, v) in hs.host.take_body_changes() {
             hs.sim.set_body_velocity(eid, floptle_core::math::Vec3::new(v[0], v[1], v[2]));
         }

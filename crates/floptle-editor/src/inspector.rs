@@ -1926,6 +1926,27 @@ fn sprite_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
     });
 }
 
+/// How slippery a collider's surface is ([`floptle_core::SurfaceFriction`]):
+/// 1, the default, writes nothing.
+fn surface_friction_ui(ui: &mut egui::Ui, world: &mut floptle_core::World, e: floptle_core::Entity, changed: &mut bool) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label("surface friction").on_hover_text(
+            "how slippery this surface is: what touches it grips by its own friction \
+             times this. 1 is ordinary, 0.1 is ice, above 1 grippier. Tyres and \
+             physics bodies slide by it; a script sets it with node:setSurfaceFriction",
+        );
+        let mut f = world.get::<floptle_core::SurfaceFriction>(e).map(|f| f.0).unwrap_or(1.0);
+        if ui.add(egui::DragValue::new(&mut f).speed(0.01).range(0.0..=4.0)).changed() {
+            if (f - 1.0).abs() < 1e-4 {
+                world.remove::<floptle_core::SurfaceFriction>(e);
+            } else {
+                world.insert(e, floptle_core::SurfaceFriction(f));
+            }
+            *changed = true;
+        }
+    });
+}
+
 /// Camera: the live preview, projection, clip planes, and the active/from-view actions.
 fn camera_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
     let Matter::Camera {
@@ -5689,6 +5710,12 @@ impl EditorTabViewer<'_> {
                     Matter::PostProcess { .. } => post_process_type_ui(ui, &mut ctx, m),
                 }
             }
+            // A terrain is ground, and ground can be ice.
+            if matches!(world.get::<Matter>(e), Some(Matter::Terrain { .. })) {
+                let mut changed = false;
+                surface_friction_ui(ui, world, e, &mut changed);
+                cmd.inspector_changed |= changed;
+            }
         });
         // Visibility (geometry nodes) — hide the node's visual without deleting it.
         if matches!(
@@ -6748,6 +6775,7 @@ impl EditorTabViewer<'_> {
                 }
                 cmd.inspector_changed = true;
             }
+            surface_friction_ui(ui, world, e, &mut cmd.inspector_changed);
         }
     }
 
@@ -7055,6 +7083,7 @@ impl EditorTabViewer<'_> {
                         }
                         cmd.inspector_changed = true;
                     }
+                    surface_friction_ui(ui, world, e, &mut cmd.inspector_changed);
                     // Trigger: bodies pass through, overlap fires the
                     // onTriggerEnter/Stay/Exit hooks — portals, pickup
                     // zones, checkpoints.

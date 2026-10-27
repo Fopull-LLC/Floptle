@@ -246,6 +246,11 @@ pub struct PhysicsWorld {
     /// before the choice, with about twice its friction: a project from then
     /// keeps the vehicles it tuned. See `PhysicsWorld::tyre_grip`.
     pub single_wheel_friction: bool,
+    /// How slippery each node's surface is (`floptle_core::SurfaceFriction`),
+    /// by the node's entity index: what touches one of its colliders grips by
+    /// its own friction times this. A node not here grips by 1. Set by the
+    /// driver from the scene, every step it changes.
+    pub surface_friction: std::collections::HashMap<u32, f32>,
     pub colliders: Vec<AnchoredCollider>,
     pub bodies: Vec<Body>,
     /// Contacts resolved on the most recent `step` (cleared each step), sim frame.
@@ -419,6 +424,7 @@ impl Default for PhysicsWorld {
             gravity: GravityField::default(),
             water: crate::water::WaterField::default(),
             single_wheel_friction: false,
+            surface_friction: std::collections::HashMap::new(),
             colliders: Vec::new(),
             bodies: Vec::new(),
             contacts: Vec::new(),
@@ -3225,8 +3231,9 @@ impl PhysicsWorld {
     fn rub(&mut self, bi: usize, budget: f32, n: Vec3) {
         // No upper clamp: a coefficient above 1 is an ordinary grippy surface
         // (rubber on rubber is about 1.5), and it is the only way to say "you
-        // can stand on this 50° ramp" — 1.0 holds exactly 45°.
-        let mu = self.bodies[bi].friction.max(0.0);
+        // can stand on this 50° ramp" — 1.0 holds exactly 45°. Times how
+        // slippery the surface underfoot is.
+        let mu = self.bodies[bi].friction.max(0.0) * self.bodies[bi].surface_grip;
         #[allow(clippy::neg_cmp_op_on_partial_ord)]
         if mu <= 0.0 || !(budget > 0.0) {
             return;
@@ -3478,6 +3485,7 @@ impl PhysicsWorld {
             b.wall_normal = None;
             // Gathered afresh by this step's contacts (`rigid_impulse`).
             b.pressed = 0.0;
+            b.surface_grip = 1.0;
         }
         let size = {
             let b = &self.bodies[bi];
@@ -3676,7 +3684,8 @@ impl PhysicsWorld {
                     let cp = face.iter().fold(Vec3::ZERO, |a, h| a + h.0) / k;
                     let n = (face.iter().fold(Vec3::ZERO, |a, h| a + h.1)).normalize_or(n0);
                     let pen = face.iter().map(|h| h.2).fold(0.0f32, f32::max);
-                    self.rigid_impulse(bi, cp, n, pen, &mut push_budget, &mut rot_budget);
+                    let grip = self.surface_of(self.colliders[ci].eid);
+                    self.rigid_impulse(bi, grip, cp, n, pen, &mut push_budget, &mut rot_budget);
                     self.note_body_contact(bi, n);
                     self.contacts.push(Contact { body: bi, collider: ci, point: cp, normal: n });
                 }
@@ -3701,7 +3710,8 @@ impl PhysicsWorld {
                     }
                     let n = hull.normal(p);
                     let cp = p - n * radius;
-                    self.rigid_impulse(bi, cp, n, pen, &mut push_budget, &mut rot_budget);
+                    let grip = self.surface_of(Some(hull.eid));
+                    self.rigid_impulse(bi, grip, cp, n, pen, &mut push_budget, &mut rot_budget);
                     self.note_body_contact(bi, n);
                     self.kin_contacts.push((bi, hull.eid, cp, n));
                 }
@@ -3709,11 +3719,21 @@ impl PhysicsWorld {
         }
     }
 
+    /// How slippery the surface of node `eid` is: its `SurfaceFriction`, or 1.
+    fn surface_of(&self, eid: Option<u32>) -> f32 {
+        if self.surface_friction.is_empty() {
+            return 1.0;
+        }
+        eid.and_then(|e| self.surface_friction.get(&e)).copied().unwrap_or(1.0).max(0.0)
+    }
+
     /// Push body `bi` out of a surface at `cp` along `n` by `pen`, and take
     /// the speed into the surface out of the point there: restitution along
     /// the normal, Coulomb friction across it, both through the body's mass
     /// and inertia so an off-centre contact turns it.
-    fn rigid_impulse(&mut self, bi: usize, cp: Vec3, n: Vec3, pen: f32, push_budget: &mut f32, rot_budget: &mut f32) {
+    /// `grip` is how slippery the surface is (see `surface_of`).
+    #[allow(clippy::too_many_arguments)]
+    fn rigid_impulse(&mut self, bi: usize, grip: f32, cp: Vec3, n: Vec3, pen: f32, push_budget: &mut f32, rot_budget: &mut f32) {
         let b = &mut self.bodies[bi];
         let inv_m = 1.0 / b.mass.max(1e-4);
         let inv_i = b.world_inv_inertia();
@@ -3734,6 +3754,7 @@ impl PhysicsWorld {
         if vn < 0.0 {
             let j = -(1.0 + b.restitution) * vn / w;
             b.pressed += j;
+            b.surface_grip = b.surface_grip.min(grip);
             b.vel += n * (j * inv_m);
             b.ang_vel += b.free_spin(inv_i * r.cross(n * j));
             // A tyre's friction is its joint's grip, sized from this same
@@ -3749,7 +3770,7 @@ impl PhysicsWorld {
                 let t = vt / vt_len;
                 let wt = inv_m + (inv_i * r.cross(t)).cross(r).dot(t);
                 if wt.is_finite() && wt > 1e-9 {
-                    let jt = (vt_len / wt).min(b.friction.max(0.0) * j);
+                    let jt = (vt_len / wt).min(b.friction.max(0.0) * grip * j);
                     b.vel -= t * (jt * inv_m);
                     b.ang_vel -= b.free_spin(inv_i * r.cross(t * jt));
                 }
@@ -3940,10 +3961,14 @@ impl PhysicsWorld {
             // not, and it is why you skid when you land fast and stick when you
             // don't. Accumulated here and spent once below.
             let mut impact_dv = 0.0f32;
+            // The most slippery surface pressing on the body this step: what
+            // its friction is scaled by (`Body::surface_grip`).
+            let mut grip_now = 1.0f32;
             // A surface the move stopped at is a contact like any the push-out
             // finds: it grounds the body, and its load feeds friction.
             if let Some(h) = swept {
                 impact_dv += h.dv;
+                grip_now = grip_now.min(self.surface_of(self.colliders.get(h.collider).and_then(|c| c.eid)));
                 self.note_body_contact(bi, h.normal);
                 self.contacts.push(Contact { body: bi, collider: h.collider, point: h.point, normal: h.normal });
             }
@@ -4085,6 +4110,7 @@ impl PhysicsWorld {
                             let vt = self.bodies[bi].vel - n * vn;
                             self.bodies[bi].vel = vt - n * vn * rest;
                             impact_dv += -vn * (1.0 + rest);
+                            grip_now = grip_now.min(self.surface_of(self.colliders[ci].eid));
                         }
                         self.note_body_contact(bi, n);
                         self.contacts.push(Contact {
@@ -4121,6 +4147,9 @@ impl PhysicsWorld {
                         self.bodies[bi].pos += up * pen;
                     }
                     let vn = vel.dot(n);
+                    if let Some(ci) = ci {
+                        grip_now = grip_now.min(self.surface_of(self.colliders[ci].eid));
+                    }
                     if vn < 0.0 {
                         let rest = self.bodies[bi].restitution;
                         let vt = vel - n * vn;
@@ -4173,6 +4202,7 @@ impl PhysicsWorld {
                             let vt = self.bodies[bi].vel - n * vn;
                             self.bodies[bi].vel = vt - n * vn * rest;
                             impact_dv += -vn * (1.0 + rest);
+                            grip_now = grip_now.min(self.surface_of(Some(hull.eid)));
                         }
                         // A moving platform is ground exactly like static
                         // geometry is, so it goes through the same classifier —
@@ -4196,6 +4226,7 @@ impl PhysicsWorld {
             // What the contacts took out, as momentum: next step's tyre grip
             // for a wheel joint's wheel (see `tyre_grip`).
             self.bodies[bi].pressed = impact_dv * self.bodies[bi].mass.max(1e-4);
+            self.bodies[bi].surface_grip = grip_now;
 
             // ---- friction, part two: what the contacts just absorbed --------
             //
@@ -5915,6 +5946,38 @@ mod swept_tests {
         let p = w.bodies[bi].pos;
         assert!((p.x - 10.0).abs() < 0.5, "a second at 60 m/s from x = -50 should end near 10, got {}", p.x);
         assert!((p.y - 0.9).abs() < 0.05, "and on the floor, got y = {}", p.y);
+    }
+
+    /// **A body slides further on ice.** A ball shoved at 5 m/s across a floor
+    /// stops in about two and a half metres; across the same floor with a
+    /// surface friction of 0.1 it is still sliding two seconds later, well
+    /// past three times as far. A node without the setting grips as before.
+    #[test]
+    fn a_body_slides_further_on_a_slippery_surface() {
+        let slide = |surface: Option<f32>| {
+            let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+            w.add_collider(Box::new(crate::shapes::BoxShape::new(Vec3::new(0.0, -0.5, 0.0), Vec3::new(100.0, 0.5, 10.0), floptle_core::math::Quat::IDENTITY)));
+            w.colliders.last_mut().unwrap().eid = Some(7);
+            if let Some(f) = surface {
+                w.surface_friction.insert(7, f);
+            }
+            let mut b = Body::sphere(Vec3::new(0.0, 0.5, 0.0), 0.5);
+            b.friction = 0.5;
+            let bi = w.add_body(b);
+            for _ in 0..30 {
+                w.step(1.0 / 60.0);
+            }
+            let x0 = w.bodies[bi].pos.x;
+            w.bodies[bi].vel = Vec3::new(5.0, 0.0, 0.0);
+            for _ in 0..120 {
+                w.step(1.0 / 60.0);
+            }
+            w.bodies[bi].pos.x - x0
+        };
+        let rock = slide(None);
+        let ice = slide(Some(0.1));
+        assert!(rock > 1.5 && rock < 4.0, "on an ordinary floor it slid {rock} m; friction 0.5 stops it in about 2.5");
+        assert!(ice > 3.0 * rock, "on ice it slid {ice} m against {rock}");
     }
 
     /// **A sweep can start against the floor.** A sphere resting on a floor

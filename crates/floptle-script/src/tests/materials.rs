@@ -1550,3 +1550,39 @@ fn a_fade_back_to_full_opacity_puts_the_blend_back() {
     assert_eq!(blend(&world, glass), Some((1.0, BlendMode::Blend)), "glass blended before the fade");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **A script makes a surface slippery, and puts it back.** `setSurfaceFriction`
+/// writes the component the physics reads; nil removes it, so the surface grips
+/// as surfaces always have; a negative value is refused where it was written.
+#[test]
+fn a_script_freezes_a_surface_and_thaws_it() {
+    let dir = std::env::temp_dir().join(format!("floptle_surface_friction_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "lake",
+        "\
+local frame = 0
+function update(node, dt)
+  frame = frame + 1
+  if frame == 1 then node:setSurfaceFriction(0.1) end
+  if frame == 2 then node:setSurfaceFriction(nil) end
+end
+",
+    );
+    let (mut world, e) = world_with_script("lake");
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    assert_eq!(world.get::<floptle_core::SurfaceFriction>(e).map(|f| f.0), Some(0.1), "the lake did not freeze");
+    host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+    assert!(world.get::<floptle_core::SurfaceFriction>(e).is_none(), "nil did not thaw it");
+
+    write_script(&dir, "badlake", "function start(node)\n  node:setSurfaceFriction(-1)\nend\n");
+    let (mut world, _) = world_with_script("badlake");
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    let msg = host.errors().join(" | ");
+    assert!(msg.contains("setSurfaceFriction") && msg.contains("0 or more"), "a negative friction was accepted: {msg}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

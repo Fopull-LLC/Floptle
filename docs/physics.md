@@ -48,7 +48,7 @@ tumbles and lands on its faces. Its body replaces its static Collider.
 | **radius / height** | Collision size, in the node's own space like a Box's half-extents: scaling the node scales the body. A sphere under an uneven scale takes its largest axis; a capsule takes the larger of X and Z for its radius and Y for its height, so it covers what is drawn. The Inspector shows the size it collides at when the node is scaled; Lua reads it as `rb.worldRadius` / `rb.worldHeight`. **Fit to mesh** fits a sphere or capsule scaled unevenly as a Mesh instead. |
 | **mass / density** | How heavy it is, in kg, and the same thing per cubic metre: the mass is the density times the body's volume as it collides, and editing either sets the other. A fitted physics object starts at 500 kg/m³ (it floats half sunk; water is 1000), a fresh capsule, which is a character, at 70 kg. Mass decides who moves whom when two bodies meet, how hard a body is to spin, and whether it floats. |
 | **bounce** | Restitution (0 = no bounce) |
-| **friction** | 0 = ice, 1 = no sliding |
+| **friction** | 0 = ice, 1 = no sliding: how this body grips, times the surface friction of what it touches |
 | **affected by gravity** | Off = floats (still collides; a script can still move it) |
 | **2D** | Keep the body in the XY plane — see below |
 | **freeze pos x/y/z** | Lock world-axis translation (e.g. freeze Z for 2.5D) |
@@ -182,6 +182,15 @@ motor. The axis can lean: a raked fork or an angled swing arm works along its
 own line. A tyre grips by how hard the ground presses on it, measured at the
 contact along the ground's normal, so a slanted axis grips the same driving
 forwards as backwards.
+
+**Surface friction** is how slippery a surface is: what touches it grips by
+its own friction times this. It is on a static body, a collidable mesh and a
+terrain, in the Inspector beside **casts shadows**: 1 (the default) is
+ordinary ground, 0.1 is ice, 0.5 wet rock, above 1 grippier. A tyre or a
+crate on a 0.1 surface slides ten times as far. A script changes it with
+`node:setSurfaceFriction(f)` (nil puts it back), so a lake can freeze or a road
+can be salted mid-game. Characters walking on their own controller do not
+slide on it yet.
 
 **Wheel friction** (Project Settings → Game). With **once**, the default for
 new projects, a wheel grips by its friction times how hard the ground presses on

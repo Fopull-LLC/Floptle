@@ -1294,6 +1294,7 @@ mod tests {
                 nav_exclude: false,
                 visible: true,
                 cast_shadow: true,
+                surface_friction: None,
                 anim_controller: None,
                 particles: None,
                 id: None,

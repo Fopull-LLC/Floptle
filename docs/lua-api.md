@@ -16,7 +16,7 @@ each group, and meant to be searched.
 
 - [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 229
 - [node — transform & body fields](#node--transform--body-fields) — 44
-- [node — methods & handles](#node--methods--handles) — 37
+- [node — methods & handles](#node--methods--handles) — 38
 - [vectors, directions & easing](#vectors-directions--easing) — 51
 - [scene lookups & raycast](#scene-lookups--raycast) — 18
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
@@ -1411,6 +1411,10 @@ node:setShaderTexture(slot, ref) — point one of this node's .flsl shader TEXTU
 node:setShaderTexture("decal", damaged and "textures/scorch.png" or "")
 node:setShaderTexture("screen", "rt:securityCam")
 ```
+
+### `node:setSurfaceFriction`
+
+node:setSurfaceFriction(0.1) — how slippery this node's surface is (a static body, a collidable mesh, a terrain): what touches it grips by its own friction times this. 1 is ordinary ground, 0.1 ice, above 1 grippier; tyres and physics bodies slide by it. nil puts it back to ordinary. Takes effect on the next physics step, so a lake can freeze mid-game.
 
 ### `node:setTerrain`
 

@@ -3026,6 +3026,17 @@ impl Sim {
         }
     }
 
+    /// The scene's surface frictions, by node (`floptle_core::SurfaceFriction`,
+    /// read by `PhysicsWorld::surface_friction`). Each step, so a script that
+    /// freezes a lake or salts a road changes the grip on the step it does.
+    pub fn sync_surface_friction(&mut self, ecs: &World) {
+        let map = &mut self.world.surface_friction;
+        map.clear();
+        for (e, f) in ecs.query::<floptle_core::SurfaceFriction>() {
+            map.insert(e.index(), f.0.max(0.0));
+        }
+    }
+
     /// Re-read each dynamic body's tunable RigidBody params from the ECS (shape/size,
     /// friction, restitution, gravity on/off, position/rotation locks), without resetting
     /// position or velocity. Lets the Inspector edit these live while playing — including

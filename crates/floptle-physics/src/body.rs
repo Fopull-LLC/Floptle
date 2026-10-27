@@ -208,6 +208,10 @@ pub struct Body {
     /// A wheel joint's wheel while `PhysicsWorld::single_wheel_friction` is
     /// on: its contacts take no friction of their own, its tyre grip does.
     pub tyre: bool,
+    /// How slippery the ground pressing on the body was last step: the lowest
+    /// `SurfaceFriction` among its contacts, 1 where none has one. Its
+    /// friction, and a wheel's tyre grip, are scaled by it.
+    pub surface_grip: f32,
     /// The steepest surface the body is pressed against, when that surface is
     /// too steep to be a floor — a wall, a cliff face, the side of a crate.
     ///
@@ -364,6 +368,7 @@ impl Body {
             ground_normal: None,
             pressed: 0.0,
             tyre: false,
+            surface_grip: 1.0,
             wall_normal: None,
             home: pos,
             active: true,

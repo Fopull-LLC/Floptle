@@ -151,6 +151,7 @@ impl Editor {
         let visible = self.world.get::<floptle_core::Visible>(e).map(|v| v.0).unwrap_or(true);
         let cast_shadow =
             self.world.get::<floptle_core::CastShadow>(e).map(|c| c.0).unwrap_or(true);
+        let surface_friction = self.world.get::<floptle_core::SurfaceFriction>(e).map(|f| f.0);
         let anim_controller =
             self.world.get::<floptle_core::AnimController>(e).map(|c| c.asset.clone());
         let particles = self
@@ -238,6 +239,7 @@ impl Editor {
             nav_exclude,
             visible,
             cast_shadow,
+            surface_friction,
             anim_controller,
             particles,
             parent: None,
@@ -365,6 +367,9 @@ impl Editor {
         if !node.cast_shadow {
             self.world.insert(e, floptle_core::CastShadow(false));
         }
+        if let Some(f) = node.surface_friction {
+            self.world.insert(e, floptle_core::SurfaceFriction(f.max(0.0)));
+        }
         if let Some(ctl) = &node.anim_controller {
             self.world.insert(e, floptle_core::AnimController { asset: ctl.clone() });
         }
@@ -475,6 +480,7 @@ impl Editor {
             nav_exclude,
             visible,
             cast_shadow,
+            surface_friction: _,
             anim_controller,
             particles,
             id,
@@ -513,6 +519,7 @@ impl Editor {
         self.world.remove::<floptle_core::CelestialBody>(e);
         self.world.remove::<floptle_core::MeshCollider>(e);
         self.world.remove::<floptle_core::Disabled>(e);
+        self.world.remove::<floptle_core::SurfaceFriction>(e);
         self.world.remove::<floptle_core::Collidable>(e);
         self.world.remove::<floptle_core::Trigger>(e);
         self.world.remove::<floptle_core::NavMeshExclude>(e);
@@ -629,6 +636,7 @@ impl Editor {
             nav_exclude: false,
             visible: true,
             cast_shadow: true,
+            surface_friction: None,
             anim_controller: None,
             particles: None,
             parent: None,
@@ -881,6 +889,7 @@ impl Editor {
             nav_exclude: false,
                 visible: true,
                 cast_shadow: true,
+                surface_friction: None,
                 anim_controller: None,
                 particles: None,
                 parent: None,

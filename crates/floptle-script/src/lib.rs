@@ -2157,6 +2157,9 @@ pub enum RichSet {
     /// `node:setJointTarget(point)` — where a target joint pulls, world
     /// space; `None` lets go.
     JointTarget(Option<[f64; 3]>),
+    /// `node:setSurfaceFriction(f)` — how slippery the node's surface is;
+    /// `None` (nil) grips as a surface always has.
+    SurfaceFriction(Option<f32>),
     /// `node:setTilemap{...}` — build (or re-shape) a 2D grid on this node.
     MatterTilemap {
         cols: u32,

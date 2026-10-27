@@ -2596,6 +2596,14 @@ pub(crate) fn apply_rich_sets(
                     j.target = t;
                 }
             }
+            RichSet::SurfaceFriction(f) => match f {
+                Some(f) => {
+                    world.insert(e, floptle_core::SurfaceFriction(f));
+                }
+                None => {
+                    world.remove::<floptle_core::SurfaceFriction>(e);
+                }
+            },
             RichSet::BodyOutline(outline) => {
                 if let Some(rb) = world.get_mut::<RigidBody>(e) {
                     rb.kind = floptle_core::BodyKind::Polygon;
@@ -7081,6 +7089,29 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                     })?),
                 };
                 q.borrow_mut().push((e, crate::RichSet::JointTarget(target)));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // node:setSurfaceFriction(f) — how slippery this node's surface is:
+        // what touches it grips by its own friction times f. nil, or 1, grips
+        // as surfaces always have.
+        let q = q.clone();
+        methods.set(
+            "setSurfaceFriction",
+            lua.create_function(move |_, (this, f): (Table, Option<f64>)| {
+                let e: u32 = this.raw_get("__id")?;
+                let f = match f {
+                    None => None,
+                    Some(f) if f.is_finite() && f >= 0.0 => Some(f as f32).filter(|f| *f != 1.0),
+                    Some(f) => {
+                        return Err(mlua::Error::runtime(format!(
+                            "node:setSurfaceFriction({f}): a surface friction is 0 or more (0.1 is ice, 1 is ordinary)"
+                        )));
+                    }
+                };
+                q.borrow_mut().push((e, crate::RichSet::SurfaceFriction(f)));
                 Ok(())
             })?,
         )?;

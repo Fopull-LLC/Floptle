@@ -926,6 +926,11 @@ fn raked_drive_speed(rake: f32, dir: f32, g: Vec3) -> f32 {
 /// [`raked_drive_speed`], with each wheel's friction its tyre grip's alone
 /// when `single` (see `PhysicsWorld::single_wheel_friction`).
 fn drive_speed_with(rake: f32, dir: f32, g: Vec3, single: bool) -> f32 {
+    drive_speed_on(rake, dir, g, single, None)
+}
+
+/// [`drive_speed_with`] on a floor whose surface friction is `surface`.
+fn drive_speed_on(rake: f32, dir: f32, g: Vec3, single: bool, surface: Option<f32>) -> f32 {
     let mut ecs = World::default();
     let floor = ecs.spawn();
     ecs.insert(floor, Transform::from_translation(DVec3::new(0.0, -1.0, 0.0)));
@@ -954,6 +959,9 @@ fn drive_speed_with(rake: f32, dir: f32, g: Vec3, single: bool) -> f32 {
     }
     let mut sim = Sim::build_layered(&ecs, &[], GravityField::uniform(g), DVec3::ZERO, floptle_core::Layers::default());
     sim.world.single_wheel_friction = single;
+    if let Some(f) = surface {
+        sim.world.surface_friction.insert(floor.index(), f);
+    }
     run(&mut sim, &mut ecs, 1.0);
     let x0 = sim.compound_of(chassis.index()).unwrap().vel.x;
     for &w in &wheels {
@@ -1010,4 +1018,15 @@ fn a_wheel_grips_once_with_one_friction_budget() {
     let classic = drive_speed_with(0.0, 1.0, g, false);
     assert!((single - most).abs() <= 0.1 * most, "with one budget it gained {single} m/s; 0.6 g for a second is {most}");
     assert!(classic > 1.3 * most, "without the setting it gained {classic} m/s: the old grip must stay as it was");
+}
+
+/// **Ice is slippery to a tyre.** The same grip-limited rover on a floor of
+/// surface friction 0.1 gains a tenth of what it does on an ordinary floor,
+/// within 15%: its tyres grip by their own friction times the ground's.
+#[test]
+fn a_rover_on_ice_gains_a_tenth_of_what_it_does_on_rock() {
+    let g = Vec3::new(0.0, -9.81, 0.0);
+    let rock = drive_speed_on(0.0, 1.0, g, true, None);
+    let ice = drive_speed_on(0.0, 1.0, g, true, Some(0.1));
+    assert!((ice - rock * 0.1).abs() <= 0.15 * rock * 0.1, "on ice it gained {ice} m/s; on rock {rock}");
 }

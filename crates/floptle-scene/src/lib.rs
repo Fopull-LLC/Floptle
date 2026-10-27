@@ -153,6 +153,10 @@ pub struct NodeDoc {
     /// true). See [`floptle_core::CastShadow`]; only an opted-out node serializes this.
     #[serde(default = "true_bool", skip_serializing_if = "is_true")]
     pub cast_shadow: bool,
+    /// How slippery the node's surface is; see [`floptle_core::SurfaceFriction`].
+    /// `None` (and so absent from the file) grips as every surface always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface_friction: Option<f32>,
     /// Animation controller asset key on this node (`None` = no controller).
     /// See [`floptle_core::AnimController`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4492,6 +4496,9 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
     if !node.cast_shadow {
         world.insert(e, floptle_core::CastShadow(false));
     }
+    if let Some(f) = node.surface_friction {
+        world.insert(e, floptle_core::SurfaceFriction(f.max(0.0)));
+    }
     if let Some(ctl) = &node.anim_controller {
         world.insert(e, floptle_core::AnimController { asset: ctl.clone() });
     }
@@ -4764,6 +4771,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
         let nav_exclude = world.get::<floptle_core::NavMeshExclude>(e).is_some();
         let visible = world.get::<floptle_core::Visible>(e).map(|v| v.0).unwrap_or(true);
         let cast_shadow = world.get::<floptle_core::CastShadow>(e).map(|c| c.0).unwrap_or(true);
+        let surface_friction = world.get::<floptle_core::SurfaceFriction>(e).map(|f| f.0);
         let anim_controller =
             world.get::<floptle_core::AnimController>(e).map(|c| c.asset.clone());
         let particles = world
@@ -4860,6 +4868,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             nav_exclude,
             visible,
             cast_shadow,
+            surface_friction,
             anim_controller,
             particles,
             parent,
@@ -5588,6 +5597,7 @@ mod tests {
                     trigger: true,       // exercise the trigger round-trip
                     visible: false,      // exercise the visible round-trip
                     cast_shadow: false,  // exercise the cast-shadow opt-out round-trip
+                    surface_friction: Some(0.1), // and an icy surface
                     anim_controller: Some("animation_controllers/Test".into()),
                     particles: Some(ParticleSystemDoc {
                         asset: "vfx/Test".into(),
@@ -5689,6 +5699,7 @@ mod tests {
                     trigger: false,
                     visible: true,
                     cast_shadow: true,
+                    surface_friction: None,
                     anim_controller: None,
                     particles: None,
                     parent: Some(0), // child of the cube — exercises parent round-trip
@@ -5741,6 +5752,7 @@ mod tests {
                     trigger: false,
                     visible: true,
                     cast_shadow: true,
+                    surface_friction: None,
                     anim_controller: None,
                     particles: None,
                     parent: None,
@@ -5790,6 +5802,7 @@ mod tests {
                     trigger: false,
                     visible: true,
                     cast_shadow: true,
+                    surface_friction: None,
                     anim_controller: None,
                     particles: None,
                     parent: None,
@@ -5926,6 +5939,7 @@ mod tests {
         assert!(cube.collidable, "collidable flag lost in round-trip");
         assert!(!cube.visible, "visible flag lost in round-trip");
         assert!(!cube.cast_shadow, "cast_shadow opt-out lost in round-trip");
+        assert_eq!(cube.surface_friction, Some(0.1), "surface friction lost in round-trip");
         assert!(!rb.gravity, "rigidbody gravity flag lost in round-trip");
         // the point light's color/intensity/range round-trip
         let lamp = snap.nodes.iter().find(|n| n.name == "lamp").unwrap();

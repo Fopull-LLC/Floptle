@@ -743,6 +743,7 @@ impl Editor {
     pub(crate) fn project_physics_into(&self, sim: &mut floptle_physics::Sim) {
         sim.world.single_wheel_friction =
             self.project.wheel_friction_resolved() == floptle_scene::WheelFrictionDoc::Single;
+        sim.sync_surface_friction(&self.world);
     }
 
     /// Rebuild the live physics sim from the current scene. A no-op unless playing —
@@ -2672,5 +2673,21 @@ mod wheel_friction_tests {
         assert!(ed.build_play_sim().world.single_wheel_friction, "the setting did not reach the sim");
         let shadow = ed.build_sim_for_world(&floptle_core::World::default());
         assert!(shadow.world.single_wheel_friction, "a shadow sim ran different wheel physics");
+    }
+
+    /// **A surface's friction reaches the sim, and follows it.** An icy node's
+    /// factor is in the sim it is built into, by the node's index; a script
+    /// that thaws it mid-game is seen on the next sync.
+    #[test]
+    fn a_surface_s_friction_reaches_the_sim_and_follows_it() {
+        let mut ed = crate::Editor::default();
+        let lake = ed.world.spawn();
+        ed.world.insert(lake, floptle_core::Transform::IDENTITY);
+        ed.world.insert(lake, floptle_core::SurfaceFriction(0.1));
+        let mut sim = ed.build_play_sim();
+        assert_eq!(sim.world.surface_friction.get(&lake.index()), Some(&0.1), "the lake's ice is not in the sim");
+        ed.world.remove::<floptle_core::SurfaceFriction>(lake);
+        sim.sync_surface_friction(&ed.world);
+        assert!(sim.world.surface_friction.is_empty(), "the thawed lake stayed icy");
     }
 }

@@ -1146,6 +1146,7 @@ impl Editor {
                     // Apply the tick's writes, then step physics exactly one tick.
                     sim.sync_dynamic_params(&self.world);
                     sim.sync_joints(&mut self.world);
+                    sim.sync_surface_friction(&self.world);
                     for (eid, v) in self.script_host.take_body_changes() {
                         sim.set_body_velocity(eid, Vec3::new(v[0], v[1], v[2]));
                     }

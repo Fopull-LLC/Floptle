@@ -62,6 +62,7 @@
 ---@field setJoint fun(self: Node, opts: table) Hold this node's body to another node, or to where it is: `n:setJoint{ kind = "rope", to = hook, length = 4 }`. Kinds: hinge, fixed, distance, rope, spring, slider, wheel, target, ball. Replaces any joint the node had.
 ---@field removeJoint fun(self: Node) Take this node's joint off: it lets go.
 ---@field setJointTarget fun(self: Node, point: any) Where this node's target joint pulls, in world space; nil lets go.
+---@field setSurfaceFriction fun(self: Node, f: number?) How slippery this node's surface is: what touches it grips by its own friction times f (1 ordinary, 0.1 ice); nil puts it back.
 ---@field setCamera fun(self: Node, t: table) Construction API: aim a camera and point it at a RENDER TARGET. Fields: fovY (RADIANS, 0.05–3), active (bool — true clears every other camera's authority), target (a bare name; the picture is the texture "rt:<name>", usable on any material or UI image), width/height (the target's pixels, 8–4096), hz (redraws per second, 0 = every frame), cullMask (layer bitmask), stack (a list of camera names drawn over this one's picture, bottom first — first-person arms on their own layer that never clip into walls; replaces the list, {} clears it). A node that is not a camera becomes one. Minimaps, mirrors, security monitors, scopes, split-screen.
 ---@field sound fun(self: Node): AudioSourceHandle The sound handle for this node's Audio Source: play / stop / pause / swap clips and read playback state.
 ---@field parent Node|nil The parent node handle, or nil at the root.

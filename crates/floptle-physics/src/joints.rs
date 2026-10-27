@@ -871,7 +871,7 @@ impl PhysicsWorld {
         let (n, r, mu, mass) = {
             let b = &self.bodies[i];
             let Some(n) = b.ground_normal.filter(|_| b.grounded && b.live()) else { return 0.0 };
-            (n, -n * b.radius, b.friction.max(0.0), b.mass.max(1e-4))
+            (n, -n * b.radius, b.friction.max(0.0) * b.surface_grip, b.mass.max(1e-4))
         };
         let g = self.gravity.accel_at(self.bodies[i].pos, &self.colliders);
         let pressed = self.bodies[i].pressed;

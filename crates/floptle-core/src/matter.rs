@@ -1408,6 +1408,13 @@ impl Default for CastShadow {
     }
 }
 
+/// How slippery this node's surface is: what touches it grips by its own
+/// friction times this. A node without one grips as it always has (1). Ice is
+/// about 0.1, wet rock 0.5; above 1 is grippier than the body's own friction
+/// says. On any collider: a static body, a collidable mesh, a whole terrain.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SurfaceFriction(pub f32);
+
 /// The **shape a light emits from**, which is the difference between a highlight
 /// that is a pinprick and one that is a window.
 ///
