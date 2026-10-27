@@ -181,7 +181,16 @@ body, an **axis** of `0, 1, 0` for suspension that works up and down, and a
 motor. The axis can lean: a raked fork or an angled swing arm works along its
 own line. A tyre grips by how hard the ground presses on it, measured at the
 contact along the ground's normal, so a slanted axis grips the same driving
-forwards as backwards. A chain is a row of small bodies, each hinged to the one before.
+forwards as backwards.
+
+**Wheel friction** (Project Settings → Game). With **once**, the default for
+new projects, a wheel grips by its friction times how hard the ground presses on
+it: tyres of friction 0.6 drive a craft at up to 0.6 g, and a parked craft holds
+a slope up to 31°. **Classic** is how wheels gripped before the setting, about
+twice as hard, because the wheel's contact with the ground spent its friction
+too. A project made before the setting keeps classic until you change it; when
+you do, raise your tyres' friction or lower your motors' torque to get the
+same handling back. A chain is a row of small bodies, each hinged to the one before.
 
 From a script:
 

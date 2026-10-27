@@ -691,6 +691,7 @@ impl Editor {
         }
         // Water is a static field like gravity, sampled per step.
         sim.world.water = Self::build_water_field(&self.world, origin);
+        self.project_physics_into(&mut sim);
         self.kin_between_ticks_warned.clear();
         self.kin_tick_poses.clear();
         self.script_host.set_layers(sim.layers().clone());
@@ -732,7 +733,16 @@ impl Editor {
         // every splashdown a desync.
         sim.world.water = Self::build_water_field(world, origin);
         sim.world.water.volumes.extend(self.declared_water_volumes(origin));
+        self.project_physics_into(&mut sim);
         sim
+    }
+
+    /// The project's physics settings, onto a sim built from its scene. Every
+    /// sim the game runs (the live one, a referee's shadow, a host's hidden
+    /// server) takes them, or two of them would disagree.
+    pub(crate) fn project_physics_into(&self, sim: &mut floptle_physics::Sim) {
+        sim.world.single_wheel_friction =
+            self.project.wheel_friction_resolved() == floptle_scene::WheelFrictionDoc::Single;
     }
 
     /// Rebuild the live physics sim from the current scene. A no-op unless playing —
@@ -2647,3 +2657,20 @@ impl BakedStatic {
 /// A level with more takes turns, a slice a frame, so a huge level pays a
 /// bounded cost and a moved piece in it follows within a few frames.
 const FOLLOW_BUDGET: usize = 1024;
+
+#[cfg(test)]
+mod wheel_friction_tests {
+    /// **The project's wheel friction reaches the sim the game runs.** Set to
+    /// "once", the sim's wheels grip once; a project from before the setting
+    /// keeps the old grip.
+    #[test]
+    fn the_project_s_wheel_friction_reaches_the_sim() {
+        let mut ed = crate::Editor::default();
+        ed.project.wheel_friction = None;
+        assert!(!ed.build_play_sim().world.single_wheel_friction, "an old project's wheels changed grip");
+        ed.project.wheel_friction = Some(floptle_scene::WheelFrictionDoc::Single);
+        assert!(ed.build_play_sim().world.single_wheel_friction, "the setting did not reach the sim");
+        let shadow = ed.build_sim_for_world(&floptle_core::World::default());
+        assert!(shadow.world.single_wheel_friction, "a shadow sim ran different wheel physics");
+    }
+}

@@ -163,6 +163,21 @@ impl End {
 const ITERATIONS: usize = 16;
 
 impl PhysicsWorld {
+    /// Mark the bodies that are a wheel joint's wheel (see [`crate::body::Body::tyre`]).
+    pub(crate) fn mark_tyres(&mut self) {
+        for b in &mut self.bodies {
+            b.tyre = false;
+        }
+        for j in &self.joints {
+            if j.kind == floptle_core::joint::JointKind::Wheel
+                && let Link::Body(i) = j.a
+                && let Some(b) = self.bodies.get_mut(i)
+            {
+                b.tyre = true;
+            }
+        }
+    }
+
     fn joint_end(&self, bi: Option<Link>, local: Vec3, world: Vec3) -> End {
         match bi {
             Some(Link::Body(i)) => {

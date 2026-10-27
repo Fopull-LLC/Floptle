@@ -2107,6 +2107,7 @@ impl Editor {
             floptle_physics::Sim::build_layered(&sworld, &terrain_vols, gravity, origin, layers);
         drop(terrain_vols);
         self.add_static_colliders_for_world(&sworld, &mut ssim);
+        self.project_physics_into(&mut ssim);
         // Seed the server bodies with the client's live dynamic state (the doc
         // only carries transforms): the session starts mid-play, and a
         // vel-zero server character instantly disagrees with a moving client.

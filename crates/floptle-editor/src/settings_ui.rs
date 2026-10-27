@@ -813,6 +813,33 @@ impl<'a> SettingsCtx<'a> {
                 }
             },
         );
+        row(
+            ui,
+            "Wheel friction",
+            Some("how a wheel joint's wheel grips. \"once\": its tyre grips by its friction times \
+                  how hard the ground presses on it, so a wheel of friction 0.6 drives at up to \
+                  0.6 g. \"classic\": its contact with the ground grips as well, about twice \
+                  as hard, which is how every wheel drove before this setting. Changing it \
+                  changes how your vehicles handle; retune their tyres' friction and motors"),
+            |ui| {
+                use floptle_scene::WheelFrictionDoc as W;
+                let mut w = project.wheel_friction_resolved();
+                egui::ComboBox::from_id_salt("project-wheel-friction")
+                    .width(fit_here(ui, 220.0))
+                    .selected_text(match w {
+                        W::Single => "once",
+                        W::Classic => "classic (twice)",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut w, W::Single, "once");
+                        ui.selectable_value(&mut w, W::Classic, "classic (twice)");
+                    });
+                if w != project.wheel_friction_resolved() {
+                    project.wheel_friction = Some(w);
+                    out.save_project = true;
+                }
+            },
+        );
     }
 
     // --- Rendering ------------------------------------------------------

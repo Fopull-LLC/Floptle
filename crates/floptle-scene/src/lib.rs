@@ -1496,6 +1496,20 @@ pub enum ImportedMaterialsDoc {
     Classic,
 }
 
+/// How a wheel joint's wheel takes its friction from the ground.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum WheelFrictionDoc {
+    /// Its contact with the ground and its tyre grip each spent its
+    /// friction, so it gripped about twice as hard as its friction says: how
+    /// every wheel drove before the setting, which a project from then keeps.
+    Classic,
+    /// Its tyre grip alone, sized from how hard the ground presses on it: a
+    /// wheel of friction 0.6 drives a craft at up to 0.6 g. New projects
+    /// start here.
+    #[default]
+    Single,
+}
+
 /// How the 3D scene smooths the stair-steps along its edges.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum AntialiasDoc {
@@ -3175,6 +3189,11 @@ pub struct ProjectConfigDoc {
     /// mode leaves its pixels as they are whatever this says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub antialias: Option<AntialiasDoc>,
+    /// How wheels take their friction; see [`WheelFrictionDoc`]. `None` means
+    /// the file predates the setting and resolves to
+    /// [`Classic`](WheelFrictionDoc::Classic).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wheel_friction: Option<WheelFrictionDoc>,
     /// Whether opening the project seeds the engine's example scripts into
     /// `scripts/`. Off leaves only the scripts a new scene needs to run (the
     /// starter camera's `freelook.lua`), and a deleted example stays deleted.
@@ -3263,6 +3282,7 @@ impl ProjectConfigDoc {
             model_texture_filter: Some(ModelTextureFilterDoc::AsFile),
             imported_materials: Some(ImportedMaterialsDoc::AsFile),
             antialias: Some(AntialiasDoc::Fxaa),
+            wheel_friction: Some(WheelFrictionDoc::Single),
             example_scripts: true,
             mixer: floptle_audio::MixerDesc::default(),
             bloom: false,
@@ -3306,6 +3326,12 @@ impl ProjectConfigDoc {
     /// the setting drew every model crisp, and still does.
     pub fn model_texture_filter_resolved(&self) -> ModelTextureFilterDoc {
         self.model_texture_filter.unwrap_or(ModelTextureFilterDoc::Crisp)
+    }
+
+    /// How this project's wheels take their friction. A project file from
+    /// before the setting gripped twice over, and still does.
+    pub fn wheel_friction_resolved(&self) -> WheelFrictionDoc {
+        self.wheel_friction.unwrap_or(WheelFrictionDoc::Classic)
     }
 
     /// How this project smooths its edges. A project file from before the
@@ -4994,6 +5020,18 @@ mod tests {
         assert_eq!(back.script_vec3, Some(super::ScriptVec3Doc::Fast));
         assert_eq!(back.script_vec3_resolved(), super::ScriptVec3Doc::Fast);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A new project's wheels grip once; one from before the setting keeps
+    /// its vehicles' grip.**
+    #[test]
+    fn a_new_project_s_wheels_grip_once_and_an_existing_one_keeps_its_grip() {
+        let old: ProjectConfigDoc = ron::from_str("(retro: false)").unwrap();
+        assert_eq!(old.wheel_friction_resolved(), super::WheelFrictionDoc::Classic);
+        let new = ProjectConfigDoc::for_new_project();
+        assert_eq!(new.wheel_friction_resolved(), super::WheelFrictionDoc::Single);
+        let back: ProjectConfigDoc = ron::from_str(&ron::ser::to_string(&new).unwrap()).unwrap();
+        assert_eq!(back.wheel_friction, Some(super::WheelFrictionDoc::Single), "the choice is written down");
     }
 
     /// **A new project smooths its edges; one from before the setting keeps

@@ -920,6 +920,12 @@ fn a_craft_on_free_wheels_rolls() {
 /// forwards (+1) or backwards (-1), under gravity `g`. Its motors are far
 /// stronger than its tyres' grip, so what it reaches is the grip.
 fn raked_drive_speed(rake: f32, dir: f32, g: Vec3) -> f32 {
+    drive_speed_with(rake, dir, g, false)
+}
+
+/// [`raked_drive_speed`], with each wheel's friction its tyre grip's alone
+/// when `single` (see `PhysicsWorld::single_wheel_friction`).
+fn drive_speed_with(rake: f32, dir: f32, g: Vec3, single: bool) -> f32 {
     let mut ecs = World::default();
     let floor = ecs.spawn();
     ecs.insert(floor, Transform::from_translation(DVec3::new(0.0, -1.0, 0.0)));
@@ -947,6 +953,7 @@ fn raked_drive_speed(rake: f32, dir: f32, g: Vec3) -> f32 {
         wheels.push(w);
     }
     let mut sim = Sim::build_layered(&ecs, &[], GravityField::uniform(g), DVec3::ZERO, floptle_core::Layers::default());
+    sim.world.single_wheel_friction = single;
     run(&mut sim, &mut ecs, 1.0);
     let x0 = sim.compound_of(chassis.index()).unwrap().vel.x;
     for &w in &wheels {
@@ -987,4 +994,20 @@ fn a_raked_suspension_grips_the_same_forwards_and_backwards() {
             assert!((back - up_back).abs() <= 0.1 * up_back, "on {name} downhill, raked {back} m/s against upright {up_back}");
         }
     }
+}
+
+/// **A wheel grips once.** A wheel joint's wheel took friction from its
+/// contact with the ground and again from its tyre grip, both sized from the
+/// same load, so a driven rover accelerated at about twice its friction
+/// times gravity. With one budget (the project setting new projects start
+/// with) a grip-limited rover on tyres of friction 0.6 gains within 10% of
+/// 0.6 g in a second; without it, a project from before keeps its grip.
+#[test]
+fn a_wheel_grips_once_with_one_friction_budget() {
+    let g = Vec3::new(0.0, -9.81, 0.0);
+    let most = 0.6 * 9.81;
+    let single = drive_speed_with(0.0, 1.0, g, true);
+    let classic = drive_speed_with(0.0, 1.0, g, false);
+    assert!((single - most).abs() <= 0.1 * most, "with one budget it gained {single} m/s; 0.6 g for a second is {most}");
+    assert!(classic > 1.3 * most, "without the setting it gained {classic} m/s: the old grip must stay as it was");
 }

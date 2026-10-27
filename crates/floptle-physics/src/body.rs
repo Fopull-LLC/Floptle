@@ -205,6 +205,9 @@ pub struct Body {
     /// contacts took out along their normals (a hard landing's whole impact,
     /// a resting body's weight). What a wheel joint's tyre grip is sized from.
     pub pressed: f32,
+    /// A wheel joint's wheel while `PhysicsWorld::single_wheel_friction` is
+    /// on: its contacts take no friction of their own, its tyre grip does.
+    pub tyre: bool,
     /// The steepest surface the body is pressed against, when that surface is
     /// too steep to be a floor — a wall, a cliff face, the side of a crate.
     ///
@@ -360,6 +363,7 @@ impl Body {
             contact: None,
             ground_normal: None,
             pressed: 0.0,
+            tyre: false,
             wall_normal: None,
             home: pos,
             active: true,

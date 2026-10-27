@@ -241,6 +241,11 @@ pub struct PhysicsWorld {
     /// session: a pool spawned, moved, resized or destroyed while the game is
     /// running is in this field the same frame it is in the renderer's gather.
     pub water: crate::water::WaterField,
+    /// A wheel joint's wheel takes friction from its tyre grip alone, not
+    /// also from its contact with the ground. Off is how every wheel gripped
+    /// before the choice, with about twice its friction: a project from then
+    /// keeps the vehicles it tuned. See `PhysicsWorld::tyre_grip`.
+    pub single_wheel_friction: bool,
     pub colliders: Vec<AnchoredCollider>,
     pub bodies: Vec<Body>,
     /// Contacts resolved on the most recent `step` (cleared each step), sim frame.
@@ -413,6 +418,7 @@ impl Default for PhysicsWorld {
         Self {
             gravity: GravityField::default(),
             water: crate::water::WaterField::default(),
+            single_wheel_friction: false,
             colliders: Vec::new(),
             bodies: Vec::new(),
             contacts: Vec::new(),
@@ -1646,6 +1652,9 @@ impl PhysicsWorld {
             was.extend(self.bodies.iter().map(|b| if b.asleep { SLEEP_SETTLE_TIME } else { b.sleep_time }));
         }
         self.settle_was_bodies = was;
+        if self.single_wheel_friction {
+            self.mark_tyres();
+        }
         let t_moves = clock();
         for bi in 0..self.bodies.len() {
             // Driver-stepped bodies advance through `Sim::step_body_tick`
@@ -3727,6 +3736,12 @@ impl PhysicsWorld {
             b.pressed += j;
             b.vel += n * (j * inv_m);
             b.ang_vel += b.free_spin(inv_i * r.cross(n * j));
+            // A tyre's friction is its joint's grip, sized from this same
+            // load: spending it here as well gave every wheel about twice its
+            // friction.
+            if b.tyre {
+                return;
+            }
             let vp = b.vel + b.ang_vel.cross(r);
             let vt = vp - n * vp.dot(n);
             let vt_len = vt.length();
