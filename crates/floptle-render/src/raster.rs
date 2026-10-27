@@ -583,6 +583,13 @@ pub(crate) const EXT_CUTOFF_SHIFT: u32 = 8;
 /// Set when the surface blends ([`floptle_core::BlendMode::Blend`]): it is
 /// drawn in the blended pass whatever its opacity, and is never cut out.
 pub(crate) const EXT_BLEND: u32 = 128;
+/// A cross-fade between two LOD bands: the instance's share of the fade
+/// (`color.a`) decides which pixels it keeps, by gradient noise, after the
+/// material's own cutout has decided which texels are surface at all. With
+/// [`EXT_DITHER_INVERT`] the complementary pixels, so two bands fill each
+/// other. Not the retro screen door ([`EXT_DITHER_ALPHA`]), which keeps its
+/// grid. Above the cutoff's bits.
+pub(crate) const EXT_DISSOLVE: u32 = 1 << 16;
 
 impl SurfaceExtras {
     /// Read a material's extras. `Classic` still carries the normal and
@@ -2556,8 +2563,8 @@ impl Raster {
     /// The project's artefacts are folded in here, before the neutral test, and
     /// the test is against the folded neutral — so a material that sets nothing
     /// still lands on index 0 and still shares one entry with every other.
-    /// Entry `ext` with screen-door transparency switched on, on the pattern
-    /// or (`invert`) its complement: what two LOD bands cross-fading wear, so
+    /// Entry `ext` dissolving ([`EXT_DISSOLVE`]), on the noise or (`invert`)
+    /// its complement: what two LOD bands cross-fading wear, so
     /// the band leaving and the band arriving dissolve into each other in the
     /// opaque pass instead of blending at half alpha each.
     pub fn dithered_extras(&mut self, ext: u32, invert: bool) -> u32 {
@@ -2566,7 +2573,7 @@ impl Raster {
         else {
             return ext;
         };
-        let flags = lanes[1][0] as u32 | EXT_DITHER_ALPHA | if invert { EXT_DITHER_INVERT } else { 0 };
+        let flags = lanes[1][0] as u32 | EXT_DISSOLVE | if invert { EXT_DITHER_INVERT } else { 0 };
         lanes[1][0] = flags as f32;
         self.push_ext_lanes(lanes)
     }
@@ -3896,7 +3903,7 @@ impl Raster {
             .mat_ext_cpu
             .as_chunks::<EXT_LANES>().0
             .iter()
-            .map(|c| (c[1][0] as u32) & EXT_DITHER_ALPHA != 0)
+            .map(|c| (c[1][0] as u32) & (EXT_DITHER_ALPHA | EXT_DISSOLVE) != 0)
             .collect();
         // The pass comes from the material's blend mode; a solid material
         // whose instance is faded (a node's Tint, a cross-fade) still blends,
@@ -4532,7 +4539,7 @@ impl Raster {
         // cuts the same pixels the colour pass does for the camera, and none
         // for the sun.
         let dither_flags: Vec<bool> =
-            self.mat_ext_cpu.as_chunks::<EXT_LANES>().0.iter().map(|c| (c[1][0] as u32) & EXT_DITHER_ALPHA != 0).collect();
+            self.mat_ext_cpu.as_chunks::<EXT_LANES>().0.iter().map(|c| (c[1][0] as u32) & (EXT_DITHER_ALPHA | EXT_DISSOLVE) != 0).collect();
         let dithered = |raw: &InstanceRaw| dither_flags.get(ext_index_of(raw) as usize).copied().unwrap_or(false);
         const OPAQUE_CUTOFF: f32 = 0.999;
         // A shader that moves its vertices draws depth through its own

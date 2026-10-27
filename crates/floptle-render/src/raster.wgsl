@@ -197,6 +197,9 @@ const EXT_SINGLE_SIDED: u32 = 64u;
 const EXT_CUTOFF_SHIFT: u32 = 8u;
 // The surface blends (`BlendMode::Blend`): never cut out, whatever its opacity.
 const EXT_BLEND: u32 = 128u;
+// An LOD cross-fade: keep pixels by gradient noise against the instance's
+// share, after the cutout (see raster.rs `EXT_DISSOLVE`).
+const EXT_DISSOLVE: u32 = 65536u;
 
 fn ext_cutoff(e: Ext) -> f32 {
     let q = (e.flags >> EXT_CUTOFF_SHIFT) & 255u;
@@ -243,6 +246,18 @@ fn ext_at(idx: u32) -> Ext {
 // A `.flsl` surface's near fade: its fragment entry asks this.
 fn surface_fade_cut(in: VsOut, pix: vec2<u32>) -> bool {
     return near_fade_cut(ext_at(u32(in.imeta.y)), in.view_pos, pix);
+}
+
+// Whether a band cross-fading (EXT_DISSOLVE) drops this pixel: gradient
+// noise against its share of the fade, the complement for the band leaving,
+// so the two bands between them draw every pixel once.
+fn dissolve_cut(e: Ext, pix: vec2<u32>, share: f32) -> bool {
+    if (share >= 0.999) {
+        return false;
+    }
+    let n = ign(pix);
+    let t = select(n, 1.0 - n, ext_has(e, EXT_DITHER_INVERT));
+    return t >= share;
 }
 
 fn near_fade_cut(e: Ext, view_pos: vec3<f32>, pix: vec2<u32>) -> bool {
@@ -1668,7 +1683,12 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     // The cutoff is the material's own (0.5 unless a model's MASK cutoff, or
     // 0 for a model that says OPAQUE, set it). A strict `<` so a cutoff of 0
     // cuts nothing at all.
-    if (!terrain && !ext_has(ext, EXT_BLEND) && in.color.a >= 0.999 && alpha < ext_cutoff(ext)) {
+    // A band cross-fading (EXT_DISSOLVE) is cut on its picture's own alpha
+    // first, its share of the fade left to the dissolve below: multiplied in,
+    // the share let the soft texels round a leaf through, as dots outside it.
+    let dissolving = !terrain && ext_has(ext, EXT_DISSOLVE);
+    let cut_a = select(alpha, texel.a * in.vcolor.a, dissolving);
+    if (!terrain && !ext_has(ext, EXT_BLEND) && (in.color.a >= 0.999 || dissolving) && cut_a < ext_cutoff(ext)) {
         discard;
     }
     // A single-sided surface is not drawn from behind. Nothing culls in the
@@ -1709,12 +1729,19 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     if (ext_has(ext, EXT_DITHER_ALPHA) && alpha < 0.999 && door >= alpha) {
         discard;
     }
+    // Two LOD bands dissolve into each other by gradient noise, which reads
+    // as the one becoming the other; a 4×4 grid read as a screen door over
+    // every tree mid-fade. The arriving band keeps `n < share`, the leaving
+    // one its complement, so between them every pixel is drawn once.
+    if (dissolving && dissolve_cut(ext, pix, in.color.a)) {
+        discard;
+    }
     if (near_fade_cut(ext, in.view_pos, pix)) {
         discard;
     }
     // Once it dithers, what survives is fully opaque — anything less would blend
     // the surviving pixels on top of the screen door.
-    let out_a = select(alpha, 1.0, ext_has(ext, EXT_DITHER_ALPHA));
+    let out_a = select(alpha, 1.0, ext_has(ext, EXT_DITHER_ALPHA) || dissolving);
 
     // Unlit (fullbright/flat) — pure albedo + emissive, the classic retro look.
     if (in.params.z > 0.5) {
@@ -1919,6 +1946,31 @@ fn fs_depth(in: VsOut, @builtin(front_facing) front: bool) {
     // not apply there: a wall faded so the player can see past it still
     // stands in the sunlight and still shades the room.
     let sun_view = g.sun_extra.y > 0.5;
+    if (ext_has(ext, EXT_DISSOLVE)) {
+        if (sun_view) {
+            // The sun sees the band whole, as for a screen door below.
+            let whole = texel_a * in.vcolor.a;
+            if (!(whole >= 0.99 || (ext_cutoff(ext) == 0.0 && !ext_has(ext, EXT_BLEND))) || (ext_has(ext, EXT_SINGLE_SIDED) && !front)) {
+                discard;
+            }
+            return;
+        }
+        // The colour pass's tests, in its order: cut on the picture's alpha,
+        // then dissolve on the share.
+        if (!ext_has(ext, EXT_BLEND) && texel_a * in.vcolor.a < ext_cutoff(ext)) {
+            discard;
+        }
+        if (ext_has(ext, EXT_SINGLE_SIDED) && !front) {
+            discard;
+        }
+        if (dissolve_cut(ext, pix, in.color.a)) {
+            discard;
+        }
+        if (near_fade_cut(ext, in.view_pos, pix)) {
+            discard;
+        }
+        return;
+    }
     if (ext_has(ext, EXT_DITHER_ALPHA)) {
         if (sun_view) {
             // The whole surface, as if it were not fading: its picture's own

@@ -274,8 +274,7 @@ fn glow_under_map(mp: &mut MaterialParams, emissive_map: bool) {
 }
 
 /// The two surface-extras entries a part wears while its LOD bands cross:
-/// its own, screen-door dithered, once with the pattern and once with its
-/// complement. The band leaving draws the pixels the band arriving does not,
+/// its own, dissolving, once on the noise and once on its complement. The band leaving draws the pixels the band arriving does not,
 /// so a crown is whole at every point of the fade and both stay in the opaque
 /// pass. Blending the two at half alpha drew every crown half see-through.
 fn fade_extras(raster: &mut floptle_render::Raster, ext: u32) -> [u32; 2] {
