@@ -1,5 +1,10 @@
 ## Just shipped
 
+**v0.117.0 — "Whole Worlds"**. Whole planets with rivers, mountain ranges and
+weather that stream in without stalling, craft with hinges and wheels, water
+to float on, volumetric fog with light shafts, and meshes, pictures and
+compute shaders a script makes itself. Everything from the 0.117 betas.
+
 **v0.117.0-rc38 — "Whole Worlds"** (beta). Compute shaders: `gpu.buffer`,
 `gpu.texture` and `compute.run` put programs on the GPU that draw nothing, for
 procedural textures, particle swarms and simulations. Moving worlds cost what
