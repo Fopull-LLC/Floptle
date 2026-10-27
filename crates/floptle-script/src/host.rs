@@ -8544,13 +8544,13 @@ impl ScriptHost {
             format!("{scene} · {node} · {kind}")
         };
         let list = unread.join(", ");
-        let (is, does) = if unread.len() == 1 { ("is", "does") } else { ("are", "do") };
+        let does = if unread.len() == 1 { "does" } else { "do" };
         self.logs.borrow_mut().push(crate::ScriptLog {
             level: crate::LogLevel::Warn,
             msg: format!(
-                "{where_}: the scene sets {list}, which the script no longer declares — \
-                 {is} stored and never read. Delete the param, or add it to `defaults` if \
-                 it {does} belong."
+                "{where_}: the scene sets {list}, which the script does not declare in \
+                 `defaults`, so the Inspector cannot show or check it. Add it to `defaults` \
+                 if the script reads it, or delete the param if it {does} not belong."
             ),
             // Line 0: the param is in the scene file, not on a line of the
             // script — pointing at line 1 would send you to the wrong file.

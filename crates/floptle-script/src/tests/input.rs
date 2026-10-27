@@ -113,3 +113,28 @@ fn input_released_edge() {
     assert!((world.get::<Transform>(e).unwrap().translation.x - 1.0).abs() < 1e-6);
     assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
 }
+
+/// **`{ quiet = true }` lets a lookup find nothing without a word.** A game
+/// that looks for its manager and makes one when it is missing expects the
+/// miss; the warning was noise there. Without the option it still says what
+/// the scene does carry.
+#[test]
+fn a_quiet_find_script_says_nothing_and_a_plain_one_still_warns() {
+    let dir = std::env::temp_dir().join(format!("floptle_quiet_find_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(&dir, "quiet", "function update(node, dt)\n  local m = findScript('manager', { quiet = true })\n  local ms = findScripts('manager', { quiet = true })\nend\n");
+    let (mut world, _e) = world_with_script("quiet");
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    let said: Vec<String> = host.drain_logs().into_iter().filter(|l| l.msg.contains("found nothing")).map(|l| l.msg).collect();
+    assert!(said.is_empty(), "a quiet lookup spoke: {said:?}");
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+
+    write_script(&dir, "loud", "function update(node, dt)\n  local m = findScript('manager')\nend\n");
+    let (mut world, _e) = world_with_script("loud");
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    let said: Vec<String> = host.drain_logs().into_iter().filter(|l| l.msg.contains("found nothing")).map(|l| l.msg).collect();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(said.len(), 1, "a plain lookup still says so: {said:?}");
+}

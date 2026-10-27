@@ -787,11 +787,11 @@ fn a_fixed_update_only_script_is_warned_about_a_param_it_never_reads() {
     let logs = host.drain_logs();
     let msgs: Vec<&str> = logs.iter().map(|l| l.msg.as_str()).collect();
     assert!(
-        msgs.iter().any(|m| m.contains("stale") && m.contains("never read")),
+        msgs.iter().any(|m| m.contains("stale") && m.contains("does not declare")),
         "no unread-params warning for a fixedUpdate-only script: {msgs:?}"
     );
     assert!(
-        !msgs.iter().any(|m| m.contains("speed") && m.contains("never read")),
+        !msgs.iter().any(|m| m.contains("speed") && m.contains("does not declare")),
         "a param the script declares was reported unread: {msgs:?}"
     );
     let _ = std::fs::remove_dir_all(&dir);

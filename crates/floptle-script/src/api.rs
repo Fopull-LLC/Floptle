@@ -4125,6 +4125,13 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
 ///
 /// A wrong key and a wrong value both raise, listing what is accepted: a
 /// defaulted typo is an options table nobody can see the effect of.
+/// `{ quiet = true }`: a lookup that finds nothing says nothing. For a game
+/// that looks for a manager and makes one when it is missing, where finding
+/// nothing is the expected answer and not a mistake.
+fn find_quiet(opts: &Option<Value>) -> bool {
+    matches!(opts, Some(Value::Table(t)) if t.get::<Option<bool>>("quiet").ok().flatten() == Some(true))
+}
+
 fn find_scope(opts: &Option<Value>) -> mlua::Result<crate::FindScope> {
     let t = match opts {
         None | Some(Value::Nil) => return Ok(crate::FindScope::default()),
@@ -4139,10 +4146,10 @@ fn find_scope(opts: &Option<Value>) -> mlua::Result<crate::FindScope> {
     };
     for pair in t.clone().pairs::<String, Value>() {
         let (k, _) = pair?;
-        if !matches!(k.as_str(), "scope" | "includeDisabled" | "onlyDisabled") {
+        if !matches!(k.as_str(), "scope" | "includeDisabled" | "onlyDisabled" | "quiet") {
             return Err(mlua::Error::RuntimeError(format!(
                 "find options: unknown key '{k}' — accepted: scope, includeDisabled, \
-                 onlyDisabled"
+                 onlyDisabled, quiet"
             )));
         }
     }
@@ -5714,6 +5721,7 @@ fn install_find_globals(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
             // else's code.
             if found.is_none()
                 && scope == crate::FindScope::Enabled
+                && !find_quiet(&opts)
                 && s.order.iter().any(|e| s.names.get(e).is_some_and(|n| n == &name))
                 && warned.borrow_mut().insert(name.clone())
             {
@@ -5818,9 +5826,11 @@ lua.globals().set(
             // alternative is a `nil` that surfaces as an unset value in a
             // different script several frames later.
             crate::KindMatch::None => {
-                warn_once(&logs, &warned, format!("findScript:{kind}"), || {
-                    no_such_kind_in_scene("findScript", &kind, &scene.borrow())
-                });
+                if !find_quiet(&opts) {
+                    warn_once(&logs, &warned, format!("findScript:{kind}"), || {
+                        no_such_kind_in_scene("findScript", &kind, &scene.borrow())
+                    });
+                }
                 return Ok(Value::Nil);
             }
         };
@@ -5863,9 +5873,11 @@ lua.globals().set(
                     return Err(crate::ambiguous_kind_error("findScripts", &kind, &hits));
                 }
                 crate::KindMatch::None => {
-                    warn_once(&logs, &warned, format!("findScripts:{kind}"), || {
-                        no_such_kind_in_scene("findScripts", &kind, &scene.borrow())
-                    });
+                    if !find_quiet(&opts) {
+                        warn_once(&logs, &warned, format!("findScripts:{kind}"), || {
+                            no_such_kind_in_scene("findScripts", &kind, &scene.borrow())
+                        });
+                    }
                     return list_table(lua, &[], |_, _| unreachable!("empty"));
                 }
             };
