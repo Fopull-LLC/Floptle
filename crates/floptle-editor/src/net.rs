@@ -1624,6 +1624,8 @@ impl Editor {
         // reply's callback closes over its nodes, and this world is about to
         // stop having them.
         self.script_host.cancel_web_requests();
+        // And everything its scripts made on the GPU, by the same rule.
+        self.reset_compute();
         // Leaving a scene with a save slot active (exit-to-menu): the slot's
         // terrain edits must be on disk before the world unloads — the flush a
         // script queued this same frame hasn't run yet, and the background

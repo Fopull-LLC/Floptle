@@ -21,6 +21,7 @@
 pub mod access;
 pub mod camera2d;
 pub mod ecs;
+pub mod gpu;
 pub mod event;
 pub mod frames;
 pub mod joint;

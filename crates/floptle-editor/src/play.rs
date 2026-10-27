@@ -1049,6 +1049,7 @@ impl Editor {
             self.script_host.set_playing(false);
             // So did every picture it downloaded.
             self.release_runtime_textures();
+            self.reset_compute();
             self.drop_captures();
             self.play_stream_hold = false;
             // Make the revert explicit — "where did my tweaks go" is a classic

@@ -3414,6 +3414,10 @@ impl ScriptHost {
         if let Err(e) = crate::capture_api::install(&lua, captures.clone(), textures.clone()) {
             floptle_say::say_err!("[lua] failed to install camera.capture: {e}");
         }
+        let compute: Rc<RefCell<crate::compute_api::ComputeBook>> = Rc::default();
+        if let Err(e) = crate::compute_api::install(&lua, compute.clone()) {
+            floptle_say::say_err!("[lua] failed to install gpu/compute: {e}");
+        }
         let files: Rc<RefCell<crate::file_api::Files>> = Rc::default();
         if let Err(e) = crate::file_api::install(&lua, files.clone()) {
             floptle_say::say_err!("[lua] failed to install app.openFile: {e}");
@@ -3588,6 +3592,7 @@ impl ScriptHost {
             textures,
             meshes,
             captures,
+            compute,
             files,
             terrain_stats,
             cloud,
@@ -4995,6 +5000,7 @@ impl ScriptHost {
             self.textures.borrow_mut().reset();
             self.meshes.borrow_mut().reset();
             self.captures.borrow_mut().cancel_all();
+            self.compute.borrow_mut().reset();
             self.files.borrow_mut().cancel_all();
         }
         // Stop drops every leaderboard callback still waiting, for the same
@@ -5014,6 +5020,7 @@ impl ScriptHost {
         self.terrain_planet.borrow_mut().cancel_all();
         self.textures.borrow_mut().cancel_all();
         self.captures.borrow_mut().cancel_all();
+        self.compute.borrow_mut().reset();
         self.files.borrow_mut().cancel_all();
         self.steam_state.borrow_mut().cancel_all();
     }
@@ -6375,6 +6382,25 @@ impl ScriptHost {
     pub fn set_can_draw(&self, can: bool) {
         self.textures.borrow_mut().set_can_draw(can);
         self.captures.borrow_mut().set_can_draw(can);
+        self.compute.borrow_mut().set_can_draw(can);
+    }
+
+    /// What scripts made on the GPU, wrote, freed, read or asked to run since
+    /// the last call, in order (`gpu.*`, `compute.run`).
+    pub fn take_compute_requests(&self) -> Vec<crate::ComputeRequest> {
+        self.compute.borrow_mut().take_requests()
+    }
+
+    /// The driver's answer for a `buffer:read` / `texture:read`: the bytes, or
+    /// why not. The callback runs in the next frame pass.
+    pub fn answer_compute_read(&self, token: u64, result: Result<Vec<u8>, String>) {
+        self.compute.borrow_mut().answer(token, result);
+    }
+
+    /// The device's limits, as `gpu.limits()` reports them and the API checks
+    /// a request against.
+    pub fn set_compute_limits(&self, limits: Vec<(String, u64)>) {
+        self.compute.borrow_mut().set_limits(limits);
     }
 
     /// Pictures scripts asked for since the last call (`camera.capture` /
@@ -6575,6 +6601,7 @@ impl ScriptHost {
         crate::account_api::drain(&self.lua, &self.account, &self.logs);
         crate::preload_api::drain(&self.lua, &self.preloads, &self.logs);
         crate::capture_api::drain(&self.lua, &self.captures, &self.logs);
+        crate::compute_api::drain(&self.lua, &self.compute, &self.logs);
         crate::file_api::drain(&self.lua, &self.files, &self.logs);
         crate::texture_api::drain(&self.lua, &self.textures, &self.logs);
         crate::terrain_api::drain_planet_queries(&self.lua, &self.terrain_planet, &self.logs);

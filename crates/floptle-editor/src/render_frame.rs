@@ -569,6 +569,9 @@ impl Editor {
         if let Some(ms) = landed {
             self.feed_dynamic_resolution(ms);
         }
+        // What this frame's scripts queued, under the timer's marks, before
+        // anything that draws its results.
+        self.run_compute_jobs(timing);
         let Some((gather, ui)) = self.build_frame_ui(
             gather,
             elapsed,

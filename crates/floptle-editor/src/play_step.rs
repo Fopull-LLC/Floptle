@@ -1781,6 +1781,7 @@ impl Editor {
         self.preload_sounds();
         self.pump_warm();
         self.pump_runtime_textures();
+        self.pump_compute();
     }
 
     /// `audio.preload`, and the sounds `assets.preload` named: decoded on a

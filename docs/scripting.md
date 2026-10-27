@@ -64,6 +64,13 @@ The three things that make a scene feel alive, driven from a script.
 - [10. Particles: `node:particles()`](scripting/visuals.md#10-particles-nodeparticles)
 - [11. Audio: `audio.play`, `node:sound()` & the mixer](scripting/visuals.md#11-audio-audioplay-nodesound-the-mixer)
 
+### [Compute shaders](scripting/compute.md)
+
+Programs on the GPU that draw nothing: procedural textures, particle swarms,
+simulations.
+
+- [31. Compute shaders: `gpu.*` & `compute.run`](scripting/compute.md#31-compute-shaders-gpu-computerun)
+
 ### [Maths & the world](scripting/world.md)
 
 Vectors, terrain, water, scattered props, decals, and orbital time.

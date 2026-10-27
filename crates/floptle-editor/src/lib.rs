@@ -219,6 +219,7 @@ mod worker;
 mod runtime_textures;
 mod camera_stack;
 mod capture;
+mod compute_jobs;
 mod user_data;
 mod node_bounds;
 mod body_fit;
@@ -2070,6 +2071,9 @@ struct Editor {
     /// Per-pass GPU timings — `None` on a device without timestamp queries, so
     /// the panel says so rather than reporting zeros.
     gpu_timer: Option<floptle_render::GpuTimer>,
+    /// What scripts made on the GPU with `gpu.*` and asked to run with
+    /// `compute.run`. See `compute_jobs`.
+    compute: compute_jobs::ComputeJobs,
     /// Frames drawn — only used to pace the `FLOPTLE_GPU_TIMING` terminal dump.
     gpu_timing_frames: u64,
     /// Is the ⏱ Frame panel open? Nothing is submitted for timing while it is

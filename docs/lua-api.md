@@ -22,6 +22,7 @@ each group, and meant to be searched.
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
 - [input — keyboard & mouse](#input--keyboard--mouse) — 49
 - [drawing — draw.*](#drawing--draw) — 19
+- [compute — gpu.* & compute.run](#compute--gpu--computerun) — 13
 - [the web — http.*, json.*](#the-web--http-json) — 15
 - [the player's account — account.*](#the-players-account--account) — 13
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 74
@@ -2164,6 +2165,60 @@ draw.text(w - 24, 24, string.format("%.0f fps", 1 / dt), 18, 1, 1, 1, 0.7, "righ
 ### `draw.tri`
 
 draw.tri(x1,y1,z1, x2,y2,z2, x3,y3,z3, r,g,b [,a]) — one filled triangle. The raw primitive under the solid shapes, for when you want your own.
+
+## compute — gpu.* & compute.run
+
+### `buf:free`
+
+buf:free() — let go of the buffer now. See gpu.free.
+
+### `buf:read`
+
+buf:read(function(values, err) end) — the buffer's contents, a frame or two later, without stalling the frame: a list of numbers, of { x, y, z [, w] } tables for vectors, or of tables of fields for a struct. err says why when there are none ("no renderer" on a host that draws nothing).
+
+### `buf:write`
+
+buf:write(values [, first]) — write into the buffer from element first (0 when left out): a list of numbers, of vectors (vec3 or { x, y, z }; a flat list of numbers fills the lanes in turn), or of tables with a struct's fields (a missing field is 0). Or a byte string of whole 4-byte values, as the shader reads them. Lands on the GPU before the next shader runs. More than the buffer holds raises.
+
+### `compute`
+
+Running compute shaders. A compute shader is a .wgsl file in your project with one or more @compute entry points, written in WGSL with loops, atomics and workgroup memory. The engine writes the declarations in front of it: each buffer and texture you bind as a global under its bind name, `params` holding time, frame and your params, and the same noise, hash and colour functions FLSL has (flsl_hash2, flsl_fbm2, …). An error is reported in the Console at the file's own line, and the file is read again when it changes.
+
+### `compute.run`
+
+compute.run("shaders/x.wgsl", "entry", { size = { w, h } or groups = { gx, gy }, bind = { name = buf or gtex or gpu.read(gtex) }, params = { name = number } }) — run the shader's entry point once, before this frame is drawn, so anything drawn this frame sees what it wrote. size is how many invocations you want: the engine divides by the entry's @workgroup_size and rounds up, so guard the edge in the shader (if (id.x >= params... )). groups gives the workgroups yourself. Calls run in the order made, each after the last has finished. Each is named in perf.gpu() as "compute entry". Read params in the shader as params.name (f32), and params.time / params.frame.
+
+### `gpu`
+
+Buffers and textures on the GPU, for compute shaders to read and write: a procedural texture, a particle swarm, a simulation, a skin painted on the GPU. gpu.buffer and gpu.texture make them, compute.run runs a shader over them before the frame is drawn, and :read hands the results back a frame or two later without ever waiting. Everything is let go on Stop and on a scene load. Compute results differ a little between graphics cards, and a dedicated server has none, so use them for what players see, not for gameplay a rollback match must agree on. A host that draws nothing (floptle run, a dedicated server) makes nothing: gpu.buffer and gpu.texture answer nil, "no renderer".
+
+### `gpu.buffer`
+
+gpu.buffer{ count = n, type = "f32" } → buf — a typed array of n elements on the GPU, zeroed. type is f32, u32, i32, vec2, vec3 or vec4 (f32 when left out), or give layout = { "pos: vec3", "vel: vec3", "life: f32" } for a struct with those fields. In the shader it is a read_write storage array under the name you bind it to. A vec3 takes 16 bytes, as WGSL lays it out. A buffer bigger than the device binds is refused with the number (gpu.limits().maxBufferBytes). buf.count and buf.type say what it holds.
+
+### `gpu.free`
+
+gpu.free(buf or gtex) — let go of a buffer or texture now, rather than at Stop. A handle to it reaches nothing afterwards. The same as buf:free() / gtex:free().
+
+### `gpu.limits`
+
+gpu.limits() → { maxBufferBytes, maxStorageBuffers, maxStorageTextures, maxWorkgroups, maxWorkgroupSize, maxWorkgroupMemory, maxTextureSize } — what this graphics device allows. A browser's are the tightest (8 storage buffers a shader, 256 invocations a workgroup, 16 KB of workgroup memory), so a game that keeps to those runs everywhere. Empty until the first frame has drawn.
+
+### `gpu.read`
+
+gpu.read(gtex) — bind a gpu texture for a shader to READ (texture_2d<f32>, textureLoad) rather than write: bind = { before = gpu.read(a), after = b }.
+
+### `gpu.texture`
+
+gpu.texture{ w = 512, h = 512 } → gtex — an RGBA picture a compute shader writes, transparent black. gtex.name ("gpu:1") goes anywhere a texture path does: a material's texture, setShaderTexture, a UI image, draw.quad, a decal. A shader writes it with textureStore (texture_storage_2d<rgba8unorm, write>), and what it writes reads like a picture's own colours. To read one in a shader, bind gpu.read(gtex); to change a picture in place, write a second and swap the two each frame.
+
+### `gtex:free`
+
+gtex:free() — let go of the texture now; anything still drawing it draws nothing. See gpu.free.
+
+### `gtex:read`
+
+gtex:read(function(bytes, err) end) — the texture's pixels, a frame or two later: a string of r, g, b, a bytes per pixel, row by row from the top, gtex.w × gtex.h of them — what assets.textureFromPixels and image.* take.
 
 ## the web — http.*, json.*
 

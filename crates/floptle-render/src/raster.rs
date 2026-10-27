@@ -2790,6 +2790,28 @@ impl Raster {
         TexBind { bind, view, linear_view, sampling, _texture: texture, revision: Default::default() }
     }
 
+    /// Register a texture made elsewhere on the GPU (one a compute shader
+    /// writes) as a material texture, drawable anywhere a texture name goes.
+    /// `srgb` says the texture can be viewed as sRGB, so what a shader wrote
+    /// reads as a picture's bytes do, the same colour an identical PNG would
+    /// draw; without it the values are drawn as they are.
+    pub fn register_gpu_texture(&mut self, gpu: &Gpu, texture: wgpu::Texture, srgb: bool, sampling: TexSampling) -> TexId {
+        // Sampled only: an sRGB view of a texture a shader also writes cannot
+        // carry its storage use, and a view takes every use of its texture
+        // unless told otherwise.
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            format: srgb.then_some(wgpu::TextureFormat::Rgba8UnormSrgb),
+            usage: Some(wgpu::TextureUsages::TEXTURE_BINDING),
+            ..Default::default()
+        });
+        let linear_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = self.sampler_for(gpu, sampling);
+        let bind = self.plain_surface_bind(gpu, "raster-gpu-tex", &view, &sampler);
+        let id = TexId(self.textures.len() as u32);
+        self.textures.push(TexBind { bind, view, linear_view, sampling, _texture: texture, revision: Default::default() });
+        id
+    }
+
     /// Let go of a texture's pixels: the slot now holds one transparent pixel,
     /// so anything still drawing with the id draws nothing.
     ///

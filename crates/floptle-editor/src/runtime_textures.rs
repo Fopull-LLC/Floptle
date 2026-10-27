@@ -15,10 +15,11 @@ use floptle_render::TextureData;
 
 use crate::Editor;
 
-/// A registry key that is not a path: a live render target (`rt:`) or a
-/// runtime picture (`img:`). Looked up, never loaded, never hot-reloaded.
+/// A registry key that is not a path: a live render target (`rt:`), a
+/// runtime picture (`img:`) or a texture a compute shader writes (`gpu:`).
+/// Looked up, never loaded, never hot-reloaded.
 pub(crate) fn names_no_file(key: &str) -> bool {
-    key.starts_with("rt:") || key.starts_with("img:")
+    key.starts_with("rt:") || key.starts_with("img:") || key.starts_with("gpu:")
 }
 
 /// A picture being decoded.

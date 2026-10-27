@@ -63,6 +63,7 @@ pub(crate) fn render_frame_texture(
     ed.ensure_ui_shaders();
     ed.ensure_post_shaders();
     ed.sync_field_shapes();
+    ed.run_compute_jobs(false);
     // The sky's shader and texture, and the map's geometry, likewise: each
     // is a no-op once the frame loop has done it, and without it a capture
     // taken before that (`shot --after`, a script's first frames) drew the

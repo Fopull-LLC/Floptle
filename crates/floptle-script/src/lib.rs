@@ -311,6 +311,7 @@ mod preload_api;
 mod texture_api;
 mod image_api;
 mod capture_api;
+mod compute_api;
 mod file_api;
 mod terrain_stats_api;
 pub mod paths;
@@ -321,6 +322,7 @@ pub mod mesh_api;
 pub use mesh_api::MeshRequest;
 pub use texture_api::TextureRequest;
 pub use capture_api::{CaptureCamera, CaptureFormat, CaptureRequest, MAX_CAPTURE_SIDE, NO_RENDERER};
+pub use compute_api::{ComputeBind, ComputeRequest};
 pub use terrain_stats_api::TerrainStats;
 pub use file_api::{OpenFileAnswer, OpenFileRequest, DEFAULT_MAX_BYTES as OPEN_FILE_DEFAULT_MAX_BYTES, MAX_BYTES as OPEN_FILE_MAX_BYTES};
 pub use account_api::keep_account_signed_out;
@@ -1075,6 +1077,8 @@ pub struct ScriptHost {
     meshes: Rc<RefCell<mesh_api::MeshBook>>,
     /// `camera.capture` / `captureTexture`: pictures waiting for the driver.
     captures: Rc<RefCell<capture_api::Captures>>,
+    /// `gpu.*` and `compute.run`: what scripts made on the GPU and asked to run.
+    compute: Rc<RefCell<compute_api::ComputeBook>>,
     /// `app.openFile` pickers waiting on the driver.
     files: Rc<RefCell<file_api::Files>>,
     /// The engine's count of what the terrains hold (`terrain.stats`).

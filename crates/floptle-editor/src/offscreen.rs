@@ -275,6 +275,8 @@ impl Editor {
         // and terrain record their own buckets. Timed again out here, all of
         // it counted a second time as `scripts`.
         self.play_step(dt, true);
+        // What this frame's scripts queued, before the frame that shows it.
+        self.run_compute_jobs(false);
         self.finish_input_frame();
         // Times itself, as `models`.
         self.load_script_swapped_models();

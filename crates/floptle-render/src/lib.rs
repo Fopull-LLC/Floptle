@@ -20,6 +20,7 @@
 pub mod bitmap_font;
 pub mod camera;
 pub mod camera_stack;
+pub mod compute;
 pub mod cull;
 pub mod device;
 pub mod env;
