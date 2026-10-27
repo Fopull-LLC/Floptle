@@ -51,6 +51,32 @@ pub(crate) struct OffscreenOpts<'a> {
     pub draws: floptle_core::CameraDraws,
 }
 
+impl crate::Editor {
+    /// How far from the eye a stacked layer's meshes reach, with room for a
+    /// pose to swing them out: what its sun map has to cover. `None` when one
+    /// of them cannot be measured, and the map keeps the scene's distance.
+    fn stack_layer_reach(
+        &self,
+        cull_mask: u32,
+        layers: Option<&floptle_core::Layers>,
+        eye: floptle_core::math::DVec3,
+    ) -> Option<f32> {
+        let mut reach = 0.0f32;
+        for (e, m) in self.world.query::<Matter>() {
+            if !matches!(m, Matter::Mesh { .. } | Matter::MapMesh { .. } | Matter::Primitive { .. })
+                || floptle_core::is_hidden(&self.world, e)
+                || floptle_core::is_disabled(&self.world, e)
+                || layers.is_some_and(|lt| (cull_mask >> lt.index_for(&self.world, e)) & 1 == 0)
+            {
+                continue;
+            }
+            let t = floptle_core::world_transform(&self.world, e);
+            reach = reach.max(crate::node_bounds::node_reach(&self.mesh_registry, m, &t, eye)?);
+        }
+        Some(reach * 1.25 + 1.0)
+    }
+}
+
 /// The scene's light as a camera with `draws` sees it. A camera that turned
 /// the sun's shadows or the fog off sees the scene as if the light said so,
 /// and every uniform is built from this copy.
@@ -539,8 +565,18 @@ impl Editor {
             cam.world_position,
             light_node.shadows || point_shadows,
         );
+        // A stacked layer's sun map covers what the layer draws, not the view
+        // out to the scene's shadow distance: a cockpit's map fitted to the
+        // cockpit, which is sharper, and which leaves out every caster nowhere
+        // near it (the map still reaches far toward the sun, so a hill or a
+        // hull between the room and the sun still shades it). Fitted to the
+        // whole view, a ten-metre room paid for the whole scene's casters.
+        let map_light = match opts.overlay.then(|| self.stack_layer_reach(cull_mask, layer_table.as_ref(), cam.world_position)).flatten() {
+            Some(reach) => Light { shadow_distance: light_node.shadow_distance.min(reach), ..light_node },
+            None => light_node,
+        };
         let (sun_vp, sun_map, sun_extra) = crate::shading::sun_map_lanes(
-            &light_node,
+            &map_light,
             sun,
             (star_meta[0] >= 1.0).then_some(star_pos[0]),
             view_proj,
@@ -1777,5 +1813,34 @@ mod camera_draws_tests {
         let clear = light_seen_by(scene, floptle_core::CameraDraws { fog: false, ..Default::default() });
         assert!(!clear.fog && !clear.fog_volumetric, "fog stayed on");
         assert!(clear.shadows && clear.shadow_map, "turning fog off touched the shadows");
+    }
+
+    /// **A stacked layer's sun map covers the layer.** Its reach is its own
+    /// nodes', not the scene's: a cube 3 m off on the layer sets it, a tower
+    /// 500 m off on another layer does not, and a mesh on the layer that cannot
+    /// be measured leaves the map at the scene's distance rather than guessing
+    /// short and cutting its shadow off.
+    #[test]
+    fn a_stacked_layer_s_sun_map_reaches_only_as_far_as_its_nodes() {
+        use floptle_core::math::DVec3;
+        let mut ed = crate::Editor::default();
+        ed.project.layers = vec!["Default".to_string(), "Cockpit".to_string()];
+        let node = |ed: &mut crate::Editor, at: DVec3, layer: Option<&str>, m: Matter| {
+            let e = ed.world.spawn();
+            ed.world.insert(e, floptle_core::Transform::from_translation(at));
+            ed.world.insert(e, m);
+            if let Some(l) = layer {
+                ed.world.insert(e, floptle_core::Layer(l.into()));
+            }
+            e
+        };
+        let cube = || Matter::Primitive { shape: floptle_core::Shape::Cube, color: [1.0; 3] };
+        node(&mut ed, DVec3::new(0.0, 0.0, -3.0), Some("Cockpit"), cube());
+        node(&mut ed, DVec3::new(0.0, 0.0, -500.0), None, cube());
+        let layers = ed.project.build_layers();
+        let reach = ed.stack_layer_reach(1 << 1, Some(&layers), DVec3::ZERO).expect("a primitive is measurable");
+        assert!(reach > 3.0 && reach < 10.0, "the cockpit layer reaches {reach} m");
+        node(&mut ed, DVec3::ZERO, Some("Cockpit"), Matter::Mesh { asset_path: "models/unloaded.glb".into() });
+        assert_eq!(ed.stack_layer_reach(1 << 1, Some(&layers), DVec3::ZERO), None, "an unmeasured mesh guessed a reach");
     }
 }

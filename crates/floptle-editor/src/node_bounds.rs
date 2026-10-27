@@ -154,6 +154,27 @@ pub(crate) fn sprite_reach(sprites: &[floptle_core::Sprite], size: f32) -> f32 {
     reach
 }
 
+/// How far from `cam_world` a mesh or primitive node's geometry can reach, or
+/// `None` when it cannot be measured.
+pub(crate) fn node_reach(
+    mesh_registry: &std::collections::HashMap<String, crate::MeshAsset>,
+    matter: &Matter,
+    t: &floptle_core::transform::Transform,
+    cam_world: floptle_core::math::DVec3,
+) -> Option<f32> {
+    let measured = Measured {
+        model_size: match matter {
+            Matter::Mesh { asset_path } => mesh_registry.get(asset_path).map(|a| a.size),
+            Matter::MapMesh { id } => mesh_registry.get(&crate::map_edit::map_key(*id)).map(|a| a.size),
+            _ => None,
+        },
+        sprite_reach: None,
+        sprite_size: None,
+    };
+    let r = floptle_render::cull::scale_radius(local_radius(matter, measured)?, t.scale);
+    Some((t.translation - cam_world).length() as f32 + r)
+}
+
 /// Is this node's geometry certainly outside `frustum`?
 ///
 /// The one rejection test, shared by the main gather and the offscreen one, so a
