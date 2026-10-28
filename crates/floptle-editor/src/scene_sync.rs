@@ -815,6 +815,89 @@ mod shadow_atlas_tests {
         assert!(after[0] > before[0] * 1.3, "the mesh still casts its old bake ({before:?} then {after:?})");
     }
 
+    /// **A dug pit's rim blends over the width the palette gives.** A pit dug
+    /// through red ground into a blue subsoil, seen from above: with no
+    /// `|blend=` the two meet across one triangle, as they always have; with
+    /// a width of 3 m far more of the picture is a mix of the two, and with
+    /// 0.5 m less than that. `FLOPTLE_BLEND_PNG=<dir>` writes the pictures.
+    #[cfg(feature = "editor-ui")]
+    #[test]
+    fn a_dug_pits_rim_blends_over_the_palettes_width() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let dir = std::env::temp_dir().join(format!("floptle_blend_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("textures")).unwrap();
+        for (name, c) in [("red", [200u8, 40, 40, 255]), ("blue", [40, 40, 200, 255])] {
+            let tex = floptle_render::TextureData { pixels: c.repeat(16 * 16), width: 16, height: 16 };
+            std::fs::write(dir.join(format!("textures/{name}.png")), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+        }
+        ed.project_root = dir.clone();
+        ed.terrain_textures = vec!["textures/red.png".into(), "textures/red.png".into(), "textures/blue.png".into()];
+        ed.terrain_textures_dirty = true;
+        for _ in 0..20_000 {
+            ed.sync_terrain_palette(false);
+            if ed.terrain_palette_job.is_none() && !ed.terrain_textures_dirty {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let mut field = floptle_field::procgen::generate_planet(&floptle_field::procgen::PlanetFill {
+            seed: 8,
+            radius: 120.0,
+            voxel: 1.5,
+            relief: 2.0,
+            cave_depth: 0.0,
+            subsoil_depth: 1.5,
+            subsoil: floptle_field::procgen::LayerPaint { slot: 3, color: [1.0; 3] },
+            ..Default::default()
+        });
+        let top = field.raycast(Vec3::new(0.0, 250.0, 0.0), Vec3::NEG_Y, 250.0).unwrap();
+        for k in 0..4 {
+            field.sculpt(floptle_field::Brush::Lower, top - Vec3::Y * (k as f32 * 0.8), 5.0, 1.0, Default::default());
+        }
+        add_body(&mut ed, 1, DVec3::ZERO, &field);
+        settle(&mut ed);
+        let sun = ed.world.spawn();
+        ed.world.insert(sun, Transform { rotation: floptle_core::math::Quat::from_rotation_x(-1.2), ..Transform::IDENTITY });
+        ed.world.insert(sun, floptle_core::Light { intensity: 1.0, shadows: false, ..Default::default() });
+        ed.camera.position = DVec3::new(top.x as f64, top.y as f64 + 22.0, top.z as f64 + 0.5);
+        ed.camera.pitch = -1.5;
+        ed.camera.yaw = 0.0;
+        let (w, h) = (320u32, 240u32);
+        let shoot = |ed: &mut crate::Editor, blend: f32| {
+            ed.terrain_tex_blend = vec![0.0, 0.0, blend];
+            ed.terrain_tex_rough = vec![0.5; 3];
+            let at = ed.camera.position;
+            ed.terrain_gpu_dirty = true;
+            settle(ed);
+            ed.settle_terrain_meshes(at, std::time::Duration::from_secs(60));
+            let cam = ed.camera.render_camera();
+            crate::shot::render_frame_pixels(ed, &cam, None, w, h, !0, false).expect("a frame")
+        };
+        let shots: Vec<(f32, Vec<u8>)> = [0.0f32, 0.5, 3.0].into_iter().map(|b| (b, shoot(&mut ed, b))).collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        // A pixel that is neither the red ground nor the blue subsoil but a mix.
+        let mixed = |px: &[u8]| {
+            px.as_chunks::<4>().0.iter().filter(|p| {
+                let (r, b) = (p[0] as f32, p[2] as f32);
+                r.max(b) > 30.0 && r / b.max(1.0) > 0.45 && r / b.max(1.0) < 2.2
+            }).count()
+        };
+        let counts: Vec<(f32, usize)> = shots.iter().map(|(b, px)| (*b, mixed(px))).collect();
+        if let Ok(out) = std::env::var("FLOPTLE_BLEND_PNG") {
+            for (b, px) in &shots {
+                let tex = floptle_render::TextureData { pixels: px.clone(), width: w, height: h };
+                std::fs::write(std::path::Path::new(&out).join(format!("blend_{b}.png")), floptle_assets::encode_png(&tex).unwrap()).unwrap();
+            }
+        }
+        let (none, narrow, wide) = (counts[0].1, counts[1].1, counts[2].1);
+        assert!(wide > none * 2 + 50, "a 3 m blend mixes {wide} pixels against {none} with none: {counts:?}");
+        // With no width the edge is one triangle wide, about a voxel (1.5 m
+        // here), so half a metre is crisper than that and three is wider.
+        assert!(narrow * 3 < none * 2, "a 0.5 m blend mixes {narrow} pixels against {none} with none: {counts:?}");
+        assert!(wide > narrow, "a 3 m blend mixes no more than a 0.5 m one: {counts:?}");
+    }
+
     /// PICTURES (run by hand): a dug world's shadows drawn from the atlas as
     /// the budgeted path leaves it (boxes and a re-laid build), then from the
     /// same proxies uploaded whole the old way. The two must be the same

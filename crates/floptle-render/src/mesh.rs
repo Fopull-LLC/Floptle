@@ -58,7 +58,10 @@ pub struct MeshData {
 /// 1e-4 resolution against 1.5-unit voxels; the floating origin is handled by
 /// the camera-relative model matrix as everywhere else.
 ///
-/// UVs are zero: terrain has no unwrap, its material is triplanar.
+/// Terrain has no unwrap (its material is triplanar), so the UV lanes carry
+/// the vertex's material edge instead ([`floptle_field::ChunkMesh::edges`]):
+/// the signed distance to ground of another material, and the pair. Zero
+/// where none was baked, which the splat shader reads as "blend as before".
 ///
 /// The colour's alpha byte carries the painted texture-slot index (0 =
 /// untextured, 1 = palette layer 0, …), not opacity: the splat shader reads it
@@ -75,10 +78,11 @@ pub fn chunk_mesh_data(m: &floptle_field::ChunkMesh) -> MeshData {
             .positions
             .iter()
             .zip(&m.normals)
-            .map(|(p, n)| Vertex {
+            .enumerate()
+            .map(|(i, (p, n))| Vertex {
                 pos: [p[0] + o[0], p[1] + o[1], p[2] + o[2]],
                 normal: *n,
-                uv: [0.0, 0.0],
+                uv: m.edges.get(i).copied().unwrap_or([0.0, 0.0]),
             })
             .collect(),
         indices: m.indices.clone(),

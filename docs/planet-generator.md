@@ -74,6 +74,26 @@ terrain.planetRivers(opts, function(channels) rivers = channels end)
 
 Order matters, because the first match wins. In the alpine example below, the cliff rule comes before the snow line, so cliff faces stay bare rock even above the snow line.
 
+## Blending materials
+
+Each palette slot is its own material. Where two meet, at a biome seam, a painted road, or the rim of a dug pit where the subsoil shows, the terrain crossfades between them. By default the crossfade is one triangle wide, so it is about as wide as a voxel and follows the mesh.
+
+Two settings per slot in the Terrain tab change that:
+
+- **blend**, in metres. With a width, the two materials blend over that much ground whatever the voxel size, and the edge runs through the triangles rather than along them. `0` keeps the one-triangle crossfade. Where two slots meet, the wider of their two widths is used.
+- **rough**, from 0 to 1 (0.5 by default). How much world-space noise breaks up the edge: `0` is a smooth line, `1` wanders by most of the width.
+
+The palette file saves them as suffixes on a slot's line, next to `|scale=` and `|glow`:
+
+```
+textures/sand.png|blend=1.5|rough=0.6
+textures/gravel.png|blend=1.5
+```
+
+Only ground blends. A layer one voxel under undug ground stays hidden, so the subsoil never shows through the surface above it.
+
+A blend, with its noise, reaches at most 2.5 voxels to each side of the edge, which is 3.75 m on a 1.5 m voxel. A width that would reach further is narrowed to fit: at `rough` 0.5 that allows about 4.3 m on a 1.5 m voxel. A wider blend also makes the terrain's meshes a little slower to build, up to about 1.6 times at the widest. A palette with no blend widths costs nothing extra.
+
 ## Example worlds
 
 Each of these is a complete `opts` table, at a size that generates in a second or two. Change `seed` for another world of the same kind.

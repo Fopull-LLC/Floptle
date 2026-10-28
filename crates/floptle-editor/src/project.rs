@@ -2274,6 +2274,14 @@ impl Editor {
                     if (scale - 1.0).abs() > 1e-4 {
                         line.push_str(&format!("|scale={scale}"));
                     }
+                    let blend = self.terrain_tex_blend.get(i).copied().unwrap_or(0.0);
+                    if blend > 0.0 {
+                        line.push_str(&format!("|blend={blend}"));
+                        let rough = self.terrain_tex_rough.get(i).copied().unwrap_or(0.5);
+                        if (rough - 0.5).abs() > 1e-4 {
+                            line.push_str(&format!("|rough={rough}"));
+                        }
+                    }
                     line
                 })
                 .collect();

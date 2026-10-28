@@ -540,6 +540,8 @@ impl Editor {
         let (vol_fog_a, vol_fog_b, vol_fog_c) =
             vol_fog_uniforms(&light_node, self.fog_time, cam.world_position.y as f32);
         let terrain_scale = crate::terrain_edit::terrain_scale_lanes(&self.terrain_tex_scale);
+        let terrain_blend = self.terrain_blend_lanes();
+        let terrain_rough = crate::terrain_edit::terrain_slot_lanes(&self.terrain_tex_rough, 0.5);
         // On a round world the fog's heights and horizon are the planet's.
         let fog_body = crate::shading::fog_body_lane(&light_node, &self.world, cam.world_position);
         let make_rm = |set: &[(DVec3, f32, MaterialParams)]| -> RaymarchGlobals {
@@ -599,6 +601,8 @@ impl Editor {
                 fog_params,
                 fog_extra,
                 terrain_scale,
+                terrain_blend,
+                terrain_rough,
                 fog_body,
                 vol_fog_a,
                 vol_fog_b,

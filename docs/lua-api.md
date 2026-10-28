@@ -2974,7 +2974,7 @@ terrain.paint(x,y,z, radius, r,g,b [, strength]) → receipt — recolor the ter
 
 ### `terrain.paintTexture`
 
-terrain.paintTexture(x,y,z, radius, slot) → receipt — paint a terrain-palette texture slot (1-based, the Terrain tab's palette; 0 clears to flat color). Answers the edit's id, or 0 when the queue was full and the edit was refused (see terrain.capacity).
+terrain.paintTexture(x,y,z, radius, slot) → receipt — paint a terrain-palette texture slot (1-based, the Terrain tab's palette; 0 clears to flat color). Answers the edit's id, or 0 when the queue was full and the edit was refused (see terrain.capacity). How wide a slot fades into its neighbours is the palette's, set per slot in the Terrain tab (blend, in metres, and rough); see Blending materials in the planet-generator guide.
 
 ### `terrain.pending`
 

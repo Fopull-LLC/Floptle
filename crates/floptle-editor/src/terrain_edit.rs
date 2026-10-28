@@ -336,6 +336,11 @@ pub(crate) struct TerrainRender {
     pub groups: HashMap<[i32; 3], MeshId>,
     /// Groups whose far chunks changed since their mesh was merged.
     pub groups_dirty: std::collections::HashSet<[i32; 3]>,
+    /// Drawn chunks whose mesh was made under settings that have since
+    /// changed (how far a vertex looks for another material). Each is meshed
+    /// again at the level it is drawn at, nearest first, and draws its old
+    /// mesh until the new one lands.
+    pub stale: std::collections::HashSet<[i32; 3]>,
 }
 
 /// Chunks along each edge of a far group: the coarsest chunks are drawn this
@@ -369,6 +374,7 @@ impl TerrainRender {
         }
         self.far.clear();
         self.groups_dirty.clear();
+        self.stale.clear();
     }
 
     /// Merge each changed group's far chunks into its one mesh.
@@ -386,6 +392,12 @@ impl TerrainRender {
                         merged.positions.extend(m.positions.iter().map(|p| (Vec3::from(*p) + shift).to_array()));
                         merged.normals.extend_from_slice(&m.normals);
                         merged.colors.extend_from_slice(&m.colors);
+                        // A chunk that baked no edges leaves zeros under its
+                        // vertices, so the next one's still line up.
+                        if !m.edges.is_empty() {
+                            merged.edges.resize(base as usize, [0.0, 0.0]);
+                            merged.edges.extend_from_slice(&m.edges);
+                        }
                         merged.indices.extend(m.indices.iter().map(|i| i + base));
                     }
                 }
@@ -1240,6 +1252,43 @@ impl TerrainWorker {
 /// grown lazily and an older project has no scales saved at all, and a zero
 /// there would collapse every terrain texture to a single texel instead of
 /// leaving it tiling as it was.
+/// Per-slot values (`terrain_tex_blend`, `terrain_tex_rough`) as the
+/// globals' four-to-a-lane layout; a slot with none reads `missing`.
+pub(crate) fn terrain_slot_lanes(values: &[f32], missing: f32) -> [[f32; 4]; 8] {
+    let mut out = [[missing; 4]; 8];
+    for i in 0..floptle_render::TERRAIN_SLOTS as usize {
+        let v = values.get(i).copied().unwrap_or(missing);
+        out[i / 4][i % 4] = if v.is_finite() { v } else { missing };
+    }
+    out
+}
+
+/// How far from a material edge a blend of width `w` metres still reaches,
+/// with its noise at `rough`: half the width, plus the noise's furthest push
+/// (`terrain_splat` moves the edge by up to three quarters of `rough × w`).
+fn blend_reach_m(w: f32, rough: f32) -> f32 {
+    w * (0.5 + 0.75 * rough.clamp(0.0, 1.0))
+}
+
+/// The most voxels a mesh looks round each vertex for another material
+/// ([`floptle_field::ChunkField::set_slot_edge_reach`], which allows no
+/// more). Each step costs meshing time: a chunk meshes in about 1.25× the
+/// time at 2 and 1.6× at 3.
+const MAX_EDGE_REACH: u8 = 3;
+
+/// How many voxels a terrain of `voxel` must look out from each vertex for
+/// the palette's widest blend to finish inside what the mesh knows: 0 when
+/// no slot blends over a width. The distance it bakes stops half a voxel
+/// short of its reach (the boundary sits halfway between two voxels).
+fn edge_reach_for(blend: &[f32], rough: &[f32], voxel: f32) -> u8 {
+    let r = rough.iter().copied().fold(0.0f32, f32::max);
+    let need = blend.iter().copied().filter(|w| *w > 0.0).fold(0.0f32, |m, w| m.max(blend_reach_m(w, r)));
+    if need <= 0.0 {
+        return 0;
+    }
+    ((need / voxel.max(1e-3) + 0.5).ceil() as u8).clamp(1, MAX_EDGE_REACH)
+}
+
 pub(crate) fn terrain_scale_lanes(scales: &[f32]) -> [[f32; 4]; 8] {
     let mut out = [[1.0f32; 4]; 8];
     for i in 0..floptle_render::TERRAIN_SLOTS as usize {
@@ -1250,6 +1299,19 @@ pub(crate) fn terrain_scale_lanes(scales: &[f32]) -> [[f32; 4]; 8] {
 }
 
 impl Editor {
+    /// The palette's blend widths for the shader, each cut to what the
+    /// finest terrain's meshes can reach: past the distances a mesh baked,
+    /// a vertex reads as no edge at all, and a wider blend would end there
+    /// in a step.
+    pub(crate) fn terrain_blend_lanes(&self) -> [[f32; 4]; 8] {
+        let voxel = self.terrains.values().map(|t| t.field.voxel()).fold(f32::MAX, f32::min);
+        let r = self.terrain_tex_rough.iter().copied().fold(0.0f32, f32::max);
+        let cover = (MAX_EDGE_REACH as f32 - 0.5) * voxel;
+        let widest = cover / blend_reach_m(1.0, r);
+        let widths: Vec<f32> = self.terrain_tex_blend.iter().map(|w| w.min(widest)).collect();
+        terrain_slot_lanes(&widths, 0.0)
+    }
+
     /// Seconds since the editor started — a monotonic clock for anything that
     /// animates on wall time rather than on the play session's `play_t`, which
     /// restarts with every Play.
@@ -1283,6 +1345,20 @@ impl Editor {
         }
         // Moving bodies hold the ground under them at full detail too: what a
         // body lands on is drawn as it collides, however far from the camera.
+        // How far the meshes look for ground of another material: as far as
+        // the palette's widest blend (`|blend=`) reaches, and not at all
+        // when no slot has one, so the meshes are exactly what they were. A
+        // change re-meshes every drawn chunk in place.
+        for (e, t) in &mut self.terrains {
+            let want_reach = edge_reach_for(&self.terrain_tex_blend, &self.terrain_tex_rough, t.field.voxel());
+            if t.field.slot_edge_reach() != want_reach {
+                t.field.set_slot_edge_reach(want_reach);
+                if let Some(r) = self.terrain_render.get_mut(e) {
+                    let drawn: Vec<[i32; 3]> = r.slots.keys().copied().collect();
+                    r.stale.extend(drawn);
+                }
+            }
+        }
         let bodies = self.moving_bodies();
         let px_per_radian = self.view_px_per_radian();
         let slot_means = self.terrain_slot_means.clone();
@@ -1469,6 +1545,7 @@ impl Editor {
                 // A chunk the field no longer fills gives its stamp back with
                 // its slot, so coming back later is an arrival and fades again.
                 render.born.retain(|c, _| has.contains(c));
+                render.stale.retain(|c| has.contains(c));
             }
 
             // Brush / script edits. The editor's brush meshes near chunks
@@ -1605,7 +1682,7 @@ impl Editor {
                         if want < FAR_FROM_LOD && terrain.field.is_evicted(coord) {
                             continue;
                         }
-                        if want != cur && !render.pending.contains_key(&coord) {
+                        if (want != cur || render.stale.contains(&coord)) && !render.pending.contains_key(&coord) {
                             queue.push((prio_of(coord), e, coord, want));
                         }
                     }
@@ -1907,6 +1984,7 @@ fn upload_chunk(
     } else {
         render.forget_far(coord);
     }
+    render.stale.remove(&coord);
     let data = floptle_render::chunk_mesh_data(cm);
     // Before the match, because two of its three arms are also "already
     // resident" — an LOD swap and an outgrown slot are both re-meshes of
@@ -4817,6 +4895,8 @@ impl Editor {
                 let slots = floptle_render::TERRAIN_SLOTS as usize;
                 let mut glow = 0u32;
                 let mut scales: Vec<f32> = Vec::new();
+                let mut blends: Vec<f32> = Vec::new();
+                let mut roughs: Vec<f32> = Vec::new();
                 // One line per slot, `path` plus zero or more `|flag` suffixes.
                 // Unknown suffixes are ignored rather than folded into the path:
                 // this file is written by newer editors than the one reading it
@@ -4834,22 +4914,32 @@ impl Editor {
                             "" => String::new(),
                             p => floptle_scene::portable::rel_path(p, &self.project_root),
                         };
-                        let mut scale = 1.0f32;
+                        let (mut scale, mut blend, mut rough) = (1.0f32, 0.0f32, 0.5f32);
                         for flag in parts {
                             if flag == "glow" {
                                 glow |= 1 << i.min(31);
                             } else if let Some(v) = flag.strip_prefix("scale=") {
                                 scale = v.parse().ok().filter(|f: &f32| f.is_finite() && *f > 0.0).unwrap_or(1.0);
+                            } else if let Some(v) = flag.strip_prefix("blend=") {
+                                blend = v.parse().ok().filter(|f: &f32| f.is_finite() && *f >= 0.0).unwrap_or(0.0).min(16.0);
+                            } else if let Some(v) = flag.strip_prefix("rough=") {
+                                rough = v.parse().ok().filter(|f: &f32| f.is_finite()).unwrap_or(0.5).clamp(0.0, 1.0);
                             }
                         }
                         scales.push(scale);
+                        blends.push(blend);
+                        roughs.push(rough);
                         path
                     })
                     .collect();
                 palette.resize(slots, String::new());
                 scales.resize(slots, 1.0);
+                blends.resize(slots, 0.0);
+                roughs.resize(slots, 0.5);
                 self.terrain_textures = palette;
                 self.terrain_tex_scale = scales;
+                self.terrain_tex_blend = blends;
+                self.terrain_tex_rough = roughs;
                 self.terrain_glow_mask = glow;
                 self.terrain_textures_dirty = true;
             }
@@ -5197,6 +5287,33 @@ mod tests {
     use super::{CHUNK_FADE_SECS, chunk_fade, chunk_priority, lod_for, raw_lod, rings_for_body, LOD_RINGS, RING_STEPS};
     use floptle_core::math::{DVec3, Quat};
     use floptle_field::BakedSdf;
+
+    /// **A mesh looks as far as the widest blend reaches, and no further.**
+    /// No width looks nowhere (the meshes are what they always were); a
+    /// width's whole reach, noise included, lands inside what is baked; and
+    /// a width past the cap is not given a reach the chunks cannot agree on.
+    #[test]
+    fn the_edge_reach_follows_the_widest_blend() {
+        use super::{blend_reach_m, edge_reach_for, MAX_EDGE_REACH};
+        let voxel = 1.5;
+        assert_eq!(edge_reach_for(&[0.0, 0.0, 0.0], &[0.5; 3], voxel), 0);
+        assert_eq!(edge_reach_for(&[], &[], voxel), 0);
+        for w in [0.1f32, 0.5, 1.0, 2.0, 3.0, 4.0] {
+            for rough in [0.0f32, 0.5, 1.0] {
+                let r = edge_reach_for(&[0.0, w], &[0.0, rough], voxel);
+                assert!((1..=MAX_EDGE_REACH).contains(&r), "{w} m at {rough}: reach {r}");
+                // What the mesh bakes stops half a voxel short of its reach.
+                let baked = (r as f32 - 0.5) * voxel;
+                if r < MAX_EDGE_REACH {
+                    assert!(baked >= blend_reach_m(w, rough), "{w} m at {rough} reaches past reach {r}");
+                    assert!(baked - voxel < blend_reach_m(w, rough), "{w} m at {rough} looks further than it needs: {r}");
+                }
+            }
+        }
+        assert_eq!(edge_reach_for(&[16.0], &[1.0], voxel), MAX_EDGE_REACH);
+        // The rule reads metres: the same width on a finer lattice looks further.
+        assert!(edge_reach_for(&[1.0], &[0.5], 0.5) > edge_reach_for(&[1.0], &[0.5], 1.5));
+    }
 
     /// **A map camera does not move the terrain's centre of detail.**
     /// With an anchor on the ship, the render camera can go from 50 to 80 body

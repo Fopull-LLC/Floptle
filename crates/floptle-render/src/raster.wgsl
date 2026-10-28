@@ -1458,11 +1458,48 @@ fn splat_slot_at(vi: u32, c: vec3<i32>) -> u32 {
 // DISTINCT slot's triplanar sample by its trilinear weight — smooth transitions
 // between ANY two slots, at any palette size. Fragments outside any resident
 // volume (a skirt sliver, an evicted terrain) fall back to the old behavior.
-fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32) -> vec4<f32> {
+fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32) -> vec4<f32> {
     let tint = in.vcolor.rgb;
     let av = in.vcolor.a * 255.0; // vertex slot: 1-based; 0 untextured, 255 legacy sentinel
     if (av < 0.5 || av > 254.5) {
         return vec4<f32>(tint, 0.0);
+    }
+    // A material edge baked into the mesh (`ChunkMesh::edges`, carried in
+    // `uv`): x the signed distance to the ground of the other material, y
+    // the pair, `lo + hi * 256`. Where the palette gives either slot a blend
+    // width the two blend over that width in world units, centred where the
+    // distance crosses zero (inside triangles, wherever it falls, not along
+    // their edges) and broken up by world noise. `ew`, the pair's change
+    // across the pixel, is zero inside a triangle whose corners agree on the
+    // pair; anywhere else the code is two codes interpolated and means
+    // nothing, and the blend below stands.
+    let pair = in.uv.y;
+    if (pair > 0.5 && ew < 0.01) {
+        let code = u32(round(pair));
+        let lo = code & 255u;
+        let hi = code >> 8u;
+        if (lo >= 1u && hi >= 1u && hi <= 32u) {
+            let w = max(G.terrain_blend[(lo - 1u) >> 2u][(lo - 1u) & 3u], G.terrain_blend[(hi - 1u) >> 2u][(hi - 1u) & 3u]);
+            if (w > 0.0) {
+                let rough = clamp(max(G.terrain_rough[(lo - 1u) >> 2u][(lo - 1u) & 3u], G.terrain_rough[(hi - 1u) >> 2u][(hi - 1u) & 3u]), 0.0, 1.0);
+                // Two octaves of world noise on the scale of the width, so a
+                // wide seam meanders widely and a narrow one in small steps.
+                let q = in.lpos / max(w, 0.05);
+                let n = vnoise(q) * 0.65 + vnoise(q * 2.7 + vec3<f32>(17.0)) * 0.35 - 0.5;
+                let t = smoothstep(-0.5 * w, 0.5 * w, in.uv.x + n * rough * 1.5 * w);
+                var c = vec3<f32>(0.0);
+                var glow = 0.0;
+                if (t < 0.999) {
+                    c += terrain_triplanar(i32(lo) - 1, in.lpos, in.lnorm, dpx, dpy) * (1.0 - t);
+                    glow += f32((g.terrain_bits.y >> (lo - 1u)) & 1u) * (1.0 - t);
+                }
+                if (t > 0.001) {
+                    c += terrain_triplanar(i32(hi) - 1, in.lpos, in.lnorm, dpx, dpy) * t;
+                    glow += f32((g.terrain_bits.y >> (hi - 1u)) & 1u) * t;
+                }
+                return vec4<f32>(c * tint * 1.6, glow);
+            }
+        }
     }
     // All three corners carry one slot (`aw`, the slot's change across the
     // pixel, is nil and the slot whole): the triangle is that material, read
@@ -1659,9 +1696,10 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let tp_dpx = dpdx(in.lpos);
     let tp_dpy = dpdy(in.lpos);
     let tp_aw = fwidth(in.vcolor.a * 255.0);
+    let tp_ew = fwidth(in.uv.y);
     var tsplat_val = vec4<f32>(0.0);
     if (terrain) {
-        tsplat_val = terrain_splat(in, tp_dpx, tp_dpy, tp_aw);
+        tsplat_val = terrain_splat(in, tp_dpx, tp_dpy, tp_aw, tp_ew);
     }
     let albedo = select(texel.rgb * in.color.rgb * in.vcolor.rgb, tsplat_val.rgb * in.color.rgb, terrain);
     let emissive = in.emissive.rgb * in.emissive.a * emit_s;

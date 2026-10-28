@@ -1261,6 +1261,8 @@ impl Editor {
                 fog_params,
                 fog_extra,
                 terrain_scale: crate::terrain_edit::terrain_scale_lanes(&self.terrain_tex_scale),
+                terrain_blend: self.terrain_blend_lanes(),
+                terrain_rough: crate::terrain_edit::terrain_slot_lanes(&self.terrain_tex_rough, 0.5),
                 fog_body: crate::shading::fog_body_lane(&light_node, &self.world, cam.world_position),
                 vol_fog_a,
                 vol_fog_b,

@@ -38,6 +38,13 @@ pub struct ChunkMesh {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
     pub colors: Vec<[u8; 4]>,
+    /// Per vertex, when the field bakes them ([`ChunkField::set_slot_edge_reach`]):
+    /// the signed distance in world units to the nearest ground of another
+    /// material, and which two materials, as `lo + hi * 256`. Positive on the
+    /// `hi` side, so the boundary is where it crosses zero, inside a triangle
+    /// wherever it falls rather than along the mesh. `[0, 0]` (and an empty
+    /// list when not baked) is no other material within reach.
+    pub edges: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
     pub origin: [f32; 3],
     /// How many of the triangles, at the end of `indices`, are skirt curtains rather
@@ -82,6 +89,9 @@ pub struct MeshScratch {
     color: Vec<[u8; 4]>,
     voxel: f32,
     band: f32,
+    /// [`ChunkField::slot_edge_reach`] when gathered: how far each vertex looks
+    /// for ground of another material.
+    edge_reach: u8,
     /// The chunk + stride this scratch was gathered for — `mesh_scratch` reads them
     /// back so a queued job is fully self-contained (the async remesh worker meshes
     /// from the scratch alone and never touches the live field; trap T4).
@@ -110,7 +120,7 @@ impl MeshScratch {
         // At full detail no corner takes a minimum, so which chunks hold data
         // is never asked.
         let chunk = base.map(|v| v.div_euclid(CHUNK));
-        Self { lo, dim, dist, color, voxel: field.voxel(), band: field.band(), chunk, stride: 1, base, cells, meshed: 0 }
+        Self { lo, dim, dist, color, voxel: field.voxel(), band: field.band(), edge_reach: field.slot_edge_reach(), chunk, stride: 1, base, cells, meshed: 0 }
     }
 
     fn new(field: &ChunkField, chunk: [i32; 3], stride: i32) -> Self {
@@ -146,7 +156,7 @@ impl MeshScratch {
         }
         let base = chunk.map(|v| v * CHUNK);
         let cells = (CHUNK / stride).max(1);
-        Self { lo, dim, dist, color, voxel: field.voxel(), band: field.band(), chunk, stride, base, cells, meshed }
+        Self { lo, dim, dist, color, voxel: field.voxel(), band: field.band(), edge_reach: field.slot_edge_reach(), chunk, stride, base, cells, meshed }
     }
 
     /// Flat scratch index for a global voxel, without bounds checks.
@@ -198,6 +208,54 @@ impl MeshScratch {
             return [128, 128, 128, 255];
         }
         self.color[(z * self.dim + y) * self.dim + x]
+    }
+
+    /// What [`ChunkMesh::edges`] holds for a vertex at `p` (field space) of
+    /// material `own`: the signed distance to the nearest ground of another
+    /// material within [`Self::edge_reach`] voxels, and the pair.
+    ///
+    /// Only ground counts: a voxel within three quarters of a voxel of the
+    /// surface. A layer a voxel under undug ground is a voxel deep, so it is
+    /// never found, and the surface over it never blends toward it. The
+    /// boundary is taken halfway between the two voxels, so the distance is
+    /// to that, not to the other voxel.
+    fn slot_edge(&self, p: Vec3, own: u8) -> [f32; 2] {
+        let r = self.edge_reach as i32;
+        if r == 0 || own == 0 || own == 255 {
+            return [0.0, 0.0];
+        }
+        let g = p / self.voxel;
+        let c = [g.x.round() as i32, g.y.round() as i32, g.z.round() as i32];
+        let ground = 0.75 * self.voxel;
+        let (mut best, mut other) = (f32::MAX, 0u8);
+        for dz in -r..=r {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    let i = [c[0] + dx, c[1] + dy, c[2] + dz];
+                    let (x, y, z) = (i[0] - self.lo[0], i[1] - self.lo[1], i[2] - self.lo[2]);
+                    if x < 0 || y < 0 || z < 0 || x as usize >= self.dim || y as usize >= self.dim || z as usize >= self.dim {
+                        continue;
+                    }
+                    let k = (z as usize * self.dim + y as usize) * self.dim + x as usize;
+                    let slot = self.color[k][3];
+                    if slot == own || slot == 0 || slot == 255 || self.dist[k].abs() > ground {
+                        continue;
+                    }
+                    let at = Vec3::new(i[0] as f32, i[1] as f32, i[2] as f32) * self.voxel;
+                    let d = (at - p).length();
+                    if d < best {
+                        best = d;
+                        other = slot;
+                    }
+                }
+            }
+        }
+        if other == 0 {
+            return [0.0, 0.0];
+        }
+        let to_edge = (best - 0.5 * self.voxel).max(0.0);
+        let (lo, hi) = (own.min(other), own.max(other));
+        [if own == hi { to_edge } else { -to_edge }, lo as f32 + hi as f32 * 256.0]
     }
 
     /// Trilinear distance at a world position — identical maths to `ChunkField::d`.
@@ -852,6 +910,9 @@ pub fn mesh_scratch(s: &MeshScratch, skirt: bool) -> ChunkMesh {
                     unsettle.push((pos_field != raw).then_some((raw, cell_dir)));
                     m.normals.push(nrm);
                     m.colors.push(col);
+                    if s.edge_reach > 0 {
+                        m.edges.push(s.slot_edge(pos_field, col[3]));
+                    }
                 }
                 let c = cell_idx(cx, cy, cz);
                 vert_at[c] = first;
@@ -1104,6 +1165,9 @@ pub fn mesh_scratch(s: &MeshScratch, skirt: bool) -> ChunkMesh {
                             m.positions.push(p.to_array());
                             m.normals.push(nrm.to_array());
                             m.colors.push(col);
+                            if s.edge_reach > 0 {
+                                m.edges.push(s.slot_edge(p + origin, col[3]));
+                            }
                             // Its edges end the mesh like a seam's: hung with a
                             // skirt back into the rock behind.
                             rim.push(true);
@@ -1182,6 +1246,9 @@ fn add_skirt(m: &mut ChunkMesh, s: &MeshScratch, rim: &[bool]) {
         m.positions.push((q - origin).to_array());
         m.normals.push(m.normals[v as usize]);
         m.colors.push(m.colors[v as usize]);
+        if let Some(&e) = m.edges.get(v as usize) {
+            m.edges.push(e);
+        }
         dropped[v as usize] = id;
         id
     };
@@ -1280,6 +1347,86 @@ mod tests {
         // A handful on the steepest slopes, where the subsoil a voxel down by
         // the radius is less than a voxel down by the slope: real exposure.
         assert!(deeper * 1000 <= corners, "{deeper} of {corners} corners of undug ground carry a deeper layer's slot");
+    }
+
+    fn subsoil_planet() -> ChunkField {
+        crate::procgen::generate_planet(&crate::procgen::PlanetFill {
+            seed: 5,
+            radius: 100.0,
+            voxel: 1.5,
+            relief: 8.0,
+            cave_depth: 0.0,
+            subsoil_depth: 1.5,
+            subsoil: crate::procgen::LayerPaint { slot: 9, color: [0.5, 0.5, 0.5] },
+            ..Default::default()
+        })
+    }
+
+    /// **Undug ground finds no subsoil to blend toward.** With the edges baked,
+    /// almost no vertex of undug ground pairs with the layer a voxel under it:
+    /// only ground counts, and the subsoil is a voxel deep. (A handful on the
+    /// steepest slopes, as for the corners above.) Every vertex has its edge.
+    #[test]
+    fn undug_ground_bakes_no_edge_toward_the_subsoil() {
+        let mut f = subsoil_planet();
+        f.set_slot_edge_reach(2);
+        let (mut verts, mut toward_subsoil, mut exposed) = (0usize, 0usize, 0usize);
+        for c in f.chunk_coords() {
+            let m = mesh_chunk(&f, c, 1, false);
+            assert_eq!(m.edges.len(), m.positions.len(), "an edge per vertex");
+            for (e, col) in m.edges.iter().zip(&m.colors) {
+                verts += 1;
+                exposed += usize::from(col[3] == 9);
+                let pair = e[1] as u32;
+                toward_subsoil += usize::from(pair != 0 && col[3] != 9 && (pair % 256 == 9 || pair / 256 == 9));
+            }
+        }
+        assert!(verts > 10_000, "{verts} vertices");
+        assert!(toward_subsoil * 1000 <= verts, "{toward_subsoil} of {verts} vertices of undug ground blend toward the subsoil");
+        // …and those are next to where the subsoil really is at the surface.
+        assert!(toward_subsoil <= 4 * exposed + 10, "{toward_subsoil} vertices blend toward the subsoil, beside only {exposed} that show it");
+    }
+
+    /// **A dug pit's rim knows where the ground changes, between the vertices.**
+    /// Round a pit dug through to the subsoil, the vertices on the subsoil side
+    /// and on the surface side of the rim carry the same pair, with opposite
+    /// signs: the boundary is where the distance crosses zero, which falls
+    /// inside triangles, not along their edges. Off by default: no reach, no
+    /// edges, and the mesh is what it always was.
+    #[test]
+    fn a_dug_pit_bakes_a_signed_edge_across_its_rim() {
+        let mut f = subsoil_planet();
+        let top = f.raycast(Vec3::new(0.0, 160.0, 0.0), Vec3::NEG_Y, 160.0).expect("the ground");
+        for k in 0..4 {
+            f.sculpt(Brush::Lower, top - Vec3::Y * (k as f32 * 0.8), 4.5, 1.0, BrushProfile::default());
+        }
+        let chunk = (top / (f.voxel() * CHUNK as f32)).floor();
+        let c = [chunk.x as i32, chunk.y as i32, chunk.z as i32];
+        assert!(mesh_chunk(&f, c, 1, false).edges.is_empty(), "no reach bakes no edges");
+        f.set_slot_edge_reach(2);
+        let (mut neg, mut pos) = (0usize, 0usize);
+        for dz in -1..=1 {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let m = mesh_chunk(&f, [c[0] + dx, c[1] + dy, c[2] + dz], 1, false);
+                    for (e, col) in m.edges.iter().zip(&m.colors) {
+                        let pair = e[1] as u32;
+                        if pair == 0 || pair / 256 != 9 {
+                            continue;
+                        }
+                        // The pair's hi is the subsoil: its side is positive.
+                        if col[3] == 9 {
+                            assert!(e[0] >= 0.0, "a subsoil vertex on the negative side: {e:?}");
+                            pos += 1;
+                        } else {
+                            assert!(e[0] <= 0.0, "a surface vertex on the subsoil's side: {e:?}");
+                            neg += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(neg > 10 && pos > 10, "the rim has {neg} surface and {pos} subsoil vertices that know the edge");
     }
 
     /// **A box of the surface is the chunk's surface there.** A ray asking

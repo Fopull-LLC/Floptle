@@ -286,6 +286,12 @@ pub struct RaymarchGlobals {
     /// handed it over), y = its depth bias, z = its blur radius in map
     /// coordinates. Appended at the end.
     pub fog_sun: [f32; 4],
+    /// Per-slot terrain blend width in world units (the palette's `|blend=`),
+    /// four slots to a lane; 0 blends across one triangle, as before.
+    /// Appended at the end, like everything above.
+    pub terrain_blend: [[f32; 4]; 8],
+    /// Per-slot roughness of that blend's edge, 0..1 (`|rough=`).
+    pub terrain_rough: [[f32; 4]; 8],
 }
 
 impl RaymarchGlobals {
@@ -386,6 +392,8 @@ impl Default for RaymarchGlobals {
             fog_extra: [0.0; 4],
             terrain_scale: [[1.0; 4]; 8],
             fog_body: [0.0; 4],
+            terrain_blend: [[0.0; 4]; 8],
+            terrain_rough: [[0.0; 4]; 8],
             atmo_cloud: [[1.0, 1.0, 1.0, 0.0]; 4],
             atmo_sun: [[1.0, 1.0, 0.0, 0.0]; 4],
             fog_cache: [0.0; 4],

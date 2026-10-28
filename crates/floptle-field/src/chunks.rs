@@ -310,6 +310,9 @@ fn local_of(i: [i32; 3]) -> usize {
 pub struct ChunkField {
     chunks: HashMap<[i32; 3], Chunk>,
     voxel: f32,
+    /// How far, in voxels, the mesher looks round each vertex for ground of
+    /// another material ([`crate::mesher::ChunkMesh::edges`]); 0 bakes none.
+    slot_edge_reach: u8,
     /// Default colour for voxels in chunks that have never been painted.
     base_color: [u8; 4],
     /// The box of voxels written since [`Self::take_changed`] last asked.
@@ -665,6 +668,7 @@ impl ChunkField {
         Self {
             chunks: HashMap::new(),
             voxel: voxel.max(1e-3),
+            slot_edge_reach: 0,
             base_color: [128, 128, 128, 255],
             changed: None,
             pending: std::collections::HashSet::new(),
@@ -680,6 +684,24 @@ impl ChunkField {
 
     pub fn voxel(&self) -> f32 {
         self.voxel
+    }
+
+    /// How far, in voxels (at most 3), each mesh vertex looks for ground of
+    /// another material, so a renderer can blend the two over a width in
+    /// metres rather than one triangle. 0, the default, bakes nothing and the
+    /// meshes are what they always were. Changing it does not re-mesh: the
+    /// caller does, when it changes.
+    ///
+    /// Three is as far as stays inside what a chunk gathers and what an edit
+    /// re-meshes ([`crate::mesher::mesh_depends`]): a vertex sits up to a
+    /// voxel past its chunk, so a fourth would read voxels the chunk next door
+    /// does not, and the two would bake the border's edge differently.
+    pub fn set_slot_edge_reach(&mut self, voxels: u8) {
+        self.slot_edge_reach = voxels.min(3);
+    }
+
+    pub fn slot_edge_reach(&self) -> u8 {
+        self.slot_edge_reach
     }
 
     /// The narrow-band half-width in world units. Stored distances saturate here.

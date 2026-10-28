@@ -1112,6 +1112,10 @@ struct EditorTabViewer<'a> {
     terrain_glow: &'a mut u32,
     /// Per-slot triplanar scale multiplier — the Terrain tab's ▦ × control.
     terrain_tex_scale: &'a mut Vec<f32>,
+    /// Per-slot blend width in metres and its roughness, 0..1 — the Terrain
+    /// tab's blend and rough controls (`|blend=`, `|rough=`).
+    terrain_tex_blend: &'a mut Vec<f32>,
+    terrain_tex_rough: &'a mut Vec<f32>,
     terrain_present: bool,
     /// Terrain stats for the tab: `(volumes, data chunks, resident bytes)`.
     terrain_stats: Option<(usize, usize, usize)>,
@@ -2806,6 +2810,11 @@ struct Editor {
     /// to match them was to go back to the image editor. Persisted beside the
     /// palette (see `save_terrain_palette`).
     terrain_tex_scale: Vec<f32>,
+    /// Per palette slot, how wide in world units its boundary with another
+    /// slot blends (`|blend=` in the palette file; 0 = across one triangle,
+    /// as before), and how much noise breaks that edge up (`|rough=`, 0..1).
+    terrain_tex_blend: Vec<f32>,
+    terrain_tex_rough: Vec<f32>,
     /// The terrain palette needs re-uploading to the GPU.
     terrain_textures_dirty: bool,
     /// The skybox texture path currently uploaded to the GPU (`None` = solid/white), so

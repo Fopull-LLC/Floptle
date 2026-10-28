@@ -192,6 +192,11 @@ struct Globals {
     // Appended at the END.
     fog_sun_vp: mat4x4<f32>,
     fog_sun: vec4<f32>,
+    // Per-slot terrain blend WIDTH in world units (palette `|blend=`), 32
+    // slots four to a vec4, and how much world noise breaks its edge up
+    // (`|rough=`, 0..1). A width of 0 blends as before. Appended at the END.
+    terrain_blend: array<vec4<f32>, 8>,
+    terrain_rough: array<vec4<f32>, 8>,
 };
 
 // The triplanar scale multiplier for palette slot `slot`.

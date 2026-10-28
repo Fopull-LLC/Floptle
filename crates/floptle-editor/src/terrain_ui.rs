@@ -168,6 +168,8 @@ impl EditorTabViewer<'_> {
         let terrain_textures = &mut *self.terrain_textures;
         let terrain_glow = &mut *self.terrain_glow;
         let terrain_tex_scale = &mut *self.terrain_tex_scale;
+        let terrain_tex_blend = &mut *self.terrain_tex_blend;
+        let terrain_tex_rough = &mut *self.terrain_tex_rough;
         let materials = self.materials;
         let asset_tree = self.asset_tree;
         let project_root = self.project_root;
@@ -272,6 +274,12 @@ impl EditorTabViewer<'_> {
             if terrain_tex_scale.len() < terrain_textures.len() {
                 terrain_tex_scale.resize(terrain_textures.len(), 1.0);
             }
+            if terrain_tex_blend.len() < terrain_textures.len() {
+                terrain_tex_blend.resize(terrain_textures.len(), 0.0);
+            }
+            if terrain_tex_rough.len() < terrain_textures.len() {
+                terrain_tex_rough.resize(terrain_textures.len(), 0.5);
+            }
             for (slot, tex) in terrain_textures.iter_mut().enumerate().take(visible) {
                 ui.horizontal_wrapped(|ui| {
                     let sel = terrain_brush.tex_slot == slot as i32;
@@ -357,10 +365,40 @@ impl EditorTabViewer<'_> {
                             terrain_tex_scale[slot] = tiles;
                             cmd.terrain_palette_changed = true;
                         }
+                        // Where this material meets another: 0 is the
+                        // one-triangle crossfade terrain always had; a width
+                        // in metres blends over that much ground whatever the
+                        // voxel size, and `rough` breaks the line up. Both are
+                        // read every frame, so neither reloads the textures.
+                        ui.add(
+                            egui::DragValue::new(&mut terrain_tex_blend[slot])
+                                .speed(0.05)
+                                .range(0.0..=16.0)
+                                .prefix("blend ")
+                                .suffix(" m"),
+                        )
+                        .on_hover_text(
+                            "how wide, in metres, this texture blends into a different one \
+                             where they meet, such as the rim of a dug pit or a painted road. \
+                             0 keeps the narrow crossfade of one triangle. Wider blends make \
+                             the terrain mesh a little slower to build.",
+                        );
+                        if terrain_tex_blend[slot] > 0.0 {
+                            ui.add(
+                                egui::DragValue::new(&mut terrain_tex_rough[slot])
+                                    .speed(0.01)
+                                    .range(0.0..=1.0)
+                                    .prefix("rough "),
+                            )
+                            .on_hover_text(
+                                "how much the blend's edge wanders: 0 is a smooth line, 1 \
+                                 a ragged one.",
+                            );
+                        }
                     }
                 });
             }
-            ui.small("Extract a model's textures (Inspector) or add PNGs to textures/, assign them to slots, then paint. Color tints the texture. ▦ sets how often a slot's texture repeats, so a fine texture and a coarse one can share a palette.");
+            ui.small("Extract a model's textures (Inspector) or add PNGs to textures/, assign them to slots, then paint. Color tints the texture. ▦ sets how often a slot's texture repeats, so a fine texture and a coarse one can share a palette. Blend sets how wide a slot fades into its neighbours.");
         }
         ui.separator();
         // Fill-bounds tool. Sculpting near an edge grows only the bounds (the
