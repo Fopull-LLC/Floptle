@@ -38,6 +38,26 @@ pub(crate) struct DisplayCache {
     modes: Rc<Vec<DisplayMode>>,
 }
 
+/// How many frames a windowed size is asked for again before it is given up
+/// on (`settle_window_size`).
+const SETTLE_FRAMES: u32 = 60;
+
+/// Make `window` a window of `size` pixels, centred on `monitor`. A maximised
+/// window is restored first: a window manager keeps a maximised window the
+/// size of the screen, whatever size is asked of it.
+fn place_window(window: &winit::window::Window, size: winit::dpi::PhysicalSize<u32>, monitor: Option<winit::monitor::MonitorHandle>) {
+    if window.is_maximized() {
+        window.set_maximized(false);
+    }
+    let _ = window.request_inner_size(size);
+    if let Some(m) = monitor {
+        let (pos, area) = (m.position(), m.size());
+        let x = pos.x + (area.width as i32 - size.width as i32).max(0) / 2;
+        let y = pos.y + (area.height as i32 - size.height as i32).max(0) / 2;
+        window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+    }
+}
+
 /// The window's monitors as `app.monitors()` lists them, and every mode of
 /// each. A mode a monitor lists once per colour depth is listed once.
 fn gather_displays(window: &winit::window::Window) -> (Vec<MonitorInfo>, Vec<DisplayMode>) {
@@ -192,6 +212,7 @@ impl crate::Editor {
     /// settings menu whose control lags a frame behind the click reads as a
     /// control that did not work.
     pub(crate) fn apply_app_requests(&mut self) {
+        self.settle_window_size();
         let req: AppRequests = self.script_host.take_app_requests();
         if req.is_empty() {
             return;
@@ -348,15 +369,49 @@ impl crate::Editor {
             window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(target)));
         } else {
             window.set_fullscreen(None);
-            let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(d.width, d.height));
-            if let Some(m) = target {
-                let (pos, size) = (m.position(), m.size());
-                let x = pos.x + (size.width as i32 - d.width as i32).max(0) / 2;
-                let y = pos.y + (size.height as i32 - d.height as i32).max(0) / 2;
-                window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
-            }
+            let want = winit::dpi::PhysicalSize::new(d.width, d.height);
+            place_window(window, want, target);
+            self.window_size_wanted = Some((want, SETTLE_FRAMES));
         }
         self.display_cache = None;
+    }
+
+    /// Keep asking for the windowed size `app.setDisplayMode` set until the
+    /// window has it, for about a second. Leaving full screen and
+    /// un-maximising are requests the window manager answers in its own
+    /// time, and one that restores the window's old size after the resize
+    /// was asked for undoes it: under KDE a maximised game stayed the size
+    /// of the screen.
+    fn settle_window_size(&mut self) {
+        let Some((want, left)) = self.window_size_wanted else { return };
+        let Some(window) = self.window.as_ref() else {
+            self.window_size_wanted = None;
+            return;
+        };
+        if window.inner_size() == want || left == 0 {
+            self.window_size_wanted = None;
+            return;
+        }
+        // Every few frames, not every frame: each is a round trip to the
+        // window manager, which is still busy with the last one.
+        if left % 10 == 0 {
+            place_window(window, want, window.current_monitor());
+        }
+        self.window_size_wanted = Some((want, left - 1));
+    }
+
+    /// Whether the window should close now: a game asked to quit, or the
+    /// editor's quit was decided. Anything a package keeps is written first.
+    /// Both window loops ask this, the editor's and a shipped game's; a game
+    /// that only the editor's loop listened to set the flag in a build and
+    /// went on running, so a player's Quit button did nothing.
+    pub(crate) fn take_exit(&mut self) -> bool {
+        if !self.pending_exit {
+            return false;
+        }
+        #[cfg(feature = "editor-ui")]
+        self.ext.save_prefs();
+        true
     }
 
     /// End the game — see the module docs for why this is three different things.
@@ -366,10 +421,10 @@ impl crate::Editor {
         // kept, and the ordinary flush is on Stop, which a build never reaches.
         self.script_host.flush_save_and_wait();
         if self.player_mode {
-            // `about_to_wait` is the one place every exit path passes through:
-            // it writes package prefs and then leaves. Setting the flag rather
-            // than exiting here is what makes the shutdown orderly — there is no
-            // event loop to reach from inside a frame.
+            // Each window loop leaves through `take_exit`, which writes package
+            // prefs first. Setting the flag rather than exiting here is what
+            // makes the shutdown orderly: there is no event loop to reach from
+            // inside a frame.
             self.pending_exit = true;
             return;
         }
@@ -613,7 +668,7 @@ mod tests {
         ed.toggle_play();
         assert!(ed.playing);
         ed.play_step(1.0 / 60.0, true);
-        assert!(ed.pending_exit, "a build was asked to quit and did not");
+        assert!(ed.take_exit(), "a build was asked to quit and its window loop would not close");
         // Play is not stopped in a build: the process is leaving, and stopping
         // would run the editor's whole restore path on the way out.
         assert!(ed.playing, "a build stopped Play instead of quitting");

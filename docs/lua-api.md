@@ -194,7 +194,7 @@ app.platform() — where the game is running: "windows", "macos", "linux" or "we
 
 ### `app.quit`
 
-app.quit() — end the game. What that means depends on where it is running, and they are genuinely different things: an EXPORTED BUILD closes (your save.* data is flushed first, since somebody quitting from a settings menu expects the setting they just changed to have been kept); the EDITOR stops Play and says so in the Console, deliberately NOT a process exit — an editor that closed because a game under test called quit would take your unsaved work with it; `floptle run` ends the run where it stands and reports that it stopped early.
+app.quit() — end the game. What that means depends on where it is running, and they are genuinely different things: an EXPORTED BUILD closes (your save.* data is flushed first, since somebody quitting from a settings menu expects the setting they just changed to have been kept); the EDITOR stops Play and says so in the Console, deliberately NOT a process exit — an editor that closed because a game under test called quit would take your unsaved work with it; `floptle run` ends the run where it stands and reports that it stopped early. A game in a browser cannot close its page, so there it flushes save.* and keeps running.
 
 ### `app.refreshRate`
 
@@ -226,7 +226,7 @@ app.setAntialias("Fxaa") — smooth the stair-steps along edges ("Fxaa": one che
 
 ### `app.setDisplayMode`
 
-app.setDisplayMode{ width =, height = [, refresh =, monitor =, fullscreen = ] } — set the resolution, refresh rate and monitor. fullscreen = true switches that monitor to that mode (exclusive full screen), so it must be one app.displayModes lists — otherwise it RAISES naming the sizes the monitor has; refresh left out takes the highest at that size. fullscreen = false makes a window that many pixels, centred on the monitor; any size. Left out, the game stays as full-screen or windowed as it is. monitor is an index from app.monitors() (default: the one the window is on). A browser covers the screen instead of switching modes. Only a game's own window: in the editor it says so once in the Console and leaves the editor alone. For this session; persist the player's choice with save.set.
+app.setDisplayMode{ width =, height = [, refresh =, monitor =, fullscreen = ] } — set the resolution, refresh rate and monitor. fullscreen = true switches that monitor to that mode (exclusive full screen), so it must be one app.displayModes lists — otherwise it RAISES naming the sizes the monitor has; refresh left out takes the highest at that size. fullscreen = false makes a window that many pixels, centred on the monitor; any size. A maximised window is restored first, and the size can take a few frames to arrive while the window manager catches up. Left out, the game stays as full-screen or windowed as it is. monitor is an index from app.monitors() (default: the one the window is on). A browser covers the screen instead of switching modes. Only a game's own window: in the editor it says so once in the Console and leaves the editor alone. For this session; persist the player's choice with save.set.
 
 ```lua
 -- a Resolution dropdown: list what the screen offers, apply a pick

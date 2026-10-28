@@ -2107,6 +2107,9 @@ struct Editor {
     /// answer, with how many more frames they are kept before being asked
     /// again: listing video modes is a round trip to the display server.
     display_cache: Option<crate::app_settings::DisplayCache>,
+    /// The window size `app.setDisplayMode` asked for and how many frames
+    /// more to keep asking: see `settle_window_size`.
+    window_size_wanted: Option<(winit::dpi::PhysicalSize<u32>, u32)>,
     /// How hard a render-scale upscale sharpens (`app.setRenderSharpness`);
     /// `None` until a game sets it, which reads as the default.
     render_sharpness: Option<f32>,
@@ -4416,7 +4419,16 @@ impl ApplicationHandler for Editor {
                 (pos.x, pos.y, size.width, size.height)
             })
             .collect();
-        let place = crate::layout::load_window().sane_on(&monitors);
+        // A game is not the editor: it opens at its own default size, as an
+        // exported build does on a machine that has never run the editor.
+        // Taking the editor's place opened `floptle play` maximised whenever
+        // the editor had been, and a game's resolution setting then could
+        // not shrink it.
+        let place = if self.player_mode {
+            crate::layout::WindowPlace::default()
+        } else {
+            crate::layout::load_window().sane_on(&monitors)
+        };
         let mut attrs = Window::default_attributes()
             .with_title(&title)
             .with_inner_size(LogicalSize::new(place.width, place.height))
@@ -4782,6 +4794,11 @@ impl ApplicationHandler for Editor {
     /// Nothing here may fail loudly: this runs while the editor is closing, and
     /// there is no useful way to report a preference that would not write.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // A game leaves the editor's arrangement alone: closing one rewrote
+        // the editor's window with the game's.
+        if self.player_mode {
+            return;
+        }
         if let Some(dock) = self.dock_state.as_ref() {
             crate::layout::save_dock(dock);
         }
@@ -4841,10 +4858,7 @@ impl ApplicationHandler for Editor {
         // the save already ran during the frame, so now actually leave. Doing it here (not
         // inside the egui closure, which has no `event_loop`) is what makes the button close
         // the app for real.
-        if self.pending_exit {
-            // Anything a package put in `ed.prefs` / `ed.store` is written
-            // here — the one place every exit path passes through.
-            self.ext.save_prefs();
+        if self.take_exit() {
             event_loop.exit();
             return;
         }

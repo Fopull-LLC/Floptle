@@ -465,6 +465,14 @@ impl Player {
             event_loop.exit();
             return;
         }
+        // `app.quit()`. A page cannot close its own tab, and leaving the loop
+        // there would only freeze the last frame on it, so a browser game
+        // keeps running; the save it asked for is already flushed.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.ed.take_exit() {
+            event_loop.exit();
+            return;
+        }
         let Some(window) = self.ed.window.clone() else { return };
         // **The browser's own Escape.** A page cannot see the keypress that
         // exits pointer lock — the browser consumes it so a
