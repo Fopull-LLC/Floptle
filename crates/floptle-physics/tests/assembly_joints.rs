@@ -971,6 +971,67 @@ fn drive_speed_on(rake: f32, dir: f32, g: Vec3, single: bool, surface: Option<f3
     (sim.compound_of(chassis.index()).unwrap().vel.x - x0) * dir
 }
 
+/// How fast a two-wheeler is going after `secs` of full throttle: the rover
+/// of [`raked_drive_speed`] on two wheels in line under its middle, with tyres
+/// of `tyre` kg and motors of `max_force` N·m, axes raked `rake` radians,
+/// driving `dir` (+1 or -1) under gravity `g`. Nothing holds it upright; on
+/// the flat a symmetric craft stays so.
+fn in_line_drive_speed(rake: f32, dir: f32, g: Vec3, tyre: f32, max_force: f32, secs: f32) -> f32 {
+    let mut ecs = World::default();
+    let floor = ecs.spawn();
+    ecs.insert(floor, Transform::from_translation(DVec3::new(0.0, -1.0, 0.0)));
+    ecs.insert(floor, RigidBody { kind: BodyKind::Box, mode: BodyMode::Static, half_extents: [200.0, 1.0, 50.0], friction: 0.6, ..Default::default() });
+    let chassis = segment(&mut ecs, "Chassis", DVec3::new(0.0, 0.8, 0.0), [1.2, 0.2, 0.7], 400.0);
+    let mut wheels = Vec::new();
+    for dx in [-1.0f64, 1.0] {
+        let w = ecs.spawn();
+        ecs.insert(w, Transform::from_translation(DVec3::new(dx, 0.4, 0.0)));
+        ecs.insert(w, RigidBody { radius: 0.4, mass: tyre, friction: 0.6, rotates: true, ..Default::default() });
+        ecs.insert(
+            w,
+            Joint {
+                kind: JointKind::Wheel,
+                other: "Chassis".into(),
+                axis: [rake.sin(), rake.cos(), 0.0],
+                stiffness: 18.0,
+                damping: 0.8,
+                motor: true,
+                motor_speed: 0.0,
+                max_force,
+                ..Default::default()
+            },
+        );
+        wheels.push(w);
+    }
+    let mut sim = Sim::build_layered(&ecs, &[], GravityField::uniform(g), DVec3::ZERO, floptle_core::Layers::default());
+    sim.world.single_wheel_friction = true;
+    run(&mut sim, &mut ecs, 1.0);
+    let x0 = sim.compound_of(chassis.index()).unwrap().vel.x;
+    for &w in &wheels {
+        ecs.get_mut::<Joint>(w).unwrap().motor_speed = -3000.0 * dir;
+    }
+    run(&mut sim, &mut ecs, secs);
+    (sim.compound_of(chassis.index()).unwrap().vel.x - x0) * dir
+}
+
+/// **A two-wheeler gets its whole motor.** Two wheels in line, each motor
+/// 252 N·m on a 0.4 m tyre, push a 415 kg craft at 3 m/s²: after two seconds
+/// it is going about 6 m/s. It went 2.4. The wheel joint keeps a wheel from
+/// turning about anything but its axle, and the axle comes out of a rotation
+/// a hair off unit length, so what was left of the spin after its axle part
+/// pointed along the axle, and the lock braked the wheel's whole turn. A
+/// four-wheeler's own wobble usually hid it; a bike, which turns about
+/// nothing else, crawled at a fraction of its motor.
+#[test]
+fn a_two_wheeler_in_line_gets_its_whole_motor() {
+    let flat = Vec3::new(0.0, -9.81, 0.0);
+    let full = 2.0 * 252.0 / 0.4 / (400.0 + 2.0 * 7.5) * 2.0;
+    for dir in [1.0, -1.0] {
+        let v = in_line_drive_speed(0.0, dir, flat, 7.5, 252.0, 2.0);
+        assert!(v > 0.9 * full, "driving {dir}, the two-wheeler gained {v} m/s in 2 s; its motors give {full}");
+    }
+}
+
 /// **A raked suspension grips the same both ways.** A tyre's grip is
 /// friction times how hard it is pressed into the ground, which does not
 /// depend on which way it drives. It was sized from the spring's push
@@ -1000,6 +1061,24 @@ fn a_raked_suspension_grips_the_same_forwards_and_backwards() {
             let up_back = raked_drive_speed(0.0, -1.0, g);
             assert!((fwd - up).abs() <= 0.1 * up, "on {name} uphill, raked {fwd} m/s against upright {up}");
             assert!((back - up_back).abs() <= 0.1 * up_back, "on {name} downhill, raked {back} m/s against upright {up_back}");
+        }
+    }
+    // A two-wheeler, motor-limited, its axes raked 25° to 45° (a fork, a
+    // swing arm), with a light tyre and one a twelfth of its load: within
+    // 10% of itself each way on the flat, and of the upright one each way
+    // on the grade. Raked, it drove half as hard one way as the other.
+    for tyre in [7.5f32, 16.7] {
+        for (name, g) in [("flat", flat), ("a 25% grade", slope)] {
+            let (up, up_back) = (in_line_drive_speed(0.0, 1.0, g, tyre, 252.0, 2.0), in_line_drive_speed(0.0, -1.0, g, tyre, 252.0, 2.0));
+            for deg in [25.0f32, 35.0, 45.0] {
+                let r = deg.to_radians();
+                let (fwd, back) = (in_line_drive_speed(r, 1.0, g, tyre, 252.0, 2.0), in_line_drive_speed(r, -1.0, g, tyre, 252.0, 2.0));
+                if name == "flat" {
+                    assert!((fwd - back).abs() <= 0.1 * fwd.max(back), "two-wheeler on {name}, tyre {tyre} kg, raked {deg}°: {fwd} m/s forwards against {back} backwards");
+                }
+                assert!((fwd - up).abs() <= 0.1 * up, "two-wheeler on {name}, tyre {tyre} kg, raked {deg}°: {fwd} m/s one way against {up} upright");
+                assert!((back - up_back).abs() <= 0.1 * up_back, "two-wheeler on {name}, tyre {tyre} kg, raked {deg}°: {back} m/s the other way against {up_back} upright");
+            }
         }
     }
 }

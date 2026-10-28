@@ -761,13 +761,22 @@ impl PhysicsWorld {
                 // about nothing else relative to it: a wheel left free to spin
                 // about the upright creeps sideways down any slope it is
                 // parked on.
-                let axle = self.wheel_axle(&jt);
+                //
+                // The axle comes out of a rotation, a hair off unit length,
+                // and what is left of the spin after taking the axle's part
+                // out then points along the axle itself. Read as the spin to
+                // stop, that was the wheel's whole turn: the lock braked every
+                // wheel that ran straight, and a bike on two wheels in line,
+                // where nothing else turns, crawled at a fraction of its
+                // motor. So the axle is made unit, the lock takes out only
+                // the part that is off it, and a rounding's worth is none.
+                let axle = self.wheel_axle(&jt).normalize_or(Vec3::Z);
                 let rel = self.ang_vel_of(Some(jt.a)) - self.ang_vel_of(jt.b);
                 let off_axle = rel - axle * rel.dot(axle);
-                let n = off_axle.normalize_or_zero();
+                let n = if off_axle.length_squared() > 1e-12 { off_axle.normalize() } else { Vec3::ZERO };
                 let w = ea.w_ang(n) + eb.w_ang(n);
                 if n != Vec3::ZERO && w.is_finite() && w > 1e-9 {
-                    let l = -rel.dot(n) / w;
+                    let l = -off_axle.dot(n) / w;
                     self.spin_impulse(Some(jt.a), n * l);
                     self.spin_impulse(jt.b, -n * l);
                     spent += l.abs();
