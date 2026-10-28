@@ -1192,6 +1192,11 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
         if let Some(sc) = spec.scroll {
             f.insert("scrollY".to_string(), sc.offset as f64);
             f.insert("scrollX".to_string(), sc.offset_x as f64);
+            f.insert("scrollFade".to_string(), sc.fade as f64);
+            // Read only: the travel the layout found last frame, which the
+            // wheel and scrollX/scrollY are clamped to.
+            f.insert("scrollMaxX".to_string(), sc.max[0] as f64);
+            f.insert("scrollMaxY".to_string(), sc.max[1] as f64);
         }
         f.insert("toggle".to_string(), f64::from(u8::from(spec.toggle)));
         // A repeater's row count — the one number a data-driven list needs,
@@ -1638,6 +1643,11 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "scrollX" => {
                         if let Some(sc) = &mut spec.scroll {
                             sc.offset_x = v.max(0.0);
+                        }
+                    }
+                    "scrollFade" => {
+                        if let Some(sc) = &mut spec.scroll {
+                            sc.fade = v.max(0.0);
                         }
                     }
                     "toggle" => spec.toggle = val != 0.0,

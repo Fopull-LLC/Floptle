@@ -247,6 +247,10 @@
 ---@field tintA number Image tint alpha 0..1.
 ---@field cell number Spritesheet cell index the image shows (set per frame for sprite animation).
 ---@field scrollY number Scroll-view position, design units (0 = top; the wheel drives it too, clamped to the content). Present only on elements with the scroll-view option.
+---@field scrollX number Scroll-view position across, design units (0 = left edge). Present only on scroll views.
+---@field scrollFade number How wide, in design units, the content fades out at an edge where more of it lies past the view; 0 is a hard edge. Present only on scroll views.
+---@field scrollMaxX number Read only: how far the view can scroll across, as last laid out (0 when the content fits). Present only on scroll views.
+---@field scrollMaxY number Read only: how far the view can scroll down, as last laid out (0 when the content fits). Present only on scroll views.
 
 ---A UI slider's live value (`node:getcomponent("UiSlider")`) — the health-bar hook:
 ---`bar:getcomponent("UiSlider").value = hp` and the Fill/Handle parts follow.

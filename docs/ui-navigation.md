@@ -250,7 +250,20 @@ and no `clicked`, and a slider it grabbed goes back to where it was. A drag
 mostly across the axis stays with the element, so a slider in a list still
 slides. A tap still clicks. With `drag` on, the mouse does all of this too.
 
-Scripts read and write `UiElement.scrollX` / `scrollY`.
+Scripts read and write `UiElement.scrollX` / `scrollY`, and `scrollFade`.
+They can also read `scrollMaxX` / `scrollMaxY`, how far the view can scroll
+(0 when the content fits). That is the same travel the wheel is clamped to,
+so a "more this way" arrow can show while `scrollX < scrollMaxX`.
+
+### Fading the clipped edges
+
+`scrollFade` is a width in design units. At each edge where content lies past
+the view, the content fades to nothing across that width. An edge with
+nothing past it stays sharp, so a list at its start fades only at its end.
+Each edge fades by no more than the content hidden past it, so the fade grows
+in as the list starts to move instead of switching on. It is worked out while
+the frame is drawn, from the same travel the wheel is clamped to, so it never
+lags the wheel by a frame. 0, the default, is a hard edge.
 
 ### Scrollbars are your elements
 

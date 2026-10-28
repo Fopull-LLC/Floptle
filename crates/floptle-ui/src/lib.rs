@@ -722,6 +722,17 @@ pub struct ScrollSpec {
     /// phone has no wheel.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub drag: bool,
+    /// How wide, in design units, the content fades out at an edge where
+    /// more of it lies past the view (`scrollFade`). 0 is a hard edge. Each
+    /// edge fades by no more than the content hidden past it, so the fade
+    /// grows in as the list starts to scroll instead of popping on.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub fade: f32,
+    /// How far the view can scroll, `[x, y]`, as the last frame laid it out
+    /// ([`scroll_max`]): what scripts read as `scrollMaxX` / `scrollMaxY`.
+    /// Not saved: it is the layout's answer, not the author's.
+    #[serde(skip)]
+    pub max: [f32; 2],
 }
 
 fn default_scroll_speed() -> f32 {
@@ -735,6 +746,8 @@ impl Default for ScrollSpec {
             offset_x: 0.0,
             speed: default_scroll_speed(),
             drag: false,
+            fade: 0.0,
+            max: [0.0, 0.0],
         }
     }
 }
@@ -1774,11 +1787,15 @@ fn layout_node(n: &Node, rect: [f32; 4], measure: MeasureText, out: &mut Vec<Pla
 // ---------------------------------------------------------------------------
 
 /// A mask's clip region: pixels outside this rounded rect are discarded.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Clip {
     /// x, y, w, h in design units.
     pub rect: [f32; 4],
     pub radius: f32,
+    /// How far in from each edge the content fades to nothing, left, top,
+    /// right, bottom, in design units: a scroll view's `scrollFade` on the
+    /// edges that hide content. 0 is a hard edge.
+    pub fade: [f32; 4],
 }
 
 /// A visual (not layout) transform applied to a quad about a pivot inside its
@@ -2052,7 +2069,7 @@ pub fn scroll_clips(
             continue;
         }
         let radius = n.spec.shape.as_ref().map(|s| s.radius.max()).unwrap_or(0.0);
-        let clip = Clip { rect: p.rect, radius };
+        let clip = Clip { rect: p.rect, radius, fade: scroll_fade(roots, placed, p.id, n.spec.scroll) };
         let mut stack: Vec<u32> = n.children.iter().map(|c| c.id).collect();
         while let Some(id) = stack.pop() {
             out.entry(id).or_insert(clip);
@@ -2062,6 +2079,18 @@ pub fn scroll_clips(
         }
     }
     out
+}
+
+/// The fade a scroll view's edges take, left, top, right, bottom: its
+/// `scrollFade` where content lies past that edge, and no more than the
+/// content hidden there. Read from the offset being drawn and the same
+/// travel the input clamps to, so it is exact on the frame the wheel moves.
+fn scroll_fade(roots: &[Node], placed: &[Placed], id: u32, scroll: Option<ScrollSpec>) -> [f32; 4] {
+    let Some(sc) = scroll.filter(|s| s.fade > 0.0) else { return [0.0; 4] };
+    let max = scroll_max(roots, placed, id);
+    let off = [sc.offset_x.clamp(0.0, max[0]), sc.offset.clamp(0.0, max[1])];
+    let w = sc.fade;
+    [w.min(off[0]), w.min(off[1]), w.min(max[0] - off[0]), w.min(max[1] - off[1])]
 }
 
 /// Size and position every scrollbar's thumb from the view it tracks.
@@ -2215,7 +2244,7 @@ pub fn draw_list_with(
             .and_then(|n| n.spec.shape.as_ref())
             .map(|s| s.radius.max())
             .unwrap_or(0.0);
-        let clip = Clip { rect, radius };
+        let clip = Clip { rect, radius, ..Default::default() };
         let mut stack = vec![*target_id];
         while let Some(id) = stack.pop() {
             clip_of.entry(id).or_insert(clip);
@@ -2449,6 +2478,7 @@ pub fn draw_list_with(
                 Some(clip.unwrap_or(Clip {
                     rect: p.rect,
                     radius: spec.shape.as_ref().map(|s| s.radius.max()).unwrap_or(0.0),
+                    ..Default::default()
                 }))
             } else {
                 clip
@@ -2725,6 +2755,47 @@ mod tests {
         let roots = [fits];
         let placed = solve(&roots, [1280.0, 720.0], &m);
         assert_eq!(scroll_max(&roots, &placed, roots[0].id), [0.0, 0.0]);
+    }
+
+    /// **A scroll view fades only the edges that hide content.** A list at
+    /// its top fades its bottom edge alone; part way down, both; and an edge
+    /// fades by no more than what lies past it, so the fade grows in as the
+    /// list moves instead of popping on. No `scrollFade` is a hard edge.
+    #[test]
+    fn a_scroll_fade_covers_only_the_edges_that_hide_content() {
+        let fade_at = |offset: f32, fade: f32| {
+            let rows: Vec<Node> = (0..4)
+                .map(|i| {
+                    el(
+                        ElementSpec {
+                            place: Place::Free { pos: [0.0, i as f32 * 50.0] },
+                            size: [Size::Fixed(100.0), Size::Fixed(40.0)],
+                            shape: Some(ShapeSpec::default()),
+                            ..Default::default()
+                        },
+                        vec![],
+                    )
+                })
+                .collect();
+            let first = rows[0].id;
+            // 190 of content in a 100-tall view: 90 of travel.
+            let view = el(
+                ElementSpec {
+                    size: [Size::Fixed(120.0), Size::Fixed(100.0)],
+                    scroll: Some(ScrollSpec { offset, fade, ..Default::default() }),
+                    ..Default::default()
+                },
+                rows,
+            );
+            let roots = [view];
+            let placed = solve(&roots, [1280.0, 720.0], &m);
+            scroll_clips(&roots, &placed).get(&first).map(|c| c.fade).unwrap()
+        };
+        assert_eq!(fade_at(0.0, 16.0), [0.0, 0.0, 0.0, 16.0], "at the top only the bottom hides content");
+        assert_eq!(fade_at(40.0, 16.0), [0.0, 16.0, 0.0, 16.0], "part way, both edges");
+        assert_eq!(fade_at(90.0, 16.0), [0.0, 16.0, 0.0, 0.0], "at the end only the top");
+        assert_eq!(fade_at(5.0, 16.0), [0.0, 5.0, 0.0, 16.0], "five units in, five units of fade");
+        assert_eq!(fade_at(40.0, 0.0), [0.0; 4], "no scrollFade, a hard edge");
     }
 
     #[test]
@@ -3286,7 +3357,7 @@ mod tests {
         let placed = solve(&roots, [1280.0, 720.0], &m);
         // Both masks claim the target; A comes first in the pair list.
         let dl = draw_list(&roots, &placed, &[(aid, tid), (bid, tid)]);
-        let clip = Clip { rect: [100.0, 0.0, 80.0, 80.0], radius: 12.0 };
+        let clip = Clip { rect: [100.0, 0.0, 80.0, 80.0], radius: 12.0, ..Default::default() };
         let target_quad = dl.quads.iter().find(|q| q.rect == [0.0, 0.0, 50.0, 50.0]).unwrap();
         assert_eq!(target_quad.clip, Some(clip), "first mask wins");
         let inner_quad = dl.quads.iter().find(|q| q.rect[2] == 10.0).unwrap();

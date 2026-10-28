@@ -1358,6 +1358,8 @@ impl Editor {
         // this pass (`node:uiRect()`): a script can hit-test the mouse against
         // a panel's real position instead of guessing.
         let mut solved_rects: HashMap<u32, [f32; 4]> = HashMap::new();
+        // Each scroll view's travel, for `scrollMaxX` / `scrollMaxY`.
+        let mut scroll_travel: Vec<(u32, [f32; 2])> = Vec::new();
         // Every layer's solved rects this frame, for the navigation pass.
         let mut nav_layers: Vec<(UiLayer, Vec<floptle_ui::Node>, Vec<floptle_ui::Placed>)> =
             Vec::new();
@@ -1435,6 +1437,21 @@ impl Editor {
                     let bars = layer_scrollbars(&self.world, &ents, roots);
                     floptle_ui::place_scrollbars(roots, &mut placed, &bars);
                     let bar_targets: HashMap<u32, u32> = bars.into_iter().collect();
+                    fn scroll_ids(n: &floptle_ui::Node, out: &mut Vec<u32>) {
+                        if n.spec.scroll.is_some() {
+                            out.push(n.id);
+                        }
+                        for c in &n.children {
+                            scroll_ids(c, out);
+                        }
+                    }
+                    let mut views = Vec::new();
+                    for r in roots {
+                        scroll_ids(r, &mut views);
+                    }
+                    for id in views {
+                        scroll_travel.push((id, floptle_ui::scroll_max(roots, &placed, id)));
+                    }
                     nav_layers.push((*layer, roots.clone(), placed.clone()));
                     // Publish each screen-space element's solved rect in
                     // physical pixels — `node:uiRect()` reads it. In window
@@ -1800,6 +1817,14 @@ impl Editor {
         // here (right before scripts run) so a script's mouse hit-test uses
         // the panel's actual rendered position.
         self.script_host.set_ui_rects(solved_rects);
+        for (id, max) in scroll_travel {
+            if let Some(e) = self.world.entity_with::<Transform>(id)
+                && self.world.get::<ElementSpec>(e).and_then(|s| s.scroll).is_some_and(|sc| sc.max != max)
+                && let Some(sc) = self.world.get_mut::<ElementSpec>(e).and_then(|s| s.scroll.as_mut())
+            {
+                sc.max = max;
+            }
+        }
         // …and the focus, so `node.focused` / `ui.focused()` read this frame's
         // truth rather than last frame's.
         self.script_host.set_ui_focus(self.ui_focus);

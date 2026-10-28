@@ -610,6 +610,7 @@ pub fn apply_prop(spec: &mut ElementSpec, name: &str, v: &PropVal) -> Applied {
         "scrollX" => scroll!().offset_x = v.num().max(0.0),
         "scrollSpeed" => scroll!().speed = v.num(),
         "scrollDrag" => scroll!().drag = v.bool(),
+        "scrollFade" => scroll!().fade = v.num().max(0.0),
         "scrollbarFor" => {
             let axis = spec.scrollbar.as_ref().map(|s| s.axis).unwrap_or_default();
             spec.scrollbar = Some(ScrollBar { target: v.text(), axis });
@@ -722,7 +723,7 @@ pub const ALL_PROPS: &[&str] = &[
     "maxLines", "maxW", "min", "minH", "minW", "numeric", "opacity", "order", "overflow", "pad",
     "part", "pin", "pivot", "placeholder", "pos", "posX", "posY", "radius", "radiusBL",
     "radiusBR", "radiusTL", "radiusTR", "rotation", "rows", "scale", "scaleX", "scaleY",
-    "scrollDrag", "scrollSpeed", "scrollX", "scrollY", "scrollbarAxis", "scrollbarFor",
+    "scrollDrag", "scrollFade", "scrollSpeed", "scrollX", "scrollY", "scrollbarAxis", "scrollbarFor",
     "selected", "shader", "size", "slice", "slicePpu", "sliderDir", "stretch", "style", "surface",
     "surfaceOffset", "surfaceTile", "surfaceTint", "template", "text",
     "textA", "textAlign", "textB", "textColor", "textFit", "textG", "textR", "textSize",

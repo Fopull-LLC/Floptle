@@ -25,7 +25,7 @@ each group, and meant to be searched.
 - [compute — gpu.* & compute.run](#compute--gpu--computerun) — 13
 - [the web — http.*, json.*](#the-web--http-json) — 15
 - [the player's account — account.*](#the-players-account--account) — 13
-- [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 74
+- [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 78
 - [networking — net.*, synced](#networking--net-synced) — 41
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 27
@@ -2473,6 +2473,22 @@ Free position Y / Pin offset Y (design units).
 ### `el.radius`
 
 Shape corner radius (design units).
+
+### `el.scrollFade`
+
+How wide, in design units, the content fades out at each edge where more of it lies past the view; an edge with nothing past it stays sharp. 0 (the default) is a hard edge. Present only on scroll views.
+
+### `el.scrollMaxX`
+
+Read only: how far the view can scroll across, as last laid out (0 when the content fits). The travel scrollX is clamped to, so `el.scrollX < el.scrollMaxX` means more lies to the right. Present only on scroll views.
+
+### `el.scrollMaxY`
+
+Read only: how far the view can scroll down, as last laid out (0 when the content fits). Present only on scroll views.
+
+### `el.scrollX`
+
+Scroll-view position across, design units (0 = left edge; the wheel drives it when the view only scrolls sideways, or with Shift). Present only on scroll views.
 
 ### `el.scrollY`
 

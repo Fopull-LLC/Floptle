@@ -282,8 +282,10 @@ it keeps its own filter (crisp pixel art stays crisp).
 
 **Slider** — `min`, `max`, `value`, `interact`, `flip`, `sliderDir`.
 
-**Scroll** — `scrollX`, `scrollY`, `scrollSpeed`, `scrollDrag`, `scrollbarFor`,
-`scrollbarAxis`.
+**Scroll** — `scrollX`, `scrollY`, `scrollSpeed`, `scrollDrag`, `scrollFade`,
+`scrollbarFor`, `scrollbarAxis`. `scrollFade = 16` fades the content out over
+16 design units at each edge where more of it lies past the view, and at no
+other edge. It needs no script and keeps up with the wheel on the same frame.
 
 **Repeater** — `template`, `count`. A made container can still repeat a prefab:
 `ui.make` describes the shape of the screen, the repeater fills a list with rows

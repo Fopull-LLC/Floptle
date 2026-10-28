@@ -1022,7 +1022,7 @@ pub fn transpile_ui(ir: &ShaderIr, ck: &Checked) -> Result<CompiledUi, Transpile
     w.line("        let ccenter = in.clip.xy + chalf;".into(), None);
     w.line("        let cr = min(in.params.w, min(chalf.x, chalf.y));".into(), None);
     w.line("        let cd = sd_round_rect(in.px - ccenter, chalf, cr);".into(), None);
-    w.line("        cmask = clamp(0.5 - cd, 0.0, 1.0);".into(), None);
+    w.line("        cmask = clamp(0.5 - cd, 0.0, 1.0) * clip_fade(in.px, in.clip, in.fade);".into(), None);
     w.line("    }".into(), None);
     // Clip the shader to the element's own rounded rect too, so effects (gloss,
     // gradient, glow) never spill past a rounded panel's corners. `params.x` is the
@@ -1339,8 +1339,10 @@ struct VsOut {
     @location(11) @interpolate(flat) grad_cfg: vec4<f32>,
     @location(12) @interpolate(flat) fx: vec4<f32>,
     @location(13) @interpolate(flat) inset: vec4<f32>,
+    @location(14) @interpolate(flat) fade: vec4<f32>,
 };
 fn sd_round_rect(p: vec2<f32>, half: vec2<f32>, r: f32) -> f32 { return 0.0; }
+fn clip_fade(px: vec2<f32>, clip: vec4<f32>, fade: vec4<f32>) -> f32 { return 1.0; }
 fn corner_radius(p: vec2<f32>, half: vec2<f32>, r: vec4<f32>) -> f32 { return 0.0; }
 fn gradient_t(p: vec2<f32>, half: vec2<f32>, cfg: vec4<f32>) -> f32 { return 0.0; }
 fn hash21(p: vec2<f32>) -> f32 { return 0.0; }

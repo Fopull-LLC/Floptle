@@ -53,6 +53,9 @@ pub struct UiInstance {
     pub fx: [f32; 4],
     /// Inset shadow only: offset x, offset y, spread px, unused.
     pub inset: [f32; 4],
+    /// How far in from each edge of `clip` the quad fades to nothing, px:
+    /// left, top, right, bottom (a scroll view's `scrollFade`).
+    pub fade: [f32; 4],
 }
 
 impl Default for UiInstance {
@@ -71,6 +74,7 @@ impl Default for UiInstance {
             xform: [0.0, 1.0, 1.0, 0.0],
             fx: [0.0, 1.0, 0.5, 0.5],
             inset: [0.0; 4],
+            fade: [0.0; 4],
         }
     }
 }
@@ -529,7 +533,7 @@ const CORNER_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayou
     }],
 };
 
-const INSTANCE_ATTRS: [wgpu::VertexAttribute; 13] = [
+const INSTANCE_ATTRS: [wgpu::VertexAttribute; 14] = [
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 0, shader_location: 1 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 2 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 3 },
@@ -543,6 +547,7 @@ const INSTANCE_ATTRS: [wgpu::VertexAttribute; 13] = [
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 160, shader_location: 11 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 176, shader_location: 12 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 192, shader_location: 13 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 208, shader_location: 14 },
 ];
 
 const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
@@ -1694,7 +1699,7 @@ impl Ui {
     ) {
         // Resolve last frame's overflow before anything reads a UV this frame.
         self.maintain(gpu);
-        let clip_px = |clip: &Option<floptle_ui::Clip>| -> ([f32; 4], f32) {
+        let clip_px = |clip: &Option<floptle_ui::Clip>| -> ([f32; 4], f32, [f32; 4]) {
             match clip {
                 Some(c) => (
                     [
@@ -1704,8 +1709,9 @@ impl Ui {
                         c.rect[3] * scale,
                     ],
                     c.radius * scale,
+                    c.fade.map(|f| f * scale),
                 ),
-                None => ([0.0; 4], 0.0),
+                None => ([0.0; 4], 0.0, [0.0; 4]),
             }
         };
         let push = |instances: &mut Vec<UiInstance>,
@@ -1740,7 +1746,7 @@ impl Ui {
             // A custom-shader face: unresolved (missing/broken .flsl) falls
             // back to a plain quad, so the element still shows something.
             let shader = q.shader.as_ref().and_then(|(p, owner)| resolve_shader(p, *owner));
-            let (clip, clip_r) = clip_px(&q.clip);
+            let (clip, clip_r, fade) = clip_px(&q.clip);
             let kind = match q.kind {
                 QuadKind::Shape => 0.0,
                 QuadKind::Shadow => 2.0,
@@ -1814,6 +1820,7 @@ impl Ui {
                 params: [q.feather * scale, kind, clip_r, 0.0],
                 uv,
                 clip,
+                fade,
                 radius: [
                     q.radius[0] * scale,
                     q.radius[1] * scale,
@@ -1971,7 +1978,7 @@ impl Ui {
                 Align::End => 1.0,
             };
             let top = rect_px[1] + (rect_px[3] - block_h) * vf;
-            let (clip, clip_r) = clip_px(&t.clip);
+            let (clip, clip_r, fade) = clip_px(&t.clip);
 
             // Shadow, then stroke, then the run itself — each is the same
             // glyphs again, so they cost quads rather than pipelines. The
@@ -2047,6 +2054,7 @@ impl Ui {
                             color: car.selection,
                             params: [0.0, 0.0, clip_r, 0.0],
                             clip,
+                            fade,
                             ..Default::default()
                         },
                     );
@@ -2062,6 +2070,7 @@ impl Ui {
                         color: car.color,
                         params: [0.0, 0.0, clip_r, 0.0],
                         clip,
+                        fade,
                         ..Default::default()
                     });
                 }
@@ -2111,6 +2120,7 @@ impl Ui {
                                     params: [0.0, 1.0, clip_r, 0.0],
                                     uv: g.uv,
                                     clip,
+                                    fade,
                                     xform: [
                                         t.xform.rotation,
                                         t.xform.scale[0],

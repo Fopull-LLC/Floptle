@@ -309,3 +309,73 @@ end
     assert!(green.1 < red.0, "the last line {green:?} runs into the bar {red:?}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// **A scroll view's `scrollFade` softens only the edges that hide content.**
+/// A strip of red tiles 400 wide in a view 160 wide, with a 40-unit fade: at
+/// the start the right edge fades and the left is solid, part way along both
+/// fade, and at the end only the left. The middle of the view is red
+/// throughout. `FLOPTLE_FADE_PNG=<dir>` keeps the pictures.
+#[test]
+fn a_scroll_fade_softens_only_the_edges_that_hide_content() {
+    let d = temp("fade");
+    scaffold(&d);
+    std::fs::write(d.join("scenes/menu.ron"), scene(false, Some("menu"))).expect("write the scene");
+    let mut shots = Vec::new();
+    for x in [0, 120, 240] {
+        std::fs::write(
+            d.join("scripts/menu.lua"),
+            format!(
+                "function start(node)\n  ui.make(node, {{ \"scroll\", pin = \"topLeft\", w = 160, h = 40, scrollX = {x}, scrollFade = 40,\n    {{ \"row\", pad = 0, gap = 0, items = {{1,2,3,4,5,6,7,8,9,10}}, function() return {{ \"box\", w = 40, h = 40, fill = \"#ff0000\" }} end }} }})\nend\n"
+            ),
+        )
+        .expect("write the script");
+        let img = match shoot(&d, "menu", &["--after", "5f"]) {
+            Ok(i) => i,
+            Err(why) => {
+                assert!(cannot_render(&why), "shot failed for a reason that is not the adapter:\n{why}");
+                let _ = std::fs::remove_dir_all(&d);
+                return;
+            }
+        };
+        if let Ok(dir) = std::env::var("FLOPTLE_FADE_PNG") {
+            img.save(Path::new(&dir).join(format!("fade_{x}.png"))).expect("save the picture");
+        }
+        shots.push((x, img));
+    }
+    for (x, img) in &shots {
+        let (left, mid, right) = (img.get_pixel(2, 20), img.get_pixel(80, 20), img.get_pixel(157, 20));
+        assert!(is_red(mid), "scrolled to {x}, the middle of the view is not red: {mid:?}");
+        assert_eq!(is_red(left), *x == 0, "scrolled to {x}, the left edge: {left:?}");
+        assert_eq!(is_red(right), *x == 240, "scrolled to {x}, the right edge: {right:?}");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// **A script reads a scroll view's travel.** 400 units of tiles in a view
+/// 160 wide scroll 240 across and nothing down, and `scrollMaxX` /
+/// `scrollMaxY` say so: an arrow showing "more this way" needs no estimate
+/// of the layout of its own.
+#[test]
+fn a_script_reads_how_far_a_scroll_view_can_scroll() {
+    let d = temp("travel");
+    scaffold(&d);
+    std::fs::write(d.join("scenes/menu.ron"), scene(false, Some("menu"))).expect("write the scene");
+    std::fs::write(
+        d.join("scripts/menu.lua"),
+        "function start(node)\n  ui.make(node, { \"scroll\", pin = \"topLeft\", w = 160, h = 40,\n    { \"row\", pad = 0, gap = 0, items = {1,2,3,4,5,6,7,8,9,10}, function() return { \"box\", w = 40, h = 40, fill = \"#ff0000\" } end } })\nend\nfunction update(node, dt)\n  local e = node:children()[1]:getcomponent(\"UiElement\")\n  print(\"TRAVEL \" .. e.scrollMaxX .. \" \" .. e.scrollMaxY)\nend\n",
+    )
+    .expect("write the script");
+    let out = d.join("travel.png");
+    let r = Command::new(bin())
+        .args(["shot", &d.to_string_lossy(), "--scene", "menu", "--out", &out.to_string_lossy(), "--size", "160x90", "--after", "5f"])
+        .output()
+        .expect("run shot");
+    let said = format!("{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+    if !r.status.success() {
+        assert!(cannot_render(&said), "shot failed for a reason that is not the adapter:\n{said}");
+        let _ = std::fs::remove_dir_all(&d);
+        return;
+    }
+    assert!(said.contains("TRAVEL 240 0") || said.contains("TRAVEL 240.0 0.0"), "the script did not read 240 across and 0 down:\n{said}");
+    let _ = std::fs::remove_dir_all(&d);
+}

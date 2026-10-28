@@ -40,6 +40,7 @@ struct VsIn {
     @location(11) xform: vec4<f32>,          // rotation rad, scale x, scale y, -
     @location(12) fx: vec4<f32>,             // grain amount, grain px, pivot x, pivot y
     @location(13) inset: vec4<f32>,          // inset offset x, y, spread px, -
+    @location(14) fade: vec4<f32>,           // clip edge fade px: L, T, R, B
 }
 
 struct VsOut {
@@ -58,6 +59,7 @@ struct VsOut {
     @location(11) @interpolate(flat) grad_cfg: vec4<f32>,
     @location(12) @interpolate(flat) fx: vec4<f32>,
     @location(13) @interpolate(flat) inset: vec4<f32>,
+    @location(14) @interpolate(flat) fade: vec4<f32>,
 }
 
 @vertex
@@ -108,6 +110,7 @@ fn vs_main(in: VsIn) -> VsOut {
     out.grad_cfg = in.grad_cfg;
     out.fx = in.fx;
     out.inset = in.inset;
+    out.fade = in.fade;
     return out;
 }
 
@@ -246,6 +249,17 @@ fn border_coverage(p: vec2<f32>, half: vec2<f32>, r: f32, d: f32, bw: vec4<f32>)
     return cov;
 }
 
+// A scroll view's `scrollFade`: how much of a pixel shows, fading to nothing
+// across `fade` px in from each edge of the clip rect that hides content.
+fn clip_fade(px: vec2<f32>, clip: vec4<f32>, fade: vec4<f32>) -> f32 {
+    let near = px - clip.xy;
+    let far = clip.xy + clip.zw - px;
+    let d = vec4<f32>(near.x, near.y, far.x, far.y);
+    let t = select(vec4<f32>(1.0), clamp(d / max(fade, vec4<f32>(1e-4)), vec4<f32>(0.0), vec4<f32>(1.0)), fade > vec4<f32>(0.0));
+    let s = t * t * (3.0 - 2.0 * t);
+    return s.x * s.y * s.z * s.w;
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // UI mask: pixels outside the clip's rounded rect vanish (1px AA edge).
@@ -255,7 +269,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let ccenter = in.clip.xy + chalf;
         let cr = min(in.params.z, min(chalf.x, chalf.y));
         let cd = sd_round_rect(in.px - ccenter, chalf, cr);
-        cmask = clamp(0.5 - cd, 0.0, 1.0);
+        cmask = clamp(0.5 - cd, 0.0, 1.0) * clip_fade(in.px, in.clip, in.fade);
     }
     let kind = in.params.y;
     // The texture, sampled ONCE up here before any branch on `kind`. Every
