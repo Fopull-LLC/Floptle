@@ -1032,6 +1032,77 @@ fn a_two_wheeler_in_line_gets_its_whole_motor() {
     }
 }
 
+/// How fast a two-wheeler gains speed, m/s², over a second in which its
+/// motors are always `lead` m/s at the rim ahead of the ground, as a traction
+/// control drives them: the craft of [`in_line_drive_speed`], with springs of
+/// `stiffness`, tyres of `tyre` kg and motors of `max_force` N·m, axes raked
+/// `rake` radians, driving `dir`, on grippy ground (μ 1.2).
+fn lead_driven_accel(rake: f32, dir: f32, lead: f32, stiffness: f32, tyre: f32, max_force: f32) -> f32 {
+    let mut ecs = World::default();
+    let floor = ecs.spawn();
+    ecs.insert(floor, Transform::from_translation(DVec3::new(0.0, -1.0, 0.0)));
+    ecs.insert(floor, RigidBody { kind: BodyKind::Box, mode: BodyMode::Static, half_extents: [400.0, 1.0, 50.0], friction: 1.2, ..Default::default() });
+    let chassis = segment(&mut ecs, "Chassis", DVec3::new(0.0, 0.8, 0.0), [1.2, 0.2, 0.7], 400.0);
+    let mut wheels = Vec::new();
+    for dx in [-1.0f64, 1.0] {
+        let w = ecs.spawn();
+        ecs.insert(w, Transform::from_translation(DVec3::new(dx, 0.4, 0.0)));
+        ecs.insert(w, RigidBody { radius: 0.4, mass: tyre, friction: 1.2, rotates: true, ..Default::default() });
+        ecs.insert(
+            w,
+            Joint {
+                kind: JointKind::Wheel,
+                other: "Chassis".into(),
+                axis: [rake.sin(), rake.cos(), 0.0],
+                stiffness,
+                damping: 0.8,
+                motor: true,
+                motor_speed: 0.0,
+                max_force,
+                ..Default::default()
+            },
+        );
+        wheels.push(w);
+    }
+    let mut sim = Sim::build_layered(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO, floptle_core::Layers::default());
+    sim.world.single_wheel_friction = true;
+    run(&mut sim, &mut ecs, 1.0);
+    let x0 = sim.compound_of(chassis.index()).unwrap().vel.x;
+    for _ in 0..(1.0 / DT).round() as usize {
+        let v = sim.compound_of(chassis.index()).unwrap().vel.x * dir;
+        // A −Z turn drives +x. Never asked to drive backwards: rolling back
+        // off the settle, it asks for the lead from a standstill.
+        let target = -dir * ((v.max(0.0) + lead) / 0.4).to_degrees();
+        for &w in &wheels {
+            ecs.get_mut::<Joint>(w).unwrap().motor_speed = target;
+        }
+        sim.sync_joints(&mut ecs);
+        sim.step_tick(DT, None);
+    }
+    (sim.compound_of(chassis.index()).unwrap().vel.x - x0) * dir
+}
+
+/// **A motor ahead of its wheel pushes with its whole force.** A traction
+/// control keeps a wheel's motor a little ahead of the ground; the motor
+/// should then push with the force it has. Solved apart from the grip, it
+/// asked only for what spins a free wheel up, the ground took that back,
+/// and the craft got a push in proportion to the lead: a tenth of the
+/// motor at a quarter of a metre a second, two fifths at one.
+#[test]
+fn a_motor_ahead_of_its_wheel_pushes_with_its_whole_force() {
+    for (tyre, max_force) in [(7.5f32, 252.0f32), (30.0, 430.0)] {
+        let full = 2.0 * max_force / 0.4 / (400.0 + 2.0 * tyre);
+        for lead in [0.25f32, 0.5, 1.0, 1000.0] {
+            let a = lead_driven_accel(0.0, 1.0, lead, 18.0, tyre, max_force);
+            assert!(a > 0.9 * full, "motors {max_force} N·m on {tyre} kg tyres, {lead} m/s ahead: {a} m/s² of {full}");
+        }
+    }
+    // And either way.
+    let back = lead_driven_accel(0.0, -1.0, 0.5, 18.0, 7.5, 252.0);
+    let full = 2.0 * 252.0 / 0.4 / (400.0 + 2.0 * 7.5);
+    assert!(back > 0.9 * full, "backwards, 0.5 m/s ahead: {back} m/s² of {full}");
+}
+
 /// **A raked suspension grips the same both ways.** A tyre's grip is
 /// friction times how hard it is pressed into the ground, which does not
 /// depend on which way it drives. It was sized from the spring's push

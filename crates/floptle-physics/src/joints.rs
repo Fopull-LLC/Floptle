@@ -781,7 +781,11 @@ impl PhysicsWorld {
                     self.spin_impulse(jt.b, -n * l);
                     spent += l.abs();
                 }
-                if jt.motor {
+                // A driven wheel on the ground is turned by its motor and
+                // held by the ground in one solve, in `tyre_grip`; a wheel in
+                // the air, or braked, is turned here.
+                let on_ground = self.ground_drives(&jt);
+                if jt.motor && !on_ground {
                     // At the motor's speed relative to what it hangs from.
                     let rel = (self.ang_vel_of(Some(jt.a)) - self.ang_vel_of(jt.b)).dot(axle);
                     let w = ea.w_ang(axle) + eb.w_ang(axle);
@@ -789,7 +793,7 @@ impl PhysicsWorld {
                 }
                 // After the drive, which turns the wheel and so moves the
                 // patch: the grip has the last word on whether it slides.
-                spent += self.tyre_grip(j, &jt, l, dt);
+                spent += self.tyre_grip(j, &jt, l, dt, on_ground);
             }
             JointKind::Hinge if jt.motor => {
                 // This node turns relative to the other at the motor's speed.
@@ -869,7 +873,7 @@ impl PhysicsWorld {
     /// drive, and a raked bike's grip shrank as it drove forwards and grew in
     /// reverse. Before the wheel has touched down for a step, the wheel's
     /// weight and the spring's push `load` stand in.
-    fn tyre_grip(&mut self, j: usize, jt: &JointRt, load: f32, dt: f32) -> f32 {
+    fn tyre_grip(&mut self, j: usize, jt: &JointRt, load: f32, dt: f32, drive: bool) -> f32 {
         let Link::Body(i) = jt.a else { return 0.0 };
         // Held only while braked and on the ground: a parked wheel.
         let braked = jt.motor && jt.motor_speed == 0.0;
@@ -886,16 +890,29 @@ impl PhysicsWorld {
         let pressed = self.bodies[i].pressed;
         let press = if pressed > 0.0 { pressed } else { (mass * (-g).dot(n)).max(0.0) * dt + load.abs() };
         let budget = mu * press;
-        if budget <= 0.0 {
-            return 0.0;
-        }
-        let b = &self.bodies[i];
-        let v = b.vel + b.ang_vel.cross(r);
         // The aim is a patch at rest once the next step's gravity has been
         // added, before it moves: the slope's pull is taken off now, or a
         // parked rover creeps one step's worth of it every step.
         let g_t = g - n * g.dot(n);
-        let slide = v - n * v.dot(n) + g_t * dt;
+        let slide_now = |w: &Self| {
+            let b = &w.bodies[i];
+            let v = b.vel + b.ang_vel.cross(r);
+            v - n * v.dot(n) + g_t * dt
+        };
+        let mount_at = |w: &Self| {
+            let patch = w.bodies[i].pos + r;
+            let mount = w.joint_end(jt.b, jt.anchor_b, Vec3::ZERO);
+            End { r: patch - (mount.p - mount.r), ..mount }
+        };
+        if drive {
+            let wheel = End { r, ..self.joint_end(Some(jt.a), Vec3::ZERO, Vec3::ZERO) };
+            let mount = mount_at(self);
+            return self.drive_on_ground(j, jt, &wheel, &mount, n, slide_now(self), budget.max(0.0), dt);
+        }
+        if budget <= 0.0 {
+            return 0.0;
+        }
+        let slide = slide_now(self);
         let len = slide.length();
         if len < 1e-6 {
             return 0.0;
@@ -905,9 +922,7 @@ impl PhysicsWorld {
         // hangs from, which the joint holds to it across the suspension: the
         // grip stops the two together, each taking its share.
         let wheel = End { r, ..self.joint_end(Some(jt.a), Vec3::ZERO, Vec3::ZERO) };
-        let patch = self.bodies[i].pos + r;
-        let mount = self.joint_end(jt.b, jt.anchor_b, Vec3::ZERO);
-        let mount = End { r: patch - (mount.p - mount.r), ..mount };
+        let mount = mount_at(self);
         if !braked {
             return self.rolling_grip(jt, &wheel, &mount, r, n, slide, budget);
         }
@@ -940,6 +955,101 @@ impl PhysicsWorld {
             self.joints[j].park = None;
         }
         imp
+    }
+
+    /// Whether joint `jt` is a driven wheel on the ground, turning: its motor
+    /// and the ground act on it in one solve ([`Self::drive_on_ground`]).
+    /// With one friction budget only ([`Self::single_wheel_friction`]): with
+    /// two, the contact's own friction also drives the wheel, and a project
+    /// that chose that keeps the drive it was tuned against.
+    fn ground_drives(&self, jt: &JointRt) -> bool {
+        let Link::Body(i) = jt.a else { return false };
+        let b = &self.bodies[i];
+        self.single_wheel_friction && jt.motor && jt.motor_speed != 0.0 && b.grounded && b.live() && b.ground_normal.is_some()
+    }
+
+    /// A driven wheel on the ground: its motor's turn `l` and the ground's
+    /// push `p` along the tread, solved together so the wheel ends the step
+    /// at the motor's speed (within its force) and its patch not sliding
+    /// (within the grip), with the grip across the tread as
+    /// [`Self::rolling_grip`] gives it. The two share the one friction
+    /// budget, both cut back alike when they ask for more. Returns the
+    /// impulse spent.
+    ///
+    /// Solved one after the other, the motor asked only for what spins a
+    /// free wheel up to its speed, the ground took that turn back the same
+    /// step and pushed the light tyre rather than the craft, and the craft
+    /// got a push in proportion to how far the motor's speed was ahead, not
+    /// to its force: a quarter of it for a traction control half a metre a
+    /// second ahead. The wheel moves along the tread with its share of what
+    /// it hangs from (the joint holds them together there), shared between
+    /// the driven wheels on the ground under it.
+    #[allow(clippy::too_many_arguments)]
+    fn drive_on_ground(&mut self, j: usize, jt: &JointRt, wheel: &End, mount: &End, n: Vec3, slide: Vec3, budget: f32, dt: f32) -> f32 {
+        let Link::Body(i) = jt.a else { return 0.0 };
+        let axle = self.wheel_axle(jt).normalize_or(Vec3::Z);
+        let Some(fwd) = axle.cross(n).try_normalize() else { return 0.0 };
+        let radius = wheel.r.length().max(1e-3);
+        let wa = wheel.w_ang(axle);
+        if !wa.is_finite() || wa <= 1e-9 {
+            return 0.0;
+        }
+        let inertia = 1.0 / wa;
+        let m_wheel = self.bodies[i].mass.max(1e-4);
+        // What moves along the tread with the wheel.
+        let sharing = (0..self.joints.len())
+            .filter(|&k| k == j || (self.joints[k].b == jt.b && !self.joints[k].broken && self.ground_drives(&self.joints[k])))
+            .count()
+            .max(1) as f32;
+        let carried = if mount.inv_m > 1e-9 { m_wheel + 1.0 / mount.inv_m / sharing } else { f32::INFINITY };
+        let inv_c = 1.0 / carried;
+        // The spin still wanted, and how fast the patch slides along the tread.
+        let spin = self.ang_vel_of(Some(jt.a)).dot(axle);
+        let want = jt.motor_speed + self.ang_vel_of(jt.b).dot(axle);
+        let e = want - spin;
+        let s = slide.dot(fwd);
+        // e' = e − (l − p·r)/I = 0 and s' = s + p/carried − r(l − p·r)/I = 0.
+        let k = inv_c + radius * radius / inertia;
+        let mut p = (radius * e - s) / inv_c.max(1e-9);
+        let mut l = inertia * e + p * radius;
+        let cap = if jt.max_force > 0.0 { jt.max_force * dt } else { f32::INFINITY };
+        if l.abs() > cap {
+            l = l.clamp(-cap, cap);
+            p = (radius * l / inertia - s) / k;
+        }
+        // Across the tread, the wheel and its mount stopped together, as
+        // `rolling_grip` does.
+        let side = slide - fwd * s;
+        let (mut across, mut share) = (Vec3::ZERO, 1.0);
+        if let Some(d) = side.try_normalize() {
+            let (wa, wb) = (wheel.w(d), mount.w(d));
+            if wa.is_finite() && wa > 1e-9 {
+                let (ma, mb) = (1.0 / wa, if wb.is_finite() && wb > 1e-9 { 1.0 / wb } else { 0.0 });
+                across = -side * (ma + mb);
+                share = ma / (ma + mb);
+            }
+        }
+        let total = (fwd * p + across).length();
+        if total > budget {
+            let k = if total > 1e-12 { budget / total } else { 0.0 };
+            p *= k;
+            across *= k;
+            l = (inertia * e + p * radius).clamp(-cap, cap);
+        }
+        if !l.is_finite() || !p.is_finite() {
+            return 0.0;
+        }
+        self.spin_impulse(Some(jt.a), axle * l);
+        self.spin_impulse(jt.b, -axle * l);
+        // The push turns the tyre whole; its motion along the tread is the
+        // wheel's and the mount's together.
+        self.joint_impulse(Some(jt.a), wheel.r, fwd * p);
+        let moved = if carried.is_finite() { fwd * p * (1.0 - m_wheel * inv_c) } else { Vec3::ZERO };
+        self.joint_impulse(Some(jt.a), Vec3::ZERO, -moved);
+        self.joint_impulse(jt.b, mount.r, moved);
+        self.joint_impulse(Some(jt.a), wheel.r, across * share);
+        self.joint_impulse(jt.b, mount.r, across * (1.0 - share));
+        l.abs() + (fwd * p + across).length()
     }
 
     /// The grip of a wheel that is free to turn (not braked): along its
