@@ -1015,8 +1015,10 @@ fn in_line_drive_speed(rake: f32, dir: f32, g: Vec3, tyre: f32, max_force: f32, 
 }
 
 /// **A two-wheeler gets its whole motor.** Two wheels in line, each motor
-/// 252 N·m on a 0.4 m tyre, push a 415 kg craft at 3 m/s²: after two seconds
-/// it is going about 6 m/s. It went 2.4. The wheel joint keeps a wheel from
+/// 252 N·m on a 0.4 m tyre, push a 415 kg craft at 3 m/s²: after a second
+/// and a half it is going about 4.5 m/s. It went under 2. (Read before the
+/// craft starts to pitch and bounce on its springs, a little after that.)
+/// The wheel joint keeps a wheel from
 /// turning about anything but its axle, and the axle comes out of a rotation
 /// a hair off unit length, so what was left of the spin after its axle part
 /// pointed along the axle, and the lock braked the wheel's whole turn. A
@@ -1025,10 +1027,10 @@ fn in_line_drive_speed(rake: f32, dir: f32, g: Vec3, tyre: f32, max_force: f32, 
 #[test]
 fn a_two_wheeler_in_line_gets_its_whole_motor() {
     let flat = Vec3::new(0.0, -9.81, 0.0);
-    let full = 2.0 * 252.0 / 0.4 / (400.0 + 2.0 * 7.5) * 2.0;
+    let full = 2.0 * 252.0 / 0.4 / (400.0 + 2.0 * 7.5) * 1.5;
     for dir in [1.0, -1.0] {
-        let v = in_line_drive_speed(0.0, dir, flat, 7.5, 252.0, 2.0);
-        assert!(v > 0.9 * full, "driving {dir}, the two-wheeler gained {v} m/s in 2 s; its motors give {full}");
+        let v = in_line_drive_speed(0.0, dir, flat, 7.5, 252.0, 1.5);
+        assert!(v > 0.9 * full, "driving {dir}, the two-wheeler gained {v} m/s in 1.5 s; its motors give {full}");
     }
 }
 
@@ -1101,6 +1103,17 @@ fn a_motor_ahead_of_its_wheel_pushes_with_its_whole_force() {
     let back = lead_driven_accel(0.0, -1.0, 0.5, 18.0, 7.5, 252.0);
     let full = 2.0 * 252.0 / 0.4 / (400.0 + 2.0 * 7.5);
     assert!(back > 0.9 * full, "backwards, 0.5 m/s ahead: {back} m/s² of {full}");
+    // Raked as a bike's fork and swing arm are, on springs as soft as one's,
+    // the same both ways: it drove one way and stalled or crept backwards
+    // the other.
+    for stiffness in [10.0f32, 12.0] {
+        for deg in [18.0f32, 30.0] {
+            let r = deg.to_radians();
+            let (fwd, back) = (lead_driven_accel(r, 1.0, 0.5, stiffness, 7.5, 252.0), lead_driven_accel(r, -1.0, 0.5, stiffness, 7.5, 252.0));
+            assert!((fwd - back).abs() <= 0.1 * fwd.max(back), "raked {deg}° on springs of {stiffness}: {fwd} m/s² one way against {back} the other");
+            assert!(fwd.min(back) > 0.8 * full, "raked {deg}° on springs of {stiffness}: {fwd} and {back} m/s² of {full}");
+        }
+    }
 }
 
 /// **A raked suspension grips the same both ways.** A tyre's grip is

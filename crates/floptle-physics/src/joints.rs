@@ -754,8 +754,28 @@ impl PhysicsWorld {
                 let vn = (self.point_vel(Some(jt.a), ea.r) - self.point_vel(jt.b, eb.r)).dot(axis_w);
                 let w = ea.w(axis_w) + eb.w(axis_w);
                 let l = Self::soft_impulse(w, s, vn, jt.stiffness, jt.damping, dt);
-                self.joint_impulse(Some(jt.a), ea.r, axis_w * l);
-                self.joint_impulse(jt.b, eb.r, -axis_w * l);
+                // On the ground, the spring pushes the wheel and its mount
+                // apart along the ground's normal only. Along a slanted axis
+                // its push also has a part along the ground, which the joint
+                // and the ground hold between them: a raked fork at rest
+                // presses its frame straight up. Applied to the light wheel,
+                // that part left it moving along the ground, the grip read
+                // it as sliding and pushed back through the ground, a thrust
+                // toward one side of the craft; a raked bike whose motor kept
+                // just ahead of the ground drove one way and stalled the
+                // other. In the air the spring pushes along its axis, and on
+                // the older two-budget grip it does as it always did (see
+                // `single_wheel_friction`): a project on that keeps the
+                // vehicles it tuned.
+                let push = match jt.a {
+                    Link::Body(i) if self.single_wheel_friction => match self.bodies[i].ground_normal.filter(|_| self.bodies[i].grounded) {
+                        Some(n) => n * (axis_w * l).dot(n),
+                        None => axis_w * l,
+                    },
+                    _ => axis_w * l,
+                };
+                self.joint_impulse(Some(jt.a), ea.r, push);
+                self.joint_impulse(jt.b, eb.r, -push);
                 spent += l.abs();
                 // A wheel turns about its axle, Z of what it hangs from, and
                 // about nothing else relative to it: a wheel left free to spin
