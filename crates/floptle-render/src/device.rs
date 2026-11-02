@@ -324,6 +324,25 @@ impl Frame {
     }
 }
 
+/// How big the blocks are that the allocator takes from the GPU for buffers
+/// and textures to be carved out of.
+///
+/// **Small mappable blocks.** wgpu's `Performance` hint starts every block the
+/// CPU can write or read at 64 MiB, and the allocator puts upload memory where
+/// the GPU reads it fastest, the part of video memory mapped through the PCI
+/// aperture (BAR1). On a card whose aperture is 256 MiB, of which the desktop
+/// already holds over half, one engine took 64 MiB for uploads and another 64
+/// the first time it read a frame back, and the driver ran out of room to map
+/// anything ("can't alloc VA space for mapping"). The same exhaustion once
+/// froze the whole desktop. Mappable blocks now start at 8 MiB and grow as
+/// they are filled; device-only blocks stay large, since that is where block
+/// size is worth something.
+fn memory_hints() -> wgpu::MemoryHints {
+    const MIB: u64 = 1024 * 1024;
+    // Host-visible blocks are half of these: 8 to 64 MiB.
+    wgpu::MemoryHints::Manual { suballocated_device_memory_block_size: 16 * MIB..128 * MIB }
+}
+
 /// The timestamp features, when this adapter has them.
 ///
 /// **Asked for, never required.** They are what lets the editor say where a
@@ -483,7 +502,7 @@ impl Gpu {
             required_features: self.device.features(),
             required_limits: self.device.limits(),
             experimental_features: wgpu::ExperimentalFeatures::default(),
-            memory_hints: wgpu::MemoryHints::Performance,
+            memory_hints: memory_hints(),
             trace: wgpu::Trace::Off,
         };
         let Ok((device, queue)) = pollster::block_on(self.adapter.request_device(&desc)) else { return false };
@@ -605,7 +624,7 @@ impl Gpu {
                 required_features: timing_features(&adapter),
                 required_limits: wanted_limits(&adapter),
                 experimental_features: wgpu::ExperimentalFeatures::default(),
-                memory_hints: wgpu::MemoryHints::Performance,
+                memory_hints: memory_hints(),
                 trace: wgpu::Trace::Off,
             })
             .await
@@ -776,7 +795,7 @@ impl Gpu {
                 l
             },
             experimental_features: wgpu::ExperimentalFeatures::default(),
-            memory_hints: wgpu::MemoryHints::Performance,
+            memory_hints: memory_hints(),
             trace: wgpu::Trace::Off,
         }))
         .expect("no GPU device (headless)");
