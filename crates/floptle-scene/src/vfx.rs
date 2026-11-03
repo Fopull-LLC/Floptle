@@ -399,6 +399,13 @@ pub struct VfxTrackDoc {
     /// shines through its thin edges toward the camera (default 0).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub translucency: f32,
+    /// A lit particle's answer to lamps (point and spot lights), 0..4: the
+    /// share of each lamp's light it takes, 1 (the default) taking it as if
+    /// facing the lamp. Lamps fall off to their range with no inverse
+    /// square, so one bright enough for ground far off burns dust near it
+    /// white: dust and smoke near vehicle lamps want about 0.2 to 0.4.
+    #[serde(default = "one_f32", skip_serializing_if = "is_one")]
+    pub lamp_response: f32,
     /// Billboards fade out over this many world units in front of whatever they
     /// intersect (0 = a hard edge).
     #[serde(default = "default_soft", skip_serializing_if = "is_default_soft")]
@@ -877,6 +884,7 @@ mod tests {
                 jitter_seed: 0,
                 lit: false,
                 translucency: 0.0,
+                lamp_response: 1.0,
                 soft: DEFAULT_SOFT,
                 cast_shadows: false,
                 distortion: 0.015,

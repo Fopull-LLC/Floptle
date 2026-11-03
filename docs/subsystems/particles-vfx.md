@@ -301,6 +301,12 @@ and leave glow and fire unlit. `translucency` (0..1, a lit billboard's
 particle, that share of it comes through toward the camera, scaled by how thin
 the particle is there (one minus its alpha), so smoke against a low sun glows at
 its edges and keeps a dark core. Lit from the front it changes nothing.
+`lamp_response` (0..4, the **lamp response** slider, default 1) is the share of
+each lamp's light a lit particle takes, 1 taking it as if facing the lamp. A
+lamp falls off to its range with no inverse square, so one bright enough to
+light ground far away burns dust beside it white; dust and smoke near vehicle
+lamps look right at about 0.2 to 0.4. A spot lamp lights only the particles
+inside its cone.
 `cast_shadows` lets a mesh track's live cloud cast into the
 field shadow march.
 `soft` is the distance, in world units, over which a billboard fades out in

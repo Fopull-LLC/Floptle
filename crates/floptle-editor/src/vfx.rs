@@ -212,9 +212,14 @@ impl ParticleLamps<'_> {
     }
 
     /// Add each lamp's light to every lit particle in `out`, into params.yzw.
+    ///
+    /// `params.y` arrives holding the particle's lamp response less one (a
+    /// lane left at zero is a response of one) and leaves holding light:
+    /// it is taken first, lamps or not, so no response is ever drawn as one.
     fn light(&self, out: &mut [ParticleInstance], rank: Option<u32>) {
+        let responses: Vec<f32> = out.iter_mut().map(|p| 1.0 + std::mem::take(&mut p.params[1])).collect();
         let Some((d3, d2)) = self.lights else { return };
-        for p in out.iter_mut().filter(|p| p.light[3] > 0.0) {
+        for (p, response) in out.iter_mut().zip(responses).filter(|(p, _)| p.light[3] > 0.0) {
             let at = Vec3::new(p.pos_rot[0], p.pos_rot[1], p.pos_rot[2]);
             let mut sum = Vec3::ZERO;
             for i in 0..d3.count.min(16) {
@@ -247,6 +252,7 @@ impl ParticleLamps<'_> {
                     sum += c * if e == 2.0 { x * x } else { x.powf(e) };
                 }
             }
+            let sum = sum * response;
             p.params[1] += sum.x;
             p.params[2] += sum.y;
             p.params[3] += sum.z;
@@ -1184,6 +1190,7 @@ pub fn starter_effect_doc(name: &str) -> VfxEffectDoc {
         jitter_seed: 0,
         lit: false,
         translucency: 0.0,
+        lamp_response: 1.0,
         soft: floptle_scene::vfx::DEFAULT_SOFT,
         cast_shadows: false,
         distortion: 0.015,
@@ -1377,6 +1384,7 @@ pub fn effect_from_doc(doc: &VfxEffectDoc) -> ParticleEffect {
                     flipbook: t.flipbook.as_ref().map(flipbook_from_doc),
                     lit: t.lit,
                     translucency: t.translucency.clamp(0.0, 1.0),
+                    lamp_response: t.lamp_response.clamp(0.0, 4.0),
                     soft: t.soft,
                     cast_shadows: t.cast_shadows,
                     distortion: t.distortion,
@@ -1949,6 +1957,29 @@ mod profile_tests {
         (ahead, beside) = (ps[0], ps[1]);
         assert!(ahead.params[1] > 1.0, "the puff in the beam is lit: {:?}", ahead.params);
         assert_eq!(beside.params[1..], [0.0; 3], "the puff beside the lamp is outside its cone");
+    }
+
+    /// **A track's lamp response scales the lamps' light.** The same puff by
+    /// the same lamp takes a fifth of the light at a response of 0.2, and all
+    /// of it at the default; the response never reaches the screen as light,
+    /// lamps or none.
+    #[test]
+    fn a_tracks_lamp_response_scales_the_lamps_light() {
+        let mut split = Split::default();
+        split.three_d.count = 1;
+        split.three_d.pos[0] = [0.0, 0.0, -5.0, 6.0];
+        split.three_d.color[0] = [4.0, 4.0, 4.0, 0.0];
+        let lamps = ParticleLamps { lights: Some((slots(&split.three_d), slots(&split.two_d))), rank_of: &|_| None, default_rank: None };
+        let mut dim = particle_at(1.0, 1.0);
+        dim.params[1] = 0.2 - 1.0;
+        let mut ps = vec![particle_at(1.0, 1.0), dim];
+        lamps.light(&mut ps, None);
+        let (full, part) = (ps[0].params[1], ps[1].params[1]);
+        assert!(full > 1.0, "the fixture: the puff is lit: {full}");
+        assert!((part - full * 0.2).abs() < 1e-4, "at a response of 0.2 it took {part} of {full}");
+        let mut none = vec![dim];
+        ParticleLamps::none().light(&mut none, None);
+        assert_eq!(none[0].params[1], 0.0, "with no lamps the response must not be drawn as light");
     }
 
     /// In a flat scene a 2D light lights only the particles on the layers it

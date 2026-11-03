@@ -85,7 +85,10 @@ pub fn collect_billboards(
                 color: s.color,
                 basis_right: [right.x, right.y, right.z, uv[2]],
                 basis_up: [up.x, up.y, up.z, uv[3]],
-                params: [soft, 0.0, 0.0, 0.0],
+                // y: the lamp response less one, until the lamps are summed
+                // into yzw (`ParticleInstance::params`), so a lane left at
+                // zero is the response every lit particle had.
+                params: [soft, ct.look.lamp_response - 1.0, 0.0, 0.0],
                 light: [effect_up.x, effect_up.y, effect_up.z, lit],
                 extra: [next[0], next[1], t, spare],
             });

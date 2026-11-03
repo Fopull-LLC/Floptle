@@ -480,6 +480,17 @@ fn look_section(
                     )
                     .changed();
             });
+            ui.horizontal(|ui| {
+                ui.label("lamp response");
+                *dirty |= ui
+                    .add(egui::Slider::new(&mut track.lamp_response, 0.0..=4.0).max_decimals(2))
+                    .on_hover_text(
+                        "how much of each lamp's light (point and spot lights) the particle takes: \
+                         1 as if facing the lamp. A lamp bright enough to light ground far off burns \
+                         dust near it white; dust and smoke near vehicle lamps look right at about 0.2 to 0.4",
+                    )
+                    .changed();
+            });
         });
     }
     egui::ComboBox::from_id_salt("vfx_space")
