@@ -5086,6 +5086,9 @@ impl ScriptHost {
 
     /// A scene load mid-session: same rule as Stop for anything on the wire.
     pub fn cancel_web_requests(&self) {
+        // What a script made to last the scene (`scene = true`) goes with it.
+        self.meshes.borrow_mut().release_owned(true, &|_| true);
+        self.textures.borrow_mut().release_owned(true, &|_| true);
         self.http.borrow_mut().cancel_all();
         self.account.borrow_mut().cancel_all();
         self.preloads.borrow_mut().cancel_all();
@@ -6681,6 +6684,13 @@ impl ScriptHost {
         // Mirror the scene graph (names / parents / transforms / scripts) so node handles
         // can traverse and reference any node this frame.
         self.sync_scene(world);
+        // What a script made for a node (`owner = node`) goes when the node does.
+        {
+            let s = self.scene.borrow();
+            let alive = |id: u32| s.ents.contains_key(&id);
+            self.meshes.borrow_mut().release_owned(false, &alive);
+            self.textures.borrow_mut().release_owned(false, &alive);
+        }
 
         // Snapshot (entity, scripts) so we can mutate Transforms while iterating.
         // A switched-off node's scripts do not run — not its `update`, not its

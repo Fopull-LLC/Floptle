@@ -91,6 +91,9 @@ impl Default for TextureLoads {
     }
 }
 
+/// The keys `assets.textureFromPixels`'s options table takes: its lifetime.
+pub(crate) const PIXELS_KEYS: &[&str] = &["owner", "scene"];
+
 pub(crate) const NO_GPU: &str = "this host draws nothing (a dedicated server, or floptle run), so it makes no textures";
 
 impl TextureLoads {
@@ -121,7 +124,8 @@ impl TextureLoads {
             }
         };
         let script = self.running.borrow().clone();
-        self.live.insert(name.clone(), crate::mesh_api::Made { script, bytes: u64::from(w) * u64::from(h) * 4 });
+        let owner = self.live.get(&name).map_or_else(Default::default, |m| m.owner);
+        self.live.insert(name.clone(), crate::mesh_api::Made { script, bytes: u64::from(w) * u64::from(h) * 4, owner });
         self.requests.push(TextureRequest { id: 0, name: name.clone(), bytes, pixels: Some([w, h]) });
         Some(name)
     }
@@ -145,7 +149,7 @@ impl TextureLoads {
         match &result {
             Ok(name) => {
                 let bytes = self.live.get(name).map_or(0, |m| m.bytes);
-                self.live.insert(name.clone(), crate::mesh_api::Made { script: maker, bytes });
+                self.live.insert(name.clone(), crate::mesh_api::Made { script: maker, bytes, owner: Default::default() });
                 if let Some(u) = url {
                     self.by_url.insert(u, ByUrl::Ready(name.clone()));
                 }
@@ -182,6 +186,26 @@ impl TextureLoads {
     }
 
     /// Stop: the driver lets go of every texture, so the book starts over.
+    /// Let go of every texture whose owner is done: `scene` at a scene
+    /// load, or the node no longer there by `alive`.
+    pub(crate) fn release_owned(&mut self, scene: bool, alive: &dyn Fn(u32) -> bool) -> usize {
+        use crate::mesh_api::Owner;
+        let gone: Vec<String> = self
+            .live
+            .iter()
+            .filter(|(_, m)| match m.owner {
+                Owner::Session => false,
+                Owner::Scene => scene,
+                Owner::Node(id) => !alive(id),
+            })
+            .map(|(n, _)| n.clone())
+            .collect();
+        for name in &gone {
+            self.release(name);
+        }
+        gone.len()
+    }
+
     pub(crate) fn reset(&mut self) {
         let (next, running) = (self.next, self.running.clone());
         *self = Self { next, can_draw: self.can_draw, running, ..Self::default() };
@@ -221,8 +245,15 @@ pub(crate) fn install(
     let st = state.clone();
     assets.set(
         "textureFromPixels",
-        lua.create_function(move |lua, (w, h, pixels): (f64, f64, Value)| {
+        lua.create_function(move |lua, (w, h, pixels, opts): (f64, f64, Value, Option<Table>)| {
             const CALL: &str = "assets.textureFromPixels";
+            let owner = match &opts {
+                Some(o) => {
+                    crate::opts::check_keys(o, PIXELS_KEYS, CALL)?;
+                    crate::mesh_api::owner_of(o, CALL)?
+                }
+                None => Default::default(),
+            };
             let side = |v: f64, what: &str| -> mlua::Result<u32> {
                 if v.fract() != 0.0 || v < 1.0 || v > MAX_PIXEL_SIDE as f64 {
                     return Err(mlua::Error::runtime(format!(
@@ -269,7 +300,7 @@ pub(crate) fn install(
             s.next += 1;
             let name = format!("img:{id}");
             let script = s.running.borrow().clone();
-            s.live.insert(name.clone(), crate::mesh_api::Made { script, bytes: u64::from(w) * u64::from(h) * 4 });
+            s.live.insert(name.clone(), crate::mesh_api::Made { script, bytes: u64::from(w) * u64::from(h) * 4, owner });
             s.requests.push(TextureRequest { id, name: name.clone(), bytes, pixels: Some([w, h]) });
             name.into_lua_multi(lua)
         })?,

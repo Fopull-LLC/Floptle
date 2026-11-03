@@ -2340,8 +2340,9 @@ mesh = {}
 ---Build a mesh from flat number lists: positions (x, y, z per vertex),
 ---indices (three per triangle, vertices numbered from 1), and optionally
 ---normals, uvs (u, v) and colors (r, g, b, a, 0..1). Answers its name at once;
----it draws from the next frame. Kept until mesh.free or Stop.
----@param spec { positions: number[], indices: integer[], normals?: number[], uvs?: number[], colors?: number[] }
+---it draws from the next frame. Kept until mesh.free or Stop, or until the
+---owner node is gone (owner) or the next scene load (scene = true).
+---@param spec { positions: number[], indices: integer[], normals?: number[], uvs?: number[], colors?: number[], owner?: Node, scene?: boolean }
 ---@return string name
 function mesh.build(spec) end
 ---Give a built mesh back. True if it was one.

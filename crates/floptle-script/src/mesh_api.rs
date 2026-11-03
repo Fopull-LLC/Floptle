@@ -30,7 +30,7 @@ pub const MAX_MESH_VERTICES: usize = 1 << 20;
 /// The most indices: a little over a million triangles.
 pub const MAX_MESH_INDICES: usize = 3 << 20;
 /// Every key `mesh.build{...}` reads.
-pub const BUILD_KEYS: &[&str] = &["positions", "indices", "normals", "uvs", "colors"];
+pub const BUILD_KEYS: &[&str] = &["positions", "indices", "normals", "uvs", "colors", "owner", "scene"];
 
 /// A mesh a script built, for the driver to upload under `name`.
 #[derive(Debug, Clone, PartialEq)]
@@ -54,6 +54,63 @@ pub(crate) struct Made {
     /// Its bytes on the GPU, as near as is known (0 until a decoded picture's
     /// size is).
     pub(crate) bytes: u64,
+    /// What it lives as long as: the session (until freed or Stop), a node,
+    /// or the scene.
+    pub(crate) owner: Owner,
+}
+
+/// How long a mesh or texture a script made lives, besides until it is freed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Owner {
+    /// Until Stop: what every one did before there was a choice.
+    #[default]
+    Session,
+    /// Until the node, by id, is gone.
+    Node(u32),
+    /// Until the next scene load.
+    Scene,
+}
+
+/// The lifetime an options table asks for: `owner = node` or `scene = true`.
+pub(crate) fn owner_of(t: &Table, call: &str) -> mlua::Result<Owner> {
+    let node: Value = t.raw_get("owner")?;
+    let scene = crate::opts::opt_bool(t, call, "scene")?.unwrap_or(false);
+    match (node, scene) {
+        (Value::Nil, false) => Ok(Owner::Session),
+        (Value::Nil, true) => Ok(Owner::Scene),
+        (Value::Table(n), false) => match n.raw_get::<Option<u32>>("__id")? {
+            Some(id) => Ok(Owner::Node(id)),
+            None => Err(mlua::Error::runtime(format!("{call}: `owner` is a node, the one it is freed with"))),
+        },
+        (Value::Table(_), true) => Err(mlua::Error::runtime(format!("{call}: `owner` and `scene` are two lifetimes; give one"))),
+        (other, _) => Err(mlua::Error::runtime(format!("{call}: `owner` is a node, not a {}", other.type_name()))),
+    }
+}
+
+impl MeshBook {
+    /// Let go of every mesh whose owner is done: `scene` at a scene load, or
+    /// the node no longer there by `alive`.
+    pub(crate) fn release_owned(&mut self, scene: bool, alive: &dyn Fn(u32) -> bool) -> usize {
+        let gone: Vec<String> = self
+            .live
+            .iter()
+            .filter(|(_, m)| match m.owner {
+                Owner::Session => false,
+                Owner::Scene => scene,
+                Owner::Node(id) => !alive(id),
+            })
+            .map(|(n, _)| n.clone())
+            .collect();
+        for name in &gone {
+            self.live.remove(name);
+            let before = self.requests.len();
+            self.requests.retain(|r| r.name != *name);
+            if self.requests.len() == before {
+                self.releases.push(name.clone());
+            }
+        }
+        gone.len()
+    }
 }
 
 /// What scripts built and freed, not yet seen by the driver.
@@ -223,7 +280,8 @@ pub(crate) fn install(lua: &Lua, book: Rc<RefCell<MeshBook>>) -> mlua::Result<()
                     + req.colors.as_ref().map_or(0, |c| c.len() as u64 * 4)
                     + req.indices.len() as u64 * 4;
                 let script = b.running.borrow().clone();
-                b.live.insert(req.name.clone(), Made { script, bytes });
+                let owner = owner_of(&spec, "mesh.build")?;
+                b.live.insert(req.name.clone(), Made { script, bytes, owner });
                 let name = req.name.clone();
                 b.requests.push(req);
                 Ok(name)

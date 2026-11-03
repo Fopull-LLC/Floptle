@@ -1154,3 +1154,54 @@ fn a_game_sees_the_meshes_and_textures_its_scripts_made() {
     assert_eq!(after.get::<u32>("scriptTextures").unwrap(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **A mesh or texture can live as long as its node or its scene.**
+/// `mesh.build{ ..., owner = node }` goes when the node does, and
+/// `assets.textureFromPixels(..., { scene = true })` at the next scene load;
+/// with neither, both live until freed or Stop, as they always did. A game
+/// building per level no longer has to remember to free what it built.
+#[test]
+fn a_mesh_or_texture_can_live_as_long_as_its_node_or_scene() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_owned_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "builder",
+        "local n = 0\n\
+         function update(node)\n  \
+           n = n + 1\n  \
+           if n == 1 then\n    \
+             local tri = { positions = { 0,0,0, 1,0,0, 0,0,1 }, indices = { 1, 2, 3 } }\n    \
+             tri.owner = find('Prop')\n    \
+             mesh.build(tri)\n    \
+             tri.owner = nil\n    \
+             mesh.build(tri)\n    \
+             assets.textureFromPixels(1, 1, '\\0\\0\\0\\0', { scene = true })\n    \
+             assets.textureFromPixels(1, 1, '\\0\\0\\0\\0')\n  \
+           end\n  \
+           local c = perf.counts()\n  \
+           counts = { c.scriptMeshes, c.scriptTextures }\n\
+         end\n",
+    );
+    let mut world = World::default();
+    let prop = world.spawn();
+    world.insert(prop, Transform::IDENTITY);
+    world.insert(prop, floptle_core::Name("Prop".into()));
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(e, Scripts(vec![floptle_core::ScriptInst::new("builder")]));
+    let mut host = ScriptHost::new();
+    host.set_playing(true);
+    let counts = |host: &mut ScriptHost, world: &mut World, t: f32| -> (u32, u32) {
+        host.run(world, &dir, 0.016, t);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let c: mlua::Table = host.instance_env(e.index(), "builder").unwrap().get("counts").unwrap();
+        (c.get(1).unwrap(), c.get(2).unwrap())
+    };
+    assert_eq!(counts(&mut host, &mut world, 0.0), (2, 2));
+    world.despawn(prop);
+    assert_eq!(counts(&mut host, &mut world, 0.016), (1, 2), "the node's mesh outlived it");
+    host.cancel_web_requests();
+    assert_eq!(counts(&mut host, &mut world, 0.032), (1, 1), "the scene's texture outlived it");
+    let _ = std::fs::remove_dir_all(&dir);
+}
