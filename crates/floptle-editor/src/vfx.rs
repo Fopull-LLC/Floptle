@@ -185,6 +185,23 @@ pub(crate) struct LampSlots<'a> {
     pub(crate) color: &'a [[f32; 4]; 16],
     pub(crate) mask: &'a [[u32; 4]; 16],
     pub(crate) falloff: &'a [[f32; 4]; 16],
+    /// 3D only: each lamp's orientation and cone, as surfaces take them
+    /// (`shading::LightSlots::rot`, `cone`).
+    pub(crate) rot: &'a [[f32; 4]; 16],
+    pub(crate) cone: &'a [[f32; 4]; 16],
+}
+
+/// How much of an aimed lamp's light reaches `at` from `lamp`: 1 inside its
+/// inner cone, 0 outside its outer one, and the surfaces' ramp between
+/// (`spot_atten` in field.wgsl). `cone[0]` at -1 is no cone: all of it.
+fn spot_share(lamp: Vec3, rot: [f32; 4], cone: [f32; 4], at: Vec3) -> f32 {
+    if cone[0] < -0.999 {
+        return 1.0;
+    }
+    let aim = floptle_core::math::Quat::from_xyzw(rot[0], rot[1], rot[2], rot[3]).normalize() * Vec3::NEG_Z;
+    let c = aim.dot((at - lamp).normalize_or_zero());
+    let t = ((c - cone[0]) / (cone[1] - cone[0]).max(1e-4)).clamp(0.0, 1.0);
+    t * t
 }
 
 impl ParticleLamps<'_> {
@@ -202,9 +219,13 @@ impl ParticleLamps<'_> {
             let mut sum = Vec3::ZERO;
             for i in 0..d3.count.min(16) {
                 let range = d3.pos[i][3].max(1e-4);
-                let d = (Vec3::new(d3.pos[i][0], d3.pos[i][1], d3.pos[i][2]) - at).length();
-                let x = (1.0 - d / range).clamp(0.0, 1.0);
-                sum += Vec3::new(d3.color[i][0], d3.color[i][1], d3.color[i][2]) * (x * x);
+                let lamp = Vec3::new(d3.pos[i][0], d3.pos[i][1], d3.pos[i][2]);
+                let x = (1.0 - (lamp - at).length() / range).clamp(0.0, 1.0);
+                // An aimed lamp lights what its cone reaches, as on a surface:
+                // without the cone a bike's headlight lit every puff of its
+                // dust within range at full strength, beside and behind it too.
+                let cone = spot_share(lamp, d3.rot[i], d3.cone[i], at);
+                sum += Vec3::new(d3.color[i][0], d3.color[i][1], d3.color[i][2]) * (x * x * cone);
             }
             if let Some(r) = rank {
                 for i in 0..d2.count.min(16) {
@@ -1855,11 +1876,13 @@ mod profile_tests {
         color: [[f32; 4]; 16],
         mask: [[u32; 4]; 16],
         falloff: [[f32; 4]; 16],
+        rot: [[f32; 4]; 16],
+        cone: [[f32; 4]; 16],
     }
 
     impl Default for Lamps {
         fn default() -> Self {
-            Self { count: 0, pos: [[0.0; 4]; 16], color: [[0.0; 4]; 16], mask: [[0; 4]; 16], falloff: [[0.0; 4]; 16] }
+            Self { count: 0, pos: [[0.0; 4]; 16], color: [[0.0; 4]; 16], mask: [[0; 4]; 16], falloff: [[0.0; 4]; 16], rot: [[0.0, 0.0, 0.0, 1.0]; 16], cone: [[-1.0, -1.0, 0.0, 0.0]; 16] }
         }
     }
 
@@ -1870,7 +1893,7 @@ mod profile_tests {
     }
 
     fn slots(l: &Lamps) -> LampSlots<'_> {
-        LampSlots { count: l.count, pos: &l.pos, color: &l.color, mask: &l.mask, falloff: &l.falloff }
+        LampSlots { count: l.count, pos: &l.pos, color: &l.color, mask: &l.mask, falloff: &l.falloff, rot: &l.rot, cone: &l.cone }
     }
 
     fn particle_at(x: f32, lit: f32) -> ParticleInstance {
@@ -1902,6 +1925,30 @@ mod profile_tests {
         assert!(near[1] > 0.5 && near[1] > near[2] && near[2] > near[3], "warm and bright: {near:?}");
         assert_eq!(ps[1].params[1..], [0.0; 3], "out of range");
         assert_eq!(ps[2].params[1..], [0.0; 3], "an unlit particle keeps its look");
+    }
+
+    /// **An aimed lamp lights only what its cone reaches.** A spot at the
+    /// origin aimed down -Z with a 20° cone: a puff in the beam takes its
+    /// light, one as near beside it takes none. Lit particles took a lamp's
+    /// light by distance alone, so a bike's headlight burned every puff of
+    /// its dust trail white, beside the bike as much as ahead of it.
+    #[test]
+    fn a_spot_lights_only_the_particles_in_its_cone() {
+        let mut split = Split::default();
+        split.three_d.count = 1;
+        split.three_d.pos[0] = [0.0, 0.0, 0.0, 12.0];
+        split.three_d.color[0] = [4.0, 4.0, 4.0, 0.0];
+        split.three_d.cone[0] = [20f32.to_radians().cos(), 15f32.to_radians().cos(), 0.0, 0.0];
+        let lamps = ParticleLamps { lights: Some((slots(&split.three_d), slots(&split.two_d))), rank_of: &|_| None, default_rank: None };
+        // Both 5 m from the lamp: one straight ahead, one off to the side.
+        let mut ahead = particle_at(0.0, 1.0);
+        let mut beside = particle_at(5.0, 1.0);
+        beside.pos_rot[2] = 0.0;
+        let mut ps = vec![ahead, beside];
+        lamps.light(&mut ps, None);
+        (ahead, beside) = (ps[0], ps[1]);
+        assert!(ahead.params[1] > 1.0, "the puff in the beam is lit: {:?}", ahead.params);
+        assert_eq!(beside.params[1..], [0.0; 3], "the puff beside the lamp is outside its cone");
     }
 
     /// In a flat scene a 2D light lights only the particles on the layers it

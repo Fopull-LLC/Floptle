@@ -1332,8 +1332,8 @@ impl Editor {
             };
             let lamps = crate::vfx::ParticleLamps {
                 lights: Some((
-                    crate::vfx::LampSlots { count: off_split.three_d.count, pos: &off_split.three_d.pos, color: &off_split.three_d.color, mask: &off_split.three_d.mask, falloff: &off_split.three_d.falloff },
-                    crate::vfx::LampSlots { count: off_split.two_d.count, pos: &off_split.two_d.pos, color: &off_split.two_d.color, mask: &off_split.two_d.mask, falloff: &off_split.two_d.falloff },
+                    crate::vfx::LampSlots { count: off_split.three_d.count, pos: &off_split.three_d.pos, color: &off_split.three_d.color, mask: &off_split.three_d.mask, falloff: &off_split.three_d.falloff, rot: &off_split.three_d.rot, cone: &off_split.three_d.cone },
+                    crate::vfx::LampSlots { count: off_split.two_d.count, pos: &off_split.two_d.pos, color: &off_split.two_d.color, mask: &off_split.two_d.mask, falloff: &off_split.two_d.falloff, rot: &off_split.two_d.rot, cone: &off_split.two_d.cone },
                 )),
                 rank_of: &rank_of,
                 default_rank: flat_camera.then(|| self.project.sorting_rank(floptle_core::DEFAULT_SORTING_LAYER)),
