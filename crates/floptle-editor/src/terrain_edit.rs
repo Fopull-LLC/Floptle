@@ -1540,6 +1540,15 @@ impl Editor {
                 // Everything re-plans: drop pending (their epochs are now stale by
                 // construction — the results check `pending`), free slots the field
                 // no longer fills, and let the coverage scan below re-queue the rest.
+                //
+                // A drawn chunk with a job in flight was asked for a new mesh
+                // (a dig, a ring change), and the scan re-queues a drawn chunk
+                // only when it is stale or at the wrong level: dropped here,
+                // a dug chunk kept its old mesh for good, the pit drawn as the
+                // ground it was. Slow jobs lost it most, a natural shape's
+                // refined pit taking long enough for a re-plan to land first.
+                let asked: Vec<[i32; 3]> = render.pending.keys().filter(|c| render.slots.contains_key(*c)).copied().collect();
+                render.stale.extend(asked);
                 render.pending.clear();
                 render.empty.clear();
                 let has: std::collections::HashSet<[i32; 3]> =
@@ -5869,6 +5878,46 @@ mod residency_tests {
             assert!(std::time::Instant::now() < until, "the world never finished meshing");
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
+    }
+
+    /// **A re-plan keeps a dig's remesh.** A full re-plan drops the jobs in
+    /// flight, and re-queues only chunks with no mesh or at the wrong level:
+    /// a dug chunk whose job it dropped kept drawing the ground it was. A
+    /// natural shape's refined pit takes long enough to mesh that a re-plan
+    /// landed first, and `shot` drew a dig as unbroken ground. The re-plan
+    /// meshes such a chunk again.
+    #[test]
+    fn a_replan_keeps_a_digs_remesh() {
+        use floptle_field::{Brush, BrushProfile};
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        ed.project.terrain_shape = Some(floptle_scene::TerrainShapeDoc::Natural);
+        let fill = floptle_field::procgen::PlanetFill { seed: 3, radius: 60.0, voxel: 1.5, relief: 0.0, cave_depth: 0.0, ..Default::default() };
+        let field = floptle_field::procgen::generate_planet(&fill);
+        let ground = field.raycast(Vec3::new(0.0, 80.0, 0.0), Vec3::NEG_Y, 60.0).unwrap();
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        let cam = DVec3::new(0.0, 68.0, 0.0);
+        ed.terrains.insert(e, EditorTerrain::new(field));
+        ed.sync_terrain_meshes(true, cam);
+        settle(&mut ed, e, cam);
+        let c = (ground / (1.5 * floptle_field::CHUNK as f32)).floor().to_array().map(|v| v as i32);
+        let bytes = |ed: &crate::Editor| ed.terrain_render[&e].slots.get(&c).map(|&(mid, _)| ed.raster.as_ref().unwrap().mesh_gpu_bytes(mid)).unwrap();
+        let flat = bytes(&ed);
+        // In Play every edit is meshed on the worker.
+        ed.playing = true;
+        let touched = ed.terrains.get_mut(&e).unwrap().field.sculpt(Brush::Lower, ground, 3.0, 1.0, BrushProfile { hardness: 1.0, falloff: floptle_field::Falloff::Linear });
+        ed.queue_terrain_dirty(e, ground, 3.0, true, touched);
+        ed.sync_terrain_meshes(false, cam);
+        assert!(ed.terrain_render[&e].pending.contains_key(&c), "the fixture: the dug chunk's job is in flight");
+        // A re-plan before the job lands.
+        ed.sync_terrain_meshes(true, cam);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while bytes(&ed) <= flat * 2 && std::time::Instant::now() < until {
+            ed.sync_terrain_meshes(false, cam);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let dug = bytes(&ed);
+        assert!(dug > flat * 2, "the dug chunk still draws its old mesh ({dug} bytes, {flat} before the dig)");
     }
 
     /// **A dug chunk of a generated world is drawn at full detail however far
