@@ -50,9 +50,10 @@ goes from a single-player scene to two machines playing together.
 
 ## Get started (players & game makers)
 
-Download the **Floptle Hub** for your platform from
-[**Floptle-releases**](https://github.com/Fopull-LLC/Floptle-releases/releases/latest)
-(`floptle-hub-…` archive), unpack, run. The Hub installs engine versions,
+[**Download the Floptle Hub**](https://fopull.com/floptle?utm_source=github&utm_medium=readme#download)
+for your platform from fopull.com, unpack, run. (The same archives are on
+[Floptle-releases](https://github.com/Fopull-LLC/Floptle-releases/releases/latest)
+as direct links, `floptle-hub-…`.) The Hub installs engine versions,
 notifies you when new ones ship, creates projects, and opens them in the
 editor — no toolchain needed. Building from source instead: see
 [Building](#building).

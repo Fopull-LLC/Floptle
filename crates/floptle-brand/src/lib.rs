@@ -52,6 +52,30 @@ pub const LOCKUP_PNG: &[u8] = include_bytes!("../../../branding/floptle-lockup.p
 
 pub const ICON_SIZES: [u32; 9] = [16, 24, 32, 48, 64, 128, 256, 512, 1024];
 
+/// Where support for Floptle goes: fopull.com's support page with Floptle
+/// picked. Tag it with [`site_link`] for where it was opened from.
+pub const SUPPORT_URL: &str = "https://fopull.com/support?product=floptle";
+
+/// A fopull.com address tagged with where it was opened from: `source` is
+/// the app (`floptle-hub`, `floptle-editor`) and `medium` the place in it
+/// (`sidebar`, `install-note`), so the site can tell what each link brings
+/// in. The tags go before any `#fragment` and after any query already
+/// there. Anything not on fopull.com comes back as it was.
+pub fn site_link(url: &str, source: &str, medium: &str) -> String {
+    if !(url.starts_with("https://fopull.com/") || url == "https://fopull.com") {
+        return url.to_string();
+    }
+    let (base, frag) = url.split_once('#').map_or((url, None), |(b, f)| (b, Some(f)));
+    let base = if base == "https://fopull.com" { "https://fopull.com/" } else { base };
+    let sep = if base.contains('?') { '&' } else { '?' };
+    let mut out = format!("{base}{sep}utm_source={source}&utm_medium={medium}");
+    if let Some(f) = frag {
+        out.push('#');
+        out.push_str(f);
+    }
+    out
+}
+
 pub fn icon_png(size: u32) -> Option<&'static [u8]> {
     Some(match size {
         16 => include_bytes!("../../../branding/icon-16.png"),
@@ -287,5 +311,21 @@ mod tests {
         let after = std::fs::metadata(home.join("applications/floptle.desktop")).unwrap().modified().unwrap();
         assert_eq!(before, after, "an unchanged entry was rewritten");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// **A site link says where it was opened from.** The tags join a query
+    /// already there, stay before a fragment, and leave other sites alone.
+    #[test]
+    fn a_site_link_says_where_it_was_opened_from() {
+        assert_eq!(site_link("https://fopull.com/", "floptle-hub", "about"), "https://fopull.com/?utm_source=floptle-hub&utm_medium=about");
+        assert_eq!(
+            site_link(SUPPORT_URL, "floptle-hub", "sidebar"),
+            "https://fopull.com/support?product=floptle&utm_source=floptle-hub&utm_medium=sidebar"
+        );
+        assert_eq!(
+            site_link("https://fopull.com/privacy#install-ping", "floptle-hub", "ping-notice"),
+            "https://fopull.com/privacy?utm_source=floptle-hub&utm_medium=ping-notice#install-ping"
+        );
+        assert_eq!(site_link("https://github.com/Fopull-LLC/Floptle", "floptle-hub", "about"), "https://github.com/Fopull-LLC/Floptle");
     }
 }

@@ -776,7 +776,7 @@ impl Editor {
                         ui.close();
                     }
                     if ui.button("🌐 fopull.com").clicked() {
-                        let _ = floptle_script::open_in_browser("https://fopull.com/");
+                        let _ = floptle_script::open_in_browser(&crate::site("menu", "https://fopull.com/"));
                         ui.close();
                     }
                     ui.separator();

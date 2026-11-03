@@ -251,6 +251,13 @@ mod run;
 mod responsive;
 mod steam_boot;
 pub(crate) use report::{open_issue_tracker, DOCS_URL, ISSUES_URL};
+
+/// A fopull.com link from the editor, tagged with where in it it was opened
+/// (`floptle_brand::site_link`), so the site can count what each one brings.
+/// Anything not on fopull.com comes back as it was.
+pub(crate) fn site(medium: &str, url: &str) -> String {
+    floptle_brand::site_link(url, "floptle-editor", medium)
+}
 #[cfg(feature = "editor-ui")]
 mod shader_graph;
 #[cfg(feature = "editor-ui")]

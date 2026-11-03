@@ -25,6 +25,22 @@ const ISSUES_URL: &str = "https://github.com/Fopull-LLC/Floptle/issues";
 const MULTIPLAYER_LINE: &str = "Online multiplayer for indie games, without running servers or port forwarding.";
 const MULTIPLAYER_GUIDE_URL: &str = "https://fopull.com/floptle/docs/multiplayer";
 
+/// A fopull.com link from the Hub, tagged with where in it it was opened
+/// (`floptle_brand::site_link`), so the site can count what each one brings.
+fn site(medium: &str, url: &str) -> String {
+    floptle_brand::site_link(url, "floptle-hub", medium)
+}
+
+/// How many days apart the support line may show at most, after an engine
+/// installs: once a month, never more.
+const SUPPORT_NOTE_DAYS: u64 = 30;
+
+/// Whether the support line is due on day `today` (days since the epoch),
+/// last shown on `last`.
+fn support_note_due(last: Option<u64>, today: u64) -> bool {
+    last.is_none_or(|d| today >= d + SUPPORT_NOTE_DAYS)
+}
+
 /// UI glyphs — every one is verified present in egui's bundled fonts (Ubuntu / NotoEmoji /
 /// emoji-icon-font), so none render as a missing-glyph box. Anything added here must be
 /// checked against that font union first: some obvious choices are not in the set and show
@@ -262,6 +278,9 @@ pub struct HubApp {
     /// new toast resets the timer without threading a clock through every set-site.
     toast_seen: Option<String>,
     toast_at: f64,
+    /// The toast the support line rides under, when it is due (an engine
+    /// just installed, a month or more since it last showed).
+    support_note: Option<String>,
     /// When the manifest was last fetched — the Hub re-checks every few hours
     /// while it's open, so "a new version shipped" surfaces without a restart.
     manifest_fetched_at: std::time::Instant,
@@ -366,6 +385,7 @@ impl HubApp {
             proc: None,
             toast: None,
             toast_seen: None,
+            support_note: None,
             toast_at: 0.0,
             manifest_fetched_at: std::time::Instant::now(),
             session,
@@ -750,7 +770,7 @@ impl HubApp {
                 // game key, the player numbers and the plan all live on the
                 // website, and nothing in the tools said where. One link, in
                 // the place a signed-in user is already looking.
-                ui.hyperlink_to("Your games on fopull.com", "https://fopull.com/cloud");
+                ui.hyperlink_to("Your games on fopull.com", site("account", "https://fopull.com/cloud"));
                 if ui.button(format!("{} Sign out", ico::CLOSE)).clicked() {
                     sign_out = true;
                 }
@@ -1053,7 +1073,14 @@ impl HubApp {
                         self.config.settings.default_version = Some(v.clone());
                         self.save();
                     }
-                    self.toast = Some((format!("installed {v}"), false));
+                    let msg = format!("installed {v}");
+                    let today = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 86_400);
+                    if support_note_due(self.config.settings.support_note_day, today) {
+                        self.support_note = Some(msg.clone());
+                        self.config.settings.support_note_day = Some(today);
+                        self.save();
+                    }
+                    self.toast = Some((msg, false));
                 }
                 Err(e) => self.toast = Some((format!("install failed: {e}"), true)),
             }
@@ -1341,9 +1368,12 @@ impl eframe::App for HubApp {
             self.toast_seen = cur;
             self.toast_at = now;
         }
-        if self.toast.is_some() && now - self.toast_at > 6.0 {
+        // A toast carrying the support line stays long enough to read a link.
+        let with_note = self.toast.as_ref().is_some_and(|(m, _)| self.support_note.as_ref() == Some(m));
+        if self.toast.is_some() && now - self.toast_at > if with_note { 15.0 } else { 6.0 } {
             self.toast = None;
             self.toast_seen = None;
+            self.support_note = None;
         }
         // Work in the background is polled on a tick, never at full rate: an
         // unthrottled repaint spins a core, and a Hub that had launched an
@@ -1426,7 +1456,7 @@ impl eframe::App for HubApp {
                 // what would stop you fixing the other one.
                 let hub_new = self.hub_update_available();
                 let engine_new = hub_new.is_none().then(|| self.update_available()).flatten();
-                if let Some((label, hint, tab)) = hub_new
+                let chip = hub_new
                     .as_ref()
                     .map(|r| (format!("Hub {} ready", r.version), "a newer Floptle Hub is available — click for what's in it", Tab::About))
                     .or_else(|| {
@@ -1435,25 +1465,28 @@ impl eframe::App for HubApp {
                             // "Floptle 0.22.1" is the whole confusion in one line.
                             (format!("Engine {}", r.version), "a newer engine is available — click to see what's in it", Tab::Installs)
                         })
-                    })
-                {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if look::chip(ui, format!("{} {label}", ico::UPGRADE), look::Chip::On)
+                    });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Always here, never more than a link: Floptle is free,
+                    // and this is where someone it has helped can say so.
+                    ui.hyperlink_to("Support Floptle", site("sidebar", floptle_brand::SUPPORT_URL))
+                        .on_hover_text("Floptle is free and open source. Pay what you like on fopull.com, if it has earned something");
+                    if let Some((label, hint, tab)) = chip
+                        && look::chip(ui, format!("{} {label}", ico::UPGRADE), look::Chip::On)
                             .interact(egui::Sense::click())
                             .on_hover_text(hint)
                             .on_hover_cursor(egui::CursorIcon::PointingHand)
                             .clicked()
+                    {
+                        self.tab = tab;
+                        self.hub_update_hidden = false;
+                        if tab == Tab::Installs
+                            && let Some(r) = &engine_new
                         {
-                            self.tab = tab;
-                            self.hub_update_hidden = false;
-                            if tab == Tab::Installs
-                                && let Some(r) = &engine_new
-                            {
-                                self.selected_version = Some(r.version.clone());
-                            }
+                            self.selected_version = Some(r.version.clone());
                         }
-                    });
-                }
+                    }
+                });
             });
         });
 
@@ -1467,7 +1500,7 @@ impl eframe::App for HubApp {
             egui::Panel::top("ping-notice").frame(banner_frame(ui)).show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(crate::ping::NOTICE);
-                    ui.hyperlink_to("What is sent", crate::ping::PRIVACY_URL);
+                    ui.hyperlink_to("What is sent", site("ping-notice", crate::ping::PRIVACY_URL));
                     ok = ui.button("OK").clicked();
                     off = ui.button("Turn it off").clicked();
                 });
@@ -1596,10 +1629,19 @@ impl eframe::App for HubApp {
                     };
                     ui.colored_label(color, format!("{mark} {msg}"));
                 });
+                // Under an install's note, once a month: one line, closed
+                // with the note, never in the editor.
+                if self.support_note.as_ref() == Some(&msg) {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.small("Floptle is free and open source. If it has earned something,");
+                        ui.hyperlink_to("fopull.com/support", site("install-note", floptle_brand::SUPPORT_URL));
+                    });
+                }
             });
             if dismiss {
                 self.toast = None;
                 self.toast_seen = None;
+                self.support_note = None;
             }
         }
 
@@ -1807,7 +1849,7 @@ impl HubApp {
                 ui.small("Create one above, or add an existing project folder.");
                 ui.add_space(10.0);
                 ui.label(MULTIPLAYER_LINE);
-                ui.hyperlink_to("How: the multiplayer guide", MULTIPLAYER_GUIDE_URL);
+                ui.hyperlink_to("How: the multiplayer guide", site("projects", MULTIPLAYER_GUIDE_URL));
             });
             return;
         }
@@ -2324,6 +2366,7 @@ impl HubApp {
                 ui.hyperlink_to(format!("{} All releases", ico::GLOBE), RELEASES_URL);
                 ui.hyperlink_to(format!("{} Documentation", ico::BOOK), DOCS_URL);
                 ui.hyperlink_to(format!("{} Report a problem", ico::BUG), ISSUES_URL);
+                ui.hyperlink_to("Support Floptle", site("news", floptle_brand::SUPPORT_URL));
             });
             ui.add_space(12.0);
         });
@@ -2414,7 +2457,7 @@ impl HubApp {
                     }
                 }
                 ui.small(crate::ping::NOTICE);
-                ui.hyperlink_to("What is sent", crate::ping::PRIVACY_URL);
+                ui.hyperlink_to("What is sent", site("settings", crate::ping::PRIVACY_URL));
             });
             ui.end_row();
 
@@ -2566,7 +2609,11 @@ impl HubApp {
 
         egui::Grid::new("about-links").num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
             ui.label(format!("{} Website", ico::GLOBE));
-            ui.hyperlink_to(WEBSITE_URL, WEBSITE_URL);
+            ui.hyperlink_to(WEBSITE_URL, site("about", WEBSITE_URL));
+            ui.end_row();
+
+            ui.label(format!("{} Support Floptle", ico::STAR));
+            ui.hyperlink_to("fopull.com/support", site("about", floptle_brand::SUPPORT_URL));
             ui.end_row();
 
             ui.label(format!("{} Source code", ico::BOOK));
@@ -2587,7 +2634,7 @@ impl HubApp {
         ui.add_space(6.0);
         ui.vertical_centered(|ui| {
             ui.label(MULTIPLAYER_LINE);
-            ui.hyperlink_to("The multiplayer guide", MULTIPLAYER_GUIDE_URL);
+            ui.hyperlink_to("The multiplayer guide", site("about", MULTIPLAYER_GUIDE_URL));
             ui.add_space(4.0);
             ui.small("Floptle is open source. Contributions, bug reports, and ideas are welcome.");
             ui.small("Built with Rust, wgpu, and egui.");
@@ -2600,7 +2647,17 @@ impl HubApp {
 #[cfg(test)]
 mod tests {
     use super::pin_engine_version;
-    use super::{rewritten_files, upgrade_summary};
+    use super::{rewritten_files, support_note_due, upgrade_summary};
+
+    /// **The support line shows once a month at most.** Never shown, it is
+    /// due; shown 29 days ago, not; 30, again.
+    #[test]
+    fn the_support_line_shows_once_a_month_at_most() {
+        assert!(support_note_due(None, 20_000));
+        assert!(!support_note_due(Some(20_000), 20_000));
+        assert!(!support_note_due(Some(20_000), 20_029));
+        assert!(support_note_due(Some(20_000), 20_030));
+    }
 
     /// **An upgrade names the files it rewrote.** A migration that rewrote
     /// every effect in a project said only "project upgraded", and the files

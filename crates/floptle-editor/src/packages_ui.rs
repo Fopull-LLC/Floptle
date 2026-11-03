@@ -1239,7 +1239,7 @@ fn detail_panel(
         install_button(ui, ctx, state, action, best, have, engine, false);
         if ui.small_button("open page ↗").clicked() {
             let _ = floptle_script::open_in_browser(
-                &floptle_package::index::package_page_for(&listing.id),
+                &crate::site("packages", &floptle_package::index::package_page_for(&listing.id)),
             );
         }
         if let Some(home) = &listing.homepage
@@ -1663,7 +1663,7 @@ fn reviews_section(
         // row under the gallery, and two identical controls in one view is one
         // too many.
         if ui.button(label).on_hover_text(hint).clicked() {
-            let _ = floptle_script::open_in_browser(&floptle_package::index::review_page_for(id));
+            let _ = floptle_script::open_in_browser(&crate::site("package-review", &floptle_package::index::review_page_for(id)));
             // Whatever gets posted over there is not in the copy fetched over
             // here, so the next look asks again rather than showing a document
             // that predates the review someone just wrote.

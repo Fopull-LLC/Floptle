@@ -103,6 +103,10 @@ pub struct Settings {
     /// sent before it has.
     #[serde(default)]
     pub ping_notice_seen: bool,
+    /// The day (days since the Unix epoch) the support line last showed
+    /// under an install's note, so it shows once a month at most.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub support_note_day: Option<u64>,
 }
 
 fn default_true() -> bool {
@@ -152,6 +156,7 @@ impl Default for Settings {
             dismissed_update: None,
             install_ping: true,
             ping_notice_seen: false,
+            support_note_day: None,
         }
     }
 }

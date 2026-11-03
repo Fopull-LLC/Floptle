@@ -477,7 +477,7 @@ impl<'a> SettingsCtx<'a> {
             {
                 ui.hyperlink_to(
                     "Manage this game on fopull.com",
-                    format!("https://fopull.com/cloud/games/{g}"),
+                    crate::site("settings", &format!("https://fopull.com/cloud/games/{g}")),
                 );
                 // `floptle ship`, from here: export the dedicated-server bundle
                 // and upload it to the page above, as the account signed in to
@@ -513,7 +513,7 @@ impl<'a> SettingsCtx<'a> {
             } else {
                 format!("https://fopull.com/cloud?game={}", name.trim())
             };
-            ui.hyperlink_to("Register this game at fopull.com/cloud", url);
+            ui.hyperlink_to("Register this game at fopull.com/cloud", crate::site("settings", &url));
         }
         ui.add_space(4.0);
         ui.small(

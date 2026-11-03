@@ -414,6 +414,11 @@ jobs:
             echo "::warning::docs/releases/$TAG.md is missing — the release page will carry a stub."
             printf 'Floptle %s\n\nDownload the floptle-hub archive for your platform; the Hub installs engine versions.\n' "$TAG" > NOTES.md
           fi
+          # The release page opens with the site's download, where the Hub is
+          # offered with its pay-what-you-want step; the archives below stay
+          # the direct links the Hub and the site download from. The Hub's own
+          # copy of the notes comes from docs/releases/, without this line.
+          { printf 'Download: https://fopull.com/floptle#download\n\n'; cat NOTES.md; } > NOTES.body && mv NOTES.body NOTES.md
 
       # Archive of record on this repo; scripts/publish-public.sh mirrors it
       # when RELEASES_TOKEN is not set.
