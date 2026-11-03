@@ -1183,6 +1183,10 @@ pub struct Light {
     /// map-tool geometry casts, which the march never saw. Distance-field
     /// matter that is not drawn as a mesh (blobs) casts only in the march.
     pub shadow_map: bool,
+    /// The shadow map's edge in texels, a power of two from 512 to 4096. It
+    /// covers the same ground at any size, so a bigger map is crisper and a
+    /// smaller one is cheaper: a settings screen's "shadow quality".
+    pub shadow_map_size: u32,
     /// Contact shadows: a short screen-space trace that catches what the marched
     /// field cannot. A dynamic mesh casts through a collider proxy — a box or a
     /// capsule — so a character's shadow is a capsule's, and the place that reads
@@ -1359,6 +1363,7 @@ impl Default for Light {
             shadow_distance: 150.0,
             shadow_steps: 64,
             shadow_map: false,
+            shadow_map_size: 2048,
             contact_shadows: false,
             contact_length: 0.35,
             contact_steps: 12,

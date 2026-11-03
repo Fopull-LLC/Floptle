@@ -75,7 +75,7 @@ pub use ui::{BuiltUiShader, Ui, UiBatch, UiBindingId, UiInstance, UiPlane, UiSha
 pub use raster::{
     ext_index_of, instance_of, is_terrain, instance_of_mat, pass_prelude, raster_custom_source, set_ext_index,
     BuiltFlsl, FlslBindingId, FlslBlend, FlslBuilder, FlslDraw, FlslShaderId, Globals, InstanceRaw, MaterialParams, Raster,
-    SkinDraw, SurfaceExtras, TexFilter, TexId, TexSampling, TexWrap, sun_shadow_matrix, FLSL_ENGINE_SAMPLERS, FLSL_ENGINE_TEXTURES, SUN_MAP_SIZE, flsl_fits_within, flsl_slots_within,
+    SkinDraw, SurfaceExtras, TexFilter, TexId, TexSampling, TexWrap, sun_map_size_for, sun_shadow_matrix, FLSL_ENGINE_SAMPLERS, FLSL_ENGINE_TEXTURES, SUN_MAP_SIZE, flsl_fits_within, flsl_slots_within,
 };
 pub use raymarch::{
     AtlasRefused, AtlasVolume, Raymarch, RaymarchGlobals, MAX_FIELD_SHAPES, MAX_SHADOW_PROXIES, MAX_VOLUMES, TERRAIN_SLOTS,

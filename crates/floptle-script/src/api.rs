@@ -126,6 +126,25 @@ const MAX_PARENT_DEPTH: usize = 64;
 /// A node's transform composed all the way up the parent chain — the same
 /// composition `floptle_core::world_transform` performs, against the script
 /// host's live mirror (which carries this frame's writes; the ECS does not yet).
+/// A PostProcess node's AO mode as the number a script reads and writes:
+/// 0 off, 1 screen space, 2 SDF.
+fn ao_mode_number(m: floptle_core::AoMode) -> f64 {
+    match m {
+        floptle_core::AoMode::Off => 0.0,
+        floptle_core::AoMode::ScreenSpace => 1.0,
+        floptle_core::AoMode::Sdf => 2.0,
+    }
+}
+
+/// The AO mode a script's number names; anything else is off.
+fn ao_mode_of(v: f64) -> floptle_core::AoMode {
+    match v.round() as i64 {
+        1 => floptle_core::AoMode::ScreenSpace,
+        2 => floptle_core::AoMode::Sdf,
+        _ => floptle_core::AoMode::Off,
+    }
+}
+
 pub(crate) fn world_transform_of(s: &crate::SceneMirror, e: u32) -> floptle_core::Transform {
     let mut w = s.transforms.get(&e).copied().unwrap_or(floptle_core::Transform::IDENTITY);
     let mut cur = e;
@@ -867,6 +886,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("shadowDistance".to_string(), l.shadow_distance as f64),
                 ("shadowSteps".to_string(), l.shadow_steps as f64),
                 ("shadowMap".to_string(), f64::from(l.shadow_map)),
+                ("shadowMapSize".to_string(), l.shadow_map_size as f64),
                 ("contactShadows".to_string(), f64::from(l.contact_shadows)),
                 ("contactLength".to_string(), l.contact_length as f64),
                 ("contactSteps".to_string(), l.contact_steps as f64),
@@ -960,6 +980,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
         vignette,
         vignette_strength,
         vignette_radius,
+        ao,
         ao_strength,
         ao_radius,
         posterize_bands,
@@ -1002,6 +1023,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("vignetteRadius".to_string(), *vignette_radius as f64),
                 ("aoStrength".to_string(), *ao_strength as f64),
                 ("aoRadius".to_string(), *ao_radius as f64),
+                ("aoMode".to_string(), ao_mode_number(*ao)),
                 ("posterizeBands".to_string(), *posterize_bands as f64),
                 ("tonemap".to_string(), *tonemap as f64),
                 ("posterizeDither".to_string(), f64::from(*posterize_dither)),
@@ -2010,6 +2032,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                 vignette,
                 vignette_strength,
                 vignette_radius,
+                ao,
                 ao_strength,
                 ao_radius,
                 posterize_bands,
@@ -2051,6 +2074,10 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "vignetteRadius" => *vignette_radius = v.max(0.0),
                     "aoStrength" => *ao_strength = v.clamp(0.0, 1.0),
                     "aoRadius" => *ao_radius = v.max(0.0),
+                    // 0 off / 1 screen space / 2 SDF. Off, or a strength of
+                    // 0, runs no AO pass at all: a settings screen's "off"
+                    // saves what the pass costs.
+                    "aoMode" => *ao = ao_mode_of(val),
                     // 0 and 1 both mean off, and the field is a count, so a
                     // negative from Lua must not wrap into a huge one.
                     "posterizeBands" => *posterize_bands = val.max(0.0) as u32,
@@ -2163,6 +2190,9 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "shadowDistance" => l.shadow_distance = v.max(0.0),
                     "shadowSteps" => l.shadow_steps = (v.max(8.0) as u32).min(64),
                     "shadowMap" => l.shadow_map = val != 0.0,
+                    // A power of two from 512 to 4096; the map is made again
+                    // at the new size on the next frame.
+                    "shadowMapSize" => l.shadow_map_size = (val.clamp(512.0, 4096.0) as u32).next_power_of_two(),
                     "contactShadows" => l.contact_shadows = val != 0.0,
                     "contactLength" => l.contact_length = v.clamp(0.01, 20.0),
                     "contactSteps" => l.contact_steps = (val.max(2.0) as u32).min(32),

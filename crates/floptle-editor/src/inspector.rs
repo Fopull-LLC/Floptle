@@ -4825,6 +4825,19 @@ impl EditorTabViewer<'_> {
                 cmd.inspector_changed |= crate::responsive::check(ui, &mut l.shadow_map, "shadow map")
                     .on_hover_text("sun shadows from a shadow map: every drawn mesh casts, map geometry included, at a cost that stays flat as a level grows. Off = the field march")
                     .changed();
+                if l.shadow_map {
+                    ui.horizontal(|ui| {
+                        ui.label("map size").on_hover_text(
+                            "the shadow map's edge in texels: it covers the same ground at any size, so bigger is crisper and smaller is cheaper",
+                        );
+                        for size in [512u32, 1024, 2048, 4096] {
+                            if ui.selectable_label(l.shadow_map_size == size, size.to_string()).clicked() && l.shadow_map_size != size {
+                                l.shadow_map_size = size;
+                                cmd.inspector_changed = true;
+                            }
+                        }
+                    });
+                }
                 // Contact shadows: the short-range half, from the depth
                 // buffer rather than from the field.
                 ui.separator();

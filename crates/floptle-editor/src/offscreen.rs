@@ -1412,6 +1412,9 @@ impl Editor {
             // prepass reads it for its shafts.
             headless_mark!("sun shadow map");
             let map_draws = crate::shading::with_shadow_casters(&instances, &shadow_casters);
+            if raster.set_sun_map_size(gpu, light_node.shadow_map_size) {
+                raymarch.set_sun_map(gpu, Some(raster.sun_map_view()));
+            }
             raster.sun_shadow_pass(gpu, globals, &map_draws, &flsl_draws, &skin_draws);
             let wants_depth = wants_prepass(
                 raster.flsl_draws_want_depth(&flsl_draws),

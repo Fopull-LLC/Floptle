@@ -122,8 +122,29 @@ impl Default for Globals {
     }
 }
 
-/// The sun shadow map's edge, in texels.
+/// The sun shadow map's edge, in texels, unless the scene asks for another
+/// ([`sun_map_size_for`]).
 pub const SUN_MAP_SIZE: u32 = 2048;
+
+/// The sun map size a scene's `shadow_map_size` gets: a power of two from
+/// 512 to 4096.
+pub fn sun_map_size_for(asked: u32) -> u32 {
+    asked.clamp(512, 4096).next_power_of_two()
+}
+
+/// The sun shadow map's depth texture, `size` texels square.
+fn sun_depth_texture(device: &wgpu::Device, label: &str, size: u32) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: Gpu::DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    })
+}
 
 /// The sun shadow map's view for a camera: an orthographic box looking along
 /// the sun, centred a third of the shadow distance ahead of the camera and
@@ -131,8 +152,9 @@ pub const SUN_MAP_SIZE: u32 = 2048;
 /// instances are drawn in. Snapped to whole texels in the sun's own frame, so a
 /// camera that moves does not make every shadow edge crawl.
 ///
-/// Returns the matrix and the size of one texel in world units.
-pub fn sun_shadow_matrix(to_sun: glam::Vec3, view_proj: Mat4, distance: f32) -> (Mat4, f32) {
+/// `size` is the map's edge in texels. Returns the matrix and the size of one
+/// texel in world units.
+pub fn sun_shadow_matrix(to_sun: glam::Vec3, view_proj: Mat4, distance: f32, size: u32) -> (Mat4, f32) {
     let l = to_sun.try_normalize().unwrap_or(glam::Vec3::Y);
     let inv = view_proj.inverse();
     let near = inv.project_point3(glam::Vec3::new(0.0, 0.0, 0.0));
@@ -140,7 +162,7 @@ pub fn sun_shadow_matrix(to_sun: glam::Vec3, view_proj: Mat4, distance: f32) -> 
     let fwd = (far - near).try_normalize().unwrap_or(glam::Vec3::NEG_Z);
     let d = distance.clamp(8.0, 400.0);
     let radius = d * 0.85;
-    let texel = radius * 2.0 / SUN_MAP_SIZE as f32;
+    let texel = radius * 2.0 / size.max(1) as f32;
     let up = if l.y.abs() > 0.95 { glam::Vec3::Z } else { glam::Vec3::Y };
     let view = Mat4::look_to_rh(glam::Vec3::ZERO, -l, up);
     // Snap the centre in the sun's frame to the texel grid.
@@ -810,6 +832,8 @@ pub struct Raster {
     globals_bind_sunpass: wgpu::BindGroup,
     _sun_map: wgpu::Texture,
     sun_map_view: wgpu::TextureView,
+    /// The sun map's edge in texels.
+    sun_map_size: u32,
     _sun_stub: wgpu::Texture,
     sun_stub_view: wgpu::TextureView,
     sun_samp: wgpu::Sampler,
@@ -1540,18 +1564,7 @@ impl Raster {
         // The sun shadow map, its comparison sampler, and a 1×1 stand-in for
         // the pass that draws into it (a texture cannot be sampled and drawn to
         // in one pass).
-        let depth_tex = |label: &str, size: u32| {
-            device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(label),
-                size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: Gpu::DEPTH_FORMAT,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            })
-        };
+        let depth_tex = |label: &str, size: u32| sun_depth_texture(device, label, size);
         let sun_map = depth_tex("raster-sun-map", SUN_MAP_SIZE);
         let sun_map_view = sun_map.create_view(&wgpu::TextureViewDescriptor::default());
         let sun_stub = depth_tex("raster-sun-map-stub", 1);
@@ -1852,6 +1865,7 @@ impl Raster {
             globals_bind,
             globals_bind_sunpass,
             _sun_map: sun_map,
+            sun_map_size: SUN_MAP_SIZE,
             sun_map_view,
             _sun_stub: sun_stub,
             sun_stub_view,
@@ -2719,6 +2733,29 @@ impl Raster {
     /// knowing the source size: 9-slice (how big an *unstretched* corner is)
     /// and `Contain`/`Cover` aspect fitting. `floptle-ui` is renderer-agnostic
     /// and has no texture registry, so it hands those decisions here.
+    /// Make the sun shadow map `size` texels square ([`sun_map_size_for`]),
+    /// a settings screen's shadow quality. The map is made again only when
+    /// the size changes; it covers the same ground at any size. Returns
+    /// whether it was, so the fog pass can be handed the new one
+    /// (`Raymarch::set_sun_map`).
+    pub fn set_sun_map_size(&mut self, gpu: &Gpu, size: u32) -> bool {
+        let size = sun_map_size_for(size);
+        if size == self.sun_map_size {
+            return false;
+        }
+        let map = sun_depth_texture(&gpu.device, "raster-sun-map", size);
+        self.sun_map_view = map.create_view(&wgpu::TextureViewDescriptor::default());
+        self._sun_map = map;
+        self.sun_map_size = size;
+        self.rebuild_globals_bind(&gpu.device);
+        true
+    }
+
+    /// The sun shadow map's edge in texels.
+    pub fn sun_map_size(&self) -> u32 {
+        self.sun_map_size
+    }
+
     /// The sun shadow map [`Self::sun_shadow_pass`] draws into, the same
     /// texture every frame: the fog pass reads it (`Raymarch::set_sun_map`).
     pub fn sun_map_view(&self) -> &wgpu::TextureView {

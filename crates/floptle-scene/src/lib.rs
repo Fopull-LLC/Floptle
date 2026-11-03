@@ -2581,6 +2581,10 @@ pub struct LightDoc {
     /// written, by default.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shadow_map: bool,
+    /// The shadow map's edge in texels (see `Light::shadow_map_size`); 2048,
+    /// and not written, by default.
+    #[serde(default = "default_shadow_map_size", skip_serializing_if = "is_default_shadow_map_size")]
+    pub shadow_map_size: u32,
     /// Contact shadows default off: they cost a screen-space trace per lit
     /// fragment, and a scene that never asked for them should not start paying.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -2679,6 +2683,12 @@ fn default_shadow_steps() -> u32 {
 fn is_default_shadow_steps(n: &u32) -> bool {
     *n == 64
 }
+fn default_shadow_map_size() -> u32 {
+    2048
+}
+fn is_default_shadow_map_size(n: &u32) -> bool {
+    *n == 2048
+}
 fn default_fog_sky() -> f32 {
     1.0
 }
@@ -2767,6 +2777,7 @@ impl From<&Light> for LightDoc {
             shadow_distance: l.shadow_distance,
             shadow_steps: l.shadow_steps,
             shadow_map: l.shadow_map,
+            shadow_map_size: l.shadow_map_size,
             contact_shadows: l.contact_shadows,
             contact_length: l.contact_length,
             contact_steps: l.contact_steps,
@@ -2818,6 +2829,7 @@ impl LightDoc {
             shadow_distance: self.shadow_distance,
             shadow_steps: self.shadow_steps.clamp(8, 64),
             shadow_map: self.shadow_map,
+            shadow_map_size: self.shadow_map_size.clamp(512, 4096).next_power_of_two(),
             contact_shadows: self.contact_shadows,
             contact_length: self.contact_length.clamp(0.01, 20.0),
             contact_steps: self.contact_steps.clamp(2, 32),
@@ -6300,6 +6312,25 @@ mod tests {
         assert!(!plain.contains("shadow_map"), "the default is not written: {plain}");
         let old: LightDoc = ron::from_str("(direction: (0, 1, 0), color: (1, 1, 1), ambient: (0, 0, 0), intensity: 1)").unwrap();
         assert!(!old.to_light().shadow_map, "an old scene marches as it always did");
+    }
+
+    /// The shadow map's size is kept when it is not the default, not written
+    /// when it is, reads as 2048 in a scene from before it, and a size that
+    /// is no power of two from 512 to 4096 loads as the nearest one up.
+    #[test]
+    fn the_shadow_map_size_round_trips_and_snaps_to_a_power_of_two() {
+        let big = LightDoc::from(&Light { shadow_map_size: 4096, ..Light::default() });
+        let ron = ron::to_string(&big).unwrap();
+        assert!(ron.contains("shadow_map_size:4096"), "{ron}");
+        assert_eq!(ron::from_str::<LightDoc>(&ron).unwrap().to_light().shadow_map_size, 4096);
+        let plain = ron::to_string(&LightDoc::from(&Light::default())).unwrap();
+        assert!(!plain.contains("shadow_map_size"), "the default is not written: {plain}");
+        let old: LightDoc = ron::from_str("(direction: (0, 1, 0))").unwrap();
+        assert_eq!(old.to_light().shadow_map_size, 2048, "a scene from before keeps the map it had");
+        for (asked, got) in [(100, 512), (1000, 1024), (3000, 4096), (90000, 4096)] {
+            let doc: LightDoc = ron::from_str(&format!("(direction: (0, 1, 0), shadow_map_size: {asked})")).unwrap();
+            assert_eq!(doc.to_light().shadow_map_size, got, "asked {asked}");
+        }
     }
 
     #[test]

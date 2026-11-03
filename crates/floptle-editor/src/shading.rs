@@ -646,8 +646,9 @@ pub(crate) fn sun_map_lanes(
     if to_sun == floptle_core::math::Vec3::ZERO {
         return off;
     }
-    let (vp, texel) = floptle_render::sun_shadow_matrix(to_sun, view_proj, l.shadow_distance);
-    let size = floptle_render::SUN_MAP_SIZE as f32;
+    let size = floptle_render::sun_map_size_for(l.shadow_map_size);
+    let (vp, texel) = floptle_render::sun_shadow_matrix(to_sun, view_proj, l.shadow_distance, size);
+    let size = size as f32;
     // Softness widens the filter: 1.5 texels hard, about 7.5 at full softness.
     let radius = 1.5 + 6.0 * l.shadow_softness.clamp(0.0, 1.0);
     // The map's depth runs over the box's whole reach toward the sun.
@@ -1316,7 +1317,9 @@ pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_ren
                 vignette: *vignette,
                 vignette_strength: *vignette_strength,
                 vignette_radius: *vignette_radius,
-                ssao: *ao == AoMode::ScreenSpace,
+                // No strength is no pass: a settings screen's "AO off" that
+                // only zeroed the strength still paid the whole pass.
+                ssao: *ao == AoMode::ScreenSpace && *ao_strength > 0.0,
                 ssao_strength: *ao_strength,
                 ssao_radius: *ao_radius,
                 posterize_bands: *posterize_bands,
@@ -1362,7 +1365,7 @@ pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_ren
                 ..floptle_render::PostSettings::default()
             };
             let ao_p =
-                if *ao == AoMode::Sdf { [1.0, *ao_strength, *ao_radius, 0.0] } else { [0.0; 4] };
+                if *ao == AoMode::Sdf && *ao_strength > 0.0 { [1.0, *ao_strength, *ao_radius, 0.0] } else { [0.0; 4] };
             return (s, ao_p);
         }
     }
@@ -1898,5 +1901,36 @@ mod antialias_tests {
         p.antialias = Some(AntialiasDoc::Fxaa);
         p.retro = true;
         assert!(!super::fxaa_on(&p), "retro pixels were smoothed");
+    }
+}
+
+#[cfg(test)]
+mod ao_tests {
+    use floptle_core::{AoMode, Matter};
+
+    /// **AO with no strength costs nothing.** The SSAO pass ran whenever the
+    /// scene's mode was screen space, whatever the strength, so a settings
+    /// screen's "AO off" that zeroed the strength paid for the whole pass;
+    /// the SDF mode marched its occlusion the same way. Off, or a strength of
+    /// 0, now asks for neither.
+    #[test]
+    fn ao_off_or_at_no_strength_runs_no_pass() {
+        let wants = |mode: AoMode, strength: f32| {
+            let mut world = floptle_core::World::default();
+            let e = world.spawn();
+            let mut m = Matter::default_post_process();
+            if let Matter::PostProcess { ao, ao_strength, .. } = &mut m {
+                *ao = mode;
+                *ao_strength = strength;
+            }
+            world.insert(e, m);
+            let (s, sdf) = super::post_process_uniforms(&world);
+            (s.ssao, sdf[0] > 0.5)
+        };
+        assert_eq!(wants(AoMode::ScreenSpace, 0.6), (true, false));
+        assert_eq!(wants(AoMode::ScreenSpace, 0.0), (false, false), "screen-space AO at no strength still ran its pass");
+        assert_eq!(wants(AoMode::Sdf, 0.6), (false, true));
+        assert_eq!(wants(AoMode::Sdf, 0.0), (false, false), "SDF AO at no strength still marched");
+        assert_eq!(wants(AoMode::Off, 0.6), (false, false));
     }
 }

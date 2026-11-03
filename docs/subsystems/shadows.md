@@ -392,7 +392,9 @@ opaque + lighting pass fell from 9.5 ms to 4.1 ms, and the map itself costs
 **How.**
 
 - `raster.rs` `sun_shadow_pass` draws the depth prepass's own opaque draw
-  list, skinned parts included, into a 2048² depth map, using the prepass
+  list, skinned parts included, into a square depth map (2048 texels by
+  default; `Light::shadow_map_size`, `env.shadowMapSize`, picks 512 to 4096
+  and the map is made again at that size), using the prepass
   pipelines and a view from `sun_shadow_matrix`. The camera culls that list,
   so `gather.rs` `shadow_map_casters` adds the static models, map meshes and
   primitives it culled that still fall in the map's box: the roof over a
@@ -416,8 +418,11 @@ opaque + lighting pass fell from 9.5 ms to 4.1 ms, and the map itself costs
 evaluates both sides, and the first cut ran the march and the map on every
 pixel: 16 ms instead of 4.
 
-**Limits:** one cascade, so detail is set by `shadow_distance` (about 10 cm a
-texel at 120). Blobs that are only a distance field cast only in the march.
+**Limits:** one cascade, so detail is set by `shadow_distance` and the map's
+size (about 10 cm a texel at 120 with the default 2048; 5 cm at 4096, 40 cm at
+512). The map's own pass fills its texels, so it costs about a quarter at 1024
+and four times at 4096 of what it costs at 2048; the lighting's lookups cost
+the same at any size. Blobs that are only a distance field cast only in the march.
 In stars mode the map is drawn toward star 0, the brightest at the camera
 (`star_uniforms` sorts them), and only that star reads it; the others march.
 Over a shadow distance the direction to a star thousands of metres away

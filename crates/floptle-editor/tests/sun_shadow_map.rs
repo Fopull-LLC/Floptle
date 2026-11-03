@@ -215,3 +215,48 @@ fn a_roof_out_of_view_shades_the_floor_through_the_map() {
         let _ = std::fs::remove_dir_all(d);
     }
 }
+
+/// **The map's size sets how crisp its shadows are.** `shadow_map_size` makes
+/// the map again at that size, covering the same ground, so a settings screen
+/// can trade shadow detail for its cost. The same sign at 512 and at 4096
+/// texels: still a shadow at both, and the soft band across its edge (the
+/// pixels between lit and shadowed, along the row through the shot's centre)
+/// several times wider on the small map.
+#[test]
+fn a_smaller_shadow_map_draws_softer_edges() {
+    let band = |size: u32| -> Option<(usize, f32)> {
+        let d = temp(&format!("size{size}"));
+        scene(&d, true, false);
+        let s = std::fs::read_to_string(d.join("scenes/first.ron")).unwrap();
+        std::fs::write(d.join("scenes/first.ron"), s.replace("shadow_map: true", &format!("shadow_map: true, shadow_map_size: {size}"))).unwrap();
+        let out = d.join("shot.png");
+        let r = Command::new(env!("CARGO_BIN_EXE_floptle"))
+            .args(["shot", &d.to_string_lossy(), "--size", "256x256", "--out", &out.to_string_lossy()])
+            .output()
+            .expect("run shot");
+        if !r.status.success() {
+            let why = String::from_utf8_lossy(&r.stderr).into_owned();
+            let cannot = why.contains("no GPU") || why.contains("could not build the renderer");
+            assert!(cannot, "shot failed for a reason that is not the adapter:\n{why}");
+            eprintln!("skipped — this machine cannot render:\n{why}");
+            return None;
+        }
+        let img = image::open(&out).expect("a PNG").to_rgba8();
+        let row: Vec<f32> = (0..256)
+            .map(|x| {
+                let p = img.get_pixel(x, 128);
+                (p[0] as f32 + p[1] as f32 + p[2] as f32) / 3.0
+            })
+            .collect();
+        let (lo, hi) = row.iter().fold((f32::MAX, f32::MIN), |(a, b), v| (a.min(*v), b.max(*v)));
+        let span = hi - lo;
+        let soft = row.iter().filter(|v| **v > lo + 0.15 * span && **v < hi - 0.15 * span).count();
+        let _ = std::fs::remove_dir_all(&d);
+        Some((soft, span))
+    };
+    let Some((small, small_span)) = band(512) else { return };
+    let (big, big_span) = band(4096).expect("the 4096 shot");
+    eprintln!("soft band across the shadow's edge: {small} px at 512, {big} px at 4096");
+    assert!(small_span > 40.0 && big_span > 40.0, "a map size cast no shadow: spans {small_span} and {big_span}");
+    assert!(small >= 3 * big.max(1), "the 512 map's edge ({small} px) is not softer than the 4096 one's ({big} px)");
+}

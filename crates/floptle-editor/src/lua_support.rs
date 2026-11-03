@@ -235,6 +235,8 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field shadowDither number Bayer-dither the penumbra (1/0) — the classic PS1 dithered shadow edge.
 ---@field shadowDistance number Max world distance a shadow ray marches before giving up; far geometry stops casting past it.
 ---@field shadowSteps number Most steps a sun-shadow ray takes (8..64, default 64). The cheapest quality lever for shadows: fewer steps cost less and thin out shadows behind long casters.
+---@field shadowMap boolean Sun shadows from a shadow map instead of the field march (default false).
+---@field shadowMapSize number The shadow map's edge in texels: 512, 1024, 2048 (default) or 4096. Bigger is crisper, smaller is cheaper; the map covers the same ground at any size.
 ---@field fog number Depth fog on (1/0; assign true/false).
 ---@field contactShadows number Contact shadows (1/0): the small dark line where things touch, traced from the depth buffer so a mesh casts its real silhouette. Only what is ON SCREEN casts one.
 ---@field contactLength number How far a contact shadow traces, in world units.

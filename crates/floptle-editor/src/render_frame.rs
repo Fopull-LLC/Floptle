@@ -608,6 +608,8 @@ impl Editor {
         ui_world: Vec<WorldCanvas>,
         window: &Arc<winit::window::Window>,
     ) {
+        // The sun shadow map's size, the scene's shadow quality.
+        let sun_map_size = self.world.query::<floptle_core::Light>().next().map_or(floptle_render::SUN_MAP_SIZE, |(_, l)| l.shadow_map_size);
         let (
             Some(gpu),
             Some(raster),
@@ -759,6 +761,9 @@ impl Editor {
                 // the prepass reads it for its shafts.
                 gpu_mark!("sun shadow map");
                 let map_draws = crate::shading::with_shadow_casters(&instances, &shadow_casters);
+                if raster.set_sun_map_size(gpu, sun_map_size) {
+                    raymarch.set_sun_map(gpu, Some(raster.sun_map_view()));
+                }
                 raster.sun_shadow_pass(gpu, globals, &map_draws, &flsl_draws, &skin_draws);
                 let depth_wanted = raster.flsl_draws_want_depth(&flsl_draws);
                 let raster_clear = if rm_draw

@@ -1080,6 +1080,75 @@ fn script_drives_the_post_chain() {
     assert_eq!(*posterize_bands, 0, "a negative band count must floor at off, not wrap");
 }
 
+/// **A settings screen picks the AO mode.** `aoMode` reads the scene's mode
+/// as a number (0 off, 1 screen space, 2 SDF) and a write switches it; it
+/// was scene data a script could not reach, so "AO off" could only zero the
+/// strength and still paid for the pass.
+#[test]
+fn a_script_switches_the_ao_mode() {
+    use floptle_core::AoMode;
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_ao_mode_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "ao",
+        "function start(node)\n  local pp = find(\"Post\"):getcomponent(\"PostProcess\")\n  was = pp.aoMode\n  pp.aoMode = params.mode\nend\n",
+    );
+    for (n, want) in [(0.0, AoMode::Off), (2.0, AoMode::Sdf), (1.0, AoMode::ScreenSpace)] {
+        let mut world = World::default();
+        let post = world.spawn();
+        world.insert(post, Transform::IDENTITY);
+        world.insert(post, floptle_core::Name("Post".into()));
+        world.insert(post, Matter::default_post_process());
+        let driver = world.spawn();
+        world.insert(driver, Transform::IDENTITY);
+        let mut inst = floptle_core::ScriptInst::new("ao");
+        inst.params.push(("mode".into(), n));
+        world.insert(driver, Scripts(vec![inst]));
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let Some(Matter::PostProcess { ao, .. }) = world.get::<Matter>(post) else { panic!("the post node lost its matter") };
+        assert_eq!(*ao, want, "aoMode = {n}");
+        let was: f64 = host.instance_env(driver.index(), "ao").unwrap().get("was").unwrap();
+        assert_eq!(was, 1.0, "the default chain reads as screen space");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A settings screen picks the shadow map's size.** `shadowMapSize` reads
+/// the scene's and a write sets it, rounded up to a power of two from 512 to
+/// 4096; the map is made again at that size on the next frame.
+#[test]
+fn a_script_sets_the_shadow_map_size() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_shadow_size_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "quality",
+        "function start(node)\n  local l = find(\"Lighting\"):getcomponent(\"Light\")\n  was = l.shadowMapSize\n  l.shadowMapSize = params.size\nend\n",
+    );
+    for (asked, got) in [(1024.0, 1024u32), (3000.0, 4096), (100.0, 512)] {
+        let mut world = World::default();
+        let lighting = world.spawn();
+        world.insert(lighting, Transform::IDENTITY);
+        world.insert(lighting, floptle_core::Name("Lighting".into()));
+        world.insert(lighting, floptle_core::Light::default());
+        let driver = world.spawn();
+        world.insert(driver, Transform::IDENTITY);
+        let mut inst = floptle_core::ScriptInst::new("quality");
+        inst.params.push(("size".into(), asked));
+        world.insert(driver, Scripts(vec![inst]));
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        assert_eq!(world.get::<floptle_core::Light>(lighting).unwrap().shadow_map_size, got, "asked {asked}");
+        let was: f64 = host.instance_env(driver.index(), "quality").unwrap().get("was").unwrap();
+        assert_eq!(was, 2048.0);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A settings screen switches off the lens and film effects players ask to
 /// lose, and resets the grade. Each value read here differs from the default,
 /// so a field that is missing from the mirror cannot pass as a default.
