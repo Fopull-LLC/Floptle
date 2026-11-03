@@ -315,6 +315,7 @@ mod compute_api;
 mod file_api;
 mod write_api;
 mod terrain_stats_api;
+mod particles_api;
 pub mod paths;
 pub mod data_api;
 mod cloud_api;
@@ -1087,6 +1088,8 @@ pub struct ScriptHost {
     files: Rc<RefCell<file_api::Files>>,
     /// The engine's count of what the terrains hold (`terrain.stats`).
     terrain_stats: Rc<RefCell<terrain_stats_api::Counted>>,
+    /// `particles.setMax`: the most live particles every effect together may hold.
+    particle_budget: Rc<std::cell::Cell<Option<u32>>>,
     /// `cloud.*`: the game this project is connected to, set by the driver.
     cloud: cloud_api::CloudState,
     /// How long one pass into Lua may run — see [`budget`].

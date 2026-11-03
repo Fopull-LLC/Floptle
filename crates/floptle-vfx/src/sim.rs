@@ -246,6 +246,11 @@ pub struct EffectInstance {
     /// Live emission scale (0..~2): multiplies every clip's rate/burst count and
     /// shades birth size — a throttle-driven plume without touching the asset.
     pub intensity: f32,
+    /// The share of its births the engine's particle budget lets through, 0..1
+    /// (1 = all). Apart from `intensity`, which is the game's own throttle and
+    /// also sizes the particles: this thins how many are born and nothing
+    /// else, and a burst that would have any keeps at least one.
+    pub thin: f32,
     instance_seed: u32,
     tracks: Vec<TrackState>,
     /// World anchor for `Space::World` tracks (the emitter's last world position).
@@ -310,6 +315,7 @@ impl EffectInstance {
             prev_t: START_EPS,
             playing: true,
             intensity: 1.0,
+            thin: 1.0,
             instance_seed,
             tracks,
             anchor: DVec3::ZERO,
@@ -476,6 +482,34 @@ impl EffectInstance {
     /// How many particles are resting on the level, asking it nothing.
     pub fn resting(&self) -> usize {
         self.tracks.iter().map(|ts| ts.particles.misc.iter().filter(|m| m.z > 0.0).count()).sum()
+    }
+
+    /// Retire the `k` live particles nearest the end of their lives, across
+    /// every track: what a particle budget takes back when the scene holds
+    /// more than it allows, the ones about to go anyway. Returns how many went.
+    pub fn retire_oldest(&mut self, k: usize) -> usize {
+        if k == 0 {
+            return 0;
+        }
+        // (life left, track, index), the least left first.
+        let mut all: Vec<(f32, usize, usize)> = Vec::with_capacity(self.alive());
+        for (ti, ts) in self.tracks.iter().enumerate() {
+            for (i, v) in ts.particles.vel_life.iter().enumerate() {
+                all.push((v.w - ts.particles.pos_age[i].w, ti, i));
+            }
+        }
+        let k = k.min(all.len());
+        if k < all.len() {
+            all.select_nth_unstable_by(k, |a, b| a.0.total_cmp(&b.0));
+        }
+        let mut gone: Vec<(usize, usize)> = all[..k].iter().map(|&(_, t, i)| (t, i)).collect();
+        // Highest index first in each track, so a swap_remove never moves one
+        // still to be removed.
+        gone.sort_unstable_by(|a, b| b.cmp(a));
+        for (t, i) in gone {
+            self.tracks[t].particles.swap_remove(i);
+        }
+        k
     }
 
     /// Total live particles across all tracks.
@@ -688,7 +722,7 @@ impl EffectInstance {
                             continue;
                         }
                         let mid = 0.5 * (s + e);
-                        let rate_eff = rate * ct.lane_rate.sample(mid / lifetime) * self.intensity;
+                        let rate_eff = rate * ct.lane_rate.sample(mid / lifetime) * self.intensity * self.thin;
                         if rate_eff <= 0.0 {
                             continue;
                         }
@@ -722,6 +756,9 @@ impl EffectInstance {
                                 let n = (count as f32 * cmul * lane * self.intensity)
                                     .round()
                                     .max(0.0) as u32;
+                                // Thinned, a burst keeps at least one: the
+                                // budget lessens an effect, never hides it.
+                                let n = if self.thin < 1.0 && n > 0 { ((n as f32 * self.thin).round() as u32).max(1) } else { n };
                                 for _ in 0..n {
                                     spawn(ts, ct, ti as u32, inst_seed, tp, clip_life, jitter, now, lifetime, gravity, emitter, emit_vel, self.intensity, self.volume);
                                 }

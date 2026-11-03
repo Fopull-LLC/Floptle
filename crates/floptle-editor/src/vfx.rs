@@ -31,6 +31,11 @@ use crate::anim::asset_key;
 /// The gravity particles feel in phase 1 — the default scene "Down" volume's
 /// pull. Per-instance sampling of the real gravity field comes with the GPU
 /// backend phase (where the field is a texture fetch anyway).
+/// How full a particle budget is kept: under it by a margin, so the bursts
+/// that land between one frame's thinning and the next fit without cutting
+/// lives short.
+const BUDGET_AIM: f32 = 0.9;
+
 pub(crate) const VFX_GRAVITY: Vec3 = Vec3::new(0.0, -10.0, 0.0);
 
 /// The live scene gravity field, handed to `advance` so `GravityMode::Field` effects
@@ -259,6 +264,18 @@ pub struct VfxSystem {
     /// 256 because the reported workload sat at ~265 and that was already a
     /// visible problem. Public, so a game that genuinely wants more says so.
     pub max_detached: usize,
+    /// The most live particles every effect together may hold
+    /// (`particles.setMax`); `None` for no budget. See [`Self::advance`].
+    pub max_particles: Option<usize>,
+    /// Particles the budget took back last frame, before their time. Small
+    /// once births are thinned to fit; the thinning is what keeps effects
+    /// living their whole lives rather than being cut short.
+    pub budget_retired: usize,
+    /// The share of their births every effect is allowed under the budget,
+    /// carried from frame to frame: it shrinks while the scene holds more
+    /// than [`BUDGET_AIM`] of the budget and grows back while it holds less,
+    /// so births settle at what keeps the budget full and lives whole.
+    budget_thin: f32,
     /// One-shots refused this frame because the pool was full. Reported through
     /// `perf.counts().effectsDropped` — a cap that silently eats the look is the
     /// failure shape this engine keeps paying for.
@@ -409,6 +426,9 @@ impl Default for VfxSystem {
             instances: HashMap::new(),
             detached: std::collections::VecDeque::new(),
             max_detached: 256,
+            max_particles: None,
+            budget_retired: 0,
+            budget_thin: 1.0,
             detached_dropped: 0,
             detached_seq: 0,
             wind: Default::default(),
@@ -686,6 +706,27 @@ impl VfxSystem {
             world.get::<ParticleSystem>(*e).is_some_and(|ps| ps.asset == *key)
         });
         self.node_frames.retain(|e, _| self.instances.contains_key(e));
+        // Under a particle budget every effect is born at the share of its
+        // rate the budget leaves, alike: the same share for the dust, the
+        // rain and the sparks, so none of them is the one that goes out.
+        let thin = match self.max_particles {
+            Some(max) => {
+                let live = self.live_particles().max(1) as f32;
+                let aim = max as f32 * BUDGET_AIM;
+                self.budget_thin = (self.budget_thin * (aim / live).clamp(0.5, 1.05)).clamp(0.001, 1.0);
+                self.budget_thin
+            }
+            None => {
+                self.budget_thin = 1.0;
+                1.0
+            }
+        };
+        for (_, inst) in self.instances.values_mut() {
+            inst.thin = thin;
+        }
+        for d in &mut self.detached {
+            d.inst.thin = thin;
+        }
         for (e, (_, inst)) in self.instances.iter_mut() {
             // Feed the emitter's world transform so World-space tracks anchor correctly.
             let emitter = floptle_core::world_transform(world, *e);
@@ -767,6 +808,32 @@ impl VfxSystem {
             }
         }
         self.detached.retain(|d| !d.inst.is_done());
+        self.hold_to_budget();
+    }
+
+    /// What the scene holds over the particle budget, given back by every
+    /// effect in proportion to what it has, the particles nearest the end of
+    /// their lives first: thinning births brings the count down over a few
+    /// frames, and this keeps it under the budget on the frame a burst lands.
+    fn hold_to_budget(&mut self) {
+        self.budget_retired = 0;
+        let Some(max) = self.max_particles else { return };
+        let live = self.live_particles();
+        if live <= max {
+            return;
+        }
+        let over = live - max;
+        let mut left = over;
+        let share = |alive: usize| (over * alive).div_ceil(live);
+        for (_, inst) in self.instances.values_mut() {
+            let k = share(inst.alive()).min(left);
+            left -= inst.retire_oldest(k);
+        }
+        for d in &mut self.detached {
+            let k = share(d.inst.alive()).min(left);
+            left -= d.inst.retire_oldest(k);
+        }
+        self.budget_retired = over - left;
     }
 
     /// The per-node particle state scripts read via `node:particles()`: one entry per
@@ -1454,6 +1521,59 @@ mod tests {
         let fx = effect_from_doc(&doc).compile();
         let m = fx.tracks[0].lane_rate.sample(0.5);
         assert!((m - 2.0).abs() < 0.05, "rate ×{m} at mid-timeline; expected ≈2");
+    }
+
+    /// **A particle budget holds every effect under it, and puts none out.**
+    /// Three dense dust plumes and a thin spark stream, about 1,900 live
+    /// particles with no budget; with `particles.setMax(500)` the scene
+    /// never holds more than 500 once a burst of births has settled, and the
+    /// spark stream, an effect a tenth the size, still has particles. Births
+    /// are thinned to fit rather than lives cut short.
+    #[test]
+    fn a_particle_budget_holds_every_effect_under_it_and_puts_none_out() {
+        let dir = std::env::temp_dir().join(format!("floptle-vfx-budget-{}", std::process::id()));
+        let mut dust = starter_effect_doc("Dust");
+        dust.tracks[0].clips[0].emit = Some(floptle_scene::VfxEmitDoc::Rate { rate: 600.0 });
+        let mut spark = starter_effect_doc("Spark");
+        spark.tracks[0].clips[0].emit = Some(floptle_scene::VfxEmitDoc::Rate { rate: 60.0 });
+        floptle_scene::save_vfx_effect(&dust, &dir.join("vfx").join("Dust.vfx.ron")).unwrap();
+        floptle_scene::save_vfx_effect(&spark, &dir.join("vfx").join("Spark.vfx.ron")).unwrap();
+        let mut world = World::default();
+        let mut node = |asset: &str| {
+            let e = world.spawn();
+            world.insert(e, floptle_core::Transform::IDENTITY);
+            world.insert(e, ParticleSystem { asset: asset.into(), play_on_start: true });
+            e
+        };
+        let plumes: Vec<Entity> = (0..3).map(|_| node("vfx/Dust")).collect();
+        let sparks = node("vfx/Spark");
+        let run = |max: Option<usize>| -> (usize, usize, VfxSystem) {
+            let mut sys = VfxSystem::default();
+            sys.rescan(&dir);
+            sys.max_particles = max;
+            let (mut most_after_settling, mut retired) = (0, 0);
+            for f in 0..180 {
+                sys.advance(&world, 1.0 / 60.0, None, &|_| None, None);
+                if f >= 60 {
+                    most_after_settling = most_after_settling.max(sys.live_particles());
+                    retired += sys.budget_retired;
+                }
+            }
+            (retired, most_after_settling, sys)
+        };
+        let (_, free, _) = run(None);
+        assert!(free > 1500, "the fixture: {free} particles with no budget");
+        let (retired, most, sys) = run(Some(500));
+        // Births thinned to fit, so the budget cuts few lives short: under a
+        // particle a frame on average, where trimming alone cut twenty.
+        assert!(retired < 120, "the budget cut {retired} particles short over two seconds: births are not thinned");
+        assert!(most <= 500, "the scene held {most} particles under a budget of 500");
+        assert!(most > 350, "the budget left the scene at {most} of 500: it thinned far past what it had to");
+        for e in plumes.iter().chain([&sparks]) {
+            let alive = sys.instances.get(e).map_or(0, |(_, i)| i.alive());
+            assert!(alive > 0, "an effect went out under the budget");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

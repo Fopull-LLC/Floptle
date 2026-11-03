@@ -3289,6 +3289,10 @@ impl ScriptHost {
         if let Err(e) = crate::terrain_stats_api::install(&lua, terrain_stats.clone()) {
             floptle_say::say_err!("[lua] failed to install terrain.stats: {e}");
         }
+        let particle_budget: Rc<std::cell::Cell<Option<u32>>> = Rc::default();
+        if let Err(e) = crate::particles_api::install(&lua, particle_budget.clone()) {
+            floptle_say::say_err!("[lua] failed to install particles: {e}");
+        }
         // `decals.*`: marks laid on the static colliders lent for the pass.
         let decals: Rc<RefCell<crate::decal_api::DecalStore>> = Rc::default();
         if let Err(e) = crate::decal_api::install_decal_api(
@@ -3613,6 +3617,7 @@ impl ScriptHost {
             compute,
             files,
             terrain_stats,
+            particle_budget,
             cloud,
             http_in_fixed,
             platform,
@@ -5021,6 +5026,8 @@ impl ScriptHost {
             self.compute.borrow_mut().reset();
             self.files.borrow_mut().cancel_all();
             self.writes.borrow_mut().cancel_all();
+            // A budget is the session's, like the other settings a game sets.
+            self.particle_budget.set(None);
         }
         // Stop drops every leaderboard callback still waiting, for the same
         // reason as `http.*` — the backend's own request stays in flight and
@@ -6473,6 +6480,12 @@ impl ScriptHost {
         c.terrains = terrains;
         c.detail = detail;
         c.at = Some(floptle_core::time::Instant::now());
+    }
+
+    /// The most live particles a game allows across every effect
+    /// (`particles.setMax`), if it set one.
+    pub fn particle_budget(&self) -> Option<u32> {
+        self.particle_budget.get()
     }
 
     /// The memory budget a game set for its terrains (`terrain.setBudget`).

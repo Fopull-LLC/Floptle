@@ -1687,6 +1687,7 @@ impl Editor {
             Some((from + dir * h.distance as f64, n))
         };
         let level: Option<floptle_vfx::LevelHit<'_>> = sim.is_some().then_some(&hit as _);
+        self.vfx.max_particles = self.script_host.particle_budget().map(|n| n as usize);
         self.vfx.advance(&self.world, sdt, vfx_grav, &frame_at, level);
         let live = (self.vfx.live_particles(), self.vfx.detached.len());
         self.script_host.profile().borrow_mut().set_particle_counts(live.0, live.1);

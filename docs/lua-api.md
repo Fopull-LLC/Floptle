@@ -44,7 +44,7 @@ each group, and meant to be searched.
 - [space — orbits & time-warp](#space--orbits--time-warp) — 21
 - [components — getcomponent](#components--getcomponent) — 118
 - [animation — node:animator](#animation--nodeanimator) — 29
-- [particles — effects from script](#particles--effects-from-script) — 13
+- [particles — effects from script](#particles--effects-from-script) — 15
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 36
 - [assets](#assets) — 19
 - [debug gizmos](#debug-gizmos) — 5
@@ -4475,6 +4475,14 @@ anim:time([layer]) — seconds into the current state.
 ### `node:particles`
 
 node:particles() — the particle handle for this node's Particle System component. Setters: :play/:stop/:restart/:setIntensity/:setVolume/:setTint/:setBeamEnd/:setBeamControl. Getters: :isPlaying/:alive/:asset. e.g. on a hit, node:particles():restart() to re-fire a burst.
+
+### `particles.max`
+
+particles.max() → the budget particles.setMax set, or nil when there is none.
+
+### `particles.setMax`
+
+particles.setMax(n | nil) — a budget on live particles across every effect in the scene: a settings screen's particle limit (nil, the default, is none). Past it every effect is thinned alike, its births scaled by the same share, so the dust, the rain and the sparks each get fewer and none goes out (a burst keeps at least one); what the scene still holds over the budget on the frame a burst lands gives up the particles nearest the end of their lives. The scene is kept a little under the budget so lives are not cut short. Counts every effect, node effects and spawnEffect one-shots alike (perf.counts().particles). Lasts until Stop. Refuses: a number under 1.
 
 ### `particles:alive`
 
