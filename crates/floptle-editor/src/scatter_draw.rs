@@ -29,11 +29,19 @@ pub(crate) struct ResolvedChunk {
     /// is shared out across frames a prop at a time, so a chunk with hundreds
     /// of props fills in over a few frames instead of stopping one.
     pub pending: Vec<Instance>,
+    /// Props drawn here whose ground an edit may have moved, as rolled: each
+    /// is dropped onto the ground again in its turn, and until then keeps
+    /// standing where it was.
+    pub resettle: Vec<Instance>,
     /// The removal-set size the chunk was resolved at. A cut prop has to
     /// disappear this frame, not when the chunk next streams — so a change
     /// here invalidates the cache.
     pub removed_len: usize,
 }
+
+/// How far past an edit's reach a prop is dropped onto the ground again: its
+/// own footprint, and the ground's slope round the hole.
+const RESETTLE_MARGIN: f64 = 2.0;
 
 /// How many props may be dropped onto the ground in one frame, across every
 /// source.
@@ -121,25 +129,33 @@ impl ScatterCache {
         self.sweeps.clear();
     }
 
-    /// Forget the chunks within `radius` of `p`: the ground there changed, so
-    /// the props standing on it are at the old height. This is what "digging
-    /// the ground out from under one drops or despawns it" is made of.
+    /// The ground within `radius` of `p` changed: the props standing there
+    /// are dropped onto it again. This is what "digging the ground out from
+    /// under one drops or despawns it" is made of.
+    ///
+    /// Only the props the edit reached (and [`RESETTLE_MARGIN`] round it) are
+    /// queued, and each keeps standing where it was until its turn, then
+    /// moves to the new ground or, with none left under it, goes. Forgetting
+    /// whole chunks out to the sweep's slack made every prop within tens of
+    /// metres vanish on every edit and come back over the next frames: a held
+    /// dig tool kept the rocks round it flickering.
     pub(crate) fn invalidate_near(&mut self, sources: &[ScatterSource], p: DVec3, radius: f64) {
         for src in sources {
             // `p` is where the ground changed, in the world. The chunks are
             // keyed in the source's own frame.
             let pl = src.frame.to_local(p);
+            let reach = radius + RESETTLE_MARGIN;
             for key in scatter::chunks_under(src, pl, radius) {
-                // What `scatter.near` was told stood here is no longer known:
-                // the ground may be gone from under it.
-                if let Some(old) = self.chunks.remove(&(src.id, key))
-                    && let Some(landed) = &self.settled_out
-                {
-                    let mut l = landed.borrow_mut();
-                    for i in &old.instances {
-                        l.remove(&(src.id, i.id));
-                    }
+                let Some(chunk) = self.chunks.get_mut(&(src.id, key)) else { continue };
+                let near: std::collections::HashSet<_> =
+                    chunk.instances.iter().filter(|i| (i.pos - pl).length() <= reach).map(|i| i.id).collect();
+                if near.is_empty() {
+                    continue;
                 }
+                let queued: std::collections::HashSet<_> = chunk.resettle.iter().map(|i| i.id).collect();
+                chunk.resettle.extend(
+                    scatter::chunk_instances(src, key).into_iter().filter(|i| near.contains(&i.id) && !queued.contains(&i.id)),
+                );
             }
         }
     }
@@ -552,6 +568,7 @@ pub(crate) fn build_instances(
                         let shrank = src.removed.len() < chunk.removed_len;
                         chunk.instances.retain(|i| !src.removed.contains(&i.id));
                         chunk.pending.retain(|i| !src.removed.contains(&i.id));
+                        chunk.resettle.retain(|i| !src.removed.contains(&i.id));
                         // A prop put back is rolled again and waits its turn
                         // like any arriving one.
                         if shrank {
@@ -578,7 +595,7 @@ pub(crate) fn build_instances(
                     settle_ms += span.ms();
                     *spent = settle_ms;
                     worked = true;
-                    e.insert(ResolvedChunk { instances: Vec::new(), pending, removed_len: src.removed.len() })
+                    e.insert(ResolvedChunk { instances: Vec::new(), pending, resettle: Vec::new(), removed_len: src.removed.len() })
                 }
             };
             // Within the frame's budget, by count and by time, the first ray
@@ -606,6 +623,44 @@ pub(crate) fn build_instances(
                     // No ground under it: not drawn, so not standing anywhere
                     // a harvest could find it.
                     None => {
+                        if let Some(l) = landed.as_mut() {
+                            l.remove(&(src.id, id));
+                        }
+                    }
+                }
+                let ms = span.ms();
+                settle_ms += ms;
+                *spent = settle_ms;
+                *ray_ms = *ray_ms * 0.8 + ms * 0.2;
+            }
+            // Props an edit may have moved the ground under: each moves to
+            // where the ground is now, in place, and stays drawn till then.
+            while !chunk.resettle.is_empty() {
+                let fits = settled < SETTLE_BUDGET && settle_ms + *ray_ms <= SETTLE_MS;
+                let slow_ok = !worked && *ray_ms > SETTLE_MS && slow_turn;
+                if !(settle_all || fits || slow_ok) {
+                    break;
+                }
+                let span = floptle_core::profile::Span::new();
+                let inst = chunk.resettle.pop().expect("not empty");
+                settled += 1;
+                worked = true;
+                let id = inst.id;
+                let at = chunk.instances.iter().position(|i| i.id == id);
+                match settle(src, inst, ground) {
+                    Some(on) => {
+                        if let Some(l) = landed.as_mut() {
+                            l.insert((src.id, on.id), (on.pos, on.up));
+                        }
+                        match at {
+                            Some(k) => chunk.instances[k] = on,
+                            None => chunk.instances.push(on),
+                        }
+                    }
+                    None => {
+                        if let Some(k) = at {
+                            chunk.instances.swap_remove(k);
+                        }
                         if let Some(l) = landed.as_mut() {
                             l.remove(&(src.id, id));
                         }
@@ -1869,6 +1924,76 @@ mod tests {
         assert!(env(&host).get::<bool>("gone").unwrap(), "a removed prop is still found by its id");
         assert!(host.scatter_sources()[0].marks.is_empty(), "a removed prop kept its look");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **An edit moves the props it reached and hides none.** Invalidating
+    /// forgot whole chunks out to the sweep's slack, so every prop within
+    /// tens of metres vanished on each edit and came back over the next
+    /// frames: a held dig tool kept the field round it flickering. Now the
+    /// drawn count never drops while the ground is re-read, only the props
+    /// within reach of the edit are cast again, and with the ground gone
+    /// under the edit only those go.
+    #[test]
+    fn an_edit_re_settles_only_what_it_reached_and_hides_nothing() {
+        let mut cache = ScatterCache { settled_out: Some(Default::default()), ..Default::default() };
+        let s = src();
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
+        // Where the edit lands: on a prop, once the field has settled.
+        let edit = std::cell::Cell::new(DVec3::ZERO);
+        // `hole`: no ground under the edit any more.
+        let mut frame = |cache: &mut ScatterCache, hole: bool| {
+            let mut casts = 0usize;
+            let mut ground = |from: DVec3, _: Vec3, _: f32| {
+                casts += 1;
+                let (flat, e) = (DVec3::new(from.x, 0.0, from.z), edit.get());
+                if hole && (flat - DVec3::new(e.x, 0.0, e.z)).length() < 3.0 { None } else { Some((60.0f32, Vec3::Y)) }
+            };
+            let mut out = Vec::new();
+            build_instances(
+                cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground,
+                &floptle_render::Frustum::everything(), 10_000, &mut out,
+            );
+            (out.len(), casts)
+        };
+        let mut drawn = 0;
+        for _ in 0..50 {
+            let (n, casts) = frame(&mut cache, false);
+            drawn = n;
+            if casts == 0 {
+                break;
+            }
+        }
+        assert!(drawn > 50, "only {drawn} props settled");
+        edit.set(cache.chunks.values().flat_map(|c| &c.instances).next().expect("a prop").pos);
+        let edit = edit.get();
+        // Ground still there: everything stays drawn, every frame.
+        cache.invalidate_near(std::slice::from_ref(&s), edit, 2.4);
+        let mut cast_total = 0;
+        for _ in 0..10 {
+            let (n, casts) = frame(&mut cache, false);
+            assert_eq!(n, drawn, "props vanished while the ground was read again");
+            cast_total += casts;
+        }
+        let reach = 2.4 + RESETTLE_MARGIN;
+        let within = cache.chunks.values().flat_map(|c| &c.instances).filter(|i| (i.pos - edit).length() <= reach + 1.0).count();
+        assert!(cast_total <= within, "an edit of 2.4 m cast {cast_total} rays; only {within} props are within its reach");
+        // Ground gone under the edit: only props within its reach go.
+        let before: Vec<(u64, DVec3)> = cache.chunks.values().flat_map(|c| c.instances.iter().map(|i| (i.id, i.pos))).collect();
+        cache.invalidate_near(std::slice::from_ref(&s), edit, 2.4);
+        for _ in 0..10 {
+            frame(&mut cache, true);
+        }
+        let after: std::collections::HashSet<u64> = cache.chunks.values().flat_map(|c| c.instances.iter().map(|i| i.id)).collect();
+        let mut in_hole = 0;
+        for (id, pos) in before {
+            let d = (pos - edit).length();
+            assert!(d <= reach || after.contains(&id), "a prop {d:.1} m from the edit went");
+            if d < 2.5 {
+                in_hole += 1;
+                assert!(!after.contains(&id), "a prop {d:.1} m from the edit still stands with no ground under it");
+            }
+        }
+        assert!(in_hole > 0, "the test field has no prop inside the hole to check");
     }
 
     /// **A harvest costs no rays.** Cutting one prop used to re-settle every
