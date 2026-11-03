@@ -1438,6 +1438,46 @@ fn set_material_on_a_model_patches_its_own_look() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **A model made at runtime is patched too.** A script that creates a node,
+/// gives it a model and tints it in one callback got a whole Material: the
+/// tint landed while the node was still an Empty, before its model did, and
+/// the prop drew flat and untextured. The same two lines a frame apart drew
+/// it right. Now it carries a patch, as a model from the scene does.
+#[test]
+fn set_material_on_a_model_made_in_the_same_callback_patches_it() {
+    use floptle_core::{Material, MaterialPatch, Matter, Name};
+    let dir = std::env::temp_dir().join(format!("floptle-matpatch-new-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "build",
+        "function start(node)\n  createNode(\"Bush\", node, function(n)\n    n.model = \"models/flora/bush.gltf\"\n    \
+         n:setMaterial{ color = {0.6, 0.5, 0.4} }\n  end)\nend\n",
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(e, Scripts(vec![floptle_core::ScriptInst::new("build")]));
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    // The editor's drain: spawn the node, then run its callback.
+    let mut creates = host.take_create_requests();
+    assert_eq!(creates.len(), 1);
+    let bush = world.spawn();
+    world.insert(bush, Transform::IDENTITY);
+    world.insert(bush, Name(creates[0].name.clone()));
+    world.insert(bush, Matter::Empty);
+    let cb = creates.remove(0).cb.expect("the create carried its callback");
+    host.call_create_callback(&mut world, cb, bush);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    assert!(matches!(world.get::<Matter>(bush), Some(Matter::Mesh { .. })), "the node did not become the model");
+    assert!(world.get::<Material>(bush).is_none(), "a model made at runtime was given a whole Material");
+    let patch = world.get::<MaterialPatch>(bush).expect("the model carries a patch");
+    assert_eq!(patch.keys, vec!["color".to_string()]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Every key `setMaterial` accepts is one a patch can carry over, so no key
 /// works on a primitive and silently does nothing on a model.
 #[test]

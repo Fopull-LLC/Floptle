@@ -7005,6 +7005,48 @@ impl ScriptHost {
     fn flush_writes(&mut self, world: &mut World) {
         // Flush transforms that a handle wrote on other nodes back to the ECS.
         self.flush_scene(world);
+        // Model swaps: the node becomes the model before the construction
+        // writes below see it. A runtime prop made with `n.model = …` then
+        // `n:setMaterial{ color = … }` in one callback was still an Empty when
+        // its material landed, so it got a whole Material and lost its own
+        // textures, leaves and normal maps. (Paths stay in `model_changes`
+        // for the editor to drain and import the mesh.)
+        {
+            let scene = self.scene.borrow();
+            for (eid, path) in self.model_changes.borrow().iter() {
+                let Some(&ent) = scene.ents.get(eid) else { continue };
+                match world.get_mut::<Matter>(ent) {
+                    Some(Matter::Mesh { asset_path }) => *asset_path = path.clone(),
+                    // An Empty — what `createNode` makes — becomes the model,
+                    // which is how a script assembles an object at runtime.
+                    None | Some(Matter::Empty) => {
+                        world.insert(ent, Matter::Mesh { asset_path: path.clone() });
+                    }
+                    // Anything else already is something; swapping a light or a
+                    // camera for a model would throw that away. Said once.
+                    Some(other) => {
+                        if self.model_warned.insert(*eid) {
+                            let dbg = format!("{other:?}");
+                            let kind = dbg.split([' ', '{', '(']).next().unwrap_or("").to_string();
+                            let name = world
+                                .get::<floptle_core::Name>(ent)
+                                .map(|n| n.0.clone())
+                                .unwrap_or_default();
+                            self.logs.borrow_mut().push(crate::ScriptLog {
+                                level: crate::LogLevel::Warn,
+                                msg: format!(
+                                    "node.model = \"{path}\" on \"{name}\" does nothing: it is a \
+                                     {kind}, and only an Empty or a model node can wear a model. \
+                                     Make a child for it — createNode(\"Part\", node) then \
+                                     part.model = \"{path}\"."
+                                ),
+                                source: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
         // Construction-API writes (setCelestial/setMaterial/setTerrain/
         // setPrimitive) — before the numeric component mirror, so a component
         // created here can be tweaked by getcomponent writes the same pass.
@@ -7081,44 +7123,10 @@ impl ScriptHost {
                 }
             }
         }
-        // Apply script-driven component swaps: mesh model + material. (Model paths stay in
-        // `model_changes` for the editor to drain and re-import the GPU mesh; materials are
-        // resolved here against the lent preset map and applied directly.)
+        // Apply script-driven material swaps, resolved here against the lent
+        // preset map. (A model swap was made before the construction writes.)
         {
             let scene = self.scene.borrow();
-            for (eid, path) in self.model_changes.borrow().iter() {
-                let Some(&ent) = scene.ents.get(eid) else { continue };
-                match world.get_mut::<Matter>(ent) {
-                    Some(Matter::Mesh { asset_path }) => *asset_path = path.clone(),
-                    // An Empty — what `createNode` makes — becomes the model,
-                    // which is how a script assembles an object at runtime.
-                    None | Some(Matter::Empty) => {
-                        world.insert(ent, Matter::Mesh { asset_path: path.clone() });
-                    }
-                    // Anything else already is something; swapping a light or a
-                    // camera for a model would throw that away. Said once.
-                    Some(other) => {
-                        if self.model_warned.insert(*eid) {
-                            let dbg = format!("{other:?}");
-                            let kind = dbg.split([' ', '{', '(']).next().unwrap_or("").to_string();
-                            let name = world
-                                .get::<floptle_core::Name>(ent)
-                                .map(|n| n.0.clone())
-                                .unwrap_or_default();
-                            self.logs.borrow_mut().push(crate::ScriptLog {
-                                level: crate::LogLevel::Warn,
-                                msg: format!(
-                                    "node.model = \"{path}\" on \"{name}\" does nothing: it is a \
-                                     {kind}, and only an Empty or a model node can wear a model. \
-                                     Make a child for it — createNode(\"Part\", node) then \
-                                     part.model = \"{path}\"."
-                                ),
-                                source: None,
-                            });
-                        }
-                    }
-                }
-            }
             let mats = self.materials.borrow();
             for (eid, refstr) in self.material_changes.borrow().iter() {
                 if let Some(&ent) = scene.ents.get(eid)
