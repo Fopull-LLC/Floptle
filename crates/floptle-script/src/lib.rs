@@ -1174,6 +1174,8 @@ pub struct ScriptHost {
     memcats: Rc<RefCell<HashMap<String, u8>>>,
     /// The category charged now.
     memcat_now: std::cell::Cell<u8>,
+    /// The script file charged now, by name: who made a mesh or a texture.
+    running_script: Rc<RefCell<String>>,
     /// `(script kind, key)` combos already reported as shadowing a `findScript`
     /// handle's own key — one line per script per session, not
     /// one per instance.

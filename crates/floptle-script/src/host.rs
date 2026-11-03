@@ -3159,7 +3159,11 @@ impl ScriptHost {
             logs.clone(),
             http_in_fixed.clone(),
         );
+        // The script whose load or hook is running, as `charge_memory_to`
+        // sets it: who made a mesh or a texture (`perf.resources`).
+        let running_script: Rc<RefCell<String>> = Rc::default();
         let textures: Rc<RefCell<crate::texture_api::TextureLoads>> = Rc::default();
+        textures.borrow_mut().running = running_script.clone();
         if let Err(e) =
             crate::texture_api::install(&lua, textures.clone(), http.clone(), logs.clone(), http_in_fixed.clone())
         {
@@ -3174,6 +3178,7 @@ impl ScriptHost {
             }
         }
         let meshes: Rc<RefCell<crate::mesh_api::MeshBook>> = Rc::default();
+        meshes.borrow_mut().running = running_script.clone();
         if let Err(e) = crate::mesh_api::install(&lua, meshes.clone()) {
             floptle_say::say_err!("[lua] failed to install the runtime mesh API: {e}");
         }
@@ -3292,6 +3297,9 @@ impl ScriptHost {
         let memcats: Rc<RefCell<HashMap<String, u8>>> = Rc::default();
         if let Err(e) = crate::perf_api::install_script_memory(&lua, memcats.clone()) {
             floptle_say::say_err!("[lua] failed to install perf.scriptMemory: {e}");
+        }
+        if let Err(e) = crate::perf_api::install_resources(&lua, meshes.clone(), textures.clone()) {
+            floptle_say::say_err!("[lua] failed to install perf.resources: {e}");
         }
         let particle_budget: Rc<std::cell::Cell<Option<u32>>> = Rc::default();
         if let Err(e) = crate::particles_api::install(&lua, particle_budget.clone()) {
@@ -3455,6 +3463,7 @@ impl ScriptHost {
             alloc_track: std::cell::Cell::new(false),
             memcats,
             memcat_now: std::cell::Cell::new(0),
+            running_script,
             instances: HashMap::new(),
             errors: Vec::new(),
             logs,
@@ -3729,6 +3738,7 @@ impl ScriptHost {
         if cat == self.memcat_now.get() {
             return;
         }
+        *self.running_script.borrow_mut() = kind.unwrap_or_default().to_string();
         self.memcat_now.set(cat);
         // SAFETY: lua_setmemcat only stores a byte in the state; nothing on
         // the stack is read or left.
@@ -6434,6 +6444,14 @@ impl ScriptHost {
     /// or why it is not. The callback runs in the next frame pass.
     pub fn answer_texture(&self, id: u64, result: Result<String, String>) {
         self.textures.borrow_mut().answer(id, result);
+    }
+
+    /// The bytes a script's texture `name` holds on the GPU, once the driver
+    /// has made it and knows its size: `perf.resources` and `perf.counts`.
+    pub fn note_texture_size(&self, name: &str, bytes: u64) {
+        if let Some(m) = self.textures.borrow_mut().live.get_mut(name) {
+            m.bytes = bytes;
+        }
     }
 
     /// Textures `assets.release` gave back since the last call.

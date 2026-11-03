@@ -1098,3 +1098,59 @@ fn each_script_s_memory_is_its_own() {
     assert!((hog + thin + engine - total).abs() < 1.0, "the parts do not add up to the heap: {hog} + {thin} + {engine} against {total}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **A game can see the meshes and textures its scripts made.** They live
+/// until freed or Stop, a scene load included, so a game making them per
+/// level grows by a set each visit, and nothing said so: a soak found six
+/// leaks only by wrapping the API. `perf.counts()` has the totals and
+/// `perf.resources()` each one with the script that made it, and a freed
+/// one goes from both.
+#[test]
+fn a_game_sees_the_meshes_and_textures_its_scripts_made() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_resources_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "level",
+        "local n = 0\n\
+         function update(node)\n  \
+           n = n + 1\n  \
+           if n == 1 then\n    \
+             water = mesh.build{ positions = { 0,0,0, 1,0,0, 0,0,1 }, indices = { 1, 2, 3 } }\n    \
+             icon = assets.textureFromPixels(4, 4, string.rep('\\255', 64))\n  \
+           elseif n == 2 then\n    \
+             c = perf.counts()\n    \
+             r = perf.resources()\n    \
+             mesh.free(water)\n  \
+           elseif n == 3 then\n    \
+             after = perf.counts()\n  \
+           end\n\
+         end\n",
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(e, Scripts(vec![floptle_core::ScriptInst::new("level")]));
+    let mut host = ScriptHost::new();
+    host.set_playing(true);
+    for f in 0..3 {
+        host.run(&mut world, &dir, 0.016, f as f32 * 0.016);
+    }
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let env = host.instance_env(e.index(), "level").unwrap();
+    let c: mlua::Table = env.get("c").unwrap();
+    assert_eq!((c.get::<u32>("scriptMeshes").unwrap(), c.get::<u32>("scriptTextures").unwrap()), (1, 1));
+    assert!(c.get::<u64>("scriptMeshBytes").unwrap() > 0, "a mesh of three points holds nothing");
+    assert_eq!(c.get::<u64>("scriptTextureBytes").unwrap(), 64, "a 4x4 picture is 64 bytes");
+    let r: mlua::Table = env.get("r").unwrap();
+    for list in ["meshes", "textures"] {
+        let rows: mlua::Table = r.get(list).unwrap();
+        assert_eq!(rows.raw_len(), 1, "{list}");
+        let row: mlua::Table = rows.get(1).unwrap();
+        assert_eq!(row.get::<String>("script").unwrap(), "level", "{list} name the script that made them");
+    }
+    let after: mlua::Table = env.get("after").unwrap();
+    assert_eq!(after.get::<u32>("scriptMeshes").unwrap(), 0, "a freed mesh is still counted");
+    assert_eq!(after.get::<u32>("scriptTextures").unwrap(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}

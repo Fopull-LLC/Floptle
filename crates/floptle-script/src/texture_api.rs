@@ -21,7 +21,7 @@
 //! other reply a script waits for, and never inside the call that asked.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use mlua::{Function, IntoLuaMulti, Lua, Table, Value};
@@ -61,8 +61,12 @@ pub(crate) struct TextureLoads {
     answers: Vec<(u64, Result<String, String>)>,
     by_url: HashMap<String, ByUrl>,
     url_of: HashMap<u64, String>,
-    /// Textures that exist, by name.
-    live: HashSet<String>,
+    /// Textures that exist, by name, with who made them.
+    pub(crate) live: HashMap<String, crate::mesh_api::Made>,
+    /// Who asked for a texture still being made, by request.
+    makers: HashMap<u64, String>,
+    /// The script running now, as the host charges it (`charge_memory_to`).
+    pub(crate) running: Rc<RefCell<String>>,
     releases: Vec<String>,
     /// Whether this host draws at all. One that does not (a dedicated server,
     /// `floptle run`) answers at once, without downloading anything.
@@ -78,7 +82,9 @@ impl Default for TextureLoads {
             answers: Vec::new(),
             by_url: HashMap::new(),
             url_of: HashMap::new(),
-            live: HashSet::new(),
+            live: HashMap::new(),
+            makers: HashMap::new(),
+            running: Rc::default(),
             releases: Vec::new(),
             can_draw: true,
         }
@@ -92,6 +98,7 @@ impl TextureLoads {
         let id = self.next;
         self.next += 1;
         self.waiting.insert(id, vec![cb]);
+        self.makers.insert(id, self.running.borrow().clone());
         id
     }
 
@@ -105,16 +112,16 @@ impl TextureLoads {
         if !self.can_draw {
             return None;
         }
-        let name = match name.filter(|n| self.live.contains(*n)) {
+        let name = match name.filter(|n| self.live.contains_key(*n)) {
             Some(n) => n.to_string(),
             None => {
                 let id = self.next;
                 self.next += 1;
-                let n = format!("img:{id}");
-                self.live.insert(n.clone());
-                n
+                format!("img:{id}")
             }
         };
+        let script = self.running.borrow().clone();
+        self.live.insert(name.clone(), crate::mesh_api::Made { script, bytes: u64::from(w) * u64::from(h) * 4 });
         self.requests.push(TextureRequest { id: 0, name: name.clone(), bytes, pixels: Some([w, h]) });
         Some(name)
     }
@@ -134,9 +141,11 @@ impl TextureLoads {
     /// The driver's answer for a request: the texture now exists, or why not.
     pub(crate) fn answer(&mut self, id: u64, result: Result<String, String>) {
         let url = self.url_of.remove(&id);
+        let maker = self.makers.remove(&id).unwrap_or_default();
         match &result {
             Ok(name) => {
-                self.live.insert(name.clone());
+                let bytes = self.live.get(name).map_or(0, |m| m.bytes);
+                self.live.insert(name.clone(), crate::mesh_api::Made { script: maker, bytes });
                 if let Some(u) = url {
                     self.by_url.insert(u, ByUrl::Ready(name.clone()));
                 }
@@ -152,7 +161,7 @@ impl TextureLoads {
 
     /// `assets.release`: `true` if `name` was a texture this API made.
     fn release(&mut self, name: &str) -> bool {
-        if !self.live.remove(name) {
+        if self.live.remove(name).is_none() {
             return false;
         }
         self.by_url.retain(|_, v| !matches!(v, ByUrl::Ready(n) if n == name));
@@ -174,8 +183,8 @@ impl TextureLoads {
 
     /// Stop: the driver lets go of every texture, so the book starts over.
     pub(crate) fn reset(&mut self) {
-        let next = self.next;
-        *self = Self { next, can_draw: self.can_draw, ..Self::default() };
+        let (next, running) = (self.next, self.running.clone());
+        *self = Self { next, can_draw: self.can_draw, running, ..Self::default() };
     }
 }
 
@@ -259,7 +268,8 @@ pub(crate) fn install(
             let id = s.next;
             s.next += 1;
             let name = format!("img:{id}");
-            s.live.insert(name.clone());
+            let script = s.running.borrow().clone();
+            s.live.insert(name.clone(), crate::mesh_api::Made { script, bytes: u64::from(w) * u64::from(h) * 4 });
             s.requests.push(TextureRequest { id, name: name.clone(), bytes, pixels: Some([w, h]) });
             name.into_lua_multi(lua)
         })?,

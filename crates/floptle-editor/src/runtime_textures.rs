@@ -98,9 +98,14 @@ impl Editor {
                 };
                 let tex = raster.register_texture(gpu, &data, Default::default());
                 self.texture_registry.insert(name.clone(), tex);
-                Ok(name)
+                Ok((name, u64::from(data.width) * u64::from(data.height) * 4))
             });
-            self.script_host.answer_texture(id, answer);
+            // The answer makes the script's record of it; its size goes on that.
+            let sized = answer.as_ref().ok().cloned();
+            self.script_host.answer_texture(id, answer.map(|(name, _)| name));
+            if let Some((name, bytes)) = sized {
+                self.script_host.note_texture_size(&name, bytes);
+            }
         }
     }
 

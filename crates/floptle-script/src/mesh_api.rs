@@ -19,7 +19,7 @@
 //! A host that draws nothing still answers a name, and nothing draws it.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use mlua::{Lua, Table, Value};
@@ -45,6 +45,17 @@ pub struct MeshRequest {
     pub indices: Vec<u32>,
 }
 
+/// A mesh or texture a script made and has not let go of: who made it and
+/// what it holds, for `perf.resources` and `perf.counts`.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Made {
+    /// The script file whose load or hook made it ("" outside any).
+    pub(crate) script: String,
+    /// Its bytes on the GPU, as near as is known (0 until a decoded picture's
+    /// size is).
+    pub(crate) bytes: u64,
+}
+
 /// What scripts built and freed, not yet seen by the driver.
 #[derive(Default)]
 pub(crate) struct MeshBook {
@@ -53,7 +64,9 @@ pub(crate) struct MeshBook {
     next: u64,
     requests: Vec<MeshRequest>,
     releases: Vec<String>,
-    live: HashSet<String>,
+    pub(crate) live: HashMap<String, Made>,
+    /// The script running now, as the host charges it (`charge_memory_to`).
+    pub(crate) running: Rc<RefCell<String>>,
 }
 
 impl MeshBook {
@@ -67,8 +80,8 @@ impl MeshBook {
 
     /// Stop: the driver lets go of every built mesh.
     pub(crate) fn reset(&mut self) {
-        let next = self.next;
-        *self = Self { next, ..Self::default() };
+        let (next, running) = (self.next, self.running.clone());
+        *self = Self { next, running, ..Self::default() };
     }
 }
 
@@ -206,7 +219,11 @@ pub(crate) fn install(lua: &Lua, book: Rc<RefCell<MeshBook>>) -> mlua::Result<()
                 let mut b = book.borrow_mut();
                 b.next += 1;
                 req.name = format!("mesh:{}", b.next);
-                b.live.insert(req.name.clone());
+                let bytes = (req.positions.len() * 12 + req.normals.len() * 12 + req.uvs.len() * 8) as u64
+                    + req.colors.as_ref().map_or(0, |c| c.len() as u64 * 4)
+                    + req.indices.len() as u64 * 4;
+                let script = b.running.borrow().clone();
+                b.live.insert(req.name.clone(), Made { script, bytes });
                 let name = req.name.clone();
                 b.requests.push(req);
                 Ok(name)
@@ -217,7 +234,7 @@ pub(crate) fn install(lua: &Lua, book: Rc<RefCell<MeshBook>>) -> mlua::Result<()
         "free",
         lua.create_function(move |_, name: String| {
             let mut b = book.borrow_mut();
-            if !b.live.remove(&name) {
+            if b.live.remove(&name).is_none() {
                 return Ok(false);
             }
             // Built and freed before the driver saw it: it never needs to exist.

@@ -584,6 +584,60 @@ pub(crate) fn install_script_memory(lua: &Lua, cats: std::rc::Rc<std::cell::RefC
     )
 }
 
+/// perf.resources() → { meshes = { {name=, script=, bytes=}, … }, textures =
+/// { … } }: every mesh and texture a script made and has not let go of,
+/// with the script file that made it, largest first. And the totals into
+/// perf.counts(): scriptMeshes, scriptMeshBytes, scriptTextures,
+/// scriptTextureBytes. They live until freed or Stop, a scene load
+/// included, so a game that makes them per level and never frees them
+/// grows by a set each visit: this is how it sees that.
+pub(crate) fn install_resources(
+    lua: &Lua,
+    meshes: std::rc::Rc<std::cell::RefCell<crate::mesh_api::MeshBook>>,
+    textures: std::rc::Rc<std::cell::RefCell<crate::texture_api::TextureLoads>>,
+) -> mlua::Result<()> {
+    let perf: Table = lua.globals().get("perf")?;
+    let list = |lua: &Lua, live: &std::collections::HashMap<String, crate::mesh_api::Made>| -> mlua::Result<Table> {
+        let mut all: Vec<(&String, &crate::mesh_api::Made)> = live.iter().collect();
+        all.sort_by(|a, b| b.1.bytes.cmp(&a.1.bytes).then_with(|| a.0.cmp(b.0)));
+        let out = lua.create_table()?;
+        for (i, (name, m)) in all.into_iter().enumerate() {
+            let row = lua.create_table()?;
+            row.set("name", name.as_str())?;
+            row.set("script", m.script.as_str())?;
+            row.set("bytes", m.bytes)?;
+            out.set(i + 1, row)?;
+        }
+        Ok(out)
+    };
+    let (m, t) = (meshes.clone(), textures.clone());
+    perf.set(
+        "resources",
+        lua.create_function(move |lua, ()| {
+            let out = lua.create_table()?;
+            out.set("meshes", list(lua, &m.borrow().live)?)?;
+            out.set("textures", list(lua, &t.borrow().live)?)?;
+            Ok(out)
+        })?,
+    )?;
+    // The totals, onto perf.counts() as it already is.
+    let counts: mlua::Function = perf.get("counts")?;
+    perf.set(
+        "counts",
+        lua.create_function(move |_, ()| {
+            let out: Table = counts.call(())?;
+            let sum = |live: &std::collections::HashMap<String, crate::mesh_api::Made>| (live.len(), live.values().map(|m| m.bytes).sum::<u64>());
+            let (mn, mb) = sum(&meshes.borrow().live);
+            let (tn, tb) = sum(&textures.borrow().live);
+            out.set("scriptMeshes", mn)?;
+            out.set("scriptMeshBytes", mb)?;
+            out.set("scriptTextures", tn)?;
+            out.set("scriptTextureBytes", tb)?;
+            Ok(out)
+        })?,
+    )
+}
+
 /// `{ name = ms, … }`.
 fn parts_table(lua: &Lua, parts: &[(&'static str, f32)]) -> mlua::Result<Table> {
     let t = lua.create_table()?;
