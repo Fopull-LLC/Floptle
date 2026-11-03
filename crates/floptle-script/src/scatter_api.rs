@@ -111,6 +111,113 @@ pub(crate) const MARK_KEYS: &[&str] = &["tint", "emissive", "emissiveStrength", 
 /// every query would be a leak.
 const SEEN_CAP: usize = 65_536;
 
+/// One hit of `scatter.near`: how far, the instance (in world space), whether
+/// it is on the ground, and the chunk it came from.
+type Hit = (f64, floptle_core::scatter::Instance, bool, floptle_core::scatter::ChunkKey);
+
+/// `scatter.near{ max = … }` queries still being paged through: the sorted
+/// hits as of the first page and how many have been handed out, by cursor.
+/// A query is made once and read a page a frame; the oldest is dropped past
+/// [`PAGES_KEPT`].
+#[derive(Default)]
+struct Pages {
+    next: u64,
+    kept: Vec<(u64, Paged)>,
+}
+
+/// What a cursor still has to hand out.
+enum Paged {
+    /// Nearest first: every hit, found on the first page, and how many have
+    /// been handed out.
+    Sorted(Vec<Hit>, usize),
+    /// In no particular order (`sort = false`): the chunks not yet rolled,
+    /// and hits rolled but not handed out. Each page rolls only what it
+    /// hands out, so the first costs no more than the rest.
+    Lazy { source: u32, at: glam::DVec3, radius: f64, chunks: Vec<floptle_core::scatter::ChunkKey>, spare: Vec<Hit> },
+}
+
+/// The hits of one chunk within `r` of `pl` (the source's own frame), in
+/// world space, standing where they landed once they have.
+fn chunk_hits(
+    src: &floptle_core::scatter::ScatterSource,
+    key: floptle_core::scatter::ChunkKey,
+    pl: glam::DVec3,
+    r: f64,
+    on_ground: &std::collections::HashMap<(u32, u64), (glam::DVec3, glam::Vec3)>,
+    out: &mut Vec<Hit>,
+) {
+    for mut i in floptle_core::scatter::chunk_instances(src, key) {
+        // Where it stands, once the driver has dropped it onto the ground;
+        // the region's nominal surface until then.
+        let landed = on_ground.get(&(src.id, i.id)).copied();
+        if let Some((pos, up)) = landed {
+            i.pos = pos;
+            i.up = up;
+        }
+        let d = (i.pos - pl).length();
+        if d <= r {
+            i.pos = src.frame.to_world(i.pos);
+            i.up = src.frame.dir_to_world(i.up);
+            out.push((d, i, landed.is_some(), key));
+        }
+    }
+}
+
+/// Remember which chunk each hit came from, for `scatter.instance`.
+fn note_seen(seen: &Seen, source: u32, hits: &[Hit]) {
+    let mut seen = seen.borrow_mut();
+    if seen.len() + hits.len() > SEEN_CAP {
+        seen.clear();
+    }
+    for (_, i, _, key) in hits {
+        seen.insert((source, i.id), *key);
+    }
+}
+
+/// How many paged queries are kept at once.
+const PAGES_KEPT: usize = 16;
+
+/// `scatter.near`'s answer for `hits`: a row a hit, or with `flat` the same
+/// facts as parallel arrays of numbers (`ids`, `x`, `y`, `z`, `distance`,
+/// `scale`, `param`, `yaw`, `settled`, and `count`), which builds no table
+/// or vector a hit.
+fn near_result(lua: &mlua::Lua, hits: &[Hit], flat: bool) -> mlua::Result<mlua::Table> {
+    let out = lua.create_table()?;
+    if flat {
+        // Each array built in one go, not an element at a time.
+        out.set("ids", lua.create_sequence_from(hits.iter().map(|h| h.1.id as f64))?)?;
+        out.set("x", lua.create_sequence_from(hits.iter().map(|h| h.1.pos.x))?)?;
+        out.set("y", lua.create_sequence_from(hits.iter().map(|h| h.1.pos.y))?)?;
+        out.set("z", lua.create_sequence_from(hits.iter().map(|h| h.1.pos.z))?)?;
+        out.set("distance", lua.create_sequence_from(hits.iter().map(|h| h.0))?)?;
+        out.set("scale", lua.create_sequence_from(hits.iter().map(|h| h.1.scale as f64))?)?;
+        out.set("param", lua.create_sequence_from(hits.iter().map(|h| h.1.param as f64))?)?;
+        out.set("yaw", lua.create_sequence_from(hits.iter().map(|h| h.1.yaw as f64))?)?;
+        out.set("settled", lua.create_sequence_from(hits.iter().map(|h| h.2))?)?;
+        out.set("count", hits.len())?;
+        return Ok(out);
+    }
+    for (n, (d, i, landed, _)) in hits.iter().enumerate() {
+        let row = lua.create_table()?;
+        // A plain number: ids are 53 bits, which a Lua number holds
+        // exactly, and a Lua integer here is 32.
+        row.set("id", i.id as f64)?;
+        row.set("distance", *d)?;
+        row.set("pos", crate::math_api::LuaVec3(i.pos))?;
+        row.set("scale", i.scale as f64)?;
+        row.set("param", i.param as f64)?;
+        // How it stands: its up (the ground's normal, when it aligns to
+        // the surface) and its spin about that up, in radians.
+        row.set("up", crate::math_api::LuaVec3(i.up.as_dvec3()))?;
+        row.set("yaw", i.yaw as f64)?;
+        // false: not dropped onto the ground yet (it has not been
+        // near enough a camera), so `pos` is on the region's own surface.
+        row.set("settled", *landed)?;
+        out.set(n + 1, row)?;
+    }
+    Ok(out)
+}
+
 /// The chunk each id `scatter.near` has answered with was rolled in, so
 /// `scatter.instance` can describe a prop that has not settled yet. An id is a
 /// hash and names no chunk of its own.
@@ -140,6 +247,7 @@ pub(crate) fn install_scatter_api(
     use floptle_core::scatter::{Align, Band, Region, ScatterSource};
     let Ok(t) = lua.create_table() else { return };
     let seen = Seen::default();
+    let pages: Rc<RefCell<Pages>> = Rc::default();
 
     // scatter.create{...} → a source id. Every knob has a default so the
     // shortest useful call is `scatter.create{ asset = "tree.glb" }`.
@@ -422,13 +530,21 @@ pub(crate) fn install_scatter_api(
         }
     }
 
-    // scatter.near(sourceId, point, radius) → the instances around a point,
-    // nearest first. What a harvest verb aims with, and what a "is there room
-    // to build here" check reads.
+    // scatter.near(sourceId, point, radius [, { flat, max, after }]) → the
+    // instances around a point, nearest first, and a cursor while there are
+    // more. What a harvest verb aims with, and what a "is there room to build
+    // here" check reads.
+    //
+    // A row a hit, each with two vectors, cost a game 12.5 ms of a 22.7 ms
+    // frame for one query round its base. `flat = true` answers parallel
+    // arrays of numbers instead, and `max` hands out that many and a cursor
+    // to ask for the next with (`after = cursor`), so a big query is spread
+    // over frames. The query is made once, on the first page.
     {
         let s = sources.clone();
         let settled = settled.clone();
         let seen = seen.clone();
+        let pages = pages.clone();
         if let Ok(f) = lua.create_function(move |lua, args: mlua::MultiValue| {
             let a: Vec<Value> = args.into_iter().collect();
             let id = match a.first() {
@@ -450,62 +566,118 @@ pub(crate) fn install_scatter_api(
                 Some(Value::Integer(i)) => *i as f64,
                 _ => 5.0,
             };
-            let out = lua.create_table()?;
+            let call = "scatter.near";
+            let sort = match a.get(3) {
+                Some(Value::Table(o)) => crate::opts::opt_bool(o, call, "sort")?.unwrap_or(true),
+                _ => true,
+            };
+            let (flat, max, after) = match a.get(3) {
+                None | Some(Value::Nil) => (false, None, None),
+                Some(Value::Table(o)) => {
+                    crate::opts::check_keys(o, &["flat", "max", "after", "sort"], call)?;
+                    (
+                        crate::opts::opt_bool(o, call, "flat")?.unwrap_or(false),
+                        crate::opts::opt_num(o, call, "max", 1.0, 1e9)?.map(|v| v as usize),
+                        crate::opts::opt_num(o, call, "after", 1.0, 1e15)?.map(|v| v as u64),
+                    )
+                }
+                Some(other) => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "scatter.near: the fourth argument is an options table, not a {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            // The next page of a query already made.
+            if let Some(cursor) = after {
+                let mut pg = pages.borrow_mut();
+                let Some(at) = pg.kept.iter().position(|(c, _)| *c == cursor) else {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "scatter.near: cursor {cursor} is not one still being paged (it was finished, or more \
+                         than {PAGES_KEPT} queries were paged since); ask again without `after`"
+                    )));
+                };
+                let (out, more) = match &mut pg.kept[at].1 {
+                    Paged::Sorted(hits, given) => {
+                        let take = max.unwrap_or(hits.len()).min(hits.len() - *given);
+                        let out = near_result(lua, &hits[*given..*given + take], flat)?;
+                        *given += take;
+                        (out, *given < hits.len())
+                    }
+                    Paged::Lazy { source, at: pl, radius, chunks, spare } => {
+                        let want = max.unwrap_or(usize::MAX);
+                        let vols = s.borrow();
+                        if let Some(src) = vols.iter().find(|v| v.id == *source) {
+                            let on_ground = settled.borrow();
+                            while spare.len() < want {
+                                let Some(key) = chunks.pop() else { break };
+                                chunk_hits(src, key, *pl, *radius, &on_ground, spare);
+                            }
+                        } else {
+                            chunks.clear();
+                        }
+                        let take = want.min(spare.len());
+                        let page: Vec<Hit> = spare.drain(..take).collect();
+                        note_seen(&seen, *source, &page);
+                        (near_result(lua, &page, flat)?, !(chunks.is_empty() && spare.is_empty()))
+                    }
+                };
+                if !more {
+                    pg.kept.remove(at);
+                }
+                return Ok((out, if more { Value::Number(cursor as f64) } else { Value::Nil }));
+            }
             let vols = s.borrow();
-            let Some(src) = vols.iter().find(|s| s.id == id) else { return Ok(out) };
+            let Some(src) = vols.iter().find(|s| s.id == id) else { return Ok((near_result(lua, &[], flat)?, Value::Nil)) };
             // The caller asks in world space; the region lives in its anchor's
             // frame. Convert once, query locally, and hand back
             // world positions — a game should never have to know the difference.
             let pl = src.frame.to_local(p);
             let on_ground = settled.borrow();
-            let mut found: Vec<(f64, floptle_core::scatter::Instance, bool, floptle_core::scatter::ChunkKey)> =
-                Vec::new();
-            for key in floptle_core::scatter::chunks_under(src, pl, r) {
-                for mut i in floptle_core::scatter::chunk_instances(src, key) {
-                    // Where it stands, once the driver has dropped it onto
-                    // the ground; the region's nominal surface until then.
-                    let landed = on_ground.get(&(src.id, i.id)).copied();
-                    if let Some((pos, up)) = landed {
-                        i.pos = pos;
-                        i.up = up;
-                    }
-                    let d = (i.pos - pl).length();
-                    if d <= r {
-                        i.pos = src.frame.to_world(i.pos);
-                        i.up = src.frame.dir_to_world(i.up);
-                        found.push((d, i, landed.is_some(), key));
-                    }
+            let mut chunks = floptle_core::scatter::chunks_under(src, pl, r);
+            let mut found: Vec<Hit> = Vec::new();
+            if let (false, Some(max)) = (sort, max) {
+                // In no order, a page at a time: roll only what this page
+                // hands out, and keep the rest of the chunks for the cursor.
+                while found.len() < max {
+                    let Some(key) = chunks.pop() else { break };
+                    chunk_hits(src, key, pl, r, &on_ground, &mut found);
                 }
-            }
-            found.sort_by(|a, b| a.0.total_cmp(&b.0));
-            {
-                let mut seen = seen.borrow_mut();
-                if seen.len() + found.len() > SEEN_CAP {
-                    seen.clear();
+                let spare = found.split_off(max.min(found.len()));
+                note_seen(&seen, src.id, &found);
+                let out = near_result(lua, &found, flat)?;
+                if chunks.is_empty() && spare.is_empty() {
+                    return Ok((out, Value::Nil));
                 }
-                for (_, i, _, key) in &found {
-                    seen.insert((src.id, i.id), *key);
+                let mut pg = pages.borrow_mut();
+                pg.next += 1;
+                let cursor = pg.next;
+                if pg.kept.len() >= PAGES_KEPT {
+                    pg.kept.remove(0);
                 }
+                pg.kept.push((cursor, Paged::Lazy { source: src.id, at: pl, radius: r, chunks, spare }));
+                return Ok((out, Value::Number(cursor as f64)));
             }
-            for (n, (d, i, landed, _)) in found.iter().enumerate() {
-                let row = lua.create_table()?;
-                // A plain number: ids are 53 bits, which a Lua number holds
-                // exactly, and a Lua integer here is 32.
-                row.set("id", i.id as f64)?;
-                row.set("distance", *d)?;
-                row.set("pos", crate::math_api::LuaVec3(i.pos))?;
-                row.set("scale", i.scale as f64)?;
-                row.set("param", i.param as f64)?;
-                // How it stands: its up (the ground's normal, when it aligns to
-                // the surface) and its spin about that up, in radians.
-                row.set("up", crate::math_api::LuaVec3(i.up.as_dvec3()))?;
-                row.set("yaw", i.yaw as f64)?;
-                // false: not dropped onto the ground yet (it has not been
-                // near enough a camera), so `pos` is on the region's own surface.
-                row.set("settled", *landed)?;
-                out.set(n + 1, row)?;
+            for key in chunks {
+                chunk_hits(src, key, pl, r, &on_ground, &mut found);
             }
-            Ok(out)
+            if sort {
+                found.sort_by(|a, b| a.0.total_cmp(&b.0));
+            }
+            note_seen(&seen, src.id, &found);
+            let Some(max) = max.filter(|m| *m < found.len()) else {
+                return Ok((near_result(lua, &found, flat)?, Value::Nil));
+            };
+            // More than a page: hand out the first and keep the rest.
+            let out = near_result(lua, &found[..max], flat)?;
+            let mut pg = pages.borrow_mut();
+            pg.next += 1;
+            let cursor = pg.next;
+            if pg.kept.len() >= PAGES_KEPT {
+                pg.kept.remove(0);
+            }
+            pg.kept.push((cursor, Paged::Sorted(found, max)));
+            Ok((out, Value::Number(cursor as f64)))
         }) {
             let _ = t.set("near", f);
         }

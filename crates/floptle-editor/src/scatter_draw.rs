@@ -1645,6 +1645,84 @@ mod tests {
         assert!(casts >= frames / SLOW_RAY_EVERY as usize, "the field stopped arriving: {casts} rays");
     }
 
+    /// **`scatter.near` answers a big query flat, or a page at a time.** A row
+    /// a hit, each with two vectors, cost a game 12.5 ms of a 22.7 ms frame.
+    /// `flat = true` holds the same facts as parallel arrays, in the same
+    /// order; `max` pages through the same answer with a cursor, which a
+    /// finished query no longer accepts.
+    #[test]
+    fn scatter_near_answers_flat_and_in_pages() {
+        let dir = std::env::temp_dir().join(format!("floptle_near_flat_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("field.lua"),
+            "function start()\n\
+             \x20 id = scatter.create{ asset = 'a', halfX = 60, halfZ = 60, perChunk = 400, align = 'world' }\n\
+             \x20 local rows = scatter.near(id, vec3(0, 0, 0), 55)\n\
+             \x20 local f = scatter.near(id, vec3(0, 0, 0), 55, { flat = true })\n\
+             \x20 same = f.count == #rows\n\
+             \x20 for i = 1, #rows do\n\
+             \x20   if f.ids[i] ~= rows[i].id or math.abs(f.x[i] - rows[i].pos.x) > 1e-9 or f.distance[i] ~= rows[i].distance then same = false end\n\
+             \x20 end\n\
+             \x20 n = #rows\n\
+             \x20 local paged, cursor, pages = {}, nil, 0\n\
+             \x20 local page\n\
+             \x20 page, cursor = scatter.near(id, vec3(0, 0, 0), 55, { flat = true, max = 10 })\n\
+             \x20 repeat\n\
+             \x20   pages = pages + 1\n\
+             \x20   for i = 1, page.count do paged[#paged + 1] = page.ids[i] end\n\
+             \x20   if cursor then page, cursor = scatter.near(id, vec3(0, 0, 0), 55, { flat = true, max = 10, after = cursor }) else page = nil end\n\
+             \x20 until not page\n\
+             \x20 paged_same = #paged == #rows\n\
+             \x20 for i = 1, #rows do if paged[i] ~= rows[i].id then paged_same = false end end\n\
+             \x20 npages = pages\n\
+             \x20 local p1, c1 = scatter.near(id, vec3(0, 0, 0), 55, { max = 100000 })\n\
+             \x20 whole_no_cursor = c1 == nil and #p1 == #rows\n\
+             \x20 local ok, err = pcall(scatter.near, id, vec3(0, 0, 0), 55, { after = 1 })\n\
+             \x20 stale = (not ok) and tostring(err)\n\
+             \x20 local t = os.clock() for _ = 1, 5 do scatter.near(id, vec3(0, 0, 0), 55) end rows_ms = (os.clock() - t) * 200\n\
+             \x20 t = os.clock() for _ = 1, 5 do scatter.near(id, vec3(0, 0, 0), 55, { flat = true }) end flat_ms = (os.clock() - t) * 200\n\
+             \x20 local all, got, worst, first = {}, 0, 0, 0\n\
+             \x20 for i = 1, #rows do all[rows[i].id] = true end\n\
+             \x20 t = os.clock()\n\
+             \x20 local pg, cur = scatter.near(id, vec3(0, 0, 0), 55, { flat = true, max = 256, sort = false })\n\
+             \x20 first = (os.clock() - t) * 1000\n\
+             \x20 lazy_ok = true\n\
+             \x20 while pg do\n\
+             \x20   for i = 1, pg.count do if not all[pg.ids[i]] then lazy_ok = false end all[pg.ids[i]] = nil got = got + 1 end\n\
+             \x20   if not cur then break end\n\
+             \x20   t = os.clock()\n\
+             \x20   pg, cur = scatter.near(id, vec3(0, 0, 0), 55, { flat = true, max = 256, sort = false, after = cur })\n\
+             \x20   worst = math.max(worst, (os.clock() - t) * 1000)\n\
+             \x20 end\n\
+             \x20 lazy_ok = lazy_ok and got == #rows and next(all) == nil\n\
+             \x20 lazy_first, lazy_worst = first, worst\n\
+             end\n",
+        )
+        .unwrap();
+        let mut world = floptle_core::World::new();
+        let e = world.spawn();
+        world.insert(e, floptle_core::Transform::IDENTITY);
+        world.insert(e, floptle_core::Scripts(vec![floptle_core::ScriptInst::new("field")]));
+        let mut host = floptle_script::ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let env = host.instance_env(e.index(), "field").unwrap();
+        let n: usize = env.get("n").unwrap();
+        assert!(n > 1000, "the field gave only {n} hits");
+        assert!(env.get::<bool>("same").unwrap(), "the flat answer differs from the rows");
+        assert!(env.get::<bool>("paged_same").unwrap(), "the pages did not add up to the whole answer");
+        assert_eq!(env.get::<usize>("npages").unwrap(), n.div_ceil(10));
+        assert!(env.get::<bool>("whole_no_cursor").unwrap(), "a page holding everything still gave a cursor");
+        let stale: String = env.get("stale").unwrap();
+        assert!(stale.contains("cursor") && stale.contains("after"), "{stale}");
+        let (rows_ms, flat_ms): (f64, f64) = (env.get("rows_ms").unwrap(), env.get("flat_ms").unwrap());
+        assert!(env.get::<bool>("lazy_ok").unwrap(), "unsorted pages did not hold every hit exactly once");
+        let (first, worst): (f64, f64) = (env.get("lazy_first").unwrap(), env.get("lazy_worst").unwrap());
+        eprintln!("scatter.near over {n} hits: rows {rows_ms:.2} ms, flat {flat_ms:.2} ms; unsorted pages of 256: first {first:.3} ms, worst {worst:.3} ms");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// **`scatter.near` answers where a prop stands, once it has landed.** It
     /// rolled the region afresh and gave the region's nominal surface, so a
     /// harvest on a hillside aimed metres off the plant. A prop the field has
