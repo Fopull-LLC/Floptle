@@ -83,14 +83,25 @@ impl AnchoredCollider {
     }
 
     /// Can anything inside the box `(lo, hi)` be within `reach` of this
-    /// collider? Conservative: `true` whenever the collider has no box, and a
-    /// hair of slack on top of `reach` so rounding can only ever keep a
-    /// collider, never drop one.
+    /// collider? Judged by its box, or by its bounding sphere where it has
+    /// no box (a box, sphere or capsule collider gives only the sphere), and
+    /// `true` when it has neither; a hair of slack on top of `reach` so
+    /// rounding can only ever keep a collider, never drop one.
+    ///
+    /// Judged by the box alone, every collider with only a sphere was in
+    /// reach of everything: a stage falling over a base of 256 crates and
+    /// walls swept each of its 72 samples against all 256 every tick, 11 ms
+    /// of physics a frame.
     pub(crate) fn may_reach(&self, lo: Vec3, hi: Vec3, reach: f32) -> bool {
-        let Some((clo, chi)) = self.aabb() else { return true };
-        let gap = (clo - hi).max(lo - chi).max(Vec3::ZERO);
         let slack = reach * 1.001 + 1e-3;
-        gap.length_squared() <= slack * slack
+        match (self.aabb(), self.bounds()) {
+            (Some((clo, chi)), _) => {
+                let gap = (clo - hi).max(lo - chi).max(Vec3::ZERO);
+                gap.length_squared() <= slack * slack
+            }
+            (None, Some((c, r))) => (lo - c).max(c - hi).max(Vec3::ZERO).length() <= r + slack,
+            (None, None) => true,
+        }
     }
 
     /// The anchor in the sim frame: where the collider's own origin is now.

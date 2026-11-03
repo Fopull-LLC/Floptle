@@ -113,16 +113,42 @@ const LATTICE_N: usize = CHUNK_U / LATTICE_STRIDE + 1;
 pub(crate) struct Lattice {
     dist: Vec<f32>,
     color: Vec<[u8; 4]>,
+    /// The least and most of `dist`: a stand-in all of whose points are open
+    /// air is answered without a look at them.
+    span: (f32, f32),
 }
 
 impl Lattice {
     fn new(dist: Vec<f32>, color: Vec<[u8; 4]>) -> Self {
-        Lattice { dist, color }
+        let span = dist.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &d| (lo.min(d), hi.max(d)));
+        Lattice { dist, color, span }
     }
 
     #[inline]
     fn at(x: usize, y: usize, z: usize) -> usize {
         (z * LATTICE_N + y) * LATTICE_N + x
+    }
+
+    /// Whether every voxel from `lo` to `hi` (the chunk's own, inclusive)
+    /// reads between `min` and `max`: the points their reads blend, and a
+    /// blend of values in a range stays in it.
+    fn fills_within(&self, lo: [usize; 3], hi: [usize; 3], min: f32, max: f32) -> bool {
+        if self.span.0 >= min && self.span.1 <= max {
+            return true;
+        }
+        let g = |v: usize| v / LATTICE_STRIDE;
+        let top = |v: usize| (v / LATTICE_STRIDE + 1).min(LATTICE_N - 1);
+        for z in g(lo[2])..=top(hi[2]) {
+            for y in g(lo[1])..=top(hi[1]) {
+                for x in g(lo[0])..=top(hi[0]) {
+                    let d = self.dist[Self::at(x, y, z)];
+                    if !(d >= min && d <= max) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
     }
 
     /// The distance at voxel `li` of the chunk, trilinear between the points.
@@ -1007,9 +1033,10 @@ impl ChunkField {
     /// Judged from what the chunks store: an absent chunk is open air, a
     /// uniform one is its value, and a stored one answers by its blocks, one
     /// holding a single value by that value and one holding varied values by
-    /// the voxels the box covers. A coarse stand-in for an evicted chunk says
-    /// no. So `false` means "cannot tell", never "solid", and a box wider than
-    /// a few chunks is not asked about.
+    /// the voxels the box covers. A coarse stand-in for an evicted chunk is
+    /// open air when every one of its points is. So `false` means "cannot
+    /// tell", never "solid", and a box wider than a few chunks is not asked
+    /// about.
     ///
     /// Why the values must be at most twice the band: `d` blends neighbours,
     /// and a blend of two values that close is never rounded below the
@@ -1033,7 +1060,19 @@ impl ChunkField {
                     let ok = match self.chunks.get(&[cx, cy, cz]) {
                         None => true,
                         Some(Chunk::Uniform(v)) => *v >= band && *v <= 2.0 * band,
-                        Some(Chunk::Lattice(_)) => false,
+                        // A stand-in reads blends of its points, so one whose
+                        // points all lie in the range reads only open air.
+                        // Ground no one is near is put away like this, and a
+                        // craft falling over it was told nothing about it.
+                        Some(Chunk::Lattice(l)) => {
+                            let at = [cx, cy, cz];
+                            let span = |k: usize| {
+                                let base = at[k] * CHUNK;
+                                ((lo[k].max(base) - base) as usize, (hi[k].min(base + CHUNK - 1) - base) as usize)
+                            };
+                            let (x, y, z) = (span(0), span(1), span(2));
+                            l.fills_within([x.0, y.0, z.0], [x.1, y.1, z.1], band, 2.0 * band)
+                        }
                         Some(Chunk::Data(d)) => {
                             let at = [cx, cy, cz];
                             let span = |k: usize| {

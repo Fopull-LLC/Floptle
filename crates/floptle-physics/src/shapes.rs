@@ -1737,12 +1737,20 @@ impl CollisionShape for ChunkTerrain {
     /// answers the field there, the band or more, and never asks a triangle:
     /// see [`floptle_field::ChunkField::open_air_in_box`]. So the box is
     /// clear of anything up to the band.
+    ///
+    /// Further than the band, the box is grown by the rest: when everything
+    /// within `r - band` of the box is open air, every point of that is at
+    /// least a band from the surface, so every point of the box is at least
+    /// `r` from it. Answered only up to the band, a fuel tank's samples were
+    /// too wide to be cleared at all, and a craft of tanks swept the terrain
+    /// below it every tick however high it flew.
     fn clear_of(&self, lo: Vec3, hi: Vec3, r: f32) -> bool {
         let scale = self.scale.max(1e-6);
-        #[allow(clippy::neg_cmp_op_on_partial_ord)]
-        if !(r <= self.field.band() * scale) {
+        let band = self.field.band() * scale;
+        if r.is_nan() {
             return false;
         }
+        let (lo, hi) = if r > band { (lo - Vec3::splat(r - band), hi + Vec3::splat(r - band)) } else { (lo, hi) };
         // The box in the field's frame, grown by a rounding allowance: a
         // point inside the world box must land inside this one however
         // `to_local` rounds it.

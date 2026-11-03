@@ -1563,6 +1563,47 @@ mod tests {
         assert!(evicted.len() + dug.len() >= coords.len() - 2);
     }
 
+    /// **Ground put away still says where it is open air.** A craft falling
+    /// over ground no one is near is cleared of it by asking whether the box
+    /// it sweeps is open air, and a stand-in always said it could not tell:
+    /// a stage dropped over a big world swept the terrain every tick. A
+    /// stand-in whose points are all open air says so now, and every one that
+    /// does is open air in the world it stands in for.
+    #[test]
+    fn ground_put_away_still_says_where_it_is_open_air() {
+        let spec = PlanetFill { seed: 25, radius: 90.0, voxel: 1.5, relief: 8.0, cave_depth: 0.0, ..PlanetFill::default() };
+        let mut f = generate_planet(&spec);
+        f.set_spec("test".into());
+        let whole = f.clone();
+        let coords = f.chunk_coords();
+        assert!(!f.evict(&coords).is_empty());
+        let side = crate::CHUNK as f32 * spec.voxel;
+        let band = f.band();
+        let (mut open, mut put_away) = (0, 0);
+        // Boxes of a quarter of a chunk across, all through every chunk put
+        // away: those over the ground are open air, those at it are not.
+        let q = side / 4.0;
+        for c in coords.iter().filter(|c| f.is_evicted(**c)) {
+            for k in 0..64 {
+                put_away += 1;
+                let corner = Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32) * side
+                    + Vec3::new((k % 4) as f32, ((k / 4) % 4) as f32, (k / 16) as f32) * q;
+                let (lo, hi) = (corner + Vec3::splat(0.1), corner + Vec3::splat(q - 0.1));
+                if !f.open_air_in_box(lo, hi) {
+                    continue;
+                }
+                open += 1;
+                for j in 0..27 {
+                    let t = Vec3::new((j % 3) as f32, ((j / 3) % 3) as f32, (j / 9) as f32) / 2.0;
+                    let p = lo + (hi - lo) * t;
+                    assert!(f.d(p) >= band - 1e-4, "a box in {c:?} said open air, but its stand-in reads {} at {p:?}", f.d(p));
+                    assert!(whole.d(p) >= band - 1.5 * spec.voxel, "a box in {c:?} said open air, but the world reads {} at {p:?}", whole.d(p));
+                }
+            }
+        }
+        assert!(open > put_away / 8, "only {open} of {put_away} boxes over ground put away said they were open air");
+    }
+
     /// **From afar, a world put away is the world.** A ray from orbit meets the
     /// stand-ins near the ground (a lattice point every four voxels, of
     /// distances that stop four voxels from the surface: within a voxel at the
