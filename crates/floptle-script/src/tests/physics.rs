@@ -873,6 +873,49 @@ fn terrain_edits_reach_the_engine_in_order_with_their_normal() {
 }
 
 
+/// **A brush table reaches the edit.** `terrain.paint`, `terrain.dig` and
+/// `terrain.sculpt` take `{ hardness, falloff }`; a name left out keeps the
+/// soft default's, a call with no table is the soft default, and a falloff
+/// that is no falloff is refused by name.
+#[test]
+fn a_brush_table_reaches_the_terrain_edit() {
+    let dir = std::env::temp_dir().join(format!("floptle-ops-brush-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "brush",
+        "local done = false\n\
+         function update(node, dt)\n  \
+           if done then return end\n  \
+           done = true\n  \
+           terrain.paint(0, 0, 0, 3, 1, 0, 0, 1, { hardness = 1, falloff = \"linear\" })\n  \
+           terrain.dig(1, 0, 0, 2, 1, { falloff = \"sharp\" })\n  \
+           terrain.sculpt(2, 0, 0, 2, 1, \"smooth\", { hardness = 0.8 })\n  \
+           terrain.paint(3, 0, 0, 3, 1, 0, 0)\n  \
+           local ok, err = pcall(terrain.paint, 0, 0, 0, 3, 1, 0, 0, 1, { falloff = \"crisp\" })\n  \
+           log(ok and \"accepted\" or tostring(err))\n\
+         end\n",
+    );
+    let (mut world, _) = world_with_script("brush");
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 0.1, 0.1);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+    assert!(said.iter().any(|m| m.contains("falloff") && m.contains("linear")), "a bad falloff names the ones there are: {said:?}");
+    use floptle_field::{BrushProfile as B, Falloff as F};
+    let d = B::default();
+    let brushes: Vec<Option<B>> = host.take_terrain_ops().into_iter().map(|o| o.brush).collect();
+    assert_eq!(
+        brushes,
+        vec![
+            Some(B { hardness: 1.0, falloff: F::Linear }),
+            Some(B { hardness: d.hardness, falloff: F::Sharp }),
+            Some(B { hardness: 0.8, falloff: d.falloff }),
+            None,
+        ]
+    );
+}
+
 /// **Many rays in one call answer what one call each would.** A hit
 /// table where `raycast` gives one, `false` where it gives nil, in order, and
 /// `perf.counts().rays` counts every ray of both.

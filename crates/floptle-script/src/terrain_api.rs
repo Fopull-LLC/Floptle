@@ -34,6 +34,9 @@ pub struct TerrainOp {
     /// `flatten`'s plane normal in world space, when the script chose one.
     /// `None` lets the engine decide: the radial up on a planet, `+Y` otherwise.
     pub normal: Option<[f64; 3]>,
+    /// How the brush falls off from its middle to its rim, when the script
+    /// chose (`{ hardness, falloff }`); `None` is the soft default.
+    pub brush: Option<floptle_field::BrushProfile>,
 }
 
 impl TerrainOp {
@@ -279,7 +282,39 @@ pub enum LodAnchor {
 /// `terrain.capacity()` is the room left, for a game pacing a big batch.
 const MAX_RADIUS: f32 = 64.0;
 /// What `terrain.sculpt`'s options table reads.
-pub(crate) const SCULPT_KEYS: &[&str] = &["normal"];
+pub(crate) const SCULPT_KEYS: &[&str] = &["normal", "hardness", "falloff"];
+
+/// The keys a brush table takes: `terrain.dig` and `terrain.paint`'s last
+/// argument, and part of `terrain.sculpt`'s options.
+pub(crate) const BRUSH_KEYS: &[&str] = &["hardness", "falloff"];
+
+/// The falloffs a brush table names, by `floptle_field::Falloff`.
+const FALLOFFS: &[&str] = &["smooth", "linear", "sharp", "soft"];
+
+/// The brush an options table asks for, if it names either key: how hard the
+/// middle is (0..1, the share of the radius at full strength) and how the
+/// rest falls to the rim. Unnamed keys keep the soft default's.
+fn brush_of(o: &Table, call: &str) -> mlua::Result<Option<floptle_field::BrushProfile>> {
+    let hardness = crate::opts::opt_num(o, call, "hardness", 0.0, 1.0)?;
+    let falloff = match crate::opts::opt_str(o, call, "falloff")? {
+        Some(f) => Some(crate::opts::parse_enum(call, "falloff", &f, FALLOFFS, |s| match s {
+            "smooth" => Some(floptle_field::Falloff::Smooth),
+            "linear" => Some(floptle_field::Falloff::Linear),
+            "sharp" => Some(floptle_field::Falloff::Sharp),
+            "soft" => Some(floptle_field::Falloff::Soft),
+            _ => None,
+        })?),
+        None => None,
+    };
+    if hardness.is_none() && falloff.is_none() {
+        return Ok(None);
+    }
+    let d = floptle_field::BrushProfile::default();
+    Ok(Some(floptle_field::BrushProfile {
+        hardness: hardness.map_or(d.hardness, |h| h as f32),
+        falloff: falloff.unwrap_or(d.falloff),
+    }))
+}
 pub const MAX_PENDING_OPS: usize = 4096;
 /// The milliseconds of script terrain edits landed a frame unless a game sets
 /// another with `terrain.editBudget`.
@@ -756,9 +791,10 @@ pub(crate) fn install_terrain_api(
         let push = push.clone();
         type Args = (f64, f64, f64, f64, Option<f64>, Option<String>, Option<Table>);
         if let Ok(f) = lua.create_function(move |_, (x, y, z, radius, strength, mode, opts): Args| {
-            let mut normal = None;
+            let (mut normal, mut brush) = (None, None);
             if let Some(o) = &opts {
                 crate::opts::check_keys(o, SCULPT_KEYS, "terrain.sculpt")?;
+                brush = brush_of(o, "terrain.sculpt")?;
                 let v: Value = o.get("normal")?;
                 if !v.is_nil() {
                     let n = crate::math_api::vec3_of(&v)
@@ -788,18 +824,27 @@ pub(crate) fn install_terrain_api(
                 mode,
                 id: 0,
                 normal,
+                brush,
             }))
         }) {
             let _ = t.set("sculpt", f);
         }
     }
 
-    // terrain.dig(x,y,z, radius, strength?) — sugar for sculpt(..., "lower"): the
-    // verb every digging game actually wants.
+    // terrain.dig(x,y,z, radius, strength?, brush?) — sugar for sculpt(...,
+    // "lower"): the verb every digging game actually wants. `brush` is
+    // { hardness, falloff }.
     {
         let push = push.clone();
-        type Args = (f64, f64, f64, f64, Option<f64>);
-        if let Ok(f) = lua.create_function(move |_, (x, y, z, radius, strength): Args| {
+        type Args = (f64, f64, f64, f64, Option<f64>, Option<Table>);
+        if let Ok(f) = lua.create_function(move |_, (x, y, z, radius, strength, opts): Args| {
+            let brush = match &opts {
+                Some(o) => {
+                    crate::opts::check_keys(o, BRUSH_KEYS, "terrain.dig")?;
+                    brush_of(o, "terrain.dig")?
+                }
+                None => None,
+            };
             Ok(push(TerrainOp {
                 pos: [x, y, z],
                 radius: (radius as f32).clamp(0.05, MAX_RADIUS),
@@ -807,20 +852,29 @@ pub(crate) fn install_terrain_api(
                 mode: TerrainOpMode::Lower,
                 id: 0,
                 normal: None,
+                brush,
             }))
         }) {
             let _ = t.set("dig", f);
         }
     }
 
-    // terrain.paint(x,y,z, radius, r,g,b, strength?) — recolor the surface.
-    // Answers the edit's receipt, as sculpt does: 0 when the queue was full and
-    // the edit was refused.
+    // terrain.paint(x,y,z, radius, r,g,b, strength?, brush?) — recolor the
+    // surface; `brush` is { hardness, falloff }, so a seam or a road edge
+    // can be crisp. Answers the edit's receipt, as sculpt does: 0 when the
+    // queue was full and the edit was refused.
     {
         let push = push.clone();
-        type Args = (f64, f64, f64, f64, f64, f64, f64, Option<f64>);
+        type Args = (f64, f64, f64, f64, f64, f64, f64, Option<f64>, Option<Table>);
         if let Ok(f) =
-            lua.create_function(move |_, (x, y, z, radius, r, g, b, strength): Args| {
+            lua.create_function(move |_, (x, y, z, radius, r, g, b, strength, opts): Args| {
+                let brush = match &opts {
+                    Some(o) => {
+                        crate::opts::check_keys(o, BRUSH_KEYS, "terrain.paint")?;
+                        brush_of(o, "terrain.paint")?
+                    }
+                    None => None,
+                };
                 Ok(push(TerrainOp {
                     pos: [x, y, z],
                     radius: (radius as f32).clamp(0.05, MAX_RADIUS),
@@ -828,6 +882,7 @@ pub(crate) fn install_terrain_api(
                     mode: TerrainOpMode::Paint([r as f32, g as f32, b as f32]),
                     id: 0,
                     normal: None,
+                    brush,
                 }))
             })
         {
@@ -848,6 +903,7 @@ pub(crate) fn install_terrain_api(
                 mode: TerrainOpMode::PaintTexture((slot.max(0.0) as u8).min(32)),
                 id: 0,
                 normal: None,
+                brush: None,
             }))
         }) {
             let _ = t.set("paintTexture", f);

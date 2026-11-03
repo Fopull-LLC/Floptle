@@ -649,11 +649,11 @@ struct OpDone {
 /// and for a sculpt what it moved. The one place an op is made, inline or on
 /// a worker, so the two cannot come out different.
 fn make_op(field: &mut floptle_field::ChunkField, op: &floptle_script::TerrainOp, at: &OpTarget) -> (Vec<[i32; 3]>, Option<floptle_field::SculptYield>) {
-    use floptle_field::{Brush, BrushProfile};
+    use floptle_field::Brush;
     use floptle_script::TerrainOpMode as M;
     let OpTarget { local, ts, flat_normal, .. } = *at;
     let r_local = op.radius / ts;
-    let profile = BrushProfile::default();
+    let profile = op.brush.unwrap_or_default();
     match op.mode {
         M::Flatten => (field.flatten_to_plane(local, flat_normal.unwrap_or(Vec3::Y), r_local, op.strength, profile), None),
         M::Raise | M::Lower | M::Smooth => {
@@ -5803,6 +5803,7 @@ mod residency_tests {
                 mode: floptle_script::TerrainOpMode::Lower,
                 id: 0,
                 normal: None,
+                brush: None,
             };
             let t = std::time::Instant::now();
             let mut batch: HashMap<Entity, TerrainBatch> = HashMap::new();
@@ -6052,6 +6053,7 @@ mod residency_tests {
             mode: floptle_script::TerrainOpMode::PaintTexture(7),
             id: 0,
             normal: None,
+            brush: None,
         }]);
         assert_eq!(ed.terrains[&e].field.slot_at(at), Some(7), "the paint did not reach the field");
         assert_eq!(slot(&mut ed), Some(7), "the collider's copy, which slotAt reads, kept the slot from before");
@@ -6099,6 +6101,7 @@ mod residency_tests {
                     mode: floptle_script::TerrainOpMode::Lower,
                     id: 0,
                     normal: None,
+                    brush: None,
                 }]);
             }
             ed.player_frame(false);
@@ -6147,6 +6150,7 @@ mod residency_tests {
             mode: floptle_script::TerrainOpMode::Lower,
             id: 0,
             normal: None,
+            brush: None,
         };
         ed.apply_script_terrain_ops(vec![dig]);
         assert_eq!(ed.terrain_op_queue.len(), 1, "the dig went into the world about to be replaced");
@@ -6417,6 +6421,7 @@ mod residency_tests {
                     mode: floptle_script::TerrainOpMode::Flatten,
                     id: 0,
                     normal: None,
+                    brush: None,
                 }
             })
             .collect();
@@ -6784,6 +6789,7 @@ mod residency_tests {
             mode: floptle_script::TerrainOpMode::Flatten,
             id: 0,
             normal: None,
+            brush: None,
         };
         let mut ops = vec![flatten(ground + Vec3::Y * 3.0, 20.0)];
         ops.extend((0..6).map(|i| flatten(ground + Vec3::new(i as f32 * 2.0, 1.0, 0.0), 3.0)));
@@ -6872,6 +6878,41 @@ mod residency_tests {
         }
     }
 
+    /// **A paint can be crisp.** Colour paint was always the soft brush, so a
+    /// radius-3 dab on coarse voxels showed as a smudge a third of its size.
+    /// A script's brush reaches the paint: over a slab, a hard linear brush
+    /// colours ground four fifths of the way out that the soft default leaves
+    /// as it was, and with no brush named the paint is as soft as before.
+    #[test]
+    fn a_paint_takes_the_brush_a_script_names() {
+        let slab = || {
+            let mut f = floptle_field::ChunkField::new(0.5);
+            f.fill_slab(Vec3::new(-10.0, -4.0, -10.0), Vec3::new(10.0, 0.0, 10.0), 0.0, [0.5, 0.5, 0.5]);
+            f
+        };
+        let at = OpTarget { e: floptle_core::World::default().spawn(), local: Vec3::ZERO, ts: 1.0, flat_normal: None };
+        let painted = |brush: Option<floptle_field::BrushProfile>| {
+            let mut f = slab();
+            let op = floptle_script::TerrainOp {
+                pos: [0.0; 3],
+                radius: 3.0,
+                strength: 1.0,
+                mode: floptle_script::TerrainOpMode::Paint([1.0, 0.0, 0.0]),
+                id: 0,
+                normal: None,
+                brush,
+            };
+            make_op(&mut f, &op, &at);
+            // How red the surface is four fifths of the way to the rim.
+            f.color(Vec3::new(2.4, -0.25, 0.0))[0]
+        };
+        let soft = painted(None);
+        let hard = painted(Some(floptle_field::BrushProfile { hardness: 1.0, falloff: floptle_field::Falloff::Linear }));
+        let untouched = (0.5f32 * 255.0).round() as u8;
+        assert!(hard >= 250, "a hard brush left the ground {hard} of 255 red 0.8 of the way out");
+        assert!(soft < 200 && soft >= untouched.saturating_sub(2), "the default brush is no longer the soft one: {soft}");
+    }
+
     fn flatten_op(p: Vec3, radius: f32) -> floptle_script::TerrainOp {
         floptle_script::TerrainOp {
             pos: [p.x as f64, p.y as f64, p.z as f64],
@@ -6880,6 +6921,7 @@ mod residency_tests {
             mode: floptle_script::TerrainOpMode::Flatten,
             id: 0,
             normal: None,
+            brush: None,
         }
     }
 
@@ -7043,6 +7085,7 @@ mod residency_tests {
             mode: floptle_script::TerrainOpMode::Paint([0.9, 0.1, 0.1]),
             id: 0,
             normal: None,
+            brush: None,
         };
         frames_to_land(&mut ed, vec![paint]);
         let made = ed.terrains[&e].field.pending_in_box(side - reach, side + reach);
@@ -7073,7 +7116,7 @@ mod residency_tests {
                 let (a, r) = (i as f32 * 2.399, (i % 40) as f32 * 5.0);
                 let p = ground + Vec3::new(a.cos() * r, 0.5, a.sin() * r);
                 let mode = match i % 3 { 0 => floptle_script::TerrainOpMode::Flatten, 1 => floptle_script::TerrainOpMode::Lower, _ => floptle_script::TerrainOpMode::Raise };
-                floptle_script::TerrainOp { pos: [p.x as f64, p.y as f64, p.z as f64], radius: 1.5, strength: 0.6, mode, id: i as u64 + 1, normal: None }
+                floptle_script::TerrainOp { pos: [p.x as f64, p.y as f64, p.z as f64], radius: 1.5, strength: 0.6, mode, id: i as u64 + 1, normal: None, brush: None }
             })
             .collect();
         let (mut ed, e) = editor_on(&field);
@@ -7360,6 +7403,7 @@ mod edited_point_tests {
             mode: floptle_script::TerrainOpMode::Flatten,
             id: 0,
             normal: None,
+            brush: None,
         };
         let at = OpTarget { e: planet, local: local.0, ts: local.1, flat_normal: None };
         assert!((edited_point_now(&world, &op, Some(&at)) - named).length() < 1e-3, "an edit that lands at once is where it was made");

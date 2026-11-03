@@ -2963,7 +2963,7 @@ terrain.detail() → the scale terrain.setDetail last set (1 when it has not bee
 
 ### `terrain.dig`
 
-terrain.dig(x,y,z, radius [, strength]) — carve a hole: sugar for terrain.sculpt(..., "lower"). Pair with raycast(...) to dig where the player aims.
+terrain.dig(x,y,z, radius [, strength [, brush]]) — carve a hole: sugar for terrain.sculpt(..., "lower"). Pair with raycast(...) to dig where the player aims. A brush table { hardness = 0..1, falloff = "smooth" | "linear" | "sharp" | "soft" } sets how the brush falls off: hardness is the share of the radius at full strength, falloff the ramp from there to the rim; the default is 0.35, "smooth", the soft brush every call had, and a name left out keeps the default's. hardness = 1 with "linear" fills the whole ball, as paintTexture does.
 
 ```lua
 if input.clicked("left") then
@@ -2998,7 +2998,7 @@ terrain.lodAnchor(node | vec3 | nil) — what terrain detail, the far-planet imp
 
 ### `terrain.paint`
 
-terrain.paint(x,y,z, radius, r,g,b [, strength]) → receipt — recolor the terrain surface inside the brush ball (0..1 colors). Answers the edit's id, as sculpt does, or 0 when the queue was full and the edit was refused (see terrain.capacity).
+terrain.paint(x,y,z, radius, r,g,b [, strength [, brush]]) → receipt — recolor the terrain surface inside the brush ball (0..1 colors). Answers the edit's id, as sculpt does, or 0 when the queue was full and the edit was refused (see terrain.capacity). A brush table { hardness = 0..1, falloff = "smooth" | "linear" | "sharp" | "soft" } sets how the brush falls off: hardness is the share of the radius at full strength, falloff the ramp from there to the rim; the default is 0.35, "smooth", the soft brush every call had, and a name left out keeps the default's. hardness = 1 with "linear" fills the whole ball, as paintTexture does. A crisp ore seam or road edge on coarse voxels wants { hardness = 1 }.
 
 ### `terrain.paintTexture`
 
@@ -3038,7 +3038,7 @@ terrain.saveDir(path) / terrain.saveDir() — set (or read) the game's SAVE-SLOT
 
 ### `terrain.sculpt`
 
-terrain.sculpt(x,y,z, radius [, strength [, mode [, opts]]]) — sculpt the nearest terrain at a world point, landing the same tick while the frame's few milliseconds of edits allow (collision updates with the surface). mode: "raise" (default), "lower"/"dig", "smooth", "flatten"; strength 0..1. "flatten" levels to the terrain's up, or on a planet to the radial up at the point, over a disc in that plane; opts = { normal = vec3 } names another plane (world space). Edits land a few milliseconds' worth a frame, in order, each whole before the next, and each where it was aimed when it was made, on a planet that moves on its rails too; terrain.pending() counts the ones still to land. No-op when no terrain surface is near the point. Refuses: an unknown opts key, a zero normal. Multiplayer: run on the server + mirror by RPC (deterministic ops).
+terrain.sculpt(x,y,z, radius [, strength [, mode [, opts]]]) — sculpt the nearest terrain at a world point, landing the same tick while the frame's few milliseconds of edits allow (collision updates with the surface). mode: "raise" (default), "lower"/"dig", "smooth", "flatten"; strength 0..1. "flatten" levels to the terrain's up, or on a planet to the radial up at the point, over a disc in that plane; opts = { normal = vec3 } names another plane (world space). Edits land a few milliseconds' worth a frame, in order, each whole before the next, and each where it was aimed when it was made, on a planet that moves on its rails too; terrain.pending() counts the ones still to land. No-op when no terrain surface is near the point. opts also takes the brush: { hardness = 0..1, falloff = "smooth" | "linear" | "sharp" | "soft" } (default 0.35, "smooth"; see terrain.paint). Refuses: an unknown opts key, a zero normal, a falloff that is none of those. Multiplayer: run on the server + mirror by RPC (deterministic ops).
 
 ### `terrain.setBudget`
 

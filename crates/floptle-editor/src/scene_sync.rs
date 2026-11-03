@@ -723,7 +723,7 @@ mod shadow_atlas_tests {
             .map(|i| {
                 let (ang, r) = (i as f32 * 2.399, 1.0 + (i % 20) as f32 * 0.4);
                 let p = if i % 2 == 0 { a } else { b } + Vec3::new(ang.cos() * r, 0.0, ang.sin() * r);
-                floptle_script::TerrainOp { pos: [p.x as f64, p.y as f64, p.z as f64], radius: 2.0, strength: 0.6, mode: floptle_script::TerrainOpMode::Flatten, id: 0, normal: None }
+                floptle_script::TerrainOp { pos: [p.x as f64, p.y as f64, p.z as f64], radius: 2.0, strength: 0.6, mode: floptle_script::TerrainOpMode::Flatten, id: 0, normal: None, brush: None }
             })
             .collect();
         let mut first = Some(ops);
@@ -916,7 +916,7 @@ mod shadow_atlas_tests {
             .map(|i| {
                 let p = top + Vec3::new(-24.0 + i as f32 * 0.4, if i % 2 == 0 { 0.0 } else { 6.0 }, (i % 2) as f32 * 10.0);
                 let mode = if i % 2 == 0 { floptle_script::TerrainOpMode::Lower } else { floptle_script::TerrainOpMode::Raise };
-                floptle_script::TerrainOp { pos: [p.x as f64, p.y as f64, p.z as f64], radius: 3.0, strength: 1.0, mode, id: 0, normal: None }
+                floptle_script::TerrainOp { pos: [p.x as f64, p.y as f64, p.z as f64], radius: 3.0, strength: 1.0, mode, id: 0, normal: None, brush: None }
             })
             .collect();
         let mut first = Some(ops);

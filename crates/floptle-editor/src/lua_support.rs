@@ -2004,7 +2004,7 @@ terrain = {}
 ---@param radius number
 ---@param strength? number
 ---@param mode? string
----@param opts? {normal?: vec3}
+---@param opts? {normal?: vec3, hardness?: number, falloff?: \"smooth\"|\"linear\"|\"sharp\"|\"soft\"}
 ---@return number id an id for the yield report this edit will produce
 function terrain.sculpt(x, y, z, radius, strength, mode, opts) end
 ---Dig a hole — sugar for `terrain.sculpt(x, y, z, radius, strength, \"lower\")`.
@@ -2013,8 +2013,9 @@ function terrain.sculpt(x, y, z, radius, strength, mode, opts) end
 ---@param z number
 ---@param radius number
 ---@param strength? number
+---@param brush? {hardness?: number, falloff?: \"smooth\"|\"linear\"|\"sharp\"|\"soft\"}
 ---@return number id an id for the yield report this edit will produce
-function terrain.dig(x, y, z, radius, strength) end
+function terrain.dig(x, y, z, radius, strength, brush) end
 ---Recolor the terrain surface inside the brush ball (r/g/b are 0..1).
 ---@param x number
 ---@param y number
@@ -2024,8 +2025,9 @@ function terrain.dig(x, y, z, radius, strength) end
 ---@param g number
 ---@param b number
 ---@param strength? number
+---@param brush? {hardness?: number, falloff?: \"smooth\"|\"linear\"|\"sharp\"|\"soft\"}
 ---@return integer receipt The edit's id, or 0 when the queue was full and it was refused.
-function terrain.paint(x, y, z, radius, r, g, b, strength) end
+function terrain.paint(x, y, z, radius, r, g, b, strength, brush) end
 ---Paint a terrain-palette texture slot (1-based, the Terrain tab's palette;
 ---0 clears back to the flat color).
 ---@param x number
