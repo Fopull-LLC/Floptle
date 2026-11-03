@@ -1942,7 +1942,7 @@ impl Sim {
     /// collision blob with it).
     pub fn shift_statics_of(&mut self, eid: u32, delta: DVec3) {
         let origin = self.world.origin;
-        for c in self.world.colliders.iter_mut().filter(|c| c.eid == Some(eid)) {
+        for c in self.world.colliders.iter_mut().chain(self.parked.iter_mut()).filter(|c| c.eid == Some(eid)) {
             let a = c.anchor + delta;
             c.re_anchor(a, origin);
         }
@@ -1955,7 +1955,9 @@ impl Sim {
             return;
         }
         let origin = self.world.origin;
-        for c in &mut self.world.colliders {
+        // Parked ones too: a switched-off room on a moving world is carried
+        // with it, so it comes back where the world is, not where it was.
+        for c in self.world.colliders.iter_mut().chain(self.parked.iter_mut()) {
             if let Some(d) = c.eid.and_then(|e| deltas.get(&e)) {
                 let a = c.anchor + *d;
                 c.re_anchor(a, origin);
@@ -2865,6 +2867,13 @@ impl Sim {
         // A set: a planet's base can be thousands of pieces, each asked about.
         let riders: std::collections::HashSet<u32> = riders.iter().copied().collect();
         self.world.ride(delta, |c| c.eid.is_some_and(|e| riders.contains(&e)));
+        // A switched-off node's colliders ride with it while they are away,
+        // or they come back where the frame was (see `parked`).
+        for c in &mut self.parked {
+            if c.eid.is_some_and(|e| riders.contains(&e)) {
+                c.anchor += delta;
+            }
+        }
     }
 
     /// Re-anchor a tagged collider (an on-rails planet's terrain moved this tick).

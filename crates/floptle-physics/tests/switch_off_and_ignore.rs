@@ -157,3 +157,42 @@ fn ignoring_a_node_with_no_body_changes_nothing_and_says_so() {
     assert!(!sim.ignore_pair(b.index(), plain.index(), None));
     assert!(sim.world.ignored_pairs.is_empty());
 }
+
+/// **A switched-off collider rides its world while it is away.** A floor on
+/// a world moving on its rails, switched off and back on: it comes back where
+/// the world is, carried every way the rails carry it (the sim's frame riding
+/// it, or its owner shifted), not where the world was when it left. Parked,
+/// it was skipped by every carry and came back offset by the world's travel:
+/// a player who stepped outside a lab and back walked through its floor.
+#[test]
+fn a_switched_off_collider_rides_its_world_while_it_is_away() {
+    for ride in [true, false] {
+        let mut ecs = World::default();
+        let floor = ecs.spawn();
+        ecs.insert(floor, Transform::from_translation(DVec3::new(0.0, -1.0, 0.0)));
+        ecs.insert(floor, RigidBody { kind: BodyKind::Box, mode: floptle_core::BodyMode::Static, half_extents: [10.0, 1.0, 10.0], ..Default::default() });
+        let mut sim = build(&ecs, 10.0);
+        let at = |sim: &Sim| sim.world.colliders().iter().find(|c| c.eid == Some(floor.index())).map(|c| c.anchor);
+        let start = at(&sim).expect("the floor's collider");
+        let step = DVec3::new(4.1, 0.6, -4.05);
+        let carry = |sim: &mut Sim| {
+            if ride {
+                sim.ride_frame(step, &[floor.index()]);
+            } else {
+                sim.shift_statics_by(&std::collections::HashMap::from([(floor.index(), step)]));
+            }
+        };
+        carry(&mut sim);
+        ecs.insert(floor, Disabled);
+        assert!(sim.sync_parked_colliders(off(&ecs)));
+        assert_eq!(at(&sim), None, "the fixture: a switched-off floor is out of the world");
+        for _ in 0..3 {
+            carry(&mut sim);
+        }
+        ecs.remove::<Disabled>(floor);
+        assert!(sim.sync_parked_colliders(off(&ecs)));
+        let back = at(&sim).expect("the floor is back");
+        let want = start + step * 4.0;
+        assert!((back - want).length() < 1e-6, "carried by {}: the floor came back at {back:?}, its world is at {want:?}", if ride { "the ride" } else { "a shift" });
+    }
+}
