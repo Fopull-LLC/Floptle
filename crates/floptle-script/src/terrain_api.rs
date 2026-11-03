@@ -284,8 +284,9 @@ const MAX_RADIUS: f32 = 64.0;
 /// What `terrain.sculpt`'s options table reads.
 pub(crate) const SCULPT_KEYS: &[&str] = &["normal", "hardness", "falloff"];
 
-/// The keys a brush table takes: `terrain.dig` and `terrain.paint`'s last
-/// argument, and part of `terrain.sculpt`'s options.
+/// The keys a brush table takes: `terrain.dig`, `terrain.paint` and
+/// `terrain.paintTexture`'s last argument, and part of `terrain.sculpt`'s
+/// options.
 pub(crate) const BRUSH_KEYS: &[&str] = &["hardness", "falloff"];
 
 /// The falloffs a brush table names, by `floptle_field::Falloff`.
@@ -890,12 +891,20 @@ pub(crate) fn install_terrain_api(
         }
     }
 
-    // terrain.paintTexture(x,y,z, radius, slot) — paint a palette texture slot
-    // (1-based, matching the Terrain tab's palette; 0 clears back to flat color).
+    // terrain.paintTexture(x,y,z, radius, slot, brush?) — paint a palette
+    // texture slot (1-based, matching the Terrain tab's palette; 0 clears back
+    // to flat color); `brush` is { hardness, falloff }, as paint takes.
     {
         let push = push.clone();
-        type Args = (f64, f64, f64, f64, f64);
-        if let Ok(f) = lua.create_function(move |_, (x, y, z, radius, slot): Args| {
+        type Args = (f64, f64, f64, f64, f64, Option<Table>);
+        if let Ok(f) = lua.create_function(move |_, (x, y, z, radius, slot, opts): Args| {
+            let brush = match &opts {
+                Some(o) => {
+                    crate::opts::check_keys(o, BRUSH_KEYS, "terrain.paintTexture")?;
+                    brush_of(o, "terrain.paintTexture")?
+                }
+                None => None,
+            };
             Ok(push(TerrainOp {
                 pos: [x, y, z],
                 radius: (radius as f32).clamp(0.05, MAX_RADIUS),
@@ -903,7 +912,7 @@ pub(crate) fn install_terrain_api(
                 mode: TerrainOpMode::PaintTexture((slot.max(0.0) as u8).min(32)),
                 id: 0,
                 normal: None,
-                brush: None,
+                brush,
             }))
         }) {
             let _ = t.set("paintTexture", f);

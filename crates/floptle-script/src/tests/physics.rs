@@ -873,8 +873,8 @@ fn terrain_edits_reach_the_engine_in_order_with_their_normal() {
 }
 
 
-/// **A brush table reaches the edit.** `terrain.paint`, `terrain.dig` and
-/// `terrain.sculpt` take `{ hardness, falloff }`; a name left out keeps the
+/// **A brush table reaches the edit.** `terrain.paint`, `terrain.dig`,
+/// `terrain.sculpt` and `terrain.paintTexture` take `{ hardness, falloff }`; a name left out keeps the
 /// soft default's, a call with no table is the soft default, and a falloff
 /// that is no falloff is refused by name.
 #[test]
@@ -892,6 +892,8 @@ fn a_brush_table_reaches_the_terrain_edit() {
            terrain.dig(1, 0, 0, 2, 1, { falloff = \"sharp\" })\n  \
            terrain.sculpt(2, 0, 0, 2, 1, \"smooth\", { hardness = 0.8 })\n  \
            terrain.paint(3, 0, 0, 3, 1, 0, 0)\n  \
+           terrain.paintTexture(4, 0, 0, 3, 2, { hardness = 0.3, falloff = \"soft\" })\n  \
+           terrain.paintTexture(5, 0, 0, 3, 2)\n  \
            local ok, err = pcall(terrain.paint, 0, 0, 0, 3, 1, 0, 0, 1, { falloff = \"crisp\" })\n  \
            log(ok and \"accepted\" or tostring(err))\n\
          end\n",
@@ -911,6 +913,8 @@ fn a_brush_table_reaches_the_terrain_edit() {
             Some(B { hardness: 1.0, falloff: F::Linear }),
             Some(B { hardness: d.hardness, falloff: F::Sharp }),
             Some(B { hardness: 0.8, falloff: d.falloff }),
+            None,
+            Some(B { hardness: 0.3, falloff: F::Soft }),
             None,
         ]
     );

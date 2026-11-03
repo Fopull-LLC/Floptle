@@ -666,7 +666,11 @@ fn make_op(field: &mut floptle_field::ChunkField, op: &floptle_script::TerrainOp
             (touched, Some(y))
         }
         M::Paint(c) => (field.paint(local, r_local, op.strength, c, profile), None),
-        M::PaintTexture(slot) => (field.paint_texture(local, r_local, slot), None),
+        // No brush is the hard stamp a texture slot always painted.
+        M::PaintTexture(slot) => match op.brush {
+            Some(b) => (field.paint_texture_with(local, r_local, slot, b), None),
+            None => (field.paint_texture(local, r_local, slot), None),
+        },
     }
 }
 

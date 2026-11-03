@@ -3002,7 +3002,7 @@ terrain.paint(x,y,z, radius, r,g,b [, strength [, brush]]) → receipt — recol
 
 ### `terrain.paintTexture`
 
-terrain.paintTexture(x,y,z, radius, slot) → receipt — paint a terrain-palette texture slot (1-based, the Terrain tab's palette; 0 clears to flat color). Answers the edit's id, or 0 when the queue was full and the edit was refused (see terrain.capacity). How wide a slot fades into its neighbours is the palette's, set per slot in the Terrain tab (blend, in metres, and rough); see Blending materials in the planet-generator guide.
+terrain.paintTexture(x,y,z, radius, slot [, brush]) → receipt — paint a terrain-palette texture slot (1-based, the Terrain tab's palette; 0 clears to flat color). With no brush every voxel in the ball takes the slot, a hard edge. A brush table { hardness, falloff } as terrain.paint takes softens it: a voxel holds one slot, so past the hard core each voxel takes it by chance, its chance the brush's weight there, and the edge comes out ragged at the voxel scale instead of stepped; the same dab twice paints the same voxels, so a seam painted along a path fills in where dabs overlap. Answers the edit's id, or 0 when the queue was full and the edit was refused (see terrain.capacity). How wide a slot fades into its neighbours is the palette's, set per slot in the Terrain tab (blend, in metres, and rough); see Blending materials in the planet-generator guide.
 
 ### `terrain.pending`
 

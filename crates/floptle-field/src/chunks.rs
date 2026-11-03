@@ -313,6 +313,16 @@ impl DenseRegion {
     }
 }
 
+/// A voxel's own number in [0, 1), the same every time it is asked: what a
+/// soft texture brush draws against its weight.
+fn voxel_chance(v: [i32; 3]) -> f32 {
+    let mut h = (v[0] as u32).wrapping_mul(0x8da6_b343) ^ (v[1] as u32).wrapping_mul(0xd816_3841) ^ (v[2] as u32).wrapping_mul(0xcb1a_b31f);
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7feb_352d);
+    h ^= h >> 15;
+    (h >> 8) as f32 / (1u32 << 24) as f32
+}
+
 /// Chunk coordinate → the chunk containing global voxel `i`.
 #[inline]
 fn chunk_of(i: [i32; 3]) -> [i32; 3] {
@@ -3044,6 +3054,20 @@ impl ChunkField {
     /// Paint a texture palette `slot` (alpha channel) over near-surface voxels inside
     /// the brush ball. Mirrors the dense [`crate::Terrain::paint_texture`].
     pub fn paint_texture(&mut self, center: Vec3, radius: f32, slot: u8) -> Vec<[i32; 3]> {
+        self.paint_slot(center, radius, slot, None)
+    }
+
+    /// [`paint_texture`](Self::paint_texture) through a brush profile. A voxel
+    /// holds one slot, so a soft rim cannot hold a share of one: past the hard
+    /// core each voxel takes the slot with the profile's weight as its chance,
+    /// drawn from its own position, so the edge is ragged at the voxel scale
+    /// rather than a staircase, the palette's edge blend smooths what is left,
+    /// and the same dab twice paints the same voxels.
+    pub fn paint_texture_with(&mut self, center: Vec3, radius: f32, slot: u8, profile: crate::BrushProfile) -> Vec<[i32; 3]> {
+        self.paint_slot(center, radius, slot, Some(profile))
+    }
+
+    fn paint_slot(&mut self, center: Vec3, radius: f32, slot: u8, profile: Option<crate::BrushProfile>) -> Vec<[i32; 3]> {
         let (lo, hi) = self.voxel_range(center, radius);
         self.realize_voxels(lo, hi);
         let band = self.band();
@@ -3052,7 +3076,13 @@ impl ChunkField {
             for iy in lo[1]..=hi[1] {
                 for ix in lo[0]..=hi[0] {
                     let p = Vec3::new(ix as f32, iy as f32, iz as f32) * self.voxel;
-                    if (p - center).length() > radius {
+                    let dist = (p - center).length();
+                    if dist > radius {
+                        continue;
+                    }
+                    if let Some(profile) = profile
+                        && voxel_chance([ix, iy, iz]) >= profile.weight(dist, radius)
+                    {
                         continue;
                     }
                     // Only near the surface — the band is all anyone can ever see.
@@ -4586,5 +4616,64 @@ mod yield_tests {
         assert_eq!(f.slot_at(hit), Some(3));
         f.paint_texture(hit, 6.0, 7);
         assert_eq!(f.slot_at(hit), Some(7));
+    }
+
+    /// **A soft texture brush has a ragged rim, not a stepped one.** A voxel
+    /// holds one slot, so past the hard core each takes it by chance, its
+    /// chance the brush's weight there: the whole core and about the weight's
+    /// share of the rim are painted, nothing past the radius, and the same
+    /// dab twice paints the same voxels. No brush is the full ball, as ever.
+    #[test]
+    fn a_soft_texture_brush_paints_its_rim_by_weight() {
+        let ground = || {
+            let mut f = ChunkField::new(0.25);
+            f.fill_with(Vec3::splat(-20.0), Vec3::splat(20.0), |p: Vec3| p.y, |_| [0.5, 0.5, 0.5]);
+            f
+        };
+        let (centre, radius) = (Vec3::ZERO, 6.0);
+        let profile = crate::BrushProfile { hardness: 0.4, falloff: crate::Falloff::Linear };
+        // Painted surface voxels by ring: (painted, expected) per band of t.
+        let survey = |f: &ChunkField| {
+            let (lo, hi) = f.voxel_range(centre, radius + 1.0);
+            let (band, mut core, mut core_n, mut rim, mut rim_want, mut outside) = (f.band(), 0, 0, 0, 0.0f32, 0);
+            for iz in lo[2]..=hi[2] {
+                for iy in lo[1]..=hi[1] {
+                    for ix in lo[0]..=hi[0] {
+                        if f.voxel_at([ix, iy, iz]).abs() > band {
+                            continue;
+                        }
+                        let dist = (Vec3::new(ix as f32, iy as f32, iz as f32) * f.voxel() - centre).length();
+                        let painted = f.color_at([ix, iy, iz])[3] == 7;
+                        if dist > radius {
+                            outside += usize::from(painted);
+                        } else if dist / radius <= profile.hardness {
+                            core_n += 1;
+                            core += usize::from(painted);
+                        } else {
+                            rim += usize::from(painted);
+                            rim_want += profile.weight(dist, radius);
+                        }
+                    }
+                }
+            }
+            (core, core_n, rim, rim_want, outside)
+        };
+        let mut soft = ground();
+        soft.paint_texture_with(centre, radius, 7, profile);
+        let (core, core_n, rim, rim_want, outside) = survey(&soft);
+        assert!(core_n > 100, "the fixture: a core of surface voxels: {core_n}");
+        assert_eq!(core, core_n, "every voxel in the hard core takes the slot");
+        assert_eq!(outside, 0, "nothing past the radius");
+        let share = rim as f32 / rim_want;
+        assert!((0.85..1.15).contains(&share), "the rim is painted by weight: {rim} voxels where {rim_want:.0} are due");
+        let mut again = ground();
+        again.paint_texture_with(centre, radius, 7, profile);
+        again.paint_texture_with(centre, radius, 7, profile);
+        assert_eq!(survey(&again), survey(&soft), "the same dab paints the same voxels");
+        let mut hard = ground();
+        hard.paint_texture(centre, radius, 7);
+        let (hcore, _, hrim, _, houtside) = survey(&hard);
+        assert_eq!(houtside, 0);
+        assert!(hcore == core_n && hrim as f32 > rim_want * 1.5, "no brush paints the whole ball: {hrim} rim voxels");
     }
 }
