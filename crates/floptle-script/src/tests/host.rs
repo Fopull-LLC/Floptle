@@ -1816,7 +1816,9 @@ fn a_vec3_component_is_a_field_the_vm_reads() {
 /// it is stale.** `node:children()` builds a handle per child on every call,
 /// so a lookup inside a per-part loop was quadratic. `node:child(id)` answers
 /// the direct child with that id however many there are (counted: a thousand
-/// children cost what ten do, within noise), a number that is no child's id
+/// children cost what ten do, within noise: the best of twenty runs on the
+/// wall clock, as `os.clock` counts every thread's time and the other tests
+/// running beside this one landed in it), a number that is no child's id
 /// is still a name, and `node:childrenGeneration()` stays put across frames
 /// until the list changes, then moves.
 #[test]
@@ -1831,9 +1833,12 @@ fn a_child_by_id_is_one_lookup_and_the_children_generation_marks_changes() {
            local kids = node:children()\n\
            local found = 0\n\
            for i = 1, #kids do if node:child(kids[i].id) and node:child(kids[i].id).id == kids[i].id then found = found + 1 end end\n\
-           local t0 = os.clock()\n\
-           for r = 1, 20 do for i = 1, 10 do node:child(kids[i].id) end end\n\
-           local per = (os.clock() - t0) / 200\n\
+           local per = math.huge\n\
+           for r = 1, 20 do\n\
+             local t0 = app.wallClock()\n\
+             for i = 1, 10 do node:child(kids[i].id) end\n\
+             per = math.min(per, (app.wallClock() - t0) / 10)\n\
+           end\n\
            log(string.format('KIDS %d %d %s %s %d %.9f', #kids, found, tostring(node:child(kids[1].id + 100000)), tostring(node:child('part2') and node:child('part2').name), node:childrenGeneration(), per))\n\
          end\n",
     );

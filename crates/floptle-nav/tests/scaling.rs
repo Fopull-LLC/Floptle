@@ -76,8 +76,15 @@ impl Yardstick {
     /// The line between "grew like its input" and "gained a scan": the
     /// geometric middle of the two references. On a quiet machine that lands at
     /// 8.0, which is exactly where the fixed bound was.
+    ///
+    /// Never below that middle of the two's true growth, 4x and 16x. A busy
+    /// machine can slow the small run as well as the large one: in a
+    /// workspace run the references once measured 2.0x and 8.4x, the line
+    /// fell to 4.1x, and a bake that grew exactly like its input, 4.2x, was
+    /// called a scan. Contention can only make work look worse than its
+    /// growth, never better, so a reading under the true one is noise.
     fn ceiling(&self) -> f64 {
-        (self.linear * self.quadratic).sqrt()
+        (self.linear.max(4.0) * self.quadratic.max(16.0)).sqrt()
     }
 
     #[track_caller]
