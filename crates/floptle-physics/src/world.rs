@@ -2330,10 +2330,20 @@ impl PhysicsWorld {
             hi = hi.max(p).max(p + d);
             reach = reach.max(r);
         }
+        // A collider certainly clear of the whole swept box, by the widest
+        // sample and the skin, cannot be touched by any sample this step,
+        // and is not marched against. A terrain answers that from its chunks
+        // in open air: a craft flying over it marched every sample along
+        // its whole move a band at a time, the distance a terrain reports
+        // in open air, about ten times what the same craft cost with no
+        // terrain under it.
         let cands: Vec<usize> = (0..self.colliders.len())
             .filter(|&i| {
                 let col = &self.colliders[i];
-                (row >> col.layer) & 1 == 1 && !col.sensor && col.may_reach(lo, hi, reach + SKIN)
+                (row >> col.layer) & 1 == 1
+                    && !col.sensor
+                    && col.may_reach(lo, hi, reach + SKIN)
+                    && !col.clear_of(lo, hi, reach + SKIN)
             })
             .collect();
         if cands.is_empty() {

@@ -169,3 +169,56 @@ fn a_box_dropped_on_kinematic_parts_lands_on_them() {
     // The stack's top is at y = 10; the box is 0.4 half-high.
     assert!((y - 10.4).abs() < 0.1, "the box came to rest at y = {y}, not on the stack");
 }
+
+/// Seconds a 5-part craft takes to fly 120 ticks at 600 m/s, `height` metres
+/// over a terrain slab, or with no terrain at all.
+fn fast_craft_cost(terrain: bool, height: f64) -> f64 {
+    let mut field = floptle_field::ChunkField::new(1.5);
+    field.fill_slab(Vec3::new(-200.0, -12.0, -200.0), Vec3::new(200.0, 0.0, 200.0), 0.0, [0.5; 3]);
+    let mut ecs = World::default();
+    let root = ecs.spawn();
+    ecs.insert(root, Transform::from_translation(DVec3::new(0.0, height, 0.0)));
+    ecs.insert(root, RigidBody { assembly: true, ..Default::default() });
+    for k in 0..5 {
+        let p = ecs.spawn();
+        ecs.insert(p, Transform::from_translation(DVec3::new(0.0, height + k as f64 * 1.1, 0.0)));
+        ecs.insert(p, Parent(root));
+        ecs.insert(p, RigidBody { kind: BodyKind::Box, half_extents: [0.5, 0.5, 0.5], mass: 1.0, ..Default::default() });
+    }
+    let terrains: Vec<(DVec3, &floptle_field::ChunkField)> = if terrain { vec![(DVec3::ZERO, &field)] } else { Vec::new() };
+    let mut sim = Sim::build(&ecs, &terrains, GravityField::uniform(Vec3::ZERO), DVec3::ZERO);
+    let mut runs: Vec<f64> = (0..5)
+        .map(|_| {
+            let start = std::time::Instant::now();
+            for _ in 0..120 {
+                // Round and round over the slab, never leaving it.
+                sim.set_compound_velocity(root.index(), Vec3::new(600.0, 0.0, 0.0));
+                sim.step_tick(1.0 / 60.0, None);
+                if sim.compound_of(root.index()).is_some_and(|c| c.pos.x > 150.0) {
+                    sim.shift_compound(root.index(), DVec3::new(-300.0, 0.0, 0.0));
+                }
+            }
+            start.elapsed().as_secs_f64()
+        })
+        .collect();
+    runs.sort_by(f64::total_cmp);
+    runs[2]
+}
+
+/// **A fast craft in open air does not pay for the terrain below it.** Each
+/// tick a fast compound sweeps its samples along their move against what
+/// they could meet, and a terrain answers open air with its band, a few
+/// voxels, so every sample marched its whole move a band at a time: the same
+/// craft cost ten times as much over a terrain as over nothing, at 30 m or
+/// at 300 m, and a game's flown craft and falling stages paid it every tick.
+/// A terrain whose chunks show the swept box is open air is left out of the
+/// sweep now. What is left (about 2.5x) is the contact pass's own terrain
+/// lookups, a field read a sample.
+#[test]
+fn a_fast_craft_in_open_air_does_not_pay_for_the_terrain_below() {
+    for h in [30.0, 300.0] {
+        let (bare, over) = (fast_craft_cost(false, h), fast_craft_cost(true, h));
+        eprintln!("at {h} m: bare {:.3} ms/tick, over terrain {:.3} ms/tick ({:.1}x)", bare * 1e3 / 120.0, over * 1e3 / 120.0, over / bare);
+        assert!(over < bare * 5.0, "{h} m over a terrain the craft cost {:.1}x what it does over nothing", over / bare);
+    }
+}
