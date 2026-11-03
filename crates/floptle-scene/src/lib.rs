@@ -599,6 +599,14 @@ pub struct JointDoc {
     pub max_force: f32,
     pub stiffness: f32,
     pub damping: f32,
+    /// A wheel's suspension in real units (`Joint::spring_rate`); 0, and
+    /// not written, unless set.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub spring_rate: f32,
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub damper_bump: f32,
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub damper_rebound: f32,
     pub break_force: f32,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub collide_connected: bool,
@@ -627,6 +635,9 @@ impl From<&floptle_core::joint::Joint> for JointDoc {
             max_force: j.max_force,
             stiffness: j.stiffness,
             damping: j.damping,
+            spring_rate: j.spring_rate,
+            damper_bump: j.damper_bump,
+            damper_rebound: j.damper_rebound,
             break_force: j.break_force,
             collide_connected: j.collide_connected,
         }
@@ -650,6 +661,9 @@ impl From<&JointDoc> for floptle_core::joint::Joint {
             max_force: d.max_force,
             stiffness: d.stiffness,
             damping: d.damping,
+            spring_rate: d.spring_rate.max(0.0),
+            damper_bump: d.damper_bump.max(0.0),
+            damper_rebound: d.damper_rebound.max(0.0),
             break_force: d.break_force,
             collide_connected: d.collide_connected,
             ..Default::default()

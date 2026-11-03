@@ -7312,6 +7312,25 @@ impl EditorTabViewer<'_> {
                     .on_hover_text("0 bounces for ever, 1 settles without overshooting")
                     .changed();
             }
+            if j.kind == JointKind::Wheel {
+                // Real units: the force a metre of travel and a metre a second
+                // of speed, the frame's mass in it. Any of them set replaces
+                // stiffness and damping above.
+                ui.horizontal_wrapped(|ui| {
+                    changed |= ui
+                        .add(egui::DragValue::new(&mut j.spring_rate).speed(10.0).range(0.0..=1e9).prefix("spring "))
+                        .on_hover_text("the suspension spring in real units: force a metre of travel (newtons, or kilonewtons with masses in tonnes). 0 uses stiffness and damping")
+                        .changed();
+                    changed |= ui
+                        .add(egui::DragValue::new(&mut j.damper_bump).speed(1.0).range(0.0..=1e9).prefix("bump "))
+                        .on_hover_text("the damper compressing: force a metre a second")
+                        .changed();
+                    changed |= ui
+                        .add(egui::DragValue::new(&mut j.damper_rebound).speed(1.0).range(0.0..=1e9).prefix("rebound "))
+                        .on_hover_text("the damper extending: force a metre a second")
+                        .changed();
+                });
+            }
             changed |= ui
                 .add(egui::DragValue::new(&mut j.break_force).speed(1.0).range(0.0..=1e9).prefix("breaks at "))
                 .on_hover_text("the force that breaks the joint; 0 never breaks")

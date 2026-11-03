@@ -1196,12 +1196,18 @@ fn a_rover_on_ice_gains_a_tenth_of_what_it_does_on_rock() {
 
 /// One wheel of [`bike_lead_accel`]: where it sits along the craft, its
 /// suspension axis, spring and damper.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct BikeWheel {
     dx: f64,
     axis: [f32; 3],
     stiffness: f32,
     damping: f32,
+    /// The spring and damper in real units, when set (`Joint::spring_rate`).
+    rate: f32,
+    bump: f32,
+    rebound: f32,
+    /// Bump stops at this much travel either way, when set.
+    stop: Option<f32>,
 }
 
 /// [`lead_driven_accel`] for a bike of any build: a chassis of `mass` whose
@@ -1271,8 +1277,8 @@ fn a_bike_drives_forwards_as_hard_as_in_reverse() {
     let full = 2.0 * 0.257 / 0.33 / (0.365 + 0.06);
     for (fork, arm) in [(24.0f32, 15.0f32), (0.0, 0.0)] {
         let w = [
-            BikeWheel { dx: 1.098, axis: aft(fork), stiffness: 8.18, damping: 0.447 },
-            BikeWheel { dx: -0.471, axis: aft(arm), stiffness: 11.7, damping: 0.447 },
+            BikeWheel { dx: 1.098, axis: aft(fork), stiffness: 8.18, damping: 0.447, ..Default::default() },
+            BikeWheel { dx: -0.471, axis: aft(arm), stiffness: 11.7, damping: 0.447, ..Default::default() },
         ];
         let fwd = bike_lead_accel(&w, 1.0, 0.85, 0.365, 0.513, 0.33, 0.03, 0.257);
         let back = bike_lead_accel(&w, -1.0, 0.85, 0.365, 0.513, 0.33, 0.03, 0.257);
@@ -1305,7 +1311,20 @@ fn bike_drop_with_air(wheels: &[BikeWheel], drop: f64, speed: f32, spin: f32) ->
         let e = ecs.spawn();
         ecs.insert(e, Transform::from_translation(DVec3::new(w.dx, r + drop, 0.0)));
         ecs.insert(e, RigidBody { radius, mass: tyre, friction: 0.9, rotates: true, ..Default::default() });
-        ecs.insert(e, Joint { kind: JointKind::Wheel, other: "Chassis".into(), axis: w.axis, stiffness: w.stiffness, damping: w.damping, ..Default::default() });
+        ecs.insert(
+            e,
+            Joint {
+                kind: JointKind::Wheel,
+                other: "Chassis".into(),
+                axis: w.axis,
+                stiffness: w.stiffness,
+                damping: w.damping,
+                spring_rate: w.rate,
+                damper_bump: w.bump,
+                damper_rebound: w.rebound,
+                ..Default::default()
+            },
+        );
         ids.push(e);
     }
     let mut sim = Sim::build_layered(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO, floptle_core::Layers::default());
@@ -1353,8 +1372,8 @@ fn bike_drop_with_air(wheels: &[BikeWheel], drop: f64, speed: f32, spin: f32) ->
 fn a_wheel_lands_at_speed_without_losing_it() {
     let aft = |deg: f32| [-deg.to_radians().sin(), deg.to_radians().cos(), 0.0];
     let w = [
-        BikeWheel { dx: 1.098, axis: aft(24.0), stiffness: 8.18, damping: 0.447 },
-        BikeWheel { dx: -0.471, axis: aft(15.0), stiffness: 11.7, damping: 0.447 },
+        BikeWheel { dx: 1.098, axis: aft(24.0), stiffness: 8.18, damping: 0.447, ..Default::default() },
+        BikeWheel { dx: -0.471, axis: aft(15.0), stiffness: 11.7, damping: 0.447, ..Default::default() },
     ];
     for speed in [10.0f32, 15.0] {
         let (before, after, _) = bike_drop(&w, 0.5, speed, 1.0);
@@ -1371,4 +1390,125 @@ fn a_wheel_lands_at_speed_without_losing_it() {
     for r in air {
         assert!((r - 10.0).abs() < 0.2, "a free wheel's rim went from 10 to {r} m/s in the air");
     }
+}
+
+/// How a bike of [`bike_drop`]'s build, moving 12 m/s, lands from `drop` m:
+/// the ticks after its first touchdown that a tyre was off the ground, the
+/// most the chassis rose back up, and the seconds until it settled (its
+/// vertical speed under 0.1 m/s from then on, over two seconds).
+fn landing(wheels: &[BikeWheel], drop: f64) -> (usize, f32, f32) {
+    let (off, rebound, settle, _) = landing_travel(wheels, drop);
+    (off, rebound, settle)
+}
+
+/// [`landing`], and the most the suspension of an upright wheel travelled
+/// from where it was hung.
+fn landing_travel(wheels: &[BikeWheel], drop: f64) -> (usize, f32, f32, f32) {
+    let (mass, cg, radius, tyre) = (0.365f32, 0.513f64, 0.33f32, 0.03f32);
+    let mut ecs = World::default();
+    let floor = ecs.spawn();
+    ecs.insert(floor, Transform::from_translation(DVec3::new(0.0, -1.0, 0.0)));
+    ecs.insert(floor, RigidBody { kind: BodyKind::Box, mode: BodyMode::Static, half_extents: [400.0, 1.0, 50.0], friction: 0.9, ..Default::default() });
+    let r = radius as f64;
+    let chassis = segment(&mut ecs, "Chassis", DVec3::new(0.0, r + cg + drop, 0.0), [0.6, 0.1, 0.3], mass);
+    let mut ids = Vec::new();
+    for w in wheels {
+        let e = ecs.spawn();
+        ecs.insert(e, Transform::from_translation(DVec3::new(w.dx, r + drop, 0.0)));
+        ecs.insert(e, RigidBody { radius, mass: tyre, friction: 0.9, rotates: true, ..Default::default() });
+        ecs.insert(
+            e,
+            Joint {
+                kind: JointKind::Wheel,
+                other: "Chassis".into(),
+                axis: w.axis,
+                stiffness: w.stiffness,
+                damping: w.damping,
+                spring_rate: w.rate,
+                damper_bump: w.bump,
+                damper_rebound: w.rebound,
+                limit: w.stop.is_some(),
+                min: -w.stop.unwrap_or(0.0),
+                max: w.stop.unwrap_or(0.0),
+                ..Default::default()
+            },
+        );
+        ids.push(e);
+    }
+    let mut sim = Sim::build_layered(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO, floptle_core::Layers::default());
+    sim.world.single_wheel_friction = true;
+    sim.set_compound_velocity(chassis.index(), Vec3::new(12.0, 0.0, 0.0));
+    for &e in &ids {
+        let mut s = sim.body_snapshot(e.index()).unwrap();
+        s.vel = Vec3::new(12.0, 0.0, 0.0);
+        s.ang_vel = Vec3::new(0.0, 0.0, -12.0 / radius);
+        sim.restore_body(e.index(), &s);
+    }
+    let (mut touched, mut off, mut low, mut high, mut settled, mut travel) = (None, 0, f32::MAX, f32::MIN, 0.0f32, 0.0f32);
+    for k in 0..240 {
+        sim.step_tick(DT, None);
+        let c = sim.compound_of(chassis.index()).unwrap();
+        for e in &ids {
+            // Hung `cg` below the chassis's centre; the chassis barely turns.
+            let hung = c.pos.y - cg as f32;
+            travel = travel.max((sim.body_snapshot(e.index()).unwrap().pos.y as f32 - hung).abs());
+        }
+        let all_down = ids.iter().all(|e| sim.body_snapshot(e.index()).unwrap().grounded);
+        let any_down = ids.iter().any(|e| sim.body_snapshot(e.index()).unwrap().grounded);
+        match touched {
+            None if any_down => touched = Some(k),
+            None => {}
+            Some(t) => {
+                if k > t + 6 && !all_down {
+                    off += 1;
+                }
+                low = low.min(c.pos.y);
+                if k > t + 6 {
+                    high = high.max(c.pos.y);
+                }
+                if c.vel.y.abs() > 0.1 {
+                    settled = (k - t) as f32 * DT;
+                }
+            }
+        }
+    }
+    (off, high - low, settled, travel)
+}
+
+/// **A suspension in real units holds a heavy frame on light wheels.** A
+/// wheel's spring and damper in frequency and ratio are of the pair's own
+/// mass, a light wheel's, so under a 0.4 t frame on 30 kg tyres the damping
+/// could not reach what the frame needed: Solar's bike bounced off the
+/// ground for a third of a second after a small jump. In real units
+/// (`spring_rate`, `damper_bump`, `damper_rebound`) the same bike lands from
+/// 0.3 and 0.6 m at 12 m/s, settles inside half a second and keeps its
+/// tyres down, where frequency and ratio throw a tyre off for a fifth of a
+/// second and take one and a half to settle. Upright on springs too soft to
+/// hold it, its bump stops hold its travel to their 8 cm.
+#[test]
+fn a_real_unit_suspension_holds_a_heavy_frame_on_light_wheels() {
+    let aft = |deg: f32| [-deg.to_radians().sin(), deg.to_radians().cos(), 0.0];
+    let ratio = [
+        BikeWheel { dx: 1.098, axis: aft(24.0), stiffness: 8.18, damping: 0.447, ..Default::default() },
+        BikeWheel { dx: -0.471, axis: aft(15.0), stiffness: 11.7, damping: 0.447, ..Default::default() },
+    ];
+    let real = [
+        BikeWheel { dx: 1.098, axis: aft(24.0), rate: 31.7, bump: 2.6, rebound: 2.6, ..Default::default() },
+        BikeWheel { dx: -0.471, axis: aft(15.0), rate: 70.3, bump: 4.7, rebound: 4.7, ..Default::default() },
+    ];
+    for drop in [0.3, 0.6] {
+        let (off, _, settle) = landing(&real, drop);
+        assert!(off <= 1, "from {drop} m a tyre was off the ground {off} ticks");
+        assert!(settle < 0.5, "from {drop} m it settled after {settle:.2} s");
+        let (off, _, settle) = landing(&ratio, drop);
+        assert!(off > 6 && settle > 1.0, "the fixture: frequency and ratio from {drop} m bounced {off} ticks and settled after {settle:.2} s");
+    }
+    let soft = [
+        BikeWheel { dx: 0.785, axis: [0.0, 1.0, 0.0], rate: 3.0, bump: 0.5, rebound: 0.5, stop: Some(0.08), ..Default::default() },
+        BikeWheel { dx: -0.785, axis: [0.0, 1.0, 0.0], rate: 3.0, bump: 0.5, rebound: 0.5, stop: Some(0.08), ..Default::default() },
+    ];
+    let (_, _, _, travel) = landing_travel(&soft, 0.3);
+    assert!(travel < 0.09, "the bump stops let the suspension travel {travel:.3} m");
+    let (_, _, _, free) = landing_travel(&[BikeWheel { stop: None, ..soft[0] }, BikeWheel { stop: None, ..soft[1] }], 0.3);
+    assert!(free > 0.2, "the fixture: without stops the soft springs travel only {free:.3} m");
 }

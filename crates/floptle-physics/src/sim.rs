@@ -509,6 +509,9 @@ impl Sim {
                 max_force: jc.max_force,
                 stiffness: jc.stiffness,
                 damping: jc.damping,
+                spring_rate: jc.spring_rate,
+                damper_bump: jc.damper_bump,
+                damper_rebound: jc.damper_rebound,
                 break_force: jc.break_force,
                 broken: jc.broken || broken.contains(&e.index()),
                 reported: jc.broken,
@@ -615,6 +618,9 @@ impl Sim {
             max_force: 0.0,
             stiffness: 0.0,
             damping: 0.0,
+            spring_rate: 0.0,
+            damper_bump: 0.0,
+            damper_rebound: 0.0,
             break_force,
             broken: false,
             reported: false,
@@ -785,6 +791,9 @@ impl Sim {
             j.max_force = jc.max_force;
             j.stiffness = jc.stiffness;
             j.damping = jc.damping;
+            j.spring_rate = jc.spring_rate;
+            j.damper_bump = jc.damper_bump;
+            j.damper_rebound = jc.damper_rebound;
             j.break_force = jc.break_force;
             j.limit = jc.limit;
             j.servo = jc.servo;

@@ -51,6 +51,11 @@ pub struct JointRt {
     pub max_force: f32,
     pub stiffness: f32,
     pub damping: f32,
+    /// A wheel's suspension in real units (`Joint::spring_rate`,
+    /// `damper_bump`, `damper_rebound`); all 0 uses `stiffness`/`damping`.
+    pub spring_rate: f32,
+    pub damper_bump: f32,
+    pub damper_rebound: f32,
     pub break_force: f32,
     pub broken: bool,
     /// The break has been written back to the node's component.
@@ -692,6 +697,10 @@ impl PhysicsWorld {
                 if kind == JointKind::Slider {
                     let e = self.weld_error(j);
                     spent += self.close_turn(j, e, dt);
+                }
+                // A slider's travel limits, and a wheel's bump stops: past
+                // the end of its travel the suspension is solid.
+                {
                     if self.joints[j].limit {
                         // Travel of this node along the rail from the other's
                         // anchor; past a limit it is moved back along it.
@@ -724,6 +733,25 @@ impl PhysicsWorld {
         -(1.0 / w) * mass_scale * (vn + bias_rate * c)
     }
 
+    /// A spring of `k` (force a unit of travel) and a damper of `c` (force a
+    /// unit of speed) between the pair, as the impulse along `n` for a gap
+    /// `x` and the speed apart `vn`: the implicit step of Catto's soft
+    /// constraints, stable at any rate, for which a damper too strong for a
+    /// step holds the pair together rather than throwing them apart. Unlike
+    /// [`Self::soft_impulse`], whose frequency and ratio are of the pair's
+    /// own mass (a light wheel's, under a heavy frame), these are forces:
+    /// the same spring holds up whatever weight is on it.
+    fn physical_spring_impulse(w: f32, x: f32, vn: f32, k: f32, c: f32, dt: f32) -> f32 {
+        let (k, c) = (k.max(0.0), c.max(0.0));
+        let soft = dt * (c + dt * k);
+        if !w.is_finite() || w <= 1e-9 || soft <= 1e-12 {
+            return 0.0;
+        }
+        let gamma = 1.0 / soft;
+        let beta = dt * k / (c + dt * k);
+        -(vn + beta / dt * x) / (w + gamma)
+    }
+
     /// The speed part of a joint, once a step. Returns the impulse spent.
     fn solve_soft(&mut self, j: usize, dt: f32) -> f32 {
         let speed = self.motor_command(j, dt);
@@ -751,9 +779,46 @@ impl PhysicsWorld {
                 // along the axis by a spring.
                 let c = ea.p - eb.p;
                 let s = axis_w.dot(c);
-                let vn = (self.point_vel(Some(jt.a), ea.r) - self.point_vel(jt.b, eb.r)).dot(axis_w);
+                let physical = jt.spring_rate > 0.0 || jt.damper_bump > 0.0 || jt.damper_rebound > 0.0;
+                // A real-unit spring on a wheel standing on the ground, on the
+                // one grip budget: the ground holds the wheel, so what the
+                // spring pushes into the ground goes straight to the frame.
+                let held = match jt.a {
+                    Link::Body(i) if physical && self.single_wheel_friction => {
+                        self.bodies[i].ground_normal.filter(|_| self.bodies[i].grounded)
+                    }
+                    _ => None,
+                };
+                let mut v_wheel = self.point_vel(Some(jt.a), ea.r);
+                if let Some(n) = held {
+                    // The ground took this speed into it out last step's
+                    // contacts; what is left of it here is the spring's own
+                    // push from last step, and read as the wheel moving it
+                    // was what a strong damper fought: a bike settled for a
+                    // second on its own phantom.
+                    v_wheel -= n * v_wheel.dot(n).min(0.0);
+                }
+                let vn = (v_wheel - self.point_vel(jt.b, eb.r)).dot(axis_w);
                 let w = ea.w(axis_w) + eb.w(axis_w);
-                let l = Self::soft_impulse(w, s, vn, jt.stiffness, jt.damping, dt);
+                let mut on_ground = false;
+                let l = if physical {
+                    // Compressing is the wheel moving along the axis toward
+                    // its mount.
+                    let c = if vn > 0.0 { jt.damper_bump } else { jt.damper_rebound };
+                    let l = Self::physical_spring_impulse(w, s, vn, jt.spring_rate, c, dt);
+                    match held {
+                        // Pushing the wheel into the ground: the frame is
+                        // pushed against the ground, through the wheel, and
+                        // only the frame moves.
+                        Some(n) if (axis_w * l).dot(n) < 0.0 => {
+                            on_ground = true;
+                            Self::physical_spring_impulse(eb.w(axis_w), s, vn, jt.spring_rate, c, dt)
+                        }
+                        _ => l,
+                    }
+                } else {
+                    Self::soft_impulse(w, s, vn, jt.stiffness, jt.damping, dt)
+                };
                 // On the ground, the spring pushes the wheel and its mount
                 // apart along the ground's normal only. Along a slanted axis
                 // its push also has a part along the ground, which the joint
@@ -774,7 +839,14 @@ impl PhysicsWorld {
                     },
                     _ => axis_w * l,
                 };
-                self.joint_impulse(Some(jt.a), ea.r, push);
+                if on_ground {
+                    // The ground carries it: the tyre's grip is sized from it.
+                    if let Link::Body(i) = jt.a {
+                        self.bodies[i].pressed += push.length();
+                    }
+                } else {
+                    self.joint_impulse(Some(jt.a), ea.r, push);
+                }
                 self.joint_impulse(jt.b, eb.r, -push);
                 spent += l.abs();
                 // A wheel turns about its axle, Z of what it hangs from, and

@@ -1441,6 +1441,9 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("motorSpeed".to_string(), j.motor_speed as f64),
                 ("maxForce".to_string(), j.max_force as f64),
                 ("stiffness".to_string(), j.stiffness as f64),
+                ("springRate".to_string(), j.spring_rate as f64),
+                ("damperBump".to_string(), j.damper_bump as f64),
+                ("damperRebound".to_string(), j.damper_rebound as f64),
                 ("damping".to_string(), j.damping as f64),
                 // Below zero: the length the anchors had when play started.
                 ("length".to_string(), j.length as f64),
@@ -2334,6 +2337,9 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "motorSpeed" => j.motor_speed = val as f32,
                     "maxForce" => j.max_force = (val as f32).max(0.0),
                     "stiffness" => j.stiffness = (val as f32).max(0.0),
+                    "springRate" => j.spring_rate = (val as f32).max(0.0),
+                    "damperBump" => j.damper_bump = (val as f32).max(0.0),
+                    "damperRebound" => j.damper_rebound = (val as f32).max(0.0),
                     "damping" => j.damping = (val as f32).max(0.0),
                     "length" => j.length = val as f32,
                     "limit" => j.limit = val != 0.0,
@@ -3311,7 +3317,8 @@ pub(crate) const CELESTIAL_KEYS: &[&str] = &[
 pub(crate) const TILEMAP_KEYS: &[&str] = &["cols", "rows", "tile", "data", "tileset"];
 pub(crate) const JOINT_KEYS: &[&str] = &[
     "kind", "to", "anchor", "otherAnchor", "axis", "length", "limit", "min", "max", "motor", "motorSpeed",
-    "maxForce", "stiffness", "damping", "breakForce", "collide", "goal", "steer",
+    "maxForce", "stiffness", "damping", "breakForce", "collide", "goal", "steer", "springRate", "damperBump",
+    "damperRebound",
 ];
 
 /// Every key `node:setSorting{...}` reads.
@@ -7111,6 +7118,9 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                 if let Some(v) = t.get::<Option<bool>>("motor")? { j.motor = v; }
                 if let Some(v) = num("maxForce")? { j.max_force = v.max(0.0); }
                 if let Some(v) = num("stiffness")? { j.stiffness = v.max(0.0); }
+                if let Some(v) = num("springRate")? { j.spring_rate = v.max(0.0); }
+                if let Some(v) = num("damperBump")? { j.damper_bump = v.max(0.0); }
+                if let Some(v) = num("damperRebound")? { j.damper_rebound = v.max(0.0); }
                 if let Some(v) = num("damping")? { j.damping = v.max(0.0); }
                 if let Some(v) = num("breakForce")? { j.break_force = v.max(0.0); }
                 if let Some(v) = t.get::<Option<bool>>("collide")? { j.collide_connected = v; }

@@ -125,6 +125,17 @@ pub struct Joint {
     /// How quickly a spring's bounce dies: 0 bounces for ever, 1 settles
     /// without overshooting.
     pub damping: f32,
+    /// A wheel's suspension spring in real units, newtons a metre (with
+    /// masses in tonnes, kilonewtons): the force per metre of travel, which
+    /// does not change with the masses on it. 0, the default, uses
+    /// `stiffness` and `damping` instead.
+    pub spring_rate: f32,
+    /// A wheel's damper in real units, newton-seconds a metre, compressing
+    /// (bump) and extending (rebound). It acts between the wheel and what it
+    /// hangs from, with the frame's mass in it, so a heavy frame on light
+    /// wheels can be damped as hard as it needs. 0 is no damper.
+    pub damper_bump: f32,
+    pub damper_rebound: f32,
     /// The joint breaks, and lets go for good, past this force. Zero: never.
     pub break_force: f32,
     /// The two bodies still collide with each other. Off by default: a
@@ -177,6 +188,9 @@ impl Default for Joint {
             max_force: 0.0,
             stiffness: 4.0,
             damping: 0.5,
+            spring_rate: 0.0,
+            damper_bump: 0.0,
+            damper_rebound: 0.0,
             break_force: 0.0,
             collide_connected: false,
             broken: false,
