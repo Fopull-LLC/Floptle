@@ -149,6 +149,38 @@ impl Editor {
         Some(id)
     }
 
+    /// Bring the textures to texture quality `q` (`app.setTextureQuality`):
+    /// the raster cuts mipmapped pictures from now on, and every mipmapped
+    /// texture already loaded from a file is read again and put back under
+    /// its own id, so what draws with it changes on the next frame. A model's
+    /// own pictures take the quality when a model is next loaded. Reading the
+    /// files again is the cost, once, on the frame the setting changes.
+    pub(crate) fn set_texture_quality(&mut self, q: u32) {
+        let Some(raster) = self.raster.as_mut() else { return };
+        if raster.texture_quality() == q.min(2) {
+            return;
+        }
+        raster.set_texture_quality(q);
+        let Some(max) = self.gpu.as_ref().map(|g| g.device.limits().max_texture_dimension_2d) else { return };
+        let smooth: Vec<(String, TexId)> = self
+            .texture_registry
+            .iter()
+            .filter(|(p, _)| {
+                self.texture_registry_setting.get(*p).is_some_and(|s| s.filter == crate::assets::FilterMode::SmoothMipmaps)
+            })
+            .map(|(p, id)| (p.clone(), *id))
+            .collect();
+        for (path, id) in smooth {
+            let file = self.resolve_asset_path(&path);
+            // A texture a script made (a capture, gpu:N) has no file to read
+            // again, and keeps what it has.
+            let Some(data) = decode_texture_file(&file, max, &path) else { continue };
+            if let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) {
+                raster.replace_texture(gpu, id, &data);
+            }
+        }
+    }
+
     /// Give each newly extracted texture the filter its model draws it with,
     /// so a material made from it looks like the part it came from. A file
     /// that already has settings keeps them: someone chose those.
@@ -4036,4 +4068,49 @@ pub(crate) fn decode_texture_file(file: &Path, max: u32, path: &str) -> Option<f
         data = floptle_assets::load_texture_sized(file, w, h)?;
     }
     Some(data)
+}
+
+#[cfg(test)]
+mod texture_quality_tests {
+    /// **Texture quality cuts what the GPU holds, and a script sets it.**
+    /// `app.setTextureQuality("Medium")` halves a smooth texture's sides, a
+    /// quarter of its bytes, on the frame it is asked for, under the same id;
+    /// a pixel-art texture is left whole, and Stop brings everything back.
+    #[test]
+    fn a_script_sets_the_texture_quality_and_the_gpu_holds_less() {
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let dir = std::env::temp_dir().join(format!("floptle_texq_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join("scripts"));
+        for name in ["big.png", "pix.png"] {
+            image::RgbaImage::from_fn(1024, 1024, |x, y| image::Rgba([(x % 256) as u8, (y % 256) as u8, 128, 255])).save(dir.join(name)).unwrap();
+        }
+        ed.project_root = dir.clone();
+        ed.texture_settings.insert(
+            "big.png".into(),
+            crate::assets::TexSetting { filter: crate::assets::FilterMode::SmoothMipmaps, ..Default::default() },
+        );
+        let big = ed.ensure_texture("big.png").expect("the smooth texture loads");
+        ed.ensure_texture("pix.png").expect("the pixel texture loads");
+        let bytes = |ed: &crate::Editor| ed.raster.as_ref().unwrap().texture_bytes();
+        let whole = bytes(&ed);
+        let mip_chain = |side: u64| -> u64 { (0..64).map(|l| (side >> l).max(1)).take_while(|_| true).take((side as f64).log2() as usize + 1).map(|s| s * s * 4).sum() };
+        assert!(whole >= mip_chain(1024) + 1024 * 1024 * 4, "both pictures are not counted: {whole}");
+
+        std::fs::write(dir.join("scripts/menu.lua"), "function start() app.setTextureQuality(\"Medium\") said = app.textureQuality() end\n").unwrap();
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        ed.world.insert(e, floptle_core::Scripts(vec![floptle_core::ScriptInst::new("menu")]));
+        ed.script_host.run(&mut ed.world, &dir.join("scripts"), 1.0 / 60.0, 0.0);
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        ed.apply_app_requests();
+        let said: String = ed.script_host.instance_env(e.index(), "menu").unwrap().get("said").unwrap();
+        assert_eq!(said, "Medium");
+        let medium = bytes(&ed);
+        assert_eq!(whole - medium, mip_chain(1024) - mip_chain(512), "Medium did not cut the smooth texture to a quarter, alone: {whole} -> {medium}");
+        assert_eq!(ed.ensure_texture("big.png"), Some(big), "the texture changed its id");
+
+        ed.set_texture_quality(0);
+        assert_eq!(bytes(&ed), whole, "High did not bring the texture back whole");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

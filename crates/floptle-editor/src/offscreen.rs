@@ -1129,7 +1129,10 @@ impl Editor {
             };
             let (field_chunks, field_edited, field_stand_ins) =
                 if profile.borrow().enabled() { self.field_residency() } else { (0, 0, 0) };
+            let texture_bytes =
+                if profile.borrow().enabled() { self.raster.as_ref().map_or(0, |r| r.texture_bytes()) } else { 0 };
             profile.borrow_mut().set_counts(floptle_core::profile::Counts {
+                texture_bytes,
                 nodes: ents.len(),
                 culled: culled_nodes,
                 instances: instances.len(),

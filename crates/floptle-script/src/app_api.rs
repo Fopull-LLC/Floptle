@@ -120,6 +120,8 @@ pub struct AppInfo {
     pub render_sharpness: f32,
     /// How edges are smoothed.
     pub antialias: Antialias,
+    /// Texture quality: 0 High, 1 Medium, 2 Low (see [`TEXTURE_QUALITIES`]).
+    pub texture_quality: u32,
     /// Whether the game's window currently covers the screen. Always `false`
     /// where there is no window (`floptle run`).
     pub fullscreen: bool,
@@ -226,6 +228,9 @@ pub struct AppRequests {
     pub dynamic_resolution: Option<Option<DynResSpec>>,
     /// A resolution, refresh rate and monitor, from `app.setDisplayMode`.
     pub display_mode: Option<DisplayModeRequest>,
+    /// Texture quality, from `app.setTextureQuality`: how many top mip
+    /// levels a mipmapped picture loses (0 High, 1 Medium, 2 Low).
+    pub texture_quality: Option<u32>,
 }
 
 impl AppRequests {
@@ -244,8 +249,13 @@ impl AppRequests {
             && self.frame_cap.is_none()
             && self.dynamic_resolution.is_none()
             && self.display_mode.is_none()
+            && self.texture_quality.is_none()
     }
 }
+
+/// The texture qualities `app.setTextureQuality` takes, by how many top mip
+/// levels each leaves out.
+pub const TEXTURE_QUALITIES: [&str; 3] = ["High", "Medium", "Low"];
 
 /// What `app.setDynamicResolution{...}` asked for.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -410,6 +420,33 @@ pub fn install(lua: &Lua, info: &SharedAppInfo, req: &SharedAppRequests) -> mlua
     {
         let i = info.clone();
         t.set("vsync", lua.create_function(move |_, ()| Ok(i.borrow().vsync.name()))?)?;
+    }
+    {
+        // app.textureQuality() / app.setTextureQuality("High"|"Medium"|"Low"):
+        // a settings screen's texture quality. Medium halves a smooth
+        // (mipmapped) texture's sides on the GPU, a quarter of its memory, and
+        // Low quarters them; pixel-art and UI images are left whole. For this
+        // session, as the other video settings are: keep the player's choice
+        // with save.* and set it again at start.
+        let i = info.clone();
+        t.set(
+            "textureQuality",
+            lua.create_function(move |_, ()| Ok(TEXTURE_QUALITIES[(i.borrow().texture_quality as usize).min(2)]))?,
+        )?;
+        let (r, i) = (req.clone(), info.clone());
+        t.set(
+            "setTextureQuality",
+            lua.create_function(move |_, q: String| {
+                let Some(n) = TEXTURE_QUALITIES.iter().position(|m| m.eq_ignore_ascii_case(&q)) else {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "app.setTextureQuality({q:?}) — the qualities are \"High\", \"Medium\" and \"Low\""
+                    )));
+                };
+                r.borrow_mut().texture_quality = Some(n as u32);
+                i.borrow_mut().texture_quality = n as u32;
+                Ok(())
+            })?,
+        )?;
     }
     {
         let r = req.clone();

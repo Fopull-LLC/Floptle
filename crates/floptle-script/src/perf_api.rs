@@ -537,6 +537,9 @@ fn counts_table(lua: &Lua, c: &Counts) -> mlua::Result<Table> {
     out.set("shadowProxies", c.shadow_proxies)?;
     out.set("shadowProxiesDropped", c.shadow_proxies_dropped)?;
     out.set("shadowVolumes", c.shadow_volumes)?;
+    // What the pictures on the GPU hold: the number a texture-quality
+    // setting moves (`app.setTextureQuality`).
+    out.set("textureBytes", c.texture_bytes)?;
     Ok(out)
 }
 

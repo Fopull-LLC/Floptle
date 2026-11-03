@@ -444,6 +444,9 @@ pub struct Counts {
     pub shadow_proxies_dropped: usize,
     /// Baked volumes the shadow march reads: terrain and mesh occluder bakes.
     pub shadow_volumes: usize,
+    /// Bytes every picture on the GPU holds, mip chains included, each
+    /// counted once: what a texture-quality setting saves.
+    pub texture_bytes: u64,
     /// Draw calls that carried a single instance, and why each did not share
     /// a draw with another. `draws` far above the number of distinct meshes
     /// is the symptom; this is the cause.

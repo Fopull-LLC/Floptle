@@ -959,6 +959,9 @@ pub struct Raster {
     /// its own file carrying the same 4096×4096 skin, was eleven copies of
     /// 64 MB. Kept as long as the meshes are, which is the session.
     mesh_textures: HashMap<u64, wgpu::Texture>,
+    /// Texture quality: how many top mip levels a mipmapped picture loses
+    /// on its way to the GPU (0 = all of it; see [`Self::set_texture_quality`]).
+    texture_drop: u32,
     /// Material textures registered through [`Raster::register_texture_shared`],
     /// by their pixels and sampling. A kit of models pointing at one texture
     /// library binds each map once, not once per model.
@@ -1911,6 +1914,7 @@ impl Raster {
             instance_cap,
             meshes: Vec::new(),
             mesh_textures: HashMap::new(),
+            texture_drop: 0,
             scene_readers_deferred: false,
             shared_textures: HashMap::new(),
             textures: Vec::new(),
@@ -2813,7 +2817,8 @@ impl Raster {
         if let Some(&id) = self.shared_textures.get(&key) {
             return id;
         }
-        let texture = self.mesh_textures.entry(key.0).or_insert_with(|| upload_texture_mips(gpu, data, mips)).clone();
+        let drop = self.texture_drop;
+        let texture = self.mesh_textures.entry(key.0).or_insert_with(|| upload_texture_mips(gpu, data, mips, drop)).clone();
         let id = TexId(self.textures.len() as u32);
         let bind = self.tex_bind_from(gpu, texture, sampling);
         self.textures.push(bind);
@@ -2822,7 +2827,7 @@ impl Raster {
     }
 
     fn tex_bind(&mut self, gpu: &Gpu, data: &TextureData, sampling: TexSampling) -> TexBind {
-        let texture = upload_texture_mips(gpu, data, matches!(sampling.filter, TexFilter::SmoothMipmaps));
+        let texture = upload_texture_mips(gpu, data, matches!(sampling.filter, TexFilter::SmoothMipmaps), self.texture_drop);
         self.tex_bind_from(gpu, texture, sampling)
     }
 
@@ -3693,7 +3698,63 @@ impl Raster {
     /// mesh brought the same pixels, otherwise a new one. With and without a
     /// mip chain are two copies: the same pixels sampled two ways.
     fn mesh_texture(&mut self, gpu: &Gpu, t: &TextureData, mips: bool) -> wgpu::Texture {
-        self.mesh_textures.entry(picture_key(t, mips)).or_insert_with(|| upload_texture_mips(gpu, t, mips)).clone()
+        let drop = self.texture_drop;
+        self.mesh_textures.entry(picture_key(t, mips)).or_insert_with(|| upload_texture_mips(gpu, t, mips, drop)).clone()
+    }
+
+    /// Texture quality, a settings screen's "texture quality": 0 keeps every
+    /// picture whole, 1 halves a mipmapped picture's sides on its way to the
+    /// GPU (a quarter of the memory), 2 quarters them. Only mipmapped
+    /// pictures, the ones drawn smooth into the distance, are cut: a pixel-art
+    /// sprite or a UI image has no smaller picture to stand for it, and is
+    /// never larger than it must be. Nothing is cut below 256 texels a side.
+    /// What is already on the GPU stays; pictures brought from now on use the
+    /// new quality (a driver re-registers the ones it wants changed with
+    /// [`Self::replace_texture`]).
+    pub fn set_texture_quality(&mut self, drop: u32) {
+        let drop = drop.min(2);
+        if drop != self.texture_drop {
+            self.texture_drop = drop;
+            // The cached copies are at the old quality.
+            self.mesh_textures.clear();
+            self.shared_textures.clear();
+        }
+    }
+
+    /// The texture quality [`Self::set_texture_quality`] set.
+    pub fn texture_quality(&self) -> u32 {
+        self.texture_drop
+    }
+
+    /// Put new pixels under texture `id`, keeping its sampling: every material
+    /// and image drawing with the id draws them from the next frame. How a
+    /// driver brings a picture to a new texture quality.
+    pub fn replace_texture(&mut self, gpu: &Gpu, id: TexId, data: &TextureData) {
+        let Some(sampling) = self.textures.get(id.0 as usize).map(|t| t.sampling) else { return };
+        self.textures[id.0 as usize] = self.tex_bind(gpu, data, sampling);
+    }
+
+    /// The bytes every picture on the GPU holds, mip chains included, each
+    /// counted once however many materials share it: material textures,
+    /// model pictures and render targets.
+    // A texture hashes and compares by its id, which never changes, whatever
+    // its insides do.
+    #[allow(clippy::mutable_key_type)]
+    pub fn texture_bytes(&self) -> u64 {
+        let mut seen: std::collections::HashSet<&wgpu::Texture> = std::collections::HashSet::new();
+        let mut total = 0u64;
+        let all = self
+            .textures
+            .iter()
+            .map(|t| &t._texture)
+            .chain(self.mesh_textures.values())
+            .chain(self.meshes.iter().filter_map(|m| m._texture.as_ref()));
+        for t in all {
+            if seen.insert(t) {
+                total += texture_size_bytes(t);
+            }
+        }
+        total
     }
 
     /// How many mip levels mesh `id`'s own texture has; `None` without one.
@@ -4871,13 +4932,54 @@ fn linear_view_of(tex: &wgpu::Texture) -> wgpu::TextureView {
 }
 
 fn upload_texture(gpu: &Gpu, t: &TextureData) -> wgpu::Texture {
-    upload_texture_mips(gpu, t, false)
+    upload_texture_mips(gpu, t, false, 0)
+}
+
+/// The bytes texture `t` holds on the GPU, every mip level counted.
+fn texture_size_bytes(t: &wgpu::Texture) -> u64 {
+    let texel = u64::from(t.format().block_copy_size(None).unwrap_or(4));
+    (0..t.mip_level_count())
+        .map(|l| u64::from((t.width() >> l).max(1)) * u64::from((t.height() >> l).max(1)) * texel)
+        .sum::<u64>()
+        * u64::from(t.depth_or_array_layers())
+}
+
+/// `t` with its sides halved `drop` times, a box filter each time, while
+/// both stay at least 256 texels: the top levels of the mip chain a lower
+/// texture quality leaves out.
+fn drop_top_mips(t: &TextureData, drop: u32) -> Option<TextureData> {
+    let (mut w, mut h) = (t.width.max(1), t.height.max(1));
+    let mut cur: Option<Vec<u8>> = None;
+    for _ in 0..drop {
+        if w.min(h) < 512 {
+            break;
+        }
+        let src = cur.as_deref().unwrap_or(&t.pixels);
+        let (nw, nh) = (w / 2, h / 2);
+        let mut next = vec![0u8; (nw * nh * 4) as usize];
+        for y in 0..nh {
+            for x in 0..nw {
+                for c in 0..4u32 {
+                    let p = |px: u32, py: u32| src[((py * w + px) * 4 + c) as usize] as u32;
+                    let (sx, sy) = (x * 2, y * 2);
+                    let avg = (p(sx, sy) + p(sx + 1, sy) + p(sx, sy + 1) + p(sx + 1, sy + 1) + 2) / 4;
+                    next[((y * nw + x) * 4 + c) as usize] = avg as u8;
+                }
+            }
+        }
+        cur = Some(next);
+        (w, h) = (nw, nh);
+    }
+    cur.map(|pixels| TextureData { pixels, width: w, height: h })
 }
 
 /// Upload an RGBA8 image as an sRGB texture; if `gen_mips`, generate a full mip chain
 /// (box-filtered on the CPU) so it can be sampled trilinearly without shimmering when
-/// minified into the distance.
-fn upload_texture_mips(gpu: &Gpu, t: &TextureData, gen_mips: bool) -> wgpu::Texture {
+/// minified into the distance. A mipmapped picture loses its top `drop`
+/// levels first ([`drop_top_mips`]).
+fn upload_texture_mips(gpu: &Gpu, t: &TextureData, gen_mips: bool, drop: u32) -> wgpu::Texture {
+    let smaller = if gen_mips && drop > 0 { drop_top_mips(t, drop) } else { None };
+    let t = smaller.as_ref().unwrap_or(t);
     let w0 = t.width.max(1);
     let h0 = t.height.max(1);
     let mip_count = if gen_mips { 1 + (w0.max(h0) as f32).log2().floor() as u32 } else { 1 };
@@ -5109,5 +5211,26 @@ mod tests {
         let g = group_by_key(many.iter().copied());
         assert_eq!(g.len(), 20_000);
         assert_eq!(g[19_999], (19_999, vec![19_999]));
+    }
+}
+
+#[cfg(test)]
+mod texture_quality_tests {
+    use super::*;
+
+    /// A lower texture quality halves a picture's sides once a level, and
+    /// stops before either side falls under 256: a 1024×512 picture loses
+    /// one level at Medium and no second at Low, and a 300² one none.
+    #[test]
+    fn a_lower_quality_halves_the_sides_and_stops_at_256() {
+        let pic = |w: u32, h: u32| TextureData { pixels: vec![200; (w * h * 4) as usize], width: w, height: h };
+        let one = drop_top_mips(&pic(1024, 512), 1).expect("Medium cuts a 1024×512 picture");
+        assert_eq!((one.width, one.height), (512, 256));
+        assert!(one.pixels.iter().all(|&p| p == 200), "a flat picture stays flat");
+        let two = drop_top_mips(&pic(1024, 512), 2).unwrap();
+        assert_eq!((two.width, two.height), (512, 256), "Low cut a side below 256");
+        let four = drop_top_mips(&pic(2048, 2048), 2).unwrap();
+        assert_eq!((four.width, four.height), (512, 512));
+        assert!(drop_top_mips(&pic(300, 300), 2).is_none(), "a small picture was cut");
     }
 }

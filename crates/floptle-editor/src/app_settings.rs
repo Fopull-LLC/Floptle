@@ -193,6 +193,7 @@ impl crate::Editor {
                 floptle_scene::AntialiasDoc::Fxaa => floptle_script::app_api::Antialias::Fxaa,
             },
             fullscreen: self.window.as_ref().is_some_and(|w| w.fullscreen().is_some()),
+            texture_quality: self.raster.as_ref().map_or(0, |r| r.texture_quality()),
             frame_cap: self.frame_cap,
             refresh_hz: (self.refresh_period > 0.0).then(|| 1.0 / self.refresh_period),
             dynamic_resolution: self.dyn_res.is_some(),
@@ -249,6 +250,9 @@ impl crate::Editor {
         }
         if let Some(fps) = req.frame_cap {
             self.frame_cap = fps.max(0.0);
+        }
+        if let Some(q) = req.texture_quality {
+            self.set_texture_quality(q);
         }
         if let Some(spec) = req.dynamic_resolution {
             self.dyn_res = spec.map(|s| {
