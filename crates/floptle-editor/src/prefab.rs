@@ -640,13 +640,18 @@ impl Editor {
         // — the damage/stress raw material).
         let mut impacts: std::collections::HashMap<u32, Vec<floptle_script::AssemblyImpact>> =
             std::collections::HashMap::new();
-        for (root, part, impulse, speed, speed_abs, point) in sim.compound_impacts() {
+        for ((root, part, impulse, speed, speed_abs, point), peer) in sim.compound_impacts_with_peer() {
             impacts.entry(root).or_default().push(floptle_script::AssemblyImpact {
                 part,
                 impulse,
                 speed,
                 speed_abs,
                 point: [point.x, point.y, point.z],
+                other: match peer {
+                    floptle_physics::ImpactPeer::Node(id) => Some(id),
+                    _ => None,
+                },
+                other_terrain: peer == floptle_physics::ImpactPeer::Terrain,
             });
         }
         self.script_host.set_assembly_impacts(impacts);

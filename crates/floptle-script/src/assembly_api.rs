@@ -82,6 +82,10 @@ pub struct AssemblyImpact {
     pub speed_abs: f32,
     /// World point of the part's hardest contact.
     pub point: [f64; 3],
+    /// What that contact was against: a node by entity index, or `None`.
+    pub other: Option<u32>,
+    /// …or a terrain's ground.
+    pub other_terrain: bool,
 }
 
 /// One queued `assembly.*` command, drained by the editor after the script pass.
@@ -466,6 +470,13 @@ pub(crate) fn install_assembly_api(
                     e.set("x", i.point[0])?;
                     e.set("y", i.point[1])?;
                     e.set("z", i.point[2])?;
+                    // What it hit: the node, "terrain", or nil for geometry
+                    // with no node of its own.
+                    if let Some(id) = i.other {
+                        e.set("other", crate::env::new_node_handle(lua, id)?)?;
+                    } else if i.other_terrain {
+                        e.set("other", "terrain")?;
+                    }
                     out.set(k + 1, e)?;
                 }
             }
@@ -533,18 +544,19 @@ mod tests {
         install_assembly_api(&lua, info, impacts.clone(), cmds).unwrap();
         impacts.borrow_mut().insert(
             7,
-            vec![AssemblyImpact {
-                part: 42,
-                impulse: 18.5,
-                speed: 12.5,
-                speed_abs: 21.0,
-                point: [1.0, 2.0, 3.0],
-            }],
+            vec![
+                AssemblyImpact { part: 42, impulse: 18.5, speed: 12.5, speed_abs: 21.0, point: [1.0, 2.0, 3.0], other: Some(5), other_terrain: false },
+                AssemblyImpact { part: 43, impulse: 1.0, speed: 1.0, speed_abs: 1.0, point: [0.0; 3], other: None, other_terrain: true },
+                AssemblyImpact { part: 44, impulse: 1.0, speed: 1.0, speed_abs: 1.0, point: [0.0; 3], other: None, other_terrain: false },
+            ],
         );
         lua.load(
             r#"
             local hits = assembly.impacts({ __id = 7 })
-            assert(#hits == 1, "one impact expected")
+            assert(#hits == 3, "three impacts expected")
+            assert(type(hits[1].other) == "table" and rawget(hits[1].other, "__id") == 5, "what part 42 hit is node 5")
+            assert(hits[2].other == "terrain", "part 43 hit the terrain")
+            assert(hits[3].other == nil, "part 44 hit geometry that is no node's")
             assert(hits[1].part == 42, "part id")
             assert(math.abs(hits[1].impulse - 18.5) < 1e-6, "impulse")
             assert(math.abs(hits[1].speed - 12.5) < 1e-6, "impact speed")

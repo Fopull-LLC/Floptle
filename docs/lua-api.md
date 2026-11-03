@@ -3466,7 +3466,7 @@ assembly.grip(node, at [, target] [, breakForce]) — weld the vessel at world p
 
 ### `assembly.impacts`
 
-assembly.impacts(node) — the LAST tick's per-part contact loads: { part, impulse, speed, speedAbs, x, y, z }. What a damage model reads: how hard each part was hit and where.
+assembly.impacts(node) — the LAST tick's per-part contact loads: { part, impulse, speed, speedAbs, x, y, z, other }. What a damage model reads: how hard each part was hit, where, and by what. speed is the closing speed along the contact's normal before the contact was resolved, and speedAbs the whole closing speed there: the speed things met at, not the solver's push apart, so a walker leaning on a parked craft at 2 m/s reads 2 m/s or less. other is what the part's hardest contact was against: the node (a walker, a crate, another craft, a static collider that is a node's), "terrain" for a terrain's ground, or nil for geometry that is no node's. A damage model can then tell a person leaning on a vehicle from a crash into a wall.
 
 ### `assembly.impulseAt`
 

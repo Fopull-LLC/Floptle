@@ -1512,3 +1512,47 @@ fn a_real_unit_suspension_holds_a_heavy_frame_on_light_wheels() {
     let (_, _, _, free) = landing_travel(&[BikeWheel { stop: None, ..soft[0] }, BikeWheel { stop: None, ..soft[1] }], 0.3);
     assert!(free > 0.2, "the fixture: without stops the soft springs travel only {free:.3} m");
 }
+
+/// The hardest impact speed a parked 19.5 t stack reports over `secs` of a
+/// capsule walker (80 kg) pressing into it at `walk` m/s, its velocity set
+/// each tick as a character controller sets it.
+fn walker_into_stack(walk: f32, secs: f32) -> (f32, Vec<floptle_physics::ImpactPeer>, u32, u32) {
+    let mut ecs = World::default();
+    let floor = ecs.spawn();
+    ecs.insert(floor, Transform::from_translation(DVec3::new(0.0, -1.0, 0.0)));
+    ecs.insert(floor, RigidBody { kind: BodyKind::Box, mode: BodyMode::Static, half_extents: [50.0, 1.0, 50.0], ..Default::default() });
+    let stack = segment(&mut ecs, "Stack", DVec3::new(0.0, 2.0, 0.0), [1.5, 2.0, 1.5], 19.5);
+    let walker = ecs.spawn();
+    ecs.insert(walker, Transform::from_translation(DVec3::new(-3.0, 0.95, 0.0)));
+    ecs.insert(walker, RigidBody { kind: BodyKind::Capsule, radius: 0.33, height: 1.8, mass: 0.08, ..Default::default() });
+    let mut sim = Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO);
+    run(&mut sim, &mut ecs, 0.5);
+    let (mut worst, mut hit) = (0.0f32, Vec::new());
+    for _ in 0..(secs / DT).round() as usize {
+        let v = sim.body_snapshot(walker.index()).unwrap().vel;
+        sim.set_body_velocity(walker.index(), Vec3::new(walk, v.y, 0.0));
+        sim.step_tick(DT, None);
+        for ((root, _, _, speed, _, _), peer) in sim.compound_impacts_with_peer() {
+            // Its own weight on the floor it stands on is not the walker.
+            if root == stack.index() && speed > 0.0 && peer != floptle_physics::ImpactPeer::Node(floor.index()) {
+                worst = worst.max(speed);
+                hit.push(peer);
+            }
+        }
+    }
+    (worst, hit, walker.index(), floor.index())
+}
+
+/// **An impact says what was hit, at the speed it was hit.** A damage model
+/// telling a person leaning on a parked craft from a crash needs both: a
+/// capsule walker pressing into a 19.5 t stack at 2 m/s for three seconds
+/// reports impacts no faster than it walks, every one but the stack's own
+/// weight on its floor naming the walker.
+/// Impacts carried a speed and no `other` at all.
+#[test]
+fn an_impact_says_what_was_hit_at_the_speed_it_was_hit() {
+    let (worst, hits, walker, _) = walker_into_stack(2.0, 3.0);
+    assert!(!hits.is_empty(), "the walker never reached the stack");
+    assert!(worst <= 2.1, "a 2 m/s walk read as a {worst:.2} m/s impact");
+    assert!(hits.iter().all(|p| *p == floptle_physics::ImpactPeer::Node(walker)), "an impact named something else: {hits:?}");
+}

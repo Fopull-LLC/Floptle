@@ -229,6 +229,18 @@ pub struct BodyReport {
 /// while keeping the normal component for square-on landing feel.
 pub type CompoundImpact = (u32, u32, f32, f32, f32, DVec3);
 
+/// What a part's hardest contact of the tick was against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImpactPeer {
+    /// A node's body or assembly, by entity index: a walker, a crate, another
+    /// craft, a static collider that is a node's.
+    Node(u32),
+    /// A terrain's ground.
+    Terrain,
+    /// Something with no node: the world's own static geometry.
+    World,
+}
+
 /// One assembly root's script-visible body state, from [`Sim::compound_states`]:
 /// `(root entity index, linear velocity, gravity-up, grounded, world centre of
 /// mass, asleep)`.
@@ -1758,7 +1770,34 @@ impl Sim {
     /// on a glancing or curved-surface hit, so judge severity by the total and
     /// derive the grind speed as `sqrt(total² − normal²)`.
     pub fn compound_impacts(&self) -> Vec<CompoundImpact> {
+        self.compound_impacts_with_peer().into_iter().map(|(i, _)| i).collect()
+    }
+
+    /// [`Self::compound_impacts`], each with what its part's hardest contact
+    /// was against: a game's damage model telling a person leaning on a
+    /// vehicle from a crash into a wall needs to know which it was.
+    pub fn compound_impacts_with_peer(&self) -> Vec<(CompoundImpact, ImpactPeer)> {
         let origin = self.world.origin;
+        let mut body_eid: Vec<Option<u32>> = vec![None; self.world.bodies.len()];
+        for l in &self.map {
+            if let Some(slot) = body_eid.get_mut(l.body) {
+                *slot = Some(l.entity.index());
+            }
+        }
+        let peer_of = |p: crate::compound::ContactPeer| match p {
+            crate::compound::ContactPeer::Collider(ci) => match self.world.colliders.get(ci) {
+                Some(c) if c.shape.chunk_terrain().is_some() => ImpactPeer::Terrain,
+                Some(c) => c.eid.map_or(ImpactPeer::World, ImpactPeer::Node),
+                None => ImpactPeer::World,
+            },
+            crate::compound::ContactPeer::Body(bi) => body_eid.get(bi).copied().flatten().map_or(ImpactPeer::World, ImpactPeer::Node),
+            crate::compound::ContactPeer::Compound(ci) => self
+                .cmap
+                .iter()
+                .find(|l| l.compound == ci)
+                .map_or(ImpactPeer::World, |l| ImpactPeer::Node(l.entity.index())),
+        };
+        let mut peers: std::collections::HashMap<(u32, u32), ImpactPeer> = std::collections::HashMap::new();
         // Value = (sum_impulse, max_impulse, hardest_point, max_speed, max_speed_abs).
         type Agg = (f32, f32, Vec3, f32, f32);
         let mut agg: std::collections::HashMap<(u32, u32), Agg> = std::collections::HashMap::new();
@@ -1771,6 +1810,7 @@ impl Sim {
             if cc.impulse > e.1 {
                 e.1 = cc.impulse;
                 e.2 = cc.point;
+                peers.insert((l.entity.index(), cc.shape_id as u32), peer_of(cc.peer));
             }
             // Peak incoming speed across the tick's contacts on this part: the
             // first (hardest) contact carries the true approach velocity before
@@ -1785,7 +1825,8 @@ impl Sim {
         }
         agg.into_iter()
             .map(|((root, part), (sum, _, p, spd, spd_abs))| {
-                (root, part, sum, spd, spd_abs, origin + p.as_dvec3())
+                let peer = peers.get(&(root, part)).copied().unwrap_or(ImpactPeer::World);
+                ((root, part, sum, spd, spd_abs, origin + p.as_dvec3()), peer)
             })
             .collect()
     }
