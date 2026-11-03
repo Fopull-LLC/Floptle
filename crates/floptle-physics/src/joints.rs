@@ -1062,11 +1062,16 @@ impl PhysicsWorld {
         self.spin_impulse(Some(jt.a), axle * l);
         self.spin_impulse(jt.b, -axle * l);
         // The push turns the tyre whole; its motion along the tread is the
-        // wheel's and the mount's together.
+        // wheel's and the mount's together, handed on at the axle, as a
+        // frame takes it from its wheel. Handed on at the patch, the frame
+        // was turned by it a second time, after the wheel's own spin had
+        // taken that turn: a bike sat back on its rear wheel by the tyre's
+        // radius times its push, its front tyre lifted off, slid, and it
+        // drove forwards at two thirds of what it did in reverse.
         self.joint_impulse(Some(jt.a), wheel.r, fwd * p);
         let moved = if carried.is_finite() { fwd * p * (1.0 - m_wheel * inv_c) } else { Vec3::ZERO };
         self.joint_impulse(Some(jt.a), Vec3::ZERO, -moved);
-        self.joint_impulse(jt.b, mount.r, moved);
+        self.joint_impulse(jt.b, mount.r - wheel.r, moved);
         self.joint_impulse(Some(jt.a), wheel.r, across * share);
         self.joint_impulse(jt.b, mount.r, across * (1.0 - share));
         l.abs() + (fwd * p + across).length()

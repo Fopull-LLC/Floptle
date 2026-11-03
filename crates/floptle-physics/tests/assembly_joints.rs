@@ -1193,3 +1193,90 @@ fn a_rover_on_ice_gains_a_tenth_of_what_it_does_on_rock() {
     let ice = drive_speed_on(0.0, 1.0, g, true, Some(0.1));
     assert!((ice - rock * 0.1).abs() <= 0.15 * rock * 0.1, "on ice it gained {ice} m/s; on rock {rock}");
 }
+
+/// One wheel of [`bike_lead_accel`]: where it sits along the craft, its
+/// suspension axis, spring and damper.
+#[derive(Clone, Copy)]
+struct BikeWheel {
+    dx: f64,
+    axis: [f32; 3],
+    stiffness: f32,
+    damping: f32,
+}
+
+/// [`lead_driven_accel`] for a bike of any build: a chassis of `mass` whose
+/// centre sits `cg` m above the axles, wheels of `radius` m and `tyre` mass
+/// on motors of `max_force` each, every wheel its own axis and spring. Any
+/// unit of mass will do, the force in the same units times m/s².
+#[allow(clippy::too_many_arguments)]
+fn bike_lead_accel(wheels: &[BikeWheel], dir: f32, lead: f32, mass: f32, cg: f64, radius: f32, tyre: f32, max_force: f32) -> f32 {
+    let mut ecs = World::default();
+    let floor = ecs.spawn();
+    ecs.insert(floor, Transform::from_translation(DVec3::new(0.0, -1.0, 0.0)));
+    ecs.insert(floor, RigidBody { kind: BodyKind::Box, mode: BodyMode::Static, half_extents: [400.0, 1.0, 50.0], friction: 1.2, ..Default::default() });
+    let r = radius as f64;
+    let chassis = segment(&mut ecs, "Chassis", DVec3::new(0.0, r + cg, 0.0), [0.6, 0.1, 0.3], mass);
+    let mut ids = Vec::new();
+    for w in wheels {
+        let e = ecs.spawn();
+        ecs.insert(e, Transform::from_translation(DVec3::new(w.dx, r, 0.0)));
+        ecs.insert(e, RigidBody { radius, mass: tyre, friction: 1.2, rotates: true, ..Default::default() });
+        ecs.insert(
+            e,
+            Joint {
+                kind: JointKind::Wheel,
+                other: "Chassis".into(),
+                axis: w.axis,
+                stiffness: w.stiffness,
+                damping: w.damping,
+                motor: true,
+                motor_speed: 0.0,
+                max_force,
+                ..Default::default()
+            },
+        );
+        ids.push(e);
+    }
+    let mut sim = Sim::build_layered(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO, floptle_core::Layers::default());
+    sim.world.single_wheel_friction = true;
+    run(&mut sim, &mut ecs, 1.0);
+    let x0 = sim.compound_of(chassis.index()).unwrap().vel.x;
+    for _ in 0..(1.0 / DT).round() as usize {
+        let v = sim.compound_of(chassis.index()).unwrap().vel.x * dir;
+        let target = -dir * ((v.max(0.0) + lead) / radius).to_degrees();
+        for &e in &ids {
+            ecs.get_mut::<Joint>(e).unwrap().motor_speed = target;
+        }
+        sim.sync_joints(&mut ecs);
+        sim.step_tick(DT, None);
+    }
+    (sim.compound_of(chassis.index()).unwrap().vel.x - x0) * dir
+}
+
+/// **A bike drives as hard forwards as in reverse.** A driven wheel's push
+/// along the ground reaches its frame through the axle. It was handed on at
+/// the tyre's contact patch instead, so the frame was turned by it a second
+/// time after the wheel's own spin had taken that turn: a craft sat back on
+/// the wheels it was driving away from by the tyre's radius times its push.
+/// A bike, its weight well behind the middle, lifted its front tyre, which
+/// slid, and drove forwards at two thirds of reverse under a traction
+/// control. Solar's bike as it is built (365 kg on 30 kg tyres, fork raked
+/// 24° and swing arm 15°, both aft, its weight 0.47 m ahead of the rear
+/// axle and 0.84 m up, each motor held to 0.257 kN·m 0.85 m/s ahead of the
+/// ground): within 5% both ways, and within 10% of all its motors give.
+/// Masses are in tonnes, as Solar's are. It was 3.04 against 3.46 m/s².
+#[test]
+fn a_bike_drives_forwards_as_hard_as_in_reverse() {
+    let aft = |deg: f32| [-deg.to_radians().sin(), deg.to_radians().cos(), 0.0];
+    let full = 2.0 * 0.257 / 0.33 / (0.365 + 0.06);
+    for (fork, arm) in [(24.0f32, 15.0f32), (0.0, 0.0)] {
+        let w = [
+            BikeWheel { dx: 1.098, axis: aft(fork), stiffness: 8.18, damping: 0.447 },
+            BikeWheel { dx: -0.471, axis: aft(arm), stiffness: 11.7, damping: 0.447 },
+        ];
+        let fwd = bike_lead_accel(&w, 1.0, 0.85, 0.365, 0.513, 0.33, 0.03, 0.257);
+        let back = bike_lead_accel(&w, -1.0, 0.85, 0.365, 0.513, 0.33, 0.03, 0.257);
+        assert!((fwd - back).abs() <= 0.05 * fwd.max(back), "fork {fork}°, arm {arm}°: {fwd} m/s² forwards against {back} in reverse");
+        assert!(fwd.min(back) > 0.9 * full, "fork {fork}°, arm {arm}°: {fwd} and {back} m/s² of the {full} its motors give");
+    }
+}
