@@ -1080,6 +1080,7 @@ fn install_assets(
     lua: &Lua,
     logs: &Rc<RefCell<Vec<ScriptLog>>>,
     preloads: Rc<RefCell<crate::preload_api::Preloads>>,
+    writes: Rc<RefCell<crate::write_api::Writes>>,
 ) -> crate::paths::Paths {
     // `assets.getFile(path)` / `assets.getContents(dir)`: resolve files in the project's
     // `Assets/` folder by a path the dev writes relative to it (e.g. "models/armor.glb").
@@ -1177,9 +1178,11 @@ fn install_assets(
         // browser and its writes land in the page's overlay.
         let pp = paths.clone();
         let sink = logs.clone();
+        let ww = writes.clone();
         let _ = t.set(
             "readText",
             lua.create_function(move |lua, path: String| {
+                settle_write(&ww, &pp, &path);
                 match read_project_text(&pp, &path, "assets.readText") {
                     Ok(text) => Ok((Value::String(lua.create_string(text.as_bytes())?), Value::Nil)),
                     Err(why) => {
@@ -1192,9 +1195,11 @@ fn install_assets(
         );
         let pp = paths.clone();
         let sink = logs.clone();
+        let ww = writes.clone();
         let _ = t.set(
             "readJson",
             lua.create_function(move |lua, path: String| {
+                settle_write(&ww, &pp, &path);
                 let text = match read_project_text(&pp, &path, "assets.readJson") {
                     Ok(text) => text,
                     Err(why) => {
@@ -1215,10 +1220,13 @@ fn install_assets(
         );
         let pp = paths.clone();
         let sink = logs.clone();
+        let ww = writes.clone();
         let _ = t.set(
             "writeText",
-            lua.create_function(move |lua, (path, text): (String, mlua::String)| {
-                match write_project_bytes(&pp, &path, &text.as_bytes(), "assets.writeText", &sink) {
+            lua.create_function(move |lua, (path, text, a3, a4): (String, mlua::String, Option<Value>, Option<mlua::Function>)| {
+                let (opts, cb) = write_opts_and_callback(a3, a4, "assets.writeText")?;
+                let off_frame = write_off_frame(opts.as_ref(), &cb, "assets.writeText", &[])?;
+                match write_or_hand_over(&pp, &ww, &path, text.as_bytes().to_vec(), off_frame, cb, "assets.writeText", &sink) {
                     Ok(()) => Ok((Value::Boolean(true), Value::Nil)),
                     Err(why) => {
                         refuse_read(&sink, &why);
@@ -1230,16 +1238,16 @@ fn install_assets(
         );
         let pp = paths.clone();
         let sink = logs.clone();
+        let ww = writes.clone();
         let _ = t.set(
             "writeJson",
-            lua.create_function(move |lua, (path, value, opts): (String, Value, Option<Table>)| {
+            lua.create_function(move |lua, (path, value, a3, a4): (String, Value, Option<Value>, Option<mlua::Function>)| {
+                let (opts, cb) = write_opts_and_callback(a3, a4, "assets.writeJson")?;
+                let off_frame = write_off_frame(opts.as_ref(), &cb, "assets.writeJson", &["pretty"])?;
                 // `{ pretty = true }` writes it indented — a chart a person
                 // will open in a text editor, or diff in git, wants that.
                 let pretty = match &opts {
-                    Some(o) => {
-                        crate::opts::check_keys(o, &["pretty"], "assets.writeJson")?;
-                        crate::opts::opt_bool(o, "assets.writeJson", "pretty")?.unwrap_or(false)
-                    }
+                    Some(o) => crate::opts::opt_bool(o, "assets.writeJson", "pretty")?.unwrap_or(false),
                     None => false,
                 };
                 // A table that cannot be JSON (nests forever, a mis-tagged
@@ -1248,7 +1256,7 @@ fn install_assets(
                 let j = crate::http_api::lua_to_json(&value)?;
                 let text = if pretty { serde_json::to_string_pretty(&j) } else { serde_json::to_string(&j) }
                     .map_err(|e| mlua::Error::RuntimeError(format!("assets.writeJson: {e}")))?;
-                match write_project_bytes(&pp, &path, text.as_bytes(), "assets.writeJson", &sink) {
+                match write_or_hand_over(&pp, &ww, &path, text.into_bytes(), off_frame, cb, "assets.writeJson", &sink) {
                     Ok(()) => Ok((Value::Boolean(true), Value::Nil)),
                     Err(why) => {
                         refuse_read(&sink, &why);
@@ -1263,23 +1271,30 @@ fn install_assets(
         // `readText` would refuse it as not UTF-8.
         let pp = paths.clone();
         let sink = logs.clone();
+        let ww = writes.clone();
         let _ = t.set(
             "readBytes",
-            lua.create_function(move |lua, path: String| match read_project_bytes(&pp, &path, "assets.readBytes") {
-                Ok(bytes) => Ok((Value::String(lua.create_string(&bytes)?), Value::Nil)),
-                Err(why) => {
-                    refuse_read(&sink, &why);
-                    Ok((Value::Nil, Value::String(lua.create_string(why.as_bytes())?)))
+            lua.create_function(move |lua, path: String| {
+                settle_write(&ww, &pp, &path);
+                match read_project_bytes(&pp, &path, "assets.readBytes") {
+                    Ok(bytes) => Ok((Value::String(lua.create_string(&bytes)?), Value::Nil)),
+                    Err(why) => {
+                        refuse_read(&sink, &why);
+                        Ok((Value::Nil, Value::String(lua.create_string(why.as_bytes())?)))
+                    }
                 }
             })
             .ok(),
         );
         let pp = paths.clone();
         let sink = logs.clone();
+        let ww = writes.clone();
         let _ = t.set(
             "writeBytes",
-            lua.create_function(move |lua, (path, bytes): (String, mlua::String)| {
-                match write_project_bytes(&pp, &path, &bytes.as_bytes(), "assets.writeBytes", &sink) {
+            lua.create_function(move |lua, (path, bytes, a3, a4): (String, mlua::String, Option<Value>, Option<mlua::Function>)| {
+                let (opts, cb) = write_opts_and_callback(a3, a4, "assets.writeBytes")?;
+                let off_frame = write_off_frame(opts.as_ref(), &cb, "assets.writeBytes", &[])?;
+                match write_or_hand_over(&pp, &ww, &path, bytes.as_bytes().to_vec(), off_frame, cb, "assets.writeBytes", &sink) {
                     Ok(()) => Ok((Value::Boolean(true), Value::Nil)),
                     Err(why) => {
                         refuse_read(&sink, &why);
@@ -2981,7 +2996,8 @@ impl ScriptHost {
 
         let gizmos = install_gizmos(&lua);
         let preloads: Rc<RefCell<crate::preload_api::Preloads>> = Rc::default();
-        let paths = install_assets(&lua, &logs, preloads.clone());
+        let writes: Rc<RefCell<crate::write_api::Writes>> = Rc::default();
+        let paths = install_assets(&lua, &logs, preloads.clone(), writes.clone());
         let project_root = paths.project.clone();
         let SceneCells {
             scene_request,
@@ -3590,6 +3606,7 @@ impl ScriptHost {
             dropped_lines,
             account,
             preloads,
+            writes,
             textures,
             meshes,
             captures,
@@ -5003,6 +5020,7 @@ impl ScriptHost {
             self.captures.borrow_mut().cancel_all();
             self.compute.borrow_mut().reset();
             self.files.borrow_mut().cancel_all();
+            self.writes.borrow_mut().cancel_all();
         }
         // Stop drops every leaderboard callback still waiting, for the same
         // reason as `http.*` — the backend's own request stays in flight and
@@ -6628,6 +6646,7 @@ impl ScriptHost {
         crate::http_api::drain(&self.lua, &self.http, &self.logs);
         crate::account_api::drain(&self.lua, &self.account, &self.logs);
         crate::preload_api::drain(&self.lua, &self.preloads, &self.logs);
+        crate::write_api::drain(&self.lua, &self.writes, &self.logs);
         crate::capture_api::drain(&self.lua, &self.captures, &self.logs);
         crate::compute_api::drain(&self.lua, &self.compute, &self.logs);
         crate::file_api::drain(&self.lua, &self.files, &self.logs);
@@ -9528,6 +9547,80 @@ fn write_project_bytes(
     call: &str,
     sink: &Rc<RefCell<Vec<ScriptLog>>>,
 ) -> Result<(), String> {
+    let (full, user) = prepare_project_write(paths, path, call, sink)?;
+    let wrote = if user { floptle_vfs::write_atomic(&full, bytes) } else { floptle_vfs::write(&full, bytes) };
+    wrote.map_err(|e| format!("{call}(\"{path}\"): {e}"))
+}
+
+/// Write now, or hand the write to the writer thread to call `cb(ok, err)` on
+/// a later frame ([`crate::write_api`]). Either way the path is checked, its
+/// folders made and any rule broken said now, on the frame.
+#[allow(clippy::too_many_arguments)]
+fn write_or_hand_over(
+    paths: &crate::paths::Paths,
+    writes: &Rc<RefCell<crate::write_api::Writes>>,
+    path: &str,
+    bytes: Vec<u8>,
+    off_frame: bool,
+    cb: Option<mlua::Function>,
+    call: &str,
+    sink: &Rc<RefCell<Vec<ScriptLog>>>,
+) -> Result<(), String> {
+    if !off_frame {
+        // A write made now goes after any still on their way to the same
+        // file, or the older one would land on top of it.
+        settle_write(writes, paths, path);
+        return write_project_bytes(paths, path, &bytes, call, sink);
+    }
+    let (full, user) = prepare_project_write(paths, path, call, sink)?;
+    writes.borrow_mut().submit(full, bytes, user, format!("{call}(\"{path}\")"), cb);
+    Ok(())
+}
+
+/// Wait for any write to `path` still on its way.
+fn settle_write(writes: &Rc<RefCell<crate::write_api::Writes>>, paths: &crate::paths::Paths, path: &str) {
+    let (root, rel, _) = paths.split(path);
+    if let Some(full) = floptle_vfs::contain(&root, rel) {
+        writes.borrow_mut().settle(&full);
+    }
+}
+
+/// `assets.write*(path, data [, opts] [, callback])`: the options table and
+/// the callback, either of which may be left out.
+fn write_opts_and_callback(a3: Option<Value>, a4: Option<mlua::Function>, call: &str) -> mlua::Result<(Option<Table>, Option<mlua::Function>)> {
+    match (a3, a4) {
+        (None | Some(Value::Nil), cb) => Ok((None, cb)),
+        (Some(Value::Table(t)), cb) => Ok((Some(t), cb)),
+        (Some(Value::Function(f)), None) => Ok((None, Some(f))),
+        (Some(other), _) => Err(mlua::Error::RuntimeError(format!(
+            "{call}: the third argument is an options table or a callback, not a {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// Whether a write goes off the frame: `{ async = true }`, or a callback to
+/// hear how it went (which only a write made later needs).
+fn write_off_frame(opts: Option<&Table>, cb: &Option<mlua::Function>, call: &str, more: &[&str]) -> mlua::Result<bool> {
+    let asked = match opts {
+        Some(o) => {
+            let keys: Vec<&str> = ["async"].iter().chain(more).copied().collect();
+            crate::opts::check_keys(o, &keys, call)?;
+            crate::opts::opt_bool(o, call, "async")?
+        }
+        None => None,
+    };
+    Ok(asked.unwrap_or(cb.is_some()))
+}
+
+/// Check where a write is going, make its folders, and say once if it is the
+/// game's install folder: everything about a write but the write.
+fn prepare_project_write(
+    paths: &crate::paths::Paths,
+    path: &str,
+    call: &str,
+    sink: &Rc<RefCell<Vec<ScriptLog>>>,
+) -> Result<(PathBuf, bool), String> {
     let (root, rel, user) = paths.split(path);
     let Some(full) = floptle_vfs::contain(&root, rel) else {
         return Err(outside_rule(call, path, user));
@@ -9543,9 +9636,7 @@ fn write_project_bytes(
     // A player's file is replaced whole or not at all: a kill mid-write
     // leaves the one they had. The game's own files keep the plain write —
     // a hidden sibling appearing in `assets/` is something the Asset Browser
-    // and hot reload would see.
-    let wrote = if user { floptle_vfs::write_atomic(&full, bytes) } else { floptle_vfs::write(&full, bytes) };
-    wrote.map_err(|e| format!("{call}(\"{path}\"): {e}"))?;
+    // and hot reload would see. (The write itself is the caller's.)
     // An exported build that writes into its own install folder has written
     // somewhere the next build will not look, and that may not be writable
     // on a player's machine at all. It still works, so a game made before
@@ -9561,7 +9652,7 @@ fn write_project_bytes(
             source: None,
         });
     }
-    Ok(())
+    Ok((full, user))
 }
 
 thread_local! {
@@ -9965,6 +10056,83 @@ mod host_tests {
         let said: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
         assert!(said.iter().any(|m| m == "again=false"), "{}", said.join("\n"));
         assert_eq!(std::fs::metadata(&file).unwrap().len(), 20 * 1024 * 1024, "a failed write cut the player's file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A file can be written off the frame.** `{ async = true }` hands the
+    /// bytes to a writer thread and answers at once; the callback comes on a
+    /// later frame, never the one that asked. A read of the file before then
+    /// reads what was asked to be written, and a write that fails tells its
+    /// callback why. Written on the frame, the flush to the disk cost a game
+    /// caching terrain 918 ms in one frame.
+    #[test]
+    fn a_file_written_off_the_frame_answers_later_and_reads_back_at_once() {
+        let dir = std::env::temp_dir().join(format!("floptle-async-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        floptle_vfs::write(
+            dir.join("scripts/player.lua"),
+            "local frame = 0\n\
+             function start()\n\
+             \x20 local blob = string.rep('\\0\\1\\2\\255', 768 * 1024)\n\
+             \x20 local ok = assets.writeBytes('user://cache/lod.bin', blob, { async = true }, function(ok, err)\n\
+             \x20   print('cb=' .. tostring(ok) .. ' frame=' .. frame)\n\
+             \x20 end)\n\
+             \x20 print('queued=' .. tostring(ok))\n\
+             \x20 print('read=' .. tostring(assets.readBytes('user://cache/lod.bin') == blob))\n\
+             \x20 assets.writeJson('user://cache/s.json', { a = 1 }, function(ok) print('json=' .. tostring(ok)) end)\n\
+             end\n\
+             function update() frame = frame + 1 end\n",
+        )
+        .unwrap();
+        let mut world = world_with_script("player");
+        let mut host = ScriptHost::new();
+        host.set_project_root(dir.clone());
+        host.set_playing(true);
+        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let first: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        assert!(first.iter().any(|m| m == "queued=true"), "{first:?}");
+        assert!(first.iter().any(|m| m == "read=true"), "a read before the write landed did not read it: {first:?}");
+        assert!(!first.iter().any(|m| m.starts_with("cb=")), "the callback ran on the frame that asked: {first:?}");
+        // Later frames hear back.
+        let mut heard = Vec::new();
+        for i in 1..200 {
+            host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, i as f32 / 60.0);
+            heard.extend(host.drain_logs().into_iter().map(|l| l.msg));
+            if heard.iter().any(|m| m.starts_with("cb=")) && heard.iter().any(|m| m.starts_with("json=")) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(heard.iter().any(|m| m.starts_with("cb=true")), "{heard:?}");
+        assert!(heard.iter().any(|m| m == "json=true"), "{heard:?}");
+        assert_eq!(std::fs::read_to_string(dir.join("save/user/cache/s.json")).unwrap(), r#"{"a":1}"#);
+
+        // A write that cannot finish (its hidden sibling's name is taken, as a
+        // full disk would refuse it) tells its callback so.
+        std::fs::create_dir_all(dir.join("save/user/cache/.lod.bin.tmp")).unwrap();
+        floptle_vfs::write(
+            dir.join("scripts/player.lua"),
+            "function start()\n\
+             \x20 assets.writeBytes('user://cache/lod.bin', 'x', { async = true }, function(ok, err) print('fail=' .. tostring(ok) .. ' ' .. tostring(err)) end)\n\
+             end\n",
+        )
+        .unwrap();
+        let mut world = world_with_script("player");
+        let mut host = ScriptHost::new();
+        host.set_project_root(dir.clone());
+        host.set_playing(true);
+        let mut heard = Vec::new();
+        for i in 0..200 {
+            host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, i as f32 / 60.0);
+            heard.extend(host.drain_logs().into_iter().map(|l| l.msg));
+            if heard.iter().any(|m| m.starts_with("fail=")) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(heard.iter().any(|m| m.starts_with("fail=false") && m.contains("assets.writeBytes")), "{heard:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

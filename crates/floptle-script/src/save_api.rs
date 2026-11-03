@@ -215,12 +215,15 @@ fn ensure_loaded(state: &mut SaveState, root: &Path, logs: &Rc<RefCell<Vec<crate
         return;
     }
     // A write of this very slot may still be on its way (switched away and
-    // back): read what it wrote, not what it replaced.
-    if let Err(e) = state.drain() {
+    // back): read what it wrote, not what it replaced. Only that one is
+    // waited for; waiting for every write on its way made the first read
+    // after a switch pay for the slot just left being flushed to the disk.
+    let path = slot_path(root, &state.slot);
+    let errors = if state.writer.writing(&path) { state.writer.wait() } else { state.writer.poll() };
+    if let Err(e) = state.settle(errors) {
         log_error(logs, e);
     }
     state.reset(true);
-    let path = slot_path(root, &state.slot);
     if !floptle_vfs::is_file(&path) {
         return;
     }
@@ -396,22 +399,28 @@ struct Worker {
     done: std::sync::mpsc::Receiver<Result<WriteStats, String>>,
     thread: Option<std::thread::JoinHandle<()>>,
     pending: usize,
+    /// The files of the writes handed over and not yet back, in order: the
+    /// thread answers in the order it was given them.
+    queued: std::collections::VecDeque<PathBuf>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Worker {
-    fn start() -> std::io::Result<Self> {
+    fn start(#[cfg(test)] delay: std::time::Duration) -> std::io::Result<Self> {
         let (jobs, rx) = std::sync::mpsc::channel::<Job>();
         let (tx, done) = std::sync::mpsc::channel();
         let thread = std::thread::Builder::new().name("save-writer".into()).spawn(move || {
             let mut frags = Fragments::default();
             for job in rx {
+                // A slow disk, for a test that needs a write still on its way.
+                #[cfg(test)]
+                std::thread::sleep(delay);
                 if tx.send(frags.apply(job)).is_err() {
                     break;
                 }
             }
         })?;
-        Ok(Self { jobs: Some(jobs), done, thread: Some(thread), pending: 0 })
+        Ok(Self { jobs: Some(jobs), done, thread: Some(thread), pending: 0, queued: Default::default() })
     }
 }
 
@@ -442,6 +451,9 @@ struct Writer {
     errors: Vec<String>,
     #[cfg(test)]
     last: Option<WriteStats>,
+    /// How long the writer thread waits before each write: a slow disk.
+    #[cfg(test)]
+    delay: std::time::Duration,
 }
 
 impl Writer {
@@ -458,7 +470,7 @@ impl Writer {
     #[cfg(not(target_arch = "wasm32"))]
     fn submit(&mut self, job: Job) {
         if self.worker.is_none() {
-            match Worker::start() {
+            match Worker::start(#[cfg(test)] self.delay) {
                 Ok(w) => self.worker = Some(w),
                 Err(_) => {
                     // No thread to be had: this frame writes it, rather than
@@ -471,10 +483,12 @@ impl Writer {
             }
         }
         let Some(w) = self.worker.as_mut() else { return };
+        let path = job.path.clone();
         let job = match w.jobs.as_ref() {
             Some(tx) => match tx.send(job) {
                 Ok(()) => {
                     w.pending += 1;
+                    w.queued.push_back(path);
                     return;
                 }
                 Err(back) => back.0,
@@ -502,6 +516,7 @@ impl Writer {
             match w.done.try_recv() {
                 Ok(r) => {
                     w.pending -= 1;
+                    w.queued.pop_front();
                     self.record(r);
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -514,6 +529,16 @@ impl Writer {
         std::mem::take(&mut self.errors)
     }
 
+    /// Whether a write of `path` is still on its way.
+    fn writing(&self, path: &Path) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(w) = self.worker.as_ref() {
+            return w.queued.iter().any(|p| p == path);
+        }
+        let _ = path;
+        false
+    }
+
     /// Results of every write handed over, waiting for the last one.
     fn wait(&mut self) -> Vec<String> {
         #[cfg(not(target_arch = "wasm32"))]
@@ -523,6 +548,7 @@ impl Writer {
             match w.done.recv() {
                 Ok(r) => {
                     w.pending -= 1;
+                    w.queued.pop_front();
                     self.record(r);
                 }
                 Err(_) => {
@@ -640,11 +666,17 @@ pub(crate) fn install_save_api(
                 )));
             }
             if name != s.slot {
-                // Waited for: the old slot's store is about to be dropped, and
-                // a failure has to be heard while it can still be named.
-                if let Err(e) = flush(&mut s, &paths.runtime_base(), true) {
+                // The old slot is handed to the writer, not waited for: its
+                // store is copied into the write, so dropping it here loses
+                // nothing, and waiting for its flush to the disk cost a frame
+                // 200 ms on a busy disk. A failure is still heard, on a later
+                // flush, and names its file.
+                let root = paths.runtime_base();
+                if let Err(e) = flush(&mut s, &root, false) {
                     log_error(&logs, e);
                 }
+                // A slot switched back to while its write is on its way waits
+                // for that write when it is first read (`ensure_loaded`).
                 s.slot = name;
                 s.reset(false);
             }
@@ -721,6 +753,32 @@ mod tests {
         assert_eq!((d, leaf.as_str()), (10, "leaf"), "the 10-deep table did not come back");
         let (d, _): (usize, String) = lua.load(read.replace("KEY", "'deepest'")).eval().unwrap();
         assert_eq!(d, SAVE_MAX_DEPTH, "the deepest table allowed did not survive the file");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **Switching slots does not wait, and switching back reads the latest.**
+    /// `save.slot` hands the slot it leaves to the writer rather than waiting
+    /// for its flush (200 ms a frame on a busy disk), and the first read of
+    /// the new slot waits only for a write of that same slot: switched back to
+    /// while its write is on its way, it never reads the file it had before.
+    #[test]
+    fn switching_back_to_a_slot_reads_what_was_just_set() {
+        let root = std::env::temp_dir().join(format!("floptle-saveswitch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (lua, state) = lua_with_save(&root);
+        // Each write takes a while, as on a busy disk: the switch back comes
+        // while the write it needs is still on its way.
+        state.borrow_mut().writer.delay = std::time::Duration::from_millis(20);
+        for i in 0..5 {
+            let (a, b): (i64, i64) = lua
+                .load(format!(
+                    "save.slot('a') save.set('n', {i}) save.slot('b') save.set('m', {i}) \
+                     save.slot('a') local a = save.get('n') save.slot('b') return a, save.get('m')"
+                ))
+                .eval()
+                .unwrap();
+            assert_eq!((a, b), (i, i), "round {i}: switching back read an older slot");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

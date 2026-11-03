@@ -313,6 +313,7 @@ mod image_api;
 mod capture_api;
 mod compute_api;
 mod file_api;
+mod write_api;
 mod terrain_stats_api;
 pub mod paths;
 pub mod data_api;
@@ -1107,6 +1108,9 @@ pub struct ScriptHost {
     /// `assets.preload`: the models scripts asked for ahead of time, and the
     /// callbacks waiting on them.
     preloads: Rc<RefCell<preload_api::Preloads>>,
+    /// `assets.write*({ async = true })`: writes handed to a thread, and
+    /// the callbacks waiting on them.
+    writes: Rc<RefCell<write_api::Writes>>,
     /// True while the tick pass is running — `http.*` warns once when called
     /// from there, because nothing about a reply's timing can be replayed.
     http_in_fixed: Rc<std::cell::Cell<bool>>,
