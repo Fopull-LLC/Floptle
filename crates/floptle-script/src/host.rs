@@ -3884,6 +3884,12 @@ impl ScriptHost {
         host.lua.load(src).exec().map_err(|e| e.to_string())
     }
 
+    /// Run `src` on this host's Lua, for a test reading the host after.
+    #[cfg(test)]
+    pub(crate) fn eval_on_for_test(&self, src: &str) -> Result<(), String> {
+        self.lua.load(src).exec().map_err(|e| e.to_string())
+    }
+
     /// The player's accessibility settings as they stand — a game's options menu
     /// writes them from Lua, and the driver honours them.
     pub fn access(&self) -> floptle_core::access::Accessibility {
@@ -5074,6 +5080,7 @@ impl ScriptHost {
             self.writes.borrow_mut().cancel_all();
             // A budget is the session's, like the other settings a game sets.
             self.particle_budget.set(None);
+            self.terrain_stats.borrow_mut().shape = None;
         }
         // Stop drops every leaderboard callback still waiting, for the same
         // reason as `http.*` — the backend's own request stays in flight and
@@ -6548,6 +6555,12 @@ impl ScriptHost {
     /// The memory budget a game set for its terrains (`terrain.setBudget`).
     pub fn terrain_budget(&self) -> Option<u64> {
         self.terrain_stats.borrow().budget
+    }
+
+    /// How many times a game asked its terrain's curved ground to be
+    /// subdivided (`terrain.setShape`), if it did.
+    pub fn terrain_shape(&self) -> Option<u8> {
+        self.terrain_stats.borrow().shape
     }
 
     /// How far a game asked its terrain's LOD rings to reach, as a share of

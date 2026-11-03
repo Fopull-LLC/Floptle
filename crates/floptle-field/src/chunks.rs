@@ -339,6 +339,9 @@ pub struct ChunkField {
     /// How far, in voxels, the mesher looks round each vertex for ground of
     /// another material ([`crate::mesher::ChunkMesh::edges`]); 0 bakes none.
     slot_edge_reach: u8,
+    /// How many times a full-detail chunk's surface is subdivided onto the
+    /// field ([`Self::set_mesh_refine`]); 0 meshes one vertex a cell.
+    mesh_refine: u8,
     /// Default colour for voxels in chunks that have never been painted.
     base_color: [u8; 4],
     /// The box of voxels written since [`Self::take_changed`] last asked.
@@ -695,6 +698,7 @@ impl ChunkField {
             chunks: HashMap::new(),
             voxel: voxel.max(1e-3),
             slot_edge_reach: 0,
+            mesh_refine: 0,
             base_color: [128, 128, 128, 255],
             changed: None,
             pending: std::collections::HashSet::new(),
@@ -724,6 +728,22 @@ impl ChunkField {
     /// does not, and the two would bake the border's edge differently.
     pub fn set_slot_edge_reach(&mut self, voxels: u8) {
         self.slot_edge_reach = voxels.min(3);
+    }
+
+    /// How many times (at most 4) curved ground in a chunk meshed at full
+    /// detail is subdivided, each new vertex settled onto the field's
+    /// surface, where it was edited (see [`crate::mesher`]'s
+    /// `refine_surface`): 0, the default, meshes one vertex a cell, and a hole
+    /// dug a few voxels across is a polygon of straight segments a voxel long.
+    /// Each level halves the pieces where the ground still curves; flat
+    /// ground is never split. Changing it does not re-mesh: the caller does,
+    /// when it changes.
+    pub fn set_mesh_refine(&mut self, levels: u8) {
+        self.mesh_refine = levels.min(4);
+    }
+
+    pub fn mesh_refine(&self) -> u8 {
+        self.mesh_refine
     }
 
     pub fn slot_edge_reach(&self) -> u8 {

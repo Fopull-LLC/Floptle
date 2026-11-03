@@ -94,6 +94,26 @@ Only ground blends. A layer one voxel under undug ground stays hidden, so the su
 
 A blend, with its noise, reaches at most 2.5 voxels to each side of the edge, which is 3.75 m on a 1.5 m voxel. A width that would reach further is narrowed to fit: at `rough` 0.5 that allows about 4.3 m on a 1.5 m voxel. A wider blend also makes the terrain's meshes a little slower to build, up to about 1.6 times at the widest. A palette with no blend widths costs nothing extra.
 
+## The shape of what is dug
+
+How dug, raised and sculpted ground is drawn is the project's choice
+(Project Settings ▸ Terrain shape), and a game can change it while it runs
+with `terrain.setShape`:
+
+- **Natural** (new projects): curved ground gets as many vertices as its
+  curve needs, each placed on the terrain's own surface. A 3 m dig on 1.5 m
+  voxels is round, with no straight piece of its rim over 0.3 m. Flat ground
+  is never split and costs nothing more.
+- **Faceted** (projects from before the setting): one vertex a voxel, the
+  crisp low-poly look. A dig is a polygon of voxel-long sides.
+
+Levels 1 to 3 sit between them (`terrain.setShape(2)`). On a generated
+world only ground that was dug or raised is subdivided: the world's own
+relief is drawn as it was, so a planet costs what it did until someone
+digs. Meshing an edited chunk where the ground curves costs about 1×, 1.1×,
+1.9×, 4× and 8× the faceted cost at levels 0 to 4; flat ground is the same
+at every level.
+
 ## Example worlds
 
 Each of these is a complete `opts` table, at a size that generates in a second or two. Change `seed` for another world of the same kind.

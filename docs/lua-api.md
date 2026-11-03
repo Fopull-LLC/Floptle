@@ -28,7 +28,7 @@ each group, and meant to be searched.
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 78
 - [networking — net.*, synced](#networking--net-synced) — 41
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
-- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 29
+- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 30
 - [pathfinding — nav.*](#pathfinding--nav) — 26
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 11
 - [weather — wind](#weather--wind) — 6
@@ -3047,6 +3047,10 @@ terrain.setBudget(bytes | nil) → the most memory every terrain together may ho
 ### `terrain.setDetail`
 
 terrain.setDetail(scale) — a view-distance / terrain-detail setting: every terrain LOD ring reaches scale times as far as the engine's own (0.25 to 2; 1 = as the engine sizes them, 0.5 = each ring half as far, 2 = twice). Smaller meshes fewer chunks at full detail and draws fewer triangles far away; larger keeps detail farther out at more cost. The ground within 64 m of the camera stays at full detail and nothing within 120 m is coarser than half, whatever the scale, so what a player touches is drawn as it collides. Combines with terrain.setBudget: the budget can draw the rings in further, never out. Lasts until set again.
+
+### `terrain.setShape`
+
+terrain.setShape("natural" | "faceted" | level) — how dug, raised and sculpted ground is drawn, for the session, in place of the project's Terrain shape setting (nil goes back to it). "natural" (level 4) gives curved ground as many vertices as its curve needs, each on the terrain's own surface, so a 3 m dig on 1.5 m voxels is round, no straight piece of its rim over 0.3 m; flat ground is never split and costs nothing more. "faceted" (level 0) is one vertex a voxel, the crisp low-poly look: a dig is a polygon of voxel-long sides. Levels 1 to 3 are between. On a generated world only ground that was dug or raised is subdivided; its own relief is drawn as it was. Meshing an edited chunk costs about 1×, 1.1×, 1.9×, 4× and 8× (levels 0 to 4) of the faceted cost where the ground curves. Refuses: any other name.
 
 ### `terrain.slotAt`
 

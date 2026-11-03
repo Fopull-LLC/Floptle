@@ -815,6 +815,32 @@ impl<'a> SettingsCtx<'a> {
         );
         row(
             ui,
+            "Terrain shape",
+            Some("how dug, raised and sculpted ground is drawn. \"natural\": curved ground gets as \
+                  many vertices as its curve needs, so a dig is round (flat ground costs nothing \
+                  more). \"faceted\": one vertex a voxel, the crisp low-poly look, a dig a polygon \
+                  of voxel-long sides. A game can choose at runtime with terrain.setShape"),
+            |ui| {
+                use floptle_scene::TerrainShapeDoc as T;
+                let mut t = project.terrain_shape_resolved();
+                egui::ComboBox::from_id_salt("project-terrain-shape")
+                    .width(fit_here(ui, 220.0))
+                    .selected_text(match t {
+                        T::Natural => "natural",
+                        T::Faceted => "faceted",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut t, T::Natural, "natural");
+                        ui.selectable_value(&mut t, T::Faceted, "faceted");
+                    });
+                if t != project.terrain_shape_resolved() {
+                    project.terrain_shape = Some(t);
+                    out.save_project = true;
+                }
+            },
+        );
+        row(
+            ui,
             "Wheel friction",
             Some("how a wheel joint's wheel grips. \"once\": its tyre grips by its friction times \
                   how hard the ground presses on it, so a wheel of friction 0.6 drives at up to \

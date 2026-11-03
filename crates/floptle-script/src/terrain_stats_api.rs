@@ -75,6 +75,9 @@ pub(crate) struct Counted {
     /// `terrain.setDetail`: how far every LOD ring reaches, as a share of
     /// its own distance (None = 1, as the engine sizes them).
     pub(crate) scale: Option<f32>,
+    /// `terrain.setShape`: how many times curved ground is subdivided, in
+    /// place of the project's setting, for the session.
+    pub(crate) shape: Option<u8>,
 }
 
 /// The least and most `terrain.setDetail` takes.
@@ -119,6 +122,40 @@ pub(crate) fn install(lua: &Lua, state: Rc<RefCell<Counted>>) -> mlua::Result<()
     )?;
     let st = state.clone();
     terrain.set("detail", lua.create_function(move |_, ()| Ok(st.borrow().scale.unwrap_or(1.0)))?)?;
+    // terrain.setShape("faceted" | "natural" | 0..4): how curved ground is
+    // drawn, for the session (a settings screen's terrain detail): a level
+    // is how many times it may be subdivided where it curves.
+    let st = state.clone();
+    terrain.set(
+        "setShape",
+        lua.create_function(move |_, v: mlua::Value| {
+            let level = match &v {
+                mlua::Value::String(s) => match s.to_str()?.as_ref() {
+                    "faceted" => 0,
+                    "natural" => 4,
+                    other => {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "terrain.setShape({other:?}) — the shapes are \"faceted\" and \"natural\", or a level 0 to 4"
+                        )));
+                    }
+                },
+                mlua::Value::Integer(n) => (*n).clamp(0, 4) as u8,
+                mlua::Value::Number(n) if n.is_finite() => n.round().clamp(0.0, 4.0) as u8,
+                mlua::Value::Nil => {
+                    st.borrow_mut().shape = None;
+                    return Ok(());
+                }
+                other => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "terrain.setShape takes \"faceted\", \"natural\" or a level 0 to 4, not a {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            st.borrow_mut().shape = Some(level);
+            Ok(())
+        })?,
+    )?;
     terrain.set(
         "stats",
         lua.create_function(move |lua, id: Option<u32>| {

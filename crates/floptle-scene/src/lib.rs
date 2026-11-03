@@ -1534,6 +1534,31 @@ pub enum WheelFrictionDoc {
     Single,
 }
 
+/// How the terrain's dug, raised and sculpted ground is drawn.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TerrainShapeDoc {
+    /// One vertex a voxel: a dig is a polygon of straight segments a voxel
+    /// long, the crisp, low-poly look. How every terrain drew before the
+    /// setting, which a project from then keeps.
+    Faceted,
+    /// Curved ground drawn with as many vertices as its curve needs, each on
+    /// the field's own surface: a dig is round. Flat ground costs nothing
+    /// more. New projects start here.
+    #[default]
+    Natural,
+}
+
+impl TerrainShapeDoc {
+    /// How many times curved ground is subdivided
+    /// (`floptle_field::ChunkField::set_mesh_refine`).
+    pub fn refine_levels(self) -> u8 {
+        match self {
+            TerrainShapeDoc::Faceted => 0,
+            TerrainShapeDoc::Natural => 4,
+        }
+    }
+}
+
 /// How the 3D scene smooths the stair-steps along its edges.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum AntialiasDoc {
@@ -3246,6 +3271,11 @@ pub struct ProjectConfigDoc {
     /// mode leaves its pixels as they are whatever this says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub antialias: Option<AntialiasDoc>,
+    /// How the terrain's curved ground is drawn; see [`TerrainShapeDoc`].
+    /// `None` means the file predates the setting and resolves to
+    /// [`Faceted`](TerrainShapeDoc::Faceted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terrain_shape: Option<TerrainShapeDoc>,
     /// How wheels take their friction; see [`WheelFrictionDoc`]. `None` means
     /// the file predates the setting and resolves to
     /// [`Classic`](WheelFrictionDoc::Classic).
@@ -3340,6 +3370,7 @@ impl ProjectConfigDoc {
             imported_materials: Some(ImportedMaterialsDoc::AsFile),
             antialias: Some(AntialiasDoc::Fxaa),
             wheel_friction: Some(WheelFrictionDoc::Single),
+            terrain_shape: Some(TerrainShapeDoc::Natural),
             example_scripts: true,
             mixer: floptle_audio::MixerDesc::default(),
             bloom: false,
@@ -3389,6 +3420,12 @@ impl ProjectConfigDoc {
     /// before the setting gripped twice over, and still does.
     pub fn wheel_friction_resolved(&self) -> WheelFrictionDoc {
         self.wheel_friction.unwrap_or(WheelFrictionDoc::Classic)
+    }
+
+    /// How this project draws its terrain's curved ground. A project file
+    /// from before the setting drew it faceted, and still does.
+    pub fn terrain_shape_resolved(&self) -> TerrainShapeDoc {
+        self.terrain_shape.unwrap_or(TerrainShapeDoc::Faceted)
     }
 
     /// How this project smooths its edges. A project file from before the

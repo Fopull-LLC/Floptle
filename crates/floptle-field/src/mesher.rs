@@ -92,6 +92,8 @@ pub struct MeshScratch {
     /// [`ChunkField::slot_edge_reach`] when gathered: how far each vertex looks
     /// for ground of another material.
     edge_reach: u8,
+    /// [`ChunkField::mesh_refine`] when gathered.
+    refine: u8,
     /// The chunk + stride this scratch was gathered for — `mesh_scratch` reads them
     /// back so a queued job is fully self-contained (the async remesh worker meshes
     /// from the scratch alone and never touches the live field; trap T4).
@@ -120,7 +122,7 @@ impl MeshScratch {
         // At full detail no corner takes a minimum, so which chunks hold data
         // is never asked.
         let chunk = base.map(|v| v.div_euclid(CHUNK));
-        Self { lo, dim, dist, color, voxel: field.voxel(), band: field.band(), edge_reach: field.slot_edge_reach(), chunk, stride: 1, base, cells, meshed: 0 }
+        Self { lo, dim, dist, color, voxel: field.voxel(), band: field.band(), edge_reach: field.slot_edge_reach(), refine: field.mesh_refine(), chunk, stride: 1, base, cells, meshed: 0 }
     }
 
     fn new(field: &ChunkField, chunk: [i32; 3], stride: i32) -> Self {
@@ -156,7 +158,13 @@ impl MeshScratch {
         }
         let base = chunk.map(|v| v * CHUNK);
         let cells = (CHUNK / stride).max(1);
-        Self { lo, dim, dist, color, voxel: field.voxel(), band: field.band(), edge_reach: field.slot_edge_reach(), chunk, stride, base, cells, meshed }
+        // Curved ground is subdivided where it was edited (`is_edited`: on a
+        // generated world, what was dug or raised, and everything on a field
+        // that was never generated). A generated world's own relief curves
+        // gently everywhere, and refining all of it would multiply the cost
+        // of every chunk near the player for a difference no one sees.
+        let refine = if field.is_edited(chunk) { field.mesh_refine() } else { 0 };
+        Self { lo, dim, dist, color, voxel: field.voxel(), band: field.band(), edge_reach: field.slot_edge_reach(), refine, chunk, stride, base, cells, meshed }
     }
 
     /// Flat scratch index for a global voxel, without bounds checks.
@@ -1188,7 +1196,187 @@ pub fn mesh_scratch(s: &MeshScratch, skirt: bool) -> ChunkMesh {
     if skirt {
         add_skirt(&mut m, s, &rim);
     }
+    // The drawn surface only: the collision meshes (no skirt) collide with
+    // the field's own surface, which the refined vertices sit on, at a
+    // fraction of the triangles.
+    if skirt && s.stride == 1 && s.refine > 0 {
+        refine_surface(&mut m, s, s.refine);
+    }
     m
+}
+
+/// Subdivide the surface triangles (not the skirt) up to `levels` times
+/// where the ground curves, each new vertex settled onto the field's
+/// surface: the edit a vertex a voxel could only outline becomes as round as
+/// the field that holds it. A dig writes the exact distance to its ball, so
+/// the field knows the true sphere to well under a voxel; one vertex a cell
+/// drew it as straight segments a voxel long.
+///
+/// Only where it curves: an edge is split when its settled midpoint stands
+/// off the straight edge by more than [`REFINE_FLAT`] of a voxel, and each
+/// triangle is cut by the edges of it that split (none, one, two or all
+/// three). Flat ground, which is most of it, is drawn as it was and costs
+/// nothing more. The decision is the edge's, from its two ends and the
+/// field alone, so the two triangles on an edge, in one chunk or two, agree
+/// and leave no crack.
+fn refine_surface(m: &mut ChunkMesh, s: &MeshScratch, levels: u8) {
+    let origin = Vec3::from(m.origin);
+    let surface = m.tri_count() - m.skirt_tris;
+    let skirt = m.indices[surface * 3..].to_vec();
+    let mut tris = m.indices[..surface * 3].to_vec();
+    for _ in 0..levels {
+        // A face whose middle stands off the ground splits all its edges,
+        // straight or not: two corners on flat ground just outside a dig and
+        // one down in it make a straight edge across a curve, and the edges
+        // alone never saw it. Asked of every face first, so the face on the
+        // other side of such an edge splits it too.
+        let mut forced: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+        // Where each vertex stands settled onto the ground: what a face or
+        // an edge is judged flat against. The mesher's own vertices stand a
+        // percent of a voxel off the field's surface, and judged against
+        // them flat ground read as curved and split whole.
+        let mut settled: Vec<Option<Vec3>> = vec![None; m.positions.len()];
+        for t in tris.as_chunks::<3>().0 {
+            let p = [0, 1, 2].map(|k| Vec3::from(m.positions[t[k] as usize]) + origin);
+            let corners = [0, 1, 2].map(|k| on_ground(&mut settled, m, s, origin, t[k]));
+            let flat = (corners[0] + corners[1] + corners[2]) / 3.0;
+            if (settle(s, (p[0] + p[1] + p[2]) / 3.0) - flat).length() > REFINE_FLAT * s.voxel {
+                for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                    forced.insert((a.min(b), a.max(b)));
+                }
+            }
+        }
+        let mut mids: std::collections::HashMap<(u32, u32), Option<u32>> = std::collections::HashMap::new();
+        let mut next = Vec::with_capacity(tris.len() * 2);
+        let mut split_any = false;
+        for t in tris.as_chunks::<3>().0 {
+            let (a, b, c) = (t[0], t[1], t[2]);
+            let ab = refine_mid(m, s, origin, &mut mids, &mut settled, &forced, a, b);
+            let bc = refine_mid(m, s, origin, &mut mids, &mut settled, &forced, b, c);
+            let ca = refine_mid(m, s, origin, &mut mids, &mut settled, &forced, c, a);
+            split_any |= ab.is_some() || bc.is_some() || ca.is_some();
+            match (ab, bc, ca) {
+                (None, None, None) => next.extend_from_slice(&[a, b, c]),
+                (Some(x), None, None) => next.extend_from_slice(&[a, x, c, x, b, c]),
+                (None, Some(y), None) => next.extend_from_slice(&[a, b, y, a, y, c]),
+                (None, None, Some(z)) => next.extend_from_slice(&[a, b, z, z, b, c]),
+                (Some(x), Some(y), None) => next.extend_from_slice(&[x, b, y, a, x, y, a, y, c]),
+                (None, Some(y), Some(z)) => next.extend_from_slice(&[z, y, c, a, b, y, a, y, z]),
+                (Some(x), None, Some(z)) => next.extend_from_slice(&[a, x, z, x, b, c, x, c, z]),
+                (Some(x), Some(y), Some(z)) => next.extend_from_slice(&[a, x, z, x, b, y, z, y, c, x, y, z]),
+            }
+        }
+        tris = next;
+        if !split_any {
+            break;
+        }
+    }
+    m.indices = tris;
+    m.indices.extend_from_slice(&skirt);
+}
+
+/// How far, as a share of a voxel, an edge's settled midpoint may stand off
+/// the straight edge before the edge is split ([`refine_surface`]).
+const REFINE_FLAT: f32 = 0.003;
+
+/// The vertex halfway along edge `a`–`b`, settled onto the field's surface
+/// along its gradient and shared by the two triangles on that edge; `None`
+/// when the surface there is as straight as the edge, which is then left
+/// whole.
+/// Vertex `i` settled onto the field's surface (in world space), from
+/// `cache` when it has been asked before.
+fn on_ground(cache: &mut Vec<Option<Vec3>>, m: &ChunkMesh, s: &MeshScratch, origin: Vec3, i: u32) -> Vec3 {
+    let i = i as usize;
+    if cache.len() <= i {
+        cache.resize(i + 1, None);
+    }
+    *cache[i].get_or_insert_with(|| {
+        let p = Vec3::from(m.positions[i]) + origin;
+        let q = settle(s, p);
+        if q.is_finite() && (q - p).length() <= 0.5 * s.voxel { q } else { p }
+    })
+}
+
+/// `start` moved onto the field's surface along its gradient, a few Newton
+/// steps.
+fn settle(s: &MeshScratch, start: Vec3) -> Vec3 {
+    let mut p = start;
+    let h = s.voxel;
+    for _ in 0..3 {
+        let d = s.d(p);
+        let g = Vec3::new(
+            s.d(p + Vec3::X * h) - s.d(p - Vec3::X * h),
+            s.d(p + Vec3::Y * h) - s.d(p - Vec3::Y * h),
+            s.d(p + Vec3::Z * h) - s.d(p - Vec3::Z * h),
+        ) / (2.0 * h);
+        let g2 = g.length_squared();
+        if g2 < 1e-8 || !d.is_finite() {
+            break;
+        }
+        p -= g * (d / g2);
+    }
+    p
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refine_mid(
+    m: &mut ChunkMesh,
+    s: &MeshScratch,
+    origin: Vec3,
+    mids: &mut std::collections::HashMap<(u32, u32), Option<u32>>,
+    settled: &mut Vec<Option<Vec3>>,
+    forced: &std::collections::HashSet<(u32, u32)>,
+    a: u32,
+    b: u32,
+) -> Option<u32> {
+    let key = (a.min(b), a.max(b));
+    if let Some(&i) = mids.get(&key) {
+        return i;
+    }
+    let (pa, pb) = (Vec3::from(m.positions[a as usize]), Vec3::from(m.positions[b as usize]));
+    // Settled from the edge's ends in a fixed order, whichever triangle
+    // asks: the two chunks on a shared edge get the same point.
+    let (lo, hi) = if pa.to_array() <= pb.to_array() { (pa, pb) } else { (pb, pa) };
+    let start = (lo + hi) * 0.5 + origin;
+    let h = s.voxel;
+    let mut p = settle(s, start);
+    // How far the ground's own middle of the edge stands off the straight
+    // line between its ends on the ground.
+    let flat = (on_ground(settled, m, s, origin, a) + on_ground(settled, m, s, origin, b)) * 0.5;
+    let mut off = (p - flat).length();
+    // A step that lands more than half a voxel away found another surface,
+    // not this one: the edge splits on its straight middle, if it splits.
+    if !p.is_finite() || (p - start).length() > 0.5 * h {
+        p = start;
+        off = 0.0;
+    }
+    // One that hardly moved found the edge already on the ground, and a
+    // face beside it that does not curve either leaves it whole.
+    if off <= REFINE_FLAT * h && !forced.contains(&key) {
+        mids.insert(key, None);
+        return None;
+    }
+    // Its material is the voxel nearest where it settled, as every vertex's
+    // is; taken from one end of its edge, the boundary between two materials
+    // became a staircase of the new small triangles.
+    let voxel = s.voxel;
+    let color = s.color_at([(p.x / voxel).round() as i32, (p.y / voxel).round() as i32, (p.z / voxel).round() as i32]);
+    // A fallback normal and edge, by place rather than by index: the two
+    // chunks on a shared edge number their vertices differently.
+    let first = if pa.to_array() <= pb.to_array() { a } else { b } as usize;
+    let nrm = s.grad(p);
+    let nrm = if nrm == Vec3::ZERO { Vec3::from(m.normals[first]) } else { nrm };
+    if !m.edges.is_empty() {
+        let (ea, eb) = (m.edges[a as usize], m.edges[b as usize]);
+        let e = if ea[1] == eb[1] { [(ea[0] + eb[0]) * 0.5, ea[1]] } else { m.edges[first] };
+        m.edges.push(e);
+    }
+    m.positions.push((p - origin).to_array());
+    m.normals.push(nrm.to_array());
+    m.colors.push(color);
+    let i = (m.positions.len() - 1) as u32;
+    mids.insert(key, Some(i));
+    Some(i)
 }
 
 /// A vertex's normal: the field's smooth gradient, one voxel either side, unless that
@@ -2435,6 +2623,114 @@ mod tests {
                 worst <= coarse as f32 + 0.5,
                 "stride {fine} against {coarse}: a ray down the passage went to z = {worst} before meeting anything"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod dig_shape_tests {
+    use super::*;
+    use crate::{Brush, BrushProfile, ChunkField};
+
+    /// The longest straight piece of a dig's rim: the surface meshed from
+    /// `field` cut by the plane `y` (just under the ground's top), as the
+    /// segments the cut leaves inside `radius` of the dig's axis.
+    pub(crate) fn longest_rim_segment(field: &ChunkField, y: f32, centre: Vec3, radius: f32) -> (f32, usize) {
+        let (mut longest, mut n) = (0.0f32, 0usize);
+        for c in field.chunk_coords() {
+            let m = mesh_chunk(field, c, 1, true);
+            let o = Vec3::from(m.origin);
+            let surface = m.tri_count() - m.skirt_tris;
+            for t in m.indices[..surface * 3].as_chunks::<3>().0 {
+                let p = [0, 1, 2].map(|k| Vec3::from(m.positions[t[k] as usize]) + o);
+                let mut cut = Vec::new();
+                for (a, b) in [(p[0], p[1]), (p[1], p[2]), (p[2], p[0])] {
+                    if (a.y - y) * (b.y - y) < 0.0 {
+                        cut.push(a + (b - a) * ((y - a.y) / (b.y - a.y)));
+                    }
+                }
+                if cut.len() == 2 {
+                    let mid = (cut[0] + cut[1]) * 0.5;
+                    let off = Vec3::new(mid.x - centre.x, 0.0, mid.z - centre.z).length();
+                    if off < radius {
+                        let l = (cut[1] - cut[0]).length();
+                        longest = longest.max(l);
+                        n += 1;
+                    }
+                }
+            }
+        }
+        (longest, n)
+    }
+
+    /// A 3 m dig into a slab of 1.5 m voxels at refine `level`: its rim's
+    /// longest straight piece on the steep wall, and the ground's triangles
+    /// within 6 m of it. With `dig` false, the slab as it was.
+    fn dig_at(level: u8, dig: bool) -> (f32, usize, f64) {
+        let mut f = ChunkField::new(1.5);
+        f.fill_slab(Vec3::new(-12.0, -6.0, -12.0), Vec3::new(12.0, 0.0, 12.0), 0.0, [0.5; 3]);
+        f.set_mesh_refine(level);
+        let at = Vec3::new(0.3, 0.0, 0.2);
+        if dig {
+            f.sculpt(Brush::Lower, at, 1.5, 1.0, BrushProfile { hardness: 1.0, ..Default::default() });
+        }
+        let mut longest = 0.0f32;
+        for y in [-0.4, -0.8] {
+            longest = longest.max(longest_rim_segment(&f, y, at, 3.0).0);
+        }
+        // The ground's top within 6 m of the dig: the slab's own sides and
+        // underside are a test fixture's, not ground.
+        let start = std::time::Instant::now();
+        let meshes: Vec<ChunkMesh> = f.chunk_coords().iter().map(|&c| mesh_chunk(&f, c, 1, true)).collect();
+        let ms = start.elapsed().as_secs_f64() * 1e3;
+        let tris = meshes
+            .iter()
+            .map(|m| {
+                let o = Vec3::from(m.origin);
+                let surface = m.tri_count() - m.skirt_tris;
+                m.indices[..surface * 3]
+                    .as_chunks::<3>().0
+                    .iter()
+                    .filter(|t| t.iter().all(|&i| { let p = Vec3::from(m.positions[i as usize]) + o; p.y > -3.0 && p.x.abs() < 6.0 && p.z.abs() < 6.0 }))
+                    .count()
+            })
+            .sum();
+        (longest, tris, ms)
+    }
+
+    /// **A dig is round, if the project wants it round.** On 1.5 m voxels a
+    /// 3 m dig drew as a polygon of straight sides over a metre long. With
+    /// the natural shape (refine 4) curved ground is subdivided where it
+    /// curves, each new vertex on the field's surface: no straight piece of
+    /// its rim is over 0.3 m. Faceted (refine 0) draws it as before. Flat
+    /// ground is never subdivided, at any level: it costs nothing more.
+    #[test]
+    fn a_dig_is_round_if_the_project_wants_it_round() {
+        let (faceted, flat_tris, _) = dig_at(0, true);
+        assert!(faceted > 1.0, "the faceted dig is no longer the polygon it was: {faceted:.3} m");
+        let (natural, tris, _) = dig_at(4, true);
+        assert!(natural <= 0.3, "a natural dig's rim has a straight piece {natural:.3} m long");
+        assert!(tris > flat_tris, "the natural dig was not subdivided");
+        for level in 0..=4 {
+            let (_, plain, _) = dig_at(level, false);
+            assert_eq!(plain, dig_at(0, false).1, "flat ground was subdivided at level {level}");
+        }
+        // A generated world's own relief, where no one has dug, is drawn as
+        // it was: only edited ground is subdivided.
+        let spec = crate::procgen::PlanetFill { seed: 9, radius: 60.0, voxel: 1.5, relief: 6.0, cave_depth: 0.0, ..Default::default() };
+        let mut world = crate::procgen::generate_planet(&spec);
+        let surface = |f: &ChunkField| -> usize { f.chunk_coords().iter().map(|&c| { let m = mesh_chunk(f, c, 1, true); m.tri_count() - m.skirt_tris }).sum() };
+        let before = surface(&world);
+        world.set_mesh_refine(4);
+        assert_eq!(surface(&world), before, "a generated world's untouched relief was subdivided");
+    }
+
+    #[test]
+    #[ignore]
+    fn probe_dig_cost() {
+        for level in 0..=4 {
+            let (l, tris, ms) = dig_at(level, true);
+            println!("level {level}: rim {l:.3} m, {tris} triangles near the dig, meshing the slab's chunks {ms:.2} ms");
         }
     }
 }

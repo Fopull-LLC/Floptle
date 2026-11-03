@@ -1351,6 +1351,15 @@ impl Editor {
         // when no slot has one, so the meshes are exactly what they were. A
         // change re-meshes every drawn chunk in place.
         for (e, t) in &mut self.terrains {
+            // How curved ground is drawn: the game's choice, else the project's.
+            let want_refine = self.script_host.terrain_shape().unwrap_or_else(|| self.project.terrain_shape_resolved().refine_levels());
+            if t.field.mesh_refine() != want_refine {
+                t.field.set_mesh_refine(want_refine);
+                if let Some(r) = self.terrain_render.get_mut(e) {
+                    let drawn: Vec<[i32; 3]> = r.slots.keys().copied().collect();
+                    r.stale.extend(drawn);
+                }
+            }
             let want_reach = edge_reach_for(&self.terrain_tex_blend, &self.terrain_tex_rough, t.field.voxel());
             if t.field.slot_edge_reach() != want_reach {
                 t.field.set_slot_edge_reach(want_reach);

@@ -1205,3 +1205,22 @@ fn a_mesh_or_texture_can_live_as_long_as_its_node_or_scene() {
     assert_eq!(counts(&mut host, &mut world, 0.032), (1, 1), "the scene's texture outlived it");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **A game chooses how its terrain's curved ground is drawn.**
+/// `terrain.setShape` takes "faceted", "natural" or a level, holds it for the
+/// session in place of the project's setting, and refuses a shape that is
+/// none of those by name. Stop lets it go.
+#[test]
+fn a_game_chooses_how_its_terrain_s_curved_ground_is_drawn() {
+    let host = ScriptHost::new();
+    assert_eq!(host.terrain_shape(), None);
+    for (src, want) in [("terrain.setShape('natural')", Some(4)), ("terrain.setShape('faceted')", Some(0)), ("terrain.setShape(2)", Some(2)), ("terrain.setShape(nil)", None)] {
+        ScriptHost::eval_on_for_test(&host, src).unwrap();
+        assert_eq!(host.terrain_shape(), want, "{src}");
+    }
+    let err = ScriptHost::eval_on_for_test(&host, "terrain.setShape('smooth')").unwrap_err();
+    assert!(err.contains("faceted") && err.contains("natural"), "{err}");
+    ScriptHost::eval_on_for_test(&host, "terrain.setShape('natural')").unwrap();
+    host.set_playing(false);
+    assert_eq!(host.terrain_shape(), None, "Stop kept the game's choice");
+}
