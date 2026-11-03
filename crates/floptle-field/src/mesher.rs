@@ -1193,14 +1193,18 @@ pub fn mesh_scratch(s: &MeshScratch, skirt: bool) -> ChunkMesh {
         }
     }
 
-    if skirt {
-        add_skirt(&mut m, s, &rim);
-    }
     // The drawn surface only: the collision meshes (no skirt) collide with
     // the field's own surface, which the refined vertices sit on, at a
-    // fraction of the triangles.
+    // fraction of the triangles. Refined before the skirt is hung, so the
+    // skirt hangs from the refined border: hung from the border as it was, a
+    // border edge split by its refined middle left a gap between the
+    // surface and the skirt under it, and a crack ran along every chunk
+    // border a dig crossed.
     if skirt && s.stride == 1 && s.refine > 0 {
-        refine_surface(&mut m, s, s.refine);
+        refine_surface(&mut m, s, s.refine, &mut rim);
+    }
+    if skirt {
+        add_skirt(&mut m, s, &rim);
     }
     m
 }
@@ -1219,7 +1223,10 @@ pub fn mesh_scratch(s: &MeshScratch, skirt: bool) -> ChunkMesh {
 /// nothing more. The decision is the edge's, from its two ends and the
 /// field alone, so the two triangles on an edge, in one chunk or two, agree
 /// and leave no crack.
-fn refine_surface(m: &mut ChunkMesh, s: &MeshScratch, levels: u8) {
+///
+/// `rim` grows with the vertices: a middle is on the rim when both ends of
+/// its edge are, so the skirt hung after hangs from the refined border.
+fn refine_surface(m: &mut ChunkMesh, s: &MeshScratch, levels: u8, rim: &mut Vec<bool>) {
     let origin = Vec3::from(m.origin);
     let surface = m.tri_count() - m.skirt_tris;
     let skirt = m.indices[surface * 3..].to_vec();
@@ -1251,9 +1258,9 @@ fn refine_surface(m: &mut ChunkMesh, s: &MeshScratch, levels: u8) {
         let mut split_any = false;
         for t in tris.as_chunks::<3>().0 {
             let (a, b, c) = (t[0], t[1], t[2]);
-            let ab = refine_mid(m, s, origin, &mut mids, &mut settled, &forced, a, b);
-            let bc = refine_mid(m, s, origin, &mut mids, &mut settled, &forced, b, c);
-            let ca = refine_mid(m, s, origin, &mut mids, &mut settled, &forced, c, a);
+            let ab = refine_mid(m, s, origin, &mut mids, &mut settled, &forced, rim, a, b);
+            let bc = refine_mid(m, s, origin, &mut mids, &mut settled, &forced, rim, b, c);
+            let ca = refine_mid(m, s, origin, &mut mids, &mut settled, &forced, rim, c, a);
             split_any |= ab.is_some() || bc.is_some() || ca.is_some();
             match (ab, bc, ca) {
                 (None, None, None) => next.extend_from_slice(&[a, b, c]),
@@ -1326,6 +1333,7 @@ fn refine_mid(
     mids: &mut std::collections::HashMap<(u32, u32), Option<u32>>,
     settled: &mut Vec<Option<Vec3>>,
     forced: &std::collections::HashSet<(u32, u32)>,
+    rim: &mut Vec<bool>,
     a: u32,
     b: u32,
 ) -> Option<u32> {
@@ -1374,6 +1382,7 @@ fn refine_mid(
     m.positions.push((p - origin).to_array());
     m.normals.push(nrm.to_array());
     m.colors.push(color);
+    rim.push(rim[a as usize] && rim[b as usize]);
     let i = (m.positions.len() - 1) as u32;
     mids.insert(key, Some(i));
     Some(i)
@@ -2704,6 +2713,42 @@ mod dig_shape_tests {
     /// curves, each new vertex on the field's surface: no straight piece of
     /// its rim is over 0.3 m. Faceted (refine 0) draws it as before. Flat
     /// ground is never subdivided, at any level: it costs nothing more.
+    /// **A refined dig leaves no crack at a chunk's edge.** Where a chunk's
+    /// surface ends, a skirt hangs from every edge, refined or not, down
+    /// into the rock, closing the seam with the chunk beside it. The skirt
+    /// was hung from the border before it was refined, and a border edge
+    /// split by its refined middle had none under it: a black line ran
+    /// through every dig that crossed a chunk border.
+    #[test]
+    fn a_refined_dig_leaves_no_crack_at_a_chunks_edge() {
+        let mut f = ChunkField::new(1.5);
+        let span = CHUNK as f32 * 1.5;
+        f.fill_slab(Vec3::new(-span, -6.0, -span), Vec3::new(span, 0.0, span), 0.0, [0.5; 3]);
+        f.set_mesh_refine(4);
+        // At the corner four chunks share.
+        f.sculpt(Brush::Lower, Vec3::ZERO, 3.0, 1.0, BrushProfile { hardness: 1.0, ..Default::default() });
+        for c in [[-1, -1, -1], [0, -1, -1], [-1, -1, 0], [0, -1, 0]] {
+            let m = mesh_chunk(&f, c, 1, true);
+            let surface = m.tri_count() - m.skirt_tris;
+            let key = |a: u32, b: u32| (a.min(b), a.max(b));
+            let mut uses: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
+            for t in m.indices[..surface * 3].chunks(3) {
+                for k in 0..3 {
+                    *uses.entry(key(t[k], t[(k + 1) % 3])).or_default() += 1;
+                }
+            }
+            let hung: std::collections::HashSet<(u32, u32)> =
+                m.indices[surface * 3..].chunks(3).flat_map(|t| [key(t[0], t[1]), key(t[1], t[2]), key(t[2], t[0])]).collect();
+            let border: Vec<(u32, u32)> = uses.iter().filter(|(_, n)| **n == 1).map(|(k, _)| *k).collect();
+            // Near the dig, where refining has split the border.
+            let near = |(a, b): &(u32, u32)| [*a, *b].iter().all(|&i| (Vec3::from(m.positions[i as usize]) + Vec3::from(m.origin)).length() < 6.0);
+            let dug: Vec<&(u32, u32)> = border.iter().filter(|e| near(e)).collect();
+            assert!(dug.len() > 4, "the fixture: chunk {c:?}'s border crosses the dig ({} edges)", dug.len());
+            let bare: Vec<_> = dug.iter().filter(|e| !hung.contains(**e)).collect();
+            assert!(bare.is_empty(), "chunk {c:?}: {} of {} border edges by the dig have no skirt under them", bare.len(), dug.len());
+        }
+    }
+
     #[test]
     fn a_dig_is_round_if_the_project_wants_it_round() {
         let (faceted, flat_tris, _) = dig_at(0, true);
