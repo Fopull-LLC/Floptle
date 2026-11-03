@@ -1280,3 +1280,95 @@ fn a_bike_drives_forwards_as_hard_as_in_reverse() {
         assert!(fwd.min(back) > 0.9 * full, "fork {fork}°, arm {arm}°: {fwd} and {back} m/s² of the {full} its motors give");
     }
 }
+
+/// A bike of [`bike_lead_accel`]'s build, its wheels free (no motor), let
+/// fall from `drop` m above the ground moving `speed` m/s along +x, its rims
+/// turning at `spin` times the speed that matches the ground. Returns the
+/// chassis's forward speed just before the wheels touch, its forward speed
+/// 0.4 s after they first do, and the rims' speeds then.
+fn bike_drop(wheels: &[BikeWheel], drop: f64, speed: f32, spin: f32) -> (f32, f32, Vec<f32>) {
+    bike_drop_with_air(wheels, drop, speed, spin).0
+}
+
+/// [`bike_drop`], and the rims' speeds on the last tick before the wheels
+/// touch.
+fn bike_drop_with_air(wheels: &[BikeWheel], drop: f64, speed: f32, spin: f32) -> ((f32, f32, Vec<f32>), Vec<f32>) {
+    let (mass, cg, radius, tyre) = (0.365f32, 0.513f64, 0.33f32, 0.03f32);
+    let mut ecs = World::default();
+    let floor = ecs.spawn();
+    ecs.insert(floor, Transform::from_translation(DVec3::new(0.0, -1.0, 0.0)));
+    ecs.insert(floor, RigidBody { kind: BodyKind::Box, mode: BodyMode::Static, half_extents: [400.0, 1.0, 50.0], friction: 0.9, ..Default::default() });
+    let r = radius as f64;
+    let chassis = segment(&mut ecs, "Chassis", DVec3::new(0.0, r + cg + drop, 0.0), [0.6, 0.1, 0.3], mass);
+    let mut ids = Vec::new();
+    for w in wheels {
+        let e = ecs.spawn();
+        ecs.insert(e, Transform::from_translation(DVec3::new(w.dx, r + drop, 0.0)));
+        ecs.insert(e, RigidBody { radius, mass: tyre, friction: 0.9, rotates: true, ..Default::default() });
+        ecs.insert(e, Joint { kind: JointKind::Wheel, other: "Chassis".into(), axis: w.axis, stiffness: w.stiffness, damping: w.damping, ..Default::default() });
+        ids.push(e);
+    }
+    let mut sim = Sim::build_layered(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO, floptle_core::Layers::default());
+    sim.world.single_wheel_friction = true;
+    sim.set_compound_velocity(chassis.index(), Vec3::new(speed, 0.0, 0.0));
+    for &e in &ids {
+        let mut s = sim.body_snapshot(e.index()).unwrap();
+        s.vel = Vec3::new(speed, 0.0, 0.0);
+        // Rolling along +x turns a wheel about -z.
+        s.ang_vel = Vec3::new(0.0, 0.0, -spin * speed / radius);
+        sim.restore_body(e.index(), &s);
+    }
+    let rims_now = |sim: &Sim| -> Vec<f32> { ids.iter().map(|e| -sim.body_snapshot(e.index()).unwrap().ang_vel.z * radius).collect() };
+    let (mut before, mut touched, mut in_air) = (speed, None, Vec::new());
+    for k in 0..600 {
+        sim.step_tick(DT, None);
+        let grounded = ids.iter().any(|e| sim.body_snapshot(e.index()).unwrap().grounded);
+        let vx = sim.compound_of(chassis.index()).unwrap().vel.x;
+        match touched {
+            None if grounded => touched = Some(k),
+            None => {
+                before = vx;
+                in_air = rims_now(&sim);
+            }
+            Some(t) if k == t + 24 => return ((before, vx, rims_now(&sim)), in_air),
+            _ => {}
+        }
+    }
+    panic!("the bike never landed");
+}
+
+/// **A wheel lands at speed without losing it.** A wheel moving fast is
+/// marched through its move, and one landing at speed, its move mostly
+/// forward and a little down, stopped a few millimetres off the ground and
+/// threw away the rest of its move: it hovered out of reach of every
+/// contact, never grounded, while the frame came down onto its raked spring
+/// and threw the light wheel forward at twice the bike's speed. Solar's bike
+/// (fork 24° and swing arm 15° aft, free wheels) dropped half a metre at 10
+/// and 15 m/s: with its rims turning with the ground it keeps 95% of its
+/// speed, with them still it loses nothing before it lands and keeps 90%,
+/// its rims spun up to the ground's speed, and a free wheel's spin holds
+/// through a second in the air. It lost a tenth before landing, and a rim
+/// spun to 30 m/s.
+#[test]
+fn a_wheel_lands_at_speed_without_losing_it() {
+    let aft = |deg: f32| [-deg.to_radians().sin(), deg.to_radians().cos(), 0.0];
+    let w = [
+        BikeWheel { dx: 1.098, axis: aft(24.0), stiffness: 8.18, damping: 0.447 },
+        BikeWheel { dx: -0.471, axis: aft(15.0), stiffness: 11.7, damping: 0.447 },
+    ];
+    for speed in [10.0f32, 15.0] {
+        let (before, after, _) = bike_drop(&w, 0.5, speed, 1.0);
+        assert!(after > 0.95 * before, "rims matched, at {speed} m/s: {before} -> {after} m/s");
+        let (before, after, rims) = bike_drop(&w, 0.5, speed, 0.0);
+        assert!(before > 0.99 * speed, "still rims, at {speed} m/s: it lost speed in the air, {speed} -> {before} m/s");
+        assert!(after > 0.9 * before, "still rims, at {speed} m/s: {before} -> {after} m/s");
+        for r in &rims {
+            assert!((r - after).abs() < 0.15 * after, "still rims, at {speed} m/s: a rim turns at {r} m/s on ground passing at {after}");
+        }
+    }
+    // A free wheel's spin through a second of air, from 6 m up.
+    let ((_, _, _), air) = bike_drop_with_air(&w, 6.0, 10.0, 1.0);
+    for r in air {
+        assert!((r - 10.0).abs() < 0.2, "a free wheel's rim went from 10 to {r} m/s in the air");
+    }
+}

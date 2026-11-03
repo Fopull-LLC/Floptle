@@ -3302,8 +3302,10 @@ impl PhysicsWorld {
     /// floor is not held back by it. One-way platforms are left to the
     /// contacts, which know which side the body came from.
     fn march_flat(&mut self, bi: usize, delta: Vec3) {
-        let len = delta.length();
-        let dir = delta / len;
+        let mut len = delta.length();
+        let mut dir = delta / len;
+        // Whether the move has already been turned along a surface it met.
+        let mut slid = false;
         let row = self.matrix[self.bodies[bi].layer as usize];
         let (centres, n_c, _) = self.bodies[bi].sample_centers();
         let pos = self.bodies[bi].pos;
@@ -3319,6 +3321,7 @@ impl PhysicsWorld {
             }
             let (centres, n_c, r) = self.bodies[bi].sample_centers();
             let mut ahead = f32::MAX;
+            let mut facing = Vec3::ZERO;
             for &ci in &cand {
                 let c = &self.colliders[ci as usize];
                 if (row >> c.layer) & 1 == 0 || c.sensor || c.one_way.is_some() {
@@ -3326,19 +3329,37 @@ impl PhysicsWorld {
                 }
                 for &p in &centres[..n_c] {
                     let d = c.distance(p) - r;
-                    if d < 0.05 && c.normal(p).dot(dir) > -0.2 {
+                    let n = c.normal(p);
+                    if d < 0.05 && n.dot(dir) > -0.2 {
                         continue;
                     }
-                    ahead = ahead.min(d);
+                    if d < ahead {
+                        (ahead, facing) = (d, n);
+                    }
                 }
             }
             if ahead < 0.005 {
-                // At the surface: go on until the samples just touch it, so
-                // the contact pass meets it. Stopping short left a falling
-                // body hovering off the floor, out of reach of every contact,
-                // gaining speed it never lost.
-                self.bodies[bi].pos += dir * left.min((ahead + 0.002).max(0.0));
-                break;
+                // At the surface: close the gap along its normal, so the
+                // samples just touch it and the contact pass meets it, and
+                // carry on along it with the rest of the move. Stepping the
+                // last of the gap along a move that only grazes the surface
+                // (a wheel landing at speed: mostly forward, a little down)
+                // closed almost none of it, and the rest of the move was
+                // thrown away: the wheel hovered off the ground out of reach of
+                // every contact, its forward travel lost, its fall never
+                // stopped, while the frame came down onto its spring.
+                self.bodies[bi].pos -= facing * (ahead + 0.002).max(0.0);
+                let rest = dir * left;
+                let along = rest - facing * rest.dot(facing).min(0.0);
+                let l = along.length();
+                if slid || l <= 1e-5 {
+                    break;
+                }
+                // Once: a second surface is a corner, and the contact pass
+                // sorts out a corner.
+                slid = true;
+                (dir, len, moved) = (along / l, l, 0.0);
+                continue;
             }
             let stride = ahead.min(left);
             self.bodies[bi].pos += dir * stride;
