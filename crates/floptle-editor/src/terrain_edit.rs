@@ -1114,7 +1114,7 @@ const DIRTY_PRIORITY_BOOST: i32 = 1_000_000;
 ///
 /// Generous — an aircraft at altitude, or a ship on approach, is still landing
 /// on the thing under it and still wants that ground first.
-const ON_BODY_RADII: f64 = 3.0;
+pub(crate) const ON_BODY_RADII: f64 = 3.0;
 
 /// Where a chunk sits in the meshing queue: **metres from the camera**, so that
 /// chunks belonging to different terrains can be compared at all.

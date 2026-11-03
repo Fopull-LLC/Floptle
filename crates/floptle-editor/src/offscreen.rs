@@ -1184,8 +1184,10 @@ impl Editor {
             &light_node,
             want_ssr && history.is_some_and(|h| h.is_primed()),
         );
+        // The world the camera stands on, for the reflections' history.
+        let cam_frame = crate::shading::camera_frame(&self.world, cam.world_position);
         let ssr_prev_vp = history
-            .and_then(|h| h.prev_view_proj(cam.world_position))
+            .and_then(|h| h.prev_view_proj(cam.world_position, cam_frame))
             .unwrap_or(floptle_core::math::Mat4::IDENTITY)
             .to_cols_array_2d();
         // Cloned out here because the draw block below borrows `self.raster` and
@@ -1496,7 +1498,7 @@ impl Editor {
                     light_node.refraction_layers,
                 );
                 for layer in 0..=cuts.len() {
-                    h.capture(gpu, color, view_proj, cam.world_position);
+                    h.capture(gpu, color, view_proj, cam.world_position, cam_frame);
                     if layer == 0 {
                         raymarch.bind_frame_targets(
                             gpu,
@@ -1511,7 +1513,7 @@ impl Editor {
                     );
                 }
                 if raster.flsl_draws_read_scene(&flsl_draws) {
-                    h.capture(gpu, color, view_proj, cam.world_position);
+                    h.capture(gpu, color, view_proj, cam.world_position, cam_frame);
                     raster.draw_flsl_scene_readers(
                         gpu, color, depth, globals, &flsl_draws, &skin_draws,
                         Some(raymarch.field_bind()),
@@ -1606,7 +1608,7 @@ impl Editor {
         if let (Some(gpu), HistorySlot::GamePanel) = (self.gpu.as_ref(), opts.history)
             && let Some(h) = self.game_scene_history.as_mut()
         {
-            h.capture(gpu, color, view_proj, cam.world_position);
+            h.capture(gpu, color, view_proj, cam.world_position, cam_frame);
         }
         if timing {
             let mut p = self.script_host.profile().borrow_mut();

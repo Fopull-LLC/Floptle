@@ -1164,8 +1164,32 @@ pub(crate) fn skybox_uniforms(
 /// radius, _]`. A disabled chain — or a node deleted mid-session — turns
 /// everything off (it self-heals back on the next scene load).
 /// The camera history motion blur reprojects against: the previous frame's
-/// view-projection, and where the camera was when it was taken.
-pub(crate) type MotionHistory = (floptle_core::math::Mat4, DVec3);
+/// view-projection, where the camera was when it was taken, and the frame it
+/// rode ([`camera_frame`]).
+pub(crate) type MotionHistory = (floptle_core::math::Mat4, DVec3, Option<floptle_render::FramePose>);
+
+/// The frame the camera rides: the world it stands on, if it stands on one
+/// (within [`crate::terrain_edit::ON_BODY_RADII`] of a celestial body's
+/// radius, the same rule the terrain meshes by), the nearest of them by
+/// radii. What stands still for the player is what stands still in it, so
+/// the effects that compare this frame with the last (reflections, motion
+/// blur) compare in it: see [`floptle_render::FramePose`]. `None` in a world
+/// with no bodies, where absolute space is the frame.
+pub(crate) fn camera_frame(world: &World, cam_world: DVec3) -> Option<floptle_render::FramePose> {
+    let mut best: Option<(f64, floptle_render::FramePose)> = None;
+    for (e, cb) in world.query::<floptle_core::CelestialBody>() {
+        if cb.body_radius <= 0.0 {
+            continue;
+        }
+        let wt = floptle_core::world_transform(world, e);
+        let radii = (wt.translation - cam_world).length() / cb.body_radius;
+        if radii < crate::terrain_edit::ON_BODY_RADII && best.is_none_or(|(r, _)| radii < r) {
+            let id = (u64::from(e.generation()) << 32) | u64::from(e.index());
+            best = Some((radii, floptle_render::FramePose { id, pos: wt.translation, rot: wt.rotation.normalize().as_dquat() }));
+        }
+    }
+    best.map(|(_, f)| f)
+}
 
 /// Fill in the per-frame half of motion blur and return the history to keep.
 ///
@@ -1189,6 +1213,7 @@ pub(crate) fn motion_frame(
     prev: Option<MotionHistory>,
     view_proj: floptle_core::math::Mat4,
     cam_world: DVec3,
+    frame: Option<floptle_render::FramePose>,
     height: u32,
 ) -> MotionHistory {
     // The ceiling scales with the frame, because the same streak in uv is twice
@@ -1196,14 +1221,13 @@ pub(crate) fn motion_frame(
     // would be a different look at every window size.
     s.motion_max = (height.max(1) as f32 * 0.05).clamp(8.0, 96.0);
     s.motion_inv_view_proj = view_proj.inverse().to_cols_array_2d();
+    // Motion relative to the frame the camera rides: on a world carried
+    // round its orbit, a wall beside the player has not moved.
     s.motion_prev_view_proj = match prev {
-        Some((vp, at)) => {
-            let delta = (cam_world - at).as_vec3();
-            (vp * floptle_core::math::Mat4::from_translation(delta)).to_cols_array_2d()
-        }
+        Some((vp, at, then)) => floptle_render::ssr::reproject_in_frame(vp, at, then, cam_world, frame).to_cols_array_2d(),
         None => view_proj.to_cols_array_2d(),
     };
-    (view_proj, cam_world)
+    (view_proj, cam_world, frame)
 }
 
 /// Resolve the PostProcess node's **focus node** into a focus distance for one

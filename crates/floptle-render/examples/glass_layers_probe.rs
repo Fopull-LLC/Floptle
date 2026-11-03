@@ -240,7 +240,7 @@ fn shot(gpu: &Gpu, layers: u32, out: &str) -> Vec<u8> {
         cuts.len() + 1
     );
     for layer in 0..=cuts.len() {
-        behind.capture(gpu, &view, vp, cam.world_position);
+        behind.capture(gpu, &view, vp, cam.world_position, None);
         if layer == 0 {
             rmr.bind_frame_targets(
                 gpu,

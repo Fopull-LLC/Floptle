@@ -698,6 +698,8 @@ impl Editor {
             vfx_instances,
             view_proj,
         } = gather;
+        // The world the camera stands on, for the reflections' history.
+        let cam_frame = crate::shading::camera_frame(&self.world, cam.world_position);
         let particle_light = crate::shading::particle_light(&self.world, &light_node, cam.world_position);
         let FrameUi {
             ctx,
@@ -861,7 +863,7 @@ impl Editor {
                         light_node.refraction_layers,
                     );
                     for layer in 0..=cuts.len() {
-                        h.capture(gpu, color, view_proj, cam.world_position);
+                        h.capture(gpu, color, view_proj, cam.world_position, cam_frame);
                         // The capture writes into the same texture every time, so
                         // the bind group it belongs to stays valid — rebinding is
                         // only for the frame that (re)created it.
@@ -880,7 +882,7 @@ impl Editor {
                     // Surface shaders that read `sceneColor`, on the last
                     // capture: everything behind them, the glass included.
                     if raster.flsl_draws_read_scene(&flsl_draws) {
-                        h.capture(gpu, color, view_proj, cam.world_position);
+                        h.capture(gpu, color, view_proj, cam.world_position, cam_frame);
                         raster.draw_flsl_scene_readers(
                             gpu, color, depth, globals, &flsl_draws, &skin_draws,
                             Some(raymarch.field_bind()),
@@ -937,7 +939,7 @@ impl Editor {
                     // taken here for the same reason the glass takes its own.
                     let scene = match scene_history.as_mut() {
                         Some(h) if vfx_batches.iter().any(|b| b.blend == floptle_render::particles::ParticleBlend::Distortion) => {
-                            h.capture(gpu, color, view_proj, cam.world_position);
+                            h.capture(gpu, color, view_proj, cam.world_position, cam_frame);
                             Some(&*h)
                         }
                         _ => None,
@@ -967,7 +969,7 @@ impl Editor {
                 // outlines) is on the far side of this line too: a
                 // mirror must not show the reference grid.
                 if let Some(h) = scene_history.as_mut() {
-                    h.capture(gpu, color, view_proj, cam.world_position);
+                    h.capture(gpu, color, view_proj, cam.world_position, cam_frame);
                 }
                 // The reference grid is an editor aid — Scene view only, and
                 // after the capture above: it is not part of the
@@ -1112,6 +1114,7 @@ impl Editor {
                             self.motion_prev,
                             cam.view_proj(aspect),
                             cam.world_position,
+                            crate::shading::camera_frame(&self.world, cam.world_position),
                             if lowres {
                                 retro.resolution().1
                             } else {

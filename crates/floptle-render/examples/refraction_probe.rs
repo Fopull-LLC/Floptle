@@ -235,7 +235,7 @@ fn shot(
     // fail check 5.
     if raster.any_transmissive(&instances) {
         let mut behind = SceneHistory::new(&gpu.device, S, S, gpu.config.format);
-        behind.capture(gpu, &view, vp, cam.world_position);
+        behind.capture(gpu, &view, vp, cam.world_position, None);
         rmr.bind_frame_targets(
             gpu,
             raster.prepass_view(),

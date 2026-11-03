@@ -1688,7 +1688,7 @@ impl Editor {
         );
         let ssr_prev_vp = self.scene_history
             .as_ref()
-            .and_then(|h| h.prev_view_proj(cam.world_position))
+            .and_then(|h| h.prev_view_proj(cam.world_position, crate::shading::camera_frame(&self.world, cam.world_position)))
             .unwrap_or(floptle_core::math::Mat4::IDENTITY)
             .to_cols_array_2d();
         // What a reflective surface sees when the screen-space march finds

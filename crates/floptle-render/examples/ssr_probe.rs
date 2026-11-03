@@ -203,7 +203,7 @@ fn shot(
         };
         // The camera has not moved, so the stored picture's matrix is this one.
         rmg.ssr_prev_vp = history
-            .prev_view_proj(cam.world_position)
+            .prev_view_proj(cam.world_position, None)
             .unwrap_or(vp)
             .to_cols_array_2d();
         rm.upload_globals(gpu, rmg);
@@ -226,7 +226,7 @@ fn shot(
             Some([SKY[0] as f64, SKY[1] as f64, SKY[2] as f64, 1.0]),
             Some(rm.field_bind()),
         );
-        history.capture(gpu, &view, vp, cam.world_position);
+        history.capture(gpu, &view, vp, cam.world_position, None);
     }
 
     let px = read_back(gpu, &color_tex);

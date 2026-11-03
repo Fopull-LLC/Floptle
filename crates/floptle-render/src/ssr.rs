@@ -19,7 +19,7 @@
 //! camera-relative, so the stored view-projection is shifted by how far the
 //! camera has moved before it is reused — see `SceneHistory::prev_view_proj`.
 
-use floptle_core::math::{DVec3, Mat4};
+use floptle_core::math::{DQuat, DVec3, Mat4};
 
 /// Last frame's composited scene, with a roughness mip chain.
 pub struct SceneHistory {
@@ -39,7 +39,24 @@ pub struct SceneHistory {
     /// The camera the stored picture was taken from, and its view-projection —
     /// `None` until the first capture, which is what makes the first frame of a
     /// scene reflect the sky instead of whatever was on screen before it.
-    taken: Option<(Mat4, DVec3)>,
+    taken: Option<(Mat4, DVec3, Option<FramePose>)>,
+}
+
+/// Where the frame the camera rides was, and how it was turned: a planet the
+/// camera stands on, carried round its orbit and spinning. `id` says which
+/// frame, so a history taken on one world is not read as if on another.
+///
+/// What stands still for a player is what stands still in this frame. A
+/// world that moves every tick (Solar's home planet goes 1.5 to 6 m a tick,
+/// and the camera with it) carried every building, rock and wall that far
+/// between two frames; read as still in absolute space, each reflection was
+/// looked up metres from where it was, torn into slices of whatever stood
+/// there instead, and each blur streaked things standing beside the player.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FramePose {
+    pub id: u64,
+    pub pos: DVec3,
+    pub rot: DQuat,
 }
 
 /// Half resolution. A reflection is read through a BRDF lobe that is at its
@@ -242,6 +259,7 @@ impl SceneHistory {
         src: &wgpu::TextureView,
         view_proj: Mat4,
         cam_world: DVec3,
+        frame: Option<FramePose>,
     ) {
         let device = &gpu.device;
         let mut encoder = device
@@ -300,7 +318,7 @@ impl SceneHistory {
             rp.draw(0..3, 0..1);
         }
         gpu.queue.submit([encoder.finish()]);
-        self.taken = Some((view_proj, cam_world));
+        self.taken = Some((view_proj, cam_world, frame));
     }
 
     /// The matrix that turns a point in **this** frame's camera-relative space
@@ -312,9 +330,12 @@ impl SceneHistory {
     /// slides whenever the camera dollies. The delta is taken in `f64` and
     /// narrowed after the subtraction, so a camera a million units out still
     /// gets a millimetre-accurate offset.
-    pub fn prev_view_proj(&self, cam_world: DVec3) -> Option<Mat4> {
-        let (vp, at) = self.taken?;
-        Some(reproject(vp, at, cam_world))
+    ///
+    /// `frame` is the frame the camera rides now ([`FramePose`]): where it is
+    /// the same frame the picture was taken in, a point is carried with it.
+    pub fn prev_view_proj(&self, cam_world: DVec3, frame: Option<FramePose>) -> Option<Mat4> {
+        let (vp, at, then) = self.taken?;
+        Some(reproject_in_frame(vp, at, then, cam_world, frame))
     }
 
     /// A 1×1 stand-in for a renderer with no history — the same role the sky's
@@ -352,6 +373,28 @@ impl SceneHistory {
 /// pixels whenever the camera moves, which reads as "reflections are noisy".
 fn reproject(vp: Mat4, at: DVec3, cam_world: DVec3) -> Mat4 {
     vp * Mat4::from_translation((cam_world - at).as_vec3())
+}
+
+/// [`reproject`] for a point that stands still in the frame the camera
+/// rides: where `then` and `now` are the same frame, a point at `p` (camera
+/// relative, now) is taken into the frame, out again where the frame was,
+/// and made relative to the old camera. Any other pair (no frame, or two
+/// different ones) falls back to points still in absolute space.
+///
+/// The frame's turn and the offsets are composed in `f64` and narrowed once:
+/// the frame is a planet whose centre is millions of metres from either
+/// camera, and the difference wanted is centimetres.
+pub fn reproject_in_frame(vp: Mat4, at: DVec3, then: Option<FramePose>, cam_world: DVec3, now: Option<FramePose>) -> Mat4 {
+    match (then, now) {
+        (Some(a), Some(b)) if a.id == b.id => {
+            // world_then = a.pos + a.rot * b.rot⁻¹ * (cam_world + p - b.pos)
+            let turn = a.rot * b.rot.inverse();
+            let shift = a.pos + turn * (cam_world - b.pos) - at;
+            let m = floptle_core::math::DMat4::from_rotation_translation(turn, shift);
+            vp * m.as_mat4()
+        }
+        _ => reproject(vp, at, cam_world),
+    }
 }
 
 #[cfg(test)]
@@ -406,5 +449,34 @@ mod tests {
         let moved = at + DVec3::new(0.0, 0.0, -4.0);
         let c = reproject(vp, at, moved) * (p_world - moved).as_vec3().extend(1.0);
         assert!((c.w - 10.0).abs() < 1e-3, "clip w is the old distance: {}", c.w);
+    }
+
+    /// **A point riding a moving world lands where it was.** A planet carried
+    /// 6 m along its orbit and turned a little between two frames, the
+    /// camera standing on it: a rock on the planet must land in the stored
+    /// picture where it was, as it does for a still world. Read as still in
+    /// absolute space it lands metres off.
+    #[test]
+    fn a_point_riding_a_moving_frame_lands_where_it_was() {
+        let proj = Mat4::perspective_rh(1.0, 1.6, 0.1, 1000.0);
+        let ndc = |c: floptle_core::math::Vec4| c.truncate() / c.w;
+        let a = FramePose { id: 7, pos: DVec3::new(3.0e7, 0.0, -1.2e7), rot: DQuat::from_rotation_y(0.3) };
+        let b = FramePose { id: 7, pos: a.pos + DVec3::new(6.0, 0.4, -2.0), rot: DQuat::from_rotation_y(0.3 + 1.0e-4) };
+        // Camera and rock, fixed in the frame: 600 m up from the centre, the
+        // rock 10 m in front.
+        let (cam_l, rock_l) = (DVec3::new(0.0, 600.0, 0.0), DVec3::new(0.0, 600.0, -10.0));
+        let (cam_a, rock_a) = (a.pos + a.rot * cam_l, a.pos + a.rot * rock_l);
+        let (cam_b, rock_b) = (b.pos + b.rot * cam_l, b.pos + b.rot * rock_l);
+        // Frame A's view looks along the frame's -Z, as the camera rides it.
+        let vp_a = proj * Mat4::from_quat(a.rot.as_quat().inverse());
+        let clip_a = vp_a * (rock_a - cam_a).as_vec3().extend(1.0);
+        let in_b = (rock_b - cam_b).as_vec3().extend(1.0);
+        let fixed = ndc(reproject_in_frame(vp_a, cam_a, Some(a), cam_b, Some(b)) * in_b);
+        assert!((ndc(clip_a) - fixed).length() < 1e-4, "a point on the moving world moved in the stored picture: {:?} vs {fixed:?}", ndc(clip_a));
+        let absolute = ndc(reproject_in_frame(vp_a, cam_a, None, cam_b, None) * in_b);
+        assert!((ndc(clip_a) - absolute).length() > 1e-2, "the fixture: read as still in absolute space, it must be visibly off");
+        // A history from another frame is read the absolute way.
+        let other = FramePose { id: 8, ..b };
+        assert_eq!(reproject_in_frame(vp_a, cam_a, Some(a), cam_b, Some(other)), reproject(vp_a, cam_a, cam_b));
     }
 }

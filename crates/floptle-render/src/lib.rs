@@ -67,7 +67,7 @@ pub use mesh::{
 pub use outline::Outline;
 pub use gpu_timer::{GpuTimer, Span};
 pub use reflect::{MAX_PROBES, PROBE_FACE, PROBE_H, PROBE_W, ProbeDetail, ReflectionProbes};
-pub use ssr::SceneHistory;
+pub use ssr::{FramePose, SceneHistory};
 pub use palette::{Palette, PaletteQuantize};
 pub use particles::{ParticleBatch, ParticleBlend, ParticleGlobals, ParticleInstance, Particles};
 pub use post::{BuiltPostShader, PostSettings, PostShaderBuilder, PostShaderId, PostShaders, PostStack, SsaoFrame, Tonemap};

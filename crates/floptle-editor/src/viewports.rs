@@ -783,6 +783,7 @@ impl Editor {
                 self.motion_prev,
                 cam.view_proj(aspect),
                 cam.world_position,
+                crate::shading::camera_frame(&self.world, cam.world_position),
                 self.game_retro
                     .as_ref()
                     .filter(|_| scaled_on)
