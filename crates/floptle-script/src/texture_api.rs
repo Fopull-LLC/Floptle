@@ -65,8 +65,8 @@ pub(crate) struct TextureLoads {
     pub(crate) live: HashMap<String, crate::mesh_api::Made>,
     /// Who asked for a texture still being made, by request.
     makers: HashMap<u64, String>,
-    /// The script running now, as the host charges it (`charge_memory_to`).
-    pub(crate) running: Rc<RefCell<String>>,
+    /// Who is making a texture now.
+    pub(crate) running: crate::mesh_api::Maker,
     releases: Vec<String>,
     /// Whether this host draws at all. One that does not (a dedicated server,
     /// `floptle run`) answers at once, without downloading anything.
@@ -84,7 +84,7 @@ impl Default for TextureLoads {
             url_of: HashMap::new(),
             live: HashMap::new(),
             makers: HashMap::new(),
-            running: Rc::default(),
+            running: Default::default(),
             releases: Vec::new(),
             can_draw: true,
         }
@@ -101,7 +101,7 @@ impl TextureLoads {
         let id = self.next;
         self.next += 1;
         self.waiting.insert(id, vec![cb]);
-        self.makers.insert(id, self.running.borrow().clone());
+        self.makers.insert(id, self.running.now());
         id
     }
 
@@ -123,7 +123,7 @@ impl TextureLoads {
                 format!("img:{id}")
             }
         };
-        let script = self.running.borrow().clone();
+        let script = self.running.now();
         let owner = self.live.get(&name).map_or_else(Default::default, |m| m.owner);
         self.live.insert(name.clone(), crate::mesh_api::Made { script, bytes: u64::from(w) * u64::from(h) * 4, owner });
         self.requests.push(TextureRequest { id: 0, name: name.clone(), bytes, pixels: Some([w, h]) });
@@ -299,7 +299,7 @@ pub(crate) fn install(
             let id = s.next;
             s.next += 1;
             let name = format!("img:{id}");
-            let script = s.running.borrow().clone();
+            let script = s.running.now();
             s.live.insert(name.clone(), crate::mesh_api::Made { script, bytes: u64::from(w) * u64::from(h) * 4, owner });
             s.requests.push(TextureRequest { id, name: name.clone(), bytes, pixels: Some([w, h]) });
             name.into_lua_multi(lua)

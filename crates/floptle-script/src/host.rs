@@ -3163,7 +3163,7 @@ impl ScriptHost {
         // sets it: who made a mesh or a texture (`perf.resources`).
         let running_script: Rc<RefCell<String>> = Rc::default();
         let textures: Rc<RefCell<crate::texture_api::TextureLoads>> = Rc::default();
-        textures.borrow_mut().running = running_script.clone();
+        textures.borrow_mut().running = crate::mesh_api::Maker::new(running_script.clone(), &lua);
         if let Err(e) =
             crate::texture_api::install(&lua, textures.clone(), http.clone(), logs.clone(), http_in_fixed.clone())
         {
@@ -3178,7 +3178,7 @@ impl ScriptHost {
             }
         }
         let meshes: Rc<RefCell<crate::mesh_api::MeshBook>> = Rc::default();
-        meshes.borrow_mut().running = running_script.clone();
+        meshes.borrow_mut().running = crate::mesh_api::Maker::new(running_script.clone(), &lua);
         if let Err(e) = crate::mesh_api::install(&lua, meshes.clone()) {
             floptle_say::say_err!("[lua] failed to install the runtime mesh API: {e}");
         }

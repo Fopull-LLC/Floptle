@@ -3652,7 +3652,7 @@ perf.parts() → { name = ms, … } — the named pieces of work inside the buck
 
 ### `perf.resources`
 
-perf.resources() → { meshes = { {name=, script=, bytes=}, … }, textures = { … } } — every mesh and texture a script made and has not let go of (mesh.build, assets.textureFromPixels / textureFromBytes / textureFromUrl, camera.captureTexture), largest first, each with the script file whose load or hook made it ("" when it was made in a callback outside one) and its bytes on the GPU. They live until mesh.free / assets.release or Stop; a scene load does not free them. perf.counts() carries the totals. Readable whether or not perf collection is on.
+perf.resources() → { meshes = { {name=, script=, bytes=}, … }, textures = { … } } — every mesh and texture a script made and has not let go of (mesh.build, assets.textureFromPixels / textureFromBytes / textureFromUrl, camera.captureTexture), largest first, each with the script file whose code made it, a createNode or spawn callback included, and its bytes on the GPU. They live until mesh.free / assets.release or Stop; a scene load does not free them. perf.counts() carries the totals. Readable whether or not perf collection is on.
 
 ### `perf.sampleScripts`
 

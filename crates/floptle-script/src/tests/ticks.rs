@@ -1155,6 +1155,56 @@ fn a_game_sees_the_meshes_and_textures_its_scripts_made() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **What a callback makes is charged to the script that made it.** The
+/// host enters a `createNode` or `spawn` callback after the hook that asked
+/// for it has returned, so it charged a mesh built there to no script, and a
+/// builder's own count read 0 while its leak showed only in the totals.
+#[test]
+fn a_mesh_made_in_a_callback_is_charged_to_its_script() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_cb_made_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "builder",
+        "local n = 0\n\
+         function update(node)\n  \
+           n = n + 1\n  \
+           if n == 1 then\n    \
+             createNode('Part', node, function(c)\n      \
+               c.model = mesh.build{ positions = { 0,0,0, 1,0,0, 0,0,1 }, indices = { 1, 2, 3 } }\n      \
+               icon = assets.textureFromPixels(4, 4, string.rep('\\255', 64))\n    \
+             end)\n  \
+           elseif n == 2 then\n    \
+             r = perf.resources()\n  \
+           end\n\
+         end\n",
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(e, Scripts(vec![floptle_core::ScriptInst::new("builder")]));
+    let mut host = ScriptHost::new();
+    host.set_playing(true);
+    host.run(&mut world, &dir, 0.016, 0.0);
+    // The editor's drain: spawn the node, then run its callback.
+    let mut creates = host.take_create_requests();
+    assert_eq!(creates.len(), 1, "createNode was queued");
+    let part = world.spawn();
+    world.insert(part, Transform::IDENTITY);
+    world.insert(part, Matter::Empty);
+    host.call_create_callback(&mut world, creates.remove(0).cb.expect("a callback"), part);
+    host.run(&mut world, &dir, 0.016, 0.016);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let r: mlua::Table = host.instance_env(e.index(), "builder").unwrap().get("r").unwrap();
+    for list in ["meshes", "textures"] {
+        let rows: mlua::Table = r.get(list).unwrap();
+        assert_eq!(rows.raw_len(), 1, "{list}");
+        let row: mlua::Table = rows.get(1).unwrap();
+        assert_eq!(row.get::<String>("script").unwrap(), "builder", "{list} made in a callback name the script that made them");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// **A mesh or texture can live as long as its node or its scene.**
 /// `mesh.build{ ..., owner = node }` goes when the node does, and
 /// `assets.textureFromPixels(..., { scene = true })` at the next scene load;

@@ -122,8 +122,42 @@ pub(crate) struct MeshBook {
     requests: Vec<MeshRequest>,
     releases: Vec<String>,
     pub(crate) live: HashMap<String, Made>,
-    /// The script running now, as the host charges it (`charge_memory_to`).
-    pub(crate) running: Rc<RefCell<String>>,
+    /// Who is making a mesh now.
+    pub(crate) running: Maker,
+}
+
+/// Who a mesh or texture is charged to: the script whose code is running.
+///
+/// The host's charge (`charge_memory_to`) names the script whose hook it
+/// entered, and is empty for a callback it calls afterwards, so a mesh made
+/// in a `createNode` or `spawn` callback was charged to no script at all. The
+/// Lua stack says whose code is calling: the first frame from a script's own
+/// chunk (named plainly, where the engine's chunks are `=` or `@` names and C
+/// is `=[C]`), so a helper in another script file is charged to that file.
+/// The host's charge stands when no script is on the stack.
+#[derive(Clone, Default)]
+pub(crate) struct Maker {
+    running: Rc<RefCell<String>>,
+    lua: Option<mlua::WeakLua>,
+}
+
+impl Maker {
+    pub(crate) fn new(running: Rc<RefCell<String>>, lua: &Lua) -> Self {
+        Self { running, lua: Some(lua.weak()) }
+    }
+
+    /// The script making something now.
+    pub(crate) fn now(&self) -> String {
+        self.lua.as_ref().and_then(mlua::WeakLua::try_upgrade).and_then(|lua| calling_script(&lua)).unwrap_or_else(|| self.running.borrow().clone())
+    }
+}
+
+/// The script chunk nearest the top of the Lua stack, if any.
+pub(crate) fn calling_script(lua: &Lua) -> Option<String> {
+    (0..256).map_while(|level| lua.inspect_stack(level)).find_map(|d| {
+        let src = d.source().source?.into_owned();
+        (!src.is_empty() && !src.starts_with(['=', '@'])).then_some(src)
+    })
 }
 
 impl MeshBook {
@@ -279,7 +313,7 @@ pub(crate) fn install(lua: &Lua, book: Rc<RefCell<MeshBook>>) -> mlua::Result<()
                 let bytes = (req.positions.len() * 12 + req.normals.len() * 12 + req.uvs.len() * 8) as u64
                     + req.colors.as_ref().map_or(0, |c| c.len() as u64 * 4)
                     + req.indices.len() as u64 * 4;
-                let script = b.running.borrow().clone();
+                let script = b.running.now();
                 let owner = owner_of(&spec, "mesh.build")?;
                 b.live.insert(req.name.clone(), Made { script, bytes, owner });
                 let name = req.name.clone();
