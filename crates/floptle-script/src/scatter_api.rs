@@ -191,19 +191,47 @@ const PAGES_KEPT: usize = 16;
 /// facts as parallel arrays of numbers (`ids`, `x`, `y`, `z`, `distance`,
 /// `scale`, `param`, `yaw`, `settled`, and `count`), which builds no table
 /// or vector a hit.
-fn near_result(lua: &mlua::Lua, hits: &[Hit], flat: bool) -> mlua::Result<mlua::Table> {
+/// The arrays `scatter.near`'s flat answer can carry, by the name a game
+/// asks for them with (`fields`); a bit each.
+const FLAT_FIELDS: [&str; 9] = ["ids", "x", "y", "z", "distance", "scale", "param", "yaw", "settled"];
+
+/// Every array of the flat answer.
+const FLAT_ALL: u16 = (1 << FLAT_FIELDS.len()) - 1;
+
+fn near_result(lua: &mlua::Lua, hits: &[Hit], flat: Option<u16>) -> mlua::Result<mlua::Table> {
     let out = lua.create_table()?;
-    if flat {
-        // Each array built in one go, not an element at a time.
-        out.set("ids", lua.create_sequence_from(hits.iter().map(|h| h.1.id as f64))?)?;
-        out.set("x", lua.create_sequence_from(hits.iter().map(|h| h.1.pos.x))?)?;
-        out.set("y", lua.create_sequence_from(hits.iter().map(|h| h.1.pos.y))?)?;
-        out.set("z", lua.create_sequence_from(hits.iter().map(|h| h.1.pos.z))?)?;
-        out.set("distance", lua.create_sequence_from(hits.iter().map(|h| h.0))?)?;
-        out.set("scale", lua.create_sequence_from(hits.iter().map(|h| h.1.scale as f64))?)?;
-        out.set("param", lua.create_sequence_from(hits.iter().map(|h| h.1.param as f64))?)?;
-        out.set("yaw", lua.create_sequence_from(hits.iter().map(|h| h.1.yaw as f64))?)?;
-        out.set("settled", lua.create_sequence_from(hits.iter().map(|h| h.2))?)?;
+    if let Some(want) = flat {
+        // Each array built in one go, not an element at a time, and only
+        // the ones asked for: building a list of numbers is most of what a
+        // big answer costs, and a game culling by place reads three.
+        let on = |k: usize| want & (1 << k) != 0;
+        if on(0) {
+            out.set("ids", lua.create_sequence_from(hits.iter().map(|h| h.1.id as f64))?)?;
+        }
+        if on(1) {
+            out.set("x", lua.create_sequence_from(hits.iter().map(|h| h.1.pos.x))?)?;
+        }
+        if on(2) {
+            out.set("y", lua.create_sequence_from(hits.iter().map(|h| h.1.pos.y))?)?;
+        }
+        if on(3) {
+            out.set("z", lua.create_sequence_from(hits.iter().map(|h| h.1.pos.z))?)?;
+        }
+        if on(4) {
+            out.set("distance", lua.create_sequence_from(hits.iter().map(|h| h.0))?)?;
+        }
+        if on(5) {
+            out.set("scale", lua.create_sequence_from(hits.iter().map(|h| h.1.scale as f64))?)?;
+        }
+        if on(6) {
+            out.set("param", lua.create_sequence_from(hits.iter().map(|h| h.1.param as f64))?)?;
+        }
+        if on(7) {
+            out.set("yaw", lua.create_sequence_from(hits.iter().map(|h| h.1.yaw as f64))?)?;
+        }
+        if on(8) {
+            out.set("settled", lua.create_sequence_from(hits.iter().map(|h| h.2))?)?;
+        }
         out.set("count", hits.len())?;
         return Ok(out);
     }
@@ -582,11 +610,37 @@ pub(crate) fn install_scatter_api(
                 _ => true,
             };
             let (flat, max, after) = match a.get(3) {
-                None | Some(Value::Nil) => (false, None, None),
+                None | Some(Value::Nil) => (None, None, None),
                 Some(Value::Table(o)) => {
-                    crate::opts::check_keys(o, &["flat", "max", "after", "sort"], call)?;
+                    crate::opts::check_keys(o, &["flat", "max", "after", "sort", "fields"], call)?;
+                    // `fields` names the arrays wanted, and asks for the
+                    // flat answer by naming them.
+                    let fields = match o.get::<Value>("fields")? {
+                        Value::Nil => None,
+                        Value::Table(t) => {
+                            let mut want = 0u16;
+                            for v in t.sequence_values::<String>() {
+                                let v = v?;
+                                let Some(k) = FLAT_FIELDS.iter().position(|f| *f == v) else {
+                                    return Err(mlua::Error::RuntimeError(format!(
+                                        "scatter.near: `fields` has {v:?}; the fields are {}",
+                                        FLAT_FIELDS.join(", ")
+                                    )));
+                                };
+                                want |= 1 << k;
+                            }
+                            Some(want)
+                        }
+                        other => {
+                            return Err(mlua::Error::RuntimeError(format!(
+                                "scatter.near: `fields` is a list of names, not a {}",
+                                other.type_name()
+                            )));
+                        }
+                    };
+                    let flat = crate::opts::opt_bool(o, call, "flat")?.unwrap_or(false);
                     (
-                        crate::opts::opt_bool(o, call, "flat")?.unwrap_or(false),
+                        fields.or(flat.then_some(FLAT_ALL)),
                         crate::opts::opt_num(o, call, "max", 1.0, 1e9)?.map(|v| v as usize),
                         crate::opts::opt_num(o, call, "after", 1.0, 1e15)?.map(|v| v as u64),
                     )

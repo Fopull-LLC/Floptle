@@ -1737,6 +1737,11 @@ mod tests {
              \x20 stale = (not ok) and tostring(err)\n\
              \x20 local t = os.clock() for _ = 1, 5 do scatter.near(id, vec3(0, 0, 0), 55) end rows_ms = (os.clock() - t) * 200\n\
              \x20 t = os.clock() for _ = 1, 5 do scatter.near(id, vec3(0, 0, 0), 55, { flat = true }) end flat_ms = (os.clock() - t) * 200\n\
+             \x20 t = os.clock() for _ = 1, 5 do scatter.near(id, vec3(0, 0, 0), 55, { fields = { 'ids', 'x', 'z' } }) end few_ms = (os.clock() - t) * 200\n\
+             \x20 local few = scatter.near(id, vec3(0, 0, 0), 55, { fields = { 'ids', 'x', 'z' } })\n\
+             \x20 few_ok = few.count == f.count and few.y == nil and few.distance == nil and few.ids[1] == f.ids[1] and few.x[1] == f.x[1] and few.z[f.count] == f.z[f.count]\n\
+             \x20 local okb, errb = pcall(scatter.near, id, vec3(0, 0, 0), 55, { fields = { 'height' } })\n\
+             \x20 bad_field = (not okb) and tostring(errb)\n\
              \x20 local all, got, worst, first = {}, 0, 0, 0\n\
              \x20 for i = 1, #rows do all[rows[i].id] = true end\n\
              \x20 t = os.clock()\n\
@@ -1771,10 +1776,13 @@ mod tests {
         assert!(env.get::<bool>("whole_no_cursor").unwrap(), "a page holding everything still gave a cursor");
         let stale: String = env.get("stale").unwrap();
         assert!(stale.contains("cursor") && stale.contains("after"), "{stale}");
-        let (rows_ms, flat_ms): (f64, f64) = (env.get("rows_ms").unwrap(), env.get("flat_ms").unwrap());
+        let (rows_ms, flat_ms, few_ms): (f64, f64, f64) = (env.get("rows_ms").unwrap(), env.get("flat_ms").unwrap(), env.get("few_ms").unwrap());
+        assert!(env.get::<bool>("few_ok").unwrap(), "the answer with three fields is not those three of the whole one");
+        let bad: String = env.get("bad_field").unwrap();
+        assert!(bad.contains("height") && bad.contains("distance"), "{bad}");
         assert!(env.get::<bool>("lazy_ok").unwrap(), "unsorted pages did not hold every hit exactly once");
         let (first, worst): (f64, f64) = (env.get("lazy_first").unwrap(), env.get("lazy_worst").unwrap());
-        eprintln!("scatter.near over {n} hits: rows {rows_ms:.2} ms, flat {flat_ms:.2} ms; unsorted pages of 256: first {first:.3} ms, worst {worst:.3} ms");
+        eprintln!("scatter.near over {n} hits: rows {rows_ms:.2} ms, flat {flat_ms:.2} ms, three fields {few_ms:.2} ms; unsorted pages of 256: first {first:.3} ms, worst {worst:.3} ms");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
