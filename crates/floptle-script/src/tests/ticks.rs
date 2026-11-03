@@ -1061,3 +1061,40 @@ fn a_rate_limited_fixed_update_runs_at_its_rate_with_the_banked_dt() {
     assert!((tr.z - 2.0).abs() < 0.11, "the dt handed over summed to {} s of 2", tr.z);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **Each script's memory is its own.** `perf.scriptMemory()` reads what each
+/// script holds by the Luau memory category its load and hooks are charged
+/// to: a script keeping about a megabyte in a local table shows it, one
+/// keeping nothing shows next to nothing, and the parts add up to the heap.
+/// A leak in one script's locals could only be seen in the heap's total.
+#[test]
+fn each_script_s_memory_is_its_own() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_memory_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "hog",
+        "local kept = {}\nfunction update(node)\n  for i = 1, 2000 do kept[#kept + 1] = string.rep('x', 400) .. #kept end\nend\n",
+    );
+    write_script(&dir, "lean", "local n = 0\nfunction update(node)\n  n = n + 1\n  if n == 3 then m = perf.scriptMemory() end\nend\n");
+    let mut world = World::default();
+    for kind in ["hog", "lean"] {
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Scripts(vec![floptle_core::ScriptInst::new(kind)]));
+    }
+    let mut host = ScriptHost::new();
+    host.set_playing(true);
+    for f in 0..3 {
+        host.run(&mut world, &dir, 0.016, f as f32 * 0.016);
+    }
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let lean = world.query::<Scripts>().find(|(_, s)| s.0[0].kind == "lean").map(|(e, _)| e).unwrap();
+    let m: mlua::Table = host.instance_env(lean.index(), "lean").unwrap().get("m").unwrap();
+    let (hog, thin, engine, total): (f64, f64, f64, f64) =
+        (m.get("hog").unwrap(), m.get("lean").unwrap(), m.get("engine").unwrap(), m.get("total").unwrap());
+    assert!(hog > 2000.0, "a script holding 6,000 strings of 400 bytes shows {hog:.0} KB");
+    assert!(thin < 50.0, "a script holding a counter shows {thin:.0} KB");
+    assert!((hog + thin + engine - total).abs() < 1.0, "the parts do not add up to the heap: {hog} + {thin} + {engine} against {total}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

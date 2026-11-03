@@ -37,7 +37,7 @@ each group, and meant to be searched.
 - [vessels — assembly.*](#vessels--assembly) — 16
 - [the camera & the screen](#the-camera--the-screen) — 9
 - [physics controls — pause & step](#physics-controls--pause--step) — 5
-- [frame cost — perf.*](#frame-cost--perf) — 24
+- [frame cost — perf.*](#frame-cost--perf) — 25
 - [accessibility — access.*](#accessibility--access) — 11
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
@@ -3653,6 +3653,10 @@ perf.sampleScripts(on [, intervalMs]) → whether it is on. The script sampler: 
 ### `perf.samples`
 
 perf.samples() → every line the script sampler landed on since the last call, HOTTEST FIRST: { {script="vessel_controller", fn="solveWheels", line=212, n=1840, ms=459.8}, ... }. fn is `?` for a chunk's main body or an anonymous function. Empty unless perf.sampleScripts is on. Needs perf.enable(true).
+
+### `perf.scriptMemory`
+
+perf.scriptMemory() → { [script] = KB, …, engine = KB, total = KB } — the Lua heap each script holds right now, by script file: what its load and its hooks (start, update, fixedUpdate, lateUpdate) allocated and still keep, freed memory taken off, however long ago it was made. A table a script keeps growing in a local shows under that script, where collectgarbage("count") gives only the heap's total. engine is what the engine allocated for scripts (node handles, and callbacks a script registered, which run outside its hooks); total is the whole heap and the parts add up to it. Past 254 script files the rest share "other scripts". Readable whether or not perf collection is on.
 
 ### `perf.scriptMs`
 

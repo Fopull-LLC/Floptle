@@ -1167,6 +1167,13 @@ pub struct ScriptHost {
     /// `alloc_track` is on — see [`ScriptHost::track_alloc`].
     alloc_by_kind: RefCell<HashMap<String, u64>>,
     alloc_track: std::cell::Cell<bool>,
+    /// The Luau memory category each script kind's allocations are charged
+    /// to, 1 up (0 is the engine's own; the last one takes every script past
+    /// the rest), shared with `perf.scriptMemory`. See
+    /// [`ScriptHost::charge_memory_to`].
+    memcats: Rc<RefCell<HashMap<String, u8>>>,
+    /// The category charged now.
+    memcat_now: std::cell::Cell<u8>,
     /// `(script kind, key)` combos already reported as shadowing a `findScript`
     /// handle's own key — one line per script per session, not
     /// one per instance.

@@ -543,6 +543,47 @@ fn counts_table(lua: &Lua, c: &Counts) -> mlua::Result<Table> {
     Ok(out)
 }
 
+/// The last memory category: every script past the first
+/// `MEMCAT_LAST - 1` shares it, as `other scripts`.
+pub(crate) const MEMCAT_LAST: u8 = 255;
+
+/// perf.scriptMemory() → { [script] = KB, ..., engine = KB, total = KB }:
+/// the Lua heap each script holds now, by the memory category its loads and
+/// hooks are charged to. Live bytes, freed ones taken off, however long ago
+/// they were made: a table a script keeps growing in a local shows under
+/// that script, where `collectgarbage("count")` gave only the heap's total.
+/// What the engine allocates for scripts (handles, and callbacks a script
+/// registered, which run outside its hooks) is `engine`.
+pub(crate) fn install_script_memory(lua: &Lua, cats: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, u8>>>) -> mlua::Result<()> {
+    let perf: Table = lua.globals().get("perf")?;
+    perf.set(
+        "scriptMemory",
+        lua.create_function(move |lua, ()| {
+            let bytes = |cat: i32| -> mlua::Result<usize> {
+                let mut n = 0usize;
+                // SAFETY: lua_totalbytes reads a counter; the stack is untouched.
+                unsafe { lua.exec_raw::<()>((), |state| n = mlua::ffi::lua_totalbytes(state, cat))? };
+                Ok(n)
+            };
+            let out = lua.create_table()?;
+            let mut shared = false;
+            for (kind, &cat) in cats.borrow().iter() {
+                if cat == MEMCAT_LAST {
+                    shared = true;
+                    continue;
+                }
+                out.set(kind.as_str(), bytes(i32::from(cat))? as f64 / 1024.0)?;
+            }
+            if shared {
+                out.set("other scripts", bytes(i32::from(MEMCAT_LAST))? as f64 / 1024.0)?;
+            }
+            out.set("engine", bytes(0)? as f64 / 1024.0)?;
+            out.set("total", bytes(-1)? as f64 / 1024.0)?;
+            Ok(out)
+        })?,
+    )
+}
+
 /// `{ name = ms, … }`.
 fn parts_table(lua: &Lua, parts: &[(&'static str, f32)]) -> mlua::Result<Table> {
     let t = lua.create_table()?;

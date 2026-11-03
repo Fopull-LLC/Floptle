@@ -3289,6 +3289,10 @@ impl ScriptHost {
         if let Err(e) = crate::terrain_stats_api::install(&lua, terrain_stats.clone()) {
             floptle_say::say_err!("[lua] failed to install terrain.stats: {e}");
         }
+        let memcats: Rc<RefCell<HashMap<String, u8>>> = Rc::default();
+        if let Err(e) = crate::perf_api::install_script_memory(&lua, memcats.clone()) {
+            floptle_say::say_err!("[lua] failed to install perf.scriptMemory: {e}");
+        }
         let particle_budget: Rc<std::cell::Cell<Option<u32>>> = Rc::default();
         if let Err(e) = crate::particles_api::install(&lua, particle_budget.clone()) {
             floptle_say::say_err!("[lua] failed to install particles: {e}");
@@ -3449,6 +3453,8 @@ impl ScriptHost {
             sources: HashMap::new(),
             alloc_by_kind: RefCell::new(HashMap::new()),
             alloc_track: std::cell::Cell::new(false),
+            memcats,
+            memcat_now: std::cell::Cell::new(0),
             instances: HashMap::new(),
             errors: Vec::new(),
             logs,
@@ -3697,6 +3703,36 @@ impl ScriptHost {
     pub fn track_alloc(&self, on: bool) {
         self.alloc_track.set(on);
         self.alloc_by_kind.borrow_mut().clear();
+    }
+
+    /// Charge what the scripts allocate from now on to `kind`'s memory
+    /// category, or to the engine's own with `None`: Luau keeps a running
+    /// count a category, so what a script holds can be read however long it
+    /// has held it (`perf.scriptMemory`). Called around each script's load
+    /// and hooks; the category is only switched when it changes, so a crowd
+    /// of one script pays once.
+    pub(crate) fn charge_memory_to(&self, kind: Option<&str>) {
+        let cat = match kind {
+            None => 0,
+            Some(k) => {
+                let mut cats = self.memcats.borrow_mut();
+                match cats.get(k) {
+                    Some(c) => *c,
+                    None => {
+                        let c = (cats.len() as u32 + 1).min(crate::perf_api::MEMCAT_LAST as u32) as u8;
+                        cats.insert(k.to_string(), c);
+                        c
+                    }
+                }
+            }
+        };
+        if cat == self.memcat_now.get() {
+            return;
+        }
+        self.memcat_now.set(cat);
+        // SAFETY: lua_setmemcat only stores a byte in the state; nothing on
+        // the stack is read or left.
+        let _ = unsafe { self.lua.exec_raw::<()>((), |state| mlua::ffi::lua_setmemcat(state, i32::from(cat))) };
     }
 
     /// Bytes of Lua heap allocated inside each script kind's hook calls since
@@ -6648,6 +6684,7 @@ impl ScriptHost {
             let Some(scripts) = world.get::<Scripts>(e) else { continue };
             for inst in &scripts.0 {
                 if inst.enabled {
+                    self.charge_memory_to(Some(&inst.kind));
                     self.ensure_instance(e, &inst.kind, scripts_dir);
                     // A sleeper's params are seeded when it wakes, by the tick
                     // that calls it.
@@ -6657,6 +6694,7 @@ impl ScriptHost {
                 }
             }
         }
+        self.charge_memory_to(None);
         self.keep_switched_off_instances(world);
         // Web replies land here — the frame pass, never the tick pass. A reply
         // arrives when it arrives, so a rollback replay must never see one.
@@ -6975,6 +7013,7 @@ impl ScriptHost {
                     // attributing allocation (`track_alloc`) — a counter read,
                     // but two per instance per pass is still not free.
                     let heap0 = self.alloc_track.get().then(|| self.lua.used_memory());
+                    self.charge_memory_to(Some(&inst.kind));
                     let called = self.tick_instance(
                         *e, &inst.kind, &inst.params, &inst.refs, &inst.strs,
                         inst.pinned_bools.as_deref(), &mut tr, dt, time, pass,
@@ -7016,6 +7055,7 @@ impl ScriptHost {
                 s.dirty.remove(&e.index());
             }
         }
+        self.charge_memory_to(None);
     }
 
     /// Flush a pass's queued writes to the ECS: cross-node handle transforms, model /
