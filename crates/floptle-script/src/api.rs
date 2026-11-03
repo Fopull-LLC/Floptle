@@ -2483,9 +2483,6 @@ pub(crate) fn apply_rich_sets(
                             m.alpha_cutoff = num(v).map(|n| (n as f32).clamp(0.0, 1.0)).unwrap_or(m.alpha_cutoff)
                         }
                         "doubleSided" => m.double_sided = num(v).map(|n| n != 0.0).unwrap_or(m.double_sided),
-                        // A custom shader reads the vertex alpha as data:
-                        // it cuts no holes.
-                        "vertexAlphaData" => m.vertex_alpha_data = num(v).map(|n| n != 0.0).unwrap_or(m.vertex_alpha_data),
                         // "opaque", "cutout" or "blend": how alpha is drawn.
                         "blend" => {
                             if let CompVal::Str(b) = v
@@ -3306,7 +3303,7 @@ pub(crate) const MATERIAL_KEYS: &[&str] = &[
     "normalMap", "normalStrength", "roughnessMap", "roughness", "metallicMap", "metallic",
     "occlusionMap", "occlusionStrength", "emissiveMap", "reflectivity", "transmission", "ior", "thickness",
     "sway", "backlight", "nearFadeStart", "nearFadeEnd", "shading", "jitter", "affineUv", "vertexLit",
-    "ditherAlpha", "retroExempt", "alphaCutoff", "doubleSided", "blend", "vertexAlphaData",
+    "ditherAlpha", "retroExempt", "alphaCutoff", "doubleSided", "blend",
 ];
 
 /// Every key `node:setCelestial{...}` reads.

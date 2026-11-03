@@ -233,12 +233,11 @@ Start small (the ADR-0007 subset), grow over time. Categories, with examples:
   [, roughness])` is the sky the engine captured this frame along a world
   direction, in real light: water reflects `skyRadiance(reflect(-viewDir, n))`
   rather than a gradient of its own.
-  **Vertex alpha cuts holes unless the material says it is data.** The depth
-  prepass draws a shader's surface with the built-in shader, which takes
-  vertex alpha as opacity: a pixel whose vertex alpha is under the material's
-  cutoff (0.5 by default) is a hole, even when the shader reads the alpha as a
-  mask or a shading channel. Set `vertexAlphaData = true` on the material
-  (`node:setMaterial`, or `vertex_alpha_data` in the scene) and it cuts none.
+  **A shader's surface is drawn whole.** Alpha is yours to read: a vertex or
+  texture alpha under the material's cutoff cuts no hole in a surface a shader
+  draws, so it can carry a mask, a blend weight or a shading channel. Its
+  depth and its sun shadow cover the same pixels. Only the material's near
+  fade drops pixels; a see-through look is `blend = "blend"`.
 - **Behind a surface** (`stage fragment`) — `sceneColor(uv)` and `sceneDepth(uv)`
   read the scene behind the surface at a screen position, and `screenUv(p)` is
   where a point lands on the screen (`screenUv(worldPos)` is this pixel). A

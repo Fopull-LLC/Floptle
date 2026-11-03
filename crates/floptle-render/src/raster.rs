@@ -541,9 +541,10 @@ pub struct SurfaceExtras {
     pub double_sided: bool,
     /// Drawn in the blended pass ([`floptle_core::BlendMode::Blend`]).
     pub blend: bool,
-    /// A custom shader's vertex alpha is data, not opacity
-    /// ([`floptle_core::Material::vertex_alpha_data`]): it cuts no holes.
-    pub vertex_alpha_data: bool,
+    /// Drawn by its own shader ([`floptle_core::Material::shader`]), which
+    /// draws every pixel its near fade keeps, whatever the alpha: the depth
+    /// prepass and the sun's shadow map stand on exactly those pixels.
+    pub shaded: bool,
     /// Dissolve toward the camera ([`floptle_core::Material::near_fade`]):
     /// gone nearer than `[0]` metres, whole beyond `[1]`. Off when `[1]` is
     /// not past `[0]`.
@@ -569,7 +570,7 @@ impl Default for SurfaceExtras {
             alpha_cutoff: 0.5,
             double_sided: true,
             blend: false,
-            vertex_alpha_data: false,
+            shaded: false,
             near_fade: [0.0, 0.0],
         }
     }
@@ -616,10 +617,10 @@ pub(crate) const EXT_BLEND: u32 = 128;
 /// other. Not the retro screen door ([`EXT_DITHER_ALPHA`]), which keeps its
 /// grid. Above the cutoff's bits.
 pub(crate) const EXT_DISSOLVE: u32 = 1 << 16;
-/// The mesh's vertex alpha is data a custom shader reads, not opacity
-/// ([`SurfaceExtras::vertex_alpha_data`]): the depth prepass, which draws a
-/// shader's surface with the built-in shader, cuts no holes by it.
-pub(crate) const EXT_VERTEX_ALPHA_DATA: u32 = 1 << 17;
+/// Drawn by its own shader ([`SurfaceExtras::shaded`]): the depth prepass,
+/// which draws it with the built-in shader, cuts no pixel its colour pass
+/// draws.
+pub(crate) const EXT_SHADED: u32 = 1 << 17;
 
 impl SurfaceExtras {
     /// Read a material's extras. `Classic` still carries the normal and
@@ -650,7 +651,7 @@ impl SurfaceExtras {
             },
             double_sided: m.double_sided,
             blend: m.blend == floptle_core::BlendMode::Blend,
-            vertex_alpha_data: m.vertex_alpha_data && m.shader.is_some(),
+            shaded: m.shader.is_some(),
             near_fade: m.near_fade,
         }
     }
@@ -691,8 +692,8 @@ impl SurfaceExtras {
         if self.blend {
             f |= EXT_BLEND;
         }
-        if self.vertex_alpha_data {
-            f |= EXT_VERTEX_ALPHA_DATA;
+        if self.shaded {
+            f |= EXT_SHADED;
         }
         if self.alpha_cutoff != 0.5 {
             let q = (self.alpha_cutoff.clamp(0.0, 1.0) * 254.0).round() as u32 + 1;
@@ -5248,18 +5249,16 @@ mod texture_quality_tests {
 }
 
 #[cfg(test)]
-mod vertex_alpha_tests {
+mod shaded_surface_tests {
     use super::*;
 
-    /// A custom shader's vertex alpha is data only when its material says
-    /// so: then the depth prepass is told to cut no holes by it. A material
-    /// without a shader, or one that does not say, cuts as it always did.
+    /// A surface drawn by its own shader says so to the depth prepass, so the
+    /// prepass and the sun stand on the pixels its colour pass draws; a
+    /// surface the built-in shader draws cuts by its alpha as it always has.
     #[test]
-    fn vertex_alpha_is_data_only_for_a_shader_that_says_so() {
-        let flags = |m: floptle_core::Material| SurfaceExtras::from_material(&m).flags() & EXT_VERTEX_ALPHA_DATA != 0;
-        let shader = Some("shaders/face_mouth.flsl".to_string());
-        assert!(flags(floptle_core::Material { shader: shader.clone(), vertex_alpha_data: true, ..Default::default() }));
-        assert!(!flags(floptle_core::Material { shader, vertex_alpha_data: false, ..Default::default() }), "the cut-out stays the default");
-        assert!(!flags(floptle_core::Material { vertex_alpha_data: true, ..Default::default() }), "no shader, no data to read");
+    fn a_shader_surface_tells_the_prepass_it_is_drawn_whole() {
+        let flags = |m: floptle_core::Material| SurfaceExtras::from_material(&m).flags() & EXT_SHADED != 0;
+        assert!(flags(floptle_core::Material { shader: Some("shaders/face_mouth.flsl".to_string()), ..Default::default() }));
+        assert!(!flags(floptle_core::Material::default()), "the built-in shader still cuts by alpha");
     }
 }

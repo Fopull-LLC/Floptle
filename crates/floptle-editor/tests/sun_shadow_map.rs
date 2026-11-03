@@ -260,3 +260,66 @@ fn a_smaller_shadow_map_draws_softer_edges() {
     assert!(small_span > 40.0 && big_span > 40.0, "a map size cast no shadow: spans {small_span} and {big_span}");
     assert!(small >= 3 * big.max(1), "the 512 map's edge ({small} px) is not softer than the 4096 one's ({big} px)");
 }
+
+/// The sign as a flat model wearing its own shader, its vertex alpha `alpha`
+/// (out of 255); `None` is the floor alone.
+fn shaded_sign_scene(d: &Path, alpha: Option<u8>) {
+    std::fs::write(d.join("project.ron"), "(title: Some(\"s\"), entry_scene: Some(\"scenes/first.ron\"), retro: false)").unwrap();
+    let sign = match alpha {
+        Some(a) => {
+            std::fs::create_dir_all(d.join("models")).unwrap();
+            std::fs::create_dir_all(d.join("shaders")).unwrap();
+            let v = |x: f32, z: f32| [x, 0.0, z];
+            let mesh = floptle_assets::WriteMesh {
+                positions: vec![v(-1.0, 1.0), v(1.0, 1.0), v(1.0, -1.0), v(-1.0, -1.0)],
+                normals: vec![[0.0, 1.0, 0.0]; 4],
+                uvs: None,
+                colors: Some(vec![[255, 255, 255, a]; 4]),
+                joints: None,
+                weights: None,
+                indices: vec![0, 1, 2, 0, 2, 3],
+                base_color: [1.0; 4],
+                texture: None,
+            };
+            let glb = floptle_assets::write_glb(&[floptle_assets::WriteNode::mesh_node("sign", mesh)], &[], &[], &[]);
+            std::fs::write(d.join("models/sign.glb"), glb).unwrap();
+            std::fs::write(d.join("shaders/flat.flsl"), "shader flat {\n  stage fragment\n  output color = vec4(0.8, 0.8, 0.8, 1)\n}\n").unwrap();
+            ", (name: \"Sign\", transform: (translation: (4.0, 4.0, 0.0), scale: (2.0, 1.0, 2.0)), \
+               matter: Mesh(asset_path: \"models/sign.glb\"), material: Some((shader: Some(\"shaders/flat.flsl\"))))"
+        }
+        None => "",
+    };
+    std::fs::write(
+        d.join("scenes/first.ron"),
+        format!(
+            "(name: \"s\", lighting: (direction: (1.0, 1.0, 0.0), ambient: (0.1, 0.1, 0.1), shadows: true, shadow_softness: 0.2, shadow_map: true), nodes: [\
+               (name: \"Camera\", transform: (translation: (0.0, 15.0, 0.0), rotation: (-0.70710677, 0.0, 0.0, 0.70710677)), matter: Camera(fov_y: 0.8, active: true)), \
+               (name: \"Floor\", transform: (translation: (0.0, -0.1, 0.0), scale: (20.0, 0.1, 20.0)), matter: Primitive(shape: Cube, color: (0.8, 0.8, 0.8))){sign}\
+             ])"
+        ),
+    )
+    .unwrap();
+}
+
+/// **A surface its own shader draws casts its whole shadow.** The shadow map
+/// draws every surface with the built-in shader, which took vertex alpha as
+/// opacity: a model whose vertex alpha carried a mask or shading channel drew
+/// whole and cast nothing where that alpha was low, and primed no depth there
+/// either. A sign at vertex alpha 0.3 wearing a shader shades the floor as
+/// darkly as the same sign at full alpha.
+#[test]
+fn a_shader_surface_casts_its_whole_shadow_whatever_its_vertex_alpha() {
+    let (dl, df, dn) = (temp("shaded-low"), temp("shaded-full"), temp("shaded-none"));
+    shaded_sign_scene(&dl, Some(77));
+    shaded_sign_scene(&df, Some(255));
+    shaded_sign_scene(&dn, None);
+    let Some(low) = centre_luma_of(&dl) else { return };
+    let full = centre_luma_of(&df).expect("the full-alpha shot");
+    let lit = centre_luma_of(&dn).expect("the bare floor's shot");
+    assert!(lit > 60.0, "the fixture: the bare floor's centre is lit: {lit}");
+    assert!(full < lit * 0.6, "the fixture: the full-alpha sign casts a shadow: {full} against {lit} lit");
+    assert!(low < lit * 0.6, "the sign at vertex alpha 0.3 cast no shadow: centre {low} against {lit} lit ({full} at full alpha)");
+    for d in [&dl, &df, &dn] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
