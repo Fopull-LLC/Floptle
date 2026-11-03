@@ -2327,6 +2327,10 @@ pub enum RichSet {
     /// silently unread on the way out.
     MatterCamera {
         fov_y: Option<f32>,
+        /// `near`, `far`: a perspective camera's planes, metres. A nearer far
+        /// plane is a view distance.
+        near: Option<f32>,
+        far: Option<f32>,
         active: Option<bool>,
         target: Option<String>,
         target_w: Option<u32>,

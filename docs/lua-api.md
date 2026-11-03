@@ -28,7 +28,7 @@ each group, and meant to be searched.
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 78
 - [networking — net.*, synced](#networking--net-synced) — 41
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
-- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 27
+- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 29
 - [pathfinding — nav.*](#pathfinding--nav) — 26
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 11
 - [weather — wind](#weather--wind) — 6
@@ -42,7 +42,7 @@ each group, and meant to be searched.
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 21
-- [components — getcomponent](#components--getcomponent) — 116
+- [components — getcomponent](#components--getcomponent) — 118
 - [animation — node:animator](#animation--nodeanimator) — 29
 - [particles — effects from script](#particles--effects-from-script) — 13
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 36
@@ -1313,7 +1313,7 @@ The outline mirrors when the sprite is flipped, and scales with the node.
 
 ### `node:setCamera`
 
-node:setCamera{fovY=1.0, active=true, target="minimap", width=256, height=256, hz=10, cullMask=…} — aim a camera, hand it play-mode authority, and point it at a RENDER TARGET. With a `target` the camera draws the world into a live texture any material or UI image wears as "rt:<name>" — minimaps, mirrors, security monitors, scopes, split-screen. `width`/`height` are the texture's pixels (8–4096) and `hz` how often it redraws (0 = every frame), so a 10 Hz minimap costs a sixth of a 60 Hz one. `active=true` clears every other camera's authority, because two active cameras is not a choice anyone made; `getComponent("Camera").active = true` does the same. `projection="orthographic"` (or `"perspective"`) switches the camera at runtime, with `orthoHeight` the world height it shows, and the Camera component reads and writes `projection` by the same names. fovY is RADIANS. Every value is checked at the call: an unknown key, a `width=0` or an `hz="10"` raises naming the property, the value and the range.
+node:setCamera{fovY=1.0, active=true, target="minimap", width=256, height=256, hz=10, cullMask=…, near=0.05, far=2000} — aim a camera, hand it play-mode authority, and point it at a RENDER TARGET. With a `target` the camera draws the world into a live texture any material or UI image wears as "rt:<name>" — minimaps, mirrors, security monitors, scopes, split-screen. `width`/`height` are the texture's pixels (8–4096) and `hz` how often it redraws (0 = every frame), so a 10 Hz minimap costs a sixth of a 60 Hz one. `active=true` clears every other camera's authority, because two active cameras is not a choice anyone made; `getComponent("Camera").active = true` does the same. `projection="orthographic"` (or `"perspective"`) switches the camera at runtime, with `orthoHeight` the world height it shows, and the Camera component reads and writes `projection` by the same names. fovY is RADIANS. Every value is checked at the call: an unknown key, a `width=0` or an `hz="10"` raises naming the property, the value and the range.
 
 `stack={"Arms", "Hud"}` names cameras drawn ON TOP of this one's picture, bottom first, and replaces the whole list (`stack={}` clears it). Each stacked camera draws only its own layers (its `cullMask`) over an empty depth buffer, so first-person arms on their own layer never push into a wall: put the arms on a layer, give a second camera a cullMask of just that layer, take the layer out of the main camera's, and stack the second camera on the main one. A stacked camera draws no sky, terrain or particles, needs no `active`, and keeps its own fovY — a narrower viewmodel FOV is the usual choice. Its own stack is not drawn. `post="after"` on a stacked camera lays its picture over after the base camera's depth of field and motion blur, so they leave it sharp (a cockpit, a gun); `post="with"` (the default) blurs it by its own distance like anything else. For a render-target or stacked camera, `shadows=false`, `sky=false`, `terrain=false` and `fog=false` each skip a pass it pays for whatever its size (all on by default; each named is set, the rest left as they are).
 
@@ -2949,6 +2949,10 @@ terrain.capacity() → how many more terrain edits the queue takes right now bef
 
 terrain.deleteSaveDir("saves/slot2/terrain") — delete a save slot's persisted terrain from disk (pair with save.deleteSlot in a "delete this save" UI). Narrow by design: relative path, no "..", and only .cfield/.tfield/.meta files in that one directory are removed (emptied dirs are tidied). The ACTIVE saveDir is refused while terrain in the scene still uses it (release it with terrain.saveDir("")); from a scene with no terrain, such as a menu after scene.load, it is deleted and released, so terrain.saveDir() reads nil. Returns the number of files removed.
 
+### `terrain.detail`
+
+terrain.detail() → the scale terrain.setDetail last set (1 when it has not been).
+
 ### `terrain.dig`
 
 terrain.dig(x,y,z, radius [, strength]) — carve a hole: sugar for terrain.sculpt(..., "lower"). Pair with raycast(...) to dig where the player aims.
@@ -3031,6 +3035,10 @@ terrain.sculpt(x,y,z, radius [, strength [, mode [, opts]]]) — sculpt the near
 ### `terrain.setBudget`
 
 terrain.setBudget(bytes | nil) → the most memory every terrain together may hold (terrain.stats().total). While the terrain holds more, it keeps less of its detail, the farthest first: a tenth more a second, to at most three quarters, and it takes the detail back once it holds under 85 % of the budget. What the player can touch, the ground within 64 m drawn in full and 120 m at no coarser than half, is kept whatever the budget; a budget too small for that is said once in the Console. nil (the default) sets no budget.
+
+### `terrain.setDetail`
+
+terrain.setDetail(scale) — a view-distance / terrain-detail setting: every terrain LOD ring reaches scale times as far as the engine's own (0.25 to 2; 1 = as the engine sizes them, 0.5 = each ring half as far, 2 = twice). Smaller meshes fewer chunks at full detail and draws fewer triangles far away; larger keeps detail farther out at more cost. The ground within 64 m of the camera stays at full detail and nothing within 120 m is coarser than half, whatever the scale, so what a player touches is drawn as it collides. Combines with terrain.setBudget: the budget can draw the rings in further, never out. Lasts until set again.
 
 ### `terrain.slotAt`
 
@@ -3863,9 +3871,17 @@ space.warp(50) — request a time-warp multiplier (1 .. 100000): rails fast-forw
 
 The play-mode view camera (1/0) — assign true to switch to it.
 
+### `cam.far`
+
+How far the camera draws, metres (read/write; 300 km unless set, at least a metre past cam.near). A view-distance setting: nothing past it is drawn, so the GPU skips it. Pair it with fog (env.fogEnd at or before it) so the edge fades rather than cuts, and with terrain.setDetail so the terrain's detail falls off with it. Also node:setCamera{ far = … }.
+
 ### `cam.fovY`
 
 Vertical field of view, radians.
+
+### `cam.near`
+
+The nearest the camera draws, metres (read/write; 0.05 unless set, from 1 mm to 1 km). Raising it buys depth precision far away; too far and a first-person view clips its own arms. Also node:setCamera{ near = … }.
 
 ### `env.ambient2d`
 
@@ -4221,7 +4237,7 @@ mat:shaderTexture(slot) -> ref — which image a texture slot points at: what yo
 
 ### `node:getComponent`
 
-node:getComponent(name) — a component handle whose fields you can read AND assign at runtime (applies live during play), or nil if absent. Components: RigidBody (friction, restitution, gravity, kinematic 1/0 — live Dynamic/Kinematic switch, shape 0/1/2, radius, height, half_x/y/z, lock_x/y/z, lock_rot_x/y/z, two_d — 2D mode, alignUp — stand up along gravity), PointLight (intensity, range, r/g/b, and the EMITTER: shape 0 point / 1 sphere / 2 rect / 3 disk / 4 tube, plus width, height, radius, length, thickness, twoSided — a rect light IS a window, so growing one softens the highlight it leaves on everything — plus shadows, which stops this lamp at the walls between it and what it lights instead of shining through them), Camera (fovY radians, active — assign true to switch cameras), ParticleSystem (play_on_start), UiElement (visible, opacity, posX/posY, width/height, radius, border, fillRGBA, textSize, textRGBA, tintRGBA, cell — spritesheet frame), UiSlider (value/min/max — drive a health bar), UiLayer (enabled, z, designHeight, worldSpace), PostProcess (enabled, bloom, bloomThreshold, bloomIntensity, vignette, vignetteStrength, vignetteRadius, aoStrength, aoRadius, aoMode (0 off / 1 screen space / 2 SDF; off or an aoStrength of 0 runs no AO pass, so a settings screen's AO toggle saves its cost), posterizeBands, posterizeDither, tonemap, and the lens: dofFocus, dofRange, dofNearRange, dofBlur, dofBlades, dofBladeAngle, dofHighlight, dofSamples, plus the shutter: motionBlur, motionSamples, the grade: exposure, contrast, saturation, temperature, tint, lift, gradeGamma, gain (0 for the offsets and 1 for the scales is neutral), and the lens and film: aberration, distortion, grain (0 = off; a settings menu's toggles) — a cutscene pushing a vignette, pulling a rack focus, or opening the shutter for a slow-motion beat), LightProbes (enabled, intensity, leak, normalBias — the baked bounce's live knobs; the bake-time ones are not here because a script cannot bake), ReflectionProbe (enabled, intensity, fade — what a room reflects when what it is reflecting is off screen; the box is the node's own shape, and moving or resizing it re-captures). e.g. node:getcomponent("RigidBody").friction = 0.02 for ice.
+node:getComponent(name) — a component handle whose fields you can read AND assign at runtime (applies live during play), or nil if absent. Components: RigidBody (friction, restitution, gravity, kinematic 1/0 — live Dynamic/Kinematic switch, shape 0/1/2, radius, height, half_x/y/z, lock_x/y/z, lock_rot_x/y/z, two_d — 2D mode, alignUp — stand up along gravity), PointLight (intensity, range, r/g/b, and the EMITTER: shape 0 point / 1 sphere / 2 rect / 3 disk / 4 tube, plus width, height, radius, length, thickness, twoSided — a rect light IS a window, so growing one softens the highlight it leaves on everything — plus shadows, which stops this lamp at the walls between it and what it lights instead of shining through them), Camera (fovY radians, active — assign true to switch cameras, near and far — the clip planes in metres, far a view distance), ParticleSystem (play_on_start), UiElement (visible, opacity, posX/posY, width/height, radius, border, fillRGBA, textSize, textRGBA, tintRGBA, cell — spritesheet frame), UiSlider (value/min/max — drive a health bar), UiLayer (enabled, z, designHeight, worldSpace), PostProcess (enabled, bloom, bloomThreshold, bloomIntensity, vignette, vignetteStrength, vignetteRadius, aoStrength, aoRadius, aoMode (0 off / 1 screen space / 2 SDF; off or an aoStrength of 0 runs no AO pass, so a settings screen's AO toggle saves its cost), posterizeBands, posterizeDither, tonemap, and the lens: dofFocus, dofRange, dofNearRange, dofBlur, dofBlades, dofBladeAngle, dofHighlight, dofSamples, plus the shutter: motionBlur, motionSamples, the grade: exposure, contrast, saturation, temperature, tint, lift, gradeGamma, gain (0 for the offsets and 1 for the scales is neutral), and the lens and film: aberration, distortion, grain (0 = off; a settings menu's toggles) — a cutscene pushing a vignette, pulling a rack focus, or opening the shutter for a slow-motion beat), LightProbes (enabled, intensity, leak, normalBias — the baked bounce's live knobs; the bake-time ones are not here because a script cannot bake), ReflectionProbe (enabled, intensity, fade — what a room reflects when what it is reflecting is off screen; the box is the node's own shape, and moving or resizing it re-captures). e.g. node:getcomponent("RigidBody").friction = 0.02 for ice.
 
 ```lua
 local rb = node:getComponent("RigidBody")

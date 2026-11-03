@@ -1962,6 +1962,8 @@ fn camera_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
         stack,
         draws,
         post_after,
+        near,
+        far,
     } = m else { return };
     let cmd = &mut *ctx.cmd;
     let e = ctx.e;
@@ -2022,6 +2024,20 @@ fn camera_type_ui(ui: &mut egui::Ui, ctx: &mut TypeCtx, m: &mut Matter) {
             let mut deg = fov_y.to_degrees();
             if crate::responsive::slider(ui, egui::Slider::new(&mut deg, 20.0..=120.0).suffix("°"), "").changed() {
                 *fov_y = deg.to_radians();
+                cmd.inspector_changed = true;
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("clip").on_hover_text(
+                "the nearest and farthest the camera draws, in metres. A nearer far \
+                 plane is a view distance: nothing past it is drawn, so fog that ends \
+                 before it hides the edge.",
+            );
+            let (mut n, mut f) = (*near, *far);
+            let a = ui.add(egui::DragValue::new(&mut n).speed(0.01).range(0.001..=1000.0).prefix("near ").suffix(" m"));
+            let b = ui.add(egui::DragValue::new(&mut f).speed(10.0).range(1.0..=1.0e7).prefix("far ").suffix(" m"));
+            if a.changed() || b.changed() {
+                (*near, *far) = Matter::clamp_camera_planes(n, f);
                 cmd.inspector_changed = true;
             }
         });
@@ -8976,6 +8992,8 @@ mod tests {
                 stack: Vec::new(),
                 draws: floptle_core::CameraDraws::default(),
                 post_after: false,
+                near: 0.05,
+                far: 300_000.0,
             },
         );
         let e = world.spawn();
@@ -9142,6 +9160,8 @@ mod tests {
                 stack: Vec::new(),
                 draws: floptle_core::CameraDraws::default(),
                 post_after: false,
+                near: 0.05,
+                far: 300_000.0,
             },
         );
         // Every optional part on: a follow target, a dead zone and limits. With

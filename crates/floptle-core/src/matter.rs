@@ -1593,6 +1593,12 @@ pub enum Matter {
         /// All on by default; a small picture-in-picture camera turns off
         /// what it does not need, and pays only for the rest.
         draws: CameraDraws,
+        /// The nearest and farthest a perspective camera draws, metres: 0.05
+        /// and 300 km unless a game sets them. A nearer far plane is a view
+        /// distance setting: what lies past it is not drawn. Unused when
+        /// `ortho`, which draws its own depth.
+        near: f32,
+        far: f32,
     },
     /// A placeable point/omni light. Its world position is the node's transform
     /// translation; `range` is the radius at which its contribution falls to ~zero.
@@ -2243,6 +2249,21 @@ impl Matter {
             return Self::ORTHO_HEIGHT;
         }
         h.clamp(Self::ORTHO_MIN, Self::ORTHO_MAX)
+    }
+
+    /// A perspective camera's near plane unless a game sets its own, metres.
+    pub const CAMERA_NEAR: f32 = 0.05;
+    /// …and its far plane: 300 km, past any horizon a walkable world has.
+    pub const CAMERA_FAR: f32 = 300_000.0;
+
+    /// A camera's near and far planes, made usable: the near plane from
+    /// 1 mm to 1 km, the far one at least a metre past it and no farther
+    /// than 10 000 km. A near plane of 0, or a far one behind it, is a
+    /// projection matrix that draws nothing or divides by zero.
+    pub fn clamp_camera_planes(near: f32, far: f32) -> (f32, f32) {
+        let near = if near.is_finite() { near.clamp(0.001, 1000.0) } else { Self::CAMERA_NEAR };
+        let far = if far.is_finite() { far.clamp(near + 1.0, 1.0e7) } else { Self::CAMERA_FAR.max(near + 1.0) };
+        (near, far)
     }
 
     /// Default render-target width, in pixels (`Matter::Camera`).

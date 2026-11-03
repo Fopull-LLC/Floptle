@@ -191,7 +191,8 @@ impl Editor {
                     RenderCamera::new(
                         wt.translation,
                         wt.rotation,
-                        Projection::of_camera(fov_y, ortho, oh, 0.05, 300000.0),
+                        crate::Editor::camera_projection(&self.world, e)
+                            .unwrap_or_else(|| Projection::of_camera(fov_y, ortho, oh, Matter::CAMERA_NEAR, Matter::CAMERA_FAR)),
                     )
                 }
                 None => self.camera.render_camera(),

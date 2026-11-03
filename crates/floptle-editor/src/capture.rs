@@ -296,7 +296,7 @@ fn resolve_camera(
     let cam = RenderCamera::new(
         wt.translation,
         wt.rotation,
-        Projection::of_camera(*fov_y, *ortho, *ortho_height, 0.05, 300_000.0),
+        crate::Editor::camera_projection(world, e).unwrap_or_else(|| Projection::of_camera(*fov_y, *ortho, *ortho_height, Matter::CAMERA_NEAR, Matter::CAMERA_FAR)),
     );
     Ok((cam, *cull_mask, e))
 }
@@ -528,6 +528,8 @@ end
             stack: Vec::new(),
             draws: floptle_core::CameraDraws::default(),
             post_after: false,
+            near: 0.05,
+            far: 300_000.0,
         }
     }
 

@@ -92,7 +92,7 @@ pub(crate) fn feed_view(ed: &mut crate::Editor, named: Option<&str>, w: u32, h: 
     let cam = RenderCamera::new(
         wt.translation,
         wt.rotation,
-        Projection::of_camera(fov_y, ortho, ortho_height, 0.05, 300_000.0),
+        crate::Editor::camera_projection(&ed.world, e).unwrap_or_else(|| Projection::of_camera(fov_y, ortho, ortho_height, floptle_core::Matter::CAMERA_NEAR, floptle_core::Matter::CAMERA_FAR)),
     );
     let aspect = ed.project.render_aspect(w.max(1) as f32 / h.max(1) as f32);
     ed.game_view_origin = [0.0, 0.0];
@@ -380,7 +380,7 @@ pub(crate) fn run(args: Args) -> i32 {
     let cam = RenderCamera::new(
         wt.translation,
         wt.rotation,
-        Projection::of_camera(fov_y, ortho, ortho_height, 0.05, 300_000.0),
+        crate::Editor::camera_projection(&ed.world, e).unwrap_or_else(|| Projection::of_camera(fov_y, ortho, ortho_height, floptle_core::Matter::CAMERA_NEAR, floptle_core::Matter::CAMERA_FAR)),
     );
 
     // **Stream the world in before photographing it.** Celestial terrain loads
@@ -503,7 +503,7 @@ pub(crate) fn run(args: Args) -> i32 {
             let cam_i = RenderCamera::new(
                 pos,
                 sequence_rotation(live.rotation, turn, f),
-                Projection::of_camera(fov_y, ortho, ortho_height, 0.05, 300_000.0),
+                crate::Editor::camera_projection(&ed.world, e).unwrap_or_else(|| Projection::of_camera(fov_y, ortho, ortho_height, floptle_core::Matter::CAMERA_NEAR, floptle_core::Matter::CAMERA_FAR)),
             );
             ed.settle_terrain_gpu();
             // Centred where the frame loop centres terrain detail, as the first
@@ -898,6 +898,8 @@ mod tests {
                     stack: Vec::new(),
                     draws: floptle_core::CameraDraws::default(),
                     post_after: false,
+                    near: 0.05,
+                    far: 300_000.0,
                 },
             );
             e
@@ -1349,6 +1351,8 @@ mod tests {
                 stack: Vec::new(),
                 draws: Default::default(),
                 post_after: false,
+                near: floptle_core::Matter::CAMERA_NEAR,
+                far: floptle_core::Matter::CAMERA_FAR,
             },
             ..blank_node()
         });

@@ -184,6 +184,8 @@ mod tests {
                     stack: Vec::new(),
                     post_after: false,
                     draws: Default::default(),
+                    near: 0.05,
+                    far: 300_000.0,
                 },
             );
             e

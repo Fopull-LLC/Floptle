@@ -331,6 +331,18 @@ impl Editor {
             Some(make_offscreen_target(gpu, egui, 320, 180, "cam-preview", wgpu::FilterMode::Linear, true));
     }
 
+    /// The projection camera node `e` describes, its own planes included:
+    /// the one place a Camera component becomes a [`Projection`] for the
+    /// Game view, a render target, a stacked camera and a shot.
+    pub(crate) fn camera_projection(world: &floptle_core::World, e: floptle_core::Entity) -> Option<Projection> {
+        match world.get::<Matter>(e) {
+            Some(Matter::Camera { fov_y, ortho, ortho_height, near, far, .. }) => {
+                Some(Projection::of_camera(*fov_y, *ortho, *ortho_height, *near, *far))
+            }
+            _ => None,
+        }
+    }
+
     /// Each frame: if a single Camera node is selected, render the scene from its POV
     /// into the 16:9 offscreen target so the Inspector can show what it sees. Mirrors
     /// the main render path (raster meshes + raymarch blobs/terrain), camera-relative
@@ -338,18 +350,13 @@ impl Editor {
     #[cfg(feature = "editor-ui")]
     pub(crate) fn update_camera_preview(&mut self, elapsed: f32) {
         let Some(e) = self.selection.last().copied() else { return };
-        let (fov_y, mask, ortho, oh) = match self.world.get::<Matter>(e) {
-            Some(Matter::Camera { fov_y, cull_mask, ortho, ortho_height, .. }) => {
-                (*fov_y, *cull_mask, *ortho, *ortho_height)
-            }
+        let mask = match self.world.get::<Matter>(e) {
+            Some(Matter::Camera { cull_mask, .. }) => *cull_mask,
             _ => return,
         };
+        let Some(proj) = Self::camera_projection(&self.world, e) else { return };
         let wt = floptle_core::world_transform(&self.world, e);
-        let cam = RenderCamera::new(
-            wt.translation,
-            wt.rotation,
-            Projection::of_camera(fov_y, ortho, oh, 0.05, 300000.0),
-        );
+        let cam = RenderCamera::new(wt.translation, wt.rotation, proj);
         self.ensure_cam_preview_target();
         let Some((cv, dv)) =
             self.cam_preview.as_ref().map(|p| (p.scene_view().clone(), p.depth_view.clone()))
@@ -443,7 +450,8 @@ impl Editor {
             let cam = RenderCamera::new(
                 wt.translation,
                 wt.rotation,
-                Projection::of_camera(r.fov_y, r.ortho, r.ortho_height, 0.05, 300000.0),
+                Self::camera_projection(&self.world, r.e)
+                    .unwrap_or_else(|| Projection::of_camera(r.fov_y, r.ortho, r.ortho_height, Matter::CAMERA_NEAR, Matter::CAMERA_FAR)),
             );
             // skip_tex = its own target: a camera can film another camera's
             // screen, never its own mid-pass (wgpu forbids it).
@@ -575,19 +583,14 @@ impl Editor {
         let cam = {
             match active {
                 Some(e) => {
-                    let (fov_y, ortho, oh) = match self.world.get::<Matter>(e) {
-                        Some(Matter::Camera { fov_y, cull_mask: cm, ortho, ortho_height, .. }) => {
-                            cull_mask = *cm;
-                            (*fov_y, *ortho, *ortho_height)
-                        }
-                        _ => (60f32.to_radians(), false, Matter::ORTHO_HEIGHT),
-                    };
+                    if let Some(Matter::Camera { cull_mask: cm, .. }) = self.world.get::<Matter>(e) {
+                        cull_mask = *cm;
+                    }
+                    let proj = Self::camera_projection(&self.world, e).unwrap_or_else(|| {
+                        Projection::of_camera(60f32.to_radians(), false, Matter::ORTHO_HEIGHT, Matter::CAMERA_NEAR, Matter::CAMERA_FAR)
+                    });
                     let wt = floptle_core::world_transform(&self.world, e);
-                    RenderCamera::new(
-                        wt.translation,
-                        wt.rotation,
-                        Projection::of_camera(fov_y, ortho, oh, 0.05, 300000.0),
-                    )
+                    RenderCamera::new(wt.translation, wt.rotation, proj)
                 }
                 None => self.camera.render_camera(),
             }
@@ -971,6 +974,8 @@ impl Editor {
                 stack: Vec::new(),
                 draws: floptle_core::CameraDraws::default(),
                 post_after: false,
+                near: 0.05,
+                far: 300_000.0,
             },
         );
         if let Some(p) = parent {
@@ -1421,5 +1426,32 @@ mod render_scale_tests {
             frame(&mut ed);
             assert!(targets(&ed) == first, "frame {i} after the switch rebuilt a render target");
         }
+    }
+}
+
+#[cfg(test)]
+mod clip_plane_tests {
+    use floptle_core::Matter;
+    use floptle_render::Projection;
+
+    /// **A camera draws to its own far plane.** Every view of a game camera
+    /// (the Game view, a render target, a stacked camera, a shot) took its
+    /// projection with the planes written in, 5 cm to 300 km, so a game had
+    /// no view distance to set. They come from the camera now.
+    #[test]
+    fn a_camera_s_projection_takes_its_own_planes() {
+        let mut world = floptle_core::World::default();
+        let e = world.spawn();
+        world.insert(e, Matter::Camera {
+            fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H,
+            target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT, stack: Vec::new(), post_after: false,
+            draws: floptle_core::CameraDraws::default(), near: 0.3, far: 500.0,
+        });
+        match crate::Editor::camera_projection(&world, e) {
+            Some(Projection::Perspective { near, far, .. }) => assert_eq!((near, far), (0.3, 500.0)),
+            other => panic!("not the camera's planes: {other:?}"),
+        }
+        let none = world.spawn();
+        assert!(crate::Editor::camera_projection(&world, none).is_none(), "a node with no camera has no projection");
     }
 }

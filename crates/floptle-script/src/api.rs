@@ -123,9 +123,6 @@ fn warn_once(
 /// in the parent map must cost a frame nothing, not hang it.
 const MAX_PARENT_DEPTH: usize = 64;
 
-/// A node's transform composed all the way up the parent chain — the same
-/// composition `floptle_core::world_transform` performs, against the script
-/// host's live mirror (which carries this frame's writes; the ECS does not yet).
 /// A PostProcess node's AO mode as the number a script reads and writes:
 /// 0 off, 1 screen space, 2 SDF.
 fn ao_mode_number(m: floptle_core::AoMode) -> f64 {
@@ -145,6 +142,9 @@ fn ao_mode_of(v: f64) -> floptle_core::AoMode {
     }
 }
 
+/// A node's transform composed all the way up the parent chain — the same
+/// composition `floptle_core::world_transform` performs, against the script
+/// host's live mirror (which carries this frame's writes; the ECS does not yet).
 pub(crate) fn world_transform_of(s: &crate::SceneMirror, e: u32) -> floptle_core::Transform {
     let mut w = s.transforms.get(&e).copied().unwrap_or(floptle_core::Transform::IDENTITY);
     let mut cur = e;
@@ -1245,6 +1245,8 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
         target_h,
         target_hz,
         ortho_height,
+        near,
+        far,
         ..
     }) = world.get::<Matter>(e)
     {
@@ -1262,6 +1264,9 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 // a 2D game's zoom, and the only camera number a flat game
                 // animates.
                 ("orthoHeight".to_string(), *ortho_height as f64),
+                // The planes: a view-distance setting writes `far`.
+                ("near".to_string(), *near as f64),
+                ("far".to_string(), *far as f64),
             ]),
         );
     }
@@ -1745,11 +1750,17 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                 target_h,
                 target_hz,
                 ortho_height,
+                near,
+                far,
                 ..
             }) = world.get_mut::<Matter>(ent)
             {
                 match field {
                     "fovY" => *fov_y = (val as f32).clamp(0.05, 3.0),
+                    // A view distance: past `far` nothing is drawn. Kept a
+                    // usable pair, the far plane always past the near one.
+                    "near" => (*near, *far) = Matter::clamp_camera_planes(val as f32, *far),
+                    "far" => (*near, *far) = Matter::clamp_camera_planes(*near, val as f32),
                     // A 2D camera's zoom. `fovY` is what an orthographic camera
                     // does not have, so without this the one thing a flat game
                     // wants to animate about its camera had no route at all —
@@ -2662,6 +2673,8 @@ pub(crate) fn apply_rich_sets(
             // call, so everything present here is something to write.
             RichSet::MatterCamera {
                 fov_y,
+                near: set_near,
+                far: set_far,
                 active,
                 target,
                 target_w,
@@ -2695,6 +2708,8 @@ pub(crate) fn apply_rich_sets(
                             stack: Vec::new(),
                             draws: floptle_core::CameraDraws::default(),
                             post_after: false,
+                            near: 0.05,
+                            far: 300_000.0,
                         },
                     );
                 }
@@ -2717,12 +2732,17 @@ pub(crate) fn apply_rich_sets(
                     stack: st,
                     draws,
                     post_after: pa,
+                    near,
+                    far,
                 }) = world.get_mut::<Matter>(e)
                 else {
                     continue;
                 };
                 if let Some(v) = fov_y {
                     *f = v;
+                }
+                if set_near.is_some() || set_far.is_some() {
+                    (*near, *far) = Matter::clamp_camera_planes(set_near.unwrap_or(*near), set_far.unwrap_or(*far));
                 }
                 if let Some(v) = active {
                     *a = v;
@@ -3263,7 +3283,7 @@ pub(crate) const SET_PARENT_KEYS: &[&str] = &["keepWorld"];
 /// nearest real one.
 pub(crate) const CAMERA_KEYS: &[&str] = &[
     "fovY", "active", "target", "width", "height", "hz", "cullMask", "projection", "orthoHeight",
-    "stack", "post", "shadows", "sky", "terrain", "fog",
+    "stack", "post", "shadows", "sky", "terrain", "fog", "near", "far",
 ];
 
 /// Every key `node:setMaterial{...}` reads.
@@ -7266,6 +7286,8 @@ fn node_construction_methods(lua: &Lua, shared: &Shared, methods: &Table) -> mlu
                 q.borrow_mut().push((
                     e,
                     crate::RichSet::MatterCamera {
+                        near: opt_num(&t, CALL, "near", 0.001, 1000.0)?.map(|v| v as f32),
+                        far: opt_num(&t, CALL, "far", 1.0, 1.0e7)?.map(|v| v as f32),
                         fov_y: opt_num(&t, CALL, "fovY", 0.05, 3.0)?.map(|v| v as f32),
                         active: opt_bool(&t, CALL, "active")?,
                         target,

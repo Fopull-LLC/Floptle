@@ -109,6 +109,8 @@ fn level_with_camera(kind: &str, n: usize) -> (World, Entity, Entity) {
             stack: Vec::new(),
             draws: floptle_core::CameraDraws::default(),
             post_after: false,
+            near: 0.05,
+            far: 300_000.0,
         },
     );
     (world, e, cam)
@@ -981,6 +983,8 @@ fn a_component_added_by_a_create_callback_reaches_the_mirror() {
             stack: Vec::new(),
             draws: floptle_core::CameraDraws::default(),
             post_after: false,
+            near: 0.05,
+            far: 300_000.0,
         },
     );
     host.sync_scene_for_test(&world);

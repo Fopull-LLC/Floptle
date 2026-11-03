@@ -1131,6 +1131,12 @@ pub enum MatterDoc {
         /// What it draws besides its nodes; all on when absent.
         #[serde(default, skip_serializing_if = "CameraDrawsDoc::is_all")]
         draws: CameraDrawsDoc,
+        /// A perspective camera's near and far planes, metres; 0.05 and
+        /// 300 km, and not written, when absent.
+        #[serde(default = "default_camera_near", skip_serializing_if = "is_default_camera_near")]
+        near: f32,
+        #[serde(default = "default_camera_far", skip_serializing_if = "is_default_camera_far")]
+        far: f32,
     },
     /// A placeable point/omni/area light (position = node transform).
     PointLight {
@@ -1979,6 +1985,8 @@ impl From<&Matter> for MatterDoc {
                 stack,
                 post_after,
                 draws,
+                near,
+                far,
             } => MatterDoc::Camera {
                 fov_y: *fov_y,
                 active: *active,
@@ -1992,6 +2000,8 @@ impl From<&Matter> for MatterDoc {
                 stack: stack.clone(),
                 post_after: *post_after,
                 draws: (*draws).into(),
+                near: *near,
+                far: *far,
             },
             Matter::PointLight { color, intensity, range, shape, shadows, spot_angle, spot_softness } => {
                 MatterDoc::PointLight {
@@ -2251,8 +2261,11 @@ impl MatterDoc {
                 stack,
                 post_after,
                 draws,
+                near,
+                far,
             } => {
                 let (w, h) = Matter::clamp_target_size(*target_w, *target_h);
+                let (near, far) = Matter::clamp_camera_planes(*near, *far);
                 Matter::Camera {
                     fov_y: *fov_y,
                     active: *active,
@@ -2269,6 +2282,8 @@ impl MatterDoc {
                     stack: stack.clone(),
                     post_after: *post_after,
                     draws: (*draws).into(),
+                    near,
+                    far,
                 }
             }
             MatterDoc::PointLight { color, intensity, range, shape, shadows, spot } => Matter::PointLight {
@@ -2682,6 +2697,18 @@ fn default_shadow_steps() -> u32 {
 }
 fn is_default_shadow_steps(n: &u32) -> bool {
     *n == 64
+}
+fn default_camera_near() -> f32 {
+    Matter::CAMERA_NEAR
+}
+fn is_default_camera_near(v: &f32) -> bool {
+    *v == Matter::CAMERA_NEAR
+}
+fn default_camera_far() -> f32 {
+    Matter::CAMERA_FAR
+}
+fn is_default_camera_far(v: &f32) -> bool {
+    *v == Matter::CAMERA_FAR
 }
 fn default_shadow_map_size() -> u32 {
     2048
@@ -5198,6 +5225,8 @@ mod tests {
                 stack: Vec::new(),
                 post_after: false,
                 draws: Default::default(),
+                near: 0.05,
+                far: 300_000.0,
             },
         );
 
@@ -5219,6 +5248,8 @@ mod tests {
                 stack: Vec::new(),
                 post_after: false,
                 draws: Default::default(),
+                near: 0.05,
+                far: 300_000.0,
             },
         );
         let mut c = Camera2D {
@@ -5796,7 +5827,7 @@ mod tests {
                     terrain_gen: None,
                     name: "eye".into(),
                     transform: TransformDoc::default(),
-                    matter: MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT, stack: Vec::new(), post_after: false, draws: Default::default() },
+                    matter: MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT, stack: Vec::new(), post_after: false, draws: Default::default(), near: 0.05, far: 300_000.0 },
                     object_materials: Default::default(),
                     tint: None,
                     tint_rim: None,
@@ -5963,7 +5994,7 @@ mod tests {
         let eye = snap.nodes.iter().find(|n| n.name == "eye").unwrap();
         assert_eq!(
             eye.matter,
-            MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT, stack: Vec::new(), post_after: false, draws: Default::default() }
+            MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT, stack: Vec::new(), post_after: false, draws: Default::default(), near: 0.05, far: 300_000.0 }
         );
     }
 
@@ -6312,6 +6343,33 @@ mod tests {
         assert!(!plain.contains("shadow_map"), "the default is not written: {plain}");
         let old: LightDoc = ron::from_str("(direction: (0, 1, 0), color: (1, 1, 1), ambient: (0, 0, 0), intensity: 1)").unwrap();
         assert!(!old.to_light().shadow_map, "an old scene marches as it always did");
+    }
+
+    /// A camera's clip planes are kept when set, not written at their
+    /// defaults, read as the defaults in a scene from before them, and a
+    /// pair that cannot make a projection (a far plane behind the near one)
+    /// loads as one that can.
+    #[test]
+    fn a_camera_s_clip_planes_round_trip() {
+        let doc = |near: f32, far: f32| -> String {
+            let m = MatterDoc::from(&floptle_core::Matter::Camera {
+                fov_y: 1.0, active: true, target: String::new(), cull_mask: !0, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H,
+                target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT, stack: Vec::new(), post_after: false,
+                draws: Default::default(), near, far,
+            });
+            ron::to_string(&m).unwrap()
+        };
+        let planes = |ron: &str| match ron::from_str::<MatterDoc>(ron).unwrap().to_matter() {
+            floptle_core::Matter::Camera { near, far, .. } => (near, far),
+            other => panic!("{other:?}"),
+        };
+        let set = doc(0.2, 1500.0);
+        assert!(set.contains("near:0.2") && set.contains("far:1500.0"), "{set}");
+        assert_eq!(planes(&set), (0.2, 1500.0));
+        let plain = doc(Matter::CAMERA_NEAR, Matter::CAMERA_FAR);
+        assert!(!plain.contains("near") && !plain.contains("far"), "the defaults are not written: {plain}");
+        assert_eq!(planes("Camera(fov_y: 1.0)"), (Matter::CAMERA_NEAR, Matter::CAMERA_FAR), "a scene from before draws as it did");
+        assert_eq!(planes("Camera(fov_y: 1.0, near: 10.0, far: 2.0)"), (10.0, 11.0), "a far plane behind the near one");
     }
 
     /// The shadow map's size is kept when it is not the default, not written
@@ -6796,6 +6854,8 @@ mod camera_stack_doc_tests {
             stack: vec!["Seat".into()],
             post_after,
             draws: Default::default(),
+            near: 0.05,
+            far: 300_000.0,
         };
         // The switches too: only the ones off are written.
         let mut dim = cam(false);

@@ -2831,6 +2831,8 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
             stack: Vec::new(),
             draws: Default::default(),
             post_after: false,
+            near: floptle_core::Matter::CAMERA_NEAR,
+            far: floptle_core::Matter::CAMERA_FAR,
         },
         // The default camera flies on play (hold right-mouse to look, wasd to move).
         scripts: vec![floptle_scene::ScriptDoc {

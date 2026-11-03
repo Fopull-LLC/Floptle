@@ -849,6 +849,8 @@ mod tests {
                 stack: Vec::new(),
                 draws: crate::CameraDraws::default(),
                 post_after: false,
+                near: 0.05,
+                far: 300_000.0,
             },
         );
         world.insert(cam, Camera2D { follow: "Player".into(), smoothing: 0.0, ..Default::default() });
@@ -889,6 +891,8 @@ mod tests {
             stack: Vec::new(),
             draws: crate::CameraDraws::default(),
             post_after: false,
+            near: 0.05,
+            far: 300_000.0,
         };
         let follower = world.spawn();
         world.insert(follower, crate::transform::Transform::default());
@@ -935,6 +939,8 @@ mod tests {
                 stack: Vec::new(),
                 draws: crate::CameraDraws::default(),
                 post_after: false,
+                near: 0.05,
+                far: 300_000.0,
             },
         );
         world.insert(cam, Camera2D::default());
@@ -1053,6 +1059,8 @@ mod tests {
             stack: Vec::new(),
             draws: crate::CameraDraws::default(),
             post_after: false,
+            near: 0.05,
+            far: 300_000.0,
         });
         world.insert(e, Camera2D { art_pixels: 8.0, ..Default::default() });
         let height = |w: &World| match w.get::<Matter>(e) {

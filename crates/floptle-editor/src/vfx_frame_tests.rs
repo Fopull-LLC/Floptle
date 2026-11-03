@@ -440,6 +440,8 @@ fn drop_debris(
             stack: Vec::new(),
             draws: floptle_core::CameraDraws::default(),
             post_after: false,
+            near: 0.05,
+            far: 300_000.0,
         },
     );
     let fx = ed.world.spawn();

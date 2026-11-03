@@ -169,6 +169,8 @@ pub(crate) fn type_catalog() -> Vec<(&'static str, Matter)> {
             stack: Vec::new(),
             draws: floptle_core::CameraDraws::default(),
             post_after: false,
+            near: 0.05,
+            far: 300_000.0,
         }),
         ("●  Point Light", Matter::PointLight {
             color: [1.0, 0.95, 0.85],

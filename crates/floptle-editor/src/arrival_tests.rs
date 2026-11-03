@@ -39,6 +39,8 @@ fn arrival_scene(tag: &str, radius: f64) -> Option<(crate::Editor, floptle_core:
             stack: Vec::new(),
             draws: floptle_core::CameraDraws::default(),
             post_after: false,
+            near: 0.05,
+            far: 300_000.0,
         },
     );
     let driver = ed.world.spawn();
@@ -333,6 +335,8 @@ fn planet_from_file(tag: &str) -> (crate::Editor, floptle_core::Entity, floptle_
             stack: Vec::new(),
             draws: floptle_core::CameraDraws::default(),
             post_after: false,
+            near: 0.05,
+            far: 300_000.0,
         },
     );
     (ed, rock, field, dir)
@@ -481,6 +485,8 @@ fn a_world_landing_mid_game_brings_its_collision_and_keeps_the_others() {
             stack: Vec::new(),
             draws: floptle_core::CameraDraws::default(),
             post_after: false,
+            near: 0.05,
+            far: 300_000.0,
         },
     );
     let w = ed.world.spawn();

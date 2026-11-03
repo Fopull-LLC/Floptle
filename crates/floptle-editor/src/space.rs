@@ -1125,6 +1125,8 @@ mod tests {
                 stack: Vec::new(),
                 draws: floptle_core::CameraDraws::default(),
                 post_after: false,
+                near: 0.05,
+                far: 300_000.0,
             },
         );
         let body_box = ed.world.spawn();
@@ -1217,6 +1219,8 @@ mod tests {
                 stack: Vec::new(),
                 draws: floptle_core::CameraDraws::default(),
                 post_after: false,
+                near: 0.05,
+                far: 300_000.0,
             },
         );
         let wall = ed.world.spawn();
@@ -1304,6 +1308,8 @@ mod tests {
                 stack: Vec::new(),
                 draws: floptle_core::CameraDraws::default(),
                 post_after: false,
+                near: 0.05,
+                far: 300_000.0,
             },
         );
         let pad = ed.world.spawn();
@@ -1405,6 +1411,8 @@ mod tests {
                 stack: Vec::new(),
                 draws: floptle_core::CameraDraws::default(),
                 post_after: false,
+                near: 0.05,
+                far: 300_000.0,
             },
         );
         let label = ed.world.spawn();

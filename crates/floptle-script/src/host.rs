@@ -6480,6 +6480,12 @@ impl ScriptHost {
         self.terrain_stats.borrow().budget
     }
 
+    /// How far a game asked its terrain's LOD rings to reach, as a share of
+    /// the engine's own (`terrain.setDetail`; 1 when it has not).
+    pub fn terrain_detail_scale(&self) -> f32 {
+        self.terrain_stats.borrow().scale.unwrap_or(1.0)
+    }
+
     /// Files scripts asked the player for since the last call
     /// (`app.openFile`), for the driver to show a picker for.
     pub fn take_open_file_requests(&self) -> Vec<crate::OpenFileRequest> {

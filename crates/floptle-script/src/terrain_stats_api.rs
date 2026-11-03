@@ -72,7 +72,13 @@ pub(crate) struct Counted {
     /// How much of its detail the terrain keeps to stay in the budget, 0..1
     /// (1 = all of it), as of the count.
     pub(crate) detail: f32,
+    /// `terrain.setDetail`: how far every LOD ring reaches, as a share of
+    /// its own distance (None = 1, as the engine sizes them).
+    pub(crate) scale: Option<f32>,
 }
+
+/// The least and most `terrain.setDetail` takes.
+pub(crate) const DETAIL_RANGE: (f32, f32) = (0.25, 2.0);
 
 pub(crate) fn install(lua: &Lua, state: Rc<RefCell<Counted>>) -> mlua::Result<()> {
     let terrain: Table = lua.globals().get("terrain")?;
@@ -93,6 +99,26 @@ pub(crate) fn install(lua: &Lua, state: Rc<RefCell<Counted>>) -> mlua::Result<()
             Ok(())
         })?,
     )?;
+    // terrain.setDetail(scale): a view-distance setting. Every LOD ring
+    // reaches `scale` times as far (0.5 = half as far, 2 = twice), so
+    // detail drops sooner or later with distance; the ground near the camera
+    // stays at full detail whatever it is.
+    let st = state.clone();
+    terrain.set(
+        "setDetail",
+        lua.create_function(move |_, scale: f64| {
+            let (lo, hi) = DETAIL_RANGE;
+            if !scale.is_finite() || scale <= 0.0 {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "terrain.setDetail: the scale is a number above 0 ({lo} to {hi}; 1 is the engine's own rings)"
+                )));
+            }
+            st.borrow_mut().scale = Some((scale as f32).clamp(lo, hi));
+            Ok(())
+        })?,
+    )?;
+    let st = state.clone();
+    terrain.set("detail", lua.create_function(move |_, ()| Ok(st.borrow().scale.unwrap_or(1.0)))?)?;
     terrain.set(
         "stats",
         lua.create_function(move |lua, id: Option<u32>| {

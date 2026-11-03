@@ -478,10 +478,11 @@ fn rings_for_body(body_radius: Option<f64>, chunk_units: f64, detail: f32) -> [i
             out[i] = out[i].min(steps(r * frac)).max((i as i32 + 1) * RING_STEPS);
         }
     }
-    // Over its memory budget, the terrain keeps less of its detail: every
-    // ring drawn in, the farthest detail going first. Never past what the
-    // floors below hold, which is what the player can touch.
-    if detail < 1.0 {
+    // `detail` scales every ring: below 1 over its memory budget, or when
+    // a game asks for less view distance (`terrain.setDetail`), the farthest
+    // detail going first; above 1 when a game asks for more. Never past what
+    // the floors below hold, which is what the player can touch.
+    if detail != 1.0 {
         out = out.map(|r| ((r as f32 * detail.max(0.0)).ceil() as i32).max(RING_STEPS));
     }
     out[0] = out[0].max(near);
@@ -1488,7 +1489,7 @@ impl Editor {
                     .map(|cb| cb.body_radius * ts as f64),
                 (chunk_units * ts) as f64,
                 // The field, not `terrain_detail()`: the renderer is borrowed.
-                1.0 - self.terrain_shed,
+                (1.0 - self.terrain_shed) * self.script_host.terrain_detail_scale(),
             );
             // Camera into the field's local frame (rotation + uniform scale), so
             // LOD rings follow the terrain wherever its node puts it.
@@ -5646,6 +5647,40 @@ mod tests {
         assert!(least[0] < least[1] && least[1] < least[2], "the rings came out of order: {least:?}");
     }
 
+    /// **A game sets how far the terrain's detail reaches.** `terrain.setDetail`
+    /// scales every ring: at 0.6 the far ones come in to 0.6 of their
+    /// distance, at 2 they reach twice as far, and at any scale the ground a
+    /// player touches keeps its floors. The scale reaches the rings the frame
+    /// uses through `terrain_detail`, times what the memory budget leaves.
+    #[test]
+    fn a_game_scales_how_far_the_terrain_detail_reaches() {
+        let chunk = 48.0;
+        let full = rings_for_body(None, chunk, 1.0);
+        let near = rings_for_body(None, chunk, 0.6);
+        let far = rings_for_body(None, chunk, 2.0);
+        assert_eq!(near[2], (full[2] as f32 * 0.6).ceil() as i32, "0.6 did not bring the far ring in: {full:?} {near:?}");
+        assert_eq!(far[2], full[2] * 2, "2 did not push the far ring out: {full:?} {far:?}");
+        assert!(far[1] > full[1], "2 left the middle ring where it was: {full:?} {far:?}");
+        let floor = |m: f64| (m / chunk * RING_STEPS as f64).ceil() as i32;
+        let least = rings_for_body(None, chunk, 0.25);
+        assert!(least[0] >= floor(super::NEAR_METRES) && least[1] >= floor(super::MID_METRES), "the floors gave way at 0.25: {least:?}");
+
+        let mut ed = crate::Editor::default();
+        assert_eq!(ed.terrain_detail(), 1.0);
+        let dir = std::env::temp_dir().join(format!("floptle_terrain_detail_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("view.lua"), "function start() terrain.setDetail(0.6) end\n").unwrap();
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        ed.world.insert(e, floptle_core::Scripts(vec![floptle_core::ScriptInst::new("view")]));
+        ed.script_host.run(&mut ed.world, &dir, 1.0 / 60.0, 0.0);
+        assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+        assert!((ed.terrain_detail() - 0.6).abs() < 1e-6, "terrain.setDetail did not reach the rings: {}", ed.terrain_detail());
+        ed.terrain_shed = 0.5;
+        assert!((ed.terrain_detail() - 0.3).abs() < 1e-6, "the budget and the game's scale do not combine: {}", ed.terrain_detail());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A world big enough for the absolute rings to mean what they say is
     /// untouched — this can only ever tighten.
     #[test]
@@ -6043,7 +6078,7 @@ mod residency_tests {
         ed.terrains.insert(e, EditorTerrain::new(field));
         let cam = ed.world.spawn();
         ed.world.insert(cam, floptle_core::Transform::from_translation(DVec3::new(0.0, ground.y as f64 + 6.0, 12.0)));
-        ed.world.insert(cam, floptle_core::Matter::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: !0, target_w: 0, target_h: 0, target_hz: 0.0, ortho: false, ortho_height: 10.0, stack: Vec::new(), post_after: false, draws: floptle_core::CameraDraws::default() });
+        ed.world.insert(cam, floptle_core::Matter::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: !0, target_w: 0, target_h: 0, target_hz: 0.0, ortho: false, ortho_height: 10.0, stack: Vec::new(), post_after: false, draws: floptle_core::CameraDraws::default(), near: 0.05, far: 300_000.0 });
         ed.toggle_play();
         {
             // Something stands where the laser bites, so its collision is meshed.

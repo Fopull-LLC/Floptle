@@ -413,6 +413,8 @@ fn matter_diff(before: &Matter, after: &Matter, target: &mut Matter) -> bool {
                 stack,
                 draws,
                 post_after,
+                near,
+                far,
             },
             Matter::Camera {
                 fov_y: bf,
@@ -425,6 +427,8 @@ fn matter_diff(before: &Matter, after: &Matter, target: &mut Matter) -> bool {
                 stack: bs,
                 post_after: bpa,
                 draws: bd,
+                near: bn,
+                far: bfar,
                 ..
             },
             Matter::Camera {
@@ -438,6 +442,8 @@ fn matter_diff(before: &Matter, after: &Matter, target: &mut Matter) -> bool {
                 stack: ts,
                 post_after: tpa,
                 draws: td,
+                near: tn,
+                far: tfar,
                 ..
             },
         ) => {
@@ -456,6 +462,8 @@ fn matter_diff(before: &Matter, after: &Matter, target: &mut Matter) -> bool {
             set(stack, bs, ts, &mut hit);
             set(post_after, bpa, tpa, &mut hit);
             set(draws, bd, td, &mut hit);
+            set(near, bn, tn, &mut hit);
+            set(far, bfar, tfar, &mut hit);
             hit
         }
         (
@@ -854,6 +862,8 @@ mod tests {
             stack: Vec::new(),
             draws: floptle_core::CameraDraws::default(),
             post_after: false,
+            near: 0.05,
+            far: 300_000.0,
         });
         let a = w.spawn();
         let b = w.spawn();
@@ -897,6 +907,8 @@ mod tests {
                 stack: Vec::new(),
                 draws: floptle_core::CameraDraws::default(),
                 post_after: false,
+                near: 0.05,
+                far: 300_000.0,
             });
             e
         };

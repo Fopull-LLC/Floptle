@@ -220,6 +220,8 @@
 ---A Camera's live properties (`node:getcomponent("Camera")`).
 ---@class CameraHandle
 ---@field fovY number Vertical field of view, radians.
+---@field near number The nearest the camera draws, metres (0.05 unless set).
+---@field far number How far the camera draws, metres (300 km unless set): a view distance.
 ---@field active number The play-mode view camera (1/0) — assign true to switch to it.
 
 ---A UI element's live properties (`node:getcomponent("UiElement")`) — drive a HUD

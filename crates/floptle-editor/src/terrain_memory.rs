@@ -61,9 +61,11 @@ impl crate::Editor {
         out
     }
 
-    /// How much of its detail the terrain keeps (see `rings_for_body`).
+    /// How far the terrain's LOD rings reach, as a share of their own (see
+    /// `rings_for_body`): what the memory budget leaves, times what a game
+    /// asked for with `terrain.setDetail`.
     pub(crate) fn terrain_detail(&self) -> f32 {
-        1.0 - self.terrain_shed
+        (1.0 - self.terrain_shed) * self.script_host.terrain_detail_scale()
     }
 
     /// Once a second of Play: count the terrains for `terrain.stats`, and
@@ -105,7 +107,7 @@ impl crate::Editor {
                 None,
             );
         }
-        self.script_host.set_terrain_stats(stats, self.terrain_detail());
+        self.script_host.set_terrain_stats(stats, 1.0 - self.terrain_shed);
     }
 }
 

@@ -745,7 +745,7 @@ fn anchor_for(ed: &crate::Editor, key: &str) -> Option<floptle_core::Entity> {
 fn scene_camera(ed: &crate::Editor, named: Option<&str>) -> Option<RenderCamera> {
     let mut fallback = None;
     for (e, m) in ed.world.query::<floptle_core::Matter>() {
-        let floptle_core::Matter::Camera { fov_y, ortho, ortho_height, active, .. } = m else {
+        let floptle_core::Matter::Camera { fov_y, ortho, ortho_height, active, near, far, .. } = m else {
             continue;
         };
         let build = |e| {
@@ -753,7 +753,7 @@ fn scene_camera(ed: &crate::Editor, named: Option<&str>) -> Option<RenderCamera>
             RenderCamera::new(
                 wt.translation,
                 wt.rotation,
-                Projection::of_camera(*fov_y, *ortho, *ortho_height, 0.05, 300_000.0),
+                Projection::of_camera(*fov_y, *ortho, *ortho_height, *near, *far),
             )
         };
         match named {

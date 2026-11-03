@@ -1149,6 +1149,52 @@ fn a_script_sets_the_shadow_map_size() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// **A settings screen sets the view distance.** `far` and `near` on a
+/// camera read back and write, through the component and `setCamera`, and a
+/// far plane asked for in front of the near one stays a metre past it.
+#[test]
+fn a_script_sets_a_camera_s_clip_planes() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_cam_planes_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(
+        &dir,
+        "view",
+        "function start(node)\n  local c = find(\"Eye\"):getcomponent(\"Camera\")\n  was = c.far\n  c.far = 800\n  far_now = c.far\n  \
+         find(\"Other\"):setCamera{ near = 0.5, far = 1200 }\n  c.near = 2000\nend\n",
+    );
+    let mut world = World::default();
+    let cam = |world: &mut World, name: &str| {
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, floptle_core::Name(name.into()));
+        world.insert(e, Matter::Camera {
+            fov_y: 1.0, active: false, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H,
+            target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT, stack: Vec::new(), post_after: false,
+            draws: floptle_core::CameraDraws::default(), near: Matter::CAMERA_NEAR, far: Matter::CAMERA_FAR,
+        });
+        e
+    };
+    let eye = cam(&mut world, "Eye");
+    let other = cam(&mut world, "Other");
+    let driver = world.spawn();
+    world.insert(driver, Transform::IDENTITY);
+    world.insert(driver, Scripts(vec![floptle_core::ScriptInst::new("view")]));
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    let env = host.instance_env(driver.index(), "view").unwrap();
+    assert_eq!(env.get::<f64>("was").unwrap(), Matter::CAMERA_FAR as f64);
+    assert_eq!(env.get::<f64>("far_now").unwrap(), 800.0);
+    let planes = |e| match world.get::<Matter>(e) {
+        Some(Matter::Camera { near, far, .. }) => (*near, *far),
+        _ => panic!("not a camera"),
+    };
+    // The near plane pushed past the far one takes the far one with it.
+    assert_eq!(planes(eye), (1000.0, 1001.0), "a near plane past the far one");
+    assert_eq!(planes(other), (0.5, 1200.0), "setCamera's planes");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A settings screen switches off the lens and film effects players ask to
 /// lose, and resets the grade. Each value read here differs from the default,
 /// so a field that is missing from the mirror cannot pass as a default.

@@ -239,7 +239,8 @@ impl crate::Editor {
             let cam = RenderCamera::new(
                 wt.translation,
                 wt.rotation,
-                Projection::of_camera(sc.fov_y, sc.ortho, sc.ortho_height, 0.05, 300000.0),
+                crate::Editor::camera_projection(&self.world, sc.e)
+                    .unwrap_or_else(|| Projection::of_camera(sc.fov_y, sc.ortho, sc.ortho_height, floptle_core::Matter::CAMERA_NEAR, floptle_core::Matter::CAMERA_FAR)),
             );
             let placed = self.camera_stacks.placed.entry(size).or_default();
             placed.resize(placed.len().max(i + 1), Default::default());
@@ -332,6 +333,8 @@ mod tests {
                 stack: stack.iter().map(|s| s.to_string()).collect(),
                 draws: floptle_core::CameraDraws::default(),
                 post_after: false,
+                near: 0.05,
+                far: 300_000.0,
             },
         );
         e
