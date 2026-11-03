@@ -200,6 +200,9 @@ const EXT_BLEND: u32 = 128u;
 // An LOD cross-fade: keep pixels by gradient noise against the instance's
 // share, after the cutout (see raster.rs `EXT_DISSOLVE`).
 const EXT_DISSOLVE: u32 = 65536u;
+// The vertex alpha is data a custom shader reads, not opacity: no holes by it
+// (raster.rs `EXT_VERTEX_ALPHA_DATA`).
+const EXT_VERTEX_ALPHA_DATA: u32 = 131072u;
 
 fn ext_cutoff(e: Ext) -> f32 {
     let q = (e.flags >> EXT_CUTOFF_SHIFT) & 255u;
@@ -1976,8 +1979,11 @@ fn fs_depth(in: VsOut, @builtin(front_facing) front: bool) {
         }
         return;
     }
-    let a = texel_a * in.color.a * in.vcolor.a;
     let ext = ext_at(u32(in.imeta.y));
+    // A custom shader that reads the vertex alpha as data has drawn every
+    // one of these pixels; the depth it stands on has to be there too.
+    let vcolor_a = select(in.vcolor.a, 1.0, ext_has(ext, EXT_VERTEX_ALPHA_DATA));
+    let a = texel_a * in.color.a * vcolor_a;
     let pix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));
     // The sun's shadow map draws through here too (`sun_extra.y` set). What
     // fades a surface for the CAMERA, its screen door and its near fade, does
@@ -1987,7 +1993,7 @@ fn fs_depth(in: VsOut, @builtin(front_facing) front: bool) {
     if (ext_has(ext, EXT_DISSOLVE)) {
         if (sun_view) {
             // The sun sees the band whole, as for a screen door below.
-            let whole = texel_a * in.vcolor.a;
+            let whole = texel_a * vcolor_a;
             if (!(whole >= 0.99 || (ext_cutoff(ext) == 0.0 && !ext_has(ext, EXT_BLEND))) || (ext_has(ext, EXT_SINGLE_SIDED) && !front)) {
                 discard;
             }
@@ -1995,7 +2001,7 @@ fn fs_depth(in: VsOut, @builtin(front_facing) front: bool) {
         }
         // The colour pass's tests, in its order: cut on the picture's alpha,
         // then dissolve on the share.
-        if (!ext_has(ext, EXT_BLEND) && texel_a * in.vcolor.a < ext_cutoff(ext)) {
+        if (!ext_has(ext, EXT_BLEND) && texel_a * vcolor_a < ext_cutoff(ext)) {
             discard;
         }
         if (ext_has(ext, EXT_SINGLE_SIDED) && !front) {
@@ -2013,7 +2019,7 @@ fn fs_depth(in: VsOut, @builtin(front_facing) front: bool) {
         if (sun_view) {
             // The whole surface, as if it were not fading: its picture's own
             // alpha still decides.
-            let whole = texel_a * in.vcolor.a;
+            let whole = texel_a * vcolor_a;
             if (!(whole >= 0.99 || (ext_cutoff(ext) == 0.0 && !ext_has(ext, EXT_BLEND))) || (ext_has(ext, EXT_SINGLE_SIDED) && !front)) {
                 discard;
             }

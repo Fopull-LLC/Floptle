@@ -3836,6 +3836,11 @@ pub struct MaterialDoc {
     /// Absent is both sides, as always.
     #[serde(default = "true_bool", skip_serializing_if = "is_true")]
     pub double_sided: bool,
+    /// A custom shader's vertex alpha is data, not opacity (see
+    /// [`floptle_core::Material::vertex_alpha_data`]). Absent is opacity, as
+    /// always.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub vertex_alpha_data: bool,
     /// Opaque, cutout or blended (see [`floptle_core::BlendMode`]). Always
     /// written. Absent in a scene from before the setting, where it reads as
     /// what the material meant then: blended below full opacity, otherwise
@@ -4132,6 +4137,7 @@ impl MaterialDoc {
             source: self.source.clone(),
             alpha_cutoff: self.alpha_cutoff.clamp(0.0, 1.0),
             double_sided: self.double_sided,
+            vertex_alpha_data: self.vertex_alpha_data,
             blend: self.blend_resolved(),
             faded_from: None,
         }
@@ -4185,6 +4191,7 @@ impl MaterialDoc {
             source: m.source.clone(),
             alpha_cutoff: m.alpha_cutoff,
             double_sided: m.double_sided,
+            vertex_alpha_data: m.vertex_alpha_data,
             blend: Some(BlendDoc::from_mode(m.blend)),
         }
     }

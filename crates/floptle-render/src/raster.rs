@@ -541,6 +541,9 @@ pub struct SurfaceExtras {
     pub double_sided: bool,
     /// Drawn in the blended pass ([`floptle_core::BlendMode::Blend`]).
     pub blend: bool,
+    /// A custom shader's vertex alpha is data, not opacity
+    /// ([`floptle_core::Material::vertex_alpha_data`]): it cuts no holes.
+    pub vertex_alpha_data: bool,
     /// Dissolve toward the camera ([`floptle_core::Material::near_fade`]):
     /// gone nearer than `[0]` metres, whole beyond `[1]`. Off when `[1]` is
     /// not past `[0]`.
@@ -566,6 +569,7 @@ impl Default for SurfaceExtras {
             alpha_cutoff: 0.5,
             double_sided: true,
             blend: false,
+            vertex_alpha_data: false,
             near_fade: [0.0, 0.0],
         }
     }
@@ -612,6 +616,10 @@ pub(crate) const EXT_BLEND: u32 = 128;
 /// other. Not the retro screen door ([`EXT_DITHER_ALPHA`]), which keeps its
 /// grid. Above the cutoff's bits.
 pub(crate) const EXT_DISSOLVE: u32 = 1 << 16;
+/// The mesh's vertex alpha is data a custom shader reads, not opacity
+/// ([`SurfaceExtras::vertex_alpha_data`]): the depth prepass, which draws a
+/// shader's surface with the built-in shader, cuts no holes by it.
+pub(crate) const EXT_VERTEX_ALPHA_DATA: u32 = 1 << 17;
 
 impl SurfaceExtras {
     /// Read a material's extras. `Classic` still carries the normal and
@@ -642,6 +650,7 @@ impl SurfaceExtras {
             },
             double_sided: m.double_sided,
             blend: m.blend == floptle_core::BlendMode::Blend,
+            vertex_alpha_data: m.vertex_alpha_data && m.shader.is_some(),
             near_fade: m.near_fade,
         }
     }
@@ -681,6 +690,9 @@ impl SurfaceExtras {
         }
         if self.blend {
             f |= EXT_BLEND;
+        }
+        if self.vertex_alpha_data {
+            f |= EXT_VERTEX_ALPHA_DATA;
         }
         if self.alpha_cutoff != 0.5 {
             let q = (self.alpha_cutoff.clamp(0.0, 1.0) * 254.0).round() as u32 + 1;
@@ -5232,5 +5244,22 @@ mod texture_quality_tests {
         let four = drop_top_mips(&pic(2048, 2048), 2).unwrap();
         assert_eq!((four.width, four.height), (512, 512));
         assert!(drop_top_mips(&pic(300, 300), 2).is_none(), "a small picture was cut");
+    }
+}
+
+#[cfg(test)]
+mod vertex_alpha_tests {
+    use super::*;
+
+    /// A custom shader's vertex alpha is data only when its material says
+    /// so: then the depth prepass is told to cut no holes by it. A material
+    /// without a shader, or one that does not say, cuts as it always did.
+    #[test]
+    fn vertex_alpha_is_data_only_for_a_shader_that_says_so() {
+        let flags = |m: floptle_core::Material| SurfaceExtras::from_material(&m).flags() & EXT_VERTEX_ALPHA_DATA != 0;
+        let shader = Some("shaders/face_mouth.flsl".to_string());
+        assert!(flags(floptle_core::Material { shader: shader.clone(), vertex_alpha_data: true, ..Default::default() }));
+        assert!(!flags(floptle_core::Material { shader, vertex_alpha_data: false, ..Default::default() }), "the cut-out stays the default");
+        assert!(!flags(floptle_core::Material { vertex_alpha_data: true, ..Default::default() }), "no shader, no data to read");
     }
 }

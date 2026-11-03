@@ -359,6 +359,7 @@ impl Material {
             "alphaCutoff" => self.alpha_cutoff = src.alpha_cutoff,
             "blend" => self.blend = src.blend,
             "doubleSided" => self.double_sided = src.double_sided,
+            "vertexAlphaData" => self.vertex_alpha_data = src.vertex_alpha_data,
             "texture" => self.texture = src.texture.clone(),
             "cell" => self.cell = src.cell,
             "sheetCols" => self.sheet_cols = src.sheet_cols,
@@ -451,6 +452,12 @@ pub struct Material {
     /// what every surface has always done: nothing was culled. `false` hides a
     /// face seen from behind, as a model exported single-sided asks.
     pub double_sided: bool,
+    /// With a custom `.flsl` shader: the mesh's vertex-colour alpha is data
+    /// the shader reads (a mask, a blend weight, a wetness or shading
+    /// channel), not opacity, so it cuts no holes. `false` (the default) is
+    /// what every surface has always done: vertex alpha under the cutoff is
+    /// a hole, shader or not. Without a shader it changes nothing.
+    pub vertex_alpha_data: bool,
 
     // --- The surface maps (v0.43). ------------------------------------------
     // Every one of these is `None`/neutral by default and its default binding is
@@ -651,6 +658,7 @@ impl Default for Material {
             faded_from: None,
             alpha_cutoff: 0.5,
             double_sided: true,
+            vertex_alpha_data: false,
             normal_map: None,
             normal_strength: 1.0,
             roughness_map: None,
