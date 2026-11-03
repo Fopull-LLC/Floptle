@@ -44,7 +44,7 @@ each group, and meant to be searched.
 - [space — orbits & time-warp](#space--orbits--time-warp) — 21
 - [components — getcomponent](#components--getcomponent) — 118
 - [animation — node:animator](#animation--nodeanimator) — 29
-- [particles — effects from script](#particles--effects-from-script) — 15
+- [particles — effects from script](#particles--effects-from-script) — 16
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 36
 - [assets](#assets) — 19
 - [debug gizmos](#debug-gizmos) — 5
@@ -4487,6 +4487,10 @@ anim:time([layer]) — seconds into the current state.
 ### `node:particles`
 
 node:particles() — the particle handle for this node's Particle System component. Setters: :play/:stop/:restart/:setIntensity/:setVolume/:setTint/:setBeamEnd/:setBeamControl. Getters: :isPlaying/:alive/:asset. e.g. on a hit, node:particles():restart() to re-fire a burst.
+
+### `particles`
+
+The scene's particles as a whole: particles.setMax and particles.max, a budget on every effect at once. One node's effect is node:particles() (particles:play, particles:setIntensity and the rest).
 
 ### `particles.max`
 
