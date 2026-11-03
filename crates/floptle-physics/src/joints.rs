@@ -708,7 +708,31 @@ impl PhysicsWorld {
                         let (lo, hi) = (self.joints[j].min, self.joints[j].max);
                         let over = if s < lo { s - lo } else if s > hi { s - hi } else { 0.0 };
                         if over != 0.0 {
+                            // Its speed along the rail, + toward `hi`.
+                            let travel_speed = |w: &Self| {
+                                let (ea, eb) = w.ends(j);
+                                -axis_w.dot(w.point_vel(Some(w.joints[j].a), ea.r) - w.point_vel(w.joints[j].b, eb.r))
+                            };
+                            let before = travel_speed(self);
                             spent += self.close_gap(j, -axis_w, over, dt);
+                            // A stop is hit, not sprung off: what was running
+                            // into it stops, what was leaving it keeps
+                            // leaving, and the push back out of it adds no
+                            // speed. Moved back as a position, the stop paid
+                            // its overshoot out as speed: a light tyre the
+                            // ground shoved up its leg past the stop threw a
+                            // jet off the runway at 8 m/s, and on its next
+                            // landing spun it at thousands of rad/s.
+                            let want = if over > 0.0 { before.min(0.0) } else { before.max(0.0) };
+                            let now = travel_speed(self);
+                            let (ea, eb) = self.ends(j);
+                            let w = ea.w(axis_w) + eb.w(axis_w);
+                            if w.is_finite() && w > 1e-9 {
+                                let l = (now - want) / w;
+                                let (a, b) = (self.joints[j].a, self.joints[j].b);
+                                self.joint_impulse(Some(a), ea.r, axis_w * l);
+                                self.joint_impulse(b, eb.r, -axis_w * l);
+                            }
                         }
                     }
                 }

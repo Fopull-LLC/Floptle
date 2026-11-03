@@ -1475,6 +1475,38 @@ fn landing_travel(wheels: &[BikeWheel], drop: f64) -> (usize, f32, f32, f32) {
     (off, high - low, settled, travel)
 }
 
+/// **A bump stop is hit, not sprung off.** A wheel left past its stop, at
+/// rest against its frame (its spring off, no gravity, nothing else pushing), is
+/// put back at the stop and stays at rest there. The stop moved it back as a
+/// position and paid the overshoot out as speed, 15 cm in a tick read as 9
+/// m/s: a light tyre the ground shoved up its leg past the stop threw a jet
+/// off its runway, and on the next landing spun it at thousands of rad/s.
+#[test]
+fn a_bump_stop_is_hit_not_sprung_off() {
+    let mut ecs = World::default();
+    let chassis = segment(&mut ecs, "Chassis", DVec3::new(0.0, 1.0, 0.0), [1.0, 0.2, 0.5], 1.0);
+    let e = ecs.spawn();
+    // Mounted at the frame's centre (a mount named, not left at zero, which
+    // would hang it where it was placed) with stops 5 cm either way, and
+    // placed 20 cm up: 15 cm past the top stop.
+    ecs.insert(e, Transform::from_translation(DVec3::new(0.0, 1.2, 0.0)));
+    ecs.insert(e, RigidBody { radius: 0.3, mass: 0.03, rotates: true, ..Default::default() });
+    ecs.insert(
+        e,
+        Joint { kind: JointKind::Wheel, other: "Chassis".into(), other_anchor: [0.0, 0.001, 0.0], axis: [0.0, 1.0, 0.0], stiffness: 0.0, damping: 0.0, limit: true, min: -0.05, max: 0.05, ..Default::default() },
+    );
+    let mut sim = Sim::build_layered(&ecs, &[], GravityField::uniform(Vec3::ZERO), DVec3::ZERO, floptle_core::Layers::default());
+    sim.step_tick(DT, None);
+    let c = sim.compound_of(chassis.index()).unwrap();
+    let (cv, cp) = (c.vel, c.pos);
+    let w = sim.body_snapshot(e.index()).unwrap();
+    let travel = w.pos.as_vec3().y - cp.y;
+    assert!(travel <= 0.052, "the wheel was not put back at its stop: {travel:.3} m up its mount");
+    let speed = w.vel.y - cv.y;
+    assert!(speed.abs() < 0.05, "the stop threw the wheel off it at {speed:.2} m/s");
+    assert!(cv.length() < 0.05, "the stop threw the frame at {:.2} m/s", cv.length());
+}
+
 /// **A suspension in real units holds a heavy frame on light wheels.** A
 /// wheel's spring and damper in frequency and ratio are of the pair's own
 /// mass, a light wheel's, so under a 0.4 t frame on 30 kg tyres the damping
