@@ -111,8 +111,9 @@ pub(crate) const MARK_KEYS: &[&str] = &["tint", "emissive", "emissiveStrength", 
 /// every query would be a leak.
 const SEEN_CAP: usize = 65_536;
 
-/// One hit of `scatter.near`: how far, the instance (in world space), whether
-/// it is on the ground, and the chunk it came from.
+/// One hit of `scatter.near`: how far, the instance (in its source's own
+/// frame until it is handed out), whether it is on the ground, and the chunk
+/// it came from.
 type Hit = (f64, floptle_core::scatter::Instance, bool, floptle_core::scatter::ChunkKey);
 
 /// `scatter.near{ max = … }` queries still being paged through: the sorted
@@ -129,15 +130,18 @@ struct Pages {
 enum Paged {
     /// Nearest first: every hit, found on the first page, and how many have
     /// been handed out.
-    Sorted(Vec<Hit>, usize),
+    Sorted { source: u32, hits: Vec<Hit>, given: usize },
     /// In no particular order (`sort = false`): the chunks not yet rolled,
     /// and hits rolled but not handed out. Each page rolls only what it
     /// hands out, so the first costs no more than the rest.
     Lazy { source: u32, at: glam::DVec3, radius: f64, chunks: Vec<floptle_core::scatter::ChunkKey>, spare: Vec<Hit> },
 }
 
-/// The hits of one chunk within `r` of `pl` (the source's own frame), in
-/// world space, standing where they landed once they have.
+/// The hits of one chunk within `r` of `pl`, in the source's own frame,
+/// standing where they landed once they have. A page is put in world space
+/// by [`page_to_world`] as it is handed out: a hit kept for a later page
+/// would otherwise stay where the world was when it was rolled, and a planet
+/// moves on.
 fn chunk_hits(
     src: &floptle_core::scatter::ScatterSource,
     key: floptle_core::scatter::ChunkKey,
@@ -156,10 +160,16 @@ fn chunk_hits(
         }
         let d = (i.pos - pl).length();
         if d <= r {
-            i.pos = src.frame.to_world(i.pos);
-            i.up = src.frame.dir_to_world(i.up);
             out.push((d, i, landed.is_some(), key));
         }
+    }
+}
+
+/// Put a page of hits in world space as the source stands now.
+fn page_to_world(src: &floptle_core::scatter::ScatterSource, hits: &mut [Hit]) {
+    for (_, i, _, _) in hits {
+        i.pos = src.frame.to_world(i.pos);
+        i.up = src.frame.dir_to_world(i.up);
     }
 }
 
@@ -598,11 +608,19 @@ pub(crate) fn install_scatter_api(
                     )));
                 };
                 let (out, more) = match &mut pg.kept[at].1 {
-                    Paged::Sorted(hits, given) => {
+                    Paged::Sorted { source, hits, given } => {
                         let take = max.unwrap_or(hits.len()).min(hits.len() - *given);
-                        let out = near_result(lua, &hits[*given..*given + take], flat)?;
+                        let mut page = hits[*given..*given + take].to_vec();
                         *given += take;
-                        (out, *given < hits.len())
+                        match s.borrow().iter().find(|v| v.id == *source) {
+                            Some(src) => page_to_world(src, &mut page),
+                            // Removed since: nothing of it is left to hand out.
+                            None => {
+                                page.clear();
+                                *given = hits.len();
+                            }
+                        }
+                        (near_result(lua, &page, flat)?, *given < hits.len())
                     }
                     Paged::Lazy { source, at: pl, radius, chunks, spare } => {
                         let want = max.unwrap_or(usize::MAX);
@@ -617,7 +635,13 @@ pub(crate) fn install_scatter_api(
                             chunks.clear();
                         }
                         let take = want.min(spare.len());
-                        let page: Vec<Hit> = spare.drain(..take).collect();
+                        let mut page: Vec<Hit> = spare.drain(..take).collect();
+                        if let Some(src) = vols.iter().find(|v| v.id == *source) {
+                            page_to_world(src, &mut page);
+                        } else {
+                            page.clear();
+                            spare.clear();
+                        }
                         note_seen(&seen, *source, &page);
                         (near_result(lua, &page, flat)?, !(chunks.is_empty() && spare.is_empty()))
                     }
@@ -644,6 +668,7 @@ pub(crate) fn install_scatter_api(
                     chunk_hits(src, key, pl, r, &on_ground, &mut found);
                 }
                 let spare = found.split_off(max.min(found.len()));
+                page_to_world(src, &mut found);
                 note_seen(&seen, src.id, &found);
                 let out = near_result(lua, &found, flat)?;
                 if chunks.is_empty() && spare.is_empty() {
@@ -666,17 +691,20 @@ pub(crate) fn install_scatter_api(
             }
             note_seen(&seen, src.id, &found);
             let Some(max) = max.filter(|m| *m < found.len()) else {
+                page_to_world(src, &mut found);
                 return Ok((near_result(lua, &found, flat)?, Value::Nil));
             };
             // More than a page: hand out the first and keep the rest.
-            let out = near_result(lua, &found[..max], flat)?;
+            let mut first = found[..max].to_vec();
+            page_to_world(src, &mut first);
+            let out = near_result(lua, &first, flat)?;
             let mut pg = pages.borrow_mut();
             pg.next += 1;
             let cursor = pg.next;
             if pg.kept.len() >= PAGES_KEPT {
                 pg.kept.remove(0);
             }
-            pg.kept.push((cursor, Paged::Sorted(found, max)));
+            pg.kept.push((cursor, Paged::Sorted { source: src.id, hits: found, given: max }));
             Ok((out, Value::Number(cursor as f64)))
         }) {
             let _ = t.set("near", f);

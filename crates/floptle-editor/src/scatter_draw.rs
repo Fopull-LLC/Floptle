@@ -1778,6 +1778,65 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **Every page of `scatter.near` is where the world is now.** The hits
+    /// a page rolled but kept for the next were put in world space when they
+    /// were rolled, so on a planet that moved between pages they came back
+    /// where it had been: tens of metres off in a game paging a field over a
+    /// few frames. A source on a node moving 10 m a frame, paged 256 at a
+    /// time unsorted: every hit stands where `scatter.instance` says, within
+    /// a millimetre.
+    #[test]
+    fn paged_hits_are_where_a_moving_source_is_now() {
+        let dir = std::env::temp_dir().join(format!("floptle_near_moving_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("field.lua"),
+            "local function check(page)\n\
+             \x20 for i = 1, page.count do\n\
+             \x20   local p = scatter.instance(id, page.ids[i]).pos\n\
+             \x20   local d = math.sqrt((p.x - page.x[i])^2 + (p.y - page.y[i])^2 + (p.z - page.z[i])^2)\n\
+             \x20   worst = math.max(worst, d)\n\
+             \x20   got = got + 1\n\
+             \x20 end\n\
+             end\n\
+             function start()\n\
+             \x20 id = scatter.create{ asset = 'a', halfX = 60, halfZ = 60, perChunk = 400, align = 'world', parent = 'Planet' }\n\
+             \x20 worst, got, pages = 0, 0, 1\n\
+             \x20 local page\n\
+             \x20 page, cursor = scatter.near(id, vec3(0, 0, 0), 55, { flat = true, max = 256, sort = false })\n\
+             \x20 check(page)\n\
+             end\n\
+             function update()\n\
+             \x20 if not cursor then return end\n\
+             \x20 local page\n\
+             \x20 page, cursor = scatter.near(id, vec3(0, 0, 0), 55, { flat = true, max = 256, sort = false, after = cursor })\n\
+             \x20 pages = pages + 1\n\
+             \x20 check(page)\n\
+             end\n",
+        )
+        .unwrap();
+        let mut world = floptle_core::World::new();
+        let planet = world.spawn();
+        world.insert(planet, floptle_core::Transform::IDENTITY);
+        world.insert(planet, floptle_core::Name("Planet".into()));
+        let e = world.spawn();
+        world.insert(e, floptle_core::Transform::IDENTITY);
+        world.insert(e, floptle_core::Scripts(vec![floptle_core::ScriptInst::new("field")]));
+        let mut host = floptle_script::ScriptHost::new();
+        for f in 0..100 {
+            world.get_mut::<floptle_core::Transform>(planet).unwrap().translation = DVec3::new(10.0 * f as f64, 0.0, 0.0);
+            host.run(&mut world, &dir, 1.0 / 60.0, f as f32 / 60.0);
+        }
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let env = host.instance_env(e.index(), "field").unwrap();
+        let (got, pages): (usize, usize) = (env.get("got").unwrap(), env.get("pages").unwrap());
+        let worst: f64 = env.get("worst").unwrap();
+        assert!(env.get::<mlua::Value>("cursor").unwrap().is_nil(), "the query was not paged to its end in 100 frames");
+        assert!(pages > 3 && got > 1000, "only {got} hits over {pages} pages: the test pages nothing");
+        assert!(worst < 1e-3, "a paged hit stood {worst} m from where the prop is");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// **`scatter.near` answers where a prop stands, once it has landed.** It
     /// rolled the region afresh and gave the region's nominal surface, so a
     /// harvest on a hillside aimed metres off the plant. A prop the field has
