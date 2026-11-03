@@ -3543,6 +3543,7 @@ impl PhysicsWorld {
             }
             .max(0.02)
         };
+        let hold = std::mem::take(&mut self.bodies[bi].hold);
         let travel = self.bodies[bi].vel.length() * dt
             + self.bodies[bi].ang_vel.length() * dt * self.bodies[bi].bounding_radius();
         // A turn is not marched the way a move is, so a corner swung through
@@ -3575,6 +3576,16 @@ impl PhysicsWorld {
                     b.up = b.orient * Vec3::Y;
                 }
             }
+            self.rigid_contacts(bi, row);
+        }
+        // A held wheel, its move made, follows the ground as far as its
+        // spring would carry it in the step (`Body::hold`): marched straight
+        // at the ground, which stops it there. After the move and not before
+        // it, or over a crest its own speed carried it off again; on its own
+        // and not in the move, or a move mostly along the ground marched past
+        // the ground as a surface it was not heading into.
+        if hold.length_squared() > 1e-10 && !self.bodies[bi].grounded {
+            self.march_flat(bi, hold);
             self.rigid_contacts(bi, row);
         }
         let b = &mut self.bodies[bi];

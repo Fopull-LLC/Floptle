@@ -1513,6 +1513,100 @@ fn a_real_unit_suspension_holds_a_heavy_frame_on_light_wheels() {
     assert!(free > 0.2, "the fixture: without stops the soft springs travel only {free:.3} m");
 }
 
+/// A bike of [`landing`]'s build rolling free at `speed` m/s along a strip of
+/// ripple: tilted 0.5 m boards end to end, every join anywhere within a
+/// centimetre of level. The ticks a tyre was off the ground, past its first
+/// second.
+fn ripple_lift_offs(wheels: &[BikeWheel], speed: f32) -> usize {
+    let (mass, cg, radius, tyre) = (0.365f32, 0.513f64, 0.33f32, 0.03f32);
+    let mut ecs = World::default();
+    let floor = ecs.spawn();
+    ecs.insert(floor, Transform::from_translation(DVec3::new(0.0, -1.05, 0.0)));
+    ecs.insert(floor, RigidBody { kind: BodyKind::Box, mode: BodyMode::Static, half_extents: [400.0, 1.0, 50.0], friction: 0.9, ..Default::default() });
+    // A fixed run of heights, so every build rides the same strip.
+    let mut seed = 0x9e37_79b9u32;
+    let mut height = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        (seed % 2001) as f64 / 1000.0 * 0.01 - 0.01
+    };
+    let (len, mut x, mut h) = (0.5f64, -2.0f64, 0.0f64);
+    for _ in 0..150 {
+        let next = height();
+        let tilt = ((next - h) / len).atan();
+        // The board's top face runs from (x, h) to (x + len, next).
+        let (mid, up) = (DVec3::new(x + len * 0.5, (h + next) * 0.5, 0.0), DVec3::new(-tilt.sin(), tilt.cos(), 0.0));
+        let board = ecs.spawn();
+        ecs.insert(board, Transform { translation: mid - up * 0.5, rotation: Quat::from_rotation_z(tilt as f32), scale: Vec3::ONE });
+        ecs.insert(board, RigidBody { kind: BodyKind::Box, mode: BodyMode::Static, half_extents: [(len * 0.5 / tilt.cos()) as f32 + 0.002, 0.5, 3.0], friction: 0.9, ..Default::default() });
+        (x, h) = (x + len, next);
+    }
+    let r = radius as f64 + 0.01;
+    let chassis = segment(&mut ecs, "Chassis", DVec3::new(0.0, r + cg, 0.0), [0.6, 0.1, 0.3], mass);
+    let mut ids = Vec::new();
+    for w in wheels {
+        let e = ecs.spawn();
+        ecs.insert(e, Transform::from_translation(DVec3::new(w.dx, r, 0.0)));
+        ecs.insert(e, RigidBody { radius, mass: tyre, friction: 0.9, rotates: true, ..Default::default() });
+        ecs.insert(
+            e,
+            Joint {
+                kind: JointKind::Wheel,
+                other: "Chassis".into(),
+                axis: w.axis,
+                stiffness: w.stiffness,
+                damping: w.damping,
+                spring_rate: w.rate,
+                damper_bump: w.bump,
+                damper_rebound: w.rebound,
+                ..Default::default()
+            },
+        );
+        ids.push(e);
+    }
+    let mut sim = Sim::build_layered(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO, floptle_core::Layers::default());
+    sim.world.single_wheel_friction = true;
+    sim.set_compound_velocity(chassis.index(), Vec3::new(speed, 0.0, 0.0));
+    for &e in &ids {
+        let mut s = sim.body_snapshot(e.index()).unwrap();
+        s.vel = Vec3::new(speed, 0.0, 0.0);
+        s.ang_vel = Vec3::new(0.0, 0.0, -speed / radius);
+        sim.restore_body(e.index(), &s);
+    }
+    let ticks = ((50.0 / speed) / DT) as usize;
+    let mut off = 0;
+    for k in 0..ticks {
+        sim.step_tick(DT, None);
+        if k as f32 * DT > 1.0 && !ids.iter().all(|e| sim.body_snapshot(e.index()).unwrap().grounded) {
+            off += 1;
+        }
+    }
+    off
+}
+
+/// **A held wheel follows ripple.** A wheel on a real-unit spring is held
+/// by the ground, the spring pushing only the frame, so nothing but its
+/// weight brought a light tyre back down where the ground fell away under
+/// it: on boards within a centimetre of level, Solar's bike lifted a tyre
+/// for a tick at a time at every speed (39, 63 and 72 ticks at 8, 12 and 15
+/// m/s). A held wheel follows the ground as far as its spring would carry it
+/// in a step. What is left past 8 m/s is the tyre thrown off a crest where
+/// two boards meet, a few millimetres for a tick or three, as a rigid tyre
+/// is, and the same bike on frequency and ratio does much the same.
+#[test]
+fn a_held_wheel_follows_ripple() {
+    let aft = |deg: f32| [-deg.to_radians().sin(), deg.to_radians().cos(), 0.0];
+    let real = [
+        BikeWheel { dx: 1.098, axis: aft(24.0), rate: 31.7, bump: 2.6, rebound: 2.6, ..Default::default() },
+        BikeWheel { dx: -0.471, axis: aft(15.0), rate: 70.3, bump: 4.7, rebound: 4.7, ..Default::default() },
+    ];
+    for (speed, most) in [(8.0f32, 3), (12.0, 25), (15.0, 45)] {
+        let off = ripple_lift_offs(&real, speed);
+        assert!(off <= most, "at {speed} m/s a held tyre was off the ground {off} ticks (at most {most})");
+    }
+}
+
 /// The hardest impact speed a parked 19.5 t stack reports over `secs` of a
 /// capsule walker (80 kg) pressing into it at `walk` m/s, its velocity set
 /// each tick as a character controller sets it.

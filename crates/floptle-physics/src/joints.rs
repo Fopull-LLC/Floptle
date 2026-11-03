@@ -841,8 +841,19 @@ impl PhysicsWorld {
                 };
                 if on_ground {
                     // The ground carries it: the tyre's grip is sized from it.
+                    // And where the ground falls away under the tyre, the
+                    // spring pushes the tyre after it: held, it had only its
+                    // weight to follow a ripple down, and a light tyre under
+                    // a heavy frame left the ground a tick at a time. So its
+                    // next move starts with the way the push would carry it
+                    // alone in a step, the march stopping it on the ground,
+                    // where on level ground it goes nowhere.
                     if let Link::Body(i) = jt.a {
-                        self.bodies[i].pressed += push.length();
+                        let b = &mut self.bodies[i];
+                        b.pressed += push.length();
+                        if b.mass > 1e-9 {
+                            b.hold = (push / b.mass * dt).clamp_length_max(b.radius * 0.25);
+                        }
                     }
                 } else {
                     self.joint_impulse(Some(jt.a), ea.r, push);

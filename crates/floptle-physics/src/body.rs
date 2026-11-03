@@ -205,6 +205,11 @@ pub struct Body {
     /// contacts took out along their normals (a hard landing's whole impact,
     /// a resting body's weight). What a wheel joint's tyre grip is sized from.
     pub pressed: f32,
+    /// How far toward the ground a wheel held there is carried at the start
+    /// of its next move, the march stopping it on the ground (see the wheel
+    /// joint's real-unit spring): what its spring would carry it in a step if
+    /// the ground fell away under it. Zero for everything else.
+    pub hold: Vec3,
     /// A wheel joint's wheel while `PhysicsWorld::single_wheel_friction` is
     /// on: its contacts take no friction of their own, its tyre grip does.
     pub tyre: bool,
@@ -367,6 +372,7 @@ impl Body {
             contact: None,
             ground_normal: None,
             pressed: 0.0,
+            hold: Vec3::ZERO,
             tyre: false,
             surface_grip: 1.0,
             wall_normal: None,
