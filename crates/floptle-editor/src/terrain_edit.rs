@@ -2432,6 +2432,8 @@ impl Editor {
                 // bodies standing on the old invisible surface.
                 if geom {
                     self.mirror_terrain_chunks_to_sim(active, &touched);
+                } else {
+                    self.mirror_terrain_paint_to_sim(active, &touched);
                 }
                 self.queue_terrain_dirty(active, hit, r_local, geom, touched);
             }
@@ -2549,6 +2551,8 @@ impl Editor {
             b.touched.dedup();
             if b.geom {
                 self.mirror_terrain_chunks_to_sim(e, &b.touched);
+            } else {
+                self.mirror_terrain_paint_to_sim(e, &b.touched);
             }
             let mut touched = Some(b.touched);
             for (lo, hi) in b.boxes {
@@ -3023,6 +3027,23 @@ impl Editor {
         }
         // The marks over what was written are told the box, not the chunks.
         self.decals_note_dug(e, written.0, written.1);
+    }
+
+    /// A paint reaches the sim's collider copy of terrain `e` too: the chunks
+    /// it touched are copied over, and nothing is meshed again, since a
+    /// colour does not change collision. That copy is what `terrain.slotAt`
+    /// reads, and skipping it for a paint left a painted road answering with
+    /// the slot from before, forever, while a dig there reported the new one.
+    pub(crate) fn mirror_terrain_paint_to_sim(&mut self, e: Entity, touched: &[[i32; 3]]) {
+        if touched.is_empty() {
+            return;
+        }
+        let Some(t) = self.terrains.get(&e) else { return };
+        // Not recorded as an edit of the ground: what rests on it stays put.
+        let Some(sim) = self.sim.as_mut() else { return };
+        if let Some(collider) = sim.world.colliders.iter_mut().find(|c| c.eid == Some(e.index())).and_then(|c| c.shape.chunk_terrain_mut()) {
+            collider.field.copy_chunks_from(&t.field, touched);
+        }
     }
 
     /// Every terrain chunk a worker is making again right now, by node.
@@ -5970,6 +5991,35 @@ mod residency_tests {
         assert!(ed.collision_pending.is_empty(), "the collision meshes never landed");
         let after = collider_distance(&mut ed);
         assert!(after > before + 0.5, "the collider does not see the hole: {before} -> {after}");
+    }
+
+    /// **A painted slot is the slot `terrain.slotAt` answers.** It reads the
+    /// sim's collider copy of the field, and a paint skipped that copy (a
+    /// colour does not change collision), so a painted road answered with the
+    /// slot from before, forever, while a dig there reported the new one.
+    #[test]
+    fn in_play_a_paint_reaches_what_slot_at_reads() {
+        let mut ed = crate::Editor::default();
+        let mut field = floptle_field::ChunkField::new(0.5);
+        field.fill_slab(Vec3::new(-12.0, -6.0, -12.0), Vec3::new(12.0, 0.0, 12.0), 0.0, [0.5, 0.5, 0.5]);
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        ed.terrains.insert(e, EditorTerrain::new(field));
+        ed.toggle_play();
+        assert!(ed.playing && ed.sim.is_some(), "did not enter play with a sim");
+        let at = Vec3::new(1.0, -0.2, 1.0);
+        let slot = |ed: &mut crate::Editor| ed.sim.as_mut().unwrap().terrain_collider_mut(e.index()).unwrap().field.slot_at(at);
+        assert_ne!(slot(&mut ed), Some(7), "the slab is already slot 7");
+        ed.apply_script_terrain_ops(vec![floptle_script::TerrainOp {
+            pos: [1.0, 0.0, 1.0],
+            radius: 1.5,
+            strength: 1.0,
+            mode: floptle_script::TerrainOpMode::PaintTexture(7),
+            id: 0,
+            normal: None,
+        }]);
+        assert_eq!(ed.terrains[&e].field.slot_at(at), Some(7), "the paint did not reach the field");
+        assert_eq!(slot(&mut ed), Some(7), "the collider's copy, which slotAt reads, kept the slot from before");
     }
 
     /// **A mining laser's bites cost the frames they land in little.** Each
