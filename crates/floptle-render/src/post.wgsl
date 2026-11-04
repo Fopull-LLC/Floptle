@@ -451,10 +451,18 @@ struct DofCam {
     inv_view_proj: mat4x4<f32>,
     // Camera-relative world (this frame's origin) → the PREVIOUS frame's clip.
     prev_view_proj: mat4x4<f32>,
-    // x = shutter, y = taps, z = max streak (px), w unused.
+    // x = shutter, y = taps, z = max streak (px), w = 1 when
+    // `motion_prev_depth` holds the last frame's view depth.
     motion: vec4<f32>,
 };
 @group(1) @binding(1) var<uniform> dof_cam: DofCam;
+// The last frame's view depth (m) in r, its luma before the streak in g and
+// whether it rode the camera in b, for motion blur only: see `motion_rides`.
+@group(1) @binding(2) var motion_prev_depth: texture_2d<f32>;
+
+fn motion_luma(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
 
 // View-space depth from the depth buffer. Reversed-Z aware via the inverse
 // projection, so this reads whatever the camera actually rendered — including
@@ -712,7 +720,10 @@ fn fs_finish(in: VsOut) -> @location(0) vec4<f32> {
 //     across tiles first, which is another two passes.
 //
 // See docs/subsystems/post-processing.md.
-fn motion_velocity(uv: vec2<f32>) -> vec2<f32> {
+// Where this pixel was a frame ago if it stood still in the world: the
+// previous frame's uv in xy and its depth from the previous camera in z; w is
+// 0 where there is no answer (a point behind the old camera).
+fn motion_reproject(uv: vec2<f32>) -> vec4<f32> {
     let dims = vec2<i32>(textureDimensions(dof_depth));
     let px = clamp(vec2<i32>(uv * vec2<f32>(dims)), vec2<i32>(0), dims - vec2<i32>(1));
     let d = textureLoad(dof_depth, px, 0).x;
@@ -723,16 +734,66 @@ fn motion_velocity(uv: vec2<f32>) -> vec2<f32> {
     let clip = vec4<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, d, 1.0);
     let world = dof_cam.inv_view_proj * clip;
     if (abs(world.w) < 1e-9) {
-        return vec2<f32>(0.0);
+        return vec4<f32>(uv, 0.0, 0.0);
     }
     let p_rel = world.xyz / world.w;
     let prev = dof_cam.prev_view_proj * vec4<f32>(p_rel, 1.0);
     if (prev.w <= 1e-6) {
-        return vec2<f32>(0.0); // behind the old camera: it had no picture of this
+        return vec4<f32>(uv, 0.0, 0.0); // behind the old camera: it had no picture of this
     }
     let pn = prev.xy / prev.w;
-    let prev_uv = vec2<f32>(pn.x * 0.5 + 0.5, 1.0 - (pn.y * 0.5 + 0.5));
-    return uv - prev_uv;
+    return vec4<f32>(pn.x * 0.5 + 0.5, 1.0 - (pn.y * 0.5 + 0.5), prev.w, 1.0);
+}
+
+// Whether the pixel at `uv` moved with the camera over the last frame rather
+// than standing still in the world, `r` its `motion_reproject`.
+//
+// What rides with the camera — the bike under the rider, the astronaut a
+// chase camera follows, a held tool — is a point standing still in the world
+// as far as the reprojection knows, and was streaked with the camera's whole
+// motion over the ground: the player's own bike smeared into a blur a frame
+// long. A point that rode the camera was, a frame ago, at this very pixel, at
+// this very depth and looking the same; one that stood still was where the
+// reprojection puts it, at the depth it predicts. Riding, then, where the
+// first holds and the second fails, or where the second lands on what was
+// itself riding a frame ago: the camera moving sideways keeps a riding
+// thing's depth, and over most of it the reprojection lands on more of the
+// same thing, which the last frame's answer has already told apart. Ground
+// sliding past fails the first test on its own detail, so the answer does
+// not spread into it. Only where the reprojection could be checked at all:
+// off the last frame's edge, or with no last frame, a pixel stood still, as
+// it always did.
+fn motion_rides(uv: vec2<f32>, r: vec4<f32>) -> bool {
+    if (dof_cam.motion.w < 0.5 || r.w < 0.5 || any(r.xy < vec2<f32>(0.0)) || any(r.xy > vec2<f32>(1.0))) {
+        return false;
+    }
+    let hd = vec2<f32>(textureDimensions(motion_prev_depth));
+    let there = textureLoad(motion_prev_depth, clamp(vec2<i32>(r.xy * hd), vec2<i32>(0), vec2<i32>(hd) - vec2<i32>(1)), 0).xyz;
+    let here = textureLoad(motion_prev_depth, clamp(vec2<i32>(uv * hd), vec2<i32>(0), vec2<i32>(hd) - vec2<i32>(1)), 0).xyz;
+    let now = dof_view_depth(uv);
+    let l = motion_luma(textureSampleLevel(tex, samp, uv, 0.0).rgb);
+    let stayed = abs(here.x - now) <= 0.05 * now + 0.02 && abs(here.y - l) <= 0.05 * l + 0.01;
+    let still = abs(there.x - r.z) <= 0.05 * r.z + 0.02;
+    return stayed && (!still || there.z > 0.5);
+}
+
+fn motion_velocity(uv: vec2<f32>) -> vec2<f32> {
+    let r = motion_reproject(uv);
+    if (r.w < 0.5 || motion_rides(uv, r)) {
+        return vec2<f32>(0.0);
+    }
+    return uv - r.xy;
+}
+
+// This frame's view depth (m), its luma before the streak and whether it rode
+// the camera (`motion_rides`) into the motion history, for the next frame's.
+// The depth is held below half's ceiling: the sky is "very far", and that is
+// all the test needs to know of it.
+@fragment
+fn fs_depth_keep(in: VsOut) -> @location(0) vec4<f32> {
+    let l = motion_luma(textureSampleLevel(tex, samp, in.uv, 0.0).rgb);
+    let rides = select(0.0, 1.0, motion_rides(in.uv, motion_reproject(in.uv)));
+    return vec4<f32>(min(dof_view_depth(in.uv), 60000.0), min(l, 60000.0), rides, 1.0);
 }
 
 @fragment

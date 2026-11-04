@@ -511,6 +511,38 @@ pub(crate) mod layouts {
         })
     }
 
+    /// Motion blur's group(1): [`depth`]'s two, and the last frame's view
+    /// depth (`motion_prev_depth`) at binding 2.
+    pub fn motion(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        let tex = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("post-motion"),
+            entries: &[
+                tex(0),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                tex(2),
+            ],
+        })
+    }
+
     /// group(2): one authored shader's own uniforms.
     pub fn shader_params(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -792,6 +824,16 @@ pub struct PostStack {
     ssao_apply_pipeline: wgpu::RenderPipeline, // scene × AO
     dof_pipeline: wgpu::RenderPipeline,        // CoC-weighted gather
     motion_pipeline: wgpu::RenderPipeline,     // depth-reprojected streak
+    motion_layout: wgpu::BindGroupLayout,
+    /// This frame's view depth into `depth_hist`, after the streak.
+    keep_pipeline: wgpu::RenderPipeline,
+    /// The view depth of the last frame motion blur ran and of the one before
+    /// it: the streak reads `depth_hist[hist_cur]` while the keep pass writes
+    /// the other. `hist_valid` is false until a frame has been kept since the
+    /// targets were made, or after a frame without motion blur.
+    depth_hist: [Target; 2],
+    hist_cur: std::cell::Cell<usize>,
+    hist_valid: std::cell::Cell<bool>,
     dof_layout: wgpu::BindGroupLayout,
     dof_cam_buf: wgpu::Buffer,
     /// A 1×1 depth texture left at FAR — what an authored post pass reads when
@@ -1037,7 +1079,14 @@ impl PostStack {
         // Motion blur shares depth-of-field's bind-group layout and its camera
         // buffer: both passes are "the frame's own geometry", and one struct
         // cannot drift from the other by a field.
-        let motion_pipeline = generic_pipeline(&module, &dof_pl_layout, "fs_motion", chain);
+        let motion_layout = layouts::motion(device);
+        let motion_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("post-motion-layout"),
+            bind_group_layouts: &[Some(&bind_layout), Some(&motion_layout)],
+            ..Default::default()
+        });
+        let motion_pipeline = generic_pipeline(&module, &motion_pl_layout, "fs_motion", chain);
+        let keep_pipeline = generic_pipeline(&module, &motion_pl_layout, "fs_depth_keep", HIST_FORMAT);
         let dof_cam_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("post-dof-cam"),
             size: std::mem::size_of::<DofCam>() as u64,
@@ -1085,14 +1134,19 @@ impl PostStack {
         let mk = |w, h, f| Target::new(gpu, &bind_layout, &sampler, &params_buf, f, w, h);
         let ao_a = mk(hw, hh, AO_FORMAT);
         let ao_bind1 = Self::make_ao_bind(gpu, &ao_layout, &ao_a, &sampler);
+        let depth_hist = [mk(width, height, HIST_FORMAT), mk(width, height, HIST_FORMAT)];
+        // Every target is made before the struct takes the buffers `mk`
+        // borrows.
+        let (scene, ping, pong) = (mk(width, height, chain), mk(width, height, chain), mk(width, height, chain));
+        let (bloom_a, bloom_b, ao_b) = (mk(hw, hh, chain), mk(hw, hh, chain), mk(hw, hh, AO_FORMAT));
         Self {
-            scene: mk(width, height, chain),
-            ping: mk(width, height, chain),
-            pong: mk(width, height, chain),
-            bloom_a: mk(hw, hh, chain),
-            bloom_b: mk(hw, hh, chain),
+            scene,
+            ping,
+            pong,
+            bloom_a,
+            bloom_b,
             ao_a,
-            ao_b: mk(hw, hh, AO_FORMAT),
+            ao_b,
             ao_bind1,
             width,
             height,
@@ -1118,6 +1172,11 @@ impl PostStack {
             ssao_apply_pipeline,
             dof_pipeline,
             motion_pipeline,
+            motion_layout,
+            keep_pipeline,
+            depth_hist,
+            hist_cur: std::cell::Cell::new(0),
+            hist_valid: std::cell::Cell::new(false),
             dof_layout,
             dof_cam_buf,
             _far_depth: far_depth,
@@ -1140,6 +1199,8 @@ impl PostStack {
         self.ao_a = mk(aw, ah, wgpu::TextureFormat::R8Unorm);
         self.ao_b = mk(aw, ah, wgpu::TextureFormat::R8Unorm);
         self.ao_bind1 = Self::make_ao_bind(gpu, &self.ao_layout, &self.ao_a, &self.sampler);
+        self.depth_hist = [mk(width, height, HIST_FORMAT), mk(width, height, HIST_FORMAT)];
+        self.hist_valid.set(false);
         self.width = width;
         self.height = height;
     }
@@ -1456,7 +1517,17 @@ impl PostStack {
         // the shutter smears what the lens produced — that is the order the two
         // happen in a camera, and swapping them gives sharp streaks through a
         // blurred image, which reads as a rendering fault.
+        if !(s.motion_on() && ssao.is_some()) {
+            // A frame without the streak keeps no depth, so the next one
+            // with it has no last frame to read.
+            self.hist_valid.set(false);
+        }
         if let (true, Some(f)) = (s.motion_on(), ssao) {
+            let read = self.hist_cur.get();
+            // The depth test reads a perspective camera's depth from its clip
+            // w; an orthographic camera's w is 1, so it keeps the plain
+            // reprojection.
+            let perspective = f.proj[3][3].abs() < 1e-6;
             gpu.queue.write_buffer(
                 &self.dof_cam_buf,
                 0,
@@ -1472,13 +1543,13 @@ impl PostStack {
                             s.motion_samples.clamp(4, 32) as f32
                         },
                         s.motion_max.max(0.0),
-                        0.0,
+                        if self.hist_valid.get() && perspective { 1.0 } else { 0.0 },
                     ],
                 }),
             );
             let motion_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("post-motion"),
-                layout: &self.dof_layout,
+                layout: &self.motion_layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -1487,6 +1558,10 @@ impl PostStack {
                     wgpu::BindGroupEntry {
                         binding: 1,
                         resource: self.dof_cam_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&self.depth_hist[read].view),
                     },
                 ],
             });
@@ -1503,6 +1578,19 @@ impl PostStack {
                 &dst.view,
                 wgpu::LoadOp::Clear(BLACK),
             );
+            // This frame's depth, look and answer, for the next frame's streak
+            // to tell what rode the camera from what stood still. It reads the
+            // history the streak did and writes the other one.
+            self.pass2(
+                gpu,
+                &self.keep_pipeline,
+                &cur.bind,
+                Some(&motion_bind),
+                &self.depth_hist[1 - read].view,
+                wgpu::LoadOp::Clear(BLACK),
+            );
+            self.hist_cur.set(1 - read);
+            self.hist_valid.set(true);
             cur = dst;
         }
 
@@ -1729,6 +1817,10 @@ impl PostStack {
 }
 
 const BLACK: wgpu::Color = wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+/// Motion blur's history: view depth in metres, the picture's luma and
+/// whether each pixel rode the camera, the first two to about a part in two
+/// thousand, which is all the match needs, at half the bytes of floats.
+const HIST_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 impl Target {
     fn new(

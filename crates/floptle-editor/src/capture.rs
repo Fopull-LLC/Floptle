@@ -16,6 +16,17 @@ use floptle_core::Matter;
 use floptle_render::{Projection, RenderCamera};
 use floptle_script::{CaptureCamera, CaptureFormat, CaptureRequest};
 
+/// Motion blur across the frames of a `shot --frames` sequence: the last
+/// frame's camera, and the post chain kept from frame to frame, since its
+/// depth history is the last frame's too. A lone picture has no last frame
+/// and is left sharp; so is a sequence's first.
+#[derive(Default)]
+pub(crate) struct ShotMotion {
+    prev: Option<crate::shading::MotionHistory>,
+    /// The chain, and the composite size and retro flag it was made for.
+    post: Option<((u32, u32, bool), floptle_render::PostStack)>,
+}
+
 /// Draw one frame of `ed`'s world from `cam` into a new `w`×`h` texture
 /// (RGBA8 in the surface's format, `COPY_SRC`).
 ///
@@ -104,10 +115,19 @@ pub(crate) fn render_frame_texture(
     );
     let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
     let own_depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
-    let mut post = floptle_render::PostStack::new(&gpu, cw, ch);
-    // Always configured, not only when an effect is on: the chain is the only
-    // route from the scene's floating-point target down to an sRGB texture.
-    post.configure(&gpu, cw, ch, retro_on);
+    // A sequence keeps its chain, for the depth history motion blur reads.
+    let kept = ed.shot_motion.as_mut().and_then(|m| m.post.take()).filter(|(k, _)| *k == (cw, ch, retro_on));
+    let post = match kept {
+        Some((_, post)) => post,
+        None => {
+            let mut post = floptle_render::PostStack::new(&gpu, cw, ch);
+            // Always configured, not only when an effect is on: the chain is
+            // the only route from the scene's floating-point target down to an
+            // sRGB texture.
+            post.configure(&gpu, cw, ch, retro_on);
+            post
+        }
+    };
     ed.gpu = Some(gpu);
 
     let (depth_view, depth_tex) = match &retro {
@@ -166,11 +186,16 @@ pub(crate) fn render_frame_texture(
     // settings, the depth-of-field focus resolved against the scene, screen
     // ambient occlusion, and any `stage post` shaders the project compiled.
     //
-    // Two are left out. **Motion blur** needs a previous frame and
-    // this is a single one, so a shutter here would smear against a frame that
-    // does not exist. **The accessibility filters** are one person's display
-    // preference, and a PNG of a project should not carry them.
+    // **Motion blur** needs a previous frame: a sequence's frames after its
+    // first have one (`ShotMotion`), and every other picture is left sharp,
+    // since a shutter there would smear against a frame that does not exist.
+    // **The accessibility filters** are left out: they are one person's
+    // display preference, and a PNG of a project should not carry them.
     let mut look = crate::shading::post_process_uniforms(&ed.world).0;
+    if let Some(m) = ed.shot_motion.as_mut() {
+        let frame = crate::shading::camera_frame(&ed.world, cam.world_position);
+        m.prev = Some(crate::shading::motion_frame(&mut look, m.prev, cam.view_proj(aspect), cam.world_position, frame, ch));
+    }
     look.time = ed.fog_time;
     look.fxaa = crate::shading::fxaa_on(&ed.project);
     if let Some(d) = crate::shading::dof_focus_distance(&ed.world, cam.world_position) {
@@ -209,6 +234,9 @@ pub(crate) fn render_frame_texture(
     };
     let any_after = stacked.is_some_and(|(size, n)| ed.camera_stacks.any_after(size, n));
     post.run_with_overlay(gpu, &look, Some(&ssao), &composite, ed.post_shaders.as_ref(), any_after.then_some(&after as &dyn Fn(&wgpu::TextureView)));
+    if let Some(m) = ed.shot_motion.as_mut() {
+        m.post = Some(((cw, ch, retro_on), post));
+    }
     if ed.gpu_timing_headless
         && let Some(t) = ed.gpu_timer.as_mut()
     {

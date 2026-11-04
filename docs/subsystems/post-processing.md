@@ -170,15 +170,38 @@ first frame after a load, a scene switch, or a camera cut — and the only safe
 one, since the alternative is one frame smeared by wherever the camera used to
 be looking.
 
+**On a world that moves, the question is asked of that world.** A planet on its
+orbit, turning, carries the camera standing on it metres a frame. The previous
+matrix is taken relative to the planet the camera is on (`shading::camera_frame`,
+`ssr::reproject_in_frame`), so a wall beside the player does not streak with the
+planet's orbit, and walking across it streaks only along the walk.
+
+**What rides with the camera stays sharp.** The reprojection takes every pixel
+for a point standing still in the world, and the bike under a rider, the
+astronaut a chase camera follows or a held tool is not one: read that way it
+was smeared with the camera's whole motion over the ground. The chain keeps
+the last frame's view depth, luma and answer (an `Rgba16Float` history beside
+the ping-pong targets), and a pixel that was at this very spot a frame ago, at
+the same depth and looking the same, where the reprojection's prediction fails
+or lands on what was riding a frame ago, gets no streak (`motion_rides` in
+`post.wgsl`). Ground sliding past fails on its own detail, so the answer does
+not spread into it. Off the last frame's edge, with no last frame, or under an
+orthographic camera (whose clip `w` carries no depth), the plain reprojection
+stands. This is the camera-riding case of object motion, not object motion: a
+car crossing a still shot still stays sharp (below).
+
 **The Game view gets it; the Scene view does not.** The Scene view is a tool, and
 placing a prop while the camera is still coasting is not something to have to
 fight. The Scene view already shows every other effect in the chain, so this is a
-deliberate exception rather than an oversight.
+deliberate exception rather than an oversight. `floptle shot --frames` carries it
+from the sequence's second frame on (the first has no last frame); a lone shot is
+left sharp.
 
 **Two things it does not do**, both structural rather than bugs:
 
 1. **Object motion.** A car crossing a locked-off shot is a point standing still
-   in the world as far as this is concerned, so it stays sharp. That half needs a
+   in the world as far as this is concerned, so it stays sharp. (What moves
+   *with* the camera is told apart, above; what moves on its own is not.) That half needs a
    velocity buffer — a second render target written by *every* draw path in the
    engine, including skinned meshes, instanced meshes, tilemaps, sprite batches,
    particles and the raymarched field — plus the previous frame's transform and

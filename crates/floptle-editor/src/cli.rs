@@ -621,8 +621,9 @@ pub(crate) const VERBS: &[Verb] = &[
                  authored. --no-ui gives the world alone.\n\n\
                  The project's post-processing is applied — bloom, vignette, ambient \
                  occlusion, posterise, colour grading, depth of field, its own `stage post` \
-                 shaders, and the retro presentation at its own resolution. Motion blur is \
-                 not: a single frame has no previous one to smear against.",
+                 shaders, and the retro presentation at its own resolution. Motion blur needs \
+                 a previous frame: a single picture is left sharp, and a --frames sequence \
+                 carries it from its second frame on.",
         args: &[
             Arg {
                 name: "PROJECT",

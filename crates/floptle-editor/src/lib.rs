@@ -2853,6 +2853,9 @@ struct Editor {
     /// first frame and after a cut, which reads as a still camera — see
     /// `shading::motion_frame`.
     motion_prev: Option<crate::shading::MotionHistory>,
+    /// Motion blur across a `shot --frames` sequence: set by the sequence,
+    /// `None` for every other picture (see `capture::ShotMotion`).
+    shot_motion: Option<crate::capture::ShotMotion>,
     /// This frame's projected GI probes (see `gi_show_probes`).
     gi_probe_dots: Vec<(Vec2, [f32; 3], bool)>,
     /// Projected rigidbody collider outlines (sphere/capsule) for this frame.

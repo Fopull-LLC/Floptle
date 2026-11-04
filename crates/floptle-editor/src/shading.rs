@@ -1397,6 +1397,61 @@ pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_ren
 }
 
 #[cfg(test)]
+mod motion_frame_tests {
+    use super::*;
+    use floptle_core::math::{DQuat, Mat4, Vec4};
+
+    /// Where a ground point is on screen this frame, and where the blur reads
+    /// it was a frame ago, for a camera driving 0.4 m across a planet whose
+    /// pose goes from `a` to `b` between the two frames.
+    fn streak(a: (DVec3, DQuat), b: (DVec3, DQuat)) -> Vec<(f32, f32, f32, f32)> {
+        let proj = Mat4::perspective_rh(1.0, 1.333, 0.1, 1000.0);
+        let look = DQuat::from_rotation_x(-0.35);
+        let cam = |pose: (DVec3, DQuat), local: DVec3| (pose.0 + pose.1 * local, pose.1 * look);
+        let vp = |rot: DQuat| proj * Mat4::from_quat(rot.inverse().as_quat());
+        let pose = |p: (DVec3, DQuat)| Some(floptle_render::FramePose { id: 7, pos: p.0, rot: p.1 });
+        let (c0, r0) = cam(a, DVec3::new(0.0, 32.0, 6.0));
+        let (c1, r1) = cam(b, DVec3::new(0.4, 32.0, 6.0));
+        let mut s = floptle_render::PostSettings::default();
+        let prev = (vp(r0), c0, pose(a));
+        let _ = motion_frame(&mut s, Some(prev), vp(r1), c1, pose(b), 240);
+        let prev_vp = Mat4::from_cols_array_2d(&s.motion_prev_view_proj);
+        let mut out = Vec::new();
+        for gx in [-6.0, 0.0, 6.0] {
+            for gz in [-4.0, -10.0] {
+                let g = b.0 + b.1 * DVec3::new(gx, 30.0, gz);
+                let rel = (g - c1).as_vec3();
+                let ndc = |c: Vec4| (c.x / c.w, c.y / c.w);
+                let (nx, ny) = ndc(vp(r1) * rel.extend(1.0));
+                let (px, py) = ndc(prev_vp * rel.extend(1.0));
+                out.push((nx, ny, px, py));
+            }
+        }
+        out
+    }
+
+    /// **Motion blur on a world that moves every tick streaks along the
+    /// camera's own motion over it.** A player driving across a planet on its
+    /// orbit, the planet turning, must see the same streaks as on a planet
+    /// standing still.
+    #[test]
+    fn motion_blur_on_a_moving_world_streaks_as_on_a_still_one() {
+        let still = (DVec3::new(4.0e6, 0.0, -2.0e6), DQuat::IDENTITY);
+        let calm = streak(still, still);
+        let turned = DQuat::from_rotation_y(0.4) * DQuat::from_rotation_z(0.2);
+        let from = (DVec3::new(4.0e6, 0.0, -2.0e6), turned);
+        let to = (from.0 + DVec3::new(6.0, 0.5, -3.0), DQuat::from_rotation_y(0.003) * turned);
+        let moving = streak(from, to);
+        // The fixture: the drive streaks the ground.
+        assert!(calm.iter().any(|(nx, _, px, _)| (nx - px).abs() > 0.01), "the fixture: the drive moves nothing on screen: {calm:?}");
+        for (c, m) in calm.iter().zip(&moving) {
+            let (dc, dm) = ((c.0 - c.2, c.1 - c.3), (m.0 - m.2, m.1 - m.3));
+            assert!((dc.0 - dm.0).abs() < 1e-3 && (dc.1 - dm.1).abs() < 1e-3, "a streak on the moving world {dm:?} is not the still world's {dc:?}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod star_tests {
     use super::*;
     use floptle_core::{CelestialBody, World};

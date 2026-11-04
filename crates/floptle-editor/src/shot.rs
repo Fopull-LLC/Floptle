@@ -15,9 +15,10 @@
 //! the project's look: the scene's own `PostProcess` node, the depth-of-field
 //! focus resolved against the scene, screen ambient occlusion, any
 //! `stage post` shaders it compiled, and the retro presentation, since a
-//! pixel-art project composites at its own resolution and upscales. Two are
-//! left out: motion blur needs a previous frame and this is a single one, and
-//! the accessibility filters are one person's display setting.
+//! pixel-art project composites at its own resolution and upscales. Motion
+//! blur needs a previous frame, so a lone picture is left sharp and a
+//! `--frames` sequence carries it from its second frame on; the accessibility
+//! filters are left out, being one person's display setting.
 //!
 //! It shows the scene's active camera, the view the game has, or a different
 //! one by name with `--camera`. A scene with no camera has no view and says
@@ -447,6 +448,11 @@ pub(crate) fn run(args: Args) -> i32 {
             }
             timed.extend(landed_timing(&mut ed));
         }
+    }
+    // A sequence is frames a player would see one after another, so it
+    // carries motion blur from its second frame on, as the game does.
+    if frames > 1 {
+        ed.shot_motion = Some(crate::capture::ShotMotion::default());
     }
     let Some(pixels) = render_frame_pixels(&mut ed, &cam, Some(e), w, h, cull_mask, !no_ui) else {
         floptle_say::say_err!("no GPU: this machine has no adapter floptle can render on");
