@@ -1634,13 +1634,14 @@ fn set_material_sets_the_cut_out_and_the_sides() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// **`thin` makes glass a sheet**, from `setMaterial` and from the Material
-/// component alike, and the component reads it back as a boolean: as the
-/// number 0 it would be true to Lua, and `if m.thin then` always taken.
+/// **`refraction` says how glass bends the view**, from `setMaterial` and
+/// from the Material component alike. It reads back as its name, starts as
+/// "project" (the project's Glass setting decides), and a name it does not
+/// know changes nothing.
 #[test]
-fn thin_reaches_a_material_both_ways() {
-    use floptle_core::Material;
-    let dir = std::env::temp_dir().join(format!("floptle-thin-{}", std::process::id()));
+fn refraction_reaches_a_material_both_ways() {
+    use floptle_core::{Material, Refraction};
+    let dir = std::env::temp_dir().join(format!("floptle-refraction-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     write_script(
         &dir,
@@ -1648,29 +1649,35 @@ fn thin_reaches_a_material_both_ways() {
         concat!(
             "function start(node)\n",
             "  local m = node:getcomponent('Material')\n",
-            "  log('thin is a ' .. type(m.thin) .. ' ' .. tostring(m.thin))\n",
-            "  m.thin = true\n",
+            "  log('refraction starts ' .. tostring(m.refraction))\n",
+            "  m.refraction = 'thin'\n",
+            "  log('refraction reads ' .. tostring(m.refraction))\n",
             "end\n",
         ),
     );
-    write_script(&dir, "sheet", "function start(node) node:setMaterial{ transmission = 0.9, thin = true } end\n");
+    write_script(&dir, "ball", "function start(node) node:setMaterial{ transmission = 0.9, refraction = 'auto' } end\n");
+    write_script(&dir, "typo", "function start(node) node:getcomponent('Material').refraction = 'nonsense' end\n");
     let mut world = World::default();
-    let mut node = |script: &str| {
+    let mut node = |script: &str, refraction: Refraction| {
         let e = world.spawn();
         world.insert(e, Transform::IDENTITY);
         world.insert(e, floptle_core::Matter::Primitive { shape: floptle_core::Shape::Cube, color: [1.0; 3] });
-        world.insert(e, Material { transmission: 0.9, ..Default::default() });
+        world.insert(e, Material { transmission: 0.9, refraction, ..Default::default() });
         world.insert(e, Scripts(vec![floptle_core::ScriptInst::new(script)]));
         e
     };
-    let (pane, sheet) = (node("pane"), node("sheet"));
+    let (pane, ball) = (node("pane", Refraction::Project), node("ball", Refraction::Project));
+    let typo = node("typo", Refraction::Solid);
     let mut host = ScriptHost::new();
     host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
     assert!(host.errors().is_empty(), "{:?}", host.errors());
     let logs: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
-    assert!(logs.iter().any(|l| l.contains("thin is a boolean false")), "the component's thin read back as: {logs:?}");
-    assert!(world.get::<Material>(pane).unwrap().thin, "m.thin = true did not reach the material");
-    assert!(world.get::<Material>(sheet).unwrap().thin, "setMaterial{{ thin = true }} did not reach the material");
+    for said in ["refraction starts project", "refraction reads thin"] {
+        assert!(logs.iter().any(|l| l.contains(said)), "no log said {said:?}: {logs:?}");
+    }
+    assert_eq!(world.get::<Material>(pane).unwrap().refraction, Refraction::Thin, "m.refraction = 'thin'");
+    assert_eq!(world.get::<Material>(typo).unwrap().refraction, Refraction::Solid, "a name it does not know changed it");
+    assert_eq!(world.get::<Material>(ball).unwrap().refraction, Refraction::Auto, "setMaterial{{ refraction = 'auto' }}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

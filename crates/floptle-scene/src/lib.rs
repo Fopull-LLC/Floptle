@@ -3261,6 +3261,12 @@ pub struct ProjectConfigDoc {
     /// [`ProjectConfigDoc::model_texture_filter_resolved`] keeps it so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_texture_filter: Option<ModelTextureFilterDoc>,
+    /// How glass bends the view through it, for every material that leaves it
+    /// to the project; see [`floptle_core::Refraction`]. `None` means the file
+    /// predates the setting: its glass bent the view once, as a solid, and
+    /// [`ProjectConfigDoc::glass_refraction_resolved`] keeps it so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glass_refraction: Option<RefractionDoc>,
     /// How imported models' materials are drawn; see [`ImportedMaterialsDoc`].
     /// `None` means the file predates the setting and resolves to
     /// [`Classic`](ImportedMaterialsDoc::Classic).
@@ -3367,6 +3373,8 @@ impl ProjectConfigDoc {
             // A config made in code is a new project's; a file without these
             // fields is an old one's, and reads `None` (field-level defaults).
             model_texture_filter: Some(ModelTextureFilterDoc::AsFile),
+            // A new project's glass reads its own shape: panes clear, balls lenses.
+            glass_refraction: Some(RefractionDoc::Auto),
             imported_materials: Some(ImportedMaterialsDoc::AsFile),
             antialias: Some(AntialiasDoc::Fxaa),
             wheel_friction: Some(WheelFrictionDoc::Single),
@@ -3407,6 +3415,17 @@ impl ProjectConfigDoc {
             script_vec3: Some(ScriptVec3Doc::Fast),
             tick_budget_ms: Some(NEW_PROJECT_TICK_BUDGET_MS),
             ..Self::ps1()
+        }
+    }
+
+    /// How this project's glass bends the view, for materials that leave it to
+    /// the project. A project file from before the setting bent it once, as a
+    /// solid, and still does; one that says `Project` (meaningless here) reads
+    /// as `Auto`.
+    pub fn glass_refraction_resolved(&self) -> floptle_core::Refraction {
+        match self.glass_refraction {
+            None => floptle_core::Refraction::Solid,
+            Some(r) => floptle_core::Refraction::Project.under(r.to_refraction()),
         }
     }
 
@@ -3843,9 +3862,13 @@ pub struct MaterialDoc {
     pub ior: f32,
     #[serde(default = "default_thickness", skip_serializing_if = "is_default_thickness")]
     pub thickness: f32,
-    /// A thin sheet, seen straight through (see
-    /// [`floptle_core::Material::thin`]). Absent is a solid, as always.
-    #[serde(default, skip_serializing_if = "is_false")]
+    /// How the glass bends the view (see [`floptle_core::Refraction`]).
+    /// Absent is the project's setting.
+    #[serde(default, skip_serializing_if = "RefractionDoc::is_project")]
+    pub refraction: RefractionDoc,
+    /// `thin: true`, as dev builds 0.117.1-dev.1428 wrote it before
+    /// `refraction` existed: read as `refraction: Thin`, never written.
+    #[serde(default, skip_serializing)]
     pub thin: bool,
     /// How far the game's wind bends the surface (see
     /// [`floptle_core::Material::sway`]). Absent is still.
@@ -3954,6 +3977,39 @@ impl ShadingDoc {
         match s {
             floptle_core::Shading::Classic => ShadingDoc::Classic,
             floptle_core::Shading::Physical => ShadingDoc::Physical,
+        }
+    }
+}
+
+/// RON mirror of [`floptle_core::Refraction`], for a material and for the
+/// project's Glass setting.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RefractionDoc {
+    #[default]
+    Project,
+    Auto,
+    Solid,
+    Thin,
+}
+
+impl RefractionDoc {
+    fn is_project(&self) -> bool {
+        matches!(self, RefractionDoc::Project)
+    }
+    pub fn to_refraction(self) -> floptle_core::Refraction {
+        match self {
+            RefractionDoc::Project => floptle_core::Refraction::Project,
+            RefractionDoc::Auto => floptle_core::Refraction::Auto,
+            RefractionDoc::Solid => floptle_core::Refraction::Solid,
+            RefractionDoc::Thin => floptle_core::Refraction::Thin,
+        }
+    }
+    pub fn from_refraction(r: floptle_core::Refraction) -> Self {
+        match r {
+            floptle_core::Refraction::Project => RefractionDoc::Project,
+            floptle_core::Refraction::Auto => RefractionDoc::Auto,
+            floptle_core::Refraction::Solid => RefractionDoc::Solid,
+            floptle_core::Refraction::Thin => RefractionDoc::Thin,
         }
     }
 }
@@ -4165,7 +4221,10 @@ impl MaterialDoc {
             // does, and the maths behind it (`1/ior`) divides.
             ior: self.ior.clamp(1.0, 3.0),
             thickness: self.thickness.clamp(0.0, 100.0),
-            thin: self.thin,
+            refraction: match self.refraction {
+                RefractionDoc::Project if self.thin => floptle_core::Refraction::Thin,
+                r => r.to_refraction(),
+            },
             sway: self.sway.clamp(0.0, 100.0),
             backlight: self.backlight.clamp(0.0, 1.0),
             near_fade: [self.near_fade.0.max(0.0), self.near_fade.1.max(0.0)],
@@ -4219,7 +4278,8 @@ impl MaterialDoc {
             transmission: m.transmission,
             ior: m.ior,
             thickness: m.thickness,
-            thin: m.thin,
+            refraction: RefractionDoc::from_refraction(m.refraction),
+            thin: false,
             sway: m.sway,
             backlight: m.backlight,
             near_fade: (m.near_fade[0], m.near_fade[1]),

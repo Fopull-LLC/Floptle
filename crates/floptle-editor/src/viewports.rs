@@ -292,6 +292,7 @@ impl Editor {
             tonemap: crate::shading::post_process_uniforms(&self.world).0.tonemap,
             ..Default::default()
         };
+        let glass = self.project.glass_refraction_resolved();
         if let (Some(gpu), Some(raster), Some(preview)) =
             (self.gpu.as_ref(), self.raster.as_mut(), self.preview.as_ref())
         {
@@ -306,6 +307,9 @@ impl Editor {
             // happen to inherit last frame's — right today by accident, and
             // wrong the moment anything moves.
             raster.set_retro_defaults(floptle_core::Retro::default());
+            // The project's Glass setting, though, IS the material: a pane
+            // previewed as a lens would show a look the game never draws.
+            raster.set_refraction_default(glass);
             raster.draw_scene(
                 gpu,
                 preview.scene_view(),

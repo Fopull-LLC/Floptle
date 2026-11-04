@@ -676,6 +676,9 @@ pub(crate) fn render_frame_pixels(
     // them a material or UI image wearing `rt:<name>` drew white, because the
     // texture was never made.
     ed.update_render_targets(ed.play_t);
+    // The project's look (era artefacts, Glass), which the window's frame sets
+    // and this verb has no frame to set it.
+    ed.apply_project_look();
     // A picture has no later frames for a scatter field to fill in over: the
     // frames `--after` played were never drawn, and drawing is when props
     // settle, so the field is settled whole for this one.

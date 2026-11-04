@@ -123,6 +123,68 @@ impl Shading {
     }
 }
 
+/// How glass bends the view through it ([`Material::refraction`]).
+///
+/// Light bends going into glass and again coming out of it, and which way it
+/// leaves depends on the shape of the far side: a pane's back face is parallel
+/// to its front, so the view leaves heading the way it came and the room
+/// behind shows straight through; a ball's back face curves the other way, and
+/// the ball is a lens.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Refraction {
+    /// Whatever the project's Glass setting says (Project Settings → Rendering).
+    /// The default, so a project's glass changes together.
+    #[default]
+    Project,
+    /// Read the shape from the surface itself, pixel by pixel: a flat surface
+    /// is a sheet and shows straight through, a curved one is a lens, and
+    /// [`thickness`](Material::thickness) says how much glass is behind the
+    /// curve, so a thin-walled beaker stays nearly clear while a solid ball
+    /// turns the room upside down. Works on any mix of panes and vessels in
+    /// one mesh.
+    Auto,
+    /// A solid that bends the view once and keeps it bent all the way to the
+    /// scene behind. What glass did before the setting existed.
+    Solid,
+    /// A sheet, always: what is behind shows straight through, shifted by no
+    /// more than `thickness`, whatever the surface's shape.
+    Thin,
+}
+
+impl Refraction {
+    /// The spelling used in scene files, Project Settings and Lua
+    /// (`setMaterial{ refraction = "auto" }`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Refraction::Project => "project",
+            Refraction::Auto => "auto",
+            Refraction::Solid => "solid",
+            Refraction::Thin => "thin",
+        }
+    }
+    /// Parse [`as_str`](Self::as_str). `None` for anything else, so a caller
+    /// can report the typo instead of quietly choosing for it.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "project" | "default" => Some(Refraction::Project),
+            "auto" | "automatic" => Some(Refraction::Auto),
+            "solid" | "lens" => Some(Refraction::Solid),
+            "thin" | "sheet" | "pane" => Some(Refraction::Thin),
+            _ => None,
+        }
+    }
+    /// This material's choice with the project's filled in. A project that
+    /// itself says `Project` (which means nothing at that level) reads as
+    /// `Auto`.
+    pub fn under(self, project: Refraction) -> Refraction {
+        match (self, project) {
+            (Refraction::Project, Refraction::Project) => Refraction::Auto,
+            (Refraction::Project, p) => p,
+            (m, _) => m,
+        }
+    }
+}
+
 /// The PS1/N64-era rendering artefacts, per material.
 ///
 /// These are **deliberate** — the era's hardware limits, offered as choices. All
@@ -377,7 +439,7 @@ impl Material {
             "transmission" => self.transmission = src.transmission,
             "ior" => self.ior = src.ior,
             "thickness" => self.thickness = src.thickness,
-            "thin" => self.thin = src.thin,
+            "refraction" => self.refraction = src.refraction,
             "sway" => self.sway = src.sway,
             "backlight" => self.backlight = src.backlight,
             "nearFadeStart" => self.near_fade[0] = src.near_fade[0],
@@ -547,15 +609,10 @@ pub struct Material {
     /// through a solid ball throws it right across. Set it to roughly the size
     /// of the object.
     pub thickness: f32,
-    /// A thin sheet rather than a solid: a windowpane, a partition, a visor,
-    /// the wall of a beaker. The view goes in through one face and out through
-    /// the face just behind it, which is parallel to it, so it comes out
-    /// heading the way it went in, shifted by no more than `thickness`, and
-    /// what is behind shows straight through. `false` (the default) is a solid
-    /// that bends the view once and keeps it bent, a lens: right for a ball or
-    /// a gem, and for a pane across a room it throws the far wall about by
-    /// metres.
-    pub thin: bool,
+    /// How it bends the view through it: from the surface's own shape, as a
+    /// sheet, or as a solid lens. By default whatever the project says; see
+    /// [`Refraction`].
+    pub refraction: Refraction,
     /// How far the game's wind bends this surface: the metres a point one
     /// metre above the node's origin moves in a 10 m/s wind, growing with the
     /// square of the height, so a stem stays rooted and its tip swings. `0`
@@ -674,7 +731,7 @@ impl Default for Material {
             transmission: 0.0,
             ior: 1.5,
             thickness: 0.5,
-            thin: false,
+            refraction: Refraction::Project,
             sway: 0.0,
             backlight: 0.0,
             near_fade: [0.0, 0.0],

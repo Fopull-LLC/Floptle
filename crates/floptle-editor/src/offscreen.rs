@@ -182,6 +182,21 @@ pub(crate) fn read_back_frame(gpu: &floptle_render::Gpu, tex: &wgpu::Texture) ->
 }
 
 impl Editor {
+    /// The project's say over how every surface draws, handed to the renderer:
+    /// its era artefacts and its Glass setting, which a material leaves to the
+    /// project unless it names its own.
+    ///
+    /// Its own function because a frame is not the only thing that draws:
+    /// `floptle shot` renders with no frame loop at all, and without this its
+    /// pictures showed glass as a solid in a project set to auto, and a retro
+    /// project with none of its artefacts.
+    pub(crate) fn apply_project_look(&mut self) {
+        if let Some(raster) = self.raster.as_mut() {
+            raster.set_retro_defaults(self.project.retro_artefacts());
+            raster.set_refraction_default(self.project.glass_refraction_resolved());
+        }
+    }
+
     /// The renderer's per-frame reset, before anything gathers the scene.
     ///
     /// Shared by the editor's frame and a shipped game's, because a build's
@@ -193,16 +208,16 @@ impl Editor {
     /// - One pose table per frame, not per pass: a frame gathers the scene
     ///   several times over and each pass reads pose indices an earlier gather
     ///   handed out.
-    /// - The project's era artefacts, before any gather, so every view has the
-    ///   same look.
+    /// - The project's look ([`apply_project_look`](Self::apply_project_look)),
+    ///   before any gather, so every view has the same one.
     /// - Skinned-buffer copies of destroyed entities go back.
     /// - In a browser, the frame's model upload budget starts again (see
     ///   `pump_model_queue`).
     pub(crate) fn begin_draw_frame(&mut self) {
         if let Some(raster) = self.raster.as_mut() {
             raster.begin_skin_frame();
-            raster.set_retro_defaults(self.project.retro_artefacts());
         }
+        self.apply_project_look();
         self.skin_variants.prune(&self.world);
         #[cfg(any(target_arch = "wasm32", test))]
         {

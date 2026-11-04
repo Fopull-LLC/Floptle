@@ -1124,6 +1124,34 @@ impl<'a> SettingsCtx<'a> {
                 },
             );
         });
+        row(
+            ui,
+            "Glass",
+            Some("how glass bends what is behind it, for every material left on \"project setting\". \
+                  auto reads each surface's shape: flat glass (windows, partitions, a tabletop) \
+                  shows straight through, curved glass is a lens as strong as its thickness \
+                  says, so beakers stay clear and a solid ball turns the room upside down. \
+                  thin makes all glass a sheet; solid bends once and stays bent, as glass did \
+                  before this setting. A material's own choice in the Inspector wins"),
+            |ui| {
+                use floptle_core::Refraction as R;
+                let mut g = project.glass_refraction_resolved();
+                egui::ComboBox::from_id_salt("project-glass")
+                    .width(fit_here(ui, 220.0))
+                    .selected_text(g.as_str())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut g, R::Auto, "auto")
+                            .on_hover_text("from each surface's shape: flat is clear, curved is a lens");
+                        ui.selectable_value(&mut g, R::Thin, "thin").on_hover_text("all glass is a sheet");
+                        ui.selectable_value(&mut g, R::Solid, "solid")
+                            .on_hover_text("bends once and stays bent: glass before this setting");
+                    });
+                if g != project.glass_refraction_resolved() {
+                    project.glass_refraction = Some(floptle_scene::RefractionDoc::from_refraction(g));
+                    out.save_project = true;
+                }
+            },
+        );
         row(ui, "Retro", Some("render at a low resolution and upscale"), |ui| {
             out.save_project |= check(ui, &mut project.retro, "pixelization").changed();
         });

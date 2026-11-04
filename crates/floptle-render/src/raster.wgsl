@@ -204,8 +204,11 @@ const EXT_DISSOLVE: u32 = 65536u;
 // prepass and the sun stand on exactly those (raster.rs `EXT_SHADED`).
 const EXT_SHADED: u32 = 131072u;
 // A thin sheet: the view through it comes out heading the way it went in
-// (raster.rs `EXT_THIN`, `Material::thin`).
+// (raster.rs `EXT_THIN`, `Refraction::Thin`).
 const EXT_THIN: u32 = 262144u;
+// Glass whose shape is read from its own surface (raster.rs `EXT_SHAPED`,
+// `Refraction::Auto`); see `refracted`.
+const EXT_SHAPED: u32 = 524288u;
 
 fn ext_cutoff(e: Ext) -> f32 {
     let q = (e.flags >> EXT_CUTOFF_SHIFT) & 255u;
@@ -724,7 +727,26 @@ fn flsl_frag_scene_depth(uv: vec2<f32>) -> f32 {
 // At total internal reflection `refract` returns zero, and so does this: those
 // rays have nothing behind the surface to show, and the reflection term is
 // already what they return.
-fn refracted(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, rough: f32, ior: f32, thick: f32, thin: bool) -> vec3<f32> {
+//
+// **How it leaves.** `mode` 0 is a solid that bends the view once and follows
+// it, bent, all the way to the scene (glass before `Refraction` existed). The
+// other two bend it a second time on the way out of a back face, and differ
+// only in where that face is taken to be:
+//
+// - 1, a sheet: parallel to the front. Bent in and bent back by as much, the
+//   view leaves heading the way it came, moved sideways by what it crossed of
+//   the glass. Bent once and followed to the far wall instead, a pane across a
+//   room threw the wall about by metres (0633, Solar's lab glazing).
+// - 2, read from the surface: `curv` is how fast the front's normal turns per
+//   metre across the screen, and `thick` how much glass is behind it. A flat
+//   front is a sheet. A front curved so that `thick` reaches round to the far
+//   side (a ball whose thickness is its diameter) has the back face a sphere
+//   would: the front normal mirrored across the plane square to the bent ray,
+//   the far end of a chord `thick · cos θ` long, which is exactly a ball's.
+//   Between the two it blends, so a thin-walled beaker, curved but with little
+//   glass behind the curve, stays nearly clear. Read per pixel, so panes and
+//   vessels in one mesh each come out right, with no pass and no texture.
+fn refracted(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, rough: f32, ior: f32, thick: f32, mode: u32, curv: f32) -> vec3<f32> {
     let dims = textureDimensions(scene_tex, 0);
     if (dims.x <= 1u || dims.y <= 1u) {
         return vec3<f32>(0.0); // no capture of what is behind: nothing to show
@@ -757,18 +779,21 @@ fn refracted(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, rough: f32, ior: f32, thi
             }
         }
     }
-    // **A thin sheet is two parallel faces, not a lens.** The view bends going
-    // in and bends back by as much coming out of the face just behind, so it
-    // leaves heading the way it came, moved sideways by what it crossed of the
-    // sheet. Bent once and followed to the far wall, a pane across a room
-    // threw the wall about by metres, swinging with the angle it was seen at
-    // (0633, Solar's lab glazing).
     var exit = p + t * travel;
     var out_dir = t;
-    if (thin) {
-        let inside = max(thick, 0.0) / max(dot(t, -n), 0.2);
-        out_dir = -v;
-        exit = p + t * inside + out_dir * max(travel - max(thick, 0.0), 0.0);
+    if (mode != 0u) {
+        let th = max(thick, 0.0);
+        let c = max(dot(t, -n), 0.2);
+        // 0 a sheet, 1 a ball: how far round the curve the glass behind reaches.
+        let shape = select(0.0, clamp(curv * th * 0.5, 0.0, 1.0), mode == 2u);
+        let back = normalize(mix(-n, n - 2.0 * dot(n, t) * t, shape));
+        let inside = mix(th / c, th * c, shape);
+        var leave = refract(t, -back, max(ior, 1.0));
+        if (dot(leave, leave) < 1e-8) {
+            leave = t; // caught inside by total internal reflection: keep going
+        }
+        out_dir = leave;
+        exit = p + t * inside + leave * max(travel - th, 0.0);
     }
     let clip = G.view_proj * vec4<f32>(exit, 1.0);
     if (clip.w <= 1e-4) {
@@ -1701,6 +1726,14 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let ext = ext_at(u32(in.imeta.y));
     let muv = map_uv(in);
     let geo_n = facing_normal(normalize(in.normal), front);
+    // How fast the surface turns, per metre, for glass that reads its own
+    // shape (`refracted`): the geometric normal's change across a pixel over
+    // the position's. Taken from the normal before any normal map, which
+    // ripples a surface's light and not the shape of the glass, and here,
+    // where derivatives are allowed. Flat is 0, a ball of radius r is 1/r.
+    let glass_curv = (length(dpdx(geo_n)) + length(dpdy(geo_n)))
+        / max(length(dpdx(in.view_pos)) + length(dpdy(in.view_pos)), 1e-6);
+    let glass_mode = select(select(0u, 2u, ext_has(ext, EXT_SHAPED)), 1u, ext_has(ext, EXT_THIN));
     // With no normal map bound this samples the flat 1×1 default and returns
     // `geo_n` unchanged, so an unmapped surface is bit-identical to before.
     // A vertex-lit surface skips it: there is no per-pixel lighting to perturb.
@@ -1894,7 +1927,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
         if (trans > 0.0) {
             let fr = f_schlick(f0, max(dot(n, v), 1e-4));
             let kt = (1.0 - max(max(fr.r, fr.g), fr.b)) * trans;
-            lit += refracted(in.view_pos, n, v, rough, ext.ior, ext.thick, ext_has(ext, EXT_THIN)) * albedo * kt;
+            lit += refracted(in.view_pos, n, v, rough, ext.ior, ext.thick, glass_mode, glass_curv) * albedo * kt;
         }
     } else {
         // --- Blinn-Phong, exactly as it was. ------------------------------

@@ -639,16 +639,41 @@ behave as the lens it is and turn the background upside down. Glass being absent
 from the prepass is what makes that reading the scene behind rather than the
 glass itself.
 
-**A pane is not a lens (`Material::thin`, v0.117.1).** That rule is right for a
-solid and wrong for a sheet. A windowpane is entered and left through two
-parallel faces, so the view bends going in, bends back by as much coming out,
-and leaves heading the way it came, shifted sideways by what it crossed of the
-glass. Bent once and followed to the far wall, a pane across a room threw the
-wall about by metres, swinging with the angle it was seen at (0633, Solar's
-lab glazing). With `thin` set, `refracted` crosses the sheet along the bent
-ray and then goes on along the view ray. Off by default, so a project's glass
-keeps the look it was built with; it belongs on windows, partitions, visors and
-thin-walled vessels.
+**A pane is not a lens (`Material::refraction`, v0.117.1).** That rule is right
+for a solid and wrong for a sheet. Light bends going into glass and again
+coming out, and which way it leaves depends on the far side. A windowpane is
+entered and left through two parallel faces, so the view bends back by as much
+as it bent and leaves heading the way it came, shifted sideways by what it
+crossed of the glass. Bent once and followed to the far wall, a pane across a
+room threw the wall about by metres, swinging with the angle it was seen at
+(0633, Solar's lab glazing).
+
+`refracted` has three modes, from `Refraction`:
+
+- **`Solid`** bends once and keeps it bent: glass before the setting.
+- **`Thin`** takes the back face to be parallel to the front: the view crosses
+  the sheet along the bent ray and leaves along the view ray.
+- **`Auto`** reads the back face from the surface itself, per pixel, with no
+  extra pass and no texture (the surface shader already binds 16 sampled
+  textures, a browser's whole budget). `glass_curv` is how fast the geometric
+  normal turns per metre across the screen (its screen derivatives over the
+  position's), taken before the normal map, which ripples light and not the
+  glass. With `thickness` it says how far round the curve the glass behind
+  reaches: `shape = clamp(curv · thickness / 2)`. At 0 the back face is the
+  sheet's (−n); at 1 it is a ball's, the front normal mirrored across the plane
+  square to the bent ray, at the far end of a chord `thickness · cos θ` long,
+  which is exactly a sphere's. A beaker is curved but has little glass behind
+  the curve, so it stays nearly clear; a ball whose thickness is its diameter
+  is a full lens. Panes and vessels in one mesh each come out right.
+
+A material's `Project` (the default) takes the project's Glass setting
+(`ProjectConfigDoc::glass_refraction`): a new project starts on `Auto`, and a
+`project.ron` without the field resolves to `Solid`, the look it was built
+with. The raster folds the project's choice in where it interns a material's
+extras (`set_refraction_default`), alongside the retro defaults, and
+`Editor::apply_project_look` hands both over from every frame and from
+`floptle shot`, which has no frame loop. Scenes that said `thin: true` (dev
+build .1428) still load as `Thin`.
 
 #### Glass behind glass (v0.53.0)
 

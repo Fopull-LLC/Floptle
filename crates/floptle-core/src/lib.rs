@@ -45,7 +45,7 @@ pub mod water;
 
 pub use ecs::{Change, ChangeCursor, ChangeKind, Entity, World};
 pub use layers::Layers;
-pub use material::{BlendMode, Material, MaterialPatch, ObjectMaterials, Retro, Shading, Tiling, Tint};
+pub use material::{BlendMode, Material, MaterialPatch, ObjectMaterials, Refraction, Retro, Shading, Tiling, Tint};
 pub use matter::{
     CameraDraws,
     TerrainCollision,

@@ -2275,9 +2275,9 @@ const ANIMATABLE_PROPS: &[(&str, &[PropField])] = &[
             ("transmission", PropKind::Float, "Surface"),
             ("ior", PropKind::Float, "Surface"),
             ("thickness", PropKind::Float, "Surface"),
+            ("refraction", PropKind::Text, "Surface"),
             ("unlit", PropKind::Float, "Flags"),
             ("fog", PropKind::Float, "Flags"),
-            ("thin", PropKind::Float, "Flags"),
             ("shading", PropKind::Text, "Flags"),
             ("jitter", PropKind::Float, "Flags"),
         ],
@@ -5917,11 +5917,13 @@ mod tests {
                                 continue;
                             }
                             let before = strs[*comp][*field].clone();
-                            // `shading` takes names, not paths — probe it with
-                            // one it accepts, or a refused value reads as an
-                            // unwritable field.
+                            // `shading` and `refraction` take names, not paths —
+                            // probe each with one it accepts, or a refused value
+                            // reads as an unwritable field.
                             let probe = if *field == "shading" {
                                 if before == "pbr" { "classic" } else { "pbr" }
+                            } else if *field == "refraction" {
+                                if before == "thin" { "auto" } else { "thin" }
                             } else if before == "probe/x.png" {
                                 "probe/y.png"
                             } else {

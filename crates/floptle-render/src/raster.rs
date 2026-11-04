@@ -528,8 +528,10 @@ pub struct SurfaceExtras {
     /// How far the bent ray travels inside the material — what turns an index of
     /// refraction into an actual displacement on screen.
     pub thickness: f32,
-    /// A thin sheet, seen straight through ([`floptle_core::Material::thin`]).
-    pub thin: bool,
+    /// How glass bends the view through it
+    /// ([`floptle_core::Material::refraction`]); `Project` is filled in from
+    /// [`Raster::set_refraction_default`] when the extras are interned.
+    pub refraction: floptle_core::Refraction,
     /// How far the wind bends it ([`floptle_core::Material::sway`]), applied
     /// in the vertex stage against [`Globals::time`]`[1..4]`, the wind.
     pub sway: f32,
@@ -567,7 +569,7 @@ impl Default for SurfaceExtras {
             transmission: 0.0,
             ior: 1.5,
             thickness: 0.5,
-            thin: false,
+            refraction: floptle_core::Refraction::Project,
             sway: 0.0,
             backlight: 0.0,
             alpha_cutoff: 0.5,
@@ -625,8 +627,12 @@ pub(crate) const EXT_DISSOLVE: u32 = 1 << 16;
 /// draws.
 pub(crate) const EXT_SHADED: u32 = 1 << 17;
 /// A thin sheet: the view through it comes out heading the way it went in
-/// ([`floptle_core::Material::thin`]).
+/// ([`floptle_core::Refraction::Thin`]).
 pub(crate) const EXT_THIN: u32 = 1 << 18;
+/// Glass whose shape is read from its surface: bent going in and again coming
+/// out of a back face inferred from the front's curvature and the thickness
+/// ([`floptle_core::Refraction::Auto`]).
+pub(crate) const EXT_SHAPED: u32 = 1 << 19;
 
 impl SurfaceExtras {
     /// Read a material's extras. `Classic` still carries the normal and
@@ -644,7 +650,7 @@ impl SurfaceExtras {
             transmission: m.transmission,
             ior: m.ior,
             thickness: m.thickness,
-            thin: m.thin,
+            refraction: m.refraction,
             sway: m.sway,
             backlight: m.backlight,
             // Opaque cuts nothing, which is a cutoff of zero. A cutout's
@@ -702,8 +708,12 @@ impl SurfaceExtras {
         if self.shaded {
             f |= EXT_SHADED;
         }
-        if self.thin {
-            f |= EXT_THIN;
+        // `Project` is resolved before interning (`push_surface_extras`); one
+        // that reaches here unresolved is a solid, glass's old behaviour.
+        match self.refraction {
+            floptle_core::Refraction::Thin => f |= EXT_THIN,
+            floptle_core::Refraction::Auto => f |= EXT_SHAPED,
+            floptle_core::Refraction::Solid | floptle_core::Refraction::Project => {}
         }
         if self.alpha_cutoff != 0.5 {
             let q = (self.alpha_cutoff.clamp(0.0, 1.0) * 254.0).round() as u32 + 1;
@@ -968,6 +978,8 @@ pub struct Raster {
     /// The project's retro artefacts, folded into every pushed material.
     /// See [`Raster::set_retro_defaults`].
     retro_defaults: floptle_core::Retro,
+    /// See [`Raster::set_refraction_default`].
+    refraction_default: floptle_core::Refraction,
     /// Combined surface sets built by [`Raster::material_set`], keyed by the five
     /// [`TexId`]s they bind (`u32::MAX` = "use the neutral default"). Cached
     /// because a material asks for its set every frame and a fresh bind group
@@ -1932,6 +1944,7 @@ impl Raster {
             mat_ext_index: HashMap::new(),
             mat_ext_dirty: false,
             retro_defaults: floptle_core::Retro::default(),
+            refraction_default: floptle_core::Refraction::Solid,
             mat_sets: HashMap::new(),
             instance_buf,
             instance_cap,
@@ -2583,6 +2596,26 @@ impl Raster {
             return;
         }
         self.retro_defaults = retro;
+        self.reset_extras();
+    }
+
+    /// The project's Glass setting: what a material whose refraction is
+    /// [`Project`](floptle_core::Refraction::Project) gets. `Solid` until a
+    /// caller says otherwise, which is what glass did before the setting.
+    /// Changing it resets the store, as [`set_retro_defaults`](Self::set_retro_defaults) does.
+    pub fn set_refraction_default(&mut self, r: floptle_core::Refraction) {
+        let r = floptle_core::Refraction::Project.under(r);
+        if self.refraction_default == r {
+            return;
+        }
+        self.refraction_default = r;
+        self.reset_extras();
+    }
+
+    /// Empty the extras store back to its neutral entry: every interned key was
+    /// computed under the project defaults that just changed, and the gather
+    /// refills it this frame.
+    fn reset_extras(&mut self) {
         self.mat_ext_cpu.clear();
         self.mat_ext_cpu.extend_from_slice(&self.neutral_extras().lanes());
         self.mat_ext_index.clear();
@@ -2594,6 +2627,7 @@ impl Raster {
     fn neutral_extras(&self) -> SurfaceExtras {
         let mut e = SurfaceExtras::default();
         e.retro = e.retro.under(self.retro_defaults);
+        e.refraction = e.refraction.under(self.refraction_default);
         e
     }
 
@@ -2621,6 +2655,7 @@ impl Raster {
 
     pub fn push_surface_extras(&mut self, mut e: SurfaceExtras) -> u32 {
         e.retro = e.retro.under(self.retro_defaults);
+        e.refraction = e.refraction.under(self.refraction_default);
         if e == self.neutral_extras() {
             return 0;
         }

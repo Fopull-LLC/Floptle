@@ -594,7 +594,7 @@ pub fn is_bool_field(comp: &str, field: &str) -> bool {
             | ("PointLight", "twoSided" | "shadows")
             // A material's two flags. `if mat.unlit then` was always taken:
             // the field came back as the number 0, and 0 is truthy in Lua.
-            | ("Material", "unlit" | "fog" | "thin")
+            | ("Material", "unlit" | "fog")
             // A flip is a flag, and 0 is truthy in Lua: without this arm
             // `if node:getcomponent("Sprite").flipX then` is a branch that is
             // always taken, whichever way the sprite is facing.
@@ -682,13 +682,15 @@ pub(crate) const MATERIAL_NUM_FIELDS: &[&str] = &[
     "nearFadeEnd", "jitter",
     "alpha", "opacity", "ambient", "r", "g", "b", "emissiveR", "emissiveG", "emissiveB",
     "emissiveStrength", "specularR", "specularG", "specularB", "specularStrength",
-    "shininess", "rimR", "rimG", "rimB", "rimStrength", "unlit", "fog", "thin",
+    "shininess", "rimR", "rimG", "rimB", "rimStrength", "unlit", "fog",
 ];
 
 /// …and every string-valued one: the texture and the surface maps, plus the
-/// shading model's name.
-pub(crate) const MATERIAL_STR_FIELDS: &[&str] =
-    &["texture", "normalMap", "roughnessMap", "metallicMap", "occlusionMap", "emissiveMap", "shading", "shader"];
+/// shading model's name and how glass refracts.
+pub(crate) const MATERIAL_STR_FIELDS: &[&str] = &[
+    "texture", "normalMap", "roughnessMap", "metallicMap", "occlusionMap", "emissiveMap", "shading", "shader",
+    "refraction",
+];
 
 /// The Material a component name addresses: the node's own for `Material`, or
 /// one sub-object's override for `Material:<key>` — created on demand, because
@@ -762,7 +764,6 @@ fn material_fields(m: &floptle_core::Material, cell: u32) -> HashMap<String, f64
         ("rimB".to_string(), m.rim[2] as f64),
         ("rimStrength".to_string(), m.rim_strength as f64),
         ("unlit".to_string(), f64::from(m.unlit)),
-        ("thin".to_string(), f64::from(m.thin)),
         ("fog".to_string(), f64::from(m.fog)),
         // The surface.
         ("normalStrength".to_string(), m.normal_strength as f64),
@@ -1956,7 +1957,6 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     // the timeline — a material that goes fullbright for three
                     // frames is a hit flash.
                     "unlit" => m.unlit = val != 0.0,
-                    "thin" => m.thin = val != 0.0,
                     "fog" => m.fog = val != 0.0,
                     _ => {}
                 }
@@ -2485,8 +2485,6 @@ pub(crate) fn apply_rich_sets(
                             m.alpha_cutoff = num(v).map(|n| (n as f32).clamp(0.0, 1.0)).unwrap_or(m.alpha_cutoff)
                         }
                         "doubleSided" => m.double_sided = num(v).map(|n| n != 0.0).unwrap_or(m.double_sided),
-                        // A thin sheet (a pane) rather than a solid (a lens).
-                        "thin" => m.thin = num(v).map(|n| n != 0.0).unwrap_or(m.thin),
                         // "opaque", "cutout" or "blend": how alpha is drawn.
                         "blend" => {
                             if let CompVal::Str(b) = v
@@ -2587,6 +2585,15 @@ pub(crate) fn apply_rich_sets(
                                 && let Some(sh) = floptle_core::Shading::parse(t)
                             {
                                 m.shading = sh;
+                            }
+                        }
+                        // "project", "auto", "solid" or "thin": how glass bends
+                        // the view. An unknown name changes nothing, as above.
+                        "refraction" => {
+                            if let CompVal::Str(t) = v
+                                && let Some(r) = floptle_core::Refraction::parse(t)
+                            {
+                                m.refraction = r;
                             }
                         }
                         // --- the deliberate PS1/N64 artefacts.
@@ -3306,7 +3313,7 @@ pub(crate) const MATERIAL_KEYS: &[&str] = &[
     "rimStrength", "unlit", "fog", "ambient", "alpha", "texture", "cell", "sheetCols", "sheetRows", "slice",
     "normalMap", "normalStrength", "roughnessMap", "roughness", "metallicMap", "metallic",
     "occlusionMap", "occlusionStrength", "emissiveMap", "reflectivity", "transmission", "ior", "thickness",
-    "thin", "sway", "backlight", "nearFadeStart", "nearFadeEnd", "shading", "jitter", "affineUv", "vertexLit",
+    "refraction", "sway", "backlight", "nearFadeStart", "nearFadeEnd", "shading", "jitter", "affineUv", "vertexLit",
     "ditherAlpha", "retroExempt", "alphaCutoff", "doubleSided", "blend",
 ];
 
@@ -4016,6 +4023,11 @@ pub fn apply_component_field_str(world: &mut World, ent: Entity, comp: &str, fie
                             m.shading = sh;
                         }
                     }
+                    "refraction" => {
+                        if let Some(r) = floptle_core::Refraction::parse(val) {
+                            m.refraction = r;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -4084,6 +4096,7 @@ pub fn mirror_component_strings(
             ("emissiveMap".to_string(), p(&m.emissive_map)),
             ("shading".to_string(), m.shading.as_str().to_string()),
             ("shader".to_string(), p(&m.shader)),
+            ("refraction".to_string(), m.refraction.as_str().to_string()),
         ])
     };
     if let Some(m) = world.get::<floptle_core::Material>(e) {
@@ -5445,7 +5458,11 @@ fn install_component_metatable(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
                     return Ok(wrap(*v));
                 }
                 if MATERIAL_STR_FIELDS.contains(&key.as_str()) {
-                    let s = if key == "shading" { d.shading.as_str() } else { "" };
+                    let s = match key.as_str() {
+                        "shading" => d.shading.as_str(),
+                        "refraction" => d.refraction.as_str(),
+                        _ => "",
+                    };
                     return Ok(Value::String(lua.create_string(s)?));
                 }
                 if matches!(key.as_str(), "color" | "emissive" | "specular" | "rim") {

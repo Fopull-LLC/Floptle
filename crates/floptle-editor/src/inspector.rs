@@ -1252,14 +1252,39 @@ fn mat_shading_ui(ui: &mut egui::Ui, ctx: &mut MatCtx, m: &mut Material, r: &mut
                     )
                     .changed();
                 ui.end_row();
-                ui.label("  thin").on_hover_text(
-                    "A sheet rather than a solid: a windowpane, a partition, a \
-                     visor, the wall of a beaker. What is behind it shows straight \
-                     through, shifted by no more than its thickness.\n\nOff, it is \
-                     a solid that bends the view like a lens: right for a ball or a \
-                     gem, while a pane across a room throws the far wall about.",
+                ui.label("  refraction").on_hover_text(
+                    "How the glass bends what is behind it.\n\n\
+                     auto: read from the surface itself, pixel by pixel. Flat glass is a \
+                     sheet and shows straight through; curved glass is a lens, as strong \
+                     as `thickness` says there is glass behind the curve, so a beaker \
+                     stays clear and a solid ball turns the room upside down. Panes and \
+                     vessels in one mesh each come out right.\n\
+                     thin: always a sheet: straight through, shifted by its thickness.\n\
+                     solid: bends the view once and keeps it bent, as glass did before \
+                     this setting existed.\n\
+                     project: whatever Project Settings → Rendering → Glass says.",
                 );
-                r.changed |= ui.add_enabled(m.transmission > 0.0, egui::Checkbox::new(&mut m.thin, "")).changed();
+                let before = m.refraction;
+                ui.add_enabled_ui(m.transmission > 0.0, |ui| {
+                    egui::ComboBox::from_id_salt("mat_refraction")
+                        .width(crate::responsive::fit_here(ui, 160.0))
+                        .selected_text(match m.refraction {
+                            floptle_core::Refraction::Project => "project setting",
+                            r => r.as_str(),
+                        })
+                        .show_ui(ui, |ui| {
+                            use floptle_core::Refraction as R;
+                            ui.selectable_value(&mut m.refraction, R::Project, "project setting")
+                                .on_hover_text("Project Settings → Rendering → Glass decides");
+                            ui.selectable_value(&mut m.refraction, R::Auto, "auto")
+                                .on_hover_text("from the surface's shape: flat is clear, curved is a lens");
+                            ui.selectable_value(&mut m.refraction, R::Thin, "thin")
+                                .on_hover_text("a sheet: windows, partitions, visors, thin-walled vessels");
+                            ui.selectable_value(&mut m.refraction, R::Solid, "solid")
+                                .on_hover_text("bends once and stays bent: glass before this setting");
+                        });
+                });
+                r.changed |= m.refraction != before;
                 ui.end_row();
                 if m.transmission > 0.0 {
                     ui.label("");

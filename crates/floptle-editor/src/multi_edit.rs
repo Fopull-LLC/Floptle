@@ -128,7 +128,7 @@ field_diff!(Material {
     transmission,
     ior,
     thickness,
-    thin,
+    refraction,
     sway,
     backlight,
     near_fade,

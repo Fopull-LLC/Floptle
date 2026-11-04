@@ -176,7 +176,7 @@ material's three dozen animatable fields do not bury its texture and its opacity
 
 | Component | What you get |
 |---|---|
-| **Material** | `texture`, `opacity`, `ambient`; **Colour** — base `r/g/b`, emissive, specular, shininess, rim; **Sheet** — `cell`, `sheetCols`, `sheetRows`; **Surface** — the maps and their strengths, roughness, metallic, reflectivity, transmission, ior, thickness; **Flags** — `unlit`, `fog`, `thin`, `shading`, `jitter` |
+| **Material** | `texture`, `opacity`, `ambient`; **Colour** — base `r/g/b`, emissive, specular, shininess, rim; **Sheet** — `cell`, `sheetCols`, `sheetRows`; **Surface** — the maps and their strengths, roughness, metallic, reflectivity, transmission, ior, thickness, `refraction`; **Flags** — `unlit`, `fog`, `shading`, `jitter` |
 | **UiElement** | `image`, `opacity`, `visible`, `text`; **Layout**, **Colour**, **Text**, **Sheet** |
 | **PointLight** | `intensity`, `range`, colour |
 | **UiSlider** | `value`, `min`, `max` |
