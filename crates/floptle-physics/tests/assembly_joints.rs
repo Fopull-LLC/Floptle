@@ -1623,9 +1623,13 @@ fn ripple_lift_offs(wheels: &[BikeWheel], speed: f32) -> usize {
 /// it: on boards within a centimetre of level, Solar's bike lifted a tyre
 /// for a tick at a time at every speed (39, 63 and 72 ticks at 8, 12 and 15
 /// m/s). A held wheel follows the ground as far as its spring would carry it
-/// in a step. What is left past 8 m/s is the tyre thrown off a crest where
-/// two boards meet, a few millimetres for a tick or three, as a rigid tyre
-/// is, and the same bike on frequency and ratio does much the same.
+/// in a step. And its carcass gives a centimetre, so the ground dropping
+/// away a few millimetres under it over a crest leaves it on the ground: a
+/// rigid tyre cleared every kink where two boards meet for a tick, and the
+/// count climbed with speed (31 ticks of 140 at 15 m/s, 38 of 90 at 20, 33
+/// of 48 at 28), its grip gone each time; Solar's bike fell at 24 m/s. What
+/// is left at 20 m/s and more is a tyre off a crest steeper than it can
+/// follow, for a tick at a time.
 #[test]
 fn a_held_wheel_follows_ripple() {
     let aft = |deg: f32| [-deg.to_radians().sin(), deg.to_radians().cos(), 0.0];
@@ -1633,7 +1637,7 @@ fn a_held_wheel_follows_ripple() {
         BikeWheel { dx: 1.098, axis: aft(24.0), rate: 31.7, bump: 2.6, rebound: 2.6, ..Default::default() },
         BikeWheel { dx: -0.471, axis: aft(15.0), rate: 70.3, bump: 4.7, rebound: 4.7, ..Default::default() },
     ];
-    for (speed, most) in [(8.0f32, 3), (12.0, 25), (15.0, 45)] {
+    for (speed, most) in [(8.0f32, 1), (12.0, 3), (15.0, 6), (20.0, 12), (24.0, 22), (28.0, 18)] {
         let off = ripple_lift_offs(&real, speed);
         assert!(off <= most, "at {speed} m/s a held tyre was off the ground {off} ticks (at most {most})");
     }

@@ -22,6 +22,10 @@ pub const SLEEP_LINEAR_SPEED: f32 = 0.05;
 /// that a room of settling debris goes quiet almost as soon as it looks like
 /// it has.
 pub const SLEEP_SETTLE_TIME: f32 = 0.5;
+/// How far a held tyre's carcass gives, as a share of its radius: the
+/// ground falling away under it by up to this much leaves it on the ground
+/// (a road tyre gives about a centimetre under its load).
+const TYRE_FLEX: f32 = 0.03;
 /// How often `PhysicsWorld::step` re-validates every sleeping body's cached
 /// support against the current colliders — the safety net for geometry that
 /// changes in place (terrain sculpting, a map edit) rather than through
@@ -3587,6 +3591,18 @@ impl PhysicsWorld {
         if hold.length_squared() > 1e-10 && !self.bodies[bi].grounded {
             self.march_flat(bi, hold);
             self.rigid_contacts(bi, row);
+            // A tyre pressed into the ground gives a little, so the ground
+            // dropping away a few millimetres under it over a crest leaves
+            // its carcass still on it: a rigid one cleared every kink in the
+            // ground for a tick, its grip gone and a driven wheel spinning up
+            // in the air, and at 24 m/s a bike fell off a flattened strip.
+            if !self.bodies[bi].grounded {
+                let flex = self.bodies[bi].radius * TYRE_FLEX;
+                if let Some(gap) = self.gap_within(bi, flex, row) {
+                    self.march_flat(bi, hold.normalize() * (gap + 1e-4));
+                    self.rigid_contacts(bi, row);
+                }
+            }
         }
         let b = &mut self.bodies[bi];
         for i in 0..3 {
@@ -3683,6 +3699,29 @@ impl PhysicsWorld {
         }
         let pts: Vec<Vec3> = touching.iter().map(|t| t.1).collect();
         crate::hull::over_support(&pts, b.com(), g, 0.002)
+    }
+
+    /// How far body `bi` is from the nearest solid static collider it may
+    /// touch, if that is within `within` of it.
+    fn gap_within(&mut self, bi: usize, within: f32, row: u32) -> Option<f32> {
+        let (centres, n_c, radius) = self.bodies[bi].sample_centers();
+        let pos = self.bodies[bi].pos;
+        let reach = centres[..n_c].iter().map(|c| c.distance(pos)).fold(0.0f32, f32::max);
+        let mut cand = std::mem::take(&mut self.cand);
+        cand.clear();
+        self.collider_index.sphere(pos, reach + radius + within, &mut cand);
+        let mut gap = f32::MAX;
+        for &ci in &cand {
+            let c = &self.colliders[ci as usize];
+            if (row >> c.layer) & 1 == 0 || c.sensor || c.one_way.is_some() {
+                continue;
+            }
+            for &p in &centres[..n_c] {
+                gap = gap.min(c.distance_within(p, radius + within) - radius);
+            }
+        }
+        self.cand = cand;
+        (gap > 0.0 && gap <= within).then_some(gap)
     }
 
     /// Two passes of contact against the static world and the kinematic
