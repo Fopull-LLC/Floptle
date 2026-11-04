@@ -70,6 +70,9 @@ pub struct JointRt {
     /// length. And how fast that is changing, a second.
     pub position: f32,
     pub speed: f32,
+    /// A wheel's suspension travel (`position`) when the craft it is on
+    /// began its count toward sleep, or NaN when it is not counting.
+    pub settle_travel: f32,
     /// Drive the motor to `goal` (a hinge's turn in radians, a slider's
     /// travel) instead of at a speed: a servo or a piston. `motor_speed` is
     /// how fast it may go getting there.

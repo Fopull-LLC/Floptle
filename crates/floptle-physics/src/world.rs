@@ -22,6 +22,9 @@ pub const SLEEP_LINEAR_SPEED: f32 = 0.05;
 /// that a room of settling debris goes quiet almost as soon as it looks like
 /// it has.
 pub const SLEEP_SETTLE_TIME: f32 = 0.5;
+/// How far a wheel's suspension may travel over a craft's count toward sleep,
+/// metres: a swing larger than this leaves the craft awake to finish it.
+const SUSPENSION_REACH: f32 = 0.002;
 /// How far a held tyre's carcass gives, as a share of its radius: the
 /// ground falling away under it by up to this much leaves it on the ground
 /// (a road tyre gives about a centimetre under its load).
@@ -2710,6 +2713,20 @@ impl PhysicsWorld {
         }
         // Held up by a joint to the world.
         supported |= self.joints.iter().any(|j| !j.broken && j.b.is_none() && in_this(j.a));
+        // A suspension still swinging is not at rest, though the frame on it
+        // stays within a sleeper's reach: a braked bike fell asleep with its
+        // frame a centimetre into its last bounce, frozen there, its tyres
+        // reading 90% of its weight between them. Judged like the members,
+        // by the whole count: each wheel's travel within a couple of
+        // millimetres of where it was when the count began, so a hair of
+        // jitter a step does not keep a parked rover awake.
+        let mut swinging = false;
+        for jt in self.joints.iter_mut().filter(|jt| !jt.broken && jt.kind == floptle_core::joint::JointKind::Wheel && in_this(jt.a)) {
+            if t == 0.0 || jt.settle_travel.is_nan() {
+                jt.settle_travel = jt.position;
+            }
+            swinging |= (jt.position - jt.settle_travel).abs() > SUSPENSION_REACH;
+        }
         // Still by the whole count, not by each step: every member within
         // what a sleeper may move over the count of where it was when the
         // count began. A rover on light tyres and stiff springs rocked a
@@ -2743,8 +2760,11 @@ impl PhysicsWorld {
             });
             all_still &= pos.distance(from) < ball && angle < ball;
         }
-        if !(all_still && supported) {
+        if !(all_still && supported && !swinging) {
             self.mark_awake(members, |was| was.or_own(supported, t > 0.0));
+            for jt in self.joints.iter_mut().filter(|jt| in_this(jt.a)) {
+                jt.settle_travel = f32::NAN;
+            }
             // Its count starts again, from where it is now.
             for &(k, _) in &awake {
                 self.settle_from[k].0 = Vec3::NAN;

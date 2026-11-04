@@ -1783,4 +1783,35 @@ fn a_wheel_says_what_load_its_tyre_carries() {
         let (_, _, ratio) = ripple_lift_offs(&wheels, speed);
         assert!((ratio - 1.0).abs() < 0.05, "over ripple at {speed} m/s the tyres' loads average {ratio:.3} of the bike's weight");
     }
+    // Braked, the bike falls asleep while its suspension is still settling,
+    // and asleep it says what it carried on average, not on the step it fell
+    // asleep on (90% of its weight, Solar's parked bikes).
+    let mut ecs = World::default();
+    let floor = ecs.spawn();
+    ecs.insert(floor, Transform::from_translation(DVec3::new(0.0, -1.0, 0.0)));
+    ecs.insert(floor, RigidBody { kind: BodyKind::Box, mode: BodyMode::Static, half_extents: [50.0, 1.0, 50.0], friction: 0.9, ..Default::default() });
+    segment(&mut ecs, "Chassis", DVec3::new(0.0, r + cg, 0.0), [0.6, 0.1, 0.3], mass);
+    let mut braked = Vec::new();
+    for w in &wheels {
+        let e = ecs.spawn();
+        ecs.insert(e, Transform::from_translation(DVec3::new(w.dx, r, 0.0)));
+        ecs.insert(e, RigidBody { radius, mass: tyre, friction: 0.9, rotates: true, ..Default::default() });
+        ecs.insert(
+            e,
+            Joint {
+                kind: JointKind::Wheel, other: "Chassis".into(), axis: w.axis, spring_rate: w.rate, damper_bump: w.bump, damper_rebound: w.rebound,
+                motor: true, motor_speed: 0.0, max_force: 5.0, ..Default::default()
+            },
+        );
+        braked.push(e);
+    }
+    let mut sim = Sim::build_layered(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -g, 0.0)), DVec3::ZERO, floptle_core::Layers::default());
+    sim.world.single_wheel_friction = true;
+    for _ in 0..(4.0 / DT) as usize {
+        sim.step_tick(DT, None);
+    }
+    let states: Vec<_> = braked.iter().map(|e| sim.body_states().find(|b| b.entity == *e).unwrap()).collect();
+    assert!(states.iter().all(|b| b.asleep), "the fixture: the braked bike did not fall asleep");
+    let sum: f32 = states.iter().map(|b| b.contact_force).sum();
+    assert!((sum - weight).abs() < weight * 0.03, "a braked bike asleep says its tyres carry {sum:.3} between them, its weight is {weight:.3}");
 }
