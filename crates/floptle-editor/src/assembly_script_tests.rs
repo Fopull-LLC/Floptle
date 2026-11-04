@@ -2124,6 +2124,40 @@ fn a_spawn_budget_spreads_a_big_build_and_says_when_it_is_done() {
     assert!(most < 500, "one budgeted frame landed {most} of the thousand spawns ({worst:.1} ms, {one:.1} ms unbudgeted)");
 }
 
+/// **A ray that starts in the ground hits it there.** The field's raycast
+/// finds no first surface ahead of a start inside rock, and `terrain.raycast`
+/// read that as a miss through open air: a ray cast down from just inside a
+/// dug pit's wall answered "air" while the ground all round it was solid
+/// (Solar's rope, 0630). It hits at its start, at distance 0; a ray from
+/// above still lands on the top.
+#[test]
+fn a_ray_that_starts_in_the_ground_hits_it_there() {
+    let (mut ed, dir) = project(
+        "inside",
+        r#"
+function update(node, dt)
+  local g = find("Ground")
+  if not g then return end
+  local above, why1 = terrain.raycast(vec3(g.x + 2, g.y + 5, g.z), vec3(0, -1, 0), 30)
+  local inside, why2 = terrain.raycast(vec3(g.x + 2, g.y - 0.3, g.z), vec3(0, -1, 0), 30)
+  log(string.format("R %s %s", above and string.format("%.2f", above.distance) or tostring(why1), inside and string.format("%.2f", inside.distance) or tostring(why2)))
+end
+"#,
+    );
+    let mut field = floptle_field::ChunkField::new(1.0);
+    field.fill_slab(Vec3::new(-20.0, -20.0, -20.0), Vec3::new(20.0, 0.0, 20.0), 0.0, [0.5, 0.5, 0.5]);
+    let g = ed.world.spawn();
+    ed.world.insert(g, Transform::from_translation(DVec3::new(0.0, 0.0, 0.0)));
+    ed.world.insert(g, Name("Ground".into()));
+    ed.world.insert(g, Matter::Terrain { id: 7, collision: Default::default() });
+    ed.terrains.insert(g, crate::terrain_edit::EditorTerrain::new(field));
+    ed.toggle_play();
+    run(&mut ed, 3);
+    let said = lines(&mut ed, "R");
+    assert_eq!(said.last().map(String::as_str), Some("5.00 0.00"), "{said:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// **Ground that is not made yet does not read as open air.** A cold planet
 /// has no collider at all, so `terrain.query` over it answers whatever else
 /// is near and a ray straight down through it finds nothing. `terrain.ready`

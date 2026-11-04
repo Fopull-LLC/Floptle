@@ -1139,7 +1139,8 @@ pub(crate) fn install_terrain_api(
     // terrain.raycast(origin, dir [, maxDist]) → the first terrain surface
     // along the ray, read from the ground's own field rather than from
     // collision meshes that may not be built yet: { pos =, normal =,
-    // distance = }. A miss answers nil and why: nil, "air" when the ray
+    // distance = }. A ray that starts in the ground hits at its start,
+    // distance 0. A miss answers nil and why: nil, "air" when the ray
     // reached maxDist (default 1000) through open space, and nil, "unknown",
     // distance when it reached ground the world has not made yet first (a
     // body not resident, or stand-in ground it passed over) — the distance
@@ -1162,7 +1163,18 @@ pub(crate) fn install_terrain_api(
                     let inv = t.rot.inverse();
                     let start = (inv * (o - c.anchor).as_vec3()) / s;
                     let ld = inv * dir.as_vec3();
-                    let Some(hit) = t.field.raycast(start, ld, (max / s as f64) as f32) else { continue };
+                    // A ray that starts in the ground has hit it where it
+                    // starts. The field's own raycast answers nothing there
+                    // (there is no first surface ahead), and read as a miss
+                    // it said "air" from inside rock: a ray from just inside
+                    // a dug pit's wall reported open space while the ground
+                    // all round it was solid.
+                    let hit = if t.field.d(start) < 0.0 {
+                        start
+                    } else {
+                        let Some(hit) = t.field.raycast(start, ld, (max / s as f64) as f32) else { continue };
+                        hit
+                    };
                     let world = c.anchor + (t.rot * (hit * s)).as_dvec3();
                     let dist = (world - o).length();
                     if best.as_ref().is_none_or(|b| dist < b.0) {
