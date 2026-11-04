@@ -37,6 +37,10 @@ pub(crate) struct ResolvedChunk {
     /// disappear this frame, not when the chunk next streams — so a change
     /// here invalidates the cache.
     pub removed_len: usize,
+    /// When each prop still dissolving in started being drawn, by id, for a
+    /// source with an `appear` time; a prop leaves once it is whole. Empty
+    /// for every other source.
+    pub arrived: HashMap<scatter::InstanceId, f64>,
 }
 
 /// How far past an edit's reach a prop is dropped onto the ground again: its
@@ -472,6 +476,7 @@ pub(crate) fn build_instances(
     } = cache;
     let dt = last_time.map_or(0.0, |t| (*time - t).max(0.0)) as f32;
     *last_time = Some(*time);
+    let now = *time;
     let spring = 1.0 - (-dt / SPRING_BACK_S).exp();
     *spent = 0.0;
     let mut landed = settled_out.as_ref().map(|s| s.borrow_mut());
@@ -604,7 +609,7 @@ pub(crate) fn build_instances(
                     settle_ms += span.ms();
                     *spent = settle_ms;
                     worked = true;
-                    e.insert(ResolvedChunk { instances: Vec::new(), pending, resettle: Vec::new(), removed_len: src.removed.len() })
+                    e.insert(ResolvedChunk { instances: Vec::new(), pending, resettle: Vec::new(), removed_len: src.removed.len(), arrived: HashMap::new() })
                 }
             };
             // Within the frame's budget, by count and by time, the first ray
@@ -626,6 +631,12 @@ pub(crate) fn build_instances(
                     Some(on) => {
                         if let Some(l) = landed.as_mut() {
                             l.insert((src.id, on.id), (on.pos, on.up));
+                        }
+                        // Starts being drawn now, so it dissolves in from now
+                        // if the source asks. Not in a picture taken whole
+                        // (`settle_all`), which would photograph it half-in.
+                        if src.appear > 0.0 && !settle_all {
+                            chunk.arrived.insert(on.id, now);
                         }
                         chunk.instances.push(on);
                     }
@@ -680,10 +691,17 @@ pub(crate) fn build_instances(
                 *spent = settle_ms;
                 *ray_ms = *ray_ms * 0.8 + ms * 0.2;
             }
+            // Whole props stop being remembered as arriving.
+            if !chunk.arrived.is_empty() {
+                let appear = f64::from(src.appear.max(1e-3));
+                chunk.arrived.retain(|_, t| now - *t < appear);
+            }
             for inst in &chunk.instances {
                 if out.len() - start >= budget {
                     return;
                 }
+                // How far it has dissolved in since it started being drawn.
+                let arrival = chunk.arrived.get(&inst.id).map_or(1.0, |t| ((now - *t) as f32 / src.appear.max(1e-3)).clamp(0.0, 1.0));
                 // Distance is measured in the source's frame, which is a rigid
                 // transform of the world's — so LOD bands are untouched by where
                 // the body happens to be.
@@ -799,11 +817,14 @@ pub(crate) fn build_instances(
                 // see, and every prop in a forest paying that is the cost.
                 const FADE_EPS: f32 = 0.01;
                 match blend {
-                    b if b <= FADE_EPS => push(band, 1.0, false),
-                    b if b >= 1.0 - FADE_EPS => push(band + 1, 1.0, false),
+                    b if b <= FADE_EPS && arrival >= 1.0 - FADE_EPS => push(band, 1.0, false),
+                    b if b >= 1.0 - FADE_EPS && arrival >= 1.0 - FADE_EPS => push(band + 1, 1.0, false),
+                    // Arriving: on the arriving pattern, as a band coming in is.
+                    b if b <= FADE_EPS => push(band, arrival, true),
+                    b if b >= 1.0 - FADE_EPS => push(band + 1, arrival, true),
                     b => {
-                        push(band, 1.0 - b, false);
-                        push(band + 1, b, true);
+                        push(band, (1.0 - b) * arrival, false);
+                        push(band + 1, b * arrival, true);
                     }
                 }
             }
@@ -1131,6 +1152,7 @@ end
             frame: Default::default(),
             look: Default::default(),
             bend: 0.0,
+            appear: 0.0,
             marks: Default::default(),
         }
     }
@@ -2473,6 +2495,49 @@ end
             assert_eq!(floptle_render::ext_index_of(r), 7, "a dissolving prop is not on the leaving pattern");
         }
         assert!(out.iter().filter(|(_, _, r)| dist(r) < 39.0).all(|(_, _, r)| r.color[3] >= 0.999), "a prop well inside the band faded");
+    }
+
+    /// **Props that start being drawn dissolve in over the source's
+    /// `appear` time.** Distance was the only fade: a chunk settling near the
+    /// camera, or a source declared beside it, arrived whole in one frame (a
+    /// canopy at 20 m was 245 blocks of the picture changing between two
+    /// frames, 0627). With `appear` the props come in on the arriving
+    /// pattern and are whole once it has passed; with none they are whole at
+    /// once, as before.
+    #[test]
+    fn props_that_start_being_drawn_dissolve_in_over_appear() {
+        let draw = |appear: f32, t: f64, cache: &mut ScatterCache| {
+            let mut s = src();
+            s.bands = vec![Band { asset: "only".into(), distance: 30.0 }];
+            s.appear = appear;
+            let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
+            let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [7, 8])]);
+            let mut out = Vec::new();
+            cache.time = t;
+            build_instances(cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground, &floptle_render::Frustum::everything(), 100_000, &mut out);
+            out.iter().map(|(_, _, r)| (r.color[3], floptle_render::ext_index_of(r))).collect::<Vec<_>>()
+        };
+        // Settled over a few frames at t = 0, the props drawn so far are all
+        // dissolving in on the arriving pattern.
+        let mut cache = ScatterCache::default();
+        let mut first = Vec::new();
+        for _ in 0..40 {
+            first = draw(0.5, 0.0, &mut cache);
+        }
+        assert!(!first.is_empty(), "the fixture: nothing was drawn");
+        assert!(first.iter().all(|(a, e)| *a < 0.05 && *e == 8), "props drawn the moment they arrived are not dissolving in: {:?}", &first[..first.len().min(4)]);
+        // Half way through, half in; past it, whole.
+        let half = draw(0.5, 0.25, &mut cache);
+        assert!(half.iter().all(|(a, _)| (*a - 0.5).abs() < 0.05), "a quarter second into half a second, props drew at {:?}", &half[..half.len().min(4)]);
+        let whole = draw(0.5, 0.6, &mut cache);
+        assert!(whole.iter().all(|(a, _)| *a >= 0.999), "props past their appear time are not whole");
+        // No appear: whole at once.
+        let mut cache = ScatterCache::default();
+        let mut now = Vec::new();
+        for _ in 0..40 {
+            now = draw(0.0, 0.0, &mut cache);
+        }
+        assert!(!now.is_empty() && now.iter().all(|(a, _)| *a >= 0.999), "a source with no appear time faded its props in");
     }
 
     /// **A prop beside a walker leans away from it; one 5 m off stays put.**

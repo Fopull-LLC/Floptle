@@ -215,6 +215,10 @@ pub struct ScatterSource {
     /// How far its props give way to [`Interactor`]s, 0 to 1: grass bends
     /// (1), a rock or a trunk does not (0, the default).
     pub bend: f32,
+    /// Seconds a prop takes to dissolve in when it starts being drawn for
+    /// any reason but distance (its chunk settling, a source declared near
+    /// the camera, a prop put back): 0, the default, draws it at once.
+    pub appear: f32,
     /// Props drawn in a look of their own, by id: the plant a harvest is
     /// aimed at, the rock a build would replace. Read at draw time, so marking
     /// one prop every frame costs a map write and re-rolls nothing; an empty
@@ -768,6 +772,7 @@ mod tests {
             frame: Default::default(),
             look: Default::default(),
             bend: 0.0,
+            appear: 0.0,
             marks: Default::default(),
         }
     }

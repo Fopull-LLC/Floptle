@@ -100,7 +100,7 @@ fn color_opt(opts: &mlua::Table, key: &str) -> Option<[f32; 3]> {
 pub(crate) const CREATE_KEYS: &[&str] = &[
     "asset", "lod", "range", "seed", "center", "radius", "halfX", "halfZ", "align", "perChunk",
     "chunk", "scaleMin", "scaleMax", "fade", "density", "densityRows", "parent", "tint", "emissive",
-    "emissiveStrength", "bend",
+    "emissiveStrength", "bend", "appear",
 ];
 
 /// The keys a `scatter.setTint` look reads.
@@ -436,6 +436,8 @@ pub(crate) fn install_scatter_api(
                 // Rocks and trunks stand firm unless the source says its
                 // props give way.
                 bend: num(&opts, "bend", 0.0).clamp(0.0, 1.0) as f32,
+                // Drawn at once unless the source asks to dissolve in.
+                appear: num(&opts, "appear", 0.0).clamp(0.0, 10.0) as f32,
                 marks: Default::default(),
             };
             // Say what this costs, here, while the two numbers that decided it
