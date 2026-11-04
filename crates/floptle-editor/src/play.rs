@@ -1530,6 +1530,7 @@ impl Editor {
         // about to be replaced.
         self.script_host.clear_scatter();
         self.scatter_cache.clear();
+        self.scatter_side.clear();
         // …and so does a wind: the bodies it blew on are going too.
         self.script_host.clear_weather();
         // …and a lake a script declared lay on ground that is going.

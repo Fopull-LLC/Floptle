@@ -363,6 +363,7 @@ pub(crate) fn push_scatter(
     protos: &HashMap<String, Vec<BakedPart>>,
     proto_radius: &HashMap<String, f32>,
     cache: &mut ScatterCache,
+    publish: bool,
     eye: DVec3,
     frustum: &floptle_render::Frustum,
     out: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
@@ -411,7 +412,11 @@ pub(crate) fn push_scatter(
     // silly density costs a frame-rate dip, never a frame that
     // never ends.
     const SCATTER_BUDGET: usize = 20_000;
-    cache.settled_out = Some(script_host.scatter_settled());
+    // What `scatter.near` reads is the game's own view's: a second view's
+    // cache (a render target, a probe, another camera's capture) rolls and
+    // forgets props round ITS eye, and published, it took the props round
+    // the player out of `near` whenever it drew.
+    cache.settled_out = publish.then(|| script_host.scatter_settled());
     cache.interactors = script_host.scatter_interactors();
     cache.time = script_host.weather_time();
     build_instances(
@@ -446,6 +451,10 @@ pub(crate) fn build_instances(
     budget: usize,
     out: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
 ) {
+    // The budget is scatter's own: `out` arrives holding the frame's meshes,
+    // terrain and decals, and counted against the cap they cut a busy
+    // scene's plants short, by whatever else happened to be on screen.
+    let start = out.len();
     // Disjoint borrows: the sweep list and the resolved chunks are read and
     // written in the same loop.
     let ScatterCache {
@@ -672,7 +681,7 @@ pub(crate) fn build_instances(
                 *ray_ms = *ray_ms * 0.8 + ms * 0.2;
             }
             for inst in &chunk.instances {
-                if out.len() >= budget {
+                if out.len() - start >= budget {
                     return;
                 }
                 // Distance is measured in the source's frame, which is a rigid
@@ -1002,6 +1011,64 @@ fn prefab_local(docs: &[floptle_scene::NodeDoc], i: usize) -> Mat4 {
 mod tests {
     use super::*;
     use floptle_core::scatter::{Band, Region};
+
+    /// **A second view leaves the game view's props alone.** Every view drew
+    /// scatter through one cache, which forgets the chunks far from the eye
+    /// it was last asked from: a render target or a probe far from the
+    /// player forgot every prop round the player each time it drew, and they
+    /// popped back in over the next frames (Solar's part-preview stand, 0627).
+    /// A view that is not the game's own keeps its props in a cache of its own.
+    #[test]
+    fn a_second_view_leaves_the_game_views_props_alone() {
+        use floptle_core::math::DVec3;
+        let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return };
+        let dir = std::env::temp_dir().join(format!("floptle_scatter_views_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        floptle_vfs::create_dir_all(dir.join("scripts")).unwrap();
+        floptle_vfs::write(
+            dir.join("scripts/grow.lua"),
+            r#"
+function start(node)
+  local m = mesh.build{ scene = true,
+    positions = { -0.2,0,-0.2, 0.2,0,-0.2, 0.2,0,0.2, -0.2,0,0.2, -0.2,0.6,-0.2, 0.2,0.6,-0.2, 0.2,0.6,0.2, -0.2,0.6,0.2 },
+    indices = { 1,3,2, 1,4,3, 5,6,7, 5,7,8, 1,2,6, 1,6,5, 2,3,7, 2,7,6, 3,4,8, 3,8,7, 4,1,5, 4,5,8 } }
+  scatter.create{ asset = m, seed = 3, perChunk = 24, chunk = 8, center = vec3(0, 0, 0), halfX = 60, halfZ = 60,
+    align = "world", lod = { { asset = m, distance = 40 } } }
+end
+"#,
+        )
+        .unwrap();
+        ed.project_root = dir.clone();
+        let ground = ed.world.spawn();
+        ed.world.insert(ground, floptle_core::Transform { translation: DVec3::new(0.0, -0.5, 0.0), scale: floptle_core::math::Vec3::new(200.0, 1.0, 200.0), ..floptle_core::Transform::IDENTITY });
+        ed.world.insert(ground, floptle_core::Matter::Primitive { shape: floptle_core::Shape::Cube, color: [0.3, 0.3, 0.3] });
+        ed.world.insert(ground, floptle_core::RigidBody { kind: floptle_core::BodyKind::Box, mode: floptle_core::BodyMode::Static, half_extents: [100.0, 0.5, 100.0], ..Default::default() });
+        let grow = ed.world.spawn();
+        ed.world.insert(grow, floptle_core::Transform::IDENTITY);
+        ed.world.insert(grow, floptle_core::Scripts(vec![floptle_core::ScriptInst { kind: "grow".into(), enabled: true, params: Vec::new(), refs: Vec::new(), strs: Vec::new(), pinned_bools: None }]));
+        ed.toggle_play();
+        for _ in 0..4 {
+            ed.play_step(1.0 / 60.0, true);
+        }
+        let view = |eye: DVec3| {
+            floptle_render::RenderCamera::new(eye, floptle_core::math::Quat::from_rotation_x(-0.4), floptle_render::Projection::of_camera(1.0, false, 10.0, 0.1, 5000.0))
+        };
+        let (color, depth) = crate::viewports::offscreen_textures(ed.gpu.as_ref().unwrap(), 64, 64, "scatter-views", wgpu::TextureUsages::TEXTURE_BINDING);
+        let (cv, dv) = (color.create_view(&Default::default()), depth.create_view(&Default::default()));
+        let draw = |ed: &mut crate::Editor, eye: DVec3, main: bool| {
+            ed.render_world_into(&cv, &dv, &view(eye), 1.0, 0.0, u32::MAX, None, (64, 64), crate::offscreen::OffscreenOpts { scatter_main: main, ..Default::default() });
+        };
+        ed.scatter_cache.settle_all = true;
+        for _ in 0..3 {
+            draw(&mut ed, DVec3::new(0.0, 2.0, 0.0), true);
+        }
+        let near = ed.scatter_cache.len();
+        assert!(near > 0, "the fixture: the game view resolved no scatter chunks");
+        // A camera 2 km up draws, as a render target or a preview stand would.
+        draw(&mut ed, DVec3::new(0.0, 2000.0, 0.0), false);
+        assert_eq!(ed.scatter_cache.len(), near, "a second view far from the player made the game view forget its props");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A headless process must not report a project's props as broken.
     ///
@@ -1420,6 +1487,28 @@ mod tests {
             64, &mut out,
         );
         assert_eq!(out.len(), 64);
+    }
+
+    /// **The budget is scatter's own.** The frame's meshes, terrain and
+    /// decals are already in the submission when scatter is added, and
+    /// counted against the cap they cut a busy scene's plants short: 18,000
+    /// cubes on screen left grass 2,000 (0627).
+    #[test]
+    fn the_scenes_own_instances_do_not_spend_scatters_budget() {
+        let mut cache = ScatterCache::default();
+        let mut s = src();
+        s.per_chunk = 512;
+        s.bands = vec![Band { asset: "a".into(), distance: 400.0 }];
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])]);
+        let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
+        let scene = (MeshId(1), None, floptle_render::instance_of(Mat4::IDENTITY, [1.0; 3]));
+        let mut out = vec![scene; 1000];
+        build_instances(
+            &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground,
+            &floptle_render::Frustum::everything(),
+            64, &mut out,
+        );
+        assert_eq!(out.len(), 1064, "the scene's 1,000 instances spent scatter's budget");
     }
 
     /// A field of the shape that froze a game: a long view distance against a

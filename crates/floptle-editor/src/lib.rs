@@ -2600,6 +2600,9 @@ struct Editor {
     /// Resolved scatter chunks, so props are dropped onto the
     /// real ground once per chunk instead of once per prop per frame.
     scatter_cache: crate::scatter_draw::ScatterCache,
+    /// Scatter for every view that is not the game's own (see
+    /// `OffscreenOpts::scatter_main`).
+    scatter_side: crate::scatter_draw::ScatterCache,
     /// Chunks whose voxels changed since the last remesh, per terrain — the regional
     /// remesh queue a brush dab (or undo swap) feeds. Drained every frame by
     /// `sync_terrain_meshes`.

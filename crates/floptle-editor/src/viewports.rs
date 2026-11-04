@@ -732,6 +732,7 @@ impl Editor {
                 history: crate::offscreen::HistorySlot::GamePanel,
                 overlay: false,
                 draws: Default::default(),
+                scatter_main: true,
             },
         );
         self.lines_deferred = false;

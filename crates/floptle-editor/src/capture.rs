@@ -167,6 +167,11 @@ pub(crate) fn render_frame_texture(
             // surfaces that show the scene behind them as the Game view does:
             // without one there is nothing to capture what is behind them into.
             history: crate::offscreen::HistorySlot::GamePanel,
+            // The game's own view when the picture is of the active camera
+            // (`floptle shot`, a capture of the player's camera); another
+            // camera's picture keeps to the side cache, or it would forget
+            // the props round the player.
+            scatter_main: stack_of.is_none_or(|e| floptle_core::active_camera(&ed.world) == Some(e)),
             ..Default::default()
         },
     );

@@ -2599,6 +2599,7 @@ impl Editor {
                 self.script_host.scatter_sources().clone();
             for (p, r) in dirty {
                 self.scatter_cache.invalidate_near(&sources, p, r);
+                self.scatter_side.invalidate_near(&sources, p, r);
             }
         }
         self.script_host.set_terrain_edits_queued(self.terrain_ops_waiting());

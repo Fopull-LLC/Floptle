@@ -49,6 +49,14 @@ pub(crate) struct OffscreenOpts<'a> {
     /// What the camera draws besides its nodes (`setCamera{ shadows = false }`
     /// and the rest): each switched off is a pass this view does not pay for.
     pub draws: floptle_core::CameraDraws,
+    /// The game's own view (the Game panel, a build's window, a picture of
+    /// it): its scatter is the frame's own, kept in the main cache that
+    /// `scatter.near` reads. Every other view (a render target, a reflection
+    /// probe, another camera's capture) rolls its props in a side cache:
+    /// sharing the main one, a view far from the player forgot every prop
+    /// round the player whenever it drew, and they popped back in over the
+    /// next frames.
+    pub scatter_main: bool,
 }
 
 impl crate::Editor {
@@ -1083,7 +1091,8 @@ impl Editor {
                 gpu,
                 &self.scatter_protos,
                 &self.scatter_proto_radius,
-                &mut self.scatter_cache,
+                if opts.scatter_main { &mut self.scatter_cache } else { &mut self.scatter_side },
+                opts.scatter_main,
                 cam.world_position,
                 &off_frustum,
                 &mut instances,
