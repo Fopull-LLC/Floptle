@@ -434,6 +434,13 @@ struct Ssr {
 
 // Camera-relative point -> the uv it lands on. `G.view_proj` carries no
 // translation, so this is the same mapping the depth prepass wrote.
+// Interleaved-gradient noise in (0,1) for pixel `pix`: the march's phase
+// (see `ssr_trace`).
+fn ssr_ign(pix: vec2<u32>) -> f32 {
+    let p = vec2<f32>(f32(pix.x), f32(pix.y));
+    return fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715))));
+}
+
 fn ssr_uv(ndc: vec2<f32>) -> vec2<f32> {
     return vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
 }
@@ -530,7 +537,14 @@ fn ssr_trace(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>, rough: f32, pix: vec2<u32
     // it a mirror shows concentric bands at the sample distances — a texture the
     // scene does not have, which reads as the reflection being broken rather
     // than as it being cheap.
-    let jitter = bayer4(pix);
+    //
+    // Noise, not the 4×4 grid. Where an edge in the reflection falls between
+    // two steps, whether a ray hits it turns on its phase, and with phases on
+    // a grid the hits and misses came out as a crosshatch: on a dark glossy
+    // benchtop and at the fading end of every reflection, a woven pattern the
+    // scene does not have. Spread without a period, the same misses read as
+    // grain, which the reflection's own blur softens.
+    let jitter = ssr_ign(pix);
     var prev_f = 0.0;
     let inv = 1.0 / f32(steps);
 
