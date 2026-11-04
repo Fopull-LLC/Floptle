@@ -639,6 +639,17 @@ behave as the lens it is and turn the background upside down. Glass being absent
 from the prepass is what makes that reading the scene behind rather than the
 glass itself.
 
+**A pane is not a lens (`Material::thin`, v0.117.1).** That rule is right for a
+solid and wrong for a sheet. A windowpane is entered and left through two
+parallel faces, so the view bends going in, bends back by as much coming out,
+and leaves heading the way it came, shifted sideways by what it crossed of the
+glass. Bent once and followed to the far wall, a pane across a room threw the
+wall about by metres, swinging with the angle it was seen at (0633, Solar's
+lab glazing). With `thin` set, `refracted` crosses the sheet along the bent
+ray and then goes on along the view ray. Off by default, so a project's glass
+keeps the look it was built with; it belongs on windows, partitions, visors and
+thin-walled vessels.
+
 #### Glass behind glass (v0.53.0)
 
 One capture gives exactly one correct layer — the nearest. Anything behind it was

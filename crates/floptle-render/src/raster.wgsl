@@ -203,6 +203,9 @@ const EXT_DISSOLVE: u32 = 65536u;
 // Drawn by its own shader, which draws every pixel its near fade keeps: the
 // prepass and the sun stand on exactly those (raster.rs `EXT_SHADED`).
 const EXT_SHADED: u32 = 131072u;
+// A thin sheet: the view through it comes out heading the way it went in
+// (raster.rs `EXT_THIN`, `Material::thin`).
+const EXT_THIN: u32 = 262144u;
 
 fn ext_cutoff(e: Ext) -> f32 {
     let q = (e.flags >> EXT_CUTOFF_SHIFT) & 255u;
@@ -721,7 +724,7 @@ fn flsl_frag_scene_depth(uv: vec2<f32>) -> f32 {
 // At total internal reflection `refract` returns zero, and so does this: those
 // rays have nothing behind the surface to show, and the reflection term is
 // already what they return.
-fn refracted(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, rough: f32, ior: f32, thick: f32) -> vec3<f32> {
+fn refracted(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, rough: f32, ior: f32, thick: f32, thin: bool) -> vec3<f32> {
     let dims = textureDimensions(scene_tex, 0);
     if (dims.x <= 1u || dims.y <= 1u) {
         return vec3<f32>(0.0); // no capture of what is behind: nothing to show
@@ -754,7 +757,19 @@ fn refracted(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, rough: f32, ior: f32, thi
             }
         }
     }
-    let exit = p + t * travel;
+    // **A thin sheet is two parallel faces, not a lens.** The view bends going
+    // in and bends back by as much coming out of the face just behind, so it
+    // leaves heading the way it came, moved sideways by what it crossed of the
+    // sheet. Bent once and followed to the far wall, a pane across a room
+    // threw the wall about by metres, swinging with the angle it was seen at
+    // (0633, Solar's lab glazing).
+    var exit = p + t * travel;
+    var out_dir = t;
+    if (thin) {
+        let inside = max(thick, 0.0) / max(dot(t, -n), 0.2);
+        out_dir = -v;
+        exit = p + t * inside + out_dir * max(travel - max(thick, 0.0), 0.0);
+    }
     let clip = G.view_proj * vec4<f32>(exit, 1.0);
     if (clip.w <= 1e-4) {
         return vec3<f32>(0.0);
@@ -777,7 +792,7 @@ fn refracted(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, rough: f32, ior: f32, thi
     // the same pane held across the room.
     let levels = f32(textureNumLevels(scene_tex) - 1u);
     let mip = screen_cone_mip(
-        rough, p, exit, t, levels, f32(textureDimensions(scene_tex, 0).y));
+        rough, p, exit, out_dir, levels, f32(textureDimensions(scene_tex, 0).y));
     return textureSampleLevel(scene_tex, scene_samp, uv, mip).rgb;
 }
 
@@ -1879,7 +1894,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
         if (trans > 0.0) {
             let fr = f_schlick(f0, max(dot(n, v), 1e-4));
             let kt = (1.0 - max(max(fr.r, fr.g), fr.b)) * trans;
-            lit += refracted(in.view_pos, n, v, rough, ext.ior, ext.thick) * albedo * kt;
+            lit += refracted(in.view_pos, n, v, rough, ext.ior, ext.thick, ext_has(ext, EXT_THIN)) * albedo * kt;
         }
     } else {
         // --- Blinn-Phong, exactly as it was. ------------------------------

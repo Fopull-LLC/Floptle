@@ -377,6 +377,7 @@ impl Material {
             "transmission" => self.transmission = src.transmission,
             "ior" => self.ior = src.ior,
             "thickness" => self.thickness = src.thickness,
+            "thin" => self.thin = src.thin,
             "sway" => self.sway = src.sway,
             "backlight" => self.backlight = src.backlight,
             "nearFadeStart" => self.near_fade[0] = src.near_fade[0],
@@ -546,6 +547,15 @@ pub struct Material {
     /// through a solid ball throws it right across. Set it to roughly the size
     /// of the object.
     pub thickness: f32,
+    /// A thin sheet rather than a solid: a windowpane, a partition, a visor,
+    /// the wall of a beaker. The view goes in through one face and out through
+    /// the face just behind it, which is parallel to it, so it comes out
+    /// heading the way it went in, shifted by no more than `thickness`, and
+    /// what is behind shows straight through. `false` (the default) is a solid
+    /// that bends the view once and keeps it bent, a lens: right for a ball or
+    /// a gem, and for a pane across a room it throws the far wall about by
+    /// metres.
+    pub thin: bool,
     /// How far the game's wind bends this surface: the metres a point one
     /// metre above the node's origin moves in a 10 m/s wind, growing with the
     /// square of the height, so a stem stays rooted and its tip swings. `0`
@@ -664,6 +674,7 @@ impl Default for Material {
             transmission: 0.0,
             ior: 1.5,
             thickness: 0.5,
+            thin: false,
             sway: 0.0,
             backlight: 0.0,
             near_fade: [0.0, 0.0],

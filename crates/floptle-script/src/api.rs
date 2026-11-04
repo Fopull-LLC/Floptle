@@ -594,7 +594,7 @@ pub fn is_bool_field(comp: &str, field: &str) -> bool {
             | ("PointLight", "twoSided" | "shadows")
             // A material's two flags. `if mat.unlit then` was always taken:
             // the field came back as the number 0, and 0 is truthy in Lua.
-            | ("Material", "unlit" | "fog")
+            | ("Material", "unlit" | "fog" | "thin")
             // A flip is a flag, and 0 is truthy in Lua: without this arm
             // `if node:getcomponent("Sprite").flipX then` is a branch that is
             // always taken, whichever way the sprite is facing.
@@ -682,7 +682,7 @@ pub(crate) const MATERIAL_NUM_FIELDS: &[&str] = &[
     "nearFadeEnd", "jitter",
     "alpha", "opacity", "ambient", "r", "g", "b", "emissiveR", "emissiveG", "emissiveB",
     "emissiveStrength", "specularR", "specularG", "specularB", "specularStrength",
-    "shininess", "rimR", "rimG", "rimB", "rimStrength", "unlit", "fog",
+    "shininess", "rimR", "rimG", "rimB", "rimStrength", "unlit", "fog", "thin",
 ];
 
 /// …and every string-valued one: the texture and the surface maps, plus the
@@ -762,6 +762,7 @@ fn material_fields(m: &floptle_core::Material, cell: u32) -> HashMap<String, f64
         ("rimB".to_string(), m.rim[2] as f64),
         ("rimStrength".to_string(), m.rim_strength as f64),
         ("unlit".to_string(), f64::from(m.unlit)),
+        ("thin".to_string(), f64::from(m.thin)),
         ("fog".to_string(), f64::from(m.fog)),
         // The surface.
         ("normalStrength".to_string(), m.normal_strength as f64),
@@ -1955,6 +1956,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     // the timeline — a material that goes fullbright for three
                     // frames is a hit flash.
                     "unlit" => m.unlit = val != 0.0,
+                    "thin" => m.thin = val != 0.0,
                     "fog" => m.fog = val != 0.0,
                     _ => {}
                 }
@@ -2483,6 +2485,8 @@ pub(crate) fn apply_rich_sets(
                             m.alpha_cutoff = num(v).map(|n| (n as f32).clamp(0.0, 1.0)).unwrap_or(m.alpha_cutoff)
                         }
                         "doubleSided" => m.double_sided = num(v).map(|n| n != 0.0).unwrap_or(m.double_sided),
+                        // A thin sheet (a pane) rather than a solid (a lens).
+                        "thin" => m.thin = num(v).map(|n| n != 0.0).unwrap_or(m.thin),
                         // "opaque", "cutout" or "blend": how alpha is drawn.
                         "blend" => {
                             if let CompVal::Str(b) = v
@@ -3302,7 +3306,7 @@ pub(crate) const MATERIAL_KEYS: &[&str] = &[
     "rimStrength", "unlit", "fog", "ambient", "alpha", "texture", "cell", "sheetCols", "sheetRows", "slice",
     "normalMap", "normalStrength", "roughnessMap", "roughness", "metallicMap", "metallic",
     "occlusionMap", "occlusionStrength", "emissiveMap", "reflectivity", "transmission", "ior", "thickness",
-    "sway", "backlight", "nearFadeStart", "nearFadeEnd", "shading", "jitter", "affineUv", "vertexLit",
+    "thin", "sway", "backlight", "nearFadeStart", "nearFadeEnd", "shading", "jitter", "affineUv", "vertexLit",
     "ditherAlpha", "retroExempt", "alphaCutoff", "doubleSided", "blend",
 ];
 

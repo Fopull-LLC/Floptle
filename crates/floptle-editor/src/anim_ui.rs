@@ -2277,6 +2277,7 @@ const ANIMATABLE_PROPS: &[(&str, &[PropField])] = &[
             ("thickness", PropKind::Float, "Surface"),
             ("unlit", PropKind::Float, "Flags"),
             ("fog", PropKind::Float, "Flags"),
+            ("thin", PropKind::Float, "Flags"),
             ("shading", PropKind::Text, "Flags"),
             ("jitter", PropKind::Float, "Flags"),
         ],

@@ -1252,6 +1252,15 @@ fn mat_shading_ui(ui: &mut egui::Ui, ctx: &mut MatCtx, m: &mut Material, r: &mut
                     )
                     .changed();
                 ui.end_row();
+                ui.label("  thin").on_hover_text(
+                    "A sheet rather than a solid: a windowpane, a partition, a \
+                     visor, the wall of a beaker. What is behind it shows straight \
+                     through, shifted by no more than its thickness.\n\nOff, it is \
+                     a solid that bends the view like a lens: right for a ball or a \
+                     gem, while a pane across a room throws the far wall about.",
+                );
+                r.changed |= ui.add_enabled(m.transmission > 0.0, egui::Checkbox::new(&mut m.thin, "")).changed();
+                ui.end_row();
                 if m.transmission > 0.0 {
                     ui.label("");
                     ui.small(

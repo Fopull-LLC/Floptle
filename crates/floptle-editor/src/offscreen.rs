@@ -1436,6 +1436,7 @@ impl Editor {
                 point_shadows,
                 contact[0] > 0.5,
                 rm.volumetric_fog(),
+                raster.any_transmissive(&instances),
             );
             if let Some(dtex) = opts.depth_tex.filter(|_| wants_depth || rm_draw) {
                 let hist = history_bind.as_ref().map(|(v, s)| (v, s));

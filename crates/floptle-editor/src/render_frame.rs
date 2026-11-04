@@ -769,7 +769,14 @@ impl Editor {
                 raster.sun_shadow_pass(gpu, globals, &map_draws, &flsl_draws, &skin_draws);
                 let depth_wanted = raster.flsl_draws_want_depth(&flsl_draws);
                 let raster_clear = if rm_draw
-                    || wants_prepass(depth_wanted, ssr_on, point_shadows, contact[0] > 0.5, rm.volumetric_fog())
+                    || wants_prepass(
+                        depth_wanted,
+                        ssr_on,
+                        point_shadows,
+                        contact[0] > 0.5,
+                        rm.volumetric_fog(),
+                        raster.any_transmissive(&instances),
+                    )
                 {
                     // Opaque depth prepass: primes the depth buffer (early-z kills
                     // hidden raster fragments before their shadow-marching shader

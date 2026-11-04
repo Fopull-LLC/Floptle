@@ -53,8 +53,13 @@ pub(crate) enum PartLook<'a> {
 ///
 /// Adding a feature that reads the prepass means adding a parameter here, which
 /// is a compile error at both call sites rather than a silent omission at one.
-pub(crate) fn wants_prepass(flsl_wants_depth: bool, ssr: bool, point_shadows: bool, contact: bool, fog: bool) -> bool {
-    flsl_wants_depth || ssr || point_shadows || contact || fog
+///
+/// Glass reads it too: how far the view through a solid travels before it
+/// meets the scene behind is the prepass's depth there, and without it a
+/// glass ball bent the view through its own `thickness` only, a lens with
+/// reflections on and next to nothing with them off.
+pub(crate) fn wants_prepass(flsl_wants_depth: bool, ssr: bool, point_shadows: bool, contact: bool, fog: bool, glass: bool) -> bool {
+    flsl_wants_depth || ssr || point_shadows || contact || fog || glass
 }
 
 /// Run this view's opaque depth prepass **and bind it**, in one call.

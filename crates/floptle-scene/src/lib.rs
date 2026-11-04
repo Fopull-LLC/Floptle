@@ -3843,6 +3843,10 @@ pub struct MaterialDoc {
     pub ior: f32,
     #[serde(default = "default_thickness", skip_serializing_if = "is_default_thickness")]
     pub thickness: f32,
+    /// A thin sheet, seen straight through (see
+    /// [`floptle_core::Material::thin`]). Absent is a solid, as always.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub thin: bool,
     /// How far the game's wind bends the surface (see
     /// [`floptle_core::Material::sway`]). Absent is still.
     #[serde(default, skip_serializing_if = "is_zero_f32")]
@@ -4161,6 +4165,7 @@ impl MaterialDoc {
             // does, and the maths behind it (`1/ior`) divides.
             ior: self.ior.clamp(1.0, 3.0),
             thickness: self.thickness.clamp(0.0, 100.0),
+            thin: self.thin,
             sway: self.sway.clamp(0.0, 100.0),
             backlight: self.backlight.clamp(0.0, 1.0),
             near_fade: [self.near_fade.0.max(0.0), self.near_fade.1.max(0.0)],
@@ -4214,6 +4219,7 @@ impl MaterialDoc {
             transmission: m.transmission,
             ior: m.ior,
             thickness: m.thickness,
+            thin: m.thin,
             sway: m.sway,
             backlight: m.backlight,
             near_fade: (m.near_fade[0], m.near_fade[1]),

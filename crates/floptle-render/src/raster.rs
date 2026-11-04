@@ -528,6 +528,8 @@ pub struct SurfaceExtras {
     /// How far the bent ray travels inside the material — what turns an index of
     /// refraction into an actual displacement on screen.
     pub thickness: f32,
+    /// A thin sheet, seen straight through ([`floptle_core::Material::thin`]).
+    pub thin: bool,
     /// How far the wind bends it ([`floptle_core::Material::sway`]), applied
     /// in the vertex stage against [`Globals::time`]`[1..4]`, the wind.
     pub sway: f32,
@@ -565,6 +567,7 @@ impl Default for SurfaceExtras {
             transmission: 0.0,
             ior: 1.5,
             thickness: 0.5,
+            thin: false,
             sway: 0.0,
             backlight: 0.0,
             alpha_cutoff: 0.5,
@@ -621,6 +624,9 @@ pub(crate) const EXT_DISSOLVE: u32 = 1 << 16;
 /// which draws it with the built-in shader, cuts no pixel its colour pass
 /// draws.
 pub(crate) const EXT_SHADED: u32 = 1 << 17;
+/// A thin sheet: the view through it comes out heading the way it went in
+/// ([`floptle_core::Material::thin`]).
+pub(crate) const EXT_THIN: u32 = 1 << 18;
 
 impl SurfaceExtras {
     /// Read a material's extras. `Classic` still carries the normal and
@@ -638,6 +644,7 @@ impl SurfaceExtras {
             transmission: m.transmission,
             ior: m.ior,
             thickness: m.thickness,
+            thin: m.thin,
             sway: m.sway,
             backlight: m.backlight,
             // Opaque cuts nothing, which is a cutoff of zero. A cutout's
@@ -694,6 +701,9 @@ impl SurfaceExtras {
         }
         if self.shaded {
             f |= EXT_SHADED;
+        }
+        if self.thin {
+            f |= EXT_THIN;
         }
         if self.alpha_cutoff != 0.5 {
             let q = (self.alpha_cutoff.clamp(0.0, 1.0) * 254.0).round() as u32 + 1;
