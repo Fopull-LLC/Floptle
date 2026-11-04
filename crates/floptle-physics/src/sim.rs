@@ -221,6 +221,12 @@ pub struct BodyReport {
     pub wake: crate::body::WakeReason,
     /// Angular velocity, radians a second about each world axis.
     pub ang_vel: Vec3,
+    /// How hard the surfaces it touches pressed on it over the last step,
+    /// as a force (mass units times m/s²: kilonewtons with masses in
+    /// tonnes): a resting body's weight, a landing's impact while it lasts,
+    /// and on a wheel joint's wheel the load its tyre carries. Zero off the
+    /// ground.
+    pub contact_force: f32,
 }
 
 /// One row of [`Sim::compound_impacts`]: `(root entity index, part = shape_id,
@@ -2690,6 +2696,7 @@ impl Sim {
                 asleep: b.asleep,
                 wake: b.wake,
                 ang_vel: b.ang_vel,
+                contact_force: if self.world.last_dt > 0.0 { b.pressed / self.world.last_dt } else { 0.0 },
             }
         })
     }

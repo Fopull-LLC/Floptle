@@ -4663,6 +4663,11 @@ let node_mt = lua.create_table()?;
                     bodies.borrow().get(&e).map(|b| b.grounded).unwrap_or(false),
                 ));
             }
+            // How hard the ground pushes back, as a force: a wheel's tyre
+            // load, read beside `grounded` and `groundNormal`.
+            "contactForce" => {
+                return Ok(Value::Number(bodies.borrow().get(&e).map(|b| b.contact_force as f64).unwrap_or(0.0)));
+            }
             "asleep" => {
                 let bodies = bodies.borrow();
                 if let Some(b) = bodies.get(&e) {

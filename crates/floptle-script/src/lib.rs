@@ -2747,6 +2747,10 @@ pub struct BodyState {
     /// How fast a turning body spins about Z, degrees a second
     /// (`node.spin`); anticlockwise positive.
     pub spin: f32,
+    /// How hard the surfaces it touches pressed on it over the last step, as
+    /// a force (`node.contactForce`): its weight at rest, a landing while it
+    /// lasts, a wheel's tyre load. Zero off the ground.
+    pub contact_force: f32,
 }
 
 impl Default for BodyState {
@@ -2762,6 +2766,7 @@ impl Default for BodyState {
             asleep: false,
             wake: "settling",
             spin: 0.0,
+            contact_force: 0.0,
         }
     }
 }
@@ -2884,6 +2889,7 @@ mod shipped_script_tests {
                     asleep: false,
                     wake: "settling",
                     spin: 0.0,
+                    contact_force: 0.8,
                 },
             );
             host.set_bodies(bodies);

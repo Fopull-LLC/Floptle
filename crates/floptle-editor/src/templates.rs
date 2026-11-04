@@ -407,6 +407,7 @@ mod tests {
                         asleep: false,
                         wake: "settling",
                         spin: 0.0,
+                        contact_force: 0.8,
                     },
                 );
                 host.set_bodies(bodies);

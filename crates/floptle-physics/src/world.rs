@@ -261,6 +261,10 @@ pub struct PhysicsWorld {
     /// before the choice, with about twice its friction: a project from then
     /// keeps the vehicles it tuned. See `PhysicsWorld::tyre_grip`.
     pub single_wheel_friction: bool,
+    /// The length of the last step, seconds: what turns a body's `pressed`
+    /// (the momentum its contacts took in a step) into a force. Zero before
+    /// the first step.
+    pub last_dt: f32,
     /// How slippery each node's surface is (`floptle_core::SurfaceFriction`),
     /// by the node's entity index: what touches one of its colliders grips by
     /// its own friction times this. A node not here grips by 1. Set by the
@@ -439,6 +443,7 @@ impl Default for PhysicsWorld {
             gravity: GravityField::default(),
             water: crate::water::WaterField::default(),
             single_wheel_friction: false,
+            last_dt: 0.0,
             surface_friction: std::collections::HashMap::new(),
             colliders: Vec::new(),
             bodies: Vec::new(),
@@ -1656,6 +1661,7 @@ impl PhysicsWorld {
 
     pub fn step(&mut self, dt: f32) {
         let dt = dt.clamp(0.0, 0.1); // guard against a huge stalled frame
+        self.last_dt = dt;
         let timed = self.timing.is_some();
         let clock = || timed.then(floptle_core::time::Instant::now);
         let t = clock();

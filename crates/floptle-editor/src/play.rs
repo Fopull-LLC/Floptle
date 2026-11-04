@@ -33,6 +33,7 @@ pub(crate) fn body_state(r: &floptle_physics::BodyReport) -> floptle_script::Bod
         asleep: r.asleep,
         wake: r.wake.name(),
         spin: r.ang_vel.z.to_degrees(),
+        contact_force: r.contact_force,
     }
 }
 

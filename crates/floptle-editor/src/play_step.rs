@@ -929,6 +929,9 @@ impl Editor {
                     asleep,
                     wake: sim.compound_of(eid).map_or("settling", |c| c.wake.name()),
                     spin: 0.0,
+                    // Likewise one force: a craft's wheels, its own bodies,
+                    // each say what their ground pushes back with.
+                    contact_force: 0.0,
                 },
             );
         }

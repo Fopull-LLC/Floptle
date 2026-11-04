@@ -15,7 +15,7 @@ each group, and meant to be searched.
 ## Contents
 
 - [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 231
-- [node — transform & body fields](#node--transform--body-fields) — 44
+- [node — transform & body fields](#node--transform--body-fields) — 45
 - [node — methods & handles](#node--methods--handles) — 38
 - [vectors, directions & easing](#vectors-directions--easing) — 51
 - [scene lookups & raycast](#scene-lookups--raycast) — 18
@@ -1047,6 +1047,10 @@ How far the world under this node was carried since the last pass, as a vec3 in 
 ### `node.castShadow`
 
 Whether the node casts sun shadows (read/write, default true) — the Inspector's casts-shadows checkbox. A body or collider's stand-in in the shadow march, or a mesh's baked shadow volume. Turn it off for bodies that are dormant or far away: the march takes the 32 casters nearest the camera, so a crowd of idle ones spends nothing once they are out of it.
+
+### `node.contactForce`
+
+How hard the surfaces the body touches pushed back on it over the last physics step, as a force (read-only): mass units times m/s², so kilonewtons with masses in tonnes. A body at rest reads its weight, a landing reads its impact while it lasts, and a wheel joint's wheel reads the load its tyre carries; 0 off the ground, in the tick it leaves. With node.grounded and node.groundNormal it is what traction control, ABS, skid sounds and a load meter want, instead of guessing a skipping tyre from its suspension's stroke. An assembly's root reads 0: its wheels, bodies of their own, read their own.
 
 ### `node.dropThrough`
 

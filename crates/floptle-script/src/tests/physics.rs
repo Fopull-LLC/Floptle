@@ -307,6 +307,23 @@ fn script_reads_grounded_and_writes_velocity() {
     assert_eq!(changes.get(&e.index()).copied().unwrap()[0], 5.0);
 }
 
+/// `node.contactForce` reads the body's ground load the driver reported.
+#[test]
+fn node_contact_force_reads_the_bodys_load() {
+    let dir = std::env::temp_dir().join(format!("floptle_body_load_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    write_script(&dir, "loadmeter", "function update(node, dt)\n  node.x = node.contactForce\nend\n");
+    let (mut world, e) = world_with_script("loadmeter");
+    let mut host = ScriptHost::new();
+    let mut bodies = HashMap::new();
+    bodies.insert(e.index(), BodyState { grounded: true, contact_force: 2.5, ..Default::default() });
+    host.set_bodies(bodies);
+    host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+    assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 2.5);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `node.asleep` reads the solver's state and a write queues for the driver,
 /// reading back at once.
 #[test]

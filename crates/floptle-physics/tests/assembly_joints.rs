@@ -1706,3 +1706,70 @@ fn an_impact_says_what_was_hit_at_the_speed_it_was_hit() {
     assert!(worst <= 2.1, "a 2 m/s walk read as a {worst:.2} m/s impact");
     assert!(hits.iter().all(|p| *p == floptle_physics::ImpactPeer::Node(walker)), "an impact named something else: {hits:?}");
 }
+
+/// **A wheel says what load its tyre carries.** A game reading traction,
+/// sounds or a load meter from a wheel joint inferred a skipping tyre from
+/// its suspension's stroke and a ray at the ground, a tick late and wrong on
+/// a chunk seam. Each body reports how hard its ground pushes back, as a
+/// force: a parked bike's two tyres carry its whole weight between them,
+/// and a tyre off the ground carries nothing in the tick it leaves.
+#[test]
+fn a_wheel_says_what_load_its_tyre_carries() {
+    let aft = |deg: f32| [-deg.to_radians().sin(), deg.to_radians().cos(), 0.0];
+    let wheels = [
+        BikeWheel { dx: 1.098, axis: aft(24.0), rate: 31.7, bump: 2.6, rebound: 2.6, ..Default::default() },
+        BikeWheel { dx: -0.471, axis: aft(15.0), rate: 70.3, bump: 4.7, rebound: 4.7, ..Default::default() },
+    ];
+    let (mass, cg, radius, tyre) = (0.365f32, 0.513f64, 0.33f32, 0.03f32);
+    let mut ecs = World::default();
+    let floor = ecs.spawn();
+    ecs.insert(floor, Transform::from_translation(DVec3::new(0.0, -1.0, 0.0)));
+    ecs.insert(floor, RigidBody { kind: BodyKind::Box, mode: BodyMode::Static, half_extents: [50.0, 1.0, 50.0], friction: 0.9, ..Default::default() });
+    let r = radius as f64 + 0.01;
+    let chassis = segment(&mut ecs, "Chassis", DVec3::new(0.0, r + cg, 0.0), [0.6, 0.1, 0.3], mass);
+    let mut ids = Vec::new();
+    for w in &wheels {
+        let e = ecs.spawn();
+        ecs.insert(e, Transform::from_translation(DVec3::new(w.dx, r, 0.0)));
+        ecs.insert(e, RigidBody { radius, mass: tyre, friction: 0.9, rotates: true, ..Default::default() });
+        ecs.insert(
+            e,
+            Joint { kind: JointKind::Wheel, other: "Chassis".into(), axis: w.axis, spring_rate: w.rate, damper_bump: w.bump, damper_rebound: w.rebound, ..Default::default() },
+        );
+        ids.push(e);
+    }
+    let g = 9.81f32;
+    let mut sim = Sim::build_layered(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -g, 0.0)), DVec3::ZERO, floptle_core::Layers::default());
+    sim.world.single_wheel_friction = true;
+    let loads = |sim: &Sim| -> Vec<(f32, bool)> {
+        ids.iter().map(|e| sim.body_states().find(|b| b.entity == *e).map(|b| (b.contact_force, b.grounded)).unwrap()).collect()
+    };
+    for _ in 0..(2.0 / DT) as usize {
+        sim.step_tick(DT, None);
+    }
+    // Parked: the two loads are the whole weight, frame and tyres.
+    let parked = loads(&sim);
+    let weight = (mass + 2.0 * tyre) * g;
+    let sum: f32 = parked.iter().map(|l| l.0).sum();
+    assert!(parked.iter().all(|l| l.1), "the fixture: the bike is not standing on both tyres: {parked:?}");
+    assert!((sum - weight).abs() < weight * 0.03, "a parked bike's tyres carry {sum:.3} between them, its weight is {weight:.3}: {parked:?}");
+    assert!(parked.iter().all(|l| l.0 > weight * 0.15), "a tyre of a parked bike carries almost nothing: {parked:?}");
+    // Thrown up: the tick a tyre leaves, it carries nothing.
+    sim.set_compound_velocity(chassis.index(), Vec3::new(0.0, 4.0, 0.0));
+    for &e in &ids {
+        let mut s = sim.body_snapshot(e.index()).unwrap();
+        s.vel = Vec3::new(0.0, 4.0, 0.0);
+        sim.restore_body(e.index(), &s);
+    }
+    let mut left = 0;
+    for _ in 0..20 {
+        sim.step_tick(DT, None);
+        for (load, grounded) in loads(&sim) {
+            if !grounded {
+                left += 1;
+                assert!(load == 0.0, "a tyre off the ground carries {load:.4}");
+            }
+        }
+    }
+    assert!(left > 0, "the fixture: no tyre left the ground");
+}
