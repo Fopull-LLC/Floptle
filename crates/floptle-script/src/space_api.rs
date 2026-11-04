@@ -173,7 +173,14 @@ pub(crate) fn install_space_api(
                     let b = &info.bodies[i];
                     let to = DVec3::from(b.pos) - p;
                     let r2 = to.length_squared().max(1e-9);
-                    let g = to / r2.sqrt() * (b.mu / r2);
+                    let r = r2.sqrt();
+                    // Below the body's radius the pull falls off as the
+                    // physics has it (`GravitySource::InvSq`: µ·r/R³), so
+                    // this is what a body there weighs. µ/r² read 10% heavy
+                    // on ground a few percent inside the radius, and a parked
+                    // bike's tyre loads looked 10% short of it.
+                    let g = if b.radius > 0.0 && r < b.radius { b.mu * r / (b.radius * b.radius * b.radius) } else { b.mu / r2 };
+                    let g = to / r * g;
                     Ok((g.x, g.y, g.z))
                 }
                 None => Ok((0.0, 0.0, 0.0)),
@@ -323,6 +330,28 @@ mod tests {
         let lo = a.iter().filter(|r| r.0 < 6500.0).count();
         assert!(lo > 60 && lo < 140, "{lo} of 200 in the inner half");
         assert!(lua.load("return space.beltOrbits{ count = 3, aMin = 10, aMax = 20, spread = 1 }").eval::<mlua::Value>().is_err());
+    }
+
+    /// What `space.gravity` says pulls at a point is what the physics pulls a
+    /// body there with, above the body's radius and below it, where the
+    /// physics' pull falls off toward the centre.
+    #[test]
+    fn space_gravity_is_the_pull_bodies_feel() {
+        let info = Rc::new(RefCell::new(SpaceInfo::default()));
+        let lua = Lua::new();
+        install_space_api(&lua, info.clone(), Rc::new(RefCell::new(None)));
+        let (mu, radius) = (7.78e6f64, 922.193f64);
+        info.borrow_mut().bodies.push(SpaceBodyInfo { name: "Home".into(), pos: [0.0; 3], vel: [0.0; 3], mu, radius, soi: f64::INFINITY });
+        let field = floptle_physics::GravityField {
+            sources: vec![floptle_physics::GravitySource::InvSq { center: floptle_core::math::Vec3::ZERO, mu: mu as f32, soi: 0.0, body_r: radius as f32 }],
+        };
+        for r in [1500.0f64, 922.5, 893.295, 400.0] {
+            let p = DVec3::new(0.3, 0.8, -0.5).normalize() * r;
+            let (gx, gy, gz): (f64, f64, f64) = lua.load(format!("return space.gravity({}, {}, {})", p.x, p.y, p.z)).eval().unwrap();
+            let felt = field.accel_at(p.as_vec3(), &[]).as_dvec3();
+            let said = DVec3::new(gx, gy, gz);
+            assert!((said - felt).length() < felt.length() * 1e-4, "at r {r}: space.gravity says {said:?}, a body there is pulled by {felt:?}");
+        }
     }
 
     #[test]

@@ -3875,7 +3875,7 @@ space.elements(x,y,z, vx,vy,vz) — the orbit a craft is ON around its dominant 
 
 ### `space.gravity`
 
-space.gravity(x, y, z) — gx, gy, gz: the µ/r² pull of the dominant body at a world position (patched conics: exactly one body pulls).
+space.gravity(x, y, z) — gx, gy, gz: the pull of the dominant body at a world position, the one physics bodies there feel (patched conics: exactly one body pulls). µ/r² above the body's radius; below it the pull falls off as µ·r/R³, to zero at the centre, so ground a little inside the radius weighs a little less than µ/R².
 
 ### `space.propagate`
 

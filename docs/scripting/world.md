@@ -894,7 +894,7 @@ space.warp(50)                      -- rails fast-forward 50×; physics stays 1�
 
 local moon = space.body("Pebble")   -- {name, x,y,z, vx,vy,vz, mu, radius, soi}
 print(space.dominant(node.x, node.y, node.z))   -- who owns me here?
-local gx, gy, gz = space.gravity(node.x, node.y, node.z)
+local gx, gy, gz = space.gravity(node.x, node.y, node.z)   -- what a body here weighs (inside `radius`: µ·r/R³)
 
 -- The conic your ship is ON around its dominant body (HUD / map readout):
 local o = space.elements(node.x, node.y, node.z, node.vx, node.vy, node.vz)
