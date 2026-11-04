@@ -210,6 +210,11 @@ pub struct Body {
     /// joint's real-unit spring): what its spring would carry it in a step if
     /// the ground fell away under it. Zero for everything else.
     pub hold: Vec3,
+    /// Spring push a held wheel was given as speed (see `hold`) that its
+    /// `pressed` had already counted as load the step before: the contacts
+    /// that take that speed back pay this off first, so a tyre's load is
+    /// not counted twice. Zero for everything else.
+    pub owed_load: f32,
     /// A wheel joint's wheel while `PhysicsWorld::single_wheel_friction` is
     /// on: its contacts take no friction of their own, its tyre grip does.
     pub tyre: bool,
@@ -373,6 +378,7 @@ impl Body {
             ground_normal: None,
             pressed: 0.0,
             hold: Vec3::ZERO,
+            owed_load: 0.0,
             tyre: false,
             surface_grip: 1.0,
             wall_normal: None,

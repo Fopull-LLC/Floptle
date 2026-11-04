@@ -3603,7 +3603,9 @@ impl PhysicsWorld {
         // leaving. Back on the ground, the contact takes what of the push
         // runs into it.
         if hold.length_squared() > 1e-10 && !self.bodies[bi].grounded {
-            self.bodies[bi].vel += hold / dt;
+            let b = &mut self.bodies[bi];
+            b.vel += hold / dt;
+            b.owed_load += b.mass * hold.length() / dt;
             self.march_flat(bi, hold);
             self.rigid_contacts(bi, row);
             // A tyre pressed into the ground gives a little, so the ground
@@ -3618,6 +3620,16 @@ impl PhysicsWorld {
                     self.rigid_contacts(bi, row);
                 }
             }
+        }
+        // What the contacts take of that speed back, now or when the tyre
+        // lands, is the push the step it was given already counted as the
+        // tyre's load, not more of it: read twice, a tyre over ripple
+        // reported up to a third more load than the bike weighs.
+        {
+            let b = &mut self.bodies[bi];
+            let paid = b.owed_load.min(b.pressed);
+            b.pressed -= paid;
+            b.owed_load -= paid;
         }
         let b = &mut self.bodies[bi];
         for i in 0..3 {
