@@ -1547,9 +1547,10 @@ fn a_real_unit_suspension_holds_a_heavy_frame_on_light_wheels() {
 
 /// A bike of [`landing`]'s build rolling free at `speed` m/s along a strip of
 /// ripple: tilted 0.5 m boards end to end, every join anywhere within a
-/// centimetre of level. The ticks a tyre was off the ground, past its first
-/// second.
-fn ripple_lift_offs(wheels: &[BikeWheel], speed: f32) -> usize {
+/// centimetre of level. Past its first second: the ticks a tyre was off the
+/// ground, and the mean speed (m/s) a tyre on the ground moved away from the
+/// board under it.
+fn ripple_lift_offs(wheels: &[BikeWheel], speed: f32) -> (usize, f32) {
     let (mass, cg, radius, tyre) = (0.365f32, 0.513f64, 0.33f32, 0.03f32);
     let mut ecs = World::default();
     let floor = ecs.spawn();
@@ -1564,9 +1565,11 @@ fn ripple_lift_offs(wheels: &[BikeWheel], speed: f32) -> usize {
         (seed % 2001) as f64 / 1000.0 * 0.01 - 0.01
     };
     let (len, mut x, mut h) = (0.5f64, -2.0f64, 0.0f64);
+    let mut tilts = Vec::new();
     for _ in 0..150 {
         let next = height();
         let tilt = ((next - h) / len).atan();
+        tilts.push(tilt as f32);
         // The board's top face runs from (x, h) to (x + len, next).
         let (mid, up) = (DVec3::new(x + len * 0.5, (h + next) * 0.5, 0.0), DVec3::new(-tilt.sin(), tilt.cos(), 0.0));
         let board = ecs.spawn();
@@ -1607,14 +1610,23 @@ fn ripple_lift_offs(wheels: &[BikeWheel], speed: f32) -> usize {
         sim.restore_body(e.index(), &s);
     }
     let ticks = ((50.0 / speed) / DT) as usize;
-    let mut off = 0;
+    let (mut off, mut away, mut down) = (0, 0.0f32, 0);
     for k in 0..ticks {
         sim.step_tick(DT, None);
-        if k as f32 * DT > 1.0 && !ids.iter().all(|e| sim.body_snapshot(e.index()).unwrap().grounded) {
+        if k as f32 * DT <= 1.0 {
+            continue;
+        }
+        let tyres: Vec<_> = ids.iter().map(|e| sim.body_snapshot(e.index()).unwrap()).collect();
+        if !tyres.iter().all(|t| t.grounded) {
             off += 1;
         }
+        for t in tyres.iter().filter(|t| t.grounded) {
+            let tilt = tilts[((t.pos.x + 2.0) / len).floor().clamp(0.0, 149.0) as usize];
+            away += t.vel.dot(Vec3::new(-tilt.sin(), tilt.cos(), 0.0)).max(0.0);
+            down += 1;
+        }
     }
-    off
+    (off, away / down.max(1) as f32)
 }
 
 /// **A held wheel follows ripple.** A wheel on a real-unit spring is held
@@ -1627,9 +1639,16 @@ fn ripple_lift_offs(wheels: &[BikeWheel], speed: f32) -> usize {
 /// away a few millimetres under it over a crest leaves it on the ground: a
 /// rigid tyre cleared every kink where two boards meet for a tick, and the
 /// count climbed with speed (31 ticks of 140 at 15 m/s, 38 of 90 at 20, 33
-/// of 48 at 28), its grip gone each time; Solar's bike fell at 24 m/s. What
-/// is left at 20 m/s and more is a tyre off a crest steeper than it can
-/// follow, for a tick at a time.
+/// of 48 at 28), its grip gone each time; Solar's bike fell at 24 m/s.
+///
+/// A tyre kept on the ground is not leaving it: given the spring's push as
+/// speed where the ground did not take it, a grounded tyre moves off the
+/// board under it at a few centimetres a second at 12-15 m/s. Kept on but
+/// left the speed it climbed the last board with, it rode its own ground
+/// contact away at a quarter of a metre a second at 20 m/s, gripping on a
+/// ground it was leaving, and the same bike on the strip rolled over at
+/// 16 m/s. What is left at 20 m/s and more is a tyre off a crest steeper
+/// than it can follow, for a tick at a time.
 #[test]
 fn a_held_wheel_follows_ripple() {
     let aft = |deg: f32| [-deg.to_radians().sin(), deg.to_radians().cos(), 0.0];
@@ -1637,9 +1656,10 @@ fn a_held_wheel_follows_ripple() {
         BikeWheel { dx: 1.098, axis: aft(24.0), rate: 31.7, bump: 2.6, rebound: 2.6, ..Default::default() },
         BikeWheel { dx: -0.471, axis: aft(15.0), rate: 70.3, bump: 4.7, rebound: 4.7, ..Default::default() },
     ];
-    for (speed, most) in [(8.0f32, 1), (12.0, 3), (15.0, 6), (20.0, 12), (24.0, 22), (28.0, 18)] {
-        let off = ripple_lift_offs(&real, speed);
+    for (speed, most, leaving) in [(8.0f32, 1, 0.015), (12.0, 3, 0.04), (15.0, 6, 0.07), (20.0, 12, 0.15), (24.0, 22, 0.25), (28.0, 18, 0.3)] {
+        let (off, away) = ripple_lift_offs(&real, speed);
         assert!(off <= most, "at {speed} m/s a held tyre was off the ground {off} ticks (at most {most})");
+        assert!(away <= leaving, "at {speed} m/s a tyre on the ground was leaving it at {away:.3} m/s (at most {leaving})");
     }
 }
 

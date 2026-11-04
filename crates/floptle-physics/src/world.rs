@@ -3588,7 +3588,16 @@ impl PhysicsWorld {
         // it, or over a crest its own speed carried it off again; on its own
         // and not in the move, or a move mostly along the ground marched past
         // the ground as a surface it was not heading into.
+        //
+        // And it takes the spring's push as speed, which went only to the
+        // frame while the ground was there to take it back: moved and not
+        // sped, a tyre over a crest kept the speed it climbed the last rise
+        // with, and put back on the ground below (or kept on it by its
+        // carcass) went on moving away from it, gripping on a ground it was
+        // leaving. Back on the ground, the contact takes what of the push
+        // runs into it.
         if hold.length_squared() > 1e-10 && !self.bodies[bi].grounded {
+            self.bodies[bi].vel += hold / dt;
             self.march_flat(bi, hold);
             self.rigid_contacts(bi, row);
             // A tyre pressed into the ground gives a little, so the ground
