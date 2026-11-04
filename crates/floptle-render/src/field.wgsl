@@ -2298,11 +2298,33 @@ fn contact_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>, pix: vec2<u32>) -> f32 
     let reach = max(G.contact.y, 1e-3);
     let steps = u32(clamp(G.contact.z, 2.0, 32.0));
     let dt = reach / f32(steps);
-    // Start off the surface, or every pixel shadows itself. A FIXED lift, not one
-    // scaled by the reach: tie it to the reach and turning the reach up lifts the
-    // ray's start over the very thing it was meant to find, so the knob stops
-    // being monotonic — a longer trace finds LESS.
-    let bias = 0.02;
+    // Start off the surface, or every pixel shadows itself. Not scaled by the
+    // reach: tie it to the reach and turning the reach up lifts the ray's
+    // start over the very thing it was meant to find, so the knob stops being
+    // monotonic — a longer trace finds LESS.
+    //
+    // At least what one depth texel spans in the world here, across the view
+    // ray: the surface is read back from the depth buffer a texel at a time,
+    // and on sloping ground the step from one texel to the next is more than
+    // a fixed 2 cm. Terrain shadowed itself in a speckle that flipped as each
+    // step crossed into the next texel, which the slightest drift of the
+    // camera made it do every frame (a millimetre a frame changed 2 % of the
+    // shading of a landscape). A real occluder stands far more than a texel
+    // off the surface, so its shadow is unchanged.
+    let fdims0 = vec2<f32>(dims);
+    let ray = normalize(p);
+    var side = cross(ray, vec3<f32>(0.0, 1.0, 0.0));
+    if (dot(side, side) < 1e-6) {
+        side = cross(ray, vec3<f32>(1.0, 0.0, 0.0));
+    }
+    side = normalize(side);
+    let s0 = G.view_proj * vec4<f32>(p, 1.0);
+    let s1 = G.view_proj * vec4<f32>(p + side, 1.0);
+    var texel_world = 0.0;
+    if (s0.w > 1e-4 && s1.w > 1e-4) {
+        texel_world = 1.0 / max(length((s1.xy / s1.w - s0.xy / s0.w) * 0.5 * fdims0), 1e-3);
+    }
+    let bias = max(0.02, texel_world);
     let ro = p + n * bias;
     // How far behind a visible surface still counts as "inside it".
     //
