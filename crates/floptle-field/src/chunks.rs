@@ -2825,10 +2825,34 @@ impl ChunkField {
             let p = ro + rd * t;
             let d = self.d(p);
             if d < eps {
-                // Bisect back onto the isosurface: the last step overshot into solid, so
-                // the crossing is bracketed and a few halvings land within a fraction of
-                // a voxel.
+                // Bracket the crossing, then bisect onto it. A step that overshot
+                // into solid has its bracket behind it. One that stopped just short,
+                // within `eps` but still outside, has not crossed yet: bisecting a
+                // bracket whose far end was outside never moved that end, and the
+                // hit came back up to `eps` short of the surface. That is 2.5 cm at
+                // half-metre voxels, so flattened ground read 2-4 cm proud of where
+                // it lay, pass after pass. So the crossing is first found ahead, in
+                // small steps; a ray that grazes the surface without crossing it
+                // marches on.
                 let (mut a, mut b) = (t - self.voxel.max(d.abs()), t);
+                if d >= 0.0 {
+                    let step = self.voxel * 0.05;
+                    let mut ahead = t;
+                    let mut crossed = false;
+                    for _ in 0..40 {
+                        a = ahead;
+                        ahead += step;
+                        if self.d(ro + rd * ahead) < 0.0 {
+                            crossed = true;
+                            break;
+                        }
+                    }
+                    if !crossed {
+                        t = ahead;
+                        continue;
+                    }
+                    b = ahead;
+                }
                 for _ in 0..24 {
                     let m = 0.5 * (a + b);
                     if self.d(ro + rd * m) < 0.0 {
@@ -4012,6 +4036,41 @@ mod tests {
     /// `fill_slab` was writing a plane clipped to a box, so the slab's rim jumped from
     /// -band to +band across one voxel (worst 4.36, 4.9% bad) — before any brush ran. A
     /// real box SDF took that to 1.04 / 0.0%. Keep it: it tells you which path regressed.
+    /// **Flattened ground reads flat.** Flatten strokes along a strip, the
+    /// plane tilted against the grid the way a planet's up is and up to
+    /// 1.6 m under the natural ground, leave the surface on the plane, and a
+    /// raycast reads it there. The raycast used to stop within 5% of a voxel
+    /// short of the surface and report that point: 2.5 cm proud at
+    /// half-metre voxels, so Solar's levelled strip read 2-4 cm off at the
+    /// same points pass after pass, however many more strokes went in.
+    #[test]
+    fn flattened_ground_reads_flat() {
+        let voxel = 0.5f32;
+        let mut f = ChunkField::new(voxel);
+        f.fill_slab(Vec3::new(-10.0, -30.0, -10.0), Vec3::new(60.0, 10.0, 10.0), 0.0, [0.4, 0.6, 0.3]);
+        let n = Vec3::new(0.08, 1.0, 0.012).normalize();
+        let p0 = Vec3::new(0.0, -0.2, 0.0);
+        let on = |x: f32, z: f32| {
+            let q = Vec3::new(x, 0.0, z);
+            q - n * (q - p0).dot(n)
+        };
+        for row in [-1.4f32, 0.0, 1.4] {
+            let mut x = 0.0;
+            while x <= 20.0 {
+                f.flatten_to_plane(on(x, row), n, 1.9, 1.0, BrushProfile::default());
+                x += 0.9;
+            }
+        }
+        let worst = (0..40)
+            .map(|i| {
+                let q = on(i as f32 * 0.45, 0.0);
+                let hit = f.raycast(q + n * 5.0, -n, 20.0).expect("the strip has ground");
+                (hit - p0).dot(n).abs()
+            })
+            .fold(0.0f32, f32::max);
+        assert!(worst < 0.01, "flattened ground reads {:.1} cm off its plane", worst * 100.0);
+    }
+
     #[test]
     fn lipschitz_by_write_path() {
         let mut f = ChunkField::new(1.5);
