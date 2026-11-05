@@ -263,6 +263,9 @@ impl Editor {
             crate::worker::spawn("terrain-palette", move || {
                 #[cfg(test)]
                 crate::terrain_edit::made_on("palette");
+                // A slot's maps are sized the way its colour is: a pixel-art
+                // slot's bumps stay one texel each.
+                let nearest: Vec<bool> = slots.iter().map(|s| s.as_ref().is_some_and(|(_, n)| *n)).collect();
                 let layers: Vec<floptle_render::TextureData> = slots
                     .into_iter()
                     .map(|slot| {
@@ -275,14 +278,15 @@ impl Editor {
                     })
                     .collect();
                 let means = layers.iter().map(crate::terrain_edit::layer_mean).collect();
-                let read = |f: &Option<std::path::PathBuf>| {
-                    f.as_ref().and_then(|f| floptle_assets::load_texture_sized_filtered(f, size, size, false))
+                let read = |f: &Option<std::path::PathBuf>, pixel: bool| {
+                    f.as_ref().and_then(|f| floptle_assets::load_texture_sized_filtered(f, size, size, pixel))
                 };
                 let (mut normals, mut orms, mut heights) = (Vec::new(), Vec::new(), Vec::new());
-                for [n, o, h] in &maps {
-                    normals.push(read(n));
-                    orms.push(read(o));
-                    heights.push(read(h));
+                for (i, [n, o, h]) in maps.iter().enumerate() {
+                    let pixel = nearest.get(i).copied().unwrap_or(false);
+                    normals.push(read(n, pixel));
+                    orms.push(read(o, pixel));
+                    heights.push(read(h, pixel));
                 }
                 // The mips, here rather than on the frame.
                 let palette = floptle_render::TerrainPalette::from_layers(layers, size).with_surfaces(normals, orms, heights);
@@ -1190,6 +1194,23 @@ mod shadow_atlas_tests {
         (w, h): (u32, u32),
         suns: &[([f32; 3], f32)],
     ) -> Vec<Vec<u8>> {
+        terrain_photos_filtered(tag, colour, normal, orm, antitile, crate::assets::FilterMode::SmoothMipmaps, height, (w, h), suns)
+    }
+
+    /// [`terrain_photos`] with the slot's colour sampled by `filter`.
+    #[cfg(feature = "editor-ui")]
+    #[allow(clippy::too_many_arguments)]
+    fn terrain_photos_filtered(
+        tag: &str,
+        colour: floptle_render::TextureData,
+        normal: Option<floptle_render::TextureData>,
+        orm: Option<floptle_render::TextureData>,
+        antitile: f32,
+        filter: crate::assets::FilterMode,
+        height: f64,
+        (w, h): (u32, u32),
+        suns: &[([f32; 3], f32)],
+    ) -> Vec<Vec<u8>> {
         let Some(mut ed) = crate::offscreen::test_editor_with_gpu() else { return Vec::new() };
         let dir = std::env::temp_dir().join(format!("floptle_surface_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1210,10 +1231,7 @@ mod shadow_atlas_tests {
         ed.terrain_textures = vec![colour.clone()];
         ed.terrain_tex_maps = vec![maps];
         ed.terrain_tex_tile = vec![[antitile, 0.0, 0.0]];
-        ed.texture_settings.insert(
-            colour,
-            crate::assets::TexSetting { filter: crate::assets::FilterMode::SmoothMipmaps, ..Default::default() },
-        );
+        ed.texture_settings.insert(colour, crate::assets::TexSetting { filter, ..Default::default() });
         land_palette(&mut ed);
         let field = floptle_field::procgen::generate_planet(&floptle_field::procgen::PlanetFill {
             seed: 3,
@@ -1409,6 +1427,67 @@ mod shadow_atlas_tests {
         // The camera looks down with +x to the right of the picture.
         assert!(p > 0.8 && pa > 0.7, "the fixture: one sun should light every plain bump from +x (agreement {p:.2}, along +x {pa:.2})");
         assert!(x > 0.8 && xa > 0.7, "hex tiling lit each hexagon's bumps from a side of its own: agreement {x:.2}, along +x {xa:.2}, over {xn} bumps");
+    }
+
+    /// **A pixel-art slot's normal map is as crisp as its pixels.** Its
+    /// colour reads the nearest texel; its normal and ORM maps were read
+    /// smoothly whatever the slot was, so each pixel's bump melted into the
+    /// next. The fixture is a normal map tilting each texel the opposite way
+    /// to its neighbours, seen close enough that a texel spans many pixels:
+    /// read nearest, the light steps from texel to texel; read smoothly, it
+    /// ramps. Twice: a small map, which the palette enlarges to its layer
+    /// size (enlarged smoothly, each step was a ramp before any sampler read
+    /// it), and a map at the layer size seen from 15 cm, where one
+    /// texel spans many pixels and the sampler alone decides.
+    #[cfg(feature = "editor-ui")]
+    #[test]
+    fn a_pixel_art_slots_normal_map_is_as_crisp_as_its_pixels() {
+        let checker = |side: u32| {
+            let mut normal = Vec::new();
+            for y in 0..side {
+                for x in 0..side {
+                    let t: u8 = if (x + y) % 2 == 0 { 218 } else { 38 };
+                    normal.extend_from_slice(&[t, 128, 218, 255]);
+                }
+            }
+            floptle_render::TextureData { pixels: normal, width: side, height: side }
+        };
+        let grey = |side: u32| floptle_render::TextureData { pixels: [180u8, 180, 180, 255].repeat((side * side) as usize), width: side, height: side };
+        let sun = [(sun_from(1.0, 0.0), 1.0)];
+        let (w, h) = (320u32, 240u32);
+        for (side, height) in [(8u32, 6.0f64), (256, 0.15)] {
+        let shoot = |tag: &str, filter| {
+            terrain_photos_filtered(&format!("{tag}{side}"), grey(side), Some(checker(side)), None, 0.0, filter, height, (w, h), &sun)
+        };
+        let crisp = shoot("pixelnormal", crate::assets::FilterMode::Pixelated);
+        if crisp.is_empty() {
+            return;
+        }
+        let soft = shoot("smoothnormal", crate::assets::FilterMode::Smooth);
+        // How many sharp edges the light has along the middle rows: single-
+        // pixel steps across at least half the row's range, per row. A texel
+        // edge read nearest is one such step, so a row crossing a dozen
+        // texels has about a dozen; read smoothly, an edge is a ramp of small
+        // steps and none counts. (A chunk seam may add one.)
+        let steps = |px: &[u8]| -> f32 {
+            let l = |x: u32, y: u32| {
+                let i = ((y * w + x) * 4) as usize;
+                px[i] as f32 * 0.3 + px[i + 1] as f32 * 0.59 + px[i + 2] as f32 * 0.11
+            };
+            let rows: Vec<f32> = (100..140)
+                .step_by(4)
+                .map(|y| {
+                    let row: Vec<f32> = (40..w - 40).map(|x| l(x, y)).collect();
+                    let range = row.iter().copied().fold(f32::MIN, f32::max) - row.iter().copied().fold(f32::MAX, f32::min);
+                    row.windows(2).filter(|p| (p[1] - p[0]).abs() > range * 0.5).count() as f32
+                })
+                .collect();
+            rows.iter().sum::<f32>() / rows.len() as f32
+        };
+        let (c, s) = (steps(&crisp[0]), steps(&soft[0]));
+        assert!(s < 2.5, "the fixture ({side} texels): a smoothly read map should ramp between texels, {s:.1} sharp edges a row");
+        assert!(c > 6.0, "a pixel-art slot's {side}-texel normal map was read smoothly: {c:.1} sharp edges a row (smooth slot {s:.1})");
+        }
     }
 
     /// **A slot's ORM map shades it.** Its occlusion darkens the light from

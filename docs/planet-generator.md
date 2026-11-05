@@ -129,7 +129,7 @@ textures/rock.png|scale=1.5|normal=textures/rock_normal.png|orm=textures/rock_or
 - **orm** is the glTF packing: red is occlusion, green roughness, blue metalness. Occlusion darkens the light from the sky and not the sun's. Roughness and metalness multiply the terrain material's own, so they need the material's shading set to Physical to show.
 - **height** is a greyscale height map. It is loaded with the others and kept for blending slots by height.
 
-Every map follows the slot's scale, its anti-tiling (each hexagon turns its normals with its piece of the picture, so a bump is lit from the same side in every hexagon) and its mipmaps. A slot without maps draws exactly as before and costs nothing; a palette where no slot has any adds no memory at all.
+Every map is filtered the way the slot's colour is: a slot whose texture is set to Pixelated reads its normal and ORM maps texel by texel too, so each pixel is its own crisp facet, and a small map is enlarged to the layer size without smoothing. Every map follows the slot's scale, its anti-tiling (each hexagon turns its normals with its piece of the picture, so a bump is lit from the same side in every hexagon) and its mipmaps. A slot without maps draws exactly as before and costs nothing; a palette where no slot has any adds no memory at all.
 
 A terrain node's own Material now applies in full: its shading model, roughness and metalness reach the ground. Before this they were ignored and terrain always drew with the Classic model.
 

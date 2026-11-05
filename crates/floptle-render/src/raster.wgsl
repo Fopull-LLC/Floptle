@@ -1569,7 +1569,18 @@ struct PalSurface {
     orm: vec4<f32>,
 };
 
-fn pal_surface(uv: vec2<f32>, layer: i32, dx: vec2<f32>, dy: vec2<f32>, amount: f32, has_n: bool, has_o: bool) -> PalSurface {
+// One read of the palette array, through the binding a pixel-art slot
+// reads (nearest, its own copy of the image for OpenGL's one image, one
+// sampler rule) or the smooth one. Every map of a slot reads the way its
+// colour does, so a pixel-art slot's bumps are as crisp as its pixels.
+fn pal_read(nearest: bool, uv: vec2<f32>, layer: i32, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {
+    if (nearest) {
+        return textureSampleGrad(terrain_pal_nearest, terrain_pal_samp_nearest, uv, layer, dx, dy);
+    }
+    return textureSampleGrad(terrain_pal, terrain_pal_samp, uv, layer, dx, dy);
+}
+
+fn pal_surface(uv: vec2<f32>, layer: i32, dx: vec2<f32>, dy: vec2<f32>, amount: f32, has_n: bool, has_o: bool, nearest: bool) -> PalSurface {
     var out: PalSurface;
     out.n = vec3<f32>(0.0, 0.0, 1.0);
     out.orm = vec4<f32>(1.0, 1.0, 1.0, 0.5);
@@ -1579,30 +1590,30 @@ fn pal_surface(uv: vec2<f32>, layer: i32, dx: vec2<f32>, dy: vec2<f32>, amount: 
     let nl = layer + 32;
     let ol = layer + 64;
     if (amount <= 0.0) {
-        out.col = textureSampleGrad(terrain_pal, terrain_pal_samp, uv, layer, dx, dy).rgb;
+        out.col = pal_read(nearest, uv, layer, dx, dy).rgb;
         if (has_n) {
-            out.n = pal_tangent(textureSampleGrad(terrain_pal, terrain_pal_samp, uv, nl, dx, dy));
+            out.n = pal_tangent(pal_read(nearest, uv, nl, dx, dy));
         }
-        out.orm = textureSampleGrad(terrain_pal, terrain_pal_samp, uv, ol, dx, dy);
+        out.orm = pal_read(nearest, uv, ol, dx, dy);
         return out;
     }
     let h = hex_taps(uv, clamp(amount, 0.0, 1.0));
-    let c1 = textureSampleGrad(terrain_pal, terrain_pal_samp, h.uv1, layer, h.r1 * dx, h.r1 * dy);
-    let c2 = textureSampleGrad(terrain_pal, terrain_pal_samp, h.uv2, layer, h.r2 * dx, h.r2 * dy);
-    let c3 = textureSampleGrad(terrain_pal, terrain_pal_samp, h.uv3, layer, h.r3 * dx, h.r3 * dy);
+    let c1 = pal_read(nearest, h.uv1, layer, h.r1 * dx, h.r1 * dy);
+    let c2 = pal_read(nearest, h.uv2, layer, h.r2 * dx, h.r2 * dy);
+    let c3 = pal_read(nearest, h.uv3, layer, h.r3 * dx, h.r3 * dy);
     let ww = hex_weights(c1, c2, c3, h.w);
     out.col = (c1 * ww.x + c2 * ww.y + c3 * ww.z).rgb;
     if (has_n) {
-        let s1 = pal_tangent(textureSampleGrad(terrain_pal, terrain_pal_samp, h.uv1, nl, h.r1 * dx, h.r1 * dy));
-        let s2 = pal_tangent(textureSampleGrad(terrain_pal, terrain_pal_samp, h.uv2, nl, h.r2 * dx, h.r2 * dy));
-        let s3 = pal_tangent(textureSampleGrad(terrain_pal, terrain_pal_samp, h.uv3, nl, h.r3 * dx, h.r3 * dy));
+        let s1 = pal_tangent(pal_read(nearest, h.uv1, nl, h.r1 * dx, h.r1 * dy));
+        let s2 = pal_tangent(pal_read(nearest, h.uv2, nl, h.r2 * dx, h.r2 * dy));
+        let s3 = pal_tangent(pal_read(nearest, h.uv3, nl, h.r3 * dx, h.r3 * dy));
         out.n = vec3<f32>(transpose(h.r1) * s1.xy, s1.z) * ww.x
             + vec3<f32>(transpose(h.r2) * s2.xy, s2.z) * ww.y
             + vec3<f32>(transpose(h.r3) * s3.xy, s3.z) * ww.z;
     }
-    let o1 = textureSampleGrad(terrain_pal, terrain_pal_samp, h.uv1, ol, h.r1 * dx, h.r1 * dy);
-    let o2 = textureSampleGrad(terrain_pal, terrain_pal_samp, h.uv2, ol, h.r2 * dx, h.r2 * dy);
-    let o3 = textureSampleGrad(terrain_pal, terrain_pal_samp, h.uv3, ol, h.r3 * dx, h.r3 * dy);
+    let o1 = pal_read(nearest, h.uv1, ol, h.r1 * dx, h.r1 * dy);
+    let o2 = pal_read(nearest, h.uv2, ol, h.r2 * dx, h.r2 * dy);
+    let o3 = pal_read(nearest, h.uv3, ol, h.r3 * dx, h.r3 * dy);
     out.orm = o1 * ww.x + o2 * ww.y + o3 * ww.z;
     return out;
 }
@@ -1630,8 +1641,8 @@ fn terrain_triplanar(slot: i32, p: vec3<f32>, n: vec3<f32>, dpx_in: vec3<f32>, d
     let mips = tile.w > 0.5;
     let dpx = select(vec3<f32>(0.0), dpx_in, mips);
     let dpy = select(vec3<f32>(0.0), dpy_in, mips);
-    // The slot's surface maps (palette `|normal=`, `|orm=`), filtered
-    // smoothly whatever the slot's colour is. The normal is whiteout-blended
+    // The slot's surface maps (palette `|normal=`, `|orm=`), filtered as
+    // its colour is: smooth, or nearest for pixel art. The normal is whiteout-blended
     // across the three projections: each tangent normal is added to the
     // surface normal's components in its plane.
     let in_range = slot >= 0 && slot < 32;
@@ -1639,9 +1650,9 @@ fn terrain_triplanar(slot: i32, p: vec3<f32>, n: vec3<f32>, dpx_in: vec3<f32>, d
     let has_n = in_range && (g.terrain_bits.z & bit) != 0u;
     let has_o = in_range && (g.terrain_bits.w & bit) != 0u;
     if (has_n || has_o) {
-        let sx = pal_surface(p.zy * scale, slot, dpx.zy * scale, dpy.zy * scale, anti, has_n, has_o);
-        let sy = pal_surface(p.xz * scale, slot, dpx.xz * scale, dpy.xz * scale, anti, has_n, has_o);
-        let sz = pal_surface(p.xy * scale, slot, dpx.xy * scale, dpy.xy * scale, anti, has_n, has_o);
+        let sx = pal_surface(p.zy * scale, slot, dpx.zy * scale, dpy.zy * scale, anti, has_n, has_o, nearest);
+        let sy = pal_surface(p.xz * scale, slot, dpx.xz * scale, dpy.xz * scale, anti, has_n, has_o, nearest);
+        let sz = pal_surface(p.xy * scale, slot, dpx.xy * scale, dpy.xy * scale, anti, has_n, has_o, nearest);
         let nn = normalize(n);
         let tx = vec3<f32>(sx.n.xy + nn.zy, abs(sx.n.z) * nn.x);
         let ty = vec3<f32>(sy.n.xy + nn.xz, abs(sy.n.z) * nn.y);
@@ -1650,9 +1661,7 @@ fn terrain_triplanar(slot: i32, p: vec3<f32>, n: vec3<f32>, dpx_in: vec3<f32>, d
         TS_ORM += (sx.orm * w.x + sy.orm * w.y + sz.orm * w.z) * wt;
         TS_W += wt;
         TS_ANY = true;
-        if (!nearest) {
-            return (sx.col * w.x + sy.col * w.y + sz.col * w.z) * mac;
-        }
+        return (sx.col * w.x + sy.col * w.y + sz.col * w.z) * mac;
     } else {
         terrain_surface_plain(n, wt);
     }

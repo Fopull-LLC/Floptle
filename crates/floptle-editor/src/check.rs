@@ -363,11 +363,56 @@ fn check_absolute_paths(root: &Path, path: &Path, where_: &str, r: &mut Report) 
 /// **A terrain palette naming an image only this machine has.** One `path`
 /// (then `|flags`) per line, not quoted, so [`check_absolute_paths`] cannot
 /// see it.
+/// Whether a palette value is an absolute path on some machine.
+fn palette_value_is_absolute(value: &str) -> bool {
+    value.starts_with('/') || value.starts_with("\\\\") || value.get(1..3) == Some(":\\") || value.get(1..3) == Some(":/")
+}
+
+/// A slot's surface maps after its path (`|normal=`, `|orm=`, `|height=`),
+/// as `(kind, value)`.
+fn palette_maps(line: &str) -> impl Iterator<Item = (&'static str, &str)> {
+    line.split('|').skip(1).filter_map(|flag| {
+        ["normal", "orm", "height"].into_iter().find_map(|k| flag.strip_prefix(k).and_then(|v| v.strip_prefix('=')).map(|v| (k, v)))
+    })
+}
+
 fn check_palette_paths(root: &Path, path: &Path, where_: &str, r: &mut Report) {
     let Ok(text) = std::fs::read_to_string(path) else { return };
     for (i, line) in text.lines().enumerate() {
+        // A slot's surface maps: one outside the project is lost in an
+        // export, and one that is not there draws as no map at all.
+        for (kind, value) in palette_maps(line) {
+            let file = format!("{where_}:{}", i + 1);
+            if palette_value_is_absolute(value) {
+                let rel = floptle_scene::portable::rel_path(value, root);
+                if rel != value.replace('\\', "/") {
+                    r.error(
+                        Some(file),
+                        format!(
+                            "terrain slot {}'s {kind} map is an absolute path ({value}) — an export will not find it. \
+                             It should be \"{rel}\". Fix: floptle check --fix",
+                            i + 1
+                        ),
+                    );
+                } else {
+                    r.error(
+                        Some(file),
+                        format!(
+                            "terrain slot {}'s {kind} map is {value} — outside the project, so an export will not \
+                             include it. Copy it into the project and point at the copy.",
+                            i + 1
+                        ),
+                    );
+                }
+            } else if !value.is_empty() && !floptle_vfs::is_file(root.join(value)) {
+                r.warn(
+                    Some(file),
+                    format!("terrain slot {}'s {kind} map {value} is not in the project, so the slot draws without it.", i + 1),
+                );
+            }
+        }
         let value = line.split('|').next().unwrap_or("");
-        if !(value.starts_with('/') || value.starts_with("\\\\") || value.get(1..3) == Some(":\\") || value.get(1..3) == Some(":/")) {
+        if !palette_value_is_absolute(value) {
             continue;
         }
         let rel = floptle_scene::portable::rel_path(value, root);
@@ -409,16 +454,33 @@ fn fix_absolute_paths(root: &Path) -> Vec<(String, usize)> {
             let lines: Vec<String> = text
                 .lines()
                 .map(|line| {
-                    let (value, flags) = line.split_once('|').map_or((line, None), |(v, f)| (v, Some(f)));
-                    let rel = floptle_scene::portable::rel_path(value, root);
-                    if rel == value {
-                        return line.to_string();
+                    // The slot's path and each surface map's, made relative;
+                    // every other flag kept as it was.
+                    let mut changed = false;
+                    let parts: Vec<String> = line
+                        .split('|')
+                        .enumerate()
+                        .map(|(k, part)| {
+                            let (key, value) = if k == 0 {
+                                ("", part)
+                            } else {
+                                match ["normal=", "orm=", "height="].into_iter().find(|p| part.starts_with(p)) {
+                                    Some(p) => (p, &part[p.len()..]),
+                                    None => return part.to_string(),
+                                }
+                            };
+                            let rel = floptle_scene::portable::rel_path(value, root);
+                            if rel == value {
+                                return part.to_string();
+                            }
+                            changed = true;
+                            format!("{key}{rel}")
+                        })
+                        .collect();
+                    if changed {
+                        n += 1;
                     }
-                    n += 1;
-                    match flags {
-                        Some(f) => format!("{rel}|{f}"),
-                        None => rel,
-                    }
+                    parts.join("|")
                 })
                 .collect();
             (lines.join("\n"), n)
@@ -1177,6 +1239,39 @@ mod tests {
         assert_eq!(fixed, vec![("terrain/first.palette".to_string(), 1)]);
         let text = std::fs::read_to_string(d.join("terrain/first.palette")).unwrap();
         assert_eq!(text, "textures/grass.png|glow\ntextures/rock.png");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **A slot's surface maps are checked like its picture.** One named by
+    /// its absolute path is an error, and the fix makes it relative and keeps
+    /// the other flags; one that is not in the project is a warning, since
+    /// the slot quietly draws without it.
+    #[test]
+    fn a_terrain_slots_maps_are_checked_and_fixed_like_its_picture() {
+        let d = temp("palette-maps");
+        std::fs::create_dir_all(d.join("textures")).unwrap();
+        std::fs::create_dir_all(d.join("terrain")).unwrap();
+        std::fs::write(d.join("scenes/first.ron"), scene("")).unwrap();
+        std::fs::write(d.join("textures/rock.png"), b"png").unwrap();
+        let abs = d.join("textures/rock_n.png");
+        std::fs::write(&abs, b"png").unwrap();
+        std::fs::write(
+            d.join("terrain/first.palette"),
+            format!("textures/rock.png|scale=2|normal={}|orm=textures/gone.png", abs.display()),
+        )
+        .unwrap();
+        let r = examine(&d);
+        let find = |what: &str| r.findings.iter().find(|f| f.message.contains(what)).map(|f| f.message.clone());
+        let normal = find("normal map").unwrap_or_else(|| panic!("no finding for the absolute normal map: {:?}", r.findings));
+        assert!(normal.contains("\"textures/rock_n.png\""), "{normal}");
+        let orm = find("orm map").unwrap_or_else(|| panic!("no finding for the missing ORM map: {:?}", r.findings));
+        assert!(orm.contains("textures/gone.png") && orm.contains("draws without it"), "{orm}");
+        assert_eq!(r.errors(), 1, "{:?}", r.findings);
+
+        let fixed = fix_absolute_paths(&d);
+        assert_eq!(fixed, vec![("terrain/first.palette".to_string(), 1)]);
+        let text = std::fs::read_to_string(d.join("terrain/first.palette")).unwrap();
+        assert_eq!(text, "textures/rock.png|scale=2|normal=textures/rock_n.png|orm=textures/gone.png");
         let _ = std::fs::remove_dir_all(&d);
     }
 
