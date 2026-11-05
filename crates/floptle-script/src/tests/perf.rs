@@ -24,8 +24,8 @@ end\n";
 /// casts 300 spheres from line 6. The frame's record names `grind`:3 as the
 /// hottest line and charges `grind` within 10% of the frame's measured CPU
 /// time less its casts; the casts are charged to the script under `spherecast`, 300 of
-/// them; and the frame is a hitch at the 5 ms threshold the script set,
-/// carrying the same samples.
+/// them, and their line is charged; and the frame is a hitch at the 5 ms
+/// threshold the script set, carrying the same samples.
 ///
 /// Every time here is compared with another measured in the same frame, so a
 /// loaded machine stretches both sides alike.
@@ -69,15 +69,14 @@ fn a_slow_frame_names_its_function_line_and_engine_calls() {
         "grind sampled {grind:.2} ms against {expect:.2} ms measured ({measured:.2} less {:.2} of casts)",
         cast.ms
     );
-    let casts_line: f32 = r.samples.iter().filter(|s| s.func == "casts").map(|s| s.ms).sum();
-    // An engine call never interrupts, so a sample after it carries its whole
-    // time: the casts' line is charged at least the casts themselves.
-    assert!(
-        casts_line >= cast.ms * 0.8,
-        "the casts' line was charged {casts_line:.2} ms of {:.2} ms of casts: {:?}",
-        cast.ms,
-        r.samples
-    );
+    // The line that makes the calls is named and charged. Whether a long call's
+    // whole time lands on it is `sampler.rs`'s own guard, which times the call
+    // in the clock the sampler charges. Here the casts are timed on the wall and
+    // the samples in CPU time, so a moment the OS took the core away mid-sweep
+    // (6.5 ms of wall against 1.4 ms charged, once, in a loaded suite) would
+    // compare two different clocks.
+    let casts_line: f32 = r.samples.iter().filter(|s| s.func == "casts" && s.line == 6).map(|s| s.ms).sum();
+    assert!(casts_line > 0.0, "the casts' line 6 was never charged: {:?}", r.samples);
     let h = prof.take_hitches();
     assert_eq!(h.len(), 1, "the script's 5 ms threshold makes the slow frame a hitch: {h:?}");
     assert_eq!(h[0].samples.first().map(|s| (s.func.as_str(), s.line)), Some(("grind", 3)));
