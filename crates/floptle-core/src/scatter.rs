@@ -224,6 +224,16 @@ pub struct ScatterSource {
     /// one prop every frame costs a map write and re-rolls nothing; an empty
     /// map is one branch per source.
     pub marks: HashMap<InstanceId, Mark>,
+    /// Props `scatter.remove` asked to dissolve out rather than vanish, and
+    /// over how many seconds. They are in [`removed`](Self::removed) like any
+    /// other, so gone for every question a game asks at once; only the picture
+    /// lingers, the draw fading each from the frame it notices it went.
+    pub leaving: HashMap<InstanceId, f32>,
+    /// A source `scatter.destroy` asked to dissolve out: `(seconds left,
+    /// seconds in all)`. It is gone for every question a game asks, rolls and
+    /// settles nothing more, and draws what it already had, fading, until the
+    /// host takes it away when the time runs out. `None` for a live source.
+    pub dying: Option<(f32, f32)>,
 }
 
 /// One prop's look on top of its source's (`scatter.setTint`).
@@ -773,6 +783,8 @@ mod tests {
             look: Default::default(),
             bend: 0.0,
             appear: 0.0,
+            leaving: HashMap::new(),
+            dying: None,
             marks: Default::default(),
         }
     }

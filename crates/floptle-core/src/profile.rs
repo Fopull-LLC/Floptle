@@ -410,6 +410,10 @@ pub struct Counts {
     /// Scatter props submitted this frame. A field can ask for 117,000 of
     /// these, and this is how you see the number.
     pub props: usize,
+    /// …and how many props the frame left out to stay within scatter's draw
+    /// cap: the farthest, across every source. Nonzero means the field is
+    /// being cut, so it cannot be a number nobody can see.
+    pub props_dropped: usize,
     /// Live particles across every effect.
     pub particles: usize,
     /// Live one-shot particle effects — `spawnEffect` instances that have not

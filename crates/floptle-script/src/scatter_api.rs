@@ -438,6 +438,8 @@ pub(crate) fn install_scatter_api(
                 bend: num(&opts, "bend", 0.0).clamp(0.0, 1.0) as f32,
                 // Drawn at once unless the source asks to dissolve in.
                 appear: num(&opts, "appear", 0.0).clamp(0.0, 10.0) as f32,
+                leaving: std::collections::HashMap::new(),
+                dying: None,
                 marks: Default::default(),
             };
             // Say what this costs, here, while the two numbers that decided it
@@ -481,7 +483,7 @@ pub(crate) fn install_scatter_api(
         if let Ok(f) = lua.create_function(move |lua, id: u32| {
             let out = lua.create_table()?;
             let v = s.borrow();
-            let Some(src) = v.iter().find(|s| s.id == id) else { return Ok(out) };
+            let Some(src) = v.iter().find(|s| s.id == id && s.dying.is_none()) else { return Ok(out) };
             let cost = floptle_core::scatter::cost(src);
             out.set("chunks", cost.chunks as mlua::Integer)?;
             out.set("props", cost.props as mlua::Integer)?;
@@ -494,33 +496,50 @@ pub(crate) fn install_scatter_api(
         }
     }
 
-    // scatter.destroy(id) — the whole source goes.
+    // scatter.destroy(id [, { fade = seconds }]) — the whole source goes. With
+    // a fade it is gone for every question at once (near, remove, cost...) and
+    // its props dissolve out over that long before it is taken away.
     {
         let s = sources.clone();
         let own = owners.clone();
-        if let Ok(f) = lua.create_function(move |_, id: u32| {
-            own.borrow_mut().remove(&id);
+        let landed = settled.clone();
+        if let Ok(f) = lua.create_function(move |_, (id, opts): (u32, Option<Table>)| {
+            let fade = opts.as_ref().map_or(0.0, |o| num(o, "fade", 0.0)).clamp(0.0, 10.0) as f32;
             let mut v = s.borrow_mut();
-            let before = v.len();
-            v.retain(|src| src.id != id);
-            Ok(v.len() != before)
+            let Some(i) = v.iter().position(|src| src.id == id && src.dying.is_none()) else { return Ok(false) };
+            own.borrow_mut().remove(&id);
+            landed.borrow_mut().retain(|(src, _), _| *src != id);
+            if fade > 0.0 {
+                v[i].dying = Some((fade, fade));
+            } else {
+                v.remove(i);
+            }
+            Ok(true)
         }) {
             let _ = t.set("destroy", f);
         }
     }
 
-    // scatter.remove(sourceId, instanceId) — one prop, permanently.
+    // scatter.remove(sourceId, instanceId [, { fade = seconds }]) — one prop,
+    // permanently. With a fade the prop is gone for every question at once
+    // and only its picture dissolves out.
     //
     // By id rather than by position, which is what makes it survive a
     // stream-out and back in: an id is derived from (seed, chunk, index), and a
     // position is a float that came from a chain of arithmetic.
     {
         let s = sources.clone();
-        if let Ok(f) = lua.create_function(move |_, (id, inst): (u32, f64)| {
+        if let Ok(f) = lua.create_function(move |_, (id, inst, opts): (u32, f64, Option<Table>)| {
+            let fade = opts.as_ref().map_or(0.0, |o| num(o, "fade", 0.0)).clamp(0.0, 10.0) as f32;
             let mut v = s.borrow_mut();
-            let Some(src) = v.iter_mut().find(|s| s.id == id) else { return Ok(false) };
-            src.marks.remove(&(inst as u64));
-            Ok(src.removed.insert(inst as u64))
+            let Some(src) = v.iter_mut().find(|s| s.id == id && s.dying.is_none()) else { return Ok(false) };
+            let inst = inst as u64;
+            src.marks.remove(&inst);
+            let fresh = src.removed.insert(inst);
+            if fresh && fade > 0.0 {
+                src.leaving.insert(inst, fade);
+            }
+            Ok(fresh)
         }) {
             let _ = t.set("remove", f);
         }
@@ -533,12 +552,16 @@ pub(crate) fn install_scatter_api(
         let s = sources.clone();
         if let Ok(f) = lua.create_function(move |_, (id, inst): (u32, Option<f64>)| {
             let mut v = s.borrow_mut();
-            let Some(src) = v.iter_mut().find(|s| s.id == id) else { return Ok(0u32) };
+            let Some(src) = v.iter_mut().find(|s| s.id == id && s.dying.is_none()) else { return Ok(0u32) };
             match inst {
-                Some(i) => Ok(u32::from(src.removed.remove(&(i as u64)))),
+                Some(i) => {
+                    src.leaving.remove(&(i as u64));
+                    Ok(u32::from(src.removed.remove(&(i as u64))))
+                }
                 None => {
                     let n = src.removed.len() as u32;
                     src.removed.clear();
+                    src.leaving.clear();
                     Ok(n)
                 }
             }
@@ -555,7 +578,7 @@ pub(crate) fn install_scatter_api(
         let s = sources.clone();
         if let Ok(f) = lua.create_function(move |lua, id: u32| {
             let out = lua.create_table()?;
-            if let Some(src) = s.borrow().iter().find(|s| s.id == id) {
+            if let Some(src) = s.borrow().iter().find(|s| s.id == id && s.dying.is_none()) {
                 // Sorted, so the saved list is stable rather than reordering
                 // itself every session and looking like a change.
                 let mut ids: Vec<u64> = src.removed.iter().copied().collect();
@@ -708,7 +731,7 @@ pub(crate) fn install_scatter_api(
                 return Ok((out, if more { Value::Number(cursor as f64) } else { Value::Nil }));
             }
             let vols = s.borrow();
-            let Some(src) = vols.iter().find(|s| s.id == id) else { return Ok((near_result(lua, &[], flat)?, Value::Nil)) };
+            let Some(src) = vols.iter().find(|s| s.id == id && s.dying.is_none()) else { return Ok((near_result(lua, &[], flat)?, Value::Nil)) };
             // The caller asks in world space; the region lives in its anchor's
             // frame. Convert once, query locally, and hand back
             // world positions — a game should never have to know the difference.
@@ -781,7 +804,7 @@ pub(crate) fn install_scatter_api(
         if let Ok(f) = lua.create_function(move |lua, (id, inst): (u32, f64)| {
             let inst = inst as u64;
             let vols = s.borrow();
-            let Some(src) = vols.iter().find(|s| s.id == id) else { return Ok(Value::Nil) };
+            let Some(src) = vols.iter().find(|s| s.id == id && s.dying.is_none()) else { return Ok(Value::Nil) };
             if src.removed.contains(&inst) {
                 return Ok(Value::Nil);
             }
@@ -826,7 +849,7 @@ pub(crate) fn install_scatter_api(
         if let Ok(f) = lua.create_function(move |_, (id, inst, look): (u32, f64, Option<Table>)| {
             const CALL: &str = "scatter.setTint";
             let mut v = s.borrow_mut();
-            let Some(src) = v.iter_mut().find(|s| s.id == id) else { return Ok(false) };
+            let Some(src) = v.iter_mut().find(|s| s.id == id && s.dying.is_none()) else { return Ok(false) };
             let inst = inst as u64;
             let Some(look) = look else {
                 src.marks.remove(&inst);
@@ -863,7 +886,7 @@ pub(crate) fn install_scatter_api(
         let s = sources.clone();
         if let Ok(f) = lua.create_function(move |_, id: u32| {
             let mut v = s.borrow_mut();
-            let Some(src) = v.iter_mut().find(|s| s.id == id) else { return Ok(0u32) };
+            let Some(src) = v.iter_mut().find(|s| s.id == id && s.dying.is_none()) else { return Ok(0u32) };
             let n = src.marks.len() as u32;
             src.marks.clear();
             Ok(n)

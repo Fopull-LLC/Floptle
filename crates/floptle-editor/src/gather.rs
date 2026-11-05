@@ -2348,6 +2348,7 @@ impl Editor {
                 field_edited,
                 field_stand_ins,
                 props: scatter_props,
+                props_dropped: self.scatter_cache.dropped,
                 particles,
                 effects,
                 effects_dropped,

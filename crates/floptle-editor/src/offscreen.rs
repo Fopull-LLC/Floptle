@@ -1114,6 +1114,7 @@ impl Editor {
             ),
             _ => 0,
         };
+        let props_dropped = if opts.scatter_main { self.scatter_cache.dropped } else { self.scatter_side.dropped };
         // In its own bucket, as the window gather records it, and out of the
         // render time around it.
         if scatter_props > 0 {
@@ -1167,6 +1168,7 @@ impl Editor {
                 field_edited,
                 field_stand_ins,
                 props: scatter_props,
+                props_dropped,
                 particles,
                 effects,
                 effects_dropped,

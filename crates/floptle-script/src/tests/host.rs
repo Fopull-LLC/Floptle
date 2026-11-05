@@ -1141,6 +1141,63 @@ fn a_reused_entity_index_gets_its_own_goodbye() {
     assert_eq!(byes(&mut host), vec!["bye Pulley2".to_string()]);
 }
 
+/// **A source destroyed with a fade is gone for the game at once and drawn
+/// until its fade runs out.** `scatter.destroy(id, { fade })` answers true,
+/// and from then on every call that names the source finds nothing (it cannot
+/// be removed from twice, nor destroyed twice), while the source stays in the
+/// draw list, dying, until the host has run past the fade. Without a fade it
+/// goes on the call, as before (0627). A prop removed with a fade is in
+/// `removed` at once, with how long its picture takes to go.
+#[test]
+fn a_scatter_source_destroyed_with_a_fade_goes_for_the_game_at_once() {
+    let dir = std::env::temp_dir().join(format!("floptle_script_test_scatter_fade_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_script(
+        &dir,
+        "flora",
+        "function start(node)\n\
+         \x20 a = scatter.create{ asset = 'rock.glb', perChunk = 2 }\n\
+         \x20 b = scatter.create{ asset = 'tree.glb', perChunk = 2 }\n\
+         \x20 cut = scatter.remove(a, 12345, { fade = 0.4 })\n\
+         \x20 gone = scatter.destroy(a, { fade = 0.5 })\n\
+         \x20 again = scatter.destroy(a)\n\
+         \x20 after = scatter.remove(a, 7)\n\
+         \x20 plain = scatter.destroy(b)\n\
+         end\n",
+    );
+    let mut world = World::default();
+    let e = world.spawn();
+    world.insert(e, Transform::IDENTITY);
+    world.insert(e, Scripts(vec![floptle_core::ScriptInst::new("flora")]));
+    let mut host = ScriptHost::new();
+    host.run(&mut world, &dir, 0.1, 0.0);
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    let env = host.instance_env(e.index(), "flora").unwrap();
+    let g = |name: &str| env.get::<bool>(name).unwrap();
+    assert_eq!(
+        (g("cut"), g("gone"), g("again"), g("after"), g("plain")),
+        (true, true, false, false, true),
+        "cut, destroy with a fade, destroy again, remove after, destroy plain"
+    );
+    {
+        let v = host.scatter_sources();
+        assert_eq!(v.len(), 1, "the plain destroy must go at once and the faded one stay to be drawn");
+        let src = &v[0];
+        assert!(src.dying.is_some(), "the faded source is not marked dying");
+        assert!(src.removed.contains(&12345) && src.leaving.get(&12345) == Some(&0.4), "the faded cut is not recorded");
+    }
+    for _ in 0..3 {
+        host.run(&mut world, &dir, 0.1, 0.1);
+    }
+    assert_eq!(host.scatter_sources().len(), 1, "a source half way through its fade was taken away early");
+    for _ in 0..3 {
+        host.run(&mut world, &dir, 0.1, 0.2);
+    }
+    assert!(host.scatter_sources().is_empty(), "a source past its fade is still in the draw list");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// **A script's scatter field goes with the script.** A source outlives the
 /// call that made it, and nothing knew whose it was: a script that made its
 /// field in `start` and was hot-reloaded while it was tuned drew one more copy

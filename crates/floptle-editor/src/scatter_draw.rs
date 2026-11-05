@@ -41,6 +41,10 @@ pub(crate) struct ResolvedChunk {
     /// source with an `appear` time; a prop leaves once it is whole. Empty
     /// for every other source.
     pub arrived: HashMap<scatter::InstanceId, f64>,
+    /// Props removed with a fade (`scatter.remove(..., { fade })`), still drawn
+    /// while they dissolve out: each with when the draw noticed it went and
+    /// how long it takes. Gone for `near` already; only the picture lingers.
+    pub leaving: Vec<(Instance, f64, f32)>,
 }
 
 /// How far past an edit's reach a prop is dropped onto the ground again: its
@@ -118,6 +122,13 @@ pub(crate) struct ScatterCache {
     /// The props leaning now, by `(source, instance)`: how far, and the build
     /// that last drew them.
     bent: HashMap<(u32, scatter::InstanceId), (Vec3, u64)>,
+    /// Props the last build left out to stay within the draw cap: the
+    /// farthest, across every source (`perf.counts().propsDropped`).
+    pub(crate) dropped: usize,
+    /// Whether the last build stopped gathering before it had looked at every
+    /// prop in range (a field several times over the cap), so `dropped` is a
+    /// floor rather than the count.
+    pub(crate) unexamined: bool,
 }
 
 /// How quickly a bent prop stands back up once nothing presses on it, in
@@ -457,8 +468,8 @@ pub(crate) fn build_instances(
 ) {
     // The budget is scatter's own: `out` arrives holding the frame's meshes,
     // terrain and decals, and counted against the cap they cut a busy
-    // scene's plants short, by whatever else happened to be on screen.
-    let start = out.len();
+    // scene's plants short, by whatever else happened to be on screen. It is
+    // counted below as what the gathered props cost.
     // Disjoint borrows: the sweep list and the resolved chunks are read and
     // written in the same loop.
     let ScatterCache {
@@ -473,6 +484,8 @@ pub(crate) fn build_instances(
         time,
         last_time,
         bent,
+        dropped: last_dropped,
+        unexamined: last_unexamined,
     } = cache;
     let dt = last_time.map_or(0.0, |t| (*time - t).max(0.0)) as f32;
     *last_time = Some(*time);
@@ -501,7 +514,15 @@ pub(crate) fn build_instances(
     // goes, so a field that is never cheap still arrives; every piece after it
     // waits for the budget.
     let mut worked = false;
-    for src in sources {
+    // What each source would draw this frame, gathered before anything is
+    // pushed, so the cap can cut the farthest props across every source
+    // rather than whichever sources came last (see `Cand`). Kept with the
+    // per-source things the push needs again.
+    let mut cands: Vec<Cand> = Vec::new();
+    let mut parts_of: Vec<Vec<Option<Vec<Part>>>> = vec![Vec::new(); sources.len()];
+    let mut cand_cost = 0usize;
+    let mut unexamined = false;
+    for (si, src) in sources.iter().enumerate() {
         let range = src.range();
         if range <= 0.0 || src.bands.is_empty() {
             continue;
@@ -580,6 +601,14 @@ pub(crate) fn build_instances(
                     // in one frame.
                     if chunk.removed_len != src.removed.len() {
                         let shrank = src.removed.len() < chunk.removed_len;
+                        // Asked to dissolve out: drawn a while longer, fading.
+                        if !src.leaving.is_empty() {
+                            for i in chunk.instances.iter().filter(|i| src.removed.contains(&i.id)) {
+                                if let Some(&fade) = src.leaving.get(&i.id) {
+                                    chunk.leaving.push((*i, now, fade));
+                                }
+                            }
+                        }
                         chunk.instances.retain(|i| !src.removed.contains(&i.id));
                         chunk.pending.retain(|i| !src.removed.contains(&i.id));
                         chunk.resettle.retain(|i| !src.removed.contains(&i.id));
@@ -601,7 +630,8 @@ pub(crate) fn build_instances(
                 // every chunk a sweep turned up in the frame it did was most
                 // of a walking frame's spike on a field of small chunks.
                 std::collections::hash_map::Entry::Vacant(e) => {
-                    if !(settle_all || settle_ms <= SETTLE_MS) {
+                    // A source dissolving out rolls nothing more.
+                    if src.dying.is_some() || !(settle_all || settle_ms <= SETTLE_MS) {
                         continue;
                     }
                     let span = floptle_core::profile::Span::new();
@@ -609,14 +639,21 @@ pub(crate) fn build_instances(
                     settle_ms += span.ms();
                     *spent = settle_ms;
                     worked = true;
-                    e.insert(ResolvedChunk { instances: Vec::new(), pending, resettle: Vec::new(), removed_len: src.removed.len(), arrived: HashMap::new() })
+                    e.insert(ResolvedChunk {
+                        instances: Vec::new(),
+                        pending,
+                        resettle: Vec::new(),
+                        removed_len: src.removed.len(),
+                        arrived: HashMap::new(),
+                        leaving: Vec::new(),
+                    })
                 }
             };
             // Within the frame's budget, by count and by time, the first ray
             // included: a ray starts when it is expected to fit. The first
             // settle of a frame used to run whatever it cost, and one slow ray
             // was a frame over budget every frame a field was arriving.
-            while !chunk.pending.is_empty() {
+            while !chunk.pending.is_empty() && src.dying.is_none() {
                 let fits = settled < SETTLE_BUDGET && settle_ms + *ray_ms <= SETTLE_MS;
                 let slow_ok = !worked && *ray_ms > SETTLE_MS && slow_turn;
                 if !(settle_all || fits || slow_ok) {
@@ -655,7 +692,7 @@ pub(crate) fn build_instances(
             }
             // Props an edit may have moved the ground under: each moves to
             // where the ground is now, in place, and stays drawn till then.
-            while !chunk.resettle.is_empty() {
+            while !chunk.resettle.is_empty() && src.dying.is_none() {
                 let fits = settled < SETTLE_BUDGET && settle_ms + *ray_ms <= SETTLE_MS;
                 let slow_ok = !worked && *ray_ms > SETTLE_MS && slow_turn;
                 if !(settle_all || fits || slow_ok) {
@@ -691,144 +728,239 @@ pub(crate) fn build_instances(
                 *spent = settle_ms;
                 *ray_ms = *ray_ms * 0.8 + ms * 0.2;
             }
-            // Whole props stop being remembered as arriving.
+            // Whole props stop being remembered as arriving, and props done
+            // dissolving out stop being drawn.
             if !chunk.arrived.is_empty() {
                 let appear = f64::from(src.appear.max(1e-3));
                 chunk.arrived.retain(|_, t| now - *t < appear);
             }
-            for inst in &chunk.instances {
-                if out.len() - start >= budget {
-                    return;
-                }
-                // How far it has dissolved in since it started being drawn.
-                let arrival = chunk.arrived.get(&inst.id).map_or(1.0, |t| ((now - *t) as f32 / src.appear.max(1e-3)).clamp(0.0, 1.0));
-                // Distance is measured in the source's frame, which is a rigid
-                // transform of the world's — so LOD bands are untouched by where
-                // the body happens to be.
-                let d = (inst.pos - eye_local).length() as f32;
-                let Some((band, blend)) = scatter::band_at(src, d) else { continue };
-                // …and only here does the world get involved: the instance's
-                // place in its region, carried out to wherever that region is.
-                let rot = src.frame.rot * inst.rotation(src.align);
-                let centre = (src.frame.to_world(inst.pos) - eye).as_vec3();
-                // …and only then, is it on screen? Distance was the only test a
-                // field ever applied, so a full disc submitted everything behind
-                // you. after the band test, which is the cheaper
-                // one and also the one that rejects most.
-                if let Some(pr) = prop_radius
-                    && !frustum
-                        .contains_sphere(centre, floptle_render::cull::scale_radius(pr, Vec3::splat(inst.scale)))
-                {
-                    continue;
-                }
-                let mut model =
-                    Mat4::from_scale_rotation_translation(Vec3::splat(inst.scale), rot, centre);
-                // Bent away from whatever is pushing through it: sheared about
-                // its base, so the foot stays planted and the top goes over.
-                // Only a source that gives way bends (`bend`); a rock does not.
-                if src.bend > 0.0 && (!interactors.is_empty() || !bent.is_empty()) {
-                    let up = rot * Vec3::Y;
-                    let key = (src.id, inst.id);
-                    let pressed = if interactors.is_empty() {
-                        Vec3::ZERO
+            if !chunk.leaving.is_empty() {
+                chunk.leaving.retain(|(_, t, fade)| now - *t < f64::from(*fade));
+            }
+            // A source dissolving out (`scatter.destroy` with a fade) fades
+            // everything it draws by the time it has left.
+            let dying = src.dying.map_or(1.0, |(left, all)| (left / all.max(1e-3)).clamp(0.0, 1.0));
+            let leaving: Vec<Instance> = chunk.leaving.iter().map(|l| l.0).collect();
+            let lists: [(&[Instance], u8); 2] = [(&chunk.instances, 0), (&leaving, 1)];
+            for (list, which) in lists {
+                for (idx, inst) in list.iter().enumerate() {
+                    // Past what any cut could keep: a source with a silly
+                    // density costs a bounded frame, never one that never ends.
+                    if cand_cost >= budget * CAND_FACTOR {
+                        unexamined = true;
+                        break;
+                    }
+                    // How far it has dissolved in since it started being drawn,
+                    // and out since it was taken away.
+                    let arrival = chunk.arrived.get(&inst.id).map_or(1.0, |t| ((now - *t) as f32 / src.appear.max(1e-3)).clamp(0.0, 1.0));
+                    let leave = if which == 1 {
+                        let (_, t, fade) = chunk.leaving[idx];
+                        (1.0 - (now - t) as f32 / fade.max(1e-3)).clamp(0.0, 1.0)
                     } else {
-                        scatter::lean(interactors, src.frame.to_world(inst.pos), up) * src.bend
+                        1.0
                     };
-                    let was = bent.get(&key).map_or(Vec3::ZERO, |b| b.0);
-                    // Pushed over at once, eased back up.
-                    let l = if pressed.length_squared() >= was.length_squared() { pressed } else { was + (pressed - was) * spring };
-                    if l.length_squared() > 1e-8 {
-                        bent.insert(key, (l, *frame));
-                    } else {
-                        bent.remove(&key);
-                    }
-                    if l != Vec3::ZERO {
-                        let shear = Mat4::from_cols(
-                            (Vec3::X + l * up.x).extend(0.0),
-                            (Vec3::Y + l * up.y).extend(0.0),
-                            (Vec3::Z + l * up.z).extend(0.0),
-                            Vec4::W,
-                        );
-                        model = Mat4::from_translation(centre) * shear * Mat4::from_translation(-centre) * model;
-                    }
-                }
-                // Mid-fade draws both bands, cross-dissolved. Drawing one and
-                // switching is what a pop is; two complementary screen doors
-                // for a few metres of walking is what nobody notices.
-                // This one prop's own look (`scatter.setTint`), asked only of
-                // a source that has marked any.
-                let mark = if src.marks.is_empty() { None } else { src.marks.get(&inst.id) };
-                let mut push = |b: usize, alpha: f32, arriving: bool| {
-                    let Some(Some(parts)) = band_parts.get(b) else { return };
-                    // The per-instance roll rides the albedo, so a game can
-                    // give one species a spread of shades without a material
-                    // per plant. Neutral at param 0.5.
-                    let tintf = 0.85 + 0.3 * inst.param;
-                    let t = src.look.tint;
-                    // A prototype may be several parts (a prefab's nodes), each
-                    // with its own mesh, texture, look and place within the
-                    // prop. They are still one instanced draw each — the prefab
-                    // is resolved to this list once, not instantiated per prop.
-                    for (mesh, tex, local, look, fade) in parts {
-                        let mut mp = *look;
-                        mp.alpha *= alpha;
-                        // Mid-fade: dissolve rather than blend, the band
-                        // leaving on the pattern and the band arriving on
-                        // its complement (`fade_extras`).
-                        if alpha < 1.0 {
-                            mp.ext_index = fade[usize::from(arriving)];
+                    let alpha = arrival * leave * dying;
+                    // Distance is measured in the source's frame, which is a rigid
+                    // transform of the world's — so LOD bands are untouched by where
+                    // the body happens to be.
+                    let d = (inst.pos - eye_local).length() as f32;
+                    let Some((band, blend)) = scatter::band_at(src, d) else { continue };
+                    // …and only then, is it on screen? Distance was the only test a
+                    // field ever applied, so a full disc submitted everything behind
+                    // you. After the band test, which is the cheaper one and also the
+                    // one that rejects most.
+                    if let Some(pr) = prop_radius {
+                        let centre = (src.frame.to_world(inst.pos) - eye).as_vec3();
+                        if !frustum.contains_sphere(centre, floptle_render::cull::scale_radius(pr, Vec3::splat(inst.scale))) {
+                            continue;
                         }
-                        // The source's tint multiplies the model's own colour,
-                        // so a texture's palette is shaded rather than replaced.
-                        mp.color = [mp.color[0] * t[0] * tintf, mp.color[1] * t[1] * tintf, mp.color[2] * t[2] * tintf];
-                        // A source's glow strength supersedes the model's; a
-                        // source with none leaves the model's own glow alone.
-                        // Its colour is the source's `emissive` if it names
-                        // one, else the model's own glow colour (and map), else
-                        // the source's tint: a field told to glow and nothing
-                        // else glows in its own colours, never white.
-                        if src.look.emissive_strength > 0.0 {
-                            mp.emissive = match src.look.emissive {
-                                Some(c) => c,
-                                None if mp.emissive != [0.0; 3] => mp.emissive,
-                                None => t,
-                            };
-                            mp.emissive_strength = src.look.emissive_strength;
-                        }
-                        // …and one marked prop over all of that.
-                        if let Some(m) = mark {
-                            mp.color = [mp.color[0] * m.tint[0], mp.color[1] * m.tint[1], mp.color[2] * m.tint[2]];
-                            if m.emissive_strength > 0.0 {
-                                mp.emissive = m.emissive;
-                                mp.emissive_strength = m.emissive_strength;
-                            }
-                            if m.rim_strength > 0.0 {
-                                mp.rim = m.rim;
-                                mp.rim_strength = m.rim_strength;
-                            }
-                        }
-                        out.push((*mesh, *tex, instance_of_mat(model * *local, &mp)));
                     }
-                };
-                // At the very ends of a fade window one half rounds to nothing.
-                // Draw the other half fully opaque rather than at 0.995: a
-                // barely-transparent prop still pays for the blended pass —
-                // depth-sorted, no depth write — for a difference no eye can
-                // see, and every prop in a forest paying that is the cost.
-                const FADE_EPS: f32 = 0.01;
-                match blend {
-                    b if b <= FADE_EPS && arrival >= 1.0 - FADE_EPS => push(band, 1.0, false),
-                    b if b >= 1.0 - FADE_EPS && arrival >= 1.0 - FADE_EPS => push(band + 1, 1.0, false),
-                    // Arriving: on the arriving pattern, as a band coming in is.
-                    b if b <= FADE_EPS => push(band, arrival, true),
-                    b if b >= 1.0 - FADE_EPS => push(band + 1, arrival, true),
-                    b => {
-                        push(band, (1.0 - b) * arrival, false);
-                        push(band + 1, b * arrival, true);
-                    }
+                    let n = |b: usize| band_parts.get(b).and_then(|p| p.as_ref()).map_or(0, |p| p.len());
+                    let cost = match draws(blend) {
+                        Draws::One(b) => n(band + b),
+                        Draws::Both => n(band) + n(band + 1),
+                    };
+                    cand_cost += cost;
+                    cands.push(Cand { si: si as u32, key, which, idx: idx as u32, band: band as u32, blend, alpha, d, cost: cost as u32 });
                 }
             }
         }
+        parts_of[si] = band_parts;
+    }
+    // **The cap cuts the farthest props, across every source.** Under it,
+    // everything is drawn in the order gathered, as it always was. Over it,
+    // the nearest are kept: cut in source order, the later sources lost whole
+    // chunks at the player's feet, and which ones changed with whatever else
+    // was on screen.
+    let mut dropped = 0usize;
+    if cand_cost > budget {
+        cands.sort_by(|a, b| a.d.total_cmp(&b.d));
+        let mut spent_n = 0usize;
+        let keep = cands
+            .iter()
+            .position(|c| {
+                spent_n += c.cost as usize;
+                spent_n > budget
+            })
+            .unwrap_or(cands.len());
+        dropped = cands.len() - keep;
+        cands.truncate(keep);
+    }
+    *last_dropped = dropped;
+    *last_unexamined = unexamined;
+    for c in &cands {
+        let src = &sources[c.si as usize];
+        let Some(chunk) = resolved.get(&(src.id, c.key)) else { continue };
+        let inst = if c.which == 0 { chunk.instances[c.idx as usize] } else { chunk.leaving[c.idx as usize].0 };
+        let band_parts = &parts_of[c.si as usize];
+        let (band, blend, alpha) = (c.band as usize, c.blend, c.alpha);
+        // …and only here does the world get involved: the instance's place in
+        // its region, carried out to wherever that region is.
+        let rot = src.frame.rot * inst.rotation(src.align);
+        let centre = (src.frame.to_world(inst.pos) - eye).as_vec3();
+        let mut model = Mat4::from_scale_rotation_translation(Vec3::splat(inst.scale), rot, centre);
+        // Bent away from whatever is pushing through it: sheared about
+        // its base, so the foot stays planted and the top goes over.
+        // Only a source that gives way bends (`bend`); a rock does not.
+        if src.bend > 0.0 && (!interactors.is_empty() || !bent.is_empty()) {
+            let up = rot * Vec3::Y;
+            let key = (src.id, inst.id);
+            let pressed = if interactors.is_empty() {
+                Vec3::ZERO
+            } else {
+                scatter::lean(interactors, src.frame.to_world(inst.pos), up) * src.bend
+            };
+            let was = bent.get(&key).map_or(Vec3::ZERO, |b| b.0);
+            // Pushed over at once, eased back up.
+            let l = if pressed.length_squared() >= was.length_squared() { pressed } else { was + (pressed - was) * spring };
+            if l.length_squared() > 1e-8 {
+                bent.insert(key, (l, *frame));
+            } else {
+                bent.remove(&key);
+            }
+            if l != Vec3::ZERO {
+                let shear = Mat4::from_cols(
+                    (Vec3::X + l * up.x).extend(0.0),
+                    (Vec3::Y + l * up.y).extend(0.0),
+                    (Vec3::Z + l * up.z).extend(0.0),
+                    Vec4::W,
+                );
+                model = Mat4::from_translation(centre) * shear * Mat4::from_translation(-centre) * model;
+            }
+        }
+        // Mid-fade draws both bands, cross-dissolved. Drawing one and
+        // switching is what a pop is; two complementary screen doors
+        // for a few metres of walking is what nobody notices.
+        // This one prop's own look (`scatter.setTint`), asked only of
+        // a source that has marked any.
+        let mark = if src.marks.is_empty() { None } else { src.marks.get(&inst.id) };
+        let mut push = |b: usize, alpha: f32, arriving: bool| {
+            let Some(Some(parts)) = band_parts.get(b) else { return };
+            // The per-instance roll rides the albedo, so a game can
+            // give one species a spread of shades without a material
+            // per plant. Neutral at param 0.5.
+            let tintf = 0.85 + 0.3 * inst.param;
+            let t = src.look.tint;
+            // A prototype may be several parts (a prefab's nodes), each
+            // with its own mesh, texture, look and place within the
+            // prop. They are still one instanced draw each — the prefab
+            // is resolved to this list once, not instantiated per prop.
+            for (mesh, tex, local, look, fade) in parts {
+                let mut mp = *look;
+                mp.alpha *= alpha;
+                // Mid-fade: dissolve rather than blend, the band
+                // leaving on the pattern and the band arriving on
+                // its complement (`fade_extras`).
+                if alpha < 1.0 {
+                    mp.ext_index = fade[usize::from(arriving)];
+                }
+                // The source's tint multiplies the model's own colour,
+                // so a texture's palette is shaded rather than replaced.
+                mp.color = [mp.color[0] * t[0] * tintf, mp.color[1] * t[1] * tintf, mp.color[2] * t[2] * tintf];
+                // A source's glow strength supersedes the model's; a
+                // source with none leaves the model's own glow alone.
+                // Its colour is the source's `emissive` if it names
+                // one, else the model's own glow colour (and map), else
+                // the source's tint: a field told to glow and nothing
+                // else glows in its own colours, never white.
+                if src.look.emissive_strength > 0.0 {
+                    mp.emissive = match src.look.emissive {
+                        Some(c) => c,
+                        None if mp.emissive != [0.0; 3] => mp.emissive,
+                        None => t,
+                    };
+                    mp.emissive_strength = src.look.emissive_strength;
+                }
+                // …and one marked prop over all of that.
+                if let Some(m) = mark {
+                    mp.color = [mp.color[0] * m.tint[0], mp.color[1] * m.tint[1], mp.color[2] * m.tint[2]];
+                    if m.emissive_strength > 0.0 {
+                        mp.emissive = m.emissive;
+                        mp.emissive_strength = m.emissive_strength;
+                    }
+                    if m.rim_strength > 0.0 {
+                        mp.rim = m.rim;
+                        mp.rim_strength = m.rim_strength;
+                    }
+                }
+                out.push((*mesh, *tex, instance_of_mat(model * *local, &mp)));
+            }
+        };
+        match blend {
+            b if b <= FADE_EPS && alpha >= 1.0 - FADE_EPS => push(band, 1.0, false),
+            b if b >= 1.0 - FADE_EPS && alpha >= 1.0 - FADE_EPS => push(band + 1, 1.0, false),
+            // Arriving or leaving: on the arriving pattern, as a band coming in is.
+            b if b <= FADE_EPS => push(band, alpha, true),
+            b if b >= 1.0 - FADE_EPS => push(band + 1, alpha, true),
+            b => {
+                push(band, (1.0 - b) * alpha, false);
+                push(band + 1, b * alpha, true);
+            }
+        }
+    }
+}
+
+/// At the very ends of a fade window one half rounds to nothing. Draw the
+/// other half fully opaque rather than at 0.995: a barely-transparent prop
+/// still pays for the blended pass — depth-sorted, no depth write — for a
+/// difference no eye can see, and every prop in a forest paying that is the
+/// cost.
+const FADE_EPS: f32 = 0.01;
+
+/// How many times the draw cap's worth of candidates a frame gathers before it
+/// stops looking: enough for the cut to choose the nearest from a field a few
+/// times over the cap, and a bound on a source whose density is silly.
+const CAND_FACTOR: usize = 4;
+
+/// One prop a frame would draw, before the cap: which source, chunk and list
+/// it is in, its band and fades as already worked out, its distance, and how
+/// many instances it costs (its parts, twice over mid cross-fade).
+#[derive(Clone, Copy)]
+struct Cand {
+    si: u32,
+    key: ChunkKey,
+    /// 0 a drawn prop, 1 one dissolving out (`ResolvedChunk::leaving`).
+    which: u8,
+    idx: u32,
+    band: u32,
+    blend: f32,
+    alpha: f32,
+    d: f32,
+    cost: u32,
+}
+
+/// Which bands a prop at `blend` across its band window draws:
+/// the one (`0` its own, `1` the next) or both, cross-dissolved.
+enum Draws {
+    One(usize),
+    Both,
+}
+
+fn draws(blend: f32) -> Draws {
+    match blend {
+        b if b <= FADE_EPS => Draws::One(0),
+        b if b >= 1.0 - FADE_EPS => Draws::One(1),
+        _ => Draws::Both,
     }
 }
 
@@ -1153,6 +1285,8 @@ end
             look: Default::default(),
             bend: 0.0,
             appear: 0.0,
+            leaving: HashMap::new(),
+            dying: None,
             marks: Default::default(),
         }
     }
@@ -2538,6 +2672,113 @@ end
             now = draw(0.0, 0.0, &mut cache);
         }
         assert!(!now.is_empty() && now.iter().all(|(a, _)| *a >= 0.999), "a source with no appear time faded its props in");
+    }
+
+    /// **The cap keeps the nearest props, across every source.** A source
+    /// listed first whose props stand 30 to 50 m away, and one listed second
+    /// round the eye: with room for only the near one's props, the near ones
+    /// are drawn and the far ones are what is cut, and counted. Cut in source
+    /// order, the far source spent the cap and the props at the player's feet
+    /// went (0627).
+    #[test]
+    fn the_cap_keeps_the_nearest_props_across_every_source() {
+        let far = ScatterSource {
+            id: 1,
+            region: Region::Ground { center: DVec3::new(40.0, 0.0, 0.0), half: [8.0, 8.0] },
+            bands: vec![Band { asset: "far".into(), distance: 60.0 }],
+            ..src()
+        };
+        let near = ScatterSource {
+            id: 2,
+            seed: 9,
+            region: Region::Ground { center: DVec3::ZERO, half: [8.0, 8.0] },
+            bands: vec![Band { asset: "near".into(), distance: 60.0 }],
+            ..src()
+        };
+        let sources = [far, near];
+        let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
+        let mut mesh = |a: &str| {
+            let id = if a == "near" { MeshId(1) } else { MeshId(0) };
+            Some(vec![(id, None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [0, 0])])
+        };
+        let mut build = |budget: usize| {
+            let mut cache = ScatterCache { settle_all: true, ..Default::default() };
+            let mut out = Vec::new();
+            build_instances(&mut cache, &sources, DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground,
+                &floptle_render::Frustum::everything(), budget, &mut out);
+            (out.iter().map(|(m, ..)| m.0).collect::<Vec<_>>(), cache.dropped)
+        };
+        let (all, none_cut) = build(100_000);
+        let n_near = all.iter().filter(|m| **m == 1).count();
+        let n_far = all.len() - n_near;
+        assert!(n_near > 0 && n_far > 0 && none_cut == 0, "the fixture: near {n_near}, far {n_far}, cut {none_cut}");
+        let (kept, cut) = build(n_near);
+        assert_eq!(kept.len(), n_near, "the cap was not filled exactly");
+        assert!(kept.iter().all(|m| *m == 1), "the cap kept far props over near ones: {} far of {}", kept.iter().filter(|m| **m == 0).count(), kept.len());
+        assert_eq!(cut, n_far, "propsDropped does not say what the cap cut");
+    }
+
+    /// **A prop removed with a fade dissolves out, then goes.** Removed, it is
+    /// gone for `near` at once (it is in `removed`), and its picture dissolves
+    /// out on the arriving pattern over the fade. Removed with none, it goes on
+    /// the frame, as before (0627).
+    #[test]
+    fn a_prop_removed_with_a_fade_dissolves_out_and_then_goes() {
+        let mut s = src();
+        s.bands = vec![Band { asset: "only".into(), distance: 30.0 }];
+        let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [7, 8])]);
+        let mut draw = |s: &ScatterSource, t: f64, cache: &mut ScatterCache| {
+            let mut out = Vec::new();
+            cache.time = t;
+            build_instances(cache, std::slice::from_ref(s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground, &floptle_render::Frustum::everything(), 100_000, &mut out);
+            out.iter().map(|(_, _, r)| r.color[3]).collect::<Vec<_>>()
+        };
+        let mut cache = ScatterCache { settle_all: true, ..Default::default() };
+        let whole = draw(&s, 0.0, &mut cache);
+        let n = whole.len();
+        assert!(n > 2 && whole.iter().all(|a| *a >= 0.999), "the fixture: {n} props, not all whole");
+        // Two props it draws (well inside the 30 m band), by distance so the
+        // pick does not depend on a hash map's order.
+        let mut drawn: Vec<_> = cache.chunks.values().flat_map(|c| &c.instances).filter(|i| i.pos.length() < 25.0).collect();
+        drawn.sort_by(|a, b| a.pos.length().total_cmp(&b.pos.length()));
+        let (id, other) = (drawn[0].id, drawn[1].id);
+        // One with a fade, one without, on the same frame.
+        s.removed.insert(id);
+        s.leaving.insert(id, 0.5);
+        s.removed.insert(other);
+        let start = draw(&s, 1.0, &mut cache);
+        assert_eq!(start.len(), n - 1, "the faded prop must still be drawn and the other gone at once");
+        let half = draw(&s, 1.25, &mut cache);
+        let fading: Vec<f32> = half.iter().copied().filter(|a| *a < 0.999).collect();
+        assert!(fading.len() == 1 && (fading[0] - 0.5).abs() < 0.05, "a quarter second into half a second the removed prop drew at {fading:?}");
+        let gone = draw(&s, 1.6, &mut cache);
+        assert_eq!(gone.len(), n - 2, "the removed prop is still drawn past its fade");
+    }
+
+    /// **A source destroyed with a fade dissolves out what it had, and rolls
+    /// nothing new.** Its props draw at the share of the fade left, and a
+    /// view that had never seen it draws nothing of it (0627).
+    #[test]
+    fn a_dying_source_fades_what_it_has_and_rolls_nothing() {
+        let mut s = src();
+        s.bands = vec![Band { asset: "only".into(), distance: 30.0 }];
+        let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY, MaterialParams::flat([1.0; 3]), [7, 8])]);
+        let mut draw = |s: &ScatterSource, cache: &mut ScatterCache| {
+            let mut out = Vec::new();
+            build_instances(cache, std::slice::from_ref(s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground, &floptle_render::Frustum::everything(), 100_000, &mut out);
+            out.iter().map(|(_, _, r)| r.color[3]).collect::<Vec<_>>()
+        };
+        let mut cache = ScatterCache { settle_all: true, ..Default::default() };
+        let n = draw(&s, &mut cache).len();
+        assert!(n > 0, "the fixture: nothing drawn");
+        s.dying = Some((0.25, 1.0));
+        let dying = draw(&s, &mut cache);
+        assert_eq!(dying.len(), n, "a dying source dropped props instead of fading them");
+        assert!(dying.iter().all(|a| (*a - 0.25).abs() < 0.02), "a quarter of the fade left, props drew at {:?}", &dying[..dying.len().min(4)]);
+        let mut fresh = ScatterCache { settle_all: true, ..Default::default() };
+        assert!(draw(&s, &mut fresh).is_empty(), "a dying source rolled props for a view that never had them");
     }
 
     /// **A prop beside a walker leans away from it; one 5 m off stays put.**

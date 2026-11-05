@@ -6678,6 +6678,20 @@ impl ScriptHost {
     pub fn run(&mut self, world: &mut World, scripts_dir: &Path, dt: f32, time: f32) {
         let _budget = self.budget.arm();
         self.weather.time.set(time as f64);
+        // A scatter source dissolving out (`scatter.destroy` with a fade) runs
+        // down its time and goes when it is up.
+        {
+            let mut v = self.scatter_sources.borrow_mut();
+            if v.iter().any(|s| s.dying.is_some()) {
+                v.retain_mut(|s| match &mut s.dying {
+                    Some((left, _)) => {
+                        *left -= dt.max(0.0);
+                        *left > 0.0
+                    }
+                    None => true,
+                });
+            }
+        }
         self.errors.clear();
         // A script that went a whole frame without overrunning starts its
         // count again: only overruns in a row stop it.

@@ -220,6 +220,8 @@ fn field(far: f32) -> ScatterSource {
         look: Default::default(),
         bend: 0.0,
         appear: 0.0,
+        leaving: Default::default(),
+        dying: None,
         marks: Default::default(),
     }
 }

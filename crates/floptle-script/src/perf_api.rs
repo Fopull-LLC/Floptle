@@ -522,6 +522,7 @@ fn counts_table(lua: &Lua, c: &Counts) -> mlua::Result<Table> {
     // point: one number for the cost, one for what was refused.
     out.set("effects", c.effects)?;
     out.set("effectsDropped", c.effects_dropped)?;
+    out.set("propsDropped", c.props_dropped)?;
     out.set("lights", c.lights)?;
     out.set("lightsDropped", c.lights_dropped)?;
     out.set("voices", c.voices)?;
