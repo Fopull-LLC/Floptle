@@ -3237,6 +3237,7 @@ pub(crate) fn uv_tiling(t: floptle_assets::gltf_import::UvTransform) -> floptle_
         count: t.scale,
         offset: [t.offset[0] + rh[0] - 0.5, t.offset[1] + rh[1] - 0.5],
         rotation: t.rotation.to_degrees().rem_euclid(360.0),
+        antitile: 0.0,
     }
 }
 

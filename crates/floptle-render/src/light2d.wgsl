@@ -116,10 +116,9 @@ fn vs_fill(in: FillIn) -> FillOut {
     var ax = normalize(in.m0.xy + vec2<f32>(1e-12, 0.0));
     var ay = normalize(in.m1.xy + vec2<f32>(0.0, 1e-12));
     if ((flags & 3u) == 1u) {
-        let rot = f32(flags >> 2u) * 0.1 * 0.017453292519943295;
-        let c = cos(rot);
-        let sn = sin(rot);
-        let m = mat2x2<f32>(vec2<f32>(c, sn), vec2<f32>(-sn, c));
+        let m = tile_flags_rotation(flags);
+        let c = m[0].x;
+        let sn = m[0].y;
         out.uv = m * ((in.uv - 0.5) * in.tile.xy) + 0.5 + in.tile.zw;
         // The UV turned by `rot` means the art turned the other way on the
         // quad, and a negative count is a mirror.
@@ -148,7 +147,28 @@ struct GBuffer {
 
 @fragment
 fn fs_fill(in: FillOut) -> GBuffer {
-    let tex = textureSample(albedo_tex, albedo_samp, in.uv);
+    var tex = textureSample(albedo_tex, albedo_samp, in.uv);
+    var nt = textureSample(normal_tex, normal_samp, in.uv).xy * 2.0 - 1.0;
+    // A hex-tiled UV material (`Tiling::Uv { antitile }`): the same taps and
+    // weights the raster pass blends (`mat_hex` there), so the G-buffer holds
+    // the picture the colour pass drew. Each tap's normal tilt is turned back
+    // into the surface's own UV axes before the blend (`hex_normal` there).
+    let flags = u32(in.info.z + 0.5);
+    let amount = tile_flags_antitile(flags);
+    let gx = dpdx(in.uv);
+    let gy = dpdy(in.uv);
+    if ((flags & 3u) == 1u && amount > 0.0) {
+        let h = hex_taps(in.uv, amount);
+        let c1 = textureSampleGrad(albedo_tex, albedo_samp, h.uv1, h.r1 * gx, h.r1 * gy);
+        let c2 = textureSampleGrad(albedo_tex, albedo_samp, h.uv2, h.r2 * gx, h.r2 * gy);
+        let c3 = textureSampleGrad(albedo_tex, albedo_samp, h.uv3, h.r3 * gx, h.r3 * gy);
+        let ww = hex_weights(c1, c2, c3, h.w);
+        tex = c1 * ww.x + c2 * ww.y + c3 * ww.z;
+        let n1 = transpose(h.r1) * (textureSampleGrad(normal_tex, normal_samp, h.uv1, h.r1 * gx, h.r1 * gy).xy * 2.0 - 1.0);
+        let n2 = transpose(h.r2) * (textureSampleGrad(normal_tex, normal_samp, h.uv2, h.r2 * gx, h.r2 * gy).xy * 2.0 - 1.0);
+        let n3 = transpose(h.r3) * (textureSampleGrad(normal_tex, normal_samp, h.uv3, h.r3 * gx, h.r3 * gy).xy * 2.0 - 1.0);
+        nt = n1 * ww.x + n2 * ww.y + n3 * ww.z;
+    }
     let c = tex * in.tint;
     // A tilemap is mostly holes. Discarding rather than writing a transparent
     // pixel keeps the empty squares out of the G-buffer's depth as well as its
@@ -160,7 +180,6 @@ fn fs_fill(in: FillOut) -> GBuffer {
     g.albedo = vec4<f32>(c.rgb, c.a);
     // The normal map's tilt, in screen x/y. Texture v runs down the art while
     // the art's y axis runs up, hence the minus.
-    let nt = textureSample(normal_tex, normal_samp, in.uv).xy * 2.0 - 1.0;
     let n = in.axis_x * nt.x - in.axis_y * nt.y;
     // r = rank, quantized to the 64 ranks a sorting layer can have (the layer
     // step is 1/64 — see `floptle_core::SORT_LAYER_STEP`). gb = the surface

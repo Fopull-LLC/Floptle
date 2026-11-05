@@ -174,7 +174,11 @@ pub(crate) fn component_header_no_copy(ui: &mut egui::Ui, title: &str, can_remov
 /// row, then the active mode's fields. Returns true when anything changed.
 /// Shared by the base-texture row and each shader texture slot (proposal §8:
 /// tiling is per-binding; wrap/filter stay per-texture in the Assets panel).
-fn tiling_ui(ui: &mut egui::Ui, t: &mut Option<floptle_core::Tiling>) -> bool {
+///
+/// `antitile` shows the hex anti-tiling control: the built-in base texture
+/// has it, a custom shader's texture slot does not yet (its `sample()` does not
+/// read it), and a control that does nothing is worse than none.
+fn tiling_ui(ui: &mut egui::Ui, t: &mut Option<floptle_core::Tiling>, antitile: bool) -> bool {
     use floptle_core::Tiling;
     let mut changed = false;
     ui.horizontal_wrapped(|ui| {
@@ -204,7 +208,7 @@ fn tiling_ui(ui: &mut egui::Ui, t: &mut Option<floptle_core::Tiling>) -> bool {
     });
     match t {
         None => {}
-        Some(Tiling::Uv { count, offset, rotation }) => {
+        Some(Tiling::Uv { count, offset, rotation, antitile: amount }) => {
             ui.horizontal_wrapped(|ui| {
                 ui.label("count");
                 changed |= ui
@@ -226,8 +230,11 @@ fn tiling_ui(ui: &mut egui::Ui, t: &mut Option<floptle_core::Tiling>) -> bool {
                     .on_hover_text("rotation around the UV center (degrees)")
                     .changed();
             });
+            if antitile {
+                changed |= antitile_row(ui, amount);
+            }
         }
-        Some(Tiling::Triplanar { scale, blend }) => {
+        Some(Tiling::Triplanar { scale, blend, antitile: amount }) => {
             ui.horizontal_wrapped(|ui| {
                 ui.label("tile size");
                 changed |= ui
@@ -239,9 +246,27 @@ fn tiling_ui(ui: &mut egui::Ui, t: &mut Option<floptle_core::Tiling>) -> bool {
                     .on_hover_text("axis-edge sharpness")
                     .changed();
             });
+            if antitile {
+                changed |= antitile_row(ui, amount);
+            }
         }
     }
     changed
+}
+
+/// The hex anti-tiling slider shared by both tiling modes.
+fn antitile_row(ui: &mut egui::Ui, amount: &mut f32) -> bool {
+    ui.horizontal_wrapped(|ui| {
+        ui.label("antitile");
+        crate::responsive::slider(ui, egui::Slider::new(amount, 0.0..=1.0), "")
+            .on_hover_text(
+                "hide the repeat: lay the tile in hexagons, each at its own random offset and \
+                 turned by up to ±180° × this, blended at their edges. 0 = the plain tile. \
+                 Three texture reads per map instead of one",
+            )
+            .changed()
+    })
+    .inner
 }
 
 /// Widget rows for a shader's exposed uniforms (shared by fragment materials,
@@ -823,7 +848,7 @@ fn mat_base_ui(ui: &mut egui::Ui, ctx: &mut MatCtx, m: &mut Material, r: &mut Ma
                         .color(ui.visuals().weak_text_color()),
                 );
             } else {
-                r.changed |= tiling_ui(ui, &mut m.tiling);
+                r.changed |= tiling_ui(ui, &mut m.tiling, true);
             }
         });
         ui.end_row();
@@ -990,7 +1015,7 @@ fn mat_shader_ui(ui: &mut egui::Ui, ctx: &mut MatCtx, m: &mut Material, r: &mut 
                             ui.label("");
                             ui.vertical(|ui| {
                                 let mut t = m.shader_tiling.get(slot).copied();
-                                if tiling_ui(ui, &mut t) {
+                                if tiling_ui(ui, &mut t, false) {
                                     match t {
                                         Some(t) => {
                                             m.shader_tiling.insert(slot.clone(), t);

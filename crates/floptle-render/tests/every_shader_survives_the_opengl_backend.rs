@@ -33,11 +33,11 @@ fn modules() -> Vec<(&'static str, String)> {
             .unwrap_or_else(|e| panic!("read {name}: {e}"))
     };
     vec![
-        ("raster.wgsl + field.wgsl", floptle_render::raster::pass_prelude().to_string()),
-        ("raymarch.wgsl + field.wgsl", floptle_render::raymarch::prelude().to_string()),
+        ("raster.wgsl + field.wgsl + hex_tile.wgsl", floptle_render::raster::pass_prelude().to_string()),
+        ("raymarch.wgsl + field.wgsl + hex_tile.wgsl", floptle_render::raymarch::prelude().to_string()),
         ("camera_stack.wgsl", one("camera_stack.wgsl")),
         ("grid.wgsl", one("grid.wgsl")),
-        ("light2d.wgsl", one("light2d.wgsl")),
+        ("light2d.wgsl + hex_tile.wgsl", floptle_render::light2d::source().to_string()),
         ("outline.wgsl", one("outline.wgsl")),
         ("palette.wgsl", one("palette.wgsl")),
         ("particles.wgsl", one("particles.wgsl")),

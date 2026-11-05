@@ -295,6 +295,13 @@ fn uniform_layout(device: &wgpu::Device, label: &str, vertex: bool) -> wgpu::Bin
     })
 }
 
+/// The 2D lighting module as the pipeline builds it: the pass shader plus the
+/// shared hex-tiling helpers (`hex_tile.wgsl`), so a hex-tiled surface lands
+/// in the G-buffer exactly as the raster pass drew it.
+pub fn source() -> &'static str {
+    concat!(include_str!("light2d.wgsl"), "\n", include_str!("hex_tile.wgsl"))
+}
+
 impl Light2d {
     /// `tex_layout` is the raster pass's own `{ texture, sampler }` group, reused
     /// verbatim so the fill can bind the very same texture bind groups the main
@@ -304,7 +311,7 @@ impl Light2d {
         let device = &gpu.device;
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("light2d"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("light2d.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(source().into()),
         });
 
         let fill_layout = uniform_layout(device, "light2d-fill", true);

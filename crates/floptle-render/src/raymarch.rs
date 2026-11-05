@@ -3028,7 +3028,7 @@ fn f32_to_f16(v: f32) -> u16 {
 /// public for the same reason — something outside this file needs to validate
 /// the real seam rather than a reconstruction of it.
 pub fn prelude() -> &'static str {
-    concat!(include_str!("raymarch.wgsl"), "\n", include_str!("field.wgsl"))
+    concat!(include_str!("raymarch.wgsl"), "\n", include_str!("field.wgsl"), "\n", include_str!("hex_tile.wgsl"))
 }
 
 #[cfg(test)]

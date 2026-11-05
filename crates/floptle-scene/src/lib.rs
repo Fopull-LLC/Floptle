@@ -4056,29 +4056,44 @@ impl RetroDoc {
 
 /// RON mirror of [`floptle_core::Tiling`].
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+///
+/// `antitile` is left out of the file at 0, so a scene that does not use it
+/// saves exactly as it did before the setting existed, and an older scene
+/// (which never wrote it) loads as 0: the plain tile.
 pub enum TilingDoc {
-    Uv { count: [f32; 2], offset: [f32; 2], rotation: f32 },
-    Triplanar { scale: f32, blend: f32 },
+    Uv {
+        count: [f32; 2],
+        offset: [f32; 2],
+        rotation: f32,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        antitile: f32,
+    },
+    Triplanar {
+        scale: f32,
+        blend: f32,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        antitile: f32,
+    },
 }
 
 impl TilingDoc {
     pub fn to_tiling(self) -> floptle_core::Tiling {
         match self {
-            TilingDoc::Uv { count, offset, rotation } => {
-                floptle_core::Tiling::Uv { count, offset, rotation }
+            TilingDoc::Uv { count, offset, rotation, antitile } => {
+                floptle_core::Tiling::Uv { count, offset, rotation, antitile }
             }
-            TilingDoc::Triplanar { scale, blend } => {
-                floptle_core::Tiling::Triplanar { scale, blend }
+            TilingDoc::Triplanar { scale, blend, antitile } => {
+                floptle_core::Tiling::Triplanar { scale, blend, antitile }
             }
         }
     }
     pub fn from_tiling(t: floptle_core::Tiling) -> Self {
         match t {
-            floptle_core::Tiling::Uv { count, offset, rotation } => {
-                TilingDoc::Uv { count, offset, rotation }
+            floptle_core::Tiling::Uv { count, offset, rotation, antitile } => {
+                TilingDoc::Uv { count, offset, rotation, antitile }
             }
-            floptle_core::Tiling::Triplanar { scale, blend } => {
-                TilingDoc::Triplanar { scale, blend }
+            floptle_core::Tiling::Triplanar { scale, blend, antitile } => {
+                TilingDoc::Triplanar { scale, blend, antitile }
             }
         }
     }
@@ -5054,6 +5069,30 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
 
 #[cfg(test)]
 mod tests {
+
+    /// **Anti-tiling costs an old scene nothing (0626).** A tiling block saved
+    /// before `antitile` existed loads as 0, the plain tile; 0 writes nothing,
+    /// so a scene that does not use it keeps its bytes; and a set amount
+    /// survives the trip, in both modes.
+    #[test]
+    fn antitile_loads_old_scenes_as_off_and_round_trips() {
+        let old: TilingDoc = ron::from_str("Uv(count:(4.0,4.0),offset:(0.0,0.0),rotation:15.0)").unwrap();
+        assert_eq!(old.to_tiling().antitile(), 0.0);
+        let old: TilingDoc = ron::from_str("Triplanar(scale:2.0,blend:4.0)").unwrap();
+        assert_eq!(old.to_tiling().antitile(), 0.0);
+        for t in [floptle_core::Tiling::uv(), floptle_core::Tiling::triplanar()] {
+            let text = ron::to_string(&TilingDoc::from_tiling(t)).unwrap();
+            assert!(!text.contains("antitile"), "an unused antitile was written: {text}");
+        }
+        for t in [
+            floptle_core::Tiling::Uv { count: [40.0, 40.0], offset: [0.1, 0.0], rotation: 0.0, antitile: 0.8 },
+            floptle_core::Tiling::Triplanar { scale: 2.0, blend: 4.0, antitile: 0.35 },
+        ] {
+            let text = ron::to_string(&TilingDoc::from_tiling(t)).unwrap();
+            let back: TilingDoc = ron::from_str(&text).unwrap();
+            assert_eq!(back.to_tiling(), t, "{text}");
+        }
+    }
 
     /// A material's link to a project material survives a save — through the
     /// runtime component and back — and a material of its own writes nothing

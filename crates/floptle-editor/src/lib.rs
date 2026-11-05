@@ -196,6 +196,8 @@ mod vfx_frame_tests;
 #[cfg(all(test, feature = "editor-ui"))]
 mod imported_maps_tests;
 #[cfg(all(test, feature = "editor-ui"))]
+mod antitile_material_tests;
+#[cfg(all(test, feature = "editor-ui"))]
 mod batching_tests;
 #[cfg(all(test, feature = "editor-ui"))]
 mod warm_tests;

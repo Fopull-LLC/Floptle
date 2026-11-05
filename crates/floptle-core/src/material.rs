@@ -13,19 +13,36 @@
 pub enum Tiling {
     /// Transform the mesh UVs: `count` repeats across the 0..1 span, scrolled
     /// by `offset`, rotated by `rotation` degrees around the UV center.
-    Uv { count: [f32; 2], offset: [f32; 2], rotation: f32 },
+    /// `antitile` (0..1, 0 = off) hides the repeat: see [`Tiling::antitile`].
+    Uv { count: [f32; 2], offset: [f32; 2], rotation: f32, antitile: f32 },
     /// Project from the three object axes and blend by the surface normal —
     /// clean tiling on shapes with stretched or absent UVs. `scale` = tile
-    /// size in object units, `blend` = axis-edge sharpness.
-    Triplanar { scale: f32, blend: f32 },
+    /// size in object units, `blend` = axis-edge sharpness. `antitile` as for
+    /// [`Uv`](Tiling::Uv).
+    Triplanar { scale: f32, blend: f32, antitile: f32 },
 }
 
 impl Tiling {
     pub fn uv() -> Self {
-        Tiling::Uv { count: [1.0, 1.0], offset: [0.0, 0.0], rotation: 0.0 }
+        Tiling::Uv { count: [1.0, 1.0], offset: [0.0, 0.0], rotation: 0.0, antitile: 0.0 }
     }
     pub fn triplanar() -> Self {
-        Tiling::Triplanar { scale: 1.0, blend: 4.0 }
+        Tiling::Triplanar { scale: 1.0, blend: 4.0, antitile: 0.0 }
+    }
+
+    /// How much the tile's repeat is hidden, 0..1 (0 = the plain tile,
+    /// exactly as before the setting existed).
+    ///
+    /// Above 0 the surface is laid with hexagons about a tile across, each
+    /// reading the tile at its own random offset and turned by up to
+    /// ±180° × `antitile`, blended across their edges (hex tiling, Mikkelsen
+    /// 2022). Three texture reads where there was one, for each map the
+    /// material has. The normal map's bumps turn with the colour. The cost is
+    /// paid only by materials that turn it on.
+    pub fn antitile(&self) -> f32 {
+        match *self {
+            Tiling::Uv { antitile, .. } | Tiling::Triplanar { antitile, .. } => antitile,
+        }
     }
 }
 
@@ -856,6 +873,9 @@ impl Material {
             count: [u1 - u0, v1 - v0],
             offset: [(u0 + u1) * 0.5 - 0.5, (v0 + v1) * 0.5 - 0.5],
             rotation: 0.0,
+            // One cell of a sheet is a picture, not a texture to repeat:
+            // hexagons would drag its neighbours in.
+            antitile: 0.0,
         })
     }
 }
@@ -962,10 +982,11 @@ mod tests {
     fn effective_tiling_maps_the_quad_onto_its_cell() {
         for (cols, rows, cell) in [(4, 4, 0), (4, 4, 6), (21, 1, 20), (3, 5, 14), (2, 2, 3)] {
             let m = sheet(cols, rows, cell);
-            let Some(Tiling::Uv { count, offset, rotation }) = m.effective_tiling() else {
+            let Some(Tiling::Uv { count, offset, rotation, antitile }) = m.effective_tiling() else {
                 panic!("a sheet must pack as a Uv window");
             };
             assert_eq!(rotation, 0.0, "a cell window is never rotated");
+            assert_eq!(antitile, 0.0, "a cell window is never hex-tiled");
             let at = |uv: f32, i: usize| (uv - 0.5) * count[i] + 0.5 + offset[i];
             let [u0, v0, u1, v1] = m.cell_uv();
             for (got, want) in

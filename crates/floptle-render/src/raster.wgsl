@@ -1285,20 +1285,94 @@ fn map_uv(in: VsOut) -> vec2<f32> {
     let uv0 = surface_uv(in);
     let flags = u32(in.rim.w + 0.5);
     if ((flags & 3u) == 1u) {
-        let rot = f32(flags >> 2u) * 0.1 * 0.017453292519943295;
-        let c = cos(rot);
-        let sn = sin(rot);
-        let m = mat2x2<f32>(vec2<f32>(c, sn), vec2<f32>(-sn, c));
+        let m = tile_flags_rotation(flags);
         return m * ((uv0 - 0.5) * in.tile.xy) + 0.5 + in.tile.zw;
     }
     return uv0;
 }
 
+// A UV-tiled material's hex tiling (`Tiling::Uv { antitile }`), worked out
+// ONCE per pixel: the hexagons, the base colour's three taps, and the blend
+// weights weighed on them. The surface maps then reuse the same taps and the
+// same weights (`hex_map`, `hex_normal`), so a brick's normal map turns and
+// shifts WITH its colour and every map's seams fall in one place.
+//
+// `on` is false (and nothing is sampled) for anything else: no tiling,
+// triplanar (which hex-tiles inside `base_texel_hex`), or antitile 0. No early
+// return, so the caller's control flow stays uniform after the call.
+struct MatHex {
+    on: bool,
+    h: HexTaps,
+    ww: vec3<f32>,
+    gx: vec2<f32>,
+    gy: vec2<f32>,
+    base: vec4<f32>,
+};
+
+fn mat_hex(in: VsOut, uv0: vec2<f32>, duvdx: vec2<f32>, duvdy: vec2<f32>) -> MatHex {
+    var o: MatHex;
+    o.on = false;
+    let flags = u32(in.rim.w + 0.5);
+    let amount = tile_flags_antitile(flags);
+    if ((flags & 3u) == 1u && amount > 0.0) {
+        let m = tile_flags_rotation(flags);
+        let uv = m * ((uv0 - 0.5) * in.tile.xy) + 0.5 + in.tile.zw;
+        o.gx = m * (duvdx * in.tile.xy);
+        o.gy = m * (duvdy * in.tile.xy);
+        o.h = hex_taps(uv, amount);
+        let c1 = textureSampleGrad(tex, samp, o.h.uv1, o.h.r1 * o.gx, o.h.r1 * o.gy);
+        let c2 = textureSampleGrad(tex, samp, o.h.uv2, o.h.r2 * o.gx, o.h.r2 * o.gy);
+        let c3 = textureSampleGrad(tex, samp, o.h.uv3, o.h.r3 * o.gx, o.h.r3 * o.gy);
+        o.ww = hex_weights(c1, c2, c3, o.h.w);
+        o.base = c1 * o.ww.x + c2 * o.ww.y + c3 * o.ww.z;
+        o.on = true;
+    }
+    return o;
+}
+
+// A surface map read through `mh`'s taps and weights.
+fn hex_map(t: texture_2d<f32>, s: sampler, mh: MatHex) -> vec4<f32> {
+    let c1 = textureSampleGrad(t, s, mh.h.uv1, mh.h.r1 * mh.gx, mh.h.r1 * mh.gy);
+    let c2 = textureSampleGrad(t, s, mh.h.uv2, mh.h.r2 * mh.gx, mh.h.r2 * mh.gy);
+    let c3 = textureSampleGrad(t, s, mh.h.uv3, mh.h.r3 * mh.gx, mh.h.r3 * mh.gy);
+    return c1 * mh.ww.x + c2 * mh.ww.y + c3 * mh.ww.z;
+}
+
+// The normal map read through `mh`, decoded to -1..1 as `mapped_normal` takes
+// it. A hexagon that shows its tile turned by `a` shows the tile's bumps
+// turned by `a` too, so each tap's tilt is turned back by `a` into the
+// surface's own UV axes before the three blend. That turn is made in the
+// frame where +y is +v; `green` is the map's handedness (`mapped_normal`'s
+// sign of strength), undone around the turn and put back after it.
+fn hex_normal(mh: MatHex, green: f32) -> vec3<f32> {
+    let f = vec2<f32>(1.0, green);
+    var s1 = textureSampleGrad(normal_tex, normal_samp, mh.h.uv1, mh.h.r1 * mh.gx, mh.h.r1 * mh.gy).xyz * 2.0 - 1.0;
+    var s2 = textureSampleGrad(normal_tex, normal_samp, mh.h.uv2, mh.h.r2 * mh.gx, mh.h.r2 * mh.gy).xyz * 2.0 - 1.0;
+    var s3 = textureSampleGrad(normal_tex, normal_samp, mh.h.uv3, mh.h.r3 * mh.gx, mh.h.r3 * mh.gy).xyz * 2.0 - 1.0;
+    s1 = vec3<f32>(f * (transpose(mh.h.r1) * (f * s1.xy)), s1.z);
+    s2 = vec3<f32>(f * (transpose(mh.h.r2) * (f * s2.xy)), s2.z);
+    s3 = vec3<f32>(f * (transpose(mh.h.r3) * (f * s3.xy)), s3.z);
+    return s1 * mh.ww.x + s2 * mh.ww.y + s3 * mh.ww.z;
+}
+
+// The base texture with explicit gradients, hex-tiled at `amount`: the
+// triplanar projections' version of `mat_hex` (each projection blends on its
+// own taps, as the terrain palette does).
+fn tex_hex(uv: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>, amount: f32) -> vec4<f32> {
+    let h = hex_taps(uv, amount);
+    let c1 = textureSampleGrad(tex, samp, h.uv1, h.r1 * dx, h.r1 * dy);
+    let c2 = textureSampleGrad(tex, samp, h.uv2, h.r2 * dx, h.r2 * dy);
+    let c3 = textureSampleGrad(tex, samp, h.uv3, h.r3 * dx, h.r3 * dy);
+    return hex_blend(c1, c2, c3, h.w);
+}
+
 // The shading normal after the normal map. `strength` scales the tilt; NEGATIVE
 // flips the green channel, which is the one-knob fix for a map authored in the
 // other handedness (the difference that makes every dent read as a bump).
-fn mapped_normal(in: VsOut, n: vec3<f32>, uv: vec2<f32>, strength: f32) -> vec3<f32> {
-    let s = textureSample(normal_tex, normal_samp, uv).xyz * 2.0 - 1.0;
+//
+// `s` is the map's texel decoded to -1..1: `textureSample(normal_tex, ..) * 2 - 1`,
+// or `hex_normal` for a hex-tiled material.
+fn mapped_normal(in: VsOut, n: vec3<f32>, uv: vec2<f32>, strength: f32, s: vec3<f32>) -> vec3<f32> {
     // A flat map is exactly (0, 0, 1) and this whole function is then the
     // identity — which is why an unmapped material needs no branch anywhere.
     let tilt = vec2<f32>(s.x, s.y * sign(strength)) * abs(strength);
@@ -1670,10 +1744,17 @@ fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32) ->
 // for implicit derivatives; the tiled paths use explicit gradients because the
 // mode comes from per-instance data (not provably uniform).
 fn base_texel(in: VsOut) -> vec4<f32> {
-    // Everything needing uniform control flow (the implicit-derivative sample
-    // and the explicit derivatives) runs BEFORE any branching on instance data.
     let uv0 = surface_uv(in);
     let base = textureSample(tex, samp, uv0);
+    return base_texel_hex(in, mat_hex(in, uv0, dpdx(uv0), dpdy(uv0)), base);
+}
+
+// `base_texel` for a caller that already has the pixel's `MatHex` (and the
+// plain sample, taken in uniform control flow), so the hex taps are paid once.
+fn base_texel_hex(in: VsOut, mh: MatHex, base: vec4<f32>) -> vec4<f32> {
+    // Everything needing uniform control flow (the explicit derivatives) runs
+    // BEFORE any branching on instance data.
+    let uv0 = surface_uv(in);
     let duvdx = dpdx(uv0);
     let duvdy = dpdy(uv0);
     let dlx = dpdx(in.lpos);
@@ -1681,11 +1762,11 @@ fn base_texel(in: VsOut) -> vec4<f32> {
     let flags = u32(in.rim.w + 0.5);
     let mode = flags & 3u;
     if (mode == 1u) {
+        if (mh.on) {
+            return mh.base;
+        }
         // Rotate around the UV center, repeat `count` times, scroll by offset.
-        let rot = f32(flags >> 2u) * 0.1 * 0.017453292519943295;
-        let c = cos(rot);
-        let sn = sin(rot);
-        let m = mat2x2<f32>(vec2<f32>(c, sn), vec2<f32>(-sn, c));
+        let m = tile_flags_rotation(flags);
         let uv = m * ((uv0 - 0.5) * in.tile.xy) + 0.5 + in.tile.zw;
         return textureSampleGrad(tex, samp, uv, m * (duvdx * in.tile.xy), m * (duvdy * in.tile.xy));
     }
@@ -1698,6 +1779,13 @@ fn base_texel(in: VsOut) -> vec4<f32> {
         let dy = dly / s;
         var w = pow(abs(normalize(in.lnorm)), vec3<f32>(sharp));
         w = w / (w.x + w.y + w.z);
+        let amount = tile_flags_antitile(flags);
+        if (amount > 0.0) {
+            let hx = tex_hex(p.zy, dx.zy, dy.zy, amount);
+            let hy = tex_hex(p.xz, dx.xz, dy.xz, amount);
+            let hz = tex_hex(p.xy, dx.xy, dy.xy, amount);
+            return hx * w.x + hy * w.y + hz * w.z;
+        }
         let cx = textureSampleGrad(tex, samp, p.zy, dx.zy, dy.zy);
         let cy = textureSampleGrad(tex, samp, p.xz, dx.xz, dy.xz);
         let cz = textureSampleGrad(tex, samp, p.xy, dx.xy, dy.xy);
@@ -1742,14 +1830,26 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     // With no normal map bound this samples the flat 1×1 default and returns
     // `geo_n` unchanged, so an unmapped surface is bit-identical to before.
     // A vertex-lit surface skips it: there is no per-pixel lighting to perturb.
-    let mapped_n = mapped_normal(in, geo_n, muv, ext.nstr);
+    let uv0 = surface_uv(in);
+    let base_s = textureSample(tex, samp, uv0);
+    var nmap_s = textureSample(normal_tex, normal_samp, muv).xyz * 2.0 - 1.0;
+    var rough_s = textureSample(rough_tex, rough_samp, muv).g;
+    var metal_s = textureSample(metal_tex, metal_samp, muv).b;
+    var ao_s = textureSample(ao_tex, ao_samp, muv).r;
+    var emit_s = textureSample(emit_tex, emit_samp, muv).rgb;
+    // A hex-tiled material reads every map through the base colour's taps.
+    let mh = mat_hex(in, uv0, dpdx(uv0), dpdy(uv0));
+    if (mh.on) {
+        nmap_s = hex_normal(mh, select(1.0, -1.0, ext.nstr < 0.0));
+        rough_s = hex_map(rough_tex, rough_samp, mh).g;
+        metal_s = hex_map(metal_tex, metal_samp, mh).b;
+        ao_s = hex_map(ao_tex, ao_samp, mh).r;
+        emit_s = hex_map(emit_tex, emit_samp, mh).rgb;
+    }
+    let mapped_n = mapped_normal(in, geo_n, muv, ext.nstr, nmap_s);
     let n = select(mapped_n, geo_n, ext_has(ext, EXT_VERTEX_LIT));
-    let rough_s = textureSample(rough_tex, rough_samp, muv).g;
-    let metal_s = textureSample(metal_tex, metal_samp, muv).b;
-    let ao_s = textureSample(ao_tex, ao_samp, muv).r;
-    let emit_s = textureSample(emit_tex, emit_samp, muv).rgb;
     let v = normalize(-in.view_pos);
-    let texel = base_texel(in);
+    let texel = base_texel_hex(in, mh, base_s);
     // MESHED TERRAIN (tsplat flag): the vertex color's alpha is a palette SLOT, not opacity,
     // and albedo comes from triplanar-splatting the palette. Terrain is always opaque, so it
     // bypasses both the alpha multiply and the cutout below (whose test would otherwise
@@ -1981,10 +2081,22 @@ fn surface_pbr(in: VsOut, front: bool, albedo: vec3<f32>, normal: vec3<f32>) -> 
     let ext = ext_at(u32(in.imeta.y));
     let muv = map_uv(in);
     let geo_n = facing_normal(normalize(normal), front);
-    let n = mapped_normal(in, geo_n, muv, ext.nstr);
-    let rough = clamp(ext.rough * textureSample(rough_tex, rough_samp, muv).g, 0.045, 1.0);
-    let metal = clamp(ext.metal * textureSample(metal_tex, metal_samp, muv).b, 0.0, 1.0);
-    let ao_s = textureSample(ao_tex, ao_samp, muv).r;
+    let uv0 = surface_uv(in);
+    var nmap_s = textureSample(normal_tex, normal_samp, muv).xyz * 2.0 - 1.0;
+    var rough_s = textureSample(rough_tex, rough_samp, muv).g;
+    var metal_s = textureSample(metal_tex, metal_samp, muv).b;
+    var ao_s = textureSample(ao_tex, ao_samp, muv).r;
+    // The same hex tiling `fs` reads its maps through (see `mat_hex`).
+    let mh = mat_hex(in, uv0, dpdx(uv0), dpdy(uv0));
+    if (mh.on) {
+        nmap_s = hex_normal(mh, select(1.0, -1.0, ext.nstr < 0.0));
+        rough_s = hex_map(rough_tex, rough_samp, mh).g;
+        metal_s = hex_map(metal_tex, metal_samp, mh).b;
+        ao_s = hex_map(ao_tex, ao_samp, mh).r;
+    }
+    let n = mapped_normal(in, geo_n, muv, ext.nstr, nmap_s);
+    let rough = clamp(ext.rough * rough_s, 0.045, 1.0);
+    let metal = clamp(ext.metal * metal_s, 0.0, 1.0);
     let v = normalize(-in.view_pos);
     let pix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));
     var occ = 1.0;

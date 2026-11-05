@@ -662,7 +662,7 @@ mod tests {
             UvTransform { offset: [0.1, 0.7], scale: [1.5, 0.5], rotation: 0.6 },
             UvTransform { offset: [0.0, 0.0], scale: [1.0, 1.0], rotation: -1.2 },
         ] {
-            let floptle_core::Tiling::Uv { count, offset, rotation } = crate::project::uv_tiling(t) else {
+            let floptle_core::Tiling::Uv { count, offset, rotation, .. } = crate::project::uv_tiling(t) else {
                 panic!("a UV tiling")
             };
             for uv in [[0.0f32, 0.0], [1.0, 0.0], [0.3, 0.9]] {

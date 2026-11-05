@@ -566,6 +566,7 @@ mod tint_tests {
             tile_mode: 0,
             tile: [0.0; 4],
             tile_rotation: 0.0,
+            tile_antitile: 0.0,
             paint_base: 0,
             terrain_paint_base: 0,
             paint_modulate: false,

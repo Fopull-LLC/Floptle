@@ -18,8 +18,8 @@ and their tiling are *data*.
 > fixed-function `Material` component is permanent; `shader: Option<String>`
 > is an OPTIONAL `.flsl` reference on it, with `shader_params` /
 > `shader_textures` / per-slot `shader_tiling` maps. The **tiling block** is
-> live on both paths: `Tiling::Uv { count, offset, rotation }` or
-> `Tiling::Triplanar { scale, blend }` per BINDING (the base texture and each
+> live on both paths: `Tiling::Uv { count, offset, rotation, antitile }` or
+> `Tiling::Triplanar { scale, blend, antitile }` per BINDING (the base texture and each
 > shader slot), with mode/fields rows in the Inspector; wrap (`Repeat / Clamp /
 > Mirror` — this doc's mirror-on-alternate) and filtering stay per-texture
 > settings in the Assets panel. Triplanar projects in OBJECT space (stable
@@ -180,6 +180,42 @@ surface normal. Result: clean, uniform tiling on *any* geometry with zero UV wor
 Pick triplanar in the material editor with one toggle; set `scale` (world tile
 size) and `blend` (edge sharpness). This is the default suggestion when a surface
 reports poor UVs.
+
+### Hiding the repeat: `antitile`
+
+A texture repeated forty times across a floor shows its period as a grid long
+before any single tile looks wrong. Both tiling modes take an `antitile` amount,
+0 to 1, for that:
+
+```ron
+tiling: Some(Uv(count: (40.0, 40.0), offset: (0.0, 0.0), rotation: 0.0, antitile: 0.8)),
+tiling: Some(Triplanar(scale: 2.0, blend: 4.0, antitile: 0.8)),
+```
+
+Above 0 the surface is laid with hexagons about a tile across. Each one reads
+the tile at its own random offset, turned by up to ±180° × `antitile`, and the
+hexagons blend at their edges, weighted towards the brighter tap so the blend
+keeps the texture's contrast instead of averaging to grey (hex tiling, Mikkelsen
+2022, the same technique the terrain palette's `|antitile=` uses). Mipmaps and
+filtering are the plain tile's: the gradients turn with the UVs.
+
+- **Every map follows the colour.** On a UV-tiled material the normal, roughness,
+  metallic, occlusion and emission maps read through the same hexagons, so a
+  brick's bumps turn and shift with its colour, and the normal map's tilt is
+  turned back into the surface's frame, so light still comes from the right side.
+  Triplanar materials hex-tile their colour (their maps use plain mesh UVs, as
+  before).
+- **2D lighting sees the same picture.** The 2D light pass's G-buffer reads the
+  same hexagons.
+- **Cost:** three texture reads per map where there was one, only on materials
+  that turn it on. 0, the default, is the plain tile, exactly as before, and is
+  left out of the saved scene.
+- **Not on sprite sheets** (a cell is a picture, not a texture to repeat), and
+  not yet on a custom shader's texture slots: its `sample()` reads the plain
+  tile, and the Inspector shows the control only on the base texture.
+- Rotation suits textures with no direction (grass, rock, sand, noise). On
+  textures with a grain (planks, brick courses), keep `antitile` low: random
+  offsets alone still break the period, with less turning.
 
 ## 4. Built-in content (out of the box)
 

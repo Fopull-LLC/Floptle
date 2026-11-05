@@ -235,6 +235,9 @@ pub struct MaterialParams {
     pub tile: [f32; 4],
     /// UV-mode rotation in degrees around the UV center (quantized to 0.1°).
     pub tile_rotation: f32,
+    /// Hex anti-tiling amount, 0..1 (`Tiling::antitile`; quantized to 1/63).
+    /// 0 is the plain tile. Applies in both tiling modes.
+    pub tile_antitile: f32,
     /// Base offset of this instance's vertex-paint block in the `vpaint` store;
     /// 0 = unpainted (paint multiplies albedo, so unpainted reads as white).
     /// Usually [`Raster::mesh_paint_base`] — instances sharing a mesh share its block.
@@ -282,6 +285,7 @@ impl MaterialParams {
             tile_mode: 0,
             tile: [0.0; 4],
             tile_rotation: 0.0,
+            tile_antitile: 0.0,
             paint_base: 0,
             terrain_paint_base: 0,
             paint_modulate: false,
@@ -313,13 +317,13 @@ impl MaterialParams {
     /// edge with its neighbour and a linear sampler blends across it — a rim of
     /// the next frame around a sprite, at some scales and not others.
     pub fn from_material_inset(m: &floptle_core::Material, texel: [f32; 2]) -> Self {
-        let (tile_mode, tile, tile_rotation) = match m.effective_tiling_inset(texel) {
-            None => (0, [0.0; 4], 0.0),
-            Some(floptle_core::Tiling::Uv { count, offset, rotation }) => {
-                (1, [count[0], count[1], offset[0], offset[1]], rotation)
+        let (tile_mode, tile, tile_rotation, tile_antitile) = match m.effective_tiling_inset(texel) {
+            None => (0, [0.0; 4], 0.0, 0.0),
+            Some(floptle_core::Tiling::Uv { count, offset, rotation, antitile }) => {
+                (1, [count[0], count[1], offset[0], offset[1]], rotation, antitile)
             }
-            Some(floptle_core::Tiling::Triplanar { scale, blend }) => {
-                (2, [scale, blend, 0.0, 0.0], 0.0)
+            Some(floptle_core::Tiling::Triplanar { scale, blend, antitile }) => {
+                (2, [scale, blend, 0.0, 0.0], 0.0, antitile)
             }
         };
         Self {
@@ -340,6 +344,7 @@ impl MaterialParams {
             tile_mode,
             tile,
             tile_rotation,
+            tile_antitile,
             paint_base: 0,
             terrain_paint_base: 0,
             paint_modulate: false,
@@ -1029,7 +1034,7 @@ pub struct Raster {
 /// distance-field module. Public so the editor can naga-validate a generated
 /// `.flsl` chunk against the real seam before asking for a pipeline.
 pub fn pass_prelude() -> &'static str {
-    concat!(include_str!("raster.wgsl"), "\n", include_str!("field.wgsl"))
+    concat!(include_str!("raster.wgsl"), "\n", include_str!("field.wgsl"), "\n", include_str!("hex_tile.wgsl"))
 }
 
 /// Replace a marker-delimited stub block (inclusive of both marker lines) with
@@ -5157,6 +5162,16 @@ pub fn set_ext_index(raw: &mut InstanceRaw, ext: u32) {
     raw.normal_mat[1][3] = (modul | (ext << 1)) as f32;
 }
 
+/// The packed tiling flags an instance carries in `rim.w`: bits 0-1 the mode,
+/// 2-13 the UV rotation in tenths of a degree, 14-19 the anti-tiling amount in
+/// 63rds. An exact small integer in f32 (well under 2^24); `hex_tile.wgsl`'s
+/// `tile_flags_*` decode it. Rotation only means anything in mode 1.
+pub fn tile_flags(m: &MaterialParams) -> f32 {
+    let rot = ((m.tile_rotation.rem_euclid(360.0) * 10.0).round() as u32) % 3600;
+    let anti = (m.tile_antitile.clamp(0.0, 1.0) * 63.0).round() as u32;
+    (m.tile_mode.min(2) as u32 | (rot << 2) | (anti << 14)) as f32
+}
+
 pub fn instance_of_mat(model: Mat4, m: &MaterialParams) -> InstanceRaw {
     // The inverse-transpose is correct under rotation + non-uniform scale; guard a
     // degenerate (zero/singular) scale, whose non-invertible 3×3 would otherwise
@@ -5199,16 +5214,7 @@ pub fn instance_of_mat(model: Mat4, m: &MaterialParams) -> InstanceRaw {
             (u32::from(m.unlit) | (m.paint_base << 1)) as f32,
             m.ambient,
         ],
-        // rim.w = packed tiling flags: mode + rotation deci-degrees (exact small
-        // int in f32 — well under 2^24). Rotation only means anything in mode 1.
-        rim: [
-            m.rim[0],
-            m.rim[1],
-            m.rim[2],
-            (m.tile_mode.min(2) as u32
-                + (m.tile_rotation.rem_euclid(360.0) * 10.0).round() as u32 * 4)
-                as f32,
-        ],
+        rim: [m.rim[0], m.rim[1], m.rim[2], tile_flags(m)],
         tile: m.tile,
     }
 }
@@ -5231,6 +5237,27 @@ impl InstanceRaw {
 
 #[cfg(test)]
 mod tests {
+
+    /// **The packed tiling flags of a material without anti-tiling are the
+    /// numbers they always were**, so every existing tiled surface draws the
+    /// same; anti-tiling sits above the rotation in bits 14-19, where
+    /// `hex_tile.wgsl`'s `tile_flags_*` read it back.
+    #[test]
+    fn tile_flags_keep_the_old_packing_and_add_antitile_above_it() {
+        for (mode, rot) in [(0u8, 0.0f32), (1, 0.0), (1, 30.0), (1, 359.95), (1, -90.0), (2, 0.0)] {
+            let m = crate::MaterialParams { tile_mode: mode, tile_rotation: rot, ..crate::MaterialParams::flat([1.0; 3]) };
+            // The packing as it was before anti-tiling (rim.w), less the one
+            // value it wrote that means the same turn: 3600 tenths is 0.
+            let old = (mode as u32 + ((rot.rem_euclid(360.0) * 10.0).round() as u32 % 3600) * 4) as f32;
+            assert_eq!(super::tile_flags(&m), old, "mode {mode} rotation {rot}");
+        }
+        let m = crate::MaterialParams { tile_mode: 1, tile_rotation: 359.9, tile_antitile: 1.0, ..crate::MaterialParams::flat([1.0; 3]) };
+        let f = super::tile_flags(&m) as u32;
+        assert_eq!((f & 3, (f >> 2) & 4095, (f >> 14) & 63), (1, 3599, 63), "{f:#b}");
+        let half = crate::MaterialParams { tile_antitile: 0.5, ..m };
+        assert_eq!((super::tile_flags(&half) as u32 >> 14) & 63, 32);
+        assert!(super::tile_flags(&m) < 16_777_216.0, "the flags must stay an exact integer in f32");
+    }
     use super::group_by_key;
 
     /// `force_unlit` sets the unlit bit and nothing else — the same lane

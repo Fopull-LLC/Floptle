@@ -182,10 +182,10 @@ fn luau_ladder() -> Result<(String, usize), String> {
 /// reason: `field.wgsl` is spliced into two of these and is not a module.
 fn shader_modules() -> Vec<(&'static str, String)> {
     vec![
-        ("raster.wgsl + field.wgsl", floptle_render::raster::pass_prelude().to_string()),
-        ("raymarch.wgsl + field.wgsl", floptle_render::raymarch::prelude().to_string()),
+        ("raster.wgsl + field.wgsl + hex_tile.wgsl", floptle_render::raster::pass_prelude().to_string()),
+        ("raymarch.wgsl + field.wgsl + hex_tile.wgsl", floptle_render::raymarch::prelude().to_string()),
         ("grid.wgsl", include_str!("../../floptle-render/src/grid.wgsl").to_string()),
-        ("light2d.wgsl", include_str!("../../floptle-render/src/light2d.wgsl").to_string()),
+        ("light2d.wgsl + hex_tile.wgsl", floptle_render::light2d::source().to_string()),
         ("outline.wgsl", include_str!("../../floptle-render/src/outline.wgsl").to_string()),
         ("palette.wgsl", include_str!("../../floptle-render/src/palette.wgsl").to_string()),
         ("particles.wgsl", include_str!("../../floptle-render/src/particles.wgsl").to_string()),

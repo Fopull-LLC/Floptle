@@ -887,11 +887,13 @@ pub(crate) fn apply_field_shapes(
 /// lanes (rotation converted to radians here — the GPU never sees degrees).
 fn tiling_pack(t: &floptle_core::Tiling) -> floptle_shader::TilingPack {
     match *t {
-        floptle_core::Tiling::Uv { count, offset, rotation } => floptle_shader::TilingPack {
+        // `antitile` is the built-in surface's: a custom shader's `sample()`
+        // does not hex-tile (the inspector hides the control on its slots).
+        floptle_core::Tiling::Uv { count, offset, rotation, .. } => floptle_shader::TilingPack {
             a: [count[0], count[1], offset[0], offset[1]],
             b: [1.0, rotation.to_radians(), 0.0, 0.0],
         },
-        floptle_core::Tiling::Triplanar { scale, blend } => {
+        floptle_core::Tiling::Triplanar { scale, blend, .. } => {
             floptle_shader::TilingPack { a: [0.0; 4], b: [2.0, 0.0, scale, blend] }
         }
     }
