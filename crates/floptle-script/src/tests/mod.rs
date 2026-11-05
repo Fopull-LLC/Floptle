@@ -25,6 +25,7 @@ mod preprocess;
 mod refs;
 mod ticks;
 mod ui;
+mod vm;
 
 pub(super) fn write_script(dir: &Path, name: &str, body: &str) {
     let mut f = std::fs::File::create(dir.join(format!("{name}.lua"))).unwrap();

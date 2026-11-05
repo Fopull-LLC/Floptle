@@ -52,6 +52,14 @@ members = [
     "crates/floptle-vfs",      # files: std::fs on the desktop, the preloaded bundle in a browser
     "crates/floptle-web",      # the browser build: wasm module, canvas, WebGPU (cdylib)
 ]
+# Vendored, patched dependencies: built as dependencies, never as members.
+exclude = ["third_party"]
+
+# Luau with a compiler fix the engine relies on (a multiple assignment evaluates
+# every value before it assigns any target, as Lua and LuaJIT do). Card 0641;
+# third_party/luau0-src/FLOPTLE-PATCHES.md says what changed and how to upgrade.
+[patch.crates-io]
+luau0-src = { path = "third_party/luau0-src" }
 
 [workspace.package]
 version = "0.117.0"

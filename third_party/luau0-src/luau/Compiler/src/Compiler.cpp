@@ -3282,6 +3282,21 @@ struct Compiler
 
         Visitor visitor(this);
 
+        // FLOPTLE PATCH (card 0641): a value that can run code (a call, an index, an operator with a metamethod) may read an
+        // already-assigned local through a closure, which no syntactic visit sees, and a local can be captured by a function
+        // compiled later than this statement. PUC Lua and LuaJIT evaluate every value before assigning, and scripts rely on it,
+        // so once any local has been assigned, every assigned local is treated as conflicting before such a value is evaluated.
+        // The cost is one MOVE per local target, only in multiple assignments. See third_party/luau0-src/FLOPTLE-PATCHES.md.
+        auto mayRunCode = [](AstExpr* e) {
+            return !(e->is<AstExprLocal>() || e->is<AstExprConstantNil>() || e->is<AstExprConstantBool>() ||
+                     e->is<AstExprConstantNumber>() || e->is<AstExprConstantString>() || e->is<AstExprFunction>() ||
+                     e->is<AstExprVarargs>());
+        };
+        auto guardValue = [&](AstExpr* e) {
+            if (visitor.assigned.any() && mayRunCode(e))
+                visitor.conflict |= visitor.assigned;
+        };
+
         // mark any registers that are used *after* assignment as conflicting
 
         // first we go through assignments to locals, since they are performed before assignments to other l-values
@@ -3292,7 +3307,10 @@ struct Compiler
             if (li.kind == LValue::Kind_Local)
             {
                 if (i < values.size)
+                {
+                    guardValue(values.data[i]);
                     values.data[i]->visit(&visitor);
+                }
 
                 visitor.assigned[li.reg] = true;
             }
@@ -3304,12 +3322,18 @@ struct Compiler
             const LValue& li = vars[i].lvalue;
 
             if (li.kind != LValue::Kind_Local && i < values.size)
+            {
+                guardValue(values.data[i]);
                 values.data[i]->visit(&visitor);
+            }
         }
 
         // mark any registers used in trailing expressions as conflicting as well
         for (size_t i = vars.size(); i < values.size; ++i)
+        {
+            guardValue(values.data[i]);
             values.data[i]->visit(&visitor);
+        }
 
         // mark any registers used on left hand side that are also assigned anywhere as conflicting
         // this is order-independent because we evaluate all right hand side arguments into registers before doing table assignments
