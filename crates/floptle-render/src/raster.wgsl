@@ -20,8 +20,7 @@ struct RasterGlobals {
     point_color: array<vec4<f32>, 16>, // rgb = color * intensity
     point_shape: array<vec4<f32>, 16>, // the EMITTER: [kind, a, b, flags] — see area_terms()
     point_rot: array<vec4<f32>, 16>,   // the emitter's world orientation (xyzw quaternion)
-    terrain_mask: vec4<f32>,           // y = triplanar scale (bitmasks moved to terrain_bits)
-    terrain_bits: vec4<u32>,           // x = per-slot NEAREST bitmask, y = GLOW, z = has a normal map, w = has an ORM map (bit-exact at 32 slots)
+    terrain_mask: vec4<f32>,           // y = triplanar scale (per-slot settings live in the slot store)
     // Each lamp's CONE: x = cos(half angle where it reaches zero), y = cos(half
     // angle where it is still full. x = -1 is NO cone. Appended at the END so
     // this struct stays byte-identical to the Rust `Globals`.
@@ -118,6 +117,8 @@ fn fog_sun_tap(p: vec3<f32>) -> f32 {
 // cost is one descriptor and the alternative was a pipeline that could not be
 // created on that backend.
 @group(0) @binding(3) var terrain_pal: texture_2d_array<f32>;
+// Every palette slot's settings (`struct TerrainSlot` in field.wgsl).
+@group(0) @binding(14) var<storage, read> terrain_slots: array<TerrainSlot>;
 @group(0) @binding(4) var terrain_pal_samp: sampler;
 @group(0) @binding(11) var terrain_pal_nearest: texture_2d_array<f32>;
 @group(0) @binding(5) var terrain_pal_samp_nearest: sampler;
@@ -1531,7 +1532,7 @@ fn point_ggx(pos_rel: vec3<f32>, n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>, roug
 // object normal. Explicit-gradient sampling (`dpx`/`dpy` = dpdx/dpdy of `p`, computed by
 // the caller BEFORE any branching) so this is legal inside data-dependent loops — the
 // weight-blended splat below samples a variable number of slots per fragment. `slot` is
-// the 0-based palette layer; per-slot nearest filtering comes from `terrain_bits.x`.
+// the 0-based palette layer; per-slot nearest filtering comes from the slot store.
 // What the slots a terrain fragment blends say about its surface, summed by
 // their weights as `terrain_splat` reads them: the normal in the terrain's
 // own space, and occlusion, roughness, metalness and height. Zero at the start
@@ -1580,21 +1581,21 @@ fn pal_read(nearest: bool, uv: vec2<f32>, layer: i32, dx: vec2<f32>, dy: vec2<f3
     return textureSampleGrad(terrain_pal, terrain_pal_samp, uv, layer, dx, dy);
 }
 
-fn pal_surface(uv: vec2<f32>, layer: i32, dx: vec2<f32>, dy: vec2<f32>, amount: f32, has_n: bool, has_o: bool, nearest: bool) -> PalSurface {
+fn pal_surface(uv: vec2<f32>, layer: i32, nl: i32, ol: i32, dx: vec2<f32>, dy: vec2<f32>, amount: f32, has_n: bool, has_o: bool, nearest: bool) -> PalSurface {
     var out: PalSurface;
     out.n = vec3<f32>(0.0, 0.0, 1.0);
     out.orm = vec4<f32>(1.0, 1.0, 1.0, 0.5);
-    // The palette's own array carries the surface maps past its colours:
-    // layer 32 + slot the normal map, 64 + slot the ORM and height, stored so
-    // the array's sRGB decode gives back the map's own values.
-    let nl = layer + 32;
-    let ol = layer + 64;
+    // The palette's own array carries the surface maps past its colours, at
+    // the layers the slot store names (`nl` normal, `ol` ORM and height),
+    // stored so the array's sRGB decode gives back the map's own values.
     if (amount <= 0.0) {
         out.col = pal_read(nearest, uv, layer, dx, dy).rgb;
         if (has_n) {
             out.n = pal_tangent(pal_read(nearest, uv, nl, dx, dy));
         }
-        out.orm = pal_read(nearest, uv, ol, dx, dy);
+        if (has_o) {
+            out.orm = pal_read(nearest, uv, ol, dx, dy);
+        }
         return out;
     }
     let h = hex_taps(uv, clamp(amount, 0.0, 1.0));
@@ -1611,10 +1612,12 @@ fn pal_surface(uv: vec2<f32>, layer: i32, dx: vec2<f32>, dy: vec2<f32>, amount: 
             + vec3<f32>(transpose(h.r2) * s2.xy, s2.z) * ww.y
             + vec3<f32>(transpose(h.r3) * s3.xy, s3.z) * ww.z;
     }
-    let o1 = pal_read(nearest, h.uv1, ol, h.r1 * dx, h.r1 * dy);
-    let o2 = pal_read(nearest, h.uv2, ol, h.r2 * dx, h.r2 * dy);
-    let o3 = pal_read(nearest, h.uv3, ol, h.r3 * dx, h.r3 * dy);
-    out.orm = o1 * ww.x + o2 * ww.y + o3 * ww.z;
+    if (has_o) {
+        let o1 = pal_read(nearest, h.uv1, ol, h.r1 * dx, h.r1 * dy);
+        let o2 = pal_read(nearest, h.uv2, ol, h.r2 * dx, h.r2 * dy);
+        let o3 = pal_read(nearest, h.uv3, ol, h.r3 * dx, h.r3 * dy);
+        out.orm = o1 * ww.x + o2 * ww.y + o3 * ww.z;
+    }
     return out;
 }
 
@@ -1622,14 +1625,15 @@ fn pal_surface(uv: vec2<f32>, layer: i32, dx: vec2<f32>, dy: vec2<f32>, amount: 
 // object normal. Explicit-gradient sampling (`dpx`/`dpy` = dpdx/dpdy of `p`, computed by
 // the caller BEFORE any branching) so this is legal inside data-dependent loops — the
 // weight-blended splat below samples a variable number of slots per fragment. `slot` is
-// the 0-based palette layer; per-slot nearest filtering comes from `terrain_bits.x`.
+// the 0-based palette layer; per-slot nearest filtering comes from the slot store.
 // `wt` is the slot's share of the fragment: its surface maps (or the plain
 // surface, without any) go into `TS_*` at that weight.
 fn terrain_triplanar(slot: i32, p: vec3<f32>, n: vec3<f32>, dpx_in: vec3<f32>, dpy_in: vec3<f32>, wt: f32) -> vec3<f32> {
     let scale = g.terrain_mask.y * terrain_slot_scale(slot);
     let an = abs(normalize(n)) + vec3<f32>(0.0001);
     let w = an / (an.x + an.y + an.z);
-    let nearest = (g.terrain_bits.x & (1u << u32(slot))) != 0u;
+    let rec = slot_rec(slot);
+    let nearest = slot >= 0 && (rec.flags.x & SLOT_NEAREST) != 0u;
     // Anti-tiling (palette `|antitile=`, `|macro=`): see `pal_sample` and
     // `terrain_macro` in field.wgsl. Both zero samples exactly as before.
     let tile = terrain_slot_tile(slot);
@@ -1645,14 +1649,14 @@ fn terrain_triplanar(slot: i32, p: vec3<f32>, n: vec3<f32>, dpx_in: vec3<f32>, d
     // its colour is: smooth, or nearest for pixel art. The normal is whiteout-blended
     // across the three projections: each tangent normal is added to the
     // surface normal's components in its plane.
-    let in_range = slot >= 0 && slot < 32;
-    let bit = 1u << u32(clamp(slot, 0, 31));
-    let has_n = in_range && (g.terrain_bits.z & bit) != 0u;
-    let has_o = in_range && (g.terrain_bits.w & bit) != 0u;
+    let has_n = slot >= 0 && rec.layers.y != SLOT_NONE;
+    let has_o = slot >= 0 && rec.layers.z != SLOT_NONE;
     if (has_n || has_o) {
-        let sx = pal_surface(p.zy * scale, slot, dpx.zy * scale, dpy.zy * scale, anti, has_n, has_o, nearest);
-        let sy = pal_surface(p.xz * scale, slot, dpx.xz * scale, dpy.xz * scale, anti, has_n, has_o, nearest);
-        let sz = pal_surface(p.xy * scale, slot, dpx.xy * scale, dpy.xy * scale, anti, has_n, has_o, nearest);
+        let nl = i32(rec.layers.y);
+        let ol = i32(rec.layers.z);
+        let sx = pal_surface(p.zy * scale, slot, nl, ol, dpx.zy * scale, dpy.zy * scale, anti, has_n, has_o, nearest);
+        let sy = pal_surface(p.xz * scale, slot, nl, ol, dpx.xz * scale, dpy.xz * scale, anti, has_n, has_o, nearest);
+        let sz = pal_surface(p.xy * scale, slot, nl, ol, dpx.xy * scale, dpy.xy * scale, anti, has_n, has_o, nearest);
         let nn = normalize(n);
         let tx = vec3<f32>(sx.n.xy + nn.zy, abs(sx.n.z) * nn.x);
         let ty = vec3<f32>(sy.n.xy + nn.xz, abs(sy.n.z) * nn.y);
@@ -1760,9 +1764,9 @@ fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32) ->
         let lo = code & 255u;
         let hi = code >> 8u;
         if (lo >= 1u && hi >= 1u && hi <= 32u) {
-            let w = max(G.terrain_blend[(lo - 1u) >> 2u][(lo - 1u) & 3u], G.terrain_blend[(hi - 1u) >> 2u][(hi - 1u) & 3u]);
+            let w = max(slot_rec(i32(lo) - 1).blend.x, slot_rec(i32(hi) - 1).blend.x);
             if (w > 0.0) {
-                let rough = clamp(max(G.terrain_rough[(lo - 1u) >> 2u][(lo - 1u) & 3u], G.terrain_rough[(hi - 1u) >> 2u][(hi - 1u) & 3u]), 0.0, 1.0);
+                let rough = clamp(max(slot_rec(i32(lo) - 1).blend.y, slot_rec(i32(hi) - 1).blend.y), 0.0, 1.0);
                 // Two octaves of world noise on the scale of the width, so a
                 // wide seam meanders widely and a narrow one in small steps.
                 let q = in.lpos / max(w, 0.05);
@@ -1772,11 +1776,11 @@ fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32) ->
                 var glow = 0.0;
                 if (t < 0.999) {
                     c += terrain_triplanar(i32(lo) - 1, in.lpos, in.lnorm, dpx, dpy, 1.0 - t) * (1.0 - t);
-                    glow += f32((g.terrain_bits.y >> (lo - 1u)) & 1u) * (1.0 - t);
+                    glow += slot_glow(i32(lo) - 1) * (1.0 - t);
                 }
                 if (t > 0.001) {
                     c += terrain_triplanar(i32(hi) - 1, in.lpos, in.lnorm, dpx, dpy, t) * t;
-                    glow += f32((g.terrain_bits.y >> (hi - 1u)) & 1u) * t;
+                    glow += slot_glow(i32(hi) - 1) * t;
                 }
                 return vec4<f32>(c * tint * 1.6, glow);
             }
@@ -1792,7 +1796,7 @@ fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32) ->
     if (aw < 0.01 && abs(av - whole) < 0.01) {
         let layer = i32(whole) - 1;
         let c = terrain_triplanar(layer, in.lpos, in.lnorm, dpx, dpy, 1.0) * tint * 1.6;
-        return vec4<f32>(c, f32((g.terrain_bits.y >> u32(max(layer, 0))) & 1u));
+        return vec4<f32>(c, slot_glow(max(layer, 0)));
     }
     let vi = splat_volume(in.view_pos);
     if (vi < 0) {
@@ -1801,8 +1805,8 @@ fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32) ->
         let f = av - lo;
         let c_lo = terrain_triplanar(i32(lo) - 1, in.lpos, in.lnorm, dpx, dpy, 1.0 - f) * tint * 1.6;
         let c_hi = terrain_triplanar(i32(ceil(av)) - 1, in.lpos, in.lnorm, dpx, dpy, f) * tint * 1.6;
-        let g_lo = f32((g.terrain_bits.y >> u32(max(i32(lo) - 1, 0))) & 1u);
-        let g_hi = f32((g.terrain_bits.y >> u32(max(i32(ceil(av)) - 1, 0))) & 1u);
+        let g_lo = slot_glow(max(i32(lo) - 1, 0));
+        let g_hi = slot_glow(max(i32(ceil(av)) - 1, 0));
         return vec4<f32>(mix(c_lo, c_hi, f), mix(g_lo, g_hi, f));
     }
     let uvi = u32(vi);
@@ -1857,12 +1861,12 @@ fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32) ->
         var ga = 0.0;
         if (pa > 0u) {
             ca = terrain_triplanar(i32(pa) - 1, in.lpos, in.lnorm, dpx, dpy, 1.0 - t) * 1.6;
-            ga = f32((g.terrain_bits.y >> (pa - 1u)) & 1u);
+            ga = slot_glow(i32(pa) - 1);
         } else {
             terrain_surface_plain(in.lnorm, 1.0 - t);
         }
         let cb = terrain_triplanar(i32(pb) - 1, in.lpos, in.lnorm, dpx, dpy, t) * 1.6;
-        let gb = f32((g.terrain_bits.y >> (pb - 1u)) & 1u);
+        let gb = slot_glow(i32(pb) - 1);
         return vec4<f32>(mix(ca, cb, t) * tint, mix(ga, gb, t));
     }
     var albedo = vec3<f32>(0.0);
@@ -1877,7 +1881,7 @@ fn terrain_splat(in: VsOut, dpx: vec3<f32>, dpy: vec3<f32>, aw: f32, ew: f32) ->
         } else {
             let layer = i32(slots[k]) - 1;
             albedo = albedo + terrain_triplanar(layer, in.lpos, in.lnorm, dpx, dpy, w) * tint * 1.6 * w;
-            glow = glow + f32((g.terrain_bits.y >> u32(layer)) & 1u) * w;
+            glow = glow + slot_glow(layer) * w;
         }
     }
     if (wsum < 1e-4) {

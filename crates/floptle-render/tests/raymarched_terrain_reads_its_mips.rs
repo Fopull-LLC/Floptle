@@ -52,8 +52,12 @@ fn shoot(gpu: &Gpu, raymarch: &mut Raymarch, ground: &Terrain, mips: bool, dx: f
     let cr = (DVec3::new(bc[0] as f64, bc[1] as f64, bc[2] as f64) - cam.world_position).as_vec3();
     vol_center[0] = [cr.x, cr.y, cr.z, 1.0];
     vol_half[0] = [hf[0], hf[1], hf[2], 0.6];
-    let mut terrain_tile = [[0.0f32; 4]; 32];
-    terrain_tile[0][3] = if mips { 1.0 } else { 0.0 };
+    // Slot 0 reads its mips or not (`SmoothMipmaps` against `Smooth`).
+    let mut slot = floptle_render::terrain_slots::TerrainSlotRaw::identity(0);
+    if mips {
+        slot.flags[0] |= floptle_render::terrain_slots::flag::MIPS;
+    }
+    raymarch.set_terrain_slots(gpu, &[slot]);
     let light = Vec3::new(0.2, 1.0, 0.1).normalize();
     let rm = RaymarchGlobals {
         view_proj: view_proj.to_cols_array_2d(),
@@ -67,9 +71,6 @@ fn shoot(gpu: &Gpu, raymarch: &mut Raymarch, ground: &Terrain, mips: bool, dx: f
         vol_center,
         vol_half,
         blobs: [[0.0; 4]; 16],
-        // No slot is pixel art (`w` is the nearest bitmask).
-        terrain_tint: [1.0, 1.0, 1.0, 0.0],
-        terrain_tile,
         ..Default::default()
     };
     raymarch.draw_into(gpu, &view, gpu.depth_view(), rm);

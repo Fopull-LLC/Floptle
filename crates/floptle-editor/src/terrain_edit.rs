@@ -1461,6 +1461,45 @@ pub(crate) fn terrain_scale_lanes(scales: &[f32]) -> [[f32; 4]; 8] {
 }
 
 impl Editor {
+    /// Every palette slot's settings as the terrain shaders read them (the
+    /// slot store, `floptle_render::terrain_slots`): scale, blend width and
+    /// roughness, anti-tiling, the filter and mip flags its texture asks
+    /// for, glow, and where its surface maps are. A slot past the palette is
+    /// the identity.
+    pub(crate) fn terrain_slot_store(&self) -> Vec<floptle_render::terrain_slots::TerrainSlotRaw> {
+        use floptle_render::terrain_slots::{flag, TerrainSlotRaw};
+        let slots = floptle_render::TERRAIN_SLOTS as usize;
+        let scale = terrain_scale_lanes(&self.terrain_tex_scale);
+        let blend = self.terrain_blend_lanes();
+        let rough = terrain_slot_lanes(&self.terrain_tex_rough, 0.5);
+        let mips = terrain_mips_mask(&self.terrain_textures, &self.texture_settings, &self.project_root);
+        let tile = terrain_tile_lanes(&self.terrain_tex_tile, mips);
+        let nearest = terrain_nearest_mask(&self.terrain_textures, &self.texture_settings, &self.project_root);
+        let [normals, orms] = self.terrain_surface_bits;
+        (0..slots)
+            .map(|i| {
+                let mut s = TerrainSlotRaw::identity(i as u32);
+                let bit = 1u32 << i;
+                s.tint_scale[3] = scale[i / 4][i % 4];
+                s.blend[0] = blend[i / 4][i % 4];
+                s.blend[1] = rough[i / 4][i % 4];
+                s.tile = [tile[i][0], tile[i][1], tile[i][2], 1.0];
+                for (mask, f) in [(mips, flag::MIPS), (nearest, flag::NEAREST), (self.terrain_glow_mask, flag::GLOW)] {
+                    if mask & bit != 0 {
+                        s.flags[0] |= f;
+                    }
+                }
+                if normals & bit != 0 {
+                    s.layers[1] = slots as u32 + i as u32;
+                }
+                if orms & bit != 0 {
+                    s.layers[2] = 2 * slots as u32 + i as u32;
+                }
+                s
+            })
+            .collect()
+    }
+
     /// The palette's blend widths for the shader, each cut to what the
     /// finest terrain's meshes can reach: past the distances a mesh baked,
     /// a vertex reads as no edge at all, and a wider blend would end there

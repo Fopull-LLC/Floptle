@@ -19,6 +19,8 @@
 // Terrain texture palette (triplanar-mapped). The volume color's alpha selects a
 // slot: 0 = untextured (flat tint), n = palette layer n-1.
 @group(0) @binding(4) var terrain_tex: texture_2d_array<f32>;
+// Every palette slot's settings (`struct TerrainSlot` in field.wgsl).
+@group(0) @binding(14) var<storage, read> terrain_slots: array<TerrainSlot>;
 // A REPEAT sampler so triplanar terrain textures tile across the surface.
 @group(0) @binding(5) var terrain_samp: sampler;
 // The equirectangular skybox texture (sampled for background pixels, reusing the
@@ -467,7 +469,7 @@ fn triplanar(slot: i32, rel: vec3<f32>, n: vec3<f32>, dpx_in: vec3<f32>, dpy_in:
     // Bit `slot` of the mask = this slot's texture asked for Pixelated/Nearest filtering
     // (the Assets panel setting). Both samplers are read and one result is selected:
     // WGSL has no sampler arrays, and `select` keeps this uniform-safe.
-    let nearest = (u32(G.terrain_tint.w) & (1u << u32(slot))) != 0u;
+    let nearest = slot_has(slot, SLOT_NEAREST);
     let anti = terrain_slot_tile(slot).x;
     // Only a slot that reads its mips (`SmoothMipmaps`) samples by its
     // footprint; a zero gradient is the full-size level, as before mips.

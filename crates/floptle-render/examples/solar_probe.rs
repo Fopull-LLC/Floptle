@@ -142,6 +142,17 @@ fn main() {
     let mut raster = Raster::new(&gpu);
     if !layers.is_empty() {
         raster.set_terrain_palette(&gpu, &layers, 0);
+        // Glowing slots, from the palette's `|glow` marks.
+        let slots: Vec<_> = (0..floptle_render::TERRAIN_SLOTS)
+            .map(|i| {
+                let mut s = floptle_render::terrain_slots::TerrainSlotRaw::identity(i);
+                if glow_mask & (1 << i) != 0 {
+                    s.flags[0] |= floptle_render::terrain_slots::flag::GLOW;
+                }
+                s
+            })
+            .collect();
+        raster.set_terrain_slots(&gpu, &slots);
     }
     let mut slots = Vec::new();
     for (_, cm) in &chunks {
@@ -254,7 +265,6 @@ fn main() {
             light_color: [1.0, 0.96, 0.9, 0.0],
             ambient: [0.16, 0.17, 0.22, 0.0],
             terrain_mask: [0.0, 0.22, 0.0, 0.0],
-            terrain_bits: [0, glow_mask, 0, 0],
             ..Default::default()
         };
         let model = Mat4::from_translation(cr);

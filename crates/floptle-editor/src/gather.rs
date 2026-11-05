@@ -114,7 +114,6 @@ pub(crate) struct FrameLighting {
 /// list, skinned and custom-shader draws, the blobs the raymarch takes, and
 /// the per-frame tables the draw was gathered against.
 pub(crate) struct FrameInstances {
-    pub(crate) terrain_nearest_mask: u32,
     pub(crate) sort_z: std::collections::HashMap<Entity, DVec3>,
     pub(crate) lights_2d: floptle_render::Light2dUniform,
     pub(crate) instances: Vec<(MeshId, Option<TexId>, InstanceRaw)>,
@@ -431,7 +430,6 @@ impl Editor {
         } = lighting;
 
         let FrameInstances {
-            terrain_nearest_mask,
             sort_z,
             lights_2d,
             mut instances,
@@ -540,13 +538,13 @@ impl Editor {
         // selection mask). Up to 16 blobs are folded together in one march.
         let (vol_fog_a, vol_fog_b, vol_fog_c) =
             vol_fog_uniforms(&light_node, self.fog_time, cam.world_position.y as f32);
-        let terrain_scale = crate::terrain_edit::terrain_scale_lanes(&self.terrain_tex_scale);
-        let terrain_blend = self.terrain_blend_lanes();
-        let terrain_rough = crate::terrain_edit::terrain_slot_lanes(&self.terrain_tex_rough, 0.5);
-        let terrain_tile = crate::terrain_edit::terrain_tile_lanes(
-            &self.terrain_tex_tile,
-            crate::terrain_edit::terrain_mips_mask(&self.terrain_textures, &self.texture_settings, &self.project_root),
-        );
+        // Every terrain slot's settings, as this frame draws them: written
+        // here, beside the frame's globals, so a setting changed since the
+        // palette's last sync is the one drawn.
+        let slot_store = self.terrain_slot_store();
+        if let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_ref()) {
+            raster.set_terrain_slots(gpu, &slot_store);
+        }
         // On a round world the fog's heights and horizon are the planet's.
         let fog_body = crate::shading::fog_body_lane(&light_node, &self.world, cam.world_position);
         let make_rm = |set: &[(DVec3, f32, MaterialParams)]| -> RaymarchGlobals {
@@ -574,7 +572,8 @@ impl Editor {
                 // .w = per-slot nearest mask (bit i = slot i is Pixelated). The palette
                 // is one texture_2d_array with one sampler, so the shader can't pick a
                 // sampler per slot — it reads this mask and selects the result instead.
-                terrain_tint: [tm.color[0], tm.color[1], tm.color[2], terrain_nearest_mask as f32],
+                // w unused: each slot's filter is in the slot store.
+                terrain_tint: [tm.color[0], tm.color[1], tm.color[2], 0.0],
                 terrain_emissive: [tm.emissive[0], tm.emissive[1], tm.emissive[2], tm.emissive_strength],
                 terrain_specular: [tm.specular[0], tm.specular[1], tm.specular[2], tm.specular_strength],
                 terrain_params: [tm.shininess, tm.rim_strength, if tm.unlit { 1.0 } else { 0.0 }, tm.ambient],
@@ -605,10 +604,6 @@ impl Editor {
                 fog_color,
                 fog_params,
                 fog_extra,
-                terrain_scale,
-                terrain_blend,
-                terrain_rough,
-                terrain_tile,
                 fog_body,
                 vol_fog_a,
                 vol_fog_b,
@@ -1748,15 +1743,9 @@ impl Editor {
             point_shape: pl_shape,
             point_rot: pl_rot,
             point_cone: pl_cone,
-            // Meshed terrain reads the triplanar scale + the per-slot nearest /
-            // Glow bitmasks here (bitmasks as u32 — bit-exact at 32 slots).
+            // Meshed terrain reads its triplanar scale here; every per-slot
+            // setting is in the slot store (`Editor::terrain_slot_store`).
             terrain_mask: [0.0, 0.22, 0.0, 0.0],
-            terrain_bits: [
-                crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings, &self.project_root),
-                self.terrain_glow_mask,
-                self.terrain_surface_bits[0],
-                self.terrain_surface_bits[1],
-            ],
         };
         FrameLighting {
             light_node,
@@ -1847,10 +1836,6 @@ impl Editor {
 
         let ents: Vec<(Entity, Matter)> =
             self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
-        // Resolved up front for the same reason as paint_bases: the draw loop holds a
-        // mutable borrow and can't call &self helpers.
-        let terrain_nearest_mask =
-            crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings, &self.project_root);
         // Per-node vertex-paint bases, resolved before the draw loop (which borrows
         // `raster` mutably, so it can't call &self helpers). Empty for unpainted scenes.
         // Every node's sorting-layer Z, resolved before the draw loop borrows
@@ -2380,7 +2365,6 @@ impl Editor {
             self.anim.restore_preview(&mut self.world);
         }
         Some(FrameInstances {
-            terrain_nearest_mask,
             sort_z,
             lights_2d,
             instances,

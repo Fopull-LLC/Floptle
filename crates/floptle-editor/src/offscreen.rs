@@ -619,15 +619,9 @@ impl Editor {
             point_shape: pl_shape,
             point_rot: pl_rot,
             point_cone: pl_cone,
-            // Meshed terrain reads the triplanar scale + the per-slot nearest /
-            // GLOW bitmasks here (bitmasks as u32 — bit-exact at 32 slots).
+            // Meshed terrain reads its triplanar scale here; every per-slot
+            // setting is in the slot store (`Editor::terrain_slot_store`).
             terrain_mask: [0.0, 0.22, 0.0, 0.0],
-            terrain_bits: [
-                crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings, &self.project_root),
-                self.terrain_glow_mask,
-                self.terrain_surface_bits[0],
-                self.terrain_surface_bits[1],
-            ],
         };
 
         // Camera-relative instances + blobs, exactly like the main gather —
@@ -1233,6 +1227,13 @@ impl Editor {
             }
             let (blob_tint, blob_emissive, blob_specular, blob_params, blob_rim) =
                 if show_blobs { blob_mat_arrays(&blobs) } else { blob_mat_arrays(&[]) };
+            // Every terrain slot's settings, as this frame draws them: written
+            // here, beside the frame's globals, so a setting changed since the
+            // palette's last sync is the one drawn.
+            let slot_store = self.terrain_slot_store();
+            if let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_ref()) {
+                raster.set_terrain_slots(gpu, &slot_store);
+            }
             let tm = &terrain_mat.shared;
             let (vol_fog_a, vol_fog_b, vol_fog_c) =
                 vol_fog_uniforms(&light_node, self.fog_time, cam.world_position.y as f32);
@@ -1256,10 +1257,8 @@ impl Editor {
                     tm.color[0],
                     tm.color[1],
                     tm.color[2],
-                    // Legacy raymarch path packs the mask in an f32 lane — exact for
-                    // slots 0..23 only; the meshed raster path uses u32 terrain_bits.
-                    crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings, &self.project_root)
-                        as f32,
+                    // Unused: each slot's filter is in the slot store.
+                    0.0,
                 ],
                 terrain_emissive: [tm.emissive[0], tm.emissive[1], tm.emissive[2], tm.emissive_strength],
                 terrain_specular: [tm.specular[0], tm.specular[1], tm.specular[2], tm.specular_strength],
@@ -1291,13 +1290,6 @@ impl Editor {
                 fog_color,
                 fog_params,
                 fog_extra,
-                terrain_scale: crate::terrain_edit::terrain_scale_lanes(&self.terrain_tex_scale),
-                terrain_blend: self.terrain_blend_lanes(),
-                terrain_rough: crate::terrain_edit::terrain_slot_lanes(&self.terrain_tex_rough, 0.5),
-                terrain_tile: crate::terrain_edit::terrain_tile_lanes(
-                    &self.terrain_tex_tile,
-                    crate::terrain_edit::terrain_mips_mask(&self.terrain_textures, &self.texture_settings, &self.project_root),
-                ),
                 fog_body: crate::shading::fog_body_lane(&light_node, &self.world, cam.world_position),
                 vol_fog_a,
                 vol_fog_b,

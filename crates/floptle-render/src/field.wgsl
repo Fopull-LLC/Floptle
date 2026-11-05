@@ -170,10 +170,6 @@ struct Globals {
     // spare. Appended at the END, like everything above it, so this struct
     // stays byte-identical to the Rust `RaymarchGlobals`.
     fog_extra: vec4<f32>,
-    // Per-slot terrain texture SCALE, 32 slots packed four to a vec4 — a
-    // multiplier on the palette's base triplanar scale, 1.0 = as before.
-    // Appended at the END, like everything above it.
-    terrain_scale: array<vec4<f32>, 8>,
     // The body fog is measured from: xyz = camera-relative centre, w = surface
     // radius. w <= 0 is a flat world, where fog heights are world y.
     // Appended at the END, like everything above it.
@@ -192,17 +188,45 @@ struct Globals {
     // Appended at the END.
     fog_sun_vp: mat4x4<f32>,
     fog_sun: vec4<f32>,
-    // Per-slot terrain blend WIDTH in world units (palette `|blend=`), 32
-    // slots four to a vec4, and how much world noise breaks its edge up
-    // (`|rough=`, 0..1). A width of 0 blends as before. Appended at the END.
-    terrain_blend: array<vec4<f32>, 8>,
-    terrain_rough: array<vec4<f32>, 8>,
-    // Per-slot anti-tiling, one vec4 per slot (palette `|antitile=`,
-    // `|macro=`, `|macrosize=`): x = hex-tiling strength 0..1, y = macro
-    // variation strength 0..1, z = the macro pattern's size in world units
-    // (0 = 60), w spare. All zero tiles exactly as before. Appended at the END.
-    terrain_tile: array<vec4<f32>, 32>,
 };
+
+// One terrain palette slot, as the slot store holds it (`terrain_slots`,
+// declared at binding 14 by the raster and the raymarch modules alike; the
+// Rust mirror is `floptle_render::terrain_slots::TerrainSlotRaw` — change the
+// two together). Every per-slot setting the terrain reads is here.
+struct TerrainSlot {
+    tint_scale: vec4<f32>, // rgb tint (1), w triplanar scale multiplier (1)
+    emissive: vec4<f32>,   // rgb, w strength (0)
+    pbr: vec4<f32>,        // roughness x, metalness x, normal strength x (negative flips), occlusion x (all 1)
+    blend: vec4<f32>,      // x width m (0), y blend roughness (0.5), z height blend (0), w height bias (0)
+    tile: vec4<f32>,       // x antitile (0), y macro (0), z macro size (0 = 60), w height contrast (1)
+    border: vec4<f32>,     // x wobble, y wobble size, z pixel dither, w parallax (all 0)
+    specular: vec4<f32>,   // classic specular override: rgb, w strength (< 0 = inherit)
+    classic: vec4<f32>,    // x shininess, y rim, z ambient (each < 0 = inherit), w reserved
+    rim_wet: vec4<f32>,    // rgb rim colour, w wetness response (reserved)
+    layers: vec4<u32>,     // palette layers: colour, normal, ORM+height, extra (0xffff = none)
+    flags: vec4<u32>,      // x flag bits (SLOT_*), y surface-shader index, z shader param base, w border style
+};
+
+const SLOT_NONE: u32 = 0xffffu;
+const SLOT_NEAREST: u32 = 1u;
+const SLOT_MIPS: u32 = 2u;
+const SLOT_GLOW: u32 = 4u;
+
+// Slot `slot` (0-based) from the store; a slot past it reads the last entry.
+fn slot_rec(slot: i32) -> TerrainSlot {
+    let last = arrayLength(&terrain_slots) - 1u;
+    return terrain_slots[min(u32(max(slot, 0)), last)];
+}
+
+fn slot_has(slot: i32, bit: u32) -> bool {
+    return (slot_rec(slot).flags.x & bit) != 0u;
+}
+
+// 1 where slot `slot` is self-lit (palette `|glow`), else 0.
+fn slot_glow(slot: i32) -> f32 {
+    return select(0.0, 1.0, slot >= 0 && slot_has(slot, SLOT_GLOW));
+}
 
 // The triplanar scale multiplier for palette slot `slot`.
 //
@@ -216,8 +240,7 @@ struct Globals {
 // a probe, an offscreen preview, anything built from `Default` — tiles exactly
 // as it did before rather than collapsing every terrain texture to a point.
 fn terrain_slot_scale(slot: i32) -> f32 {
-    let i = clamp(u32(slot), 0u, 31u);
-    let v = G.terrain_scale[i >> 2u][i & 3u];
+    let v = slot_rec(slot).tint_scale.w;
     return select(v, 1.0, v <= 0.0);
 }
 
@@ -237,9 +260,11 @@ fn pal_sample(t: texture_2d_array<f32>, s: sampler, uv: vec2<f32>, layer: i32, d
     return hex_blend(c1, c2, c3, h.w).rgb;
 }
 
-// A slot's anti-tiling settings (see `terrain_tile`).
+// A slot's anti-tiling settings: x antitile, y macro strength, z macro
+// size, w 1 where the slot reads its mips.
 fn terrain_slot_tile(slot: i32) -> vec4<f32> {
-    return G.terrain_tile[clamp(u32(slot), 0u, 31u)];
+    let r = slot_rec(slot);
+    return vec4<f32>(r.tile.x, r.tile.y, r.tile.z, select(0.0, 1.0, (r.flags.x & SLOT_MIPS) != 0u));
 }
 
 // The macro variation multiplier for slot `slot` at world-stable position `p`:

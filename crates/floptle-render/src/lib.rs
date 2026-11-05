@@ -43,6 +43,7 @@ pub mod retro;
 pub mod reflect;
 pub mod ssr;
 pub mod terrain_palette;
+pub mod terrain_slots;
 pub mod tris;
 pub mod ui;
 pub mod woff;

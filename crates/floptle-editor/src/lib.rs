@@ -4344,6 +4344,9 @@ impl Editor {
         let mut raymarch = Raymarch::new(gpu);
         // The fog pass reads the raster's sun shadow map for its shafts.
         raymarch.set_sun_map(gpu, Some(raster.sun_map_view()));
+        // One terrain slot store for both passes, so the near and far ground
+        // draw every slot alike.
+        raymarch.set_terrain_slots_buffer(gpu, raster.terrain_slots_buffer().clone());
         self.raymarch = Some(raymarch);
         // **Everything `render_world_into` needs, in one place.** That function
         // binds gpu, raster, raymarch, particles, lines and tris as a single

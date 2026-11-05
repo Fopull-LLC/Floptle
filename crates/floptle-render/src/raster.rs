@@ -72,15 +72,10 @@ pub struct Globals {
     /// Each light's world orientation (xyzw quaternion): a rect/disk faces the
     /// node's forward, a tube lies along its local X.
     pub point_rot: [[f32; 4]; 16],
-    /// Meshed-terrain splat params: y = triplanar world scale (x/z/w unused — the
-    /// per-slot bitmasks moved to `terrain_bits`, where 32 slots stay bit-exact;
-    /// f32 packing silently corrupts bits past 2^24).
+    /// Meshed-terrain splat params: y = triplanar world scale (x/z/w unused).
+    /// Every per-slot setting lives in the slot store
+    /// ([`Raster::set_terrain_slots`]).
     pub terrain_mask: [f32; 4],
-    /// Per-slot bitmasks, exact at 32 slots: x = nearest filtering, y = GLOW
-    /// (self-lit slots), z = has a normal map, w = has an ORM map (the
-    /// palette's layers 32 + slot and 64 + slot; see
-    /// [`crate::TerrainPalette::with_surfaces`]).
-    pub terrain_bits: [u32; 4],
     /// Each light's CONE, when it is aimed: x = cosine of the half angle where
     /// it reaches zero, y = cosine of the half angle where it is still full.
     /// **x = -1 is no cone**, which is what the default fills, so a caller that
@@ -113,7 +108,6 @@ impl Default for Globals {
             point_shape: [[0.0; 4]; 16],
             point_rot: [[0.0, 0.0, 0.0, 1.0]; 16],
             terrain_mask: [0.0, 0.22, 0.0, 0.0],
-            terrain_bits: [0; 4],
             // -1 is "no cone": every direction is inside it.
             point_cone: [[-1.0, -1.0, 0.0, 0.0]; 16],
             sun_vp: [[0.0; 4]; 4],
@@ -400,6 +394,7 @@ fn make_globals_bind(
     pal_view: &wgpu::TextureView,
     pal_samp: &wgpu::Sampler,
     pal_samp_nearest: &wgpu::Sampler,
+    slots: &wgpu::Buffer,
     skin_joints: &wgpu::Buffer,
     skin_weights: &wgpu::Buffer,
     skin_palette: &wgpu::Buffer,
@@ -432,6 +427,7 @@ fn make_globals_bind(
                 binding: 11,
                 resource: wgpu::BindingResource::TextureView(pal_view),
             },
+            wgpu::BindGroupEntry { binding: 14, resource: slots.as_entire_binding() },
         ],
     })
 }
@@ -940,6 +936,9 @@ pub struct Raster {
     /// surface, and pixel-art slots pick nearest via the `terrain_mask` bitmask.
     terrain_samp: wgpu::Sampler,
     terrain_samp_nearest: wgpu::Sampler,
+    /// The terrain slot store (binding 14); the raymarch is handed the same
+    /// buffer ([`Self::terrain_slots_buffer`]).
+    terrain_slots: wgpu::Buffer,
     /// Per-slot nearest bitmask, carried into every frame's `Globals.terrain_mask.x`.
     terrain_nearest_mask: u32,
     tex_layout: wgpu::BindGroupLayout,
@@ -1560,6 +1559,10 @@ impl Raster {
                     },
                     count: None,
                 },
+                // Binding 14: the terrain slot store, every palette slot's
+                // settings (`terrain_slots.rs`). Storage, so it takes no
+                // sampled-texture slot from custom shaders.
+                crate::terrain_slots::slot_layout_entry(14),
                 // Bindings 6/7/8: GPU skinning — per-vertex joint
                 // indices and weights, and the frame's bone palettes. Same shape and
                 // same vertex-only visibility as `vpaint`, and here for the same
@@ -1692,6 +1695,7 @@ impl Raster {
             })
         };
         let terrain_samp = repeat(wgpu::FilterMode::Linear);
+        let terrain_slots = crate::terrain_slots::new_slot_buffer(device);
         let terrain_samp_nearest = repeat(wgpu::FilterMode::Nearest);
 
         // The skinning stores start at their reserved slot 0 — `skin_base == 0`
@@ -1755,6 +1759,7 @@ impl Raster {
             &terrain_pal_view,
             &terrain_samp,
             &terrain_samp_nearest,
+            &terrain_slots,
             &skin_joints_buf,
             &skin_weights_buf,
             &skin_palette_buf,
@@ -1772,6 +1777,7 @@ impl Raster {
             &terrain_pal_view,
             &terrain_samp,
             &terrain_samp_nearest,
+            &terrain_slots,
             &skin_joints_buf,
             &skin_weights_buf,
             &skin_palette_buf,
@@ -1941,6 +1947,7 @@ impl Raster {
             _terrain_pal: terrain_pal,
             terrain_samp,
             terrain_samp_nearest,
+            terrain_slots,
             terrain_nearest_mask: 0,
             light2d: crate::light2d::Light2d::new(gpu, &tex_layout, gpu.scene_format()),
             palette: crate::palette::Palette::new(gpu, gpu.scene_format()),
@@ -3092,6 +3099,7 @@ impl Raster {
             &self.terrain_pal_view,
             &self.terrain_samp,
             &self.terrain_samp_nearest,
+            &self.terrain_slots,
             &self.skin_joints_buf,
             &self.skin_weights_buf,
             &self.skin_palette_buf,
@@ -3109,6 +3117,7 @@ impl Raster {
             &self.terrain_pal_view,
             &self.terrain_samp,
             &self.terrain_samp_nearest,
+            &self.terrain_slots,
             &self.skin_joints_buf,
             &self.skin_weights_buf,
             &self.skin_palette_buf,
@@ -3139,6 +3148,17 @@ impl Raster {
         });
         self.rebuild_globals_bind(&gpu.device);
         self.terrain_nearest_mask = nearest_mask;
+    }
+
+    /// Write the terrain slot store: slot `i` of the palette is `slots[i]`.
+    /// The raymarch reads the same buffer when given it.
+    pub fn set_terrain_slots(&self, gpu: &Gpu, slots: &[crate::terrain_slots::TerrainSlotRaw]) {
+        crate::terrain_slots::write_slots(&gpu.queue, &self.terrain_slots, slots);
+    }
+
+    /// The terrain slot store's buffer, for the raymarch to share.
+    pub fn terrain_slots_buffer(&self) -> &wgpu::Buffer {
+        &self.terrain_slots
     }
 
     /// The palette texture meshed terrain draws from.

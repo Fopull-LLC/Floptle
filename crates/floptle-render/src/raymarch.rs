@@ -252,15 +252,6 @@ pub struct RaymarchGlobals {
     /// default: see `fog_sky` in `field.wgsl` for why a
     /// ramp that stops at the geometry makes a dark fog colour unusable.
     pub fog_extra: [f32; 4],
-    /// **Per-slot terrain texture scale**, [`TERRAIN_SLOTS`] of them packed four
-    /// to a `vec4` — a multiplier on the palette's base triplanar scale.
-    ///
-    /// One scale for the whole palette meant matching a fine gravel to a broad
-    /// rock face was a job for an image editor. `0.0` reads as `1.0` in the
-    /// shader, so a globals block built from [`Default`] tiles exactly as it
-    /// always did. Appended at the end so this struct stays byte-identical to
-    /// the WGSL one.
-    pub terrain_scale: [[f32; 4]; 8],
     /// The body fog is measured from (`Lighting.fog_follows_body`): xyz = its
     /// CAMERA-RELATIVE centre, w = its surface radius. `w <= 0` is a flat world,
     /// where fog heights are world y. Appended at the end so this struct stays
@@ -286,18 +277,6 @@ pub struct RaymarchGlobals {
     /// handed it over), y = its depth bias, z = its blur radius in map
     /// coordinates. Appended at the end.
     pub fog_sun: [f32; 4],
-    /// Per-slot terrain blend width in world units (the palette's `|blend=`),
-    /// four slots to a lane; 0 blends across one triangle, as before.
-    /// Appended at the end, like everything above.
-    pub terrain_blend: [[f32; 4]; 8],
-    /// Per-slot roughness of that blend's edge, 0..1 (`|rough=`).
-    pub terrain_rough: [[f32; 4]; 8],
-    /// **Per-slot anti-tiling**, one `vec4` per [`TERRAIN_SLOTS`] slot (palette
-    /// `|antitile=`, `|macro=`, `|macrosize=`): x = hex-tiling strength 0..1,
-    /// y = macro variation strength 0..1, z = the macro pattern's size in world
-    /// units (0 reads as 60), w spare. All zero tiles exactly as before.
-    /// Appended at the end so this struct stays byte-identical to the WGSL one.
-    pub terrain_tile: [[f32; 4]; 32],
 }
 
 impl RaymarchGlobals {
@@ -396,11 +375,7 @@ impl Default for RaymarchGlobals {
             // -1 is "no cone": every direction is inside it.
             point_cone: [[-1.0, -1.0, 0.0, 0.0]; 16],
             fog_extra: [0.0; 4],
-            terrain_scale: [[1.0; 4]; 8],
             fog_body: [0.0; 4],
-            terrain_blend: [[0.0; 4]; 8],
-            terrain_rough: [[0.0; 4]; 8],
-            terrain_tile: [[0.0; 4]; 32],
             atmo_cloud: [[1.0, 1.0, 1.0, 0.0]; 4],
             atmo_sun: [[1.0, 1.0, 0.0, 0.0]; 4],
             fog_cache: [0.0; 4],
@@ -697,6 +672,9 @@ pub struct Raymarch {
     /// not counted.
     uploaded_cells: u64,
     terrain_tex: wgpu::Texture,
+    /// The terrain slot store (binding 14): its own until the raster's is
+    /// shared with it ([`Self::set_terrain_slots_buffer`]).
+    terrain_slots: wgpu::Buffer,
     /// Equirectangular sky texture (1×1 white until a skybox texture is set).
     sky_tex: wgpu::Texture,
     bind: wgpu::BindGroup,
@@ -878,6 +856,8 @@ impl Raymarch {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
+                // The terrain slot store, shared with the raster pass.
+                crate::terrain_slots::slot_layout_entry(14),
             ],
         });
 
@@ -972,10 +952,11 @@ impl Raymarch {
             compare: Some(wgpu::CompareFunction::LessEqual),
             ..Default::default()
         });
+        let terrain_slots = crate::terrain_slots::new_slot_buffer(device);
         let bind = make_bind(
             device, &bind_layout, &globals_buf, &dist_tex, &color_tex, &sampler, &terrain_tex,
             &tile_sampler, &tile_sampler_nearest, &sky_tex, &prime_fallback, &gi.tex, &fog_fallback,
-            &sun_fallback, &sun_samp,
+            &sun_fallback, &sun_samp, &terrain_slots,
         );
         let field_layout = field_bind_layout(device);
         let scene_fallback = crate::ssr::SceneHistory::empty(device);
@@ -1015,6 +996,7 @@ impl Raymarch {
             alloc_cap: None,
             uploaded_cells: 0,
             terrain_tex,
+            terrain_slots,
             sky_tex,
             bind,
             field_layout,
@@ -1315,6 +1297,7 @@ impl Raymarch {
             fog,
             self.sun_map.as_ref().unwrap_or(&self.sun_fallback),
             &self.sun_samp,
+            &self.terrain_slots,
         );
         self.bind_primed = self.prime_view.as_ref().map(|v| {
             make_bind(
@@ -1333,6 +1316,7 @@ impl Raymarch {
                 fog,
                 self.sun_map.as_ref().unwrap_or(&self.sun_fallback),
                 &self.sun_samp,
+                &self.terrain_slots,
             )
         });
     }
@@ -1503,6 +1487,20 @@ impl Raymarch {
     /// is held once.
     pub fn set_terrain_palette_texture(&mut self, gpu: &Gpu, tex: wgpu::Texture) {
         self.terrain_tex = tex;
+        self.rebuild_binds(&gpu.device);
+    }
+
+    /// Write the terrain slot store this draws terrain with: slot `i` of the
+    /// palette is `slots[i]`. For a raymarch on its own; one beside a raster
+    /// pass shares the raster's store instead.
+    pub fn set_terrain_slots(&self, gpu: &Gpu, slots: &[crate::terrain_slots::TerrainSlotRaw]) {
+        crate::terrain_slots::write_slots(&gpu.queue, &self.terrain_slots, slots);
+    }
+
+    /// Read the slot store from `buf` (the raster pass's), so the two passes
+    /// draw every slot alike from one buffer.
+    pub fn set_terrain_slots_buffer(&mut self, gpu: &Gpu, buf: wgpu::Buffer) {
+        self.terrain_slots = buf;
         self.rebuild_binds(&gpu.device);
     }
 
@@ -2595,6 +2593,7 @@ fn make_bind(
     fog: &wgpu::Buffer,
     sun: &wgpu::TextureView,
     sun_samp: &wgpu::Sampler,
+    slots: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     let dist_view = dist.create_view(&wgpu::TextureViewDescriptor::default());
     let gi_view = gi.create_view(&wgpu::TextureViewDescriptor::default());
@@ -2622,6 +2621,7 @@ fn make_bind(
             wgpu::BindGroupEntry { binding: 11, resource: fog.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(sun) },
             wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(sun_samp) },
+            wgpu::BindGroupEntry { binding: 14, resource: slots.as_entire_binding() },
         ],
     })
 }
